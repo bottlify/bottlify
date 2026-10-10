@@ -1789,15 +1789,23 @@ const EMPTY_BLOCK = new Float32Array(0);
  * the cascade at a stage that never wanted one, and the draw loses its
  * texturing with the rest of the picture intact.
  *
+ * A vertex shader leaves D3DTSS_TEXCOORDINDEX nothing to do: the index and
+ * its generation modes belong to fixed-function vertex processing, which a
+ * shader replaces, and stage n samples the oTn the shader wrote -- wined3d's
+ * fixed-function fragment stage reads its own stage's varying and applies the
+ * index only in its fixed-function vertex stage. `shaderCoordinates` says the
+ * vertices are a shader's.
+ *
  * @param {RenderModel} model
  * @param {import('../webgpu/internal/vertexformat.js').VertexLayout} layout
- * @param {(texture: any) => number} [onesOf]
- *     The channels a texture samples as one that the GPU's texture lacks
- *     (`sampledOnes`); none when absent.
+ * @param {{ shaderCoordinates?: boolean, onesOf?: (texture: any) => number }} [how]
+ *     `onesOf` is the channels a texture samples as one that the GPU's texture
+ *     lacks (`sampledOnes`); none when absent.
  * @returns {{ stages: import('../webgpu/internal/pipeline.js').StageKey[],
  *             textures: (any | null)[], truncated: CascadeTruncation | null }}
  */
-export function stageCascade(model, layout, onesOf = ()=>0){
+export function stageCascade(model, layout, how = {}){
+    const onesOf = how.onesOf ?? (()=>0);
     /** @type {import('../webgpu/internal/pipeline.js').StageKey[]} */
     const stages = [];
     /** @type {(any | null)[]} */
@@ -1813,7 +1821,7 @@ export function stageCascade(model, layout, onesOf = ()=>0){
         {
             break;
         }
-        const texCoordIndex = get(D3DTSS.TEXCOORDINDEX);
+        const texCoordIndex = how.shaderCoordinates ? stage : get(D3DTSS.TEXCOORDINDEX);
         const transformFlags = get(D3DTSS.TEXTURETRANSFORMFLAGS);
         const key = {
             colorOp,
@@ -2736,6 +2744,16 @@ export function createRenderer(options){
     let kept = 0;
     /** Frames whose commands have reached the queue: those numbered below this. */
     let submittedFrames = 0;
+
+    /**
+     * Where the replaying side's time goes: how long a recorded frame took to
+     * be made into GPU work and put on the queue, and how long a read-back took
+     * from being asked to having its bytes -- the wait a program reading its
+     * targets back sees, of which the GPU's own part is only some.
+     */
+    const timing = { replays: 0, replayMs: 0, worstReplayMs: 0, readBacks: 0, readBackMs: 0,
+        worstReadBackMs: 0 };
+    const clock = ()=>(typeof performance === 'undefined' ? Date.now() : performance.now());
 
     const counters = {
         frames: 0,
@@ -5833,7 +5851,7 @@ export function createRenderer(options){
         const spriteSets = points?.sprite
             ? [...new Set(stageCascade(model, {
                 texCoordSets: 0, attributes: [], stride, preTransformed: false, blendWeights: 0,
-            }).stages.map(stage=>varyingLocation(D3DDECLUSAGE.TEXCOORD,
+            }, { shaderCoordinates: true }).stages.map(stage=>varyingLocation(D3DDECLUSAGE.TEXCOORD,
                 stage.texCoordIndex & COORD_SET_MASK)))]
             : [];
         /** @type {import('../d3d9/wgsl.js').TranslatedShader} */
@@ -5863,7 +5881,7 @@ export function createRenderer(options){
         }
         const cascade = stageCascade(model, {
             texCoordSets: sets, attributes: [], stride, preTransformed: false, blendWeights: 0,
-        }, onesOfTexture);
+        }, { shaderCoordinates: true, onesOf: onesOfTexture });
         const state = {
             ...pipelineStateOf(model, {
                 fvf: 0, topology, ...formatsOf(model), stages: cascade.stages, lighting: null,
@@ -7185,7 +7203,7 @@ export function createRenderer(options){
                 vertexLayoutKey = `f${processing.fvf.toString(16)}s${stride}`;
             }
         }
-        const cascade = stageCascade(model, layout, onesOfTexture);
+        const cascade = stageCascade(model, layout, { onesOf: onesOfTexture });
         keyStages(model, cascade);
         reportCascade(cascade);
         if (skipTextures.size > 0 && cascade.textures.some(
@@ -7908,14 +7926,28 @@ export function createRenderer(options){
          * @param {any} surface a d3d8 surface
          * @returns {Promise<{ width: number, height: number, data: Uint8Array }>}
          */
-        readSurface(surface){
+        readSurface(surface, ahead = false){
             const gpu = surfaceFor(surface);
             const recorded = ensureFrame();
             recording = null;
             recorded.cut = backend.markPresent();
             recorded.dump = dump;
-            const read = chain.then(()=>replay(recorded, null, gpu));
-            chain = read.then(()=>undefined, failure);
+            /** @type {() => void} */
+            let onQueue = ()=>{};
+            const queued = new Promise(resolve=>{
+                onQueue = ()=>resolve(undefined);
+            });
+            const asked = clock();
+            const read = chain.then(()=>replay(recorded, null, gpu, ahead ? onQueue : null));
+            read.then(()=>{
+                const took = clock() - asked;
+                timing.readBacks++;
+                timing.readBackMs += took;
+                timing.worstReadBackMs = Math.max(timing.worstReadBackMs, took);
+            }, ()=>{});
+            // A read nothing waits for yet holds the next frame only until
+            // its copy is on the queue, not until its bytes come back.
+            chain = (ahead ? Promise.race([queued, read]) : read).then(()=>undefined, failure);
             return /** @type {Promise<any>} */ (read);
         },
 
@@ -8532,6 +8564,7 @@ export function createRenderer(options){
                 // cascade cut short, a texture uploaded, how many textures
                 // the frame drew with.
                 recentFrames: frameHistory.slice(),
+                timing: { ...timing },
                 // Empty unless the build asked for it; see `dumpDraws`.
                 lastDump: joinDump(lastDump),
                 // The bytecode of the shaders the dumped draws ran, each once.
@@ -8575,10 +8608,12 @@ export function createRenderer(options){
      * @param {any} recorded
      * @param {any} surface what to present, or null for a flush
      * @param {any} [snapshot] a backend surface to read back after the replay
+     * @param {(() => void) | null} [submitted] told once the frame is on the queue
      * @returns {Promise<any>} the snapshot's pixels, when one was asked for
      */
-    async function replay(recorded, surface, snapshot = null){
+    async function replay(recorded, surface, snapshot = null, submitted = null){
         const pipelines = await Promise.allSettled(recorded.pipelines);
+        const began = clock();
         const frame = backend.beginFrame({ cut: recorded.cut });
         // A frame counts when a query is open as it starts or opens in it,
         // and then every pass of it can: a BEGIN may land in any of them.
@@ -8657,6 +8692,11 @@ export function createRenderer(options){
             // becomes every frame after it, and the only symptom is a picture
             // that stopped changing while the counters keep climbing.
             frame.end();
+            const took = clock() - began;
+            timing.replays++;
+            timing.replayMs += took;
+            timing.worstReplayMs = Math.max(timing.worstReplayMs, took);
+            submitted?.();
         }
         lastFrame = recorded.commands;
         if (counted && occlusion)

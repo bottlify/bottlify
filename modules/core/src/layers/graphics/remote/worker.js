@@ -388,6 +388,10 @@ export function serveGraphics(scope, deps){
             played = playedDirect3D(FACTORIES[api], {
                 ...options,
                 liveDump,
+                // A render target read back ahead of the copy the program
+                // will make of it: its bytes went with `wrote` before this.
+                readBackAhead: (/** @type {number} */ address, /** @type {number} */ version)=>
+                    post({ type: 'prefetched', address, version }),
                 backend,
                 createSampler: (/** @type {any} */ descriptor)=>device.createSampler(descriptor),
                 // The program has memory; what of it this side reads is what it is sent.

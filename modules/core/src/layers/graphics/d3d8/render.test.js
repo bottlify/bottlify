@@ -4070,7 +4070,7 @@ test('a cascade stage says what its texture fills, and a stage that samples noth
         });
         const layout = decodeFvf(FVF.XYZ | FVF.DIFFUSE | (1 << FVF.TEXCOUNT_SHIFT));
         const filled = stageCascade(model, layout,
-            texture=>(texture === narrow ? 0b1110 : 0)).stages;
+            { onesOf: texture=>(texture === narrow ? 0b1110 : 0) }).stages;
         assert.equal(filled[0].ones, 0b1110);
         assert.equal('ones' in filled[1], false, 'four channels add nothing to the key');
         assert.equal('ones' in filled[2], false, 'nor does a texture the stage never reads');

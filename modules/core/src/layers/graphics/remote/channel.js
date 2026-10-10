@@ -124,6 +124,14 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
      * @type {Map<string, { count: number, ms: number, maxMs: number }>}
      */
     const waits = new Map();
+    /**
+     * Render targets the played device read back ahead, by the address of
+     * their memory: which version of their `drawnInto` it holds. The bytes came
+     * with a `wrote` before the word did.
+     *
+     * @type {Map<number, number>}
+     */
+    const readAhead = new Map();
     /** @param {string} name @param {number} since */
     const waited = (name, since)=>{
         const ms = now() - since;
@@ -228,6 +236,9 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
         writer,
         lender,
 
+        /** @param {number} address @returns {number | undefined} */
+        readAheadAt: address=>readAhead.get(address >>> 0),
+
         /**
          * @param {number} wait @param {string} name
          * @returns {any}
@@ -330,6 +341,9 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
                     resolve?.({ answer: message.answer, outs: message.outs ?? [] });
                     break;
                 }
+                case 'prefetched':
+                    readAhead.set(message.address >>> 0, message.version);
+                    break;
                 case 'diagnostics':
                     diagnostics = message.diagnostics;
                     told++;

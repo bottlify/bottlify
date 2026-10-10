@@ -295,6 +295,10 @@ function isTransformType(type){
  *     Where a full-screen device's gamma ramp reaches the picture. Absent, a
  *     ramp is kept and read back only.
  * @property {import('../webgpu/internal/latency.js').FrameQueued} [frameQueued]
+ * @property {(address: number, version: number) => void} [readBackAhead]
+ *     Where the device plays a recording, told each time a render target a
+ *     copy has read back is read back again ahead of the next copy: its memory
+ *     at `address` holds the GPU's picture as of `version` of its `drawnInto`.
  *     Told of every frame a present queues; what it answers is what the
  *     present waits on before it answers the program. Absent, a present never
  *     waits.
@@ -395,7 +399,7 @@ export function createDirect3D8(options = {}){
     const {
         backend, readMemory, windowMemory, writeMemory, createSampler, allocate: guestMemory,
         free: giveBack, dumpDraws, dumpEvery, liveDump, maxDraws, divergence, skipTexture,
-        probeTexture, fog, mips, nanProbe, onDeviceLost, gamma, frameQueued, ...caps
+        probeTexture, fog, mips, nanProbe, onDeviceLost, gamma, frameQueued, readBackAhead, ...caps
     } = options;
     /** @type {DeviceCaps} */
     const resolved = { ...DEFAULT_CAPS, ...caps, fullscreenGamma: gamma?.applies() === true };
@@ -403,7 +407,7 @@ export function createDirect3D8(options = {}){
     const services = {
         backend, readMemory, windowMemory, writeMemory, createSampler, allocate: guestMemory,
         free: giveBack, dumpDraws, dumpEvery, liveDump, maxDraws, divergence, skipTexture,
-        probeTexture, fog, mips, nanProbe, onDeviceLost, gamma, frameQueued,
+        probeTexture, fog, mips, nanProbe, onDeviceLost, gamma, frameQueued, readBackAhead,
     };
     if (backend && !readMemory)
     {
@@ -783,7 +787,8 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             return undefined;
         }
         return {
-            readBack: surface=>renderer.readSurface(surface).then(
+            /** @param {any} surface @param {boolean} [ahead] read before anything waits for it */
+            readBack: (surface, ahead = false)=>renderer.readSurface(surface, ahead).then(
                 (/** @type {{ data: Uint8Array }} */ pixels)=>{
                     writePixels(surface, pixels.data, write);
                 }),
@@ -895,6 +900,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
      * @param {any} surface
      */
     const retireSurface = surface=>{
+        readsAhead.delete(surface);
         free(surface.base);
         renderer?.retire(surface);
     };
@@ -1424,7 +1430,26 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         {
             return D3DERR_INVALIDCALL;
         }
+        drew(renderTarget);
         return D3D_OK;
+    };
+
+    /**
+     * How many times each surface may have been drawn into, cleared or copied
+     * into on the GPU. A device whose drawing is played elsewhere keeps it for
+     * whoever answers a copy out of a render target from the target's memory:
+     * the memory is still the GPU's picture while this has not moved since it
+     * was read back (`remote/direct3d.js`, `createTargetReads`).
+     *
+     * @type {WeakMap<object, number>}
+     */
+    const drawnInto = new WeakMap();
+    /** @param {any} surface */
+    const drew = surface=>{
+        if (surface)
+        {
+            drawnInto.set(surface, (drawnInto.get(surface) ?? 0) + 1);
+        }
     };
 
     /**
@@ -1452,8 +1477,51 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
      * @returns {number | Promise<number>}
      */
     const presented = submitted=>{
+        readAhead();
         const held = submitted ? services.frameQueued?.(submitted) ?? null : null;
         return held ? held.then(()=>D3D_OK) : D3D_OK;
+    };
+
+    /**
+     * Render targets a copy has read back, with the last read issued for each:
+     * which `drawnInto` it took and when its bytes are in memory. A program
+     * that reads a target back every frame -- a fence against the GPU running
+     * ahead -- reads one drawn in the frame before, so each is read again as a
+     * frame is presented, and the copy waits on that read rather than issuing
+     * its own. Every choice turns on the counts alone, never on whether a read
+     * has come back yet, so a device that plays a recording asks its GPU for
+     * exactly what a device drawing for itself asks. Where the drawing is
+     * played for a device elsewhere, that device is told
+     * (`services.readBackAhead`) and answers its own copy.
+     *
+     * @type {Map<object, { version: number, read: Promise<void> }>}
+     */
+    const readsAhead = new Map();
+    /**
+     * @param {any} surface @param {number} version @param {any} pixels
+     * @param {boolean} [ahead]
+     */
+    const readInto = (surface, version, pixels, ahead = false)=>{
+        const read = pixels.readBack(surface, ahead);
+        readsAhead.set(surface, { version, read });
+        return read;
+    };
+    const readAhead = ()=>{
+        const pixels = readsAhead.size > 0 ? targetPixels() : undefined;
+        if (!pixels)
+        {
+            return;
+        }
+        const tell = services.readBackAhead ?? (()=>{});
+        for (const [surface, last] of readsAhead)
+        {
+            const now = drawnInto.get(surface) ?? 0;
+            if (now !== last.version)
+            {
+                const at = /** @type {any} */ (surface).base;
+                readInto(surface, now, pixels, true).then(()=>tell(at, now), ()=>{});
+            }
+        }
     };
 
     /**
@@ -1784,6 +1852,14 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
          * target's size a viewport must lie within, the clip planes, and the
          * shaders bound, each taken for its handle alone while it lives.
          */
+        /**
+         * How many times a surface may have been drawn into on the GPU; see
+         * `drawnInto`.
+         *
+         * @param {object} surface
+         */
+        drawnInto: surface=>drawnInto.get(surface) ?? 0,
+
         ringState(){
             const declared = isShaderHandle(boundVertexShader) || (boundVertexShader & 0xe) !== 0;
             const target = renderTarget ? describe(renderTarget) : null;
@@ -2076,6 +2152,10 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             if (rects && rectCount === 0)
             {
                 return D3D_OK;
+            }
+            if ((flags & D3DCLEAR.TARGET) !== 0)
+            {
+                drew(renderTarget);
             }
             if (renderer)
             {
@@ -3020,6 +3100,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             {
                 return hr;
             }
+            drew(destination);
             const whole = { left: 0, top: 0, right: from.Width, bottom: from.Height };
             const copies = chosen && targets
                 ? chosen.map((rect, index)=>({ rect, at: targets[index] }))
@@ -3065,7 +3146,16 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             // black. They are read back first, as a lock of the target reads.
             const pixels = surfaceTypeOf(from) === SURFACE_TYPE.RENDER_TARGET
                 ? targetPixels() : undefined;
-            return pixels ? pixels.readBack(source).then(describeMoves) : describeMoves();
+            if (pixels)
+            {
+                // A read of this drawing already issued -- ahead, or by the
+                // copy before -- is waited on rather than asked again.
+                const now = drawnInto.get(source) ?? 0;
+                const last = readsAhead.get(source);
+                return (last && last.version === now ? last.read
+                    : readInto(source, now, pixels)).then(describeMoves);
+            }
+            return describeMoves();
         },
 
         /**
@@ -3178,6 +3268,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                             Math.min(desc.Height, bounds.Height));
                         moves.push(rectMoveOf(one, rect, other, { x: rect.left, y: rect.top }));
                         renderer?.markDirty(other);
+                        drew(other);
                     }
                 }
             }

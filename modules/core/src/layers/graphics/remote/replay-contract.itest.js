@@ -177,11 +177,13 @@ function rig(version, way, caps = {}){
                 }
                 toSender({ type: 'wrote', writes: [{ address, bytes: bytes.slice() }] });
             },
+            readBackAhead: (/** @type {number} */ address, /** @type {number} */ drawn)=>
+                toSender({ type: 'prefetched', address, version: drawn }),
         });
         if (way === 'at once')
         {
             toSender = message=>{
-                for (const { address, bytes } of message.writes)
+                for (const { address, bytes } of message.writes ?? [])
                 {
                     if (bytes)
                     {
@@ -2311,6 +2313,124 @@ test('Direct3D 8: a Reset after render targets, a state block and surfaces of it
         await run.look('after the reset');
         for (const [name, object] of /** @type {[string, any][]} */ ([['vertices', vertices],
             ['indices', indices], ['device', device]]))
+        {
+            await run.call(`Release ${name}`, ()=>object.release());
+        }
+        await run.look('end');
+    });
+});
+
+test('Direct3D 8: a small target read back every frame, drawn into only now and then, leaves'
+    + ' the program the same bytes on both sides', async()=>{
+    // A GPU fence as a program makes one: a render target nothing draws into
+    // most frames, copied into an image surface and locked to read each frame.
+    // The recording answers the copy from the target's own memory while
+    // nothing has touched the target since the last read-back; the bytes have
+    // to be what the renderer would have answered.
+    await same(8, async run=>{
+        const { device, vertices, indices } = await device8(run);
+        /** @type {{ surface?: any }} */
+        const fence = {};
+        await run.call('CreateRenderTarget fence', ()=>device.CreateRenderTarget(16, 16,
+            D3DFMT.X8R8G8B8, 0, fence), [fence]);
+        /** @type {{ surface?: any }} */
+        const image = {};
+        await run.call('CreateImageSurface', ()=>device.CreateImageSurface(16, 16,
+            D3DFMT.X8R8G8B8, image), [image]);
+        /** @type {Record<string, any>} */
+        const old = {};
+        await run.call('GetRenderTarget', ()=>device.GetRenderTarget(old.target = {}),
+            [old.target]);
+        for (let frame = 0; frame < 5; frame++)
+        {
+            await run.call('BeginScene', ()=>device.BeginScene());
+            // Frames 0 and 3 clear the fence, each in its own colour; the
+            // rest only name it and name the back buffer again.
+            await run.call('SetRenderTarget fence', ()=>device.SetRenderTarget(fence.surface,
+                null));
+            if (frame === 0 || frame === 3)
+            {
+                await run.call('Clear fence', ()=>device.Clear(0, null, D3DCLEAR.TARGET,
+                    0xff102030 + frame * 0x010101, 1, 0));
+            }
+            await run.call('SetRenderTarget back', ()=>device.SetRenderTarget(old.target.surface,
+                null));
+            await run.call('Clear back', ()=>device.Clear(0, null, D3DCLEAR.TARGET,
+                0xff405060 + frame, 1, 0));
+            await run.call('EndScene', ()=>device.EndScene());
+            /** @type {{ moves?: any[] }} */
+            const held = {};
+            await run.call('CopyRects fence', ()=>device.CopyRects(fence.surface, null, 0,
+                image.surface, null, held));
+            applyMoves(run, held);
+            /** @type {{ pBits?: number, Pitch?: number }} */
+            const pixels = {};
+            await run.call('LockRect image', ()=>image.surface.LockRect(pixels, null,
+                D3DLOCK.READONLY), [pixels]);
+            run.bytes(`fence ${frame}`, /** @type {number} */ (pixels.pBits), 16 * 16 * 4);
+            await run.call('UnlockRect image', ()=>image.surface.UnlockRect());
+            await run.call('Present', ()=>device.Present(null, null, 0, null));
+            await run.call('idle', ()=>device.idle());
+        }
+        for (const [name, object] of /** @type {[string, any][]} */ ([
+            ['old target', old.target.surface], ['image', image.surface],
+            ['fence', fence.surface], ['vertices', vertices], ['indices', indices],
+            ['device', device]]))
+        {
+            await run.call(`Release ${name}`, ()=>object.release());
+        }
+        await run.look('end');
+    });
+});
+
+test('Direct3D 8: a target drawn into every frame and read back the frame after leaves the'
+    + ' program the same bytes on both sides', async()=>{
+    // The order a fence keeps: the copy of what the frame before drew, then
+    // the frame's own drawing into it. The played device reads the target
+    // back ahead as each frame is presented, and the recording answers the
+    // next copy from that.
+    await same(8, async run=>{
+        const { device, vertices, indices } = await device8(run);
+        /** @type {{ surface?: any }} */
+        const fence = {};
+        await run.call('CreateRenderTarget fence', ()=>device.CreateRenderTarget(16, 16,
+            D3DFMT.X8R8G8B8, 0, fence), [fence]);
+        /** @type {{ surface?: any }} */
+        const image = {};
+        await run.call('CreateImageSurface', ()=>device.CreateImageSurface(16, 16,
+            D3DFMT.X8R8G8B8, image), [image]);
+        /** @type {Record<string, any>} */
+        const old = {};
+        await run.call('GetRenderTarget', ()=>device.GetRenderTarget(old.target = {}),
+            [old.target]);
+        for (let frame = 0; frame < 6; frame++)
+        {
+            /** @type {{ moves?: any[] }} */
+            const held = {};
+            await run.call('CopyRects fence', ()=>device.CopyRects(fence.surface, null, 0,
+                image.surface, null, held));
+            applyMoves(run, held);
+            /** @type {{ pBits?: number, Pitch?: number }} */
+            const pixels = {};
+            await run.call('LockRect image', ()=>image.surface.LockRect(pixels, null,
+                D3DLOCK.READONLY), [pixels]);
+            run.bytes(`fence ${frame}`, /** @type {number} */ (pixels.pBits), 16 * 16 * 4);
+            await run.call('UnlockRect image', ()=>image.surface.UnlockRect());
+            await run.call('BeginScene', ()=>device.BeginScene());
+            await run.call('SetRenderTarget fence', ()=>device.SetRenderTarget(fence.surface,
+                null));
+            await run.call('Clear fence', ()=>device.Clear(0, null, D3DCLEAR.TARGET,
+                0xff000000 + frame * 0x030507, 1, 0));
+            await run.call('SetRenderTarget back', ()=>device.SetRenderTarget(old.target.surface,
+                null));
+            await run.call('EndScene', ()=>device.EndScene());
+            await run.call('Present', ()=>device.Present(null, null, 0, null));
+            await run.call('idle', ()=>device.idle());
+        }
+        for (const [name, object] of /** @type {[string, any][]} */ ([
+            ['old target', old.target.surface], ['image', image.surface],
+            ['fence', fence.surface], ['vertices', vertices], ['indices', indices],
+            ['device', device]]))
         {
             await run.call(`Release ${name}`, ()=>object.release());
         }

@@ -335,6 +335,9 @@ function visit(value, bind){
  *     knows, which the recorded device has no say in. It is given the
  *     device's own objects, so what it asks of them is not recorded.
  * @param {ReadonlySet<string>} [options.answers]  the only methods `answered` is asked about
+ * @param {(target: any, name: string, args: any[]) => void} [options.observe]
+ *     told every call the recorded device has made, with its own objects, before
+ *     `answered` is asked: what the call changed, for a question asked later
  * @returns {{ root: any, allocated: (address: number, bytes: number) => void,
  *     freed: (address: number) => void,
  *     writing: (address: number, length: number) => void,
@@ -352,7 +355,8 @@ function visit(value, bind){
  *     recorded answered there
  */
 export function createRecording(options){
-    const { root, readMemory, transport, answered = ()=>false, answers = new Set() } = options;
+    const { root, readMemory, transport, answered = ()=>false, answers = new Set(),
+        observe = null } = options;
     const windowMemory = options.windowMemory ?? readMemory;
     const { writer } = transport;
     const lender = transport.lender ?? null;
@@ -1203,6 +1207,10 @@ export function createRecording(options){
             if (lender)
             {
                 claimWritten(target, name, args);
+            }
+            if (!failed)
+            {
+                observe?.(target, name, applied);
             }
             if (paced)
             {
