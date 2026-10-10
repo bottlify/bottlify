@@ -1795,8 +1795,8 @@ test('every capability claimed is one the renderer honours', ()=>{
         'D3DTSS_MIPMAPLODBIAS, which the shader adds to the level a read takes');
     assert.equal(caps.StencilCaps, 0xff, 'KEEP through DECR, the operations the pipeline maps');
     assert.equal(caps.MaxVertexBlendMatrices, 0, 'no vertex blending');
-    assert.equal(caps.TextureAddressCaps & (0x00000008 | 0x00000020), 0,
-        'no border colour and no mirror-once, which the sampler folds into others');
+    assert.equal(caps.TextureAddressCaps & (0x00000008 | 0x00000020), 0x00000028,
+        'a border colour and mirror-once, which the shader makes over a clamping sampler');
     assert.equal(caps.RasterCaps & 0x00010000, 0x00010000,
         'D3DPRASTERCAPS_FOGRANGE: range fog fades by the distance from the eye');
 

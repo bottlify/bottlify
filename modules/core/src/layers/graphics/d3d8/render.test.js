@@ -39,7 +39,7 @@ import {
     HARDWARE_SAMPLER, filledIndices, listIndices, multiplyMatrices, packLight, pipelineStateOf,
     samplerFlagsOf,
     screenExtent, transformPosition, uniformBlock, uniformsOf, pixelUniformsOf, fogModeOf, fogOf,
-    isAffine, lodBiasOf, stageCascade,
+    addressVariantOf, isAffine, lodBiasOf, samplerDescriptorOf, stageCascade,
     vertexCountOf,
 } from './render.js';
 import { createBackend } from '../webgpu/backend.js';
@@ -1336,6 +1336,24 @@ test('the sampler state packs as the shader unpacks it', ()=>{
     assert.equal(samplerFlagsOf(new Map()), 1 << 4 | 1 << 5, 'the defaults: wrap, point, no mips');
     assert.equal(samplerFlagsOf(new Map([[D3DTSS.ADDRESSW, D3DTADDRESS.CLAMP]])) >>> 16, 2,
         'a volume\'s third address mode above the rest');
+});
+
+test('border and mirror-once clamp on the GPU and are the sample\'s variant, by axis', ()=>{
+    const states = new Map(/** @type {[number, number][]} */ ([
+        [D3DTSS.ADDRESSU, D3DTADDRESS.MIRRORONCE], [D3DTSS.ADDRESSV, D3DTADDRESS.BORDER],
+        [D3DTSS.ADDRESSW, D3DTADDRESS.MIRRORONCE], [D3DTSS.BORDERCOLOR, 0x11223344]]));
+    const get = (/** @type {number} */ state)=>states.get(state) ?? 0;
+    assert.equal(samplerFlagsOf(states) & 0xf, 2 | (2 << 2), 'both clamp in the flags');
+    assert.equal(samplerFlagsOf(states) >>> 16, 2);
+    const descriptor = samplerDescriptorOf(states);
+    assert.deepEqual([descriptor.addressModeU, descriptor.addressModeV, descriptor.addressModeW],
+        ['clamp-to-edge', 'clamp-to-edge', 'clamp-to-edge']);
+    assert.deepEqual(addressVariantOf(get, '2d'),
+        { mirrorOnce: 1, border: { mask: 2, colour: 0x11223344 } }, 'no w on a flat texture');
+    assert.deepEqual(addressVariantOf(get, '3d'),
+        { mirrorOnce: 5, border: { mask: 2, colour: 0x11223344 } });
+    assert.deepEqual(addressVariantOf(get, 'cube'), {}, 'a cube\'s faces are not addressed');
+    assert.deepEqual(addressVariantOf(()=>D3DTADDRESS.CLAMP, '3d'), {});
 });
 
 test('recorded: a texture is uploaded after it is unlocked, and only then', async()=>{

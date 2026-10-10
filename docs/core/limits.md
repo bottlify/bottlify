@@ -80,11 +80,14 @@ differently raises a `divergence` event naming the API.
   `texture-compression-bc`.
 - Shaders and pipelines are cached in memory only; every run builds them again.
 - Direct3D 9 claims vertex and pixel shader model 3.0. Not offered: user clip planes
-  (`MaxUserClipPlanes` is 0), the border and mirror-once address modes, the per-stage constant
-  and temporary register of the texture stages; a draw from a stream whose offset, past its
-  whole vertices, is not a multiple of four bytes is refused (WebGPU binds a vertex buffer only
-  there). A mip level-of-detail bias (`D3DSAMP_MIPMAPLODBIAS`, Direct3D 8's
-  `D3DTSS_MIPMAPLODBIAS`) is applied in the shader, held to ±16.
+  (`MaxUserClipPlanes` is 0), the per-stage constant and temporary register of the texture
+  stages; a draw from a stream whose offset, past its whole vertices, is not a multiple of four
+  bytes is refused (WebGPU binds a vertex buffer only there). A mip level-of-detail bias
+  (`D3DSAMP_MIPMAPLODBIAS`, Direct3D 8's `D3DTSS_MIPMAPLODBIAS`) is applied in the shader, held
+  to ±16. The border and mirror-once address modes are the shader's over a clamping sampler:
+  the border colour is selected where the coordinate lies outside [0, 1], so a filtered read
+  does not blend the edge texels into it over the last half texel, and a cube map's faces take
+  neither.
 - Direct3D 9's 32-bit float formats are kept as half floats, and A16B16G16R16/G16R16 as half
   floats of their value.
 - The engine's own `d3dx9` reads BMP, DDS, TGA, PNG and JPEG images; `D3DXCreateTeapot`,

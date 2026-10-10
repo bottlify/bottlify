@@ -162,6 +162,12 @@ test('a stage list is folded stage by stage, and its length is part of the key',
         'a level-of-detail bias is folded');
     assert.notEqual(pipelineKey({ ...base, stages: [stage({ lodBias: 1 })] }),
         pipelineKey({ ...base, stages: [stage({ lodBias: 1.5 })] }), 'and how much it is');
+    const keys = [stage({ mirrorOnce: 1 }), stage({ mirrorOnce: 2 }),
+        stage({ border: { mask: 1, colour: 0 } }), stage({ border: { mask: 1, colour: 1 } }),
+        stage({ border: { mask: 2, colour: 0 } }), stage()]
+        .map(only=>pipelineKey({ ...base, stages: [only] }));
+    assert.equal(new Set(keys).size, keys.length,
+        'which axes fold, which select a border, and the border colour are folded');
 });
 
 test('every part of the lighting state that shapes the shader is folded', ()=>{

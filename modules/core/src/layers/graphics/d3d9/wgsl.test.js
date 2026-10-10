@@ -238,6 +238,62 @@ test('a sampler\'s level-of-detail bias joins every kind of read through it, and
         assertLine(legacy.wgsl, 't0 = textureSampleBias(tex0, samp0, in.t0.xy, 0.5);');
     });
 
+test('a mirror-once axis is folded at every kind of read, a border axis selects its colour',
+    ()=>{
+        // The GPU sampler clamps both (`samplerDescriptorOf`). A read whose
+        // level the GPU derives takes the derivatives of the coordinate before
+        // the fold, so the mirror line keeps its level.
+        const r = REGISTER.TEMP;
+        const s = REGISTER.SAMPLER;
+        const reads = parseShader([PS_3_0, ...dclSampler(0), ...dclSampler(1, 3),
+            op(OPCODE.DCL, 2), (0x80000000 | D3DDECLUSAGE.TEXCOORD) >>> 0, dst(REGISTER.INPUT, 0),
+            op(OPCODE.TEX, 3), dst(r, 0), src(REGISTER.INPUT, 0), src(s, 0),
+            op(OPCODE.TEX, 3, 2), dst(r, 2), src(REGISTER.INPUT, 0), src(s, 0),
+            op(OPCODE.TEXLDL, 3), dst(r, 3), src(REGISTER.INPUT, 0), src(s, 0),
+            op(OPCODE.TEXLDD, 5), dst(r, 4), src(REGISTER.INPUT, 0), src(s, 0), src(r, 1),
+            src(r, 2),
+            op(OPCODE.TEX, 3), dst(r, 5), src(REGISTER.INPUT, 0), src(s, 1),
+            op(OPCODE.ADD, 3), dst(r, 0), src(r, 0), src(r, 5),
+            op(OPCODE.MOV, 2), dst(REGISTER.COLOROUT, 0), src(r, 0), END_TOKEN]);
+        assert.equal(reads.error, null);
+        const both = { mirrorOnce: 3, lodBias: 1 };
+        const folded = translateShader(reads, { sampling: [both, both] });
+        assert.equal(folded.error, null);
+        for (const line of [
+            'r0 = textureSampleGrad(tex0, samp0, abs(in.v0.xy), dpdx(in.v0.xy) * 2.0,'
+                + ' dpdy(in.v0.xy) * 2.0);',
+            'r2 = textureSampleGrad(tex0, samp0, abs(in.v0.xy), dpdx(in.v0.xy)'
+                + ' * exp2(in.v0.w + 1.0), dpdy(in.v0.xy) * exp2(in.v0.w + 1.0));',
+            'r3 = textureSampleLevel(tex0, samp0, abs(in.v0.xy), in.v0.w + 1.0);',
+            'r4 = textureSampleGrad(tex0, samp0, abs(in.v0.xy), r1.xy * 2.0, r2.xy * 2.0);',
+            'r5 = textureSampleBias(tex1, samp1, in.v0.xyz, 1.0);',
+        ])
+        {
+            assertLine(folded.wgsl, line);
+        }
+        const one = translateShader(reads, { sampling: [{ mirrorOnce: 2 }] });
+        assertLine(one.wgsl, 'r3 = textureSampleLevel(tex0, samp0, vec2f((in.v0.xy).x,'
+            + ' abs((in.v0.xy).y)), in.v0.w);');
+
+        // D3DCOLOR 0xff000080: opaque, blue at half. The channels a texture
+        // lacks are filled first, and the border colour is taken as it is.
+        const border = { border: { mask: 1, colour: 0xff000080 } };
+        const bordered = translateShader(reads, { sampling: [border, border], ones: [0b1110] });
+        assertLine(bordered.wgsl, 'r3 = select(vec4f(textureSampleLevel(tex0, samp0, in.v0.xy,'
+            + ' in.v0.w).x, 1.0, 1.0, 1.0), vec4f(0.0, 0.0, 0.5019607843137255, 1.0),'
+            + ' (in.v0.xy).x < 0.0 || (in.v0.xy).x > 1.0);');
+        assertLine(bordered.wgsl, 'r5 = textureSample(tex1, samp1, in.v0.xyz);');
+
+        // A 1.x stage folds and borders as its texture is addressed.
+        const legacy = translateShader(parseShader([PS_1_1,
+            0x00000042, 0xb00f0000,                 // tex t0
+            0x00000001, 0x800f0000, 0xb0e40000,     // mov r0, t0
+            END_TOKEN]), { sampling: [{ mirrorOnce: 1, border: { mask: 2, colour: 0 } }] });
+        assertLine(legacy.wgsl, 't0 = select(textureSampleGrad(tex0, samp0,'
+            + ' vec2f(abs((in.t0.xy).x), (in.t0.xy).y), dpdx(in.t0.xy), dpdy(in.t0.xy)),'
+            + ' vec4f(0.0, 0.0, 0.0, 0.0), (in.t0.xy).y < 0.0 || (in.t0.xy).y > 1.0);');
+    });
+
 test('a cube sampler takes three coordinates, and a sampler read without a dcl is refused', ()=>{
     const parsed = parseShader([PS_2_0, ...dclSampler(1, 3),
         op(OPCODE.TEX, 3), dst(REGISTER.TEMP, 0), src(REGISTER.TEXTURE, 0),

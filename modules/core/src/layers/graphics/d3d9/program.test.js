@@ -1697,3 +1697,48 @@ test('a sampler\'s level-of-detail bias reaches the reads of a shader pair and o
         vs.shader.release();
         ps.shader.release();
     });
+
+test('a border and a mirror-once axis reach a shader pair\'s reads and the fixed stages, clamped',
+    async()=>{
+        const h = harness();
+        /** @type {{ shader?: any }} */
+        const vs = {};
+        /** @type {{ shader?: any }} */
+        const ps = {};
+        assert.equal(h.device.CreateVertexShader(VERTEX_SHADER, vs), D3D_OK);
+        assert.equal(h.device.CreatePixelShader(PIXEL_SHADER, ps), D3D_OK);
+        h.device.SetTexture(0, h.texture);
+        // D3DSAMP_ADDRESSU BORDER, ADDRESSV MIRRORONCE, D3DSAMP_BORDERCOLOR.
+        assert.equal(h.device.SetSamplerState(0, 1, 4), D3D_OK);
+        assert.equal(h.device.SetSamplerState(0, 2, 5), D3D_OK);
+        assert.equal(h.device.SetSamplerState(0, 4, 0xff00ff00), D3D_OK);
+        assert.equal(h.device.BeginScene(), D3D_OK);
+        h.device.SetVertexShader(vs.shader);
+        h.device.SetPixelShader(ps.shader);
+        assert.equal(h.device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+        h.device.SetPixelShader(null);
+        assert.equal(h.device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+        assert.equal(h.device.EndScene(), D3D_OK);
+        assert.equal(h.device.Present(), D3D_OK);
+        await h.device.idle();
+        assert.deepEqual(h.reports, []);
+        const [translated, fixed] = modulesOf(h, 'ps:');
+        assert.ok(translated.includes('select(textureSampleGrad(tex0, samp0, vec2f((in.t0.xy).x,'
+            + ' abs((in.t0.xy).y)), dpdx(in.t0.xy), dpdy(in.t0.xy)), vec4f(0.0, 1.0, 0.0, 1.0),'
+            + ' (in.t0.xy).x < 0.0 || (in.t0.xy).x > 1.0)'), translated);
+        assert.ok(fixed.includes('addressCoordinate(abs(raw.y), (flags >> 2u) & 3u,'));
+        assert.ok(fixed.includes('vec4f(0.0, 1.0, 0.0, 1.0), raw.x < 0.0 || raw.x > 1.0)'));
+        const programSampler = h.gpu.device.calls
+            .filter((/** @type {any} */ call)=>call.op === 'createBindGroup')
+            .flatMap((/** @type {any} */ call)=>call.descriptor.entries)
+            .map((/** @type {any} */ entry)=>entry.resource)
+            .find((/** @type {any} */ resource)=>resource?.kind === 'sampler'
+                && resource.descriptor.addressModeV !== 'repeat');
+        assert.deepEqual([programSampler?.descriptor.addressModeU,
+            programSampler?.descriptor.addressModeV], ['clamp-to-edge', 'clamp-to-edge'],
+        'the GPU sampler clamps, and the shader folds and selects');
+        h.device.SetTexture(0, null);
+        h.device.SetVertexShader(null);
+        vs.shader.release();
+        ps.shader.release();
+    });

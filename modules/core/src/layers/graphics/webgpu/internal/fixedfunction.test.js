@@ -634,6 +634,49 @@ test('a level-of-detail bias is added to its own stage\'s level before the clamp
         assert.ok(fragment.wgsl.includes(`let lod = clamp(${derived} + 0.25,`));
     });
 
+test('a mirror-once axis is folded before its clamp, a border axis selects its colour outside',
+    ()=>{
+        const textured = {
+            colorOp: D3DTOP.SELECTARG1, colorArg1: D3DTA.TEXTURE, colorArg2: D3DTA.CURRENT,
+            alphaOp: D3DTOP.SELECTARG1, alphaArg1: D3DTA.TEXTURE, alphaArg2: D3DTA.CURRENT,
+            texCoordIndex: 0,
+        };
+        const fvf = FVF.XYZ | FVF.DIFFUSE | (1 << FVF.TEXCOUNT_SHIFT) | (1 << 16);
+        const sampleOf = (/** @type {string} */ code)=>{
+            const from = code.slice(code.indexOf('fn sampleStage0'));
+            return from.slice(0, from.indexOf('\n}\n'));
+        };
+        const plain = sampleOf(generate(baseState({ fvf, stages: [textured] })).code);
+        const mirrored = sampleOf(generate(baseState({ fvf,
+            stages: [{ ...textured, mirrorOnce: 1 }] })).code);
+        assert.ok(mirrored.includes('addressCoordinate(abs(raw.x), flags & 3u, levelSize.x)'),
+            'u folded about zero, and then clamped as its flags say');
+        assert.ok(mirrored.includes('addressCoordinate(raw.y, (flags >> 2u) & 3u, levelSize.y)'),
+            'v as it was');
+        assert.ok(mirrored.includes('let dx = dpdx(raw * size);'), 'the level from the raw one');
+        assert.equal(mirrored.replace('abs(raw.x)', 'raw.x'), plain);
+
+        // D3DCOLOR 0x80ff4000: alpha 0x80, red 0xff, green 0x40, blue 0.
+        const bordered = sampleOf(generate(baseState({ fvf,
+            stages: [{ ...textured, border: { mask: 3, colour: 0x80ff4000 } }] })).code);
+        assert.ok(bordered.includes('return select(textureSampleLevel(texture0, sampler0, uv,'
+            + ' level), vec4f(1.0, 0.25098039215686274, 0.0, 0.5019607843137255),'
+            + ' raw.x < 0.0 || raw.x > 1.0 || raw.y < 0.0 || raw.y > 1.0);'), bordered);
+        const vOnly = sampleOf(generate(baseState({ fvf,
+            stages: [{ ...textured, border: { mask: 2, colour: 0 } }] })).code);
+        assert.ok(vOnly.includes('vec4f(0.0, 0.0, 0.0, 0.0), raw.y < 0.0 || raw.y > 1.0);'));
+        assert.equal(sampleOf(generate(baseState({ fvf,
+            stages: [{ ...textured, border: { mask: 4, colour: 0 } }] })).code), plain,
+        'a flat texture has no w to be outside on');
+
+        // A volume's third axis takes either, by its own bit.
+        const volume = sampleOf(generate(baseState({ fvf, stages: [{ ...textured,
+            dimension: '3d', mirrorOnce: 4, border: { mask: 1, colour: 0xffffffff } }] })).code);
+        assert.ok(volume.includes('addressCoordinate(abs(raw.z), (flags >> 16u) & 3u,'
+            + ' levelSize.z)'));
+        assert.ok(volume.includes('vec4f(1.0, 1.0, 1.0, 1.0), raw.x < 0.0 || raw.x > 1.0);'));
+    });
+
 test('a stage puts its coordinate through its own texture transform before sampling', ()=>{
     // Direct3D applies D3DTS_TEXTURE0..7 to (u, v, 1) for a two-coordinate
     // set: two dot products against the rows the block carries, computed

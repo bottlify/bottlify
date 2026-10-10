@@ -1201,6 +1201,46 @@ function levelOfDetail(bias){
 }
 
 /**
+ * One coordinate as D3DTADDRESS_MIRRORONCE folds it on an axis whose bit is
+ * in `mask` (1 u, 2 v, 4 w): about zero once, its magnitude, which the clamp
+ * the stage's flags carry for that axis then holds -- a texture repeated once
+ * mirrored and then its edge. An axis without the bit is written as it was.
+ *
+ * @param {string} coordinate @param {number} mask @param {number} axis
+ * @returns {string}
+ */
+function mirroredAxis(coordinate, mask, axis){
+    return (mask & axis) !== 0 ? `abs(${coordinate})` : coordinate;
+}
+
+/**
+ * A stage's sample under D3DTADDRESS_BORDER: the stage's border colour where
+ * its coordinate lies outside [0, 1] on an axis in the mode, the sample taken
+ * at the clamped edge elsewhere. Without a border, the sample as it was.
+ *
+ * @param {string} read  The sample, a vec4f.
+ * @param {{ mask: number, colour: number } | undefined} border
+ *     The axes (1 u, 2 v, 4 w) and D3DSAMP_BORDERCOLOR as a D3DCOLOR.
+ * @param {string} raw  The coordinate before addressing.
+ * @param {number} axes  How many components it has.
+ * @returns {string}
+ */
+function bordered(read, border, raw, axes){
+    if (!border || (border.mask & ((1 << axes) - 1)) === 0)
+    {
+        return read;
+    }
+    const outside = ['x', 'y', 'z'].slice(0, axes)
+        .filter((_, axis)=>(border.mask & (1 << axis)) !== 0)
+        .map(axis=>`${raw}.${axis} < 0.0 || ${raw}.${axis} > 1.0`)
+        .join(' || ');
+    const channel = (/** @type {number} */ shift)=>literalOf(((border.colour >>> shift) & 0xff)
+        / 255);
+    return `select(${read}, vec4f(${channel(16)}, ${channel(8)}, ${channel(0)}, ${channel(24)}),`
+        + ` ${outside})`;
+}
+
+/**
  * The sampling of one stage, with the stage's sampler state read from the
  * block: address modes, point filtering by snapping to texel centres, and the
  * mip mode as an explicit level. The derivatives are taken from the raw
@@ -1244,7 +1284,7 @@ function sampleFunctions(count, generated = [], keys = [], dimensions = [], ones
         {
             lines.push(dimension === 'cube'
                 ? cubeSample(index, flags, ones[index], lod)
-                : volumeSample(index, flags, ones[index], lod));
+                : volumeSample(index, flags, ones[index], lod, stages[index]));
             continue;
         }
         // The stage's texture transform, as Direct3D applies it to a
@@ -1255,6 +1295,8 @@ function sampleFunctions(count, generated = [], keys = [], dimensions = [], ones
         // and a projected one is divided here, per pixel, as the rasteriser
         // does it.
         const generation = generated[index] ?? null;
+        const stage = stages[index];
+        const mirrorOnce = stage?.mirrorOnce ?? 0;
         const transformed = generation
             ? `    let raw = ${generation.projected === 3 ? 'carried.xy / carried.z'
                 : generation.projected === 4 ? 'carried.xy / carried.w' : 'carried.xy'};\n`
@@ -1282,8 +1324,10 @@ ${transformed}    let flags = ${flags};
         level = lod;
     }
     let levelSize = max(floor(size / exp2(floor(level))), vec2f(1.0));
-    var uv = vec2f(addressCoordinate(raw.x, flags & 3u, levelSize.x),
-        addressCoordinate(raw.y, (flags >> 2u) & 3u, levelSize.y));
+    var uv = vec2f(addressCoordinate(${mirroredAxis('raw.x', mirrorOnce, 1)}, flags & 3u,`
+            + ` levelSize.x),
+        addressCoordinate(${mirroredAxis('raw.y', mirrorOnce, 2)}, (flags >> 2u) & 3u,`
+            + ` levelSize.y));
     var point = (flags >> 4u) & 1u;
     if (lod > 0.0) {
         point = (flags >> 5u) & 1u;
@@ -1292,7 +1336,7 @@ ${transformed}    let flags = ${flags};
         uv = (floor(uv * levelSize) + 0.5) / levelSize;
     }
 ${keyTest(index, keys[index] ?? null)
-}    return ${read};
+}    return ${bordered(read, stage?.border, 'raw', 2)};
 }
 `);
     }
@@ -1358,8 +1402,10 @@ function cubeSample(index, flags, ones, lod = levelOfDetail()){
  *
  * @param {number} index @param {string} flags @param {number} [ones]
  * @param {string} [lod]  The unclamped level of detail (`levelOfDetail`).
+ * @param {import('./pipeline.js').StageKey} [stage]  For its mirror-once and border axes.
  */
-function volumeSample(index, flags, ones, lod = levelOfDetail()){
+function volumeSample(index, flags, ones, lod = levelOfDetail(), stage = undefined){
+    const mirrorOnce = stage?.mirrorOnce ?? 0;
     const read = sampledWithOnes(
         `textureSampleLevel(texture${index}, sampler${index}, uvw, level)`, ones);
     return `fn sampleStage${index}(raw: vec3f) -> vec4f {
@@ -1378,9 +1424,12 @@ function volumeSample(index, flags, ones, lod = levelOfDetail()){
         level = lod;
     }
     let levelSize = max(floor(size / exp2(floor(level))), vec3f(1.0));
-    var uvw = vec3f(addressCoordinate(raw.x, flags & 3u, levelSize.x),
-        addressCoordinate(raw.y, (flags >> 2u) & 3u, levelSize.y),
-        addressCoordinate(raw.z, (flags >> 16u) & 3u, levelSize.z));
+    var uvw = vec3f(addressCoordinate(${mirroredAxis('raw.x', mirrorOnce, 1)}, flags & 3u,`
+        + ` levelSize.x),
+        addressCoordinate(${mirroredAxis('raw.y', mirrorOnce, 2)}, (flags >> 2u) & 3u,`
+        + ` levelSize.y),
+        addressCoordinate(${mirroredAxis('raw.z', mirrorOnce, 4)}, (flags >> 16u) & 3u,`
+        + ` levelSize.z));
     var point = (flags >> 4u) & 1u;
     if (lod > 0.0) {
         point = (flags >> 5u) & 1u;
@@ -1388,7 +1437,7 @@ function volumeSample(index, flags, ones, lod = levelOfDetail()){
     if (point == 1u) {
         uvw = (floor(uvw * levelSize) + 0.5) / levelSize;
     }
-    return ${read};
+    return ${bordered(read, stage?.border, 'raw', 3)};
 }
 `;
 }

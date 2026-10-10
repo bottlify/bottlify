@@ -124,9 +124,15 @@ const STENCIL_CAPS = 0x1ff;
 const D3DPTADDRESSCAPS_WRAP = 0x00000001;
 const D3DPTADDRESSCAPS_MIRROR = 0x00000002;
 const D3DPTADDRESSCAPS_CLAMP = 0x00000004;
+const D3DPTADDRESSCAPS_BORDER = 0x00000008;
 const D3DPTADDRESSCAPS_INDEPENDENTUV = 0x00000010;
+const D3DPTADDRESSCAPS_MIRRORONCE = 0x00000020;
+/**
+ * Every mode: border and mirror-once, which no WebGPU sampler has, are the
+ * shader's over a clamping sampler (`addressVariantOf` in the renderer).
+ */
 const ADDRESS_CAPS = D3DPTADDRESSCAPS_WRAP | D3DPTADDRESSCAPS_MIRROR | D3DPTADDRESSCAPS_CLAMP
-    | D3DPTADDRESSCAPS_INDEPENDENTUV;
+    | D3DPTADDRESSCAPS_BORDER | D3DPTADDRESSCAPS_INDEPENDENTUV | D3DPTADDRESSCAPS_MIRRORONCE;
 
 const D3DLINECAPS_TEXTURE = 0x00000001;
 const D3DLINECAPS_ZTEST = 0x00000002;
@@ -212,8 +218,6 @@ export function capabilityWords(caps, identity = {}){
         TextureFilterCaps: FILTER_CAPS,
         CubeTextureFilterCaps: FILTER_CAPS,
         VolumeTextureFilterCaps: FILTER_CAPS,
-        // Border and mirror-once are folded into clamp and mirror by the
-        // sampler, so neither is promised.
         TextureAddressCaps: ADDRESS_CAPS,
         VolumeTextureAddressCaps: ADDRESS_CAPS,
         LineCaps: D3DLINECAPS_TEXTURE | D3DLINECAPS_ZTEST | D3DLINECAPS_BLEND

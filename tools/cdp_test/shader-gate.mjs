@@ -285,10 +285,10 @@ function pageRunner(){
         const texel = plan.texels[s.index % plan.texels.length];
         const size = texel.size ?? 1;
         /** @type {number[][]} */
-        const levels = texel.levels ?? [texel.bytes];
+        const levels = texel.image ? [] : texel.levels ?? [texel.bytes];
         const texture = device.createTexture({
             size: [size, size, dimension === '3d' ? size : layers], format: texel.format,
-            dimension: dimension === '3d' ? '3d' : '2d', mipLevelCount: levels.length,
+            dimension: dimension === '3d' ? '3d' : '2d', mipLevelCount: Math.max(1, levels.length),
             usage: TEXTURE_BINDING | TEXTURE_COPY_DST,
         });
         levels.forEach((bytes, level)=>{
@@ -303,6 +303,11 @@ function pageRunner(){
                     [across, across, deep]);
             }
         });
+        if (texel.image)
+        {
+            device.queue.writeTexture({ texture }, new Uint8Array(texel.image),
+                { bytesPerRow: size * 4, rowsPerImage: size }, [size, size, 1]);
+        }
         return [texture.createView({ dimension }), device.createSampler(texel.sampler
             ?? { magFilter: 'linear', minFilter: 'linear' })];
     });

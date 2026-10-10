@@ -308,6 +308,13 @@ export function varyingLocation(usage, index){
  * @typedef {Object} SamplerVariant
  * @property {number} [lodBias]  D3DSAMP_MIPMAPLODBIAS, not zero: added to the
  *     level of detail of every read, implicit or explicit.
+ * @property {number} [mirrorOnce]  The axes (1 u, 2 v, 4 w) addressed
+ *     D3DTADDRESS_MIRRORONCE, whose GPU sampler clamps: a read folds the
+ *     coordinate about zero first. Not of a cube map, whose faces are not
+ *     addressed.
+ * @property {{ mask: number, colour: number }} [border]  The axes addressed
+ *     D3DTADDRESS_BORDER, whose GPU sampler clamps, and D3DSAMP_BORDERCOLOR as
+ *     a D3DCOLOR: a read outside [0, 1] on one of them is that colour.
  */
 
 /**
@@ -318,6 +325,101 @@ export function varyingLocation(usage, index){
 const floatLiteral = value=>{
     const text = String(value);
     return text.includes('.') || text.includes('e') ? text : `${text}.0`;
+};
+
+/**
+ * A coordinate with the axes in `mask` folded about zero, as mirror-once
+ * folds them before its clamp.
+ *
+ * @param {string} at @param {number} components  2 or 3. @param {number} mask
+ */
+const foldedCoordinate = (at, components, mask)=>{
+    const all = (1 << components) - 1;
+    if ((mask & all) === all)
+    {
+        return `abs(${at})`;
+    }
+    const parts = COMPONENT.slice(0, components).split('')
+        .map((axis, index)=>((mask & (1 << index)) !== 0
+            ? `abs((${at}).${axis})` : `(${at}).${axis}`));
+    return `vec${components}f(${parts.join(', ')})`;
+};
+
+/**
+ * One read through a sampler as its state asks (`SamplerVariant`), before any
+ * channel is filled: the level-of-detail bias joined to whatever level the
+ * read names -- added to an explicit level or bias, and as a scale of two to
+ * its power on derivatives, which moves their level by it -- and the
+ * coordinate folded on its mirror-once axes. A folded read whose level is the
+ * GPU's to derive is given the derivatives of the coordinate before the fold,
+ * whose size is the same everywhere but where the fold meets itself, where
+ * the folded one's would shrink to nothing. A read with no variant is the
+ * plain one, to the byte.
+ *
+ * @param {string} pair  The texture and sampler, 'texN, sampN'.
+ * @param {string} at  The coordinate.
+ * @param {number} components  How many it has: 2, or 3 for a volume or cube.
+ * @param {{ how: 'sample' } | { how: 'bias' | 'level', by: string }
+ *     | { how: 'grad', dx: string, dy: string }} read
+ * @param {SamplerVariant | undefined} variant
+ * @param {boolean} addressed  Whether the texture's axes are addressed: not a cube's.
+ * @returns {string}
+ */
+const variantRead = (pair, at, components, read, variant, addressed)=>{
+    const lodBias = variant?.lodBias ?? 0;
+    const plus = lodBias ? ` + ${floatLiteral(lodBias)}` : '';
+    const scale = lodBias ? ` * ${floatLiteral(2 ** lodBias)}` : '';
+    const mask = addressed ? (variant?.mirrorOnce ?? 0) & ((1 << components) - 1) : 0;
+    const folded = mask === 0 ? at : foldedCoordinate(at, components, mask);
+    switch (read.how)
+    {
+        case 'level':
+            return `textureSampleLevel(${pair}, ${folded}, ${read.by}${plus})`;
+        case 'grad':
+            return `textureSampleGrad(${pair}, ${folded}, ${read.dx}${scale}, ${read.dy}${scale})`;
+        case 'bias':
+            return mask === 0
+                ? `textureSampleBias(${pair}, ${at}, ${read.by}${plus})`
+                : `textureSampleGrad(${pair}, ${folded}, dpdx(${at}) * exp2(${read.by}${plus}),`
+                    + ` dpdy(${at}) * exp2(${read.by}${plus}))`;
+        default:
+            if (mask !== 0)
+            {
+                return `textureSampleGrad(${pair}, ${folded}, dpdx(${at})${scale},`
+                    + ` dpdy(${at})${scale})`;
+            }
+            return lodBias
+                ? `textureSampleBias(${pair}, ${at}, ${floatLiteral(lodBias)})`
+                : `textureSample(${pair}, ${at})`;
+    }
+};
+
+/**
+ * A read under D3DTADDRESS_BORDER: the sampler's border colour where the
+ * coordinate lies outside [0, 1] on an axis in the mode, the read clamped to
+ * the edge elsewhere. Without a border, the read as it was.
+ *
+ * @param {string} read  A vec4f expression, its channels filled.
+ * @param {string} at @param {number} components
+ * @param {SamplerVariant | undefined} variant
+ * @param {boolean} addressed  Whether the texture's axes are addressed: not a cube's.
+ * @returns {string}
+ */
+const borderedRead = (read, at, components, variant, addressed)=>{
+    const border = addressed ? variant?.border : undefined;
+    const mask = (border?.mask ?? 0) & ((1 << components) - 1);
+    if (!border || mask === 0)
+    {
+        return read;
+    }
+    const outside = COMPONENT.slice(0, components).split('')
+        .filter((_, axis)=>(mask & (1 << axis)) !== 0)
+        .map(axis=>`(${at}).${axis} < 0.0 || (${at}).${axis} > 1.0`)
+        .join(' || ');
+    const channel = (/** @type {number} */ shift)=>floatLiteral(((border.colour >>> shift) & 0xff)
+        / 255);
+    return `select(${read}, vec4f(${channel(16)}, ${channel(8)}, ${channel(0)}, ${channel(24)}),`
+        + ` ${outside})`;
 };
 
 /**
@@ -858,11 +960,13 @@ export function translateShader(parsed, options = {}){
                     ?? TEXTURE_TYPE['2d'],
             });
         }
-        const coordinates = swizzled(at, dimension === '2d' ? 'xy' : 'xyz');
-        const bias = options.sampling?.[stage]?.lodBias;
-        return sampledWithOnes(bias
-            ? `textureSampleBias(tex${stage}, samp${stage}, ${coordinates}, ${floatLiteral(bias)})`
-            : `textureSample(tex${stage}, samp${stage}, ${coordinates})`, options.ones?.[stage]);
+        const components = dimension === '2d' ? 2 : 3;
+        const coordinates = swizzled(at, components === 2 ? 'xy' : 'xyz');
+        const variant = options.sampling?.[stage];
+        const addressed = dimension !== 'cube';
+        return borderedRead(sampledWithOnes(variantRead(`tex${stage}, samp${stage}`, coordinates,
+            components, { how: 'sample' }, variant, addressed), options.ones?.[stage]),
+        coordinates, components, variant, addressed);
     };
 
     /**
@@ -959,13 +1063,15 @@ export function translateShader(parsed, options = {}){
     };
 
     /**
-     * A texture read as the GPU answers it: the coordinate through the
-     * sampler's texture, of whichever dimension the sampler was declared with.
+     * A texture read as Direct3D answers it: the coordinate through the
+     * sampler's texture, of whichever dimension the sampler was declared with,
+     * as its state asks (`variantRead`, `borderedRead`), and the channels the
+     * bound texture lacks read as one.
      *
      * @param {import('./shader.js').Instruction} instruction
      * @param {string} how   'sample', 'level' or 'grad'.
      */
-    const textureRead = (instruction, how)=>{
+    const sample = (instruction, how)=>{
         const samplerOperand = instruction.sources[1];
         const entry = samplers.find(one=>one.index === samplerOperand.index);
         if (!entry)
@@ -979,48 +1085,23 @@ export function translateShader(parsed, options = {}){
             fail(`a vertex shader reads a texture with ${instruction.name}, which needs a level`);
         }
         const coordinates = entry.type === 'texture_2d<f32>' ? 'xy' : 'xyz';
+        const components = coordinates.length;
         const project = (instruction.control & 0x1) !== 0;
         const bias = (instruction.control & 0x2) !== 0;
         const at = project
             ? `(${src(instruction, 0)}.${coordinates} / ${src(instruction, 0)}.w)`
             : `${src(instruction, 0)}.${coordinates}`;
-        const pair = `tex${entry.index}, samp${entry.index}`;
-        // The sampler's own bias joins whatever level the read names: added to
-        // an explicit level or bias, and as a scale of two to its power on
-        // the derivatives a gradient read gives, which is what moves their
-        // level by it.
-        const lodBias = options.sampling?.[entry.index]?.lodBias;
-        const plus = lodBias ? ` + ${floatLiteral(lodBias)}` : '';
-        if (how === 'level')
-        {
-            return `textureSampleLevel(${pair}, ${at}, ${src(instruction, 0)}.w${plus})`;
-        }
-        if (how === 'grad')
-        {
-            const derivatives = entry.type === 'texture_2d<f32>' ? 'xy' : 'xyz';
-            const scale = lodBias ? ` * ${floatLiteral(2 ** lodBias)}` : '';
-            return `textureSampleGrad(${pair}, ${at},`
-                + ` ${src(instruction, 2)}.${derivatives}${scale},`
-                + ` ${src(instruction, 3)}.${derivatives}${scale})`;
-        }
-        if (bias)
-        {
-            return `textureSampleBias(${pair}, ${at}, ${src(instruction, 0)}.w${plus})`;
-        }
-        return lodBias
-            ? `textureSampleBias(${pair}, ${at}, ${floatLiteral(lodBias)})`
-            : `textureSample(${pair}, ${at})`;
+        const variant = options.sampling?.[entry.index];
+        const addressed = entry.type !== 'texture_cube<f32>';
+        /** @type {Parameters<typeof variantRead>[3]} */
+        const read = how === 'level' ? { how: 'level', by: `${src(instruction, 0)}.w` }
+            : how === 'grad' ? { how: 'grad', dx: `${src(instruction, 2)}.${coordinates}`,
+                dy: `${src(instruction, 3)}.${coordinates}` }
+                : bias ? { how: 'bias', by: `${src(instruction, 0)}.w` } : { how: 'sample' };
+        return borderedRead(sampledWithOnes(variantRead(`tex${entry.index}, samp${entry.index}`,
+            at, components, read, variant, addressed), options.ones?.[entry.index]),
+        at, components, variant, addressed);
     };
-
-    /**
-     * A texture read as Direct3D answers it: the channels the bound texture
-     * lacks read as one.
-     *
-     * @param {import('./shader.js').Instruction} instruction
-     * @param {string} how   'sample', 'level' or 'grad'.
-     */
-    const sample = (instruction, how)=>sampledWithOnes(textureRead(instruction, how),
-        options.ones?.[instruction.sources[1].index]);
 
     /** @param {import('./shader.js').Instruction} instruction */
     const comparison = instruction=>COMPARISON[instruction.control & 0x7] ?? '==';

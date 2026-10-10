@@ -175,7 +175,9 @@ const onesKey = ones=>(ones === null ? '' : Array.from(ones, value=>value ?? 0).
  * @param {(import('../d3d9/wgsl.js').SamplerVariant | undefined)[]} variants
  */
 const variantsKey = variants=>Array.from(variants, variant=>(variant
-    ? `${variant.lodBias ?? 0}` : '')).join(',');
+    ? `${variant.lodBias ?? 0}/${variant.mirrorOnce ?? 0}`
+        + `/${variant.border ? `${variant.border.mask}:${variant.border.colour}` : ''}`
+    : '')).join(',');
 
 /**
  * The component D3DTTFF_PROJECTED divides a coordinate set by, for each
@@ -1879,12 +1881,15 @@ export function stageCascade(model, layout, how = {}){
         const dimension = samples ? textureDimensionOf(texture) : '2d';
         const ones = samples ? onesOf(texture) : 0;
         const lodBias = samples ? lodBiasOf(get(D3DTSS.MIPMAPLODBIAS)) : 0;
-        stages.push(dimension === '2d' && ones === 0 && lodBias === 0 ? key : {
-            ...key,
-            ...(dimension === '2d' ? {} : { dimension }),
-            ...(ones === 0 ? {} : { ones }),
-            ...(lodBias === 0 ? {} : { lodBias }),
-        });
+        const addressing = samples ? addressVariantOf(get, dimension) : NO_ADDRESS_VARIANT;
+        stages.push(dimension === '2d' && ones === 0 && lodBias === 0
+            && addressing === NO_ADDRESS_VARIANT ? key : {
+                ...key,
+                ...(dimension === '2d' ? {} : { dimension }),
+                ...(ones === 0 ? {} : { ones }),
+                ...(lodBias === 0 ? {} : { lodBias }),
+                ...addressing,
+            });
         textures.push(samples ? texture : null);
     }
     // A stage at the end that only passes the current colour and alpha on
@@ -1900,6 +1905,45 @@ export function stageCascade(model, layout, how = {}){
         textures.pop();
     }
     return { stages, textures, truncated: unbound };
+}
+
+/** What `addressVariantOf` answers for a stage that addresses as a WebGPU sampler can. */
+const NO_ADDRESS_VARIANT = Object.freeze({});
+
+/**
+ * The address modes of a sampler that no WebGPU sampler has, by axis (1 u,
+ * 2 v, 4 w): D3DTADDRESS_MIRRORONCE, and D3DTADDRESS_BORDER with the border
+ * colour it reads. A cube map's faces are not addressed, a flat texture has
+ * no w, and a sampler with neither mode answers `NO_ADDRESS_VARIANT`.
+ *
+ * @param {(state: number) => number} get  The stage's or sampler's states.
+ * @param {string | null} dimension  '2d', 'cube' or '3d'; null for not known,
+ *     which counts every axis.
+ * @returns {{ mirrorOnce?: number, border?: { mask: number, colour: number } }}
+ */
+export function addressVariantOf(get, dimension){
+    if (dimension === 'cube')
+    {
+        return NO_ADDRESS_VARIANT;
+    }
+    const axes = dimension === '2d' ? [D3DTSS.ADDRESSU, D3DTSS.ADDRESSV]
+        : [D3DTSS.ADDRESSU, D3DTSS.ADDRESSV, D3DTSS.ADDRESSW];
+    let mirrorOnce = 0;
+    let border = 0;
+    axes.forEach((state, axis)=>{
+        const mode = get(state);
+        mirrorOnce |= mode === D3DTADDRESS.MIRRORONCE ? 1 << axis : 0;
+        border |= mode === D3DTADDRESS.BORDER ? 1 << axis : 0;
+    });
+    if (mirrorOnce === 0 && border === 0)
+    {
+        return NO_ADDRESS_VARIANT;
+    }
+    const colour = get(D3DTSS.BORDERCOLOR) >>> 0;
+    return {
+        ...(mirrorOnce === 0 ? {} : { mirrorOnce }),
+        ...(border === 0 ? {} : { border: { mask: border, colour } }),
+    };
 }
 
 /** The furthest a level-of-detail bias moves a sample, either way, as hardware holds it. */
@@ -2259,8 +2303,11 @@ const ADDRESS = Object.freeze({
     [D3DTADDRESS.WRAP]: 'repeat',
     [D3DTADDRESS.MIRROR]: 'mirror-repeat',
     [D3DTADDRESS.CLAMP]: 'clamp-to-edge',
+    // The two modes WebGPU lacks are clamped by the sampler, and the shader
+    // folds a mirror-once coordinate and selects the border colour itself
+    // (`addressVariantOf`).
     [D3DTADDRESS.BORDER]: 'clamp-to-edge',
-    [D3DTADDRESS.MIRRORONCE]: 'mirror-repeat',
+    [D3DTADDRESS.MIRRORONCE]: 'clamp-to-edge',
 });
 
 /** GPUShaderStage.FRAGMENT. */
@@ -2382,14 +2429,19 @@ function anisotropyOf(min, mag, degree, mipFilter){
 /** WebGPU's own default for the far end of the level range. */
 const LOD_MAX = 32;
 
-/** D3DTADDRESS, as the shader's two-bit address mode. */
-/** @type {Readonly<Record<number, number>>} */
+/**
+ * D3DTADDRESS, as the shader's two-bit address mode. Border and mirror-once
+ * clamp, and the sample folds the coordinate and selects the border colour
+ * (`addressVariantOf`).
+ *
+ * @type {Readonly<Record<number, number>>}
+ */
 const ADDRESS_BITS = Object.freeze({
     [D3DTADDRESS.WRAP]: 0,
     [D3DTADDRESS.MIRROR]: 1,
     [D3DTADDRESS.CLAMP]: 2,
     [D3DTADDRESS.BORDER]: 2,
-    [D3DTADDRESS.MIRRORONCE]: 1,
+    [D3DTADDRESS.MIRRORONCE]: 2,
 });
 
 /**
@@ -5471,7 +5523,9 @@ export function createRenderer(options){
     /**
      * What each of a shader's samplers asks of its reads that its GPU sampler
      * cannot do (`SamplerVariant` in the translator), by sampler number; null
-     * when none asks, which is every draw whose samplers hold no level bias.
+     * when none asks, which is every draw whose samplers hold no level bias
+     * and address no axis mirror-once or by a border. A 1.x stage, which
+     * declares no dimension, is addressed as the texture bound there is.
      *
      * @param {RenderModel} model
      * @param {import('../d3d9/shader.js').ParsedShader | null} parsed
@@ -5485,14 +5539,17 @@ export function createRenderer(options){
         }
         /** @type {import('../d3d9/wgsl.js').SamplerVariant[] | null} */
         let variants = null;
-        for (const { index } of declaredSamplers(parsed))
+        for (const { index, dimension } of declaredSamplers(parsed))
         {
-            const lodBias = lodBiasOf(model.stageStates(first + index).get(D3DTSS.MIPMAPLODBIAS)
-                ?? 0);
-            if (lodBias !== 0)
+            const states = model.stageStates(first + index);
+            const get = (/** @type {number} */ state)=>states.get(state) ?? 0;
+            const lodBias = lodBiasOf(get(D3DTSS.MIPMAPLODBIAS));
+            const addressing = addressVariantOf(get,
+                dimension ?? textureDimensionOf(model.textures.get(first + index)));
+            if (lodBias !== 0 || addressing !== NO_ADDRESS_VARIANT)
             {
                 variants ??= [];
-                variants[index] = { lodBias };
+                variants[index] = { ...(lodBias === 0 ? {} : { lodBias }), ...addressing };
             }
         }
         return variants;
