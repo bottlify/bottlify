@@ -977,6 +977,9 @@ export function createPathFunctions(host){
 
                 /** int _wfindnexti64(intptr_t handle, struct _wfinddatai64_t *fileinfo) */
                 _wfindnexti64: findNext(WFINDDATAI64),
+
+                /** int _waccess(const wchar_t *path, int mode) -- `_access`, wide. */
+                _waccess: operation(8, ([path])=>(exists(readWide(path)) ? 0 : ENOENT)),
             }
             : {}),
 
