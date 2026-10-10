@@ -21,6 +21,7 @@
  *                                  [--keep-images N,M] [--watch-import LIB.dll[#ord+ord]]
  *                                  [--click x,y[,after]] [--key Code[,after]] [--coi]
  *                                  [--mode NAME] [--executors N] [--cork-config JSON]
+ *                                  [--graphics-worker] [--journal-calls]
  *                                  [--command-line STRING] [--windows NAME]
  *                                  [--file HOST=GUEST] [--save-files]
  *                                  [--user-data-dir DIR] [--port N] [--store local] [--prefetch]
@@ -519,6 +520,12 @@ function parse(argv){
         // Executors of the program's process (`createApp`'s `executors`): past
         // one, threads that are ready together run at once.
         executors: number('--executors', mode.executors ?? 0),
+        // Direct3D and OpenGL drawn in a graphics worker, the program's thread
+        // keeping only their state, as the player runs them.
+        graphicsWorker: argv.includes('--graphics-worker'),
+        // The call areas a person's report is taken with, traced from the
+        // first instruction: what tracing costs a run is part of what it measures.
+        journalCalls: argv.includes('--journal-calls'),
         // The engine in a worker, with the page's canvas transferred to it;
         // otherwise on the page's own thread.
         worker: argv.includes('--worker'),
@@ -956,6 +963,17 @@ function describe(result, context, calls, symbols){
     if (graphics)
     {
         say(`  graphics: created=[${graphics.created.join(' ')}]`);
+        if (graphics.openglMs)
+        {
+            say(`    OpenGL host time, estimated: playing the ring ${graphics.openglMs.ring} ms,`
+                + ` the calls ${graphics.openglMs.calls} ms`);
+        }
+        if (graphics.sentToWorker)
+        {
+            const { batches, bytes, ms } = graphics.sentToWorker;
+            say(`    to the graphics worker: ${batches} batches, ${bytes} bytes, posting them`
+                + ` ${ms} ms`);
+        }
         if (graphics.compressedTextures)
         {
             // count:bytes:hash of every compressed block the program handed
@@ -1492,6 +1510,9 @@ export async function game(options){
             screen: options.screen,
             quantum: options.quantum,
             executors: options.executors,
+            graphicsWorker: options.graphicsWorker,
+            ...options.journalCalls ? { logCapacity: 100000, logCategories: {
+                'call.cpu': 'trace', 'call.gpu': 'trace', 'call.net': 'trace' } } : {},
             log: Boolean(options.log),
             logLines: options.logLines,
             video: options.video,

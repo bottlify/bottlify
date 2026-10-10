@@ -1751,6 +1751,30 @@ export function createWindowFunctions(host){
     };
 
     /**
+     * Whether paintOrder lists a window: it and every window it is placed
+     * inside still standing, up to a top-level one.
+     *
+     * @param {any} record
+     */
+    const inPaintOrder = record=>{
+        // Bounded: children a program looped into each other with SetParent
+        // reach no top-level window, and paintOrder lists none of them.
+        let steps = windows.size;
+        for (let at = record; steps-- >= 0; at = windows.get(at.parent))
+        {
+            if (!at || at.destroyed)
+            {
+                return false;
+            }
+            if (!isChild(at))
+            {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    /**
      * The rectangles, in screen coordinates, of the windows over a window:
      * every shown top-level window stacked above its own; each shown sibling
      * above it, or above an ancestor, that clips its siblings -- as every
@@ -5313,24 +5337,39 @@ export function createWindowFunctions(host){
 
     host.queue.paintsFrom?.(filter=>{
         const asking = filter.thread ?? null;
-        // Asked at every look into a queue, and mostly there is nothing to
-        // paint: the order is only worked out when a window waits for one.
+        // Asked at every look into a queue -- a game's loop looks a hundred
+        // thousand times a second -- and mostly no window this look may be
+        // given owes a paint, though one may: a hidden window's controls
+        // keep theirs for as long as it stays hidden. The order is only
+        // worked out when it has two windows to choose between.
         let waiting = false;
+        /** @type {any[]} */
+        const due = [];
         for (const record of windows.values())
         {
-            if (paint.owesPaint(record) && !record.destroyed)
+            if (!paint.owesPaint(record) || record.destroyed)
             {
-                waiting = true;
-                break;
+                continue;
             }
-        }
-        for (const record of waiting ? paintOrder() : [])
-        {
-            if (paint.owesPaint(record) && shown(record) && !frozen(record)
+            waiting = true;
+            if (inPaintOrder(record) && shown(record) && !frozen(record)
                 && (filter.hwnd === ANY_WINDOW || filter.hwnd === record.hwnd)
                 && (asking === null || creatorOf(record) === null || creatorOf(record) === asking))
             {
-                return record.hwnd;
+                due.push(record);
+            }
+        }
+        if (due.length === 1)
+        {
+            return due[0].hwnd;
+        }
+        if (due.length > 1)
+        {
+            const choosable = new Set(due);
+            const first = paintOrder().find(record=>choosable.has(record));
+            if (first)
+            {
+                return first.hwnd;
             }
         }
         if (!waiting)
