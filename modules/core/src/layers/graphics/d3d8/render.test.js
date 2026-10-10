@@ -856,6 +856,36 @@ test('recorded: an unlocked buffer is read through a window, not a copy', async(
     assert.deepEqual([...written.bytes], [...quad([0, 0, 4, 4], 0).subarray(0, 60)]);
 });
 
+test('a buffer released for the last time gives its GPU buffer back once no stream binds it',
+    async()=>{
+        // A program that makes and drops buffers while it loads kept every
+        // one's GPU buffer and staging copy for the rest of the run.
+        const h = harness();
+        const { device, backend } = h;
+        const held = ()=>backend.diagnostics().buffers.length;
+        const before = held();
+        /** @type {{ buffer?: any }} */
+        const out = {};
+        assert.equal(device.CreateVertexBuffer(60, 0, FVF_QUAD, D3DPOOL.DEFAULT, out), D3D_OK);
+        /** @type {{ pBits?: number }} */
+        const locked = {};
+        assert.equal(out.buffer.Lock(0, 0, locked, 0), D3D_OK);
+        h.write(/** @type {number} */ (locked.pBits), quad([0, 0, 4, 4], 0).subarray(0, 60));
+        assert.equal(out.buffer.Unlock(), D3D_OK);
+        assert.equal(device.BeginScene(), D3D_OK);
+        assert.equal(device.SetVertexShader(FVF_QUAD), D3D_OK);
+        assert.equal(device.SetStreamSource(0, out.buffer, 20), D3D_OK);
+        assert.equal(device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+        assert.equal(device.EndScene(), D3D_OK);
+        assert.equal(held(), before + 1);
+        assert.equal(out.buffer.release(), 0);
+        await h.present();
+        assert.equal(held(), before + 1, 'still bound to stream 0, it stays');
+        assert.equal(device.SetStreamSource(0, null, 0), D3D_OK);
+        await h.present();
+        assert.equal(held(), before, 'unbound, it goes');
+    });
+
 test('recorded: a draw binds its pipeline, its stream and a viewport inside its pass', async()=>{
     const h = harness();
     const { device, gpu } = h;
