@@ -106,8 +106,14 @@ export function uncoveredRegion(windows, owner, exclusive, screen){
         return at;
     };
     const topLevels = windows.filter(window=>!window.child && shown(window));
+    // A hidden window has no place on the screen to hold the picture, and in
+    // exclusive mode a flip shows whatever the cooperative window's state: a
+    // launcher that names its own dialog, hides it and runs the game in a
+    // window of its own owns the picture through that window. Counting from
+    // the hidden one put every shown window over the picture.
     const named = byHandle.get(`0x${(owner >>> 0).toString(16)}`);
-    const owning = named ? topLevelOf(named) : topLevels.at(-1);
+    const namedTop = named ? topLevelOf(named) : null;
+    const owning = namedTop && topLevels.includes(namedTop) ? namedTop : topLevels.at(-1);
     if (!owning)
     {
         return null;
