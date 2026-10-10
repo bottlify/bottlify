@@ -50,8 +50,10 @@ import {
     constantBlocks, createProgramCache, samplerDimension, shapeKey, vertexLayoutOf,
 } from '../webgpu/internal/programmable.js';
 import {
-    FOG_RANGE_LOCATION, HYBRID_CONSTANTS, fixedVertexStage, translateShader, varyingLocation,
+    FOG_RANGE_LOCATION, HYBRID_CONSTANTS, VERTEX_SAMPLER_BINDING, fixedVertexStage, translateShader,
+    varyingLocation,
 } from '../d3d9/wgsl.js';
+import { D3DVERTEXTEXTURESAMPLER0 } from '../d3d9/samplerstates.js';
 import { D3DDECLUSAGE } from '../d3d9/declaration.js';
 import { decodeS3tc } from '../webgpu/internal/s3tc.js';
 import { toHalf } from '../d3d9/half.js';
@@ -5140,6 +5142,7 @@ export function createRenderer(options){
         }
         const made = samplerPlan.map((/** @type {any} */ planned, /** @type {number} */ index)=>({
             stage: planned.stage,
+            binding: planned.binding,
             texture: boundTextures[index],
             record: boundTextures[index] ? textures.get(boundTextures[index]) : null,
             view: boundViews[index],
@@ -5493,15 +5496,26 @@ export function createRenderer(options){
                 `vertex stage of shader ${program.vertexId} was not drawn: ${vertex.error}`);
             return null;
         }
-        const samplerPlan = pixel.samplers.map((/** @type {any} */ entry)=>{
-            const lod = lodOf(model.textures.get(entry.index));
+        // A vertex shader's sampler n is D3DVERTEXTEXTURESAMPLER0 + n, bound
+        // after the pixel samplers from VERTEX_SAMPLER_BINDING on.
+        /** @param {any} entry @param {number} stage @param {number} binding */
+        const planOf = (entry, stage, binding)=>{
+            const lod = lodOf(model.textures.get(stage));
             return {
-                stage: entry.index,
+                stage,
+                binding,
                 dimension: samplerDimension(entry.type),
                 lod,
-                sampler: programSamplerFor(model.stageStates(entry.index), lod),
+                sampler: programSamplerFor(model.stageStates(stage), lod),
             };
-        });
+        };
+        const samplerPlan = [
+            ...pixel.samplers.map((/** @type {any} */ entry, /** @type {number} */ at)=>
+                planOf(entry, entry.index, at * 2)),
+            ...(vertex.samplers ?? []).map((/** @type {any} */ entry, /** @type {number} */ at)=>
+                planOf(entry, D3DVERTEXTEXTURESAMPLER0 + entry.index,
+                    VERTEX_SAMPLER_BINDING + at * 2)),
+        ];
         const state = {
             ...pipelineStateOf(model, {
                 fvf: 0, topology, ...formatsOf(model), stages: [], lighting: null,
@@ -6373,15 +6387,15 @@ export function createRenderer(options){
      * list of bindings, which a draw that binds what the one before bound
      * shares with it.
      *
-     * @param {{ view: any, sampler: any }[]} samplerBindings
+     * @param {{ view: any, sampler: any, binding?: number }[]} samplerBindings
      */
     const samplerEntriesOf = samplerBindings=>{
         let entries = samplerEntries.get(samplerBindings);
         if (entries === undefined)
         {
             entries = samplerBindings.flatMap((bound, index)=>[
-                { binding: index * 2, resource: bound.view },
-                { binding: index * 2 + 1, resource: bound.sampler },
+                { binding: bound.binding ?? index * 2, resource: bound.view },
+                { binding: (bound.binding ?? index * 2) + 1, resource: bound.sampler },
             ]);
             samplerEntries.set(samplerBindings, entries);
         }

@@ -59,9 +59,8 @@
  *   predicated write keeps each component its predicate is false for, and
  *   if, breakp and callnz read one component of it.
  *
- * One thing is not translated and says so: texture reads from a vertex
- * shader. A shader using it is reported as untranslatable rather than
- * translated wrong.
+ * - **A vertex shader's samplers** (D3DVERTEXTEXTURESAMPLER0 to 3) sit in
+ *   the same group from `VERTEX_SAMPLER_BINDING` on, read by texldl.
  */
 
 import { OPCODE, REGISTER, SHADER_KIND } from './shader.js';
@@ -114,6 +113,13 @@ const COMPONENT = 'xyzw';
 
 /** Which bind group each stage's constants live in, and where the samplers go. */
 export const BIND_GROUP = Object.freeze({ VERTEX_CONSTANTS: 0, PIXEL_CONSTANTS: 1, SAMPLERS: 2 });
+
+/**
+ * Where a vertex shader's samplers start in the sampler group: past the
+ * sixteen pixel samplers' texture and sampler pairs, so the two stages share
+ * the group without either knowing what the other declares.
+ */
+export const VERTEX_SAMPLER_BINDING = 32;
 
 /** The constant registers the fixed vertex stage of a hybrid reads. */
 export const HYBRID_CONSTANTS = Object.freeze({
@@ -414,10 +420,11 @@ function moduleHeader(options){
         `@group(${group}) @binding(1) var<uniform> ci: array<vec4i, 16>;`,
         `@group(${group}) @binding(2) var<uniform> cb: array<vec4u, 4>;`,
     ];
+    const base = options.vertex ? VERTEX_SAMPLER_BINDING : 0;
     options.samplers.forEach((entry, at)=>{
-        header.push(`@group(${BIND_GROUP.SAMPLERS}) @binding(${at * 2}) var tex${entry.index}:`
-            + ` ${entry.type};`);
-        header.push(`@group(${BIND_GROUP.SAMPLERS}) @binding(${at * 2 + 1})`
+        header.push(`@group(${BIND_GROUP.SAMPLERS}) @binding(${base + at * 2})`
+            + ` var tex${entry.index}: ${entry.type};`);
+        header.push(`@group(${BIND_GROUP.SAMPLERS}) @binding(${base + at * 2 + 1})`
             + ` var samp${entry.index}: sampler;`);
     });
     const inName = options.vertex ? 'VsIn' : 'PsIn';
@@ -693,10 +700,6 @@ export function translateShader(parsed, options = {}){
                 fail('a label read as a value');
                 return 'r0';
             case REGISTER.SAMPLER:
-                if (vertex)
-                {
-                    fail('a texture read from a vertex shader is not translated');
-                }
                 return `s${index}`;
             default:
                 fail(`register type ${operand.type} is not translated`);
@@ -923,9 +926,10 @@ export function translateShader(parsed, options = {}){
             fail(`sampler s${samplerOperand.index} is read without a declaration`);
             return 'vec4f(0.0)';
         }
-        if (vertex)
+        if (vertex && how !== 'level')
         {
-            fail('a texture read from a vertex shader is not translated');
+            // A vertex has no neighbours to take a level from: texldl only.
+            fail(`a vertex shader reads a texture with ${instruction.name}, which needs a level`);
         }
         const coordinates = entry.type === 'texture_2d<f32>' ? 'xy' : 'xyz';
         const project = (instruction.control & 0x1) !== 0;
