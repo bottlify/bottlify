@@ -19,7 +19,11 @@
  *
  * Usage (from the repository root):
  *   node tools/night-run/night-run.mjs [--budget USD] [--model ID] [--minutes N]
- *       [--only id,id] [--skip id,id] [--branch NAME] [--dry]
+ *       [--only id,id] [--skip id,id] [--branch NAME] [--install] [--dry]
+ *
+ * `--install` goes through to_install/apps instead: one session per installer
+ * whose game is not in the library yet, told to install it, delete the
+ * installer once the bottle starts, and bring the game to its loading.
  *
  * `--branch` is the branch the sessions commit to and push (review by default):
  * run from a worktree of its own on another branch, the night does not share a
@@ -67,6 +71,9 @@ const list = (/** @type {string | true | undefined} */ value)=>
 const only = list(flags.only);
 const branch = typeof flags.branch === 'string' ? flags.branch : 'review';
 const skip = list(flags.skip);
+const install = flags.install === true;
+/** @param {{ id: string, title: string, labels: string[] }} item @param {number} dollars */
+const brief = (item, dollars)=>(install ? installBrief : bottleBrief)(item, dollars);
 
 /** @returns {Promise<{ id: string, title: string, labels: string[] }[]>} */
 async function brokenBottles(){
@@ -93,8 +100,91 @@ async function brokenBottles(){
     return bottles.sort((a, b)=>a.title.localeCompare(b.title));
 }
 
+/**
+ * The installers in to_install/apps whose game is not in the library yet: a
+ * bottle records the file it was installed from, and a directory holding that
+ * file is done already.
+ *
+ * @returns {Promise<{ id: string, title: string, labels: string[] }[]>}
+ */
+async function pendingInstallers(){
+    const installed = new Set();
+    for (const id of await readdir(join(ROOT, 'bundles')))
+    {
+        const text = await readFile(join(ROOT, 'bundles', id, 'manifest.json'), 'utf8')
+            .catch(()=>null);
+        const from = text === null ? null : JSON.parse(text).installedFrom;
+        if (typeof from === 'string')
+        {
+            installed.add(from.toLowerCase());
+        }
+    }
+    const pending = [];
+    for (const slug of (await readdir(join(ROOT, 'to_install', 'apps'))).sort())
+    {
+        const files = await readdir(join(ROOT, 'to_install', 'apps', slug)).catch(()=>[]);
+        const done = files.some(file=>installed.has(file.toLowerCase()));
+        if (files.length && !done && (!only.length || only.includes(slug)) && !skip.includes(slug))
+        {
+            pending.push({ id: slug, title: slug, labels: files });
+        }
+    }
+    return pending;
+}
+
+/** @param {{ id: string, title: string, labels: string[] }} item @param {number} dollars */
+const installBrief = (item, dollars)=>`Night run, one installer: to_install/apps/${item.id} \
+(files: ${item.labels.join(', ')}). Nobody is watching; do not ask questions.
+
+Goal, in order: install the game, start it, bring it to its loading -- past launchers, settings \
+dialogs, intros and menus, through New Game / Single Player / the first level until it loads its \
+world or is in it. Solved means a harness run shows the installed title loading or in its game \
+and the fixes are committed. A dead end means every approach was refuted by measurement -- say \
+what was measured.
+
+The steps:
+1. Read CLAUDE.md, tools/cdp_test/README.md and the bringup skill (.claude/skills/bringup).
+2. Check it is not installed already: look through bundles/*/manifest.json (title, \
+installedFrom, entry) for this game. If it is there, delete to_install/apps/${item.id} and stop.
+3. Install it the way a person would: through the launcher in the harness browser \
+(tools/cdp_test/live/drive.mjs: /upload?file= the installer into the library's Add, then walk its \
+wizard with /shot, /click, /key), or unattended with node tools/install-watch.mjs <installer> \
+(--press 'Next >|Install|Finish', --shots, --collect-to DIR) and pack the result with \
+tools/make-btl.mjs into bundles/<id>/ with a manifest like the others (title, entry, root, \
+installedFrom, kind "game", labels ["demo"] when it is one). A bare archive of an installed tree \
+is unpacked and packed the same way. Audit first: node tools/import-audit.mjs \
+to_install/apps/${item.id} --dynamic --specs dbg/specs.
+4. If the installer fails, fix the generic contract that stops it (the installer family's, \
+not this file's) and install again.
+5. Once the bottle exists and starts, delete to_install/apps/${item.id}: the installer is not \
+kept once the game is installed.
+6. Run the title (node tools/cdp_test/game.mjs <bundle id> --headed --worker --coi --wait 240) \
+and fix what stops it up to its loading. Save the way in as bundles/<id>/route.json (format: \
+--route in tools/cdp_test/README.md) with "reaches" saying what screen it ends on.
+7. Set "status" in its manifest: "playable", "start-only" (in its game but something is wrong) \
+or "non-playable". Copy the screenshot showing how far it got to dbg/night/${item.id}.png.
+
+Rules:
+- Fix the generic contract that is wrong -- never branch on a program's name, executable or \
+hash, never hardcode an offset for one title. Every fix carries a test in the same change. Run \
+only the touched layer's tests and gates (the table in CLAUDE.md), npm run typecheck and \
+npm run lint. No full test suite.
+- Work in this checkout on branch ${branch}. Commit each fix and push it \
+(git push origin ${branch}); the message says what contract was wrong and what the program did \
+because of it. No Co-Authored-By or session lines. Never stage bottlify-ui/public/config.json or \
+anything holding a token; bundles/ and to_install/ are not in git. Temporary files go to dbg/.
+- Do not start, stop or restart the launcher on port 5180 or the bottle server on 8788. Only the \
+harness browser; one run at a time. Never close a browser someone else drives.
+- Do not touch modules/cork's translator: if the title stops inside it, write down the evidence \
+and move on.
+- This session has about $${dollars.toFixed(0)} of API budget. When the title loads its game and \
+the route is saved, or the budget is nearly spent, stop.
+
+Finish with one short paragraph: installed or not (bundle id), solved / dead end / out of \
+budget, how far the title gets, the commits made (hashes), and what stops it now.`;
+
 /** @param {{ id: string, title: string, labels: string[] }} bottle @param {number} dollars */
-const brief = (bottle, dollars)=>`Night run, one bottle: "${bottle.title}" \
+const bottleBrief = (bottle, dollars)=>`Night run, one bottle: "${bottle.title}" \
 (bundle id ${bottle.id}, labels: ${bottle.labels.join(', ') || 'none'}). \
 Nobody is watching; do not ask questions.
 
@@ -163,7 +253,7 @@ async function main(){
             + 'the night run bills an API key, never a subscription');
     }
     await mkdir(OUT, { recursive: true });
-    const bottles = await brokenBottles();
+    const bottles = install ? await pendingInstallers() : await brokenBottles();
     console.log(`${bottles.length} bottles, $${budget} over them, ${model}, ${minutes} min each`);
     for (const bottle of bottles)
     {
