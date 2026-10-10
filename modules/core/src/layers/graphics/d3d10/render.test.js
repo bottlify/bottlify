@@ -1911,3 +1911,20 @@ test('a draw with no input layout runs on what the vertex shader makes of SV_Ver
     assert.deepEqual(pipeline.vertex.buffers, [], 'no stream feeds it');
     assert.deepEqual(h.divergences, []);
 });
+
+test('a geometry shader is refused when it is made, never made and then left out of the draw',
+    ()=>{
+        const h = harness();
+        const { device } = h;
+        const position = { name: 'SV_POSITION', systemValue: SYSTEM_VALUE.POSITION, register: 0 };
+        const gs = assemble({ kind: SHADER_KIND.GEOMETRY, inputs: [position], outputs: [position],
+            instructions: [ret()] });
+        /** @type {{ shader?: any }} */
+        const out = { shader: 'untouched' };
+        assert.equal(device.CreateGeometryShader(gs, out), 0x80004001, 'E_NOTIMPL');
+        assert.equal(out.shader, null);
+        assert.ok(diverged(h, 'a geometry shader is refused'), h.divergences.join('\n'));
+        // What is not a geometry shader is the bad argument Windows answers.
+        assert.equal(device.CreateGeometryShader(passThroughVertexShader(), out), 0x80070057);
+        assert.equal(device.CreateGeometryShader(null, out), 0x80070057);
+    });

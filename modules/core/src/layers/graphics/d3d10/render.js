@@ -2062,10 +2062,6 @@ export function createRenderer(services){
                 counters.skipped.noShader++;
                 return;
             }
-            if (pipeline.stages.gs.shader)
-            {
-                diverge('a geometry shader is bound and ignored: the draw runs without one');
-            }
             const topology = TOPOLOGY[pipeline.topology];
             if (!topology)
             {

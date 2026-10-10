@@ -937,9 +937,25 @@ export function createDevice(options = {}){
             return createShader(IID.ID3D10VertexShader, SHADER_KIND.VERTEX, out, bytecode);
         },
 
-        /** @param {Uint8Array} bytecode @param {{ shader?: any }} out */
+        /**
+         * A geometry shader is refused, once its bytecode is known to be one:
+         * WebGPU has no geometry stage and the translator does not emulate
+         * one, and a shader made and then left out of every draw would draw
+         * the program's points and triangles where it expands, culls or
+         * routes them. Bytecode that is not a geometry shader is the plain
+         * bad-argument answer Windows gives.
+         *
+         * @param {Uint8Array} bytecode @param {{ shader?: any }} out
+         */
         CreateGeometryShader(bytecode, out){
-            return createShader(IID.ID3D10GeometryShader, SHADER_KIND.GEOMETRY, out, bytecode);
+            out.shader = null;
+            if (!bytecode || !parseShaderOfKind(bytecode, SHADER_KIND.GEOMETRY))
+            {
+                return E_INVALIDARG;
+            }
+            diverge('a geometry shader is refused: WebGPU has no geometry stage and none is'
+                + ' emulated here');
+            return E_NOTIMPL;
         },
 
         /**

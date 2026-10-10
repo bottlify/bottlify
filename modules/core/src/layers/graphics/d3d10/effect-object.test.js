@@ -1018,8 +1018,12 @@ test('a shader variable counts on through every shader of the effect from its ow
         [[S_OK, false], [D3DERR_INVALIDCALL, false], [S_OK, true]]);
     assert.deepEqual([shaderAt('pixel', 1), shaderAt('pixel', 5), shaderAt('pixel', 6)],
         [[S_OK, false], [S_OK, true], [D3DERR_INVALIDCALL, false]]);
+    // Windows hands back the geometry shader it made; the device here refuses
+    // every geometry shader, and the effect says so and holds none.
     assert.deepEqual([shaderAt('geometry', 2), shaderAt('geometry', 6), shaderAt('geometry', 12)],
-        [[S_OK, false], [S_OK, true], [E_FAIL, false]]);
+        [[S_OK, false], [S_OK, false], [E_FAIL, false]]);
+    assert.ok(reports.some(line=>line.includes('geometryshader could not be made')),
+        reports.join('\n'));
 
     /** @param {any} variable @param {'inputs' | 'outputs'} which @param {number} index */
     const element = (variable, which, index)=>{

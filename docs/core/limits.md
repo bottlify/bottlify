@@ -74,6 +74,9 @@ differently raises a `divergence` event naming the API.
 - No Direct3D 11 or 12.
 - Direct3D 10 and Vulkan draw on the engine thread; Direct3D 7, 8, 9 and OpenGL in the graphics
   worker.
+- Direct3D 10 has no geometry shaders: `CreateGeometryShader` and its stream-output variant
+  answer `E_NOTIMPL` for a valid shader, since WebGPU has no geometry stage and none is emulated.
+  An effect pass that sets one is drawn without it, and the effect says so.
 - A lost GPU device is not recovered: `Present` and `Reset` answer `D3DERR_DEVICELOST`
   (`D3DERR_DEVICEREMOVED` on 9Ex) and no new frames arrive.
 - DXT textures are decoded on the CPU unless `graphics.compressedTextures` is on and the GPU has
