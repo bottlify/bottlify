@@ -2547,6 +2547,70 @@ export function createRenderer(services){
             return waiting.promise;
         },
 
+        /**
+         * The GPU's copy of a texture's first subresource read back into its
+         * own host bytes, for a caller that hands those bytes to the
+         * processor: sent to the GPU now, and settled when the bytes are
+         * there. Null when the host bytes are already what the GPU holds, or
+         * the texture is one that cannot be read back.
+         *
+         * @param {any} resource
+         * @returns {Promise<void> | null}
+         */
+        readBack(resource){
+            if (!backend || !gpuWritten(resource))
+            {
+                return null;
+            }
+            const backing = backingOf(resource);
+            if (!backing.texture || !readable(backing))
+            {
+                return null;
+            }
+            const level = backing.layout.levels[0];
+            const texel = TEXEL_BYTES[backing.layout.storage.format];
+            /** @type {() => void} */
+            let arrive = ()=>{};
+            const arrived = new Promise(done=>{
+                arrive = ()=>done(undefined);
+            });
+            let delivered = false;
+            record({
+                kind: 'readback',
+                sourceId: backing.id,
+                surface: {
+                    texture: backing.texture, mipLevel: 0, layer: 0,
+                    width: level.width, height: level.height, bytesPerTexel: texel,
+                },
+                /** @param {{ width: number, height: number, data: Uint8Array } | null} image */
+                deliver(image){
+                    if (delivered)
+                    {
+                        return;
+                    }
+                    delivered = true;
+                    if (image)
+                    {
+                        const into = subresourceBytes(resource, 0);
+                        for (let row = 0; row < level.height; row++)
+                        {
+                            const start = row * image.width * texel;
+                            into.bytes.set(image.data.subarray(start, start + level.width * texel),
+                                row * into.rowPitch);
+                        }
+                    }
+                    else
+                    {
+                        diverge('a read back that did not arrive leaves the pixels a device'
+                            + ' context is opened over as they were');
+                    }
+                    arrive();
+                },
+            });
+            this.flush();
+            return arrived;
+        },
+
         /** @returns {number} commands recorded so far */
         recorded: ()=>recordedCount,
 

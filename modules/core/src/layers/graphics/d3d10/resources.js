@@ -32,8 +32,8 @@ import { attachCom } from './com.js';
 import {
     ALL_REMAINING, D3D10_BIND, D3D10_CPU_ACCESS, D3D10_MAP,
     D3D10_MAP_FLAG_DO_NOT_WAIT, D3D10_RESOURCE_DIMENSION, D3D10_RESOURCE_MISC,
-    D3D10_USAGE, DXGI_ERROR_WAS_STILL_DRAWING, DXGI_USAGE, E_INVALIDARG, FORMAT_INFO, FORMAT_KIND,
-    IID, S_OK,
+    D3D10_USAGE, DXGI_ERROR_INVALID_CALL, DXGI_ERROR_WAS_STILL_DRAWING, DXGI_FORMAT, DXGI_USAGE,
+    E_INVALIDARG, FORMAT_INFO, FORMAT_KIND, IID, S_OK,
 } from './constants.js';
 import { VIEW_UNION } from './structs.js';
 import { fullMipChainLength, levelExtent, resolveViewFormat } from './validity.js';
@@ -70,7 +70,21 @@ const VIEW_SHAPE = Object.freeze({
  *             noOverwrite: boolean) => void} unmap
  * @property {(resource: any) => Promise<void> | null} [pending]
  *     The GPU work a map of this resource has to wait for, if any.
+ * @property {(resource: any) => Promise<void> | null} [readBack]
+ *     The GPU's copy of the first subresource brought into the host bytes,
+ *     settled when it has arrived; null when the host bytes are current.
  */
+
+/**
+ * The formats GDI draws into as they are: four bytes a pixel, blue first,
+ * the fourth byte unused -- a 32-bit DIB.
+ *
+ * @type {ReadonlySet<number>}
+ */
+const DC_FORMATS = new Set([
+    DXGI_FORMAT.B8G8R8A8_UNORM, DXGI_FORMAT.B8G8R8A8_UNORM_SRGB, DXGI_FORMAT.B8G8R8A8_TYPELESS,
+    DXGI_FORMAT.B8G8R8X8_UNORM, DXGI_FORMAT.B8G8R8X8_UNORM_SRGB, DXGI_FORMAT.B8G8R8X8_TYPELESS,
+]);
 
 /**
  * @typedef {Object} ResourceOptions
@@ -130,6 +144,7 @@ export function createResource(options){
     /** @type {Map<number, number>} subresource -> the map type it is held under */
     const mapped = new Map();
     let evictionPriority = 0;
+    let dcHeld = false;
 
     return attachCom({
         dimension: options.dimension,
@@ -184,6 +199,47 @@ export function createResource(options){
                     mapType === D3D10_MAP.WRITE_DISCARD,
                     mapType === D3D10_MAP.WRITE_NO_OVERWRITE);
             }
+        },
+
+        /**
+         * The surface's pixels opened to GDI (IDXGISurface1::GetDC): only a
+         * texture made GDI-compatible, of one subresource and one sample, in
+         * a format GDI draws as it is, and only once at a time and never
+         * while it is mapped (d3d10_1.c:712-744). Unless the program
+         * discards them, the pixels are what the GPU last drew, which
+         * `ready` waits for.
+         *
+         * @param {boolean} discard
+         * @returns {{ hr: number, data?: Uint8Array, rowPitch?: number,
+         *             ready?: Promise<void> | null }}
+         */
+        OpenDC(discard){
+            const gdi = ((options.desc.MiscFlags ?? 0) & D3D10_RESOURCE_MISC.GDI_COMPATIBLE) !== 0;
+            if (!gdi || dcHeld || mapped.size > 0 || subresources !== 1
+                || !DC_FORMATS.has(options.desc.Format)
+                || (options.desc.SampleDesc?.Count ?? 1) !== 1)
+            {
+                return { hr: DXGI_ERROR_INVALID_CALL };
+            }
+            dcHeld = true;
+            const ready = discard ? null : options.storage.readBack?.(this) ?? null;
+            const held = options.storage.map(this, 0);
+            return { hr: S_OK, data: held.data, rowPitch: held.rowPitch, ready };
+        },
+
+        /**
+         * GDI done with the pixels: what it drew goes to the GPU.
+         *
+         * @returns {number}
+         */
+        CloseDC(){
+            if (!dcHeld)
+            {
+                return DXGI_ERROR_INVALID_CALL;
+            }
+            dcHeld = false;
+            options.storage.unmap(this, 0, false, false);
+            return S_OK;
         },
 
         /** @param {{ desc?: any }} out */
@@ -632,7 +688,7 @@ export function textureInterfaces(desc, textureIid, dimension){
         IID.IDXGIDeviceSubObject, IID.IDXGIResource, textureIid];
     const single = dimension !== D3D10_RESOURCE_DIMENSION.TEXTURE3D
         && desc.MipLevels === 1 && (desc.ArraySize ?? 1) === 1;
-    return single ? [...base, IID.IDXGISurface] : base;
+    return single ? [...base, IID.IDXGISurface, IID.IDXGISurface1] : base;
 }
 
 /**

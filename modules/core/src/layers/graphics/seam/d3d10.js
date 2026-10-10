@@ -246,6 +246,12 @@ export const IDXGISURFACE_SLOTS = /** @type {[string, number][]} */ ([
     ['Unmap', 0],
 ]);
 
+export const IDXGISURFACE1_SLOTS = /** @type {[string, number][]} */ ([
+    ...IDXGISURFACE_SLOTS,
+    ['GetDC', 2],
+    ['ReleaseDC', 1],
+]);
+
 export const IDXGIOUTPUT_SLOTS = /** @type {[string, number][]} */ ([
     ...IDXGIOBJECT_SLOTS,
     ['GetDesc', 1],
@@ -552,13 +558,15 @@ export const ID3D10DEVICE1_SLOTS = /** @type {[string, number][]} */ ([
  *     The hardware behind the GPU, which DXGI's adapter reports as Direct3D 9's does.
  * @property {import('../d3d10/dxgi.js').FactoryOptions['resolution']} [resolution]
  *     Told the mode a fullscreen swap chain takes the screen at, as Direct3D 9 tells it.
+ * @property {import('./ddraw.js').SurfaceDcServices} [gdi]
+ *     Device contexts over guest memory, for IDXGISurface1::GetDC; absent, none is handed out.
  */
 
 /**
  * @param {Deps} deps
  */
 export function createDirect3D10Seam({ publisher, memory, allocate, free, deviceOptions,
-    factoryOptions: given, screen, identity, resolution })
+    factoryOptions: given, screen, identity, resolution, gdi })
 {
     const fields = createFields(memory);
     /** @type {import('../d3d10/dxgi.js').FactoryOptions} */
@@ -1317,7 +1325,74 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
             unmapFrom(texture, 0);
             return S_OK;
         },
+        /**
+         * A device context over the surface: GDI draws into guest memory
+         * holding the surface's pixels -- once the GPU's last drawing of them
+         * has come back, unless the program discards them -- and ReleaseDC
+         * hands what it drew to the surface.
+         *
+         * @param {any} texture @param {number[]} args
+         */
+        GetDC: (texture, [discard, out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return E_INVALIDARG;
+            }
+            if (!gdi || !allocate)
+            {
+                return DXGI_ERROR_INVALID_CALL;
+            }
+            const opened = texture.OpenDC(discard !== 0);
+            if (opened.hr !== S_OK)
+            {
+                return opened.hr;
+            }
+            const open = ()=>{
+                const data = /** @type {Uint8Array} */ (opened.data);
+                const address = allocate(Math.max(data.length, 4));
+                const handle = address === 0 ? 0 : gdi.createSurfaceDc({
+                    width: texture.desc.Width, height: texture.desc.Height,
+                    pitch: /** @type {number} */ (opened.rowPitch), bitCount: 32,
+                    bits: address, palette: null, format: '555',
+                });
+                if (handle === 0)
+                {
+                    if (address !== 0)
+                    {
+                        free?.(address);
+                    }
+                    texture.CloseDC();
+                    return DXGI_ERROR_INVALID_CALL;
+                }
+                memory.writeMemory(address, data);
+                contexts.set(texture, { address, handle, data });
+                fields.writeU32(out, handle);
+                return S_OK;
+            };
+            return opened.ready ? opened.ready.then(open) : open();
+        },
+        /** @param {any} texture */
+        ReleaseDC: texture=>{
+            const held = contexts.get(texture);
+            if (!held || !gdi)
+            {
+                return DXGI_ERROR_INVALID_CALL;
+            }
+            contexts.delete(texture);
+            held.data.set(memory.readMemory(held.address, held.data.length));
+            gdi.deleteSurfaceDc(held.handle);
+            free?.(held.address);
+            return texture.CloseDC();
+        },
     };
+
+    /**
+     * The device context a surface has open, and the guest memory it draws
+     * into.
+     *
+     * @type {WeakMap<object, { address: number, handle: number, data: Uint8Array }>}
+     */
+    const contexts = new WeakMap();
 
     /**
      * The interfaces every resource shares, after its own: Direct3D's two
@@ -1334,6 +1409,7 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
             [IID.IDXGIDeviceSubObject, IDXGIDEVICESUBOBJECT_SLOTS],
             [IID.IDXGIResource, IDXGIRESOURCE_SLOTS],
             [IID.IDXGISurface, IDXGISURFACE_SLOTS],
+            [IID.IDXGISurface1, IDXGISURFACE1_SLOTS],
         ], dxgiResourceMethods),
     ];
 

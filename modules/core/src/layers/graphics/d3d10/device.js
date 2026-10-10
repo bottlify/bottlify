@@ -453,6 +453,7 @@ export function createDevice(options = {}){
         unmap: (resource, subresource, discard, noOverwrite)=>
             renderer.unmap(resource, subresource, discard, noOverwrite),
         pending: resource=>renderer.pendingReadback(resource),
+        readBack: resource=>renderer.readBack(resource),
     };
 
     /**
@@ -1938,7 +1939,8 @@ export function createDevice(options = {}){
                 Usage: D3D10_USAGE.DEFAULT,
                 BindFlags: bindFlagsForUsage(request.usage),
                 CPUAccessFlags: 0,
-                MiscFlags: 0,
+                // A swap chain made GDI-compatible makes its buffers so.
+                MiscFlags: request.gdiCompatible ? D3D10_RESOURCE_MISC.GDI_COMPATIBLE : 0,
                 DXGIUsage: request.usage,
             });
             return createResource({

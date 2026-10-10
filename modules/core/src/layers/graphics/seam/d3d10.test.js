@@ -30,7 +30,8 @@ import {
     ID3D10SHADERREFLECTION_SLOTS, ID3D10STATEBLOCK_SLOTS, ID3D10TEXTURE_SLOTS,
     ID3D10VIEW_SLOTS, IDXGIADAPTER1_SLOTS, IDXGIADAPTER_SLOTS, IDXGIDEVICE1_SLOTS,
     IDXGIDEVICE_SLOTS, IDXGIFACTORY1_SLOTS, IDXGIFACTORY_SLOTS, IDXGIOUTPUT_SLOTS,
-    IDXGIRESOURCE_SLOTS, IDXGISURFACE_SLOTS, IDXGISWAPCHAIN_SLOTS, createDirect3D10Seam,
+    IDXGIRESOURCE_SLOTS, IDXGISURFACE1_SLOTS, IDXGISURFACE_SLOTS, IDXGISWAPCHAIN_SLOTS,
+    createDirect3D10Seam,
 } from './d3d10.js';
 import {
     D3D10_BIND, D3D10_CPU_ACCESS, D3D10_DRIVER_TYPE, D3D10_MAP, D3D10_PRIMITIVE_TOPOLOGY,
@@ -183,8 +184,10 @@ const floatBits = floats=>[...new Uint32Array(Float32Array.from(floats).buffer)]
 
 /**
  * The whole assembly as a program reaches it, over a recording GPU.
+ *
+ * @param {{ gdi?: import('./ddraw.js').SurfaceDcServices }} [assembly]
  */
-function seamed(){
+function seamed(assembly = {}){
     const box = machine();
     const gpu = createFakeDevice();
     /** @type {any[]} */
@@ -211,6 +214,7 @@ function seamed(){
             createTexture: gpu.device.createTexture,
             divergence: (api, detail)=>divergences.push(`${api}: ${detail}`),
         }),
+        gdi: assembly.gdi,
     });
     const d3d10 = seam.libraries['D3D10.dll'];
     const dxgi = seam.libraries['DXGI.dll'];
@@ -2313,4 +2317,118 @@ test('enumerating into no pointer is refused, each call with its own code'
         E_INVALIDARG);
     h.box.call(adapter, 2);
     assert.equal(h.box.call(factory, 2), 0, 'nothing was handed out and kept');
+});
+
+test('a GDI-compatible surface hands out one device context over the pixels the GPU drew, and'
+    + ' takes back what GDI drew (test_surface_getdc, d3d10_1.c:697-744; dxgi.c:1975-2010)',
+async()=>{
+    /** @type {any[]} */
+    const made = [];
+    /** @type {number[]} */
+    const deleted = [];
+    const h = seamed({ gdi: {
+        createSurfaceDc: attributes=>{
+            made.push(attributes);
+            return 0x7700 + made.length;
+        },
+        deleteSurfaceDc: handle=>{
+            deleted.push(handle);
+        },
+    } });
+    const { device } = h.createDeviceAndSwapChain();
+    const GDI_COMPATIBLE = 0x20;
+    /** @param {number} misc */
+    const surface = misc=>{
+        const at = h.box.place([0]);
+        assert.equal(h.device(device, 'CreateTexture2D', [h.box.place([4, 2, 1, 1,
+            DXGI_FORMAT.B8G8R8A8_UNORM, 1, 0, D3D10_USAGE.DEFAULT, D3D10_BIND.RENDER_TARGET, 0,
+            misc]), 0, at]), S_OK);
+        const texture = h.box.memory.readU32(at);
+        const surfaceAt = h.box.place([0]);
+        assert.equal(h.box.call(texture, 0, [h.box.placeGuid(IID.IDXGISurface1), surfaceAt]),
+            S_OK, 'every one-image texture is an IDXGISurface1');
+        return { texture, surface1: h.box.memory.readU32(surfaceAt) };
+    };
+    /** @param {number} surface1 @param {number} discard @param {number} out */
+    const getDC = (surface1, discard, out)=>h.box.callParked(surface1,
+        slot(IDXGISURFACE1_SLOTS, 'GetDC'), [discard, out]);
+    /** @param {number} surface1 */
+    const releaseDC = surface1=>h.box.call(surface1, slot(IDXGISURFACE1_SLOTS, 'ReleaseDC'),
+        [0]);
+
+    const plain = surface(0);
+    const dcAt = h.box.place([0xdeadbeef]);
+    assert.equal(await getDC(plain.surface1, 0, dcAt), DXGI_ERROR_INVALID_CALL,
+        'not made GDI-compatible');
+
+    const gdi = surface(GDI_COMPATIBLE);
+    assert.equal(releaseDC(gdi.surface1), DXGI_ERROR_INVALID_CALL, 'nothing to release');
+    // What the GPU drew is what GDI is handed: a clear, read back first.
+    const viewAt = h.box.place([0]);
+    assert.equal(h.device(device, 'CreateRenderTargetView', [gdi.texture, 0, viewAt]), S_OK);
+    h.device(device, 'ClearRenderTargetView', [h.box.memory.readU32(viewAt),
+        h.box.place(floatBits([1, 0, 0, 1]))]);
+    assert.equal(await getDC(gdi.surface1, 0, dcAt), S_OK);
+    assert.equal(h.box.memory.readU32(dcAt), 0x7701);
+    const [attributes] = made;
+    assert.deepEqual([attributes.width, attributes.height, attributes.pitch,
+        attributes.bitCount], [4, 2, 16, 32]);
+    assert.deepEqual([...h.box.services.readMemory(attributes.bits, 4)], [0, 0, 0xff, 0xff],
+        'the cleared red, blue first as a DIB keeps it');
+    assert.equal(h.gpu.count('mapAsync') > 0 || h.gpu.of('copyTextureToBuffer').length > 0,
+        true, 'read back from the GPU');
+
+    const again = h.box.place([0xdeadbeef]);
+    assert.equal(await getDC(gdi.surface1, 0, again), DXGI_ERROR_INVALID_CALL, 'one at a time');
+    assert.equal(h.box.memory.readU32(again), 0xdeadbeef);
+
+    // GDI draws green into the first pixel; the release hands it to the texture.
+    h.box.services.writeMemory(attributes.bits, Uint8Array.from([0, 0xff, 0, 0xff]));
+    assert.equal(releaseDC(gdi.surface1), S_OK);
+    assert.deepEqual(deleted, [0x7701]);
+    assert.equal(releaseDC(gdi.surface1), DXGI_ERROR_INVALID_CALL, 'released already');
+    const object = /** @type {any} */ (h.publisher.objectAt(gdi.texture));
+    const reopened = object.OpenDC(true);
+    assert.deepEqual([...reopened.data.subarray(0, 4)], [0, 0xff, 0, 0xff]);
+    object.CloseDC();
+    const upload = h.gpu.of('writeTexture').at(-1);
+    assert.ok(upload, 'what GDI drew went to the GPU');
+});
+
+test('a swap chain made GDI-compatible makes its buffers so, and only then hands out a device'
+    + ' context (test_create_swapchain, dxgi.c:1975-2010)', async()=>{
+    const h = seamed({ gdi: { createSurfaceDc: ()=>0x7701, deleteSurfaceDc: ()=>{} } });
+    const { device } = h.createDeviceAndSwapChain();
+    /** @param {number} flags */
+    const bufferOf = flags=>{
+        const descAt = h.box.allocate(DXGI_SWAP_CHAIN_DESC.SIZE);
+        writeSwapChainDesc(h.box.services, descAt, {
+            bufferDesc: { width: 4, height: 4, refreshNumerator: 60, refreshDenominator: 1,
+                format: DXGI_FORMAT.B8G8R8A8_UNORM, scanlineOrdering: 0, scaling: 0 },
+            sampleDesc: { count: 1, quality: 0 },
+            bufferUsage: DXGI_USAGE.RENDER_TARGET_OUTPUT,
+            bufferCount: 1,
+            outputWindow: 0x1234,
+            windowed: true,
+            swapEffect: DXGI_SWAP_EFFECT.DISCARD,
+            flags,
+        });
+        const factoryAt = h.box.place([0]);
+        assert.equal(h.dxgi.CreateDXGIFactory.handler([h.box.placeGuid(IID.IDXGIFactory),
+            factoryAt]) >>> 0, S_OK);
+        const chainAt = h.box.place([0]);
+        assert.equal(h.box.call(h.box.memory.readU32(factoryAt),
+            slot(IDXGIFACTORY_SLOTS, 'CreateSwapChain'), [device, descAt, chainAt]), S_OK);
+        const bufferAt = h.box.place([0]);
+        assert.equal(h.swapChain(h.box.memory.readU32(chainAt), 'GetBuffer',
+            [0, h.box.placeGuid(IID.IDXGISurface1), bufferAt]), S_OK);
+        return h.box.memory.readU32(bufferAt);
+    };
+    const dcAt = h.box.place([0]);
+    assert.equal(await h.box.callParked(bufferOf(0), slot(IDXGISURFACE1_SLOTS, 'GetDC'),
+        [0, dcAt]), DXGI_ERROR_INVALID_CALL);
+    const gdiBuffer = bufferOf(0x4);
+    assert.equal(await h.box.callParked(gdiBuffer, slot(IDXGISURFACE1_SLOTS, 'GetDC'),
+        [1, dcAt]), S_OK, 'DXGI_SWAP_CHAIN_FLAG_GDI_COMPATIBLE');
+    assert.equal(h.box.call(gdiBuffer, slot(IDXGISURFACE1_SLOTS, 'ReleaseDC'), [0]), S_OK);
 });

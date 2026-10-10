@@ -42,8 +42,8 @@
 import { attachCom } from './com.js';
 import {
     DXGI_ERROR_INVALID_CALL, DXGI_ERROR_NOT_FOUND, DXGI_ERROR_UNSUPPORTED, DXGI_FORMAT,
-    DXGI_MODE_SCALING, DXGI_MODE_SCANLINE_ORDER, DXGI_SWAP_EFFECT, DXGI_USAGE, E_INVALIDARG,
-    E_NOINTERFACE, IID, S_OK,
+    DXGI_MODE_SCALING, DXGI_MODE_SCANLINE_ORDER, DXGI_SWAP_CHAIN_FLAG, DXGI_SWAP_EFFECT, DXGI_USAGE,
+    E_INVALIDARG, E_NOINTERFACE, IID, S_OK,
 } from './constants.js';
 import {
     DISPLAY_FORMATS, backBufferUsage, highestAccessibleBuffer, swapChainDescResult,
@@ -627,6 +627,7 @@ function createSwapChain(requested, device, factory, services){
             format: desc.bufferDesc.format,
             sampleDesc: desc.sampleDesc,
             usage: backBufferUsage(desc.bufferUsage, index),
+            gdiCompatible: (desc.flags & DXGI_SWAP_CHAIN_FLAG.GDI_COMPATIBLE) !== 0,
             onFirstRef: ()=>{
                 outstanding++;
                 swapChain.addRef();
