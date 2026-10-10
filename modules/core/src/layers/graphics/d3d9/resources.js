@@ -37,7 +37,7 @@ import {
     surfaceBytes, surfacePitch,
 } from './constants.js';
 import { SURFACE_TYPE, surfaceIsLockable } from './validity.js';
-import { fromHalf } from './half.js';
+import { halvesToStored, toHalf } from './half.js';
 
 /**
  * D3DLOCK_READONLY, which is the same number in both versions of the API. Here
@@ -744,15 +744,25 @@ export function packBits(format, colour){
  * @returns {Uint8Array}
  */
 export function packColour(format, colour){
+    const wide = FORMAT_INFO[format]?.wide;
+    if (wide)
+    {
+        // Each channel the colour's fraction of 255, red first, as many as the
+        // format has.
+        const channels = [16, 8, 0, 24].slice(0, wide.channels)
+            .map(shift=>toHalf(((colour >>> shift) & 0xff) / 0xff));
+        return halvesToStored(wide.stored, new Uint8Array(Uint16Array.from(channels).buffer),
+            wide.channels);
+    }
     const width = FORMAT_INFO[format]?.bytesPerPixel ?? 4;
     const bits = packBits(format, colour);
     return Uint8Array.from({ length: width }, (_, index)=>(bits >>> (index * 8)) & 0xff);
 }
 
 /**
- * Pixels read back off the GPU -- four bytes each, blue first, the surface's
- * whole extent -- into the surface's guest bytes, packed the way its format
- * lays a pixel out.
+ * Pixels read back off the GPU -- four bytes each, blue first, or a wide
+ * format's half floats, the surface's whole extent -- into the surface's guest
+ * bytes, packed the way its format lays a pixel out.
  *
  * @param {Surface} surface
  * @param {Uint8Array} pixels
@@ -765,9 +775,12 @@ export function writePixels(surface, pixels, writeMemory){
     const desc = /** @type {SurfaceDesc} */ (out.desc);
     const bytesPerPixel = FORMAT_INFO[desc.Format].bytesPerPixel;
     const pitch = surfacePitch(desc.Format, desc.Width);
-    if (FORMAT_INFO[desc.Format].float)
+    const wide = FORMAT_INFO[desc.Format].wide;
+    if (wide)
     {
-        writeFloatPixels(surface.base, desc, pitch, pixels, writeMemory);
+        // Its rows lie at its pitch with nothing between them, as the read-back's do.
+        writeMemory(surface.base,
+            halvesToStored(wide.stored, pixels, desc.Width * desc.Height * wide.channels));
         return;
     }
     // A four-byte surface is laid out exactly as the read-back is, rows at
@@ -791,34 +804,6 @@ export function writePixels(surface, pixels, writeMemory){
             }
         }
         writeMemory(surface.base + y * pitch, row);
-    }
-}
-
-/**
- * A floating-point target read back -- half-precision floats, one a pixel, as
- * its `r16float` holds them -- into the surface's own format.
- *
- * @param {number} base @param {SurfaceDesc} desc @param {number} pitch
- * @param {Uint8Array} pixels @param {(address: number, bytes: Uint8Array) => void} writeMemory
- */
-function writeFloatPixels(base, desc, pitch, pixels, writeMemory){
-    const halves = new Uint16Array(pixels.slice(0, desc.Width * desc.Height * 2).buffer);
-    const row = new DataView(new ArrayBuffer(pitch));
-    for (let y = 0; y < desc.Height; y++)
-    {
-        for (let x = 0; x < desc.Width; x++)
-        {
-            const half = halves[y * desc.Width + x];
-            if (desc.Format === D3DFMT.R16F)
-            {
-                row.setUint16(x * 2, half, true);
-            }
-            else
-            {
-                row.setFloat32(x * 4, fromHalf(half), true);
-            }
-        }
-        writeMemory(base + y * pitch, new Uint8Array(row.buffer));
     }
 }
 

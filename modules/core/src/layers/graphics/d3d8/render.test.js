@@ -53,6 +53,7 @@ import {
 } from '../webgpu/internal/reference.js';
 import { generateFixedFunction } from '../webgpu/internal/fixedfunction.js';
 import { FOG_SOURCE } from '../webgpu/internal/pipeline.js';
+import { toHalf } from '../d3d9/half.js';
 
 /**
  * The sampler state of stage zero as the last uniform block on the queue carries it.
@@ -4029,6 +4030,40 @@ test('a floating-point surface is an r16float, R32F narrowed to half precision o
         [0x3c00, 0x3800, 0xc000, 0x7bff]);
     const halves = Uint8Array.from([0x00, 0x3c, 0x00, 0x38]);
     assert.deepEqual([...expandTexels(D3DFMT.R16F, halves, 2)], [...halves]);
+});
+
+test('a wide format is half floats by its channel count, red first, converted on upload', ()=>{
+    /** @param {number[]} values @returns {Uint8Array} */
+    const f32 = values=>new Uint8Array(Float32Array.from(values).buffer);
+    /** @param {number[]} values @returns {Uint8Array} */
+    const u16 = values=>new Uint8Array(Uint16Array.from(values).buffer);
+    /** @param {Uint8Array} bytes */
+    const halvesOf = bytes=>[...new Uint16Array(bytes.slice().buffer)];
+    // Two texels each, every channel distinct, so a channel out of order shows.
+    for (const { format, gpu, texels, halves } of [
+        { format: D3DFMT.A16B16G16R16F, gpu: 'rgba16float',
+            texels: u16([0x3c00, 0x3800, 0x0000, 0x3c00, 0xc000, 0x4000, 0x7bff, 0x0001]),
+            halves: [0x3c00, 0x3800, 0x0000, 0x3c00, 0xc000, 0x4000, 0x7bff, 0x0001] },
+        { format: D3DFMT.G16R16F, gpu: 'rg16float',
+            texels: u16([0x3c00, 0x3800, 0xc000, 0x4000]),
+            halves: [0x3c00, 0x3800, 0xc000, 0x4000] },
+        { format: D3DFMT.A32B32G32R32F, gpu: 'rgba16float',
+            texels: f32([1, 0.5, 0, 1, -2, 2, 65504, 1e6]),
+            halves: [0x3c00, 0x3800, 0x0000, 0x3c00, 0xc000, 0x4000, 0x7bff, 0x7c00] },
+        { format: D3DFMT.G32R32F, gpu: 'rg16float',
+            texels: f32([1, 0.5, -2, 0.1]),
+            halves: [0x3c00, 0x3800, 0xc000, 0x2e66] },
+        { format: D3DFMT.A16B16G16R16, gpu: 'rgba16float',
+            texels: u16([0xffff, 0, 0x8000, 0xffff, 0, 0xffff, 1, 0]),
+            halves: [0x3c00, 0, 0x3800, 0x3c00, 0, 0x3c00, toHalf(1 / 0xffff), 0] },
+        { format: D3DFMT.G16R16, gpu: 'rg16float',
+            texels: u16([0xffff, 0, 0x8000, 0x4000]),
+            halves: [0x3c00, 0, 0x3800, 0x3400] },
+    ])
+    {
+        assert.equal(gpuFormatOf(format, 64, 64, true), gpu, `format ${format}`);
+        assert.deepEqual(halvesOf(expandTexels(format, texels, 2)), halves, `format ${format}`);
+    }
 });
 
 test('recorded: a draw under the stencil test carries it, its reference set on the pass;'

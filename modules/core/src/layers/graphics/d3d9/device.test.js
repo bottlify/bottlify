@@ -818,6 +818,75 @@ test('a floating-point format is a render target a shadow map draws its depths i
     }
 });
 
+/** The HDR formats: half and full floats, and 16-bit fractions, two and four channels. */
+const WIDE_FORMATS = [
+    { format: D3DFMT.A16B16G16R16F, bytesPerPixel: 8 },
+    { format: D3DFMT.G16R16F, bytesPerPixel: 4 },
+    { format: D3DFMT.A32B32G32R32F, bytesPerPixel: 16 },
+    { format: D3DFMT.G32R32F, bytesPerPixel: 8 },
+    { format: D3DFMT.A16B16G16R16, bytesPerPixel: 8 },
+    { format: D3DFMT.G16R16, bytesPerPixel: 4 },
+];
+/** D3DUSAGE_QUERY_FILTER and D3DUSAGE_QUERY_POSTPIXELSHADER_BLENDING. */
+const QUERY_FILTER = 0x00020000;
+const QUERY_POSTPIXELSHADER_BLENDING = 0x00080000;
+
+test('an HDR format is a texture of every kind and a render target, filtered and blended', ()=>{
+    // A shader-model-3 program renders its lighting into A16B16G16R16F, asks
+    // CheckDeviceFormat whether it may filter and blend it, and takes its
+    // no-HDR path at the first D3DERR_NOTAVAILABLE.
+    const d3d = createDirect3D9();
+    const device = createDevice();
+    for (const { format, bytesPerPixel } of WIDE_FORMATS)
+    {
+        for (const type of [D3DRTYPE.TEXTURE, D3DRTYPE.CUBETEXTURE, D3DRTYPE.SURFACE])
+        {
+            assert.equal(d3d.CheckDeviceFormat(D3DUSAGE.RENDERTARGET, type, format), D3D_OK);
+            assert.equal(d3d.CheckDeviceFormat(D3DUSAGE.RENDERTARGET | QUERY_FILTER
+                | QUERY_POSTPIXELSHADER_BLENDING, type, format), D3D_OK, `format ${format}`);
+        }
+        assert.equal(d3d.CheckDeviceFormat(QUERY_FILTER, D3DRTYPE.VOLUMETEXTURE, format), D3D_OK);
+        assert.equal(d3d.CheckDeviceFormat(D3DUSAGE.AUTOGENMIPMAP | D3DUSAGE.RENDERTARGET,
+            D3DRTYPE.TEXTURE, format), D3D_OK);
+        assert.equal(d3d.CheckDeviceFormat(D3DUSAGE.DEPTHSTENCIL, D3DRTYPE.SURFACE, format),
+            D3DERR_NOTAVAILABLE);
+        assert.equal(d3d.CheckDepthStencilMatch(format, D3DFMT.D24S8), D3D_OK);
+
+        /** @type {{ texture?: any, surface?: any }} */
+        const out = {};
+        assert.equal(device.CreateTexture(64, 32, 0, D3DUSAGE.RENDERTARGET, format,
+            D3DPOOL.DEFAULT, out), D3D_OK);
+        /** @type {{ surface?: any }} */
+        const level = {};
+        assert.equal(out.texture.GetSurfaceLevel(1, level), D3D_OK);
+        /** @type {{ desc?: any }} */
+        const described = {};
+        assert.equal(level.surface.GetDesc(described), D3D_OK);
+        assert.equal(described.desc.Format, format);
+        assert.equal(described.desc.Size, 32 * 16 * bytesPerPixel);
+        level.surface.release();
+        out.texture.release();
+        assert.equal(device.CreateTexture(16, 16, 1, 0, format, D3DPOOL.MANAGED, out), D3D_OK);
+        /** @type {{ pBits?: number, Pitch?: number }} */
+        const locked = {};
+        assert.equal(out.texture.LockRect(0, locked, null, 0), D3D_OK);
+        assert.equal(locked.Pitch, 16 * bytesPerPixel, 'a row is its channels and no padding');
+        assert.equal(out.texture.UnlockRect(0), D3D_OK);
+        out.texture.release();
+        assert.equal(device.CreateCubeTexture(16, 1, D3DUSAGE.RENDERTARGET, format,
+            D3DPOOL.DEFAULT, out), D3D_OK);
+        out.texture.release();
+        assert.equal(device.CreateVolumeTexture(8, 8, 4, 1, 0, format, D3DPOOL.MANAGED, out),
+            D3D_OK);
+        out.texture.release();
+        assert.equal(device.CreateRenderTarget(32, 32, format, true, out), D3D_OK);
+        out.surface.release();
+        assert.equal(device.CreateOffscreenPlainSurface(32, 32, format, D3DPOOL.SYSTEMMEM, out),
+            D3D_OK);
+        out.surface.release();
+    }
+});
+
 test('a render target and a depth stencil released to nothing while set live on until replaced',
     ()=>{
         const device = createDevice();

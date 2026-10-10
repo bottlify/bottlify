@@ -56,7 +56,7 @@ import {
 import { D3DVERTEXTEXTURESAMPLER0 } from '../d3d9/samplerstates.js';
 import { D3DDECLUSAGE } from '../d3d9/declaration.js';
 import { decodeS3tc } from '../webgpu/internal/s3tc.js';
-import { toHalf } from '../d3d9/half.js';
+import { storedToHalves } from '../d3d9/half.js';
 import { passedSamples, reachableArea } from '../webgpu/internal/occlusion.js';
 import {
     fixedFragmentStage, generates, generationOf, readsNormal,
@@ -626,18 +626,6 @@ const TEXEL_EXPANSION = Object.freeze({
         }
         return new Uint8Array(out.buffer);
     },
-    // The floating-point formats go to `r16float` as numbers: R16F as it lies,
-    // R32F narrowed to half precision.
-    [D3DFMT.R16F]: (pixels, count)=>pixels.slice(0, count * 2),
-    [D3DFMT.R32F]: (pixels, count)=>{
-        const floats = new Float32Array(pixels.slice(0, count * 4).buffer);
-        const out = new Uint16Array(count);
-        for (let index = 0; index < count; index++)
-        {
-            out[index] = toHalf(floats[index]);
-        }
-        return new Uint8Array(out.buffer);
-    },
 });
 
 /** @param {number} value five bits @returns {number} eight */
@@ -665,7 +653,8 @@ function expandSixteen(pixels, count, unpack){
 
 /**
  * A texture level's bytes as they lie in guest memory, expanded to the one
- * format the backend samples.
+ * format the backend samples: a wide format's channels to half floats, every
+ * other colour format to `bgra8unorm` or `rgba8snorm`.
  *
  * @param {number} format  D3DFMT
  * @param {Uint8Array} pixels
@@ -673,6 +662,11 @@ function expandSixteen(pixels, count, unpack){
  * @returns {Uint8Array}
  */
 export function expandTexels(format, pixels, count){
+    const wide = FORMAT_INFO[format]?.wide;
+    if (wide)
+    {
+        return storedToHalves(wide.stored, pixels, count * wide.channels);
+    }
     const expand = TEXEL_EXPANSION[format];
     if (!expand)
     {
@@ -686,13 +680,21 @@ export const COLOR_FORMAT = 'bgra8unorm';
 /** What a signed format is sampled from: its channels come back -1..1. */
 const SIGNED_FORMAT = 'rgba8snorm';
 /**
- * What a floating-point format is drawn into and sampled from: rendered,
- * filtered and blended on every WebGPU device, where 32-bit floats are each an
- * optional feature.
+ * What a wide format is drawn into and sampled from, by its channel count:
+ * half floats, which every WebGPU device renders, filters and blends. 32-bit
+ * floats are rendered too, but filtered and blended only with the optional
+ * float32-filterable and float32-blendable features, which this backend does
+ * not ask for -- and a program of the era filters and blends its HDR targets
+ * wherever CheckDeviceFormat lets it. 16-bit fractions exist only behind an
+ * optional feature as well. So R32F, G32R32F and A32B32G32R32F are narrowed to
+ * half precision, and G16R16 and A16B16G16R16 are kept as halves of their
+ * value (`storedToHalves` says what each loses), each reported once.
+ *
+ * @type {Readonly<Record<number, string>>}
  */
-// ponytail: R32F at half precision; `r32float` where the device has float32-filterable
-// and float32-blendable, when a picture shows the steps.
-const FLOAT_FORMAT = 'r16float';
+// ponytail: 32-bit floats at half precision; `r32float` and its wider kin where the
+// device has float32-filterable and float32-blendable, when a picture shows the steps.
+const HALF_FORMAT = Object.freeze({ 1: 'r16float', 2: 'rg16float', 4: 'rgba16float' });
 
 /**
  * The block-compressed formats, by the D3DFMT they arrive as.
@@ -801,9 +803,9 @@ export function gpuFormatOf(format, width, height, compressedTextures){
     {
         return SIGNED_FORMAT;
     }
-    if (info.float)
+    if (info.wide)
     {
-        return FLOAT_FORMAT;
+        return HALF_FORMAT[info.wide.channels];
     }
     if (!info.depth)
     {
@@ -2474,16 +2476,35 @@ export function createRenderer(options){
     const probeTexture = options.probeTexture ?? null;
     const compressedTextures = options.compressedTextures === true;
     /**
-     * Nothing to add to a surface's description; said once, the first time a
-     * format is kept at less precision than it has.
+     * Nothing to add to a surface's description; said once a format, the first
+     * time a wide one is kept as less than it is.
      *
      * @param {number} format
      * @returns {{}}
      */
     const narrowed = format=>{
-        if (format === D3DFMT.R32F)
+        const wide = FORMAT_INFO[format]?.wide;
+        if (!wide || !divergence)
         {
-            divergence?.('Direct3D', 'an R32F surface is kept at half precision (r16float)');
+            return {};
+        }
+        const name = Object.entries(D3DFMT).find(([, value])=>value === format)?.[0];
+        const kept = HALF_FORMAT[wide.channels];
+        if (wide.stored === 'float')
+        {
+            divergence('Direct3D', `a surface of ${name} is kept at half precision (${kept})`);
+        }
+        if (wide.stored === 'unorm16')
+        {
+            divergence('Direct3D', `a surface of ${name} is kept as half floats (${kept}): eleven`
+                + ' significant bits rather than sixteen, and a draw\'s values outside 0..1 are'
+                + ' kept until a read-back clamps them');
+        }
+        // Direct3D samples a channel the format lacks as one; WebGPU samples it as zero.
+        if (wide.channels < 4)
+        {
+            divergence('Direct3D', `a texture of ${name} samples the colour channels it lacks as 0,`
+                + ' where Direct3D answers 1');
         }
         return {};
     };

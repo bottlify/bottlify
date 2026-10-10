@@ -1275,6 +1275,25 @@ export function spaceAbove(imageEnd){
 }
 
 /**
+ * The least stack a thread is given, whatever its image was linked for. An
+ * image linked for 64 KiB was measured here reaching 70 KiB down its first
+ * thread, inside a window procedure, for a program released to run on
+ * Windows; the linked figure is not what such a program can count on being
+ * held to. A megabyte, the linker's own default, is the floor. Recorded in
+ * roadmap/decisions.md (A42).
+ */
+export const MINIMUM_STACK_RESERVE = 0x100000;
+
+/**
+ * The stack a thread of an image linked for `reserve` gets.
+ *
+ * @param {number} reserve  The image's SizeOfStackReserve.
+ */
+export function stackReserveOf(reserve){
+    return Math.max(reserve >>> 0, MINIMUM_STACK_RESERVE);
+}
+
+/**
  * Where the first thread's stack goes. Under the default initial stack pointer
  * when what the image was linked to reserve fits between the stub table and
  * it; otherwise at the bottom of the stack pool, the size the image asked for
@@ -3205,8 +3224,7 @@ async function buildApp(options){
     // program that asks for almost nothing still has room to make a call, and
     // capped so that a program asking for an enormous stack cannot leave the
     // pool with room for only one thread.
-    const threadStackSize = Math.min(
-        Math.max(mainImage.stackReserve, 0x10000),
+    const threadStackSize = Math.min(stackReserveOf(mainImage.stackReserve),
         Math.floor(STACK_POOL_WHOLE / 16));
     const memorySize = options.memorySize ?? DEFAULT_MEMORY_SIZE;
     const HEAP_SIZE = heapSizeFor(memorySize, options.heapSize, HEAP_BASE);
@@ -4461,7 +4479,7 @@ async function buildApp(options){
     const stackRoom = initialStack - (mainStack.initialStack === undefined
         ? thunkBase + cpu.layout.thunkCapacity : STACK_POOL_START);
     const stackSize = options.stackSize
-        ?? Math.min(Math.max(parsePe(options.executable).stackReserve, 0x10000), stackRoom);
+        ?? Math.min(stackReserveOf(parsePe(options.executable).stackReserve), stackRoom);
 
     memory.register({
         name: 'entry-vector', base: entryVector, size: 4,

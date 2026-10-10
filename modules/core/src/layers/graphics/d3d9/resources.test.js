@@ -16,6 +16,7 @@ import {
     rectMoveOf, writePixels,
 } from './resources.js';
 import { SURFACE_TYPE } from './validity.js';
+import { fromHalf, toHalf } from './half.js';
 
 const SIZE = 128;
 const BYTES_PER_PIXEL = 4;
@@ -632,6 +633,66 @@ test("packColour gives a pixel of a format's width, listed layout or not", ()=>{
     assert.equal(packColour(D3DFMT.D16, 0xff123456).length, 2, 'a two-byte format packColour'
         + ' has no layout for still packs to two bytes');
     assert.equal(packColour(D3DFMT.A2R10G10B10, 0xff123456).length, 4);
+});
+
+test('packColour gives a wide format each channel as its fraction of 255, red first', ()=>{
+    // Red 255, green 0, blue 51 (0.2), alpha 128.
+    const colour = 0x80ff0033;
+    const half = (/** @type {Uint8Array} */ bytes)=>[...new Uint16Array(bytes.buffer)];
+    const float = (/** @type {Uint8Array} */ bytes)=>[...new Float32Array(bytes.buffer)];
+    assert.deepEqual(half(packColour(D3DFMT.A16B16G16R16F, colour)),
+        [0x3c00, 0, toHalf(0.2), toHalf(128 / 255)]);
+    assert.deepEqual(half(packColour(D3DFMT.G16R16F, colour)), [0x3c00, 0]);
+    assert.deepEqual(half(packColour(D3DFMT.R16F, colour)), [0x3c00]);
+    assert.deepEqual(float(packColour(D3DFMT.A32B32G32R32F, colour)),
+        [1, 0, fromHalf(toHalf(0.2)), fromHalf(toHalf(128 / 255))]);
+    assert.deepEqual(float(packColour(D3DFMT.G32R32F, colour)), [1, 0]);
+    assert.deepEqual(float(packColour(D3DFMT.R32F, colour)), [1]);
+    const fraction = (/** @type {number} */ value)=>Math.round(fromHalf(toHalf(value)) * 0xffff);
+    assert.deepEqual(half(packColour(D3DFMT.A16B16G16R16, colour)),
+        [0xffff, 0, fraction(0.2), fraction(128 / 255)]);
+    assert.deepEqual(half(packColour(D3DFMT.G16R16, colour)), [0xffff, 0]);
+});
+
+test('writePixels turns a wide target\'s half floats into the format it was made in', ()=>{
+    const width = 3;
+    const height = 2;
+    // Every texel's channels distinct: 1, 0.5, 2, -1, 0.25, ... in turn.
+    const values = [1, 0.5, 2, -1, 0.25, 0, 65504, 0.125];
+    for (const { format, channels, decode, expected } of [
+        { format: D3DFMT.A16B16G16R16F, channels: 4,
+            decode: (/** @type {Uint8Array} */ b)=>[...new Uint16Array(b.buffer)].map(fromHalf),
+            expected: (/** @type {number} */ v)=>v },
+        { format: D3DFMT.G16R16F, channels: 2,
+            decode: (/** @type {Uint8Array} */ b)=>[...new Uint16Array(b.buffer)].map(fromHalf),
+            expected: (/** @type {number} */ v)=>v },
+        { format: D3DFMT.A32B32G32R32F, channels: 4,
+            decode: (/** @type {Uint8Array} */ b)=>[...new Float32Array(b.buffer)],
+            expected: (/** @type {number} */ v)=>v },
+        { format: D3DFMT.G32R32F, channels: 2,
+            decode: (/** @type {Uint8Array} */ b)=>[...new Float32Array(b.buffer)],
+            expected: (/** @type {number} */ v)=>v },
+        { format: D3DFMT.A16B16G16R16, channels: 4,
+            decode: (/** @type {Uint8Array} */ b)=>[...new Uint16Array(b.buffer)],
+            expected: (/** @type {number} */ v)=>Math.round(Math.max(0, Math.min(1, v)) * 0xffff) },
+        { format: D3DFMT.G16R16, channels: 2,
+            decode: (/** @type {Uint8Array} */ b)=>[...new Uint16Array(b.buffer)],
+            expected: (/** @type {number} */ v)=>Math.round(Math.max(0, Math.min(1, v)) * 0xffff) },
+    ])
+    {
+        const base = 0x4000;
+        const surface = createSurface({
+            type: SURFACE_TYPE.RENDER_TARGET, width, height, format,
+            pool: D3DPOOL.DEFAULT, usage: 0, base, lockable: true,
+            count: createReferenceCount(),
+        });
+        const read = Array.from({ length: width * height * channels },
+            (_, index)=>values[index % values.length]);
+        const pixels = new Uint8Array(Uint16Array.from(read, toHalf).buffer);
+        const arrived = new Uint8Array(surfacePitch(format, width) * height);
+        writePixels(surface, pixels, (address, bytes)=>arrived.set(bytes, address - base));
+        assert.deepEqual(decode(arrived), read.map(expected), `format ${format}`);
+    }
 });
 
 /**
