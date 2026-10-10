@@ -56,23 +56,23 @@ test('a click lands on its point on a cursor moved by relative motion, wherever 
         }
     }
     assert.deepEqual(cursor.pressed, [{ x: 672, y: 528 }, { x: 132, y: 174 }]);
-    assert.equal(frames, 6, 'three frames a click');
+    assert.equal(frames, 8, 'four frames a click');
 });
 
-test('a click\'s steps: the corner, then the move with the press, then the release', ()=>{
+test('a click\'s steps: the corner, the move, the press, then the release', ()=>{
     /** @type {any[][]} */
     const frames = [];
     const route = createInputRoute(event=>frames.at(-1)?.push(event));
     route.click(10, 20, { button: 'right' });
-    for (let step = 0; step < 4; step++)
+    for (let step = 0; step < 5; step++)
     {
         frames.push([]);
         route.tick();
     }
     assert.deepEqual(frames, [
         [{ kind: 'pointerMove', x: 0, y: 0, dx: -CORNER, dy: -CORNER }],
-        [{ kind: 'pointerMove', x: 10, y: 20, dx: 10, dy: 20 },
-            { kind: 'pointerButton', button: 'right', down: true }],
+        [{ kind: 'pointerMove', x: 10, y: 20, dx: 10, dy: 20 }],
+        [{ kind: 'pointerButton', button: 'right', down: true }],
         [{ kind: 'pointerButton', button: 'right', down: false }],
         [],
     ]);
@@ -91,4 +91,31 @@ test('a key is held for its frames, and what is queued goes in order', ()=>{
     }
     assert.deepEqual(sent, ['Space:true', 'Space:false', 'Enter:true', 'Enter:false']);
     assert.deepEqual(left, [5, 4, 3, 2, 1, 0], 'Space down, held, held, up; Enter down, up');
+});
+
+test('a click\'s press comes on a frame after its move, for a menu that hit-tests first', ()=>{
+    // Such a menu finds what is under its cursor on one frame and takes a
+    // press on a later one; a press that came with the motion fell on the
+    // spot the cursor had left.
+    const cursor = relativeCursor();
+    /** @type {{ x: number, y: number } | null} */
+    let hovered = null;
+    /** @type {{ x: number, y: number }[]} */
+    const taken = [];
+    /** @type {any[]} */
+    let frame = [];
+    const route = createInputRoute(event=>frame.push(event));
+    route.click(400, 215);
+    while (route.pending() > 0)
+    {
+        frame = [];
+        route.tick();
+        if (frame.some(event=>event.kind === 'pointerButton' && event.down) && hovered)
+        {
+            taken.push(hovered);
+        }
+        cursor.read(frame);
+        hovered = { ...cursor.at };
+    }
+    assert.deepEqual(taken, [{ x: 400, y: 215 }]);
 });

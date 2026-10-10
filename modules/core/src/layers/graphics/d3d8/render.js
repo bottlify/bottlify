@@ -54,7 +54,7 @@ import {
     varyingLocation,
 } from '../d3d9/wgsl.js';
 import { D3DTSS9, D3DVERTEXTEXTURESAMPLER0 } from '../d3d9/samplerstates.js';
-import { D3DDECLUSAGE } from '../d3d9/declaration.js';
+import { D3DDECLUSAGE, MAX_STREAMS } from '../d3d9/declaration.js';
 import { OPCODE, REGISTER, SHADER_KIND } from '../d3d9/shader.js';
 import { decodeS3tc } from '../webgpu/internal/s3tc.js';
 import { storedToHalves } from '../d3d9/half.js';
@@ -2903,6 +2903,14 @@ export function createRenderer(options){
      * @type {Set<any>}
      */
     const released = new Set();
+    /**
+     * Vertex and index buffers the program released for the last time, each
+     * with its record, waiting for a present that finds them bound to no
+     * stream and not as the indices.
+     *
+     * @type {Map<any, { gpu: any }>}
+     */
+    const releasedBuffers = new Map();
     let nextTextureId = 0;
     /**
      * Textures that make their own levels and whose top level changed since
@@ -4743,6 +4751,23 @@ export function createRenderer(options){
             held: null,
         };
         buffers.set(buffer, made);
+        // The last release gives the buffer's GPU memory back, as a texture's
+        // does: once no stream binds it and the frames that drew from it are
+        // replayed. A program that loads a level makes and drops buffers by
+        // the ten thousand, and each one kept its storage and its staging
+        // copy for the rest of the run.
+        const releaseBuffer = buffer.release;
+        if (typeof releaseBuffer === 'function')
+        {
+            buffer.release = ()=>{
+                const left = releaseBuffer();
+                if (left === 0 && buffers.get(buffer) === made)
+                {
+                    releasedBuffers.set(buffer, made);
+                }
+                return left;
+            };
+        }
         return made;
     };
 
@@ -9022,6 +9047,25 @@ export function createRenderer(options){
                 const lines = handOver;
                 // Numbered as the frame history numbers it.
                 chain = chain.then(()=>liveDump?.written?.(joinDump(lines), replayed - 1));
+            }
+            if (releasedBuffers.size > 0)
+            {
+                const bound = new Set([model.indices, model.stream?.buffer]);
+                for (let index = 0; index < MAX_STREAMS && model.streamAt; index++)
+                {
+                    bound.add(model.streamAt(index)?.buffer);
+                }
+                for (const [buffer, entry] of releasedBuffers)
+                {
+                    if (!bound.has(buffer))
+                    {
+                        releasedBuffers.delete(buffer);
+                        buffers.delete(buffer);
+                        const gpu = entry.gpu;
+                        chain = chain.then(()=>backend.releaseDynamicBuffer?.(gpu))
+                            .catch(failure);
+                    }
+                }
             }
             if (released.size > 0)
             {

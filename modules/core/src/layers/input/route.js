@@ -17,8 +17,10 @@
  * there to the point: the program's cursor and the window's pointer meet
  * there whatever the program. The push and the move go a frame apart, since a
  * program that adds a frame's motion up before it stops the cursor at an edge
- * would take the two together for a push into the corner; the press goes
- * with the move, and the release a frame later.
+ * would take the two together for a push into the corner. The press goes a
+ * frame after the move, as a hand's does: a menu that finds the button under
+ * its cursor on one frame and takes the press on a later one (Battlefield 2's)
+ * missed a press that came with the motion. The release goes a frame later.
  *
  * A key is pressed on one step and let go after `frames` more. Whatever is
  * queued runs in order, each after the one before it has let go.
@@ -55,8 +57,8 @@ export function createInputRoute(send){
             const button = options.button ?? 'left';
             steps.push(
                 [{ kind: 'pointerMove', x: 0, y: 0, dx: -CORNER, dy: -CORNER }],
-                [{ kind: 'pointerMove', x, y, dx: x, dy: y },
-                    { kind: 'pointerButton', button, down: true }],
+                [{ kind: 'pointerMove', x, y, dx: x, dy: y }],
+                [{ kind: 'pointerButton', button, down: true }],
                 [{ kind: 'pointerButton', button, down: false }]);
         },
         key(code, frames = 1){

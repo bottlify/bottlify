@@ -1040,9 +1040,9 @@ export function presentFrame(app, request, state, frame){
             {
                 break;
             }
-            // A click takes three presents (`clicks` below), a key its frames
+            // A click takes four presents (`clicks` below), a key its frames
             // and one to let go, anything else one.
-            const span = timed === request.clicks ? 3
+            const span = timed === request.clicks ? 4
                 : 'frames' in action ? (action.frames ?? 1) + 1 : 2;
             free = Math.max(free, action.after + span);
         }
