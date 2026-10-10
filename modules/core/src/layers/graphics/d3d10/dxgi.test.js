@@ -8,7 +8,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     D3D10_BIND, D3D10_DRIVER_TYPE, D3D10_SDK_VERSION, DXGI_ERROR_INVALID_CALL,
-    DXGI_ERROR_NOT_FOUND, DXGI_FORMAT, DXGI_SWAP_EFFECT, DXGI_USAGE, E_NOINTERFACE, IID, S_OK,
+    DXGI_ERROR_NOT_FOUND, DXGI_FORMAT, DXGI_SWAP_EFFECT, DXGI_USAGE, E_INVALIDARG, E_NOINTERFACE,
+    IID, S_OK,
 } from './constants.js';
 import {
     CreateDXGIFactory, CreateDXGIFactory1, createFactory, defaultSwapChainDesc,
@@ -500,3 +501,31 @@ test('a swap chain asked for at zero by zero takes its window\'s client area, an
     assert.deepEqual(measured, [], 'a window is measured only when a side is zero');
     assertFullyReleased(device, 'the device');
 });
+
+test('a swap chain is made at a sample count its device makes textures at, and at no other',
+    ()=>{
+        const device = createDevice();
+        /** @param {number} count @param {number} quality */
+        const made = (count, quality)=>{
+            /** @type {{ swapChain?: any }} */
+            const created = {};
+            const hr = device.factory().CreateSwapChain(device,
+                swapChainDesc({ sampleDesc: { count, quality } }), created);
+            return { hr, swapChain: created.swapChain };
+        };
+        const four = made(4, 0);
+        assert.equal(four.hr, S_OK);
+        /** @type {{ buffer?: any }} */
+        const buffer = {};
+        assert.equal(four.swapChain.GetBuffer(0, IID.ID3D10Texture2D, buffer), S_OK);
+        assert.deepEqual(buffer.buffer.desc.SampleDesc, { Count: 4, Quality: 0 },
+            'the back buffer is multisampled');
+        buffer.buffer.release();
+        four.swapChain.release();
+        for (const [count, quality] of [[2, 0], [4, 1], [0, 0], [64, 0]])
+        {
+            assert.deepEqual(made(count, quality), { hr: E_INVALIDARG, swapChain: null },
+                `${count} samples at quality ${quality}`);
+        }
+        assertFullyReleased(device, 'the device');
+    });

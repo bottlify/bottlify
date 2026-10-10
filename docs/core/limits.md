@@ -77,6 +77,10 @@ differently raises a `divergence` event naming the API.
 - Direct3D 10 has no geometry shaders: `CreateGeometryShader` and its stream-output variant
   answer `E_NOTIMPL` for a valid shader, since WebGPU has no geometry stage and none is emulated.
   An effect pass that sets one is drawn without it, and the effect says so.
+- Direct3D 10 multisamples at four samples only, the count WebGPU has:
+  `CheckMultisampleQualityLevels` answers one quality level at four for the colour and depth
+  formats WebGPU multisamples, and none at two, eight or any other count. A multisampled texture array is refused. A resolve, and the
+  present of a multisampled swap chain, average the four samples equally.
 - A lost GPU device is not recovered: `Present` and `Reset` answer `D3DERR_DEVICELOST`
   (`D3DERR_DEVICEREMOVED` on 9Ex) and no new frames arrive.
 - DXT textures are decoded on the CPU unless `graphics.compressedTextures` is on and the GPU has

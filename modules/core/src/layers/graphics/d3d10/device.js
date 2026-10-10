@@ -45,14 +45,19 @@ import {
 } from './constants.js';
 import { SHADER_KIND, SYSTEM_VALUE, parseDxbc, parseShaderOfKind } from './dxbc.js';
 import { createFactory } from './dxgi.js';
-import { INDEX_FORMAT, VERTEX_FORMAT, textureStorage } from './gpuformats.js';
+import {
+    INDEX_FORMAT, VERTEX_FORMAT, multisampleQualityLevels as webgpuMultisampleQualityLevels,
+    textureStorage,
+} from './gpuformats.js';
 import { createDrawStatistics, createQueryObject } from './queries.js';
 import { createRenderer } from './render.js';
 import {
     VIEW_KINDS, createResource, createView, resolveMipLevels, resolveViewDesc, textureInterfaces,
 } from './resources.js';
 import { STATE_KIND, createStateStore } from './states.js';
-import { bindFlagsForUsage, bufferCreateResult, textureCreateResult } from './validity.js';
+import {
+    bindFlagsForUsage, bufferCreateResult, resolveViewFormat, textureCreateResult,
+} from './validity.js';
 
 /**
  * @typedef {import('./render.js').SubresourceData} SubresourceData
@@ -110,18 +115,6 @@ const PREDICATE_QUERIES = new Set([
  *     Told of every frame a swap chain's present queues; what it answers is
  *     what the present waits on before it answers the program.
  */
-
-/**
- * The multisample support a backend with no multisampling reports: one sample
- * at one quality level, and nothing beyond that.
- *
- * @param {number} format
- * @param {number} sampleCount
- * @returns {number}
- */
-function noMultisampling(format, sampleCount){
-    return sampleCount === 1 ? 1 : 0;
-}
 
 /**
  * @param {any} adapter
@@ -381,7 +374,8 @@ function readSlots(slots, startSlot, count){
  * @param {DeviceOptions & { flags?: number }} [options]
  */
 export function createDevice(options = {}){
-    const multisampleQualityLevels = options.multisampleQualityLevels ?? noMultisampling;
+    const multisampleQualityLevels = options.multisampleQualityLevels
+        ?? webgpuMultisampleQualityLevels;
     const caps = { multisampleQualityLevels };
     const factory = options.adapter
         ? null
@@ -522,6 +516,12 @@ export function createDevice(options = {}){
         if (hr !== S_OK)
         {
             return hr;
+        }
+        if ((desc.SampleDesc?.Count ?? 1) > 1 && (desc.ArraySize ?? 1) > 1)
+        {
+            diverge('a multisampled texture array is refused: WebGPU multisamples a texture'
+                + ' of one layer only');
+            return E_INVALIDARG;
         }
         const resolved = Object.freeze({
             ...desc,
@@ -1569,12 +1569,49 @@ export function createDevice(options = {}){
         },
 
         /**
-         * There is no multisampling here, so no resource can be a multisampled
-         * source and the call always names something it cannot resolve.
+         * The samples of a multisampled texture averaged into a one-sample
+         * one. Both have to be two-dimensional textures of one extent, the
+         * destination a default one, and the format one each can be viewed
+         * in: the resource's own when it is typed, a member of its family when
+         * it is typeless. A call that breaks a rule is dropped, as the runtime
+         * drops it; one that keeps them is made by the GPU in its turn.
+         *
+         * @param {any} destination
+         * @param {number} destinationSubresource
+         * @param {any} source
+         * @param {number} sourceSubresource
+         * @param {number} format
          */
-        ResolveSubresource(){
-            diverge('ResolveSubresource does nothing: the source is not multisampled, and'
-                + ' resolving one that is not is refused');
+        ResolveSubresource(destination, destinationSubresource, source, sourceSubresource,
+            format)
+        {
+            const texture2D = (/** @type {any} */ resource)=>resource
+                && resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE2D;
+            if (!texture2D(destination) || !texture2D(source))
+            {
+                return;
+            }
+            const to = destination.desc;
+            const from = source.desc;
+            const castable = (/** @type {any} */ desc)=>{
+                const info = FORMAT_INFO[desc.Format];
+                return info && (info.kind === FORMAT_KIND.TYPELESS
+                    ? resolveViewFormat(desc.Format, format) === format
+                    : desc.Format === format);
+            };
+            const level = destinationSubresource % to.MipLevels;
+            if (from.SampleDesc.Count < 2 || to.SampleDesc.Count !== 1
+                || to.Usage !== D3D10_USAGE.DEFAULT
+                || sourceSubresource >= from.MipLevels * from.ArraySize
+                || destinationSubresource >= to.MipLevels * to.ArraySize
+                || Math.max(1, to.Width >>> level) !== from.Width
+                || Math.max(1, to.Height >>> level) !== from.Height
+                || !castable(from) || !castable(to))
+            {
+                return;
+            }
+            renderer.resolve(destination, destinationSubresource, source, sourceSubresource,
+                format);
         },
 
         /** What has been recorded goes to the GPU now rather than at the next present. */
@@ -1763,11 +1800,21 @@ export function createDevice(options = {}){
          * @returns {number}
          */
         CheckMultisampleQualityLevels(format, sampleCount, out){
-            if (!out)
+            if (!out || (format !== DXGI_FORMAT.UNKNOWN && !FORMAT_INFO[format]))
             {
                 return E_INVALIDARG;
             }
-            out.levels = multisampleQualityLevels(format, sampleCount);
+            // No sample at all, or more than the API has room for, is a
+            // failure and still an answer of none (test_check_multisample_
+            // quality_levels).
+            if (sampleCount === 0 || sampleCount > D3D10_LIMITS.MAX_MULTISAMPLE_SAMPLE_COUNT)
+            {
+                out.levels = 0;
+                return E_FAIL;
+            }
+            out.levels = format === DXGI_FORMAT.UNKNOWN
+                ? 0
+                : multisampleQualityLevels(format, sampleCount);
             return S_OK;
         },
 

@@ -220,6 +220,18 @@ export function createFactory(options = {}, secondVersion = false){
                 out.swapChain = null;
                 return DXGI_ERROR_INVALID_CALL;
             }
+            // The back buffers are textures of the device: a sample count the
+            // device cannot make a texture at is one the swap chain cannot have.
+            /** @type {{ levels?: number }} */
+            const levels = {};
+            if (desc.sampleDesc.count !== 1
+                && (device.CheckMultisampleQualityLevels(desc.bufferDesc.format,
+                    desc.sampleDesc.count, levels) !== S_OK
+                    || desc.sampleDesc.quality >= (levels.levels ?? 0)))
+            {
+                out.swapChain = null;
+                return E_INVALIDARG;
+            }
             out.swapChain = createSwapChain(desc, device, factory, windowClientSize);
             return S_OK;
         },

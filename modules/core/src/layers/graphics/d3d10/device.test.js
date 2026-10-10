@@ -2098,3 +2098,103 @@ test('a layout of no elements feeds a vertex shader that reads only system value
     none.layout.release();
     assertFullyReleased(device);
 });
+
+test('multisample quality levels answer as Windows does at the edges'
+    + ' (test_check_multisample_quality_levels, d3d10core.c:10613-10679)', ()=>{
+    const device = createDevice();
+    const RGBA8 = DXGI_FORMAT.R8G8B8A8_UNORM;
+    /** @param {number} format @param {number} count */
+    const check = (format, count)=>{
+        const out = { levels: 0xdeadbeef };
+        return [device.CheckMultisampleQualityLevels(format, count, out), out.levels];
+    };
+    assert.deepEqual(check(RGBA8, 0), [E_FAIL, 0], 'no samples');
+    assert.deepEqual(check(RGBA8, 1), [S_OK, 1]);
+    assert.deepEqual(check(RGBA8, 4), [S_OK, 1], 'four samples, the count WebGPU has');
+    assert.deepEqual(check(DXGI_FORMAT.R8G8B8A8_TYPELESS, 4), [S_OK, 1],
+        'a typeless family, as test_multisample_resolve asks');
+    assert.deepEqual(check(DXGI_FORMAT.R24G8_TYPELESS, 4), [S_OK, 1], 'a depth family');
+    assert.deepEqual(check(DXGI_FORMAT.D32_FLOAT, 4), [S_OK, 1]);
+    assert.deepEqual(check(RGBA8, 2), [S_OK, 0], 'two samples WebGPU does not have');
+    assert.deepEqual(check(RGBA8, 15), [S_OK, 0]);
+    assert.equal(check(RGBA8, 32)[0], S_OK);
+    assert.deepEqual(check(RGBA8, 33), [E_FAIL, 0], 'past the API\'s 32');
+    assert.deepEqual(check(RGBA8, 64), [E_FAIL, 0]);
+    assert.deepEqual(check(DXGI_FORMAT.BC3_UNORM, 2), [S_OK, 0]);
+    assert.deepEqual(check(DXGI_FORMAT.BC3_UNORM, 4), [S_OK, 0], 'blocks are never drawn into');
+    assert.deepEqual(check(DXGI_FORMAT.R32G32B32A32_FLOAT, 4), [S_OK, 0],
+        'a format WebGPU does not multisample');
+    assert.deepEqual(check(DXGI_FORMAT.UNKNOWN, 2), [S_OK, 0]);
+    assert.deepEqual(check(65536, 2), [E_INVALIDARG, 0xdeadbeef], 'no format at all');
+    assert.equal(device.CheckMultisampleQualityLevels(RGBA8, 2, null), E_INVALIDARG);
+    assertFullyReleased(device);
+});
+
+test('a texture is made at the sample counts the device reports and no other'
+    + ' (test_create_texture2d, d3d10core.c:2159-2177)', ()=>{
+    const device = createDevice();
+    const ms = createTexture2D(device, { SampleDesc: { Count: 4, Quality: 0 } });
+    assert.deepEqual(ms.desc.SampleDesc, { Count: 4, Quality: 0 });
+    ms.release();
+    /** @param {object} overrides */
+    const refused = overrides=>{
+        /** @type {{ resource?: any }} */
+        const out = { resource: 'untouched' };
+        const hr = device.CreateTexture2D({ ...TEXTURE_2D, ...overrides }, null, out);
+        return [hr, out.resource];
+    };
+    for (const [overrides, why] of /** @type {[object, string][]} */ ([
+        [{ SampleDesc: { Count: 4, Quality: 1 } }, 'one quality level, and this asks the second'],
+        [{ SampleDesc: { Count: 2, Quality: 0 } }, 'a count the device reported none of'],
+        [{ SampleDesc: { Count: 15, Quality: 0 } }, 'fifteen samples'],
+        [{ SampleDesc: { Count: 4, Quality: 0 }, MipLevels: 2 }, 'a multisampled mip chain'],
+        [{ SampleDesc: { Count: 4, Quality: 0 }, MipLevels: 0 }, 'the full chain of 512'],
+        [{ SampleDesc: { Count: 4, Quality: 0 }, Usage: D3D10_USAGE.STAGING, BindFlags: 0,
+            CPUAccessFlags: D3D10_CPU_ACCESS.READ }, 'a multisampled staging texture'],
+    ]))
+    {
+        assert.deepEqual(refused(overrides), [E_INVALIDARG, null], why);
+    }
+    assertFullyReleased(device);
+});
+
+test('a multisampled texture array is refused and says why: WebGPU has none', ()=>{
+    /** @type {string[]} */
+    const divergences = [];
+    const device = createDevice({ divergence: (/** @type {string} */ api,
+        /** @type {string} */ detail)=>divergences.push(`${api}: ${detail}`) });
+    /** @type {{ resource?: any }} */
+    const out = {};
+    assert.equal(device.CreateTexture2D({ ...TEXTURE_2D, ArraySize: 2,
+        SampleDesc: { Count: 4, Quality: 0 } }, null, out), E_INVALIDARG);
+    assert.ok(divergences.some(line=>line.includes('multisampled texture array')),
+        divergences.join('\n'));
+    assertFullyReleased(device);
+});
+
+test('a multisampled texture\'s default views look at it by sample, and no other dimension'
+    + ' does', ()=>{
+    const device = createDevice();
+    const ms = createTexture2D(device, { SampleDesc: { Count: 4, Quality: 0 },
+        BindFlags: D3D10_BIND.RENDER_TARGET | D3D10_BIND.SHADER_RESOURCE });
+    /** @type {{ view?: any }} */
+    const rtv = {};
+    assert.equal(device.CreateRenderTargetView(ms, null, rtv), S_OK);
+    /** @type {{ desc?: any }} */
+    const described = {};
+    rtv.view.GetDesc(described);
+    assert.equal(described.desc.ViewDimension, D3D10_RTV_DIMENSION.TEXTURE2DMS);
+    /** @type {{ view?: any }} */
+    const srv = {};
+    assert.equal(device.CreateShaderResourceView(ms, null, srv), S_OK);
+    srv.view.GetDesc(described);
+    assert.equal(described.desc.ViewDimension, D3D10_SRV_DIMENSION.TEXTURE2DMS);
+    /** @type {{ view?: any }} */
+    const flat = {};
+    assert.equal(device.CreateRenderTargetView(ms, { Format: 0,
+        ViewDimension: D3D10_RTV_DIMENSION.TEXTURE2D, MipSlice: 0 }, flat), E_INVALIDARG);
+    rtv.view.release();
+    srv.view.release();
+    ms.release();
+    assertFullyReleased(device);
+});

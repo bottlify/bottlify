@@ -488,6 +488,15 @@ export function textureCreateResult(desc, dimension, caps, hasInitialData){
             return E_INVALIDARG;
         }
     }
+    // A multisampled texture is one level the GPU draws and resolves: there
+    // is no chain to fill, no bytes a program could hand it, and nothing the
+    // processor may map.
+    if (sample.Count > 1
+        && ((desc.MipLevels || fullMipChainLength(desc.Width, height, depth)) !== 1
+            || hasInitialData || desc.Usage !== D3D10_USAGE.DEFAULT))
+    {
+        return E_INVALIDARG;
+    }
 
     if (desc.MipLevels > fullMipChainLength(desc.Width, height, depth))
     {

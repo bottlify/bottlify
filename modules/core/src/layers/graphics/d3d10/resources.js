@@ -296,8 +296,15 @@ function defaultDimensionName(resource, dimensions){
     {
         return 'TEXTURECUBE';
     }
-    const name = resource.desc.ArraySize > 1 ? shape.array : shape.single;
+    const name = isMultisampled(resource)
+        ? (resource.desc.ArraySize > 1 ? 'TEXTURE2DMSARRAY' : 'TEXTURE2DMS')
+        : resource.desc.ArraySize > 1 ? shape.array : shape.single;
     return dimensions[name] === undefined ? null : name;
+}
+
+/** @param {any} resource */
+function isMultisampled(resource){
+    return (resource.desc.SampleDesc?.Count ?? 1) > 1;
 }
 
 /** @param {any} resource */
@@ -342,6 +349,12 @@ function dimensionSuitsResource(resource, name){
     if (name.startsWith('TEXTURECUBE'))
     {
         return isCube(resource);
+    }
+    // A texture of several samples is viewed only by sample; one of a single
+    // sample may still be viewed through a multisampled dimension.
+    if (isMultisampled(resource) && !name.startsWith('TEXTURE2DMS'))
+    {
+        return false;
     }
     // Every name for a shape starts with that shape: TEXTURE2D, TEXTURE2DARRAY,
     // TEXTURE2DMS and TEXTURE2DMSARRAY all view a 2D texture, while TEXTURE1D

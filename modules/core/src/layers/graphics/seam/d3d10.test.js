@@ -1359,8 +1359,8 @@ test('what this build cannot do says so in the slot rather than in a crash', ()=
     const modes = h.box.place([7]);
     assert.equal(h.swapChain(swapChain, 'ResizeTarget', [modes]), S_OK);
     assert.equal(h.swapChain(swapChain, 'ResizeTarget', [0]), DXGI_ERROR_INVALID_CALL);
-    assert.equal(h.device(device, 'ResolveSubresource', [0, 0, 0, 0, 0]), 0);
-    assert.ok(h.divergences.some(line=>line.includes('ResolveSubresource')));
+    assert.equal(h.device(device, 'ResolveSubresource', [0, 0, 0, 0, 0]), 0,
+        'a resolve of nothing is dropped');
 });
 
 // --- the effect framework ---
@@ -2184,3 +2184,20 @@ test('the libraries hand DXGI the window\'s client area for a swap chain asked f
             'the window\'s client area, not the 1920 by 1080 display');
         assert.deepEqual(measured, [0x1234]);
     });
+
+test('multisample quality levels through the seam: a count out of range writes its zero and'
+    + ' fails, an unknown format writes nothing (d3d10core.c:10638-10679)', ()=>{
+    const h = seamed();
+    const { device } = h.createDeviceAndSwapChain();
+    /** @param {number} format @param {number} count */
+    const check = (format, count)=>{
+        const out = h.box.place([0xdeadbeef]);
+        const hr = h.device(device, 'CheckMultisampleQualityLevels', [format, count, out]);
+        return [hr, h.box.memory.readU32(out)];
+    };
+    assert.deepEqual(check(DXGI_FORMAT.R8G8B8A8_UNORM, 4), [S_OK, 1]);
+    assert.deepEqual(check(DXGI_FORMAT.R8G8B8A8_UNORM, 33), [0x80004005, 0], 'E_FAIL');
+    assert.deepEqual(check(65536, 2), [E_INVALIDARG, 0xdeadbeef]);
+    assert.equal(h.device(device, 'CheckMultisampleQualityLevels',
+        [DXGI_FORMAT.R8G8B8A8_UNORM, 2, 0]), E_INVALIDARG);
+});

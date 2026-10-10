@@ -2512,9 +2512,11 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
                 const held = {};
                 const hr = device.CheckMultisampleQualityLevels(format >>> 0, count >>> 0,
                     (out >>> 0) === 0 ? null : held);
-                if (hr === S_OK)
+                // A count out of range fails and still writes its zero; an
+                // unknown format fails and writes nothing.
+                if (held.levels !== undefined)
                 {
-                    fields.writeU32(out, held.levels ?? 0);
+                    fields.writeU32(out, held.levels);
                 }
                 return hr;
             },

@@ -425,3 +425,56 @@ export const INDEX_FORMAT = Object.freeze({
     [DXGI_FORMAT.R16_UINT]: 'uint16',
     [DXGI_FORMAT.R32_UINT]: 'uint32',
 });
+
+/** The one sample count WebGPU multisamples at, besides one. */
+export const MULTISAMPLE_COUNT = 4;
+
+/**
+ * The formats WebGPU renders to, blends and resolves at four samples in every
+ * implementation: no feature asks for them. The integer formats WebGPU can
+ * also multisample are left out, because a multisampled integer target has no
+ * resolve, the one thing a Direct3D 10 program does with one.
+ *
+ * @type {ReadonlySet<string>}
+ */
+const MULTISAMPLED = new Set([
+    'r8unorm', 'rg8unorm', 'rgba8unorm', 'rgba8unorm-srgb', 'bgra8unorm', 'bgra8unorm-srgb',
+    'rgb10a2unorm', 'r16float', 'rg16float', 'rgba16float',
+    'depth16unorm', 'depth24plus-stencil8', 'depth32float', 'depth32float-stencil8',
+]);
+
+/**
+ * How many quality levels a format has at a sample count, as
+ * CheckMultisampleQualityLevels answers it: one at one sample, one at four
+ * where the format is kept in one WebGPU multisamples -- as a colour or, for
+ * a depth family, as a depth format -- and none otherwise.
+ *
+ * @param {number} dxgiFormat  A format the caller knows to be real.
+ * @param {number} sampleCount
+ * @returns {number}
+ */
+export function multisampleQualityLevels(dxgiFormat, sampleCount){
+    if (sampleCount === 1)
+    {
+        return 1;
+    }
+    if (sampleCount !== MULTISAMPLE_COUNT)
+    {
+        return 0;
+    }
+    return [textureStorage(dxgiFormat, 0), textureStorage(dxgiFormat, BIND_DEPTH_STENCIL)]
+        .some(storage=>storage && !storage.conversion && MULTISAMPLED.has(storage.format))
+        ? 1
+        : 0;
+}
+
+/**
+ * Whether a multisampled texture viewed in this WebGPU format can be resolved:
+ * a colour format of those above. Depth has no resolve in Direct3D 10.
+ *
+ * @param {string} format
+ * @returns {boolean}
+ */
+export function resolvable(format){
+    return MULTISAMPLED.has(format) && !isDepthFormat(format);
+}
