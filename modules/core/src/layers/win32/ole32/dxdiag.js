@@ -180,6 +180,14 @@ export function dxDiagTree(windows, screen, directx = DIRECTX_RELEASES[9], physi
         ullUsedPageFile: text('0'),
         ullAvailPageFile: text(String(physicalMemory)),
         szPhysicalMemoryEnglish: text(`${Math.floor(physicalMemory / 0x100000)}MB RAM`),
+        // The retail runtimes, none of the SDK's debug ones, at no debug level.
+        ...Object.fromEntries(['bIsD3D8DebugRuntimeAvailable', 'bIsD3DDebugRuntime',
+            'bIsDInput8DebugRuntimeAvailable', 'bIsDInput8DebugRuntime',
+            'bIsDMusicDebugRuntimeAvailable', 'bIsDMusicDebugRuntime', 'bIsDDrawDebugRuntime',
+            'bIsDPlayDebugRuntime', 'bIsDSoundDebugRuntime'].map(name=>[name, bool(false)])),
+        ...Object.fromEntries(['nD3DDebugLevel', 'nDDrawDebugLevel', 'nDIDebugLevel',
+            'nDMusicDebugLevel', 'nDPlayDebugLevel', 'nDSoundDebugLevel', 'nDShowDebugLevel']
+            .map(name=>[name, i32(0)])),
     };
     /** @type {(properties: Record<string, DxDiagProperty>) => DxDiagNode} */
     const node = properties=>({ properties: new Map(Object.entries(properties)),

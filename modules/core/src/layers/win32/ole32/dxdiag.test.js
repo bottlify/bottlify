@@ -21,6 +21,8 @@ const E_INVALIDARG = 0x80070057 | 0;
 const CO_E_NOTINITIALIZED = 0x800401f0 | 0;
 const VT_UI4 = 19;
 const VT_BSTR = 8;
+const VT_BOOL = 11;
+const VT_I4 = 3;
 
 /** @param {{ width: number, height: number, bitsPerPixel: number }} [screen] */
 function setup(screen){
@@ -166,6 +168,9 @@ test('the SDK\'s way of asking which DirectX this is reads 9, 0 and c from DxDia
     assert.equal(host.wideAt(prop('ullAvailPageFile').value), String(512 * 0x100000));
     assert.equal(host.wideAt(prop('ullUsedPageFile').value), '0');
     assert.equal(host.wideAt(prop('szPhysicalMemoryEnglish').value), '512MB RAM');
+    // And whether the SDK's debug runtimes are in, which they are not.
+    assert.deepEqual(prop('bIsD3DDebugRuntime'), { vt: VT_BOOL, value: 0 });
+    assert.deepEqual(prop('nD3DDebugLevel'), { vt: VT_I4, value: 0 });
 });
 
 test('Initialize wants the block\'s own size and the dx9 header, and the root waits for it', ()=>{
