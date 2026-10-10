@@ -522,3 +522,39 @@ test('D3DXGetImageInfoFromFile describes the file it names; D3DXLoadSurfaceFromF
         0]), 0);
     assert.deepEqual(texels(wide), [3, 3, 3, 3, 4, 4, 4, 4], 'the whole image, point sampled');
 });
+
+test('a palette-indexed DDS becomes A8R8G8B8, keeping the alpha its palette holds', async()=>{
+    // P8's palette entries carry an alpha in peFlags; the nearest format with room for
+    // it is A8R8G8B8, and D3DXIMAGE_INFO still names the file's own P8.
+    const { device, view, textures, calls, loader, place, heap, memory } = rig();
+    const header = new Array(128).fill(0);
+    [0x44, 0x44, 0x53, 0x20].forEach((x, i)=>{
+        header[i] = x;
+    });
+    const put = (/** @type {number} */ at, /** @type {number} */ value)=>{
+        for (let k = 0; k < 4; k++)
+        {
+            header[at + k] = (value >>> (k * 8)) & 0xff;
+        }
+    };
+    put(4, 124);
+    put(8, 0x1007);
+    put(12, 1);
+    put(16, 1);
+    put(76, 32);
+    put(80, 0x20);
+    put(88, 8);
+    const palette = new Array(1024).fill(0);
+    palette.splice(4, 4, 200, 100, 50, 128);
+    const file = [...header, ...palette, 1];
+    const data = place(file);
+    const out = heap.allocate(4);
+    const info = heap.allocate(28);
+    assert.equal(await loader.fromMemory(exArgs({ device, data, size: file.length, mips: 1,
+        out, info })), 0);
+    assert.equal(calls[0][5], FMT.A8R8G8B8);
+    const texture = textures.get(view.getUint32(out, true));
+    assert.deepEqual([...memory.subarray(texture.data[0], texture.data[0] + 4)],
+        [50, 100, 200, 128]);
+    assert.equal(view.getUint32(info + 16, true), FMT.P8);
+});

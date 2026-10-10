@@ -20,6 +20,10 @@
 import { assemble, execute } from '../../modules/core/src/layers/win32/d3dx9/d3d9-machine.fixture.js';
 import { parseShader } from '../../modules/core/src/layers/graphics/d3d9/shader.js';
 import { translateShader } from '../../modules/core/src/layers/graphics/d3d9/wgsl.js';
+import {
+    D3DFMT, FORMAT_INFO, sampledOnes,
+} from '../../modules/core/src/layers/graphics/d3d9/constants.js';
+import { fromHalf, toHalf } from '../../modules/core/src/layers/graphics/d3d9/half.js';
 
 /** @param {number} seed */
 export function generator(seed){
@@ -42,6 +46,52 @@ const between = (next, low, high)=>Math.fround(low + next() * (high - low));
 /** What a sampler's 1x1 texture holds: bytes, so the GPU and the machine read the same number. */
 export const SAMPLER_BYTES = [[64, 128, 192, 255], [255, 32, 96, 160], [16, 240, 128, 8],
     [200, 100, 50, 25]];
+
+/**
+ * The format each sampler's texture may be: four channels of bytes, or a wide
+ * format of one or two channels, kept as the engine keeps it (r16float,
+ * rg16float), whose missing channels the translation fills with one
+ * (`sampledOnes`) and the machine reads as one.
+ */
+const SAMPLER_FORMATS = [null, D3DFMT.R16F, D3DFMT.G16R16F];
+/** @type {Record<number, string>} */
+const KEPT_AS = { 1: 'r16float', 2: 'rg16float' };
+
+/**
+ * @typedef {Object} SamplerTexel
+ * @property {string} format     The WebGPU format of the 1x1 texture.
+ * @property {number[]} bytes    Its one texel as uploaded.
+ * @property {number[]} values   What Direct3D samples from it, the filled channels one.
+ * @property {number} ones       The channels the read fills (`sampledOnes`).
+ */
+
+/**
+ * Each sampler's texture for a case, by sampler number. Drawn from a generator
+ * of its own, so a seed's program is the one it always was.
+ *
+ * @param {number} seed
+ * @returns {SamplerTexel[]}
+ */
+export function samplerTexels(seed){
+    const next = generator(seed ^ 0x2f6b9c4d);
+    return Array.from({ length: SAMPLER_BYTES.length }, (_, sampler)=>{
+        const bytes = SAMPLER_BYTES[sampler];
+        const format = pick(next, SAMPLER_FORMATS);
+        const channels = format === null ? 4 : FORMAT_INFO[format].wide?.channels ?? 4;
+        if (format === null || channels === 4)
+        {
+            return { format: 'rgba8unorm', bytes, values: bytes.map(byte=>Math.fround(byte / 255)),
+                ones: 0 };
+        }
+        const halves = bytes.slice(0, channels).map(byte=>toHalf(byte / 255));
+        return {
+            format: KEPT_AS[channels],
+            bytes: [...new Uint8Array(Uint16Array.from(halves).buffer)],
+            values: [0, 1, 2, 3].map(at=>(at < channels ? fromHalf(halves[at]) : 1)),
+            ones: sampledOnes(format),
+        };
+    });
+}
 
 /**
  * @typedef {Object} Profile
@@ -359,6 +409,7 @@ const programText = (p, body, subs = [])=>[p.name, ...p.head, ...p.init, ...body
  * @property {string} wgsl
  * @property {string} entry
  * @property {{ index: number, type: string }[]} samplers
+ * @property {SamplerTexel[]} texels  Each sampler's texture, by sampler number.
  * @property {number[]} constants      The float constants as the GPU reads them, flat.
  * @property {number[]} ints
  * @property {number[]} bools
@@ -426,19 +477,20 @@ export function buildCase(profile, seed, length = 10){
         const unit = ps1 || name.startsWith('t') || (!p.vertex && name === 'v0');
         inputs[name] = Array.from({ length: 4 }, ()=>between(next, unit ? 0 : -3, unit ? 1 : 3));
     }
+    const texels = samplerTexels(seed);
     const result = execute(tokens, {
         constants: { f: constants, i: ints, b: bools },
         inputs: { v: [inputs.v0, inputs.v1, inputs.v2], t: [inputs.t0, inputs.t1] },
         position: [0, 0],
         frontFacing: true,
-        sample: sampler=>SAMPLER_BYTES[sampler % SAMPLER_BYTES.length]
-            .map(byte=>Math.fround(byte / 255)),
+        sample: sampler=>texels[sampler % texels.length].values,
         derivative: ()=>[0, 0, 0, 0],
     });
-    const translated = translateShader(parseShader(tokens));
+    const translated = translateShader(parseShader(tokens),
+        { ones: texels.map(texel=>texel.ones) });
     return {
         profile, seed, text, vertex: p.vertex,
-        wgsl: translated.wgsl, entry: translated.entry, samplers: translated.samplers,
+        wgsl: translated.wgsl, entry: translated.entry, samplers: translated.samplers, texels,
         constants, ints, bools, inputs,
         expected: Object.fromEntries(Object.entries(result.outputs)
             .map(([name, values])=>[name, Array.from(values, Number)])),

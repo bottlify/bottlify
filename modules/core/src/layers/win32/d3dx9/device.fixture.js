@@ -9,13 +9,16 @@
  * reached only through the vtables their pointers lead to, as a program
  * reaches them. Each slot of every vtable holds the entry 0xE0000 + slot, and
  * the fake bridge dispatches on the object and the slot; every call is
- * recorded by name.
+ * recorded by name. An object the layer publishes is one of them too, its
+ * vtable leading back to its own methods, so code that reaches an object
+ * only through its vtable reaches the layer's own the same way.
  *
  * Like the bridge, it refuses a call into the guest made before the handler
  * that makes it has returned.
  */
 
 import { layoutOf } from './pixels.js';
+import { formatGuid } from '../ole32/guid.js';
 
 const D3DUSAGE_RENDERTARGET = 0x1;
 const D3DUSAGE_DEPTHSTENCIL = 0x2;
@@ -30,7 +33,9 @@ const NAMES = {
         40: 'GetDepthStencilSurface', 41: 'BeginScene', 42: 'EndScene', 47: 'SetViewport',
         48: 'GetViewport', 57: 'SetRenderState', 59: 'CreateStateBlock', 65: 'SetTexture',
         67: 'SetTextureStageState', 69: 'SetSamplerState', 83: 'DrawPrimitiveUP',
-        89: 'SetFVF', 92: 'SetVertexShader', 107: 'SetPixelShader' },
+        82: 'DrawIndexedPrimitive', 86: 'CreateVertexDeclaration', 87: 'SetVertexDeclaration',
+        89: 'SetFVF', 92: 'SetVertexShader', 100: 'SetStreamSource', 104: 'SetIndices',
+        107: 'SetPixelShader' },
     texture: { 1: 'AddRef', 2: 'Release', 3: 'GetDevice', 10: 'GetType', 13: 'GetLevelCount',
         17: 'GetLevelDesc', 18: 'GetSurfaceLevel', 19: 'LockRect', 20: 'UnlockRect' },
     cube: { 1: 'AddRef', 2: 'Release', 3: 'GetDevice', 10: 'GetType', 13: 'GetLevelCount',
@@ -191,6 +196,10 @@ export function deviceRig(options = {}){
         {
             throw new Error(`a call through ${args[0]}, which is no object`);
         }
+        if (self.kind === 'com')
+        {
+            return comCall(self, slot, args);
+        }
         const name = /** @type {any} */ (NAMES)[self.kind]?.[slot] ?? `${self.kind} ${slot}`;
         calls.push([name, ...args.slice(1)]);
         if (slot === 1)
@@ -275,6 +284,9 @@ export function deviceRig(options = {}){
                 }
                 case 59:
                     put(args[2], object({ kind: 'block' }));
+                    return 0;
+                case 86:
+                    put(args[2], object({ kind: 'declaration', at: args[1] }));
                     return 0;
                 default:
                     return 0;
@@ -383,6 +395,72 @@ export function deviceRig(options = {}){
     };
 
     /**
+     * A method of an object the layer published, as the bridge runs it:
+     * IUnknown's three here, the rest the descriptor's own, called as a
+     * handler is -- its return before any call it makes into the guest.
+     *
+     * @param {any} self @param {number} slot @param {number[]} args
+     * @returns {any}
+     */
+    const comCall = (self, slot, args)=>{
+        const { object: com, id } = self;
+        if (com.destroyed)
+        {
+            throw new Error(`a call through ${args[0]}, whose object was released`);
+        }
+        const method = com.interfaceFor(id).methods[slot];
+        if (method.builtin === 'addRef')
+        {
+            return com.addRef();
+        }
+        if (method.builtin === 'release')
+        {
+            const owed = com.refCount === 1 ? com.lastRelease?.() : undefined;
+            return owed ? owed.then(()=>com.release()) : com.release();
+        }
+        if (method.builtin === 'queryInterface')
+        {
+            const record = com.queryInterface(formatGuid(memory.subarray(args[1],
+                args[1] + 16)));
+            put(args[2], record ? publishAs(record.object, record.id) : 0);
+            return record ? 0 : 0x80004002;
+        }
+        inHandler = true;
+        try
+        {
+            return method.invoke(com, args.slice(1));
+        }
+        finally
+        {
+            inHandler = false;
+        }
+    };
+
+    /** The pointer of each object and interface published. @type {Map<any, Map<string, number>>} */
+    const pointers = new Map();
+    /**
+     * An object of the layer's, published for an interface: an object in guest
+     * memory whose vtable leads back to its methods, one pointer an interface.
+     *
+     * @param {any} com @param {string} id
+     */
+    const publishAs = (com, id)=>{
+        const known = pointers.get(com) ?? new Map();
+        pointers.set(com, known);
+        const key = id.toUpperCase();
+        if (!known.has(key))
+        {
+            known.set(key, object({ kind: 'com', object: com, id }));
+        }
+        return /** @type {number} */ (known.get(key));
+    };
+    /** The object the layer published at a pointer. @param {number} at */
+    const published = at=>{
+        const self = objects.get(at >>> 0);
+        return self?.kind === 'com' ? self.object : null;
+    };
+
+    /**
      * A mesh as a program might hold one: its vertices and 16- or 32-bit
      * indices in guest memory, its declaration, its attribute table, and the
      * point representatives it answers for an adjacency.
@@ -455,7 +533,6 @@ export function deviceRig(options = {}){
         return object(state);
     };
 
-    let published = 0x90000000;
     /** @type {string[][]} */
     const diverged = [];
     const host = {
@@ -464,7 +541,8 @@ export function deviceRig(options = {}){
         writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ bytes)=>
             memory.set(bytes, at),
         heap, callGuest,
-        vtables: { publish: ()=>(published += 4) },
+        vtables: { publish: (/** @type {any} */ com, /** @type {string} */ id)=>
+            publishAs(com, id) },
         currentThread: ()=>undefined,
         divergence: (/** @type {string} */ api, /** @type {string} */ detail)=>
             diverged.push([api, detail]),
@@ -518,6 +596,9 @@ export function deviceRig(options = {}){
 
     return { memory, view, heap, host, device, objects, calls, diverged, invoke, call,
         texture, cubeTexture, surface, mesh, object, putFloats, floats, live, guestFunction,
+        published, method: (/** @type {number} */ at, /** @type {number} */ slot,
+            /** @type {number[]} */ rest)=>callGuest({ entry: view.getUint32(view.getUint32(at,
+            true) + slot * 4, true), args: [at, ...rest] }),
         get viewport(){
             return viewport;
         } };

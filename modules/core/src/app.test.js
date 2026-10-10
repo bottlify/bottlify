@@ -22,6 +22,7 @@ import {
     heapSizeFor,
     spaceAbove,
     placeMainStack,
+    stackReserveOf,
     resourceLookup,
     createMissingImports,
     shippedLibraryReader,
@@ -1259,6 +1260,14 @@ test('the space above the program moves up past an image too large for the fixed
     assert.deepEqual(spaceAbove(0x400000 + 0x159e6000),
         { moduleBase: 0x15e00000, stackPoolBase: 0x1be00000, heapBase: 0x1fe00000 },
         'a large image pushes the whole layout above its end, on a megabyte');
+});
+
+test('a thread gets at least a megabyte of stack, whatever its image was linked for', ()=>{
+    // Call of Duty 2's demo is linked for 64 KiB and its first thread reaches
+    // 70 KiB down inside a window procedure; on Windows it runs.
+    assert.equal(stackReserveOf(0x10000), 0x100000);
+    assert.equal(stackReserveOf(0), 0x100000);
+    assert.equal(stackReserveOf(0x800000), 0x800000, 'more is given as asked');
 });
 
 test('the first thread gets its whole reserve, in the pool when it does not fit low', ()=>{

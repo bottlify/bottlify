@@ -55,6 +55,7 @@ import { openBundle } from '../btl.mjs';
 import { placementOf } from '../../modules/installer/src/prefix.js';
 import { windowsVersion } from '../../modules/core/src/layers/win32/kernel32/versions.js';
 import { disassemble } from '../../modules/core/src/layers/win32/d3dx9/d3d9-machine.fixture.js';
+import { disassembleShader } from '../../modules/core/src/layers/win32/d3dx9/shader-asm.js';
 import { modeOf } from '../play/modes.js';
 
 const TOOL_ROOT = resolve(fileURLToPath(new URL('.', import.meta.url)));
@@ -82,6 +83,32 @@ const REPORTS_DIR = join(TOOL_ROOT, 'reports');
 
 /** Lines per round trip when draining the call log. */
 const LOG_CHUNK = 20000;
+
+/**
+ * A compiled shader as text. The reference machine's listing first, which says
+ * what each instruction reads; a shader past the limits of its version -- which
+ * the compiler warns of and still makes, since WGSL holds it -- is refused
+ * there, and is then listed by D3DXDisassembleShader's own code with why.
+ *
+ * @param {Uint32Array} tokens
+ */
+function listing(tokens){
+    try
+    {
+        return disassemble(tokens);
+    }
+    catch (e){
+        let text;
+        try
+        {
+            text = disassembleShader(tokens);
+        }
+        catch (_e){
+            text = `not listed: ${/** @type {Error} */ (_e).message}\n`;
+        }
+        return `; the reference machine refuses it: ${/** @type {Error} */ (e).message}\n${text}`;
+    }
+}
 
 /**
  * A BGRA buffer as a PNG, so a texture the engine uploaded can simply be
@@ -1976,8 +2003,7 @@ the run as it stands: ${path}`;
                 }
                 const bytes = shader.tokens ? Buffer.from(shader.tokens, 'base64') : null;
                 writeFileSync(join(shaderDirectory, `${name}.txt`), `${shader.messages}${bytes
-                    ? disassemble(new Uint32Array(bytes.buffer, bytes.byteOffset,
-                        bytes.byteLength / 4))
+                    ? listing(new Uint32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 4))
                     : 'no bytecode\n'}`);
             });
             console.log(`shaders:    ${result.shaders.length} in ${shaderDirectory}`);

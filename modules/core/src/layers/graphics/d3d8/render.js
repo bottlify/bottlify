@@ -44,7 +44,7 @@ import {
 } from './constants.js';
 import { FVF, POSITION_MASK, decodeFvf } from '../webgpu/internal/vertexformat.js';
 import { D3DLOCK_NO_DIRTY_UPDATE, levelExtent } from '../d3d9/resources.js';
-import { D3DRS as D3DRS9 } from '../d3d9/constants.js';
+import { D3DRS as D3DRS9, sampledOnes } from '../d3d9/constants.js';
 import { resourceId } from '../webgpu/internal/bindings.js';
 import {
     constantBlocks, createProgramCache, samplerDimension, shapeKey, vertexLayoutOf,
@@ -55,8 +55,9 @@ import {
 } from '../d3d9/wgsl.js';
 import { D3DVERTEXTEXTURESAMPLER0 } from '../d3d9/samplerstates.js';
 import { D3DDECLUSAGE } from '../d3d9/declaration.js';
+import { OPCODE, REGISTER, SHADER_KIND } from '../d3d9/shader.js';
 import { decodeS3tc } from '../webgpu/internal/s3tc.js';
-import { toHalf } from '../d3d9/half.js';
+import { storedToHalves } from '../d3d9/half.js';
 import { passedSamples, reachableArea } from '../webgpu/internal/occlusion.js';
 import {
     fixedFragmentStage, generates, generationOf, readsNormal,
@@ -126,6 +127,47 @@ const PLANAR_IDENTITY = Object.freeze([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0,
  * The stages a 1.x pixel shader samples: four below 1.4, six in it.
  */
 const LEGACY_STAGES = 6;
+
+/** The texture a `dcl` of each D3DSAMPLER_TEXTURE_TYPE declares. */
+const DECLARED_DIMENSION = Object.freeze({ 2: '2d', 3: 'cube', 4: '3d' });
+
+/** @type {WeakMap<object, { index: number, dimension: string | null }[]>} */
+const declaredSamplerLists = new WeakMap();
+
+/**
+ * The samplers a shader reads, each with the dimension it declares: a 1.x pixel
+ * shader's are its stages, of whatever dimension is bound there; every other
+ * shader's are its `dcl`s.
+ *
+ * @param {import('../d3d9/shader.js').ParsedShader} parsed
+ * @returns {{ index: number, dimension: string | null }[]}
+ */
+function declaredSamplers(parsed){
+    let list = declaredSamplerLists.get(parsed);
+    if (!list)
+    {
+        list = parsed.version.kind === SHADER_KIND.PIXEL && parsed.version.major < 2
+            ? Array.from({ length: LEGACY_STAGES }, (_, index)=>({ index, dimension: null }))
+            : parsed.instructions
+                .filter(instruction=>instruction.opcode === OPCODE.DCL
+                    && instruction.dest?.type === REGISTER.SAMPLER)
+                .map(instruction=>({
+                    index: /** @type {import('../d3d9/shader.js').Operand} */ (instruction.dest)
+                        .index,
+                    dimension: /** @type {Record<number, string>} */ (DECLARED_DIMENSION)[
+                        /** @type {any} */ (instruction.declaration).samplerType] ?? '2d',
+                }));
+        declaredSamplerLists.set(parsed, list);
+    }
+    return list;
+}
+
+/**
+ * A list of `onesAt`'s, for a key: each sampler's channels, empty for none.
+ *
+ * @param {number[] | null} ones
+ */
+const onesKey = ones=>(ones === null ? '' : Array.from(ones, value=>value ?? 0).join(','));
 
 /**
  * The component D3DTTFF_PROJECTED divides a coordinate set by, for each
@@ -626,18 +668,6 @@ const TEXEL_EXPANSION = Object.freeze({
         }
         return new Uint8Array(out.buffer);
     },
-    // The floating-point formats go to `r16float` as numbers: R16F as it lies,
-    // R32F narrowed to half precision.
-    [D3DFMT.R16F]: (pixels, count)=>pixels.slice(0, count * 2),
-    [D3DFMT.R32F]: (pixels, count)=>{
-        const floats = new Float32Array(pixels.slice(0, count * 4).buffer);
-        const out = new Uint16Array(count);
-        for (let index = 0; index < count; index++)
-        {
-            out[index] = toHalf(floats[index]);
-        }
-        return new Uint8Array(out.buffer);
-    },
 });
 
 /** @param {number} value five bits @returns {number} eight */
@@ -665,7 +695,8 @@ function expandSixteen(pixels, count, unpack){
 
 /**
  * A texture level's bytes as they lie in guest memory, expanded to the one
- * format the backend samples.
+ * format the backend samples: a wide format's channels to half floats, every
+ * other colour format to `bgra8unorm` or `rgba8snorm`.
  *
  * @param {number} format  D3DFMT
  * @param {Uint8Array} pixels
@@ -673,6 +704,11 @@ function expandSixteen(pixels, count, unpack){
  * @returns {Uint8Array}
  */
 export function expandTexels(format, pixels, count){
+    const wide = FORMAT_INFO[format]?.wide;
+    if (wide)
+    {
+        return storedToHalves(wide.stored, pixels, count * wide.channels);
+    }
     const expand = TEXEL_EXPANSION[format];
     if (!expand)
     {
@@ -686,13 +722,21 @@ export const COLOR_FORMAT = 'bgra8unorm';
 /** What a signed format is sampled from: its channels come back -1..1. */
 const SIGNED_FORMAT = 'rgba8snorm';
 /**
- * What a floating-point format is drawn into and sampled from: rendered,
- * filtered and blended on every WebGPU device, where 32-bit floats are each an
- * optional feature.
+ * What a wide format is drawn into and sampled from, by its channel count:
+ * half floats, which every WebGPU device renders, filters and blends. 32-bit
+ * floats are rendered too, but filtered and blended only with the optional
+ * float32-filterable and float32-blendable features, which this backend does
+ * not ask for -- and a program of the era filters and blends its HDR targets
+ * wherever CheckDeviceFormat lets it. 16-bit fractions exist only behind an
+ * optional feature as well. So R32F, G32R32F and A32B32G32R32F are narrowed to
+ * half precision, and G16R16 and A16B16G16R16 are kept as halves of their
+ * value (`storedToHalves` says what each loses), each reported once.
+ *
+ * @type {Readonly<Record<number, string>>}
  */
-// ponytail: R32F at half precision; `r32float` where the device has float32-filterable
-// and float32-blendable, when a picture shows the steps.
-const FLOAT_FORMAT = 'r16float';
+// ponytail: 32-bit floats at half precision; `r32float` and its wider kin where the
+// device has float32-filterable and float32-blendable, when a picture shows the steps.
+const HALF_FORMAT = Object.freeze({ 1: 'r16float', 2: 'rg16float', 4: 'rgba16float' });
 
 /**
  * The block-compressed formats, by the D3DFMT they arrive as.
@@ -801,9 +845,9 @@ export function gpuFormatOf(format, width, height, compressedTextures){
     {
         return SIGNED_FORMAT;
     }
-    if (info.float)
+    if (info.wide)
     {
-        return FLOAT_FORMAT;
+        return HALF_FORMAT[info.wide.channels];
     }
     if (!info.depth)
     {
@@ -1754,11 +1798,14 @@ const EMPTY_BLOCK = new Float32Array(0);
  *
  * @param {RenderModel} model
  * @param {import('../webgpu/internal/vertexformat.js').VertexLayout} layout
- * @param {{ shaderCoordinates?: boolean }} [how]
+ * @param {{ shaderCoordinates?: boolean, onesOf?: (texture: any) => number }} [how]
+ *     `onesOf` is the channels a texture samples as one that the GPU's texture
+ *     lacks (`sampledOnes`); none when absent.
  * @returns {{ stages: import('../webgpu/internal/pipeline.js').StageKey[],
  *             textures: (any | null)[], truncated: CascadeTruncation | null }}
  */
 export function stageCascade(model, layout, how = {}){
+    const onesOf = how.onesOf ?? (()=>0);
     /** @type {import('../webgpu/internal/pipeline.js').StageKey[]} */
     const stages = [];
     /** @type {(any | null)[]} */
@@ -1822,7 +1869,12 @@ export function stageCascade(model, layout, how = {}){
         const samples = readsTexture(key.colorOp, key.colorArg1, key.colorArg2, key.colorArg0)
             || readsTexture(key.alphaOp, key.alphaArg1, key.alphaArg2, key.alphaArg0);
         const dimension = samples ? textureDimensionOf(texture) : '2d';
-        stages.push(dimension === '2d' ? key : { ...key, dimension });
+        const ones = samples ? onesOf(texture) : 0;
+        stages.push(dimension === '2d' && ones === 0 ? key : {
+            ...key,
+            ...(dimension === '2d' ? {} : { dimension }),
+            ...(ones === 0 ? {} : { ones }),
+        });
         textures.push(samples ? texture : null);
     }
     // A stage at the end that only passes the current colour and alpha on
@@ -2482,16 +2534,29 @@ export function createRenderer(options){
     const probeTexture = options.probeTexture ?? null;
     const compressedTextures = options.compressedTextures === true;
     /**
-     * Nothing to add to a surface's description; said once, the first time a
-     * format is kept at less precision than it has.
+     * Nothing to add to a surface's description; said once a format, the first
+     * time a wide one is kept as less than it is.
      *
      * @param {number} format
      * @returns {{}}
      */
     const narrowed = format=>{
-        if (format === D3DFMT.R32F)
+        const wide = FORMAT_INFO[format]?.wide;
+        if (!wide || !divergence)
         {
-            divergence?.('Direct3D', 'an R32F surface is kept at half precision (r16float)');
+            return {};
+        }
+        const name = Object.entries(D3DFMT).find(([, value])=>value === format)?.[0];
+        const kept = HALF_FORMAT[wide.channels];
+        if (wide.stored === 'float')
+        {
+            divergence('Direct3D', `a surface of ${name} is kept at half precision (${kept})`);
+        }
+        if (wide.stored === 'unorm16')
+        {
+            divergence('Direct3D', `a surface of ${name} is kept as half floats (${kept}): eleven`
+                + ' significant bits rather than sixteen, and a draw\'s values outside 0..1 are'
+                + ' kept until a read-back clamps them');
         }
         return {};
     };
@@ -2518,6 +2583,14 @@ export function createRenderer(options){
     const buffers = new WeakMap();
     /** @type {WeakMap<object, any>} d3d8 texture -> { gpu, dirty, ... } */
     const textures = new WeakMap();
+    /**
+     * The channels a bound texture samples as one that its GPU texture lacks,
+     * by its format (`sampledOnes`): what every path that samples it fills.
+     *
+     * @param {any} texture
+     * @returns {number}
+     */
+    const onesOfTexture = texture=>(texture ? sampledOnes(textures.get(texture)?.format) : 0);
     /** @type {WeakMap<object, number>} a level's surface -> which level it is */
     const surfaceLevels = new WeakMap();
     /** @type {WeakMap<object, number>} a cube face's surface -> which face it is */
@@ -5030,7 +5103,7 @@ export function createRenderer(options){
         // pieces are looked up by its values, as a fixed-function preparation
         // is.
         const version = model.stateVersionBesideTextures;
-        const legacy = legacyStages(model, program);
+        const sampling = samplingOf(model, program);
         const last = programPieces;
         let pieces = version !== undefined && last.made !== null
             && last.version === version
@@ -5038,16 +5111,16 @@ export function createRenderer(options){
             && last.pixelShader === program.pixelShader
             && last.declarationId === program.declarationId
             && last.stride === stride && last.topology === topology
-            && last.legacy === legacy.key
+            && last.sampling === sampling.key
             ? last.made
             : null;
         if (pieces === null)
         {
-            const key = programKeyOf(model, stride, topology, program, legacy.key);
+            const key = programKeyOf(model, stride, topology, program, sampling.key);
             pieces = programPiecesKept.get(key) ?? null;
             if (pieces === null)
             {
-                pieces = programPiecesOf(model, stride, topology, program, legacy);
+                pieces = programPiecesOf(model, stride, topology, program, sampling);
                 if (pieces === null)
                 {
                     return null;
@@ -5068,7 +5141,7 @@ export function createRenderer(options){
             last.declarationId = program.declarationId;
             last.stride = stride;
             last.topology = topology;
-            last.legacy = legacy.key;
+            last.sampling = sampling.key;
             last.made = version === undefined ? null : pieces;
         }
         const { pixel, vertex, samplerPlan, state, source } = pieces;
@@ -5183,11 +5256,11 @@ export function createRenderer(options){
      * made for; see `prepareProgram`.
      *
      * @type {{ version: number | undefined, vertexShader: any, pixelShader: any,
-     *          declarationId: number, stride: number, topology: string, legacy: string,
+     *          declarationId: number, stride: number, topology: string, sampling: string,
      *          made: any }}
      */
     const programPieces = { version: undefined, vertexShader: null, pixelShader: null,
-        declarationId: 0, stride: 0, topology: '', legacy: '', made: null };
+        declarationId: 0, stride: 0, topology: '', sampling: '', made: null };
 
     /**
      * The pieces of the states this frame's shader draws were made with, by
@@ -5207,10 +5280,10 @@ export function createRenderer(options){
      * frequency, which the vertex layout is read through.
      *
      * @param {RenderModel} model @param {number} stride @param {string} topology
-     * @param {ProgramState} program @param {string} legacyKey @param {number} [shape]
+     * @param {ProgramState} program @param {string} samplingKey @param {number} [shape]
      * @returns {number}
      */
-    const programKeyOf = (model, stride, topology, program, legacyKey, shape = 0)=>{
+    const programKeyOf = (model, stride, topology, program, samplingKey, shape = 0)=>{
         const version = model.stateVersionBesideTextures;
         if (version === undefined || version !== programStateVersion)
         {
@@ -5225,7 +5298,7 @@ export function createRenderer(options){
         words[at++] = program.declarationId;
         words[at++] = stride;
         words[at++] = topologyIdOf(topology);
-        words[at++] = legacyIdOf(legacyKey);
+        words[at++] = samplingIdOf(samplingKey);
         words[at++] = shape;
         const frequencies = model.streamFrequencies;
         for (let stream = 0; stream < PROGRAM_STREAMS; stream++)
@@ -5288,14 +5361,14 @@ export function createRenderer(options){
     /** @type {number | undefined} */
     let programStateVersion;
     /** @type {Map<string, number>} */
-    const legacyIds = new Map();
+    const samplingIds = new Map();
     /** @param {string} key */
-    const legacyIdOf = key=>{
-        let id = legacyIds.get(key);
+    const samplingIdOf = key=>{
+        let id = samplingIds.get(key);
         if (id === undefined)
         {
-            id = legacyIds.size;
-            legacyIds.set(key, id);
+            id = samplingIds.size;
+            samplingIds.set(key, id);
         }
         return id;
     };
@@ -5317,23 +5390,73 @@ export function createRenderer(options){
         return serial;
     };
 
-    /** What `legacyStages` answers for a shader of model 2 or later. */
-    const NO_LEGACY_STAGES = Object.freeze({ key: '' });
+    /**
+     * What `samplingOf` answers for a shader of model 2 or later whose
+     * textures all sample as they are kept.
+     */
+    const PLAIN_SAMPLING = Object.freeze({ key: '', pixelKey: '' });
 
     /**
-     * What a 1.x pixel shader's reads depend on beyond the shader: the
-     * dimension of the texture bound at each stage and, below 1.4, the
-     * component D3DTTFF_PROJECTED divides each stage's coordinates by. None
-     * for any other shader.
+     * The channels the texture bound at each of a shader's samplers samples as
+     * one that the GPU's texture lacks, by sampler number; null when there are
+     * none, which is every draw of four-channel textures. A texture of another
+     * dimension than the sampler declares is not bound (`samplerBindingsOf`)
+     * and has nothing filled.
+     *
+     * @param {RenderModel} model
+     * @param {import('../d3d9/shader.js').ParsedShader | null} parsed
+     * @param {number} first  The stage the shader's s0 is: 0, or D3DVERTEXTEXTURESAMPLER0.
+     * @returns {number[] | null}
+     */
+    const onesAt = (model, parsed, first)=>{
+        if (!parsed)
+        {
+            return null;
+        }
+        /** @type {number[] | null} */
+        let ones = null;
+        for (const { index, dimension } of declaredSamplers(parsed))
+        {
+            const texture = model.textures.get(first + index);
+            const bound = texture
+                && (dimension === null || dimension === textureDimensionOf(texture));
+            const missing = bound ? onesOfTexture(texture) : 0;
+            if (missing !== 0)
+            {
+                ones ??= [];
+                ones[index] = missing;
+            }
+        }
+        return ones;
+    };
+
+    /**
+     * What a shader's reads depend on beyond the shader: the channels each
+     * texture it samples lacks and reads as one (`onesAt`), for its pixel and
+     * its vertex samplers; and for a 1.x pixel shader, the dimension of the
+     * texture bound at each stage and, below 1.4, the component
+     * D3DTTFF_PROJECTED divides each stage's coordinates by.
      *
      * @param {RenderModel} model @param {ProgramState} program
-     * @returns {{ key: string, stageDimensions?: string[], projectedBy?: string[] }}
+     * @returns {{ key: string, pixelKey: string, stageDimensions?: string[],
+     *     projectedBy?: string[], pixelOnes?: number[], vertexOnes?: number[] }}
+     *     `key` is empty for a draw that reads nothing beyond its shaders, and
+     *     `pixelKey` the part of it the pixel shader's translation reads.
      */
-    const legacyStages = (model, program)=>{
+    const samplingOf = (model, program)=>{
+        const pixelOnes = onesAt(model, program.pixel, 0);
+        const vertexOnes = onesAt(model, program.vertex, D3DVERTEXTEXTURESAMPLER0);
+        const pixelPart = pixelOnes === null ? '' : `|o${onesKey(pixelOnes)}`;
+        const ones = pixelPart + (vertexOnes === null ? '' : `|v${onesKey(vertexOnes)}`);
+        const filled = {
+            ...(pixelOnes === null ? {} : { pixelOnes }),
+            ...(vertexOnes === null ? {} : { vertexOnes }),
+        };
         const version = program.pixel?.version;
         if (!version || version.major >= 2)
         {
-            return NO_LEGACY_STAGES;
+            return ones === '' ? PLAIN_SAMPLING
+                : { key: ones, pixelKey: pixelPart, ...filled };
         }
         /** @type {string[]} */
         const stageDimensions = [];
@@ -5349,9 +5472,10 @@ export function createRenderer(options){
                 ? ''
                 : PROJECTED_BY[flags & 0xff] ?? '');
         }
+        const stages = `${stageDimensions.join(',')}|${projectedBy.join(',')}`;
         return {
-            key: `${stageDimensions.join(',')}|${projectedBy.join(',')}`,
-            stageDimensions, projectedBy,
+            key: `${stages}${ones}`, pixelKey: `${stages}${pixelPart}`,
+            stageDimensions, projectedBy, ...filled,
         };
     };
 
@@ -5383,9 +5507,9 @@ export function createRenderer(options){
      * @param {number} stride
      * @param {string} topology
      * @param {ProgramState} program
-     * @param {ReturnType<typeof legacyStages>} legacy
+     * @param {ReturnType<typeof samplingOf>} sampling
      */
-    const programPiecesOf = (model, stride, topology, program, legacy)=>{
+    const programPiecesOf = (model, stride, topology, program, sampling)=>{
         if (!program.declaration)
         {
             return null;
@@ -5409,15 +5533,16 @@ export function createRenderer(options){
         const alphaFunc = (model.renderStates.get(D3DRS.ALPHATESTENABLE) ?? 0) !== 0
             ? model.renderStates.get(D3DRS.ALPHAFUNC) ?? 0 : undefined;
         const pixel = translationOf(pixelShader,
-            `ps|fog${fog.source}/${fog.mode}${flat ? '|flat' : ''}|${legacy.key}`
+            `ps|fog${fog.source}/${fog.mode}${flat ? '|flat' : ''}|${sampling.pixelKey}`
                 + (alphaFunc === undefined ? '' : `|a${alphaFunc}`) + (nanProbe ? '|nan' : ''),
             ()=>translateShader(
                 /** @type {import('../d3d9/shader.js').ParsedShader} */ (program.pixel), {
                     ...(fog.source === FOG_SOURCE.NONE
                         ? {} : { fog: fog.mode, fogSource: fog.source }),
                     flatColours: flat,
-                    stageDimensions: legacy.stageDimensions,
-                    projectedBy: legacy.projectedBy,
+                    stageDimensions: sampling.stageDimensions,
+                    projectedBy: sampling.projectedBy,
+                    ...(sampling.pixelOnes ? { ones: sampling.pixelOnes } : {}),
                     ...(alphaFunc === undefined ? {} : { alphaTest: alphaFunc }),
                     ...(nanProbe ? { nanProbe } : {}),
                 }));
@@ -5495,11 +5620,13 @@ export function createRenderer(options){
         const vertex = program.vertex
             ? translationOf(/** @type {object} */ (program.vertexShader),
                 `vs:${shapes}|w${missing.join(',')}${flat ? '|flat' : ''}|f${fog.source}`
-                    + pointKey,
+                    + pointKey
+                    + (sampling.vertexOnes ? `|o${onesKey(sampling.vertexOnes)}` : ''),
                 ()=>translateShader(
                     /** @type {import('../d3d9/shader.js').ParsedShader} */ (program.vertex),
                     { inputs: layout.shapes, alsoWrite: missing, flatColours: flat,
-                        fogSource: fog.source, ...(points ? { points } : {}) }))
+                        fogSource: fog.source, ...(points ? { points } : {}),
+                        ...(sampling.vertexOnes ? { ones: sampling.vertexOnes } : {}) }))
             : hybridStageFor(
                 `${program.declarationId}|${shapes}|w${missing.join(',')}|g${generated.join(',')}`
                     + `|f${fog.source}/${fog.mode}${flat ? '|flat' : ''}`
@@ -5557,8 +5684,14 @@ export function createRenderer(options){
             pipelineFrame: null,
             pipelineIndex: 0,
             source: {
+                // The pipeline is cached by this and the state, neither of which
+                // names what is bound: what the translations read of it -- a 1.x
+                // stage's dimension and projection, the channels a read fills --
+                // is said, as the translations are tagged by it, so one
+                // translation pair is one pipeline.
                 key: `${state.vertexShader}/${state.pixelShader}/${program.declarationId}`
-                    + `/${shapes}/${stride}${streamsKey(layout)}`,
+                    + `/${shapes}/${stride}${streamsKey(layout)}`
+                    + (sampling.key === '' ? '' : `|${sampling.key}`),
                 vertex, pixel, layout,
             },
         };
@@ -5748,7 +5881,7 @@ export function createRenderer(options){
         }
         const cascade = stageCascade(model, {
             texCoordSets: sets, attributes: [], stride, preTransformed: false, blendWeights: 0,
-        }, { shaderCoordinates: true });
+        }, { shaderCoordinates: true, onesOf: onesOfTexture });
         const state = {
             ...pipelineStateOf(model, {
                 fvf: 0, topology, ...formatsOf(model), stages: cascade.stages, lighting: null,
@@ -5798,8 +5931,11 @@ export function createRenderer(options){
     const DIMENSION_CODES = Object.freeze({ '2d': 1, cube: 2, '3d': 3 });
 
     /**
-     * Which stages have a texture and of what dimension, two bits a stage:
-     * what a cascade is shaped by among the bindings.
+     * Which stages have a texture and of what dimension, two bits a stage, and
+     * above those whether its texture's green and blue are filled with one:
+     * what a cascade is shaped by among the bindings. The channels filled are
+     * the last ones (`sampledOnes`), alpha always among them and red never,
+     * so those two bits tell every fill apart.
      *
      * @param {RenderModel} model
      * @returns {number}
@@ -5812,6 +5948,7 @@ export function createRenderer(options){
             if (texture)
             {
                 shape |= DIMENSION_CODES[textureDimensionOf(texture)] << (stage * 2);
+                shape |= ((onesOfTexture(texture) >>> 1) & 3) << (STAGE_COUNT * 2 + stage * 2);
             }
         }
         return shape;
@@ -7066,7 +7203,7 @@ export function createRenderer(options){
                 vertexLayoutKey = `f${processing.fvf.toString(16)}s${stride}`;
             }
         }
-        const cascade = stageCascade(model, layout);
+        const cascade = stageCascade(model, layout, { onesOf: onesOfTexture });
         keyStages(model, cascade);
         reportCascade(cascade);
         if (skipTextures.size > 0 && cascade.textures.some(
@@ -7843,8 +7980,9 @@ export function createRenderer(options){
                 const value = colorToFloats(color);
                 // A target without alpha has none to clear: the format says the
                 // channel is undefined, and a zero there would make the
-                // presented frame transparent.
-                const alpha = target.Format === D3DFMT.A8R8G8B8 ? value.a : 1;
+                // presented frame transparent. One with alpha, whichever format
+                // it is, keeps what the clear gives it.
+                const alpha = FORMAT_INFO[target.Format]?.alpha === true ? value.a : 1;
                 beginPass(model, {
                     clearColor: (flags & D3DCLEAR.TARGET) !== 0
                         ? { ...value, a: alpha }

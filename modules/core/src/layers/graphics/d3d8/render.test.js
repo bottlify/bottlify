@@ -39,7 +39,7 @@ import {
     HARDWARE_SAMPLER, filledIndices, listIndices, multiplyMatrices, packLight, pipelineStateOf,
     samplerFlagsOf,
     screenExtent, transformPosition, uniformBlock, uniformsOf, pixelUniformsOf, fogModeOf, fogOf,
-    isAffine,
+    isAffine, stageCascade,
     vertexCountOf,
 } from './render.js';
 import { createBackend } from '../webgpu/backend.js';
@@ -53,6 +53,9 @@ import {
 } from '../webgpu/internal/reference.js';
 import { generateFixedFunction } from '../webgpu/internal/fixedfunction.js';
 import { FOG_SOURCE } from '../webgpu/internal/pipeline.js';
+import { formatTraits } from '../webgpu/internal/textures.js';
+import { D3DFMT as D3DFMT9, FORMAT_INFO, isCompressed, sampledOnes } from '../d3d9/constants.js';
+import { toHalf } from '../d3d9/half.js';
 
 /**
  * The sampler state of stage zero as the last uniform block on the queue carries it.
@@ -1796,6 +1799,26 @@ test('recorded: with ZENABLE off no depth is written, whatever ZWRITEENABLE says
     assert.equal(off.depthWriteEnabled, false);
     const on = await drawWith(1);
     assert.equal(on.depthWriteEnabled, true, 'and with the test on, the write is ZWRITEENABLE');
+});
+
+test('recorded: a whole clear keeps its alpha in any target format that has one', async()=>{
+    // The X8 case above is opaque because the format has no alpha; a format with
+    // one -- four bits of it here -- is cleared to what the program asked for.
+    for (const format of [D3DFMT.A8R8G8B8, D3DFMT.A4R4G4B4, D3DFMT.A1R5G5B5])
+    {
+        const h = harness({ depth: false });
+        const { device, gpu } = h;
+        /** @type {{ surface?: any }} */
+        const target = {};
+        assert.equal(device.CreateRenderTarget(4, 4, format, false, target), D3D_OK);
+        assert.equal(device.SetRenderTarget(target.surface, null), D3D_OK);
+        assert.equal(device.Clear(0, null, D3DCLEAR.TARGET, argb(1, 2, 3, 0x40), 1, 0), D3D_OK);
+        await h.present();
+        const pass = gpu.of('beginRenderPass').find((/** @type {any} */ call)=>
+            call.descriptor.colorAttachments[0].clearValue !== undefined);
+        assert.equal(pass.descriptor.colorAttachments[0].clearValue.a, 0x40 / 255,
+            `format ${format}`);
+    }
 });
 
 test('recorded: a whole clear is a clearing pass, a partial clear a scissored quad', async()=>{
@@ -4001,6 +4024,61 @@ test('an L6V5U5 bump map widens its five-bit U and V and six-bit luminance into 
         [127, -127, 127, 127, -8, 0, 0, 127]);
 });
 
+test('a texture samples the channels its format lacks as Direct3D does, each by one rule', ()=>{
+    // Wine's d3d9 visual.c: R16F and R32F read (r, 1, 1, 1); G16R16F, G32R32F
+    // and G16R16 (r, g, 1, 1). Their GPU textures hold one and two channels,
+    // so a read fills the rest, alpha too; every other format is expanded on
+    // upload to four channels that hold Direct3D's answer already, and fills
+    // nothing.
+    /** @type {Map<number, number>} */
+    const expected = new Map([
+        [D3DFMT9.R16F, 0b1110], [D3DFMT9.R32F, 0b1110],
+        [D3DFMT9.G16R16F, 0b1100], [D3DFMT9.G32R32F, 0b1100], [D3DFMT9.G16R16, 0b1100],
+    ]);
+    for (const format of Object.keys(FORMAT_INFO).map(Number))
+    {
+        assert.equal(sampledOnes(format), expected.get(format) ?? 0, `format ${format}`);
+    }
+    assert.equal(sampledOnes(0), 0, 'an unknown format fills nothing');
+    // The narrow formats of eight bits answer from their expansion: A8 is
+    // (0, 0, 0, a), the luminance formats (l, l, l, a or 1), V8U8 (u, v, 1, 1),
+    // L6V5U5 (u, v, l, 1) and Q8W8V8U8 (u, v, w, q).
+    assert.deepEqual([...expandTexels(D3DFMT.A8, Uint8Array.from([9]), 1)], [0, 0, 0, 9]);
+    assert.deepEqual([...expandTexels(D3DFMT9.Q8W8V8U8, Uint8Array.from([1, 0x81, 3, 0x7f]), 1)],
+        [1, 0x81, 3, 0x7f], 'u, v, w and q as they lie, red first in rgba8snorm');
+});
+
+test('a cascade stage says what its texture fills, and a stage that samples nothing says nothing',
+    ()=>{
+        const narrow = { name: 'narrow' };
+        const plain = { name: 'plain' };
+        const states = [
+            new Map([[D3DTSS.COLOROP, D3DTOP.SELECTARG1], [D3DTSS.COLORARG1, D3DTA.TEXTURE],
+                [D3DTSS.ALPHAOP, D3DTOP.SELECTARG1], [D3DTSS.ALPHAARG1, D3DTA.TEXTURE]]),
+            new Map([[D3DTSS.COLOROP, D3DTOP.MODULATE], [D3DTSS.COLORARG1, D3DTA.TEXTURE],
+                [D3DTSS.COLORARG2, D3DTA.CURRENT], [D3DTSS.ALPHAOP, D3DTOP.SELECTARG1],
+                [D3DTSS.ALPHAARG1, D3DTA.CURRENT]]),
+            new Map([[D3DTSS.COLOROP, D3DTOP.MODULATE], [D3DTSS.COLORARG1, D3DTA.DIFFUSE],
+                [D3DTSS.COLORARG2, D3DTA.CURRENT], [D3DTSS.ALPHAOP, D3DTOP.SELECTARG1],
+                [D3DTSS.ALPHAARG1, D3DTA.CURRENT]]),
+            new Map([[D3DTSS.COLOROP, D3DTOP.DISABLE]]),
+        ];
+        const model = /** @type {any} */ ({
+            renderStates: new Map(),
+            stageStates: (/** @type {number} */ stage)=>states[stage] ?? new Map(),
+            textures: new Map([[0, narrow], [1, plain], [2, narrow]]),
+        });
+        const layout = decodeFvf(FVF.XYZ | FVF.DIFFUSE | (1 << FVF.TEXCOUNT_SHIFT));
+        const filled = stageCascade(model, layout,
+            { onesOf: texture=>(texture === narrow ? 0b1110 : 0) }).stages;
+        assert.equal(filled[0].ones, 0b1110);
+        assert.equal('ones' in filled[1], false, 'four channels add nothing to the key');
+        assert.equal('ones' in filled[2], false, 'nor does a texture the stage never reads');
+        const unfilled = stageCascade(model, layout).stages;
+        assert.ok(unfilled.every(stage=>!('ones' in stage)), 'none is asked for by default');
+        assert.deepEqual(unfilled.slice(1), filled.slice(1));
+    });
+
 test('a floating-point surface is an r16float, R32F narrowed to half precision on upload', ()=>{
     assert.equal(gpuFormatOf(D3DFMT.R16F, 64, 64, false), 'r16float');
     assert.equal(gpuFormatOf(D3DFMT.R32F, 64, 64, true), 'r16float');
@@ -4009,6 +4087,56 @@ test('a floating-point surface is an r16float, R32F narrowed to half precision o
         [0x3c00, 0x3800, 0xc000, 0x7bff]);
     const halves = Uint8Array.from([0x00, 0x3c, 0x00, 0x38]);
     assert.deepEqual([...expandTexels(D3DFMT.R16F, halves, 2)], [...halves]);
+});
+
+test('a wide format is half floats by its channel count, red first, converted on upload', ()=>{
+    /** @param {number[]} values @returns {Uint8Array} */
+    const f32 = values=>new Uint8Array(Float32Array.from(values).buffer);
+    /** @param {number[]} values @returns {Uint8Array} */
+    const u16 = values=>new Uint8Array(Uint16Array.from(values).buffer);
+    /** @param {Uint8Array} bytes */
+    const halvesOf = bytes=>[...new Uint16Array(bytes.slice().buffer)];
+    // Two texels each, every channel distinct, so a channel out of order shows.
+    for (const { format, gpu, texels, halves } of [
+        { format: D3DFMT.A16B16G16R16F, gpu: 'rgba16float',
+            texels: u16([0x3c00, 0x3800, 0x0000, 0x3c00, 0xc000, 0x4000, 0x7bff, 0x0001]),
+            halves: [0x3c00, 0x3800, 0x0000, 0x3c00, 0xc000, 0x4000, 0x7bff, 0x0001] },
+        { format: D3DFMT.G16R16F, gpu: 'rg16float',
+            texels: u16([0x3c00, 0x3800, 0xc000, 0x4000]),
+            halves: [0x3c00, 0x3800, 0xc000, 0x4000] },
+        { format: D3DFMT.A32B32G32R32F, gpu: 'rgba16float',
+            texels: f32([1, 0.5, 0, 1, -2, 2, 65504, 1e6]),
+            halves: [0x3c00, 0x3800, 0x0000, 0x3c00, 0xc000, 0x4000, 0x7bff, 0x7c00] },
+        { format: D3DFMT.G32R32F, gpu: 'rg16float',
+            texels: f32([1, 0.5, -2, 0.1]),
+            halves: [0x3c00, 0x3800, 0xc000, 0x2e66] },
+        { format: D3DFMT.A16B16G16R16, gpu: 'rgba16float',
+            texels: u16([0xffff, 0, 0x8000, 0xffff, 0, 0xffff, 1, 0]),
+            halves: [0x3c00, 0, 0x3800, 0x3c00, 0, 0x3c00, toHalf(1 / 0xffff), 0] },
+        { format: D3DFMT.G16R16, gpu: 'rg16float',
+            texels: u16([0xffff, 0, 0x8000, 0x4000]),
+            halves: [0x3c00, 0, 0x3800, 0x3400] },
+    ])
+    {
+        assert.equal(gpuFormatOf(format, 64, 64, true), gpu, `format ${format}`);
+        assert.deepEqual(halvesOf(expandTexels(format, texels, 2)), halves, `format ${format}`);
+    }
+});
+
+test('every format a surface is drawn into is one core WebGPU filters and blends into', ()=>{
+    // Narrowing the 32-bit floats is what keeps this true; a mapping onto
+    // `rgba32float` without float32-blendable needs the pipeline to drop the
+    // blend it cannot make, and CheckDeviceFormat to stop offering it.
+    for (const [key, info] of Object.entries(FORMAT_INFO))
+    {
+        const format = Number(key);
+        if (info.depth || info.signed || info.video || isCompressed(format))
+        {
+            continue;
+        }
+        const traits = formatTraits(gpuFormatOf(format, 64, 64, true));
+        assert.deepEqual(traits, { filterable: true, blendable: true }, `format ${format}`);
+    }
 });
 
 test('recorded: a draw under the stencil test carries it, its reference set on the pass;'

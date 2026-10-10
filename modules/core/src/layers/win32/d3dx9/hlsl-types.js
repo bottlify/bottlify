@@ -368,6 +368,13 @@ export function conversionRank(from, to){
         return a.length === b.length && a.every((c, i)=>c === b[i]) ? RANK.CONVERSION
             : RANK.IMPOSSIBLE;
     }
+    if (from.kind === 'sampler' && to.kind === 'sampler')
+    {
+        // A plain `sampler` stands for any of the typed ones and they for it, as fxc passes a
+        // `sampler s = sampler_state {...}` to a sampler2D parameter; two different typed
+        // ones do not meet.
+        return from.dim === 'any' || to.dim === 'any' ? RANK.CONVERSION : RANK.IMPOSSIBLE;
+    }
     if (!isNumeric(from) || !isNumeric(to))
     {
         return RANK.IMPOSSIBLE;

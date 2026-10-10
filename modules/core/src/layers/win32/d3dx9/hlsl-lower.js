@@ -811,14 +811,21 @@ export function lower(module, entry, profile, options = {}){
                     + 'addressable', null);
             }
             const u = object.uniform;
-            // The register the element lives at is picked by the address register.
-            const whole = u.stride === 1 ? b.lane(index, 0) : b.mul(b.lane(index, 0),
-                b.num(u.stride));
-            const address = profile.major >= 2 ? whole : b.sub(whole, b.frc(whole));
-            b.address(address);
-            const rowMajor = u.cst.type.cls === PC.MATRIX_ROWS
-                || (u.cst.type.members ?? []).length > 0 || u.cst.type.cls === PC.MATRIX_ROWS;
-            return materialize(constantValue(u.elem, u.cst, u.base, true, rowMajor));
+            // The same element read again is the copy already made: a skinning matrix
+            // named three times would otherwise be three loads of the address register and
+            // three copies of every row, more registers than vs_1_1 has.
+            return b.remember(`uniform:${u.cst.name}:${u.base}:${u.stride}`, [b.lane(index, 0)],
+                ()=>{
+                    // The register the element lives at is picked by the address register.
+                    const whole = u.stride === 1 ? b.lane(index, 0) : b.mul(b.lane(index, 0),
+                        b.num(u.stride));
+                    const address = profile.major >= 2 ? whole : b.sub(whole, b.frc(whole));
+                    b.address(address);
+                    const rowMajor = u.cst.type.cls === PC.MATRIX_ROWS
+                        || (u.cst.type.members ?? []).length > 0
+                        || u.cst.type.cls === PC.MATRIX_ROWS;
+                    return materialize(constantValue(u.elem, u.cst, u.base, true, rowMajor));
+                });
         }
         // Not known and not in registers: each element in turn, chosen by the index.
         let result = element(0);

@@ -13,18 +13,26 @@
  * that would need a real GPU to answer is not a question this double can be
  * asked -- which is also why no test may judge a frame by looking at it.
  *
- * The one thing it keeps is bytes: a buffer's, and the top level of a
- * four-byte-per-pixel texture's, as writes, clears and copies move them -- in
- * queue order, so a copy encoded before a submit sees the write the queue took
- * in between. A draw puts nothing in a texture; what a draw would paint is the
+ * The one thing it keeps is bytes: a buffer's, and the top level of an
+ * eight-bit or a half-float colour texture's, as writes, clears and copies
+ * move them -- in queue order, so a copy encoded before a submit sees the
+ * write the queue took in between. A draw puts nothing in a texture; what a draw would paint is the
  * reference rasteriser's to say.
  */
+
+import { toHalf } from '../../d3d9/half.js';
 
 /** Bytes per pixel of the formats whose texels are kept, by name. */
 const KEPT_FORMATS = /** @type {Record<string, number>} */ ({
     bgra8unorm: 4,
     rgba8unorm: 4,
+    r16float: 2,
+    rg16float: 4,
+    rgba16float: 8,
 });
+
+/** The channels a half-float format has, red first. @type {Record<string, number>} */
+const HALF_CHANNELS = { r16float: 1, rg16float: 2, rgba16float: 4 };
 
 /**
  * @param {{ compilationMessages?: Record<string, any[]>,
@@ -147,11 +155,15 @@ export function createFakeDevice(options = {}){
                 const value = attachment.clearValue ?? { r: 0, g: 0, b: 0, a: 1 };
                 /** @param {number} channel */
                 const byte = channel=>Math.round(Math.max(0, Math.min(1, channel)) * 255);
-                const pixel = texture.format === 'bgra8unorm'
-                    ? [byte(value.b), byte(value.g), byte(value.r), byte(value.a)]
-                    : [byte(value.r), byte(value.g), byte(value.b), byte(value.a)];
+                const halves = HALF_CHANNELS[texture.format];
+                const pixel = halves
+                    ? new Uint8Array(Uint16Array.from([value.r, value.g, value.b, value.a]
+                        .slice(0, halves), toHalf).buffer)
+                    : texture.format === 'bgra8unorm'
+                        ? [byte(value.b), byte(value.g), byte(value.r), byte(value.a)]
+                        : [byte(value.r), byte(value.g), byte(value.b), byte(value.a)];
                 deferred.push(()=>{
-                    for (let at = 0; at < texture.bytes.length; at += 4)
+                    for (let at = 0; at < texture.bytes.length; at += pixel.length)
                     {
                         texture.bytes.set(pixel, at);
                     }

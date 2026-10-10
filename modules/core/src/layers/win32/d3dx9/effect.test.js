@@ -10,6 +10,7 @@ import { createD3dxFunctions } from './functions.js';
 import { IID_ID3DXEFFECT, IID_ID3DXEFFECTCOMPILER, IID_ID3DXEFFECTPOOL, IID_ID3DXEFFECT_25,
     IID_ID3DXEFFECT_26, createEffects } from './effect.js';
 import { PC, PT, buildEffect, techniqueCompiles } from './effect-model.js';
+import { assembleShader } from './shader-asm.js';
 import { execute } from './d3d9-machine.fixture.js';
 
 const D3D_OK = 0;
@@ -605,6 +606,24 @@ test('a string array sized by its list has that many elements, each its string',
         assert.equal(g.text(g.u32(out)), text);
     }
     assert.equal(await g.call(fx, 'GetParameterElement', names, 2), 0);
+});
+
+test('an annotation array sized by its list has that many elements', async()=>{
+    // Battlefield 2 sizes an allocation by a technique's `Declaration`
+    // annotation; an open length came out as -1 elements, a -4-byte block.
+    const g = guest();
+    const fx = await g.effect('float4 ps() : COLOR { return 1; }\n'
+        + 'technique t < int Declaration[] = { 0, 3, 1, 2 }; string list[] = {"a", "b"}; >\n'
+        + '{ pass p { PixelShader = compile ps_2_0 ps(); } }\n');
+    const technique = await g.call(fx, 'GetTechnique', 0);
+    const declaration = await g.call(fx, 'GetAnnotationByName', technique, g.put('Declaration'));
+    assert.ok(declaration);
+    assert.equal((await g.desc(fx, declaration)).elements, 4);
+    const ints = g.out(16);
+    assert.equal(await g.call(fx, 'GetIntArray', declaration, ints, 4), D3D_OK);
+    assert.deepEqual(g.ints(ints, 4), [0, 3, 1, 2]);
+    const list = await g.call(fx, 'GetAnnotationByName', technique, g.put('list'));
+    assert.equal((await g.desc(fx, list)).elements, 2);
 });
 
 test('the setters and getters convert as D3DX does, and refuse the wrong shape', async()=>{
@@ -1520,7 +1539,36 @@ test('the model of an effect: its states resolved, its shaders compiled once eac
     assert.deepEqual(unknown.model?.techniques[0].passes[0].states, []);
     const assembly = await buildEffect('technique t { pass p { VertexShader = asm { vs_1_1\n'
         + 'dcl_position v0\nmov oPos, v0 }; } } technique u { pass p { } }');
-    assert.match(assembly.messages, /asm block is not assembled/);
+    assert.equal(assembly.messages, '');
     assert.deepEqual(assembly.model?.techniques.map(t=>techniqueCompiles(
-        /** @type {any} */ (assembly.model), t)), [false, true]);
+        /** @type {any} */ (assembly.model), t)), [true, true]);
+    assert.deepEqual(assembly.model?.shaders.map(s=>[s.profile, s.pixel]), [['vs_1_1', false]]);
+    assert.deepEqual(assembly.model?.shaders[0].tokens,
+        assembleShader('vs_1_1\ndcl_position v0\nmov oPos, v0').tokens);
+});
+
+test('an asm block is assembled where it stands, in a pass or in a parameter', async()=>{
+    // Written as the period's effects write it: the version with dots, numbers run
+    // together with commas, a trailing space.
+    const text = 'ps.1.1\ndef c0,1,1,1,0.8 \ntex t0 \nmul r0, t0, c0\n';
+    const inPass = await buildEffect(`technique t { pass p { PixelShader = asm {\n${text}}; } }`);
+    assert.equal(inPass.messages, '');
+    assert.deepEqual(inPass.model?.shaders[0].tokens, assembleShader(text).tokens);
+    assert.equal(inPass.model?.shaders[0].profile, 'ps_1_1');
+    const named = await buildEffect('PixelShader p = asm { ps_1_1\ndef c0, 1, 0, 0, 0.5\n'
+        + 'mov r0, c0 };\ntechnique t { pass q { PixelShader = (p); } }');
+    assert.equal(named.messages, '');
+    assert.deepEqual(named.model?.techniques.map(t=>techniqueCompiles(
+        /** @type {any} */ (named.model), t)), [true]);
+    // Two blocks of different text are two shaders, the same text one.
+    const two = await buildEffect('technique t { pass a { PixelShader = asm { ps_1_1\n'
+        + 'mov r0, v0 }; } pass b { PixelShader = asm { ps_1_1\nmov r0, v1 }; }'
+        + ' pass c { PixelShader = asm { ps_1_1\nmov r0, v0 }; } }');
+    assert.equal(two.model?.shaders.length, 2);
+    // One that does not assemble leaves its technique invalid and says why.
+    const wrong = await buildEffect('technique t { pass p { PixelShader = asm { ps_2_0\n'
+        + 'nosuch r0 }; } } technique u { pass p { } }');
+    assert.match(wrong.messages, /asm line 2: warning X5000: unknown instruction "nosuch"/);
+    assert.deepEqual(wrong.model?.techniques.map(t=>techniqueCompiles(
+        /** @type {any} */ (wrong.model), t)), [false, true]);
 });

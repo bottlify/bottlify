@@ -357,6 +357,15 @@ the name cannot be opened -- what it holds is the engine's, not bytes; GetFileVe
 such a library already (A39). The system programs stay as A38 has them. Revisit if a program
 reads a system library's bytes or enumerates the folder to find one. *2026-10-08.*
 
+**A42 -- A thread's stack is at least a megabyte, whatever SizeOfStackReserve says.** The first
+thread and every thread created with the image's default get `max(SizeOfStackReserve, 1 MiB)`.
+A program linked for 64 KiB (the Call of Duty 2 demo) was measured reaching 70 KiB down its first
+thread, inside a window procedure, and faulting below the mapped stack; the title is released to
+run on Windows, so the linked figure is not a limit programs are held to there. A megabyte is the
+linker's default and what Wine gives every thread as a floor. Not derived from a specification:
+Windows' own rounding of a small reserve was not measured. Revisit if a program is found that
+depends on a small stack ending where it was linked to end. *2026-10-10.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this

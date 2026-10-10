@@ -21,7 +21,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import {
     D3DFOG, D3DLIGHT, D3DMCS, D3DTA, D3DTOP, TCI, fixedFragmentStage, fogFunctionDeclaration,
-    argumentsRead, generateFixedFunction,
+    argumentsRead, generateFixedFunction, sampledWithOnes,
 } from './fixedfunction.js';
 import { FOG_SOURCE } from './pipeline.js';
 import { FVF, decodeFvf } from './vertexformat.js';
@@ -553,6 +553,50 @@ test('a cube stage samples a direction of three components, a volume stage three
         assert.match(volume, /var texture0: texture_3d<f32>;/);
         assert.match(volume, /addressCoordinate\(raw\.z, \(flags >> 16u\) & 3u, levelSize\.z\)/,
             'the third coordinate addressed by its own mode');
+    });
+
+test('a stage whose texture lacks channels samples them as one, a four-channel one as it was',
+    ()=>{
+        // Direct3D 9 samples R16F as (r, 1, 1, 1) and G16R16F as (r, g, 1, 1);
+        // the GPU's r16float and rg16float answer zero for green and blue.
+        const textured = {
+            colorOp: D3DTOP.SELECTARG1, colorArg1: D3DTA.TEXTURE, colorArg2: D3DTA.CURRENT,
+            alphaOp: D3DTOP.SELECTARG1, alphaArg1: D3DTA.TEXTURE, alphaArg2: D3DTA.CURRENT,
+            texCoordIndex: 0,
+        };
+        const fvf = FVF.XYZ | FVF.DIFFUSE | (2 << FVF.TEXCOUNT_SHIFT) | (1 << 16);
+        const plain = generate(baseState({ fvf, stages: [textured, textured] })).code;
+        const filled = generate(baseState({ fvf,
+            stages: [{ ...textured, ones: 0b1110 }, { ...textured, ones: 0b1100 }] })).code;
+        assert.ok(filled.includes('return vec4f(textureSampleLevel(texture0, sampler0, uv,'
+            + ' level).x, 1.0, 1.0, 1.0);'));
+        assert.ok(filled.includes('return vec4f(textureSampleLevel(texture1, sampler1, uv,'
+            + ' level).xy, 1.0, 1.0);'));
+        assert.ok(plain.includes('return textureSampleLevel(texture0, sampler0, uv, level);'),
+            'four channels fill nothing');
+        assert.equal(generate(baseState({ fvf, stages: [{ ...textured, ones: 0 }, textured] }))
+            .code, plain, 'and generate the same source as a stage that says nothing');
+
+        // A cube and a volume stage fill the same way.
+        for (const [dimension, at] of [['cube', 'towards'], ['3d', 'uvw']])
+        {
+            const code = generate(baseState({ fvf,
+                stages: [{ ...textured, dimension, ones: 0b1110 }] })).code;
+            assert.ok(code.includes(`return vec4f(textureSampleLevel(texture0, sampler0, ${at},`
+                + ' level).x, 1.0, 1.0, 1.0);'), dimension);
+        }
+
+        // The fragment stage over a vertex shader fills as the whole pipeline does.
+        const fragment = fixedFragmentStage(baseState({ fvf: 0, vertexShader: 1,
+            stages: [{ ...textured, ones: 0b1100 }] }), [0, 2]);
+        assert.equal(fragment.error, null);
+        assert.ok(fragment.wgsl.includes('return vec4f(textureSampleLevel(texture0, sampler0, uv,'
+            + ' level).xy, 1.0, 1.0);'));
+        // Only the last channels are ever lacked, so the fill is the kept ones
+        // and constants -- never a mask of channels between kept ones.
+        assert.equal(sampledWithOnes('t', 0b1000), 'vec4f(t.xyz, 1.0)');
+        assert.throws(()=>sampledWithOnes('t', 0b0100), /mask 4/);
+        assert.throws(()=>sampledWithOnes('t', 0b1111), /mask 15/);
     });
 
 test('a stage puts its coordinate through its own texture transform before sampling', ()=>{

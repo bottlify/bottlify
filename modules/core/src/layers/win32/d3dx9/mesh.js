@@ -4,12 +4,16 @@
  * See LICENSE for details
  */
 
-import { DEVICE, INDEX_BUFFER, UNKNOWN_RELEASE, createDeviceCalls } from './device.js';
+import { DEVICE, INDEX_BUFFER, UNKNOWN_ADDREF, UNKNOWN_RELEASE, createDeviceCalls }
+    from './device.js';
+import { adjacencyErrors } from './mesh-topology.js';
 
 /**
  * D3DX's geometry over vertex data: the bounds of a run of positions, and
  * what D3DX does to a mesh -- its normals computed, a subset of it made one
- * triangle strip.
+ * triangle strip, its indices and adjacency checked (D3DXValidMesh), and
+ * D3DXCleanMesh, which finds nothing to clean in a mesh that checks out and
+ * so answers with that mesh, as the documentation says it does then.
  *
  * Positions are D3DXVECTOR3, three floats at the start of each vertex, the
  * vertices `stride` bytes apart. The bounds' arithmetic is single precision,
@@ -24,6 +28,7 @@ import { DEVICE, INDEX_BUFFER, UNKNOWN_RELEASE, createDeviceCalls } from './devi
 
 const D3D_OK = 0;
 const D3DERR_INVALIDCALL = 0x8876086c;
+const D3DXERR_INVALIDMESH = 0x88760b55;
 const E_NOTIMPL = 0x80004001;
 const E_OUTOFMEMORY = 0x8007000e;
 
@@ -158,8 +163,11 @@ export function vertexNormals(positions, indices, reps){
 
 /**
  * @param {MeshHost} host
+ * @param {{ giveBuffer: (out: number, bytes: Uint8Array) => number }} [buffers]
+ *     Where D3DXValidMesh and D3DXCleanMesh put their messages; without it they
+ *     give none.
  */
-export function createMeshFunctions(host){
+export function createMeshFunctions(host, buffers){
     const f = Math.fround;
     /** @param {number} at @returns {[number, number, number]} */
     const position = at=>{
@@ -389,7 +397,134 @@ export function createMeshFunctions(host){
         });
     };
 
+    /**
+     * What is wrong with a mesh and its adjacency, a line each: an index past
+     * its vertices, and an adjacency that names no face, the face itself, or
+     * a face that does not name it back.
+     *
+     * @param {number} mesh @param {number} adjacency @param {any} thread
+     * @returns {Promise<string[] | number>}
+     */
+    const meshErrors = async(mesh, adjacency, thread)=>{
+        const faces = await method(thread, mesh, MESH.GetNumFaces, []);
+        const vertices = await method(thread, mesh, MESH.GetNumVertices, []);
+        const indices = await withScratch(4, at=>indicesOf(mesh, thread, at));
+        if (typeof indices === 'number')
+        {
+            return indices;
+        }
+        /** @type {string[]} */
+        const errors = [];
+        indices.forEach((index, i)=>{
+            if (index >= vertices)
+            {
+                errors.push(`face ${Math.floor(i / 3)} uses vertex ${index}, past the mesh's `
+                    + `${vertices}`);
+            }
+        });
+        const given = [...new Uint32Array(host.readMemory(adjacency >>> 0, faces * 12).slice()
+            .buffer)];
+        return errors.concat(adjacencyErrors(given, faces));
+    };
+
+    /**
+     * The messages, a line each, in a buffer where one is asked for.
+     *
+     * @param {number} out @param {string[]} errors
+     */
+    const tell = (out, errors)=>{
+        if (out !== 0 && errors.length > 0 && buffers)
+        {
+            buffers.giveBuffer(out, Uint8Array.from([...errors.map(line=>`${line}\n`).join(''),
+                '\0'], c=>c.charCodeAt(0) & 0xff));
+        }
+    };
+
     return {
+        /**
+         * HRESULT D3DXValidMesh(LPD3DXMESH pMeshIn, const DWORD *pAdjacency,
+         *     LPD3DXBUFFER *ppErrorsAndWarnings)
+         *
+         * D3DXERR_INVALIDMESH, and what is wrong as text, for a mesh meshErrors
+         * finds fault with. The bowties and back-to-back faces D3DX also
+         * reports are not looked for.
+         */
+        D3DXValidMesh: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([mesh, adjacency, out])=>{
+                if ((out >>> 0) !== 0)
+                {
+                    putU32s(out, [0]);
+                }
+                if ((mesh >>> 0) === 0 || (adjacency >>> 0) === 0 || !host.callGuest
+                    || !host.heap)
+                {
+                    return D3DERR_INVALIDCALL;
+                }
+                const thread = host.currentThread?.();
+                return Promise.resolve().then(()=>meshErrors(mesh >>> 0, adjacency, thread))
+                    .then(errors=>{
+                        if (typeof errors === 'number')
+                        {
+                            return errors;
+                        }
+                        tell(out >>> 0, errors);
+                        return errors.length > 0 ? D3DXERR_INVALIDMESH : D3D_OK;
+                    });
+            },
+        },
+
+        /**
+         * HRESULT D3DXCleanMesh(D3DXCLEANTYPE CleanType, LPD3DXMESH pMeshIn,
+         *     const DWORD *pAdjacencyIn, LPD3DXMESH *ppMeshOut, DWORD *pAdjacencyOut,
+         *     LPD3DXBUFFER *ppErrorsAndWarnings)
+         *
+         * A mesh D3DXValidMesh passes is answered as itself, a reference added,
+         * its adjacency copied out; one it fails, as it fails it. Neither
+         * bowties nor back-to-back faces are looked for, so none is split.
+         */
+        D3DXCleanMesh: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([, mesh, adjacency, meshOut, adjacencyOut, out])=>{
+                for (const at of [meshOut, out])
+                {
+                    if ((at >>> 0) !== 0)
+                    {
+                        putU32s(at, [0]);
+                    }
+                }
+                if ((mesh >>> 0) === 0 || (adjacency >>> 0) === 0 || (meshOut >>> 0) === 0
+                    || !host.callGuest || !host.heap)
+                {
+                    return D3DERR_INVALIDCALL;
+                }
+                const thread = host.currentThread?.();
+                return Promise.resolve().then(()=>meshErrors(mesh >>> 0, adjacency, thread))
+                    .then(async errors=>{
+                        if (typeof errors === 'number')
+                        {
+                            return errors;
+                        }
+                        tell(out >>> 0, errors);
+                        if (errors.length > 0)
+                        {
+                            return D3DXERR_INVALIDMESH;
+                        }
+                        const faces = await method(thread, mesh, MESH.GetNumFaces, []);
+                        if ((adjacencyOut >>> 0) !== 0)
+                        {
+                            host.writeMemory(adjacencyOut >>> 0, host.readMemory(adjacency >>> 0,
+                                faces * 12).slice());
+                        }
+                        await method(thread, mesh, UNKNOWN_ADDREF, []);
+                        putU32s(meshOut, [mesh]);
+                        return D3D_OK;
+                    });
+            },
+        },
+
         /**
          * HRESULT D3DXConvertMeshSubsetToSingleStrip(LPD3DXBASEMESH MeshIn,
          *     DWORD AttribId, DWORD IBOptions, LPDIRECT3DINDEXBUFFER9 *ppIndexBuffer,

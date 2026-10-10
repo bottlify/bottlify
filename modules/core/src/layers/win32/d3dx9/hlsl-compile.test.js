@@ -648,3 +648,104 @@ test('ps_1_1 compares through cnd on r0.a, as fxc does', async()=>{
     assert.deepEqual(run([-0.25, 0, 0, 0], [0, 0, 0.5, 0]), [0.5, 0.5, 0.5, 0.5]);
     assert.deepEqual(run([0, 0, 0, 0], [0, 0, 0, 0]), [0, 0, 0, 0]);
 });
+
+test('a typedef\'s name constructs the type it names, as a cast to it does', async()=>{
+    // `typedef vector<half, 4> vec4;` then `vec4(v.xyz, 1)`, the way an effect of the
+    // period spells its types.
+    const result = await compile(`typedef vector<half, 4> vec4; typedef vector<half, 2> vec2;
+        float4 main(float4 v : COLOR0) : COLOR0 { vec2 h = vec2(v.x, 0.5);
+            return vec4(h, v.z, 1) + (vec4)0; }`, 'ps_2_0');
+    assert.equal(result.ok, true, result.messages);
+    assert.deepEqual(shade(result, [0.25, 0.5, 0.75, 1]), [0.25, 0.5, 0.75, 1]);
+    const strukt = await compile(`struct S { float4 a; };
+        float4 main() : COLOR0 { S s = S(1, 2, 3, 4); return s.a; }`, 'ps_2_0');
+    assert.equal(strukt.ok, false, 'a structure is not constructed by its name');
+});
+
+test('a plain sampler is passed for a typed sampler parameter, two typed ones are not mixed',
+    async()=>{
+        const result = await compile(`sampler s = sampler_state { MinFilter = LINEAR; };
+            float4 read(sampler2D from, float2 uv) { return tex2D(from, uv); }
+            float4 main(float2 uv : TEXCOORD0) : COLOR0 { return read(s, uv); }`, 'ps_2_0');
+        assert.equal(result.ok, true, result.messages);
+        assert.ok(decode(/** @type {Uint32Array} */ (result.tokens)).instructions
+            .some((/** @type {any} */ i)=>i.name === 'texld'));
+        const mixed = await compile(`sampler3D s;
+            float4 read(sampler2D from, float2 uv) { return tex2D(from, uv); }
+            float4 main(float2 uv : TEXCOORD0) : COLOR0 { return read(s, uv); }`, 'ps_2_0');
+        assert.equal(mixed.ok, false);
+        assert.match(mixed.messages, /X3013/);
+    });
+
+test('ps_1_4 reads tex2Dproj at a coordinate set as texld with _dw', async()=>{
+    // fxc: texld r0, t0_dw.xyw -- the read divides x and y by w.
+    const result = await compile(`sampler sam;
+        float4 main(float4 at : TEXCOORD0) : COLOR { return tex2Dproj(sam, at); }`, 'ps_1_4');
+    assert.equal(result.ok, true, result.messages);
+    const program = decode(/** @type {Uint32Array} */ (result.tokens));
+    assert.match(disassemble(/** @type {Uint32Array} */ (result.tokens)), /texld r0, t0_dw/);
+    const out = [...execute(program, { inputs: { v: [], t: [[0.5, 0.25, 0.75, 2]] },
+        constants: { f: new Float32Array(32 * 4) }, sample: (_, __, c)=>[c[0], c[1], 0, 1] })
+        .outputs.oC0];
+    assert.deepEqual(out, [0.25, 0.125, 0, 1]);
+    // A computed coordinate has no modifier to divide it, nor a set before 1.4.
+    const computed = await compile(`sampler sam;
+        float4 main(float4 at : TEXCOORD0) : COLOR { return tex2Dproj(sam, at * 2); }`,
+    'ps_1_4');
+    assert.equal(computed.ok, false);
+    const older = await compile(`sampler sam;
+        float4 main(float4 at : TEXCOORD0) : COLOR { return tex2Dproj(sam, at); }`, 'ps_1_3');
+    assert.equal(older.ok, false);
+});
+
+test('a quarter is a _d4 only from ps_1_4; before it the product stays a multiply', async()=>{
+    // ps_1_1 to 1_3 scale a result by _x2, _x4 and _d2; _d4 and _d8 came with 1.4.
+    for (const [profile, d4] of /** @type {[string, boolean][]} */ ([['ps_1_1', false],
+        ['ps_1_3', false], ['ps_1_4', true]]))
+    {
+        const result = await compile(`float4 main(float4 c : COLOR0) : COLOR {
+            return float4(c.rgb, c.a * 0.25); }`, profile);
+        assert.equal(result.ok, true, result.messages);
+        const tokens = /** @type {Uint32Array} */ (result.tokens);
+        assert.equal(/_d4/.test(disassemble(tokens)), d4, profile);
+        assert.deepEqual(shade(result, [0.5, 0.25, 0.75, 1]), [0.5, 0.25, 0.75, 0.25], profile);
+    }
+});
+
+test('an element of a uniform array read again by the same index is the copy already made',
+    async()=>{
+        // A skinning matrix named several times: one load of a0 and one copy of its rows,
+        // not one for every mention -- three mentions used to need more registers than
+        // vs_1_1 has.
+        const result = await compile(`float4x3 bones[20]; float4x4 vp;
+            float4 main(float4 p : POSITION, float i : BLENDINDICES, out float4 c : COLOR0)
+                : POSITION {
+                float3 at = mul(p, bones[i]);
+                float3 x = bones[i][0]; float3 y = bones[i][1]; float3 w = bones[i][3];
+                c = float4(x.x, y.y, w.z, 1);
+                return mul(float4(at, 1), vp); }`, 'vs_1_1');
+        assert.equal(result.ok, true, result.messages);
+        const tokens = /** @type {Uint32Array} */ (result.tokens);
+        const text = disassemble(tokens);
+        assert.equal(text.match(/mov a0\.x/g)?.length, 1, text);
+        const table = Object.fromEntries(constants(result).map(c=>[c.name, c.index]));
+        const f = new Float32Array(256 * 4);
+        // bones[2], held by column: rows c+0..2 of the element at bones + 2 * 3.
+        const base = (table.bones + 2 * 3) * 4;
+        const m = [[1, 2, 3], [4, 5, 6], [7, 8, 9], [10, 11, 12]];
+        for (let col = 0; col < 3; col++)
+        {
+            for (let row = 0; row < 4; row++)
+            {
+                f[base + col * 4 + row] = m[row][col];
+            }
+        }
+        for (let k = 0; k < 4; k++)
+        {
+            f[(table.vp + k) * 4 + k] = 1;
+        }
+        const out = execute(decode(tokens), { inputs: { v: [[1, 1, 1, 1], [2, 0, 0, 0]], t: [] },
+            constants: { f } }).outputs;
+        assert.deepEqual([...out.oD0], [1, 5, 12, 1]);
+        assert.deepEqual([...out.oPos], [22, 26, 30, 1]);
+    });

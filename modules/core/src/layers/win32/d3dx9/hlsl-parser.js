@@ -183,7 +183,8 @@ import { HlslError, tokenize } from './hlsl-lexer.js';
  *   | { kind: 'index', object: Expr, index: Expr, pos: Position }
  *   | { kind: 'member', object: Expr, name: string, pos: Position }
  *   | { kind: 'initlist', items: Expr[], pos: Position }
- *   | { kind: 'compile', target: string, callee: string, args: Expr[], pos: Position }
+ *   | { kind: 'compile', target: string, callee: string, args: Expr[], asm?: string,
+ *       pos: Position }
  *   | { kind: 'samplerstate', entries: { name: string, value: Expr, pos: Position }[],
  *       pos: Position }
  *   | { kind: 'texref', name: string, pos: Position }} Expr
@@ -705,6 +706,50 @@ export function parse(source, file = 'memory'){
     };
 
     /**
+     * `asm { ... }`, a shader in assembly, its text given back for the assembler: the tokens
+     * between the braces, a line of them to a line of the source, joined as they were written
+     * (no space where none stood). A comment is lost, which the assembler would have skipped.
+     *
+     * @param {Position} pos
+     * @returns {Expr}
+     */
+    const asmBlock = pos=>{
+        next();
+        expectPunct('{');
+        let depth = 1;
+        let text = '';
+        /** @type {Token | null} */
+        let last = null;
+        for (;;)
+        {
+            const token = next();
+            if (token.type === 'eof')
+            {
+                throw unexpected(token);
+            }
+            if (token.type === 'punct' && (token.text === '{' || token.text === '}'))
+            {
+                depth += token.text === '{' ? 1 : -1;
+                if (depth === 0)
+                {
+                    break;
+                }
+            }
+            if (last && token.pos.line !== last.pos.line)
+            {
+                text += '\n';
+            }
+            else if (last && token.pos.col !== last.pos.col + last.text.length)
+            {
+                text += ' ';
+            }
+            text += token.text;
+            last = token;
+        }
+        return { kind: 'compile', target: 'asm', callee: '', args: [], asm: text, pos };
+    };
+
+    /**
      * `{ Name = value; ... }` of a sampler or a texture declared with a state block.
      *
      * @param {Position} pos
@@ -1042,6 +1087,12 @@ export function parse(source, file = 'memory'){
             const callee = expectIdent().text;
             return { kind: 'compile', target, callee, args: parseArguments(), pos: token.pos };
         }
+        if (token.text === 'asm' && isPunct('{'))
+        {
+            // `PixelShader p = asm { ... };`: the block read from its brace, as a pass's is.
+            at--;
+            return asmBlock(token.pos);
+        }
         if (token.text === 'sampler_state' && isPunct('{'))
         {
             return samplerStateBody(token.pos);
@@ -1057,6 +1108,13 @@ export function parse(source, file = 'memory'){
         {
             type.pos = token.pos;
             return { kind: 'construct', type, args: parseArguments(), pos: token.pos };
+        }
+        // `typedef vector<half, 4> vec4;` then `vec4(p, 1)`: fxc takes a typedef's name as
+        // a constructor of the type it names, as it takes it in a cast.
+        if (typeNames.has(token.text) && isPunct('('))
+        {
+            return { kind: 'construct', type: { cls: 'named', name: token.text, pos: token.pos },
+                args: parseArguments(), pos: token.pos };
         }
         if (isPunct('('))
         {
@@ -1300,12 +1358,7 @@ export function parse(source, file = 'memory'){
                 }
                 else if (isWord('asm') && isPunct('{', 1))
                 {
-                    // A shader in assembly: read past, a compile of nothing the effect can
-                    // say it did not make.
-                    next();
-                    skipBalanced();
-                    value = { kind: 'compile', target: 'asm', callee: '', args: [],
-                        pos: state.pos };
+                    value = asmBlock(state.pos);
                 }
                 else
                 {

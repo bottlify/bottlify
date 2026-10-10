@@ -267,10 +267,20 @@ export const D3DFMT = Object.freeze({
     V8U8: 60,
     L6V5U5: 61,
     Q8W8V8U8: 63,
+    // Sixteen bits a channel, as fractions: lookup tables and normal maps that eight
+    // bits band.
+    G16R16: 34,
+    A16B16G16R16: 36,
     // One floating-point channel: what a shadow map of the Direct3D 9 era keeps its
     // depths in when the card samples no depth texture.
     R16F: 111,
     R32F: 114,
+    // Two and four floating-point channels: the targets a shader-model-3 program
+    // renders its lighting into before tone mapping it down to the screen.
+    G16R16F: 112,
+    A16B16G16R16F: 113,
+    G32R32F: 115,
+    A32B32G32R32F: 116,
     D32: 71,
     D24S8: 75,
     D24X8: 77,
@@ -291,6 +301,19 @@ export const D3DFMT = Object.freeze({
     UYVY: 0x59565955,
 });
 
+/** @typedef {{ channels: 1 | 2 | 4, stored: 'half' | 'float' | 'unorm16' }} WideFormat */
+
+/**
+ * @param {number} bytesPerPixel @param {boolean} alpha @param {boolean} float
+ * @param {1 | 2 | 4} channels @param {'half' | 'float' | 'unorm16'} stored
+ */
+function wideFormat(bytesPerPixel, alpha, float, channels, stored){
+    return Object.freeze({
+        bytesPerPixel, depth: false, alpha, ...(float ? { float } : {}),
+        wide: Object.freeze({ channels, stored }),
+    });
+}
+
 /**
  * Bytes per pixel of the uncompressed formats this layer lays out, and whether
  * a format is a depth one -- the validity tables branch on that and on nothing
@@ -309,10 +332,16 @@ export const D3DFMT = Object.freeze({
  * `float` marks a floating-point format: drawn into and sampled as numbers, not
  * as fractions of 255.
  *
+ * `wide` marks a format of sixteen or thirty-two bits a channel. The GPU keeps
+ * every one of them as half floats, red first, `channels` of them a texel;
+ * `stored` says how each channel lies in the guest's memory -- a half float, a
+ * 32-bit float, or a 16-bit fraction of 65535 -- which is what an upload
+ * converts from and a read-back converts to.
+ *
  * @type {Readonly<Record<number,
  *     { bytesPerPixel: number, depth: boolean, alpha: boolean,
  *       blockBytes?: number, blockSize?: number, video?: boolean, signed?: boolean,
- *       float?: boolean }>>}
+ *       float?: boolean, wide?: WideFormat }>>}
  */
 export const FORMAT_INFO = Object.freeze({
     [D3DFMT.A8R8G8B8]: Object.freeze({ bytesPerPixel: 4, depth: false, alpha: true }),
@@ -344,8 +373,16 @@ export const FORMAT_INFO = Object.freeze({
     // U in bits 0-4 and V in 5-9, both signed, and an unsigned luminance in
     // 10-15: the bump map with luminance hardware of the ps_1_1 era offered.
     [D3DFMT.L6V5U5]: Object.freeze({ bytesPerPixel: 2, depth: false, alpha: false, signed: true }),
-    [D3DFMT.R16F]: Object.freeze({ bytesPerPixel: 2, depth: false, alpha: false, float: true }),
-    [D3DFMT.R32F]: Object.freeze({ bytesPerPixel: 4, depth: false, alpha: false, float: true }),
+    // Every channel lies red first in memory, whatever the name's order: Direct3D
+    // names a format from its most significant bits down.
+    [D3DFMT.R16F]: wideFormat(2, false, true, 1, 'half'),
+    [D3DFMT.R32F]: wideFormat(4, false, true, 1, 'float'),
+    [D3DFMT.G16R16F]: wideFormat(4, false, true, 2, 'half'),
+    [D3DFMT.A16B16G16R16F]: wideFormat(8, true, true, 4, 'half'),
+    [D3DFMT.G32R32F]: wideFormat(8, false, true, 2, 'float'),
+    [D3DFMT.A32B32G32R32F]: wideFormat(16, true, true, 4, 'float'),
+    [D3DFMT.G16R16]: wideFormat(4, false, false, 2, 'unorm16'),
+    [D3DFMT.A16B16G16R16]: wideFormat(8, true, false, 4, 'unorm16'),
     [D3DFMT.D32]: Object.freeze({ bytesPerPixel: 4, depth: true, alpha: false }),
     [D3DFMT.D24S8]: Object.freeze({ bytesPerPixel: 4, depth: true, alpha: false }),
     [D3DFMT.D24X8]: Object.freeze({ bytesPerPixel: 4, depth: true, alpha: false }),
@@ -374,6 +411,26 @@ export const FORMAT_INFO = Object.freeze({
     [D3DFMT.DXT5]: Object.freeze({
         bytesPerPixel: 0, depth: false, alpha: true, blockBytes: 16, blockSize: 4 }),
 });
+
+/**
+ * The channels a sample of `format` must read as one because the texture the
+ * GPU keeps it in does not hold them, as a mask: bit 0 red to bit 3 alpha.
+ *
+ * Direct3D 9 samples a channel a format lacks as one -- R16F as (r, 1, 1, 1),
+ * G16R16F as (r, g, 1, 1) (Wine's d3d9 visual.c float texture tests, and the
+ * fixups wined3d gives these formats) -- where WebGPU samples a missing green
+ * or blue as zero and only a missing alpha as one. Every format but the wide
+ * ones is expanded on upload into a texture of four channels holding the
+ * answer already, so the rule is one over the wide formats' channel count;
+ * the channels lacked are always the last ones, alpha among them.
+ *
+ * @param {number} format  D3DFMT
+ * @returns {number} zero for a format that samples as it is kept
+ */
+export function sampledOnes(format){
+    const channels = FORMAT_INFO[format]?.wide?.channels ?? 4;
+    return 0b1111 & ~((1 << channels) - 1);
+}
 
 /**
  * Where in a locked surface a sub-rectangle begins.

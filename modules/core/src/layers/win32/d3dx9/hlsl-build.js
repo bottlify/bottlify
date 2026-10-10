@@ -982,13 +982,17 @@ export function createBuilder(profile){
      * @param {Const} sampler @param {Vec} coord @param {string} mode
      */
     const legacySample = (sampler, coord, mode)=>{
-        if (mode !== 'plain')
-        {
-            throw new TargetError('X4532', `this texture read is not available in ${profile.name}`);
-        }
         const src = coord.src;
         const direct = src.kind === 'input' && src.input.usage === USAGE.TEXCOORD
             && src.swz.every((c, i)=>c === i);
+        // tex2Dproj in 1.4 is texld of the coordinate set with _dw, which divides x and y
+        // by w as the read takes them; the modifier is only on a set as it came in, and a
+        // model 1 shader has no division of its own to do it any other way.
+        const projected = mode === 'project' && profile.minor >= 4 && direct;
+        if (mode !== 'plain' && !projected)
+        {
+            throw new TargetError('X4532', `this texture read is not available in ${profile.name}`);
+        }
         const reg = newReg(4);
         if (profile.minor < 4)
         {
@@ -1016,8 +1020,11 @@ export function createBuilder(profile){
             // coordinate is moved into one there, as fxc does.
             const from = src.kind === 'imm' || src.kind === 'const'
                 ? emit('mov', coord.w, [src]).src : src;
+            /** @type {Src} */
+            const dividedByW = { .../** @type {import('./hlsl-ir.js').SrcInput} */ (src),
+                mod: 'dw' };
             instrs.push({ op: 'texld', dest: { kind: 'reg', reg, mask: 15 },
-                srcs: [from, { kind: 'sampler', cst: sampler }] });
+                srcs: [projected ? dividedByW : from, { kind: 'sampler', cst: sampler }] });
         }
         return vec({ kind: 'reg', reg, swz: [0, 1, 2, 3] });
     };
@@ -1085,6 +1092,28 @@ export function createBuilder(profile){
             srcs: [fit(v.src, into.w)] });
     };
 
+    /**
+     * What `make` gave the last time for the same tag and operands, while what the build
+     * knows still holds (no flow control and no rollback since): an element of a uniform
+     * array read through the address register, made once for the same index rather than
+     * loaded and copied out again at every read.
+     *
+     * @template T
+     * @param {string} tag @param {Vec[]} operands @param {() => T} make
+     * @returns {T}
+     */
+    const remember = (tag, operands, make)=>{
+        const key = `@${tag}/${operands.map(v=>keyOf(v.src)).join('/')}`;
+        const had = /** @type {T | undefined} */ (/** @type {unknown} */ (known.get(key)));
+        if (had !== undefined)
+        {
+            return had;
+        }
+        const made = make();
+        known.set(key, /** @type {Vec} */ (/** @type {unknown} */ (made)));
+        return made;
+    };
+
     /** Where the code is now, to come back to: the instructions after it are dropped. */
     const checkpoint = ()=>({ count: instrs.length, known: new Map(known) });
 
@@ -1099,7 +1128,7 @@ export function createBuilder(profile){
     };
 
     return {
-        control, carry, assign, checkpoint, rollback,
+        control, carry, assign, checkpoint, rollback, remember,
         profile, instrs, inputs, outputs, constants, newReg, get vregCount(){
             return vregCount;
         },

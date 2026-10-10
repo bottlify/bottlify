@@ -57,7 +57,8 @@ import {
 } from './constants.js';
 import { D3DCLEAR, D3DTS } from '../d3d8/constants.js';
 import {
-    IDENTITY, STAGE_COUNT, createRenderer, multiplyMatrices, sameLight, vertexCountOf,
+    IDENTITY, STAGE_COUNT, createRenderer, gpuFormatOf, multiplyMatrices, sameLight,
+    vertexCountOf,
 } from '../d3d8/render.js';
 import { createDefaultStageStates } from '../d3d8/stagestates.js';
 import { createDefaultRenderStates } from './renderstates.js';
@@ -75,6 +76,7 @@ import { validateStages } from '../d3d8/validity.js';
 import { processStreams } from '../d3d8/process.js';
 import { decodeFvf } from '../webgpu/internal/vertexformat.js';
 import { fullTarget, viewportState } from '../webgpu/internal/viewport.js';
+import { formatTraits } from '../webgpu/internal/textures.js';
 import {
     D3DDECLUSAGE, MAX_STREAMS, createVertexDeclaration, elementsOfFvf, fixedFunctionLayoutOf,
     fvfOfElements, validateElements,
@@ -92,6 +94,14 @@ import {
 /** D3DUSAGE_QUERY_SRGBREAD and D3DUSAGE_QUERY_SRGBWRITE, asked of CheckDeviceFormat. */
 const USAGE_QUERY_SRGBREAD = 0x00010000;
 const USAGE_QUERY_SRGBWRITE = 0x00040000;
+/**
+ * D3DUSAGE_QUERY_FILTER, whether a texture of the format is filtered by more
+ * than D3DTEXF_POINT, and D3DUSAGE_QUERY_POSTPIXELSHADER_BLENDING, whether a
+ * target of it takes what comes after the pixel shader: the blend, the alpha
+ * test, fog and the colour write mask.
+ */
+const USAGE_QUERY_FILTER = 0x00020000;
+const USAGE_QUERY_POSTPIXELSHADER_BLENDING = 0x00080000;
 
 /** The three states a device is ever in, as far as a program can tell. */
 export const DEVICE_STATE = Object.freeze({
@@ -524,6 +534,21 @@ export function createDirect3D9(options = {}){
             // writes a texture as sRGB, so a program told yes would draw in
             // the wrong space -- told no, it does its own correction or none.
             if ((usage & (USAGE_QUERY_SRGBREAD | USAGE_QUERY_SRGBWRITE)) !== 0)
+            {
+                return D3DERR_NOTAVAILABLE;
+            }
+            // Answered by what the WebGPU format the surface is made in does,
+            // not by what a card of the era did with the format: A32B32G32R32F
+            // narrowed to half floats is filtered and blended, where an
+            // unfiltered answer would only send a program to filter it by hand.
+            // A depth format's filter answer is left as it was; nothing blends
+            // into one.
+            const traits = info.depth ? null : formatTraits(gpuFormatOf(format, 4, 4, true));
+            if ((usage & USAGE_QUERY_FILTER) !== 0 && traits && !traits.filterable)
+            {
+                return D3DERR_NOTAVAILABLE;
+            }
+            if ((usage & USAGE_QUERY_POSTPIXELSHADER_BLENDING) !== 0 && !traits?.blendable)
             {
                 return D3DERR_NOTAVAILABLE;
             }

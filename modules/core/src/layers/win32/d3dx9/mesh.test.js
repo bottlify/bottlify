@@ -234,3 +234,54 @@ test('D3DXConvertMeshSubsetToSingleStrip strips the faces of one attribute', asy
     assert.equal(r.call(api.D3DXConvertMeshSubsetToSingleStrip, [0, 0, 0, out, 0]),
         D3DERR_INVALIDCALL);
 });
+
+test('D3DXValidMesh finds fault with indices past the vertices and an adjacency that does not'
+    + ' agree with itself; D3DXCleanMesh answers a sound mesh with itself', async()=>{
+    const r = deviceRig();
+    /** @type {string[]} */
+    const told = [];
+    const api = /** @type {any} */ (createMeshFunctions(r.host, { giveBuffer: (out, bytes)=>{
+        told.push(String.fromCharCode(...bytes.subarray(0, bytes.length - 1)));
+        r.view.setUint32(out, 0xb0f, true);
+        return 0;
+    } }));
+    const mesh = r.mesh({ declaration: [[0, 0, 2, 0, 0, 0]], stride: 12, vertices: 4,
+        indices: [0, 1, 2, 2, 1, 3] });
+    const adjacency = r.heap.allocate(24);
+    const put = (/** @type {number[]} */ words)=>words.forEach((w, i)=>
+        r.view.setUint32(adjacency + i * 4, w, true));
+    const NO = 0xffffffff;
+    put([NO, 1, NO, 0, NO, NO]);
+    const out = r.heap.allocate(16);
+    r.view.setUint32(out, 0xdead, true);
+    assert.equal(await r.call(api.D3DXValidMesh, [mesh, adjacency, out]), 0);
+    assert.equal(r.view.getUint32(out, true), 0, 'nothing to say');
+    assert.equal(api.D3DXValidMesh.argBytes, 12);
+
+    put([NO, 1, NO, NO, NO, 7]);
+    assert.equal(await r.call(api.D3DXValidMesh, [mesh, adjacency, out]), 0x88760b55);
+    assert.equal(r.view.getUint32(out, true), 0xb0f);
+    assert.deepEqual(told[0].split('\n'), ['face 0 names face 1 as a neighbour, which does not '
+        + 'name it back', 'face 1\'s neighbour 7 is no face of the mesh', '']);
+    assert.equal(r.call(api.D3DXValidMesh, [mesh, 0, out]), D3DERR_INVALIDCALL);
+
+    put([NO, 1, NO, 0, NO, NO]);
+    const adjacencyOut = r.heap.allocate(24);
+    const refs = r.objects.get(mesh).refs;
+    assert.equal(api.D3DXCleanMesh.argBytes, 24);
+    assert.equal(await r.call(api.D3DXCleanMesh, [1, mesh, adjacency, out, adjacencyOut, out + 4]),
+        0);
+    assert.equal(r.view.getUint32(out, true), mesh, 'the same mesh');
+    assert.equal(r.objects.get(mesh).refs, refs + 1, 'a reference the caller releases');
+    assert.deepEqual(Array.from({ length: 6 }, (_, i)=>r.view.getUint32(adjacencyOut + i * 4,
+        true)), [NO, 1, NO, 0, NO, NO]);
+    assert.equal(r.view.getUint32(out + 4, true), 0, 'no messages');
+
+    const broken = r.mesh({ declaration: [[0, 0, 2, 0, 0, 0]], stride: 12, vertices: 2,
+        indices: [0, 1, 2] });
+    put([NO, NO, NO]);
+    assert.equal(await r.call(api.D3DXCleanMesh, [1, broken, adjacency, out, 0, out + 4]),
+        0x88760b55);
+    assert.equal(r.view.getUint32(out, true), 0, 'no mesh out');
+    assert.equal(told.at(-1), 'face 0 uses vertex 2, past the mesh\'s 2\n');
+});

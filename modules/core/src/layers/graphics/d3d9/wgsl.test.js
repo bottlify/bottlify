@@ -206,6 +206,74 @@ test('a cube sampler takes three coordinates, and a sampler read without a dcl i
     assert.match(undeclared.error ?? '', /s2 is read without a declaration/);
 });
 
+test('a texture of fewer than four channels samples the rest as one, at every kind of read', ()=>{
+    // Direct3D 9 samples R16F and R32F as (r, 1, 1, 1) and G16R16F, G32R32F
+    // and G16R16 as (r, g, 1, 1) (Wine's d3d9 visual.c); the GPU keeps them as
+    // r16float and rg16float, which sample green and blue as zero. `ones` says
+    // by sampler which channels to fill, as `sampledOnes` gives them.
+    const one = (/** @type {string} */ read)=>`vec4f(${read}.x, 1.0, 1.0, 1.0)`;
+    const two = (/** @type {string} */ read)=>`vec4f(${read}.xy, 1.0, 1.0)`;
+    const r = REGISTER.TEMP;
+    const s = REGISTER.SAMPLER;
+    const reads = parseShader([PS_3_0, ...dclSampler(0), ...dclSampler(1, 3),
+        op(OPCODE.DCL, 2), (0x80000000 | D3DDECLUSAGE.TEXCOORD) >>> 0, dst(REGISTER.INPUT, 0),
+        op(OPCODE.TEX, 3), dst(r, 0), src(REGISTER.INPUT, 0), src(s, 0),
+        op(OPCODE.TEX, 3, 1), dst(r, 1), src(REGISTER.INPUT, 0), src(s, 0),
+        op(OPCODE.TEX, 3, 2), dst(r, 2), src(REGISTER.INPUT, 0), src(s, 0),
+        op(OPCODE.TEXLDL, 3), dst(r, 3), src(REGISTER.INPUT, 0), src(s, 0),
+        op(OPCODE.TEXLDD, 5), dst(r, 4), src(REGISTER.INPUT, 0), src(s, 0), src(r, 1), src(r, 2),
+        op(OPCODE.TEX, 3), dst(r, 5), src(REGISTER.INPUT, 0), src(s, 1),
+        op(OPCODE.ADD, 3), dst(r, 0), src(r, 0), src(r, 5),
+        op(OPCODE.MOV, 2), dst(REGISTER.COLOROUT, 0), src(r, 0), END_TOKEN]);
+    assert.equal(reads.error, null);
+    const plain = translateShader(reads);
+    assert.equal(plain.error, null);
+    const filled = translateShader(reads, { ones: [0b1100, 0b1110] });
+    assert.equal(filled.error, null);
+    for (const line of [
+        `r0 = ${two('textureSample(tex0, samp0, in.v0.xy)')};`,
+        `r1 = ${two('textureSample(tex0, samp0, (in.v0.xy / in.v0.w))')};`,
+        `r2 = ${two('textureSampleBias(tex0, samp0, in.v0.xy, in.v0.w)')};`,
+        `r3 = ${two('textureSampleLevel(tex0, samp0, in.v0.xy, in.v0.w)')};`,
+        `r4 = ${two('textureSampleGrad(tex0, samp0, in.v0.xy, r1.xy, r2.xy)')};`,
+        `r5 = ${one('textureSample(tex1, samp1, in.v0.xyz)')};`,
+    ])
+    {
+        assertLine(filled.wgsl, line);
+    }
+    // Four channels everywhere is the translation as it always was, to the byte.
+    assert.equal(translateShader(reads, { ones: [0, 0] }).wgsl, plain.wgsl);
+    assert.equal(translateShader(reads, { ones: [] }).wgsl, plain.wgsl);
+    assert.ok(!plain.wgsl.includes(', 1.0, 1.0'));
+
+    // A vertex shader's texldl, by its own sampler number.
+    const vertex = translateShader(parseShader([VS_3_0, ...dclInput(0, 0), ...dclSampler(0),
+        op(OPCODE.DCL, 2), 0x80000000, dst(REGISTER.OUTPUT, 0),
+        op(OPCODE.TEXLDL, 3), dst(r, 0), src(REGISTER.INPUT, 0), src(s, 0),
+        op(OPCODE.MOV, 2), dst(REGISTER.OUTPUT, 0), src(r, 0), END_TOKEN]), { ones: [0b1110] });
+    assert.equal(vertex.error, null);
+    assertLine(vertex.wgsl, `r0 = ${one('textureSampleLevel(tex0, samp0, v0.xy, v0.w)')};`);
+
+    // The 1.x reads, by the stage they read: tex, and texbem's sample at the
+    // moved coordinate, whose offsets are read from the filled red and green.
+    const legacy = translateShader(parseShader([PS_1_1,
+        0x00000042, 0xb00f0000,                 // tex t0
+        0x00000043, 0xb00f0001, 0xb0e40000,     // texbem t1, t0
+        0x00000001, 0x800f0000, 0xb0e40001,     // mov r0, t1
+        END_TOKEN]), { ones: [0b1100, 0b1110] });
+    assert.equal(legacy.error, null);
+    assertLine(legacy.wgsl, `t0 = ${two('textureSample(tex0, samp0, in.t0.xy)')};`);
+    assertLine(legacy.wgsl, `t1 = ${one('textureSample(tex1, samp1, (vec4f(in.t1.xy'
+        + ' + vec2f(dot(t0.xy, c[_bump + 2].xz), dot(t0.xy, c[_bump + 2].yw)),'
+        + ' in.t1.zw)).xy)')};`);
+    const phased = translateShader(parseShader([versionToken(SHADER_KIND.PIXEL, 1, 4),
+        0x00000042, 0x800f0000, 0xb0e40000,     // texld r0, t0
+        END_TOKEN]), { ones: [0b1110] });
+    assert.equal(phased.error, null);
+    assert.ok(phased.wgsl.includes(one('textureSample(tex0, samp0, in.t0.xy)')),
+        phased.wgsl);
+});
+
 test('swizzles, source modifiers, write masks and saturation are honoured', ()=>{
     const r = REGISTER.TEMP;
     const c = REGISTER.CONST;
@@ -407,7 +475,7 @@ test('model 3 names its outputs and inputs by declared semantic', ()=>{
         END_TOKEN]));
     assert.equal(ps.error, null);
     assertLine(ps.wgsl, `@location(${varyingLocation(D3DDECLUSAGE.TEXCOORD, 2)}) v5: vec4f,`);
-    assertLine(ps.wgsl, 'oC1 = vec4f(select(-1.0, 1.0, in.vFace));');
+    assertLine(ps.wgsl, 'oC1 = vec4f(select(1.0, -1.0, in.vFace));');
     assertLine(ps.wgsl, '@location(1) oC1: vec4f,');
 });
 

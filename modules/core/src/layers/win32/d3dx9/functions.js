@@ -20,9 +20,10 @@
  *
  * The ones that build something on a device go through the program's own
  * device's methods: a texture from an image file (`texture.js`), an effect
- * (`effect.js`). Those not built yet -- a mesh, a shape -- answer E_NOTIMPL with
- * the argument width still declared, their out-pointers null, and say so where
- * divergences are told.
+ * (`effect.js`), a mesh (`mesh-object.js`, `shapes.js`). Those not built yet --
+ * the teapot, text, simplification, a UV atlas, a normal map -- answer
+ * E_NOTIMPL with the argument width still declared, their out-pointers null,
+ * and say so where divergences are told.
  *
  * Matrices are row-major, sixteen floats, `m[row * 4 + col]` -- the layout
  * D3DXMATRIX has in memory and the one every function here reads and writes.
@@ -48,6 +49,9 @@ import { createComObject } from '../ole32/objects.js';
 import { createConstantTableObjects } from './constants.js';
 import { createShaderSemantics } from './semantics.js';
 import { createMeshFunctions } from './mesh.js';
+import { createMeshObjects } from './mesh-object.js';
+import { createShapes } from './shapes.js';
+import { createDeclarationFunctions } from './fvf.js';
 import { preprocess, preprocessTracked } from './preprocess.js';
 import { compileShader } from './hlsl-compile.js';
 import { assembleShader, disassembleShader } from './shader-asm.js';
@@ -76,20 +80,11 @@ const IID_ID3DXBUFFER = '{8BA5FB08-5195-40E2-AC58-0D989C3A0102}';
  * @type {Record<string, number[]>}
  */
 const NOT_BUILT = {
-    D3DXCleanMesh: [24, 3, 5],
     D3DXComputeNormalMap: [24],
-    D3DXCreateBox: [24, 4, 5],
-    D3DXCreateCylinder: [32, 6, 7],
-    D3DXCreateMesh: [24, 5],
-    D3DXCreateMeshFVF: [24, 5],
-    D3DXCreatePolygon: [20, 3, 4],
-    D3DXCreateSphere: [24, 4, 5],
     D3DXCreateTeapot: [12, 1, 2],
     D3DXCreateTextA: [32, 5, 6],
-    D3DXCreateTorus: [28, 5, 6],
     D3DXSimplifyMesh: [28, 6],
     D3DXUVAtlasPartition: [68, 11, 12, 13, 14],
-    D3DXValidMesh: [12, 2],
 };
 
 
@@ -337,6 +332,7 @@ export function createD3dxFunctions(host, options = {}){
         }
     };
 
+    const meshes = createMeshObjects(host, { giveBuffer });
     const constantTables = createConstantTableObjects(host);
     const effects = createEffects(host, { giveBuffer, macrosAt,
         includer: include=>includer(include),
@@ -716,7 +712,16 @@ export function createD3dxFunctions(host, options = {}){
         ...createShaderSemantics(host),
 
         /** See mesh.js. */
-        ...createMeshFunctions(host),
+        ...createMeshFunctions(host, { giveBuffer }),
+
+        /** See mesh-object.js. */
+        ...meshes.exports,
+
+        /** See shapes.js. */
+        ...createShapes(host, meshes, { giveBuffer }),
+
+        /** See fvf.js. */
+        ...createDeclarationFunctions(host),
 
         /** See texture-tools.js. */
         ...createTextureTools(host),

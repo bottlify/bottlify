@@ -89,6 +89,22 @@ test('a path this layer cannot address is refused rather than half-parsed', ()=>
     assert.throws(()=>parsePath('C:\\a\\b:c'), { code: 'INVALID_PATH' });
 });
 
+test('a \\\\?\\ path is taken as written: one divider, no trimming, no devices', ()=>{
+    // The Win32 file namespace turns the parsing off (Naming Files, Paths, and Namespaces).
+    assert.deepEqual(parsePath('\\\\?\\C:\\Documents and Settings\\User'),
+        { drive: 'C', rooted: true, components: ['Documents and Settings', 'User'],
+            device: null, wildcard: false });
+    assert.deepEqual(parsePath('\\\\?\\c:').components, []);
+    assert.deepEqual(parsePath('\\\\?\\C:\\a.\\nul ').components, ['a.', 'nul ']);
+    assert.equal(parsePath('\\\\?\\C:\\a\\nul').device, null);
+    assert.equal(parsePath('\\\\?\\C:\\a\\*.txt').wildcard, true);
+    // A slash is a character there, and no name holds one; a dot is a name, not a step.
+    assert.throws(()=>parsePath('\\\\?\\C:\\a/b'), { code: 'INVALID_PATH' });
+    assert.throws(()=>parsePath('\\\\?\\C:\\a\\..\\b'), { code: 'INVALID_PATH' });
+    assert.throws(()=>parsePath('\\\\?\\UNC\\server\\share'), { code: 'INVALID_PATH' });
+    assert.throws(()=>parsePath('\\\\?\\'), { code: 'INVALID_PATH' });
+});
+
 test('a wildcard is reported and kept verbatim', ()=>{
     assert.equal(parsePath('C:\\Game\\*.exe').wildcard, true);
     assert.equal(parsePath('C:\\Game\\file.exe').wildcard, false);

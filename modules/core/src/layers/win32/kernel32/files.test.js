@@ -884,6 +884,16 @@ test('SearchPathA walks the documented order, adds an extension, and reports the
         'and its file part is in characters of two bytes');
 });
 
+test('a \\\\?\\ path is its own full path, handed back as written', ()=>{
+    // That namespace turns the parsing off, GetFullPathName's included.
+    const { memory, fns, at } = setup();
+    const written = fns.GetFullPathNameA.handler(
+        [at(NAME, '\\\\?\\C:\\GAME\\..\\x'), 0x40, OUT_TEXT, OUT_PART]);
+    assert.equal(memory.string(OUT_TEXT), '\\\\?\\C:\\GAME\\..\\x');
+    assert.equal(written, '\\\\?\\C:\\GAME\\..\\x'.length);
+    assert.equal(memory.string(memory.dword(OUT_PART)), 'x');
+});
+
 test('a path ending in a separator has no file part', ()=>{
     const { memory, fns, at } = setup();
 

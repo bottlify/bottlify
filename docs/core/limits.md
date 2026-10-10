@@ -79,6 +79,16 @@ differently raises a `divergence` event naming the API.
 - DXT textures are decoded on the CPU unless `graphics.compressedTextures` is on and the GPU has
   `texture-compression-bc`.
 - Shaders and pipelines are cached in memory only; every run builds them again.
+- Direct3D 9 claims vertex and pixel shader model 3.0. Not offered: user clip planes
+  (`MaxUserClipPlanes` is 0), the border and mirror-once address modes, a mip level-of-detail
+  bias (`D3DTSS_MIPMAPLODBIAS` is read but not applied), the per-stage constant and temporary
+  register of the texture stages; a draw from a stream whose offset is not a whole vertex of its
+  stride is refused.
+- Direct3D 9's 32-bit float formats are kept as half floats, and A16B16G16R16/G16R16 as half
+  floats of their value.
+- The engine's own `d3dx9` reads BMP, DDS and TGA images, not JPEG or PNG; `D3DXCreateTeapot`,
+  `D3DXCreateTextA`, `D3DXSimplifyMesh`, `D3DXUVAtlasPartition` and `D3DXComputeNormalMap` answer
+  `E_NOTIMPL`.
 - No DirectX redistributables ship with the engine: a program brings `d3dx9_*`, XAudio2 and the rest
   itself (its installer's DirectX setup, or the DLLs beside its exe); without them the engine's own
   `d3dx9` table answers.

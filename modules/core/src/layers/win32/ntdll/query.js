@@ -75,6 +75,9 @@ const PROCESS_BASIC = Object.freeze({
 /** The information classes answered here. */
 const SYSTEM_BASIC_INFORMATION = 0;
 const SYSTEM_PROCESS_INFORMATION = 5;
+/** The class NtSetSystemInformation takes here, and its structure's size on 32-bit Windows. */
+const SYSTEM_FILECACHE_INFORMATION = 21;
+const SYSTEM_FILECACHE_SIZE = 36;
 
 /**
  * SYSTEM_PROCESS_INFORMATION as 32-bit Windows lays it out, one per process,
@@ -441,6 +444,33 @@ export function createQueryFunctions(host){
                 view.setUint8(SYSTEM_BASIC.PROCESSOR_COUNT, PROCESSOR_COUNT);
                 host.writeMemory(buffer >>> 0, struct);
                 return STATUS.SUCCESS;
+            },
+        },
+
+        /**
+         * NTSTATUS NtSetSystemInformation(SYSTEM_INFORMATION_CLASS SystemInformationClass,
+         *                                 PVOID SystemInformation,
+         *                                 ULONG SystemInformationLength)
+         *
+         * SystemFileCacheInformation sets the bounds of the system's file cache, which a
+         * program of the period asks to lift before it streams its data. The files here
+         * are read through the volume, which keeps no cache a program could bound, so a
+         * well-formed request is taken and changes nothing; any other class is one this
+         * engine has no system setting for.
+         */
+        NtSetSystemInformation: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([infoClass, buffer, length])=>{
+                if ((infoClass >>> 0) !== SYSTEM_FILECACHE_INFORMATION)
+                {
+                    return STATUS.INVALID_INFO_CLASS;
+                }
+                if ((length >>> 0) !== SYSTEM_FILECACHE_SIZE)
+                {
+                    return STATUS.INFO_LENGTH_MISMATCH;
+                }
+                return (buffer >>> 0) === 0 ? STATUS.ACCESS_VIOLATION : STATUS.SUCCESS;
             },
         },
 

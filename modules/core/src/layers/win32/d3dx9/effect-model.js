@@ -18,16 +18,18 @@
  * one entry point (`hlsl-compile.js`) over the same source and the same included
  * files, its arguments bound to the uniform parameters of `f`.
  *
- * What fxc would read but this does not -- an `asm { }` shader, a state this table
- * does not list, a state value that is an expression of parameters (fxc's preshader)
- * -- is said in the messages as a warning and left out, rather than refusing the
- * whole effect; a pass whose shader does not compile makes its technique invalid,
- * which is what ValidateTechnique and FindNextValidTechnique report.
+ * An `asm { }` shader is assembled where it stands. What fxc would read but this does
+ * not -- a state this table does not list, a state value that is an expression of
+ * parameters (fxc's preshader) -- is said in the messages as a warning and left out,
+ * rather than refusing the whole effect; a pass whose shader does not compile or
+ * assemble makes its technique invalid, which is what ValidateTechnique and
+ * FindNextValidTechnique report.
  */
 
 import { preprocessTracked } from './preprocess.js';
 import { HlslError, formatDiagnostic } from './hlsl-lexer.js';
 import { parse } from './hlsl-parser.js';
+import { assembleShader } from './shader-asm.js';
 import { check } from './hlsl-check.js';
 import { D3DXSHADER, compileShader, withLineMarkers } from './hlsl-compile.js';
 import { arrayOf, flatBases, flattenValue, fromTypeRef, scalarCount } from './hlsl-types.js';
@@ -677,8 +679,8 @@ export async function buildEffect(source, options = {}){
      * @returns {number}
      */
     const shaderFor = expr=>{
-        const key = JSON.stringify([expr.target, expr.callee, expr.args], (k, v)=>(k === 'pos'
-            ? undefined : v));
+        const key = JSON.stringify([expr.target, expr.callee, expr.args, expr.asm ?? null],
+            (k, v)=>(k === 'pos' ? undefined : v));
         const known = shaderKeys.get(key);
         if (known !== undefined)
         {
@@ -691,8 +693,25 @@ export async function buildEffect(source, options = {}){
         shaderKeys.set(key, index);
         if (expr.target === 'asm')
         {
-            messages.push(`${posText(expr)}: warning X4710: a shader in an asm block is not `
-                + 'assembled by this layer; its technique is not valid');
+            const shader = shaders[index];
+            const { tokens, errors } = assembleShader(expr.asm ?? '');
+            if (tokens)
+            {
+                // The version token names the kind and the model: 0xFFFF pixel, 0xFFFE vertex.
+                const version = tokens[0];
+                shader.pixel = version >>> 16 === 0xffff;
+                shader.profile = `${shader.pixel ? 'ps' : 'vs'}_${(version >>> 8) & 0xff}_`
+                    + `${version & 0xff}`;
+                shader.tokens = tokens;
+            }
+            // An assembly that fails leaves its technique invalid, as a compile that fails.
+            shader.messages = errors.map(e=>`${posText(expr)}: asm line ${e.line}: error `
+                + `X5000: ${e.message}`).join('\n');
+            for (const line of errors.map(e=>`${posText(expr)}: asm line ${e.line}: warning `
+                + `X5000: ${e.message}`))
+            {
+                messages.push(line);
+            }
             return index;
         }
         pending.push({ index, args: expr.args });
@@ -721,13 +740,24 @@ export async function buildEffect(source, options = {}){
             messages.push(`memory: warning X4717: annotation '${a.name}': unknown type`);
             return [];
         }
-        for (const dim of [...(a.dims ?? [])].reverse())
+        const value = literalOf(a.value);
+        const dims = [...(a.dims ?? [])].reverse();
+        for (const [at, dim] of dims.entries())
         {
-            const length = literalOf(dim)?.numbers[0] ?? 1;
+            let length = literalOf(dim)?.numbers[0] ?? 1;
+            if (length < 0 && at === dims.length - 1)
+            {
+                // `int list[] = {...}`: the outermost length is the list's.
+                // Left open it reads as four billion elements, and a program
+                // sizing an allocation by it asks for a negative size.
+                const per = type.kind === 'string' ? 1 : Math.max(1, scalarCount(type));
+                const count = type.kind === 'string' ? value?.strings.length ?? 0
+                    : value?.numbers.length ?? 0;
+                length = Math.max(1, Math.ceil(count / per));
+            }
             type = arrayOf(type, length);
         }
         const model = shapeOf(type, a.type, a.name, null, PARAMETER.ANNOTATION);
-        const value = literalOf(a.value);
         if (value)
         {
             setInit(model, slotsFor(type, value.numbers, value.strings));
