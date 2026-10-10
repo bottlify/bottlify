@@ -1747,6 +1747,27 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
     };
 
     /**
+     * Whether a surface is one the renderer keeps on the GPU, as it decides
+     * (`onGpu` in d3d8/render.js): a colour surface that is a texture's level
+     * or a render target.
+     *
+     * @param {any} surface
+     */
+    const drawnOnGpu = surface=>{
+        const desc = describe(surface);
+        return !FORMAT_INFO[desc.Format].depth
+            && (Boolean(surface.container) || (desc.Usage & D3DUSAGE.RENDERTARGET) !== 0);
+    };
+
+    /**
+     * Two surfaces the GPU holds in one texture, which it cannot draw from one
+     * into the other.
+     *
+     * @param {any} a @param {any} b
+     */
+    const oneTexture = (a, b)=>a === b || (Boolean(a.container) && a.container === b.container);
+
+    /**
      * A surface that lives on the GPU: what was drawn into it is not in the
      * guest's bytes, and a copy out of those bytes copies something else.
      *
@@ -4170,6 +4191,16 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                     { x: target.left, y: target.top }))
                     || renderer?.stretchSurface?.(source, rect, destination, target,
                         filter >= D3DTEXF_LINEAR))
+                {
+                    out.moves = [];
+                    return D3D_OK;
+                }
+                // Recording for a device that draws elsewhere, there is no
+                // renderer here to ask: the played one draws the stretch
+                // whenever both sides are its GPU's and not one texture, and
+                // the program is answered as it will be.
+                if (services.renderedElsewhere === true && drawnOnGpu(source)
+                    && drawnOnGpu(destination) && !oneTexture(source, destination))
                 {
                     out.moves = [];
                     return D3D_OK;

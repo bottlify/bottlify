@@ -57,6 +57,8 @@ const GETDATA_FLUSH = 1;
 const SBT_ALL = 1;
 /** D3DTEXF_POINT. */
 const TEXF_POINT = 1;
+/** D3DTEXF_LINEAR. */
+const TEXF_LINEAR = 2;
 /** D3DCUBEMAP_FACE_NEGATIVE_X. */
 const FACE_NEGATIVE_X = 1;
 
@@ -1024,6 +1026,11 @@ test('Direct3D 9: the copies between surfaces -- UpdateSurface, UpdateTexture, S
             await run.call('StretchRect back into drawn', ()=>device.StretchRect(back.surface,
                 { left: 0, top: 0, right: 16, bottom: 16 }, drawnLevel.surface,
                 { left: 16, top: 16, right: 32, bottom: 32 }, TEXF_POINT));
+            // Scaled, which only the device that draws can do: the one that
+            // records for it answers as that one will.
+            await run.call('StretchRect back scaled into drawn', ()=>device.StretchRect(
+                back.surface, { left: 0, top: 0, right: 32, bottom: 32 }, drawnLevel.surface,
+                { left: 0, top: 0, right: 16, bottom: 16 }, TEXF_LINEAR));
             await run.call('StretchRect drawn into plain', ()=>device.StretchRect(
                 drawnLevel.surface, null, plainVideo.surface, null, TEXF_POINT));
             await run.call('ColorFill plain', ()=>device.ColorFill(plainVideo.surface,
