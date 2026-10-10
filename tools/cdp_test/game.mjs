@@ -28,7 +28,7 @@
  *                                  [--cpu-profile SECONDS] [--heap-profile [old]]
  *                                  [--export-translations FILE]
  *                                  [--watch SECONDS] [--press LABEL|LABEL... [--press-settle MS]]
- *                                  [--route]
+ *                                  [--route] [--shots-every SECONDS]
  *
  * `--watch S` is for a program that does not present, an installer above
  * all: every S seconds the desktop it paints with GDI is written as a PNG,
@@ -267,6 +267,7 @@ function parse(argv){
         // The frame this many frames after the last long stall, written beside
         // the report as game-<stamp>-snap.png: a demo's frame N in every run.
         snapFrame: number('--snap-frame', 0),
+        shotsEvery: number('--shots-every', 0),
         snapFromStart: argv.includes('--snap-from-start'),
         // With it, this many frames from it, --snap-every apart, each written
         // as game-<stamp>-snap-<frame>.png.
@@ -1760,6 +1761,29 @@ export async function game(options){
                 }, ()=>{});
             }, 30000)
             : null;
+        // `--shots-every S`: the page as it stands every S seconds, written at
+        // once, so a run that never comes back still leaves what it showed.
+        const shotsStamp = new Date().toISOString().replace(/[:.]/g, '-');
+        let shooting = false;
+        const shotsTimer = options.shotsEvery > 0
+            ? setInterval(()=>{
+                if (shooting)
+                {
+                    return;
+                }
+                shooting = true;
+                const at = Math.round((Date.now() - startedAt) / 1000);
+                cdp.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true },
+                    sessionId).then(shot=>{
+                    const path = join(REPORTS_DIR,
+                        `game-${shotsStamp}-at-${String(at).padStart(5, '0')}s.png`);
+                    writeFileSync(path, Buffer.from(shot.data, 'base64'));
+                    console.log(`  shot at ${at} s: ${path}`);
+                }, ()=>{}).finally(()=>{
+                    shooting = false;
+                });
+            }, options.shotsEvery * 1000)
+            : null;
         let result;
         try
         {
@@ -1832,6 +1856,10 @@ the run as it stands: ${path}`;
             if (deviceTimer !== null)
             {
                 clearInterval(deviceTimer);
+            }
+            if (shotsTimer !== null)
+            {
+                clearInterval(shotsTimer);
             }
             if (watchTimer !== null)
             {
