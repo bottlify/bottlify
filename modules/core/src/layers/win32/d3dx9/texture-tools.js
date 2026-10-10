@@ -6,7 +6,8 @@
 
 import { DEVICE, TEXTURE, createDeviceCalls } from './device.js';
 import { D3DX_DEFAULT } from './texture.js';
-import { FMT, encodeTexels, isCompressed, isSupported, layoutOf } from './pixels.js';
+import { FMT, decodeTexels, encodeTexels, halve, isCompressed, isSupported, layoutOf, resample }
+    from './pixels.js';
 import { D3DXFloat32To16Array } from './inguest-vector.js';
 
 /**
@@ -29,6 +30,13 @@ import { D3DXFloat32To16Array } from './inguest-vector.js';
  * level, at the texel's centre, and writes what it answers in the level's
  * format: the formats the loaders write (pixels.js), through eight bits a
  * channel, and the floating-point ones, from the floats as they are.
+ *
+ * D3DXFilterTexture makes each level below the one it is given from the level
+ * above it -- each face's, for a cube texture -- through the levels' locks, in
+ * the formats pixels.js reads and writes: a box filter (pixels.js's `halve`)
+ * for D3DX_DEFAULT and the box, linear and triangle filters, which at a ratio
+ * of two take the same two by two texels, and a texel picked for NONE and
+ * POINT.
  */
 
 const D3D_OK = 0;
@@ -40,6 +48,15 @@ const D3DPTEXTURECAPS_SQUAREONLY = 0x20;
 const D3DPTEXTURECAPS_NONPOW2CONDITIONAL = 0x100;
 const D3DUSAGE_AUTOGENMIPMAP = 0x400;
 const D3DSURFACE_DESC_BYTES = 32;
+const E_NOTIMPL = 0x80004001;
+const D3DLOCK_READONLY = 0x10;
+const D3DRTYPE_TEXTURE = 3;
+const D3DRTYPE_VOLUMETEXTURE = 4;
+const D3DRTYPE_CUBETEXTURE = 5;
+/** D3DX_FILTER_NONE to D3DX_FILTER_BOX: the low byte of a filter; the rest are flags. */
+const D3DX_FILTER_NONE = 1;
+const D3DX_FILTER_POINT = 2;
+const D3DX_FILTER_BOX = 5;
 
 /** The floating-point formats a fill writes: bytes a channel, and how many channels. */
 const FLOATS = new Map([[111, [2, 1]], [112, [2, 2]], [113, [2, 4]], [114, [4, 1]],
@@ -316,6 +333,114 @@ export function createTextureTools(host){
         }
     };
 
+    /**
+     * D3DXFilterTexture's work, once its handler has returned.
+     *
+     * @param {number} texture @param {number} source @param {number} filter @param {any} thread
+     * @returns {Promise<number>}
+     */
+    const filterTexture = async(texture, source, filter, thread)=>{
+        await null;
+        const api = 'D3DXFilterTexture';
+        const type = await method(thread, texture, TEXTURE.GetType, []);
+        if (type === D3DRTYPE_VOLUMETEXTURE)
+        {
+            host.divergence?.(api, 'a volume texture is not filtered: answered E_NOTIMPL');
+            return E_NOTIMPL;
+        }
+        if (type !== D3DRTYPE_TEXTURE && type !== D3DRTYPE_CUBETEXTURE)
+        {
+            return D3DERR_INVALIDCALL;
+        }
+        const levels = await method(thread, texture, TEXTURE.GetLevelCount, []);
+        const top = source === D3DX_DEFAULT ? 0 : source;
+        if (top >= levels)
+        {
+            return D3DERR_INVALIDCALL;
+        }
+        const heap = /** @type {NonNullable<TextureToolsHost['heap']>} */ (host.heap);
+        const scratch = heap.allocate(D3DSURFACE_DESC_BYTES + 8);
+        if (scratch === 0)
+        {
+            return E_OUTOFMEMORY;
+        }
+        const locked = scratch + D3DSURFACE_DESC_BYTES;
+        const picked = filter !== D3DX_DEFAULT && (filter & 0xff) <= D3DX_FILTER_POINT;
+        try
+        {
+            /** @type {{ format: number, width: number, height: number }[]} */
+            const described = [];
+            for (let level = top; level < levels; level++)
+            {
+                const answer = await method(thread, texture, TEXTURE.GetLevelDesc,
+                    [level, scratch]);
+                if (answer !== D3D_OK)
+                {
+                    return answer;
+                }
+                described[level] = { format: u32(scratch), width: u32(scratch + 24),
+                    height: u32(scratch + 28) };
+            }
+            const { format } = described[top];
+            if (!isSupported(format))
+            {
+                host.divergence?.(api, `format ${format} is not one a filter reads: answered `
+                    + 'E_NOTIMPL');
+                return E_NOTIMPL;
+            }
+            for (let face = 0; face < (type === D3DRTYPE_CUBETEXTURE ? 6 : 1); face++)
+            {
+                // A cube texture's LockRect and UnlockRect name the face first.
+                const which = type === D3DRTYPE_CUBETEXTURE ? [face] : [];
+                /** The level read is locked only to read. @param {number} level */
+                const lock = level=>method(thread, texture, TEXTURE.LockRect,
+                    [...which, level, locked, 0, level === top ? D3DLOCK_READONLY : 0]);
+                /** @type {Uint8Array | null} */
+                let bgra = null;
+                for (let level = top; level < levels; level++)
+                {
+                    const { width, height } = described[level];
+                    const { rowBytes, rows } = layoutOf(format, width, height);
+                    const answer = await lock(level);
+                    if (answer !== D3D_OK)
+                    {
+                        return answer;
+                    }
+                    const pitch = u32(locked);
+                    const bits = u32(locked + 4);
+                    if (bgra === null)
+                    {
+                        const packed = new Uint8Array(rowBytes * rows);
+                        for (let row = 0; row < rows; row++)
+                        {
+                            packed.set(host.readMemory(bits + row * pitch, rowBytes),
+                                row * rowBytes);
+                        }
+                        bgra = decodeTexels(format, packed, width, height);
+                    }
+                    else
+                    {
+                        const above = described[level - 1];
+                        bgra = picked ? resample(bgra, above.width, above.height, width, height)
+                            : halve(bgra, above.width, above.height).bgra;
+                        const bytes = encodeTexels(format, bgra, width, height);
+                        for (let row = 0; row < rows; row++)
+                        {
+                            host.writeMemory(bits + row * pitch,
+                                bytes.subarray(row * rowBytes, (row + 1) * rowBytes));
+                        }
+                    }
+                    await method(thread, texture, TEXTURE.UnlockRect, [...which, level]);
+                }
+            }
+            return D3D_OK;
+        }
+        finally
+        {
+            heap.free(scratch);
+        }
+    };
+
     return {
         /**
          * HRESULT D3DXCheckTextureRequirements(LPDIRECT3DDEVICE9 pDevice, UINT *pWidth,
@@ -399,6 +524,30 @@ export function createTextureTools(host){
                     return D3DERR_INVALIDCALL;
                 }
                 return fillTexture(texture >>> 0, fill >>> 0, data, host.currentThread?.());
+            },
+        },
+
+        /**
+         * HRESULT D3DXFilterTexture(LPDIRECT3DBASETEXTURE9 pBaseTexture,
+         *     const PALETTEENTRY *pPalette, UINT SrcLevel, DWORD MipFilter)
+         *
+         * SrcLevel D3DX_DEFAULT is the first level; a level the texture does
+         * not have, or a filter that is none of D3DX_DEFAULT and NONE to BOX,
+         * is refused.
+         */
+        D3DXFilterTexture: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([texture, , source, filter])=>{
+                const kind = filter & 0xff;
+                if ((texture >>> 0) === 0 || !host.callGuest || !host.heap
+                    || ((filter >>> 0) !== D3DX_DEFAULT
+                        && (kind < D3DX_FILTER_NONE || kind > D3DX_FILTER_BOX)))
+                {
+                    return D3DERR_INVALIDCALL;
+                }
+                return filterTexture(texture >>> 0, source >>> 0, filter >>> 0,
+                    host.currentThread?.());
             },
         },
     };

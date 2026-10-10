@@ -136,3 +136,60 @@ test('D3DXFillTexture writes float formats from the floats, halves as the librar
         assert.equal(await r.call(tools.D3DXFillTexture, [odd, fill, 0]), D3DERR_INVALIDCALL);
         assert.equal(r.diverged.at(-1)?.[0], 'D3DXFillTexture');
     });
+
+/** A surface's texels, packed. @param {ReturnType<typeof deviceRig>} r @param {number} at */
+const texelsOf = (r, at)=>{
+    const surface = r.objects.get(at);
+    return [...r.memory.subarray(surface.data, surface.data + surface.pitch * surface.height)];
+};
+
+test('D3DXFilterTexture makes each level below the source from the one above, a box of two by'
+    + ' two', async()=>{
+    const r = deviceRig();
+    const tools = /** @type {any} */ (createTextureTools(r.host));
+    const texture = r.texture(4, 2, 0, 0, FMT.A8R8G8B8, 1);
+    const [top, second, third] = r.objects.get(texture).surfaces;
+    r.memory.set([0, 0, 0, 0, 4, 8, 12, 16, 100, 100, 100, 100, 50, 50, 50, 50,
+        8, 8, 8, 8, 4, 0, 4, 0, 0, 0, 0, 0, 10, 10, 10, 10], r.objects.get(top).data);
+    r.memory.fill(0xee, r.objects.get(third).data, r.objects.get(third).data + 4);
+    assert.equal(tools.D3DXFilterTexture.argBytes, 16);
+    assert.equal(await r.call(tools.D3DXFilterTexture, [texture, 0, D3DX_DEFAULT,
+        D3DX_DEFAULT]), 0);
+    assert.deepEqual(texelsOf(r, second), [4, 4, 6, 6, 40, 40, 40, 40], 'each the mean, rounded');
+    assert.deepEqual(texelsOf(r, third), [22, 22, 23, 23], 'from the second, not the first');
+    assert.deepEqual(r.calls.filter(c=>c[0] === 'LockRect').map(c=>[c[1], c[4]]),
+        [[0, 0x10], [1, 0], [2, 0]], 'the source only read');
+
+    r.memory.fill(0, r.objects.get(third).data, r.objects.get(third).data + 4);
+    assert.equal(await r.call(tools.D3DXFilterTexture, [texture, 0, 1, 5]), 0);
+    assert.deepEqual(texelsOf(r, third), [22, 22, 23, 23], 'from level one down');
+    assert.deepEqual(texelsOf(r, top).slice(0, 4), [0, 0, 0, 0], 'the source untouched');
+});
+
+test('D3DXFilterTexture filters every face of a cube texture and refuses what it cannot',
+    async()=>{
+        const r = deviceRig();
+        const tools = /** @type {any} */ (createTextureTools(r.host));
+        const cube = r.cubeTexture(2, 2, 0, FMT.X8R8G8B8, 1);
+        const faces = r.objects.get(cube).faces;
+        faces.forEach((/** @type {number[]} */ levels, /** @type {number} */ n)=>
+            r.memory.fill(n * 10, r.objects.get(levels[0]).data,
+                r.objects.get(levels[0]).data + 16));
+        assert.equal(await r.call(tools.D3DXFilterTexture, [cube, 0, 0, 2]), 0);
+        faces.forEach((/** @type {number[]} */ levels, /** @type {number} */ n)=>
+            assert.deepEqual(texelsOf(r, levels[1]), [n * 10, n * 10, n * 10, 255],
+                `face ${n}, made opaque as X8R8G8B8 is`));
+        assert.ok(r.calls.some(c=>c[0] === 'LockRect' && c[1] === 5 && c[2] === 1),
+            'the face named before the level');
+
+        const texture = r.texture(2, 2, 2, 0, FMT.A8R8G8B8, 1);
+        assert.equal(await r.call(tools.D3DXFilterTexture, [texture, 0, 2, D3DX_DEFAULT]),
+            D3DERR_INVALIDCALL, 'no third level');
+        assert.equal(r.call(tools.D3DXFilterTexture, [texture, 0, 0, 0]), D3DERR_INVALIDCALL,
+            'no filter');
+        assert.equal(r.call(tools.D3DXFilterTexture, [texture, 0, 0, 6]), D3DERR_INVALIDCALL);
+        assert.equal(r.call(tools.D3DXFilterTexture, [0, 0, 0, 5]), D3DERR_INVALIDCALL);
+        const floats = r.texture(2, 2, 2, 0, 116, 1);
+        assert.equal(await r.call(tools.D3DXFilterTexture, [floats, 0, 0, 5]), 0x80004001);
+        assert.match(r.diverged.flat().join(' '), /format 116 is not one a filter reads/);
+    });

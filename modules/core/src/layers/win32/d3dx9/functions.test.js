@@ -163,7 +163,7 @@ const NOT_BUILT = {
     D3DXCreateMesh: [6, 5],
     D3DXCreateMeshFVF: [6, 5], D3DXCreatePolygon: [5, 3, 4], D3DXCreateSphere: [6, 4, 5],
     D3DXCreateTeapot: [3, 1, 2], D3DXCreateTextA: [8, 5, 6],
-    D3DXCreateTorus: [7, 5, 6], D3DXFilterTexture: [4],
+    D3DXCreateTorus: [7, 5, 6],
     D3DXSaveSurfaceToFileInMemory: [5, 0],
     D3DXSimplifyMesh: [7, 6], D3DXUVAtlasPartition: [17, 11, 12, 13, 14], D3DXValidMesh: [3, 2],
 };
@@ -232,6 +232,7 @@ const BUILT = {
     D3DXCheckTextureRequirements: 7, D3DXComputeBoundingBox: 5, D3DXComputeBoundingSphere: 5,
     D3DXComputeNormals: 2, D3DXConvertMeshSubsetToSingleStrip: 5, D3DXCreateLine: 2,
     D3DXCreateRenderToSurface: 7, D3DXCreateTexture: 8, D3DXFillTexture: 3,
+    D3DXFilterTexture: 4,
     D3DXGetShaderVersion: 1, D3DXSaveTextureToFileA: 4, D3DXSaveTextureToFileW: 4,
     D3DXSaveTextureToFileInMemory: 4,
     D3DXCreateTextureFromFileA: 3, D3DXCreateTextureFromFileW: 3,

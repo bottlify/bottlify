@@ -115,7 +115,6 @@ const NOT_BUILT = {
     D3DXCreateTeapot: [12, 1, 2],
     D3DXCreateTextA: [32, 5, 6],
     D3DXCreateTorus: [28, 5, 6],
-    D3DXFilterTexture: [16],
     D3DXSaveSurfaceToFileA: [20],
     D3DXSaveSurfaceToFileInMemory: [20, 0],
     D3DXSimplifyMesh: [28, 6],
