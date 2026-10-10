@@ -316,6 +316,9 @@ export function createCpuModule(){
                 // hundreds of megabytes of it. Must stay a power of two -- the
                 // emulator requires it.
                 memorySize: config?.memorySize ?? DEFAULT_MEMORY_SIZE,
+                // A gone process's memory, taken in place of a new one where it
+                // fits (`CorkHostConfig.reused`).
+                reused: config?.reused,
                 // The translator's module, imported at boot for `cork`.
                 engineUrl: config?.engineUrl ?? null,
                 /** @type {import('./engine.js').EngineConfig} */
@@ -479,7 +482,8 @@ export function createCpuModule(){
                             noExecuteBelow: settings.noExecuteBelow,
                             executors: settings.executors,
                         };
-                        state.host = createCorkHost({ ...hostConfig, engine: engineModule });
+                        state.host = createCorkHost({ ...hostConfig, engine: engineModule,
+                            reused: settings.reused });
                         if (several)
                         {
                             // What crosses to a worker is data: the translation store
@@ -782,6 +786,14 @@ export function createCpuModule(){
                  * @returns {Uint8Array | null}
                  */
                 ramView: ()=>started().ramView?.() ?? null,
+                /**
+                 * The engine's whole memory, for a process that takes it once
+                 * this one has gone (`CorkHostConfig.reused`); null under an
+                 * engine that keeps none of its own, or before boot.
+                 *
+                 * @returns {WebAssembly.Memory | null}
+                 */
+                wasmMemory: ()=>state.host?.wasmMemory?.() ?? null,
                 /** @param {string} name @param {number} value */
                 writeReg32: (name, value)=>started().writeReg32(name, value),
 

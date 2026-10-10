@@ -136,6 +136,12 @@ const hex = (value, width = 8)=>(value >>> 0).toString(16).padStart(width, '0');
  *     block is at the start of the memory.
  * @property {WebAssembly.Memory} [memory]  The memory, made by the host of another executor of
  *     the process (`wasmMemory`) -- shared, sized for `executors` -- rather than one of its own.
+ * @property {{ memory: WebAssembly.Memory, guestEnd: number }} [reused]  The memory of a
+ *     process that has gone, taken instead of a new one where it is the size this host would
+ *     make: a finished process's memory is freed only by a garbage collection nothing prompts,
+ *     and a parent starting one short-lived child after another would otherwise hold one
+ *     memory per child. Below `guestEnd` the guest may have written, and that is zeroed with
+ *     the engine's own pages; above it the guest's memory is as it was made.
  */
 
 /**
@@ -154,7 +160,8 @@ export const CORK_TSC_MHZ = 3000;
  */
 export function createCorkHost(config){
     const { engine, memorySize, trapPort, entryVector, initialStack, cork: corkConfig,
-        closedBelow = 0, noExecuteBelow = 0, executors = 1, executor = 0, memory: given } = config;
+        closedBelow = 0, noExecuteBelow = 0, executors = 1, executor = 0, memory: given,
+        reused } = config;
     // Where code may run from: a closed range runs nothing either.
     const runsFrom = Math.max(closedBelow, noExecuteBelow) >>> 0;
     for (const name of ENGINE_EXPORTS)
@@ -216,7 +223,22 @@ export function createCorkHost(config){
         throw new Error(`cpu: a memory of ${given.buffer.byteLength} bytes has no room for`
             + ` ${executors} executors`);
     }
-    const memory = given ?? new WebAssembly.Memory({ initial: pages, maximum: pages, shared });
+    const taken = given === undefined && reused !== undefined && executors === 1
+        && reused.memory.buffer.byteLength === pages * 65536
+        && (reused.memory.buffer instanceof SharedArrayBuffer) === shared
+        ? reused.memory : undefined;
+    const memory = given ?? taken
+        ?? new WebAssembly.Memory({ initial: pages, maximum: pages, shared });
+    if (taken !== undefined)
+    {
+        // A new memory is zero; this one is made so where it was used: its
+        // state block and the guest's RAM up to where the guest was given
+        // memory, and the engine's tables past the RAM.
+        const bytes = new Uint8Array(memory.buffer);
+        const guestEnd = Math.min(Math.max(reused?.guestEnd ?? memorySize, 0), memorySize);
+        bytes.fill(0, 0, own.ramBase + guestEnd);
+        bytes.fill(0, own.ramBase + memorySize);
+    }
 
     // The memory is fixed (initial === maximum), so the buffer never detaches
     // and the views are taken once.

@@ -156,6 +156,7 @@ const OWN = Symbol('guest heap');
  * @property {(address: number, bytes: number) => boolean} resize
  * @property {() => { base: number, size: number }[]} freeSpans
  * @property {(owner: any) => number[]} owned
+ * @property {() => number} handedTo  the first arena address never inside a block
  * @property {() => { blocks: number, used: number, free: number, largestFree: number }}
  *     diagnostics
  */
@@ -653,6 +654,7 @@ export function createGuestHeap({ allocator, arena, memory }){
                     }
                     return own;
                 },
+                handedTo: ()=>allocator.handedTo(),
                 diagnostics: ()=>allocator.diagnostics(),
             };
         },

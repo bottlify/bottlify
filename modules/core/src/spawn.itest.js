@@ -1243,3 +1243,83 @@ test('a timed wait on a child running beside its parent runs out while the child
         t.after(()=>app.dispose());
         assert.equal(await app.run({ timeoutMs: 30000 }), 0x102, 'WAIT_TIMEOUT');
     });
+
+test('a child takes the memory of the child before it, zeroed where that one wrote',
+    { timeout: 60000 }, async t=>{
+        // A gone process's memory is freed by a garbage collection nothing
+        // prompts; a parent that starts one short-lived child after another
+        // -- a compiler a shader at a time -- held one memory per child until
+        // the page could allocate no more. The second child is handed the
+        // first's, and finds zero where the first left its mark.
+        /**
+         * CreateProcessA on a command line and the wait on what it started.
+         * @param {string} command
+         * @returns {(at: { iat: (name: string) => number, at: (name: string) => number })
+         *     => number[]}
+         */
+        const start = command=>({ iat, at })=>[
+            0x68, ...u32(at('info')), 0x68, ...u32(at('startup')),
+            0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0,
+            0x68, ...u32(at(command)), 0x6a, 0,
+            0xff, 0x15, ...u32(iat('CreateProcessA')),
+            0x6a, 0xff, 0xff, 0x35, ...u32(at('info')),
+            0xff, 0x15, ...u32(iat('WaitForSingleObject')),
+        ];
+        const parent = buildExe({
+            imports: { 'KERNEL32.dll': ['CreateProcessA', 'WaitForSingleObject', 'ExitProcess'] },
+            data: {
+                writer: ascii('C:\\App\\writer.exe'),
+                reader: ascii('C:\\App\\reader.exe'),
+                startup: [...u32(68), ...new Array(64).fill(0)],
+                info: new Array(16).fill(0),
+            },
+            codeSize: 0xa0,
+            code: ({ iat, at })=>[...start('writer')({ iat, at }), ...start('reader')({ iat, at }),
+                0x6a, 0, 0xff, 0x15, ...u32(iat('ExitProcess'))],
+        });
+        /** HeapAlloc(GetProcessHeap(), 0, 64 KiB) into eax. @param {(name: string) => number} iat */
+        const allocate = iat=>[
+            0xff, 0x15, ...u32(iat('GetProcessHeap')),
+            0x68, ...u32(0x10000), 0x6a, 0, 0x50,
+            0xff, 0x15, ...u32(iat('HeapAlloc')),
+        ];
+        const imports = { 'KERNEL32.dll': ['GetProcessHeap', 'HeapAlloc', 'ExitProcess'] };
+        // mov dword [eax], 0x5a5a5a5a; exit with the block's address
+        const writer = buildExe({ imports, code: ({ iat })=>[...allocate(iat),
+            0xc7, 0x00, ...u32(0x5a5a5a5a), 0x50, 0xff, 0x15, ...u32(iat('ExitProcess'))] });
+        // exit with the address plus what lies there
+        const reader = buildExe({ imports, code: ({ iat })=>[...allocate(iat),
+            0x8b, 0x08, 0x01, 0xc8, 0x50, 0xff, 0x15, ...u32(iat('ExitProcess'))] });
+
+        const memorySize = 256 * 1024 * 1024;
+        const Made = WebAssembly.Memory;
+        let made = 0;
+        WebAssembly.Memory = /** @type {any} */ (function(/** @type {any} */ descriptor){
+            const memory = new Made(descriptor);
+            made += memory.buffer.byteLength >= memorySize ? 1 : 0;
+            return memory;
+        });
+        WebAssembly.Memory.prototype = Made.prototype;
+        t.after(()=>{
+            WebAssembly.Memory = Made;
+        });
+        const app = await createApp({
+            executable: parent,
+            imagePath: 'C:\\App\\parent.exe',
+            engine: 'cork',
+            memorySize,
+            storage: { load: async()=>({ files: [
+                { path: 'C:\\App\\writer.exe', bytes: writer },
+                { path: 'C:\\App\\reader.exe', bytes: reader },
+            ] }) },
+        });
+        t.after(()=>app.dispose());
+        /** @type {number[]} */
+        const codes = [];
+        app.on('process-resumed', (/** @type {any} */ event)=>codes.push(event.code >>> 0));
+        assert.equal(await app.run({ timeoutMs: 30000 }), 0);
+        assert.equal(codes.length, 2, 'both children ran');
+        assert.notEqual(codes[0], 0, 'the writer was given a block');
+        assert.equal(codes[1], codes[0], 'the reader was given the same block, and found it zero');
+        assert.equal(made, 2, 'the parent\'s memory and one more, not one per child');
+    });

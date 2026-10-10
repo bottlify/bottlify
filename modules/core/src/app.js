@@ -269,6 +269,9 @@ import { createTranslatorPool, portTranslator } from './host/pool/pool.js';
  *           The files a child's parent handed it as its output and error,
  *           each the parent's own open file, whose position the child's
  *           writes move.
+ * @property {{ memory: WebAssembly.Memory, guestEnd: number } | null} [reusedMemory]
+ *           The memory of a process of the run that has gone, for this one to
+ *           take: set by the run, not something a caller supplies.
  * @property {boolean} [refuseReplacement]
  *           Stop rather than replace this process with a child it asked for. A
  *           replacement erases every log and ring of the run that asked for it,
@@ -3538,6 +3541,7 @@ async function buildApp(options){
         },
         cpu: {
             jit: options.jit, sampling: options.sampling, memorySize,
+            reused: options.reusedMemory ?? undefined,
             initialStack: mainStack.initialStack,
             // ponytail: open, where Windows never maps the first 64 KiB, until
             // a store alone can fault there. Closed, FMOD's mixer thread reads
@@ -6122,6 +6126,9 @@ async function buildApp(options){
         }
     };
 
+    /** This process's memory, once it has gone (`spareMemory`). @type {{ memory: WebAssembly.Memory, guestEnd: number } | null} */
+    let spare = null;
+
     return {
         /** Where the program was mapped and where it starts. */
         image,
@@ -7343,7 +7350,19 @@ async function buildApp(options){
                 hotCode,
             };
         },
+        /**
+         * This process's memory for the next one to take, once it has gone,
+         * with how much of it the guest may have written; null before then
+         * and under an engine that keeps none.
+         *
+         * @returns {{ memory: WebAssembly.Memory, guestEnd: number } | null}
+         */
+        spareMemory: ()=>spare,
         dispose(){
+            // Read while the machine stands: the arena's mark is the last
+            // thing that says where the guest wrote.
+            const memoryLeft = cpu.wasmMemory?.() ?? null;
+            const guestEnd = win32.heap?.()?.handedTo?.();
             // What the program wrote last is saved now rather than after it
             // settles: the machine it was written on is about to go.
             saver?.flush();
@@ -7361,6 +7380,8 @@ async function buildApp(options){
                 {
                     translationStore?.close?.();
                 }
+                spare = memoryLeft && typeof guestEnd === 'number'
+                    ? { memory: memoryLeft, guestEnd } : null;
             });
         },
     };
@@ -7982,6 +8003,21 @@ export async function createApp(options){
         : createClassTable(serveHere);
 
     /**
+     * The memory of the last process to go, for the next one built: a gone
+     * process's memory waits for a garbage collection nothing prompts, and a
+     * parent that starts one short-lived child after another -- a compiler a
+     * shader at a time -- would hold one memory per child until the page ran
+     * out. Taken once.
+     *
+     * @type {{ memory: WebAssembly.Memory, guestEnd: number } | null}
+     */
+    let spareMemory = null;
+    /** @param {any} gone  a machine disposed */
+    const keepMemory = gone=>{
+        spareMemory = gone?.spareMemory?.() ?? spareMemory;
+    };
+
+    /**
      * A machine for a process, named to the class table.
      *
      * @param {any} [extra]
@@ -7990,7 +8026,10 @@ export async function createApp(options){
         const process = {};
         /** The machine, once built: what its children are started beside. @type {any} */
         let self = null;
-        const built = await buildApp(machine({ ...extra, com: { table: classTable, process },
+        const reusedMemory = spareMemory;
+        spareMemory = null;
+        const built = await buildApp(machine({ ...extra, reusedMemory,
+            com: { table: classTable, process },
             // With concurrency a child runs from CreateProcess on, beside
             // its parent, as on Windows; otherwise it waits for the parent to
             // have nothing left to run, and runs in its place.
@@ -8280,6 +8319,7 @@ export async function createApp(options){
         serving.delete(line);
         noteMachines();
         await line.current.dispose();
+        keepMemory(line.current);
         sound.giveBack();
         stand(current);
         bindLogLevels();
@@ -8352,6 +8392,7 @@ export async function createApp(options){
         noteLogSequence();
         mediaInstance = child.media.instance() ?? mediaInstance;
         await child.dispose();
+        keepMemory(child);
 
         line.current = parent;
         replayLogLevels();
@@ -9070,6 +9111,7 @@ export async function createApp(options){
             noteLogSequence();
             mediaInstance = ended.media.instance() ?? mediaInstance;
             await ended.dispose();
+            keepMemory(ended);
             sound.giveBack();
             // The page sees whoever stands in the main line again.
             replayLogLevels();
@@ -9185,6 +9227,7 @@ export async function createApp(options){
             mediaInstance = line.current.media.instance() ?? mediaInstance;
             await retire(line.current);
             await line.current.dispose();
+            keepMemory(line.current);
 
             if (!child)
             {
@@ -9310,6 +9353,7 @@ export async function createApp(options){
                 }
             })
             .finally(()=>{
+                spareMemory = null;
                 shownHere?.dispose();
                 presenter?.dispose?.();
                 translationPool?.dispose();

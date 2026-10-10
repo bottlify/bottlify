@@ -671,6 +671,13 @@ export function createHeapAllocator({ base, size }){
                 .map(block=>(/** @type {HeapBlock} */ (block)).address);
         },
 
+        /**
+         * The first arena address never inside a block: above it the arena is
+         * as untouched as it was given, which a caller handing the memory to
+         * another process trusts to know what it has to zero.
+         */
+        handedTo: ()=>handedTo,
+
         diagnostics(){
             let used = 0;
             for (const block of live.values())

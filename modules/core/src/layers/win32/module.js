@@ -679,6 +679,9 @@ export function createWin32Module(){
                 // through GlobalMemoryStatus, so anything that takes from the arena
                 // and does not give back changes how the program behaves.
                 diagnostics: ()=>allocator.diagnostics(),
+                // Where the arena has never been handed out: the memory above
+                // it is still zero, for a process that takes this one's memory.
+                handedTo: ()=>allocator.handedTo(),
             };
             bridge.useHeap(heap);
 
