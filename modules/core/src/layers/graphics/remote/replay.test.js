@@ -875,3 +875,79 @@ test('an occlusion count is asked of the renderer without waiting, and taken whe
         assert.ok(later instanceof Promise, 'a frame later: waited for');
         assert.equal(await later, D3D_OK);
     });
+
+test('a surface a read-back is still filling keeps its memory until the pixels have landed',
+    async()=>{
+        // The program let go of a system-memory surface right after asking
+        // for a target's pixels in it: given back at once, the heap handed the
+        // span on before the played side's pixels came, which wrote them over
+        // whatever had it by then.
+        const ram = new Uint8Array(1 << 20);
+        let next = RAM_BASE;
+        /** @type {Map<number, number>} */
+        const live = new Map();
+        /** @type {string[]} */
+        const strays = [];
+        const gpu = createFakeDevice();
+        const services = {
+            // A renderer that reads back, so the pixels come from the played side.
+            backend: createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
+                now: ()=>0 }),
+            createSampler: (/** @type {any} */ descriptor)=>({ kind: 'sampler',
+                id: `sampler-${JSON.stringify(descriptor)}`, descriptor }),
+            readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
+                ram.slice(at - RAM_BASE, at - RAM_BASE + length),
+            writeMemory: (/** @type {number} */ at, /** @type {Uint8Array} */ bytes)=>{
+                const owned = [...live].some(([base, size])=>at >= base
+                    && at + bytes.length <= base + size);
+                if (!owned)
+                {
+                    strays.push(`0x${at.toString(16)}+${bytes.length}`);
+                }
+                ram.set(bytes, at - RAM_BASE);
+            },
+            allocate: (/** @type {number} */ bytes)=>{
+                const at = next;
+                next += (bytes + 0xfff) & ~0xfff;
+                live.set(at, bytes);
+                return at;
+            },
+            free: (/** @type {number} */ at)=>{
+                live.delete(at);
+            },
+        };
+        const d3d = acrossAPort(services);
+        try
+        {
+            /** @type {{ device?: any }} */
+            const out = {};
+            assert.equal(d3d.CreateDevice({ swapEffect: D3DSWAPEFFECT.DISCARD, backBufferCount: 1,
+                backBufferWidth: 8, backBufferHeight: 8, backBufferFormat: D3DFMT.X8R8G8B8 }, out),
+            D3D_OK);
+            const device = out.device;
+            /** @type {{ surface?: any }} */
+            const back = {};
+            assert.equal(device.GetBackBuffer(0, 0, 0, back), D3D_OK);
+            const before = new Set(live.keys());
+            /** @type {{ surface?: any }} */
+            const offscreen = {};
+            assert.equal(device.CreateOffscreenPlainSurface(8, 8, D3DFMT.X8R8G8B8,
+                D3DPOOL.SYSTEMMEM, offscreen), D3D_OK);
+            const base = [...live.keys()].find(at=>!before.has(at));
+            assert.ok(base !== undefined, 'the surface has memory of its own');
+            assert.equal(await device.GetRenderTargetData(back.surface, offscreen.surface), D3D_OK);
+            assert.equal(offscreen.surface.release(), 0);
+            assert.ok(live.has(base), 'still the surface\'s while its pixels are on the way');
+            // The played side's renderer reads back when it gets to it.
+            for (let waited = 0; waited < 200 && live.has(base); waited++)
+            {
+                await new Promise(resolve=>setTimeout(resolve, 10));
+            }
+            assert.equal(live.has(base), false, 'given back once they have come');
+            assert.deepEqual(strays, [], 'nothing written where nothing is held');
+        }
+        finally
+        {
+            d3d.close();
+        }
+    });
