@@ -166,7 +166,7 @@ const NOT_BUILT = {
     D3DXCreateTeapot: [3, 1, 2], D3DXCreateTextA: [8, 5, 6],
     D3DXCreateTextureFromFileExA: [14, 13],
     D3DXCreateTorus: [7, 5, 6], D3DXFilterTexture: [4], D3DXGetImageInfoFromFileA: [2],
-    D3DXSaveSurfaceToFileInMemory: [5, 0], D3DXSaveTextureToFileInMemory: [4, 0],
+    D3DXSaveSurfaceToFileInMemory: [5, 0],
     D3DXSimplifyMesh: [7, 6], D3DXUVAtlasPartition: [17, 11, 12, 13, 14], D3DXValidMesh: [3, 2],
 };
 

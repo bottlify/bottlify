@@ -42,6 +42,7 @@ import { createRenderToSurface } from './render-to-surface.js';
 import { createEffects } from './effect.js';
 import { D3DX_DEFAULT, createTextureLoader } from './texture.js';
 import { createTextureTools } from './texture-tools.js';
+import { createTextureSaver } from './save-texture.js';
 import { guestEntry } from '../msvcrt/guest-code.js';
 import { createComObject } from '../ole32/objects.js';
 import { createConstantTableObjects } from './constants.js';
@@ -121,7 +122,6 @@ const NOT_BUILT = {
     D3DXGetImageInfoFromFileA: [8],
     D3DXSaveSurfaceToFileA: [20],
     D3DXSaveSurfaceToFileInMemory: [20, 0],
-    D3DXSaveTextureToFileInMemory: [16, 0],
     D3DXSimplifyMesh: [28, 6],
     D3DXUVAtlasPartition: [68, 11, 12, 13, 14],
     D3DXValidMesh: [12, 2],
@@ -163,6 +163,8 @@ const IN_GUEST = [[inGuest, COMPILED], [matrix, MATRIX], [vector, VECTOR],
  *           Told of each compile, for a tool that compares the source with what came out.
  * @property {(path: string) => Promise<Uint8Array | null> | Uint8Array | null} [readFile]
  *           A file's bytes, for D3DXCreateEffectFromFile and its kin.
+ * @property {(path: string, bytes: Uint8Array) => Promise<boolean> | boolean} [writeFile]
+ *           A file written whole, for D3DXSaveTextureToFile: false when it could not be.
  * @property {(module: number, name: string | number, type: number) =>
  *     Promise<Uint8Array | null> | Uint8Array | null} [resource]
  *           A module's resource, for D3DXCreateEffectFromResource and its kin.
@@ -402,6 +404,9 @@ export function createD3dxFunctions(host, options = {}){
 
         /** See texture-tools.js. */
         ...createTextureTools(host),
+
+        /** See save-texture.js. */
+        ...createTextureSaver(host, { giveBuffer }),
 
         /** See effect.js. */
         ...effects.exports,
