@@ -1884,5 +1884,6 @@ test('table fog through a vertex shader is taken over the depth, whatever the pr
         const floats = new Float32Array(h.boundBytes(h.groupsOfDraw().get(0), 0).buffer);
         // The range is the block's last register: start, end, density, and
         // whether the depth is z.
-        assert.deepEqual([...floats.subarray(floats.length - 4)], [0, 1, 1, 1], 'density 1 by default');
+        assert.deepEqual([...floats.subarray(floats.length - 4)], [0, 1, 1, 1],
+            'density 1 by default');
     });
