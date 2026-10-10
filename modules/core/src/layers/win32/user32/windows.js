@@ -3436,7 +3436,10 @@ export function createWindowFunctions(host){
             if (shown(each))
             {
                 repaint(each);
-                unerased.add(each);
+                if (erasedWith(record, each))
+                {
+                    unerased.add(each);
+                }
             }
         }
     };
@@ -3505,6 +3508,31 @@ export function createWindowFunctions(host){
     /** @param {any} record @returns {any[]} every live descendant, in paint order */
     const descendantsOf = record=>childrenOf(record)
         .flatMap(child=>[child, ...descendantsOf(child)]);
+
+    /**
+     * Whether a window's frame and background go with it when it is erased
+     * now: the window itself, and a descendant only through parents that clip
+     * their children. One inside a parent that does not waits for the
+     * parent's WM_PAINT and is erased in its own BeginPaint (server
+     * window.c get_window_update_flags: "here we only want to repaint
+     * children of windows that clip them, others need to wait for WM_PAINT
+     * to be done in the parent first"). A skin that paints its controls from
+     * their WM_ERASEBKGND, calling BeginPaint there, otherwise validated
+     * them before their WM_PAINT drew their faces.
+     *
+     * @param {any} record @param {any} each  `record` or one of its descendants
+     */
+    const erasedWith = (record, each)=>{
+        for (let at = each; at !== record; at = live(at.parent))
+        {
+            const parent = live(at.parent);
+            if (!parent || (parent.style & WS_CLIPCHILDREN) === 0)
+            {
+                return false;
+            }
+        }
+        return true;
+    };
 
     /** @param {{ left: number, top: number, right: number, bottom: number }} rect */
     const rectOf = rect=>({ left: rect.left, top: rect.top, right: rect.right,
@@ -3863,7 +3891,10 @@ export function createWindowFunctions(host){
                 || client.top !== before.client.top + dy || (each === record && how.redraw))
             {
                 repaint(each);
-                unerased.add(each);
+                if (erasedWith(record, each))
+                {
+                    unerased.add(each);
+                }
                 continue;
             }
             if (each === record)

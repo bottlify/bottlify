@@ -1715,23 +1715,34 @@ test('a window appearing paints the desktop but does not present it as a frame',
     assert.deepEqual(presents, [], 'and was not presented as a frame');
 });
 
-test('ShowWindow frames and erases the window and its children before it returns', ()=>{
+test('ShowWindow erases the window, and its children only through clipping parents', ()=>{
     // Windows XP's SetWindowPos paints a window it shows -- WM_NCPAINT, then
-    // WM_ERASEBKGND, its children's after its own -- before it
-    // returns, and the client waits for WM_PAINT. A setup that shows a dialog
-    // and goes to work without looking at its queue has the dialog on the
-    // screen rather than the page that was there before it.
+    // WM_ERASEBKGND -- before it returns, and the client waits for WM_PAINT.
+    // A setup that shows a dialog and goes to work without looking at its
+    // queue has the dialog on the screen rather than the page that was there.
+    // Its children go with it only through a parent that clips them; inside
+    // one that does not they wait for the parent's WM_PAINT and are erased in
+    // their own BeginPaint (server window.c get_window_update_flags) -- a
+    // skin that calls BeginPaint from a control's WM_ERASEBKGND would
+    // otherwise validate the control before its WM_PAINT drew its face.
     const WM_ERASEBKGND = 0x0014;
-    const { fns, memory, hwnd, dispatched } = withWindow({ paint: true, reply: ()=>1 });
-    const child = createWindow(fns, memory, { style: WS_CHILD | WS_VISIBLE, parent: hwnd,
-        x: 0, y: 0, width: 20, height: 10 });
-    dispatched.length = 0;
-    fns.ShowWindow.handler([hwnd, SW_SHOW]);
-    const painting = dispatched.filter(entry=>[WM_NCPAINT, WM_ERASEBKGND, WM_PAINT]
-        .includes(entry.message)).map(entry=>[entry.hwnd, entry.message]);
-    assert.deepEqual(painting, [[hwnd, WM_NCPAINT], [hwnd, WM_ERASEBKGND],
-        [child, WM_NCPAINT], [child, WM_ERASEBKGND]]);
-    assert.equal(fns.GetUpdateRect.handler([hwnd, 0, 0]), 1, 'its client is still to paint');
+    const WS_CLIPCHILDREN = 0x02000000;
+    for (const clips of [false, true])
+    {
+        const { fns, memory, hwnd, dispatched } = withWindow({ paint: true, reply: ()=>1,
+            style: clips ? WS_CLIPCHILDREN : 0 });
+        const child = createWindow(fns, memory, { style: WS_CHILD | WS_VISIBLE, parent: hwnd,
+            x: 0, y: 0, width: 20, height: 10 });
+        dispatched.length = 0;
+        fns.ShowWindow.handler([hwnd, SW_SHOW]);
+        const painting = dispatched.filter(entry=>[WM_NCPAINT, WM_ERASEBKGND, WM_PAINT]
+            .includes(entry.message)).map(entry=>[entry.hwnd, entry.message]);
+        assert.deepEqual(painting, [[hwnd, WM_NCPAINT], [hwnd, WM_ERASEBKGND],
+            ...(clips ? [[child, WM_NCPAINT], [child, WM_ERASEBKGND]] : [])],
+        clips ? 'a clipping parent takes its child along' : 'the child waits for its WM_PAINT');
+        assert.equal(fns.GetUpdateRect.handler([hwnd, 0, 0]), 1, 'its client is still to paint');
+        assert.equal(fns.GetUpdateRect.handler([child, 0, 0]), 1, 'and so is the child');
+    }
 });
 
 test('a window that is not on the screen draws nowhere, and a child of one neither', ()=>{
