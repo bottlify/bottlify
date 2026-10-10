@@ -2611,3 +2611,26 @@ test('a render target and a depth stencil released to nothing while set live on 
         original.surface.release();
         assertFullyReleased(device);
     });
+
+test('GetAvailableTextureMem falls as default-pool resources are made and comes back as they go',
+    ()=>{
+        // Wine's d3d8 test_vidmem_accounting, as Direct3D 9's.
+        const device = createDevice();
+        const start = device.GetAvailableTextureMem();
+        /** @type {any[]} */
+        const made = [];
+        for (let index = 0; index < 20; index++)
+        {
+            /** @type {{ texture?: any }} */
+            const out = {};
+            assert.equal(device.CreateTexture(1024, 1024, 1, D3DUSAGE.RENDERTARGET,
+                D3DFMT.A8R8G8B8, D3DPOOL.DEFAULT, out), D3D_OK);
+            made.push(out.texture);
+        }
+        assert.ok(start - device.GetAvailableTextureMem() > 2 * 1024 * 1024 * made.length);
+        for (const texture of made)
+        {
+            assert.equal(texture.release(), 0);
+        }
+        assert.equal(device.GetAvailableTextureMem(), start);
+    });

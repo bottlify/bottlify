@@ -219,6 +219,56 @@ function sharedCount(count, retire){
 }
 
 /**
+ * The video memory a device reports as available: what it starts with, less
+ * the bytes of the default-pool resources the program holds. A program that
+ * sizes its pools by what is left is told less as it allocates, where a
+ * number that never moved told it to keep allocating. (Wine's
+ * test_vidmem_accounting, Direct3D 8 and 9: the answer falls by at least half
+ * of what a run of default-pool render targets holds.) Nothing is refused for
+ * it, as neither version refuses.
+ *
+ * @param {number} total
+ */
+export function createVideoMemory(total){
+    let used = 0;
+    return {
+        /**
+         * A resource made in `pool`, holding `bytes`; what it answers gives
+         * them back, once its last reference has gone.
+         *
+         * @param {number} pool @param {number} bytes
+         * @returns {() => void}
+         */
+        take(pool, bytes){
+            const held = pool === D3DPOOL.DEFAULT ? bytes : 0;
+            used += held;
+            return ()=>{
+                used -= held;
+            };
+        },
+        /** In whole megabytes, as drivers answer, and never below nothing. */
+        available: ()=>Math.max(0, total - used) & ~0xfffff,
+    };
+}
+
+/**
+ * The bytes of a mip chain, `levels` of them from the top, each half the one
+ * above down to one texel.
+ *
+ * @param {number} format @param {number} width @param {number} height
+ * @param {number} depth @param {number} levels
+ */
+export function chainBytes(format, width, height, depth, levels){
+    let bytes = 0;
+    for (let level = 0; level < Math.max(1, levels); level++)
+    {
+        bytes += surfaceBytes(format, Math.max(1, width >> level), Math.max(1, height >> level))
+            * Math.max(1, depth >> level);
+    }
+    return bytes;
+}
+
+/**
  * A resource's priority, which a managed resource alone keeps: it is a hint
  * to the manager that evicts, and nothing else is ever evicted, so every
  * other pool reads back zero whatever it was told (Wine's d3d8 and d3d9

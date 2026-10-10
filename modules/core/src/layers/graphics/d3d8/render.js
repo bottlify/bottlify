@@ -507,40 +507,55 @@ const LIST_OF = Object.freeze({
  */
 export function listIndices(type, indices){
     const count = indices.length;
-    /** @type {number[]} */
-    const out = [];
+    const length = type === D3DPT.LINESTRIP ? 2 * Math.max(0, count - 1)
+        : type === D3DPT.TRIANGLESTRIP || type === D3DPT.TRIANGLEFAN ? 3 * Math.max(0, count - 2)
+            : -1;
+    if (length < 0)
+    {
+        throw new Error(`Primitive type ${type} is already a list`);
+    }
+    // Written straight into an array of the list's own length and width: a
+    // draw rewritten this way is rewritten every frame, and a number array
+    // pushed to and then copied was most of what it cost. Sixteen-bit indices
+    // stay sixteen-bit; any others are as wide as their largest.
+    let wide = false;
+    if (!(indices instanceof Uint16Array))
+    {
+        for (let index = 0; index < count && !wide; index++)
+        {
+            wide = indices[index] > 0xffff;
+        }
+    }
+    const out = wide ? new Uint32Array(length) : new Uint16Array(length);
+    let at = 0;
     switch (type)
     {
         case D3DPT.LINESTRIP:
             for (let index = 0; index + 1 < count; index++)
             {
-                out.push(indices[index], indices[index + 1]);
+                out[at++] = indices[index];
+                out[at++] = indices[index + 1];
             }
             break;
         case D3DPT.TRIANGLESTRIP:
             for (let index = 0; index + 2 < count; index++)
             {
-                if (index % 2 === 0)
-                {
-                    out.push(indices[index], indices[index + 1], indices[index + 2]);
-                }
-                else
-                {
-                    out.push(indices[index], indices[index + 2], indices[index + 1]);
-                }
-            }
-            break;
-        case D3DPT.TRIANGLEFAN:
-            for (let index = 1; index + 1 < count; index++)
-            {
-                out.push(indices[index], indices[index + 1], indices[0]);
+                const odd = index & 1;
+                out[at++] = indices[index];
+                out[at++] = indices[index + 1 + odd];
+                out[at++] = indices[index + 2 - odd];
             }
             break;
         default:
-            throw new Error(`Primitive type ${type} is already a list`);
+            for (let index = 1; index + 1 < count; index++)
+            {
+                out[at++] = indices[index];
+                out[at++] = indices[index + 1];
+                out[at++] = indices[0];
+            }
+            break;
     }
-    const wide = out.some(value=>value > 0xffff);
-    return wide ? Uint32Array.from(out) : Uint16Array.from(out);
+    return out;
 }
 
 /**
@@ -574,6 +589,47 @@ export function filledIndices(type, indices, fill){
     return wide ? Uint32Array.from(out) : Uint16Array.from(out);
 }
 
+/** @param {number} value five bits @returns {number} eight */
+const five = value=>(value << 3) | (value >>> 2);
+/** @param {number} value four bits @returns {number} eight */
+const four = value=>(value << 4) | value;
+/** @param {number} value six bits @returns {number} eight */
+const six = value=>(value << 2) | (value >>> 4);
+
+/**
+ * A sixteen-bit format's expansion, by a table of every word's four bytes made
+ * the first time the format is uploaded: a level is a lookup a texel, where
+ * unpacking each word into an array of four and copying it was most of what a
+ * 16-bit texture cost to upload.
+ *
+ * @param {(word: number)=>number[]} unpack  b, g, r, a of one little-endian word
+ * @returns {(pixels: Uint8Array, count: number)=>Uint8Array}
+ */
+function sixteenBit(unpack){
+    /** @type {Uint8Array | null} */
+    let table = null;
+    return (pixels, count)=>{
+        if (!table)
+        {
+            table = new Uint8Array(0x10000 * 4);
+            for (let word = 0; word < 0x10000; word++)
+            {
+                table.set(unpack(word), word * 4);
+            }
+        }
+        const out = new Uint8Array(count * 4);
+        // Four bytes at a time, in the order they lie: the same on either
+        // byte order, since both sides are read and written as one word.
+        const words = new Uint32Array(table.buffer);
+        const into = new Uint32Array(out.buffer);
+        for (let index = 0; index < count; index++)
+        {
+            into[index] = words[pixels[index * 2] | (pixels[index * 2 + 1] << 8)];
+        }
+        return out;
+    };
+}
+
 /**
  * The colour formats this can upload, each expanded to `bgra8unorm`.
  *
@@ -594,21 +650,21 @@ const TEXEL_EXPANSION = Object.freeze({
         }
         return out;
     },
-    [D3DFMT.R5G6B5]: (pixels, count)=>expandSixteen(pixels, count, word=>[
+    [D3DFMT.R5G6B5]: sixteenBit(word=>[
         five(word & 0x1f), six((word >>> 5) & 0x3f), five(word >>> 11), 0xff,
     ]),
-    [D3DFMT.X1R5G5B5]: (pixels, count)=>expandSixteen(pixels, count, word=>[
+    [D3DFMT.X1R5G5B5]: sixteenBit(word=>[
         five(word & 0x1f), five((word >>> 5) & 0x1f), five((word >>> 10) & 0x1f), 0xff,
     ]),
-    [D3DFMT.A1R5G5B5]: (pixels, count)=>expandSixteen(pixels, count, word=>[
+    [D3DFMT.A1R5G5B5]: sixteenBit(word=>[
         five(word & 0x1f), five((word >>> 5) & 0x1f), five((word >>> 10) & 0x1f),
         (word & 0x8000) !== 0 ? 0xff : 0,
     ]),
-    [D3DFMT.A4R4G4B4]: (pixels, count)=>expandSixteen(pixels, count, word=>[
+    [D3DFMT.A4R4G4B4]: sixteenBit(word=>[
         four(word & 0xf), four((word >>> 4) & 0xf), four((word >>> 8) & 0xf),
         four(word >>> 12),
     ]),
-    [D3DFMT.X4R4G4B4]: (pixels, count)=>expandSixteen(pixels, count, word=>[
+    [D3DFMT.X4R4G4B4]: sixteenBit(word=>[
         four(word & 0xf), four((word >>> 4) & 0xf), four((word >>> 8) & 0xf), 0xff,
     ]),
     [D3DFMT.A8]: (pixels, count)=>{
@@ -692,48 +748,6 @@ const TEXEL_EXPANSION = Object.freeze({
         return new Uint8Array(out.buffer);
     },
 });
-
-/** @param {number} value five bits @returns {number} eight */
-const five = value=>(value << 3) | (value >>> 2);
-/** @param {number} value four bits @returns {number} eight */
-const four = value=>(value << 4) | value;
-/** @param {number} value six bits @returns {number} eight */
-const six = value=>(value << 2) | (value >>> 4);
-
-/**
- * Each sixteen-bit format's every word, unpacked once into the four bytes it
- * becomes: an upload is then one lookup a texel, where it was an array made
- * and copied for each.
- *
- * @type {WeakMap<(word: number) => number[], Uint32Array>}
- */
-const SIXTEEN_TABLES = new WeakMap();
-
-/**
- * @param {Uint8Array} pixels
- * @param {number} count
- * @param {(word: number)=>number[]} unpack  b, g, r, a of one little-endian word
- * @returns {Uint8Array}
- */
-function expandSixteen(pixels, count, unpack){
-    let table = SIXTEEN_TABLES.get(unpack);
-    if (!table)
-    {
-        table = new Uint32Array(0x10000);
-        const bytes = new Uint8Array(table.buffer);
-        for (let word = 0; word < 0x10000; word++)
-        {
-            bytes.set(unpack(word), word * 4);
-        }
-        SIXTEEN_TABLES.set(unpack, table);
-    }
-    const out = new Uint32Array(count);
-    for (let index = 0; index < count; index++)
-    {
-        out[index] = table[pixels[index * 2] | (pixels[index * 2 + 1] << 8)];
-    }
-    return new Uint8Array(out.buffer);
-}
 
 /**
  * A texture level's bytes as they lie in guest memory, expanded to the one
@@ -3272,34 +3286,45 @@ export function createRenderer(options){
      */
     const countLighting = (model, prepared)=>{
         const layout = prepared.layout;
-        if (!layout)
-        {
-            // A draw through shaders: what its vertex stage lights and how is
-            // in the shader, not in the state this counts.
-            return;
-        }
-        const lighting = prepared.lighting;
-        const tally = counters.lighting;
         const fogMode = (model.renderStates.get(D3DRS.FOGENABLE) ?? 0) !== 0
             ? ((model.renderStates.get(D3DRS.FOGTABLEMODE) ?? 0)
                 || (model.renderStates.get(D3DRS.FOGVERTEXMODE) ?? 0))
             : 0;
         if (fogMode !== 0)
         {
-            tally.fog.modes.add(fogMode);
-            tally.fog[layout.preTransformed ? 'preTransformed' : 'transformed']++;
             frameStats.fogged++;
             // Read every fogged draw, kept as one short string per frame. The
             // sampled sets below stop at the first few hundred draws of a run,
             // so they describe how a program started and cannot show a setting
             // it changed to later. A scene that washes towards the fog colour
             // and stays there is precisely that, and this is what can see it.
-            frameStats.fog = prepared.fogSetting ??= fogSettingOf(model);
+            // A shader draw is marked: its vertex fog is the shader's own, and
+            // its table fog is taken over the depth its projection says.
+            // Built once a preparation, which starts with none.
+            if (!prepared.fogSetting)
+            {
+                prepared.fogSetting = fogSettingOf(model) + (layout ? ''
+                    : `/vs${isAffine(transformOf(model, D3DTS.PROJECTION)) ? 'z' : 'w'}`);
+            }
+            frameStats.fog = prepared.fogSetting;
             // And how many draws ran under each setting: a program fogs its
             // sky, its ground and its interface differently, and a frame that
             // goes wrong is one where a draw ran under another draw's fog --
             // which only a count per setting can show.
             frameStats.fogs.set(frameStats.fog, (frameStats.fogs.get(frameStats.fog) ?? 0) + 1);
+        }
+        if (!layout)
+        {
+            // A draw through shaders: what its vertex stage lights and how is
+            // in the shader, not in the state the rest counts.
+            return;
+        }
+        const lighting = prepared.lighting;
+        const tally = counters.lighting;
+        if (fogMode !== 0)
+        {
+            tally.fog.modes.add(fogMode);
+            tally.fog[layout.preTransformed ? 'preTransformed' : 'transformed']++;
         }
         // The samples below are text, built per draw, and a frame has hundreds
         // of draws: they are built for the first few hundred fogged draws only.
@@ -6748,8 +6773,11 @@ export function createRenderer(options){
         command.pipeline = prepared.pipelineIndex;
         command.state = prepared.state;
         command.uniforms = prepared.uniforms;
-        command.stageBindings = prepared.stageBindings;
-        command.program = prepared.program;
+        const bindings = unsampledTargets(model, prepared.stageBindings);
+        command.stageBindings = bindings;
+        // A shader draw binds its samplers from its program, the same list.
+        command.program = bindings === prepared.stageBindings || !prepared.program
+            ? prepared.program : { ...prepared.program, samplerBindings: bindings };
         command.vertices = geometry.vertices;
         command.indices = geometry.indices;
         command.count = geometry.count;
@@ -6760,6 +6788,54 @@ export function createRenderer(options){
         command.check = undefined;
         frame.commands.push(command);
     };
+
+    /**
+     * A draw's bindings with any texture it is drawing into put out of reach.
+     *
+     * Direct3D lets a texture stay bound to a stage while a level of it is the
+     * render target or the depth buffer; what such a draw samples is undefined
+     * there, and it draws. WebGPU refuses a pass that samples a texture it
+     * renders into, and with it the whole frame's command buffer: a program that
+     * leaves its target bound on a stage -- whether or not the stage is read --
+     * showed nothing at all, the last frame it drew before standing on the
+     * screen for good. The stage samples the placeholder instead, which is
+     * what an unbound stage reads, and that is said once.
+     *
+     * @param {RenderModel} model
+     * @param {{ view: any, sampler: any, placeholder?: boolean, record?: any,
+     *     texture?: any }[]} bindings  a preparation's, which other draws share
+     */
+    const unsampledTargets = (model, bindings)=>{
+        const target = model.renderTarget ? textures.get(model.renderTarget) ?? null : null;
+        const depth = model.depthStencil ? textures.get(model.depthStencil) ?? null : null;
+        if (target === null && depth === null)
+        {
+            return bindings;
+        }
+        let safe = bindings;
+        for (let index = 0; index < bindings.length; index++)
+        {
+            const sampled = bindings[index].record;
+            if (!sampled || (sampled !== target && sampled !== depth))
+            {
+                continue;
+            }
+            if (safe === bindings)
+            {
+                safe = bindings.slice();
+            }
+            safe[index] = { ...bindings[index], record: null, placeholder: true,
+                view: placeholderView(textureDimensionOf(bindings[index].texture)) };
+            if (divergence && !targetSampledReported)
+            {
+                targetSampledReported = true;
+                divergence('Direct3D', 'a draw samples the texture it draws into: the stage'
+                    + ' reads the placeholder, as WebGPU draws nothing that does both');
+            }
+        }
+        return safe;
+    };
+    let targetSampledReported = false;
 
     /** A draw command of the one shape every draw is recorded in. */
     const blankDraw = ()=>({
@@ -7482,7 +7558,12 @@ export function createRenderer(options){
         const processing = model.stageProcessing;
         if (processing.program && (processing.vertexShader !== 0 || processing.pixelShader !== 0))
         {
-            return prepareProgram(model, stride, topology, processing.program);
+            const prepared = prepareProgram(model, stride, topology, processing.program);
+            if (prepared)
+            {
+                countLighting(model, prepared);
+            }
+            return prepared;
         }
         if (processing.vertexShader !== 0)
         {
@@ -7779,10 +7860,51 @@ export function createRenderer(options){
      * @param {number} baseVertex
      * @param {number} [fill]  D3DFILL; SOLID rewrites a strip or fan as a list.
      */
-    const expandedGeometry = (type, indices, baseVertex, fill = D3DFILL.SOLID)=>{
-        const expanded = fill === D3DFILL.SOLID
+    const expandedGeometry = (type, indices, baseVertex, fill = D3DFILL.SOLID)=>
+        geometryOf(fill === D3DFILL.SOLID
             ? listIndices(type, indices)
-            : filledIndices(type, indices, fill);
+            : filledIndices(type, indices, fill), baseVertex);
+
+    /**
+     * A draw of vertices in order rewritten as a list: the list depends on
+     * nothing but the type, the count and the fill, so each is made once --
+     * a program's fans of four, drawn by the hundred every frame, were each
+     * rewritten from an array of the numbers counted out again. Never more
+     * than a few hundred kept: a count that changes every draw starts over.
+     *
+     * @type {Map<string, Uint16Array | Uint32Array>}
+     */
+    const ascendingLists = new Map();
+
+    /**
+     * @param {number} type
+     * @param {number} count
+     * @param {number} baseVertex
+     * @param {number} fill
+     */
+    const ascendingGeometry = (type, count, baseVertex, fill)=>{
+        const key = `${type}:${fill}:${count}`;
+        let expanded = ascendingLists.get(key);
+        if (!expanded)
+        {
+            const order = ascending(count);
+            expanded = fill === D3DFILL.SOLID ? listIndices(type, order)
+                : filledIndices(type, order, fill);
+            if (ascendingLists.size >= 256)
+            {
+                ascendingLists.clear();
+            }
+            ascendingLists.set(key, expanded);
+        }
+        return geometryOf(expanded, baseVertex);
+    };
+
+    /**
+     * A list written to the scratch ring, which copies it.
+     *
+     * @param {Uint16Array | Uint32Array} expanded @param {number} baseVertex
+     */
+    const geometryOf = (expanded, baseVertex)=>{
         return {
             indices: {
                 ...scratchIndices.write(expanded),
@@ -8519,7 +8641,7 @@ export function createRenderer(options){
             record(model, prepared, {
                 vertices: { gpu: streamBuffer?.gpu ?? zeroBuffer().gpu, offset: start },
                 ...(rewrite
-                    ? expandedGeometry(type, ascending(count), startVertex, fill)
+                    ? ascendingGeometry(type, count, startVertex, fill)
                     : { indices: null, count, first: startVertex }),
             }, true, streamZeroBias(model));
             if (dumping() && prepared.program)
@@ -8679,7 +8801,7 @@ export function createRenderer(options){
             }
             const vertices = scratchVertices.write(vertexData.subarray(0, count * stride));
             const geometry = rewrite
-                ? expandedGeometry(type, ascending(count), 0, fill)
+                ? ascendingGeometry(type, count, 0, fill)
                 : { indices: null, count, first: 0 };
             record(model, prepared, { vertices, ...geometry });
             if (dumping() && prepared.program)

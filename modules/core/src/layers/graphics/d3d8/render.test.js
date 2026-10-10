@@ -709,6 +709,78 @@ test('byte-exact: strips and fans expand to the lists they draw, winding kept', 
     assert.equal(vertexCountOf(D3DPT.POINTLIST, 0), 0);
 });
 
+test('byte-exact: every sixteen-bit word expands to its channels widened by their top bits', ()=>{
+    const words = new Uint8Array(0x10000 * 2);
+    for (let word = 0; word < 0x10000; word++)
+    {
+        words[word * 2] = word & 0xff;
+        words[word * 2 + 1] = word >>> 8;
+    }
+    /** @type {[number, (word: number) => number[]][]} */
+    const formats = [
+        [D3DFMT.R5G6B5, w=>[w & 31, (w >>> 5) & 63, w >>> 11].map((v, i)=>(i === 1
+            ? (v << 2) | (v >>> 4) : (v << 3) | (v >>> 2))).concat(255)],
+        [D3DFMT.X1R5G5B5, w=>[w & 31, (w >>> 5) & 31, (w >>> 10) & 31]
+            .map(v=>(v << 3) | (v >>> 2)).concat(255)],
+        [D3DFMT.A1R5G5B5, w=>[w & 31, (w >>> 5) & 31, (w >>> 10) & 31]
+            .map(v=>(v << 3) | (v >>> 2)).concat(w & 0x8000 ? 255 : 0)],
+        [D3DFMT.A4R4G4B4, w=>[w & 15, (w >>> 4) & 15, (w >>> 8) & 15, w >>> 12].map(v=>v * 17)],
+        [D3DFMT.X4R4G4B4, w=>[w & 15, (w >>> 4) & 15, (w >>> 8) & 15].map(v=>v * 17).concat(255)],
+    ];
+    for (const [format, channels] of formats)
+    {
+        const out = expandTexels(format, words, 0x10000);
+        for (let word = 0; word < 0x10000; word++)
+        {
+            const want = channels(word);
+            const got = [...out.subarray(word * 4, word * 4 + 4)];
+            if (got.some((value, index)=>value !== want[index]))
+            {
+                assert.deepEqual(got, want, `format ${format}, word 0x${word.toString(16)}`);
+            }
+        }
+    }
+});
+
+test('a strip or fan of any length and index width expands as triangle by triangle', ()=>{
+    // The rewrite writes straight into a typed array; this is the same lists
+    // spelt out one primitive at a time, over lengths and widths at random.
+    let seed = 0x2545f491;
+    const random = ()=>{
+        seed ^= seed << 13;
+        seed ^= seed >>> 17;
+        seed ^= seed << 5;
+        return (seed >>> 0) / 0x100000000;
+    };
+    /** @param {number} type @param {number[]} order */
+    const spelt = (type, order)=>{
+        /** @type {number[]} */
+        const out = [];
+        const step = type === D3DPT.LINESTRIP ? 2 : 3;
+        for (let first = 0; first + step - 1 < order.length; first++)
+        {
+            out.push(...(type === D3DPT.LINESTRIP ? [order[first], order[first + 1]]
+                : type === D3DPT.TRIANGLEFAN ? (first + 2 < order.length
+                    ? [order[first + 1], order[first + 2], order[0]] : [])
+                    : first % 2 === 0 ? [order[first], order[first + 1], order[first + 2]]
+                        : [order[first], order[first + 2], order[first + 1]]));
+        }
+        return out;
+    };
+    for (let round = 0; round < 300; round++)
+    {
+        const type = [D3DPT.LINESTRIP, D3DPT.TRIANGLESTRIP, D3DPT.TRIANGLEFAN][round % 3];
+        const length = Math.floor(random() * 40);
+        const limit = random() < 0.2 ? 0x20000 : 0x10000;
+        const order = Array.from({ length }, ()=>Math.floor(random() * limit));
+        const narrow = round % 2 === 0 && limit === 0x10000;
+        const list = listIndices(type, narrow ? Uint16Array.from(order) : order);
+        assert.deepEqual([...list], spelt(type, order), `round ${round}`);
+        assert.equal(list instanceof Uint32Array, order.some(index=>index > 0xffff),
+            `round ${round}: wide only past sixteen bits`);
+    }
+});
+
 test('byte-exact: triangles under a fill mode become their edges or their vertices', ()=>{
     // D3DFILL_WIREFRAME draws each triangle's three edges and D3DFILL_POINT
     // its three vertices (Microsoft's D3DFILLMODE), whatever type of

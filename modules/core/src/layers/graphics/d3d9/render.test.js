@@ -1247,3 +1247,46 @@ test('StretchRect scales one target over another on the GPU, filtered as asked',
     assert.ok(viewports.some((/** @type {any} */ v)=>JSON.stringify(v).includes('8')
         && JSON.stringify(v).includes('6')), JSON.stringify(viewports));
 });
+
+test('a texture left bound while a level of it is the target samples the placeholder, and the'
+    + ' frame is drawn', async()=>{
+    // Direct3D draws a stage bound to the texture being rendered into, its
+    // reads undefined; WebGPU refuses the pass that does both, and with it the
+    // frame's command buffer, so the screen kept the frame before for good.
+    const h = harness({ width: 8, height: 8 });
+    const device = h.device;
+    /** @type {{ texture?: any }} */
+    const made = {};
+    assert.equal(device.CreateTexture(8, 8, 1, D3DUSAGE.RENDERTARGET, D3DFMT.X8R8G8B8,
+        D3DPOOL.DEFAULT, made), D3D_OK);
+    /** @type {{ surface?: any }} */
+    const level = {};
+    assert.equal(made.texture.GetSurfaceLevel(0, level), D3D_OK);
+    /** @type {{ surface?: any }} */
+    const back = {};
+    assert.equal(device.GetBackBuffer(0, 0, 0, back), D3D_OK);
+    const triangle = Uint8Array.from([
+        ...vertex(0, 0, argb(255, 0, 0)), ...vertex(8, 0, argb(255, 0, 0)),
+        ...vertex(0, 8, argb(255, 0, 0)),
+    ]);
+    assert.equal(device.SetFVF(FVF_TRIANGLE), D3D_OK);
+    assert.equal(device.SetTexture(0, made.texture), D3D_OK);
+    assert.equal(device.BeginScene(), D3D_OK);
+    // Into the texture with it bound, then onto the back buffer reading it.
+    assert.equal(device.SetRenderTarget(0, level.surface), D3D_OK);
+    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, triangle, TRIANGLE_STRIDE),
+        D3D_OK);
+    assert.equal(device.SetRenderTarget(0, back.surface), D3D_OK);
+    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, triangle, TRIANGLE_STRIDE),
+        D3D_OK);
+    assert.equal(device.EndScene(), D3D_OK);
+    await h.present();
+
+    assert.deepEqual(h.gpu.errors, [], 'the device took the frame');
+    const draws = h.device.diagnostics().lastFrame
+        .filter((/** @type {any} */ command)=>command.kind === 'draw');
+    assert.equal(draws.length, 2);
+    assert.equal(draws[0].stageBindings[0].placeholder, true, 'the target is not sampled');
+    assert.equal(draws[1].stageBindings[0].placeholder, false,
+        'drawn elsewhere, the texture is sampled as bound');
+});

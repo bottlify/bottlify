@@ -63,8 +63,9 @@ import {
 import { createDefaultStageStates } from '../d3d8/stagestates.js';
 import { createDefaultRenderStates } from './renderstates.js';
 import {
-    createPriority, createReferenceCount, createSurface, createTexture, createVolumeTexture,
-    packColour, rectMoveOf, regionAtLevel, volumeUpdate, writeFrontBuffer, writePixels,
+    chainBytes, createPriority, createReferenceCount, createSurface, createTexture,
+    createVideoMemory, createVolumeTexture, packColour, rectMoveOf, regionAtLevel, volumeUpdate,
+    writeFrontBuffer, writePixels,
 } from './resources.js';
 import {
     SURFACE_TYPE, reportedBackBufferCount, validatePresentParameters, volumeCreateResult,
@@ -994,6 +995,8 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
      */
     const pooled = new Set();
 
+    const videoMemory = createVideoMemory(caps.videoMemory ?? AVAILABLE_TEXTURE_MEMORY);
+
     /**
      * A resource that the program owns: it took a reference on the device.
      *
@@ -1001,18 +1004,27 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
      * @param {() => void} [onGone]  What the resource gives back when its last
      *     reference goes, before the device's is released.
      */
-    const explicitCount = (pool = D3DPOOL.MANAGED, onGone = ()=>{})=>{
+    const explicitCount = (pool = D3DPOOL.MANAGED, onGone = ()=>{}, bytes = 0)=>{
         // The reference a resource holds on the device follows the program's
         // count: one the device keeps bound past the program's last Release
         // holds none, and taking it back takes one again (Wine's d3d9ex
         // test_reset_ex ends with the device's count at zero).
         count.addRef();
+        const giveBack = videoMemory.take(pool, bytes);
         const made = createReferenceCount({
             onFirstRef: ()=>count.addRef(),
             onZero: ()=>count.release(),
-            onLastRef: onGone,
+            // Out of the set as soon as it is gone, not at the next reset: a
+            // program that makes and releases buffers while it loads, and never
+            // resets, would otherwise keep one entry for every buffer it made.
+            onLastRef: ()=>{
+                pooled.delete(entry);
+                giveBack();
+                onGone();
+            },
         });
-        pooled.add({ pool, count: made });
+        const entry = { pool, count: made };
+        pooled.add(entry);
         return made;
     };
 
@@ -1258,7 +1270,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
     const createBuffer = options=>{
         // Its storage goes back when the last reference does, the program's or
         // the device's binding, whichever is later.
-        const bufferCount = explicitCount(options.pool, ()=>free(base));
+        const bufferCount = explicitCount(options.pool, ()=>free(base), options.length);
         const base = allocate(options.length);
         let locked = false;
         const buffer = {
@@ -1742,6 +1754,27 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
     };
 
     /**
+     * Whether a surface is one the renderer keeps on the GPU, as it decides
+     * (`onGpu` in d3d8/render.js): a colour surface that is a texture's level
+     * or a render target.
+     *
+     * @param {any} surface
+     */
+    const drawnOnGpu = surface=>{
+        const desc = describe(surface);
+        return !FORMAT_INFO[desc.Format].depth
+            && (Boolean(surface.container) || (desc.Usage & D3DUSAGE.RENDERTARGET) !== 0);
+    };
+
+    /**
+     * Two surfaces the GPU holds in one texture, which it cannot draw from one
+     * into the other.
+     *
+     * @param {any} a @param {any} b
+     */
+    const oneTexture = (a, b)=>a === b || (Boolean(a.container) && a.container === b.container);
+
+    /**
      * A surface that lives on the GPU: what was drawn into it is not in the
      * guest's bytes, and a copy out of those bytes copies something else.
      *
@@ -1801,7 +1834,9 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
     const makeTexture = spec=>{
         const texture = createTexture({
             ...spec,
-            count: explicitCount(spec.pool),
+            count: explicitCount(spec.pool, undefined,
+                chainBytes(spec.format, spec.width, spec.height, 1, spec.levels)
+                * (spec.cube ? 6 : 1)),
             allocate: spec.allocate ?? allocate,
             free: spec.free ?? free,
             // This version refuses a lock rectangle that is not one.
@@ -2015,7 +2050,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
 
         /** @returns {number} bytes, rounded the way this call always reports them */
         GetAvailableTextureMem(){
-            return caps.videoMemory ?? AVAILABLE_TEXTURE_MEMORY;
+            return videoMemory.available();
         },
 
         /**
@@ -3695,7 +3730,8 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             const chain = levels || volumeLevelCount(width, height, depth);
             const texture = createVolumeTexture({
                 width, height, depth, levels: chain, format, pool, usage,
-                count: explicitCount(pool), allocate, free,
+                count: explicitCount(pool, undefined,
+                    chainBytes(format, width, height, depth, chain)), allocate, free,
             });
             renderer?.trackTexture?.(texture,
                 { width, height, depth, format, levels: chain, usage });
@@ -3732,7 +3768,8 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 usage: D3DUSAGE.RENDERTARGET | usage,
                 lockable,
                 base: allocate(surfaceBytes(format, width, height)),
-                count: explicitCount(D3DPOOL.DEFAULT, ()=>retireSurface(surface)),
+                count: explicitCount(D3DPOOL.DEFAULT, ()=>retireSurface(surface),
+                    surfaceBytes(format, width, height)),
                 rejectsMalformedRects: true,
                 divergence: services.divergence ?? null,
                 pixels: targetPixels(),
@@ -3762,7 +3799,8 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 pool: D3DPOOL.DEFAULT,
                 usage: D3DUSAGE.DEPTHSTENCIL | usage,
                 base: allocate(surfaceBytes(format, width, height)),
-                count: explicitCount(D3DPOOL.DEFAULT, ()=>retireSurface(surface)),
+                count: explicitCount(D3DPOOL.DEFAULT, ()=>retireSurface(surface),
+                    surfaceBytes(format, width, height)),
                 rejectsMalformedRects: true,
             });
             out.surface = surface;
@@ -3798,7 +3836,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 base: userMemory || allocate(surfaceBytes(format, width, height)),
                 // The program's own memory stays the program's.
                 count: explicitCount(pool, ()=>(userMemory === 0 ? retireSurface(surface)
-                    : renderer?.retire(surface))),
+                    : renderer?.retire(surface)), surfaceBytes(format, width, height)),
                 rejectsMalformedRects: true,
             });
             out.surface = surface;
@@ -4165,6 +4203,16 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                     { x: target.left, y: target.top }))
                     || renderer?.stretchSurface?.(source, rect, destination, target,
                         filter >= D3DTEXF_LINEAR))
+                {
+                    out.moves = [];
+                    return D3D_OK;
+                }
+                // Recording for a device that draws elsewhere, there is no
+                // renderer here to ask: the played one draws the stretch
+                // whenever both sides are its GPU's and not one texture, and
+                // the program is answered as it will be.
+                if (services.renderedElsewhere === true && drawnOnGpu(source)
+                    && drawnOnGpu(destination) && !oneTexture(source, destination))
                 {
                     out.moves = [];
                     return D3D_OK;

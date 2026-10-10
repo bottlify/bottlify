@@ -215,3 +215,16 @@ test('a graphics worker is used once it has a device, and given up when it has n
     assert.equal(waited.worker, null);
     assert.ok(silent.terminated);
 });
+
+test('a frame the worker\'s GPU refused is said, with how often it was', ()=>{
+    const worker = fakeWorker();
+    /** @type {string[]} */
+    const said = [];
+    const end = connectGraphicsWorker({ worker,
+        divergence: (api, detail)=>said.push(`${api}: ${detail}`) });
+    worker.answer({ type: 'refused', message: 'Invalid CommandBuffer', seen: 1 });
+    worker.answer({ type: 'refused', message: 'Invalid CommandBuffer', seen: 256 });
+    assert.deepEqual(said, ['graphics: the GPU refused a frame: Invalid CommandBuffer',
+        'graphics: the GPU refused a frame: Invalid CommandBuffer (x256)']);
+    end.dispose();
+});

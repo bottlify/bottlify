@@ -1829,3 +1829,30 @@ test('user clip planes: world planes through the world for the fixed stages, cli
         ps.shader.release();
     }
 });
+
+test('a shader draw into a texture bound to its own sampler samples the placeholder, and the frame'
+    + ' is drawn', async()=>{
+    const h = harness();
+    /** @type {{ shader?: any }} */
+    const vs = {};
+    /** @type {{ shader?: any }} */
+    const ps = {};
+    assert.equal(h.device.CreateVertexShader(VERTEX_SHADER, vs), D3D_OK);
+    assert.equal(h.device.CreatePixelShader(PIXEL_SHADER, ps), D3D_OK);
+    h.device.SetVertexShader(vs.shader);
+    h.device.SetPixelShader(ps.shader);
+    /** @type {{ texture?: any }} */
+    const made = {};
+    assert.equal(h.device.CreateTexture(8, 8, 1, 1, D3DFMT.X8R8G8B8, D3DPOOL.DEFAULT, made),
+        D3D_OK, 'D3DUSAGE_RENDERTARGET');
+    /** @type {{ surface?: any }} */
+    const level = {};
+    assert.equal(made.texture.GetSurfaceLevel(0, level), D3D_OK);
+    assert.equal(h.device.SetRenderTarget(0, level.surface), D3D_OK);
+    h.device.SetTexture(0, made.texture);
+    await h.draw();
+    assert.deepEqual(h.gpu.errors, [], 'the device took the frame');
+    const draw = h.device.diagnostics().lastFrame.find(
+        (/** @type {any} */ command)=>command.kind === 'draw');
+    assert.equal(draw.program.samplerBindings[0].placeholder, true);
+});

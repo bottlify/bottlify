@@ -19,6 +19,8 @@
 const ERROR_INVALID_ADDRESS = 487;
 const ERROR_MOD_NOT_FOUND = 126;
 const ERROR_INVALID_PARAMETER = 87;
+const ERROR_PATH_NOT_FOUND = 3;
+const ERROR_ALREADY_EXISTS = 183;
 
 /** SymGetOptions before a program sets any: names are undecorated. */
 const SYMOPT_UNDNAME = 0x2;
@@ -53,6 +55,10 @@ const WALK_STARTED = 0x4b4c4157;
  * @property {() => { base: number, size: number }[]} modules
  *           The modules of the process, as Toolhelp lists them.
  * @property {(code: number) => void} setLastError
+ * @property {(address: number) => string} [readCString]
+ * @property {{ stat: (path: string) => { exists: boolean, isDirectory: boolean } | null,
+ *     mkdir: (path: string) => boolean, currentDirectory?: () => string }} [files]
+ *           The volume, for MakeSureDirectoryPathExists.
  */
 
 /**
@@ -104,6 +110,56 @@ export function createDbghelpFunctions(host){
             handler: ([value])=>{
                 options = value >>> 0;
                 return options;
+            },
+        },
+
+        /**
+         * BOOL MakeSureDirectoryPathExists(PCSTR DirPath)
+         *
+         * Every directory of the path, made where it is missing. The last
+         * component is a directory only when the path ends in a backslash;
+         * otherwise it is a file's name and is left alone. A directory that
+         * is already there is no failure; a file where a directory is wanted,
+         * or a directory that cannot be made, is.
+         */
+        MakeSureDirectoryPathExists: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([pointer])=>{
+                if ((pointer >>> 0) === 0 || !host.readCString || !host.files)
+                {
+                    return fail(0, ERROR_INVALID_PARAMETER);
+                }
+                const files = host.files;
+                const given = host.readCString(pointer >>> 0).replace(/\//g, '\\');
+                const absolute = /^[A-Za-z]:\\/.test(given) ? given
+                    : `${(files.currentDirectory?.() ?? 'C:\\').replace(/\\$/, '')}\\${given}`;
+                const parts = absolute.split('\\');
+                // The last part is a file's name, or empty after a closing backslash.
+                parts.pop();
+                let path = parts.shift() ?? '';
+                for (const part of parts)
+                {
+                    if (part === '')
+                    {
+                        continue;
+                    }
+                    path = `${path}\\${part}`;
+                    const entry = files.stat(path);
+                    if (entry?.exists)
+                    {
+                        if (!entry.isDirectory)
+                        {
+                            return fail(0, ERROR_ALREADY_EXISTS);
+                        }
+                        continue;
+                    }
+                    if (!files.mkdir(path))
+                    {
+                        return fail(0, ERROR_PATH_NOT_FOUND);
+                    }
+                }
+                return 1;
             },
         },
 

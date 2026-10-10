@@ -2180,7 +2180,8 @@ export function createWin32Module(){
                 // The debug help library with no symbol files: what a crash
                 // reporter walks the faulting stack with.
                 'DBGHELP.dll': createDbghelpFunctions({
-                    writeMemory, readMemory,
+                    writeMemory, readMemory, files: volume,
+                    readCString: (/** @type {number} */ address)=>readCString(address, 260),
                     modules: ()=>modules.list?.() ?? [],
                     setLastError: setError,
                 }),

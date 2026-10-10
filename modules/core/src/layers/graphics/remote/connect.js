@@ -124,6 +124,8 @@ export function portEnd(port){
  * @property {() => boolean} drew   whether a root of its plays on the worker
  * @property {(data: any) => void} frame
  * @property {() => void} lost
+ * @property {(message: string, seen: number) => void} refused  the worker's GPU
+ *     refused a command buffer, and with it a frame
  */
 
 /**
@@ -182,6 +184,10 @@ function join(worker, connection){
                     {
                         each.lost();
                     }
+                    break;
+                case 'refused':
+                    // One GPU, told once, by whichever connection shows it.
+                    showing(connections)?.refused(data.message, data.seen);
                     break;
                 default:
                     break;
@@ -312,6 +318,7 @@ export function connectGraphicsWorker(options){
     /** Frames the worker presented and replaced before they were sent. */
     let dropped = 0;
 
+    /** @type {Connection} */
     const connection = {
         drew: ()=>ports.length > 0,
         /** @param {any} data */
@@ -320,6 +327,8 @@ export function connectGraphicsWorker(options){
             present(data);
         },
         lost: ()=>lost?.(),
+        refused: (message, seen)=>divergence?.('graphics', `the GPU refused a frame: ${message}`
+            + (seen > 1 ? ` (x${seen})` : '')),
     };
     const leave = join(worker, connection);
 

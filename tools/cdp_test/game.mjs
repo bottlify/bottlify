@@ -28,7 +28,7 @@
  *                                  [--cpu-profile SECONDS] [--heap-profile [old]]
  *                                  [--export-translations FILE]
  *                                  [--watch SECONDS] [--press LABEL|LABEL... [--press-settle MS]]
- *                                  [--route]
+ *                                  [--route] [--shots-every SECONDS]
  *
  * `--watch S` is for a program that does not present, an installer above
  * all: every S seconds the desktop it paints with GDI is written as a PNG,
@@ -267,6 +267,7 @@ function parse(argv){
         // The frame this many frames after the last long stall, written beside
         // the report as game-<stamp>-snap.png: a demo's frame N in every run.
         snapFrame: number('--snap-frame', 0),
+        shotsEvery: number('--shots-every', 0),
         snapFromStart: argv.includes('--snap-from-start'),
         // With it, this many frames from it, --snap-every apart, each written
         // as game-<stamp>-snap-<frame>.png.
@@ -306,8 +307,10 @@ function parse(argv){
             : null,
         // A run that reads a gigabyte of bundle over HTTP one block at a time
         // is slower than one reading a local file, and the page cannot be asked
-        // how it is doing while it runs.
-        waitMs: number('--wait', 900) * 1000,
+        // how it is doing while it runs. A run timed by `--run-seconds` answers
+        // only once its time is up, so the wait is at least that and the
+        // report's read-back after it.
+        waitMs: number('--wait', Math.max(900, number('--run-seconds', 0) + 300)) * 1000,
         calls: number('--calls', 40),
         // Every host call written to a file. The ring in a report holds the end
         // of a run, and what a program decided it decided long before that.
@@ -1760,6 +1763,41 @@ export async function game(options){
                 }, ()=>{});
             }, 30000)
             : null;
+        // `--shots-every S`: the page as it stands every S seconds, written at
+        // once, so a run that never comes back still leaves what it showed.
+        const shotsStamp = new Date().toISOString().replace(/[:.]/g, '-');
+        let shooting = false;
+        const shotsTimer = options.shotsEvery > 0
+            ? setInterval(()=>{
+                if (shooting)
+                {
+                    return;
+                }
+                shooting = true;
+                const at = Math.round((Date.now() - startedAt) / 1000);
+                // The frame presented last, read back from the device: the page's
+                // own canvas shows nothing while a run goes on headless.
+                cdp.send('Runtime.evaluate', { expression: 'window.__bottlify__.frameShot()',
+                    returnByValue: true, awaitPromise: true }, sessionId).then(answer=>{
+                    const shot = answer?.result?.value;
+                    if (!shot)
+                    {
+                        console.log(`  shot at ${at} s: no frame presented yet`);
+                        return;
+                    }
+                    const bytes = Buffer.from(shot.pixels, 'base64');
+                    // Read back as RGBA whatever the surface's format.
+                    const image = toPng(shot.width, shot.height, toBgra(bytes));
+                    const path = join(REPORTS_DIR,
+                        `game-${shotsStamp}-at-${String(at).padStart(5, '0')}s.png`);
+                    writeFileSync(path, image);
+                    console.log(`  shot at ${at} s: ${path} (frame ${shot.frameIndex}`
+                        + ` of ${shot.presents} presented)`);
+                }, ()=>{}).finally(()=>{
+                    shooting = false;
+                });
+            }, options.shotsEvery * 1000)
+            : null;
         let result;
         try
         {
@@ -1813,9 +1851,8 @@ export async function game(options){
                         if (frame)
                         {
                             writeFileSync(join(REPORTS_DIR, `game-${stampOut}-frame.png`),
-                                toPng(frame.width, frame.height, frame.format.startsWith('bgra')
-                                    ? Buffer.from(frame.pixels, 'base64')
-                                    : toBgra(Buffer.from(frame.pixels, 'base64'))));
+                                toPng(frame.width, frame.height,
+                                    toBgra(Buffer.from(frame.pixels, 'base64'))));
                         }
                         return `${stack}
 the run as it stands: ${path}`;
@@ -1832,6 +1869,10 @@ the run as it stands: ${path}`;
             if (deviceTimer !== null)
             {
                 clearInterval(deviceTimer);
+            }
+            if (shotsTimer !== null)
+            {
+                clearInterval(shotsTimer);
             }
             if (watchTimer !== null)
             {

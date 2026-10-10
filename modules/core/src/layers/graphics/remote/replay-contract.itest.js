@@ -57,6 +57,8 @@ const GETDATA_FLUSH = 1;
 const SBT_ALL = 1;
 /** D3DTEXF_POINT. */
 const TEXF_POINT = 1;
+/** D3DTEXF_LINEAR. */
+const TEXF_LINEAR = 2;
 /** D3DCUBEMAP_FACE_NEGATIVE_X. */
 const FACE_NEGATIVE_X = 1;
 
@@ -528,6 +530,16 @@ async function divergences(version, scenario, ways = WAYS, caps = {}){
     await scenario(direct);
     /** @type {string[]} */
     const found = [];
+    // A frame the GPU refused draws nothing, whichever side it is on, and
+    // the two sides would agree on what they asked of it all the same.
+    /** @param {string} side @param {any} on */
+    const refused = (side, on)=>{
+        if (on.gpu.errors.length > 0)
+        {
+            found.push(`[${side}] the GPU refused: ${on.gpu.errors[0]}`);
+        }
+    };
+    refused('direct', direct.on);
     for (const way of ways)
     {
         const played = runner(rig(version, way, caps));
@@ -539,6 +551,7 @@ async function divergences(version, scenario, ways = WAYS, caps = {}){
         {
             played.on.close();
         }
+        refused(way, played.on);
         const answers = parting(direct.seen, played.seen, 'what the program saw');
         if (answers)
         {
@@ -1024,6 +1037,11 @@ test('Direct3D 9: the copies between surfaces -- UpdateSurface, UpdateTexture, S
             await run.call('StretchRect back into drawn', ()=>device.StretchRect(back.surface,
                 { left: 0, top: 0, right: 16, bottom: 16 }, drawnLevel.surface,
                 { left: 16, top: 16, right: 32, bottom: 32 }, TEXF_POINT));
+            // Scaled, which only the device that draws can do: the one that
+            // records for it answers as that one will.
+            await run.call('StretchRect back scaled into drawn', ()=>device.StretchRect(
+                back.surface, { left: 0, top: 0, right: 32, bottom: 32 }, drawnLevel.surface,
+                { left: 0, top: 0, right: 16, bottom: 16 }, TEXF_LINEAR));
             await run.call('StretchRect drawn into plain', ()=>device.StretchRect(
                 drawnLevel.surface, null, plainVideo.surface, null, TEXF_POINT));
             await run.call('ColorFill plain', ()=>device.ColorFill(plainVideo.surface,

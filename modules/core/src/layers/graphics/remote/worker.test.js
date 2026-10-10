@@ -314,3 +314,37 @@ test('each process\'s frames keep a slot of their own, say whose they are, and a
             }
         }
     });
+
+test('a validation error of the worker\'s GPU is sent on, once and then every 256th', async()=>{
+    const gpu = createFakeDevice();
+    Object.assign(gpu.device, { queue: gpu.queue });
+    /** @type {((event: any) => void)[]} */
+    const listeners = [];
+    const listen = gpu.device.addEventListener;
+    gpu.device.addEventListener = (type, listener)=>{
+        listeners.push(listener);
+        listen(type, listener);
+    };
+    /** @type {any[]} */
+    const posted = [];
+    /** @type {any} */
+    const scope = { postMessage: (/** @type {any} */ message)=>posted.push(message),
+        onmessage: null };
+    serveGraphics(scope, {
+        gpu: { requestAdapter: async()=>({ features: new Set(), info: {},
+            requestDevice: async()=>gpu.device }) },
+        canvas: ()=>gpu.canvas,
+    });
+    scope.onmessage({ data: { type: 'open', frames: 'none' } });
+    await settle();
+    assert.equal(listeners.length, 1, 'the worker listens');
+    for (let time = 0; time < 300; time++)
+    {
+        listeners[0]({ error: {
+            message: `Invalid  CommandBuffer "frame#${time}"\n is invalid.` } });
+    }
+    assert.deepEqual(posted.filter(message=>message.type === 'refused'), [
+        { type: 'refused', message: 'Invalid CommandBuffer "frame#0" is invalid.', seen: 1 },
+        { type: 'refused', message: 'Invalid CommandBuffer "frame#255" is invalid.', seen: 256 },
+    ], 'counted alike whichever frame it names');
+});

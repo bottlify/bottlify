@@ -99,3 +99,43 @@ test('StackWalk ends where the chain leaves mapped memory, and refuses another m
     assert.equal(fns.StackWalk.handler([0x8664, -1, -2, frame, 0, 0, 0, 0, 0]), 0);
     assert.equal(lastError(), 87);
 });
+
+test('MakeSureDirectoryPathExists makes every missing directory up to the last backslash', ()=>{
+    /** @type {Set<string>} */
+    const directories = new Set(['C:', 'C:\\Game']);
+    const files = new Set(['C:\\Game\\file.txt']);
+    /** @type {Map<number, string>} */
+    const strings = new Map([[0x10, 'C:\\Game\\Profiles\\Player\\'],
+        [0x20, 'C:\\Game\\Logs\\run.log'], [0x30, 'C:\\Game\\file.txt\\sub\\'],
+        [0x40, 'C:\\Game\\Profiles\\']]);
+    let lastError = 0;
+    const { MakeSureDirectoryPathExists: make } = createDbghelpFunctions({
+        readMemory: ()=>new Uint8Array(0),
+        writeMemory: ()=>{},
+        modules: ()=>[],
+        setLastError: code=>{ lastError = code; },
+        readCString: address=>strings.get(address) ?? '',
+        files: {
+            stat: path=>(directories.has(path) ? { exists: true, isDirectory: true }
+                : files.has(path) ? { exists: true, isDirectory: false } : null),
+            mkdir: path=>{
+                if (!directories.has(path.slice(0, path.lastIndexOf('\\'))))
+                {
+                    return false;
+                }
+                directories.add(path);
+                return true;
+            },
+        },
+    });
+    assert.equal(make.handler([0x10]), 1);
+    assert.ok(directories.has('C:\\Game\\Profiles'));
+    assert.ok(directories.has('C:\\Game\\Profiles\\Player'));
+    assert.equal(make.handler([0x20]), 1, 'the last part is a file\'s name');
+    assert.ok(directories.has('C:\\Game\\Logs'));
+    assert.equal(directories.has('C:\\Game\\Logs\\run.log'), false);
+    assert.equal(make.handler([0x40]), 1, 'already there');
+    assert.equal(make.handler([0x30]), 0, 'a file where a directory is wanted');
+    assert.equal(lastError, 183);
+    assert.equal(make.handler([0]), 0);
+});

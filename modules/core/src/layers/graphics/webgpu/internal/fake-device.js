@@ -55,6 +55,26 @@ export function createFakeDevice(options = {}){
     /** @type {{ mark: number, resolve: () => void }[]} answers owed, oldest first */
     const workWaiters = [];
     const messages = /** @type {Record<string, any[]>} */ (options.compilationMessages || {});
+    /**
+     * What a real device would have reported as validation errors, oldest
+     * first: the one rule kept here is the one a draw breaks without any other
+     * sign, a texture sampled in a pass that also renders into it, which makes
+     * the encoder's whole command buffer invalid and its submit do nothing.
+     * Each is also dispatched as an `uncapturederror`, as a device does.
+     *
+     * @type {string[]}
+     */
+    const errors = [];
+    /** @type {((event: any) => void)[]} */
+    const errorListeners = [];
+    /** @param {string} message */
+    const refuse = message=>{
+        errors.push(message);
+        for (const listener of errorListeners)
+        {
+            listener({ error: { message } });
+        }
+    };
     let nextId = 0;
 
     /** @param {string} kind @param {any} extra @returns {any} */
@@ -142,11 +162,48 @@ export function createFakeDevice(options = {}){
     };
 
     /**
+     * The mip levels and array layers a view reaches, as WebGPU defaults them:
+     * from its base to the texture's last.
+     *
+     * @param {any} view
+     */
+    const rangeOf = view=>{
+        const made = view.texture.descriptor ?? {};
+        const asked = view.viewDescriptor ?? {};
+        const level = asked.baseMipLevel ?? 0;
+        const layer = asked.baseArrayLayer ?? 0;
+        const layers = made.size?.depthOrArrayLayers ?? made.size?.[2] ?? 1;
+        return {
+            level, levels: asked.mipLevelCount ?? (made.mipLevelCount ?? 1) - level,
+            layer, layers: asked.arrayLayerCount ?? layers - layer,
+        };
+    };
+
+    /** Whether two views of a texture share a subresource. @param {any} a @param {any} b */
+    const overlaps = (a, b)=>{
+        if (a.texture !== b.texture)
+        {
+            return false;
+        }
+        const one = rangeOf(a);
+        const other = rangeOf(b);
+        return one.level < other.level + other.levels && other.level < one.level + one.levels
+            && one.layer < other.layer + other.layers && other.layer < one.layer + one.layers;
+    };
+
+    /**
      * @param {any} descriptor
      * @param {(() => void)[]} deferred  the encoder's, run at submit
+     * @param {any} encoder
      */
-    const beginRenderPass = (descriptor, deferred)=>{
+    const beginRenderPass = (descriptor, deferred, encoder)=>{
         const pass = object('pass', { descriptor });
+        // The levels and layers this pass writes: a bind group whose view
+        // reaches one of them uses it both ways in one synchronisation scope.
+        // WebGPU tells them apart by subresource, so a pass that draws a level
+        // from the one above it is not this.
+        const written = [...(descriptor.colorAttachments ?? []), descriptor.depthStencilAttachment]
+            .map(attachment=>attachment?.view).filter(view=>view?.texture);
         for (const attachment of descriptor.colorAttachments ?? [])
         {
             // A location left empty is a null, as WebGPU takes it.
@@ -193,6 +250,16 @@ export function createFakeDevice(options = {}){
          * @param {number[] | undefined} offsets
          */
         pass.setBindGroup = (index, group, offsets)=>{
+            const both = /** @type {any[]} */ (group?.entries ?? [])
+                .find(entry=>entry.resource?.texture && written.some(view=>
+                    overlaps(view, entry.resource)));
+            if (both && !encoder.invalid)
+            {
+                encoder.invalid = true;
+                refuse(`[Texture "${both.resource.texture.descriptor?.label ?? ''}"] usage`
+                    + ' (TextureBinding|RenderAttachment) includes writable usage and another'
+                    + ' usage in the same synchronization scope.');
+            }
             const dynamic = /** @type {any[]} */ (group?.entries ?? [])
                 .filter(entry=>entry.resource && entry.resource.buffer)
                 .sort((left, right)=>left.binding - right.binding);
@@ -235,7 +302,7 @@ export function createFakeDevice(options = {}){
         /** @type {(() => void)[]} */
         const deferred = [];
         encoder.beginRenderPass = (/** @type {any} */ passDescriptor)=>
-            beginRenderPass(passDescriptor, deferred);
+            beginRenderPass(passDescriptor, deferred, encoder);
         /** @param {any} source @param {any} destination @param {any} size */
         encoder.copyBufferToTexture = (source, destination, size)=>{
             deferred.push(()=>moveTexels(source, destination, size));
@@ -329,6 +396,13 @@ export function createFakeDevice(options = {}){
     const device = {
         calls,
         features: new Set(options.features ?? []),
+        /** @param {string} type @param {(event: any) => void} listener */
+        addEventListener(type, listener){
+            if (type === 'uncapturederror')
+            {
+                errorListeners.push(listener);
+            }
+        },
         createTexture,
         createCommandEncoder,
         createShaderModule,
@@ -411,6 +485,13 @@ export function createFakeDevice(options = {}){
         submit(buffers){
             for (const buffer of buffers)
             {
+                // An invalid command buffer is refused whole, as a device
+                // refuses it: none of its copies or clears land.
+                if (buffer.encoder?.invalid)
+                {
+                    refuse('[Invalid CommandBuffer] is invalid.');
+                    continue;
+                }
                 for (const copy of buffer.deferred ?? [])
                 {
                     copy();
@@ -474,6 +555,7 @@ export function createFakeDevice(options = {}){
         device,
         queue,
         calls,
+        errors,
         screen,
         canvas,
         /** @param {string} op @returns {any[]} */
