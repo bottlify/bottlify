@@ -3473,8 +3473,9 @@ async function buildApp(options){
         // calling anything at all cannot be picked out from the noise of the
         // ones that have not.
         // An argument whose text was kept (traceStrings) is shown as that
-        // text: a path is what a question about a failed open needs.
-        const args = (call.args ?? []).slice(0, 4)
+        // text: a path is what a question about a failed open needs. Every
+        // kept argument is written: a blit's source context is its sixth.
+        const args = (call.args ?? [])
             .map((/** @type {number} */ value, /** @type {number} */ at)=>(
                 call.strings?.[at] ? JSON.stringify(String(call.strings[at]).slice(0, 160))
                     : `0x${(value >>> 0).toString(16)}`))

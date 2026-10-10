@@ -572,7 +572,7 @@ const printJournal = ()=>{
         || entry.category === 'call.com' || crossing.test(entry.text));
     for (const entry of trail.slice(whole ? -number('--trace-lines', 3000) : -150))
     {
-        console.log('JOURNAL', (entry.time / 1000).toFixed(2), entry.text.slice(0, 220));
+        console.log('JOURNAL', (entry.time / 1000).toFixed(2), entry.text.slice(0, 400));
     }
 };
 if (traceOnFault)
