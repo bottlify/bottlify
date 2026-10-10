@@ -1092,6 +1092,28 @@ export function createBuilder(profile){
             srcs: [fit(v.src, into.w)] });
     };
 
+    /**
+     * What `make` gave the last time for the same tag and operands, while what the build
+     * knows still holds (no flow control and no rollback since): an element of a uniform
+     * array read through the address register, made once for the same index rather than
+     * loaded and copied out again at every read.
+     *
+     * @template T
+     * @param {string} tag @param {Vec[]} operands @param {() => T} make
+     * @returns {T}
+     */
+    const remember = (tag, operands, make)=>{
+        const key = `@${tag}/${operands.map(v=>keyOf(v.src)).join('/')}`;
+        const had = /** @type {T | undefined} */ (/** @type {unknown} */ (known.get(key)));
+        if (had !== undefined)
+        {
+            return had;
+        }
+        const made = make();
+        known.set(key, /** @type {Vec} */ (/** @type {unknown} */ (made)));
+        return made;
+    };
+
     /** Where the code is now, to come back to: the instructions after it are dropped. */
     const checkpoint = ()=>({ count: instrs.length, known: new Map(known) });
 
@@ -1106,7 +1128,7 @@ export function createBuilder(profile){
     };
 
     return {
-        control, carry, assign, checkpoint, rollback,
+        control, carry, assign, checkpoint, rollback, remember,
         profile, instrs, inputs, outputs, constants, newReg, get vregCount(){
             return vregCount;
         },

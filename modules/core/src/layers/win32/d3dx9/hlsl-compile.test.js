@@ -711,3 +711,41 @@ test('a quarter is a _d4 only from ps_1_4; before it the product stays a multipl
         assert.deepEqual(shade(result, [0.5, 0.25, 0.75, 1]), [0.5, 0.25, 0.75, 0.25], profile);
     }
 });
+
+test('an element of a uniform array read again by the same index is the copy already made',
+    async()=>{
+        // A skinning matrix named several times: one load of a0 and one copy of its rows,
+        // not one for every mention -- three mentions used to need more registers than
+        // vs_1_1 has.
+        const result = await compile(`float4x3 bones[20]; float4x4 vp;
+            float4 main(float4 p : POSITION, float i : BLENDINDICES, out float4 c : COLOR0)
+                : POSITION {
+                float3 at = mul(p, bones[i]);
+                float3 x = bones[i][0]; float3 y = bones[i][1]; float3 w = bones[i][3];
+                c = float4(x.x, y.y, w.z, 1);
+                return mul(float4(at, 1), vp); }`, 'vs_1_1');
+        assert.equal(result.ok, true, result.messages);
+        const tokens = /** @type {Uint32Array} */ (result.tokens);
+        const text = disassemble(tokens);
+        assert.equal(text.match(/mov a0\.x/g)?.length, 1, text);
+        const table = Object.fromEntries(constants(result).map(c=>[c.name, c.index]));
+        const f = new Float32Array(256 * 4);
+        // bones[2], held by column: rows c+0..2 of the element at bones + 2 * 3.
+        const base = (table.bones + 2 * 3) * 4;
+        const m = [[1, 2, 3], [4, 5, 6], [7, 8, 9], [10, 11, 12]];
+        for (let col = 0; col < 3; col++)
+        {
+            for (let row = 0; row < 4; row++)
+            {
+                f[base + col * 4 + row] = m[row][col];
+            }
+        }
+        for (let k = 0; k < 4; k++)
+        {
+            f[(table.vp + k) * 4 + k] = 1;
+        }
+        const out = execute(decode(tokens), { inputs: { v: [[1, 1, 1, 1], [2, 0, 0, 0]], t: [] },
+            constants: { f } }).outputs;
+        assert.deepEqual([...out.oD0], [1, 5, 12, 1]);
+        assert.deepEqual([...out.oPos], [22, 26, 30, 1]);
+    });
