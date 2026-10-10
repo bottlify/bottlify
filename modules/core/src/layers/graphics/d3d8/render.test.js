@@ -82,7 +82,8 @@ const FVF_TEXTURED_QUAD = FVF.XYZRHW | FVF.DIFFUSE | (1 << FVF.TEXCOUNT_SHIFT);
  * A device with a backend over the recording GPU, and guest memory it can read.
  *
  * @param {{ width?: number, height?: number, format?: number, depth?: boolean,
- *           dumpDraws?: boolean, dumpEvery?: number, liveDump?: { dumpFrames: number },
+ *           dumpDraws?: boolean, dumpEvery?: number, liveDump?: { dumpFrames: number,
+ *               written?: (lines: string[], frame: number) => void },
  *           maxDraws?: number, fog?: boolean,
  *           mips?: boolean,
  *           probeTexture?: string,
@@ -4384,7 +4385,11 @@ test('recorded: a draw blended by D3DRS_BLENDFACTOR sets it on the pass', async(
 });
 
 test('a dump asked for on a running device writes down that many frames, then stops', async()=>{
-    const liveDump = { dumpFrames: 0 };
+    /** @type {{ lines: string[], frame: number }[]} */
+    const handed = [];
+    const liveDump = { dumpFrames: 0,
+        written: (/** @type {string[]} */ lines, /** @type {number} */ frame)=>
+            handed.push({ lines, frame }) };
     const h = harness({ width: 64, height: 64, liveDump });
     const { device } = h;
     assert.equal(device.SetVertexShader(FVF_QUAD), D3D_OK);
@@ -4403,6 +4408,8 @@ test('a dump asked for on a running device writes down that many frames, then st
     assert.equal(await frame(), 1, 'and kept, for a report asked for a frame later');
     const dumped = device.diagnostics().lastDump;
     assert.match(dumped[0], /^#0 /);
+    // Handed over as it was written, once, with the frame it was.
+    assert.deepEqual(handed, [{ lines: dumped, frame: 1 }]);
 });
 
 test('a frame submitted early for a read-back keeps the lines of its draws', async()=>{

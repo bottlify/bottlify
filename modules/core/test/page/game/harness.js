@@ -2063,6 +2063,13 @@ export function createHarness(canvas, how = {}){
                 pixels: toBase64(image.pixels), frameIndex: presentState.presented.frameIndex,
                 presents: presentState.presents };
         },
+        // The next frames with draws written down by the running devices
+        // (`app.debug.dumpFrames`): a frame of a level, where a dump from the
+        // start of the run catches only the loading screen. `lastDumped` is
+        // the last of them once the graphics worker has sent it.
+        /** @param {number} frames */
+        dumpFrames: frames=>(running ? running.debug.dumpFrames(frames) : 0),
+        lastDumped: ()=>(running ? running.debug.dumped() : null),
         // The tail of the engine's journal, formatted: what a category a run
         // switched on has recorded, read while the run is still going.
         /** @param {number} [count] */

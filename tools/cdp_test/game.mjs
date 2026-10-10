@@ -28,7 +28,7 @@
  *                                  [--cpu-profile SECONDS] [--heap-profile [old]]
  *                                  [--export-translations FILE]
  *                                  [--watch SECONDS] [--press LABEL|LABEL... [--press-settle MS]]
- *                                  [--route] [--shots-every SECONDS]
+ *                                  [--route] [--shots-every SECONDS] [--dump-at SECONDS]
  *
  * `--watch S` is for a program that does not present, an installer above
  * all: every S seconds the desktop it paints with GDI is written as a PNG,
@@ -268,6 +268,7 @@ function parse(argv){
         // the report as game-<stamp>-snap.png: a demo's frame N in every run.
         snapFrame: number('--snap-frame', 0),
         shotsEvery: number('--shots-every', 0),
+        dumpAt: number('--dump-at', 0),
         snapFromStart: argv.includes('--snap-from-start'),
         // With it, this many frames from it, --snap-every apart, each written
         // as game-<stamp>-snap-<frame>.png.
@@ -1798,6 +1799,38 @@ export async function game(options){
                 });
             }, options.shotsEvery * 1000)
             : null;
+        // `--dump-at S`: the next frame with draws written down S seconds in,
+        // by the device that draws it -- a frame of the level rather than of
+        // the loading screen -- and written to a file of its own as soon as
+        // the graphics worker sends it.
+        /** @type {ReturnType<typeof setInterval> | null} */
+        let dumpPoll = null;
+        const dumpTimer = options.dumpAt > 0
+            ? setTimeout(()=>{
+                const evaluate = (/** @type {string} */ expression)=>cdp.send('Runtime.evaluate',
+                    { expression, returnByValue: true, awaitPromise: true }, sessionId);
+                evaluate('window.__bottlify__.dumpFrames(1)').then(answer=>{
+                    console.log(`  dump at ${options.dumpAt} s: ${
+                        JSON.stringify(answer?.result?.value ?? answer?.exceptionDetails?.text)}`);
+                }, ()=>{});
+                dumpPoll = setInterval(()=>{
+                    evaluate('window.__bottlify__.lastDumped()').then(answer=>{
+                        const dumped = answer?.result?.value;
+                        if (!dumped || dumpPoll === null)
+                        {
+                            return;
+                        }
+                        clearInterval(dumpPoll);
+                        dumpPoll = null;
+                        const path = join(REPORTS_DIR, `game-${shotsStamp}-frame${dumped.frame}`
+                            + '-draws.txt');
+                        writeFileSync(path, `${dumped.lines.join('\n')}\n`);
+                        console.log(`  dumped frame ${dumped.frame}: ${dumped.lines.length}`
+                            + ` lines in ${path}`);
+                    }, ()=>{});
+                }, 5000);
+            }, options.dumpAt * 1000)
+            : null;
         let result;
         try
         {
@@ -1873,6 +1906,14 @@ the run as it stands: ${path}`;
             if (shotsTimer !== null)
             {
                 clearInterval(shotsTimer);
+            }
+            if (dumpTimer !== null)
+            {
+                clearTimeout(dumpTimer);
+            }
+            if (dumpPoll !== null)
+            {
+                clearInterval(dumpPoll);
             }
             if (watchTimer !== null)
             {

@@ -6904,6 +6904,7 @@ async function buildApp(options){
             },
             /** Every live window, children included, as the window manager lists them. */
             windows: ()=>win32.windows(),
+            ...liveDumpOf(options.device?.worker),
             /** @param {string} name */
             register: name=>cpu.readReg32(name),
             eip: ()=>cpu.eip(),
@@ -7686,23 +7687,7 @@ async function buildSystemHost(deps){
             desktop: ()=>ask('debug.desktop'),
             /** @param {number} address @param {any} how */
             hook: (address, how)=>ask('debug.hook', [address, how]),
-            /**
-             * Writes down the next `frames` frames with draws, every draw with
-             * its shaders, stages and state, on a program already running: the
-             * account reaches `report()` as the device's `lastDump` and its
-             * shaders' bytecode. Zero stops it.
-             *
-             * @param {number} [frames]
-             */
-            dumpFrames: (frames = 1)=>{
-                const worker = options.device?.worker;
-                if (!worker)
-                {
-                    throw new Error('dumpFrames: this run draws without a graphics worker');
-                }
-                worker.postMessage({ type: 'debug', dumpFrames: frames });
-                return frames;
-            },
+            ...liveDumpOf(options.device?.worker),
         },
         trace: ()=>ask('trace'),
         report: ()=>ask('report'),
@@ -7795,6 +7780,43 @@ function volumeMemory(){
     const sharingMemory = createSharingMemory();
     return { revisions: new Int32Array(new SharedArrayBuffer(26 * 4)),
         sharing: openSharedSharing(sharingMemory), sharingMemory };
+}
+
+/**
+ * A running program's frames written down on asking, by the devices the
+ * graphics worker plays: `dumpFrames(n)` has the next n frames with draws
+ * written down, every draw with its shaders, stages and state, and
+ * `dumped()` is the last of them as the worker sent it -- from the device
+ * that drew it, which a diagnostics table read a report later need not be.
+ *
+ * @param {any} worker  the graphics worker, when the run has one
+ */
+function liveDumpOf(worker){
+    /** @type {{ lines: string[], frame: number } | null} */
+    let last = null;
+    let listening = false;
+    return {
+        /** @param {number} [frames] */
+        dumpFrames: (frames = 1)=>{
+            if (!worker)
+            {
+                throw new Error('dumpFrames: this run draws without a graphics worker');
+            }
+            if (!listening)
+            {
+                listening = true;
+                worker.addEventListener('message', (/** @type {{ data: any }} */ event)=>{
+                    if (event.data?.type === 'dumped')
+                    {
+                        last = { lines: event.data.lines, frame: event.data.frame };
+                    }
+                });
+            }
+            worker.postMessage({ type: 'debug', dumpFrames: frames });
+            return frames;
+        },
+        dumped: ()=>last,
+    };
 }
 
 /**

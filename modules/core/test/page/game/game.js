@@ -152,6 +152,8 @@ if (inWorker)
     namespace.logLines = ()=>callLog.length;
     namespace.frameReport = ()=>ask('frameReport');
     namespace.frameShot = ()=>ask('frameShot');
+    namespace.dumpFrames = (/** @type {number} */ frames)=>ask('dumpFrames', { frames });
+    namespace.lastDumped = ()=>ask('lastDumped');
     namespace.journalRecent = (/** @type {number} */ count)=>ask('journalRecent', { count });
     namespace.standing = (/** @type {string | undefined} */ list)=>ask('standing', { list });
     namespace.clearLog = ()=>{
@@ -168,6 +170,8 @@ else
     namespace.logLines = harness.logLines;
     namespace.frameReport = harness.frameReport;
     namespace.frameShot = harness.frameShot;
+    namespace.dumpFrames = harness.dumpFrames;
+    namespace.lastDumped = harness.lastDumped;
     namespace.journalRecent = harness.journalRecent;
     namespace.standing = harness.standing;
     namespace.clearLog = harness.clearLog;
