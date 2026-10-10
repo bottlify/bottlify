@@ -2753,6 +2753,44 @@ test('a transparent child paints after the siblings beneath it, an opaque one fr
         'the first child made is the topmost, and paints first');
 });
 
+test('the controls of a hidden window keep their paint until it shows, and get it in order', ()=>{
+    // A game's console: a hidden window whose edit control it writes its log
+    // into all along. The control owes a paint at every look into the queue,
+    // and none is handed out until the window shows -- then the window
+    // first, its controls after it.
+    const RDW_VALIDATE = 0x8;
+    const RDW_NOCHILDREN = 0x40;
+    const { fns, memory, hwnd } = withWindow();
+    const child = ()=>{
+        memory.putString(TITLE, 'child');
+        return fns.CreateWindowExA.handler([0, CLASS_NAME, TITLE,
+            WS_CHILD | WS_VISIBLE, 10, 10, 200, 100, hwnd, 0, HINSTANCE, 0]);
+    };
+    const log = child();
+    const button = child();
+    fns.InvalidateRect.handler([log, 0, 0]);
+    for (let look = 0; look < 3; look++)
+    {
+        assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 0,
+            'nothing to paint while the window is hidden');
+    }
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, log, 0, 0, PM_REMOVE]), 0,
+        'not even for the control by name');
+    fns.ShowWindow.handler([hwnd, SW_SHOW]);
+    /** @type {number[]} */
+    const painted = [];
+    while (fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]) === 1)
+    {
+        if (memory.u32(MSG_BUFFER + MSG.message) === WM_PAINT)
+        {
+            const target = memory.u32(MSG_BUFFER + MSG.hwnd);
+            painted.push(target);
+            fns.RedrawWindow.handler([target, 0, 0, RDW_VALIDATE | RDW_NOCHILDREN]);
+        }
+    }
+    assert.deepEqual(painted, [hwnd, log, button], 'the window, then its controls');
+});
+
 test('a paint dispatched to a window with no procedure is validated as the default one would', ()=>{
     // A control of a system class has no procedure here. Its WM_PAINT still
     // has to go somewhere that clears the area, or a program pumping with
