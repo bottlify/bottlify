@@ -153,6 +153,28 @@ function makeVertexFormat(type, size, normalised){
 }
 
 /**
+ * Three byte or short components -- a normal of GL_BYTE or GL_SHORT, a colour
+ * of three GL_UNSIGNED_BYTE -- which no vertex format holds, read as the four
+ * of the next format up with the shader taking the first three. Only from
+ * client memory, which is copied a whole stride a vertex, so the fourth
+ * component read is inside what was copied; the layout's own check that the
+ * format fits the stride holds the rest. A buffer object's size is not known
+ * here, and its last vertex could end before the fourth component.
+ *
+ * @param {import('./arrays.js').ArrayPointer} pointer
+ * @param {boolean} normalised
+ * @returns {VertexFormat | null}
+ */
+function widenedTriple(pointer, normalised){
+    if (pointer.size !== 3 || pointer.buffer !== 0)
+    {
+        return null;
+    }
+    const four = vertexFormatOf(pointer.type, 4, normalised);
+    return four && four.bytes <= 8 ? { ...four, components: 3 } : null;
+}
+
+/**
  * @typedef {Object} ArrayRequest
  * @property {string} name
  * @property {import('./arrays.js').ArrayPointer} pointer
@@ -174,7 +196,8 @@ export function planLayout(arrays){
     for (const array of arrays)
     {
         const pointer = array.pointer;
-        const format = vertexFormatOf(pointer.type, pointer.size, array.normalised);
+        const format = vertexFormatOf(pointer.type, pointer.size, array.normalised)
+            ?? widenedTriple(pointer, array.normalised);
         if (!format)
         {
             return null;

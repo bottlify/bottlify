@@ -242,3 +242,25 @@ test('coordinate sets to the seventh are named and packed canonically', ()=>{
     assert.deepEqual([...packed.subarray(at, at + 4)], [0.25, 0.75, 0, 1],
         'the fifth set travels in the packed vertex');
 });
+
+test('three bytes or shorts in client memory are read as four, the shader taking three', ()=>{
+    // A normal of GL_BYTE or GL_SHORT has no vertex format of three; refused,
+    // every draw it was in was assembled vertex by vertex on the processor.
+    const layout = planLayout([
+        { name: 'position', pointer: pointer({ type: GL.FLOAT, size: 3, stride: 16 }),
+            normalised: false },
+        { name: 'normal', pointer: pointer({ type: GL.BYTE, size: 3, stride: 16, pointer: 12 }),
+            normalised: true },
+    ]);
+    assert.ok(layout);
+    assert.deepEqual(layout.attributes[1], { name: 'normal', slot: 0, offset: 12,
+        format: 'snorm8x4', components: 3, scalar: 'f32' });
+    assert.equal(planLayout([
+        { name: 'normal', pointer: pointer({ type: GL.SHORT, size: 3, stride: 16, buffer: 7 }),
+            normalised: true },
+    ]), null, 'a buffer object\'s last vertex may end before the fourth');
+    assert.equal(planLayout([
+        { name: 'normal', pointer: pointer({ type: GL.SHORT, size: 3, stride: 12, pointer: 6 }),
+            normalised: true },
+    ]), null, 'nor off the four-byte boundary the wider format needs');
+});
