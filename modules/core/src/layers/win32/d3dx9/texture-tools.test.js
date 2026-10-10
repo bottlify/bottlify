@@ -87,3 +87,52 @@ test('D3DXCreateTexture makes the corrected texture with the device\'s CreateTex
     assert.equal(r.call(tools.D3DXCreateTexture, [r.device, 1, 1, 1, 0, 21, 1, 0]),
         D3DERR_INVALIDCALL);
 });
+
+test('D3DXFillTexture asks the function for each texel\'s colour at its centre', async()=>{
+    const r = deviceRig();
+    const tools = /** @type {any} */ (createTextureTools(r.host));
+    /** @type {number[][]} */
+    const asked = [];
+    const fill = r.guestFunction(([out, coord, size, data])=>{
+        const [u, v] = r.floats(coord, 2);
+        asked.push([u, v, ...r.floats(size, 2), data]);
+        // Red across, green down, blue a half, alpha one.
+        r.putFloats(out, [u, v, 0.5, 1]);
+        return 0;
+    });
+    const texture = r.texture(4, 2, 0, 0, FMT.A8R8G8B8, 1);
+    assert.equal(await r.call(tools.D3DXFillTexture, [texture, fill, 0x1234]), 0);
+    assert.equal(asked.length, 4 * 2 + 2 * 1 + 1, 'every texel of every level');
+    assert.deepEqual(asked[0], [0.125, 0.25, 0.25, 0.5, 0x1234]);
+    assert.deepEqual(asked[5], [0.375, 0.75, 0.25, 0.5, 0x1234]);
+    assert.deepEqual(asked.at(-1), [0.5, 0.5, 1, 1, 0x1234]);
+    const level0 = r.objects.get(r.objects.get(texture).surfaces[0]);
+    // B, G, R, A of the texel at (1, 1): u 0.375, v 0.75.
+    assert.deepEqual([...r.memory.subarray(level0.data + 20, level0.data + 24)],
+        [128, 191, 96, 255]);
+    assert.equal(level0.locked, false, 'unlocked again');
+});
+
+test('D3DXFillTexture writes float formats from the floats, halves as the library rounds',
+    async()=>{
+        const r = deviceRig();
+        const tools = /** @type {any} */ (createTextureTools(r.host));
+        const fill = r.guestFunction(([out])=>{
+            r.putFloats(out, [1.5, -2, 0.1, 70000]);
+            return 0;
+        });
+        const single = r.texture(1, 1, 1, 0, 116, 1);
+        assert.equal(await r.call(tools.D3DXFillTexture, [single, fill, 0]), 0);
+        const at = r.objects.get(r.objects.get(single).surfaces[0]).data;
+        assert.deepEqual(r.floats(at, 4), [1.5, -2, Math.fround(0.1), 70000]);
+        const half = r.texture(1, 1, 1, 0, 113, 1);
+        assert.equal(await r.call(tools.D3DXFillTexture, [half, fill, 0]), 0);
+        const h = r.objects.get(r.objects.get(half).surfaces[0]).data;
+        assert.deepEqual([0, 1, 2, 3].map(i=>r.view.getUint16(h + i * 2, true)),
+            [0x3e00, 0xc000, 0x2e66, 0x7c46], '70000 past the half range, as the library keeps it');
+        assert.equal(r.call(tools.D3DXFillTexture, [0, fill, 0]), D3DERR_INVALIDCALL);
+        assert.equal(r.call(tools.D3DXFillTexture, [half, 0, 0]), D3DERR_INVALIDCALL);
+        const odd = r.texture(1, 1, 1, 0, 0x3159564b, 1);
+        assert.equal(await r.call(tools.D3DXFillTexture, [odd, fill, 0]), D3DERR_INVALIDCALL);
+        assert.equal(r.diverged.at(-1)?.[0], 'D3DXFillTexture');
+    });

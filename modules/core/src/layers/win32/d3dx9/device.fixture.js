@@ -143,11 +143,29 @@ export function deviceRig(options = {}){
         return 0;
     };
 
+    /** The program's own functions, by the entry a test gave them. @type {Map<number, any>} */
+    const functions = new Map();
+    /**
+     * A function of the program's, called with its arguments; its entry.
+     *
+     * @param {(args: number[]) => number} fn
+     */
+    const guestFunction = fn=>{
+        const entry = 0xf0000 + functions.size * 16;
+        functions.set(entry, fn);
+        return entry;
+    };
+
     let inHandler = false;
     const callGuest = async(/** @type {{ entry: number, args: number[] }} */ { entry, args })=>{
         if (inHandler)
         {
             throw new Error('a call into the guest before the handler returned');
+        }
+        const own = functions.get(entry);
+        if (own)
+        {
+            return own(args);
         }
         const slot = entry - 0xe0000;
         const self = objects.get(args[0] >>> 0);
@@ -428,7 +446,7 @@ export function deviceRig(options = {}){
         view.getFloat32(at + i * 4, true));
 
     return { memory, view, heap, host, device, objects, calls, diverged, invoke, call,
-        texture, surface, mesh, object, putFloats, floats, live,
+        texture, surface, mesh, object, putFloats, floats, live, guestFunction,
         get viewport(){
             return viewport;
         } };

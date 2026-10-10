@@ -4,9 +4,10 @@
  * See LICENSE for details
  */
 
-import { DEVICE, createDeviceCalls } from './device.js';
+import { DEVICE, TEXTURE, createDeviceCalls } from './device.js';
 import { D3DX_DEFAULT } from './texture.js';
-import { FMT, isCompressed } from './pixels.js';
+import { FMT, encodeTexels, isCompressed, isSupported, layoutOf } from './pixels.js';
+import { D3DXFloat32To16Array } from './inguest-vector.js';
 
 /**
  * D3DX's textures made empty: D3DXCheckTextureRequirements's corrections of a
@@ -23,6 +24,11 @@ import { FMT, isCompressed } from './pixels.js';
  * (D3DUSAGE_AUTOGENMIPMAP). A format of D3DFMT_UNKNOWN or D3DX_DEFAULT is
  * A8R8G8B8; any other is kept as asked -- the device's own CreateTexture
  * says whether it has it, where D3DX would look for the nearest one it has.
+ *
+ * D3DXFillTexture asks the program's own function for every texel of every
+ * level, at the texel's centre, and writes what it answers in the level's
+ * format: the formats the loaders write (pixels.js), through eight bits a
+ * channel, and the floating-point ones, from the floats as they are.
  */
 
 const D3D_OK = 0;
@@ -33,6 +39,68 @@ const D3DPTEXTURECAPS_POW2 = 0x2;
 const D3DPTEXTURECAPS_SQUAREONLY = 0x20;
 const D3DPTEXTURECAPS_NONPOW2CONDITIONAL = 0x100;
 const D3DUSAGE_AUTOGENMIPMAP = 0x400;
+const D3DSURFACE_DESC_BYTES = 32;
+
+/** The floating-point formats a fill writes: bytes a channel, and how many channels. */
+const FLOATS = new Map([[111, [2, 1]], [112, [2, 2]], [113, [2, 4]], [114, [4, 1]],
+    [115, [4, 2]], [116, [4, 4]]]);
+
+/** A float as the library's own conversion makes a half of it. @param {number} value */
+const halfOf = value=>{
+    const bits = new Uint32Array(Float32Array.of(value).buffer)[0];
+    let half = 0;
+    D3DXFloat32To16Array(/** @type {any} */ ({ u32: ()=>bits,
+        setU16: (/** @type {number} */ _, /** @type {number} */ v)=>{
+            half = v;
+        } }), 0, 0, 1);
+    return half;
+};
+
+/**
+ * A level's texels in its format, from the RGBA each texel was given, rows
+ * packed; null for a format this does not write.
+ *
+ * @param {number} format @param {Float32Array} rgba @param {number} width @param {number} height
+ * @returns {Uint8Array | null}
+ */
+export function packFilled(format, rgba, width, height){
+    const floats = FLOATS.get(format);
+    if (floats)
+    {
+        const [bytes, channels] = floats;
+        const out = new Uint8Array(width * height * bytes * channels);
+        const view = new DataView(out.buffer);
+        for (let i = 0; i < width * height; i++)
+        {
+            for (let c = 0; c < channels; c++)
+            {
+                const at = (i * channels + c) * bytes;
+                if (bytes === 2)
+                {
+                    view.setUint16(at, halfOf(rgba[i * 4 + c]), true);
+                }
+                else
+                {
+                    view.setFloat32(at, rgba[i * 4 + c], true);
+                }
+            }
+        }
+        return out;
+    }
+    if (!isSupported(format))
+    {
+        return null;
+    }
+    const bgra = new Uint8Array(width * height * 4);
+    /** @param {number} v */
+    const unorm = v=>Math.round(Math.min(1, Math.max(0, v)) * 255);
+    for (let i = 0; i < width * height; i++)
+    {
+        bgra.set([unorm(rgba[i * 4 + 2]), unorm(rgba[i * 4 + 1]), unorm(rgba[i * 4]),
+            unorm(rgba[i * 4 + 3])], i * 4);
+    }
+    return encodeTexels(format, bgra, width, height);
+}
 /** D3DCAPS9's size, and where TextureCaps and MaxTextureWidth and Height are in it. */
 const CAPS_BYTES = 304;
 const CAPS_TEXTURE = 60;
@@ -163,6 +231,91 @@ export function createTextureTools(host){
     /** @param {number} at  A UINT in-out pointer: D3DX_DEFAULT when null. */
     const given = at=>((at >>> 0) === 0 ? D3DX_DEFAULT : u32(at));
 
+    /**
+     * D3DXFillTexture's work, once its handler has returned.
+     *
+     * @param {number} texture @param {number} fill @param {number} data @param {any} thread
+     * @returns {Promise<number>}
+     */
+    const fillTexture = async(texture, fill, data, thread)=>{
+        await null;
+        const heap = /** @type {NonNullable<TextureToolsHost['heap']>} */ (host.heap);
+        const callGuest = /** @type {NonNullable<TextureToolsHost['callGuest']>} */ (
+            host.callGuest);
+        // The level's description, its lock, then the out vector, the texel's
+        // centre and the texel's size the function is handed.
+        const scratch = heap.allocate(D3DSURFACE_DESC_BYTES + 8 + 32);
+        if (scratch === 0)
+        {
+            return E_OUTOFMEMORY;
+        }
+        const locked = scratch + D3DSURFACE_DESC_BYTES;
+        const out = locked + 8;
+        const coord = out + 16;
+        const size = coord + 8;
+        try
+        {
+            const levels = await method(thread, texture, TEXTURE.GetLevelCount, []);
+            for (let level = 0; level < levels; level++)
+            {
+                const described = await method(thread, texture, TEXTURE.GetLevelDesc,
+                    [level, scratch]);
+                if (described !== D3D_OK)
+                {
+                    return described;
+                }
+                const format = u32(scratch);
+                const width = u32(scratch + 24);
+                const height = u32(scratch + 28);
+                if (!FLOATS.has(format) && !isSupported(format))
+                {
+                    host.divergence?.('D3DXFillTexture', `format ${format} is not one a fill `
+                        + 'writes: answered D3DERR_INVALIDCALL');
+                    return D3DERR_INVALIDCALL;
+                }
+                const rgba = new Float32Array(width * height * 4);
+                host.writeMemory(size, new Uint8Array(Float32Array.of(1 / width, 1 / height)
+                    .buffer));
+                for (let y = 0; y < height; y++)
+                {
+                    for (let x = 0; x < width; x++)
+                    {
+                        host.writeMemory(out, new Uint8Array(16));
+                        host.writeMemory(coord, new Uint8Array(Float32Array.of(
+                            (x + 0.5) / width, (y + 0.5) / height).buffer));
+                        await callGuest({ entry: fill >>> 0, args: [out, coord, size,
+                            data >>> 0], ...(thread === undefined ? {} : { thread }) });
+                        rgba.set(new Float32Array(host.readMemory(out, 16).slice().buffer),
+                            (y * width + x) * 4);
+                    }
+                }
+                const packed = /** @type {Uint8Array} */ (packFilled(format, rgba, width,
+                    height));
+                const answer = await method(thread, texture, TEXTURE.LockRect,
+                    [level, locked, 0, 0]);
+                if (answer !== D3D_OK)
+                {
+                    return answer;
+                }
+                const pitch = u32(locked);
+                const bits = u32(locked + 4);
+                const rows = FLOATS.has(format) ? height : layoutOf(format, width, height).rows;
+                const rowBytes = packed.length / rows;
+                for (let row = 0; row < rows; row++)
+                {
+                    host.writeMemory(bits + row * pitch, packed.subarray(row * rowBytes,
+                        (row + 1) * rowBytes));
+                }
+                await method(thread, texture, TEXTURE.UnlockRect, [level]);
+            }
+            return D3D_OK;
+        }
+        finally
+        {
+            heap.free(scratch);
+        }
+    };
+
     return {
         /**
          * HRESULT D3DXCheckTextureRequirements(LPDIRECT3DDEVICE9 pDevice, UINT *pWidth,
@@ -225,6 +378,27 @@ export function createTextureTools(host){
                         : method(thread, device, DEVICE.CreateTexture, [found.width,
                             found.height, found.levels, found.usage, found.format, pool >>> 0,
                             out >>> 0, 0])));
+            },
+        },
+
+        /**
+         * HRESULT D3DXFillTexture(LPDIRECT3DTEXTURE9 pTexture, LPD3DXFILL2D pFunction,
+         *     LPVOID pData)
+         *
+         * The function is VOID WINAPI (D3DXVECTOR4 *pOut, const D3DXVECTOR2 *pTexCoord,
+         * const D3DXVECTOR2 *pTexelSize, LPVOID pData), called once a texel, the
+         * levels in order and each level row by row.
+         */
+        D3DXFillTexture: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([texture, fill, data])=>{
+                if ((texture >>> 0) === 0 || (fill >>> 0) === 0 || !host.callGuest
+                    || !host.heap)
+                {
+                    return D3DERR_INVALIDCALL;
+                }
+                return fillTexture(texture >>> 0, fill >>> 0, data, host.currentThread?.());
             },
         },
     };
