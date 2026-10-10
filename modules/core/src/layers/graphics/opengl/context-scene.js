@@ -102,6 +102,28 @@ function logicOperation(op){
 }
 
 /**
+ * The texels a level the context holds none of reads as -- one copied from
+ * the framebuffer lives only on the device -- made once per level and size
+ * rather than for every draw that samples it: a frame of draws from a
+ * full-screen copy was megabytes allocated and zeroed a draw.
+ *
+ * @type {WeakMap<object, Uint8Array>}
+ */
+const BLANK_TEXELS = new WeakMap();
+
+/** @param {{ width: number, height: number }} level */
+function blankTexels(level){
+    const bytes = level.width * level.height * 4;
+    let blank = BLANK_TEXELS.get(level);
+    if (!blank || blank.length !== bytes)
+    {
+        blank = new Uint8Array(bytes);
+        BLANK_TEXELS.set(level, blank);
+    }
+    return blank;
+}
+
+/**
  * @param {import('./kernel.js').ContextKernel} kernel
  */
 export function createSceneBuilder(kernel){
@@ -190,7 +212,7 @@ export function createSceneBuilder(kernel){
                 images.push({
                     width: level.width,
                     height: level.height,
-                    texels: level.texels ?? new Uint8Array(level.width * level.height * 4),
+                    texels: level.texels ?? blankTexels(level),
                 });
             }
             const generated = unit.genEnabled.some((/** @type {number} */ g)=>g !== 0);

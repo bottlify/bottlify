@@ -256,3 +256,38 @@ test('an immediate vertex keeps the attributes current at its glVertex, whatever
     assert.deepEqual([...second.texCoords[0]].slice(0, 2), [0.75, 1]);
     assert.equal(third.color, second.color, 'unchanged between them: the same values, shared');
 });
+
+test('a texture copied from the framebuffer reads as one blank image, not one a draw', ()=>{
+    // It lives only on the device; the scene stood a zeroed buffer of its
+    // size in for it on every draw that sampled it.
+    /** @type {any[]} */
+    const images = [];
+    /** @type {any} */
+    const gpu = {
+        attach: ()=>{}, attached: ()=>true, drawArrays: ()=>false,
+        draw: (/** @type {any} */ c, /** @type {() => any} */ scene)=>
+            images.push(scene().units[0]?.images[0]?.texels),
+        clear: ()=>{}, copyToTexture: ()=>true, present: ()=>null,
+        settled: ()=>Promise.resolve(), diagnostics: ()=>({}),
+    };
+    /** @type {any} */
+    const context = createGlContext({
+        memory: { read: ()=>new Uint8Array(0), write: ()=>{} }, gpu,
+    });
+    context.attach({ width: 8, height: 8, doubleBuffered: true, depthBits: 24 });
+    context.glBindTexture(GL.TEXTURE_2D, 1);
+    context.glCopyTexImage2D(GL.TEXTURE_2D, 0, GL.RGBA, 0, 0, 8, 8, 0);
+    context.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.LINEAR);
+    context.glEnable(GL.TEXTURE_2D);
+    for (let draw = 0; draw < 2; draw++)
+    {
+        context.glBegin(GL.TRIANGLES);
+        context.glVertex3f(0, 0, 0);
+        context.glVertex3f(1, 0, 0);
+        context.glVertex3f(0, 1, 0);
+        context.glEnd();
+    }
+    assert.equal(images.length, 2);
+    assert.ok(images[0] instanceof Uint8Array && images[0].length === 8 * 8 * 4);
+    assert.equal(images[1], images[0], 'the same image for both draws');
+});
