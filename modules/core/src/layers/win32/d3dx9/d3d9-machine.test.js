@@ -809,7 +809,7 @@ test('decode rejects what the version does not have', ()=>{
     bad('ps_2_0\nmov_x2 r0, c0\n', /unknown instruction/);
     bad('vs_2_0\nmov r0.x, c0\nmov oPos, r0\nsetp_lt p0, c0, c1\n',
         /unknown instruction|predicate|setp/);
-    bad('vs_2_0\nmov p0, c0\n', /predicate registers are not supported/);
+    bad('vs_2_0\nmov p0, c0\n', /mov cannot write p0/);
     bad('vs_2_0\nmov r0, c0\nendif\n', /endif without if/);
     bad('vs_2_0\nif b0\nmov r0, c0\n', /if at token \d+ is never closed/);
     bad('vs_2_0\nif b0\nelse\nelse\nendif\n', /else without if/);
@@ -923,8 +923,9 @@ test('decode rejects malformed token streams', ()=>{
     const movToken = (/** @type {number} */ extra)=>Uint32Array.from([
         0xffff0200, (1 | (2 << 24) | extra) >>> 0, 0x800f0800, 0xa0e40000, 0xffff]);
     decode(movToken(0));
-    rejects(()=>decode(movToken(1 << 30)), /predicated instruction/);
-    rejects(()=>decode(movToken(1 << 28)), /co-issued/);
+    // D3DSI_COISSUE is bit 30 and D3DSHADER_INSTRUCTION_PREDICATED bit 28.
+    rejects(()=>decode(movToken(1 << 30)), /co-issued/);
+    rejects(()=>decode(movToken(1 << 28)), /predication does not exist in ps_2_0/);
     rejects(()=>decode(movToken(1 << 16)), /unexpected control bits/);
     rejects(()=>decode(Uint32Array.from([0xffff0200, 0x00000063, 0xffff])), /unknown opcode 99/);
     rejects(()=>decode(Uint32Array.from([0xffff0200, 0xfffd, 0xffff])), /phase marker/);
@@ -946,7 +947,7 @@ test('decode rejects malformed token streams', ()=>{
         (0x80e40000 | ((type & 7) << 28) | ((type & 0x18) << 8)) >>> 0, 0xffff]);
     rejects(()=>decode(typed(11)), /constant register beyond c255/);
     rejects(()=>decode(typed(16)), /half-precision/);
-    rejects(()=>decode(typed(19)), /predicate register/);
+    rejects(()=>decode(typed(19)), /predicate|p0/);
     rejects(()=>decode(typed(13)), /constant register beyond/);
     rejects(()=>decode(typed(20)), /cannot be a source/);
     // A relative destination.
@@ -1185,14 +1186,30 @@ test('programs keep no state between runs', ()=>{
     rejects(()=>execute(reader, {}), /read of unwritten r0.x/);
 });
 
-test('predication is refused with a clear message', ()=>{
-    rejects(()=>decode(Uint32Array.from([0xfffe0300, 94 | (3 << 24), 0xb00f0000, 0x90e40000,
-        0x90e40000, 0xffff])),
-    /setp \(predication\) is not supported by this machine/);
-    rejects(()=>decode(Uint32Array.from([0xffff0300, 96 | (1 << 24), 0xb0e40000, 0xffff])),
-        /breakp \(predication\) is not supported/);
-    rejects(()=>assemble('ps_3_0\nsetp_lt p0, c0, c1\n'), /unknown instruction "setp_lt"/);
-    rejects(()=>assemble('ps_3_0\nmov oC0, c0\n(p0) mov r0, c0\n'), /line 3/);
+test('predication: setp writes p0 through its mask, a predicated write keeps the rest', ()=>{
+    const result = execute(assemble([
+        'vs_3_0', 'dcl_position o0', 'dcl_texcoord o1', 'defb b0, true', 'defi i0, 3, 0, 0, 0',
+        'def c0, 1, 2, 3, 4', 'def c1, 2, 2, 2, 2', 'def c2, 9, 9, 9, 9',
+        'setp_gt p0, c0, c1',
+        'mov o0, c0',
+        '(p0) mov o0, c2',
+        'mov o1, c0',
+        '(!p0.x) mov o1.xy, c2',
+        'mov r0, c0',
+        'rep i0', 'add r0, r0, c1', 'breakp p0.w', 'endrep',
+        'if p0.y', 'mov r0.x, c2.x', 'endif',
+    ].join('\n')), {});
+    assert.deepEqual([...result.outputs.o0], [1, 2, 9, 9], 'z and w were greater');
+    assert.deepEqual([...result.outputs.o1], [9, 9, 3, 4], 'x was not, so !p0.x held for both');
+    // breakp left the repeat after one pass; p0.y was false.
+    assert.equal(Math.fround(execute(assemble([
+        'vs_3_0', 'dcl_position o0', 'def c0, 1, 2, 3, 4', 'def c1, 2, 2, 2, 2',
+        'defi i0, 3, 0, 0, 0', 'setp_gt p0, c0, c1', 'mov r0, c0',
+        'rep i0', 'add r0, r0, c1', 'breakp p0.w', 'endrep', 'mov o0, r0',
+    ].join('\n')), {}).outputs.o0[0]), 3);
+    rejects(()=>execute(assemble('vs_3_0\ndcl_position o0\nif p0.x\nendif\nmov o0, c0\n'),
+        { constants: { f: [0, 0, 0, 0] } }), /p0.x is read before setp wrote it/);
+    rejects(()=>assemble('vs_2_0\nsetp_lt p0, c0, c1\n'), /not available in vs_2_0|predication/);
 });
 
 test('the limits are the documented ones', ()=>{

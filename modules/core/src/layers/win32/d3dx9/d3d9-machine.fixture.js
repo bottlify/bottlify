@@ -23,9 +23,14 @@
  * ps_2_0, ps_2_x, ps_3_0. The ps_1_x models are a different machine from the
  * later ones and are described in their own section below.
  *
+ * Predication (2_x and 3_0): setp writes the p0 register through its mask;
+ * an instruction with the predicated bit carries a p0 source after its
+ * destination and writes only the components whose predicate component (by
+ * that source's swizzle, negated by !) is true; if, callnz and breakp read
+ * one component of p0. A read of a p0 component no setp wrote throws.
+ *
  * Not supported, and rejected by decode() with a message saying so:
- * predication (the p0 register, the predicated bit of an opcode token, setp,
- * breakp), relative addressing of a destination, the constant ranges beyond
+ * relative addressing of a destination, the constant ranges beyond
  * c255 (register types 11 to 13), half-precision temporaries (type 16), and,
  * outside the ps_1_x models, the `phase` marker, co-issue and destination
  * shift scales. Inside them: ps_1_0 (the documentation describes ps_1_1 and
@@ -241,7 +246,7 @@ const REG = Object.freeze({
 /** D3DSPSM, the source modifiers this machine implements. */
 const MOD = Object.freeze({
     NONE: 0, NEG: 1, BIAS: 2, BIASNEG: 3, SIGN: 4, SIGNNEG: 5, COMP: 6, X2: 7, X2NEG: 8,
-    DZ: 9, DW: 10, ABS: 11, ABSNEG: 12,
+    DZ: 9, DW: 10, ABS: 11, ABSNEG: 12, NOT: 13,
 });
 
 /** How each ps_1_x source modifier is spelled: before the register, and after it. */
@@ -376,7 +381,6 @@ function ps1Name(code, minor, fallback){
     return code === 66 ? (minor === 4 ? 'texld' : 'tex') : fallback;
 }
 
-const UNSUPPORTED_OPS = new Set(['setp', 'breakp']);
 const SCALAR_SOURCE_OPS = new Set(['rcp', 'rsq', 'exp', 'expp', 'log', 'logp']);
 
 /**
@@ -466,6 +470,8 @@ function parseVersion(token){
  * @property {boolean} decl         True for dcl, def* and the phase marker, which do not
  *   execute.
  * @property {boolean} coissue      A ps_1_x instruction written with a `+`: the second of a pair.
+ * @property {boolean} [predicated]  Whether the instruction runs under a predicate.
+ * @property {Operand} [predicate]   The p0 source it runs under, after the destination.
  * @property {number} phase         ps_1_x: 0, or 1 after the `phase` marker of ps_1_4.
  * @property {number} ordinal       Position among the executing instructions, from 0.
  * @property {number} tokenOffset
@@ -591,11 +597,6 @@ function readParam(t, p, limit, v, isDest, what){
             relative = { type: REG.ADDR, index: 0, swizzle: 0 };
         }
     }
-    if (type === REG.PREDICATE)
-    {
-        throw new Error(
-            `decode: predicate register at token ${p} is not supported by this machine`);
-    }
     if (type === REG.CONST2 || type === REG.CONST3 || type === REG.CONST4)
     {
         throw new Error(`decode: constant register beyond c${v.limits.floatConsts - 1} `
@@ -654,8 +655,9 @@ function slotKinds(name){
     {
         case 'loop': return ['loop', 'int'];
         case 'rep': return ['int'];
-        case 'if': return ['bool'];
-        case 'callnz': return ['label', 'bool'];
+        case 'if': return ['condition'];
+        case 'callnz': return ['label', 'condition'];
+        case 'breakp': return ['predicate'];
         case 'call': case 'label': return ['label'];
         case 'texld': case 'texldp': case 'texldb': case 'texldl':
             return ['value', 'sampler'];
@@ -675,7 +677,11 @@ function checkSource(v, op, kind, where){
     const name = registerName(v, op.type, op.index);
     const bad = (/** @type {string} */ why)=>new Error(`decode: ${why} (${where})`);
     const absOk = (v.vs && v.num >= 20) || (!v.vs && v.num === 30);
-    if (op.modifier !== MOD.NONE)
+    if (op.modifier === MOD.NOT && (kind === 'condition' || kind === 'predicate'))
+    {
+        // ! negates a boolean or the predicate.
+    }
+    else if (op.modifier !== MOD.NONE)
     {
         if (kind !== 'value')
         {
@@ -708,6 +714,23 @@ function checkSource(v, op, kind, where){
                 throw bad(`${name} is not a boolean constant register`);
             }
             range(lim.boolConsts);
+            return;
+        case 'condition':
+        case 'predicate':
+            if (op.type === REG.CONSTBOOL && kind === 'condition')
+            {
+                range(lim.boolConsts);
+                return;
+            }
+            if (op.type !== REG.PREDICATE || op.index !== 0 || v.num < 21)
+            {
+                throw bad(kind === 'condition' ? `${name} is not a boolean constant register or p0`
+                    : `${name} is not p0`);
+            }
+            if (!isReplicate(op.swizzle))
+            {
+                throw bad('a predicate read as a condition takes a replicate swizzle');
+            }
             return;
         case 'label':
             if (op.type !== REG.LABEL)
@@ -830,9 +853,19 @@ function checkDest(v, ins, where){
             throw bad(`register ${name} is beyond the ${count} registers of its file in ${v.name}`);
         }
     };
+    if ((op.type === REG.PREDICATE) !== (ins.name === 'setp'))
+    {
+        throw bad(ins.name === 'setp' ? 'setp writes p0 only' : `${ins.name} cannot write p0`);
+    }
     switch (op.type)
     {
         case REG.TEMP: range(lim.temps); return;
+        case REG.PREDICATE:
+            if (op.index !== 0 || op.saturate)
+            {
+                throw bad('the predicate register is p0, written plain');
+            }
+            return;
         case REG.ADDR:
             if (!v.vs)
             {
@@ -981,6 +1014,12 @@ function checkInstruction(v, ins){
                 throw bad('m3x2 writes x and y only');
             }
             break;
+        case 'setp':
+            if (ins.control < 1 || ins.control > 6)
+            {
+                throw bad('setp needs a comparison (gt, eq, ge, lt, ne, le)');
+            }
+            break;
         case 'ifc': case 'breakc':
             if (ins.control < 1 || ins.control > 6)
             {
@@ -1003,7 +1042,8 @@ function checkInstruction(v, ins){
         default:
             break;
     }
-    if (ins.name !== 'ifc' && ins.name !== 'breakc' && ins.opcode !== 66 && ins.control !== 0)
+    if (ins.name !== 'ifc' && ins.name !== 'breakc' && ins.name !== 'setp' && ins.opcode !== 66
+        && ins.control !== 0)
     {
         throw bad(`unexpected control bits 0x${ins.control.toString(16)}`);
     }
@@ -1594,10 +1634,6 @@ export function decode(tokens, options = {}){
         {
             throw new Error(`decode: ${name} is not available in ${v.name} (token ${pos})`);
         }
-        if (UNSUPPORTED_OPS.has(info.name))
-        {
-            throw new Error(`decode: ${info.name} (predication) is not supported by this machine`);
-        }
         if (v.ps1)
         {
             if (tok & ((1 << 28) | (1 << 29)))
@@ -1608,12 +1644,11 @@ export function decode(tokens, options = {}){
         }
         else if (tok & (1 << 30))
         {
-            throw new Error(`decode: predicated instruction at token ${pos} `
-                + 'is not supported by this machine');
-        }
-        else if (tok & (1 << 28))
-        {
             throw new Error(`decode: co-issued instruction at token ${pos} is not supported`);
+        }
+        else if ((tok & (1 << 28)) && v.num < 21)
+        {
+            throw new Error(`decode: predication does not exist in ${v.name} (token ${pos})`);
         }
         const control = (tok >>> 16) & 0xff;
         let end = n;
@@ -1636,6 +1671,7 @@ export function decode(tokens, options = {}){
             opcode: code, name, control, dest: null, sources: [], decl: false,
             coissue: v.ps1 && !!(tok & (1 << 30)), phase: ps1 ? ps1.phase : 0,
             ordinal: -1, tokenOffset: pos,
+            predicated: !v.ps1 && !!(tok & (1 << 28)),
         };
         let cursor = pos + 1;
         if (info.name === 'dcl')
@@ -1727,6 +1763,17 @@ export function decode(tokens, options = {}){
                 if (info.dst)
                 {
                     [dest, c] = readParam(t, c, end, v, true, 'destination');
+                }
+                if (ins.predicated)
+                {
+                    const [predicate, next] = readParam(t, c, end, v, false, 'predicate');
+                    if (predicate.type !== REG.PREDICATE)
+                    {
+                        throw new Error(`decode: ${info.name} at token ${pos} is predicated `
+                            + 'on a register that is not p0');
+                    }
+                    ins.predicate = predicate;
+                    c = next;
                 }
                 const sources = [];
                 for (let k = 0; k < srcCount; k++)
@@ -1849,7 +1896,7 @@ export function decode(tokens, options = {}){
                 ins.startIdx = top.idx;
                 break;
             }
-            case 'break': case 'breakc': {
+            case 'break': case 'breakc': case 'breakp': {
                 let k = stack.length - 1;
                 while (k >= 0 && stack[k].kind === 'if')
                 {
@@ -2269,7 +2316,7 @@ function parseRegister(v, letters, digits, full){
         case 'oDepth': need(num < 0); return { type: REG.DEPTHOUT, index: 0 };
         case 'vPos': need(num < 0); return { type: REG.MISC, index: 0 };
         case 'vFace': need(num < 0); return { type: REG.MISC, index: 1 };
-        case 'p': throw new Error('predicate registers are not supported by this machine');
+        case 'p': need(num === 0); return { type: REG.PREDICATE, index: 0 };
         default: throw new Error(`bad register "${full}"`);
     }
 }
@@ -2398,7 +2445,12 @@ function assembleSource(v, text){
     /** @type {number} */
     let modifier = MOD.NONE;
     const complement = /^1\s*-\s*/.exec(s);
-    if (complement)
+    if (s.startsWith('!'))
+    {
+        modifier = MOD.NOT;
+        s = s.slice(1).trim();
+    }
+    else if (complement)
     {
         modifier = MOD.COMP;
         s = s.slice(complement[0].length);
@@ -2642,6 +2694,15 @@ function assembleStatement(v, line){
         coissue = true;
         line = line.slice(1).trim();
     }
+    // (p0) or (!p0.x) in front: the instruction runs under the predicate.
+    /** @type {number[]} */
+    let predicate = [];
+    const guard = /^\(\s*([^)]+?)\s*\)\s*/.exec(line);
+    if (guard)
+    {
+        predicate = assembleSource(v, guard[1]);
+        line = line.slice(guard[0].length);
+    }
     const space = line.search(/\s/);
     const word = (space < 0 ? line : line.slice(0, space)).toLowerCase();
     const operands = splitOperands(space < 0 ? '' : line.slice(space + 1));
@@ -2712,6 +2773,10 @@ function assembleStatement(v, line){
             control = COMPARISONS.indexOf(part);
             name = base === 'if' ? 'ifc' : 'breakc';
         }
+        else if (COMPARISONS.indexOf(part) > 0 && base === 'setp')
+        {
+            control = COMPARISONS.indexOf(part);
+        }
         else
         {
             throw new Error(`unknown instruction "${word}"`);
@@ -2747,12 +2812,13 @@ function assembleStatement(v, line){
     {
         throw new Error(`${word} has no destination to modify`);
     }
+    body.push(...predicate);
     for (const s of rest)
     {
         body.push(...assembleSource(v, s));
     }
     const opcode = info.code | (control << 16) | lengthField(body.length)
-        | (coissue ? 1 << 30 : 0);
+        | (coissue ? 1 << 30 : 0) | (predicate.length ? 1 << 28 : 0);
     return [opcode >>> 0, ...body];
 }
 
@@ -3050,6 +3116,33 @@ export function execute(subject, io){
         return value;
     };
 
+    const p0 = [false, false, false, false];
+    /** The components of p0 a setp has written. */
+    let p0Written = 0;
+
+    /**
+     * Component `pos` of a predicate source, through its swizzle and !.
+     *
+     * @param {Operand} op @param {number} pos
+     */
+    const predicateAt = (op, pos)=>{
+        const component = (op.swizzle >> (2 * pos)) & 3;
+        if (!(p0Written & (1 << component)))
+        {
+            fail(`p0.${COMPONENTS[component]} is read before setp wrote it`);
+        }
+        return p0[component] !== (op.modifier === MOD.NOT);
+    };
+
+    /**
+     * What if, callnz and breakp branch on: a boolean constant or one
+     * component of the predicate, either negated by !.
+     *
+     * @param {Operand} op
+     */
+    const conditionOf = op=>(op.type === REG.PREDICATE ? predicateAt(op, 0)
+        : constBool(op.index) !== (op.modifier === MOD.NOT));
+
     /**
      * @param {Operand} d
      * @returns {string}
@@ -3059,7 +3152,18 @@ export function execute(subject, io){
     /** @param {number[]} res */
     const commit = res=>{
         const d = /** @type {Operand} */ (cur.dest);
-        const mask = d.writeMask;
+        let mask = d.writeMask;
+        if (cur.predicate)
+        {
+            // A predicated write leaves each component its predicate is false for.
+            for (let c = 0; c < 4; c++)
+            {
+                if ((mask & (1 << c)) && !predicateAt(cur.predicate, c))
+                {
+                    mask &= ~(1 << c);
+                }
+            }
+        }
         if (d.type === REG.ADDR)
         {
             for (let c = 0; c < 4; c++)
@@ -3134,8 +3238,8 @@ export function execute(subject, io){
     };
 
     /** @param {number} sel */
-    const compare = sel=>{
-        const [a, b] = [src(cur.sources[0], 0), src(cur.sources[1], 0)];
+    const compare = (sel, pos = 0)=>{
+        const [a, b] = [src(cur.sources[0], pos), src(cur.sources[1], pos)];
         switch (sel)
         {
             case 1: return a > b;
@@ -3183,6 +3287,18 @@ export function execute(subject, io){
         {
             case 'nop': break;
             case 'mov': perComponent(c=>src(s[0], c)); break;
+            case 'setp': {
+                const d = /** @type {Operand} */ (cur.dest);
+                for (let c = 0; c < 4; c++)
+                {
+                    if (d.writeMask & (1 << c))
+                    {
+                        p0[c] = compare(cur.control, c);
+                        p0Written |= 1 << c;
+                    }
+                }
+                break;
+            }
             case 'mova': perComponent(c=>src(s[0], c)); break;
             case 'add': perComponent(c=>f32(src(s[0], c) + src(s[1], c))); break;
             case 'sub': perComponent(c=>f32(src(s[0], c) - src(s[1], c))); break;
@@ -3436,7 +3552,7 @@ export function execute(subject, io){
         switch (cur.name)
         {
             case 'if': case 'ifc': {
-                const ok = cur.name === 'if' ? constBool(cur.sources[0].index)
+                const ok = cur.name === 'if' ? conditionOf(cur.sources[0])
                     : compare(cur.control);
                 if (ok)
                 {
@@ -3490,8 +3606,9 @@ export function execute(subject, io){
                 }
                 break;
             }
-            case 'break': case 'breakc': {
-                if (cur.name === 'breakc' && !compare(cur.control))
+            case 'break': case 'breakc': case 'breakp': {
+                if ((cur.name === 'breakc' && !compare(cur.control))
+                    || (cur.name === 'breakp' && !conditionOf(cur.sources[0])))
                 {
                     pc++;
                     break;
@@ -3506,7 +3623,7 @@ export function execute(subject, io){
                 break;
             }
             case 'call': case 'callnz': {
-                if (cur.name === 'callnz' && !constBool(cur.sources[1].index))
+                if (cur.name === 'callnz' && !conditionOf(cur.sources[1]))
                 {
                     pc++;
                     break;

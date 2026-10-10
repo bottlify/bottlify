@@ -1235,14 +1235,18 @@ function knownDifference(version, line, mine, theirs){
     const out = [...theirs];
     /** @type {string[]} */
     const reasons = [];
-    if (version.startsWith('vs') && /^sub[ _]/.test(line))
+    // A predicate's token sits between the destination and the sources.
+    const guard = /^\(([^)]*)\)\s*/.exec(line);
+    const bare = guard ? line.slice(guard[0].length) : line;
+    const shift = guard ? 1 : 0;
+    if (version.startsWith('vs') && /^sub[ _]/.test(bare))
     {
         // D3DX turns sub into add with the second source negated in a vertex shader; the
         // reference keeps opcode 3. The rewrite applied to the reference's tokens must give
         // the assembler's.
         out[1] = (out[1] & ~0xffff) | 2;
-        const relative = (out[3] & (1 << 13)) !== 0 && !/^vs_1/.test(version);
-        const second = relative ? 5 : 4;
+        const relative = (out[3 + shift] & (1 << 13)) !== 0 && !/^vs_1/.test(version);
+        const second = (relative ? 5 : 4) + shift;
         const flips = new Map([[0, 1], [1, 0], [11, 12], [12, 11]]);
         const flipped = flips.get((out[second] >>> 24) & 15);
         if (flipped === undefined)
@@ -1296,8 +1300,9 @@ test('differential gate: every line both assemblers accept gives identical token
             }
             catch (e){
                 const message = e instanceof Error ? e.message : String(e);
-                // The reference has no predication, no ! (boolean not), no relative
-                // destinations, no constants beyond c255 and no half-precision registers.
+                // The reference has no relative destinations, no constants beyond c255
+                // and no half-precision registers; its predication and ! are 2_x and
+                // later only.
                 const why = /p0/.test(text) ? 'predication' : /!b\d/.test(text) ? 'boolean not' : '';
                 assert.ok(why, `unexpected reference rejection of:\n${text}\n${message}`);
                 count(`reference rejects: ${why}`);
