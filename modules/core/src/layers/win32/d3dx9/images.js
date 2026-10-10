@@ -5,13 +5,14 @@
  */
 
 import { FMT, decodeTexels, isCompressed, isSupported, layoutOf } from './pixels.js';
+import { PngError, isPng, readPng } from './png.js';
 
 /**
  * The image files D3DX's texture loaders read, from the files' own
  * specifications: DDS (the DDS_HEADER and DDS_PIXELFORMAT of the DirectX
  * documentation), Truevision TGA 2.0, and the Windows bitmap
- * (BITMAPFILEHEADER and BITMAPINFOHEADER, BITMAPCOREHEADER, with BI_BITFIELDS).
- * JPEG and PNG are not read yet, and say so.
+ * (BITMAPFILEHEADER and BITMAPINFOHEADER, BITMAPCOREHEADER, with BI_BITFIELDS),
+ * and PNG (`png.js`). JPEG is not read yet, and says so.
  */
 
 /** D3DXIMAGE_FILEFORMAT. */
@@ -60,9 +61,21 @@ export function readImage(bytes){
     {
         throw new ImageError('a JPEG file: not read yet');
     }
-    if (text === '\x89PNG')
+    if (isPng(bytes))
     {
-        throw new ImageError('a PNG file: not read yet');
+        try
+        {
+            const { width, height, format, bgra } = readPng(bytes);
+            return { fileFormat: IFF.PNG, width, height, format, mipLevels: 1,
+                levels: [{ width, height, format: FMT.A8R8G8B8, data: bgra }] };
+        }
+        catch (e){
+            if (e instanceof PngError)
+            {
+                throw new ImageError(e.message);
+            }
+            throw e;
+        }
     }
     // TGA has no signature; its header is the test.
     return readTga(bytes);
