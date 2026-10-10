@@ -684,7 +684,8 @@ test('a subroutine is inlined at each call, and its ret leaves it from inside a 
     assertLine(translated.wgsl, '_ret0 = true;');
     assertLine(translated.wgsl, 'if (_ret0) { break; }');
     assertLine(translated.wgsl, 'var _ret1 = false;');
-    assert.ok(!translated.wgsl.includes('return out;\n    out.oPos'), 'main\'s ret ends nothing early');
+    assert.ok(!translated.wgsl.includes('return out;\n    out.oPos'),
+        'main\'s ret ends nothing early');
 });
 
 test('a call nobody can answer is refused by name', ()=>{
