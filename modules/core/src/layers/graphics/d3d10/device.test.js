@@ -1899,10 +1899,18 @@ test('the compressed, packed and typeless formats report what this device does w
         'a 32-bit float is loaded, not filtered');
     assert.ok(support(DXGI_FORMAT.R16_FLOAT) & 0x2, 'a one-channel vertex element');
     assert.ok(support(DXGI_FORMAT.R8G8_UINT) & 0x2);
+    // display_format_support (d3d10core.c:54-63): the four required, the BGRA
+    // pair allowed; nothing else is shown.
     for (const format of [DXGI_FORMAT.R8G8B8A8_UNORM, DXGI_FORMAT.R8G8B8A8_UNORM_SRGB,
-        DXGI_FORMAT.B8G8R8A8_UNORM, DXGI_FORMAT.B8G8R8A8_UNORM_SRGB])
+        DXGI_FORMAT.B8G8R8A8_UNORM, DXGI_FORMAT.B8G8R8A8_UNORM_SRGB,
+        DXGI_FORMAT.R16G16B16A16_FLOAT, DXGI_FORMAT.R10G10B10A2_UNORM])
     {
         assert.ok(support(format) & 0x80000, `format ${format} can be displayed`);
+    }
+    for (const format of [DXGI_FORMAT.R8G8B8A8_TYPELESS, DXGI_FORMAT.B8G8R8X8_UNORM,
+        DXGI_FORMAT.R32G32B32A32_FLOAT])
+    {
+        assert.ok(!(support(format) & 0x80000), `format ${format} is not displayed`);
     }
     for (const format of [DXGI_FORMAT.R1_UNORM, DXGI_FORMAT.B5G6R5_UNORM,
         DXGI_FORMAT.B5G5R5A1_UNORM])
@@ -2197,4 +2205,23 @@ test('a multisampled texture\'s default views look at it by sample, and no other
     srv.view.release();
     ms.release();
     assertFullyReleased(device);
+});
+
+test('the combined entry points answer with the swap chain\'s own failure and hand back'
+    + ' neither object (test_create_device, d3d10_1.c:249-266)', ()=>{
+    for (const [window, format, expected] of [
+        [0, DXGI_FORMAT.R8G8B8A8_UNORM, DXGI_ERROR_INVALID_CALL],
+        [0x1234, DXGI_FORMAT.BC5_UNORM, E_INVALIDARG],
+    ])
+    {
+        const desc = { ...defaultSwapChainDesc(), outputWindow: window };
+        desc.bufferDesc = { ...desc.bufferDesc, format };
+        /** @type {{ swapChain?: any }} */
+        const chain = { swapChain: 'untouched' };
+        /** @type {{ device?: any }} */
+        const device = { device: 'untouched' };
+        assert.equal(D3D10CreateDeviceAndSwapChain(null, D3D10_DRIVER_TYPE.HARDWARE, null, 0,
+            D3D10_SDK_VERSION, desc, chain, device), expected, `window ${window}, ${format}`);
+        assert.deepEqual([chain.swapChain, device.device], [null, null]);
+    }
 });

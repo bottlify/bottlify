@@ -51,7 +51,7 @@ import {
  * A device with a backend over the recording GPU, and a swap chain to present.
  *
  * @param {{ width?: number, height?: number, compressedTextures?: boolean,
- *           depthClipControl?: boolean, sampleCount?: number,
+ *           depthClipControl?: boolean, sampleCount?: number, format?: number,
  *           fake?: Parameters<typeof createFakeDevice>[0],
  *           frameQueued?: import('../webgpu/internal/latency.js').FrameQueued }} [options]
  */
@@ -71,6 +71,7 @@ function harness(options = {}){
     desc.bufferDesc.width = options.width ?? 8;
     desc.bufferDesc.height = options.height ?? 8;
     desc.sampleDesc.count = options.sampleCount ?? 1;
+    desc.bufferDesc.format = options.format ?? desc.bufferDesc.format;
     desc.outputWindow = 0x1234;
     /** @type {{ device?: any }} */
     const deviceOut = {};
@@ -2085,4 +2086,43 @@ test('a shader reads a multisampled texture by sample only where one is bound, a
     assert.deepEqual(layouts.map((/** @type {any} */ call)=>call.descriptor.entries[0].texture),
         [{ sampleType: 'float', viewDimension: '2d' },
             { sampleType: 'unfilterable-float', viewDimension: '2d', multisampled: true }]);
+});
+
+test('a back buffer a canvas cannot take is shown through one it can: sRGB bytes copied as they'
+    + ' are, ten bits a channel drawn into half floats', async()=>{
+    for (const [format, kept, shown, how] of [
+        [DXGI_FORMAT.R8G8B8A8_UNORM, 'rgba8unorm', 'rgba8unorm', 'as it is'],
+        [DXGI_FORMAT.R8G8B8A8_UNORM_SRGB, 'rgba8unorm-srgb', 'rgba8unorm', 'copyTexture'],
+        [DXGI_FORMAT.B8G8R8A8_UNORM_SRGB, 'bgra8unorm-srgb', 'bgra8unorm', 'copyTexture'],
+        [DXGI_FORMAT.R16G16B16A16_FLOAT, 'rgba16float', 'rgba16float', 'as it is'],
+        [DXGI_FORMAT.R10G10B10A2_UNORM, 'rgb10a2unorm', 'rgba16float', 'd3d10:copy'],
+    ])
+    {
+        const h = harness({ format: Number(format) });
+        h.device.ClearRenderTargetView(h.renderTargetView, [0, 0, 1, 1]);
+        await h.present();
+        assert.deepEqual(h.divergences, [], String(kept));
+        const backBuffer = h.gpu.of('createTexture').find((/** @type {any} */ call)=>
+            call.descriptor.format === kept);
+        const surface = h.presented[0].surface;
+        assert.equal(surface.format, shown, `${kept} is shown as ${shown}`);
+        if (how === 'as it is')
+        {
+            assert.equal(surface.texture, backBuffer.texture);
+            continue;
+        }
+        assert.notEqual(surface.texture, backBuffer.texture);
+        if (how === 'copyTexture')
+        {
+            const copy = h.gpu.of('copyTextureToTexture').at(-1);
+            assert.deepEqual([copy.source.texture, copy.destination.texture],
+                [backBuffer.texture, surface.texture], `${kept}: the bytes, copied`);
+        }
+        else
+        {
+            const pass = h.gpu.of('beginRenderPass').at(-1);
+            assert.equal(pass.descriptor.label, `pass:${how}`);
+            assert.equal(pass.descriptor.colorAttachments[0].view.texture, surface.texture);
+        }
+    }
 });

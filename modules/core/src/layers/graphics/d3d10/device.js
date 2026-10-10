@@ -56,7 +56,8 @@ import {
 } from './resources.js';
 import { STATE_KIND, createStateStore } from './states.js';
 import {
-    bindFlagsForUsage, bufferCreateResult, resolveViewFormat, textureCreateResult,
+    DISPLAY_FORMATS, bindFlagsForUsage, bufferCreateResult, resolveViewFormat,
+    textureCreateResult,
 } from './validity.js';
 
 /**
@@ -297,11 +298,12 @@ export function D3D10CreateDeviceAndSwapChain(adapter, driverType, software, fla
     if (created !== S_OK)
     {
         // Neither object survives a failure here: a caller that got a device
-        // back would have no way of telling it apart from a full success.
+        // back would have no way of telling it apart from a full success. The
+        // swap chain's own answer is the call's (d3d10_1.c:252-266).
         device.release();
         deviceOut.device = null;
         chain.swapChain = null;
-        return DXGI_ERROR_INVALID_CALL;
+        return created;
     }
     return S_OK;
 }
@@ -1135,8 +1137,12 @@ export function createDevice(options = {}){
                 }
                 if (/^(rgba8unorm|bgra8unorm)/.test(kept.format) && !kept.conversion)
                 {
-                    support |= FORMAT_SUPPORT.MIP_AUTOGEN | FORMAT_SUPPORT.DISPLAY;
+                    support |= FORMAT_SUPPORT.MIP_AUTOGEN;
                 }
+            }
+            if (DISPLAY_FORMATS.has(format))
+            {
+                support |= FORMAT_SUPPORT.DISPLAY;
             }
             if (info.kind === FORMAT_KIND.DEPTH && kept)
             {

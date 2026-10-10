@@ -43,23 +43,14 @@ import {
     DXGI_ERROR_INVALID_CALL, DXGI_ERROR_NOT_FOUND, DXGI_FORMAT, DXGI_MODE_SCALING,
     DXGI_MODE_SCANLINE_ORDER, DXGI_SWAP_EFFECT, DXGI_USAGE, E_INVALIDARG, E_NOINTERFACE, IID, S_OK,
 } from './constants.js';
-import { backBufferUsage, highestAccessibleBuffer, swapChainDescResult } from './validity.js';
+import {
+    DISPLAY_FORMATS, backBufferUsage, highestAccessibleBuffer, swapChainDescResult,
+} from './validity.js';
 import { REFRESH_HZ, displayModes } from '../../win32/user32/display.js';
 import { VIDEO_ADAPTER_NAME } from '../../win32/devices.js';
 
 /** DXGI_ERROR_NOT_CURRENTLY_AVAILABLE: what the browser has no way to give. */
 const DXGI_ERROR_NOT_CURRENTLY_AVAILABLE = 0x887a0022;
-
-/**
- * The formats an output lists modes in: the ones a swap chain's buffer is
- * shown from.
- *
- * @type {ReadonlySet<number>}
- */
-const DISPLAY_FORMATS = new Set([
-    DXGI_FORMAT.R8G8B8A8_UNORM, DXGI_FORMAT.R8G8B8A8_UNORM_SRGB, DXGI_FORMAT.B8G8R8A8_UNORM,
-    DXGI_FORMAT.B8G8R8A8_UNORM_SRGB,
-]);
 
 /**
  * @typedef {Object} ModeFields
@@ -222,6 +213,13 @@ export function createFactory(options = {}, secondVersion = false){
             {
                 out.swapChain = null;
                 return DXGI_ERROR_INVALID_CALL;
+            }
+            // A buffer nothing could show is a bad argument rather than a bad
+            // call (test_create_swapchain, dxgi.c:2100-2108).
+            if (!DISPLAY_FORMATS.has(desc.bufferDesc.format))
+            {
+                out.swapChain = null;
+                return E_INVALIDARG;
             }
             // The back buffers are textures of the device: a sample count the
             // device cannot make a texture at is one the swap chain cannot have.
@@ -625,6 +623,10 @@ function createSwapChain(requested, device, factory, windowClientSize){
             {
                 return DXGI_ERROR_INVALID_CALL;
             }
+            if (!DISPLAY_FORMATS.has(next.bufferDesc.format))
+            {
+                return E_INVALIDARG;
+            }
             desc = next;
             // Every buffer is rebuilt, so the ones handed out before this call
             // are no longer the swap chain's -- which is exactly why the call
@@ -706,7 +708,11 @@ function createSwapChain(requested, device, factory, windowClientSize){
     return swapChain;
 }
 
-/** The description a device fills in when a program supplies nothing. */
+/**
+ * The description a device fills in when a program supplies nothing.
+ *
+ * @returns {import('./structs.js').SwapChainFields}
+ */
 export function defaultSwapChainDesc(){
     return {
         bufferDesc: {

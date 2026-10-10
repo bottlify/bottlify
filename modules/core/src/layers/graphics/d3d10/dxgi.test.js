@@ -12,7 +12,7 @@ import {
     IID, S_OK,
 } from './constants.js';
 import {
-    CreateDXGIFactory, CreateDXGIFactory1, createFactory, defaultSwapChainDesc,
+    CreateDXGIFactory, CreateDXGIFactory1, createFactory, defaultSwapChainDesc, outputModes,
 } from './dxgi.js';
 import { D3D10CreateDevice } from './device.js';
 
@@ -555,5 +555,48 @@ test('a present that only tests shows, counts and rotates nothing'
     assert.equal(swapChain.currentBackBufferIndex(), 1);
     assert.equal(shown.length, 1, 'one frame went to the device');
     swapChain.release();
+    assertFullyReleased(device, 'the device');
+});
+
+test('a swap chain is made only in a format it can be shown in (test_create_swapchain,'
+    + ' dxgi.c:2100-2108)', ()=>{
+    const device = createDevice();
+    /** @param {number} format @param {boolean} windowed */
+    const made = (format, windowed = true)=>{
+        /** @type {{ swapChain?: any }} */
+        const created = {};
+        const desc = swapChainDesc({ windowed });
+        desc.bufferDesc.format = format;
+        const hr = device.factory().CreateSwapChain(device, desc, created);
+        created.swapChain?.release();
+        return [hr, created.swapChain ?? null];
+    };
+    for (const format of [DXGI_FORMAT.R8G8B8A8_UNORM, DXGI_FORMAT.R8G8B8A8_UNORM_SRGB,
+        DXGI_FORMAT.B8G8R8A8_UNORM, DXGI_FORMAT.B8G8R8A8_UNORM_SRGB,
+        DXGI_FORMAT.R16G16B16A16_FLOAT, DXGI_FORMAT.R10G10B10A2_UNORM])
+    {
+        assert.equal(made(format)[0], S_OK, `format ${format}`);
+    }
+    for (const format of [DXGI_FORMAT.UNKNOWN, DXGI_FORMAT.R8G8B8A8_TYPELESS,
+        DXGI_FORMAT.BC5_UNORM, DXGI_FORMAT.R32_FLOAT])
+    {
+        assert.deepEqual(made(format), [E_INVALIDARG, null], `format ${format}`);
+    }
+    assert.deepEqual(made(DXGI_FORMAT.UNKNOWN, false), [E_INVALIDARG, null], 'fullscreen too');
+    const size = { width: 1024, height: 768 };
+    assert.deepEqual([DXGI_FORMAT.R16G16B16A16_FLOAT, DXGI_FORMAT.R10G10B10A2_UNORM,
+        DXGI_FORMAT.R32_FLOAT].map(format=>outputModes(size, format).length > 0),
+    [true, true, false], 'an output lists modes in the formats a swap chain is shown in');
+
+    /** @type {{ swapChain?: any }} */
+    const created = {};
+    assert.equal(device.factory().CreateSwapChain(device, swapChainDesc(), created), S_OK);
+    assert.equal(created.swapChain.ResizeBuffers(0, 0, 0, DXGI_FORMAT.BC5_UNORM, 0),
+        E_INVALIDARG);
+    /** @type {{ desc?: any }} */
+    const out = {};
+    created.swapChain.GetDesc(out);
+    assert.equal(out.desc.bufferDesc.format, DXGI_FORMAT.R8G8B8A8_UNORM, 'kept as it was');
+    created.swapChain.release();
     assertFullyReleased(device, 'the device');
 });

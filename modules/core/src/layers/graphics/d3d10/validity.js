@@ -614,6 +614,20 @@ export function swapChainDescResult(desc){
 }
 
 /**
+ * The formats a swap chain's buffers can be shown from, which are also the
+ * ones CheckFormatSupport says DISPLAY for and an output lists modes in: the
+ * four Direct3D 10 requires (d3d10core.c display_format_support) and the
+ * BGRA pair it allows.
+ *
+ * @type {ReadonlySet<number>}
+ */
+export const DISPLAY_FORMATS = new Set([
+    DXGI_FORMAT.R8G8B8A8_UNORM, DXGI_FORMAT.R8G8B8A8_UNORM_SRGB, DXGI_FORMAT.B8G8R8A8_UNORM,
+    DXGI_FORMAT.B8G8R8A8_UNORM_SRGB, DXGI_FORMAT.R16G16B16A16_FLOAT,
+    DXGI_FORMAT.R10G10B10A2_UNORM,
+]);
+
+/**
  * @param {number} swapEffect
  * @param {number} bufferCount
  * @returns {number} the largest index `GetBuffer` answers for

@@ -322,6 +322,34 @@ const RESOLVE_SHADER = [
     '}',
 ].join('\n');
 
+/** A texture's top level drawn into a target of another format, texel for texel. */
+const COPY_SHADER = [
+    '@group(0) @binding(0) var source: texture_2d<f32>;',
+    '@vertex fn vertexMain(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {',
+    '    let uv = vec2<f32>(f32((index << 1u) & 2u), f32(index & 2u));',
+    '    return vec4<f32>(uv * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0), 0.0, 1.0);',
+    '}',
+    '@fragment fn fragmentMain(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {',
+    '    return textureLoad(source, vec2<i32>(position.xy), 0);',
+    '}',
+].join('\n');
+
+/**
+ * The formats a canvas is configured in, by the format a back buffer is kept
+ * in: its own where a canvas takes it, the linear twin of an sRGB one -- the
+ * same bytes, shown as they are -- and half floats for ten bits a channel.
+ *
+ * @type {Readonly<Record<string, string>>}
+ */
+const CANVAS_FORMAT = Object.freeze({
+    rgba8unorm: 'rgba8unorm',
+    bgra8unorm: 'bgra8unorm',
+    rgba16float: 'rgba16float',
+    'rgba8unorm-srgb': 'rgba8unorm',
+    'bgra8unorm-srgb': 'bgra8unorm',
+    rgb10a2unorm: 'rgba16float',
+});
+
 /**
  * @param {number} a
  * @param {number} b
@@ -1833,27 +1861,36 @@ export function createRenderer(services){
         backing.gpuDirty = true;
     };
 
-    /** @type {Map<string, Promise<any>>} format -> the pipeline that resolves into it */
-    const resolvePipelines = new Map();
+    /** @type {Map<string, Promise<any>>} kind and format -> the pipeline that draws it */
+    const blitPipelines = new Map();
 
-    /** @param {string} format */
-    const resolvePipelineFor = format=>{
-        let built = resolvePipelines.get(format);
+    /**
+     * The pipeline that draws a whole texture into a target of `format`: by
+     * averaging its four samples, or by reading its one.
+     *
+     * @param {'resolve' | 'copy'} kind
+     * @param {string} format
+     */
+    const blitPipelineFor = (kind, format)=>{
+        const key = `${kind}:${format}`;
+        let built = blitPipelines.get(key);
         if (!built)
         {
             built = (async()=>{
                 const module = await backend.createShaderModule({
-                    code: RESOLVE_SHADER, label: 'd3d10:resolve',
+                    code: kind === 'resolve' ? RESOLVE_SHADER : COPY_SHADER,
+                    label: `d3d10:${kind}`,
                 });
                 const layout = layoutFor([
-                    { binding: 0, visibility: STAGE.FRAGMENT, texture: {
-                        sampleType: 'unfilterable-float', viewDimension: '2d', multisampled: true,
-                    } },
-                ], 'd3d10:resolve');
+                    { binding: 0, visibility: STAGE.FRAGMENT, texture: kind === 'resolve'
+                        ? { sampleType: 'unfilterable-float', viewDimension: '2d',
+                            multisampled: true }
+                        : { sampleType: 'unfilterable-float', viewDimension: '2d' } },
+                ], `d3d10:${kind}`);
                 const gpu = backend.createRenderPipeline({
-                    label: `d3d10:resolve:${format}`,
+                    label: `d3d10:${kind}:${format}`,
                     layout: backend.createPipelineLayout({
-                        label: 'd3d10:resolve', bindGroupLayouts: [layout],
+                        label: `d3d10:${kind}`, bindGroupLayouts: [layout],
                     }),
                     vertex: { module, entryPoint: 'vertexMain', buffers: [] },
                     fragment: { module, entryPoint: 'fragmentMain', targets: [{ format }] },
@@ -1861,43 +1898,49 @@ export function createRenderer(services){
                 });
                 return { gpu, layout };
             })();
-            resolvePipelines.set(format, built);
+            blitPipelines.set(key, built);
         }
         return built;
     };
 
     /**
-     * Records a multisampled level's resolve into one level and slice of a
-     * one-sample texture, both read in the format the resolve names.
+     * Records the top level of a texture drawn into one level and slice of
+     * another: a multisampled one resolved, a one-sample one copied through
+     * the shader where the two formats are not ones the GPU copies between.
      *
-     * @param {any} from          The multisampled backing.
-     * @param {any} to            The one-sample backing.
+     * @param {any} from          The backing drawn from.
+     * @param {any} to            The one-sample backing drawn into.
      * @param {number} level
      * @param {number} slice
-     * @param {string} format     A WebGPU format both are viewed in.
+     * @param {string} format     The WebGPU format the source is read in.
+     * @param {string} [written]  The one the target is written in; the same by default.
      */
-    const recordResolve = (from, to, level, slice, format)=>{
+    const recordBlit = (from, to, level, slice, format, written = format)=>{
+        const kind = from.sampleCount > 1 ? 'resolve' : 'copy';
         const geometry = to.layout.levels[level];
         record({
             kind: 'blit',
             ids: [from.id, to.id],
-            what: 'a multisampled texture was not resolved',
-            pipeline: resolvePipelineFor(format),
+            what: kind === 'resolve'
+                ? 'a multisampled texture was not resolved'
+                : 'a texture was not drawn into another',
+            pipeline: blitPipelineFor(kind, written),
             steps: [{
                 surface: {
                     texture: to.texture,
                     view: to.texture.createView({
-                        label: 'd3d10:resolve:target', format, dimension: '2d',
+                        label: `d3d10:${kind}:target`, format: written, dimension: '2d',
                         baseMipLevel: level, mipLevelCount: 1, baseArrayLayer: slice,
                         arrayLayerCount: 1,
                     }),
                     width: geometry.width,
                     height: geometry.height,
-                    format,
-                    label: 'd3d10:resolve',
+                    format: written,
+                    label: `d3d10:${kind}`,
                 },
                 entries: [{ binding: 0, resource: from.texture.createView({
-                    label: 'd3d10:resolve:source', format, dimension: '2d',
+                    label: `d3d10:${kind}:source`, format, dimension: '2d', baseMipLevel: 0,
+                    mipLevelCount: 1, baseArrayLayer: 0, arrayLayerCount: 1,
                 }) }],
             }],
         });
@@ -1905,28 +1948,35 @@ export function createRenderer(services){
     };
 
     /**
-     * What a multisampled back buffer is shown as: a one-sample texture of
-     * its format, resolved into before each present.
+     * What a back buffer is shown as when it cannot be shown as it is: a
+     * one-sample texture in a format a canvas takes, filled before each
+     * present. Its own format is kept where the two differ only by sRGB, so
+     * the bytes shown are the bytes drawn.
      *
      * @param {any} backing
+     * @param {string} shown  The canvas format.
      */
-    const presentedOf = backing=>{
+    const presentedOf = (backing, shown)=>{
         if (!backing.presented)
         {
+            const own = backing.layout.format;
+            const twin = own !== shown && copyCompatible(own, shown);
             const texture = createTexture({
-                label: `d3d10:presented:${backing.layout.format}`,
+                label: `d3d10:presented:${shown}`,
                 size: { width: backing.surface.width, height: backing.surface.height,
                     depthOrArrayLayers: 1 },
-                format: backing.layout.format,
+                format: shown,
+                ...(twin ? { viewFormats: [own] } : {}),
                 usage: TextureUsage.RENDER_ATTACHMENT | TextureUsage.TEXTURE_BINDING
-                    | TextureUsage.COPY_SRC,
+                    | TextureUsage.COPY_SRC | TextureUsage.COPY_DST,
             });
             backing.presented = {
                 id: nextBacking++,
                 texture,
+                written: twin || own === shown ? own : shown,
                 layout: { levels: [{ width: backing.surface.width,
                     height: backing.surface.height }] },
-                surface: { ...backing.surface, texture,
+                surface: { ...backing.surface, texture, format: shown,
                     view: texture.createView({ label: 'd3d10:presented' }) },
             };
         }
@@ -2374,13 +2424,33 @@ export function createRenderer(services){
             }
             counters.frames++;
             const backing = backingOf(backBuffer);
-            if (backing.sampleCount > 1 && backing.texture)
+            const own = backing.layout.format;
+            const shown = CANVAS_FORMAT[own] ?? own;
+            if (!backing.texture || (backing.sampleCount === 1 && shown === own))
             {
-                const shown = presentedOf(backing);
-                recordResolve(backing, shown, 0, 0, backing.layout.format);
-                return submit(shown.surface);
+                return submit(backing.surface);
             }
-            return submit(backing.surface);
+            // A canvas takes no sRGB, ten-bit or multisampled frame: the back
+            // buffer is resolved, copied or drawn into one it takes.
+            const presented = presentedOf(backing, shown);
+            if (backing.sampleCount === 1 && copyCompatible(own, shown))
+            {
+                record({
+                    kind: 'copyTexture',
+                    sourceId: backing.id,
+                    destinationId: presented.id,
+                    source: { texture: backing.texture, mipLevel: 0, origin: { x: 0, y: 0, z: 0 } },
+                    destination: { texture: presented.texture, mipLevel: 0,
+                        origin: { x: 0, y: 0, z: 0 } },
+                    size: { width: backing.surface.width, height: backing.surface.height,
+                        depthOrArrayLayers: 1 },
+                });
+            }
+            else
+            {
+                recordBlit(backing, presented, 0, 0, own, presented.written);
+            }
+            return submit(presented.surface);
         },
 
         /**
@@ -2416,7 +2486,7 @@ export function createRenderer(services){
                 return;
             }
             const { level, slice } = subresourceOf(destination, destinationSubresource);
-            recordResolve(from, to, level, slice, read.format);
+            recordBlit(from, to, level, slice, read.format);
         },
 
         /**
