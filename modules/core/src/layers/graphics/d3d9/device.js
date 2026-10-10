@@ -1008,9 +1008,16 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         const made = createReferenceCount({
             onFirstRef: ()=>count.addRef(),
             onZero: ()=>count.release(),
-            onLastRef: onGone,
+            // Out of the set as soon as it is gone, not at the next reset: a
+            // program that makes and releases buffers while it loads, and never
+            // resets, would otherwise keep one entry for every buffer it made.
+            onLastRef: ()=>{
+                pooled.delete(entry);
+                onGone();
+            },
         });
-        pooled.add({ pool, count: made });
+        const entry = { pool, count: made };
+        pooled.add(entry);
         return made;
     };
 

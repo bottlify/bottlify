@@ -6,6 +6,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import v8 from 'node:v8';
+import vm from 'node:vm';
 import {
     D3DERR_DEVICELOST, D3DERR_DEVICENOTRESET, D3DERR_INVALIDCALL, D3DERR_NOTAVAILABLE, D3DFMT,
     D3DLIGHTTYPE, D3DPOOL, D3DRS, D3DRTYPE, D3DSWAPEFFECT, D3DUSAGE, D3DZB, D3D_OK, dwordToFloat,
@@ -938,3 +940,28 @@ test('a render target and a depth stencil released to nothing while set live on 
         original.surface.release();
         assertFullyReleased(device);
     });
+
+test('a buffer released and unbound is not kept by the device until a reset', async()=>{
+    // A program that makes and releases buffers while it loads, and never
+    // resets, kept one record for every buffer it had ever made.
+    const device = createDevice();
+    /** @type {WeakRef<object>[]} */
+    const counters = [];
+    const makeAndRelease = ()=>{
+        /** @type {{ buffer?: any }} */
+        const out = {};
+        assert.equal(device.CreateVertexBuffer(16, 0, 0, D3DPOOL.DEFAULT, out), D3D_OK);
+        counters.push(new WeakRef(out.buffer.counter));
+        assert.equal(out.buffer.release(), 0);
+    };
+    for (let made = 0; made < 64; made++)
+    {
+        makeAndRelease();
+    }
+    // A collection waits for the turn the references were dropped in to end.
+    await new Promise(resolve=>setImmediate(resolve));
+    v8.setFlagsFromString('--expose-gc');
+    /** @type {() => void} */ (vm.runInNewContext('gc'))();
+    assert.equal(counters.filter(counter=>counter.deref() !== undefined).length, 0);
+    assert.equal(device.release(), 0);
+});
