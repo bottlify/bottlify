@@ -868,6 +868,10 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
         GetParent: getParent,
         /** @param {any} adapter @param {number[]} args */
         EnumOutputs: (adapter, [index, out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return E_INVALIDARG;
+            }
             /** @type {{ output?: any }} */
             const held = {};
             const hr = adapter.EnumOutputs(index >>> 0, held);
@@ -917,6 +921,10 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
         GetParent: getParent,
         /** @param {any} factory @param {number[]} args */
         EnumAdapters: (factory, [index, out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return DXGI_ERROR_INVALID_CALL;
+            }
             /** @type {{ adapter?: any }} */
             const held = {};
             const hr = factory.EnumAdapters(index >>> 0, held);
@@ -929,6 +937,10 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
         },
         /** @param {any} factory @param {number[]} args */
         EnumAdapters1: (factory, [index, out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return DXGI_ERROR_INVALID_CALL;
+            }
             /** @type {{ adapter?: any }} */
             const held = {};
             const hr = factory.EnumAdapters1(index >>> 0, held);

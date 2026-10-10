@@ -2293,3 +2293,24 @@ test('DXGI names the adapter, the output and the monitor as user32 and Direct3D 
     assert.ok(sizes.some(([width, height])=>width === 1920 && height === 1080),
         'the display\'s own size among them');
 });
+
+test('enumerating into no pointer is refused, each call with its own code'
+    + ' (dxgi.c:1472-1473, 6381-6382)', ()=>{
+    const h = seamed();
+    const factoryAt = h.box.place([0]);
+    assert.equal(h.dxgi.CreateDXGIFactory1.handler([h.box.placeGuid(IID.IDXGIFactory1),
+        factoryAt]) >>> 0, S_OK);
+    const factory = h.box.memory.readU32(factoryAt);
+    assert.equal(h.box.call(factory, slot(IDXGIFACTORY_SLOTS, 'EnumAdapters'), [0, 0]),
+        DXGI_ERROR_INVALID_CALL);
+    assert.equal(h.box.call(factory, slot(IDXGIFACTORY1_SLOTS, 'EnumAdapters1'), [0, 0]),
+        DXGI_ERROR_INVALID_CALL);
+    const adapterAt = h.box.place([0]);
+    assert.equal(h.box.call(factory, slot(IDXGIFACTORY_SLOTS, 'EnumAdapters'), [0, adapterAt]),
+        S_OK);
+    const adapter = h.box.memory.readU32(adapterAt);
+    assert.equal(h.box.call(adapter, slot(IDXGIADAPTER_SLOTS, 'EnumOutputs'), [0, 0]),
+        E_INVALIDARG);
+    h.box.call(adapter, 2);
+    assert.equal(h.box.call(factory, 2), 0, 'nothing was handed out and kept');
+});
