@@ -438,6 +438,28 @@ function copySwapChainDesc(desc){
 }
 
 /**
+ * A back buffer's extent where either side was asked for as zero: that side of
+ * the window's client area, and eight where the client area has none -- a
+ * window of no size still gets a swap chain (dxgi.c test_create_swapchain).
+ *
+ * @param {number} width
+ * @param {number} height
+ * @param {() => { width: number, height: number }} client  Measured only if needed.
+ * @returns {{ width: number, height: number }}
+ */
+function extentFromWindow(width, height, client){
+    if (width !== 0 && height !== 0)
+    {
+        return { width, height };
+    }
+    const measured = client();
+    return {
+        width: width !== 0 ? width : measured.width || 8,
+        height: height !== 0 ? height : measured.height || 8,
+    };
+}
+
+/**
  * @param {import('./structs.js').SwapChainFields} requested
  * @param {any} device
  * @param {any} factory
@@ -447,7 +469,16 @@ function createSwapChain(requested, device, factory, windowClientSize){
     // Nothing here takes the display for itself, so a swap chain asked for
     // fullscreen is made windowed and says so, as one made while fullscreen
     // is unavailable is.
-    let desc = { ...copySwapChainDesc(requested), windowed: true };
+    const asked = copySwapChainDesc(requested);
+    let desc = {
+        ...asked,
+        windowed: true,
+        bufferDesc: {
+            ...asked.bufferDesc,
+            ...extentFromWindow(asked.bufferDesc.width, asked.bufferDesc.height,
+                ()=>windowClientSize(asked.outputWindow)),
+        },
+    };
     /** @type {Map<number, any>} */
     let buffers = new Map();
     let outstanding = 0;
@@ -558,13 +589,11 @@ function createSwapChain(requested, device, factory, windowClientSize){
             {
                 return DXGI_ERROR_INVALID_CALL;
             }
-            const client = windowClientSize(desc.outputWindow);
             const next = {
                 ...desc,
                 bufferDesc: {
                     ...desc.bufferDesc,
-                    width: width === 0 ? client.width : width,
-                    height: height === 0 ? client.height : height,
+                    ...extentFromWindow(width, height, ()=>windowClientSize(desc.outputWindow)),
                     format: format === DXGI_FORMAT.UNKNOWN ? desc.bufferDesc.format : format,
                 },
                 bufferCount: bufferCount === 0 ? desc.bufferCount : bufferCount,

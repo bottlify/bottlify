@@ -459,3 +459,44 @@ test('nothing here goes fullscreen, and the target is null when it says so', ()=
     created.swapChain.release();
     assertFullyReleased(device, 'the device');
 });
+
+test('a swap chain asked for at zero by zero takes its window\'s client area, and eight where'
+    + ' the window has none (test_create_swapchain, dxgi.c:2119-2186)', ()=>{
+    /** @type {Record<number, { width: number, height: number }>} */
+    const clients = { 0x10: { width: 206, height: 184 }, 0x20: { width: 0, height: 0 } };
+    /** @type {number[]} */
+    const measured = [];
+    const device = createDevice({
+        factoryOptions: { windowClientSize: (/** @type {number} */ window)=>{
+            measured.push(window);
+            return clients[window];
+        } },
+    });
+    /** @param {number} outputWindow @param {number} width @param {number} height */
+    const made = (outputWindow, width, height)=>{
+        /** @type {{ swapChain?: any }} */
+        const created = {};
+        const desc = swapChainDesc({ outputWindow });
+        desc.bufferDesc.width = width;
+        desc.bufferDesc.height = height;
+        assert.equal(device.factory().CreateSwapChain(device, desc, created), S_OK);
+        /** @type {{ desc?: any }} */
+        const out = {};
+        created.swapChain.GetDesc(out);
+        /** @type {{ buffer?: any }} */
+        const buffer = {};
+        assert.equal(created.swapChain.GetBuffer(0, IID.ID3D10Texture2D, buffer), S_OK);
+        const extent = [out.desc.bufferDesc.width, out.desc.bufferDesc.height,
+            buffer.buffer.desc.Width, buffer.buffer.desc.Height];
+        buffer.buffer.release();
+        created.swapChain.release();
+        return extent;
+    };
+    assert.deepEqual(made(0x10, 0, 0), [206, 184, 206, 184], 'the client area, and the buffer');
+    assert.deepEqual(made(0x20, 0, 0), [8, 8, 8, 8], 'an empty client area');
+    assert.deepEqual(made(0x10, 0, 50), [206, 50, 206, 50], 'only the side asked for as zero');
+    measured.length = 0;
+    assert.deepEqual(made(0x10, 64, 32), [64, 32, 64, 32]);
+    assert.deepEqual(measured, [], 'a window is measured only when a side is zero');
+    assertFullyReleased(device, 'the device');
+});

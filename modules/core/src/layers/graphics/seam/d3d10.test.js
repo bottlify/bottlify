@@ -54,6 +54,7 @@ import {
     ID3D10EFFECTTYPE_SLOTS, ID3D10EFFECTVARIABLE_SLOTS, ID3D10EFFECT_SLOTS,
 } from './d3d10-effect.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
+import { createGraphicsLibraries } from './exports.js';
 
 const E_NOTIMPL = 0x80004001;
 
@@ -2131,3 +2132,55 @@ test('an input layout of no elements is made through the seam from a NULL array'
     assert.notEqual(layout, 0);
     assert.equal(h.box.call(layout, 2), 0);
 });
+
+test('the libraries hand DXGI the window\'s client area for a swap chain asked for at zero',
+    ()=>{
+        const box = machine();
+        const gpu = createFakeDevice();
+        const backend = createBackend({ device: gpu.device, queue: gpu.queue,
+            presentTo: ()=>{}, now: ()=>0 });
+        /** @type {number[]} */
+        const measured = [];
+        const { libraries } = createGraphicsLibraries({
+            graphics: {
+                create: (/** @type {string} */ name)=>(name === 'd3d10'
+                    ? { backend, createSampler: (/** @type {any} */ descriptor)=>({ descriptor }),
+                        createTexture: gpu.device.createTexture }
+                    : null),
+                available: ()=>false,
+            },
+            only: ['D3D10.dll', 'DXGI.dll'],
+            memory: box.services,
+            publishInterface: box.publishInterface,
+            unpublishInterface: box.unpublishInterface,
+            allocate: box.allocate,
+            screen: ()=>({ width: 1920, height: 1080, bitsPerPixel: 32 }),
+            windowClientSize: (/** @type {number} */ window)=>{
+                measured.push(window);
+                return window === 0x1234 ? { width: 300, height: 200 } : null;
+            },
+        });
+        const descAt = box.allocate(DXGI_SWAP_CHAIN_DESC.SIZE);
+        writeSwapChainDesc(box.services, descAt, {
+            bufferDesc: { width: 0, height: 0, refreshNumerator: 60, refreshDenominator: 1,
+                format: DXGI_FORMAT.R8G8B8A8_UNORM, scanlineOrdering: 0, scaling: 0 },
+            sampleDesc: { count: 1, quality: 0 },
+            bufferUsage: DXGI_USAGE.RENDER_TARGET_OUTPUT,
+            bufferCount: 1,
+            outputWindow: 0x1234,
+            windowed: true,
+            swapEffect: DXGI_SWAP_EFFECT.DISCARD,
+            flags: 0,
+        });
+        const chainAt = box.place([0]);
+        const deviceAt = box.place([0]);
+        assert.equal(libraries['D3D10.dll'].D3D10CreateDeviceAndSwapChain.handler([0,
+            D3D10_DRIVER_TYPE.HARDWARE, 0, 0, D3D10_SDK_VERSION, descAt, chainAt, deviceAt]) >>> 0,
+        S_OK);
+        const out = box.allocate(DXGI_SWAP_CHAIN_DESC.SIZE);
+        assert.equal(box.call(box.memory.readU32(chainAt), slot(IDXGISWAPCHAIN_SLOTS, 'GetDesc'),
+            [out]), S_OK);
+        assert.deepEqual([box.memory.readU32(out), box.memory.readU32(out + 4)], [300, 200],
+            'the window\'s client area, not the 1920 by 1080 display');
+        assert.deepEqual(measured, [0x1234]);
+    });
