@@ -391,6 +391,20 @@ export function createDynamicBuffer(options){
         flush,
 
         /**
+         * Bytes put into the live backing as they are, renaming nothing and
+         * asking nothing of the draws that read it: for bytes inside a lock
+         * still held, which no draw recorded before the lock reads.
+         *
+         * @param {number} offset @param {Uint8Array} bytes
+         */
+        rewrite(offset, bytes){
+            shadow.set(bytes, offset);
+            dirtyStart = dirtyStart < 0 ? offset : Math.min(dirtyStart, offset);
+            dirtyEnd = Math.max(dirtyEnd, offset + bytes.length);
+            touch();
+        },
+
+        /**
          * The bytes as the buffer's draws read them: what the unlocks put
          * in, not whatever the program wrote since. A draw the GPU cannot
          * take as it is, rewritten on the CPU, reads them here.

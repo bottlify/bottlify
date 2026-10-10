@@ -326,6 +326,44 @@ test('byte-exact: a triangle from a locked vertex buffer covers the pixels it na
             'and left of the vertical edge');
     });
 
+test('a dynamic buffer written after its unlock draws what was written', async()=>{
+    // A dynamic buffer's memory stays the buffer's after the unlock, as a
+    // driver's does: a program that locks its skinning buffer once a frame
+    // and writes each model's vertices through that address afterwards draws
+    // them, where the bytes of the unlock drew every model a frame behind.
+    const h = harness({ width: 8, height: 8 });
+    const { device } = h;
+    /** @type {{ buffer?: any }} */
+    const created = {};
+    assert.equal(device.CreateVertexBuffer(3 * TRIANGLE_STRIDE,
+        D3DUSAGE.DYNAMIC | D3DUSAGE.WRITEONLY, FVF_TRIANGLE, D3DPOOL.DEFAULT, created), D3D_OK);
+    /** @type {{ pBits?: number }} */
+    const locked = {};
+    assert.equal(created.buffer.Lock(0, 0, locked, D3DLOCK.DISCARD), D3D_OK);
+    const at = /** @type {number} */ (locked.pBits);
+    /** @param {number[][]} corners */
+    const put = corners=>corners.forEach(([x, y], index)=>
+        h.write(at + index * TRIANGLE_STRIDE, vertex(x, y, argb(0, 0, 255))));
+    put([[0, 0], [1, 0], [0, 1]]);
+    assert.equal(created.buffer.Unlock(), D3D_OK);
+    const written = [[1, 1], [7, 1], [1, 4]];
+    put(written);
+
+    assert.equal(device.SetStreamSource(0, created.buffer, 0, TRIANGLE_STRIDE), D3D_OK);
+    assert.equal(device.SetFVF(FVF_TRIANGLE), D3D_OK);
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+    assert.equal(device.EndScene(), D3D_OK);
+    await h.present();
+
+    const draws = h.device.diagnostics().lastFrame.filter(
+        (/** @type {any} */ command)=>command.kind === 'draw');
+    assert.equal(draws.length, 1);
+    assert.deepEqual(queuedTriangle(h, draws[0]).map(point=>[point.x, point.y]), written,
+        'the draw reads what the program wrote after the unlock');
+    created.buffer.release();
+});
+
 test('the frame record says what was cleared, what was drawn and where, and what is shown',
     async()=>{
         // The datum that decides a black or a frozen picture without a

@@ -2736,7 +2736,11 @@ const CLEAR_STRIDE = 20;
  *     under. Off by default: it transforms every vertex of every draw a second
  *     time on the processor, which is a cost an ordinary run must not pay.
  * @property {number} [dumpEvery]
- * @property {{ dumpFrames: number,
+ * @property {boolean} [rereadBuffers]
+ *     Every draw reads the bytes it reaches from guest memory again, held
+ *     lock or not -- a debugging aid, for a program that writes a buffer
+ *     outside its locks.
+ * @property {{ dumpFrames: number, bufferLocks?: string,
  *     written?: (lines: string[], frame: number) => void }} [liveDump]
  *     Set on a running program to have its next frames with draws written
  *     down as `dumpDraws` writes them; counts down as they are, and the last
@@ -2783,6 +2787,9 @@ const CLEAR_STRIDE = 20;
  *     block-aligned) or decodes to `bgra8unorm` (false, the default). Never
  *     whether a DXT surface may be created -- that is the device's to say.
  */
+
+/** D3DUSAGE_DYNAMIC: a buffer the program keeps writing. */
+const D3DUSAGE_DYNAMIC = 0x200;
 
 /**
  * @param {RendererOptions} options
@@ -3045,6 +3052,42 @@ export function createRenderer(options){
         frames: 0,
         draws: 0,
         clears: 0,
+        /**
+         * Indexed draws whose indices reach vertices outside the MinIndex and
+         * NumVertices they were given: a hint drivers do not hold a program
+         * to, and which marking what a draw reads cannot trust either.
+         */
+        outsideVertexRange: 0,
+        /**
+         * The shapes of the draws a run made: which entry point, and how the
+         * buffer ones reached their vertices -- a stream offset that is not
+         * whole vertices, a base vertex, a minimum index. What a program draws
+         * one way under one setting and another way under another is told
+         * apart here.
+         */
+        shapes: { primitive: 0, indexed: 0, up: 0, indexedUp: 0, offset: 0, offsetPartial: 0,
+            baseVertex: 0, maxBaseVertex: 0, minIndex: 0, furtherStreams: 0,
+            /** @type {Record<string, number>} stream zero's stride, by count */
+            strides: /** @type {Record<string, number>} */ ({}),
+            /**
+             * Buffer locks for writing, by buffer size and flags
+             * ("size:none|nooverwrite|discard"), and draws from a buffer ever
+             * locked for writing, by its size.
+             * @type {Record<string, number>}
+             */
+            locks: /** @type {Record<string, number>} */ ({}),
+            /** @type {Record<string, number>} */
+            lockedDraws: /** @type {Record<string, number>} */ ({}),
+            /** Draws from a buffer that is locked as they are made, by its size. @type {Record<string, number>} */
+            drawsWhileLocked: /** @type {Record<string, number>} */ ({}),
+            /** Unlocks, by buffer size. @type {Record<string, number>} */
+            unlocks: /** @type {Record<string, number>} */ ({}),
+            /**
+             * Draws from an unlocked buffer whose guest memory differs from
+             * what its last unlock sent, by its size.
+             * @type {Record<string, number>}
+             */
+            staleDraws: /** @type {Record<string, number>} */ ({}) },
         skipped: {
             vertexShader: 0,
             pixelShader: 0,
@@ -4366,6 +4409,61 @@ export function createRenderer(options){
     };
 
     /**
+     * A draw from a buffer the program still holds locked reads what the
+     * program has written there so far: the locked part of what it reaches is
+     * read from guest memory now and sent before the draw, where it would
+     * otherwise wait for the unlock. Direct3D 9 does not allow drawing from a
+     * locked buffer, but drivers draw from the memory the lock handed out, and
+     * a program that locks its skinning buffer with DISCARD, appends a model's
+     * vertices and draws them before it unlocks at the end of the frame relies
+     * on that: drawn from the bytes of the unlock before, every model it drew
+     * stood in the pose of the frame before.
+     *
+     * @param {any} source  the guest's buffer @param {any} gpu  its backend buffer
+     * @param {number} from @param {number} to  the bytes the draw reaches
+     */
+    const readHeld = (source, gpu, from, to)=>{
+        const held = buffers.get(source)?.held;
+        const dynamic = ((source?.usage ?? 0) & D3DUSAGE_DYNAMIC) !== 0;
+        if (!held && (dynamic || options.rereadBuffers === true)
+            && typeof source?.base === 'number' && to > from)
+        {
+            // A dynamic buffer's memory stays the buffer's after the unlock,
+            // as a driver's does, and a program may go on writing there: a
+            // game that skins its models into one after unlocking it drew
+            // every model in the pose of the frame before. What the guest's
+            // memory holds now against what was sent: a difference is sent.
+            const now = windowMemory(source.base + from, to - from);
+            const sent = gpu.bytes(from, to - from);
+            let at = 0;
+            while (at < now.length && now[at] === sent[at])
+            {
+                at++;
+            }
+            if (at < now.length)
+            {
+                const stale = counters.shapes.staleDraws;
+                stale[source.length] = (stale[source.length] ?? 0) + 1;
+                gpu.rewrite(from + at, now.subarray(at));
+                gpu.flush();
+            }
+            return;
+        }
+        if (!held || typeof source?.base !== 'number')
+        {
+            return;
+        }
+        const start = Math.max(from, held.offset);
+        const end = Math.min(to, held.offset + held.length);
+        if (end <= start)
+        {
+            return;
+        }
+        gpu.rewrite(start, windowMemory(source.base + start, end - start));
+        gpu.flush();
+    };
+
+    /**
      * The vertex buffers a draw binds past stream zero's, slot by slot, or
      * null when one of them cannot be bound as it lies: WebGPU starts a
      * vertex buffer at a multiple of four bytes, and stream zero's offset is
@@ -4414,6 +4512,7 @@ export function createRenderer(options){
             const ranged = span && !instanced;
             const from = (source.offset ?? 0) + (ranged ? span.first * source.stride : 0);
             const to = ranged ? from + span.count * source.stride : buffer.size;
+            readHeld(source.buffer, buffer, from, Math.min(to, buffer.size));
             buffer.markRead(from, Math.min(to, buffer.size));
             bound.push({ slot: index + 1, gpu: buffer.gpu, offset });
         }
@@ -7830,6 +7929,91 @@ export function createRenderer(options){
     };
 
     /**
+     * Counts a buffer draw's shape (`counters.shapes`).
+     *
+     * @param {RenderModel} model @param {'primitive' | 'indexed'} kind @param {number} minIndex
+     */
+    const countShape = (model, kind, minIndex)=>{
+        const shapes = counters.shapes;
+        shapes[kind]++;
+        const { offset = 0, stride } = model.stream;
+        if (offset !== 0)
+        {
+            shapes.offset++;
+            if (stride > 0 && offset % stride !== 0)
+            {
+                shapes.offsetPartial++;
+            }
+        }
+        if (kind === 'indexed' && model.baseVertexIndex !== 0)
+        {
+            shapes.baseVertex++;
+            shapes.maxBaseVertex = Math.max(shapes.maxBaseVertex, model.baseVertexIndex);
+        }
+        if (minIndex !== 0)
+        {
+            shapes.minIndex++;
+        }
+        if (model.streamAt?.(1)?.buffer)
+        {
+            shapes.furtherStreams++;
+        }
+        shapes.strides[stride] = (shapes.strides[stride] ?? 0) + 1;
+        const source = model.stream.buffer;
+        if (source && lockedBuffers.has(source))
+        {
+            shapes.lockedDraws[source.length] = (shapes.lockedDraws[source.length] ?? 0) + 1;
+            if (buffers.get(source)?.held)
+            {
+                shapes.drawsWhileLocked[source.length]
+                    = (shapes.drawsWhileLocked[source.length] ?? 0) + 1;
+            }
+        }
+    };
+
+    /** Buffers the program has locked for writing, for `countShape`. @type {WeakSet<object>} */
+    const lockedBuffers = new WeakSet();
+
+    /**
+     * The vertices an indexed draw reaches, numbered from the stream's start:
+     * those its indices name, together with the MinIndex and NumVertices it
+     * was given -- a hint a driver does not hold the program to, so the
+     * bytes a lock must not overwrite are the ones the indices read.
+     *
+     * @param {Uint8Array} bytes  its indices
+     * @param {number} elementBytes @param {number} base  BaseVertexIndex
+     * @param {number | undefined} minIndex @param {number | undefined} numVertices
+     * @returns {{ first: number, count: number } | undefined}
+     */
+    const drawnSpan = (bytes, elementBytes, base, minIndex, numVertices)=>{
+        let low = Infinity;
+        let high = -1;
+        for (let at = 0; at + elementBytes <= bytes.length; at += elementBytes)
+        {
+            const index = elementBytes === 2 ? bytes[at] | (bytes[at + 1] << 8)
+                : (bytes[at] | (bytes[at + 1] << 8) | (bytes[at + 2] << 16)
+                    | (bytes[at + 3] << 24)) >>> 0;
+            low = index < low ? index : low;
+            high = index > high ? index : high;
+        }
+        if (high < 0)
+        {
+            return minIndex !== undefined && numVertices !== undefined
+                ? { first: base + minIndex, count: numVertices } : undefined;
+        }
+        if (minIndex !== undefined && numVertices !== undefined)
+        {
+            if (low < minIndex || high >= minIndex + numVertices)
+            {
+                counters.outsideVertexRange++;
+            }
+            low = Math.min(low, minIndex);
+            high = Math.max(high, minIndex + numVertices - 1);
+        }
+        return { first: base + low, count: high - low + 1 };
+    };
+
+    /**
      * The geometry a draw hands `record`, which copies it at once: one object
      * for every draw that has no other, where a literal each was garbage.
      *
@@ -8010,6 +8194,12 @@ export function createRenderer(options){
      * @param {() => Uint8Array} bytes  the draw's indices
      */
     const nativeStrip = (model, type, format, bytes)=>{
+        // `app.debug.bufferLocks('liststrips')`: every strip rewritten as a
+        // list, as before strips were drawn as strips -- a debugging aid.
+        if (liveDump?.bufferLocks === 'liststrips')
+        {
+            return false;
+        }
         if (type !== D3DPT.LINESTRIP
             && (type !== D3DPT.TRIANGLESTRIP || isFlatShaded(model)))
         {
@@ -8069,7 +8259,16 @@ export function createRenderer(options){
                 return;
             }
             const entry = bufferFor(buffer);
-            entry.held = entry.gpu.lock(offset, length, lockFlagsOf(flags, LockFlags));
+            const kind = (flags & D3DLOCK.NOOVERWRITE) !== 0 ? 'nooverwrite'
+                : (flags & D3DLOCK.DISCARD) !== 0 ? 'discard' : 'none';
+            const lockKey = `${buffer.length}:${kind}`;
+            counters.shapes.locks[lockKey] = (counters.shapes.locks[lockKey] ?? 0) + 1;
+            lockedBuffers.add(buffer);
+            // `app.debug.bufferLocks('rename')`: every lock renames, so what a
+            // queued draw reads is never written over -- for telling a defect
+            // in following what draws read apart from one elsewhere.
+            entry.held = entry.gpu.lock(offset, length, liveDump?.bufferLocks === 'rename'
+                ? LockFlags.RENAME : lockFlagsOf(flags, LockFlags));
         },
 
         /**
@@ -8080,6 +8279,8 @@ export function createRenderer(options){
          * @param {any} buffer
          */
         unlockBuffer(buffer){
+            const unlocks = counters.shapes.unlocks;
+            unlocks[buffer.length] = (unlocks[buffer.length] ?? 0) + 1;
             const entry = buffers.get(buffer);
             if (!entry || !entry.held)
             {
@@ -8687,6 +8888,7 @@ export function createRenderer(options){
          */
         drawPrimitive(model, type, startVertex, primitiveCount){
             const stream = model.stream;
+            countShape(model, 'primitive', 0);
             const count = vertexCountOf(type, primitiveCount);
             const fill = fillOf(model, type);
             const rewrite = fill !== D3DFILL.SOLID || listed(model, type);
@@ -8705,6 +8907,10 @@ export function createRenderer(options){
             // here, and the binding below starts the buffer at the rest.
             const start = streamBuffer ? streamZeroStart(model) : 0;
             const from = start + startVertex * stream.stride;
+            if (streamBuffer)
+            {
+                readHeld(stream.buffer, streamBuffer, from, from + count * stream.stride);
+            }
             streamBuffer?.markRead(from, from + count * stream.stride);
             record(model, prepared, {
                 vertices: { gpu: streamBuffer?.gpu ?? zeroBuffer().gpu, offset: start },
@@ -8736,6 +8942,7 @@ export function createRenderer(options){
          */
         drawIndexedPrimitive(model, type, startIndex, primitiveCount, minIndex, numVertices){
             const stream = model.stream;
+            countShape(model, 'indexed', minIndex ?? 0);
             const format = indexFormatOf(model.indices.format);
             if (!format)
             {
@@ -8800,11 +9007,12 @@ export function createRenderer(options){
             const streamBuffer = bufferFor(stream.buffer).gpu;
             const indexBuffer = bufferFor(model.indices).gpu;
             const start = streamZeroStart(model);
-            const span = minIndex !== undefined && numVertices !== undefined
-                ? { first: model.baseVertexIndex + minIndex, count: numVertices } : undefined;
+            const span = drawnSpan(indexBuffer.bytes(byteOffset, count * format.bytes),
+                format.bytes, model.baseVertexIndex, minIndex, numVertices);
             if (span)
             {
                 const from = start + span.first * stream.stride;
+                readHeld(stream.buffer, streamBuffer, from, from + span.count * stream.stride);
                 streamBuffer.markRead(from, from + span.count * stream.stride);
             }
             else
@@ -8861,6 +9069,7 @@ export function createRenderer(options){
          * @param {number} stride
          */
         drawPrimitiveUp(model, type, primitiveCount, vertexData, stride){
+            counters.shapes.up++;
             const count = vertexCountOf(type, primitiveCount);
             const fill = fillOf(model, type);
             const rewrite = fill !== D3DFILL.SOLID || listed(model, type);
@@ -8900,6 +9109,7 @@ export function createRenderer(options){
             model, type, numVertices, primitiveCount, indexData, indexFormat, vertexData, stride,
         )
         {
+            counters.shapes.indexedUp++;
             const format = indexFormatOf(indexFormat);
             if (!format)
             {
@@ -9161,6 +9371,13 @@ export function createRenderer(options){
                 frames: counters.frames,
                 draws: counters.draws,
                 clears: counters.clears,
+                outsideVertexRange: counters.outsideVertexRange,
+                shapes: { ...counters.shapes, strides: { ...counters.shapes.strides },
+                    locks: { ...counters.shapes.locks },
+                    lockedDraws: { ...counters.shapes.lockedDraws },
+                    drawsWhileLocked: { ...counters.shapes.drawsWhileLocked },
+                    unlocks: { ...counters.shapes.unlocks },
+                    staleDraws: { ...counters.shapes.staleDraws } },
                 programmable: counters.programmable,
                 mipsGenerated: counters.mipsGenerated,
                 prepared: { ...counters.prepared },
