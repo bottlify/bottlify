@@ -28,10 +28,11 @@ import { createTable, readTable } from '../../log/internal/table.js';
  *     What the memory layer answers beyond reads and writes -- the writer
  *     account, where a test is about attribution.
  * @param {any} [options.journal]  Where a hook's crossings are written.
+ * @param {() => number} [options.now]  The clock call rates are measured by.
  */
 function machine(options = {}){
     const {
-        esp = 0x3000, args = [], profiler, callPhases = false, lastError, ecx = 0, journal,
+        esp = 0x3000, args = [], profiler, callPhases = false, lastError, ecx = 0, journal, now,
     } = options;
     /** @type {Map<number, number>} */
     const cells = new Map([[esp, 0x401234]]);
@@ -103,7 +104,7 @@ function machine(options = {}){
 
     const parking = createParking({ kernel });
     const dispatcher = createDispatcher({
-        cpu, memory, parking, profiler, callPhases, lastError, journal,
+        cpu, memory, parking, profiler, callPhases, lastError, journal, now,
         suspend: ()=>{},
     });
     return { cpu, memory, registers, parking, dispatcher, parkedThreads, current };
@@ -1646,4 +1647,45 @@ test('the report counts every call by function and charges each the host time sa
     assert.deepEqual(rows.find((/** @type {string[]} */ row)=>row[0] === 'X!Often'), ['X!Often', '500']);
     assert.deepEqual(rows.find((/** @type {string[]} */ row)=>row[0] === 'X!Once'), ['X!Once', '1']);
     assert.ok(report.hostMs >= 0);
+});
+
+test('a function called too often a second is named, in the report and once in the journal', ()=>{
+    // A program that starts going to the host for ever -- polling a query
+    // that will not answer, spinning on a message -- shows as it starts.
+    let clock = 0;
+    /** @type {any[][]} */
+    const written = [];
+    const journal = {
+        enabled: ()=>false,
+        /** @param {any[]} line */
+        write: (...line)=>written.push(line),
+        Level: { TRACE: 0, WARN: 3 },
+    };
+    const { dispatcher } = machine({ now: ()=>clock, journal });
+    dispatcher.register(1, { name: 'USER32.dll!PeekMessageA', ...STDCALL, argBytes: 0,
+        handler: ()=>0 });
+    dispatcher.register(2, { name: 'KERNEL32.dll!Sleep', ...STDCALL, argBytes: 0,
+        handler: ()=>0 });
+    for (let call = 0; call < 25000; call++)
+    {
+        dispatcher.dispatch(1);
+    }
+    dispatcher.dispatch(2);
+    assert.deepEqual(dispatcher.diagnostics().chatty, [], 'no whole second measured yet');
+    clock = 1000;
+    const chatty = dispatcher.diagnostics().chatty;
+    assert.equal(chatty.length, 1, 'Sleep, called once, is not named');
+    assert.match(chatty[0], /^USER32\.dll!PeekMessageA 2500\d\/s \d+ms\/s$/);
+    assert.equal(written.length, 1);
+    assert.equal(written[0][0], 3, 'a warning');
+    assert.equal(written[0][1], 'call.chatty');
+
+    clock = 2000;
+    for (let call = 0; call < 25000; call++)
+    {
+        dispatcher.dispatch(1);
+    }
+    clock = 3000;
+    dispatcher.diagnostics();
+    assert.equal(written.length, 1, 'written to the journal once, however long it goes on');
 });

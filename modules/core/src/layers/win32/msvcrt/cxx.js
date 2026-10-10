@@ -53,6 +53,15 @@ export const EH_PROLOG_CODE = Uint8Array.of(
     0x50, 0xc3);
 
 /**
+ * `_chkesp`'s body: `ret`. A function built with the stack-frame check (/GZ)
+ * calls it after each call through a pointer, with the flags of comparing
+ * ESP to the value it saved; the release runtime reports nothing and returns
+ * with every register and flag as it found them, EAX -- the result of the
+ * call just checked -- among them.
+ */
+export const CHKESP_CODE = Uint8Array.of(0xc3);
+
+/**
  * @param {CxxHost} host
  */
 export function createCxxFunctions(host){
@@ -111,6 +120,12 @@ export function createCxxFunctions(host){
          * read-only .text beside the compiled functions, not a variable.
          */
         _EH_prolog: { code: ()=>EH_PROLOG_CODE },
+
+        /**
+         * void _chkesp(void): code in the guest (`CHKESP_CODE`), since a
+         * host handler's answer would land in EAX over the checked call's.
+         */
+        _chkesp: { code: ()=>CHKESP_CODE },
 
         /**
          * void *__RTDynamicCast(void *object, LONG delta, void *from,

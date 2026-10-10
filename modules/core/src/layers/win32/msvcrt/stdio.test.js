@@ -1146,6 +1146,27 @@ test('fscanf consumes what its scan reads and leaves the rest for the next read'
     assert.equal(fns.fscanf.handler([stream, format, buffer]), -1, 'EOF at the end');
 });
 
+test('fscanf whose trailing space reads to the end of the file marks the stream for feof', ()=>{
+    // A loop `while (!feof(f)) fscanf(f, "%s %d\n", ...)` ends on the record's
+    // _IOEOF, which the CRT sets when the whitespace directive's read finds the
+    // end; a scan that stops before it leaves the flag clear.
+    const { memory, fns } = build();
+    const path = memory.put('C:\\lines.txt');
+    const writer = fns.fopen.handler([path, memory.put('wb')]);
+    fns.fwrite.handler([memory.put('a 1\r\nb 2\r\n'), 1, 10, writer]);
+    fns.fclose.handler([writer]);
+    const stream = fns.fopen.handler([path, memory.put('r')]);
+    const word = memory.allocate(16);
+    const number = memory.allocate(4);
+    const format = memory.put('%s %d\n');
+    assert.equal(fns.fscanf.handler([stream, format, word, number]), 2);
+    assert.equal(memory.u32(stream + 12) & 0x10, 0, 'the next line is still ahead');
+    assert.equal(fns.fscanf.handler([stream, format, word, number]), 2);
+    assert.deepEqual([memory.text(word), memory.i32(number)], ['b', 2]);
+    assert.equal(memory.u32(stream + 12) & 0x10, 0x10, 'the record says the file ended');
+    assert.equal(fns.feof.handler([stream]), 0x10);
+});
+
 test('_fsopen and _wfsopen are fopen and _wfopen with a share flag that changes nothing', ()=>{
     const { memory, fns, text } = runtime({ 'C:\\in.txt': 'abc' });
     const input = fns._fsopen.handler([memory.put('C:\\in.txt'), memory.put('rb'), 0x40]);
@@ -1158,4 +1179,29 @@ test('_fsopen and _wfsopen are fopen and _wfopen with a share flag that changes 
     assert.equal(text('C:\\out.txt'), 'hi');
     assert.equal(fns._fsopen.handler([memory.put('C:\\none.txt'), memory.put('r'), 0x40]), 0);
     assert.deepEqual([fns._fsopen.argBytes, fns._wfsopen.argBytes], [12, 12]);
+});
+
+test('tmpfile opens a new file for update in binary, each its own, removed when it closes', ()=>{
+    const { memory, files, fns } = build();
+    const first = fns.tmpfile.handler([]);
+    const second = fns.tmpfile.handler([]);
+    assert.notEqual(first, 0);
+    assert.notEqual(second, 0);
+    assert.notEqual(first, second);
+
+    const buffer = memory.allocate(8);
+    memory.bytes.set([7, 0x0a, 9], buffer);
+    assert.equal(fns.fwrite.handler([buffer, 1, 3, first]), 3);
+    assert.equal(fns.fseek.handler([first, 0, 0]), 0);
+    const back = memory.allocate(8);
+    assert.equal(fns.fread.handler([back, 1, 8, first]), 3, 'read back: opened for update');
+    assert.deepEqual([...memory.bytes.subarray(back, back + 3)], [7, 0x0a, 9],
+        'binary: the line feed is not widened');
+
+    assert.equal(fns.fclose.handler([first]), 0);
+    assert.equal(fns.fclose.handler([second]), 0);
+    for (const name of files.closed)
+    {
+        assert.equal(files.stat(name)?.exists === true, false, `${name} is gone once closed`);
+    }
 });

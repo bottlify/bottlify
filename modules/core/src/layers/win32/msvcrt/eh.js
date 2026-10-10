@@ -615,6 +615,33 @@ export function createCxxExceptions(host){
         convention: 'cdecl', argBytes: 16, preserveResult: true, handler: frameHandler,
     };
 
+    /**
+     * void __CxxLongjmpUnwind(jmp_buf *env)
+     *
+     * The routine `_setjmp3` names for a C++ frame: a longjmp back
+     * into it destroys the objects the frame made since the mark, down
+     * to the state the mark was set in. The buffer carries the frame's
+     * tables as its first word of unwind data.
+     *
+     * Exported under both spellings: msvcrt.spec names it undecorated, which is
+     * what a library linked by the Microsoft toolchain imports, and another
+     * toolchain's import library asks for the stdcall-decorated name.
+     */
+    const cxxLongjmpUnwind = {
+        argBytes: 4,
+        /** @param {number[]} args */
+        handler: ([buffer])=>{
+            const at = buffer >>> 0;
+            const entry = host.registers();
+            const frame = readU32(at + 24);
+            const info = funcInfo(readU32(at + 40));
+            return unwindTo(frame, info, readI32(at + 28), {
+                thread: host.currentThread(),
+                stackAtRest: (entry.esp - 0x10 & ~0xf) >>> 0,
+            }).then(()=>0);
+        },
+    };
+
     return {
         frameHandler,
 
@@ -669,28 +696,8 @@ export function createCxxExceptions(host){
                 },
             },
 
-            /**
-             * void __CxxLongjmpUnwind(jmp_buf *env)
-             *
-             * The routine `_setjmp3` names for a C++ frame: a longjmp back
-             * into it destroys the objects the frame made since the mark, down
-             * to the state the mark was set in. The buffer carries the frame's
-             * tables as its first word of unwind data.
-             */
-            '__CxxLongjmpUnwind@4': {
-                argBytes: 4,
-                /** @param {number[]} args */
-                handler: ([buffer])=>{
-                    const at = buffer >>> 0;
-                    const entry = host.registers();
-                    const frame = readU32(at + 24);
-                    const info = funcInfo(readU32(at + 40));
-                    return unwindTo(frame, info, readI32(at + 28), {
-                        thread: host.currentThread(),
-                        stackAtRest: (entry.esp - 0x10 & ~0xf) >>> 0,
-                    }).then(()=>0);
-                },
-            },
+            '__CxxLongjmpUnwind@4': cxxLongjmpUnwind,
+            __CxxLongjmpUnwind: cxxLongjmpUnwind,
 
             /** bool __uncaught_exception(void) -- a C name in msvcrt.dll. */
             __uncaught_exception: {

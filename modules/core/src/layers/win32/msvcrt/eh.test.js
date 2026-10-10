@@ -463,3 +463,12 @@ test('abort ends the process and never returns', ()=>{
     assert.equal(m.eh.table.abort.handler(), 'parked');
     assert.deepEqual(m.aborted, ['abort']);
 });
+
+test('__CxxLongjmpUnwind answers to its undecorated name and the decorated one', ()=>{
+    const table = /** @type {Record<string, any>} */ (machine().eh.table);
+    assert.ok(table.__CxxLongjmpUnwind, 'a library built by the Microsoft toolchain imports this');
+    assert.equal(table.__CxxLongjmpUnwind, table['__CxxLongjmpUnwind@4']);
+    assert.equal(table.__CxxLongjmpUnwind.convention, undefined,
+        'stdcall: the callee pops the buffer');
+    assert.equal(table.__CxxLongjmpUnwind.argBytes, 4);
+});

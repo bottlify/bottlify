@@ -25,6 +25,7 @@ the guest, its files directly in that directory.
 | `launcher.mjs` | starts a title in the launcher the way a person does and profiles the page thread | `node tools/cdp_test/launcher.mjs <bundle-id> [flags]` (launcher running: `npm run ui`) |
 | `triangle.mjs` | the graphics acceptance scenario: a fixture draws a triangle, four pixels are compared byte for byte; `--graphics-worker pixels` draws it in the graphics worker (`bitmap`, its default way of sending frames back, makes headless SwiftShader lose the read-back's `mapAsync`) | `node tools/cdp_test/triangle.mjs [--graphics-worker pixels] [--isolated]`; `--isolated` serves the page cross-origin isolated, so guest memory is shared |
 | `probe.mjs` / `cli.mjs` | the acceptance probe: browser, page, worker, ping, screenshot | `npm run cdp:probe` |
+| `gl-lighting-gate.mjs` | the GL lighting gate: seeded random lights, materials and vertices, the processor's `lightVertex` against the vertex stage's `glLit` run as a compute dispatch on the device | `npm run cdp:lighting [-- --count 60 --vertices 32 --seed 1]` |
 | `browser.mjs` | finds and launches a Chromium with a CDP endpoint | library |
 | `cdp.mjs` | a minimal CDP client over WebSocket | library |
 | `server.mjs` | a static server for the sandbox pages, the sources and a bundle | library |

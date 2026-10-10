@@ -59,8 +59,8 @@ import {
 import {
     CLEAR_UNIFORM_FLOATS, COPY_UNIFORM_FLOATS, UNIFORM, UNITS, clearDescriptor, clearKey,
     copyKey, drawDescriptor, drawKey, generateClear, generateCopy, generateDraw, generateShow,
-    sameKeyInputs,
-    showDescriptor, showKey,
+    lightingStateOf, sameKeyInputs,
+    showDescriptor, showKey, writeLighting,
 } from './wgsl.js';
 
 /** The formats every drawable is backed by. */
@@ -1177,6 +1177,8 @@ export function createGpuRenderer(services){
             polygonOffset: scene.polygonOffset,
             vertexProgram: scene.programs.vertex,
             fragmentProgram: scene.programs.fragment,
+            // A vertex program takes the place of the fixed stage, lighting and all.
+            lighting: scene.programs.vertex ? null : lightingStateOf(scene.lighting),
         };
     };
 
@@ -1337,7 +1339,7 @@ export function createGpuRenderer(services){
      *           alphaTest: import('./pipeline.js').Scene['alphaTest'],
      *           depthDirection: number,
      *           modelview: ArrayLike<number>,
-     *           block: Float32Array }>}
+     *           block: Float32Array, lit: boolean }>}
      */
     const fixedUniformsCache = new WeakMap();
 
@@ -1390,7 +1392,11 @@ export function createGpuRenderer(services){
      */
     const uniformsOf = (context, scene, mvp)=>{
         const cached = fixedUniformsCache.get(context);
-        if (cached && sameMatrix(cached.mvp, mvp) && sameMatrix(cached.modelview, scene.modelview)
+        // ponytail: a lit draw's block is built anew -- the scene's lighting is
+        // a fresh record each draw; compare its values if lit draws ever
+        // need to join one another.
+        if (cached && !scene.lighting && !cached.lit && sameMatrix(cached.mvp, mvp)
+            && sameMatrix(cached.modelview, scene.modelview)
             && sameUnits(cached.units, scene.units)
             && sameCurrent(cached.current, scene.current) && sameFog(cached.fog, scene.fog)
             && sameAlphaTest(cached.alphaTest, scene.alphaTest)
@@ -1466,9 +1472,14 @@ export function createGpuRenderer(services){
         block[UNIFORM.misc] = scene.alphaTest ? scene.alphaTest.reference : 0;
         const depthDirection = depthDirectionOf(scene);
         block[UNIFORM.misc + 1] = depthDirection;
+        if (scene.lighting)
+        {
+            writeLighting(block, scene.lighting);
+        }
         fixedUniformsCache.set(context, {
             mvp, modelview: scene.modelview, units: scene.units, current: scene.current,
             fog: scene.fog, alphaTest: scene.alphaTest, depthDirection, block,
+            lit: scene.lighting !== null,
         });
         return block;
     };

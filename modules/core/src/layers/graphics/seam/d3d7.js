@@ -139,6 +139,8 @@ export function createDirect3D7Seam(
     /** One D3D7 object per DirectDraw object, made when first asked for. */
     /** @type {WeakMap<object, any>} */
     const objects = new WeakMap();
+    /** The device made last, whose counters a run reports. @type {any} */
+    let lastDevice = null;
     /** @param {any} root */
     const d3dFor = root=>{
         const existing = objects.get(root);
@@ -1052,6 +1054,7 @@ export function createDirect3D7Seam(
                 return made.hr;
             }
             made.device.ddraw = root;
+            lastDevice = made.device;
             fields.writeU32(out >>> 0,
                 publisher.publish(made.device, deviceInterfaces, IID_IDirect3DDevice7));
             return D3D_OK;
@@ -1124,6 +1127,9 @@ export function createDirect3D7Seam(
 
         /** For tests, which have no guest to call through. */
         interfaces: { device: deviceInterfaces, buffer: bufferInterfaces },
+
+        /** What the device made last drew, as Direct3D 8's and 9's seams answer it. */
+        diagnostics: ()=>lastDevice?.diagnostics?.() ?? null,
 
         /**
          * What the Direct3D of DirectX 3, 5 and 6 shares with this one: the

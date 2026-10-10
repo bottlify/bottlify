@@ -693,6 +693,41 @@ function vertices(corners, textured){
     return out;
 }
 
+test('recorded: a blended draw adds and writes every channel, as a D3D7 device always does',
+    async()=>{
+        // BLENDOP and COLORWRITEENABLE are Direct3D 8's: a program of this
+        // version can neither set nor read them, but the renderer it draws
+        // through reads them, and as zero they were no blend operation and a
+        // write mask of nothing -- every draw failed or painted no pixel.
+        const f = recorded();
+        const { device, gpu, target } = f;
+        /** @type {{ value?: number }} */
+        const out = {};
+        assert.equal(device.GetRenderState(171, out), DDERR_INVALIDPARAMS, 'BLENDOP is D3D8');
+        assert.equal(device.SetRenderState(168, 0), DDERR_INVALIDPARAMS,
+            'COLORWRITEENABLE is D3D8');
+        assert.equal(device.SetRenderState(D3DRENDERSTATE.ALPHABLENDENABLE, 1), D3D_OK);
+        assert.equal(device.SetRenderState(D3DRENDERSTATE.SRCBLEND, 5), D3D_OK);
+        assert.equal(device.SetRenderState(D3DRENDERSTATE.DESTBLEND, 6), D3D_OK);
+        assert.equal(device.BeginScene(), D3D_OK);
+        assert.equal(device.DrawPrimitive(D3DPT.TRIANGLESTRIP, FVF_TL,
+            vertices([[0, 0], [8, 0], [0, 8], [8, 8]], false), 4), D3D_OK);
+        assert.equal(device.EndScene(), D3D_OK);
+        device.present(target.buffer);
+        await device.idle();
+
+        assert.equal(device.diagnostics().draws, 1);
+        assert.equal(gpu.count('draw'), 1);
+        const [pipeline] = gpu.of('createRenderPipeline').map(call=>call.descriptor);
+        const [colour] = pipeline.fragment.targets;
+        assert.equal(colour.writeMask & 7, 7, 'red, green and blue are written');
+        assert.deepEqual(colour.blend.color,
+            { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' });
+        assert.equal(device.release(), 0);
+        assert.equal(target.release(), 0);
+        assert.equal(f.root.release('IDirectDraw7'), 0);
+    });
+
 test('recorded: a draw and a present are one encoder, one submit, one frame', async()=>{
     const f = recorded();
     const { device, gpu, target } = f;

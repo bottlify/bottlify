@@ -2310,3 +2310,80 @@ test('CoCreateInstance reaches DirectDraw through its class object, and it waits
         assert.equal(h.ddrawDll.DllGetClassObject.handler([other, factoryId, 0x4100]) >>> 0,
             0x80040111, 'CLASS_E_CLASSNOTAVAILABLE for a class it does not serve');
     });
+
+// --- block-compressed surfaces ---
+
+const DDSD_LINEARSIZE = 0x00080000;
+const DDPF_FOURCC = 0x00000004;
+const DDPF_ALPHAPIXELS = 0x00000001;
+const DDBLT_WAIT = 0x01000000;
+
+/**
+ * A system-memory surface of the format given, through the seventh generation.
+ *
+ * @param {ReturnType<typeof seamed>} h @param {number} ddraw
+ * @param {number} width @param {number} height
+ * @param {import('../ddraw/structs.js').PixelFormatFields} pixelFormat
+ * @returns {number}
+ */
+function systemSurface(h, ddraw, width, height, pixelFormat){
+    const at = 0x5000;
+    h.box.bytes.fill(0, at, at + DDSURFACEDESC2.SIZE);
+    writeSurfaceDesc(h.box.services, at, DDSURFACEDESC2, {
+        flags: DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT,
+        width, height, pitch: 0, backBufferCount: 0, mipMapCount: 0,
+        caps: DDSCAPS_SYSTEMMEMORY | DDSCAPS_TEXTURE, caps2: 0, pixelFormat,
+    });
+    assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, 'CreateSurface'), [at, 0x5100, 0]),
+        DD_OK);
+    return h.box.memory.readU32(0x5100);
+}
+
+test('a DXT5 surface reports its size whole, and a copy into an RGB texture decompresses it',
+    ()=>{
+        // A loader of the era locks its DXTn surface, copies dwLinearSize bytes
+        // of its file in, and copies that into a texture of a format the device
+        // enumerated. Reported as one row's pitch, the copy took one row of
+        // blocks; refused, the textures stayed empty.
+        const h = seamed();
+        const ddraw = h.create7();
+        const dxt5 = systemSurface(h, ddraw, 8, 8, { size: 0x20, flags: DDPF_FOURCC,
+            fourCC: 0x35545844, bitCount: 0, redMask: 0, greenMask: 0, blueMask: 0,
+            alphaMask: 0 });
+        const argb4444 = systemSurface(h, ddraw, 8, 8, { size: 0x20,
+            flags: DDPF_RGB | DDPF_ALPHAPIXELS, fourCC: 0, bitCount: 16, redMask: 0xf00,
+            greenMask: 0xf0, blueMask: 0xf, alphaMask: 0xf000 });
+
+        const desc = descOf(h, dxt5);
+        assert.equal(desc.flags & DDSD_PITCH, 0, 'no pitch');
+        assert.ok((desc.flags & DDSD_LINEARSIZE) !== 0, 'DDSD_LINEARSIZE');
+        assert.equal(desc.pitch, 4 * 16, 'dwLinearSize: four blocks of sixteen bytes');
+
+        // Opaque blocks of pure red, written as one run of the linear size.
+        const lock = 0x5800;
+        h.box.memory.writeU32(lock, DDSURFACEDESC2.SIZE);
+        assert.equal(h.surface7(dxt5, 'Lock', [0, lock, 0, 0]), DD_OK);
+        const bits = h.box.memory.readU32(lock + DDSURFACEDESC2.lpSurface);
+        for (let block = 0; block < 4; block++)
+        {
+            h.box.bytes.set([255, 255, 0, 0, 0, 0, 0, 0, 0x00, 0xf8, 0x1f, 0x00, 0, 0, 0, 0],
+                bits + block * 16);
+        }
+        assert.equal(h.surface7(dxt5, 'Unlock', [0]), DD_OK);
+
+        assert.equal(h.surface7(argb4444, 'Blt', [0, dxt5, 0, DDBLT_WAIT, 0]), DD_OK);
+        const texels = lockedAt(h, argb4444);
+        const pitch = descOf(h, argb4444).pitch;
+        for (const [x, y] of [[0, 0], [7, 0], [3, 5], [7, 7]])
+        {
+            assert.equal(h.box.bytes[texels + y * pitch + x * 2]
+                | (h.box.bytes[texels + y * pitch + x * 2 + 1] << 8), 0xff00, `${x},${y}`);
+        }
+
+        assert.equal(h.surface7(dxt5, 'Blt', [0, argb4444, 0, DDBLT_WAIT, 0]), DDERR_UNSUPPORTED,
+            'nothing compresses');
+        assert.equal(h.release(dxt5), 0);
+        assert.equal(h.release(argb4444), 0);
+        assert.equal(h.release(ddraw), 0);
+        h.assertAllReleased();
+    });

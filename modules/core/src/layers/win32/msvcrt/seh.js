@@ -364,6 +364,31 @@ export function createCrtSeh(host){
         return 0;
     };
 
+    /**
+     * void _seh_longjmp_unwind(jmp_buf *env)
+     *
+     * The routine `_setjmp3` names for a frame with `__try` blocks:
+     * a longjmp back into that frame runs its `__finally` blocks from
+     * the level it is at down to the level the mark was set at.
+     *
+     * Exported under both spellings: msvcrt.spec names it undecorated, which is
+     * what a library linked by the Microsoft toolchain imports, and another
+     * toolchain's import library asks for the stdcall-decorated name.
+     */
+    const sehLongjmpUnwind = {
+        argBytes: 4,
+        /** @param {number[]} args */
+        handler: ([buffer])=>{
+            const at = buffer >>> 0;
+            const asked = host.currentThread?.();
+            return localUnwind(readU32(at + JMP_BUF.REGISTRATION),
+                readU32(at + JMP_BUF.TRY_LEVEL), {
+                    thread: asked,
+                    stackAtRest: (host.registers().esp - 0x10 & ~0xf) >>> 0,
+                }).then(()=>0);
+        },
+    };
+
     return {
         exceptHandler3,
         localUnwind,
@@ -461,26 +486,8 @@ export function createCrtSeh(host){
                 },
             },
 
-            /**
-             * void _seh_longjmp_unwind(jmp_buf *env)
-             *
-             * The routine `_setjmp3` names for a frame with `__try` blocks:
-             * a longjmp back into that frame runs its `__finally` blocks from
-             * the level it is at down to the level the mark was set at.
-             */
-            '_seh_longjmp_unwind@4': {
-                argBytes: 4,
-                /** @param {number[]} args */
-                handler: ([buffer])=>{
-                    const at = buffer >>> 0;
-                    const asked = host.currentThread?.();
-                    return localUnwind(readU32(at + JMP_BUF.REGISTRATION),
-                        readU32(at + JMP_BUF.TRY_LEVEL), {
-                            thread: asked,
-                            stackAtRest: (host.registers().esp - 0x10 & ~0xf) >>> 0,
-                        }).then(()=>0);
-                },
-            },
+            '_seh_longjmp_unwind@4': sehLongjmpUnwind,
+            _seh_longjmp_unwind: sehLongjmpUnwind,
 
             /**
              * void longjmp(jmp_buf env, int value)

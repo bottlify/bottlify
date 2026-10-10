@@ -72,11 +72,13 @@ import {
     DDERR_NOTAOVERLAYSURFACE, DDERR_NOTFLIPPABLE, DDERR_NOTFOUND, DDERR_SURFACEBUSY,
     DDERR_SURFACELOST, DDERR_UNSUPPORTED, DDPCAPS_1BIT, DDPCAPS_2BIT, DDPCAPS_4BIT,
     DDPCAPS_8BIT, DDPCAPS_ALLOW256,
-    DDPCAPS_PRIMARYSURFACE, DDPF_RGB, DDSCAPS_3DDEVICE, DDSCAPS_BACKBUFFER, DDSCAPS_COMPLEX,
+    DDPCAPS_PRIMARYSURFACE, DDPF_ALPHAPIXELS, DDPF_FOURCC, DDPF_RGB, DDSCAPS_3DDEVICE,
+    DDSCAPS_BACKBUFFER, DDSCAPS_COMPLEX,
     DDSCAPS_FLIP, DDSCAPS_FRONTBUFFER, DDSCAPS_LOCALVIDMEM, DDSCAPS_MIPMAP, DDSCAPS_OFFSCREENPLAIN,
     DDSCAPS_PRIMARYSURFACE, DDSCAPS_SYSTEMMEMORY, DDSCAPS_TEXTURE, DDSCAPS_VIDEOMEMORY,
     DDSCAPS_ZBUFFER, DDSCL_EXCLUSIVE, DDSCL_FULLSCREEN, DDSD_BACKBUFFERCOUNT,
-    DDSD_CAPS, DDSD_CKDESTBLT, DDSD_CKSRCBLT, DDSD_HEIGHT, DDSD_MIPMAPCOUNT, DDSD_PITCH,
+    DDSD_CAPS, DDSD_CKDESTBLT, DDSD_CKSRCBLT, DDSD_HEIGHT, DDSD_LINEARSIZE, DDSD_MIPMAPCOUNT,
+    DDSD_PITCH,
     DDSD_PIXELFORMAT, DDSD_REFRESHRATE, DDSD_WIDTH, DD_OK, DDGDI_GETHOSTIDENTIFIER,
 } from '../ddraw/constants.js';
 import { DDBD_16, DDBD_32 } from '../d3d7/constants.js';
@@ -237,6 +239,20 @@ export function versionOf(id){
  */
 
 /**
+ * The DXTn FOURCCs whose blocks a copy decodes, by the S3TC kind they share;
+ * DXT2 and DXT4 are their unmultiplied siblings' blocks.
+ *
+ * @type {Readonly<Record<number, import('../webgpu/internal/s3tc.js').S3tcKind>>}
+ */
+const S3TC_OF_FOURCC = Object.freeze({
+    0x31545844: 'dxt1',
+    0x32545844: 'dxt3',
+    0x33545844: 'dxt3',
+    0x34545844: 'dxt5',
+    0x35545844: 'dxt5',
+});
+
+/**
  * @param {Object} deps
  * @param {any} deps.publisher    From createPublisher.
  * @param {any} deps.memory       readMemory/writeMemory.
@@ -276,6 +292,8 @@ export function versionOf(id){
  *        video memory each time.
  * @param {(width: number, height: number,
  *     where?: { window?: number, fullscreen?: boolean }) => void} [deps.resolution]
+ * @param {(api: string, detail: string) => void} [deps.divergence]
+ *     Told of a copy this build refuses between two formats, with both of them.
  *        The screen is this size now, and a fullscreen window is placed over it.
  */
 export function createDirectDrawSeam(
@@ -283,7 +301,7 @@ export function createDirectDrawSeam(
         extraInterfaces = [], extraSurfaceInterfaces = [], now = ()=>performance.now(),
         schedule = (ms, run)=>{
             setTimeout(run, ms);
-        }, identity, gamma, deactivated, deactivations, resolution },
+        }, identity, gamma, deactivated, deactivations, resolution, divergence },
 )
 {
     const fields = createFields(memory);
@@ -581,8 +599,56 @@ export function createDirectDrawSeam(
     // --- surface ---
 
     /**
+     * The block kind of a DXTn surface, which a copy decompresses from; null
+     * for every other format.
+     *
+     * @param {any} surface
+     * @returns {import('../webgpu/internal/s3tc.js').S3tcKind | null}
+     */
+    const compressedKind = surface=>{
+        const format = surface.pixelFormat;
+        if ((format.flags & DDPF_FOURCC) === 0)
+        {
+            return null;
+        }
+        return S3TC_OF_FOURCC[format.fourCC >>> 0] ?? null;
+    };
+
+    /** @param {any} surface */
+    const formatName = surface=>{
+        const format = surface.pixelFormat;
+        return `${surface.width}x${surface.height} flags=0x${(format.flags >>> 0).toString(16)}`
+            + ` fourcc=0x${(format.fourCC >>> 0).toString(16)}`
+            + ` bits=${surface.bytesPerPixel * 8} r=0x${(format.redMask >>> 0).toString(16)}`
+            + ` g=0x${(format.greenMask >>> 0).toString(16)}`
+            + ` b=0x${(format.blueMask >>> 0).toString(16)}`
+            + ` a=0x${(format.alphaMask >>> 0).toString(16)}`;
+    };
+    /**
+     * A copy refused for its formats, said once per pair: what a program
+     * meant by it is otherwise only an empty texture.
+     *
+     * @type {Set<string>}
+     */
+    const refusedPairs = new Set();
+    /** @param {string} call @param {any} dest @param {any} src @param {number} outcome */
+    const reportRefusal = (call, dest, src, outcome)=>{
+        if (outcome !== DDERR_UNSUPPORTED || !divergence)
+        {
+            return;
+        }
+        const pair = `${formatName(src)} -> ${formatName(dest)}`;
+        if (!refusedPairs.has(pair))
+        {
+            refusedPairs.add(pair);
+            divergence('DirectDraw', `${call}: no copy from ${pair}`);
+        }
+    };
+
+    /**
      * A key is compared on the colour a pixel shows: an RGB format's unused
-     * bits take no part in it, and are copied with the rest of the pixel.
+     * bits take no part in it, and are copied with the rest of the pixel. The
+     * channel masks are what a copy between two formats converts by.
      *
      * @param {any} surface @returns {import('../ddraw/blit.js').BlitSurface}
      */
@@ -591,9 +657,11 @@ export function createDirectDrawSeam(
         const colour = (format.flags & DDPF_RGB) !== 0
             ? (format.redMask | format.greenMask | format.blueMask) >>> 0
             : 0;
+        const compressed = compressedKind(surface);
         return {
             buffer: surface.buffer,
             pitch: surface.pitch,
+            ...(compressed ? { compressed } : {}),
             width: surface.width,
             height: surface.height,
             bytesPerPixel: surface.bytesPerPixel,
@@ -603,6 +671,18 @@ export function createDirectDrawSeam(
                 ? { depthMask: format.greenMask >>> 0 }
                 : {}),
             ...(colour !== 0 ? { keyMask: colour } : {}),
+            ...(colour !== 0
+                ? {
+                    channels: {
+                        red: format.redMask >>> 0,
+                        green: format.greenMask >>> 0,
+                        blue: format.blueMask >>> 0,
+                        alpha: (format.flags & DDPF_ALPHAPIXELS) !== 0
+                            ? format.alphaMask >>> 0
+                            : 0,
+                    },
+                }
+                : {}),
         };
     };
 
@@ -643,7 +723,8 @@ export function createDirectDrawSeam(
 
     /**
      * What every blit refuses before a pixel moves: a lost surface, a locked
-     * one, and a depth this layer has no arithmetic for.
+     * one, and one with no depth at all. Three bytes a pixel is the copy's
+     * own question: it reads them where it converts the format.
      *
      * @param {any} dest @param {any} source
      */
@@ -658,7 +739,7 @@ export function createDirectDrawSeam(
             {
                 return DDERR_SURFACEBUSY;
             }
-            if (surface.bytesPerPixel === 3 || surface.bytesPerPixel === 0)
+            if (surface.bytesPerPixel === 0 && !(surface === source && compressedKind(source)))
             {
                 return DDERR_UNSUPPORTED;
             }
@@ -699,8 +780,13 @@ export function createDirectDrawSeam(
     const descriptorOf = (surface, surfacePointer)=>{
         const srcColorKey = surface.getColorKey(DDCKEY_SRCBLT).key ?? undefined;
         const destColorKey = surface.getColorKey(DDCKEY_DESTBLT).key ?? undefined;
+        // A DXTn surface has no rows a program can step by: it reports the
+        // size of all its blocks instead, dwLinearSize in lPitch's place, and
+        // a loader copies that many bytes of its file in one go.
+        const compressed = compressedKind(surface) !== null;
         return {
-            flags: DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PITCH | DDSD_PIXELFORMAT
+            flags: DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PIXELFORMAT
+                | (compressed ? DDSD_LINEARSIZE : DDSD_PITCH)
                 | (surface.backBufferCount > 0 ? DDSD_BACKBUFFERCOUNT : 0)
                 | (surface.mipMapCount > 0 ? DDSD_MIPMAPCOUNT : 0)
                 | (srcColorKey ? DDSD_CKSRCBLT : 0) | (destColorKey ? DDSD_CKDESTBLT : 0),
@@ -708,7 +794,9 @@ export function createDirectDrawSeam(
             destColorKey,
             width: surface.width,
             height: surface.height,
-            pitch: surface.pitch,
+            pitch: compressed
+                ? surface.pitch * Math.max(1, Math.ceil(surface.height / 4))
+                : surface.pitch,
             backBufferCount: surface.backBufferCount,
             mipMapCount: surface.mipMapCount,
             caps: surface.caps,
@@ -744,6 +832,7 @@ export function createDirectDrawSeam(
                 const hr = blitPreconditions(surface, from);
                 if (hr !== DD_OK)
                 {
+                    reportRefusal('Blt', surface, from ?? surface, hr);
                     return hr;
                 }
                 // dwFillDepth shares dwFillColor's place in the structure.
@@ -774,6 +863,7 @@ export function createDirectDrawSeam(
                         dest: blitView(surface),
                         src: from ? blitView(from) : undefined,
                     });
+                    reportRefusal('Blt', surface, from, outcome);
                     if (outcome === DD_OK)
                     {
                         surface.changeUniquenessValue();
@@ -816,6 +906,7 @@ export function createDirectDrawSeam(
                     const outcome = bltFast({
                         ...request, dest: blitView(surface), src: blitView(from),
                     });
+                    reportRefusal('BltFast', surface, from, outcome);
                     if (outcome === DD_OK)
                     {
                         surface.changeUniquenessValue();

@@ -1457,8 +1457,10 @@ export function createShellFunctions(host){
          *
          * A copy, move, rename or delete of a list of files, on the volume.
          * A build with no volume to work on refuses it as not implemented and
-         * says nothing it asked for was done.
+         * says nothing it asked for was done. The undecorated name is the
+         * ANSI one, as shell32.dll exports it.
          */
+        SHFileOperation: fileOperation(false),
         SHFileOperationA: fileOperation(false),
         SHFileOperationW: fileOperation(true),
 

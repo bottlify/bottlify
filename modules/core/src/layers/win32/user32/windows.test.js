@@ -4064,8 +4064,8 @@ test('a message box a worker raises over another thread\'s window is shown as th
     const activation = dispatched.slice(told)
         .filter(m=>m.hwnd === owner && (m.message === WM_NCACTIVATE || m.message === WM_ACTIVATE));
     assert.ok(activation.length > 0, 'the owner was told it lost the activation');
-    assert.deepEqual([...new Set(activation.map(m=>m.thread))], [worker],
-        'by the worker, whose call raised the box');
+    assert.deepEqual([...new Set(activation.map(m=>m.thread))], [main],
+        'on the owner\'s thread, from its queue: the worker raising the box runs none of it');
     // And the box is the worker's, its controls too: the worker's modal loop
     // takes their WM_PAINT, which a box of the owner's thread never had.
     const box = activation.find(m=>m.message === WM_ACTIVATE)?.lParam ?? 0;
@@ -4076,23 +4076,43 @@ test('a message box a worker raises over another thread\'s window is shown as th
         [worker.id, worker.id]);
 });
 
-test('what the window manager sends another thread\'s window runs on the sender, and says so',
-    ()=>{
-        const main = { id: 1, name: 'main', state: 'running' };
-        const worker = { id: 2, name: 'thread-2', state: 'running' };
-        const caller = { current: /** @type {unknown} */ (worker) };
-        const { fns, memory, dispatched, divergences } = setup({ caller });
-        putClass(memory);
-        fns.RegisterClassA.handler([CLASS_STRUCT]);
-        const hwnd = createWindow(fns, memory);
-        assert.equal(divergences.length, 0, 'nothing to say for its own window');
+test('activation and the focus moved off another thread\'s window are told on that thread,'
+    + ' and the thread that moved them does not wait', ()=>{
+    // A splash screen's thread took the foreground from a game's window while
+    // the game drew; the game's WM_KILLFOCUS -- a device reset -- ran on the
+    // splash screen's thread, beside the game's own thread drawing with that
+    // device, and the next frame drew with a surface the reset had released.
+    const main = { id: 1, name: 'main', state: 'running' };
+    const worker = { id: 2, name: 'thread-2', state: 'running' };
+    const caller = { current: /** @type {unknown} */ (worker) };
+    const WM_SETFOCUS = 0x0007, WM_KILLFOCUS = 0x0008, WM_ACTIVATE = 0x0006;
+    const { fns, memory, dispatched, divergences } = setup({ caller });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const theirs = createWindow(fns, memory, { style: WS_VISIBLE });
+    fns.SetFocus.handler([theirs]);
+    fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]);
 
-        caller.current = main;
-        fns.SetFocus.handler([hwnd]);
-        assert.equal(dispatched.at(-1)?.message, 0x0007, 'WM_SETFOCUS, sent at once');
-        assert.equal(dispatched.at(-1)?.thread, main, 'on the thread that set the focus');
-        assert.ok(divergences.some(text=>text.startsWith('SendMessage:')), 'and says so');
-    });
+    caller.current = main;
+    const told = dispatched.length;
+    // Shown, it is activated, and the focus goes with it.
+    const ours = createWindow(fns, memory, { style: WS_VISIBLE });
+    fns.SetFocus.handler([ours]);
+    const now = dispatched.slice(told);
+    assert.ok(now.some(m=>m.hwnd === ours && m.message === WM_SETFOCUS && m.thread === main),
+        'the mover\'s own window hears at once');
+    assert.ok(!now.some(m=>m.hwnd === theirs), 'the other thread\'s window hears nothing yet');
+
+    caller.current = worker;
+    fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]);
+    const taken = dispatched.slice(told).filter(m=>m.hwnd === theirs);
+    assert.ok(taken.some(m=>m.message === WM_KILLFOCUS), 'WM_KILLFOCUS, from its queue');
+    assert.ok(taken.some(m=>m.message === WM_ACTIVATE && (m.wParam & 0xffff) === 0),
+        'and WM_ACTIVATE(WA_INACTIVE)');
+    assert.deepEqual([...new Set(taken.map(m=>m.thread))], [worker], 'on its own thread');
+    assert.ok(!divergences.some(text=>text.startsWith('SendMessage:')),
+        'nothing ran on a thread that is not the window\'s');
+});
 
 test('SendNotifyMessage leaves another thread\'s window a message and does not wait', ()=>{
     const main = { id: 1, name: 'main', state: 'running' };

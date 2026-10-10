@@ -605,7 +605,8 @@ test('SHFileOperation copies, moves, renames and deletes on the volume', async()
 
     const copy = m.record(FO_COPY, m.list(['a.txt', 'b.txt'], false),
         m.list(['copies'], false), FOF_NO_UI);
-    assert.equal(await m.shell.SHFileOperationA.handler([copy]), 0);
+    assert.equal(await m.shell.SHFileOperation.handler([copy]), 0,
+        'the undecorated name is the ANSI call');
     assert.equal(m.view.getUint32(0x112, true), 0, 'fAnyOperationsAborted, at 18');
     assert.equal(m.view.getUint32(0x116, true), 0xaaaaaaaa, 'hNameMappings is not asked for');
     assert.ok(m.volume.stat('copies\\a.txt') && m.volume.stat('copies\\b.txt'));

@@ -82,10 +82,32 @@ import {
  * @property {import('./pipeline.js').SceneProgram | null} vertexProgram
  *           the enabled, loaded vertex program; null draws the fixed stage
  * @property {import('./pipeline.js').SceneProgram | null} fragmentProgram
+ * @property {LightingState | null} [lighting]
+ *           the fixed pipeline's lighting, when it is on and no vertex
+ *           program takes its place; absent or null draws unlit
+ */
+
+/**
+ * @typedef {Object} LightingState
+ *     What of the lighting is the shader's text; the values are the uniforms'.
+ * @property {number} lights        how many enabled lights, in order
+ * @property {boolean} localViewer
+ * @property {boolean} normalise    GL_NORMALIZE or GL_RESCALE_NORMAL
+ * @property {boolean} separateSpecular
+ * @property {number} colourMaterial  the properties the vertex colour stands
+ *           for: ambient 1, diffuse 2, specular 4, emission 8
  */
 
 /** How many texture units the uniform block and the layouts allow for. */
 export const UNITS = 4;
+
+/** How many lights the uniform block carries: GL_MAX_LIGHTS. */
+export const LIGHTS = 8;
+
+/** Floats per light in the uniform block, and where each part lies. */
+const LIGHT_FLOATS = 24;
+const LIGHT = Object.freeze({ ambient: 0, diffuse: 4, specular: 8, position: 12,
+    spot: 16, params: 20 });
 
 /**
  * The uniform block's layout, in floats, shared with the renderer that fills
@@ -108,10 +130,22 @@ export const UNIFORM = Object.freeze({
     fogColor: 48 + UNITS * 36 + 12 + VARYING_TEXCOORDS * 4,
     fogParams: 48 + UNITS * 36 + 16 + VARYING_TEXCOORDS * 4,  // density, start, end, coordinate
     misc: 48 + UNITS * 36 + 20 + VARYING_TEXCOORDS * 4,       // alpha reference, depth direction
-    floats: 48 + UNITS * 36 + 24 + VARYING_TEXCOORDS * 4,
+    lightModelAmbient: 48 + UNITS * 36 + 24 + VARYING_TEXCOORDS * 4,
+    // emission, ambient, diffuse, specular, then shininess
+    material: 48 + UNITS * 36 + 28 + VARYING_TEXCOORDS * 4,
+    lights: 48 + UNITS * 36 + 48 + VARYING_TEXCOORDS * 4,     // LIGHTS * LIGHT_FLOATS
+    floats: 48 + UNITS * 36 + 48 + VARYING_TEXCOORDS * 4 + LIGHTS * LIGHT_FLOATS,
 });
 
-const UNIFORM_STRUCT = `struct Uniforms {
+export const UNIFORM_STRUCT = `struct GlLight {
+    ambient: vec4f,
+    diffuse: vec4f,
+    specular: vec4f,
+    position: vec4f,
+    spot: vec4f,
+    params: vec4f,
+};
+struct Uniforms {
     modelViewProjection: mat4x4f,
     modelView: mat4x4f,
     normalMatrix: mat4x4f,
@@ -125,9 +159,151 @@ const UNIFORM_STRUCT = `struct Uniforms {
     fogColor: vec4f,
     fogParams: vec4f,
     misc: vec4f,
+    lightModelAmbient: vec4f,
+    material: array<vec4f, 5>,
+    lights: array<GlLight, ${LIGHTS}>,
 };
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 `;
+
+/** The colour-material bits, by the property they stand for. */
+const COLOUR_MATERIAL_BIT = Object.freeze({ ambient: 1, diffuse: 2, specular: 4, emission: 8 });
+
+/**
+ * The lighting a draw's shader is generated for: the parts of the scene's
+ * lighting that change its text. Null when the draw is unlit.
+ *
+ * @param {import('./pipeline.js').SceneLighting | null} lighting
+ * @returns {LightingState | null}
+ */
+export function lightingStateOf(lighting){
+    if (!lighting)
+    {
+        return null;
+    }
+    let colourMaterial = 0;
+    for (const property of lighting.colourMaterial ?? [])
+    {
+        colourMaterial |= COLOUR_MATERIAL_BIT[property];
+    }
+    return {
+        lights: Math.min(lighting.lights.length, LIGHTS),
+        localViewer: lighting.model.localViewer,
+        normalise: lighting.normalise,
+        separateSpecular: lighting.model.separateSpecular,
+        colourMaterial,
+    };
+}
+
+/**
+ * The lighting's values into a uniform block: the light model's ambient, the
+ * front material and every enabled light. A spot direction goes in unit
+ * length, and a light without a cone with a cosine of -2, which no angle
+ * reaches, and an exponent of zero, so the shader's one formula gives it the
+ * full light the specification does.
+ *
+ * @param {Float32Array} block
+ * @param {import('./pipeline.js').SceneLighting} lighting
+ */
+export function writeLighting(block, lighting){
+    block.set(lighting.model.ambient, UNIFORM.lightModelAmbient);
+    const m = lighting.material;
+    block.set(m.emission, UNIFORM.material);
+    block.set(m.ambient, UNIFORM.material + 4);
+    block.set(m.diffuse, UNIFORM.material + 8);
+    block.set(m.specular, UNIFORM.material + 12);
+    block[UNIFORM.material + 16] = m.shininess;
+    const count = Math.min(lighting.lights.length, LIGHTS);
+    for (let i = 0; i < count; i++)
+    {
+        const light = lighting.lights[i];
+        const at = UNIFORM.lights + i * LIGHT_FLOATS;
+        block.set(light.ambient, at + LIGHT.ambient);
+        block.set(light.diffuse, at + LIGHT.diffuse);
+        block.set(light.specular, at + LIGHT.specular);
+        block.set(light.position, at + LIGHT.position);
+        const cone = light.spotCutoff !== 180;
+        const d = light.spotDirection;
+        const length = Math.hypot(d[0], d[1], d[2]);
+        block[at + LIGHT.spot] = length === 0 ? 0 : d[0] / length;
+        block[at + LIGHT.spot + 1] = length === 0 ? 0 : d[1] / length;
+        block[at + LIGHT.spot + 2] = length === 0 ? 0 : d[2] / length;
+        block[at + LIGHT.spot + 3] = cone ? light.spotExponent : 0;
+        block[at + LIGHT.params] = cone ? Math.cos(light.spotCutoff * Math.PI / 180) : -2;
+        block[at + LIGHT.params + 1] = light.constantAttenuation;
+        block[at + LIGHT.params + 2] = light.linearAttenuation;
+        block[at + LIGHT.params + 3] = light.quadraticAttenuation;
+    }
+}
+
+/**
+ * The fixed pipeline's lighting equation as a WGSL function of the eye
+ * position, the object normal and the vertex colour, returning the lit
+ * primary colour: `lightVertex` (`lighting.js`) term for term, with the
+ * specular term left out where the light model separates it -- as the
+ * processor's path leaves it out -- and the vertex's secondary colour its
+ * own. WGSL's pow is undefined at a zero base and its normalize at a zero
+ * vector, where the specification has answers; those cases are spelled out.
+ *
+ * @param {LightingState} lighting
+ * @returns {string}
+ */
+export function lightingFunction(lighting){
+    /** @param {'ambient' | 'diffuse' | 'specular' | 'emission'} name @param {number} index */
+    const property = (name, index)=>((lighting.colourMaterial & COLOUR_MATERIAL_BIT[name]) !== 0
+        ? 'colour' : `uniforms.material[${index}]`);
+    const normalise = lighting.normalise ? '    n = glSafeNormalize(n);\n' : '';
+    const toEye = lighting.localViewer ? 'glSafeNormalize(-v)' : 'vec3f(0.0, 0.0, 1.0)';
+    const sum = lighting.separateSpecular ? 'lit' : 'lit + highlight';
+    return `fn glSafeNormalize(v: vec3f) -> vec3f {
+    let l = length(v);
+    return select(vec3f(0.0), v / l, l > 0.0);
+}
+fn glPow(base: f32, exponent: f32) -> f32 {
+    if (exponent == 0.0) { return 1.0; }
+    if (base <= 0.0) { return 0.0; }
+    return pow(base, exponent);
+}
+fn glLit(eye: vec4f, objectNormal: vec3f, colour: vec4f) -> vec4f {
+    var n = (uniforms.normalMatrix * vec4f(objectNormal, 0.0)).xyz;
+${normalise}    let emission = ${property('emission', 0)};
+    let ambient = ${property('ambient', 1)};
+    let diffuse = ${property('diffuse', 2)};
+    let specular = ${property('specular', 3)};
+    let v = eye.xyz / select(eye.w, 1.0, eye.w == 0.0);
+    var lit = emission.rgb + uniforms.lightModelAmbient.rgb * ambient.rgb;
+    var highlight = vec3f(0.0);
+    for (var i = 0u; i < ${lighting.lights}u; i++) {
+        let light = uniforms.lights[i];
+        var toLight = glSafeNormalize(light.position.xyz);
+        var attenuation = 1.0;
+        if (light.position.w != 0.0) {
+            let delta = light.position.xyz / light.position.w - v;
+            let distance = length(delta);
+            toLight = glSafeNormalize(delta);
+            attenuation = 1.0 / (light.params.y + light.params.z * distance
+                + light.params.w * distance * distance);
+        }
+        var spot = 1.0;
+        if (light.params.x > -1.5) {
+            let cosine = -dot(toLight, light.spot.xyz);
+            spot = select(glPow(max(cosine, 0.0), light.spot.w), 0.0, cosine < light.params.x);
+        }
+        let diffuseDot = max(0.0, dot(n, toLight));
+        let scale = attenuation * spot;
+        lit += scale * (light.ambient.rgb * ambient.rgb
+            + diffuseDot * light.diffuse.rgb * diffuse.rgb);
+        if (diffuseDot > 0.0) {
+            let toEye = ${toEye};
+            let halfway = glSafeNormalize(toLight + toEye);
+            let specularDot = max(0.0, dot(n, halfway));
+            highlight += scale * glPow(specularDot, uniforms.material[4].x)
+                * light.specular.rgb * specular.rgb;
+        }
+    }
+    return vec4f(clamp(${sum}, vec3f(0.0), vec3f(1.0)), clamp(diffuse.a, 0.0, 1.0));
+}`;
+}
 
 /** GL comparison → WebGPU compare function. */
 const COMPARE = Object.freeze({
@@ -264,12 +440,19 @@ export function drawKey(state){
         state.vertexProgram
             ? `vp${state.vertexProgram.name}.${state.vertexProgram.version}`
             : '-',
+        lightingKey(state.lighting),
         state.fragmentProgram
             ? `fp${state.fragmentProgram.name}.${state.fragmentProgram.version}.`
                 + `${state.viewportHeight ?? 0}`
             : '-',
     ].join('|');
 }
+
+/** @param {LightingState | null | undefined} lighting */
+const lightingKey = lighting=>(lighting
+    ? `L${lighting.lights}${lighting.localViewer ? 'v' : ''}${lighting.normalise ? 'n' : ''}`
+        + `${lighting.separateSpecular ? 's' : ''}${lighting.colourMaterial}`
+    : '-');
 
 /** @param {ArrayLike<any>} a @param {ArrayLike<any>} b */
 const sameItems = (a, b)=>{
@@ -372,6 +555,14 @@ export function sameKeyInputs(a, b){
     const pa = a.polygonOffset;
     const pb = b.polygonOffset;
     if (pa !== pb && (!pa || !pb || pa.factor !== pb.factor || pa.units !== pb.units))
+    {
+        return false;
+    }
+    const la = a.lighting ?? null;
+    const lb = b.lighting ?? null;
+    if (la !== lb && (!la || !lb || la.lights !== lb.lights || la.localViewer !== lb.localViewer
+        || la.normalise !== lb.normalise || la.separateSpecular !== lb.separateSpecular
+        || la.colourMaterial !== lb.colourMaterial))
     {
         return false;
     }
@@ -730,6 +921,12 @@ function fixedVertexMain(state, varyings){
         `    out.color = ${colour ? widen(colour, [0, 0, 0, 1]) : 'uniforms.color'};`,
         `    out.secondary = ${secondary ? widen(secondary, [0, 0, 0, 1]) : 'uniforms.secondary'};`,
     ];
+    if (state.lighting)
+    {
+        vertexBody.push(`    out.color = glLit(eyePosition, ${normal
+            ? widen(normal, [0, 0, 1, 0])
+            : 'uniforms.normal'}.xyz, out.color);`);
+    }
     if (needsNormal)
     {
         vertexBody.push(
@@ -864,6 +1061,7 @@ ${fixedVertexIn(state)}
 ${vertexOutStruct(varyings, state.flat)}
 
 ${SPHERE_MAP_FN}
+${state.lighting ? lightingFunction(state.lighting) : ''}
 
 ${fixedVertexMain(state, varyings)}
 
@@ -937,6 +1135,7 @@ function generateProgramDraw(state){
 ${vertexOutStruct(varyings, state.flat)}
 
 ${SPHERE_MAP_FN}
+${state.lighting ? lightingFunction(state.lighting) : ''}
 
 ${fixedVertexMain(state, varyings)}
 `;

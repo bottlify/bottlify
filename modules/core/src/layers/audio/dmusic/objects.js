@@ -1915,15 +1915,29 @@ export function createDirectMusic(host){
             const at = Math.max(path.lastIndexOf('\\'), path.lastIndexOf('/'));
             return at <= 0 ? '' : path.slice(0, at);
         };
-        /** @param {number} address */
-        const readDescriptor = address=>({
-            name: readWide(address + ids.DMUS_OBJECTDESC.wszName, 64),
-            filename: readWide(address + ids.DMUS_OBJECTDESC.wszFileName, 260),
-            memLength: readU32(address + ids.DMUS_OBJECTDESC.llMemLength)
-                + readU32(address + ids.DMUS_OBJECTDESC.llMemLength + 4) * 0x100000000,
-            memData: readU32(address + ids.DMUS_OBJECTDESC.pbMemData),
-            stream: readU32(address + ids.DMUS_OBJECTDESC.pStream),
-        });
+        /**
+         * A descriptor's fields, each only when dwValidData says it was filled
+         * in: a program sets the flags for what it wrote and leaves the rest
+         * of the structure as its stack had it, so a field read without its
+         * flag is a stale length or pointer, not a request.
+         *
+         * @param {number} address
+         */
+        const readDescriptor = address=>{
+            const valid = readU32(address + ids.DMUS_OBJECTDESC.dwValidData);
+            const inMemory = (valid & ids.DMUS_OBJ.MEMORY) !== 0;
+            return {
+                name: (valid & ids.DMUS_OBJ.NAME) !== 0
+                    ? readWide(address + ids.DMUS_OBJECTDESC.wszName, 64) : '',
+                filename: (valid & ids.DMUS_OBJ.FILENAME) !== 0
+                    ? readWide(address + ids.DMUS_OBJECTDESC.wszFileName, 260) : '',
+                memLength: inMemory ? readU32(address + ids.DMUS_OBJECTDESC.llMemLength)
+                    + readU32(address + ids.DMUS_OBJECTDESC.llMemLength + 4) * 0x100000000 : 0,
+                memData: inMemory ? readU32(address + ids.DMUS_OBJECTDESC.pbMemData) : 0,
+                stream: (valid & ids.DMUS_OBJ.STREAM) !== 0
+                    ? readU32(address + ids.DMUS_OBJECTDESC.pStream) : 0,
+            };
+        };
 
         /**
          * @param {number} iid @param {Uint8Array} bytes @param {string} dir

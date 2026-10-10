@@ -935,3 +935,20 @@ test('in exclusive mode a control inside the program window is over the primary'
     assert.equal(area(uncoveredRegion([game, edit], 0x10, false, screen) ?? []), 640 * 480,
         'windowed, the child is inside the picture as before');
 });
+
+test('a hidden cooperative window leaves the picture to the program\'s topmost shown window', ()=>{
+    // A launcher sets the cooperative level on its menu dialog, hides it and
+    // runs the game in a full-screen window of its own: the flips are the
+    // screen. Counted from the hidden dialog, the game's window was over the
+    // whole picture and the screen kept the menu.
+    const screen = { left: 0, top: 0, right: 640, bottom: 480 };
+    const dialog = { hwnd: '0x16', rect: screen, client: screen, visible: false, parent: null };
+    const button = { hwnd: '0x1a', rect: { left: 70, top: 180, right: 226, bottom: 206 },
+        client: { left: 70, top: 180, right: 226, bottom: 206 }, visible: true,
+        child: true, parent: '0x16' };
+    const game = { hwnd: '0x8e', rect: screen, client: screen, visible: true, parent: null };
+    assert.deepEqual(uncoveredRegion([dialog, button, game], 0x16, true, screen), [screen]);
+    const shownDialog = { ...dialog, visible: true };
+    assert.deepEqual(uncoveredRegion([shownDialog, button, game], 0x16, true, screen), [],
+        'a shown cooperative window under the game window is covered as before');
+});

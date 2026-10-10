@@ -225,7 +225,8 @@ export function createCorkHost(config){
     }
     const taken = given === undefined && reused !== undefined && executors === 1
         && reused.memory.buffer.byteLength === pages * 65536
-        && (reused.memory.buffer instanceof SharedArrayBuffer) === shared
+        && (typeof SharedArrayBuffer === 'function'
+            && reused.memory.buffer instanceof SharedArrayBuffer) === shared
         ? reused.memory : undefined;
     const memory = given ?? taken
         ?? new WebAssembly.Memory({ initial: pages, maximum: pages, shared });
