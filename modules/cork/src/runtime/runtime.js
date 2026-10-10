@@ -250,14 +250,15 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         // leaves there; on, what the emulator leaves. Off, as games run: the tests and
         // the hardware corpus turn it on.
         precise: false,
-        // An instruction that only reads tests its pages as a store does, so a
-        // page the program cannot read -- a reservation not committed, one
-        // protected PAGE_NOACCESS -- faults as on Windows rather than reading
-        // RAM. Off, a read is wrapped into RAM: one `and` for a shift, a load
-        // and a branch -- a cost the benchmark does not tell from its noise,
-        // where a program that commits a page in its handler when it is first
-        // touched read zeros and never saw the fault.
-        checkReads: true,
+        // Whether an instruction that only reads tests its pages as a store
+        // does, so a page the program cannot read -- a reservation not
+        // committed, one protected PAGE_NOACCESS -- faults as on Windows. Left
+        // unset, reads are wrapped into RAM (one `and` for a shift, a load and
+        // a branch) until the program first touches such a page where it is
+        // tested -- the interpreter, a store -- and tested from then on
+        // (`readsFaulted`): a program that never goes near one pays nothing.
+        // True tests from the start, false never.
+        checkReads: undefined,
         // Locked instructions as wasm atomics, each one indivisible on the shared
         // memory: for a process whose threads run on more than one executor
         // (roadmap/v2, stage 3). Off, a process on one executor pays nothing.
@@ -340,6 +341,12 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      * @type {'wide' | 'narrow' | 'mixed'}
      */
     let precision = settings.wideFirst === true ? 'wide' : 'mixed';
+    /**
+     * Whether regions test the pages they read (`checkReads`): from the
+     * start when asked, or from the program's first fault on a page it cannot
+     * reach.
+     */
+    let readsChecked = settings.checkReads === true;
     /** Whether regions are made loose (`looseStacks`): until code is translated on a stack. */
     let loose = settings.looseStacks !== false && settings.precise !== true
         && settings.undoLog !== true;
@@ -643,6 +650,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      * @property {boolean} [wide]  an x87 region compiled for the wide precision controls
      * @property {boolean} [narrow]  an x87 region compiled for single precision
      * @property {boolean} [loose]  compiled with its stores through esp untested (`looseStacks`)
+     * @property {boolean} [wrapped]  compiled with its reads wrapped into RAM, untested
      * @property {boolean} [checked]  an x87 region whose entries test nothing of the stack's shape
      * @property {boolean} [copies]  its blocks inside its loops are entered through copies
      *     (`emitRegion`); without, they have no entry (`closed`)
@@ -736,6 +744,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         modules: 0, invalidations: 0, volatilePages: 0, dropped: 0, moduleBytes: 0,
         queueDrops: 0, queueEvictions: 0, emitFailures: 0,
         cacheHits: 0, cacheMisses: 0, missNoRecord: 0, missNoModule: 0, precisionSwitches: 0,
+        readSwitches: 0,
         stackCode: 0,
         // Batches the store answered in the call that formed them, and a turn later.
         lookedUpNow: 0, lookedUpLater: 0,
@@ -974,6 +983,29 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         loose = false;
         counts.stackCode++;
         const on = new Set([...regions].filter(record=>record.loose)
+            .flatMap(record=>[...record.pages]));
+        for (const page of on)
+        {
+            invalidatePage(page);
+        }
+    };
+
+    /**
+     * The program touched a page it cannot reach, and the tier that tested
+     * the access faulted it: reads are tested from now on, and the regions
+     * that wrapped theirs into RAM go -- the same instruction would read zeros
+     * there where the interpreter faults. A program reaches one only on
+     * purpose (a reservation it commits in its own handler), and a run
+     * switches at most once.
+     */
+    const readsFaulted = ()=>{
+        if (readsChecked || settings.checkReads === false)
+        {
+            return;
+        }
+        readsChecked = true;
+        counts.readSwitches++;
+        const on = new Set([...regions].filter(record=>record.wrapped)
             .flatMap(record=>[...record.pages]));
         for (const page of on)
         {
@@ -1257,7 +1289,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         narrow: precision === 'narrow',
         structure: settings.structure,
         precise: settings.precise === true,
-        checkReads: settings.checkReads !== false,
+        checkReads: readsChecked,
         atomic: settings.atomic === true,
         looseStacks: loose,
         leaveOut,
@@ -1479,7 +1511,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      *
      * @param {{ region: import('../region.js').Region, entryTop: number, stamp: string,
      *     wide?: boolean, narrow?: boolean, checked?: boolean, copies?: boolean,
-     *     loose?: boolean,
+     *     loose?: boolean, wrapped?: boolean,
      *     replaces?: RegionRecord, targets?: [number, number[]][], copying?: boolean,
      *     waited?: boolean }} one
      *     replaces: the region it is formed again from, with the callees of its indirect calls
@@ -1507,6 +1539,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             || (one.wide && precision !== 'wide')
             || (one.narrow && precision !== 'narrow')
             || (one.loose && !loose)
+            || (one.wrapped && readsChecked)
             || (one.checked !== true && checkedAt(region, one.entryTop)))
         {
             // A page of it was written while the batch was built.
@@ -1570,6 +1603,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             spans: region.blocks.map(block=>[block.start, block.end]), extents,
             entryTop: one.entryTop, hash: region.hash, labels: JSON.stringify(built.labels),
             linked: built.linked === true, wide: one.wide === true, loose: one.loose === true,
+            wrapped: one.wrapped === true,
             narrow: one.narrow === true, checked: one.checked === true,
             copies: one.copies === true, closed, blocks: built.labels.length,
         };
@@ -1716,19 +1750,20 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         + (settings.precise === true ? 'P' : '') + (settings.countTransfers ? 'T' : '')
         + (settings.dispatch === true ? 'D' : '') + (settings.callTargets === true ? 'C' : '')
         + (settings.callReturn === true ? 'R' : '') + (sharedMemory ? 'M' : '')
-        + (settings.atomic === true ? 'A' : '') + (settings.checkReads !== false ? 'Q' : '')
+        + (settings.atomic === true ? 'A' : '')
         + `p${(settings.trapPort ?? 0).toString(16)}`;
     /** The store key of one formed region: an x87 region compiled for the wide
      * precision controls or for single, or checked, is another translation of the same
      * bytes.
      * @param {{ region: { entry: number, hash: string }, entryTop: number, wide?: boolean,
-     *     narrow?: boolean, checked?: boolean, copies?: boolean, loose?: boolean }} one */
+     *     narrow?: boolean, checked?: boolean, copies?: boolean, loose?: boolean,
+     *     wrapped?: boolean }} one */
     const regionKey = one=>cacheKey({
         version: cacheVersion, features: found, variant, layoutId: layout.id,
         bundleId: settings.bundleId ?? 'unknown', entry: one.region.entry,
         hash: `${one.region.hash}-${one.entryTop}${one.wide ? '-w' : ''}`
             + `${one.narrow ? '-n' : ''}${one.checked ? '-c' : ''}${one.copies ? '-k' : ''}`
-            + `${one.loose ? '-s' : ''}`,
+            + `${one.loose ? '-s' : ''}${one.wrapped === false ? '-q' : ''}`,
     });
 
     /**
@@ -2231,6 +2266,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             formed.push({ region, entryTop: record.entryTop, stamp: stamp(region.pages),
                 cached: null, wide: record.wide === true && precision === 'wide',
                 narrow: record.narrow === true && precision === 'narrow', loose,
+                wrapped: !readsChecked,
                 checked: record.checked === true, copies: record.copies === true,
                 replaces: record, targets: [...targets] });
         }
@@ -2274,6 +2310,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             formed.push({ region, entryTop: record.entryTop, stamp: stamp(region.pages),
                 cached: null, wide: record.wide === true && precision === 'wide',
                 narrow: record.narrow === true && precision === 'narrow', loose,
+                wrapped: !readsChecked,
                 checked: record.checked === true, copies: true, copying: true, replaces: record,
                 ...(record.targets === undefined ? {} : { targets: record.targets }) });
             if (formed.length >= settings.batchRegions)
@@ -2649,6 +2686,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             one.wide = precision === 'wide' && usesX87(one.region);
             one.narrow = precision === 'narrow' && usesX87(one.region);
             one.loose = loose;
+            one.wrapped = !readsChecked;
             one.checked = checkedAt(one.region, one.entryTop);
         }
         const translator = unbuilt.length > 0 ? freeTranslator() : null;
@@ -2848,7 +2886,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         /** @type {{ region: import('../region.js').Region, entryTop: number,
          *     stamp: string, cached: import('./cache.js').CachedRegion | null, wide?: boolean,
          *     narrow?: boolean, checked?: boolean, moduleBytes?: Uint8Array | null,
-         *     waited?: boolean, loose?: boolean }[]} */
+         *     waited?: boolean, loose?: boolean, wrapped?: boolean }[]} */
         const formed = [];
         const formedAt = clock();
         // The block starts of the regions this batch formed with no x87 in
@@ -2923,6 +2961,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             formed.push({ region, entryTop, stamp: stamp(region.pages), cached: null,
                 wide: precision === 'wide' && usesX87(region),
                 narrow: precision === 'narrow' && usesX87(region), loose,
+                wrapped: !readsChecked,
                 checked: checkedAt(region, entryTop) });
             if (!usesX87(region))
             {
@@ -3194,6 +3233,13 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             }
             misses.set(key, seen);
         },
+        /**
+         * The program faulted on a page it cannot reach: reads are tested
+         * from now on (`checkReads` left unset).
+         */
+        readsFaulted,
+        /** Whether translated reads test their pages now. */
+        readsChecked: ()=>readsChecked,
         noteHot(eip, top = 0, hotness = 0){
             if (!settings.translate)
             {
@@ -3424,6 +3470,9 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 // x87 regions compiled for the wide precision controls until this is
                 // 1, for single until it is 2 (`precision`).
                 precisionSwitches: counts.precisionSwitches,
+                // Reads tested since the program's first fault on a page it
+                // cannot reach (1), or not (0).
+                readSwitches: counts.readSwitches,
                 // Whether stores through esp go untested (`looseStacks`), and how
                 // often code on a stack switched that off (once at most).
                 looseStacks: loose,

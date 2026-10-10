@@ -93,9 +93,11 @@ async function run(config){
 }
 
 test('a reserved page faults, and the handler that commits it goes on -- with nothing asked',
-    { timeout: 60_000 }, async()=>{
+    { timeout: 90_000 }, async()=>{
         // The default: a program that commits pages in its own handler as it
-        // touches them needs no setting of its own to run.
+        // touches them needs no setting of its own to run -- its first fault
+        // has translated reads tested from then on.
         assert.equal(await run({}), 7, 'interpreted and translated alike');
+        assert.equal(await run({ checkReads: true }), 7, 'reads tested from the start');
         assert.equal(await run({ translate: false }), 7, 'interpreted only');
     });

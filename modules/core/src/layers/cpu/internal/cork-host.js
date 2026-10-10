@@ -642,6 +642,12 @@ export function createCorkHost(config){
             // not present, and whether the access wrote.
             ...page === null ? {} : { errorCode: page.write ? 2 : 0, address: page.address >>> 0 },
         };
+        // A page the program closed itself, inside RAM: translated reads that
+        // wrap into RAM would read it as zeros, so they test from now on.
+        if (page !== null && page.address >>> 0 >= closedBelow && page.address >>> 0 < memorySize)
+        {
+            runtime.readsFaulted?.();
+        }
         if (faultHandler?.(fault) !== true)
         {
             lastFault = fault;
@@ -1418,10 +1424,12 @@ export function createCorkHost(config){
         /**
          * Opens or closes pages to the program, as a reservation's commit and
          * VirtualProtect do: a closed one faults any access, with its address.
-         * Not where translated reads are left untested (`checkReads: false`) --
-         * there a translated read would wrap into RAM where the interpreter
-         * faults, the same instruction answering two ways -- and never below
-         * `closedBelow` or past RAM, which stay closed. Answers whether it did.
+         * Not with `checkReads: false`, where translated reads never test -- a
+         * translated read would wrap into RAM where the interpreter faults, the
+         * same instruction answering two ways for the whole run; left unset,
+         * the first fault on such a page has reads tested from then on
+         * (`takeFault`). Never below `closedBelow` or past RAM, which stay
+         * closed. Answers whether it did.
          *
          * @param {number} address @param {number} length @param {boolean} open
          */
