@@ -1529,9 +1529,7 @@ export async function game(options){
             video: options.video,
             dumpDraws: options.dumpDraws,
             // A window a person watches shows every frame as it comes, not the last at the end.
-            // Shown on the page as they come: a headed run's window, and what
-            // --shots-every takes pictures of.
-            live: options.headed || options.shotsEvery > 0,
+            live: options.headed,
             dumpEvery: options.dumpEvery || undefined,
             profileCalls: options.profileCalls,
             maxDraws: options.maxDraws,
@@ -1775,11 +1773,22 @@ export async function game(options){
                 }
                 shooting = true;
                 const at = Math.round((Date.now() - startedAt) / 1000);
-                cdp.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true },
-                    sessionId).then(shot=>{
+                // The frame presented last, read back from the device: the page's
+                // own canvas shows nothing while a run goes on headless.
+                cdp.send('Runtime.evaluate', { expression: 'window.__bottlify__.frameShot()',
+                    returnByValue: true, awaitPromise: true }, sessionId).then(answer=>{
+                    const shot = answer?.result?.value;
+                    if (!shot)
+                    {
+                        console.log(`  shot at ${at} s: no frame presented yet`);
+                        return;
+                    }
+                    const bytes = Buffer.from(shot.pixels, 'base64');
+                    const image = toPng(shot.width, shot.height,
+                        shot.format === 'bgra8unorm' ? bytes : toBgra(bytes));
                     const path = join(REPORTS_DIR,
                         `game-${shotsStamp}-at-${String(at).padStart(5, '0')}s.png`);
-                    writeFileSync(path, Buffer.from(shot.data, 'base64'));
+                    writeFileSync(path, image);
                     console.log(`  shot at ${at} s: ${path}`);
                 }, ()=>{}).finally(()=>{
                     shooting = false;
