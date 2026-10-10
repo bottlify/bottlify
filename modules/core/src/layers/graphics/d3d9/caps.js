@@ -108,6 +108,10 @@ const D3DPTFILTERCAPS_MAGFPOINT = 0x01000000;
 const D3DPTFILTERCAPS_MAGFLINEAR = 0x02000000;
 const D3DPTFILTERCAPS_MINFANISOTROPIC = 0x00000400;
 const D3DPTFILTERCAPS_MAGFANISOTROPIC = 0x04000000;
+const D3DVS20CAPS_PREDICATION = 0x00000001;
+/** D3DPS20CAPS_ARBITRARYSWIZZLE, GRADIENTINSTRUCTIONS, PREDICATION, NODEPENDENTREADLIMIT, NOTEXINSTRUCTIONLIMIT. */
+const PS20_MODEL_3_CAPS = 0x1f;
+
 const FILTER_CAPS = D3DPTFILTERCAPS_MINFPOINT | D3DPTFILTERCAPS_MINFLINEAR
     | D3DPTFILTERCAPS_MIPFPOINT | D3DPTFILTERCAPS_MIPFLINEAR
     | D3DPTFILTERCAPS_MAGFPOINT | D3DPTFILTERCAPS_MAGFLINEAR
@@ -263,16 +267,24 @@ export function capabilityWords(caps, identity = {}){
         // StretchRect stretches on the GPU, point or linear: D3DPTFILTERCAPS_MINFPOINT,
         // MINFLINEAR, MAGFPOINT and MAGFLINEAR.
         StretchRectFilterCaps: 0x00000100 | 0x00000200 | 0x01000000 | 0x02000000,
-        VS20Caps_Caps: 0,
-        VS20Caps_DynamicFlowControlDepth: 0,
+        // Model 3's floor, which the translator meets whole: predication,
+        // dynamic flow 24 deep and static flow 4, arbitrary swizzles,
+        // gradients and no limit on dependent reads or texture instructions.
+        VS20Caps_Caps: vs.major >= 3 ? D3DVS20CAPS_PREDICATION : 0,
+        VS20Caps_DynamicFlowControlDepth: vs.major >= 3 ? 24 : 0,
         VS20Caps_NumTemps: vs.major >= 2 ? 32 : 0,
-        VS20Caps_StaticFlowControlDepth: 0,
-        PS20Caps_Caps: 0,
-        PS20Caps_DynamicFlowControlDepth: 0,
+        VS20Caps_StaticFlowControlDepth: vs.major >= 3 ? 4 : 0,
+        PS20Caps_Caps: ps.major >= 3 ? PS20_MODEL_3_CAPS : 0,
+        PS20Caps_DynamicFlowControlDepth: ps.major >= 3 ? 24 : 0,
         PS20Caps_NumTemps: ps.major >= 2 ? 32 : 0,
-        PS20Caps_StaticFlowControlDepth: 0,
-        PS20Caps_NumInstructionSlots: ps.major >= 2 ? 96 : 0,
-        VertexTextureFilterCaps: 0,
+        PS20Caps_StaticFlowControlDepth: ps.major >= 3 ? 4 : 0,
+        PS20Caps_NumInstructionSlots: ps.major >= 3 ? 512 : ps.major >= 2 ? 96 : 0,
+        // A vertex texture is read through the sampler its states make,
+        // point or linear.
+        VertexTextureFilterCaps: vs.major >= 3
+            ? D3DPTFILTERCAPS_MINFPOINT | D3DPTFILTERCAPS_MINFLINEAR
+                | D3DPTFILTERCAPS_MAGFPOINT | D3DPTFILTERCAPS_MAGFLINEAR
+            : 0,
         MaxVShaderInstructionsExecuted: vs.major >= 2 ? 65535 : 0,
         MaxPShaderInstructionsExecuted: ps.major >= 2 ? 65535 : 0,
         MaxVertexShader30InstructionSlots: vs.major >= 3 ? 512 : 0,

@@ -262,11 +262,11 @@ export const DEFAULT_CAPS = Object.freeze({
     compressedTextures: false,
     depthCube: false,
     depthPlain: false,
-    // Model 2: what the translator turns into a pipeline whole. Model 3 adds
-    // predication and vertex texture reads, which it does not, and a program
-    // told 3.0 takes paths that use them.
-    vertexShaderVersion: Object.freeze({ major: 2, minor: 0 }),
-    pixelShaderVersion: Object.freeze({ major: 2, minor: 0 }),
+    // Model 3, which the translator turns into a pipeline whole: predication,
+    // subroutines, indexed outputs and vertex texture reads among it, held
+    // to the reference machine by the shader gate.
+    vertexShaderVersion: Object.freeze({ major: 3, minor: 0 }),
+    pixelShaderVersion: Object.freeze({ major: 3, minor: 0 }),
     // None: the renderer clips against no user plane, and a plane a program
     // sets and finds not clipping is worse than a plane it is refused.
     maxUserClipPlanes: 0,

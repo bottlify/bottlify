@@ -101,9 +101,18 @@ test('a device that advertises shaders fills the fields a program checks alongsi
 
 test('the default device advertises the model the renderer draws whole', ()=>{
     const words = capabilityWords(DEFAULT_CAPS);
-    assert.equal(words.VertexShaderVersion, 0xfffe0200);
-    assert.equal(words.PixelShaderVersion, 0xffff0200);
-    assert.ok(words.MaxVertexShaderConst >= 96);
+    assert.equal(words.VertexShaderVersion, 0xfffe0300);
+    assert.equal(words.PixelShaderVersion, 0xffff0300);
+    assert.ok(words.MaxVertexShaderConst >= 256);
+    // Model 3's floor: what a program checks before it takes the 3.0 path.
+    assert.equal(words.VS20Caps_Caps & 1, 1, 'D3DVS20CAPS_PREDICATION');
+    assert.equal(words.VS20Caps_DynamicFlowControlDepth, 24);
+    assert.equal(words.VS20Caps_StaticFlowControlDepth, 4);
+    assert.equal(words.PS20Caps_Caps, 0x1f);
+    assert.equal(words.PS20Caps_NumInstructionSlots, 512);
+    assert.ok(words.MaxVertexShader30InstructionSlots >= 512);
+    assert.ok(words.MaxPixelShader30InstructionSlots >= 512);
+    assert.notEqual(words.VertexTextureFilterCaps, 0, 'vertex textures are read');
 });
 
 test('table fog is claimed over both depths it is taken over', ()=>{
