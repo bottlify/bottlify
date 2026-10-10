@@ -144,6 +144,21 @@ test('an uncompressed DDS is named by its masks and read into texels', ()=>{
     assert.equal(readImage(Uint8Array.from([...luminance, 9])).format, FMT.L8);
 });
 
+test('a palette-indexed DDS reads its texels through the palette, alpha from peFlags', ()=>{
+    // DDPF_PALETTEINDEXED8, eight bits a texel, 256 entries of r, g, b and the alpha
+    // Direct3D keeps in peFlags, between the header and the texels.
+    const header = ddsHeader({ width: 2, height: 1, pfFlags: 0x20, bits: 8 });
+    const palette = new Array(256 * 4).fill(0);
+    palette.splice(0, 4, 10, 20, 30, 40);
+    palette.splice(5 * 4, 4, 200, 150, 100, 255);
+    const image = readImage(Uint8Array.from([...header, ...palette, 5, 0]));
+    assert.equal(image.format, FMT.P8);
+    assert.equal(image.levels[0].format, FMT.A8R8G8B8);
+    assert.deepEqual([...image.levels[0].data], [100, 150, 200, 255, 30, 20, 10, 40]);
+    assert.throws(()=>readImage(Uint8Array.from([...header, ...palette.slice(0, 100)])),
+        /palette/);
+});
+
 test('what the loader does not read is refused by name', ()=>{
     assert.throws(()=>readImage(Uint8Array.from([0xff, 0xd8, 0xff, 0xe0, 0, 0])),
         e=>e instanceof ImageError && /JPEG/.test(e.message));

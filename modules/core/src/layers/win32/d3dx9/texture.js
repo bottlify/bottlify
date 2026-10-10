@@ -127,7 +127,9 @@ function formatFromFile(file){
     {
         return file;
     }
-    return file === FMT.R8G8B8 || file === FMT.P8 ? FMT.X8R8G8B8 : FMT.A8R8G8B8;
+    // A palette entry carries an alpha (peFlags), so P8's nearest is A8R8G8B8, as the
+    // format table Wine's d3dx9 conformance tests hold to gives P8 eight bits of it.
+    return file === FMT.R8G8B8 ? FMT.X8R8G8B8 : FMT.A8R8G8B8;
 }
 
 /**

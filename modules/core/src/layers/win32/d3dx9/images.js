@@ -109,7 +109,10 @@ const DDSCAPS2_CUBEMAP = 0x200;
 const DDSCAPS2_ALL_FACES = 0xfc00;
 
 /** DDS_PIXELFORMAT flags. */
-const DDPF = { ALPHAPIXELS: 0x1, ALPHA: 0x2, FOURCC: 0x4, RGB: 0x40, LUMINANCE: 0x20000 };
+const DDPF = { ALPHAPIXELS: 0x1, ALPHA: 0x2, FOURCC: 0x4, PALETTEINDEXED8: 0x20, RGB: 0x40,
+    LUMINANCE: 0x20000 };
+/** A palette-indexed DDS: 256 PALETTEENTRY (r, g, b, alpha in peFlags) after the header. */
+const DDS_PALETTE_BYTES = 256 * 4;
 
 /**
  * @param {DataView} view  At the pixel format.
@@ -188,6 +191,10 @@ function ddsFormat(view){
     {
         return FMT.A8;
     }
+    if ((flags & DDPF.PALETTEINDEXED8) && bits === 8)
+    {
+        return FMT.P8;
+    }
     return 0;
 }
 
@@ -218,13 +225,36 @@ function readDds(bytes){
     {
         throw new ImageError('a DDS pixel format this loader does not know');
     }
-    if (!isSupported(format))
+    const indexed = format === FMT.P8;
+    if (!indexed && !isSupported(format))
     {
         throw new ImageError(`a DDS of format ${format}: not read yet`);
     }
+    if (indexed && bytes.length < 128 + DDS_PALETTE_BYTES)
+    {
+        throw new ImageError('a palette-indexed DDS file cut short of its palette');
+    }
+    const palette = indexed ? bytes.subarray(128, 128 + DDS_PALETTE_BYTES) : null;
+    /**
+     * A level of indices through the palette, whose fourth byte Direct3D reads as the
+     * entry's alpha (IDirect3DDevice9::SetPaletteEntries).
+     *
+     * @param {Uint8Array} data @returns {Uint8Array}
+     */
+    const throughPalette = data=>{
+        const out = new Uint8Array(data.length * 4);
+        const entries = /** @type {Uint8Array} */ (palette);
+        data.forEach((index, i)=>{
+            out[i * 4] = entries[index * 4 + 2];
+            out[i * 4 + 1] = entries[index * 4 + 1];
+            out[i * 4 + 2] = entries[index * 4];
+            out[i * 4 + 3] = entries[index * 4 + 3];
+        });
+        return out;
+    };
     /** @type {Level[][]} */
     const faces = [];
-    let at = 128;
+    let at = indexed ? 128 + DDS_PALETTE_BYTES : 128;
     for (let face = 0; face < (cube ? 6 : 1); face++)
     {
         /** @type {Level[]} */
@@ -233,7 +263,7 @@ function readDds(bytes){
         {
             const w = Math.max(1, width >> level);
             const h = Math.max(1, height >> level);
-            const layout = layoutOf(format, w, h);
+            const layout = indexed ? { rowBytes: w, rows: h } : layoutOf(format, w, h);
             const size = layout.rowBytes * layout.rows;
             if (at + size > bytes.length)
             {
@@ -249,7 +279,7 @@ function readDds(bytes){
             levels.push(isCompressed(format)
                 ? { width: w, height: h, format, data }
                 : { width: w, height: h, format: FMT.A8R8G8B8,
-                    data: decodeTexels(format, data, w, h) });
+                    data: indexed ? throughPalette(data) : decodeTexels(format, data, w, h) });
             at += size;
         }
         faces.push(levels);
