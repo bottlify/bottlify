@@ -294,6 +294,9 @@ function addressedRead(texel, coord){
  * @property {boolean} [predicated]  Whether p0 exists: setp, predicated writes, if p0, breakp.
  * @property {'lod' | 'address'} [sampling]  The samplers' state the GPU sampler
  *     cannot hold (`samplingTexels`).
+ * @property {number} [clip]  User clip planes, carried as varyings: a vertex
+ *     shader writes each plane's distance from its position, out of the
+ *     registers past its own; a pixel shader discards where one is below zero.
  */
 
 /** @param {() => number} next @param {string} r @param {string} s */
@@ -423,6 +426,11 @@ PROFILES.ps_3_0_address = { ...PROFILES.ps_3_0, name: 'ps_3_0', sampling: 'addre
     special: ['texldl', 'pow'], flow: false, predicated: false };
 PROFILES.vs_3_0_address = { ...PROFILES.vs_3_0, name: 'vs_3_0', sampling: 'address',
     special: ['texldl', 'texldl', 'm4x4'], flow: false, predicated: false };
+// User clip planes where the device does not clip by distances: three and six
+// planes' distances out of a vertex shader, five planes' discard in a pixel one.
+PROFILES.vs_1_1_clip = { ...PROFILES.vs_1_1, clip: 3 };
+PROFILES.vs_2_0_clip = { ...PROFILES.vs_2_0, clip: 6 };
+PROFILES.ps_2_0_clip = { ...PROFILES.ps_2_0, clip: 5 };
 
 /**
  * One instruction, at random from what the profile names.
@@ -691,18 +699,48 @@ export function buildCase(profile, seed, length = 10){
         },
         derivative: ()=>[0, 0, 0, 0],
     });
+    const clip = p.clip ? { count: p.clip, distances: false } : null;
     const translated = translateShader(parseShader(tokens), {
         ones: texels.map(texel=>texel.ones),
         ...(p.sampling ? { sampling: texels.map(texel=>texel.variant) } : {}),
+        ...(clip ? { clip } : {}),
     });
+    const expected = Object.fromEntries(Object.entries(result.outputs)
+        .map(([name, values])=>[name, Array.from(values, Number)]));
+    const written = { ...result.written };
+    let killed = result.killed;
+    if (clip && p.vertex)
+    {
+        // Each plane, from the registers past the shader's own, against the
+        // position it wrote: a distance of one past the last plane.
+        const at = /** @type {number} */ (translated.clipRegister);
+        const position = expected.oPos ?? [0, 0, 0, 1];
+        const distances = Array.from({ length: Math.ceil(clip.count / 4) * 4 }, (_, plane)=>(
+            plane < clip.count ? [0, 1, 2, 3].reduce((sum, axis)=>Math.fround(sum
+                + Math.fround(constants[(at + plane) * 4 + axis] * position[axis])), 0) : 1));
+        for (let group = 0; group * 4 < clip.count; group++)
+        {
+            expected[`clip${group}`] = distances.slice(group * 4, group * 4 + 4);
+            written[`clip${group}`] = 0xf;
+        }
+    }
+    else if (clip)
+    {
+        // The distances the vertex stage handed on, drawn apart from the program.
+        const nextClip = generator(seed ^ 0x6c1f3a09);
+        for (let group = 0; group * 4 < clip.count; group++)
+        {
+            inputs[`clip${group}`] = [0, 1, 2, 3].map(at=>(group * 4 + at < clip.count
+                ? between(nextClip, -0.2, 1) : 1));
+        }
+        killed ||= Object.keys(inputs).some(name=>name.startsWith('clip')
+            && inputs[name].some(value=>value < 0));
+    }
     return {
         profile, seed, text, vertex: p.vertex,
         wgsl: translated.wgsl, entry: translated.entry, samplers: translated.samplers, texels,
-        constants, ints, bools, inputs,
-        expected: Object.fromEntries(Object.entries(result.outputs)
-            .map(([name, values])=>[name, Array.from(values, Number)])),
-        written: result.written, viewportRegister: translated.viewportRegister,
-        killed: result.killed, unsettled,
+        constants, ints, bools, inputs, expected, written,
+        viewportRegister: translated.viewportRegister, killed, unsettled,
         error: translated.error,
     };
 }

@@ -789,6 +789,15 @@ test('Direct3D 9: buffers locked plain, with DISCARD and with NOOVERWRITE, drawn
             await run.call('SetStreamSource static', ()=>device.SetStreamSource(0, vertices, 0,
                 STRIDE));
             await drawQuad9(run, device, `static ${frame}`, tex, frame / 8);
+            // Two user clip planes, moving from frame to frame: the planes
+            // reach the block a draw carries, wherever the device draws.
+            await run.call('SetClipPlane 0', ()=>device.SetClipPlane(0, [1, 0, 0, frame / 4]));
+            await run.call('SetClipPlane 4', ()=>device.SetClipPlane(4, [0, -1, 0.5, 1]));
+            await run.call('SetRenderState CLIPPLANEENABLE', ()=>device.SetRenderState(
+                D3DRS.CLIPPLANEENABLE, 0b10001));
+            await drawQuad9(run, device, `clipped ${frame}`, tex, frame / 8);
+            await run.call('SetRenderState CLIPPLANEENABLE off', ()=>device.SetRenderState(
+                D3DRS.CLIPPLANEENABLE, 0));
             // Part of a vertex in: the whole vertices go into the first, and
             // the buffer is bound at the rest.
             await run.call('SetStreamSource part of a vertex in', ()=>device.SetStreamSource(0,

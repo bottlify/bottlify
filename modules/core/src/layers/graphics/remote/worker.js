@@ -292,7 +292,9 @@ export function serveGraphics(scope, deps){
         {
             throw new Error('no GPU adapter answered requestAdapter in the graphics worker');
         }
-        const features = ['texture-compression-bc', 'depth-clip-control']
+        // Clip distances let the user clip planes be the rasteriser's; without
+        // them a clipped draw's fragment stage discards instead.
+        const features = ['texture-compression-bc', 'depth-clip-control', 'clip-distances']
             .filter(feature=>adapter.features.has(feature));
         const device = await adapter.requestDevice({ requiredFeatures: features });
         device.lost?.then((/** @type {{ reason?: string }} */ info)=>{

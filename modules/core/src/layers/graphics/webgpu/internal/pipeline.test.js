@@ -199,6 +199,14 @@ test('every part of the lighting state that shapes the shader is folded', ()=>{
     assert.equal(pipelineKey({ ...base, lighting: lighting() }), original);
 });
 
+test('the user clip planes a draw clips by, and how, are folded; none adds nothing', ()=>{
+    const base = baseState();
+    const keys = [base, { ...base, clipPlanes: 1 }, { ...base, clipPlanes: 3 },
+        { ...base, clipPlanes: 3, clipDistances: true }].map(pipelineKey);
+    assert.equal(new Set(keys).size, keys.length);
+    assert.ok(!keys[0].includes('clip'));
+});
+
 test('no stages and one default stage are different keys', ()=>{
     // The cascade is off until a stage arms it, so "off" has to be expressible
     // as something other than stage zero's value. Without the length prefix an

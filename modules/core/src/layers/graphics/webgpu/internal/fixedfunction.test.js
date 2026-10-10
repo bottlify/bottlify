@@ -717,6 +717,55 @@ test('a stage writes the temporary register its RESULTARG names, and reads it an
             '    temp = vec4f(saturate((uniforms.stageConstant[0]).rgb)'));
     });
 
+test('user clip planes are distances the device clips by, or varyings the fragment discards on',
+    ()=>{
+        // Planes 0, 2, 3, 4 and 5 of six: five, the block's rows in the
+        // vertex's own space, so the distance needs no transform.
+        const clipping = baseState({ clipPlanes: 0b111101 });
+        const fallback = generate(clipping).code;
+        assert.ok(fallback.includes('    clipPlane: array<vec4f, 5>,\n};'));
+        const varyings = '    @location(2) clip0: vec4f,\n    @location(3) clip1: vec4f,';
+        assert.ok(fallback.includes(varyings), 'after the varyings the vertex already had');
+        assert.ok(fallback.includes('    out.clip0 = vec4f(dot(uniforms.clipPlane[0],'
+            + ' vec4f(vertex.position, 1.0)), dot(uniforms.clipPlane[1], vec4f(vertex.position,'
+            + ' 1.0)), dot(uniforms.clipPlane[2], vec4f(vertex.position, 1.0)),'
+            + ' dot(uniforms.clipPlane[3], vec4f(vertex.position, 1.0)));'));
+        assert.ok(fallback.includes('    out.clip1 = vec4f(dot(uniforms.clipPlane[4],'
+            + ' vec4f(vertex.position, 1.0)), 1.0, 1.0, 1.0);'), 'a missing plane clips nothing');
+        assert.ok(fallback.includes('    if (any(input.clip0 < vec4f(0.0)) ||'
+            + ' any(input.clip1 < vec4f(0.0)))\n    {\n        discard;\n    }\n'
+            + '    return current;'), 'at the end, after everything that samples');
+        assert.ok(!fallback.includes('clip_distances'));
+
+        const device = generate({ ...clipping, clipDistances: true }).code;
+        assert.ok(device.startsWith('enable clip_distances;\n'));
+        assert.ok(device.includes(
+            '    @builtin(clip_distances) clipDistances: array<f32, 5>,\n};'));
+        assert.ok(device.includes('    out.clipDistances[4] = dot(uniforms.clipPlane[4],'
+            + ' vec4f(vertex.position, 1.0));'));
+        assert.ok(device.includes('struct FragmentIn {\n    @builtin(position) position: vec4f,'),
+            'a vertex output the fragment stage may not take is left out of its input');
+        assert.ok(device.includes('fn fragmentMain(input: FragmentIn)'));
+        assert.ok(!device.includes('discard'));
+
+        // A pre-transformed vertex has no space to clip in.
+        const rhw = baseState({ fvf: FVF.XYZRHW | FVF.DIFFUSE });
+        assert.equal(generate({ ...rhw, clipPlanes: 1 }).code, generate(rhw).code);
+        // And no plane is the source as it always was.
+        assert.ok(!generate(baseState()).code.includes('clip'));
+
+        // A vertex shader's planes are its own; the fixed fragment stage over
+        // it discards on the varyings the translation carries them in.
+        const fragment = fixedFragmentStage(baseState({ fvf: 0, vertexShader: 1,
+            clipPlanes: 0b11 }), [0]);
+        assert.ok(fragment.wgsl.includes('    @location(12) clip0: vec4f,'));
+        assert.ok(fragment.wgsl.includes('    if (any(in.clip0 < vec4f(0.0)))'));
+        assert.ok(!fragment.wgsl.includes('clipPlane'), 'and its block carries no planes');
+        assert.deepEqual(fragment.reads, [0, 12]);
+        assert.ok(!fixedFragmentStage(baseState({ fvf: 0, vertexShader: 1, clipPlanes: 0b11,
+            clipDistances: true }), [0]).wgsl.includes('clip'));
+    });
+
 test('a stage puts its coordinate through its own texture transform before sampling', ()=>{
     // Direct3D applies D3DTS_TEXTURE0..7 to (u, v, 1) for a two-coordinate
     // set: two dot products against the rows the block carries, computed

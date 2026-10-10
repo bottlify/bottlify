@@ -279,7 +279,7 @@ export const DEFAULT_CAPS = Object.freeze({
     pixelShaderVersion: Object.freeze({ major: 3, minor: 0 }),
     // None: the renderer clips against no user plane, and a plane a program
     // sets and finds not clipping is worse than a plane it is refused.
-    maxUserClipPlanes: 0,
+    maxUserClipPlanes: 6,
     maxActiveLights: 8,
     maxTextureWidth: 4096,
     maxTextureHeight: 4096,
@@ -1464,6 +1464,10 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         },
         get lights(){
             return lights;
+        },
+        // The user clip planes, which D3DRS_CLIPPLANEENABLE says are in force.
+        get clipPlanes(){
+            return clipPlanes;
         },
         get lightsVersion(){
             return lightsVersion;

@@ -169,6 +169,102 @@ export const D3DMCS = Object.freeze({ MATERIAL: 0, COLOR1: 1, COLOR2: 2 });
 export const D3DLIGHT = Object.freeze({ POINT: 1, SPOT: 2, DIRECTIONAL: 3 });
 
 /**
+ * Where a pair of programmable stages carries user clip-plane distances when
+ * the device cannot clip by them itself: two locations no translated shader
+ * uses, since a vertex shader's position semantic is the position builtin
+ * and never a varying, and below the location the pixel stage's front-facing
+ * input takes from the inter-stage limit.
+ */
+export const CLIP_LOCATION = 12;
+
+/**
+ * What a vertex stage's position is clipped by beside the view volume:
+ * D3DRS_CLIPPLANEENABLE's planes, in index order.
+ *
+ * @typedef {Object} ClipState
+ * @property {number} count       How many are enabled: one to six.
+ * @property {boolean} distances  Whether the device clips by distances it is
+ *     given (WebGPU's `clip-distances`). Otherwise each distance travels as a
+ *     varying, interpolated as the rasteriser would, and the fragment stage
+ *     discards where one is below zero.
+ */
+
+/**
+ * The vertex stage's half of the user clip planes: the output fields and the
+ * lines that write them, from each enabled plane's distance.
+ *
+ * @param {ClipState} clip
+ * @param {(plane: number) => string} distance  WGSL for the nth enabled plane's.
+ * @param {number} [location]  The first location a varying may take.
+ * @returns {{ fields: string[], lines: string[], locations: number[] }}
+ */
+export function clipOutputs(clip, distance, location = CLIP_LOCATION){
+    if (clip.distances)
+    {
+        return {
+            fields: [`    @builtin(clip_distances) clipDistances: array<f32, ${clip.count}>,`],
+            lines: Array.from({ length: clip.count },
+                (_, plane)=>`    out.clipDistances[${plane}] = ${distance(plane)};`),
+            locations: [],
+        };
+    }
+    // Four distances a varying; one past the last enabled plane is a
+    // distance of one, which clips nothing.
+    const groups = Math.ceil(clip.count / 4);
+    return {
+        fields: Array.from({ length: groups },
+            (_, group)=>`    @location(${location + group}) clip${group}: vec4f,`),
+        lines: Array.from({ length: groups }, (_, group)=>`    out.clip${group} = vec4f(${
+            [0, 1, 2, 3].map(at=>(group * 4 + at < clip.count ? distance(group * 4 + at) : '1.0'))
+                .join(', ')});`),
+        locations: Array.from({ length: groups }, (_, group)=>location + group),
+    };
+}
+
+/**
+ * The fragment stage's half: where the device clips, nothing; otherwise the
+ * varyings `clipOutputs` wrote and a discard where any distance is below
+ * zero. Written at the end of the stage, after everything that samples.
+ *
+ * @param {ClipState | null | undefined} clip
+ * @param {string} input  The fragment's input structure.
+ * @param {number} [location]
+ * @returns {{ fields: string[], lines: string[], locations: number[] }}
+ */
+export function clipInputs(clip, input, location = CLIP_LOCATION){
+    if (!clip || clip.distances)
+    {
+        return { fields: [], lines: [], locations: [] };
+    }
+    const groups = Math.ceil(clip.count / 4);
+    const below = Array.from({ length: groups },
+        (_, group)=>`any(${input}.clip${group} < vec4f(0.0))`).join(' || ');
+    return {
+        fields: Array.from({ length: groups },
+            (_, group)=>`    @location(${location + group}) clip${group}: vec4f,`),
+        lines: [`    if (${below})`, '    {', '        discard;', '    }'],
+        locations: Array.from({ length: groups }, (_, group)=>location + group),
+    };
+}
+
+/**
+ * The clip state a pipeline state asks for, or null: `clipPlanes` is
+ * D3DRS_CLIPPLANEENABLE's enabled bits, and `clipDistances` whether the
+ * device clips by them.
+ *
+ * @param {{ clipPlanes?: number, clipDistances?: boolean }} state
+ * @returns {ClipState | null}
+ */
+export function clipStateOf(state){
+    let count = 0;
+    for (let bits = state.clipPlanes ?? 0; bits !== 0; bits &= bits - 1)
+    {
+        count++;
+    }
+    return count === 0 ? null : { count, distances: state.clipDistances === true };
+}
+
+/**
  * One light, as the uniform block carries it.
  *
  * Every row is a vec4f so that the block's layout is the same arithmetic in
@@ -775,6 +871,14 @@ export function generateFixedFunction(state, layout){
     {
         varyings.push(`    @location(${location}) fogAmount: f32,`);
     }
+    // User clip planes, in the space the block's rows put them in: the
+    // vertex's own, so the distance needs no transform of the position. A
+    // pre-transformed vertex has no space to clip in, and is not clipped.
+    const clip = layout.preTransformed ? null : clipStateOf(state);
+    const clipped = clip ? clipOutputs(clip,
+        plane=>`dot(uniforms.clipPlane[${plane}], vec4f(vertex.position, 1.0))`,
+        location + (carriedFog ? 1 : 0)) : null;
+    const discarded = clip ? clipInputs(clip, 'input', location + (carriedFog ? 1 : 0)) : null;
 
     const inputs = layout.attributes
         .map(attribute=>`    @location(${attribute.shaderLocation}) `
@@ -833,7 +937,8 @@ export function generateFixedFunction(state, layout){
     // promises two modules the same position from the same computation only
     // under the attribute -- which has no effect where the struct is the
     // fragment's input.
-    const code = `${lightCount === 0 ? '' : LIGHT_STRUCT}${uniformStruct(lightCount, tailOf(state))}
+    const code = `${clip?.distances ? 'enable clip_distances;\n' : ''}${lightCount === 0 ? ''
+        : LIGHT_STRUCT}${uniformStruct(lightCount, vertexTailOf(state, layout.preTransformed))}
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 ${functionDeclarations(lighting, vertexFog || fogSource === FOG_SOURCE.TABLE
         ? state.fogMode : D3DFOG.NONE, vertexFog)}${samplerDeclarations(dimensionsOf(state), 0, 1)}
@@ -847,24 +952,29 @@ ${inputs}
 
 struct VertexOut {
     @builtin(position) @invariant position: vec4f,
+${[...varyings, ...clipped?.fields ?? []].join('\n')}
+};
+${clip?.distances ? `
+struct FragmentIn {
+    @builtin(position) position: vec4f,
 ${varyings.join('\n')}
 };
-
+` : ''}
 @vertex
 fn vertexMain(vertex: VertexIn${cornerInput}) -> VertexOut {
     var out: VertexOut;
 ${position}
 ${pixelCentre}${unclipped}
 ${pointLines.join('\n')}
-${[...assignments, ...fogAmount].join('\n')}
+${[...assignments, ...fogAmount, ...clipped?.lines ?? []].join('\n')}
     return out;
 }
 
 @fragment
-fn fragmentMain(input: VertexOut) -> @location(0) vec4f {
+fn fragmentMain(input: ${clip?.distances ? 'FragmentIn' : 'VertexOut'}) -> @location(0) vec4f {
 ${fragmentBody(state, specularEnable, undefined, undefined,
         flat ? 'vec4f(input.specular.rgb, input.specularAlpha)' : 'input.specular',
-        points?.sprite === true)}
+        points?.sprite === true)}${discarded?.lines.length ? `\n${discarded.lines.join('\n')}` : ''}
     return current;
 }
 `;
@@ -884,6 +994,8 @@ ${fragmentBody(state, specularEnable, undefined, undefined,
  *
  * @typedef {Object} UniformTail
  * @property {boolean} stageConstants
+ * @property {number} [clipPlanes]  How many user clip planes follow, in the
+ *     vertex's own space: one row each, for a fixed vertex stage that clips.
  */
 
 /**
@@ -897,6 +1009,20 @@ export function tailOf(state){
 }
 
 /**
+ * The tail of the block a fixed vertex stage reads for a state: `tailOf`'s,
+ * and the clip planes when the state clips and the vertex is not
+ * pre-transformed.
+ *
+ * @param {import('./pipeline.js').PipelineState} state
+ * @param {boolean} preTransformed
+ * @returns {UniformTail}
+ */
+export function vertexTailOf(state, preTransformed){
+    const clip = preTransformed ? null : clipStateOf(state);
+    return { ...tailOf(state), clipPlanes: clip?.count ?? 0 };
+}
+
+/**
  * The block the fixed-function stages read, as WGSL declares it; the layout
  * `UNIFORM_AT` in the renderer is this struct's, and the tail after the
  * lights `uniformTailOf`'s.
@@ -905,6 +1031,7 @@ export function tailOf(state){
  * @param {UniformTail} [tail]
  */
 function uniformStruct(lightCount, tail = { stageConstants: false }){
+    const planes = tail.clipPlanes ?? 0;
     return `struct Uniforms {
     worldViewProjection: mat4x4f,
     world: mat4x4f,
@@ -930,7 +1057,8 @@ function uniformStruct(lightCount, tail = { stageConstants: false }){
     point: vec4f,
     pointScale: vec4f,${lightCount === 0 ? '' : `
     lights: array<Light, ${lightCount}>,`}${tail.stageConstants ? `
-    stageConstant: array<vec4f, 8>,` : ''}
+    stageConstant: array<vec4f, 8>,` : ''}${planes === 0 ? '' : `
+    clipPlane: array<vec4f, ${planes}>,`}
 };`;
 }
 
@@ -1158,6 +1286,10 @@ export function fixedFragmentStage(state, written){
         }
         carried.push(`    input.fogAmount = ${has(10) ? 'in.fog.x' : has(1) ? 'in.v1.a' : '0.0'};`);
     }
+    // A vertex shader's clip distances, where the device does not clip by
+    // them, arrive as the translation wrote them (`clipOutputs`).
+    const discarded = clipInputs(clipStateOf(state), 'in');
+    fields.push(...discarded.fields);
     const members = ['    diffuse: vec4f,', '    specular: vec4f,',
         ...Array.from({ length: sets },
             (_, set)=>`    texCoord${set}: ${wide.has(set) ? 'vec4f' : 'vec2f'},`),
@@ -1180,14 +1312,16 @@ ${members.join('\n')}
 fn ps_main(in: PsIn) -> @location(0) vec4f {
     var input: Carried;
 ${carried.join('\n')}
-${fragmentBody(state, state.specularEnable === true, [], 'in.position')}
+${fragmentBody(state, state.specularEnable === true, [], 'in.position')}${
+    discarded.lines.length ? `\n${discarded.lines.join('\n')}` : ''}
     return current;
 }
 `;
     return {
         wgsl, entry: 'ps_main',
         samplers: state.stages.map((stage, index)=>({ index, type: stage.dimension ?? '2d' })),
-        inputs: [], outputs: [], reads: written.filter(location=>location <= 10),
+        inputs: [], outputs: [],
+        reads: [...written.filter(location=>location <= 10), ...discarded.locations],
         constants: 0, error: null,
     };
 }

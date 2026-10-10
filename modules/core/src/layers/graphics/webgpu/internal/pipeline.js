@@ -252,6 +252,12 @@ function lookUp(table, value, what){
  * @property {PointState} [points]
  *     A point list, which WebGPU draws only a pixel wide: each point is drawn
  *     as a quad of its size instead, its vertex read once an instance.
+ * @property {number} [clipPlanes]
+ *     D3DRS_CLIPPLANEENABLE's bits, for a draw whose vertices the user planes
+ *     clip; absent, none.
+ * @property {boolean} [clipDistances]
+ *     Whether those planes are clipped by the device (`clip-distances`) rather
+ *     than by a discard in the fragment stage.
  * @property {StencilState} [stencil]
  * @property {number} [blendConstant]  D3DRS_BLENDFACTOR, a D3DCOLOR; set on the pass, not keyed.
  *     D3DRS_STENCILENABLE on a target with a stencil: absent, no stencil test.
@@ -357,6 +363,7 @@ export function pipelineKey(state){
         ...(state.rangeFog ? ['range'] : []),
         ...(state.points
             ? [`points${state.points.sprite ? 's' : ''}${state.points.scale ? 'd' : ''}`] : []),
+        ...(state.clipPlanes ? [`clip${state.clipPlanes}${state.clipDistances ? 'd' : 'v'}`] : []),
         ...(state.stencil ? [`stencil${[state.stencil.func, state.stencil.fail,
             state.stencil.zfail, state.stencil.pass, state.stencil.ccwFunc, state.stencil.ccwFail,
             state.stencil.ccwZfail, state.stencil.ccwPass, state.stencil.readMask & 0xff,

@@ -2507,8 +2507,8 @@ export function createDirect3D8Seam(
                 | D3DVTXPCAPS_DIRECTIONALLIGHTS | D3DVTXPCAPS_POSITIONALLIGHTS
                 | D3DVTXPCAPS_LOCALVIEWER,
             MaxActiveLights: caps.maxActiveLights ?? 8,
-            // Nothing clips against a program's planes or blends by vertex
-            // weights, which is what Direct3D 9 answers for the same reason.
+            // The renderer clips by six of a program's planes; nothing blends
+            // by vertex weights, which is what Direct3D 9 answers too.
             MaxUserClipPlanes: caps.maxUserClipPlanes ?? 0,
             MaxVertexBlendMatrices: caps.maxVertexBlendMatrices ?? 0,
             MaxVertexBlendMatrixIndex: caps.maxVertexBlendMatrixIndex ?? 0,

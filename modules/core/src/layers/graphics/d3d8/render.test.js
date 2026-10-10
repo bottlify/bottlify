@@ -39,7 +39,8 @@ import {
     HARDWARE_SAMPLER, filledIndices, listIndices, multiplyMatrices, packLight, pipelineStateOf,
     samplerFlagsOf,
     screenExtent, transformPosition, uniformBlock, uniformsOf, pixelUniformsOf, fogModeOf, fogOf,
-    addressVariantOf, isAffine, lodBiasOf, samplerDescriptorOf, stageCascade,
+    addressVariantOf, clipMaskOf, clipPlanesOf, isAffine, lodBiasOf, samplerDescriptorOf,
+    stageCascade,
     vertexCountOf,
 } from './render.js';
 import { createBackend } from '../webgpu/backend.js';
@@ -1355,6 +1356,54 @@ test('border and mirror-once clamp on the GPU and are the sample\'s variant, by 
     assert.deepEqual(addressVariantOf(get, 'cube'), {}, 'a cube\'s faces are not addressed');
     assert.deepEqual(addressVariantOf(()=>D3DTADDRESS.CLAMP, '3d'), {});
 });
+
+test('the enabled clip planes, in index order, go through a matrix into the vertex\'s own space',
+    ()=>{
+        const planes = new Map([[0, [1, 0, 0, 0]], [2, [0, 1, 0, -2]], [5, [0, 0, 1, 0.5]]]);
+        const model = /** @type {any} */ ({ renderStates: new Map([[152, 0b100101]]),
+            clipPlanes: planes });
+        assert.equal(clipMaskOf(model), 0b100101);
+        assert.deepEqual([...clipPlanesOf(model, 0b100101, null)],
+            [1, 0, 0, 0, 0, 1, 0, -2, 0, 0, 1, 0.5], 'as set, for a vertex shader');
+        // A world that scales x by two and moves y by three: a point p of the
+        // model is at (2 p.x, p.y + 3, p.z) in the world, and y = 2 there --
+        // plane 2 -- is y = -1 here.
+        const world = [2, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 3, 0, 1];
+        const object = clipPlanesOf(model, 0b000100, world);
+        assert.deepEqual([...object], [0, 1, 0, 1]);
+        const point = [5, -1, 7, 1];
+        assert.equal(object.reduce((sum, value, at)=>sum + value * point[at], 0), 0,
+            'a model point on the plane is on it in the world');
+        // D3DRS_CLIPPING off clips by no plane at all; a device that keeps no
+        // planes clips by none either.
+        assert.equal(clipMaskOf({ ...model, renderStates: new Map([[152, 1], [136, 0]]) }), 0);
+        assert.equal(clipMaskOf({ ...model, clipPlanes: undefined }), 0);
+        assert.equal(clipMaskOf({ ...model, renderStates: new Map([[152, 0xffff]]) }), 0x3f,
+            'six planes and no more');
+    });
+
+test('recorded: a Direct3D 8 draw is clipped by the planes D3DRS_CLIPPLANEENABLE turns on',
+    async()=>{
+        const h = harness();
+        const { device, gpu } = h;
+        assert.equal(device.SetClipPlane(2, [0, 0, 1, -1]), D3D_OK);
+        assert.equal(device.SetRenderState(D3DRS.CLIPPLANEENABLE, 0b100), D3D_OK);
+        assert.equal(device.BeginScene(), D3D_OK);
+        assert.equal(device.SetVertexShader(FVF.XYZ | FVF.DIFFUSE), D3D_OK);
+        assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(48), 16),
+            D3D_OK);
+        // Pre-transformed vertices are not clipped by the planes.
+        assert.equal(device.SetVertexShader(FVF_QUAD), D3D_OK);
+        assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(60), 20),
+            D3D_OK);
+        assert.equal(device.EndScene(), D3D_OK);
+        await h.present();
+        const modules = gpu.of('createShaderModule').map((/** @type {any} */ call)=>
+            /** @type {string} */ (call.descriptor.code));
+        assert.equal(modules.filter(code=>code.includes('out.clip0 = vec4f(dot(uniforms'
+            + '.clipPlane[0], vec4f(vertex.position, 1.0)), 1.0, 1.0, 1.0);')).length, 1);
+        assert.equal(modules.filter(code=>code.includes('clipPlane')).length, 1);
+    });
 
 test('recorded: a texture is uploaded after it is unlocked, and only then', async()=>{
     const h = harness();

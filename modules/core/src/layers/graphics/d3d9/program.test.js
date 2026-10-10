@@ -93,10 +93,11 @@ const STRIDE = 24;
 
 /**
  * @param {{ dumpDraws?: boolean, refusePipeline?: (descriptor: any) => string | null,
- *     model?: number }} [options]
+ *     model?: number, features?: string[] }} [options]
  */
 function harness(options = {}){
-    const gpu = createFakeDevice({ refusePipeline: options.refusePipeline });
+    const gpu = createFakeDevice({ refusePipeline: options.refusePipeline,
+        features: options.features });
     /** @type {string[]} */
     const reports = [];
     const backend = createBackend({
@@ -1776,3 +1777,55 @@ test('a stage writes the temporary register and reads its own constant, which it
         assert.deepEqual([...floats.subarray(UNIFORM_FLOATS, UNIFORM_FLOATS + 8)],
             [0x40, 0x20, 0x10, 0x80, 0, 0xff, 0, 0xff].map(byte=>Math.fround(byte / 255)));
     });
+
+test('user clip planes: world planes through the world for the fixed stages, clip-space ones for'
+    + ' a shader, by the device or by a discard', async()=>{
+    for (const features of [[], ['clip-distances']])
+    {
+        const h = harness({ features });
+        const device = features.length ? 'the device' : 'a discard';
+        // D3DRS_CLIPPLANEENABLE planes 1 and 3.
+        assert.equal(h.device.SetRenderState(D3DRS.CLIPPLANEENABLE, 0b1010), D3D_OK);
+        assert.equal(h.device.SetClipPlane(1, [0, 1, 0, -0.5]), D3D_OK);
+        assert.equal(h.device.SetClipPlane(3, [1, 0, 0, 0]), D3D_OK);
+        // A world that moves everything up by two.
+        assert.equal(h.device.SetTransform(D3DTS.WORLD,
+            [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 2, 0, 1]), D3D_OK);
+        await h.draw();
+        const fixed = modulesOf(h, 'fixed-function:')[0];
+        assert.ok(fixed.includes(features.length
+            ? 'out.clipDistances[1] = dot(uniforms.clipPlane[1],'
+            : 'out.clip0 = vec4f(dot(uniforms.clipPlane[0],'), device);
+        const block = new Float32Array(h.boundBytes(h.groupsOfDraw().get(0), 0).buffer);
+        assert.equal(block.length, UNIFORM_FLOATS + 8, `${device}: two planes past the block`);
+        // y = 0.5 in the world is y = -1.5 for the model; x = 0 is x = 0.
+        assert.deepEqual([...block.subarray(UNIFORM_FLOATS)], [0, 1, 0, 1.5, 1, 0, 0, 0]);
+
+        /** @type {{ shader?: any }} */
+        const vs = {};
+        /** @type {{ shader?: any }} */
+        const ps = {};
+        assert.equal(h.device.CreateVertexShader(VERTEX_SHADER, vs), D3D_OK);
+        assert.equal(h.device.CreatePixelShader(PIXEL_SHADER, ps), D3D_OK);
+        h.device.SetVertexShader(vs.shader);
+        h.device.SetPixelShader(ps.shader);
+        h.device.SetTexture(0, h.texture);
+        await h.draw();
+        assert.deepEqual(h.reports, []);
+        const vertex = modulesOf(h, 'vs:').at(-1) ?? '';
+        const pixel = modulesOf(h, 'ps:').at(-1) ?? '';
+        assert.ok(vertex.includes(features.length ? 'out.clipDistances[0] = dot(c[_clip + 0],'
+            + ' out.oPos);' : 'out.clip0 = vec4f(dot(c[_clip + 0], out.oPos),'), device);
+        assert.equal(pixel.includes('discard;'), features.length === 0,
+            `${device}: the pixel shader discards only where the device does not clip`);
+        const register = Number(/const _clip = (\d+);/.exec(vertex)?.[1]);
+        const constants = new Float32Array(h.boundBytes(h.groupsOfDraw().get(0), 0).buffer);
+        assert.deepEqual([...constants.subarray(register * 4, register * 4 + 8)],
+            [0, 1, 0, -0.5, 1, 0, 0, 0], 'a shader\'s planes as they were set');
+        h.device.SetVertexShader(null);
+        h.device.SetPixelShader(null);
+        h.device.SetTexture(0, null);
+        vs.shader.release();
+        ps.shader.release();
+    }
+});

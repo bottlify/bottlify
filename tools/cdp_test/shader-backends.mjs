@@ -20,6 +20,13 @@
  * compiler: a construct it refuses is one at least one real backend refuses,
  * a construct it takes may still cost the driver differently. Without naga
  * the tool says it measured nothing and exits 2, never that all passed.
+ *
+ * One construct naga's HLSL writer does not take at all: the clip distances
+ * of a module that enables `clip_distances`, which its HLSL backend leaves
+ * out of the capabilities it validates for. A browser compiles WGSL with a
+ * compiler of its own, and is given such a module only on a device made with
+ * `clip-distances`. That lowering is counted as not measured, never as
+ * passed; the Metal one is made as any other.
  */
 
 import { execFileSync } from 'node:child_process';
@@ -29,8 +36,8 @@ import { join } from 'node:path';
 import { buildCase, PROFILES } from './shader-cases.mjs';
 
 const TARGETS = [
-    { name: 'msl 2.1', ext: 'metal', args: ['--metal-version', '2.1'] },
-    { name: 'hlsl 5.1', ext: 'hlsl', args: ['--shader-model', '51'] },
+    { name: 'msl 2.1', ext: 'metal', args: ['--metal-version', '2.1'], clipDistances: true },
+    { name: 'hlsl 5.1', ext: 'hlsl', args: ['--shader-model', '51'], clipDistances: false },
 ];
 
 /** @param {string[]} argv @param {string} flag @param {string} fallback */
@@ -88,6 +95,7 @@ for (const dir of dirs)
 
 const work = mkdtempSync(join(tmpdir(), 'shader-backends-'));
 let failed = 0;
+let unmeasured = 0;
 try
 {
     corpus.forEach((one, at)=>{
@@ -95,6 +103,11 @@ try
         writeFileSync(source, one.wgsl);
         for (const target of TARGETS)
         {
+            if (!target.clipDistances && /^enable clip_distances;/m.test(one.wgsl))
+            {
+                unmeasured++;
+                continue;
+            }
             try
             {
                 execFileSync(naga, [...target.args, source, join(work, `${at}.${target.ext}`)],
@@ -112,6 +125,8 @@ finally
 {
     rmSync(work, { recursive: true, force: true });
 }
-console.log(`${corpus.length} shaders, ${corpus.length * TARGETS.length} lowerings, `
-    + `${failed} refused (${TARGETS.map(t=>t.name).join(', ')}; naga)`);
+console.log(`${corpus.length} shaders, ${corpus.length * TARGETS.length - unmeasured} lowerings, `
+    + `${failed} refused (${TARGETS.map(t=>t.name).join(', ')}; naga)`
+    + (unmeasured ? `; ${unmeasured} not measured: naga's HLSL writer has no clip distances`
+        : ''));
 process.exit(failed ? 1 : 0);

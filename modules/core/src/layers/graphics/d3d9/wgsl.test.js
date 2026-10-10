@@ -294,6 +294,63 @@ test('a mirror-once axis is folded at every kind of read, a border axis selects 
             + ' vec4f(0.0, 0.0, 0.0, 0.0), (in.t0.xy).y < 0.0 || (in.t0.xy).y > 1.0);');
     });
 
+test('a vertex shader\'s position is clipped by the planes past its registers, as it wrote it',
+    ()=>{
+        // Direct3D gives a shader's planes in clip space: the distance is the
+        // plane against oPos, taken before the engine's half-pixel move.
+        const parsed = parseShader([VS_2_0, ...dclInput(0, 0),
+            op(OPCODE.MOV, 2), dst(REGISTER.RASTOUT, 0), src(REGISTER.CONST, 3), END_TOKEN]);
+        const plain = translateShader(parsed);
+        const varyings = translateShader(parsed, { clip: { count: 5, distances: false } });
+        assert.equal(varyings.error, null);
+        assert.equal(varyings.clipRegister, /** @type {number} */ (plain.viewportRegister) + 1);
+        assert.equal(varyings.constants, plain.constants + 5);
+        assertLine(varyings.wgsl, `const _clip = ${varyings.clipRegister};`);
+        assertLine(varyings.wgsl, 'out.clip0 = vec4f(dot(c[_clip + 0], out.oPos),'
+            + ' dot(c[_clip + 1], out.oPos), dot(c[_clip + 2], out.oPos),'
+            + ' dot(c[_clip + 3], out.oPos));');
+        assertLine(varyings.wgsl, 'out.clip1 = vec4f(dot(c[_clip + 4], out.oPos), 1.0, 1.0, 1.0);');
+        assertLine(varyings.wgsl, '@location(12) clip0: vec4f,');
+        assert.ok(varyings.wgsl.indexOf('out.clip1 =') < varyings.wgsl.indexOf('out.oPos.w * c['),
+            'before the half-pixel move');
+        assert.deepEqual(varyings.outputs.filter(location=>location >= 12), [12, 13]);
+
+        const device = translateShader(parsed, { clip: { count: 2, distances: true } });
+        assert.ok(device.wgsl.startsWith('enable clip_distances;\n'));
+        assertLine(device.wgsl, '@builtin(clip_distances) clipDistances: array<f32, 2>,');
+        assertLine(device.wgsl, 'out.clipDistances[1] = dot(c[_clip + 1], out.oPos);');
+        assert.ok(!plain.wgsl.includes('clip0') && !plain.wgsl.includes('clipDistances'));
+
+        // The pixel shader paired with varyings discards on them.
+        const pixel = parseShader([PS_2_0, op(OPCODE.MOV, 2), dst(REGISTER.COLOROUT, 0),
+            src(REGISTER.CONST, 0), END_TOKEN]);
+        const discarding = translateShader(pixel, { clip: { count: 5, distances: false } });
+        assert.equal(discarding.error, null);
+        assertLine(discarding.wgsl, '@location(13) clip1: vec4f,');
+        assertLine(discarding.wgsl,
+            'if (any(in.clip0 < vec4f(0.0)) || any(in.clip1 < vec4f(0.0)))');
+        assert.ok(discarding.wgsl.indexOf('discard;') < discarding.wgsl.indexOf('out.oC0 = oC0;'));
+        assert.deepEqual(discarding.reads, [12, 13]);
+        assert.equal(translateShader(pixel, { clip: { count: 5, distances: true } }).wgsl,
+            translateShader(pixel).wgsl, 'where the device clips, the pixel stage is as it was');
+
+        // The fixed vertex stage of a hybrid clips its untransformed position
+        // by planes in its own space, from the registers past its own.
+        const shapes = new Map([[0, { components: 3, scalar: /** @type {'f32'} */ ('f32'),
+            bgra: false }]]);
+        const hybrid = fixedVertexStage([{ usage: D3DDECLUSAGE.POSITION, usageIndex: 0,
+            register: 0 }], shapes, [], [], 0, undefined, { clip: { count: 1, distances: true } });
+        assert.equal(hybrid.clipRegister, HYBRID_CONSTANTS.COUNT);
+        assert.equal(hybrid.constants, HYBRID_CONSTANTS.COUNT + 1);
+        assertLine(hybrid.wgsl, `out.clipDistances[0] = dot(c[${HYBRID_CONSTANTS.COUNT}],`
+            + ' vec4f(vec4f(in.v0, 1.0).xyz, 1.0));');
+        const rhw = fixedVertexStage([{ usage: D3DDECLUSAGE.POSITIONT, usageIndex: 0,
+            register: 0 }], new Map([[0, { components: 4, scalar: /** @type {'f32'} */ ('f32'),
+            bgra: false }]]), [], [], 0, undefined, { clip: { count: 1, distances: true } });
+        assert.ok(!rhw.wgsl.includes('clipDistances') && rhw.clipRegister === undefined,
+            'a pre-transformed vertex is not clipped');
+    });
+
 test('a cube sampler takes three coordinates, and a sampler read without a dcl is refused', ()=>{
     const parsed = parseShader([PS_2_0, ...dclSampler(1, 3),
         op(OPCODE.TEX, 3), dst(REGISTER.TEMP, 0), src(REGISTER.TEXTURE, 0),

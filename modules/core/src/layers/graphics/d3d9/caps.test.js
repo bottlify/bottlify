@@ -128,7 +128,8 @@ test('what the renderer does not do is not claimed', ()=>{
     assert.equal(words.TextureOpCaps, 0x03feffff, 'the operations the combiner draws');
     assert.equal(words.StencilCaps, 0x1ff, 'every stencil operation, and two-sided stencil');
     assert.equal(words.RasterCaps & 0x00010000, 0x00010000, 'D3DPRASTERCAPS_FOGRANGE');
-    assert.equal(words.MaxUserClipPlanes, 0, 'no clipping against user planes');
+    assert.equal(words.MaxUserClipPlanes, 6, 'six user planes, clipped by the device or'
+        + ' discarded by the fragment stage');
     assert.equal(words.RasterCaps & 0x01000000, 0x01000000,
         'D3DPRASTERCAPS_SCISSORTEST: draws and clears are cut to the scissor');
     assert.equal(words.RasterCaps & 0x06020000, 0x06020000,

@@ -1713,7 +1713,7 @@ test('the capabilities a device reports are answers, not gaps', ()=>{
     assert.equal(caps.MaxTextureBlendStages, 8);
     assert.equal(caps.MaxSimultaneousTextures, 8);
     assert.equal(caps.MaxActiveLights, 8);
-    assert.equal(caps.MaxUserClipPlanes, 0, 'nothing clips against a plane of the program\'s');
+    assert.equal(caps.MaxUserClipPlanes, 6, 'the planes the renderer clips by');
     assert.equal(caps.MaxStreams, 16);
     assert.equal(caps.MaxPointSize, 64, 'a float in the middle of the dwords');
     assert.equal(caps.ExtentsAdjust, 0);
