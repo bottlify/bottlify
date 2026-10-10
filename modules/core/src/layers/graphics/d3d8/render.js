@@ -589,6 +589,47 @@ export function filledIndices(type, indices, fill){
     return wide ? Uint32Array.from(out) : Uint16Array.from(out);
 }
 
+/** @param {number} value five bits @returns {number} eight */
+const five = value=>(value << 3) | (value >>> 2);
+/** @param {number} value four bits @returns {number} eight */
+const four = value=>(value << 4) | value;
+/** @param {number} value six bits @returns {number} eight */
+const six = value=>(value << 2) | (value >>> 4);
+
+/**
+ * A sixteen-bit format's expansion, by a table of every word's four bytes made
+ * the first time the format is uploaded: a level is a lookup a texel, where
+ * unpacking each word into an array of four and copying it was most of what a
+ * 16-bit texture cost to upload.
+ *
+ * @param {(word: number)=>number[]} unpack  b, g, r, a of one little-endian word
+ * @returns {(pixels: Uint8Array, count: number)=>Uint8Array}
+ */
+function sixteenBit(unpack){
+    /** @type {Uint8Array | null} */
+    let table = null;
+    return (pixels, count)=>{
+        if (!table)
+        {
+            table = new Uint8Array(0x10000 * 4);
+            for (let word = 0; word < 0x10000; word++)
+            {
+                table.set(unpack(word), word * 4);
+            }
+        }
+        const out = new Uint8Array(count * 4);
+        // Four bytes at a time, in the order they lie: the same on either
+        // byte order, since both sides are read and written as one word.
+        const words = new Uint32Array(table.buffer);
+        const into = new Uint32Array(out.buffer);
+        for (let index = 0; index < count; index++)
+        {
+            into[index] = words[pixels[index * 2] | (pixels[index * 2 + 1] << 8)];
+        }
+        return out;
+    };
+}
+
 /**
  * The colour formats this can upload, each expanded to `bgra8unorm`.
  *
@@ -609,21 +650,21 @@ const TEXEL_EXPANSION = Object.freeze({
         }
         return out;
     },
-    [D3DFMT.R5G6B5]: (pixels, count)=>expandSixteen(pixels, count, word=>[
+    [D3DFMT.R5G6B5]: sixteenBit(word=>[
         five(word & 0x1f), six((word >>> 5) & 0x3f), five(word >>> 11), 0xff,
     ]),
-    [D3DFMT.X1R5G5B5]: (pixels, count)=>expandSixteen(pixels, count, word=>[
+    [D3DFMT.X1R5G5B5]: sixteenBit(word=>[
         five(word & 0x1f), five((word >>> 5) & 0x1f), five((word >>> 10) & 0x1f), 0xff,
     ]),
-    [D3DFMT.A1R5G5B5]: (pixels, count)=>expandSixteen(pixels, count, word=>[
+    [D3DFMT.A1R5G5B5]: sixteenBit(word=>[
         five(word & 0x1f), five((word >>> 5) & 0x1f), five((word >>> 10) & 0x1f),
         (word & 0x8000) !== 0 ? 0xff : 0,
     ]),
-    [D3DFMT.A4R4G4B4]: (pixels, count)=>expandSixteen(pixels, count, word=>[
+    [D3DFMT.A4R4G4B4]: sixteenBit(word=>[
         four(word & 0xf), four((word >>> 4) & 0xf), four((word >>> 8) & 0xf),
         four(word >>> 12),
     ]),
-    [D3DFMT.X4R4G4B4]: (pixels, count)=>expandSixteen(pixels, count, word=>[
+    [D3DFMT.X4R4G4B4]: sixteenBit(word=>[
         four(word & 0xf), four((word >>> 4) & 0xf), four((word >>> 8) & 0xf), 0xff,
     ]),
     [D3DFMT.A8]: (pixels, count)=>{
@@ -644,7 +685,10 @@ const TEXEL_EXPANSION = Object.freeze({
         for (let index = 0; index < count; index++)
         {
             const value = pixels[index];
-            out.set([value, value, value, 0xff], index * 4);
+            out[index * 4] = value;
+            out[index * 4 + 1] = value;
+            out[index * 4 + 2] = value;
+            out[index * 4 + 3] = 0xff;
         }
         return out;
     },
@@ -653,7 +697,10 @@ const TEXEL_EXPANSION = Object.freeze({
         for (let index = 0; index < count; index++)
         {
             const value = pixels[index * 2];
-            out.set([value, value, value, pixels[index * 2 + 1]], index * 4);
+            out[index * 4] = value;
+            out[index * 4 + 1] = value;
+            out[index * 4 + 2] = value;
+            out[index * 4 + 3] = pixels[index * 2 + 1];
         }
         return out;
     },
@@ -663,7 +710,10 @@ const TEXEL_EXPANSION = Object.freeze({
         {
             const packed = pixels[index];
             const value = four(packed & 0xf);
-            out.set([value, value, value, four(packed >>> 4)], index * 4);
+            out[index * 4] = value;
+            out[index * 4 + 1] = value;
+            out[index * 4 + 2] = value;
+            out[index * 4 + 3] = four(packed >>> 4);
         }
         return out;
     },
@@ -673,7 +723,10 @@ const TEXEL_EXPANSION = Object.freeze({
         const out = new Uint8Array(count * 4);
         for (let index = 0; index < count; index++)
         {
-            out.set([pixels[index * 2], pixels[index * 2 + 1], 0x7f, 0x7f], index * 4);
+            out[index * 4] = pixels[index * 2];
+            out[index * 4 + 1] = pixels[index * 2 + 1];
+            out[index * 4 + 2] = 0x7f;
+            out[index * 4 + 3] = 0x7f;
         }
         return out;
     },
@@ -695,29 +748,6 @@ const TEXEL_EXPANSION = Object.freeze({
         return new Uint8Array(out.buffer);
     },
 });
-
-/** @param {number} value five bits @returns {number} eight */
-const five = value=>(value << 3) | (value >>> 2);
-/** @param {number} value four bits @returns {number} eight */
-const four = value=>(value << 4) | value;
-/** @param {number} value six bits @returns {number} eight */
-const six = value=>(value << 2) | (value >>> 4);
-
-/**
- * @param {Uint8Array} pixels
- * @param {number} count
- * @param {(word: number)=>number[]} unpack  b, g, r, a of one little-endian word
- * @returns {Uint8Array}
- */
-function expandSixteen(pixels, count, unpack){
-    const out = new Uint8Array(count * 4);
-    for (let index = 0; index < count; index++)
-    {
-        const word = pixels[index * 2] | (pixels[index * 2 + 1] << 8);
-        out.set(unpack(word), index * 4);
-    }
-    return out;
-}
 
 /**
  * A texture level's bytes as they lie in guest memory, expanded to the one
