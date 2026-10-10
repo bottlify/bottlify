@@ -295,6 +295,10 @@ function isTransformType(type){
  *     Where a full-screen device's gamma ramp reaches the picture. Absent, a
  *     ramp is kept and read back only.
  * @property {import('../webgpu/internal/latency.js').FrameQueued} [frameQueued]
+ * @property {(address: number, version: number) => void} [readBackAhead]
+ *     Where the device plays a recording, told each time a render target a
+ *     copy has read back is read back again ahead of the next copy: its memory
+ *     at `address` holds the GPU's picture as of `version` of its `drawnInto`.
  *     Told of every frame a present queues; what it answers is what the
  *     present waits on before it answers the program. Absent, a present never
  *     waits.
@@ -395,7 +399,7 @@ export function createDirect3D8(options = {}){
     const {
         backend, readMemory, windowMemory, writeMemory, createSampler, allocate: guestMemory,
         free: giveBack, dumpDraws, dumpEvery, liveDump, maxDraws, divergence, skipTexture,
-        probeTexture, fog, mips, nanProbe, onDeviceLost, gamma, frameQueued, ...caps
+        probeTexture, fog, mips, nanProbe, onDeviceLost, gamma, frameQueued, readBackAhead, ...caps
     } = options;
     /** @type {DeviceCaps} */
     const resolved = { ...DEFAULT_CAPS, ...caps, fullscreenGamma: gamma?.applies() === true };
@@ -403,7 +407,7 @@ export function createDirect3D8(options = {}){
     const services = {
         backend, readMemory, windowMemory, writeMemory, createSampler, allocate: guestMemory,
         free: giveBack, dumpDraws, dumpEvery, liveDump, maxDraws, divergence, skipTexture,
-        probeTexture, fog, mips, nanProbe, onDeviceLost, gamma, frameQueued,
+        probeTexture, fog, mips, nanProbe, onDeviceLost, gamma, frameQueued, readBackAhead,
     };
     if (backend && !readMemory)
     {
@@ -895,6 +899,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
      * @param {any} surface
      */
     const retireSurface = surface=>{
+        readsAhead.delete(surface);
         free(surface.base);
         renderer?.retire(surface);
     };
@@ -1471,8 +1476,58 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
      * @returns {number | Promise<number>}
      */
     const presented = submitted=>{
+        readAhead();
         const held = submitted ? services.frameQueued?.(submitted) ?? null : null;
         return held ? held.then(()=>D3D_OK) : D3D_OK;
+    };
+
+    /**
+     * Render targets a copy has read back, by what `drawnInto` said when their
+     * memory last took the GPU's picture. A program that reads a target back
+     * every frame -- a fence against the GPU running ahead -- reads one drawn
+     * in the frame before, so each is read back again as a frame is presented,
+     * and the copy finds the picture in its memory rather than waiting on the
+     * GPU for it. Where the drawing is played for a device elsewhere, that
+     * device is told (`services.readBackAhead`) and answers its own copy.
+     *
+     * The version is set once the bytes are in memory; a read on its way is
+     * marked so it is not asked twice.
+     *
+     * @type {Map<object, number>}
+     */
+    const readsAhead = new Map();
+    /** @type {Set<object>} */
+    const readingAhead = new Set();
+    /** @param {any} surface @param {number} version @param {any} pixels */
+    const readInto = (surface, version, pixels)=>{
+        readingAhead.add(surface);
+        return pixels.readBack(surface).then(()=>{
+            readingAhead.delete(surface);
+            if (readsAhead.has(surface))
+            {
+                readsAhead.set(surface, version);
+            }
+        }, (/** @type {unknown} */ error)=>{
+            readingAhead.delete(surface);
+            throw error;
+        });
+    };
+    const readAhead = ()=>{
+        const pixels = readsAhead.size > 0 ? targetPixels() : undefined;
+        if (!pixels)
+        {
+            return;
+        }
+        const tell = services.readBackAhead ?? (()=>{});
+        for (const [surface, version] of readsAhead)
+        {
+            const now = drawnInto.get(surface) ?? 0;
+            if (now !== version && !readingAhead.has(surface))
+            {
+                const at = /** @type {any} */ (surface).base;
+                readInto(surface, now, pixels).then(()=>tell(at, now), ()=>{});
+            }
+        }
     };
 
     /**
@@ -3097,7 +3152,22 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             // black. They are read back first, as a lock of the target reads.
             const pixels = surfaceTypeOf(from) === SURFACE_TYPE.RENDER_TARGET
                 ? targetPixels() : undefined;
-            return pixels ? pixels.readBack(source).then(describeMoves) : describeMoves();
+            if (pixels)
+            {
+                // Read back ahead and not drawn into since: its memory is
+                // already the GPU's picture.
+                const now = drawnInto.get(source) ?? 0;
+                if (readsAhead.get(source) === now && !readingAhead.has(source))
+                {
+                    return describeMoves();
+                }
+                if (!readsAhead.has(source))
+                {
+                    readsAhead.set(source, -1);
+                }
+                return readInto(source, now, pixels).then(describeMoves);
+            }
+            return describeMoves();
         },
 
         /**
@@ -3210,6 +3280,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                             Math.min(desc.Height, bounds.Height));
                         moves.push(rectMoveOf(one, rect, other, { x: rect.left, y: rect.top }));
                         renderer?.markDirty(other);
+                        drew(other);
                     }
                 }
             }

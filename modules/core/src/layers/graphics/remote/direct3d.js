@@ -123,7 +123,7 @@ export function recordedDirect3D(factory, services, transport){
                 services.gamma.set(recording?.outward(owner) ?? owner, ramp),
         },
     });
-    const targets = createTargetReads();
+    const targets = createTargetReads(transport);
     recording = createRecording({
         root: recorded,
         readMemory: services.readMemory ?? ((/** @type {number} */ address,
@@ -158,16 +158,29 @@ const COPIES_INTO = /** @type {Record<string, number>} */ ({
  * it through a lock, its memory is still the GPU's picture, and the copy is made
  * from it here, byte for byte what the renderer would have answered.
  *
+ * The played device also reads such a target back again ahead of the next
+ * copy whenever it changes, and says which `drawnInto` its memory then holds
+ * (`transport.readAheadAt`): a target drawn into every frame and read back the
+ * frame after has its picture here before the copy is made.
+ *
  * Kept for one recorded root: a Reset forgets every target.
  */
-export function createTargetReads(){
+export function createTargetReads(transport = /** @type {any} */ ({})){
     /** What each target's `drawnInto` was when it was last read back. @type {WeakMap<object, number>} */
     let readAt = new WeakMap();
+    /**
+     * Targets written outside the device's count -- a lock, a context -- by
+     * the count then: a read-ahead of that version is not the picture.
+     *
+     * @type {WeakMap<object, number>}
+     */
+    let writtenAt = new WeakMap();
     /** @param {any} surface */
     const touched = surface=>{
         if (surface && typeof surface === 'object')
         {
             readAt.delete(surface);
+            writtenAt.set(surface, -1);
         }
     };
     /** @param {any} device @param {any} surface */
@@ -192,9 +205,10 @@ export function createTargetReads(){
                 touched(target);
                 return;
             }
-            if (name === 'Reset' || name === 'UpdateTexture')
+            if (name === 'Reset')
             {
                 readAt = new WeakMap();
+                writtenAt = new WeakMap();
             }
         },
 
@@ -209,11 +223,20 @@ export function createTargetReads(){
             {
                 return answeredByRenderer(target, name, args);
             }
-            const now = drawn(target, args[0]);
-            if (now !== null && readAt.get(args[0]) === now)
+            const source = args[0];
+            const now = drawn(target, source);
+            if (now !== null && readAt.get(source) === now)
             {
                 return false;
             }
+            const ahead = typeof source?.base === 'number'
+                ? transport.readAheadAt?.(source.base) : undefined;
+            if (now !== null && ahead === now && !writtenAt.has(source))
+            {
+                readAt.set(source, now);
+                return false;
+            }
+            writtenAt.delete(source);
             const asked = answeredByRenderer(target, name, args);
             if (asked && now !== null)
             {
