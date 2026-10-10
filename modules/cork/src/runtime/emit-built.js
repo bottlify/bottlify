@@ -196,7 +196,7 @@ function contextKey(layout, features, options, leaveOut){
         options.precise === true, options.place === true, options.profileCalls === true,
         options.atomic === true,
         options.resume === true, options.callReturn === true, options.looseStacks === true,
-        [...leaveOut].sort()]);
+        options.checkReads === true, [...leaveOut].sort()]);
 }
 
 /** @type {Map<string, number>} */
@@ -291,7 +291,7 @@ function sameShape(kept, shape){
  *     leaveOut?: Set<string> | string[], wide?: boolean, narrow?: boolean,
  *     structure?: boolean, precise?: boolean, profileCalls?: boolean, resume?: boolean,
  *     atomic?: boolean,
- *     callReturn?: boolean, looseStacks?: boolean,
+ *     callReturn?: boolean, looseStacks?: boolean, checkReads?: boolean,
  *     memory?: { shared?: boolean, maxPages?: number } }}
  *     [options]
  *     timings: `emitMs` and `encodeMs` are measured (the runtime's `timings`), else 0;
@@ -325,6 +325,7 @@ export function emitBatch(jobs, layout, features, options = {}, cache = undefine
         resume: options.resume === true,
         callReturn: options.callReturn === true,
         looseStacks: options.looseStacks === true,
+        checkReads: options.checkReads === true,
         leaveOut,
         ...(options.trapPort === undefined ? {} : { trapPort: options.trapPort }),
     });

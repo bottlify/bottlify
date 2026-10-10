@@ -1336,6 +1336,36 @@ test('the miss count is per top, so a flood at a served top cannot withhold anot
         assert.ok(m.runtime.entryOf(CODE, 1) >= 0);
     });
 
+test('reads wrap until the program faults on a page it cannot reach, and test from then on',
+    async()=>{
+        // mov eax, [0x3000]; hlt -- a read, translated wrapped while no page
+        // has been closed on the program.
+        const m = machine();
+        m.write(CODE, [0xa1, 0x00, 0x30, 0, 0, 0xf4]);
+        m.runtime.noteHot(CODE);
+        m.runtime.noteHot(CODE);
+        await m.runtime.translatePending();
+        assert.ok(m.runtime.entryOf(CODE) >= 0);
+        assert.equal(m.runtime.readsChecked?.(), false, 'nothing asked: wrapped');
+        m.runtime.readsFaulted?.();
+        assert.equal(m.runtime.readsChecked?.(), true);
+        assert.equal(m.runtime.entryOf(CODE), -1, 'the wrapped region goes');
+        assert.equal(m.runtime.diagnostics().readSwitches, 1);
+        m.runtime.readsFaulted?.();
+        assert.equal(m.runtime.diagnostics().readSwitches, 1, 'once');
+        // Formed again, it tests its read: a closed page faults before it.
+        m.runtime.noteHot(CODE);
+        m.runtime.noteHot(CODE);
+        await m.runtime.translatePending();
+        m.runtime.pages.markRange(0x3000, 0x1000, PageFlag.INACCESSIBLE);
+        const exit = m.runtime.run(m.runtime.entryOf(CODE), 100);
+        assert.equal(exit.kind, 'fault', 'the read meets the closed page');
+        // Asked never to test, a fault changes nothing.
+        const never = machine({ checkReads: false });
+        never.runtime.readsFaulted?.();
+        assert.equal(never.runtime.readsChecked?.(), false);
+    });
+
 test('with a store, a relinked region runs through collections, its batches held weakly',
     async()=>{
         // The stored batches' instances are held weakly (`weak-instances.js`):

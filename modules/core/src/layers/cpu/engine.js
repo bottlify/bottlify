@@ -386,6 +386,7 @@
  * @property {number} cacheMisses
  * @property {number} [lookedUpNow]    Batches the store answered in the call that formed them.
  * @property {number} [lookedUpLater]  Batches it answered a turn of the event loop later.
+ * @property {number} [readSwitches]  1 once translated reads test their pages after a fault.
  * @property {number} [precisionSwitches]  Times x87 regions went to another precision control:
  *     from the wide ones to single, and from single to a test at every rounding operation.
  * @property {number} [interpretedRelaxedReads]  x87 status words the interpreter tier in wasm
@@ -474,6 +475,9 @@
  * @property {(eip: number, x87Top?: number, hotness?: number) => void} noteHot
  *     A candidate from the layer's
  *     sampler, with the x87 top a region there is compiled for.
+ * @property {() => void} [readsFaulted]  The program faulted on a page it cannot reach: translated
+ *     reads test their pages from now on (`checkReads` left unset).
+ * @property {() => boolean} [readsChecked]  Whether translated reads test their pages now.
  * @property {(address: number, x87Top?: number, held?: boolean) => void} missAt  One
  *     untranslated exit to an address at an x87 top; it becomes a candidate once enough land
  *     there at that top -- unless the region left it to the host on purpose (`held`).
