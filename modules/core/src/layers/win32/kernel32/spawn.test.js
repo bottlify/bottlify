@@ -673,3 +673,38 @@ test('CreateProcess\'s current directory is where a system program starts', ()=>
         'C:\\App\\Other',
         'a relative one taken against the parent\'s');
 });
+
+test('an unquoted image name with a space reaches the child quoted, as CreateProcess quotes it',
+    ()=>{
+        const host = fakeHost({ files: ['C:\\Program Files\\Game\\game.exe'] });
+        const spawner = createSpawner(host);
+
+        // The child's runtime ends argv[0] at the first unquoted space, so the
+        // caller's spelling would give WinMain `Files\Game\game.exe` as its
+        // lpCmdLine.
+        const bare = spawner.launch('', 'C:\\Program Files\\Game\\game.exe', 0);
+        assert.equal(bare.imagePath, 'C:\\Program Files\\Game\\game.exe');
+        assert.equal(bare.commandLine, '"C:\\Program Files\\Game\\game.exe"');
+
+        const withArguments = spawner.launch('', 'C:\\Program Files\\Game\\game.exe -w  x', 0);
+        assert.equal(withArguments.commandLine, '"C:\\Program Files\\Game\\game.exe" -w  x',
+            'the arguments as the caller spaced them');
+
+        const quoted = spawner.launch('', '"C:\\Program Files\\Game\\game.exe" -w', 0);
+        assert.equal(quoted.commandLine, '"C:\\Program Files\\Game\\game.exe" -w',
+            'a line already quoted is left alone');
+
+        const named = spawner.launch('C:\\Program Files\\Game\\game.exe',
+            'C:\\Program Files\\Game\\game.exe', 0);
+        assert.equal(named.commandLine, 'C:\\Program Files\\Game\\game.exe',
+            'with an application name the line is the caller\'s, verbatim');
+
+        assert.equal(spawner.imageOf('C:\\Program Files\\Game\\game.exe -w'),
+            'C:\\Program Files\\Game\\game.exe');
+    });
+
+test('an unquoted image name without a space keeps the caller\'s line', ()=>{
+    const host = fakeHost({ files: ['C:\\App\\child.exe'] });
+    const made = createSpawner(host).launch('', 'C:\\App\\child.exe /s', 0);
+    assert.equal(made.commandLine, 'C:\\App\\child.exe /s');
+});
