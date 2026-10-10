@@ -131,7 +131,7 @@ something, and measure it.
 | Setting | Default | What it does | When to change it, and the risk |
 | --- | --- | --- | --- |
 | `precise` | `false` | x87 exception flags, signalling NaNs, underflow, C1 and the flags an instruction leaves undefined kept exactly as the processor keeps them. | On for conformance tests and for a program that reads those bits. Slower x87 code. |
-| `checkReads` | `false` | An instruction that only reads tests its pages as a store does, so a page the program cannot reach faults with its address; the core then closes a reservation's pages not committed and those protected `PAGE_NOACCESS`. | On for a program that commits pages in its own handler when they are touched. Off, a translated read is wrapped into RAM and every page reads. |
+| `checkReads` | `true` | An instruction that only reads tests its pages as a store does, so a page the program cannot reach faults with its address; the core closes a reservation's pages not committed and those protected `PAGE_NOACCESS`. | Off, a translated read is wrapped into RAM and every page reads: a program that commits pages in its own handler when they are touched reads zeros instead. |
 | `atomic` | `false` | `lock`-prefixed instructions and `xchg` with memory as wasm atomics. | On when several threads run on several executors over one memory (the core sets it). Off there, two threads can lose updates. |
 | `translate` | `true` | `false` interprets everything. | A reference run to compare against when translated code is suspected. Many times slower. |
 | `leaveOut` | `[]` | Instruction classes (`'x87'`, `'mmx'`, `'sse'`) left to the interpreter. | Finding which class a defect is in. Slower, and no translation store is kept. |

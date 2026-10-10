@@ -1418,15 +1418,15 @@ export function createCorkHost(config){
         /**
          * Opens or closes pages to the program, as a reservation's commit and
          * VirtualProtect do: a closed one faults any access, with its address.
-         * Only where every tier tests a read (`checkReads`) -- elsewhere a
-         * translated read would wrap into RAM where the interpreter faults, the
-         * same instruction answering two ways -- and never below `closedBelow`
-         * or past RAM, which stay closed. Answers whether it did.
+         * Not where translated reads are left untested (`checkReads: false`) --
+         * there a translated read would wrap into RAM where the interpreter
+         * faults, the same instruction answering two ways -- and never below
+         * `closedBelow` or past RAM, which stay closed. Answers whether it did.
          *
          * @param {number} address @param {number} length @param {boolean} open
          */
         pageAccess: (address, length, open)=>{
-            if (corkConfig?.checkReads !== true || !runtime.pages)
+            if (corkConfig?.checkReads === false || !runtime.pages)
             {
                 return false;
             }

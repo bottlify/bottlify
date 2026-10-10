@@ -26,8 +26,7 @@ read the same names:
 | `multi2` | two executors | `executors: 2` |
 | `multi` | three executors | `executors: 3` |
 | `multi4` | four executors | `executors: 4` |
-| `checked` | reads of reserved and `PAGE_NOACCESS` pages fault in translated code too | `cork: { checkReads: true }` |
-| `multi-checked` | three executors and checked reads | both |
+| `unchecked` | translated reads untested: reserved and `PAGE_NOACCESS` pages read as RAM | `cork: { checkReads: false }` |
 
 - Harness: `node tools/cdp_test/game.mjs <bundle> --mode <name>`; node probe:
   `node tools/launch-probe.mjs <bundle> --mode <name>`. `--executors N` and `--cork-config JSON` go
@@ -181,16 +180,16 @@ Modes: `default` (and the base arm), `multi`. In node the same title is measured
 
 ### 4.4 Dungeon Siege demo (`dungeon-siege-demo`) -- page protection
 
-The title reads pages it reserved without access and expects the fault; that is what `checked`
-turns on in translated code.
+The title reads pages it reserved without access and expects the fault; translated code tests
+reads by default since 2026-10-10 (`unchecked` turns that off).
 
 ```
 node tools/cdp_test/game.mjs dungeon-siege-demo --worker --coi --run-seconds 300 --wait 600 \
   --mode <MODE>
 ```
 
-Modes: `default`, `checked`, `multi-checked`. Expected: `default` may stop on that read (report
-where); `checked` goes past it. Missing entry points this title asks for are known and are not
+Modes: `default`, `multi`, `unchecked`. Expected: `default` and `multi` go past that read;
+`unchecked` may stop on it (report where). Missing entry points this title asks for are known and are not
 findings of this run.
 
 ### 4.5 The triangle (`tri-e2e`) -- the smallest program that draws

@@ -30,10 +30,8 @@ export const MODES = {
     multi2: { what: 'two executors: threads ready together run at once', executors: 2 },
     multi: { what: 'three executors', executors: 3 },
     multi4: { what: 'four executors', executors: 4 },
-    checked: { what: 'reads of reserved and PAGE_NOACCESS pages fault in translated code too',
-        cork: { checkReads: true } },
-    'multi-checked': { what: 'three executors and checked reads', executors: 3,
-        cork: { checkReads: true } },
+    unchecked: { what: 'translated reads untested: reserved and PAGE_NOACCESS pages read as RAM',
+        cork: { checkReads: false } },
 };
 
 /**
