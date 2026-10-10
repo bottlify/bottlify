@@ -191,3 +191,32 @@ test('a lit draw reaches the device as it is, with the lighting its shader light
     assert.equal(arrays.length, 1, 'taken as arrays, not assembled vertex by vertex');
     assert.notEqual(arrays[0].lighting, null);
 });
+
+test('a draw assembled vertex by vertex is counted, with why it was', ()=>{
+    // The road a lit draw took for every frame of a game, unseen: the
+    // renderer counts what reaches it that way.
+    /** @type {[string, number][]} */
+    const noted = [];
+    /** @type {any} */
+    const gpu = {
+        attach: ()=>{}, attached: ()=>true, drawArrays: ()=>false, draw: ()=>{},
+        /** @param {string} why @param {number} vertices */
+        noteAssembled: (why, vertices)=>noted.push([why, vertices]),
+        clear: ()=>{}, copyToTexture: ()=>{}, present: ()=>null,
+        settled: ()=>Promise.resolve(), diagnostics: ()=>({}),
+    };
+    /** @type {any} */
+    const context = createGlContext({
+        memory: { read: ()=>new Uint8Array(64), write: ()=>{} }, gpu,
+    });
+    context.attach({ width: 8, height: 8, doubleBuffered: true, depthBits: 24 });
+    context.glEnableClientState(GL.VERTEX_ARRAY);
+    context.glVertexPointer(3, GL.FLOAT, 0, 0);
+    context.glDrawArrays(GL.TRIANGLES, 0, 3);
+    context.glBegin(GL.TRIANGLES);
+    context.glVertex3f(0, 0, 0);
+    context.glVertex3f(1, 0, 0);
+    context.glVertex3f(0, 1, 0);
+    context.glEnd();
+    assert.deepEqual(noted, [['refused', 3], ['immediate', 3]]);
+});

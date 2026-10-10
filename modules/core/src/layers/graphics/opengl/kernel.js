@@ -40,7 +40,7 @@
  * @property {() => boolean} inPrimitive
  * @property {() => import('./raster.js').Box} scissorBox
  * @property {Record<string, import('./matrix.js').MatrixStack>} stacks
- * @property {(mode: number, vertices: any[]) => void} drawVertices
+ * @property {(mode: number, vertices: any[], assembled?: string) => void} drawVertices
  * @property {((request: import('./gpu.js').DrawRequest) => boolean) | null} drawArrays
  *           A draw straight from the arrays, when a renderer takes them as
  *           they lie: true when it did, false when the vertices are to be

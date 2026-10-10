@@ -24,6 +24,8 @@ export function createModelRenderer(){
     const drawables = new WeakMap();
     let frames = 0;
     const settled = Promise.resolve();
+    /** Draws assembled vertex by vertex, as `gpu.js` counts them. */
+    const assembled = { draws: 0, vertices: 0, byReason: /** @type {Record<string, number>} */ ({}) };
 
     return {
         /** @param {object} context @param {{ width: number, height: number }} drawable */
@@ -80,6 +82,13 @@ export function createModelRenderer(){
         },
 
         draw(){},
+
+        /** @param {string} why @param {number} vertices */
+        noteAssembled(why, vertices){
+            assembled.draws++;
+            assembled.vertices += vertices;
+            assembled.byReason[why] = (assembled.byReason[why] ?? 0) + 1;
+        },
         copyToTexture(){},
         releaseBuffer(){},
 
@@ -99,6 +108,6 @@ export function createModelRenderer(){
 
         settled: ()=>settled,
 
-        diagnostics: ()=>({ frames }),
+        diagnostics: ()=>({ frames, assembled }),
     };
 }

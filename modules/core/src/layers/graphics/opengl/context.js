@@ -1767,11 +1767,17 @@ export function createGlContext(options = {}){
      * @param {number} mode
      * @param {any[]} vertices
      */
-    function drawVertices(mode, vertices){
+    /**
+     * @param {number} mode @param {any[]} vertices
+     * @param {string} [assembled]  why the vertices were assembled here rather
+     *     than handed over as arrays: what the renderer counts
+     *     (`noteAssembled`), so a program whose draws all take this road shows
+     */
+    function drawVertices(mode, vertices, assembled = 'immediate'){
         if (enter('drawVertices', [mode, vertices]))
         {
             kept?.push({ mode, vertices });
-            draw(mode, vertices);
+            draw(mode, vertices, assembled);
         }
     }
 
@@ -1782,8 +1788,9 @@ export function createGlContext(options = {}){
      *
      * @param {number} mode
      * @param {any[]} vertices
+     * @param {string} [assembled]  why they were assembled here (`drawVertices`)
      */
-    function draw(mode, vertices){
+    function draw(mode, vertices, assembled = 'immediate'){
         if (vertices.length === 0)
         {
             return;
@@ -1792,6 +1799,7 @@ export function createGlContext(options = {}){
         {
             if (attached)
             {
+                gpu.noteAssembled?.(assembled, vertices.length);
                 gpu.draw(context, scenes.scene, mode, vertices);
             }
             return;

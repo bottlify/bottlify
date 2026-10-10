@@ -407,6 +407,10 @@ export function createGpuRenderer(services){
     const stats = {
         frames: 0, pipelines: 0, draws: 0, clears: 0, fallbacks: 0, uploads: 0, renames: 0,
         refused: 0, skipped: 0, cut: 0,
+        // Draws a context assembled vertex by vertex rather than handed over
+        // as arrays, and their vertices, by why (`noteAssembled`): each one
+        // is processor work on the program's thread and again in a worker.
+        assembled: { draws: 0, vertices: 0, byReason: /** @type {Record<string, number>} */ ({}) },
         // A draw's source is generated once per distinct state and reused after
         // that, the same shape the Direct3D 8 path counts: a frame of identical
         // shadow-volume draws is one generation, not one per draw.
@@ -2552,6 +2556,12 @@ export function createGpuRenderer(services){
 
         clear,
         drawArrays,
+        /** @param {string} why @param {number} vertices */
+        noteAssembled(why, vertices){
+            stats.assembled.draws++;
+            stats.assembled.vertices += vertices;
+            stats.assembled.byReason[why] = (stats.assembled.byReason[why] ?? 0) + 1;
+        },
         draw: drawPacked,
         copyToTexture,
 

@@ -496,6 +496,7 @@ export function installArrayCalls(context, kernel){
     function drawFromArrays(mode, first, count, indexed){
         if (!kernel.drawArrays)
         {
+            refusal = 'no device';
             return false;
         }
         const arrays = enabledArrays();
@@ -503,8 +504,10 @@ export function installArrayCalls(context, kernel){
         // cannot be read without.
         if (!readerFor(arrays[0].pointer))
         {
+            refusal = 'unreadable';
             return false;
         }
+        refusal = 'refused';
         /** @type {{ bytes: Uint8Array, type: number,
          *           buffer: import('./objects.js').BufferObject | null, offset: number } | null} */
         let indices = null;
@@ -518,6 +521,7 @@ export function installArrayCalls(context, kernel){
                 : readerFor({ size: 1, type: indexed.type, stride: 0, pointer: 0, buffer: bound });
             if (!read)
             {
+                refusal = 'unreadable';
                 return false;
             }
             const base = indexed.indices instanceof Uint8Array ? 0 : indexed.indices;
@@ -546,11 +550,19 @@ export function installArrayCalls(context, kernel){
     }
 
     /**
+     * Why the last draw by arrays was not handed over as arrays: the device's
+     * renderer said no (`refused`: a layout it cannot bind, a list being
+     * compiled), there is none, or an array cannot be read.
+     */
+    let refusal = 'refused';
+
+    /**
      * @param {string} name
      * @param {number} mode
      * @param {number[]} indices
+     * @param {string} [why]  the refusal that sent the draw here
      */
-    function drawIndexed(name, mode, indices){
+    function drawIndexed(name, mode, indices, why = 'refused'){
         if (kernel.inPrimitive())
         {
             setError(GL.INVALID_OPERATION);
@@ -579,7 +591,7 @@ export function installArrayCalls(context, kernel){
                 vertices.push(vertex);
             }
         }
-        kernel.drawVertices(mode, vertices);
+        kernel.drawVertices(mode, vertices, why);
     }
 
     /**
@@ -955,7 +967,7 @@ export function installArrayCalls(context, kernel){
                 return;
             }
             drawIndexed('glDrawArrays', mode,
-                Array.from({ length: count }, (unused, i)=>first + i));
+                Array.from({ length: count }, (unused, i)=>first + i), refusal);
         },
 
         /**
@@ -997,7 +1009,7 @@ export function installArrayCalls(context, kernel){
                     + ' nothing');
                 return;
             }
-            drawIndexed('glDrawElements', mode, list);
+            drawIndexed('glDrawElements', mode, list, refusal);
         },
 
         /**
