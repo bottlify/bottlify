@@ -413,6 +413,26 @@ export const FORMAT_INFO = Object.freeze({
 });
 
 /**
+ * The channels a sample of `format` must read as one because the texture the
+ * GPU keeps it in does not hold them, as a mask: bit 0 red to bit 3 alpha.
+ *
+ * Direct3D 9 samples a channel a format lacks as one -- R16F as (r, 1, 1, 1),
+ * G16R16F as (r, g, 1, 1) (Wine's d3d9 visual.c float texture tests, and the
+ * fixups wined3d gives these formats) -- where WebGPU samples a missing green
+ * or blue as zero and only a missing alpha as one. Every format but the wide
+ * ones is expanded on upload into a texture of four channels holding the
+ * answer already, so the rule is one over the wide formats' channel count;
+ * the channels lacked are always the last ones, alpha among them.
+ *
+ * @param {number} format  D3DFMT
+ * @returns {number} zero for a format that samples as it is kept
+ */
+export function sampledOnes(format){
+    const channels = FORMAT_INFO[format]?.wide?.channels ?? 4;
+    return 0b1111 & ~((1 << channels) - 1);
+}
+
+/**
  * Where in a locked surface a sub-rectangle begins.
  *
  * A compressed surface can only be addressed by whole blocks, so a rectangle

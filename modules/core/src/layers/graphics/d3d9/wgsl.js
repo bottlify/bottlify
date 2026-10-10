@@ -65,7 +65,9 @@
 
 import { OPCODE, REGISTER, SHADER_KIND } from './shader.js';
 import { D3DDECLUSAGE } from './declaration.js';
-import { compareExpression, fogFunctionDeclaration } from '../webgpu/internal/fixedfunction.js';
+import {
+    compareExpression, fogFunctionDeclaration, sampledWithOnes,
+} from '../webgpu/internal/fixedfunction.js';
 import { FOG_SOURCE } from '../webgpu/internal/pipeline.js';
 
 /** D3DSPSM, the source modifiers. */
@@ -466,7 +468,8 @@ function returnsEarly(list){
  * @param {{ inputs?: Map<number, InputShape>, alsoWrite?: readonly number[],
  *     fog?: number, fogSource?: number, flatColours?: boolean,
  *     stageDimensions?: readonly string[], projectedBy?: readonly string[],
- *     points?: { sprite: boolean }, alphaTest?: number, nanProbe?: boolean }} [options]
+ *     points?: { sprite: boolean }, alphaTest?: number, nanProbe?: boolean,
+ *     ones?: readonly number[] }} [options]
  *        For a vertex shader, the shape of each v# the declaration supplies,
  *        by register. Absent means every declared input arrives as four
  *        floats; present, a declared register it does not name reads as the
@@ -492,6 +495,10 @@ function returnsEarly(list){
  *        reads sample, and `projectedBy` the component each stage's
  *        coordinates are divided by under D3DTTFF_PROJECTED ('' for none),
  *        which a 1.0 to 1.3 shader's reads honour.
+ *        `ones` is, by sampler number (s#, or the stage a 1.x read names),
+ *        the channels the texture bound there samples as one that the GPU's
+ *        texture lacks (`sampledOnes` in `constants.js`); absent or zero, a
+ *        read is the sample as it comes.
  * @returns {TranslatedShader}
  */
 export function translateShader(parsed, options = {}){
@@ -828,8 +835,8 @@ export function translateShader(parsed, options = {}){
                     ?? TEXTURE_TYPE['2d'],
             });
         }
-        return `textureSample(tex${stage}, samp${stage},`
-            + ` ${swizzled(at, dimension === '2d' ? 'xy' : 'xyz')})`;
+        return sampledWithOnes(`textureSample(tex${stage}, samp${stage},`
+            + ` ${swizzled(at, dimension === '2d' ? 'xy' : 'xyz')})`, options.ones?.[stage]);
     };
 
     /**
@@ -926,13 +933,13 @@ export function translateShader(parsed, options = {}){
     };
 
     /**
-     * A texture read: the coordinate through the sampler's texture, of
-     * whichever dimension the sampler was declared with.
+     * A texture read as the GPU answers it: the coordinate through the
+     * sampler's texture, of whichever dimension the sampler was declared with.
      *
      * @param {import('./shader.js').Instruction} instruction
      * @param {string} how   'sample', 'level' or 'grad'.
      */
-    const sample = (instruction, how)=>{
+    const textureRead = (instruction, how)=>{
         const samplerOperand = instruction.sources[1];
         const entry = samplers.find(one=>one.index === samplerOperand.index);
         if (!entry)
@@ -968,6 +975,16 @@ export function translateShader(parsed, options = {}){
         }
         return `textureSample(${pair}, ${at})`;
     };
+
+    /**
+     * A texture read as Direct3D answers it: the channels the bound texture
+     * lacks read as one.
+     *
+     * @param {import('./shader.js').Instruction} instruction
+     * @param {string} how   'sample', 'level' or 'grad'.
+     */
+    const sample = (instruction, how)=>sampledWithOnes(textureRead(instruction, how),
+        options.ones?.[instruction.sources[1].index]);
 
     /** @param {import('./shader.js').Instruction} instruction */
     const comparison = instruction=>COMPARISON[instruction.control & 0x7] ?? '==';

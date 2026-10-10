@@ -85,8 +85,7 @@ differently raises a `divergence` event naming the API.
   register of the texture stages; a draw from a stream whose offset is not a whole vertex of its
   stride is refused.
 - Direct3D 9's 32-bit float formats are kept as half floats, and A16B16G16R16/G16R16 as half
-  floats of their value; a format with fewer than four channels samples its missing colour channels
-  as 0, not 1.
+  floats of their value.
 - The engine's own `d3dx9` reads BMP, DDS and TGA images, not JPEG or PNG; `D3DXCreateTeapot`,
   `D3DXCreateTextA`, `D3DXSimplifyMesh`, `D3DXUVAtlasPartition` and `D3DXComputeNormalMap` answer
   `E_NOTIMPL`.

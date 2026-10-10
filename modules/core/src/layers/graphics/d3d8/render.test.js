@@ -39,7 +39,7 @@ import {
     HARDWARE_SAMPLER, filledIndices, listIndices, multiplyMatrices, packLight, pipelineStateOf,
     samplerFlagsOf,
     screenExtent, transformPosition, uniformBlock, uniformsOf, pixelUniformsOf, fogModeOf, fogOf,
-    isAffine,
+    isAffine, stageCascade,
     vertexCountOf,
 } from './render.js';
 import { createBackend } from '../webgpu/backend.js';
@@ -54,7 +54,7 @@ import {
 import { generateFixedFunction } from '../webgpu/internal/fixedfunction.js';
 import { FOG_SOURCE } from '../webgpu/internal/pipeline.js';
 import { formatTraits } from '../webgpu/internal/textures.js';
-import { FORMAT_INFO, isCompressed } from '../d3d9/constants.js';
+import { D3DFMT as D3DFMT9, FORMAT_INFO, isCompressed, sampledOnes } from '../d3d9/constants.js';
 import { toHalf } from '../d3d9/half.js';
 
 /**
@@ -4023,6 +4023,61 @@ test('an L6V5U5 bump map widens its five-bit U and V and six-bit luminance into 
     assert.deepEqual([...new Int8Array(expandTexels(D3DFMT.L6V5U5, texels, 2).buffer)],
         [127, -127, 127, 127, -8, 0, 0, 127]);
 });
+
+test('a texture samples the channels its format lacks as Direct3D does, each by one rule', ()=>{
+    // Wine's d3d9 visual.c: R16F and R32F read (r, 1, 1, 1); G16R16F, G32R32F
+    // and G16R16 (r, g, 1, 1). Their GPU textures hold one and two channels,
+    // so a read fills the rest, alpha too; every other format is expanded on
+    // upload to four channels that hold Direct3D's answer already, and fills
+    // nothing.
+    /** @type {Map<number, number>} */
+    const expected = new Map([
+        [D3DFMT9.R16F, 0b1110], [D3DFMT9.R32F, 0b1110],
+        [D3DFMT9.G16R16F, 0b1100], [D3DFMT9.G32R32F, 0b1100], [D3DFMT9.G16R16, 0b1100],
+    ]);
+    for (const format of Object.keys(FORMAT_INFO).map(Number))
+    {
+        assert.equal(sampledOnes(format), expected.get(format) ?? 0, `format ${format}`);
+    }
+    assert.equal(sampledOnes(0), 0, 'an unknown format fills nothing');
+    // The narrow formats of eight bits answer from their expansion: A8 is
+    // (0, 0, 0, a), the luminance formats (l, l, l, a or 1), V8U8 (u, v, 1, 1),
+    // L6V5U5 (u, v, l, 1) and Q8W8V8U8 (u, v, w, q).
+    assert.deepEqual([...expandTexels(D3DFMT.A8, Uint8Array.from([9]), 1)], [0, 0, 0, 9]);
+    assert.deepEqual([...expandTexels(D3DFMT9.Q8W8V8U8, Uint8Array.from([1, 0x81, 3, 0x7f]), 1)],
+        [1, 0x81, 3, 0x7f], 'u, v, w and q as they lie, red first in rgba8snorm');
+});
+
+test('a cascade stage says what its texture fills, and a stage that samples nothing says nothing',
+    ()=>{
+        const narrow = { name: 'narrow' };
+        const plain = { name: 'plain' };
+        const states = [
+            new Map([[D3DTSS.COLOROP, D3DTOP.SELECTARG1], [D3DTSS.COLORARG1, D3DTA.TEXTURE],
+                [D3DTSS.ALPHAOP, D3DTOP.SELECTARG1], [D3DTSS.ALPHAARG1, D3DTA.TEXTURE]]),
+            new Map([[D3DTSS.COLOROP, D3DTOP.MODULATE], [D3DTSS.COLORARG1, D3DTA.TEXTURE],
+                [D3DTSS.COLORARG2, D3DTA.CURRENT], [D3DTSS.ALPHAOP, D3DTOP.SELECTARG1],
+                [D3DTSS.ALPHAARG1, D3DTA.CURRENT]]),
+            new Map([[D3DTSS.COLOROP, D3DTOP.MODULATE], [D3DTSS.COLORARG1, D3DTA.DIFFUSE],
+                [D3DTSS.COLORARG2, D3DTA.CURRENT], [D3DTSS.ALPHAOP, D3DTOP.SELECTARG1],
+                [D3DTSS.ALPHAARG1, D3DTA.CURRENT]]),
+            new Map([[D3DTSS.COLOROP, D3DTOP.DISABLE]]),
+        ];
+        const model = /** @type {any} */ ({
+            renderStates: new Map(),
+            stageStates: (/** @type {number} */ stage)=>states[stage] ?? new Map(),
+            textures: new Map([[0, narrow], [1, plain], [2, narrow]]),
+        });
+        const layout = decodeFvf(FVF.XYZ | FVF.DIFFUSE | (1 << FVF.TEXCOUNT_SHIFT));
+        const filled = stageCascade(model, layout,
+            texture=>(texture === narrow ? 0b1110 : 0)).stages;
+        assert.equal(filled[0].ones, 0b1110);
+        assert.equal('ones' in filled[1], false, 'four channels add nothing to the key');
+        assert.equal('ones' in filled[2], false, 'nor does a texture the stage never reads');
+        const unfilled = stageCascade(model, layout).stages;
+        assert.ok(unfilled.every(stage=>!('ones' in stage)), 'none is asked for by default');
+        assert.deepEqual(unfilled.slice(1), filled.slice(1));
+    });
 
 test('a floating-point surface is an r16float, R32F narrowed to half precision on upload', ()=>{
     assert.equal(gpuFormatOf(D3DFMT.R16F, 64, 64, false), 'r16float');

@@ -1410,3 +1410,191 @@ test('draws that change only their constants share a preparation and read their 
     assert.deepEqual(colours, [[0, 0, 0, 1], [1, 1, 1, 1], [2, 2, 2, 1], [2, 2, 2, 1]]);
     assert.equal(h.gpu.of('createRenderPipeline').length, 2, 'one pipeline per state');
 });
+
+/**
+ * What a read fills of a texture of one channel (R16F, R32F) and of two
+ * (G16R16F, G32R32F, G16R16): Direct3D samples the channels these lack as one
+ * (Wine's d3d9 visual.c), the GPU's r16float and rg16float as zero. The
+ * precision a wide format is kept at is still reported; nothing else is.
+ */
+const fillsOne = (/** @type {string} */ read)=>`vec4f(${read}.x, 1.0, 1.0, 1.0)`;
+const fillsTwo = (/** @type {string} */ read)=>`vec4f(${read}.xy, 1.0, 1.0)`;
+
+/** @param {ReturnType<typeof harness>} h @param {number} format @param {number} [size] */
+const narrowTexture = (h, format, size = 2)=>{
+    /** @type {{ texture?: any }} */
+    const out = {};
+    assert.equal(h.device.CreateTexture(size, size, 1, 0, format, D3DPOOL.MANAGED, out), D3D_OK);
+    return out.texture;
+};
+
+/** @param {ReturnType<typeof harness>} h @param {string} prefix  'vs:' or 'ps:' */
+const modulesOf = (h, prefix)=>h.gpu.of('createShaderModule')
+    .map((/** @type {any} */ call)=>call.descriptor)
+    .filter((/** @type {any} */ module)=>module.label.startsWith(prefix))
+    .map((/** @type {any} */ module)=>/** @type {string} */ (module.code));
+
+test('a pixel shader reads the channels its texture lacks as one, in a pipeline of its own',
+    async()=>{
+        const h = harness();
+        /** @type {{ shader?: any }} */
+        const vs = {};
+        /** @type {{ shader?: any }} */
+        const ps = {};
+        assert.equal(h.device.CreateVertexShader(VERTEX_SHADER, vs), D3D_OK);
+        assert.equal(h.device.CreatePixelShader(PIXEL_SHADER, ps), D3D_OK);
+        h.device.SetVertexShader(vs.shader);
+        h.device.SetPixelShader(ps.shader);
+        const narrow = narrowTexture(h, D3DFMT.G16R16F);
+        assert.equal(h.device.BeginScene(), D3D_OK);
+        for (const texture of [h.texture, narrow, h.texture, narrow])
+        {
+            h.device.SetTexture(0, texture);
+            assert.equal(h.device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+        }
+        assert.equal(h.device.EndScene(), D3D_OK);
+        assert.equal(h.device.Present(), D3D_OK);
+        await h.device.idle();
+        assert.deepEqual(h.reports.filter(report=>!report.includes(' is kept ')), []);
+
+        const pixels = modulesOf(h, 'ps:');
+        assert.equal(pixels.length, 2, 'one module for each, each kept after');
+        assert.ok(pixels[0].includes('r0 = textureSample(tex0, samp0, in.t0.xy);'),
+            'the four-channel texture is read as it always was');
+        assert.ok(pixels[1].includes(
+            `r0 = ${fillsTwo('textureSample(tex0, samp0, in.t0.xy)')};`), pixels[1]);
+        assert.equal(h.device.diagnostics().programs.built, 2);
+
+        h.device.SetTexture(0, null);
+        h.device.SetVertexShader(null);
+        h.device.SetPixelShader(null);
+        vs.shader.release();
+        ps.shader.release();
+        narrow.release();
+    });
+
+test('a ps_1_1 read and a pixel shader over fixed vertices fill a narrow texture alike',
+    async()=>{
+        const h = harness();
+        /** @type {{ shader?: any }} */
+        const vs = {};
+        /** @type {{ shader?: any }} */
+        const legacy = {};
+        /** @type {{ shader?: any }} */
+        const ps = {};
+        assert.equal(h.device.CreateVertexShader(VERTEX_SHADER, vs), D3D_OK);
+        // tex t0; mov r0, t0
+        assert.equal(h.device.CreatePixelShader([versionToken(SHADER_KIND.PIXEL, 1, 1),
+            0x00000042, 0xb00f0000, 0x00000001, 0x800f0000, 0xb0e40000, END_TOKEN], legacy),
+        D3D_OK);
+        assert.equal(h.device.CreatePixelShader(PIXEL_SHADER, ps), D3D_OK);
+        const single = narrowTexture(h, D3DFMT.R32F);
+        const pair = narrowTexture(h, D3DFMT.G16R16);
+        assert.equal(h.device.BeginScene(), D3D_OK);
+        h.device.SetVertexShader(vs.shader);
+        h.device.SetPixelShader(legacy.shader);
+        h.device.SetTexture(0, single);
+        assert.equal(h.device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+        // The hybrid: the fixed vertex stage made for a pixel shader.
+        h.device.SetVertexShader(null);
+        h.device.SetPixelShader(ps.shader);
+        h.device.SetTexture(0, pair);
+        assert.equal(h.device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+        assert.equal(h.device.EndScene(), D3D_OK);
+        assert.equal(h.device.Present(), D3D_OK);
+        await h.device.idle();
+        assert.deepEqual(h.reports.filter(report=>!report.includes(' is kept ')), []);
+
+        const pixels = modulesOf(h, 'ps:');
+        assert.equal(pixels.length, 2);
+        assert.ok(pixels[0].includes(
+            `t0 = ${fillsOne('textureSample(tex0, samp0, in.t0.xy)')};`), pixels[0]);
+        assert.ok(pixels[1].includes(
+            `r0 = ${fillsTwo('textureSample(tex0, samp0, in.t0.xy)')};`), pixels[1]);
+
+        h.device.SetTexture(0, null);
+        h.device.SetPixelShader(null);
+        vs.shader.release();
+        legacy.shader.release();
+        ps.shader.release();
+        single.release();
+        pair.release();
+    });
+
+test('a vertex shader\'s texldl of a one-channel texture reads green and blue as one', async()=>{
+    const h = harness({ model: 3 });
+    const output = (/** @type {number} */ usage, /** @type {number} */ register)=>[
+        op(OPCODE.DCL, 2), (0x80000000 | usage) >>> 0, dst(REGISTER.OUTPUT, register)];
+    /** @type {{ shader?: any }} */
+    const vs = {};
+    /** @type {{ shader?: any }} */
+    const ps = {};
+    assert.equal(h.device.CreateVertexShader([
+        versionToken(SHADER_KIND.VERTEX, 3, 0),
+        ...dclInput(D3DDECLUSAGE.POSITION, 0),
+        ...output(D3DDECLUSAGE.POSITION, 0),
+        ...output(D3DDECLUSAGE.TEXCOORD, 1),
+        ...output(D3DDECLUSAGE.COLOR, 2),
+        op(OPCODE.DCL, 2), (2 << 27) >>> 0, dst(REGISTER.SAMPLER, 0),
+        op(OPCODE.TEXLDL, 3), dst(REGISTER.OUTPUT, 2), src(REGISTER.INPUT, 0),
+        src(REGISTER.SAMPLER, 0),
+        op(OPCODE.MOV, 2), dst(REGISTER.OUTPUT, 0), src(REGISTER.INPUT, 0),
+        op(OPCODE.MOV, 2), dst(REGISTER.OUTPUT, 1), src(REGISTER.INPUT, 0),
+        END_TOKEN,
+    ], vs), D3D_OK);
+    assert.equal(h.device.CreatePixelShader(PIXEL_SHADER, ps), D3D_OK);
+    h.device.SetVertexShader(vs.shader);
+    h.device.SetPixelShader(ps.shader);
+    const heights = narrowTexture(h, D3DFMT.R16F, 4);
+    assert.equal(h.device.SetTexture(0, h.texture), D3D_OK);
+    assert.equal(h.device.SetTexture(257, heights), D3D_OK);
+    await h.draw();
+    assert.deepEqual(h.reports.filter(report=>!report.includes(' is kept ')), []);
+
+    const [vertex] = modulesOf(h, 'vs:');
+    assert.ok(vertex.includes(fillsOne('textureSampleLevel(tex0, samp0, v0.xy, v0.w)')), vertex);
+    const [pixel] = modulesOf(h, 'ps:');
+    assert.ok(pixel.includes('r0 = textureSample(tex0, samp0, in.t0.xy);'),
+        'the pixel stage\'s own texture has four');
+
+    h.device.SetTexture(0, null);
+    h.device.SetTexture(257, null);
+    h.device.SetVertexShader(null);
+    h.device.SetPixelShader(null);
+    vs.shader.release();
+    ps.shader.release();
+    heights.release();
+});
+
+test('the fixed pixel stage over a vertex shader fills a narrow texture, and is made again for it',
+    async()=>{
+        const h = harness();
+        /** @type {{ shader?: any }} */
+        const vs = {};
+        assert.equal(h.device.CreateVertexShader(TEXTURED_VERTEX_SHADER, vs), D3D_OK);
+        h.device.SetVertexShader(vs.shader);
+        const narrow = narrowTexture(h, D3DFMT.G32R32F);
+        assert.equal(h.device.BeginScene(), D3D_OK);
+        for (const texture of [h.texture, narrow, h.texture])
+        {
+            h.device.SetTexture(0, texture);
+            assert.equal(h.device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+        }
+        assert.deepEqual(h.device.diagnostics().prepared, { built: 2, reused: 1 },
+            'the narrow texture is a fragment stage of its own, the first one kept');
+        assert.equal(h.device.EndScene(), D3D_OK);
+        assert.equal(h.device.Present(), D3D_OK);
+        await h.device.idle();
+        assert.deepEqual(h.reports.filter(report=>!report.includes(' is kept ')), []);
+        const fragments = modulesOf(h, 'ps:');
+        assert.equal(fragments.length, 2);
+        assert.ok(fragments[0].includes(
+            'return textureSampleLevel(texture0, sampler0, uv, level);'));
+        assert.ok(fragments[1].includes(
+            `return ${fillsTwo('textureSampleLevel(texture0, sampler0, uv, level)')};`),
+        fragments[1]);
+        h.device.SetTexture(0, null);
+        h.device.SetVertexShader(null);
+        vs.shader.release();
+        narrow.release();
+    });

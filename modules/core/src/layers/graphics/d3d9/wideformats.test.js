@@ -40,7 +40,20 @@ const WIDE = [
     { format: D3DFMT.A16B16G16R16, gpu: 'rgba16float', channels: 4, stored: 'unorm16',
         name: 'A16B16G16R16' },
     { format: D3DFMT.G16R16, gpu: 'rg16float', channels: 2, stored: 'unorm16', name: 'G16R16' },
+    { format: D3DFMT.R16F, gpu: 'r16float', channels: 1, stored: 'half', name: 'R16F' },
+    { format: D3DFMT.R32F, gpu: 'r16float', channels: 1, stored: 'float', name: 'R32F' },
 ];
+
+/**
+ * What the fixed-function stage's sample fills of a texture of so many
+ * channels: green and blue for one, blue for two, as Direct3D reads them.
+ *
+ * @type {Record<number, string>}
+ */
+const FILLED = {
+    1: 'vec4f(textureSampleLevel(texture0, sampler0, uv, level).x, 1.0, 1.0, 1.0)',
+    2: 'vec4f(textureSampleLevel(texture0, sampler0, uv, level).xy, 1.0, 1.0)',
+};
 
 /** @param {'half' | 'float' | 'unorm16'} stored */
 const channelBytes = stored=>(stored === 'float' ? 4 : 2);
@@ -155,7 +168,21 @@ for (const { format, gpu, channels, stored, name } of WIDE)
         assert.equal(narrowed.some(report=>report.includes('half precision')), stored === 'float');
         assert.equal(narrowed.some(report=>report.includes('eleven significant bits')),
             stored === 'unorm16');
-        assert.equal(narrowed.some(report=>report.includes('channels it lacks')), channels < 4);
+        assert.ok(!h.reports.some(report=>report.includes('lacks')),
+            'a channel the format lacks is no longer a divergence');
+        // Direct3D samples the channels the format lacks as one; the GPU's
+        // texture has them as zero, so the stage's sample fills them.
+        const stage = h.gpu.of('createShaderModule').map((/** @type {any} */ call)=>
+            call.descriptor.code).find((/** @type {string} */ code)=>code.includes('fn sampleStage0'));
+        if (channels === 4)
+        {
+            assert.ok(stage.includes(
+                'return textureSampleLevel(texture0, sampler0, uv, level);'), 'nothing filled');
+        }
+        else
+        {
+            assert.ok(stage.includes(`return ${FILLED[channels]};`), stage);
+        }
         assert.equal(device.SetTexture(0, null), D3D_OK);
         out.texture.release();
     });

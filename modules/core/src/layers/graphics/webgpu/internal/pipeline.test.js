@@ -154,6 +154,10 @@ test('a stage list is folded stage by stage, and its length is part of the key',
         'a colour key is folded');
     assert.notEqual(pipelineKey({ ...base, stages: [stage({ colorKey: 0xff })] }),
         pipelineKey({ ...base, stages: [stage({ colorKey: 0xfe })] }), 'and which key it is');
+    assert.notEqual(pipelineKey({ ...base, stages: [stage({ ones: 0b1100 })] }), one,
+        'the channels a texture samples as one are folded');
+    assert.notEqual(pipelineKey({ ...base, stages: [stage({ ones: 0b1100 })] }),
+        pipelineKey({ ...base, stages: [stage({ ones: 0b1110 })] }), 'and which they are');
 });
 
 test('every part of the lighting state that shapes the shader is folded', ()=>{

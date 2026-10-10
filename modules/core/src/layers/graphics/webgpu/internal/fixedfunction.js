@@ -817,7 +817,7 @@ ${functionDeclarations(lighting, vertexFog || fogSource === FOG_SOURCE.TABLE
         ? state.fogMode : D3DFOG.NONE, vertexFog)}${samplerDeclarations(dimensionsOf(state), 0, 1)}
 ${keys.some(key=>key !== null) ? 'var<private> colourKeyed: bool = false;\n' : ''}${
     sampleFunctions(state.stages.length, state.stages.map((stage, index)=>(generated[index]
-        ? { projected: stage.projected ?? 0 } : null)), keys, dimensionsOf(state))}
+        ? { projected: stage.projected ?? 0 } : null)), keys, dimensionsOf(state), onesOf(state))}
 struct VertexIn {
 ${inputs}
 };
@@ -1113,7 +1113,7 @@ export function fixedFragmentStage(state, written){
 @group(1) @binding(0) var<uniform> uniforms: Uniforms;
 ${functionDeclarations(null, fogSource === FOG_SOURCE.TABLE ? state.fogMode : D3DFOG.NONE)}${
     samplerDeclarations(dimensionsOf(state), 2, 0)}
-${sampleFunctions(state.stages.length, [], [], dimensionsOf(state))}
+${sampleFunctions(state.stages.length, [], [], dimensionsOf(state), onesOf(state))}
 struct PsIn {
 ${fields.join('\n')}
 };
@@ -1202,9 +1202,11 @@ const ADDRESS_FUNCTION = `fn addressCoordinate(t: f32, mode: u32, texels: f32) -
  * @param {readonly string[]} [dimensions]
  *     Per stage, '2d', 'cube' or '3d': a cube or volume stage samples three
  *     components, and is sampled by `cubeSample` or `volumeSample`.
+ * @param {readonly number[]} [ones]
+ *     Per stage, the channels its texture samples as one (`sampledWithOnes`).
  * @returns {string}
  */
-function sampleFunctions(count, generated = [], keys = [], dimensions = []){
+function sampleFunctions(count, generated = [], keys = [], dimensions = [], ones = []){
     if (count === 0)
     {
         return '';
@@ -1218,8 +1220,8 @@ function sampleFunctions(count, generated = [], keys = [], dimensions = []){
         if (dimension !== '2d')
         {
             lines.push(dimension === 'cube'
-                ? cubeSample(index, flags)
-                : volumeSample(index, flags));
+                ? cubeSample(index, flags, ones[index])
+                : volumeSample(index, flags, ones[index]));
             continue;
         }
         // The stage's texture transform, as Direct3D applies it to a
@@ -1239,6 +1241,8 @@ function sampleFunctions(count, generated = [], keys = [], dimensions = []){
                 `        dot(uniforms.texTransform[${index * 4 + 1}].xyz, extended));`,
                 '',
             ].join('\n');
+        const read = sampledWithOnes(
+            `textureSampleLevel(texture${index}, sampler${index}, uv, level)`, ones[index]);
         lines.push(`fn sampleStage${index}(carried: ${generation ? 'vec4f' : 'vec2f'}) -> vec4f {
 ${transformed}    let flags = ${flags};
     let size = vec2f(textureDimensions(texture${index}, 0));
@@ -1265,7 +1269,7 @@ ${transformed}    let flags = ${flags};
         uv = (floor(uv * levelSize) + 0.5) / levelSize;
     }
 ${keyTest(index, keys[index] ?? null)
-}    return textureSampleLevel(texture${index}, sampler${index}, uv, level);
+}    return ${read};
 }
 `);
     }
@@ -1280,9 +1284,11 @@ ${keyTest(index, keys[index] ?? null)
  * moves the direction to the centre of the face's texel it points into: the
  * two minor components over the major one are that face's coordinates.
  *
- * @param {number} index @param {string} flags
+ * @param {number} index @param {string} flags @param {number} [ones]
  */
-function cubeSample(index, flags){
+function cubeSample(index, flags, ones){
+    const read = sampledWithOnes(
+        `textureSampleLevel(texture${index}, sampler${index}, towards, level)`, ones);
     return `fn sampleStage${index}(direction: vec3f) -> vec4f {
     let flags = ${flags};
     let size = f32(textureDimensions(texture${index}, 0).x);
@@ -1317,7 +1323,7 @@ function cubeSample(index, flags){
             towards = vec3f(snapped.xy, face.z);
         }
     }
-    return textureSampleLevel(texture${index}, sampler${index}, towards, level);
+    return ${read};
 }
 `;
 }
@@ -1326,9 +1332,11 @@ function cubeSample(index, flags){
  * The sampling of a volume stage: the 2D stage's, over three coordinates,
  * with the third's address mode in bits 16-17 of the stage's flags.
  *
- * @param {number} index @param {string} flags
+ * @param {number} index @param {string} flags @param {number} [ones]
  */
-function volumeSample(index, flags){
+function volumeSample(index, flags, ones){
+    const read = sampledWithOnes(
+        `textureSampleLevel(texture${index}, sampler${index}, uvw, level)`, ones);
     return `fn sampleStage${index}(raw: vec3f) -> vec4f {
     let flags = ${flags};
     let size = vec3f(textureDimensions(texture${index}, 0));
@@ -1355,7 +1363,7 @@ function volumeSample(index, flags){
     if (point == 1u) {
         uvw = (floor(uvw * levelSize) + 0.5) / levelSize;
     }
-    return textureSampleLevel(texture${index}, sampler${index}, uvw, level);
+    return ${read};
 }
 `;
 }
@@ -1368,6 +1376,16 @@ function volumeSample(index, flags){
  */
 function dimensionsOf(state){
     return state.stages.map(stage=>stage.dimension ?? '2d');
+}
+
+/**
+ * The channels each stage's texture samples as one.
+ *
+ * @param {import('./pipeline.js').PipelineState} state
+ * @returns {number[]}
+ */
+function onesOf(state){
+    return state.stages.map(stage=>stage.ones ?? 0);
 }
 
 /**
@@ -1454,6 +1472,34 @@ function samplerDeclarations(dimensions, group, first){
             + ` var sampler${index}: sampler;`);
     }
     return lines.join('\n');
+}
+
+/**
+ * A sample with the channels its texture lacks read as one, as Direct3D reads
+ * them (`sampledOnes` in `d3d9/constants.js` says which): the channels kept,
+ * then the constant ones, so the sample is taken once and the variant costs
+ * nothing at run time over the plain read. With nothing to fill, the sample as
+ * it was -- a draw of four-channel textures generates the same source.
+ *
+ * One definition, because the fixed-function stages and a translated shader
+ * have to fill the same channels of the same texture.
+ *
+ * @param {string} sample  A vec4f expression.
+ * @param {number} [ones]  Bit 0 red to bit 3 alpha, always the last channels;
+ *     zero or absent for none.
+ * @returns {string}
+ */
+export function sampledWithOnes(sample, ones = 0){
+    if (!ones)
+    {
+        return sample;
+    }
+    const kept = 31 - Math.clz32(ones & -ones);
+    if (kept === 0 || ones !== (0xf & ~((1 << kept) - 1)))
+    {
+        throw new Error(`a sample fills its last channels with one, not mask ${ones}`);
+    }
+    return `vec4f(${sample}.${'xyz'.slice(0, kept)}${', 1.0'.repeat(4 - kept)})`;
 }
 
 /**

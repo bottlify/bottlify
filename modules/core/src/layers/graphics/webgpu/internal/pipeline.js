@@ -161,6 +161,9 @@ function lookUp(table, value, what){
  * @property {'cube' | '3d'} [dimension]
  *     The texture the stage samples, when it is not two-dimensional: its
  *     coordinate is then three components and its binding another kind.
+ * @property {number} [ones]
+ *     The channels the stage's texture samples as one that the GPU's texture
+ *     lacks (`sampledOnes` in `d3d9/constants.js`), when there are any.
  */
 
 /**
@@ -290,6 +293,7 @@ export function pipelineKey(state){
             ...(stage.colorKey === undefined ? [] : [`k${stage.colorKey}`]),
             ...(stage.bump === undefined ? [] : [`b${stage.bump.join('/')}`]),
             ...(stage.dimension === undefined ? [] : [stage.dimension]),
+            ...(stage.ones === undefined ? [] : [`o${stage.ones}`]),
         ].join(','))
         .join(';');
 
