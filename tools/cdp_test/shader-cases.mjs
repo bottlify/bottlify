@@ -24,6 +24,12 @@ import {
     D3DFMT, FORMAT_INFO, sampledOnes,
 } from '../../modules/core/src/layers/graphics/d3d9/constants.js';
 import { fromHalf, toHalf } from '../../modules/core/src/layers/graphics/d3d9/half.js';
+import {
+    D3DTADDRESS, D3DTEXF, D3DTSS,
+} from '../../modules/core/src/layers/graphics/d3d8/constants.js';
+import {
+    addressVariantOf, lodBiasOf, samplerDescriptorOf,
+} from '../../modules/core/src/layers/graphics/d3d8/render.js';
 
 /** @param {number} seed */
 export function generator(seed){
@@ -63,6 +69,15 @@ const KEPT_AS = { 1: 'r16float', 2: 'rg16float' };
  * @property {number[]} bytes    Its one texel as uploaded.
  * @property {number[]} values   What Direct3D samples from it, the filled channels one.
  * @property {number} ones       The channels the read fills (`sampledOnes`).
+ * @property {number} [size]     A sampling profile's: the texture's width and height.
+ * @property {number[][]} [levels]  A sampling profile's: each level's one colour, as bytes.
+ * @property {number[]} [image]  An address profile's: its one level, texel by texel, as bytes.
+ * @property {number[]} [modes]  An address profile's: D3DTADDRESS of u and v.
+ * @property {number} [border]   An address profile's: D3DSAMP_BORDERCOLOR, a D3DCOLOR.
+ * @property {any} [sampler]     A sampling profile's: the GPU sampler the engine makes for
+ *     the sampler's state (`samplerDescriptorOf`); absent, linear and repeating.
+ * @property {import('../../modules/core/src/layers/graphics/d3d9/wgsl.js').SamplerVariant}
+ *     [variant]  What the state asks of the reads beyond that sampler.
  */
 
 /**
@@ -93,6 +108,168 @@ export function samplerTexels(seed){
     });
 }
 
+/** The colour of each level of a sampling profile's textures, distinct from level to level. */
+const LEVEL_BYTES = [[250, 20, 40, 255], [30, 240, 60, 200], [10, 50, 230, 120],
+    [200, 200, 20, 60]];
+/** The level-of-detail biases a sampling profile's samplers are given. */
+const LOD_BIASES = [-1.5, -0.75, 0.25, 1.25, 2.5];
+/** How near a level of detail may come to the half between two levels and be compared. */
+const LEVEL_MARGIN = 0.02;
+
+/** The address modes an address profile's samplers are given, the two WebGPU lacks twice. */
+const ADDRESS_MODES = [D3DTADDRESS.WRAP, D3DTADDRESS.MIRROR, D3DTADDRESS.CLAMP,
+    D3DTADDRESS.BORDER, D3DTADDRESS.BORDER, D3DTADDRESS.MIRRORONCE, D3DTADDRESS.MIRRORONCE];
+/** An address profile's textures: four texels by four. */
+const ADDRESS_SIZE = 4;
+/** How near a texel's edge, in texels, a point read may come and be compared. */
+const TEXEL_MARGIN = 0.02;
+
+/**
+ * Each sampler's texture and state for a profile that samples under a state
+ * the GPU sampler alone cannot express: 'lod', a level-of-detail bias, over a
+ * texture of three levels of one colour each, read through a point mip filter
+ * -- the GPU's nearest level -- so a level is told by its colour exactly; or
+ * 'address', each axis's address mode with border and mirror-once among them,
+ * over a texture of sixteen texels of their own read through point filters.
+ *
+ * @param {number} seed @param {'lod' | 'address'} kind
+ * @returns {SamplerTexel[]}
+ */
+export function samplingTexels(seed, kind){
+    const next = generator(seed ^ 0x51ed270b);
+    if (kind === 'address')
+    {
+        return Array.from({ length: SAMPLER_BYTES.length }, (_, sampler)=>{
+            const image = Array.from({ length: ADDRESS_SIZE * ADDRESS_SIZE * 4 },
+                (__, at)=>(37 * at + 61 * sampler + 11) & 0xff);
+            const modes = [pick(next, ADDRESS_MODES), pick(next, ADDRESS_MODES)];
+            const border = Math.floor(next() * 0x100000000) >>> 0;
+            const states = new Map([[D3DTSS.MAGFILTER, D3DTEXF.POINT],
+                [D3DTSS.MINFILTER, D3DTEXF.POINT], [D3DTSS.MIPFILTER, D3DTEXF.NONE],
+                [D3DTSS.ADDRESSU, modes[0]], [D3DTSS.ADDRESSV, modes[1]],
+                [D3DTSS.BORDERCOLOR, border]]);
+            return {
+                format: 'rgba8unorm', bytes: image.slice(0, 4), values: [], ones: 0,
+                size: ADDRESS_SIZE, image, modes, border, sampler: samplerDescriptorOf(states),
+                variant: addressVariantOf(state=>states.get(state) ?? 0, '2d'),
+            };
+        });
+    }
+    return Array.from({ length: SAMPLER_BYTES.length }, (_, sampler)=>{
+        const levels = [0, 1, 2].map(level=>LEVEL_BYTES[(level + sampler) % LEVEL_BYTES.length]);
+        const lodBias = kind === 'lod' ? pick(next, LOD_BIASES) : 0;
+        const states = new Map([[D3DTSS.MAGFILTER, D3DTEXF.LINEAR],
+            [D3DTSS.MINFILTER, D3DTEXF.LINEAR], [D3DTSS.MIPFILTER, D3DTEXF.POINT],
+            [D3DTSS.MIPMAPLODBIAS, new Uint32Array(Float32Array.of(lodBias).buffer)[0]]]);
+        return {
+            format: 'rgba8unorm', bytes: levels[0], values: levels[0].map(byte=>byte / 255),
+            ones: 0, size: 4, levels, sampler: samplerDescriptorOf(states),
+            variant: { lodBias: lodBiasOf(states.get(D3DTSS.MIPMAPLODBIAS) ?? 0) },
+        };
+    });
+}
+
+/**
+ * What a sampling profile's texture answers a read, as Direct3D reads it: the
+ * level the read's level of detail names with the sampler's bias added, the
+ * nearest of the three, the top one at or below zero. A derived level is none
+ * here -- every varying is the same at the three corners, so every derivative
+ * is zero -- and its read is the top level whatever the bias. Null where the
+ * level lies too near the half between two for the GPU's rounding to be known.
+ *
+ * @param {SamplerTexel} texel @param {{ kind: string, value?: number }} mode
+ * @returns {number[] | null}
+ */
+function sampledLevel(texel, mode){
+    const levels = /** @type {number[][]} */ (texel.levels);
+    if (mode.kind !== 'lod')
+    {
+        return levels[0].map(byte=>byte / 255);
+    }
+    const lod = Math.fround(/** @type {number} */ (mode.value) + (texel.variant?.lodBias ?? 0));
+    if (lod > 0 && lod < levels.length - 0.5
+        && Math.abs(lod - Math.floor(lod) - 0.5) < LEVEL_MARGIN)
+    {
+        return null;
+    }
+    const level = lod <= 0 ? 0 : Math.min(levels.length - 1, Math.floor(lod + 0.5));
+    return levels[level].map(byte=>byte / 255);
+}
+
+/**
+ * One coordinate as a point read of an address profile's texture takes it:
+ * the texel it falls in on that axis, 'border' outside [0, 1] under the
+ * border mode, or null where it lies too near an edge -- of a texel, or of
+ * the border -- for the GPU's rounding to be known.
+ *
+ * @param {number} coordinate @param {number} mode  D3DTADDRESS
+ * @returns {number | 'border' | null}
+ */
+function addressedTexel(coordinate, mode){
+    const near = (/** @type {number} */ value, /** @type {number} */ edge)=>
+        Math.abs(value - edge) < TEXEL_MARGIN / ADDRESS_SIZE;
+    if (mode === D3DTADDRESS.BORDER && (near(coordinate, 0) || near(coordinate, 1)))
+    {
+        return null;
+    }
+    if (mode === D3DTADDRESS.BORDER && (coordinate < 0 || coordinate > 1))
+    {
+        return 'border';
+    }
+    let at;
+    switch (mode)
+    {
+        case D3DTADDRESS.WRAP:
+            at = coordinate - Math.floor(coordinate);
+            break;
+        case D3DTADDRESS.MIRROR: {
+            const folded = coordinate - 2 * Math.floor(coordinate / 2);
+            at = folded <= 1 ? folded : 2 - folded;
+            break;
+        }
+        case D3DTADDRESS.MIRRORONCE:
+            at = Math.min(1, Math.abs(coordinate));
+            break;
+        default:
+            at = Math.min(1, Math.max(0, coordinate));
+    }
+    const texels = at * ADDRESS_SIZE;
+    const edge = Math.round(texels);
+    // A clamped or mirrored end is the same texel from either side; a wrapped
+    // one is the first or the last.
+    const settled = (edge === 0 || edge === ADDRESS_SIZE) && mode !== D3DTADDRESS.WRAP;
+    if (!settled && Math.abs(texels - edge) < TEXEL_MARGIN)
+    {
+        return null;
+    }
+    return Math.min(ADDRESS_SIZE - 1, Math.max(0, Math.floor(texels)));
+}
+
+/**
+ * What an address profile's texture answers a read at `coord`, as Direct3D
+ * addresses it: the border colour if either axis is outside under the border
+ * mode, else the texel both axes name; null where either is unsettled.
+ *
+ * @param {SamplerTexel} texel @param {number[]} coord
+ * @returns {number[] | null}
+ */
+function addressedRead(texel, coord){
+    const modes = /** @type {number[]} */ (texel.modes);
+    const u = addressedTexel(Math.fround(coord[0]), modes[0]);
+    const v = addressedTexel(Math.fround(coord[1]), modes[1]);
+    if (u === null || v === null)
+    {
+        return null;
+    }
+    if (u === 'border' || v === 'border')
+    {
+        const colour = /** @type {number} */ (texel.border);
+        return [16, 8, 0, 24].map(shift=>((colour >>> shift) & 0xff) / 255);
+    }
+    const at = (v * ADDRESS_SIZE + u) * 4;
+    return /** @type {number[]} */ (texel.image).slice(at, at + 4).map(byte=>byte / 255);
+}
+
 /**
  * @typedef {Object} Profile
  * @property {string} name
@@ -115,6 +292,11 @@ export function samplerTexels(seed){
  * @property {string[]} [special]    Instructions with forms of their own, by name.
  * @property {boolean} [flow]        Whether to try if, rep and loop blocks.
  * @property {boolean} [predicated]  Whether p0 exists: setp, predicated writes, if p0, breakp.
+ * @property {'lod' | 'address'} [sampling]  The samplers' state the GPU sampler
+ *     cannot hold (`samplingTexels`).
+ * @property {number} [clip]  User clip planes, carried as varyings: a vertex
+ *     shader writes each plane's distance from its position, out of the
+ *     registers past its own; a pixel shader discards where one is below zero.
  */
 
 /** @param {() => number} next @param {string} r @param {string} s */
@@ -230,6 +412,25 @@ PROFILES.ps_1_4 = {
     binary: ['add', 'sub', 'mul', 'dp3', 'dp4'], ternary: ['mad', 'lrp', 'cnd', 'cmp'],
     dmods: ['', '_sat', '_x2', '_x4', '_d2'], sourceForms: PS1_FORMS, tail: [],
 };
+
+// The level-of-detail bias, through texldl, whose level the bias moves where
+// every derivative is zero, in each stage that has it.
+PROFILES.ps_3_0_lod = { ...PROFILES.ps_3_0, name: 'ps_3_0', sampling: 'lod',
+    special: ['texldl', 'texldl', 'pow'], flow: false, predicated: false };
+PROFILES.vs_3_0_lod = { ...PROFILES.vs_3_0, name: 'vs_3_0', sampling: 'lod',
+    special: ['texldl', 'texldl', 'm4x4'], flow: false, predicated: false };
+// Border and mirror-once beside the modes WebGPU has, at coordinates in and
+// out of [0, 1]: a pixel shader's second coordinate set and a vertex's inputs
+// range over [-3, 3].
+PROFILES.ps_3_0_address = { ...PROFILES.ps_3_0, name: 'ps_3_0', sampling: 'address',
+    special: ['texldl', 'pow'], flow: false, predicated: false };
+PROFILES.vs_3_0_address = { ...PROFILES.vs_3_0, name: 'vs_3_0', sampling: 'address',
+    special: ['texldl', 'texldl', 'm4x4'], flow: false, predicated: false };
+// User clip planes where the device does not clip by distances: three and six
+// planes' distances out of a vertex shader, five planes' discard in a pixel one.
+PROFILES.vs_1_1_clip = { ...PROFILES.vs_1_1, clip: 3 };
+PROFILES.vs_2_0_clip = { ...PROFILES.vs_2_0, clip: 6 };
+PROFILES.ps_2_0_clip = { ...PROFILES.ps_2_0, clip: 5 };
 
 /**
  * One instruction, at random from what the profile names.
@@ -418,6 +619,8 @@ const programText = (p, body, subs = [])=>[p.name, ...p.head, ...p.init, ...body
  * @property {Record<string, number>} written
  * @property {number | undefined} viewportRegister
  * @property {boolean} killed
+ * @property {boolean} [unsettled]  A read lay where the GPU's rounding decides it
+ *     (`sampledLevel`): not compared.
  * @property {string | null} error
  */
 
@@ -477,25 +680,67 @@ export function buildCase(profile, seed, length = 10){
         const unit = ps1 || name.startsWith('t') || (!p.vertex && name === 'v0');
         inputs[name] = Array.from({ length: 4 }, ()=>between(next, unit ? 0 : -3, unit ? 1 : 3));
     }
-    const texels = samplerTexels(seed);
+    const texels = p.sampling ? samplingTexels(seed, p.sampling) : samplerTexels(seed);
+    let unsettled = false;
     const result = execute(tokens, {
         constants: { f: constants, i: ints, b: bools },
         inputs: { v: [inputs.v0, inputs.v1, inputs.v2], t: [inputs.t0, inputs.t1] },
         position: [0, 0],
         frontFacing: true,
-        sample: sampler=>texels[sampler % texels.length].values,
+        sample: (sampler, dimension, coord, mode)=>{
+            const texel = texels[sampler % texels.length];
+            if (!texel.levels && !texel.image)
+            {
+                return texel.values;
+            }
+            const read = texel.image ? addressedRead(texel, coord) : sampledLevel(texel, mode);
+            unsettled ||= read === null;
+            return read ?? [0, 0, 0, 0];
+        },
         derivative: ()=>[0, 0, 0, 0],
     });
-    const translated = translateShader(parseShader(tokens),
-        { ones: texels.map(texel=>texel.ones) });
+    const clip = p.clip ? { count: p.clip, distances: false } : null;
+    const translated = translateShader(parseShader(tokens), {
+        ones: texels.map(texel=>texel.ones),
+        ...(p.sampling ? { sampling: texels.map(texel=>texel.variant) } : {}),
+        ...(clip ? { clip } : {}),
+    });
+    const expected = Object.fromEntries(Object.entries(result.outputs)
+        .map(([name, values])=>[name, Array.from(values, Number)]));
+    const written = { ...result.written };
+    let killed = result.killed;
+    if (clip && p.vertex)
+    {
+        // Each plane, from the registers past the shader's own, against the
+        // position it wrote: a distance of one past the last plane.
+        const at = /** @type {number} */ (translated.clipRegister);
+        const position = expected.oPos ?? [0, 0, 0, 1];
+        const distances = Array.from({ length: Math.ceil(clip.count / 4) * 4 }, (_, plane)=>(
+            plane < clip.count ? [0, 1, 2, 3].reduce((sum, axis)=>Math.fround(sum
+                + Math.fround(constants[(at + plane) * 4 + axis] * position[axis])), 0) : 1));
+        for (let group = 0; group * 4 < clip.count; group++)
+        {
+            expected[`clip${group}`] = distances.slice(group * 4, group * 4 + 4);
+            written[`clip${group}`] = 0xf;
+        }
+    }
+    else if (clip)
+    {
+        // The distances the vertex stage handed on, drawn apart from the program.
+        const nextClip = generator(seed ^ 0x6c1f3a09);
+        for (let group = 0; group * 4 < clip.count; group++)
+        {
+            inputs[`clip${group}`] = [0, 1, 2, 3].map(at=>(group * 4 + at < clip.count
+                ? between(nextClip, -0.2, 1) : 1));
+        }
+        killed ||= Object.keys(inputs).some(name=>name.startsWith('clip')
+            && inputs[name].some(value=>value < 0));
+    }
     return {
         profile, seed, text, vertex: p.vertex,
         wgsl: translated.wgsl, entry: translated.entry, samplers: translated.samplers, texels,
-        constants, ints, bools, inputs,
-        expected: Object.fromEntries(Object.entries(result.outputs)
-            .map(([name, values])=>[name, Array.from(values, Number)])),
-        written: result.written, viewportRegister: translated.viewportRegister,
-        killed: result.killed,
+        constants, ints, bools, inputs, expected, written,
+        viewportRegister: translated.viewportRegister, killed, unsettled,
         error: translated.error,
     };
 }

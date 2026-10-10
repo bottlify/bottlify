@@ -29,6 +29,7 @@
 import { describe as describeSlots } from './vtables.js';
 import { createEffectSeam } from './d3d10-effect.js';
 import { readGuid } from './ddraw.js';
+import { describeAdapter } from './adapter.js';
 import { createFields } from './structs.js';
 import {
     D3D10_LIMITS, D3D10_MAP, D3D10_MAP_FLAG_DO_NOT_WAIT, D3D10_RESOURCE_DIMENSION,
@@ -41,7 +42,8 @@ import {
 } from '../d3d10/device.js';
 import { CreateDXGIFactory, CreateDXGIFactory1 } from '../d3d10/dxgi.js';
 import {
-    DXGI_MODE_DESC, readModeDesc, readSwapChainDesc, writeModeDesc, writeSwapChainDesc,
+    DXGI_MODE_DESC, VIEW_UNION, readModeDesc, readSwapChainDesc, readViewDesc, writeModeDesc,
+    writeSwapChainDesc, writeViewDesc,
 } from '../d3d10/structs.js';
 import { bindFlagsForUsage, levelExtent } from '../d3d10/validity.js';
 import {
@@ -96,15 +98,6 @@ const D3D10_TEXTURE3D_DESC = Object.freeze({
 
 const D3D10_SUBRESOURCE_DATA = Object.freeze({
     pSysMem: 0x00, SysMemPitch: 0x04, SysMemSlicePitch: 0x08, SIZE: 0x0c,
-});
-
-/**
- * The three view descriptions share a head and differ in the union after it.
- * The union is read as three dwords whatever the dimension names, and the
- * object model sorts out which fields mean anything.
- */
-const VIEW_DESC = Object.freeze({
-    Format: 0x00, ViewDimension: 0x04, u0: 0x08, u1: 0x0c, u2: 0x10, u3: 0x14,
 });
 
 const D3D10_BLEND_DESC = Object.freeze({
@@ -251,6 +244,12 @@ export const IDXGISURFACE_SLOTS = /** @type {[string, number][]} */ ([
     ['GetDesc', 1],
     ['Map', 2],
     ['Unmap', 0],
+]);
+
+export const IDXGISURFACE1_SLOTS = /** @type {[string, number][]} */ ([
+    ...IDXGISURFACE_SLOTS,
+    ['GetDC', 2],
+    ['ReleaseDC', 1],
 ]);
 
 export const IDXGIOUTPUT_SLOTS = /** @type {[string, number][]} */ ([
@@ -552,15 +551,31 @@ export const ID3D10DEVICE1_SLOTS = /** @type {[string, number][]} */ ([
  *     What a device draws with: the backend and the GPU's sampler and texture
  *     makers, reached when a program creates one rather than before.
  * @property {import('../d3d10/dxgi.js').FactoryOptions} [factoryOptions]
+ * @property {() => { width: number, height: number, displayWidth?: number,
+ *                     displayHeight?: number }} [screen]
+ *     The desktop user32 reports, which DXGI's one output shows.
+ * @property {() => import('./adapter.js').AdapterIdentity | null} [identity]
+ *     The hardware behind the GPU, which DXGI's adapter reports as Direct3D 9's does.
+ * @property {import('../d3d10/dxgi.js').FactoryOptions['resolution']} [resolution]
+ *     Told the mode a fullscreen swap chain takes the screen at, as Direct3D 9 tells it.
+ * @property {import('./ddraw.js').SurfaceDcServices} [gdi]
+ *     Device contexts over guest memory, for IDXGISurface1::GetDC; absent, none is handed out.
  */
 
 /**
  * @param {Deps} deps
  */
 export function createDirect3D10Seam({ publisher, memory, allocate, free, deviceOptions,
-    factoryOptions })
+    factoryOptions: given, screen, identity, resolution, gdi })
 {
     const fields = createFields(memory);
+    /** @type {import('../d3d10/dxgi.js').FactoryOptions} */
+    const factoryOptions = {
+        ...(screen ? { display: ()=>screen() } : {}),
+        ...(resolution ? { resolution } : {}),
+        ...(identity ? { vendorId: ()=>describeAdapter(identity()).vendorId } : {}),
+        ...given,
+    };
 
     /** @param {number} address @param {number} count @returns {number[]} */
     const readPointers = (address, count)=>{
@@ -762,7 +777,7 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
             fields.writeU32(out + DXGI_OUTPUT_DESC.AttachedToDesktop,
                 held.desc.AttachedToDesktop ? 1 : 0);
             fields.writeU32(out + DXGI_OUTPUT_DESC.Rotation, held.desc.Rotation);
-            fields.writeU32(out + DXGI_OUTPUT_DESC.Monitor, 1);
+            fields.writeU32(out + DXGI_OUTPUT_DESC.Monitor, held.desc.Monitor);
             return S_OK;
         },
         /**
@@ -861,6 +876,10 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
         GetParent: getParent,
         /** @param {any} adapter @param {number[]} args */
         EnumOutputs: (adapter, [index, out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return E_INVALIDARG;
+            }
             /** @type {{ output?: any }} */
             const held = {};
             const hr = adapter.EnumOutputs(index >>> 0, held);
@@ -887,20 +906,17 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
             }
             return hr;
         },
-        // Direct3D 10 and 10.1 are what this adapter speaks, as every device
-        // made on it answers both; anything else asked by GUID is refused,
-        // which is how a program picks between its own paths.
         /** @param {any} adapter @param {number[]} args */
         CheckInterfaceSupport: (adapter, [guid, version])=>{
-            if ((version >>> 0) !== 0)
+            /** @type {{ version?: { low: number, high: number } }} */
+            const held = {};
+            const hr = adapter.CheckInterfaceSupport(readGuid(memory, guid), held);
+            if (hr === S_OK && held.version && (version >>> 0) !== 0)
             {
-                fields.writeU32(version, 0);
-                fields.writeU32(version + 4, 0);
+                fields.writeU32(version, held.version.low);
+                fields.writeU32(version + 4, held.version.high);
             }
-            const id = readGuid(memory, guid);
-            return id === IID.ID3D10Device || id === IID.ID3D10Device1
-                ? S_OK
-                : DXGI_ERROR_INVALID_CALL;
+            return hr;
         },
     });
 
@@ -913,6 +929,10 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
         GetParent: getParent,
         /** @param {any} factory @param {number[]} args */
         EnumAdapters: (factory, [index, out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return DXGI_ERROR_INVALID_CALL;
+            }
             /** @type {{ adapter?: any }} */
             const held = {};
             const hr = factory.EnumAdapters(index >>> 0, held);
@@ -925,6 +945,10 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
         },
         /** @param {any} factory @param {number[]} args */
         EnumAdapters1: (factory, [index, out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return DXGI_ERROR_INVALID_CALL;
+            }
             /** @type {{ adapter?: any }} */
             const held = {};
             const hr = factory.EnumAdapters1(index >>> 0, held);
@@ -1017,9 +1041,15 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
             return handBack(held.buffer, texture2DInterfaces, id, out);
         },
         /** @param {any} swapChain @param {number[]} args */
-        SetFullscreenState: (swapChain, [fullscreen])=>
-            swapChain.SetFullscreenState(fullscreen !== 0),
-        /** @param {any} swapChain @param {number[]} args */
+        SetFullscreenState: (swapChain, [fullscreen, target])=>
+            swapChain.SetFullscreenState(fullscreen !== 0,
+                (target >>> 0) === 0 ? null : publisher.objectAt(target)),
+        /**
+         * The target is a reference of the caller's, and released here when
+         * the caller left no room for it.
+         *
+         * @param {any} swapChain @param {number[]} args
+         */
         GetFullscreenState: (swapChain, [fullscreenAt, targetAt])=>{
             /** @type {{ fullscreen?: boolean, target?: any }} */
             const held = {};
@@ -1028,7 +1058,15 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
             {
                 fields.writeU32(fullscreenAt, held.fullscreen ? 1 : 0);
             }
-            if ((targetAt >>> 0) !== 0)
+            if ((targetAt >>> 0) === 0)
+            {
+                held.target?.release();
+            }
+            else if (held.target)
+            {
+                handBack(held.target, outputInterfaces, IID.IDXGIOutput, targetAt);
+            }
+            else
             {
                 fields.writeU32(targetAt, 0);
             }
@@ -1049,13 +1087,10 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
         ResizeBuffers: (swapChain, [count, width, height, format, flags])=>
             swapChain.ResizeBuffers(count >>> 0, width >>> 0, height >>> 0, format >>> 0,
                 flags >>> 0),
-        /**
-         * A windowed swap chain's target is its window, which the page sizes:
-         * the mode is taken and nothing else changes.
-         *
-         * @param {any} swapChain @param {number[]} args
-         */
-        ResizeTarget: (swapChain, [mode])=>((mode >>> 0) === 0 ? DXGI_ERROR_INVALID_CALL : S_OK),
+        /** @param {any} swapChain @param {number[]} args */
+        ResizeTarget: (swapChain, [mode])=>swapChain.ResizeTarget((mode >>> 0) === 0
+            ? null
+            : readModeDesc(memory, mode >>> 0)),
         /** @param {any} swapChain @param {number[]} args */
         GetContainingOutput: (swapChain, [out])=>{
             if ((out >>> 0) === 0)
@@ -1290,7 +1325,74 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
             unmapFrom(texture, 0);
             return S_OK;
         },
+        /**
+         * A device context over the surface: GDI draws into guest memory
+         * holding the surface's pixels -- once the GPU's last drawing of them
+         * has come back, unless the program discards them -- and ReleaseDC
+         * hands what it drew to the surface.
+         *
+         * @param {any} texture @param {number[]} args
+         */
+        GetDC: (texture, [discard, out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return E_INVALIDARG;
+            }
+            if (!gdi || !allocate)
+            {
+                return DXGI_ERROR_INVALID_CALL;
+            }
+            const opened = texture.OpenDC(discard !== 0);
+            if (opened.hr !== S_OK)
+            {
+                return opened.hr;
+            }
+            const open = ()=>{
+                const data = /** @type {Uint8Array} */ (opened.data);
+                const address = allocate(Math.max(data.length, 4));
+                const handle = address === 0 ? 0 : gdi.createSurfaceDc({
+                    width: texture.desc.Width, height: texture.desc.Height,
+                    pitch: /** @type {number} */ (opened.rowPitch), bitCount: 32,
+                    bits: address, palette: null, format: '555',
+                });
+                if (handle === 0)
+                {
+                    if (address !== 0)
+                    {
+                        free?.(address);
+                    }
+                    texture.CloseDC();
+                    return DXGI_ERROR_INVALID_CALL;
+                }
+                memory.writeMemory(address, data);
+                contexts.set(texture, { address, handle, data });
+                fields.writeU32(out, handle);
+                return S_OK;
+            };
+            return opened.ready ? opened.ready.then(open) : open();
+        },
+        /** @param {any} texture */
+        ReleaseDC: texture=>{
+            const held = contexts.get(texture);
+            if (!held || !gdi)
+            {
+                return DXGI_ERROR_INVALID_CALL;
+            }
+            contexts.delete(texture);
+            held.data.set(memory.readMemory(held.address, held.data.length));
+            gdi.deleteSurfaceDc(held.handle);
+            free?.(held.address);
+            return texture.CloseDC();
+        },
     };
+
+    /**
+     * The device context a surface has open, and the guest memory it draws
+     * into.
+     *
+     * @type {WeakMap<object, { address: number, handle: number, data: Uint8Array }>}
+     */
+    const contexts = new WeakMap();
 
     /**
      * The interfaces every resource shares, after its own: Direct3D's two
@@ -1307,6 +1409,7 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
             [IID.IDXGIDeviceSubObject, IDXGIDEVICESUBOBJECT_SLOTS],
             [IID.IDXGIResource, IDXGIRESOURCE_SLOTS],
             [IID.IDXGISurface, IDXGISURFACE_SLOTS],
+            [IID.IDXGISurface1, IDXGISURFACE1_SLOTS],
         ], dxgiResourceMethods),
     ];
 
@@ -1428,11 +1531,11 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
 
     /**
      * @param {string} id
-     * @param {(desc: any) => Record<string, number>} unionOf
-     *     The union fields after the head, in order, as the view reports them.
+     * @param {import('../d3d10/structs.js').ViewUnion} union  How its description is laid out.
      * @param {[string, [string, number][]][]} [later]  Later versions it also answers as.
+     * @param {import('../d3d10/structs.js').ViewUnion} [union1]  The 10.1 description's.
      */
-    const viewInterfaces = (id, unionOf, later = [])=>describeAll([
+    const viewInterfaces = (id, union, later = [], union1 = union)=>describeAll([
         [id, ID3D10VIEW_SLOTS], [IID.ID3D10View, ID3D10BASEVIEW_SLOTS],
         [IID.ID3D10DeviceChild, ID3D10DEVICECHILD_SLOTS], ...later,
     ], {
@@ -1451,43 +1554,24 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
             /** @type {{ desc?: any }} */
             const held = {};
             view.GetDesc(held);
-            fields.writeStruct(out, VIEW_DESC, {
-                Format: held.desc.Format,
-                ViewDimension: held.desc.ViewDimension,
-                ...unionOf(held.desc),
-            });
+            writeViewDesc(memory, out, union, held.desc);
         },
-        // Direct3D 10.1's description differs only by a cube-array member no
-        // view here has, so the older one is written in its place.
         /** @param {any} view @param {number[]} args */
         GetDesc1: (view, [out])=>{
             /** @type {{ desc?: any }} */
             const held = {};
             view.GetDesc(held);
-            fields.writeStruct(out, VIEW_DESC, {
-                Format: held.desc.Format,
-                ViewDimension: held.desc.ViewDimension,
-                ...unionOf(held.desc),
-            });
+            writeViewDesc(memory, out, union1, held.desc);
         },
     });
 
-    const renderTargetViewInterfaces = viewInterfaces(IID.ID3D10RenderTargetView, desc=>({
-        u0: desc.MipSlice ?? desc.ElementOffset ?? 0,
-        u1: desc.FirstArraySlice ?? desc.ElementWidth ?? 0,
-        u2: desc.ArraySize ?? 0,
-    }));
-    const depthStencilViewInterfaces = viewInterfaces(IID.ID3D10DepthStencilView, desc=>({
-        u0: desc.MipSlice ?? 0,
-        u1: desc.FirstArraySlice ?? 0,
-        u2: desc.ArraySize ?? 0,
-    }));
-    const shaderResourceViewInterfaces = viewInterfaces(IID.ID3D10ShaderResourceView, desc=>({
-        u0: desc.MostDetailedMip ?? desc.ElementOffset ?? 0,
-        u1: desc.MipLevels ?? desc.ElementWidth ?? 0,
-        u2: desc.FirstArraySlice ?? 0,
-        u3: desc.ArraySize ?? 0,
-    }), [[IID.ID3D10ShaderResourceView1, ID3D10SHADERRESOURCEVIEW1_SLOTS]]);
+    const renderTargetViewInterfaces = viewInterfaces(IID.ID3D10RenderTargetView,
+        VIEW_UNION.RENDER_TARGET);
+    const depthStencilViewInterfaces = viewInterfaces(IID.ID3D10DepthStencilView,
+        VIEW_UNION.DEPTH_STENCIL);
+    const shaderResourceViewInterfaces = viewInterfaces(IID.ID3D10ShaderResourceView,
+        VIEW_UNION.SHADER_RESOURCE, [[IID.ID3D10ShaderResourceView1,
+            ID3D10SHADERRESOURCEVIEW1_SLOTS]], VIEW_UNION.SHADER_RESOURCE1);
 
     /**
      * @param {string} id
@@ -1736,21 +1820,11 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
      * A view description, or null for the default view.
      *
      * @param {number} address
-     * @param {string[]} names  What the union's dwords are called for this view kind.
+     * @param {import('../d3d10/structs.js').ViewUnion} union
      */
-    const readViewDesc = (address, names)=>{
-        if ((address >>> 0) === 0)
-        {
-            return null;
-        }
-        const raw = fields.readStruct(address, VIEW_DESC);
-        /** @type {Record<string, number>} */
-        const desc = { Format: raw.Format, ViewDimension: raw.ViewDimension };
-        names.forEach((name, index)=>{
-            desc[name] = raw[`u${index}`];
-        });
-        return desc;
-    };
+    const readViewDescAt = (address, union)=>((address >>> 0) === 0
+        ? null
+        : readViewDesc(memory, address, union));
 
     /**
      * @param {number} address
@@ -2012,15 +2086,15 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
      * @param {string} method
      * @param {import('./com.js').InterfaceDescriptor[]} interfaces
      * @param {string} id
-     * @param {string[]} unionNames
+     * @param {import('../d3d10/structs.js').ViewUnion} union  How its description is laid out.
      */
-    const viewCreate = (method, interfaces, id, unionNames)=>
+    const viewCreate = (method, interfaces, id, union)=>
         /** @param {any} device @param {number[]} args */
         (device, [resourcePointer, descAt, out])=>{
             /** @type {{ view?: any }} */
             const held = {};
             const hr = device[method](publisher.objectAt(resourcePointer),
-                readViewDesc(descAt, unionNames), held);
+                readViewDescAt(descAt, union), held);
             if (hr !== S_OK)
             {
                 if ((out >>> 0) !== 0)
@@ -2437,13 +2511,13 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
                 address=>fields.readStruct(address, D3D10_TEXTURE3D_DESC)),
             CreateShaderResourceView: viewCreate('CreateShaderResourceView',
                 shaderResourceViewInterfaces, IID.ID3D10ShaderResourceView,
-                ['MostDetailedMip', 'MipLevels', 'FirstArraySlice', 'ArraySize']),
+                VIEW_UNION.SHADER_RESOURCE),
             CreateRenderTargetView: viewCreate('CreateRenderTargetView',
                 renderTargetViewInterfaces, IID.ID3D10RenderTargetView,
-                ['MipSlice', 'FirstArraySlice', 'ArraySize']),
+                VIEW_UNION.RENDER_TARGET),
             CreateDepthStencilView: viewCreate('CreateDepthStencilView',
                 depthStencilViewInterfaces, IID.ID3D10DepthStencilView,
-                ['MipSlice', 'FirstArraySlice', 'ArraySize']),
+                VIEW_UNION.DEPTH_STENCIL),
             /** @param {any} device @param {number[]} args */
             CreateInputLayout: (device, [elements, count, bytecode, length, out])=>{
                 /** @type {{ layout?: any }} */
@@ -2481,7 +2555,7 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
                 blendStateInterfaces, IID.ID3D10BlendState1, 'state'),
             CreateShaderResourceView1: viewCreate('CreateShaderResourceView1',
                 shaderResourceViewInterfaces, IID.ID3D10ShaderResourceView1,
-                ['MostDetailedMip', 'MipLevels', 'FirstArraySlice', 'ArraySize']),
+                VIEW_UNION.SHADER_RESOURCE1),
             /** @param {any} device */
             GetFeatureLevel: device=>device.GetFeatureLevel(),
             CreateDepthStencilState: stateCreate('CreateDepthStencilState', readDepthStencilDesc,
@@ -2549,9 +2623,11 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
                 const held = {};
                 const hr = device.CheckMultisampleQualityLevels(format >>> 0, count >>> 0,
                     (out >>> 0) === 0 ? null : held);
-                if (hr === S_OK)
+                // A count out of range fails and still writes its zero; an
+                // unknown format fails and writes nothing.
+                if (held.levels !== undefined)
                 {
-                    fields.writeU32(out, held.levels ?? 0);
+                    fields.writeU32(out, held.levels);
                 }
                 return hr;
             },

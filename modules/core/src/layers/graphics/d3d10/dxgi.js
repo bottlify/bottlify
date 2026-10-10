@@ -29,10 +29,11 @@
  *   is talking to. Answering for both makes that test meaningless.
  *
  * One more asymmetry that looks like an inconsistency and is not: creating a
- * swap chain reports its refusals as `DXGI_ERROR_INVALID_CALL`, while reading a
- * description into a null pointer reports `E_INVALIDARG`. The first is DXGI
- * saying the request cannot be honoured, the second is the plain
- * bad-argument code, and programs do distinguish them.
+ * swap chain reports a request it cannot honour -- no window, a buffer count
+ * its swap effect does not take -- as `DXGI_ERROR_INVALID_CALL`, while a
+ * format or sample count nothing could show, and reading a description into
+ * a null pointer, report `E_INVALIDARG`, the plain bad-argument code.
+ * Programs do distinguish them.
  *
  * The machine arrives injected: adapters, outputs and the size of a window are
  * configuration, so the whole of this file runs headless in a test.
@@ -40,26 +41,15 @@
 
 import { attachCom } from './com.js';
 import {
-    DXGI_ERROR_INVALID_CALL, DXGI_ERROR_NOT_FOUND, DXGI_FORMAT, DXGI_MODE_SCALING,
-    DXGI_MODE_SCANLINE_ORDER, DXGI_SWAP_EFFECT, DXGI_USAGE, E_INVALIDARG, E_NOINTERFACE, IID, S_OK,
+    DXGI_ERROR_INVALID_CALL, DXGI_ERROR_NOT_FOUND, DXGI_ERROR_UNSUPPORTED, DXGI_FORMAT,
+    DXGI_MODE_SCALING, DXGI_MODE_SCANLINE_ORDER, DXGI_SWAP_CHAIN_FLAG, DXGI_SWAP_EFFECT, DXGI_USAGE,
+    E_INVALIDARG, E_NOINTERFACE, IID, S_OK,
 } from './constants.js';
-import { backBufferUsage, highestAccessibleBuffer, swapChainDescResult } from './validity.js';
+import {
+    DISPLAY_FORMATS, backBufferUsage, highestAccessibleBuffer, swapChainDescResult,
+} from './validity.js';
 import { REFRESH_HZ, displayModes } from '../../win32/user32/display.js';
 import { VIDEO_ADAPTER_NAME } from '../../win32/devices.js';
-
-/** DXGI_ERROR_NOT_CURRENTLY_AVAILABLE: what the browser has no way to give. */
-const DXGI_ERROR_NOT_CURRENTLY_AVAILABLE = 0x887a0022;
-
-/**
- * The formats an output lists modes in: the ones a swap chain's buffer is
- * shown from.
- *
- * @type {ReadonlySet<number>}
- */
-const DISPLAY_FORMATS = new Set([
-    DXGI_FORMAT.R8G8B8A8_UNORM, DXGI_FORMAT.R8G8B8A8_UNORM_SRGB, DXGI_FORMAT.B8G8R8A8_UNORM,
-    DXGI_FORMAT.B8G8R8A8_UNORM_SRGB,
-]);
 
 /**
  * @typedef {Object} ModeFields
@@ -73,11 +63,12 @@ const DISPLAY_FORMATS = new Set([
  */
 
 /**
- * The modes an output of this size lists in one format: the sizes every
- * other path of this build lists, at the one rate a browser presents at,
- * progressive, ordered by width, then height.
+ * The modes an output of this size lists in one format: the sizes user32's
+ * EnumDisplaySettings lists for the same display, at the one rate a browser
+ * presents at, progressive, ordered by width, then height.
  *
- * @param {{ width: number, height: number }} size
+ * @param {{ width: number, height: number, displayWidth?: number,
+ *           displayHeight?: number }} size  The mode in effect, and the display's own size.
  * @param {number} format
  * @returns {ModeFields[]}
  */
@@ -86,7 +77,9 @@ export function outputModes(size, format){
     {
         return [];
     }
-    return displayModes({ width: size.width, height: size.height, bitsPerPixel: 32 })
+    return displayModes({ width: size.width, height: size.height, bitsPerPixel: 32,
+        ...(size.displayWidth ? { displayWidth: size.displayWidth } : {}),
+        ...(size.displayHeight ? { displayHeight: size.displayHeight } : {}) })
         .filter(mode=>mode.refresh === REFRESH_HZ)
         .map(mode=>({
             width: mode.width,
@@ -99,40 +92,77 @@ export function outputModes(size, format){
         }));
 }
 
+/** The user-mode driver's version, 1.0.0.0: its high dword, then its low one. */
+const DRIVER_VERSION = Object.freeze({ high: 0x00010000, low: 0 });
+
+/** DXGI_PRESENT_TEST: a present that only asks whether it would be shown. */
+const DXGI_PRESENT_TEST = 0x1;
+
 /**
  * @typedef {Object} OutputConfig
  * @property {string} deviceName
  * @property {{ left: number, top: number, right: number, bottom: number }} [desktopCoordinates]
+ * @property {() => { width: number, height: number, displayWidth?: number,
+ *                     displayHeight?: number }} [desktop]
+ *     The desktop's size, read when asked, in place of fixed coordinates, and
+ *     the display's own when that is larger.
+ * @property {number} [monitor]  The HMONITOR the output's description names.
  */
 
 /**
  * @typedef {Object} AdapterConfig
  * @property {string} description
- * @property {number} [vendorId]
+ * @property {number | (() => number)} [vendorId]
  * @property {number} [deviceId]
  * @property {OutputConfig[]} [outputs]
  */
 
 /**
  * @typedef {Object} FactoryOptions
- * @property {AdapterConfig[]} [adapters]
+ * @property {AdapterConfig[]} [adapters]  Every adapter, outright; the machine's one otherwise.
  * @property {(window: number) => { width: number, height: number }} [windowClientSize]
+ * @property {() => { width: number, height: number, displayWidth?: number,
+ *                     displayHeight?: number }} [display]
+ *     The desktop the machine's one output shows, as user32 reports it.
+ * @property {() => number} [vendorId]
+ *     The PCI vendor of the machine's one adapter, as Direct3D 9 reports it.
+ * @property {(width: number, height: number,
+ *             where: { window: number, fullscreen: boolean, announce?: boolean }) => void}
+ *     [resolution]
+ *     Told the mode a swap chain takes the screen at, and the window it takes
+ *     with it, as a Direct3D 9 device tells it: the reported display becomes
+ *     that mode, and a fullscreen window is placed over it.
  */
 
 /**
- * What a machine with one adapter and one output looks like.
- *
- * @type {readonly AdapterConfig[]}
+ * The display's name and handle as user32 gives them -- EnumDisplayDevices'
+ * DeviceName and what MonitorFromWindow answers -- and Direct3D 9's adapter
+ * identifier repeats: a program matches an output to a monitor by them, and
+ * GetMonitorInfo refuses any other handle.
  */
-const DEFAULT_ADAPTERS = Object.freeze([{
-    description: VIDEO_ADAPTER_NAME,
-    vendorId: 0,
-    deviceId: 0,
-    outputs: [{
-        deviceName: 'Bottlify Output 0',
-        desktopCoordinates: { left: 0, top: 0, right: 1920, bottom: 1080 },
-    }],
-}]);
+const DISPLAY_DEVICE_NAME = '\\\\.\\DISPLAY1';
+const PRIMARY_MONITOR = 0x00010001;
+
+/**
+ * What a machine with one adapter and one output looks like: the adapter by
+ * the name and vendor every other API reports, the output showing the
+ * desktop user32 reports, read when asked so a mode change is seen.
+ *
+ * @param {FactoryOptions} options
+ * @returns {AdapterConfig[]}
+ */
+function machineAdapters(options){
+    return [{
+        description: VIDEO_ADAPTER_NAME,
+        vendorId: options.vendorId,
+        deviceId: 0,
+        outputs: [{
+            deviceName: DISPLAY_DEVICE_NAME,
+            monitor: PRIMARY_MONITOR,
+            desktop: options.display ?? (()=>({ width: 640, height: 480 })),
+        }],
+    }];
+}
 
 /**
  * @param {string} iid
@@ -178,7 +208,7 @@ export function CreateDXGIFactory1(iid, out, options = {}){
  * @param {boolean} [secondVersion]  Whether it answers as IDXGIFactory1.
  */
 export function createFactory(options = {}, secondVersion = false){
-    const configs = options.adapters ?? DEFAULT_ADAPTERS;
+    const configs = options.adapters ?? machineAdapters(options);
     const windowClientSize = options.windowClientSize ?? (()=>({ width: 640, height: 480 }));
 
     /** @type {any[]} */
@@ -220,7 +250,28 @@ export function createFactory(options = {}, secondVersion = false){
                 out.swapChain = null;
                 return DXGI_ERROR_INVALID_CALL;
             }
-            out.swapChain = createSwapChain(desc, device, factory, windowClientSize);
+            // A buffer nothing could show is a bad argument rather than a bad
+            // call (test_create_swapchain, dxgi.c:2100-2108).
+            if (!DISPLAY_FORMATS.has(desc.bufferDesc.format))
+            {
+                out.swapChain = null;
+                return E_INVALIDARG;
+            }
+            // The back buffers are textures of the device: a sample count the
+            // device cannot make a texture at is one the swap chain cannot have.
+            /** @type {{ levels?: number }} */
+            const levels = {};
+            if (desc.sampleDesc.count !== 1
+                && (device.CheckMultisampleQualityLevels(desc.bufferDesc.format,
+                    desc.sampleDesc.count, levels) !== S_OK
+                    || desc.sampleDesc.quality >= (levels.levels ?? 0)))
+            {
+                out.swapChain = null;
+                return E_INVALIDARG;
+            }
+            out.swapChain = createSwapChain(desc, device, factory, {
+                windowClientSize, resolution: options.resolution, display: options.display,
+            });
             return S_OK;
         },
 
@@ -277,11 +328,35 @@ function createAdapter(config, factory){
             }
             out.desc = {
                 Description: config.description,
-                VendorId: config.vendorId ?? 0,
+                VendorId: (typeof config.vendorId === 'function'
+                    ? config.vendorId()
+                    : config.vendorId) ?? 0,
                 DeviceId: config.deviceId ?? 0,
                 SubSysId: 0,
                 Revision: 0,
             };
+            return S_OK;
+        },
+
+        /**
+         * Which device interfaces a device made on this adapter answers to,
+         * and the user-mode driver's version for them: Direct3D 10 and 10.1
+         * and the DXGI device every one of them is, at the version Direct3D
+         * 9's adapter identifier gives the same driver. Anything else is
+         * unsupported, and its version left as the caller had it
+         * (test_check_interface_support, dxgi.c:1270-1304).
+         *
+         * @param {string} iid
+         * @param {{ version?: { low: number, high: number } }} out
+         * @returns {number}
+         */
+        CheckInterfaceSupport(iid, out){
+            if (iid !== IID.IDXGIDevice && iid !== IID.ID3D10Device
+                && iid !== IID.ID3D10Device1)
+            {
+                return DXGI_ERROR_UNSUPPORTED;
+            }
+            out.version = { ...DRIVER_VERSION };
             return S_OK;
         },
 
@@ -317,10 +392,28 @@ function createAdapter(config, factory){
  * @param {any} adapter
  */
 function createOutput(config, adapter){
-    const desktop = config.desktopCoordinates ?? { left: 0, top: 0, right: 0, bottom: 0 };
-    const size = {
-        width: desktop.right - desktop.left || 640,
-        height: desktop.bottom - desktop.top || 480,
+    /** @returns {{ left: number, top: number, right: number, bottom: number }} */
+    const coordinates = ()=>{
+        if (config.desktop)
+        {
+            const { width, height } = config.desktop();
+            return { left: 0, top: 0, right: width, bottom: height };
+        }
+        return config.desktopCoordinates ?? { left: 0, top: 0, right: 0, bottom: 0 };
+    };
+    /**
+     * @returns {{ width: number, height: number, displayWidth?: number,
+     *             displayHeight?: number }}
+     */
+    const sizeOf = ()=>{
+        const desktop = coordinates();
+        const display = config.desktop?.();
+        return {
+            width: desktop.right - desktop.left || 640,
+            height: desktop.bottom - desktop.top || 480,
+            ...(display?.displayWidth ? { displayWidth: display.displayWidth } : {}),
+            ...(display?.displayHeight ? { displayHeight: display.displayHeight } : {}),
+        };
     };
     return attachCom({
         /**
@@ -328,7 +421,7 @@ function createOutput(config, adapter){
          * @returns {ModeFields[]} every mode listed in that format
          */
         GetDisplayModeList(format){
-            return outputModes(size, format);
+            return outputModes(sizeOf(), format);
         },
 
         /**
@@ -354,6 +447,7 @@ function createOutput(config, adapter){
             const format = wanted.format === DXGI_FORMAT.UNKNOWN
                 ? DXGI_FORMAT.R8G8B8A8_UNORM
                 : wanted.format;
+            const size = sizeOf();
             const modes = outputModes(size, format);
             if (modes.length === 0)
             {
@@ -383,7 +477,7 @@ function createOutput(config, adapter){
 
         /** @returns {{ width: number, height: number }} the desktop this output shows */
         size(){
-            return { ...size };
+            return sizeOf();
         },
 
         /** @param {{ desc?: any }} out */
@@ -394,10 +488,11 @@ function createOutput(config, adapter){
             }
             out.desc = {
                 DeviceName: config.deviceName,
-                DesktopCoordinates: config.desktopCoordinates
-                    ?? { left: 0, top: 0, right: 0, bottom: 0 },
+                DesktopCoordinates: coordinates(),
                 AttachedToDesktop: true,
-                Rotation: 0,
+                // DXGI_MODE_ROTATION_IDENTITY: a desktop that is not turned.
+                Rotation: 1,
+                Monitor: config.monitor ?? 0,
             };
             return S_OK;
         },
@@ -438,16 +533,75 @@ function copySwapChainDesc(desc){
 }
 
 /**
+ * A back buffer's extent where either side was asked for as zero: that side of
+ * the window's client area, and eight where the client area has none -- a
+ * window of no size still gets a swap chain (dxgi.c test_create_swapchain).
+ *
+ * @param {number} width
+ * @param {number} height
+ * @param {() => { width: number, height: number }} client  Measured only if needed.
+ * @returns {{ width: number, height: number }}
+ */
+function extentFromWindow(width, height, client){
+    if (width !== 0 && height !== 0)
+    {
+        return { width, height };
+    }
+    const measured = client();
+    return {
+        width: width !== 0 ? width : measured.width || 8,
+        height: height !== 0 ? height : measured.height || 8,
+    };
+}
+
+/**
  * @param {import('./structs.js').SwapChainFields} requested
  * @param {any} device
  * @param {any} factory
- * @param {(window: number) => { width: number, height: number }} windowClientSize
+ * @param {{ windowClientSize: (window: number) => { width: number, height: number },
+ *           resolution?: FactoryOptions['resolution'],
+ *           display?: FactoryOptions['display'] }} services
  */
-function createSwapChain(requested, device, factory, windowClientSize){
-    // Nothing here takes the display for itself, so a swap chain asked for
-    // fullscreen is made windowed and says so, as one made while fullscreen
-    // is unavailable is.
-    let desc = { ...copySwapChainDesc(requested), windowed: true };
+function createSwapChain(requested, device, factory, services){
+    const { windowClientSize } = services;
+    const asked = copySwapChainDesc(requested);
+    let desc = {
+        ...asked,
+        bufferDesc: {
+            ...asked.bufferDesc,
+            ...extentFromWindow(asked.bufferDesc.width, asked.bufferDesc.height,
+                ()=>windowClientSize(asked.outputWindow)),
+        },
+    };
+    /**
+     * The desktop's mode before the swap chain took the screen, given back
+     * when it leaves.
+     *
+     * @type {{ width: number, height: number } | null}
+     */
+    let desktop = null;
+
+    /**
+     * Fullscreen the way this engine has it, which is the way a Direct3D 9
+     * device has it: the reported display is the mode, and the window is
+     * placed over all of it and told its size. The page shows that window
+     * whole; nothing is taken from the browser.
+     *
+     * @param {number} width @param {number} height
+     */
+    const takeScreen = (width, height)=>{
+        if (desktop === null)
+        {
+            const shown = services.display?.();
+            desktop = shown ? { width: shown.width, height: shown.height } : null;
+        }
+        services.resolution?.(width, height, { window: desc.outputWindow, fullscreen: true,
+            announce: true });
+    };
+    if (!desc.windowed)
+    {
+        takeScreen(desc.bufferDesc.width, desc.bufferDesc.height);
+    }
     /** @type {Map<number, any>} */
     let buffers = new Map();
     let outstanding = 0;
@@ -473,6 +627,7 @@ function createSwapChain(requested, device, factory, windowClientSize){
             format: desc.bufferDesc.format,
             sampleDesc: desc.sampleDesc,
             usage: backBufferUsage(desc.bufferUsage, index),
+            gdiCompatible: (desc.flags & DXGI_SWAP_CHAIN_FLAG.GDI_COMPATIBLE) !== 0,
             onFirstRef: ()=>{
                 outstanding++;
                 swapChain.addRef();
@@ -532,6 +687,13 @@ function createSwapChain(requested, device, factory, windowClientSize){
             {
                 return DXGI_ERROR_INVALID_CALL;
             }
+            // A test asks only whether a present would be shown: nothing is
+            // presented, counted or rotated, and the window is never occluded
+            // here.
+            if ((flags & DXGI_PRESENT_TEST) !== 0)
+            {
+                return S_OK;
+            }
             presentCount++;
             currentBuffer = (currentBuffer + 1) % Math.max(1, desc.bufferCount);
             // Buffer zero is the one a program draws into whatever the swap
@@ -558,13 +720,11 @@ function createSwapChain(requested, device, factory, windowClientSize){
             {
                 return DXGI_ERROR_INVALID_CALL;
             }
-            const client = windowClientSize(desc.outputWindow);
             const next = {
                 ...desc,
                 bufferDesc: {
                     ...desc.bufferDesc,
-                    width: width === 0 ? client.width : width,
-                    height: height === 0 ? client.height : height,
+                    ...extentFromWindow(width, height, ()=>windowClientSize(desc.outputWindow)),
                     format: format === DXGI_FORMAT.UNKNOWN ? desc.bufferDesc.format : format,
                 },
                 bufferCount: bufferCount === 0 ? desc.bufferCount : bufferCount,
@@ -573,6 +733,10 @@ function createSwapChain(requested, device, factory, windowClientSize){
             if (swapChainDescResult(next) !== S_OK)
             {
                 return DXGI_ERROR_INVALID_CALL;
+            }
+            if (!DISPLAY_FORMATS.has(next.bufferDesc.format))
+            {
+                return E_INVALIDARG;
             }
             desc = next;
             // Every buffer is rebuilt, so the ones handed out before this call
@@ -584,15 +748,67 @@ function createSwapChain(requested, device, factory, windowClientSize){
         },
 
         /**
-         * Going fullscreen is refused the way DXGI refuses it when the display
-         * cannot be had just now; going windowed is where the swap chain
-         * already is.
+         * Fullscreen takes the screen at the back buffer's size, on this
+         * adapter's one output; windowed gives the desktop's mode back. The
+         * window stays where fullscreen placed it: nothing here keeps the
+         * rectangle it had before.
          *
          * @param {boolean} fullscreen
+         * @param {any} [target]  An output, or null for the containing one.
          * @returns {number}
          */
-        SetFullscreenState(fullscreen){
-            return fullscreen ? DXGI_ERROR_NOT_CURRENTLY_AVAILABLE : S_OK;
+        SetFullscreenState(fullscreen, target = null){
+            if (fullscreen && target)
+            {
+                /** @type {{ output?: any }} */
+                const held = {};
+                device.adapter().EnumOutputs(0, held);
+                held.output?.release();
+                if (target !== held.output)
+                {
+                    return DXGI_ERROR_INVALID_CALL;
+                }
+            }
+            if (fullscreen === !desc.windowed)
+            {
+                return S_OK;
+            }
+            desc = { ...desc, windowed: !fullscreen };
+            if (fullscreen)
+            {
+                takeScreen(desc.bufferDesc.width, desc.bufferDesc.height);
+            }
+            else if (desktop)
+            {
+                services.resolution?.(desktop.width, desktop.height,
+                    { window: desc.outputWindow, fullscreen: false });
+                desktop = null;
+            }
+            return S_OK;
+        },
+
+        /**
+         * A new mode for the target: fullscreen, the screen is taken at it;
+         * windowed, the window would be resized to it, which nothing here can
+         * do yet.
+         *
+         * @param {ModeFields} mode
+         * @returns {number}
+         */
+        ResizeTarget(mode){
+            if (!mode)
+            {
+                return DXGI_ERROR_INVALID_CALL;
+            }
+            if (!desc.windowed)
+            {
+                takeScreen(mode.width || desc.bufferDesc.width,
+                    mode.height || desc.bufferDesc.height);
+                return S_OK;
+            }
+            device.diverge('ResizeTarget on a windowed swap chain leaves its window the'
+                + ' size it is');
+            return S_OK;
         },
 
         /**
@@ -614,10 +830,15 @@ function createSwapChain(requested, device, factory, windowClientSize){
             {
                 return E_INVALIDARG;
             }
-            // Nothing here goes exclusive: a browser has no mode to set, so the
-            // answer is windowed and there is no target output to report.
-            out.fullscreen = false;
+            out.fullscreen = !desc.windowed;
             out.target = null;
+            if (out.fullscreen)
+            {
+                /** @type {{ output?: any }} */
+                const held = {};
+                device.adapter().EnumOutputs(0, held);
+                out.target = held.output ?? null;
+            }
             return S_OK;
         },
 
@@ -655,7 +876,11 @@ function createSwapChain(requested, device, factory, windowClientSize){
     return swapChain;
 }
 
-/** The description a device fills in when a program supplies nothing. */
+/**
+ * The description a device fills in when a program supplies nothing.
+ *
+ * @returns {import('./structs.js').SwapChainFields}
+ */
 export function defaultSwapChainDesc(){
     return {
         bufferDesc: {

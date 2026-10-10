@@ -204,6 +204,7 @@ export const HELPERS = Object.freeze({
  * @property {number} dimension    A RESOURCE_DIMENSION.
  * @property {number} returnType   A RETURN_TYPE.
  * @property {boolean} comparison  Read by a compare-sample, so declared as depth.
+ * @property {boolean} [multisampled]  A TEXTURE2DMS bound to a texture of several samples.
  */
 
 /**
@@ -231,6 +232,33 @@ export const HELPERS = Object.freeze({
  * @property {string[]} helpers                    HELPERS the body calls, callees first.
  */
 
+/**
+ * The pixel stage of a draw with no pixel shader bound. Direct3D still
+ * rasterises such a draw -- a depth pre-pass or a shadow map is drawn this way
+ * -- and writes depth and stencil, but no render target; this stage reads
+ * nothing and writes nothing, so linked with any vertex shader its fragment
+ * entry point is empty and every target's write mask is zero.
+ *
+ * @type {Readonly<TranslatedShader>}
+ */
+export const NO_PIXEL_SHADER = Object.freeze({
+    kind: SHADER_KIND.PIXEL,
+    inputs: [],
+    outputs: [],
+    constantBuffers: [],
+    textures: [],
+    samplers: [],
+    temps: 0,
+    indexableTemps: [],
+    immediateConstants: [],
+    body: [],
+    inputRegisters: 0,
+    outputRegisters: 0,
+    writesDepth: false,
+    unsupported: [],
+    helpers: [],
+});
+
 /** @param {number} mask @returns {string} the components a mask names */
 function maskComponents(mask){
     return COMPONENT.filter((_, index)=>(mask & (1 << index)) !== 0).join('');
@@ -249,10 +277,16 @@ const u32Literal = dword=>`${dword >>> 0}u`;
  * here -- see `linkProgram` -- because its `@location` numbering belongs to the
  * pair, not to the shader.
  *
+ * A texture the shader declares as two-dimensional and multisampled is read
+ * as a one-sample texture -- its sample 0 -- unless `multisampled` names its
+ * slot: the view bound there is of a texture with more samples than one, and
+ * WebGPU binds that only as a multisampled texture, read by sample.
+ *
  * @param {import('./dxbc.js').DxbcContainer} container
+ * @param {{ multisampled?: readonly number[] }} [options]
  * @returns {TranslatedShader}
  */
-export function translateShader(container){
+export function translateShader(container, options = {}){
     const program = /** @type {import('./dxbc.js').ShaderProgram} */ (container.shader);
     const instructions = decodeSm4(program.tokens);
     const isPixel = program.kind === SHADER_KIND.PIXEL;
@@ -770,6 +804,10 @@ export function translateShader(container){
                     dimension: instruction.control & 0x1f,
                     returnType: (instruction.extra[0] ?? 0) & 0xf,
                     comparison: false,
+                    ...((instruction.control & 0x1f) === RESOURCE_DIMENSION.TEXTURE2DMS
+                        && (options.multisampled ?? []).includes(dest.indices[0].value)
+                        ? { multisampled: true }
+                        : {}),
                 });
                 if ((instruction.control & 0x1f) === RESOURCE_DIMENSION.BUFFER)
                 {
@@ -1191,6 +1229,15 @@ export function translateShader(container){
                     unsupported(`${instruction.name} on an undeclared or unsupported texture`);
                     break;
                 }
+                if (texture.multisampled)
+                {
+                    const sample = instruction.opcode === OPCODE.LD_MS && sampleIndex
+                        ? `${i(sampleIndex)}.x`
+                        : '0';
+                    store(target, sampledBits(texture, resource,
+                        `textureLoad(t${texture.slot}, ${shaped.coordinate}, ${sample})`));
+                    break;
+                }
                 // A multisample view here is of a one-sample texture, whose
                 // one level is its only level and whose sample 0 is its only
                 // sample; any other sample reads as zero, as one out of
@@ -1210,7 +1257,9 @@ export function translateShader(container){
                 const [target, level, resource] = instruction.operands;
                 const texture = textureOf(resource.indices[0].value);
                 const name = texture ? `t${texture.slot}` : '';
-                const levels = `textureNumLevels(${name})`;
+                // A multisampled texture has one level and is measured without
+                // naming it.
+                const levels = texture?.multisampled ? '1u' : `textureNumLevels(${name})`;
                 const wanted = `${u(level)}.x`;
                 const size = held();
                 const extent = texture ? extentFor(texture, size, name) : null;
@@ -1221,7 +1270,9 @@ export function translateShader(container){
                 }
                 // A level past the last answers zero for its sizes; the
                 // array size and the level count are still the texture's.
-                emit(`let ${size} = textureDimensions(${name}, min(${wanted}, ${levels} - 1u));`);
+                emit(texture.multisampled
+                    ? `let ${size} = textureDimensions(${name});`
+                    : `let ${size} = textureDimensions(${name}, min(${wanted}, ${levels} - 1u));`);
                 const sizes = extent.sizes.map(component=>
                     `select(0u, ${component}, ${wanted} < ${levels})`);
                 const mode = instruction.control & 0x3;
@@ -1286,7 +1337,8 @@ export function translateShader(container){
 
 /**
  * @param {TextureDecl} texture
- * @returns {{ type: string, sampleType: string, viewDimension: string } | null}
+ * @returns {{ type: string, sampleType: string, viewDimension: string,
+ *             multisampled?: boolean } | null}
  */
 function textureType(texture){
     const sampled = texture.returnType === RETURN_TYPE.UINT
@@ -1315,6 +1367,17 @@ function textureType(texture){
     {
         return null;
     }
+    if (texture.multisampled)
+    {
+        // A multisampled float texture is never filtered, and WebGPU binds it
+        // only as unfilterable.
+        return texture.comparison ? null : {
+            type: `texture_multisampled_2d<${sampled.scalar}>`,
+            sampleType: sampled.sampleType === 'float' ? 'unfilterable-float' : sampled.sampleType,
+            viewDimension: '2d',
+            multisampled: true,
+        };
+    }
     if (texture.comparison)
     {
         return {
@@ -1333,7 +1396,7 @@ function textureType(texture){
  * @property {number} binding
  * @property {number} visibility
  * @property {{ type: string }} [buffer]
- * @property {{ sampleType: string, viewDimension: string }} [texture]
+ * @property {{ sampleType: string, viewDimension: string, multisampled?: boolean }} [texture]
  * @property {{ type: string }} [sampler]
  */
 
@@ -1397,7 +1460,10 @@ function declarations(shader, group, visibility){
         entries.push({
             binding,
             visibility,
-            texture: { sampleType: type.sampleType, viewDimension: type.viewDimension },
+            texture: type.multisampled
+                ? { sampleType: type.sampleType, viewDimension: type.viewDimension,
+                    multisampled: true }
+                : { sampleType: type.sampleType, viewDimension: type.viewDimension },
         });
     }
     for (const sampler of shader.samplers)

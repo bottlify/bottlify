@@ -502,10 +502,15 @@ test('clip planes are bounded by the capability and read back as zero until set'
     assert.equal(device.SetClipPlane(0, null), D3DERR_INVALIDCALL);
     assert.equal(device.release(), 0);
 
-    // The default is none at all: nothing behind this device clips.
+    // The default is six, the planes the renderer clips by; a device made
+    // with none takes none.
     const bare = make().device;
-    assert.equal(bare.SetClipPlane(0, [1, 0, 0, 0]), D3DERR_INVALIDCALL);
+    assert.equal(bare.SetClipPlane(5, [1, 0, 0, 0]), D3D_OK);
+    assert.equal(bare.SetClipPlane(6, [1, 0, 0, 0]), D3DERR_INVALIDCALL);
     assert.equal(bare.release(), 0);
+    const none = make({ caps: { maxUserClipPlanes: 0 } }).device;
+    assert.equal(none.SetClipPlane(0, [1, 0, 0, 0]), D3DERR_INVALIDCALL);
+    assert.equal(none.release(), 0);
 });
 
 test('a multiplied transform is the current one times the given one', ()=>{

@@ -66,7 +66,7 @@
 import { OPCODE, REGISTER, SHADER_KIND } from './shader.js';
 import { D3DDECLUSAGE } from './declaration.js';
 import {
-    compareExpression, fogFunctionDeclaration, sampledWithOnes,
+    clipInputs, clipOutputs, compareExpression, fogFunctionDeclaration, sampledWithOnes,
 } from '../webgpu/internal/fixedfunction.js';
 import { FOG_SOURCE } from '../webgpu/internal/pipeline.js';
 
@@ -297,8 +297,123 @@ export function varyingLocation(usage, index){
  * @property {number} [bumpRegister]
  *     A 1.x pixel shader's that bumps: the first of the two registers a stage
  *     its bump matrix and luminance travel in, past the ones it reads.
+ * @property {number} [clipRegister]
+ *     A vertex stage that clips: the first of the registers its user clip
+ *     planes travel in, one a plane, past every other it reads.
  * @property {string | null} error
  */
+
+/**
+ * What a sampler's state asks of the reads through it beyond the GPU sampler
+ * it is bound with, which WebGPU's samplers cannot be told. Only a sampler
+ * that asks has one, and only its reads are written differently.
+ *
+ * @typedef {Object} SamplerVariant
+ * @property {number} [lodBias]  D3DSAMP_MIPMAPLODBIAS, not zero: added to the
+ *     level of detail of every read, implicit or explicit.
+ * @property {number} [mirrorOnce]  The axes (1 u, 2 v, 4 w) addressed
+ *     D3DTADDRESS_MIRRORONCE, whose GPU sampler clamps: a read folds the
+ *     coordinate about zero first. Not of a cube map, whose faces are not
+ *     addressed.
+ * @property {{ mask: number, colour: number }} [border]  The axes addressed
+ *     D3DTADDRESS_BORDER, whose GPU sampler clamps, and D3DSAMP_BORDERCOLOR as
+ *     a D3DCOLOR: a read outside [0, 1] on one of them is that colour.
+ */
+
+/**
+ * A coordinate with the axes in `mask` folded about zero, as mirror-once
+ * folds them before its clamp.
+ *
+ * @param {string} at @param {number} components  2 or 3. @param {number} mask
+ */
+const foldedCoordinate = (at, components, mask)=>{
+    const all = (1 << components) - 1;
+    if ((mask & all) === all)
+    {
+        return `abs(${at})`;
+    }
+    const parts = COMPONENT.slice(0, components).split('')
+        .map((axis, index)=>((mask & (1 << index)) !== 0
+            ? `abs((${at}).${axis})` : `(${at}).${axis}`));
+    return `vec${components}f(${parts.join(', ')})`;
+};
+
+/**
+ * One read through a sampler as its state asks (`SamplerVariant`), before any
+ * channel is filled: the level-of-detail bias joined to whatever level the
+ * read names -- added to an explicit level or bias, and as a scale of two to
+ * its power on derivatives, which moves their level by it -- and the
+ * coordinate folded on its mirror-once axes. A folded read whose level is the
+ * GPU's to derive is given the derivatives of the coordinate before the fold,
+ * whose size is the same everywhere but where the fold meets itself, where
+ * the folded one's would shrink to nothing. A read with no variant is the
+ * plain one, to the byte.
+ *
+ * @param {string} pair  The texture and sampler, 'texN, sampN'.
+ * @param {string} at  The coordinate.
+ * @param {number} components  How many it has: 2, or 3 for a volume or cube.
+ * @param {{ how: 'sample' } | { how: 'bias' | 'level', by: string }
+ *     | { how: 'grad', dx: string, dy: string }} read
+ * @param {SamplerVariant | undefined} variant
+ * @param {boolean} addressed  Whether the texture's axes are addressed: not a cube's.
+ * @returns {string}
+ */
+const variantRead = (pair, at, components, read, variant, addressed)=>{
+    const lodBias = variant?.lodBias ?? 0;
+    const plus = lodBias ? ` + ${literal(lodBias)}` : '';
+    const scale = lodBias ? ` * ${literal(2 ** lodBias)}` : '';
+    const mask = addressed ? (variant?.mirrorOnce ?? 0) & ((1 << components) - 1) : 0;
+    const folded = mask === 0 ? at : foldedCoordinate(at, components, mask);
+    switch (read.how)
+    {
+        case 'level':
+            return `textureSampleLevel(${pair}, ${folded}, ${read.by}${plus})`;
+        case 'grad':
+            return `textureSampleGrad(${pair}, ${folded}, ${read.dx}${scale}, ${read.dy}${scale})`;
+        case 'bias':
+            return mask === 0
+                ? `textureSampleBias(${pair}, ${at}, ${read.by}${plus})`
+                : `textureSampleGrad(${pair}, ${folded}, dpdx(${at}) * exp2(${read.by}${plus}),`
+                    + ` dpdy(${at}) * exp2(${read.by}${plus}))`;
+        default:
+            if (mask !== 0)
+            {
+                return `textureSampleGrad(${pair}, ${folded}, dpdx(${at})${scale},`
+                    + ` dpdy(${at})${scale})`;
+            }
+            return lodBias
+                ? `textureSampleBias(${pair}, ${at}, ${literal(lodBias)})`
+                : `textureSample(${pair}, ${at})`;
+    }
+};
+
+/**
+ * A read under D3DTADDRESS_BORDER: the sampler's border colour where the
+ * coordinate lies outside [0, 1] on an axis in the mode, the read clamped to
+ * the edge elsewhere. Without a border, the read as it was.
+ *
+ * @param {string} read  A vec4f expression, its channels filled.
+ * @param {string} at @param {number} components
+ * @param {SamplerVariant | undefined} variant
+ * @param {boolean} addressed  Whether the texture's axes are addressed: not a cube's.
+ * @returns {string}
+ */
+const borderedRead = (read, at, components, variant, addressed)=>{
+    const border = addressed ? variant?.border : undefined;
+    const mask = (border?.mask ?? 0) & ((1 << components) - 1);
+    if (!border || mask === 0)
+    {
+        return read;
+    }
+    const outside = COMPONENT.slice(0, components).split('')
+        .filter((_, axis)=>(mask & (1 << axis)) !== 0)
+        .map(axis=>`(${at}).${axis} < 0.0 || (${at}).${axis} > 1.0`)
+        .join(' || ');
+    const channel = (/** @type {number} */ shift)=>literal(((border.colour >>> shift) & 0xff)
+        / 255);
+    return `select(${read}, vec4f(${channel(16)}, ${channel(8)}, ${channel(0)}, ${channel(24)}),`
+        + ` ${outside})`;
+};
 
 /**
  * @param {import('./shader.js').Operand} operand
@@ -408,10 +523,12 @@ const FOUR_FLOATS = Object.freeze({ components: 4, scalar: 'f32', bgra: false })
  * @param {{ index: number, type: string }[]} options.samplers
  * @param {string[]} options.inputFields    Lines inside the input structure.
  * @param {string[]} options.outputFields   Lines inside the output structure.
+ * @param {boolean} [options.clipDistances]  Whether the stage writes clip distances.
  */
 function moduleHeader(options){
     const group = options.vertex ? BIND_GROUP.VERTEX_CONSTANTS : BIND_GROUP.PIXEL_CONSTANTS;
     const header = [
+        ...(options.clipDistances ? ['enable clip_distances;'] : []),
         // Direct3D leaves a derivative taken in divergent flow undefined
         // rather than refusing the shader, and model 2 and 3 compilers put
         // texld inside branches and loops, which WGSL's uniformity analysis
@@ -469,7 +586,8 @@ function returnsEarly(list){
  *     fog?: number, fogSource?: number, flatColours?: boolean,
  *     stageDimensions?: readonly string[], projectedBy?: readonly string[],
  *     points?: { sprite: boolean }, alphaTest?: number, nanProbe?: boolean,
- *     ones?: readonly number[] }} [options]
+ *     ones?: readonly number[], sampling?: readonly (SamplerVariant | undefined)[],
+ *     clip?: import('../webgpu/internal/fixedfunction.js').ClipState }} [options]
  *        For a vertex shader, the shape of each v# the declaration supplies,
  *        by register. Absent means every declared input arrives as four
  *        floats; present, a declared register it does not name reads as the
@@ -499,6 +617,14 @@ function returnsEarly(list){
  *        the channels the texture bound there samples as one that the GPU's
  *        texture lacks (`sampledOnes` in `constants.js`); absent or zero, a
  *        read is the sample as it comes.
+ *        `sampling` is, by the same numbers, what a sampler's state asks of
+ *        its reads that its GPU sampler cannot do (`SamplerVariant`); absent,
+ *        a read is the GPU sampler's alone.
+ *        `clip` is the user clip planes a vertex shader's position is clipped
+ *        by, in clip space as Direct3D gives them to a shader: a distance
+ *        each, from the registers past the ones it reads (`clipRegister`);
+ *        and for a pixel shader paired with a vertex stage that carries them
+ *        as varyings, the discard they ask for (`clipInputs`).
  * @returns {TranslatedShader}
  */
 export function translateShader(parsed, options = {}){
@@ -835,8 +961,13 @@ export function translateShader(parsed, options = {}){
                     ?? TEXTURE_TYPE['2d'],
             });
         }
-        return sampledWithOnes(`textureSample(tex${stage}, samp${stage},`
-            + ` ${swizzled(at, dimension === '2d' ? 'xy' : 'xyz')})`, options.ones?.[stage]);
+        const components = dimension === '2d' ? 2 : 3;
+        const coordinates = swizzled(at, components === 2 ? 'xy' : 'xyz');
+        const variant = options.sampling?.[stage];
+        const addressed = dimension !== 'cube';
+        return borderedRead(sampledWithOnes(variantRead(`tex${stage}, samp${stage}`, coordinates,
+            components, { how: 'sample' }, variant, addressed), options.ones?.[stage]),
+        coordinates, components, variant, addressed);
     };
 
     /**
@@ -933,13 +1064,15 @@ export function translateShader(parsed, options = {}){
     };
 
     /**
-     * A texture read as the GPU answers it: the coordinate through the
-     * sampler's texture, of whichever dimension the sampler was declared with.
+     * A texture read as Direct3D answers it: the coordinate through the
+     * sampler's texture, of whichever dimension the sampler was declared with,
+     * as its state asks (`variantRead`, `borderedRead`), and the channels the
+     * bound texture lacks read as one.
      *
      * @param {import('./shader.js').Instruction} instruction
      * @param {string} how   'sample', 'level' or 'grad'.
      */
-    const textureRead = (instruction, how)=>{
+    const sample = (instruction, how)=>{
         const samplerOperand = instruction.sources[1];
         const entry = samplers.find(one=>one.index === samplerOperand.index);
         if (!entry)
@@ -953,38 +1086,23 @@ export function translateShader(parsed, options = {}){
             fail(`a vertex shader reads a texture with ${instruction.name}, which needs a level`);
         }
         const coordinates = entry.type === 'texture_2d<f32>' ? 'xy' : 'xyz';
+        const components = coordinates.length;
         const project = (instruction.control & 0x1) !== 0;
         const bias = (instruction.control & 0x2) !== 0;
         const at = project
             ? `(${src(instruction, 0)}.${coordinates} / ${src(instruction, 0)}.w)`
             : `${src(instruction, 0)}.${coordinates}`;
-        const pair = `tex${entry.index}, samp${entry.index}`;
-        if (how === 'level')
-        {
-            return `textureSampleLevel(${pair}, ${at}, ${src(instruction, 0)}.w)`;
-        }
-        if (how === 'grad')
-        {
-            const derivatives = entry.type === 'texture_2d<f32>' ? 'xy' : 'xyz';
-            return `textureSampleGrad(${pair}, ${at}, ${src(instruction, 2)}.${derivatives},`
-                + ` ${src(instruction, 3)}.${derivatives})`;
-        }
-        if (bias)
-        {
-            return `textureSampleBias(${pair}, ${at}, ${src(instruction, 0)}.w)`;
-        }
-        return `textureSample(${pair}, ${at})`;
+        const variant = options.sampling?.[entry.index];
+        const addressed = entry.type !== 'texture_cube<f32>';
+        /** @type {Parameters<typeof variantRead>[3]} */
+        const read = how === 'level' ? { how: 'level', by: `${src(instruction, 0)}.w` }
+            : how === 'grad' ? { how: 'grad', dx: `${src(instruction, 2)}.${coordinates}`,
+                dy: `${src(instruction, 3)}.${coordinates}` }
+                : bias ? { how: 'bias', by: `${src(instruction, 0)}.w` } : { how: 'sample' };
+        return borderedRead(sampledWithOnes(variantRead(`tex${entry.index}, samp${entry.index}`,
+            at, components, read, variant, addressed), options.ones?.[entry.index]),
+        at, components, variant, addressed);
     };
-
-    /**
-     * A texture read as Direct3D answers it: the channels the bound texture
-     * lacks read as one.
-     *
-     * @param {import('./shader.js').Instruction} instruction
-     * @param {string} how   'sample', 'level' or 'grad'.
-     */
-    const sample = (instruction, how)=>sampledWithOnes(textureRead(instruction, how),
-        options.ones?.[instruction.sources[1].index]);
 
     /** @param {import('./shader.js').Instruction} instruction */
     const comparison = instruction=>COMPARISON[instruction.control & 0x7] ?? '==';
@@ -1732,6 +1850,19 @@ export function translateShader(parsed, options = {}){
         // half a pixel further on, so the position the shader wrote moves by
         // half a pixel: half the viewport's scale in clip space, times w.
         viewportRegister = constants === Infinity ? 256 : constants;
+        // The user clip planes are taken on the position the shader wrote,
+        // before the half-pixel move below, which is the engine's own.
+        if (options.clip)
+        {
+            const clipped = clipOutputs(options.clip, plane=>`dot(c[_clip + ${plane}], out.oPos)`);
+            if (clipped.locations.some(location=>outputs.includes(location)))
+            {
+                fail('the shader writes a varying where its clip distances would travel');
+            }
+            outputFields.push(...clipped.fields);
+            outputs.push(...clipped.locations);
+            body.push(...clipped.lines);
+        }
         body.push(`    out.oPos = vec4f(out.oPos.xy + out.oPos.w * c[${viewportRegister}].xy`
             + ' * 0.5, out.oPos.zw);');
         // The fog stage after a pixel shader below model 3 reads the oFog
@@ -1848,6 +1979,20 @@ export function translateShader(parsed, options = {}){
                 '        oC0 = vec4f(1.0, 0.0, 1.0, 1.0);',
                 '    }');
         }
+        // The user clip planes of a vertex stage that carries their distances
+        // as varyings: the pixel is not drawn where one is below zero.
+        const discarded = clipInputs(options.clip, 'in');
+        if (discarded.locations.some(location=>reads.includes(location)))
+        {
+            fail('the shader reads a varying where clip distances would travel');
+        }
+        inputFields.push(...discarded.fields);
+        reads.push(...discarded.locations);
+        if (discarded.lines.length > 0)
+        {
+            const at = body.findIndex(line=>line.startsWith('    out.'));
+            body.splice(at < 0 ? body.length : at, 0, ...discarded.lines);
+        }
         // D3DRS_ALPHATESTENABLE runs after the pixel shader as after the
         // fixed stages: the colour's alpha, as written, against the
         // reference the register past the shader's own carries.
@@ -1873,7 +2018,17 @@ export function translateShader(parsed, options = {}){
         alphaRegister = bumpRegister !== undefined ? bumpRegister + 16
             : constants === Infinity ? 224 : constants;
     }
+    // The clip planes follow every other register a vertex stage reads.
+    const clipRegister = vertex && options.clip
+        ? (pointRegister !== undefined ? pointRegister + 1
+            : fogRegister !== undefined ? fogRegister + 2
+                : /** @type {number} */ (viewportRegister) + 1)
+        : undefined;
     const reach = (()=>{
+        if (clipRegister !== undefined && options.clip)
+        {
+            return clipRegister + options.clip.count;
+        }
         if (alphaRegister !== undefined)
         {
             return alphaRegister + 1;
@@ -1899,6 +2054,7 @@ export function translateShader(parsed, options = {}){
     const wgsl = [
         ...moduleHeader({
             vertex, constants: reach, samplers, inputFields, outputFields,
+            clipDistances: vertex && options.clip?.distances === true,
         }),
         D3D_MATH,
         ...fogCurve,
@@ -1914,6 +2070,7 @@ export function translateShader(parsed, options = {}){
         ...(usesParts.has('log') && vertex && major < 2 ? [LOG_PARTS] : []),
         ...(bumpRegister === undefined ? [] : [`const _bump = ${bumpRegister};`]),
         ...(alphaRegister === undefined ? [] : [`const _alphaRef = ${alphaRegister};`]),
+        ...(clipRegister === undefined ? [] : [`const _clip = ${clipRegister};`]),
         vertex ? '@vertex' : '@fragment',
         `fn ${entry}(in: ${vertex ? 'VsIn' : 'PsIn'}) -> ${vertex ? 'VsOut' : 'PsOut'} {`,
         `    var out: ${vertex ? 'VsOut' : 'PsOut'};`,
@@ -1932,6 +2089,7 @@ export function translateShader(parsed, options = {}){
         ...(pointRegister === undefined ? {} : { pointRegister }),
         ...(alphaRegister === undefined ? {} : { alphaRegister }),
         ...(bumpRegister === undefined ? {} : { bumpRegister }),
+        ...(clipRegister === undefined ? {} : { clipRegister }),
         error,
     };
 }
@@ -1974,7 +2132,8 @@ const TCI_CAMERASPACEREFLECTIONVECTOR = 0x30000;
  *        and for table fog the colour alone, with the curve's range beside it
  *        for the pixel shader to evaluate per pixel.
  * @param {{ flatColours?: boolean, normalizeNormals?: boolean, rangeFog?: boolean,
- *     points?: { sprite: boolean, scale: boolean } }} [options]
+ *     points?: { sprite: boolean, scale: boolean },
+ *     clip?: import('../webgpu/internal/fixedfunction.js').ClipState }} [options]
  *        `flatColours`: the two colour varyings flat, for D3DSHADE_FLAT, as
  *        the pixel shader must read them. `normalizeNormals`:
  *        D3DRS_NORMALIZENORMALS, whether the camera-space normal a
@@ -1982,6 +2141,10 @@ const TCI_CAMERASPACEREFLECTIONVECTOR = 0x30000;
  *        D3DRS_RANGEFOGENABLE, vertex fog over the distance from the eye.
  *        `points`: a point list drawn as quads, sized by the vertex's PSIZE
  *        or the state's, scaled with the distance as the fixed function does.
+ *        `clip`: the user clip planes, in the vertex's own space -- world
+ *        planes through the world matrix, which the caller puts there -- one
+ *        register each from `HYBRID_CONSTANTS.COUNT`. A pre-transformed
+ *        vertex is not clipped.
  * @returns {TranslatedShader}
  */
 export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [], fog = 0,
@@ -2143,14 +2306,23 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
                 ? outputs.filter(isCoordinate).map(location=>`out.o${location}`)
                 : []));
     }
+    const clip = options.clip && vertex ? options.clip : null;
+    if (clip)
+    {
+        const clipped = clipOutputs(clip,
+            plane=>`dot(c[${HYBRID_CONSTANTS.COUNT + plane}], vec4f(${vertex}, 1.0))`);
+        outputFields.push(...clipped.fields);
+        outputs.push(...clipped.locations);
+        body.push(...clipped.lines);
+    }
     // Half a pixel on to WebGPU's pixel centres, as every Direct3D position.
     body.unshift(`    out.oPos = ${position ?? 'vec4f(0.0, 0.0, 0.0, 1.0)'};`,
         `    out.oPos = vec4f(out.oPos.xy + out.oPos.w * c[${HYBRID_CONSTANTS.VIEWPORT}].zw`
             + ' * 0.5, out.oPos.zw);');
     const wgsl = [
         ...moduleHeader({
-            vertex: true, constants: HYBRID_CONSTANTS.COUNT, samplers: [], inputFields,
-            outputFields,
+            vertex: true, constants: HYBRID_CONSTANTS.COUNT + (clip?.count ?? 0), samplers: [],
+            inputFields, outputFields, clipDistances: clip?.distances === true,
         }),
         D3D_MATH,
         // The fog curve over the fixed function's own range row.
@@ -2173,7 +2345,8 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
     ].join('\n');
     return {
         wgsl, entry: 'vs_main', inputs, outputs, reads: [], samplers: [],
-        constants: HYBRID_CONSTANTS.COUNT,
+        constants: HYBRID_CONSTANTS.COUNT + (clip?.count ?? 0),
+        ...(clip ? { clipRegister: HYBRID_CONSTANTS.COUNT } : {}),
         error: position ? null : 'the declaration carries no position',
     };
 }

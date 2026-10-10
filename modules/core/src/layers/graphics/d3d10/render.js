@@ -38,14 +38,15 @@ import {
 import { convertTexels, convertedTexelBytes } from './blocks.js';
 import {
     INDEX_FORMAT, TEXEL_BYTES, VERTEX_FORMAT, VERTEX_FORMAT_BYTES, copyCompatible,
-    isDepthFormat, textureStorage, viewFormatOf,
+    MIPS_GENERATED, isDepthFormat, resolvable, textureStorage, viewFormatOf,
 } from './gpuformats.js';
 import { levelExtent } from './validity.js';
 import { passedSamples, reachableArea } from '../webgpu/internal/occlusion.js';
 import {
-    BINDING, BUFFER_VIEW_FORMATS, STAGE, linkProgram, translateShader,
+    BINDING, BUFFER_VIEW_FORMATS, NO_PIXEL_SHADER, STAGE, linkProgram, translateShader,
 } from './wgsl.js';
 import { LockFlags } from '../webgpu/internal/buffers.js';
+import { RESOURCE_DIMENSION } from './sm4.js';
 
 /**
  * @typedef {Object} RenderServices
@@ -152,6 +153,9 @@ const ADDRESS = Object.freeze({
 const blendable = format=>!/int$/.test(format) && !/32float$/.test(format);
 
 /** The state a null rasterizer, depth-stencil or blend state stands for. */
+/** What a draw with no input layout bound is fed by: nothing. */
+const NO_INPUT_LAYOUT = Object.freeze({ elements: Object.freeze([]) });
+
 const DEFAULT_RASTERIZER = Object.freeze({
     FillMode: D3D10_FILL_MODE.SOLID,
     CullMode: D3D10_CULL_MODE.BACK,
@@ -276,9 +280,6 @@ const DEFAULT_BLEND = Object.freeze({
  * @property {number[]} color
  */
 
-/** The formats a level is drawn into and filtered from when the GPU makes mips. */
-const FILTERED_TARGET = /^(rgba8unorm|bgra8unorm|rgba16float|rg16float|r16float|rgb10a2unorm|rg8unorm|r8unorm)/;
-
 /**
  * A triangle over the whole target, sampling the level above at the middle of
  * each target texel.
@@ -298,6 +299,53 @@ const MIP_SHADER = [
     '    return textureSampleLevel(source, linear, in.uv, 0.0);',
     '}',
 ].join('\n');
+
+/**
+ * A resolve: every pixel the average of its four samples, read through a view
+ * in the format the resolve names -- an sRGB one decodes each sample before
+ * the average and encodes the result, as Direct3D resolves in that format's
+ * space -- and drawn into the one-sample destination.
+ */
+const RESOLVE_SHADER = [
+    '@group(0) @binding(0) var source: texture_multisampled_2d<f32>;',
+    '@vertex fn vertexMain(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {',
+    '    let uv = vec2<f32>(f32((index << 1u) & 2u), f32(index & 2u));',
+    '    return vec4<f32>(uv * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0), 0.0, 1.0);',
+    '}',
+    '@fragment fn fragmentMain(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {',
+    '    let at = vec2<i32>(position.xy);',
+    '    return (textureLoad(source, at, 0) + textureLoad(source, at, 1)',
+    '        + textureLoad(source, at, 2) + textureLoad(source, at, 3)) * 0.25;',
+    '}',
+].join('\n');
+
+/** A texture's top level drawn into a target of another format, texel for texel. */
+const COPY_SHADER = [
+    '@group(0) @binding(0) var source: texture_2d<f32>;',
+    '@vertex fn vertexMain(@builtin(vertex_index) index: u32) -> @builtin(position) vec4<f32> {',
+    '    let uv = vec2<f32>(f32((index << 1u) & 2u), f32(index & 2u));',
+    '    return vec4<f32>(uv * vec2<f32>(2.0, -2.0) + vec2<f32>(-1.0, 1.0), 0.0, 1.0);',
+    '}',
+    '@fragment fn fragmentMain(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {',
+    '    return textureLoad(source, vec2<i32>(position.xy), 0);',
+    '}',
+].join('\n');
+
+/**
+ * The formats a canvas is configured in, by the format a back buffer is kept
+ * in: its own where a canvas takes it, the linear twin of an sRGB one -- the
+ * same bytes, shown as they are -- and half floats for ten bits a channel.
+ *
+ * @type {Readonly<Record<string, string>>}
+ */
+const CANVAS_FORMAT = Object.freeze({
+    rgba8unorm: 'rgba8unorm',
+    bgra8unorm: 'bgra8unorm',
+    rgba16float: 'rgba16float',
+    'rgba8unorm-srgb': 'rgba8unorm',
+    'bgra8unorm-srgb': 'bgra8unorm',
+    rgb10a2unorm: 'rgba16float',
+});
 
 /**
  * @param {number} a
@@ -338,6 +386,8 @@ export function createRenderer(services){
     const samplers = new WeakMap();
     /** @type {WeakMap<object, any>} shader -> translation */
     const translations = new WeakMap();
+    /** @type {WeakMap<object, Map<string, any>>} shader -> its multisampled variants */
+    const multisampledTranslations = new WeakMap();
     /** @type {Map<string, Promise<any>>} */
     const pipelines = new Map();
     /** @type {Map<string, any>} */
@@ -526,7 +576,10 @@ export function createRenderer(services){
         else if (layout.format && desc.Usage !== D3D10_USAGE.STAGING)
         {
             let usage = TextureUsage.COPY_DST | TextureUsage.COPY_SRC;
-            if ((desc.BindFlags & (D3D10_BIND.RENDER_TARGET | D3D10_BIND.DEPTH_STENCIL)) !== 0)
+            // WebGPU makes a multisampled texture only as something to draw
+            // into, whatever else the program binds it as.
+            if ((desc.BindFlags & (D3D10_BIND.RENDER_TARGET | D3D10_BIND.DEPTH_STENCIL)) !== 0
+                || backing.sampleCount > 1)
             {
                 usage |= TextureUsage.RENDER_ATTACHMENT;
             }
@@ -689,6 +742,12 @@ export function createRenderer(services){
         {
             return;
         }
+        if (backing.sampleCount > 1)
+        {
+            diverge('bytes a program gives a multisampled texture are kept but not uploaded:'
+                + ' WebGPU writes one only by drawing');
+            return;
+        }
         if (backing.layout.storage.depth)
         {
             // WebGPU copies into no depth format with a stencil, and a depth
@@ -818,23 +877,25 @@ export function createRenderer(services){
             diverge(`a view of a typeless texture as format ${desc.Format} reads it as`
                 + ` ${chosen.format}: WebGPU does not reinterpret one type as another`);
         }
+        const dimension = resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D
+            ? '3d'
+            : isCube ? 'cube' : array ? '2d-array' : '2d';
         const created = backing.texture.createView({
             label: `d3d10:view:${chosen.format ?? chosen.aspect}`,
             ...(chosen.format ? { format: chosen.format } : {}),
             ...(chosen.aspect ? { aspect: chosen.aspect } : {}),
-            dimension: resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D
-                ? '3d'
-                : isCube ? 'cube' : array ? '2d-array' : '2d',
-            baseMipLevel: desc.MostDetailedMip ?? desc.MipSlice ?? 0,
-            mipLevelCount: desc.MipLevels ?? 1,
+            dimension,
+            baseMipLevel: view.range.mip,
+            mipLevelCount: view.range.levels,
             baseArrayLayer: resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D
                 ? 0
-                : desc.FirstArraySlice ?? 0,
+                : view.range.first,
             arrayLayerCount: resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D
                 ? 1
-                : desc.ArraySize ?? 1,
+                : view.range.count,
         });
-        gpu = { view: created, sampleType: sampleTypeOf(chosen.format, chosen.aspect) };
+        gpu = { view: created, sampleType: sampleTypeOf(chosen.format, chosen.aspect), dimension,
+            multisampled: backing.sampleCount > 1 };
         views.set(view, gpu);
         return gpu;
     };
@@ -1046,8 +1107,33 @@ export function createRenderer(services){
 
     // --- shaders and pipelines ---
 
-    /** @param {any} shader a shader object holding a parsed container */
-    const translationOf = shader=>{
+    /**
+     * @param {any} shader a shader object holding a parsed container, or null
+     *     for the pixel stage of a draw that binds none
+     * @param {string} [multisampled]  The slots read by sample, as a key.
+     */
+    const translationOf = (shader, multisampled = '')=>{
+        if (!shader)
+        {
+            return NO_PIXEL_SHADER;
+        }
+        if (multisampled)
+        {
+            let variants = multisampledTranslations.get(shader);
+            if (!variants)
+            {
+                variants = new Map();
+                multisampledTranslations.set(shader, variants);
+            }
+            let variant = variants.get(multisampled);
+            if (!variant)
+            {
+                variant = translateShader(shader.container,
+                    { multisampled: multisampled.split(',').map(Number) });
+                variants.set(multisampled, variant);
+            }
+            return variant;
+        }
         let translation = translations.get(shader);
         if (!translation)
         {
@@ -1055,6 +1141,34 @@ export function createRenderer(services){
             translations.set(shader, translation);
         }
         return translation;
+    };
+
+    /**
+     * The slots, as a key, where a stage's shader declares a multisampled
+     * texture and the view bound there is of one with several samples: what
+     * its translation has to read by sample. Empty for nearly every draw, and
+     * found from the few textures the shader declares.
+     *
+     * @param {any} stage
+     * @returns {string}
+     */
+    const multisampledSlotsOf = stage=>{
+        if (!stage.shader)
+        {
+            return '';
+        }
+        let slots = '';
+        for (const texture of translationOf(stage.shader).textures)
+        {
+            const view = texture.dimension === RESOURCE_DIMENSION.TEXTURE2DMS
+                ? stage.shaderResources[texture.slot]
+                : null;
+            if (view && viewOf(view)?.multisampled)
+            {
+                slots += `${slots ? ',' : ''}${texture.slot}`;
+            }
+        }
+        return slots;
     };
 
     /** @param {import('./wgsl.js').BindGroupLayoutEntry[]} entries @param {string} label */
@@ -1147,14 +1261,20 @@ export function createRenderer(services){
      * @param {any} state the draw's captured state
      * @returns {string} the pipeline the state needs
      */
-    const pipelineKey = state=>[
-        idOf(state.vertexShader), idOf(state.pixelShader), idOf(state.inputLayout),
-        idOf(state.blendState), idOf(state.depthStencilState), idOf(state.rasterizerState),
-        state.topology, state.targetFormats.join(','), state.targetWriteMasks.join(','),
-        state.depthFormat ?? '-',
-        state.sampleMask >>> 0,
-        state.sampleCount, state.strides.join(','), state.indexFormat ?? '-',
-    ].join('|');
+    const pipelineKey = state=>{
+        const key = [
+            idOf(state.vertexShader), idOf(state.pixelShader), idOf(state.inputLayout),
+            idOf(state.blendState), idOf(state.depthStencilState), idOf(state.rasterizerState),
+            state.topology, state.targetFormats.join(','), state.targetWriteMasks.join(','),
+            state.depthFormat ?? '-',
+            state.sampleMask >>> 0,
+            state.sampleCount, state.strides.join(','), state.indexFormat ?? '-',
+        ].join('|');
+        // Only a draw that reads a multisampled texture by sample says so.
+        return state.vsMultisampled || state.psMultisampled
+            ? `${key}|ms:${state.vsMultisampled}/${state.psMultisampled}`
+            : key;
+    };
 
     /** @type {WeakMap<object, number>} */
     const ids = new WeakMap();
@@ -1213,8 +1333,8 @@ export function createRenderer(services){
      * @returns {Promise<any>}
      */
     const buildPipeline = async state=>{
-        const vs = translationOf(state.vertexShader);
-        const ps = translationOf(state.pixelShader);
+        const vs = translationOf(state.vertexShader, state.vsMultisampled);
+        const ps = translationOf(state.pixelShader, state.psMultisampled);
         /** @type {(string | null)[]} */
         const formats = state.targetFormats;
         const bound = formats.flatMap((format, index)=>(format ? [index] : []));
@@ -1417,8 +1537,8 @@ export function createRenderer(services){
         const described = {};
         view.GetDesc(described);
         const desc = described.desc;
-        const mip = desc.MipSlice ?? 0;
-        const layer = desc.FirstArraySlice ?? 0;
+        const mip = view.range.mip;
+        const layer = view.range.first;
         if (held.resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D)
         {
             diverge('a view into a slice of a 3D texture draws into its first slice');
@@ -1501,6 +1621,20 @@ export function createRenderer(services){
                         + ` ${entry.texture.sampleType} one is read as an empty texture`);
                     return { binding: entry.binding, resource: fallback.view(entry.texture) };
                 }
+                // WebGPU refuses the whole bind group over a view of another
+                // shape, where Direct3D leaves only that read undefined.
+                if (gpu && gpu.multisampled !== (entry.texture.multisampled === true))
+                {
+                    diverge(`a ${gpu.multisampled ? 'multisampled' : 'one-sample'} texture bound`
+                        + ' where the shader reads the other kind is read as an empty texture');
+                    return { binding: entry.binding, resource: fallback.view(entry.texture) };
+                }
+                if (gpu && gpu.dimension !== entry.texture.viewDimension)
+                {
+                    diverge(`a ${gpu.dimension} view bound where the shader reads a`
+                        + ` ${entry.texture.viewDimension} one is read as an empty texture`);
+                    return { binding: entry.binding, resource: fallback.view(entry.texture) };
+                }
                 return {
                     binding: entry.binding,
                     resource: gpu ? gpu.view : fallback.view(entry.texture),
@@ -1536,7 +1670,11 @@ export function createRenderer(services){
     const gpuCopy = (destination, destinationSubresource, at, source, sourceSubresource, box)=>{
         const from = backingOf(source);
         const to = backingOf(destination);
-        if (!from.texture || from.layout.storage.depth || from.sampleCount !== 1)
+        // A multisampled texture is copied only whole, into another of its
+        // sample count: there is no reading one back.
+        if (!from.texture || from.layout.storage.depth
+            || (from.sampleCount !== 1 && (box || at.x !== 0 || at.y !== 0
+                || to.sampleCount !== from.sampleCount)))
         {
             return false;
         }
@@ -1564,7 +1702,7 @@ export function createRenderer(services){
         if (to.texture)
         {
             if (!copyCompatible(from.layout.format, to.layout.format)
-                || to.layout.storage.depth || to.sampleCount !== 1)
+                || to.layout.storage.depth || to.sampleCount !== from.sampleCount)
             {
                 return false;
             }
@@ -1715,8 +1853,131 @@ export function createRenderer(services){
                 });
             }
         }
-        record({ kind: 'mips', id: backing.id, pipeline: mipPipelineFor(format), steps });
+        record({ kind: 'blit', ids: [backing.id], what: 'mips were not generated',
+            pipeline: mipPipelineFor(format), steps });
         backing.gpuDirty = true;
+    };
+
+    /** @type {Map<string, Promise<any>>} kind and format -> the pipeline that draws it */
+    const blitPipelines = new Map();
+
+    /**
+     * The pipeline that draws a whole texture into a target of `format`: by
+     * averaging its four samples, or by reading its one.
+     *
+     * @param {'resolve' | 'copy'} kind
+     * @param {string} format
+     */
+    const blitPipelineFor = (kind, format)=>{
+        const key = `${kind}:${format}`;
+        let built = blitPipelines.get(key);
+        if (!built)
+        {
+            built = (async()=>{
+                const module = await backend.createShaderModule({
+                    code: kind === 'resolve' ? RESOLVE_SHADER : COPY_SHADER,
+                    label: `d3d10:${kind}`,
+                });
+                const layout = layoutFor([
+                    { binding: 0, visibility: STAGE.FRAGMENT, texture: kind === 'resolve'
+                        ? { sampleType: 'unfilterable-float', viewDimension: '2d',
+                            multisampled: true }
+                        : { sampleType: 'unfilterable-float', viewDimension: '2d' } },
+                ], `d3d10:${kind}`);
+                const gpu = backend.createRenderPipeline({
+                    label: `d3d10:${kind}:${format}`,
+                    layout: backend.createPipelineLayout({
+                        label: `d3d10:${kind}`, bindGroupLayouts: [layout],
+                    }),
+                    vertex: { module, entryPoint: 'vertexMain', buffers: [] },
+                    fragment: { module, entryPoint: 'fragmentMain', targets: [{ format }] },
+                    primitive: { topology: 'triangle-list' },
+                });
+                return { gpu, layout };
+            })();
+            blitPipelines.set(key, built);
+        }
+        return built;
+    };
+
+    /**
+     * Records the top level of a texture drawn into one level and slice of
+     * another: a multisampled one resolved, a one-sample one copied through
+     * the shader where the two formats are not ones the GPU copies between.
+     *
+     * @param {any} from          The backing drawn from.
+     * @param {any} to            The one-sample backing drawn into.
+     * @param {number} level
+     * @param {number} slice
+     * @param {string} format     The WebGPU format the source is read in.
+     * @param {string} [written]  The one the target is written in; the same by default.
+     */
+    const recordBlit = (from, to, level, slice, format, written = format)=>{
+        const kind = from.sampleCount > 1 ? 'resolve' : 'copy';
+        const geometry = to.layout.levels[level];
+        record({
+            kind: 'blit',
+            ids: [from.id, to.id],
+            what: kind === 'resolve'
+                ? 'a multisampled texture was not resolved'
+                : 'a texture was not drawn into another',
+            pipeline: blitPipelineFor(kind, written),
+            steps: [{
+                surface: {
+                    texture: to.texture,
+                    view: to.texture.createView({
+                        label: `d3d10:${kind}:target`, format: written, dimension: '2d',
+                        baseMipLevel: level, mipLevelCount: 1, baseArrayLayer: slice,
+                        arrayLayerCount: 1,
+                    }),
+                    width: geometry.width,
+                    height: geometry.height,
+                    format: written,
+                    label: `d3d10:${kind}`,
+                },
+                entries: [{ binding: 0, resource: from.texture.createView({
+                    label: `d3d10:${kind}:source`, format, dimension: '2d', baseMipLevel: 0,
+                    mipLevelCount: 1, baseArrayLayer: 0, arrayLayerCount: 1,
+                }) }],
+            }],
+        });
+        to.gpuDirty = true;
+    };
+
+    /**
+     * What a back buffer is shown as when it cannot be shown as it is: a
+     * one-sample texture in a format a canvas takes, filled before each
+     * present. Its own format is kept where the two differ only by sRGB, so
+     * the bytes shown are the bytes drawn.
+     *
+     * @param {any} backing
+     * @param {string} shown  The canvas format.
+     */
+    const presentedOf = (backing, shown)=>{
+        if (!backing.presented)
+        {
+            const own = backing.layout.format;
+            const twin = own !== shown && copyCompatible(own, shown);
+            const texture = createTexture({
+                label: `d3d10:presented:${shown}`,
+                size: { width: backing.surface.width, height: backing.surface.height,
+                    depthOrArrayLayers: 1 },
+                format: shown,
+                ...(twin ? { viewFormats: [own] } : {}),
+                usage: TextureUsage.RENDER_ATTACHMENT | TextureUsage.TEXTURE_BINDING
+                    | TextureUsage.COPY_SRC | TextureUsage.COPY_DST,
+            });
+            backing.presented = {
+                id: nextBacking++,
+                texture,
+                written: twin || own === shown ? own : shown,
+                layout: { levels: [{ width: backing.surface.width,
+                    height: backing.surface.height }] },
+                surface: { ...backing.surface, texture, format: shown,
+                    view: texture.createView({ label: 'd3d10:presented' }) },
+            };
+        }
+        return backing.presented;
     };
 
     return {
@@ -1906,7 +2167,7 @@ export function createRenderer(services){
             if (backend && backing.texture && gpuWritten(resource)
                 && resource.dimension !== D3D10_RESOURCE_DIMENSION.TEXTURE1D
                 && resource.dimension !== D3D10_RESOURCE_DIMENSION.TEXTURE3D
-                && FILTERED_TARGET.test(format) && backing.sampleCount === 1)
+                && MIPS_GENERATED.test(format) && backing.sampleCount === 1)
             {
                 recordMips(resource, backing);
                 return true;
@@ -2036,14 +2297,12 @@ export function createRenderer(services){
                 counters.skipped.noViewport++;
                 return;
             }
-            if (!pipeline.stages.vs.shader || !pipeline.stages.ps.shader)
+            // Without a pixel shader the draw still runs: it writes depth and
+            // stencil and no render target, as a depth-only pass expects.
+            if (!pipeline.stages.vs.shader)
             {
                 counters.skipped.noShader++;
                 return;
-            }
-            if (pipeline.stages.gs.shader)
-            {
-                diverge('a geometry shader is bound and ignored: the draw runs without one');
             }
             const topology = TOPOLOGY[pipeline.topology];
             if (!topology)
@@ -2055,7 +2314,9 @@ export function createRenderer(services){
             const state = {
                 vertexShader: pipeline.stages.vs.shader,
                 pixelShader: pipeline.stages.ps.shader,
-                inputLayout: pipeline.inputLayout,
+                // No layout feeds no attribute: the draw runs on what the
+                // vertex shader makes of its system values alone.
+                inputLayout: pipeline.inputLayout ?? NO_INPUT_LAYOUT,
                 blendState: pipeline.blendState,
                 depthStencilState: pipeline.depthStencilState,
                 rasterizerState: pipeline.rasterizerState,
@@ -2067,20 +2328,17 @@ export function createRenderer(services){
                 sampleCount: sizing.sampleCount,
                 strides: pipeline.vertexStrides.slice(),
                 indexFormat: draw.indexCount === undefined ? null : indexFormat,
+                vsMultisampled: multisampledSlotsOf(pipeline.stages.vs),
+                psMultisampled: multisampledSlotsOf(pipeline.stages.ps),
             };
-            if (!state.inputLayout)
-            {
-                diverge('a draw with no input layout is skipped');
-                return;
-            }
             const rasterizer = pipeline.rasterizerState
                 ? stateDesc(pipeline.rasterizerState)
                 : DEFAULT_RASTERIZER;
             const scissor = rasterizer.ScissorEnable && pipeline.scissorRects[0]
                 ? pipeline.scissorRects[0]
                 : null;
-            const program = linkProgram(translationOf(state.vertexShader),
-                translationOf(state.pixelShader));
+            const program = linkProgram(translationOf(state.vertexShader, state.vsMultisampled),
+                translationOf(state.pixelShader, state.psMultisampled));
             const vertexBuffers = pipeline.vertexBuffers.map((buffer, slot)=>{
                 const backing = buffer ? backingOf(buffer) : null;
                 if (!backing || !backing.gpu)
@@ -2162,7 +2420,70 @@ export function createRenderer(services){
                 return chain;
             }
             counters.frames++;
-            return submit(backingOf(backBuffer).surface);
+            const backing = backingOf(backBuffer);
+            const own = backing.layout.format;
+            const shown = CANVAS_FORMAT[own] ?? own;
+            if (!backing.texture || (backing.sampleCount === 1 && shown === own))
+            {
+                return submit(backing.surface);
+            }
+            // A canvas takes no sRGB, ten-bit or multisampled frame: the back
+            // buffer is resolved, copied or drawn into one it takes.
+            const presented = presentedOf(backing, shown);
+            if (backing.sampleCount === 1 && copyCompatible(own, shown))
+            {
+                record({
+                    kind: 'copyTexture',
+                    sourceId: backing.id,
+                    destinationId: presented.id,
+                    source: { texture: backing.texture, mipLevel: 0, origin: { x: 0, y: 0, z: 0 } },
+                    destination: { texture: presented.texture, mipLevel: 0,
+                        origin: { x: 0, y: 0, z: 0 } },
+                    size: { width: backing.surface.width, height: backing.surface.height,
+                        depthOrArrayLayers: 1 },
+                });
+            }
+            else
+            {
+                recordBlit(backing, presented, 0, 0, own, presented.written);
+            }
+            return submit(presented.surface);
+        },
+
+        /**
+         * The resolve of a multisampled subresource into a one-sample one,
+         * in the format given, which both resources have to be viewable as.
+         *
+         * @param {any} destination
+         * @param {number} destinationSubresource
+         * @param {any} source
+         * @param {number} sourceSubresource
+         * @param {number} format  The DXGI format the samples are averaged in.
+         */
+        resolve(destination, destinationSubresource, source, sourceSubresource, format){
+            if (!backend)
+            {
+                return;
+            }
+            void sourceSubresource;
+            const from = backingOf(source);
+            const to = backingOf(destination);
+            if (!from.texture || !to.texture)
+            {
+                return;
+            }
+            const read = viewFormatOf(from.layout.storage, format, { compressed });
+            const written = viewFormatOf(to.layout.storage, format, { compressed });
+            if (!read.format || read.reinterpreted || written.reinterpreted
+                || read.format !== written.format || !resolvable(read.format))
+            {
+                diverge(`a resolve in format ${format} is not made: the GPU views the two`
+                    + ` textures as ${read.format ?? read.aspect} and`
+                    + ` ${written.format ?? written.aspect}`);
+                return;
+            }
+            const { level, slice } = subresourceOf(destination, destinationSubresource);
+            recordBlit(from, to, level, slice, read.format);
         },
 
         /**
@@ -2224,6 +2545,70 @@ export function createRenderer(services){
                 this.flush();
             }
             return waiting.promise;
+        },
+
+        /**
+         * The GPU's copy of a texture's first subresource read back into its
+         * own host bytes, for a caller that hands those bytes to the
+         * processor: sent to the GPU now, and settled when the bytes are
+         * there. Null when the host bytes are already what the GPU holds, or
+         * the texture is one that cannot be read back.
+         *
+         * @param {any} resource
+         * @returns {Promise<void> | null}
+         */
+        readBack(resource){
+            if (!backend || !gpuWritten(resource))
+            {
+                return null;
+            }
+            const backing = backingOf(resource);
+            if (!backing.texture || !readable(backing))
+            {
+                return null;
+            }
+            const level = backing.layout.levels[0];
+            const texel = TEXEL_BYTES[backing.layout.storage.format];
+            /** @type {() => void} */
+            let arrive = ()=>{};
+            const arrived = new Promise(done=>{
+                arrive = ()=>done(undefined);
+            });
+            let delivered = false;
+            record({
+                kind: 'readback',
+                sourceId: backing.id,
+                surface: {
+                    texture: backing.texture, mipLevel: 0, layer: 0,
+                    width: level.width, height: level.height, bytesPerTexel: texel,
+                },
+                /** @param {{ width: number, height: number, data: Uint8Array } | null} image */
+                deliver(image){
+                    if (delivered)
+                    {
+                        return;
+                    }
+                    delivered = true;
+                    if (image)
+                    {
+                        const into = subresourceBytes(resource, 0);
+                        for (let row = 0; row < level.height; row++)
+                        {
+                            const start = row * image.width * texel;
+                            into.bytes.set(image.data.subarray(start, start + level.width * texel),
+                                row * into.rowPitch);
+                        }
+                    }
+                    else
+                    {
+                        diverge('a read back that did not arrive leaves the pixels a device'
+                            + ' context is opened over as they were');
+                    }
+                    arrive();
+                },
+            });
+            this.flush();
+            return arrived;
         },
 
         /** @returns {number} commands recorded so far */
@@ -2427,22 +2812,23 @@ export function createRenderer(services){
                     readers.push({ read: frame.snapshot(command.surface), command });
                     continue;
                 }
-                if (command.kind === 'mips')
+                if (command.kind === 'blit')
                 {
-                    settleClears(command.id);
+                    command.ids.forEach(settleClears);
                     const built = pipelinesNeeded[position];
                     if (built.status === 'rejected')
                     {
-                        diverge(`mips were not generated: ${built.reason && built.reason.message
+                        diverge(`${command.what}: ${built.reason && built.reason.message
                             || built.reason}`);
                         continue;
                     }
                     for (const step of command.steps)
                     {
-                        const mipPass = frame.beginPass({ target: step.surface });
-                        mipPass.setPipeline(built.value.gpu);
-                        mipPass.setBindings(0, built.value.layout, step.entries, 'd3d10:mips');
-                        mipPass.draw(3, 1, 0, 0);
+                        const blitPass = frame.beginPass({ target: step.surface });
+                        blitPass.setPipeline(built.value.gpu);
+                        blitPass.setBindings(0, built.value.layout, step.entries,
+                            step.surface.label);
+                        blitPass.draw(3, 1, 0, 0);
                     }
                     closePass();
                     continue;

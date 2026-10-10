@@ -45,14 +45,20 @@ import {
 } from './constants.js';
 import { SHADER_KIND, SYSTEM_VALUE, parseDxbc, parseShaderOfKind } from './dxbc.js';
 import { createFactory } from './dxgi.js';
-import { INDEX_FORMAT, VERTEX_FORMAT, textureStorage } from './gpuformats.js';
+import {
+    INDEX_FORMAT, MIPS_GENERATED, MULTISAMPLE_COUNT, VERTEX_FORMAT,
+    multisampleQualityLevels as webgpuMultisampleQualityLevels, textureStorage,
+} from './gpuformats.js';
 import { createDrawStatistics, createQueryObject } from './queries.js';
 import { createRenderer } from './render.js';
 import {
     VIEW_KINDS, createResource, createView, resolveMipLevels, resolveViewDesc, textureInterfaces,
 } from './resources.js';
 import { STATE_KIND, createStateStore } from './states.js';
-import { bindFlagsForUsage, bufferCreateResult, textureCreateResult } from './validity.js';
+import {
+    DISPLAY_FORMATS, bindFlagsForUsage, bufferCreateResult, resolveViewFormat,
+    textureCreateResult,
+} from './validity.js';
 
 /**
  * @typedef {import('./render.js').SubresourceData} SubresourceData
@@ -79,8 +85,23 @@ const FORMAT_SUPPORT = Object.freeze({
     BLENDABLE: 0x8000,
     DEPTH_STENCIL: 0x10000,
     CPU_LOCKABLE: 0x20000,
+    MULTISAMPLE_RESOLVE: 0x40000,
     DISPLAY: 0x80000,
+    MULTISAMPLE_RENDERTARGET: 0x200000,
+    MULTISAMPLE_LOAD: 0x400000,
 });
+
+/**
+ * The views of a depth family that read its depth, and so can be sampled
+ * against a reference: R32_FLOAT, R24_UNORM_X8_TYPELESS, R16_UNORM and
+ * R32_FLOAT_X8X24_TYPELESS (D3D10's format support table).
+ *
+ * @type {ReadonlySet<number>}
+ */
+const DEPTH_READING_VIEWS = new Set([
+    DXGI_FORMAT.R32_FLOAT, DXGI_FORMAT.R24_UNORM_X8_TYPELESS, DXGI_FORMAT.R16_UNORM,
+    DXGI_FORMAT.R32_FLOAT_X8X24_TYPELESS,
+]);
 
 /** The frames a DXGI device queues ahead unless told otherwise, and the most it will. */
 const DEFAULT_FRAME_LATENCY = 3;
@@ -110,18 +131,6 @@ const PREDICATE_QUERIES = new Set([
  *     Told of every frame a swap chain's present queues; what it answers is
  *     what the present waits on before it answers the program.
  */
-
-/**
- * The multisample support a backend with no multisampling reports: one sample
- * at one quality level, and nothing beyond that.
- *
- * @param {number} format
- * @param {number} sampleCount
- * @returns {number}
- */
-function noMultisampling(format, sampleCount){
-    return sampleCount === 1 ? 1 : 0;
-}
 
 /**
  * @param {any} adapter
@@ -304,11 +313,12 @@ export function D3D10CreateDeviceAndSwapChain(adapter, driverType, software, fla
     if (created !== S_OK)
     {
         // Neither object survives a failure here: a caller that got a device
-        // back would have no way of telling it apart from a full success.
+        // back would have no way of telling it apart from a full success. The
+        // swap chain's own answer is the call's (d3d10_1.c:252-266).
         device.release();
         deviceOut.device = null;
         chain.swapChain = null;
-        return DXGI_ERROR_INVALID_CALL;
+        return created;
     }
     return S_OK;
 }
@@ -381,7 +391,8 @@ function readSlots(slots, startSlot, count){
  * @param {DeviceOptions & { flags?: number }} [options]
  */
 export function createDevice(options = {}){
-    const multisampleQualityLevels = options.multisampleQualityLevels ?? noMultisampling;
+    const multisampleQualityLevels = options.multisampleQualityLevels
+        ?? webgpuMultisampleQualityLevels;
     const caps = { multisampleQualityLevels };
     const factory = options.adapter
         ? null
@@ -442,6 +453,7 @@ export function createDevice(options = {}){
         unmap: (resource, subresource, discard, noOverwrite)=>
             renderer.unmap(resource, subresource, discard, noOverwrite),
         pending: resource=>renderer.pendingReadback(resource),
+        readBack: resource=>renderer.readBack(resource),
     };
 
     /**
@@ -523,6 +535,12 @@ export function createDevice(options = {}){
         {
             return hr;
         }
+        if ((desc.SampleDesc?.Count ?? 1) > 1 && (desc.ArraySize ?? 1) > 1)
+        {
+            diverge('a multisampled texture array is refused: WebGPU multisamples a texture'
+                + ' of one layer only');
+            return E_INVALIDARG;
+        }
         const resolved = Object.freeze({
             ...desc,
             MipLevels: resolveMipLevels(desc, dimension),
@@ -560,19 +578,19 @@ export function createDevice(options = {}){
         const resolved = resolveViewDesc({
             resource,
             desc: desc ?? null,
-            dimensions: kind.dimensions,
+            dimensions: kind.union.dimensions,
+            members: kind.union.members,
             bindFlag: kind.bindFlag,
-            mipRange: kind.mipRange,
         });
         if (!resolved)
         {
             return E_INVALIDARG;
         }
-        const { dimensionName, ...reported } = resolved;
         out.view = createView({
             resource,
-            desc: Object.freeze(reported),
-            dimensionName,
+            desc: Object.freeze(resolved.desc),
+            dimensionName: resolved.dimensionName,
+            range: resolved.range,
             iid: kind.iid,
             also: kind.also,
             retainDevice,
@@ -937,9 +955,25 @@ export function createDevice(options = {}){
             return createShader(IID.ID3D10VertexShader, SHADER_KIND.VERTEX, out, bytecode);
         },
 
-        /** @param {Uint8Array} bytecode @param {{ shader?: any }} out */
+        /**
+         * A geometry shader is refused, once its bytecode is known to be one:
+         * WebGPU has no geometry stage and the translator does not emulate
+         * one, and a shader made and then left out of every draw would draw
+         * the program's points and triangles where it expands, culls or
+         * routes them. Bytecode that is not a geometry shader is the plain
+         * bad-argument answer Windows gives.
+         *
+         * @param {Uint8Array} bytecode @param {{ shader?: any }} out
+         */
         CreateGeometryShader(bytecode, out){
-            return createShader(IID.ID3D10GeometryShader, SHADER_KIND.GEOMETRY, out, bytecode);
+            out.shader = null;
+            if (!bytecode || !parseShaderOfKind(bytecode, SHADER_KIND.GEOMETRY))
+            {
+                return E_INVALIDARG;
+            }
+            diverge('a geometry shader is refused: WebGPU has no geometry stage and none is'
+                + ' emulated here');
+            return E_NOTIMPL;
         },
 
         /**
@@ -971,19 +1005,22 @@ export function createDevice(options = {}){
          * index: every input the shader declares has to be fed by some element,
          * or the draw could never assemble a vertex.
          *
-         * @param {readonly any[]} elements
+         * @param {readonly any[] | null} elements
          * @param {Uint8Array} shaderBytecode  A container with the input signature.
          * @param {{ layout?: any }} out
          * @returns {number}
          */
         CreateInputLayout(elements, shaderBytecode, out){
             out.layout = null;
-            if (!elements || elements.length === 0
-                || elements.length > D3D10_LIMITS.INPUT_ELEMENTS || !shaderBytecode)
+            // No elements at all is a layout: a vertex shader that reads only
+            // system values -- a full-screen pass built from SV_VertexID --
+            // is fed by it.
+            const given = elements ?? [];
+            if (given.length > D3D10_LIMITS.INPUT_ELEMENTS || !shaderBytecode)
             {
                 return E_INVALIDARG;
             }
-            for (const element of elements)
+            for (const element of given)
             {
                 if (!element.SemanticName || element.InputSlot >= D3D10_LIMITS.VERTEX_INPUT_SLOTS)
                 {
@@ -1001,7 +1038,7 @@ export function createDevice(options = {}){
                 {
                     continue;
                 }
-                const fed = elements.some(element=>
+                const fed = given.some(element=>
                     element.SemanticName.toUpperCase() === input.name.toUpperCase()
                     && (element.SemanticIndex ?? 0) === input.index);
                 if (!fed)
@@ -1010,7 +1047,7 @@ export function createDevice(options = {}){
                 }
             }
             out.layout = attachCom({
-                elements: Object.freeze(elements.map(element=>Object.freeze({ ...element }))),
+                elements: Object.freeze(given.map(element=>Object.freeze({ ...element }))),
                 /** @param {{ device?: any }} target */
                 GetDevice(target){
                     retainDevice();
@@ -1079,7 +1116,10 @@ export function createDevice(options = {}){
                 return E_FAIL;
             }
             const block = info.blockEdge > 1;
-            let support = FORMAT_SUPPORT.CPU_LOCKABLE | (block ? 0 : FORMAT_SUPPORT.BUFFER);
+            const depth = info.kind === FORMAT_KIND.DEPTH;
+            // A buffer holds elements a view can name: no blocks, and no depth.
+            let support = FORMAT_SUPPORT.CPU_LOCKABLE
+                | (block || depth ? 0 : FORMAT_SUPPORT.BUFFER);
             if (VERTEX_FORMAT[format])
             {
                 support |= FORMAT_SUPPORT.IA_VERTEX_BUFFER;
@@ -1088,8 +1128,12 @@ export function createDevice(options = {}){
             {
                 support |= FORMAT_SUPPORT.IA_INDEX_BUFFER;
             }
-            const kept = textureStorage(format,
-                info.kind === FORMAT_KIND.DEPTH ? D3D10_BIND.DEPTH_STENCIL : 0, textureOptions);
+            // The view of a depth family that reads its depth is kept as that
+            // family's depth texture, whatever it would be as a colour.
+            const readsDepth = DEPTH_READING_VIEWS.has(format);
+            const kept = textureStorage(format, depth ? D3D10_BIND.DEPTH_STENCIL : 0,
+                textureOptions) ?? (readsDepth ? { format: 'depth', conversion: null,
+                depth: true } : null);
             if (kept)
             {
                 // WebGPU makes no compressed or depth texture of three dimensions.
@@ -1098,7 +1142,7 @@ export function createDevice(options = {}){
                     | (block ? 0 : FORMAT_SUPPORT.TEXTURE1D)
                     | (block || kept.depth ? 0 : FORMAT_SUPPORT.TEXTURE3D);
             }
-            if (kept && info.kind === FORMAT_KIND.COLOUR)
+            if (kept && !kept.depth && info.kind === FORMAT_KIND.COLOUR)
             {
                 support |= FORMAT_SUPPORT.SHADER_LOAD;
                 // What a sampler may filter: normalised and float formats, but
@@ -1109,19 +1153,37 @@ export function createDevice(options = {}){
                 {
                     support |= FORMAT_SUPPORT.SHADER_SAMPLE;
                 }
-                if (info.renderable && !kept.conversion)
+                // A8_UNORM is drawn into as the alpha of an eight-bit texture;
+                // its conversion is for the bytes a program uploads.
+                if (info.renderable && (!kept.conversion || kept.conversion === 'a8'))
                 {
                     support |= FORMAT_SUPPORT.RENDER_TARGET
                         | (filterable ? FORMAT_SUPPORT.BLENDABLE : 0);
                 }
-                if (/^(rgba8unorm|bgra8unorm)/.test(kept.format) && !kept.conversion)
+                if (MIPS_GENERATED.test(kept.format) && !kept.conversion)
                 {
-                    support |= FORMAT_SUPPORT.MIP_AUTOGEN | FORMAT_SUPPORT.DISPLAY;
+                    support |= FORMAT_SUPPORT.MIP_AUTOGEN;
                 }
             }
-            if (info.kind === FORMAT_KIND.DEPTH && kept)
+            if (DISPLAY_FORMATS.has(format))
             {
-                support |= FORMAT_SUPPORT.DEPTH_STENCIL | FORMAT_SUPPORT.SHADER_SAMPLE_COMPARISON;
+                support |= FORMAT_SUPPORT.DISPLAY;
+            }
+            if (depth && kept)
+            {
+                support |= FORMAT_SUPPORT.DEPTH_STENCIL;
+            }
+            // Comparison is a read of depth, through the view that reads it:
+            // the typed depth format itself is never bound to a shader.
+            if (readsDepth)
+            {
+                support |= FORMAT_SUPPORT.SHADER_SAMPLE_COMPARISON;
+            }
+            if (multisampleQualityLevels(format, MULTISAMPLE_COUNT) > 0)
+            {
+                support |= FORMAT_SUPPORT.MULTISAMPLE_RENDERTARGET
+                    | (depth || kept?.depth ? 0 : FORMAT_SUPPORT.MULTISAMPLE_RESOLVE
+                        | FORMAT_SUPPORT.MULTISAMPLE_LOAD);
             }
             out.support = support;
             return S_OK;
@@ -1550,12 +1612,49 @@ export function createDevice(options = {}){
         },
 
         /**
-         * There is no multisampling here, so no resource can be a multisampled
-         * source and the call always names something it cannot resolve.
+         * The samples of a multisampled texture averaged into a one-sample
+         * one. Both have to be two-dimensional textures of one extent, the
+         * destination a default one, and the format one each can be viewed
+         * in: the resource's own when it is typed, a member of its family when
+         * it is typeless. A call that breaks a rule is dropped, as the runtime
+         * drops it; one that keeps them is made by the GPU in its turn.
+         *
+         * @param {any} destination
+         * @param {number} destinationSubresource
+         * @param {any} source
+         * @param {number} sourceSubresource
+         * @param {number} format
          */
-        ResolveSubresource(){
-            diverge('ResolveSubresource does nothing: the source is not multisampled, and'
-                + ' resolving one that is not is refused');
+        ResolveSubresource(destination, destinationSubresource, source, sourceSubresource,
+            format)
+        {
+            const texture2D = (/** @type {any} */ resource)=>resource
+                && resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE2D;
+            if (!texture2D(destination) || !texture2D(source))
+            {
+                return;
+            }
+            const to = destination.desc;
+            const from = source.desc;
+            const castable = (/** @type {any} */ desc)=>{
+                const info = FORMAT_INFO[desc.Format];
+                return info && (info.kind === FORMAT_KIND.TYPELESS
+                    ? resolveViewFormat(desc.Format, format) === format
+                    : desc.Format === format);
+            };
+            const level = destinationSubresource % to.MipLevels;
+            if (from.SampleDesc.Count < 2 || to.SampleDesc.Count !== 1
+                || to.Usage !== D3D10_USAGE.DEFAULT
+                || sourceSubresource >= from.MipLevels * from.ArraySize
+                || destinationSubresource >= to.MipLevels * to.ArraySize
+                || Math.max(1, to.Width >>> level) !== from.Width
+                || Math.max(1, to.Height >>> level) !== from.Height
+                || !castable(from) || !castable(to))
+            {
+                return;
+            }
+            renderer.resolve(destination, destinationSubresource, source, sourceSubresource,
+                format);
         },
 
         /** What has been recorded goes to the GPU now rather than at the next present. */
@@ -1744,11 +1843,21 @@ export function createDevice(options = {}){
          * @returns {number}
          */
         CheckMultisampleQualityLevels(format, sampleCount, out){
-            if (!out)
+            if (!out || (format !== DXGI_FORMAT.UNKNOWN && !FORMAT_INFO[format]))
             {
                 return E_INVALIDARG;
             }
-            out.levels = multisampleQualityLevels(format, sampleCount);
+            // No sample at all, or more than the API has room for, is a
+            // failure and still an answer of none (test_check_multisample_
+            // quality_levels).
+            if (sampleCount === 0 || sampleCount > D3D10_LIMITS.MAX_MULTISAMPLE_SAMPLE_COUNT)
+            {
+                out.levels = 0;
+                return E_FAIL;
+            }
+            out.levels = format === DXGI_FORMAT.UNKNOWN
+                ? 0
+                : multisampleQualityLevels(format, sampleCount);
             return S_OK;
         },
 
@@ -1789,6 +1898,16 @@ export function createDevice(options = {}){
             return options.backend ? options.frameQueued?.(submitted) ?? null : null;
         },
 
+        /**
+         * Where DXGI says what it accepted and did not do, as the device's own
+         * calls say it.
+         *
+         * @param {string} detail
+         */
+        diverge(detail){
+            diverge(detail);
+        },
+
         /** @returns {Promise<void>} settled when every presented frame has been submitted */
         idle(){
             return renderer.idle();
@@ -1820,7 +1939,8 @@ export function createDevice(options = {}){
                 Usage: D3D10_USAGE.DEFAULT,
                 BindFlags: bindFlagsForUsage(request.usage),
                 CPUAccessFlags: 0,
-                MiscFlags: 0,
+                // A swap chain made GDI-compatible makes its buffers so.
+                MiscFlags: request.gdiCompatible ? D3D10_RESOURCE_MISC.GDI_COMPATIBLE : 0,
                 DXGIUsage: request.usage,
             });
             return createResource({

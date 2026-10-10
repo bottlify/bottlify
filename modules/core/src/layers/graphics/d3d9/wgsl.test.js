@@ -187,6 +187,170 @@ test('the pixel-stage instructions become the statements they mean', ()=>{
     }
 });
 
+test('a sampler\'s level-of-detail bias joins every kind of read through it, and only its own',
+    ()=>{
+        // D3DSAMP_MIPMAPLODBIAS is added to the level a read takes: one
+        // derived from the derivatives, a texldb's bias, a texldl's level
+        // (whose reference says the sampler's bias and MAXMIPLEVEL are
+        // honoured), and a texldd's derivatives by two to its power.
+        const r = REGISTER.TEMP;
+        const s = REGISTER.SAMPLER;
+        const reads = parseShader([PS_3_0, ...dclSampler(0), ...dclSampler(1),
+            op(OPCODE.DCL, 2), (0x80000000 | D3DDECLUSAGE.TEXCOORD) >>> 0, dst(REGISTER.INPUT, 0),
+            op(OPCODE.TEX, 3), dst(r, 0), src(REGISTER.INPUT, 0), src(s, 0),
+            op(OPCODE.TEX, 3, 1), dst(r, 1), src(REGISTER.INPUT, 0), src(s, 0),
+            op(OPCODE.TEX, 3, 2), dst(r, 2), src(REGISTER.INPUT, 0), src(s, 0),
+            op(OPCODE.TEXLDL, 3), dst(r, 3), src(REGISTER.INPUT, 0), src(s, 0),
+            op(OPCODE.TEXLDD, 5), dst(r, 4), src(REGISTER.INPUT, 0), src(s, 0), src(r, 1),
+            src(r, 2),
+            op(OPCODE.TEX, 3), dst(r, 5), src(REGISTER.INPUT, 0), src(s, 1),
+            op(OPCODE.ADD, 3), dst(r, 0), src(r, 0), src(r, 5),
+            op(OPCODE.MOV, 2), dst(REGISTER.COLOROUT, 0), src(r, 0), END_TOKEN]);
+        assert.equal(reads.error, null);
+        const plain = translateShader(reads);
+        const biased = translateShader(reads, { sampling: [{ lodBias: -1 }] });
+        assert.equal(biased.error, null);
+        for (const line of [
+            'r0 = textureSampleBias(tex0, samp0, in.v0.xy, -1.0);',
+            'r1 = textureSampleBias(tex0, samp0, (in.v0.xy / in.v0.w), -1.0);',
+            'r2 = textureSampleBias(tex0, samp0, in.v0.xy, in.v0.w + -1.0);',
+            'r3 = textureSampleLevel(tex0, samp0, in.v0.xy, in.v0.w + -1.0);',
+            'r4 = textureSampleGrad(tex0, samp0, in.v0.xy, r1.xy * 0.5, r2.xy * 0.5);',
+            'r5 = textureSample(tex1, samp1, in.v0.xy);',
+        ])
+        {
+            assertLine(biased.wgsl, line);
+        }
+        assert.equal(translateShader(reads, { sampling: [] }).wgsl, plain.wgsl,
+            'no variant is the translation as it always was, to the byte');
+
+        // A vertex shader's texldl and a 1.x stage's read take it the same way.
+        const vertex = translateShader(parseShader([VS_3_0, ...dclInput(0, 0), ...dclSampler(0),
+            op(OPCODE.DCL, 2), 0x80000000, dst(REGISTER.OUTPUT, 0),
+            op(OPCODE.TEXLDL, 3), dst(r, 0), src(REGISTER.INPUT, 0), src(s, 0),
+            op(OPCODE.MOV, 2), dst(REGISTER.OUTPUT, 0), src(r, 0), END_TOKEN]),
+        { sampling: [{ lodBias: 2 }] });
+        assertLine(vertex.wgsl, 'r0 = textureSampleLevel(tex0, samp0, v0.xy, v0.w + 2.0);');
+        const legacy = translateShader(parseShader([PS_1_1,
+            0x00000042, 0xb00f0000,                 // tex t0
+            0x00000001, 0x800f0000, 0xb0e40000,     // mov r0, t0
+            END_TOKEN]), { sampling: [{ lodBias: 0.5 }] });
+        assertLine(legacy.wgsl, 't0 = textureSampleBias(tex0, samp0, in.t0.xy, 0.5);');
+    });
+
+test('a mirror-once axis is folded at every kind of read, a border axis selects its colour',
+    ()=>{
+        // The GPU sampler clamps both (`samplerDescriptorOf`). A read whose
+        // level the GPU derives takes the derivatives of the coordinate before
+        // the fold, so the mirror line keeps its level.
+        const r = REGISTER.TEMP;
+        const s = REGISTER.SAMPLER;
+        const reads = parseShader([PS_3_0, ...dclSampler(0), ...dclSampler(1, 3),
+            op(OPCODE.DCL, 2), (0x80000000 | D3DDECLUSAGE.TEXCOORD) >>> 0, dst(REGISTER.INPUT, 0),
+            op(OPCODE.TEX, 3), dst(r, 0), src(REGISTER.INPUT, 0), src(s, 0),
+            op(OPCODE.TEX, 3, 2), dst(r, 2), src(REGISTER.INPUT, 0), src(s, 0),
+            op(OPCODE.TEXLDL, 3), dst(r, 3), src(REGISTER.INPUT, 0), src(s, 0),
+            op(OPCODE.TEXLDD, 5), dst(r, 4), src(REGISTER.INPUT, 0), src(s, 0), src(r, 1),
+            src(r, 2),
+            op(OPCODE.TEX, 3), dst(r, 5), src(REGISTER.INPUT, 0), src(s, 1),
+            op(OPCODE.ADD, 3), dst(r, 0), src(r, 0), src(r, 5),
+            op(OPCODE.MOV, 2), dst(REGISTER.COLOROUT, 0), src(r, 0), END_TOKEN]);
+        assert.equal(reads.error, null);
+        const both = { mirrorOnce: 3, lodBias: 1 };
+        const folded = translateShader(reads, { sampling: [both, both] });
+        assert.equal(folded.error, null);
+        for (const line of [
+            'r0 = textureSampleGrad(tex0, samp0, abs(in.v0.xy), dpdx(in.v0.xy) * 2.0,'
+                + ' dpdy(in.v0.xy) * 2.0);',
+            'r2 = textureSampleGrad(tex0, samp0, abs(in.v0.xy), dpdx(in.v0.xy)'
+                + ' * exp2(in.v0.w + 1.0), dpdy(in.v0.xy) * exp2(in.v0.w + 1.0));',
+            'r3 = textureSampleLevel(tex0, samp0, abs(in.v0.xy), in.v0.w + 1.0);',
+            'r4 = textureSampleGrad(tex0, samp0, abs(in.v0.xy), r1.xy * 2.0, r2.xy * 2.0);',
+            'r5 = textureSampleBias(tex1, samp1, in.v0.xyz, 1.0);',
+        ])
+        {
+            assertLine(folded.wgsl, line);
+        }
+        const one = translateShader(reads, { sampling: [{ mirrorOnce: 2 }] });
+        assertLine(one.wgsl, 'r3 = textureSampleLevel(tex0, samp0, vec2f((in.v0.xy).x,'
+            + ' abs((in.v0.xy).y)), in.v0.w);');
+
+        // D3DCOLOR 0xff000080: opaque, blue at half. The channels a texture
+        // lacks are filled first, and the border colour is taken as it is.
+        const border = { border: { mask: 1, colour: 0xff000080 } };
+        const bordered = translateShader(reads, { sampling: [border, border], ones: [0b1110] });
+        assertLine(bordered.wgsl, 'r3 = select(vec4f(textureSampleLevel(tex0, samp0, in.v0.xy,'
+            + ' in.v0.w).x, 1.0, 1.0, 1.0), vec4f(0.0, 0.0, 0.5019607843137255, 1.0),'
+            + ' (in.v0.xy).x < 0.0 || (in.v0.xy).x > 1.0);');
+        assertLine(bordered.wgsl, 'r5 = textureSample(tex1, samp1, in.v0.xyz);');
+
+        // A 1.x stage folds and borders as its texture is addressed.
+        const legacy = translateShader(parseShader([PS_1_1,
+            0x00000042, 0xb00f0000,                 // tex t0
+            0x00000001, 0x800f0000, 0xb0e40000,     // mov r0, t0
+            END_TOKEN]), { sampling: [{ mirrorOnce: 1, border: { mask: 2, colour: 0 } }] });
+        assertLine(legacy.wgsl, 't0 = select(textureSampleGrad(tex0, samp0,'
+            + ' vec2f(abs((in.t0.xy).x), (in.t0.xy).y), dpdx(in.t0.xy), dpdy(in.t0.xy)),'
+            + ' vec4f(0.0, 0.0, 0.0, 0.0), (in.t0.xy).y < 0.0 || (in.t0.xy).y > 1.0);');
+    });
+
+test('a vertex shader\'s position is clipped by the planes past its registers, as it wrote it',
+    ()=>{
+        // Direct3D gives a shader's planes in clip space: the distance is the
+        // plane against oPos, taken before the engine's half-pixel move.
+        const parsed = parseShader([VS_2_0, ...dclInput(0, 0),
+            op(OPCODE.MOV, 2), dst(REGISTER.RASTOUT, 0), src(REGISTER.CONST, 3), END_TOKEN]);
+        const plain = translateShader(parsed);
+        const varyings = translateShader(parsed, { clip: { count: 5, distances: false } });
+        assert.equal(varyings.error, null);
+        assert.equal(varyings.clipRegister, /** @type {number} */ (plain.viewportRegister) + 1);
+        assert.equal(varyings.constants, plain.constants + 5);
+        assertLine(varyings.wgsl, `const _clip = ${varyings.clipRegister};`);
+        assertLine(varyings.wgsl, 'out.clip0 = vec4f(dot(c[_clip + 0], out.oPos),'
+            + ' dot(c[_clip + 1], out.oPos), dot(c[_clip + 2], out.oPos),'
+            + ' dot(c[_clip + 3], out.oPos));');
+        assertLine(varyings.wgsl, 'out.clip1 = vec4f(dot(c[_clip + 4], out.oPos), 1.0, 1.0, 1.0);');
+        assertLine(varyings.wgsl, '@location(12) clip0: vec4f,');
+        assert.ok(varyings.wgsl.indexOf('out.clip1 =') < varyings.wgsl.indexOf('out.oPos.w * c['),
+            'before the half-pixel move');
+        assert.deepEqual(varyings.outputs.filter(location=>location >= 12), [12, 13]);
+
+        const device = translateShader(parsed, { clip: { count: 2, distances: true } });
+        assert.ok(device.wgsl.startsWith('enable clip_distances;\n'));
+        assertLine(device.wgsl, '@builtin(clip_distances) clipDistances: array<f32, 2>,');
+        assertLine(device.wgsl, 'out.clipDistances[1] = dot(c[_clip + 1], out.oPos);');
+        assert.ok(!plain.wgsl.includes('clip0') && !plain.wgsl.includes('clipDistances'));
+
+        // The pixel shader paired with varyings discards on them.
+        const pixel = parseShader([PS_2_0, op(OPCODE.MOV, 2), dst(REGISTER.COLOROUT, 0),
+            src(REGISTER.CONST, 0), END_TOKEN]);
+        const discarding = translateShader(pixel, { clip: { count: 5, distances: false } });
+        assert.equal(discarding.error, null);
+        assertLine(discarding.wgsl, '@location(13) clip1: vec4f,');
+        assertLine(discarding.wgsl,
+            'if (any(in.clip0 < vec4f(0.0)) || any(in.clip1 < vec4f(0.0)))');
+        assert.ok(discarding.wgsl.indexOf('discard;') < discarding.wgsl.indexOf('out.oC0 = oC0;'));
+        assert.deepEqual(discarding.reads, [12, 13]);
+        assert.equal(translateShader(pixel, { clip: { count: 5, distances: true } }).wgsl,
+            translateShader(pixel).wgsl, 'where the device clips, the pixel stage is as it was');
+
+        // The fixed vertex stage of a hybrid clips its untransformed position
+        // by planes in its own space, from the registers past its own.
+        const shapes = new Map([[0, { components: 3, scalar: /** @type {'f32'} */ ('f32'),
+            bgra: false }]]);
+        const hybrid = fixedVertexStage([{ usage: D3DDECLUSAGE.POSITION, usageIndex: 0,
+            register: 0 }], shapes, [], [], 0, undefined, { clip: { count: 1, distances: true } });
+        assert.equal(hybrid.clipRegister, HYBRID_CONSTANTS.COUNT);
+        assert.equal(hybrid.constants, HYBRID_CONSTANTS.COUNT + 1);
+        assertLine(hybrid.wgsl, `out.clipDistances[0] = dot(c[${HYBRID_CONSTANTS.COUNT}],`
+            + ' vec4f(vec4f(in.v0, 1.0).xyz, 1.0));');
+        const rhw = fixedVertexStage([{ usage: D3DDECLUSAGE.POSITIONT, usageIndex: 0,
+            register: 0 }], new Map([[0, { components: 4, scalar: /** @type {'f32'} */ ('f32'),
+            bgra: false }]]), [], [], 0, undefined, { clip: { count: 1, distances: true } });
+        assert.ok(!rhw.wgsl.includes('clipDistances') && rhw.clipRegister === undefined,
+            'a pre-transformed vertex is not clipped');
+    });
+
 test('a cube sampler takes three coordinates, and a sampler read without a dcl is refused', ()=>{
     const parsed = parseShader([PS_2_0, ...dclSampler(1, 3),
         op(OPCODE.TEX, 3), dst(REGISTER.TEMP, 0), src(REGISTER.TEXTURE, 0),

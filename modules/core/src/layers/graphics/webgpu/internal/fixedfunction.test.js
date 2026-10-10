@@ -599,6 +599,173 @@ test('a stage whose texture lacks channels samples them as one, a four-channel o
         assert.throws(()=>sampledWithOnes('t', 0b1111), /mask 15/);
     });
 
+test('a level-of-detail bias is added to its own stage\'s level before the clamp, and only there',
+    ()=>{
+        const textured = {
+            colorOp: D3DTOP.SELECTARG1, colorArg1: D3DTA.TEXTURE, colorArg2: D3DTA.CURRENT,
+            alphaOp: D3DTOP.SELECTARG1, alphaArg1: D3DTA.TEXTURE, alphaArg2: D3DTA.CURRENT,
+            texCoordIndex: 0,
+        };
+        const fvf = FVF.XYZ | FVF.DIFFUSE | (2 << FVF.TEXCOUNT_SHIFT) | (1 << 16);
+        const plain = generate(baseState({ fvf, stages: [textured, textured] })).code;
+        const biased = generate(baseState({ fvf,
+            stages: [textured, { ...textured, lodBias: -1.5 }] })).code;
+        const derived = '0.5 * log2(max(max(dot(dx, dx), dot(dy, dy)), 1.0e-12))';
+        const sampleOf = (/** @type {string} */ code, /** @type {number} */ index)=>{
+            const from = code.slice(code.indexOf(`fn sampleStage${index}`));
+            return from.slice(0, from.indexOf('\n}\n'));
+        };
+        assert.ok(sampleOf(biased, 1).includes(`let lod = clamp(${derived} + -1.5,`),
+            'the bias joins the derived level, inside the clamp to the levels allowed');
+        assert.equal(sampleOf(biased, 0), sampleOf(plain, 0), 'the stage without one is as it was');
+        assert.ok(!plain.includes(' + -1.5'));
+        assert.equal(generate(baseState({ fvf, stages: [textured, textured] })).code, plain);
+
+        // A cube and a volume stage take it the same way.
+        for (const dimension of ['cube', '3d'])
+        {
+            const code = generate(baseState({ fvf,
+                stages: [{ ...textured, dimension, lodBias: 2 }] })).code;
+            assert.ok(sampleOf(code, 0).includes(`let lod = clamp(${derived} + 2.0,`), dimension);
+        }
+        // And the fragment stage over a vertex shader.
+        const fragment = fixedFragmentStage(baseState({ fvf: 0, vertexShader: 1,
+            stages: [{ ...textured, lodBias: 0.25 }] }), [0, 2]);
+        assert.ok(fragment.wgsl.includes(`let lod = clamp(${derived} + 0.25,`));
+    });
+
+test('a mirror-once axis is folded before its clamp, a border axis selects its colour outside',
+    ()=>{
+        const textured = {
+            colorOp: D3DTOP.SELECTARG1, colorArg1: D3DTA.TEXTURE, colorArg2: D3DTA.CURRENT,
+            alphaOp: D3DTOP.SELECTARG1, alphaArg1: D3DTA.TEXTURE, alphaArg2: D3DTA.CURRENT,
+            texCoordIndex: 0,
+        };
+        const fvf = FVF.XYZ | FVF.DIFFUSE | (1 << FVF.TEXCOUNT_SHIFT) | (1 << 16);
+        const sampleOf = (/** @type {string} */ code)=>{
+            const from = code.slice(code.indexOf('fn sampleStage0'));
+            return from.slice(0, from.indexOf('\n}\n'));
+        };
+        const plain = sampleOf(generate(baseState({ fvf, stages: [textured] })).code);
+        const mirrored = sampleOf(generate(baseState({ fvf,
+            stages: [{ ...textured, mirrorOnce: 1 }] })).code);
+        assert.ok(mirrored.includes('addressCoordinate(abs(raw.x), flags & 3u, levelSize.x)'),
+            'u folded about zero, and then clamped as its flags say');
+        assert.ok(mirrored.includes('addressCoordinate(raw.y, (flags >> 2u) & 3u, levelSize.y)'),
+            'v as it was');
+        assert.ok(mirrored.includes('let dx = dpdx(raw * size);'), 'the level from the raw one');
+        assert.equal(mirrored.replace('abs(raw.x)', 'raw.x'), plain);
+
+        // D3DCOLOR 0x80ff4000: alpha 0x80, red 0xff, green 0x40, blue 0.
+        const bordered = sampleOf(generate(baseState({ fvf,
+            stages: [{ ...textured, border: { mask: 3, colour: 0x80ff4000 } }] })).code);
+        assert.ok(bordered.includes('return select(textureSampleLevel(texture0, sampler0, uv,'
+            + ' level), vec4f(1.0, 0.25098039215686274, 0.0, 0.5019607843137255),'
+            + ' raw.x < 0.0 || raw.x > 1.0 || raw.y < 0.0 || raw.y > 1.0);'), bordered);
+        const vOnly = sampleOf(generate(baseState({ fvf,
+            stages: [{ ...textured, border: { mask: 2, colour: 0 } }] })).code);
+        assert.ok(vOnly.includes('vec4f(0.0, 0.0, 0.0, 0.0), raw.y < 0.0 || raw.y > 1.0);'));
+        assert.equal(sampleOf(generate(baseState({ fvf,
+            stages: [{ ...textured, border: { mask: 4, colour: 0 } }] })).code), plain,
+        'a flat texture has no w to be outside on');
+
+        // A volume's third axis takes either, by its own bit.
+        const volume = sampleOf(generate(baseState({ fvf, stages: [{ ...textured,
+            dimension: '3d', mirrorOnce: 4, border: { mask: 1, colour: 0xffffffff } }] })).code);
+        assert.ok(volume.includes('addressCoordinate(abs(raw.z), (flags >> 16u) & 3u,'
+            + ' levelSize.z)'));
+        assert.ok(volume.includes('vec4f(1.0, 1.0, 1.0, 1.0), raw.x < 0.0 || raw.x > 1.0);'));
+    });
+
+test('a stage writes the temporary register its RESULTARG names, and reads it and its constant',
+    ()=>{
+        const stage = (/** @type {object} */ over)=>({
+            colorOp: D3DTOP.SELECTARG1, colorArg1: D3DTA.TFACTOR, colorArg2: D3DTA.CURRENT,
+            alphaOp: D3DTOP.SELECTARG1, alphaArg1: D3DTA.TFACTOR, alphaArg2: D3DTA.CURRENT,
+            texCoordIndex: 0, ...over,
+        });
+        const code = generate(baseState({ stages: [stage({ resultArg: D3DTA.TEMP }),
+            stage({ colorOp: D3DTOP.ADD, colorArg2: D3DTA.TEMP,
+                alphaArg1: D3DTA.CONSTANT })] })).code;
+        assert.ok(code.includes('    var current = input.diffuse;\n    var temp = vec4f(0.0);\n'));
+        assert.ok(code.includes('    temp = vec4f(saturate((uniforms.textureFactor).rgb),'
+            + ' saturate((uniforms.textureFactor).a));'));
+        assert.ok(code.includes('    current = vec4f(saturate((uniforms.textureFactor'
+            + ' + temp).rgb), saturate((uniforms.stageConstant[1]).a));'));
+        assert.ok(code.includes('    stageConstant: array<vec4f, 8>,\n};'),
+            'the constants past the lights, where a stage reads one');
+        assert.ok(code.indexOf('stageConstant: array') > code.indexOf('pointScale: vec4f'));
+
+        // Without either, the source declares neither.
+        const plain = generate(baseState({ stages: [stage({})] })).code;
+        assert.ok(!plain.includes('temp') && !plain.includes('stageConstant'));
+        assert.equal(generate(baseState({ stages: [stage({ colorArg2: D3DTA.TEMP,
+            alphaArg2: D3DTA.CONSTANT })] })).code, plain, 'an unread slot shapes nothing');
+
+        // Lit, the constants follow the lights.
+        const lit = generate(baseState({ fvf: LIT_FVF, lighting: lighting(),
+            stages: [stage({ colorArg1: D3DTA.CONSTANT })] })).code;
+        assert.ok(lit.includes(
+            '    lights: array<Light, 1>,\n    stageConstant: array<vec4f, 8>,'));
+
+        // The fragment stage over a vertex shader declares the same block.
+        const fragment = fixedFragmentStage(baseState({ fvf: 0, vertexShader: 1,
+            stages: [stage({ colorArg1: D3DTA.CONSTANT, resultArg: D3DTA.TEMP })] }), [0]);
+        assert.equal(fragment.error, null);
+        assert.ok(fragment.wgsl.includes('    stageConstant: array<vec4f, 8>,'));
+        assert.ok(fragment.wgsl.includes(
+            '    temp = vec4f(saturate((uniforms.stageConstant[0]).rgb)'));
+    });
+
+test('user clip planes are distances the device clips by, or varyings the fragment discards on',
+    ()=>{
+        // Planes 0, 2, 3, 4 and 5 of six: five, the block's rows in the
+        // vertex's own space, so the distance needs no transform.
+        const clipping = baseState({ clipPlanes: 0b111101 });
+        const fallback = generate(clipping).code;
+        assert.ok(fallback.includes('    clipPlane: array<vec4f, 5>,\n};'));
+        const varyings = '    @location(2) clip0: vec4f,\n    @location(3) clip1: vec4f,';
+        assert.ok(fallback.includes(varyings), 'after the varyings the vertex already had');
+        assert.ok(fallback.includes('    out.clip0 = vec4f(dot(uniforms.clipPlane[0],'
+            + ' vec4f(vertex.position, 1.0)), dot(uniforms.clipPlane[1], vec4f(vertex.position,'
+            + ' 1.0)), dot(uniforms.clipPlane[2], vec4f(vertex.position, 1.0)),'
+            + ' dot(uniforms.clipPlane[3], vec4f(vertex.position, 1.0)));'));
+        assert.ok(fallback.includes('    out.clip1 = vec4f(dot(uniforms.clipPlane[4],'
+            + ' vec4f(vertex.position, 1.0)), 1.0, 1.0, 1.0);'), 'a missing plane clips nothing');
+        assert.ok(fallback.includes('    if (any(input.clip0 < vec4f(0.0)) ||'
+            + ' any(input.clip1 < vec4f(0.0)))\n    {\n        discard;\n    }\n'
+            + '    return current;'), 'at the end, after everything that samples');
+        assert.ok(!fallback.includes('clip_distances'));
+
+        const device = generate({ ...clipping, clipDistances: true }).code;
+        assert.ok(device.startsWith('enable clip_distances;\n'));
+        assert.ok(device.includes(
+            '    @builtin(clip_distances) clipDistances: array<f32, 5>,\n};'));
+        assert.ok(device.includes('    out.clipDistances[4] = dot(uniforms.clipPlane[4],'
+            + ' vec4f(vertex.position, 1.0));'));
+        assert.ok(device.includes('struct FragmentIn {\n    @builtin(position) position: vec4f,'),
+            'a vertex output the fragment stage may not take is left out of its input');
+        assert.ok(device.includes('fn fragmentMain(input: FragmentIn)'));
+        assert.ok(!device.includes('discard'));
+
+        // A pre-transformed vertex has no space to clip in.
+        const rhw = baseState({ fvf: FVF.XYZRHW | FVF.DIFFUSE });
+        assert.equal(generate({ ...rhw, clipPlanes: 1 }).code, generate(rhw).code);
+        // And no plane is the source as it always was.
+        assert.ok(!generate(baseState()).code.includes('clip'));
+
+        // A vertex shader's planes are its own; the fixed fragment stage over
+        // it discards on the varyings the translation carries them in.
+        const fragment = fixedFragmentStage(baseState({ fvf: 0, vertexShader: 1,
+            clipPlanes: 0b11 }), [0]);
+        assert.ok(fragment.wgsl.includes('    @location(12) clip0: vec4f,'));
+        assert.ok(fragment.wgsl.includes('    if (any(in.clip0 < vec4f(0.0)))'));
+        assert.ok(!fragment.wgsl.includes('clipPlane'), 'and its block carries no planes');
+        assert.deepEqual(fragment.reads, [0, 12]);
+        assert.ok(!fixedFragmentStage(baseState({ fvf: 0, vertexShader: 1, clipPlanes: 0b11,
+            clipDistances: true }), [0]).wgsl.includes('clip'));
+    });
+
 test('a stage puts its coordinate through its own texture transform before sampling', ()=>{
     // Direct3D applies D3DTS_TEXTURE0..7 to (u, v, 1) for a two-coordinate
     // set: two dot products against the rows the block carries, computed

@@ -164,6 +164,20 @@ function lookUp(table, value, what){
  * @property {number} [ones]
  *     The channels the stage's texture samples as one that the GPU's texture
  *     lacks (`sampledOnes` in `d3d9/constants.js`), when there are any.
+ * @property {number} [lodBias]
+ *     D3DTSS_MIPMAPLODBIAS of a stage that samples, when it is not zero: added
+ *     to the level of detail its sample computes. Written into the shader, so
+ *     only a stage with one carries it.
+ * @property {number} [mirrorOnce]
+ *     The axes (1 u, 2 v, 4 w) a sampling stage addresses D3DTADDRESS_MIRRORONCE,
+ *     which no WebGPU sampler has: the sample folds the coordinate itself.
+ * @property {number} [resultArg]
+ *     D3DTSS_RESULTARG when it is D3DTA_TEMP: the stage writes the temporary
+ *     register and leaves the current colour as it was. Absent, it writes the
+ *     current colour, the default.
+ * @property {{ mask: number, colour: number }} [border]
+ *     The axes it addresses D3DTADDRESS_BORDER, and D3DSAMP_BORDERCOLOR as a
+ *     D3DCOLOR, which the sample selects outside [0, 1] on those axes.
  */
 
 /**
@@ -238,6 +252,12 @@ function lookUp(table, value, what){
  * @property {PointState} [points]
  *     A point list, which WebGPU draws only a pixel wide: each point is drawn
  *     as a quad of its size instead, its vertex read once an instance.
+ * @property {number} [clipPlanes]
+ *     D3DRS_CLIPPLANEENABLE's bits, for a draw whose vertices the user planes
+ *     clip; absent, none.
+ * @property {boolean} [clipDistances]
+ *     Whether those planes are clipped by the device (`clip-distances`) rather
+ *     than by a discard in the fragment stage.
  * @property {StencilState} [stencil]
  * @property {number} [blendConstant]  D3DRS_BLENDFACTOR, a D3DCOLOR; set on the pass, not keyed.
  *     D3DRS_STENCILENABLE on a target with a stencil: absent, no stencil test.
@@ -294,6 +314,11 @@ export function pipelineKey(state){
             ...(stage.bump === undefined ? [] : [`b${stage.bump.join('/')}`]),
             ...(stage.dimension === undefined ? [] : [stage.dimension]),
             ...(stage.ones === undefined ? [] : [`o${stage.ones}`]),
+            ...(stage.lodBias === undefined ? [] : [`l${stage.lodBias}`]),
+            ...(stage.mirrorOnce === undefined ? [] : [`m${stage.mirrorOnce}`]),
+            ...(stage.resultArg === undefined ? [] : [`t${stage.resultArg}`]),
+            ...(stage.border === undefined ? []
+                : [`r${stage.border.mask}/${stage.border.colour}`]),
         ].join(','))
         .join(';');
 
@@ -338,6 +363,7 @@ export function pipelineKey(state){
         ...(state.rangeFog ? ['range'] : []),
         ...(state.points
             ? [`points${state.points.sprite ? 's' : ''}${state.points.scale ? 'd' : ''}`] : []),
+        ...(state.clipPlanes ? [`clip${state.clipPlanes}${state.clipDistances ? 'd' : 'v'}`] : []),
         ...(state.stencil ? [`stencil${[state.stencil.func, state.stencil.fail,
             state.stencil.zfail, state.stencil.pass, state.stencil.ccwFunc, state.stencil.ccwFail,
             state.stencil.ccwZfail, state.stencil.ccwPass, state.stencil.readMask & 0xff,

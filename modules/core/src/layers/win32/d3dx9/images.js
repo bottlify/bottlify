@@ -5,13 +5,15 @@
  */
 
 import { FMT, decodeTexels, isCompressed, isSupported, layoutOf } from './pixels.js';
+import { PngError, isPng, readPng } from './png.js';
+import { decodeJpeg } from '../../media/internal/jpeg.js';
 
 /**
  * The image files D3DX's texture loaders read, from the files' own
  * specifications: DDS (the DDS_HEADER and DDS_PIXELFORMAT of the DirectX
  * documentation), Truevision TGA 2.0, and the Windows bitmap
- * (BITMAPFILEHEADER and BITMAPINFOHEADER, BITMAPCOREHEADER, with BI_BITFIELDS).
- * JPEG and PNG are not read yet, and say so.
+ * (BITMAPFILEHEADER and BITMAPINFOHEADER, BITMAPCOREHEADER, with BI_BITFIELDS),
+ * PNG (`png.js`) and JPEG (the media layer's decoder).
  */
 
 /** D3DXIMAGE_FILEFORMAT. */
@@ -58,14 +60,99 @@ export function readImage(bytes){
     }
     if (bytes[0] === 0xff && bytes[1] === 0xd8)
     {
-        throw new ImageError('a JPEG file: not read yet');
+        return readJpeg(bytes);
     }
-    if (text === '\x89PNG')
+    if (isPng(bytes))
     {
-        throw new ImageError('a PNG file: not read yet');
+        try
+        {
+            const { width, height, format, bgra } = readPng(bytes);
+            return { fileFormat: IFF.PNG, width, height, format, mipLevels: 1,
+                levels: [{ width, height, format: FMT.A8R8G8B8, data: bgra }] };
+        }
+        catch (e){
+            if (e instanceof PngError)
+            {
+                throw new ImageError(e.message);
+            }
+            throw e;
+        }
     }
     // TGA has no signature; its header is the test.
     return readTga(bytes);
+}
+
+/**
+ * A JPEG, through the media layer's decoder (baseline and progressive), its
+ * components made colour the way the JFIF and Adobe conventions say: three
+ * are YCbCr unless an Adobe marker says they were not transformed, four are
+ * Adobe's inverted CMYK, or YCCK when its transform flag is 2. The format
+ * D3DXIMAGE_INFO names is what Windows' imaging component decodes into: L8
+ * for grey, R8G8B8 for the rest.
+ *
+ * @param {Uint8Array} bytes
+ * @returns {Image}
+ */
+function readJpeg(bytes){
+    let image;
+    try
+    {
+        image = decodeJpeg(bytes);
+    }
+    catch (e){
+        throw new ImageError(`a JPEG this decoder cannot read: ${/** @type {Error} */ (e).message}`);
+    }
+    const { width, height, components: n, samples } = image;
+    const clamp = (/** @type {number} */ v)=>Math.max(0, Math.min(255, Math.round(v)));
+    const ycc = n === 3 ? !image.adobe || image.transform === 1 : n === 4 && image.transform === 2;
+    const bgra = new Uint8Array(width * height * 4);
+    for (let i = 0; i < width * height; i++)
+    {
+        const at = i * n;
+        let r;
+        let g;
+        let b;
+        if (n === 1 || n === 2)
+        {
+            r = g = b = samples[at];
+        }
+        else if (ycc)
+        {
+            const y = samples[at];
+            const cb = samples[at + 1] - 128;
+            const cr = samples[at + 2] - 128;
+            r = clamp(y + 1.402 * cr);
+            g = clamp(y - 0.344136 * cb - 0.714136 * cr);
+            b = clamp(y + 1.772 * cb);
+        }
+        else
+        {
+            r = samples[at];
+            g = samples[at + 1];
+            b = samples[at + 2];
+        }
+        if (n === 4)
+        {
+            // Adobe writes CMYK inverted: each byte is 255 less the ink, so the
+            // colour is the ink's complement scaled by K's.
+            const k = samples[at + 3];
+            if (ycc)
+            {
+                r = 255 - r;
+                g = 255 - g;
+                b = 255 - b;
+            }
+            r = clamp(r * k / 255);
+            g = clamp(g * k / 255);
+            b = clamp(b * k / 255);
+        }
+        bgra[i * 4] = b;
+        bgra[i * 4 + 1] = g;
+        bgra[i * 4 + 2] = r;
+        bgra[i * 4 + 3] = 255;
+    }
+    return { fileFormat: IFF.JPG, width, height, format: n === 1 ? FMT.L8 : FMT.R8G8B8,
+        mipLevels: 1, levels: [{ width, height, format: FMT.A8R8G8B8, data: bgra }] };
 }
 
 /**

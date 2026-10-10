@@ -38,13 +38,14 @@ const HALF_CHANNELS = { r16float: 1, rg16float: 2, rgba16float: 4 };
  * @param {{ compilationMessages?: Record<string, any[]>,
  *           refusePipeline?: (descriptor: any) => string | null | undefined,
  *           occlusionSamples?: (index: number) => number,
- *           workDone?: boolean }} [options]
+ *           workDone?: boolean, features?: string[] }} [options]
  *        `occlusionSamples` is what the occlusion query at each slot of a query
  *        set resolves to, standing in for the rasteriser; zero when absent.
  *        `workDone` gives the queue an `onSubmittedWorkDone` whose answers the
  *        test decides: the device finishes submits, in order, only when told
  *        to (`finish`). Without it the queue has none, as a double that
  *        cannot say when anything is done should not pretend to.
+ *        `features` are the optional features the device says it was made with.
  */
 export function createFakeDevice(options = {}){
     /** @type {any[]} */
@@ -327,6 +328,7 @@ export function createFakeDevice(options = {}){
 
     const device = {
         calls,
+        features: new Set(options.features ?? []),
         createTexture,
         createCommandEncoder,
         createShaderModule,

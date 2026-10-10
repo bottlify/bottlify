@@ -87,6 +87,7 @@ export { DEVICE_STATE, LIGHT_ENABLED };
  * @property {boolean} depthCube       as cube maps,
  * @property {boolean} depthPlain      and as image surfaces.
  * @property {number} [maxVolumeExtent]  The longest axis a volume texture may have.
+ * @property {number} [maxUserClipPlanes]  The user clip planes the renderer clips by.
  * @property {{ major: number, minor: number }} [vertexShaderVersion]
  *           The newest vertex shader a create accepts; 0.0 makes none.
  * @property {number} [maxVertexShaderConst]  The vertex shader's float constant registers.
@@ -105,6 +106,7 @@ export const DEFAULT_CAPS = Object.freeze({
     depthCube: false,
     depthPlain: false,
     maxVolumeExtent: 256,
+    maxUserClipPlanes: 6,
     vertexShaderVersion: Object.freeze({ major: 1, minor: 1 }),
     maxVertexShaderConst: 256,
     pixelShaderVersion: Object.freeze({ major: 1, minor: 4 }),
@@ -1386,6 +1388,10 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         get lights(){
             return lights;
         },
+        // The user clip planes, which D3DRS_CLIPPLANEENABLE says are in force.
+        get clipPlanes(){
+            return clipPlanes;
+        },
         get lightsVersion(){
             return lightsVersion;
         },
@@ -2414,7 +2420,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         ValidateDevice(out){
             const hr = boundPixelShader !== 0
                 ? D3D_OK
-                : validateStages(stageStatesFor, STAGE_COUNT);
+                : validateStages(stageStatesFor, STAGE_COUNT, { temp: true });
             if (hr === D3D_OK)
             {
                 out.passes = 1;

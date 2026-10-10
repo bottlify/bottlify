@@ -158,6 +158,17 @@ test('a stage list is folded stage by stage, and its length is part of the key',
         'the channels a texture samples as one are folded');
     assert.notEqual(pipelineKey({ ...base, stages: [stage({ ones: 0b1100 })] }),
         pipelineKey({ ...base, stages: [stage({ ones: 0b1110 })] }), 'and which they are');
+    assert.notEqual(pipelineKey({ ...base, stages: [stage({ lodBias: 1 })] }), one,
+        'a level-of-detail bias is folded');
+    assert.notEqual(pipelineKey({ ...base, stages: [stage({ lodBias: 1 })] }),
+        pipelineKey({ ...base, stages: [stage({ lodBias: 1.5 })] }), 'and how much it is');
+    const keys = [stage({ mirrorOnce: 1 }), stage({ mirrorOnce: 2 }),
+        stage({ border: { mask: 1, colour: 0 } }), stage({ border: { mask: 1, colour: 1 } }),
+        stage({ border: { mask: 2, colour: 0 } }), stage({ resultArg: 5 }), stage()]
+        .map(only=>pipelineKey({ ...base, stages: [only] }));
+    assert.equal(new Set(keys).size, keys.length,
+        'which axes fold, which select a border, the border colour and the register a'
+        + ' stage writes are folded');
 });
 
 test('every part of the lighting state that shapes the shader is folded', ()=>{
@@ -186,6 +197,14 @@ test('every part of the lighting state that shapes the shader is folded', ()=>{
     // A light's own numbers are uniforms, so a light that only moved must not
     // build a second pipeline.
     assert.equal(pipelineKey({ ...base, lighting: lighting() }), original);
+});
+
+test('the user clip planes a draw clips by, and how, are folded; none adds nothing', ()=>{
+    const base = baseState();
+    const keys = [base, { ...base, clipPlanes: 1 }, { ...base, clipPlanes: 3 },
+        { ...base, clipPlanes: 3, clipDistances: true }].map(pipelineKey);
+    assert.equal(new Set(keys).size, keys.length);
+    assert.ok(!keys[0].includes('clip'));
 });
 
 test('no stages and one default stage are different keys', ()=>{

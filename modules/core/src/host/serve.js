@@ -26,6 +26,7 @@ import { ringPacing } from './ring-pacing.js';
 import { openGraphicsWorker } from './graphics-worker.js';
 import { createLogReader } from '../layers/log/reader.js';
 import { FEED_AHEAD_MS, createFeeder } from '../layers/audio/output/feed.js';
+import { gpuFeaturesOf } from '../layers/graphics/webgpu/features.js';
 
 /** How many presented frames are remembered for a diagnostic to read back. */
 const PRESENT_HISTORY = 600;
@@ -519,9 +520,7 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
             throw Object.assign(new Error('WebGPU is present but no adapter answered '
                 + 'requestAdapter'), { reason: 'no GPU adapter' });
         }
-        const features = ['texture-compression-bc', 'depth-clip-control']
-            .filter(feature=>adapter.features.has(feature));
-        const opened = await adapter.requestDevice({ requiredFeatures: features });
+        const opened = await adapter.requestDevice({ requiredFeatures: gpuFeaturesOf(adapter) });
         // A validation error the engine did not catch drops the whole frame
         // it was in, silently. It goes into the run's own journal, beside the
         // frame it dropped, where the person reading the run looks; the

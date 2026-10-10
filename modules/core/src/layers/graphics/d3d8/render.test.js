@@ -39,7 +39,8 @@ import {
     HARDWARE_SAMPLER, filledIndices, listIndices, multiplyMatrices, packLight, pipelineStateOf,
     samplerFlagsOf,
     screenExtent, transformPosition, uniformBlock, uniformsOf, pixelUniformsOf, fogModeOf, fogOf,
-    isAffine, stageCascade,
+    addressVariantOf, clipMaskOf, clipPlanesOf, isAffine, lodBiasOf, samplerDescriptorOf,
+    stageCascade,
     vertexCountOf,
 } from './render.js';
 import { createBackend } from '../webgpu/backend.js';
@@ -1337,6 +1338,72 @@ test('the sampler state packs as the shader unpacks it', ()=>{
     assert.equal(samplerFlagsOf(new Map([[D3DTSS.ADDRESSW, D3DTADDRESS.CLAMP]])) >>> 16, 2,
         'a volume\'s third address mode above the rest');
 });
+
+test('border and mirror-once clamp on the GPU and are the sample\'s variant, by axis', ()=>{
+    const states = new Map(/** @type {[number, number][]} */ ([
+        [D3DTSS.ADDRESSU, D3DTADDRESS.MIRRORONCE], [D3DTSS.ADDRESSV, D3DTADDRESS.BORDER],
+        [D3DTSS.ADDRESSW, D3DTADDRESS.MIRRORONCE], [D3DTSS.BORDERCOLOR, 0x11223344]]));
+    const get = (/** @type {number} */ state)=>states.get(state) ?? 0;
+    assert.equal(samplerFlagsOf(states) & 0xf, 2 | (2 << 2), 'both clamp in the flags');
+    assert.equal(samplerFlagsOf(states) >>> 16, 2);
+    const descriptor = samplerDescriptorOf(states);
+    assert.deepEqual([descriptor.addressModeU, descriptor.addressModeV, descriptor.addressModeW],
+        ['clamp-to-edge', 'clamp-to-edge', 'clamp-to-edge']);
+    assert.deepEqual(addressVariantOf(get, '2d'),
+        { mirrorOnce: 1, border: { mask: 2, colour: 0x11223344 } }, 'no w on a flat texture');
+    assert.deepEqual(addressVariantOf(get, '3d'),
+        { mirrorOnce: 5, border: { mask: 2, colour: 0x11223344 } });
+    assert.deepEqual(addressVariantOf(get, 'cube'), {}, 'a cube\'s faces are not addressed');
+    assert.deepEqual(addressVariantOf(()=>D3DTADDRESS.CLAMP, '3d'), {});
+});
+
+test('the enabled clip planes, in index order, go through a matrix into the vertex\'s own space',
+    ()=>{
+        const planes = new Map([[0, [1, 0, 0, 0]], [2, [0, 1, 0, -2]], [5, [0, 0, 1, 0.5]]]);
+        const model = /** @type {any} */ ({ renderStates: new Map([[152, 0b100101]]),
+            clipPlanes: planes });
+        assert.equal(clipMaskOf(model), 0b100101);
+        assert.deepEqual([...clipPlanesOf(model, 0b100101, null)],
+            [1, 0, 0, 0, 0, 1, 0, -2, 0, 0, 1, 0.5], 'as set, for a vertex shader');
+        // A world that scales x by two and moves y by three: a point p of the
+        // model is at (2 p.x, p.y + 3, p.z) in the world, and y = 2 there --
+        // plane 2 -- is y = -1 here.
+        const world = [2, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 3, 0, 1];
+        const object = clipPlanesOf(model, 0b000100, world);
+        assert.deepEqual([...object], [0, 1, 0, 1]);
+        const point = [5, -1, 7, 1];
+        assert.equal(object.reduce((sum, value, at)=>sum + value * point[at], 0), 0,
+            'a model point on the plane is on it in the world');
+        // D3DRS_CLIPPING off clips by no plane at all; a device that keeps no
+        // planes clips by none either.
+        assert.equal(clipMaskOf({ ...model, renderStates: new Map([[152, 1], [136, 0]]) }), 0);
+        assert.equal(clipMaskOf({ ...model, clipPlanes: undefined }), 0);
+        assert.equal(clipMaskOf({ ...model, renderStates: new Map([[152, 0xffff]]) }), 0x3f,
+            'six planes and no more');
+    });
+
+test('recorded: a Direct3D 8 draw is clipped by the planes D3DRS_CLIPPLANEENABLE turns on',
+    async()=>{
+        const h = harness();
+        const { device, gpu } = h;
+        assert.equal(device.SetClipPlane(2, [0, 0, 1, -1]), D3D_OK);
+        assert.equal(device.SetRenderState(D3DRS.CLIPPLANEENABLE, 0b100), D3D_OK);
+        assert.equal(device.BeginScene(), D3D_OK);
+        assert.equal(device.SetVertexShader(FVF.XYZ | FVF.DIFFUSE), D3D_OK);
+        assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(48), 16),
+            D3D_OK);
+        // Pre-transformed vertices are not clipped by the planes.
+        assert.equal(device.SetVertexShader(FVF_QUAD), D3D_OK);
+        assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(60), 20),
+            D3D_OK);
+        assert.equal(device.EndScene(), D3D_OK);
+        await h.present();
+        const modules = gpu.of('createShaderModule').map((/** @type {any} */ call)=>
+            /** @type {string} */ (call.descriptor.code));
+        assert.equal(modules.filter(code=>code.includes('out.clip0 = vec4f(dot(uniforms'
+            + '.clipPlane[0], vec4f(vertex.position, 1.0)), 1.0, 1.0, 1.0);')).length, 1);
+        assert.equal(modules.filter(code=>code.includes('clipPlane')).length, 1);
+    });
 
 test('recorded: a texture is uploaded after it is unlocked, and only then', async()=>{
     const h = harness();
@@ -4077,6 +4144,39 @@ test('a cascade stage says what its texture fills, and a stage that samples noth
         const unfilled = stageCascade(model, layout).stages;
         assert.ok(unfilled.every(stage=>!('ones' in stage)), 'none is asked for by default');
         assert.deepEqual(unfilled.slice(1), filled.slice(1));
+    });
+
+test('a cascade stage that samples carries its level-of-detail bias, and only one that is set',
+    ()=>{
+        const texture = { name: 'texture' };
+        const bits = (/** @type {number} */ value)=>new Uint32Array(Float32Array.of(value).buffer)[0];
+        const states = [
+            new Map([[D3DTSS.COLOROP, D3DTOP.SELECTARG1], [D3DTSS.COLORARG1, D3DTA.TEXTURE],
+                [D3DTSS.ALPHAOP, D3DTOP.SELECTARG1], [D3DTSS.ALPHAARG1, D3DTA.TEXTURE],
+                [D3DTSS.MIPMAPLODBIAS, bits(-0.75)]]),
+            new Map([[D3DTSS.COLOROP, D3DTOP.MODULATE], [D3DTSS.COLORARG1, D3DTA.TEXTURE],
+                [D3DTSS.COLORARG2, D3DTA.CURRENT], [D3DTSS.ALPHAOP, D3DTOP.SELECTARG1],
+                [D3DTSS.ALPHAARG1, D3DTA.CURRENT], [D3DTSS.MIPMAPLODBIAS, bits(1e30)]]),
+            // A bias on a stage that samples nothing shapes nothing.
+            new Map([[D3DTSS.COLOROP, D3DTOP.MODULATE], [D3DTSS.COLORARG1, D3DTA.DIFFUSE],
+                [D3DTSS.COLORARG2, D3DTA.CURRENT], [D3DTSS.ALPHAOP, D3DTOP.SELECTARG1],
+                [D3DTSS.ALPHAARG1, D3DTA.CURRENT], [D3DTSS.MIPMAPLODBIAS, bits(2)]]),
+            new Map([[D3DTSS.COLOROP, D3DTOP.MODULATE], [D3DTSS.COLORARG1, D3DTA.TEXTURE],
+                [D3DTSS.COLORARG2, D3DTA.CURRENT], [D3DTSS.ALPHAOP, D3DTOP.SELECTARG1],
+                [D3DTSS.ALPHAARG1, D3DTA.CURRENT], [D3DTSS.MIPMAPLODBIAS, bits(NaN)]]),
+        ];
+        const model = /** @type {any} */ ({
+            renderStates: new Map(),
+            stageStates: (/** @type {number} */ stage)=>states[stage] ?? new Map(),
+            textures: new Map([[0, texture], [1, texture], [2, texture], [3, texture]]),
+        });
+        const layout = decodeFvf(FVF.XYZ | FVF.DIFFUSE | (1 << FVF.TEXCOUNT_SHIFT));
+        const stages = stageCascade(model, layout).stages;
+        assert.equal(stages[0].lodBias, -0.75);
+        assert.equal(stages[1].lodBias, 16, 'held to what hardware reaches');
+        assert.equal('lodBias' in stages[2], false);
+        assert.equal('lodBias' in stages[3], false, 'a bias that is no number is none');
+        assert.equal(lodBiasOf(bits(-0)), 0);
     });
 
 test('a floating-point surface is an r16float, R32F narrowed to half precision on upload', ()=>{

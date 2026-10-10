@@ -30,18 +30,21 @@ import {
     ID3D10SHADERREFLECTION_SLOTS, ID3D10STATEBLOCK_SLOTS, ID3D10TEXTURE_SLOTS,
     ID3D10VIEW_SLOTS, IDXGIADAPTER1_SLOTS, IDXGIADAPTER_SLOTS, IDXGIDEVICE1_SLOTS,
     IDXGIDEVICE_SLOTS, IDXGIFACTORY1_SLOTS, IDXGIFACTORY_SLOTS, IDXGIOUTPUT_SLOTS,
-    IDXGIRESOURCE_SLOTS, IDXGISURFACE_SLOTS, IDXGISWAPCHAIN_SLOTS, createDirect3D10Seam,
+    IDXGIRESOURCE_SLOTS, IDXGISURFACE1_SLOTS, IDXGISURFACE_SLOTS, IDXGISWAPCHAIN_SLOTS,
+    createDirect3D10Seam,
 } from './d3d10.js';
 import {
     D3D10_BIND, D3D10_CPU_ACCESS, D3D10_DRIVER_TYPE, D3D10_MAP, D3D10_PRIMITIVE_TOPOLOGY,
-    D3D10_MAP_FLAG_DO_NOT_WAIT, D3D10_QUERY, D3D10_SDK_VERSION, D3D10_USAGE,
-    DXGI_ERROR_INVALID_CALL, DXGI_FORMAT,
+    D3D10_MAP_FLAG_DO_NOT_WAIT, D3D10_QUERY, D3D10_RESOURCE_MISC, D3D10_SDK_VERSION, D3D10_USAGE,
+    DXGI_ERROR_INVALID_CALL, DXGI_ERROR_UNSUPPORTED, DXGI_FORMAT,
     DXGI_SWAP_EFFECT, DXGI_USAGE, E_INVALIDARG, IID, S_OK,
 } from '../d3d10/constants.js';
 import { DXGI_SWAP_CHAIN_DESC, writeSwapChainDesc } from '../d3d10/structs.js';
 import {
-    constantBufferShader, passThroughVertexShader, solidPixelShader,
+    assemble, constantBufferShader, dclInputSiv, dclOutputSiv, o, passThroughVertexShader, ret,
+    solidPixelShader, utof, v as input,
 } from '../d3d10/shader-fixtures.js';
+import { COMPONENT_TYPE, SHADER_KIND, SYSTEM_VALUE } from '../d3d10/dxbc.js';
 import { createBackend } from '../webgpu/backend.js';
 import { FX_KIND, effectBinary } from '../d3d10/effect-fixtures.js';
 import { CONSTANT_TYPE } from '../d3d10/effect.js';
@@ -52,6 +55,10 @@ import {
     ID3D10EFFECTTYPE_SLOTS, ID3D10EFFECTVARIABLE_SLOTS, ID3D10EFFECT_SLOTS,
 } from './d3d10-effect.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
+import { createGraphicsLibraries } from './exports.js';
+import { PCI_VENDOR_IDS } from './adapter.js';
+import { VIDEO_ADAPTER_NAME } from '../../win32/devices.js';
+import { REFRESH_HZ, displayModes } from '../../win32/user32/display.js';
 
 const E_NOTIMPL = 0x80004001;
 
@@ -177,8 +184,10 @@ const floatBits = floats=>[...new Uint32Array(Float32Array.from(floats).buffer)]
 
 /**
  * The whole assembly as a program reaches it, over a recording GPU.
+ *
+ * @param {{ gdi?: import('./ddraw.js').SurfaceDcServices }} [assembly]
  */
-function seamed(){
+function seamed(assembly = {}){
     const box = machine();
     const gpu = createFakeDevice();
     /** @type {any[]} */
@@ -205,6 +214,7 @@ function seamed(){
             createTexture: gpu.device.createTexture,
             divergence: (api, detail)=>divergences.push(`${api}: ${detail}`),
         }),
+        gdi: assembly.gdi,
     });
     const d3d10 = seam.libraries['D3D10.dll'];
     const dxgi = seam.libraries['DXGI.dll'];
@@ -1224,11 +1234,26 @@ test('d3d10_1.dll makes an ID3D10Device1 at 10.0, and forwards the rest to d3d10
     assert.equal(h.box.call(h.box.memory.readU32(dxgiAt), slot(IDXGIDEVICE_SLOTS, 'GetAdapter'),
         [adapterAt]), S_OK);
     const adapter = h.box.memory.readU32(adapterAt);
-    const supports = (/** @type {string} */ iid)=>h.box.call(adapter,
-        slot(IDXGIADAPTER_SLOTS, 'CheckInterfaceSupport'), [h.box.placeGuid(iid), 0]);
-    assert.equal(supports(IID.ID3D10Device), S_OK);
-    assert.equal(supports(IID.ID3D10Device1), S_OK);
-    assert.equal(supports(IID.IDXGIFactory), DXGI_ERROR_INVALID_CALL);
+    // test_check_interface_support (dxgi.c:1270-1304): the DXGI device and
+    // both Direct3D 10 devices, with a driver version; anything else is
+    // unsupported and the version is left alone.
+    /** @param {string} iid */
+    const supports = iid=>{
+        const version = h.box.place([0xdeadbeef, 0xdeadbeef]);
+        const hr = h.box.call(adapter, slot(IDXGIADAPTER_SLOTS, 'CheckInterfaceSupport'),
+            [h.box.placeGuid(iid), version]);
+        return [hr, h.box.memory.readU32(version), h.box.memory.readU32(version + 4)];
+    };
+    for (const iid of [IID.IDXGIDevice, IID.ID3D10Device, IID.ID3D10Device1])
+    {
+        assert.deepEqual(supports(iid), [S_OK, 0, 0x00010000], `${iid}: driver 1.0.0.0`);
+        assert.equal(h.box.call(adapter, slot(IDXGIADAPTER_SLOTS, 'CheckInterfaceSupport'),
+            [h.box.placeGuid(iid), 0]), S_OK, 'with no version asked');
+    }
+    const ID3D11Device = '{DB6F6DDB-AC77-4E88-8253-819DF9BBF140}';
+    assert.deepEqual(supports(ID3D11Device), [DXGI_ERROR_UNSUPPORTED, 0xdeadbeef, 0xdeadbeef]);
+    assert.deepEqual(supports(IID.IDXGIFactory), [DXGI_ERROR_UNSUPPORTED, 0xdeadbeef,
+        0xdeadbeef]);
 
     // D3D10_BLEND_DESC1: two words, then eight targets of eight words.
     const desc = h.box.allocate(0x108);
@@ -1350,14 +1375,27 @@ test('what this build cannot do says so in the slot rather than in a crash', ()=
     assert.equal(h.box.memory.readU32(outAndBeyond), 0, 'the sixth argument is the out');
     assert.equal(h.box.memory.readU32(outAndBeyond + 4), 0xfeedface,
         'the caller\'s next stack word is not an argument');
-    assert.equal(h.swapChain(swapChain, 'SetFullscreenState', [1, 0]), 0x887a0022,
-        'DXGI_ERROR_NOT_CURRENTLY_AVAILABLE: the display belongs to the page');
+    // Fullscreen as a Direct3D 9 device has it, and its target handed back.
+    assert.equal(h.swapChain(swapChain, 'SetFullscreenState', [1, 0]), S_OK);
+    const stateAt = h.box.place([0, 0xdeadbeef]);
+    assert.equal(h.swapChain(swapChain, 'GetFullscreenState', [stateAt, stateAt + 4]), S_OK);
+    assert.equal(h.box.memory.readU32(stateAt), 1);
+    const target = h.box.memory.readU32(stateAt + 4);
+    const containingAt = h.box.place([0]);
+    assert.equal(h.swapChain(swapChain, 'GetContainingOutput', [containingAt]), S_OK);
+    assert.equal(target, h.box.memory.readU32(containingAt), 'the output it is on');
+    assert.equal(h.swapChain(swapChain, 'GetFullscreenState', [stateAt, 0]), S_OK,
+        'with no room for the target');
+    h.box.call(target, 2);
+    h.box.call(target, 2);
     assert.equal(h.swapChain(swapChain, 'SetFullscreenState', [0, 0]), S_OK);
-    const modes = h.box.place([7]);
+    assert.equal(h.swapChain(swapChain, 'GetFullscreenState', [stateAt, stateAt + 4]), S_OK);
+    assert.deepEqual([h.box.memory.readU32(stateAt), h.box.memory.readU32(stateAt + 4)], [0, 0]);
+    const modes = h.box.place([7, 0, 0, 0, 0, 0, 0]);
     assert.equal(h.swapChain(swapChain, 'ResizeTarget', [modes]), S_OK);
     assert.equal(h.swapChain(swapChain, 'ResizeTarget', [0]), DXGI_ERROR_INVALID_CALL);
-    assert.equal(h.device(device, 'ResolveSubresource', [0, 0, 0, 0, 0]), 0);
-    assert.ok(h.divergences.some(line=>line.includes('ResolveSubresource')));
+    assert.equal(h.device(device, 'ResolveSubresource', [0, 0, 0, 0, 0]), 0,
+        'a resolve of nothing is dropped');
 });
 
 // --- the effect framework ---
@@ -1725,4 +1763,672 @@ test('an effect variable\'s typed views are called through its vtable', ()=>{
     h.box.call(read(textureAt), 2);
     assert.equal(h.box.call(e.effect, 2), 0);
     assert.equal(e.references(), e.baseline, 'every reference handed out came back');
+});
+
+// --- view descriptions, through guest memory ---
+
+/** What a stack the program never cleared holds in the union's other dwords. */
+const STALE = 0xcdcdcdcd;
+
+/**
+ * A view description in guest memory the way Wine's get_rtv_desc,
+ * get_dsv_desc and get_srv_desc fill one (d3d10core.c:235-560): the head, then
+ * only the members of the dimension asked for, laid out as the SDK header lays
+ * that dimension's union out -- written here from the header, not from the
+ * table the seam reads with -- and stale dwords in every other place.
+ *
+ * @param {ReturnType<typeof seamed>} h
+ * @param {'rtv' | 'dsv' | 'srv'} kind
+ * @param {number[]} entry  Wine's {format, dimension, mip, (mip count,) layer, layer count}.
+ * @returns {number} where it was placed
+ */
+function placeViewDesc(h, kind, entry){
+    const [format, dimension, ...rest] = entry;
+    /** @type {Record<string, Record<number, (values: number[]) => number[]>>} */
+    const layouts = {
+        // D3D10_RTV_DIMENSION: TEX1D 2, TEX1DARRAY 3, TEX2D 4, TEX2DARRAY 5,
+        // TEX2DMS 6, TEX2DMSARRAY 7, TEX3D 8.
+        rtv: {
+            2: ([mip])=>[mip], 3: ([mip, layer, count])=>[mip, layer, count],
+            4: ([mip])=>[mip], 5: ([mip, layer, count])=>[mip, layer, count],
+            6: ()=>[], 7: ([, layer, count])=>[layer, count],
+            8: ([mip, layer, count])=>[mip, layer, count],
+        },
+        // D3D10_DSV_DIMENSION: TEX1D 1, TEX1DARRAY 2, TEX2D 3, TEX2DARRAY 4,
+        // TEX2DMS 5, TEX2DMSARRAY 6.
+        dsv: {
+            1: ([mip])=>[mip], 2: ([mip, layer, count])=>[mip, layer, count],
+            3: ([mip])=>[mip], 4: ([mip, layer, count])=>[mip, layer, count],
+            5: ()=>[], 6: ([, layer, count])=>[layer, count],
+        },
+        // D3D10_SRV_DIMENSION: as the render target's, and TEXTURECUBE 9.
+        srv: {
+            2: ([mip, levels])=>[mip, levels],
+            3: ([mip, levels, layer, count])=>[mip, levels, layer, count],
+            4: ([mip, levels])=>[mip, levels],
+            5: ([mip, levels, layer, count])=>[mip, levels, layer, count],
+            6: ()=>[], 7: ([, , layer, count])=>[layer, count],
+            8: ([mip, levels])=>[mip, levels], 9: ([mip, levels])=>[mip, levels],
+        },
+    };
+    const members = (layouts[kind][dimension] ?? (()=>[]))(rest.map(value=>value >>> 0));
+    const union = [STALE, STALE, STALE, STALE];
+    members.forEach((value, index)=>{
+        union[index] = value;
+    });
+    return h.box.place([format, dimension, ...union]);
+}
+
+/**
+ * The description a view reports, read at the SDK header's offsets for its
+ * dimension, as Wine's check_*_desc reads it, with what lies past the
+ * structure: a description written one dword too long shows there.
+ *
+ * @param {ReturnType<typeof seamed>} h
+ * @param {'rtv' | 'dsv' | 'srv'} kind
+ * @param {number} view
+ */
+function reportedViewDesc(h, kind, view){
+    const size = kind === 'srv' ? 6 : 5;
+    const out = h.box.place(Array(size + 1).fill(STALE));
+    h.box.call(view, slot(ID3D10VIEW_SLOTS, 'GetDesc'), [out]);
+    const words = Array.from({ length: size + 1 },
+        (_, index)=>h.box.memory.readU32(out + index * 4));
+    return { words: words.slice(0, size), past: words[size] };
+}
+
+/**
+ * @param {ReturnType<typeof seamed>} h
+ * @param {number} device
+ * @param {{ mips: number, slices: number, format: number, bind: number, misc?: number,
+ *           volume?: boolean }} texture
+ */
+function viewTexture(h, device, texture){
+    const out = h.box.place([0]);
+    const hr = texture.volume
+        ? h.device(device, 'CreateTexture3D', [h.box.place([64, 64, texture.slices,
+            texture.mips, texture.format, D3D10_USAGE.DEFAULT, texture.bind, 0, 0]), 0, out])
+        : h.device(device, 'CreateTexture2D', [h.box.place([512, 512, texture.mips,
+            texture.slices, texture.format, 1, 0, D3D10_USAGE.DEFAULT, texture.bind, 0,
+            texture.misc ?? 0]), 0, out]);
+    assert.equal(hr, S_OK);
+    return h.box.memory.readU32(out);
+}
+
+const RGBA8 = DXGI_FORMAT.R8G8B8A8_UNORM;
+const RGBA8_TL = DXGI_FORMAT.R8G8B8A8_TYPELESS;
+const D24S8 = DXGI_FORMAT.D24_UNORM_S8_UINT;
+const ALL = 0xffffffff;
+
+/**
+ * Runs one of Wine's view tables through the seam: each valid row creates the
+ * view from a description with stale dwords beside its members and reads back
+ * the expected description at the header's offsets; each invalid row is
+ * E_INVALIDARG with the out pointer cleared.
+ *
+ * @param {'rtv' | 'dsv' | 'srv'} kind
+ * @param {string} method
+ * @param {number} bind
+ * @param {[any, number[] | null, number[]][]} valid  texture, description (null: default), expected
+ * @param {[any, number[]][]} invalid
+ */
+function runViewTable(kind, method, bind, valid, invalid){
+    const h = seamed();
+    const { device } = h.createDeviceAndSwapChain();
+    const size = kind === 'srv' ? 6 : 5;
+    for (const [index, [texture, desc, expected]] of valid.entries())
+    {
+        const resource = viewTexture(h, device, { ...texture, bind });
+        const out = h.box.place([0xdeadbeef]);
+        assert.equal(h.device(device, method, [resource, desc ? placeViewDesc(h, kind, desc) : 0,
+            out]), S_OK, `row ${index}`);
+        const view = h.box.memory.readU32(out);
+        const { words, past } = reportedViewDesc(h, kind, view);
+        const wanted = [...expected.map(value=>value >>> 0)];
+        // Wine's check_*_desc compares the head and the dimension's members;
+        // the rest of the union is zero here, as it is in a description
+        // Windows built and the program cleared before asking.
+        while (wanted.length < size)
+        {
+            wanted.push(0);
+        }
+        assert.deepEqual(words, wanted, `row ${index}: the description at the header's offsets`);
+        assert.equal(past, STALE, `row ${index}: nothing written past the structure`);
+        h.box.call(view, 2);
+        h.box.call(resource, 2);
+    }
+    for (const [index, [texture, desc]] of invalid.entries())
+    {
+        const resource = viewTexture(h, device, { ...texture, bind });
+        const out = h.box.place([0xdeadbeef]);
+        assert.equal(h.device(device, method, [resource, placeViewDesc(h, kind, desc), out]),
+            E_INVALIDARG, `invalid row ${index}`);
+        assert.equal(h.box.memory.readU32(out), 0, `invalid row ${index}: no view`);
+        h.box.call(resource, 2);
+    }
+}
+
+test('render-target views: Wine\'s table of descriptions, each read by its own dimension'
+    + ' (test_create_rendertarget_view, d3d10core.c:2894-2987)', ()=>{
+    const t = (/** @type {number} */ mips, /** @type {number} */ slices,
+        /** @type {number} */ format)=>({ mips, slices, format });
+    const v = (/** @type {number} */ mips, /** @type {number} */ slices,
+        /** @type {number} */ format)=>({ mips, slices, format, volume: true });
+    const [TEX_1D, TEX_1D_ARRAY, TEX_2D, TEX_2D_ARRAY, TEX_2DMS, TEX_2DMS_ARR, TEX_3D] =
+        [2, 3, 4, 5, 6, 7, 8];
+    runViewTable('rtv', 'CreateRenderTargetView', D3D10_BIND.RENDER_TARGET, [
+        [t(1, 1, RGBA8), null, [RGBA8, TEX_2D, 0]],
+        [t(10, 1, RGBA8), null, [RGBA8, TEX_2D, 0]],
+        [t(10, 1, RGBA8), [0, TEX_2D, 0], [RGBA8, TEX_2D, 0]],
+        [t(10, 1, RGBA8), [0, TEX_2D, 1], [RGBA8, TEX_2D, 1]],
+        [t(10, 1, RGBA8), [0, TEX_2D, 9], [RGBA8, TEX_2D, 9]],
+        [t(1, 1, RGBA8_TL), [RGBA8, TEX_2D, 0], [RGBA8, TEX_2D, 0]],
+        [t(10, 1, RGBA8_TL), [RGBA8, TEX_2D, 0], [RGBA8, TEX_2D, 0]],
+        [t(1, 4, RGBA8), null, [RGBA8, TEX_2D_ARRAY, 0, 0, 4]],
+        [t(10, 4, RGBA8), null, [RGBA8, TEX_2D_ARRAY, 0, 0, 4]],
+        [t(10, 4, RGBA8), [0, TEX_2D_ARRAY, 0, 0, ALL], [RGBA8, TEX_2D_ARRAY, 0, 0, 4]],
+        [t(10, 4, RGBA8), [0, TEX_2D_ARRAY, 1, 0, ALL], [RGBA8, TEX_2D_ARRAY, 1, 0, 4]],
+        [t(10, 4, RGBA8), [0, TEX_2D_ARRAY, 9, 0, ALL], [RGBA8, TEX_2D_ARRAY, 9, 0, 4]],
+        [t(10, 4, RGBA8), [0, TEX_2D_ARRAY, 0, 1, ALL], [RGBA8, TEX_2D_ARRAY, 0, 1, 3]],
+        [t(10, 4, RGBA8), [0, TEX_2D_ARRAY, 0, 3, ALL], [RGBA8, TEX_2D_ARRAY, 0, 3, 1]],
+        [t(1, 1, RGBA8), [0, TEX_2DMS], [RGBA8, TEX_2DMS]],
+        [t(1, 4, RGBA8), [0, TEX_2DMS], [RGBA8, TEX_2DMS]],
+        [t(10, 4, RGBA8), [0, TEX_2DMS], [RGBA8, TEX_2DMS]],
+        [t(1, 1, RGBA8), [0, TEX_2DMS_ARR, 0, 0, 1], [RGBA8, TEX_2DMS_ARR, 0, 1]],
+        [t(1, 1, RGBA8), [0, TEX_2DMS_ARR, 0, 0, ALL], [RGBA8, TEX_2DMS_ARR, 0, 1]],
+        [t(10, 4, RGBA8), [0, TEX_2DMS_ARR, 0, 0, 1], [RGBA8, TEX_2DMS_ARR, 0, 1]],
+        [t(10, 4, RGBA8), [0, TEX_2DMS_ARR, 0, 0, 4], [RGBA8, TEX_2DMS_ARR, 0, 4]],
+        [t(10, 4, RGBA8), [0, TEX_2DMS_ARR, 0, 0, ALL], [RGBA8, TEX_2DMS_ARR, 0, 4]],
+        [v(1, 6, RGBA8), null, [RGBA8, TEX_3D, 0, 0, 6]],
+        [v(2, 6, RGBA8), null, [RGBA8, TEX_3D, 0, 0, 6]],
+        [v(2, 6, RGBA8), [0, TEX_3D, 0, 0, ALL], [RGBA8, TEX_3D, 0, 0, 6]],
+        [v(2, 4, RGBA8), [0, TEX_3D, 1, 0, ALL], [RGBA8, TEX_3D, 1, 0, 2]],
+        [v(2, 4, RGBA8), [0, TEX_3D, 0, 1, ALL], [RGBA8, TEX_3D, 0, 1, 3]],
+        [v(2, 4, RGBA8), [0, TEX_3D, 0, 3, ALL], [RGBA8, TEX_3D, 0, 3, 1]],
+        [v(2, 4, RGBA8), [0, TEX_3D, 1, 1, 1], [RGBA8, TEX_3D, 1, 1, 1]],
+        [v(2, 4, RGBA8), [0, TEX_3D, 1, 1, ALL], [RGBA8, TEX_3D, 1, 1, 1]],
+        [v(6, 8, RGBA8), [0, TEX_3D, 1, 0, ALL], [RGBA8, TEX_3D, 1, 0, 4]],
+        [v(6, 8, RGBA8), [0, TEX_3D, 5, 0, ALL], [RGBA8, TEX_3D, 5, 0, 1]],
+    ], [
+        [t(1, 1, RGBA8), [RGBA8, 0]],
+        [t(6, 4, RGBA8), [RGBA8, 0]],
+        [t(1, 1, RGBA8), [RGBA8, TEX_1D, 0]],
+        [t(1, 1, RGBA8), [RGBA8, TEX_1D_ARRAY, 0, 0, 1]],
+        [t(1, 1, RGBA8), [RGBA8, TEX_3D, 0, 0, 1]],
+        [t(1, 1, RGBA8), [RGBA8_TL, TEX_2D, 0]],
+        [t(1, 1, RGBA8_TL), [0, TEX_2D, 0]],
+        [t(1, 1, RGBA8), [RGBA8, TEX_2D, 1]],
+        [t(1, 1, RGBA8), [RGBA8, TEX_2D_ARRAY, 0, 0, 0]],
+        [t(1, 1, RGBA8), [RGBA8, TEX_2D_ARRAY, 1, 0, 1]],
+        [t(1, 1, RGBA8), [RGBA8, TEX_2D_ARRAY, 0, 0, 2]],
+        [t(1, 1, RGBA8), [RGBA8, TEX_2D_ARRAY, 0, 1, 1]],
+        [t(1, 1, RGBA8), [RGBA8, TEX_2DMS_ARR, 0, 0, 2]],
+        [t(1, 1, RGBA8), [RGBA8, TEX_2DMS_ARR, 0, 1, 1]],
+        [v(1, 9, RGBA8), [RGBA8, TEX_2D, 0]],
+        [v(1, 9, RGBA8), [RGBA8, TEX_2D_ARRAY, 0, 0, 1]],
+        [v(1, 1, RGBA8), [RGBA8, TEX_3D, 0, 0, 0]],
+        [v(1, 1, RGBA8), [RGBA8, TEX_3D, 1, 0, 1]],
+        [v(1, 9, RGBA8), [RGBA8_TL, TEX_3D, 0, 0, 1]],
+        [v(4, 8, RGBA8), [RGBA8, TEX_3D, 0, 0, 9]],
+        [v(4, 8, RGBA8), [RGBA8, TEX_3D, 3, 0, 2]],
+        [v(4, 8, RGBA8), [RGBA8, TEX_3D, 1, 0, 8]],
+        [v(4, 8, RGBA8), [RGBA8, TEX_3D, 0, 8, ALL]],
+        [v(4, 8, RGBA8), [RGBA8, TEX_3D, 3, 1, ALL]],
+    ]);
+});
+
+test('depth-stencil views: Wine\'s table of descriptions, each read by its own dimension'
+    + ' (test_create_depthstencil_view, d3d10core.c:2616-2672)', ()=>{
+    const t = (/** @type {number} */ mips, /** @type {number} */ slices,
+        /** @type {number} */ format)=>({ mips, slices, format });
+    const R24G8_TL = DXGI_FORMAT.R24G8_TYPELESS;
+    const [TEX_1D, TEX_1D_ARRAY, TEX_2D, TEX_2D_ARRAY, TEX_2DMS, TEX_2DMS_ARR] =
+        [1, 2, 3, 4, 5, 6];
+    runViewTable('dsv', 'CreateDepthStencilView', D3D10_BIND.DEPTH_STENCIL, [
+        [t(1, 1, D24S8), null, [D24S8, TEX_2D, 0]],
+        [t(10, 1, D24S8), null, [D24S8, TEX_2D, 0]],
+        [t(10, 1, D24S8), [0, TEX_2D, 0], [D24S8, TEX_2D, 0]],
+        [t(10, 1, D24S8), [0, TEX_2D, 1], [D24S8, TEX_2D, 1]],
+        [t(10, 1, D24S8), [0, TEX_2D, 9], [D24S8, TEX_2D, 9]],
+        [t(1, 1, R24G8_TL), [D24S8, TEX_2D, 0], [D24S8, TEX_2D, 0]],
+        [t(10, 1, R24G8_TL), [D24S8, TEX_2D, 0], [D24S8, TEX_2D, 0]],
+        [t(1, 4, D24S8), null, [D24S8, TEX_2D_ARRAY, 0, 0, 4]],
+        [t(10, 4, D24S8), null, [D24S8, TEX_2D_ARRAY, 0, 0, 4]],
+        [t(10, 4, D24S8), [0, TEX_2D_ARRAY, 0, 0, ALL], [D24S8, TEX_2D_ARRAY, 0, 0, 4]],
+        [t(10, 4, D24S8), [0, TEX_2D_ARRAY, 5, 0, ALL], [D24S8, TEX_2D_ARRAY, 5, 0, 4]],
+        [t(10, 4, D24S8), [0, TEX_2D_ARRAY, 0, 2, ALL], [D24S8, TEX_2D_ARRAY, 0, 2, 2]],
+        [t(1, 1, D24S8), [0, TEX_2DMS], [D24S8, TEX_2DMS]],
+        [t(10, 4, D24S8), [0, TEX_2DMS], [D24S8, TEX_2DMS]],
+        [t(1, 1, D24S8), [0, TEX_2DMS_ARR, 0, 0, ALL], [D24S8, TEX_2DMS_ARR, 0, 1]],
+        [t(10, 4, D24S8), [0, TEX_2DMS_ARR, 0, 0, 1], [D24S8, TEX_2DMS_ARR, 0, 1]],
+        [t(10, 4, D24S8), [0, TEX_2DMS_ARR, 0, 0, ALL], [D24S8, TEX_2DMS_ARR, 0, 4]],
+    ], [
+        [t(1, 1, D24S8), [D24S8, 0]],
+        [t(6, 4, D24S8), [D24S8, 0]],
+        [t(1, 1, D24S8), [D24S8, TEX_1D, 0]],
+        [t(1, 1, D24S8), [D24S8, TEX_1D_ARRAY, 0, 0, 1]],
+        [t(1, 1, D24S8), [R24G8_TL, TEX_2D, 0]],
+        [t(1, 1, R24G8_TL), [0, TEX_2D, 0]],
+        [t(1, 1, D24S8), [D24S8, TEX_2D, 1]],
+        [t(1, 1, D24S8), [D24S8, TEX_2D_ARRAY, 0, 0, 0]],
+        [t(1, 1, D24S8), [D24S8, TEX_2D_ARRAY, 1, 0, 1]],
+        [t(1, 1, D24S8), [D24S8, TEX_2D_ARRAY, 0, 0, 2]],
+        [t(1, 1, D24S8), [D24S8, TEX_2D_ARRAY, 0, 1, 1]],
+        [t(1, 1, D24S8), [D24S8, TEX_2DMS_ARR, 0, 0, 2]],
+        [t(1, 1, D24S8), [D24S8, TEX_2DMS_ARR, 0, 1, 1]],
+    ]);
+});
+
+test('shader-resource views: Wine\'s table of descriptions, each read by its own dimension'
+    + ' (test_create_shader_resource_view, d3d10core.c:3542-3632)', ()=>{
+    const t = (/** @type {number} */ mips, /** @type {number} */ slices,
+        /** @type {number} */ format)=>({ mips, slices, format });
+    const v = (/** @type {number} */ mips, /** @type {number} */ slices,
+        /** @type {number} */ format)=>({ mips, slices, format, volume: true });
+    const [TEX_1D, TEX_1D_ARRAY, TEX_2D, TEX_2D_ARRAY, TEX_2DMS, TEX_2DMS_ARR, TEX_3D] =
+        [2, 3, 4, 5, 6, 7, 8];
+    runViewTable('srv', 'CreateShaderResourceView', D3D10_BIND.SHADER_RESOURCE, [
+        [t(10, 1, RGBA8), null, [RGBA8, TEX_2D, 0, 10]],
+        [t(10, 1, RGBA8), [0, TEX_2D, 0, ALL], [RGBA8, TEX_2D, 0, 10]],
+        [t(10, 1, RGBA8), [RGBA8, TEX_2D, 0, ALL], [RGBA8, TEX_2D, 0, 10]],
+        [t(10, 1, RGBA8), [0, TEX_2D, 0, 10], [RGBA8, TEX_2D, 0, 10]],
+        [t(1, 1, RGBA8_TL), [RGBA8, TEX_2D, 0, ALL], [RGBA8, TEX_2D, 0, 1]],
+        [t(10, 1, RGBA8_TL), [RGBA8, TEX_2D, 0, ALL], [RGBA8, TEX_2D, 0, 10]],
+        [t(10, 4, RGBA8), null, [RGBA8, TEX_2D_ARRAY, 0, 10, 0, 4]],
+        [t(10, 4, RGBA8), [0, TEX_2D_ARRAY, 0, ALL, 0, ALL], [RGBA8, TEX_2D_ARRAY, 0, 10, 0, 4]],
+        [t(10, 4, RGBA8), [0, TEX_2D_ARRAY, 1, ALL, 0, ALL], [RGBA8, TEX_2D_ARRAY, 1, 9, 0, 4]],
+        [t(10, 4, RGBA8), [0, TEX_2D_ARRAY, 9, ALL, 0, ALL], [RGBA8, TEX_2D_ARRAY, 9, 1, 0, 4]],
+        [t(10, 4, RGBA8), [0, TEX_2D_ARRAY, 0, ALL, 1, ALL], [RGBA8, TEX_2D_ARRAY, 0, 10, 1, 3]],
+        [t(10, 4, RGBA8), [0, TEX_2D_ARRAY, 0, ALL, 3, ALL], [RGBA8, TEX_2D_ARRAY, 0, 10, 3, 1]],
+        [t(1, 1, RGBA8), [0, TEX_2DMS], [RGBA8, TEX_2DMS]],
+        [t(10, 4, RGBA8), [0, TEX_2DMS], [RGBA8, TEX_2DMS]],
+        [t(1, 1, RGBA8), [0, TEX_2DMS_ARR, 0, 1, 0, 1], [RGBA8, TEX_2DMS_ARR, 0, 1]],
+        [t(1, 1, RGBA8), [0, TEX_2DMS_ARR, 0, 1, 0, ALL], [RGBA8, TEX_2DMS_ARR, 0, 1]],
+        [t(10, 4, RGBA8), [0, TEX_2DMS_ARR, 0, 1, 0, 4], [RGBA8, TEX_2DMS_ARR, 0, 4]],
+        [t(10, 4, RGBA8), [0, TEX_2DMS_ARR, 0, 1, 0, ALL], [RGBA8, TEX_2DMS_ARR, 0, 4]],
+        [v(1, 12, RGBA8), null, [RGBA8, TEX_3D, 0, 1]],
+        [v(1, 12, RGBA8), [0, TEX_3D, 0, 1], [RGBA8, TEX_3D, 0, 1]],
+        [v(1, 12, RGBA8), [0, TEX_3D, 0, ALL], [RGBA8, TEX_3D, 0, 1]],
+        [v(4, 12, RGBA8), [0, TEX_3D, 0, ALL], [RGBA8, TEX_3D, 0, 4]],
+    ], [
+        [t(1, 1, RGBA8), [RGBA8, 0]],
+        [t(6, 4, RGBA8), [RGBA8, 0]],
+        [t(1, 1, RGBA8), [RGBA8, TEX_1D, 0, 1]],
+        [t(1, 1, RGBA8), [RGBA8, TEX_1D_ARRAY, 0, 1, 0, 1]],
+        [t(1, 1, RGBA8), [RGBA8, TEX_3D, 0, 1]],
+        [t(1, 1, RGBA8), [RGBA8_TL, TEX_2D, 0, ALL]],
+        [t(1, 1, RGBA8_TL), [0, TEX_2D, 0, ALL]],
+        [t(1, 1, RGBA8), [RGBA8, TEX_2D, 0, 0]],
+        [t(1, 1, RGBA8), [RGBA8, TEX_2D, 0, 2]],
+        [t(1, 1, RGBA8), [RGBA8, TEX_2D, 1, 1]],
+        [t(1, 1, RGBA8), [RGBA8, TEX_2D_ARRAY, 0, 0, 0, 0]],
+        [t(1, 1, RGBA8), [RGBA8, TEX_2D_ARRAY, 0, 0, 0, 1]],
+        [t(1, 1, RGBA8), [RGBA8, TEX_2D_ARRAY, 0, 1, 0, 0]],
+        [t(1, 1, RGBA8), [RGBA8, TEX_2D_ARRAY, 0, 2, 0, 1]],
+        [t(1, 1, RGBA8), [RGBA8, TEX_2D_ARRAY, 1, 1, 0, 1]],
+        [t(1, 1, RGBA8), [RGBA8, TEX_2D_ARRAY, 0, 1, 0, 2]],
+        [t(1, 1, RGBA8), [RGBA8, TEX_2D_ARRAY, 0, 1, 1, 1]],
+        [t(1, 1, RGBA8), [RGBA8, TEX_2DMS_ARR, 0, 1, 0, 2]],
+        [t(1, 1, RGBA8), [RGBA8, TEX_2DMS_ARR, 0, 1, 1, 1]],
+        [v(1, 9, RGBA8), [RGBA8, TEX_2D, 0, 1]],
+        [v(1, 9, RGBA8), [RGBA8, TEX_2D_ARRAY, 0, 1, 0, 1]],
+        [v(1, 1, RGBA8), [RGBA8, TEX_3D, 0, 0]],
+        [v(1, 1, RGBA8), [RGBA8_TL, TEX_3D, 0, 1]],
+        [v(1, 1, RGBA8), [0, TEX_3D, 0, 2]],
+        [v(1, 1, RGBA8), [0, TEX_3D, 1, 1]],
+    ]);
+});
+
+test('a cube texture is viewed as a cube, by default or asked (test_create_shader_resource_view,'
+    + ' d3d10core.c:3573-3577, 3611-3613)', ()=>{
+    const cube = (/** @type {number} */ mips)=>({ mips, slices: 6, format: RGBA8,
+        misc: D3D10_RESOURCE_MISC.TEXTURECUBE });
+    const TEX_CUBE = 9;
+    runViewTable('srv', 'CreateShaderResourceView', D3D10_BIND.SHADER_RESOURCE, [
+        [cube(1), null, [RGBA8, TEX_CUBE, 0, 1]],
+        [cube(2), null, [RGBA8, TEX_CUBE, 0, 2]],
+        [cube(2), [0, TEX_CUBE, 0, ALL], [RGBA8, TEX_CUBE, 0, 2]],
+        [cube(2), [0, TEX_CUBE, 0, 1], [RGBA8, TEX_CUBE, 0, 1]],
+        [cube(2), [0, TEX_CUBE, 1, 1], [RGBA8, TEX_CUBE, 1, 1]],
+        // Its six faces are still a two-dimensional array.
+        [cube(1), [0, 5, 0, 1, 2, 4], [RGBA8, 5, 0, 1, 2, 4]],
+    ], [
+        [cube(1), [RGBA8, TEX_CUBE, 0, 0]],
+        [cube(1), [RGBA8, TEX_CUBE, 0, 2]],
+        [cube(1), [RGBA8, TEX_CUBE, 1, 1]],
+        [{ mips: 1, slices: 1, format: RGBA8, volume: true }, [RGBA8, TEX_CUBE, 0, 1]],
+        [{ mips: 1, slices: 6, format: RGBA8 }, [RGBA8, TEX_CUBE, 0, 1]],
+    ]);
+});
+
+test('a buffer view\'s first element and element count come through the seam, are held to the'
+    + ' buffer, and read back (test_create_shader_resource_view, d3d10core.c:3658-3666;'
+    + ' test_buffer_srv, 15039-15044)', ()=>{
+    const h = seamed();
+    const { device } = h.createDeviceAndSwapChain();
+    /** @param {number} bytes */
+    const buffer = bytes=>{
+        const out = h.box.place([0]);
+        assert.equal(h.device(device, 'CreateBuffer', [h.box.place([bytes, D3D10_USAGE.DEFAULT,
+            D3D10_BIND.SHADER_RESOURCE, 0, 0]), 0, out]), S_OK);
+        return h.box.memory.readU32(out);
+    };
+    /**
+     * @param {number} resource @param {number} format
+     * @param {number} first @param {number} count
+     */
+    const view = (resource, format, first, count)=>{
+        const out = h.box.place([0xdeadbeef]);
+        const hr = h.device(device, 'CreateShaderResourceView', [resource,
+            h.box.place([format, 1, first, count, STALE, STALE]), out]);
+        return { hr, view: h.box.memory.readU32(out) };
+    };
+    const RGBA32F = DXGI_FORMAT.R32G32B32A32_FLOAT;
+    const kilobyte = buffer(1024);
+    const whole = view(kilobyte, RGBA32F, 0, 64);
+    assert.equal(whole.hr, S_OK, 'sixty-four sixteen-byte elements fill a kilobyte');
+    const part = view(kilobyte, RGBA32F, 4, 8);
+    assert.equal(part.hr, S_OK);
+    assert.deepEqual(reportedViewDesc(h, 'srv', part.view).words, [RGBA32F, 1, 4, 8, 0, 0]);
+    assert.deepEqual(/** @type {any} */ (h.publisher.objectAt(part.view)).range, null,
+        'a buffer view has no levels or slices');
+    /** @type {{ desc?: any }} */
+    const held = {};
+    /** @type {any} */ (h.publisher.objectAt(part.view)).GetDesc(held);
+    assert.deepEqual([held.desc.ElementOffset, held.desc.ElementWidth], [4, 8],
+        'what the renderer hands the shader as the view\'s first element and count');
+
+    // Wine's offset buffers: the range ends exactly at the buffer's end.
+    assert.equal(view(buffer(320), DXGI_FORMAT.R8G8B8A8_UNORM, 64, 16).hr, S_OK);
+    assert.equal(view(buffer(260), DXGI_FORMAT.R8_UNORM, 256, 4).hr, S_OK);
+    // One element past it, or none at all, is no view.
+    for (const [first, count] of [[60, 8], [0, 65], [64, 1], [0, 0]])
+    {
+        const refused = view(kilobyte, RGBA32F, first, count);
+        assert.deepEqual([refused.hr, refused.view], [E_INVALIDARG, 0], `${first}+${count}`);
+    }
+});
+
+test('an input layout of no elements is made through the seam from a NULL array', ()=>{
+    const h = seamed();
+    const { device } = h.createDeviceAndSwapChain();
+    const bytecode = assemble({
+        kind: SHADER_KIND.VERTEX,
+        inputs: [{ name: 'SV_VERTEXID', systemValue: SYSTEM_VALUE.VERTEX_ID, register: 0,
+            componentType: COMPONENT_TYPE.UINT }],
+        outputs: [{ name: 'SV_POSITION', systemValue: SYSTEM_VALUE.POSITION, register: 0 }],
+        instructions: [dclInputSiv(input(0), SYSTEM_VALUE.VERTEX_ID),
+            dclOutputSiv(o(0), SYSTEM_VALUE.POSITION), utof(o(0), input(0)), ret()],
+    });
+    const out = h.box.place([0xdeadbeef]);
+    assert.equal(h.device(device, 'CreateInputLayout', [0, 0, h.box.placeBytes(bytecode),
+        bytecode.length, out]), S_OK);
+    const layout = h.box.memory.readU32(out);
+    assert.notEqual(layout, 0);
+    assert.equal(h.box.call(layout, 2), 0);
+});
+
+test('the libraries hand DXGI the window\'s client area for a swap chain asked for at zero',
+    ()=>{
+        const box = machine();
+        const gpu = createFakeDevice();
+        const backend = createBackend({ device: gpu.device, queue: gpu.queue,
+            presentTo: ()=>{}, now: ()=>0 });
+        /** @type {number[]} */
+        const measured = [];
+        const { libraries } = createGraphicsLibraries({
+            graphics: {
+                create: (/** @type {string} */ name)=>(name === 'd3d10'
+                    ? { backend, createSampler: (/** @type {any} */ descriptor)=>({ descriptor }),
+                        createTexture: gpu.device.createTexture }
+                    : null),
+                available: ()=>false,
+            },
+            only: ['D3D10.dll', 'DXGI.dll'],
+            memory: box.services,
+            publishInterface: box.publishInterface,
+            unpublishInterface: box.unpublishInterface,
+            allocate: box.allocate,
+            screen: ()=>({ width: 1920, height: 1080, bitsPerPixel: 32 }),
+            windowClientSize: (/** @type {number} */ window)=>{
+                measured.push(window);
+                return window === 0x1234 ? { width: 300, height: 200 } : null;
+            },
+        });
+        const descAt = box.allocate(DXGI_SWAP_CHAIN_DESC.SIZE);
+        writeSwapChainDesc(box.services, descAt, {
+            bufferDesc: { width: 0, height: 0, refreshNumerator: 60, refreshDenominator: 1,
+                format: DXGI_FORMAT.R8G8B8A8_UNORM, scanlineOrdering: 0, scaling: 0 },
+            sampleDesc: { count: 1, quality: 0 },
+            bufferUsage: DXGI_USAGE.RENDER_TARGET_OUTPUT,
+            bufferCount: 1,
+            outputWindow: 0x1234,
+            windowed: true,
+            swapEffect: DXGI_SWAP_EFFECT.DISCARD,
+            flags: 0,
+        });
+        const chainAt = box.place([0]);
+        const deviceAt = box.place([0]);
+        assert.equal(libraries['D3D10.dll'].D3D10CreateDeviceAndSwapChain.handler([0,
+            D3D10_DRIVER_TYPE.HARDWARE, 0, 0, D3D10_SDK_VERSION, descAt, chainAt, deviceAt]) >>> 0,
+        S_OK);
+        const out = box.allocate(DXGI_SWAP_CHAIN_DESC.SIZE);
+        assert.equal(box.call(box.memory.readU32(chainAt), slot(IDXGISWAPCHAIN_SLOTS, 'GetDesc'),
+            [out]), S_OK);
+        assert.deepEqual([box.memory.readU32(out), box.memory.readU32(out + 4)], [300, 200],
+            'the window\'s client area, not the 1920 by 1080 display');
+        assert.deepEqual(measured, [0x1234]);
+    });
+
+test('multisample quality levels through the seam: a count out of range writes its zero and'
+    + ' fails, an unknown format writes nothing (d3d10core.c:10638-10679)', ()=>{
+    const h = seamed();
+    const { device } = h.createDeviceAndSwapChain();
+    /** @param {number} format @param {number} count */
+    const check = (format, count)=>{
+        const out = h.box.place([0xdeadbeef]);
+        const hr = h.device(device, 'CheckMultisampleQualityLevels', [format, count, out]);
+        return [hr, h.box.memory.readU32(out)];
+    };
+    assert.deepEqual(check(DXGI_FORMAT.R8G8B8A8_UNORM, 4), [S_OK, 1]);
+    assert.deepEqual(check(DXGI_FORMAT.R8G8B8A8_UNORM, 33), [0x80004005, 0], 'E_FAIL');
+    assert.deepEqual(check(65536, 2), [E_INVALIDARG, 0xdeadbeef]);
+    assert.equal(h.device(device, 'CheckMultisampleQualityLevels',
+        [DXGI_FORMAT.R8G8B8A8_UNORM, 2, 0]), E_INVALIDARG);
+});
+
+test('DXGI names the adapter, the output and the monitor as user32 and Direct3D 9 do'
+    + ' (test_get_containing_output, dxgi.c:2494-2513)', ()=>{
+    const box = machine();
+    let display = { width: 1280, height: 720, bitsPerPixel: 32 };
+    const { libraries } = createGraphicsLibraries({
+        graphics: { create: ()=>null, available: ()=>false, adapter: ()=>({ vendor: 'nvidia' }) },
+        only: ['D3D10.dll', 'DXGI.dll'],
+        memory: box.services,
+        publishInterface: box.publishInterface,
+        unpublishInterface: box.unpublishInterface,
+        allocate: box.allocate,
+        screen: ()=>display,
+    });
+    const factoryAt = box.place([0]);
+    assert.equal(libraries['DXGI.dll'].CreateDXGIFactory.handler([
+        box.placeGuid(IID.IDXGIFactory), factoryAt]) >>> 0, S_OK);
+    const factory = box.memory.readU32(factoryAt);
+    const adapterAt = box.place([0]);
+    assert.equal(box.call(factory, slot(IDXGIFACTORY_SLOTS, 'EnumAdapters'), [0, adapterAt]),
+        S_OK);
+    const adapter = box.memory.readU32(adapterAt);
+    const adapterDesc = box.allocate(0x124);
+    assert.equal(box.call(adapter, slot(IDXGIADAPTER_SLOTS, 'GetDesc'), [adapterDesc]), S_OK);
+    /** @param {number} at @param {number} length */
+    const wide = (at, length)=>String.fromCharCode(...new Uint16Array(
+        box.services.readMemory(at, length * 2).slice().buffer)).replace(/\0.*$/s, '');
+    assert.equal(wide(adapterDesc, 128), VIDEO_ADAPTER_NAME);
+    assert.equal(box.memory.readU32(adapterDesc + 0x100), PCI_VENDOR_IDS.nvidia,
+        'the vendor Direct3D 9\'s adapter identifier reports');
+    assert.deepEqual([box.memory.readU32(adapterDesc + 0x11c),
+        box.memory.readU32(adapterDesc + 0x120)], [1, 0], 'the LUID Direct3D 9 reports');
+
+    const outputAt = box.place([0]);
+    assert.equal(box.call(adapter, slot(IDXGIADAPTER_SLOTS, 'EnumOutputs'), [0, outputAt]), S_OK);
+    const output = box.memory.readU32(outputAt);
+    const outputDesc = box.allocate(0x5c);
+    /** @returns {any[]} */
+    const described = ()=>{
+        assert.equal(box.call(output, slot(IDXGIOUTPUT_SLOTS, 'GetDesc'), [outputDesc]), S_OK);
+        return [wide(outputDesc, 32), [0, 4, 8, 12].map(at=>box.memory.readU32(outputDesc
+            + 0x40 + at)), box.memory.readU32(outputDesc + 0x58)];
+    };
+    assert.deepEqual(described(), ['\\\\.\\DISPLAY1', [0, 0, 1280, 720], 0x00010001],
+        'user32\'s display name, desktop and monitor handle');
+    display = { width: 1920, height: 1080, bitsPerPixel: 32 };
+    assert.deepEqual(described()[1], [0, 0, 1920, 1080], 'a mode change is seen');
+    const countAt = box.place([0]);
+    assert.equal(box.call(output, slot(IDXGIOUTPUT_SLOTS, 'GetDisplayModeList'),
+        [DXGI_FORMAT.R8G8B8A8_UNORM, 0, countAt, 0]), S_OK);
+    const count = box.memory.readU32(countAt);
+    const modes = box.allocate(count * 0x1c);
+    assert.equal(box.call(output, slot(IDXGIOUTPUT_SLOTS, 'GetDisplayModeList'),
+        [DXGI_FORMAT.R8G8B8A8_UNORM, 0, countAt, modes]), S_OK);
+    const sizes = Array.from({ length: count }, (_, index)=>[box.memory.readU32(modes
+        + index * 0x1c), box.memory.readU32(modes + index * 0x1c + 4)]);
+    assert.deepEqual(sizes, displayModes(display).filter(mode=>mode.refresh === REFRESH_HZ)
+        .map(mode=>[mode.width, mode.height]), 'the sizes EnumDisplaySettings lists');
+    assert.ok(sizes.some(([width, height])=>width === 1920 && height === 1080),
+        'the display\'s own size among them');
+});
+
+test('enumerating into no pointer is refused, each call with its own code'
+    + ' (dxgi.c:1472-1473, 6381-6382)', ()=>{
+    const h = seamed();
+    const factoryAt = h.box.place([0]);
+    assert.equal(h.dxgi.CreateDXGIFactory1.handler([h.box.placeGuid(IID.IDXGIFactory1),
+        factoryAt]) >>> 0, S_OK);
+    const factory = h.box.memory.readU32(factoryAt);
+    assert.equal(h.box.call(factory, slot(IDXGIFACTORY_SLOTS, 'EnumAdapters'), [0, 0]),
+        DXGI_ERROR_INVALID_CALL);
+    assert.equal(h.box.call(factory, slot(IDXGIFACTORY1_SLOTS, 'EnumAdapters1'), [0, 0]),
+        DXGI_ERROR_INVALID_CALL);
+    const adapterAt = h.box.place([0]);
+    assert.equal(h.box.call(factory, slot(IDXGIFACTORY_SLOTS, 'EnumAdapters'), [0, adapterAt]),
+        S_OK);
+    const adapter = h.box.memory.readU32(adapterAt);
+    assert.equal(h.box.call(adapter, slot(IDXGIADAPTER_SLOTS, 'EnumOutputs'), [0, 0]),
+        E_INVALIDARG);
+    h.box.call(adapter, 2);
+    assert.equal(h.box.call(factory, 2), 0, 'nothing was handed out and kept');
+});
+
+test('a GDI-compatible surface hands out one device context over the pixels the GPU drew, and'
+    + ' takes back what GDI drew (test_surface_getdc, d3d10_1.c:697-744; dxgi.c:1975-2010)',
+async()=>{
+    /** @type {any[]} */
+    const made = [];
+    /** @type {number[]} */
+    const deleted = [];
+    const h = seamed({ gdi: {
+        createSurfaceDc: attributes=>{
+            made.push(attributes);
+            return 0x7700 + made.length;
+        },
+        deleteSurfaceDc: handle=>{
+            deleted.push(handle);
+        },
+    } });
+    const { device } = h.createDeviceAndSwapChain();
+    const GDI_COMPATIBLE = 0x20;
+    /** @param {number} misc */
+    const surface = misc=>{
+        const at = h.box.place([0]);
+        assert.equal(h.device(device, 'CreateTexture2D', [h.box.place([4, 2, 1, 1,
+            DXGI_FORMAT.B8G8R8A8_UNORM, 1, 0, D3D10_USAGE.DEFAULT, D3D10_BIND.RENDER_TARGET, 0,
+            misc]), 0, at]), S_OK);
+        const texture = h.box.memory.readU32(at);
+        const surfaceAt = h.box.place([0]);
+        assert.equal(h.box.call(texture, 0, [h.box.placeGuid(IID.IDXGISurface1), surfaceAt]),
+            S_OK, 'every one-image texture is an IDXGISurface1');
+        return { texture, surface1: h.box.memory.readU32(surfaceAt) };
+    };
+    /** @param {number} surface1 @param {number} discard @param {number} out */
+    const getDC = (surface1, discard, out)=>h.box.callParked(surface1,
+        slot(IDXGISURFACE1_SLOTS, 'GetDC'), [discard, out]);
+    /** @param {number} surface1 */
+    const releaseDC = surface1=>h.box.call(surface1, slot(IDXGISURFACE1_SLOTS, 'ReleaseDC'),
+        [0]);
+
+    const plain = surface(0);
+    const dcAt = h.box.place([0xdeadbeef]);
+    assert.equal(await getDC(plain.surface1, 0, dcAt), DXGI_ERROR_INVALID_CALL,
+        'not made GDI-compatible');
+
+    const gdi = surface(GDI_COMPATIBLE);
+    assert.equal(releaseDC(gdi.surface1), DXGI_ERROR_INVALID_CALL, 'nothing to release');
+    // What the GPU drew is what GDI is handed: a clear, read back first.
+    const viewAt = h.box.place([0]);
+    assert.equal(h.device(device, 'CreateRenderTargetView', [gdi.texture, 0, viewAt]), S_OK);
+    h.device(device, 'ClearRenderTargetView', [h.box.memory.readU32(viewAt),
+        h.box.place(floatBits([1, 0, 0, 1]))]);
+    assert.equal(await getDC(gdi.surface1, 0, dcAt), S_OK);
+    assert.equal(h.box.memory.readU32(dcAt), 0x7701);
+    const [attributes] = made;
+    assert.deepEqual([attributes.width, attributes.height, attributes.pitch,
+        attributes.bitCount], [4, 2, 16, 32]);
+    assert.deepEqual([...h.box.services.readMemory(attributes.bits, 4)], [0, 0, 0xff, 0xff],
+        'the cleared red, blue first as a DIB keeps it');
+    assert.equal(h.gpu.count('mapAsync') > 0 || h.gpu.of('copyTextureToBuffer').length > 0,
+        true, 'read back from the GPU');
+
+    const again = h.box.place([0xdeadbeef]);
+    assert.equal(await getDC(gdi.surface1, 0, again), DXGI_ERROR_INVALID_CALL, 'one at a time');
+    assert.equal(h.box.memory.readU32(again), 0xdeadbeef);
+
+    // GDI draws green into the first pixel; the release hands it to the texture.
+    h.box.services.writeMemory(attributes.bits, Uint8Array.from([0, 0xff, 0, 0xff]));
+    assert.equal(releaseDC(gdi.surface1), S_OK);
+    assert.deepEqual(deleted, [0x7701]);
+    assert.equal(releaseDC(gdi.surface1), DXGI_ERROR_INVALID_CALL, 'released already');
+    const object = /** @type {any} */ (h.publisher.objectAt(gdi.texture));
+    const reopened = object.OpenDC(true);
+    assert.deepEqual([...reopened.data.subarray(0, 4)], [0, 0xff, 0, 0xff]);
+    object.CloseDC();
+    const upload = h.gpu.of('writeTexture').at(-1);
+    assert.ok(upload, 'what GDI drew went to the GPU');
+});
+
+test('a swap chain made GDI-compatible makes its buffers so, and only then hands out a device'
+    + ' context (test_create_swapchain, dxgi.c:1975-2010)', async()=>{
+    const h = seamed({ gdi: { createSurfaceDc: ()=>0x7701, deleteSurfaceDc: ()=>{} } });
+    const { device } = h.createDeviceAndSwapChain();
+    /** @param {number} flags */
+    const bufferOf = flags=>{
+        const descAt = h.box.allocate(DXGI_SWAP_CHAIN_DESC.SIZE);
+        writeSwapChainDesc(h.box.services, descAt, {
+            bufferDesc: { width: 4, height: 4, refreshNumerator: 60, refreshDenominator: 1,
+                format: DXGI_FORMAT.B8G8R8A8_UNORM, scanlineOrdering: 0, scaling: 0 },
+            sampleDesc: { count: 1, quality: 0 },
+            bufferUsage: DXGI_USAGE.RENDER_TARGET_OUTPUT,
+            bufferCount: 1,
+            outputWindow: 0x1234,
+            windowed: true,
+            swapEffect: DXGI_SWAP_EFFECT.DISCARD,
+            flags,
+        });
+        const factoryAt = h.box.place([0]);
+        assert.equal(h.dxgi.CreateDXGIFactory.handler([h.box.placeGuid(IID.IDXGIFactory),
+            factoryAt]) >>> 0, S_OK);
+        const chainAt = h.box.place([0]);
+        assert.equal(h.box.call(h.box.memory.readU32(factoryAt),
+            slot(IDXGIFACTORY_SLOTS, 'CreateSwapChain'), [device, descAt, chainAt]), S_OK);
+        const bufferAt = h.box.place([0]);
+        assert.equal(h.swapChain(h.box.memory.readU32(chainAt), 'GetBuffer',
+            [0, h.box.placeGuid(IID.IDXGISurface1), bufferAt]), S_OK);
+        return h.box.memory.readU32(bufferAt);
+    };
+    const dcAt = h.box.place([0]);
+    assert.equal(await h.box.callParked(bufferOf(0), slot(IDXGISURFACE1_SLOTS, 'GetDC'),
+        [0, dcAt]), DXGI_ERROR_INVALID_CALL);
+    const gdiBuffer = bufferOf(0x4);
+    assert.equal(await h.box.callParked(gdiBuffer, slot(IDXGISURFACE1_SLOTS, 'GetDC'),
+        [1, dcAt]), S_OK, 'DXGI_SWAP_CHAIN_FLAG_GDI_COMPATIBLE');
+    assert.equal(h.box.call(gdiBuffer, slot(IDXGISURFACE1_SLOTS, 'ReleaseDC'), [0]), S_OK);
 });

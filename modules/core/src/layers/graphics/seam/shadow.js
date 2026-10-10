@@ -1620,7 +1620,8 @@ export const DRAWABLE_MIRRORS = Object.freeze({
     ]),
     /**
      * Direct3D 9's SetStreamSource: stream zero is drawn from when it has a
-     * buffer, a stride and an offset that is a whole number of strides.
+     * buffer, a stride and an offset whose remainder past whole strides is a
+     * whole number of four bytes, where WebGPU can bind a vertex buffer.
      */
     SetStreamSource9: Object.freeze([
         [0x83, 0x7c, 0x24, 0x08, 0x00],                          // cmp dword [esp+8], 0
@@ -1633,7 +1634,7 @@ export const DRAWABLE_MIRRORS = Object.freeze({
         [0x8b, 0x44, 0x24, 0x10],                                // mov eax, [esp+16]
         [0x31, 0xd2],                                            // xor edx, edx
         [0xf7, 0x74, 0x24, 0x14],                                // div dword [esp+20]
-        [0x85, 0xd2],                                            // test edx, edx
+        [0xf6, 0xc2, 0x03],                                      // test dl, 3
         { jcc: 0x75, to: 'drawn' },                              // jnz drawn
         markDrawable(DRAW.STREAM),
         { label: 'drawn' },

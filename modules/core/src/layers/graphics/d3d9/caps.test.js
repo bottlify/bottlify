@@ -128,18 +128,24 @@ test('what the renderer does not do is not claimed', ()=>{
     assert.equal(words.TextureOpCaps, 0x03feffff, 'the operations the combiner draws');
     assert.equal(words.StencilCaps, 0x1ff, 'every stencil operation, and two-sided stencil');
     assert.equal(words.RasterCaps & 0x00010000, 0x00010000, 'D3DPRASTERCAPS_FOGRANGE');
-    assert.equal(words.MaxUserClipPlanes, 0, 'no clipping against user planes');
+    assert.equal(words.MaxUserClipPlanes, 6, 'six user planes, clipped by the device or'
+        + ' discarded by the fragment stage');
     assert.equal(words.RasterCaps & 0x01000000, 0x01000000,
         'D3DPRASTERCAPS_SCISSORTEST: draws and clears are cut to the scissor');
     assert.equal(words.RasterCaps & 0x06020000, 0x06020000,
         'DEPTHBIAS, SLOPESCALEDEPTHBIAS and ANISOTROPY, which the pipeline and sampler read');
-    assert.equal(words.RasterCaps & 0x00002000, 0, 'no MIPMAPLODBIAS, which nothing reads');
+    assert.equal(words.RasterCaps & 0x00002000, 0x00002000,
+        'MIPMAPLODBIAS, which the shader adds to the level a read takes');
     assert.equal(words.TextureCaps & 0x10800, 0x10800,
         'cube maps and their chains, which the renderer samples');
     assert.equal(words.CubeTextureFilterCaps, words.TextureFilterCaps);
     assert.equal(words.TextureCaps & 0xa000, 0xa000, 'volumes and their chains');
     assert.equal(words.VolumeTextureFilterCaps, words.TextureFilterCaps);
     assert.equal(words.VolumeTextureAddressCaps, words.TextureAddressCaps);
+    assert.equal(words.TextureAddressCaps & (0x00000008 | 0x00000020), 0x00000028,
+        'BORDER and MIRRORONCE, which the shader makes over a clamping sampler');
+    assert.equal(words.PrimitiveMiscCaps & (0x00000400 | 0x00008000), 0x00008400,
+        'TSSARGTEMP and PERSTAGECONSTANT, the generated cascade\'s registers');
     assert.equal(words.MaxVolumeExtent, 256);
     assert.equal(words.NumSimultaneousRTs, 1);
     assert.equal(words.StretchRectFilterCaps, 0x03000300,

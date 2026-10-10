@@ -51,6 +51,8 @@
  * @property {(desc: any)=>Promise<any>} createRenderPipelineAsync
  * @property {(desc?: any)=>GpuCommandEncoderLike} createCommandEncoder
  * @property {(desc: any)=>any} createQuerySet
+ * @property {{ has: (name: string) => boolean }} [features]
+ *     The optional features the device was made with.
  */
 
 /**

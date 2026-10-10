@@ -53,14 +53,15 @@ import {
     FOG_RANGE_LOCATION, HYBRID_CONSTANTS, VERTEX_SAMPLER_BINDING, fixedVertexStage, translateShader,
     varyingLocation,
 } from '../d3d9/wgsl.js';
-import { D3DVERTEXTEXTURESAMPLER0 } from '../d3d9/samplerstates.js';
+import { D3DTSS9, D3DVERTEXTEXTURESAMPLER0 } from '../d3d9/samplerstates.js';
 import { D3DDECLUSAGE } from '../d3d9/declaration.js';
 import { OPCODE, REGISTER, SHADER_KIND } from '../d3d9/shader.js';
 import { decodeS3tc } from '../webgpu/internal/s3tc.js';
 import { storedToHalves } from '../d3d9/half.js';
 import { passedSamples, reachableArea } from '../webgpu/internal/occlusion.js';
 import {
-    fixedFragmentStage, generates, generationOf, readsNormal,
+    CLIP_LOCATION, clipStateOf, fixedFragmentStage, generates, generationOf, readsNormal, tailOf,
+    vertexTailOf,
 } from '../webgpu/internal/fixedfunction.js';
 import { FOG_SOURCE, fogSourceOf, pipelineKey } from '../webgpu/internal/pipeline.js';
 
@@ -168,6 +169,16 @@ function declaredSamplers(parsed){
  * @param {number[] | null} ones
  */
 const onesKey = ones=>(ones === null ? '' : Array.from(ones, value=>value ?? 0).join(','));
+
+/**
+ * A list of `variantsAt`'s, for a key: each sampler's variant, empty for none.
+ *
+ * @param {(import('../d3d9/wgsl.js').SamplerVariant | undefined)[]} variants
+ */
+const variantsKey = variants=>Array.from(variants, variant=>(variant
+    ? `${variant.lodBias ?? 0}/${variant.mirrorOnce ?? 0}`
+        + `/${variant.border ? `${variant.border.mask}:${variant.border.colour}` : ''}`
+    : '')).join(',');
 
 /**
  * The component D3DTTFF_PROJECTED divides a coordinate set by, for each
@@ -1048,6 +1059,12 @@ function putDword(block, at, dword){
  *     POINTSIZE, POINTSIZE_MIN, POINTSIZE_MAX, then POINTSCALE_A, B, C and the
  *     viewport's height: eight floats.
  * @property {readonly Light[]} [lights]
+ * @property {ArrayLike<number>} [stageConstants]
+ *     Every stage's D3DTSS_CONSTANT as four floats, eight stages: past the
+ *     lights, for a draw whose stages read D3DTA_CONSTANT (`tailOf`).
+ * @property {ArrayLike<number>} [clipPlanes]
+ *     The enabled user clip planes in the vertex's own space, four floats
+ *     each: past the constants, for a fixed vertex stage that clips.
  */
 
 /**
@@ -1110,7 +1127,9 @@ const wordsOver = storage=>{
 export function uniformBlock(values, take = floats=>new Float32Array(floats)){
     const at = UNIFORM_AT;
     const lights = values.lights ?? [];
-    const block = take(UNIFORM_FLOATS + lights.length * LIGHT_FLOATS);
+    const tail = UNIFORM_FLOATS + lights.length * LIGHT_FLOATS;
+    const planesAt = tail + (values.stageConstants ? STAGE_CONSTANT_FLOATS : 0);
+    const block = take(planesAt + (values.clipPlanes?.length ?? 0));
     block.set(asFloats(values.worldViewProjection), at.worldViewProjection);
     block.set(asFloats(values.world ?? IDENTITY_FLOATS), at.world);
     block.set(values.viewport.offset, at.viewportOffset);
@@ -1156,7 +1175,94 @@ export function uniformBlock(values, take = floats=>new Float32Array(floats)){
     {
         packLight(block, at.lights + index * LIGHT_FLOATS, lights[index]);
     }
+    if (values.stageConstants)
+    {
+        block.set(values.stageConstants, tail);
+    }
+    if (values.clipPlanes)
+    {
+        block.set(values.clipPlanes, planesAt);
+    }
     return block;
+}
+
+/**
+ * The user clip planes D3DRS_CLIPPLANEENABLE enables, as bits: none where the
+ * device keeps no planes for the renderer, or D3DRS_CLIPPING is off, which
+ * turns every clip plane off with the rest of clipping.
+ *
+ * @param {RenderModel} model
+ * @returns {number}
+ */
+export function clipMaskOf(model){
+    if (!model.clipPlanes || (model.renderStates.get(D3DRS9.CLIPPING) ?? 1) === 0)
+    {
+        return 0;
+    }
+    return (model.renderStates.get(D3DRS9.CLIPPLANEENABLE) ?? 0) & CLIP_PLANE_BITS;
+}
+
+/** The planes a device has: six, as D3DCAPS9.MaxUserClipPlanes claims. */
+const CLIP_PLANE_BITS = 0x3f;
+
+/**
+ * The enabled planes, in index order, four floats each: as set, or through
+ * `matrix` -- each plane times the matrix's rows -- which takes a world plane
+ * into the space a vertex is in before the world transform, where its
+ * distance needs no transform of the vertex.
+ *
+ * @param {RenderModel} model @param {number} mask
+ * @param {ArrayLike<number> | null} matrix  Row-major, as Direct3D's.
+ * @param {Float32Array} [out]  Room for six planes, which the answer is the start of.
+ * @returns {Float32Array}
+ */
+export function clipPlanesOf(model, mask, matrix, out){
+    let count = 0;
+    for (let bits = mask; bits !== 0; bits &= bits - 1)
+    {
+        count++;
+    }
+    const floats = out ? out.subarray(0, count * 4) : new Float32Array(count * 4);
+    let at = 0;
+    for (let index = 0; index < 6; index++)
+    {
+        if ((mask & (1 << index)) === 0)
+        {
+            continue;
+        }
+        const plane = model.clipPlanes?.get(index) ?? NO_PLANE;
+        for (let row = 0; row < 4; row++)
+        {
+            floats[at + row] = matrix
+                ? matrix[row * 4] * plane[0] + matrix[row * 4 + 1] * plane[1]
+                    + matrix[row * 4 + 2] * plane[2] + matrix[row * 4 + 3] * plane[3]
+                : plane[row];
+        }
+        at += 4;
+    }
+    return floats;
+}
+
+/** A plane never set: every coefficient zero, which clips nothing. */
+const NO_PLANE = Object.freeze([0, 0, 0, 0]);
+
+/** The floats every stage's constant takes past the lights: a row a stage. */
+const STAGE_CONSTANT_FLOATS = STAGE_COUNT * 4;
+
+/**
+ * Every stage's D3DTSS_CONSTANT, as the block's tail carries it.
+ *
+ * @param {RenderModel} model
+ * @returns {Float32Array}
+ */
+function stageConstantsOf(model){
+    const floats = new Float32Array(STAGE_CONSTANT_FLOATS);
+    for (let stage = 0; stage < STAGE_COUNT; stage++)
+    {
+        const colour = colorToFloats(model.stageStates(stage).get(D3DTSS9.CONSTANT) ?? 0);
+        floats.set([colour.r, colour.g, colour.b, colour.a], stage * 4);
+    }
+    return floats;
 }
 
 /**
@@ -1368,6 +1474,9 @@ function inverseRotation(view){
  * @property {any} depthStencil
  * @property {Map<number, Float32Array>} transforms
  * @property {Map<number, { light: Light, enabled: boolean }>} lights
+ * @property {Map<number, ArrayLike<number>>} [clipPlanes]
+ *     SetClipPlane's planes by index, where the device clips by them: world
+ *     space for the fixed-function stage, clip space for a vertex shader.
  * @property {number} [lightsVersion]   Raised whenever `lights` changes.
  * @property {number} [drawStateVersion]
  *     Raised by every state change a draw's preparation depends on, so that the
@@ -1538,9 +1647,11 @@ export function lightingOf(model, layout){
  * @param {RenderModel} model
  * @param {(floats: number) => Float32Array} [take]
  * @param {boolean} [mips]
+ * @param {import('../webgpu/internal/fixedfunction.js').UniformTail} [tail]
+ *     What the block carries past the lights, as the stages' shader declares it.
  * @returns {Float32Array}
  */
-export function pixelUniformsOf(model, take, mips = true){
+export function pixelUniformsOf(model, take, mips = true, tail = undefined){
     const rs = (/** @type {string} */ name)=>model.renderStates.get(D3DRS[name]) ?? 0;
     PIXEL_FOG[0] = dwordToFloat(rs('FOGSTART'));
     PIXEL_FOG[1] = dwordToFloat(rs('FOGEND'));
@@ -1555,6 +1666,7 @@ export function pixelUniformsOf(model, take, mips = true){
         alphaRef: rs('ALPHAREF'),
         stages: stageFlags(model, mips),
         textureTransforms: stageTransforms(model),
+        ...(tail?.stageConstants ? { stageConstants: stageConstantsOf(model) } : {}),
     }, take);
 }
 
@@ -1566,9 +1678,11 @@ const PIXEL_FOG = [0, 1, 1];
  * @param {import('../webgpu/internal/pipeline.js').LightingState | null} [lighting]
  * @param {(floats: number) => Float32Array} [take]  Where the block's floats come from.
  * @param {boolean} [mips]  False pins every sample to the top level.
+ * @param {import('../webgpu/internal/fixedfunction.js').UniformTail} [tail]
+ *     What the block carries past the lights, as the draw's shader declares it.
  * @returns {Float32Array} the block an ordinary draw carries
  */
-export function uniformsOf(model, lighting, take, mips = true){
+export function uniformsOf(model, lighting, take, mips = true, tail = undefined){
     const rs = (/** @type {string} */ name)=>model.renderStates.get(D3DRS[name]) ?? 0;
     const world = transformOf(model, D3DTS.WORLD);
     const view = transformOf(model, D3DTS.VIEW);
@@ -1610,6 +1724,8 @@ export function uniformsOf(model, lighting, take, mips = true){
         // said, so a block that carried lights it does not know about would be
         // read past its own end.
         lights: lighting ? enabledLights(model) : [],
+        ...(tail?.stageConstants ? { stageConstants: stageConstantsOf(model) } : {}),
+        ...(tail?.clipPlanes ? { clipPlanes: clipPlanesOf(model, clipMaskOf(model), world) } : {}),
     }, take);
 }
 
@@ -1832,6 +1948,7 @@ export function stageCascade(model, layout, how = {}){
             alphaArg2: get(D3DTSS.ALPHAARG2),
             ...arguments0(get),
             ...bumpOf(get),
+            ...resultOf(get),
             texCoordIndex,
             // A projected generated coordinate is divided by its third or
             // fourth component at the sample, which is the count's last.
@@ -1870,11 +1987,16 @@ export function stageCascade(model, layout, how = {}){
             || readsTexture(key.alphaOp, key.alphaArg1, key.alphaArg2, key.alphaArg0);
         const dimension = samples ? textureDimensionOf(texture) : '2d';
         const ones = samples ? onesOf(texture) : 0;
-        stages.push(dimension === '2d' && ones === 0 ? key : {
-            ...key,
-            ...(dimension === '2d' ? {} : { dimension }),
-            ...(ones === 0 ? {} : { ones }),
-        });
+        const lodBias = samples ? lodBiasOf(get(D3DTSS.MIPMAPLODBIAS)) : 0;
+        const addressing = samples ? addressVariantOf(get, dimension) : NO_ADDRESS_VARIANT;
+        stages.push(dimension === '2d' && ones === 0 && lodBias === 0
+            && addressing === NO_ADDRESS_VARIANT ? key : {
+                ...key,
+                ...(dimension === '2d' ? {} : { dimension }),
+                ...(ones === 0 ? {} : { ones }),
+                ...(lodBias === 0 ? {} : { lodBias }),
+                ...addressing,
+            });
         textures.push(samples ? texture : null);
     }
     // A stage at the end that only passes the current colour and alpha on
@@ -1890,6 +2012,62 @@ export function stageCascade(model, layout, how = {}){
         textures.pop();
     }
     return { stages, textures, truncated: unbound };
+}
+
+/** What `addressVariantOf` answers for a stage that addresses as a WebGPU sampler can. */
+const NO_ADDRESS_VARIANT = Object.freeze({});
+
+/**
+ * The address modes of a sampler that no WebGPU sampler has, by axis (1 u,
+ * 2 v, 4 w): D3DTADDRESS_MIRRORONCE, and D3DTADDRESS_BORDER with the border
+ * colour it reads. A cube map's faces are not addressed, a flat texture has
+ * no w, and a sampler with neither mode answers `NO_ADDRESS_VARIANT`.
+ *
+ * @param {(state: number) => number} get  The stage's or sampler's states.
+ * @param {string | null} dimension  '2d', 'cube' or '3d'; null for not known,
+ *     which counts every axis.
+ * @returns {{ mirrorOnce?: number, border?: { mask: number, colour: number } }}
+ */
+export function addressVariantOf(get, dimension){
+    if (dimension === 'cube')
+    {
+        return NO_ADDRESS_VARIANT;
+    }
+    const axes = dimension === '2d' ? [D3DTSS.ADDRESSU, D3DTSS.ADDRESSV]
+        : [D3DTSS.ADDRESSU, D3DTSS.ADDRESSV, D3DTSS.ADDRESSW];
+    let mirrorOnce = 0;
+    let border = 0;
+    axes.forEach((state, axis)=>{
+        const mode = get(state);
+        mirrorOnce |= mode === D3DTADDRESS.MIRRORONCE ? 1 << axis : 0;
+        border |= mode === D3DTADDRESS.BORDER ? 1 << axis : 0;
+    });
+    if (mirrorOnce === 0 && border === 0)
+    {
+        return NO_ADDRESS_VARIANT;
+    }
+    const colour = get(D3DTSS.BORDERCOLOR) >>> 0;
+    return {
+        ...(mirrorOnce === 0 ? {} : { mirrorOnce }),
+        ...(border === 0 ? {} : { border: { mask: border, colour } }),
+    };
+}
+
+/** The furthest a level-of-detail bias moves a sample, either way, as hardware holds it. */
+const LOD_BIAS_LIMIT = 16;
+
+/**
+ * D3DSAMP_MIPMAPLODBIAS (D3DTSS_ in Direct3D 8), a DWORD holding a float, as
+ * the bias a sample adds to its level of detail: zero for one that is no
+ * number, held to what hardware reaches.
+ *
+ * @param {number} dword
+ * @returns {number}
+ */
+export function lodBiasOf(dword){
+    const bias = dwordToFloat(dword);
+    return Number.isFinite(bias)
+        ? Math.min(LOD_BIAS_LIMIT, Math.max(-LOD_BIAS_LIMIT, bias)) + 0 : 0;
 }
 
 /**
@@ -1909,6 +2087,21 @@ function bumpOf(get){
     return { bump: [D3DTSS.BUMPENVMAT00, D3DTSS.BUMPENVMAT01, D3DTSS.BUMPENVMAT10,
         D3DTSS.BUMPENVMAT11, D3DTSS.BUMPENVLSCALE, D3DTSS.BUMPENVLOFFSET]
         .map(state=>dwordToFloat(get(state))) };
+}
+
+/**
+ * Where a stage writes, only for one that writes the temporary register: a
+ * bump stage writes nothing, and every other the current colour unless
+ * D3DTSS_RESULTARG says D3DTA_TEMP.
+ *
+ * @param {(state: number)=>number} get
+ * @returns {{ resultArg?: number }}
+ */
+function resultOf(get){
+    const op = get(D3DTSS.COLOROP);
+    return op !== D3DTOP.BUMPENVMAP && op !== D3DTOP.BUMPENVMAPLUMINANCE
+        && (get(D3DTSS.RESULTARG) & D3DTA_SELECTMASK) === D3DTA.TEMP
+        ? { resultArg: D3DTA.TEMP } : {};
 }
 
 /**
@@ -2067,6 +2260,9 @@ function depthBiasOf(model, depthFormat, topology){
  * @param {string | undefined} shape.depthFormat
  * @param {import('../webgpu/internal/pipeline.js').StageKey[]} shape.stages
  * @param {import('../webgpu/internal/pipeline.js').LightingState | null} [shape.lighting]
+ * @param {boolean} [shape.clipping]  Whether the vertices are clipped by the
+ *     user planes at all: not a pre-transformed vertex.
+ * @param {boolean} [shape.clipDistances]  Whether the device clips by distances.
  * @returns {import('../webgpu/internal/pipeline.js').PipelineState}
  */
 export function pipelineStateOf(model, shape){
@@ -2140,11 +2336,29 @@ export function pipelineStateOf(model, shape){
             vertexLayoutKey: shape.vertexLayoutKey,
         } : {}),
         ...(shape.topology === POINT_QUADS ? { points: pointsOf(model) } : {}),
+        ...clippingOf(model, shape),
         ...(shape.depthFormat !== undefined && hasStencil(shape.depthFormat)
             && (model.renderStates.get(STENCIL_RS.ENABLE) ?? 0) !== 0
             ? { stencil: stencilOf(model) } : {}),
         ...blendConstantOf(model),
     };
+}
+
+/**
+ * The user clip planes a draw's vertex stage clips by, only for one that
+ * clips: the state of every other draw is as it was.
+ *
+ * @param {RenderModel} model
+ * @param {{ clipping?: boolean, clipDistances?: boolean }} shape
+ * @returns {{ clipPlanes?: number, clipDistances?: boolean }}
+ */
+function clippingOf(model, shape){
+    const mask = shape.clipping === false ? 0 : clipMaskOf(model);
+    if (mask === 0)
+    {
+        return {};
+    }
+    return { clipPlanes: mask, ...(shape.clipDistances ? { clipDistances: true } : {}) };
 }
 
 /** D3DBLEND_BLENDFACTOR and D3DBLEND_INVBLENDFACTOR, Direct3D 9's alone. */
@@ -2232,8 +2446,11 @@ const ADDRESS = Object.freeze({
     [D3DTADDRESS.WRAP]: 'repeat',
     [D3DTADDRESS.MIRROR]: 'mirror-repeat',
     [D3DTADDRESS.CLAMP]: 'clamp-to-edge',
+    // The two modes WebGPU lacks are clamped by the sampler, and the shader
+    // folds a mirror-once coordinate and selects the border colour itself
+    // (`addressVariantOf`).
     [D3DTADDRESS.BORDER]: 'clamp-to-edge',
-    [D3DTADDRESS.MIRRORONCE]: 'mirror-repeat',
+    [D3DTADDRESS.MIRRORONCE]: 'clamp-to-edge',
 });
 
 /** GPUShaderStage.FRAGMENT. */
@@ -2355,14 +2572,19 @@ function anisotropyOf(min, mag, degree, mipFilter){
 /** WebGPU's own default for the far end of the level range. */
 const LOD_MAX = 32;
 
-/** D3DTADDRESS, as the shader's two-bit address mode. */
-/** @type {Readonly<Record<number, number>>} */
+/**
+ * D3DTADDRESS, as the shader's two-bit address mode. Border and mirror-once
+ * clamp, and the sample folds the coordinate and selects the border colour
+ * (`addressVariantOf`).
+ *
+ * @type {Readonly<Record<number, number>>}
+ */
 const ADDRESS_BITS = Object.freeze({
     [D3DTADDRESS.WRAP]: 0,
     [D3DTADDRESS.MIRROR]: 1,
     [D3DTADDRESS.CLAMP]: 2,
     [D3DTADDRESS.BORDER]: 2,
-    [D3DTADDRESS.MIRRORONCE]: 1,
+    [D3DTADDRESS.MIRRORONCE]: 2,
 });
 
 /**
@@ -2533,6 +2755,10 @@ export function createRenderer(options){
     const skipTextures = new Set((options.skipTexture ?? '').split(',').filter(Boolean));
     const probeTexture = options.probeTexture ?? null;
     const compressedTextures = options.compressedTextures === true;
+    // A device made with `clip-distances` clips by the distances a vertex
+    // stage gives it; every other draws a clipped primitive's fragments and
+    // discards the ones a plane cuts away.
+    const clipDistances = backend?.hasFeature?.('clip-distances') === true;
     /**
      * Nothing to add to a surface's description; said once a format, the first
      * time a wide one is kept as less than it is.
@@ -3592,7 +3818,7 @@ export function createRenderer(options){
         {
             most = Math.max(most, order[at]);
         }
-        const skipped = model.baseVertexIndex * stream.stride;
+        const skipped = streamZeroStart(model) + model.baseVertexIndex * stream.stride;
         const wanted = Math.min((most + 1) * stream.stride, stream.buffer.length - skipped);
         const vertices = wanted > 0
             ? readMemory(stream.buffer.base + skipped, wanted)
@@ -4011,6 +4237,17 @@ export function createRenderer(options){
      */
     const streamZeroBias = model=>(model.stream.stride > 0
         ? Math.floor((model.stream.offset ?? 0) / model.stream.stride) : 0);
+
+    /**
+     * Where stream zero's buffer is bound: what is left of its offset past
+     * the whole vertices `streamZeroBias` folds into the first vertex, which
+     * the device has checked is a multiple of four (Direct3D 8 has no offset
+     * and leaves it zero).
+     *
+     * @param {RenderModel} model
+     */
+    const streamZeroStart = model=>(model.stream.stride > 0
+        ? (model.stream.offset ?? 0) - streamZeroBias(model) * model.stream.stride : 0);
 
     /**
      * The further streams a layout reads and their strides, for a key: a
@@ -5149,7 +5386,7 @@ export function createRenderer(options){
         const take = ensureFrame().arena.take;
         const vertexBlocks = program.vertex
             ? shaderVertexBlocks(model, program, vertex, take)
-            : hybridBlocks(model, take);
+            : hybridBlocks(model, take, vertex);
         const pixelBlocks = constantBlocks(program.pixelConstants, pixel.constants, take);
         if (pixel.bumpRegister !== undefined)
         {
@@ -5431,26 +5668,70 @@ export function createRenderer(options){
     };
 
     /**
+     * What each of a shader's samplers asks of its reads that its GPU sampler
+     * cannot do (`SamplerVariant` in the translator), by sampler number; null
+     * when none asks, which is every draw whose samplers hold no level bias
+     * and address no axis mirror-once or by a border. A 1.x stage, which
+     * declares no dimension, is addressed as the texture bound there is.
+     *
+     * @param {RenderModel} model
+     * @param {import('../d3d9/shader.js').ParsedShader | null} parsed
+     * @param {number} first  The stage the shader's s0 is: 0, or D3DVERTEXTEXTURESAMPLER0.
+     * @returns {import('../d3d9/wgsl.js').SamplerVariant[] | null}
+     */
+    const variantsAt = (model, parsed, first)=>{
+        if (!parsed)
+        {
+            return null;
+        }
+        /** @type {import('../d3d9/wgsl.js').SamplerVariant[] | null} */
+        let variants = null;
+        for (const { index, dimension } of declaredSamplers(parsed))
+        {
+            const states = model.stageStates(first + index);
+            const get = (/** @type {number} */ state)=>states.get(state) ?? 0;
+            const lodBias = lodBiasOf(get(D3DTSS.MIPMAPLODBIAS));
+            const addressing = addressVariantOf(get,
+                dimension ?? textureDimensionOf(model.textures.get(first + index)));
+            if (lodBias !== 0 || addressing !== NO_ADDRESS_VARIANT)
+            {
+                variants ??= [];
+                variants[index] = { ...(lodBias === 0 ? {} : { lodBias }), ...addressing };
+            }
+        }
+        return variants;
+    };
+
+    /**
      * What a shader's reads depend on beyond the shader: the channels each
-     * texture it samples lacks and reads as one (`onesAt`), for its pixel and
+     * texture it samples lacks and reads as one (`onesAt`) and what its
+     * samplers' state asks of the reads (`variantsAt`), for its pixel and
      * its vertex samplers; and for a 1.x pixel shader, the dimension of the
      * texture bound at each stage and, below 1.4, the component
      * D3DTTFF_PROJECTED divides each stage's coordinates by.
      *
      * @param {RenderModel} model @param {ProgramState} program
      * @returns {{ key: string, pixelKey: string, stageDimensions?: string[],
-     *     projectedBy?: string[], pixelOnes?: number[], vertexOnes?: number[] }}
+     *     projectedBy?: string[], pixelOnes?: number[], vertexOnes?: number[],
+     *     pixelVariants?: import('../d3d9/wgsl.js').SamplerVariant[],
+     *     vertexVariants?: import('../d3d9/wgsl.js').SamplerVariant[] }}
      *     `key` is empty for a draw that reads nothing beyond its shaders, and
      *     `pixelKey` the part of it the pixel shader's translation reads.
      */
     const samplingOf = (model, program)=>{
         const pixelOnes = onesAt(model, program.pixel, 0);
         const vertexOnes = onesAt(model, program.vertex, D3DVERTEXTEXTURESAMPLER0);
-        const pixelPart = pixelOnes === null ? '' : `|o${onesKey(pixelOnes)}`;
-        const ones = pixelPart + (vertexOnes === null ? '' : `|v${onesKey(vertexOnes)}`);
+        const pixelVariants = variantsAt(model, program.pixel, 0);
+        const vertexVariants = variantsAt(model, program.vertex, D3DVERTEXTEXTURESAMPLER0);
+        const pixelPart = (pixelOnes === null ? '' : `|o${onesKey(pixelOnes)}`)
+            + (pixelVariants === null ? '' : `|s${variantsKey(pixelVariants)}`);
+        const ones = pixelPart + (vertexOnes === null ? '' : `|v${onesKey(vertexOnes)}`)
+            + (vertexVariants === null ? '' : `|t${variantsKey(vertexVariants)}`);
         const filled = {
             ...(pixelOnes === null ? {} : { pixelOnes }),
             ...(vertexOnes === null ? {} : { vertexOnes }),
+            ...(pixelVariants === null ? {} : { pixelVariants }),
+            ...(vertexVariants === null ? {} : { vertexVariants }),
         };
         const version = program.pixel?.version;
         if (!version || version.major >= 2)
@@ -5532,9 +5813,18 @@ export function createRenderer(options){
             && (model.renderStates.get(D3DRS.RANGEFOGENABLE) ?? 0) !== 0;
         const alphaFunc = (model.renderStates.get(D3DRS.ALPHATESTENABLE) ?? 0) !== 0
             ? model.renderStates.get(D3DRS.ALPHAFUNC) ?? 0 : undefined;
+        // The user planes clip a vertex shader's position, and a fixed
+        // vertex stage's unless its vertices are pre-transformed; where the
+        // device does not clip by distances, the pixel stage discards.
+        const transformed = !program.vertex && program.declaration
+            .some(element=>element.Usage === D3DDECLUSAGE.POSITIONT);
+        const clipping = clippingOf(model, { clipping: !transformed, clipDistances });
+        const planes = clipStateOf(clipping);
+        const discards = planes !== null && !planes.distances;
         const pixel = translationOf(pixelShader,
             `ps|fog${fog.source}/${fog.mode}${flat ? '|flat' : ''}|${sampling.pixelKey}`
-                + (alphaFunc === undefined ? '' : `|a${alphaFunc}`) + (nanProbe ? '|nan' : ''),
+                + (alphaFunc === undefined ? '' : `|a${alphaFunc}`) + (nanProbe ? '|nan' : '')
+                + (discards ? `|k${planes.count}` : ''),
             ()=>translateShader(
                 /** @type {import('../d3d9/shader.js').ParsedShader} */ (program.pixel), {
                     ...(fog.source === FOG_SOURCE.NONE
@@ -5543,8 +5833,10 @@ export function createRenderer(options){
                     stageDimensions: sampling.stageDimensions,
                     projectedBy: sampling.projectedBy,
                     ...(sampling.pixelOnes ? { ones: sampling.pixelOnes } : {}),
+                    ...(sampling.pixelVariants ? { sampling: sampling.pixelVariants } : {}),
                     ...(alphaFunc === undefined ? {} : { alphaTest: alphaFunc }),
                     ...(nanProbe ? { nanProbe } : {}),
+                    ...(discards ? { clip: planes } : {}),
                 }));
         if (pixel.error)
         {
@@ -5610,30 +5902,39 @@ export function createRenderer(options){
         // The fog varyings a vertex shader's translation writes itself, below.
         const fogCarried = program.vertex && fog.source !== FOG_SOURCE.NONE
             ? [varyingLocation(D3DDECLUSAGE.FOG, 0), FOG_RANGE_LOCATION] : [];
+        // The clip distances' varyings, which the vertex stage writes itself.
+        const clipCarried = discards ? [CLIP_LOCATION, CLIP_LOCATION + 1] : [];
         const missing = pixel.reads.filter(
             (/** @type {number} */ location)=>!written.includes(location)
-                && !fogCarried.includes(location)
+                && !fogCarried.includes(location) && !clipCarried.includes(location)
                 && !generated.some((mode, set)=>mode !== 0
                     && varyingLocation(D3DDECLUSAGE.TEXCOORD, set) === location));
         const points = topology === POINT_QUADS ? pointsOf(model) : null;
         const pointKey = points ? `|p${points.sprite ? 's' : ''}${points.scale ? 'd' : ''}` : '';
+        const clipKey = planes ? `|k${planes.count}${planes.distances ? 'd' : 'v'}` : '';
         const vertex = program.vertex
             ? translationOf(/** @type {object} */ (program.vertexShader),
                 `vs:${shapes}|w${missing.join(',')}${flat ? '|flat' : ''}|f${fog.source}`
                     + pointKey
-                    + (sampling.vertexOnes ? `|o${onesKey(sampling.vertexOnes)}` : ''),
+                    + (sampling.vertexOnes ? `|o${onesKey(sampling.vertexOnes)}` : '')
+                    + (sampling.vertexVariants ? `|s${variantsKey(sampling.vertexVariants)}` : '')
+                    + clipKey,
                 ()=>translateShader(
                     /** @type {import('../d3d9/shader.js').ParsedShader} */ (program.vertex),
                     { inputs: layout.shapes, alsoWrite: missing, flatColours: flat,
                         fogSource: fog.source, ...(points ? { points } : {}),
-                        ...(sampling.vertexOnes ? { ones: sampling.vertexOnes } : {}) }))
+                        ...(sampling.vertexOnes ? { ones: sampling.vertexOnes } : {}),
+                        ...(sampling.vertexVariants
+                            ? { sampling: sampling.vertexVariants } : {}),
+                        ...(planes ? { clip: planes } : {}) }))
             : hybridStageFor(
                 `${program.declarationId}|${shapes}|w${missing.join(',')}|g${generated.join(',')}`
                     + `|f${fog.source}/${fog.mode}${flat ? '|flat' : ''}`
                     + `${normalizeNormals ? '|normalize' : ''}${rangeFog ? '|range' : ''}`
-                    + pointKey,
+                    + pointKey + clipKey,
                 wanted, layout.shapes, missing, generated, fog,
-                { flatColours: flat, normalizeNormals, rangeFog, ...(points ? { points } : {}) });
+                { flatColours: flat, normalizeNormals, rangeFog, ...(points ? { points } : {}),
+                    ...(planes ? { clip: planes } : {}) });
         if (vertex.error)
         {
             skip('program');
@@ -5664,7 +5965,7 @@ export function createRenderer(options){
         const state = {
             ...pipelineStateOf(model, {
                 fvf: 0, topology, ...formatsOf(model), stages: [], lighting: null,
-                fog: fogApplied,
+                fog: fogApplied, clipping: !transformed, clipDistances,
             }),
             vertexShader: program.vertex ? program.vertexId : -1,
             pixelShader: program.pixelId,
@@ -5780,7 +6081,8 @@ export function createRenderer(options){
         }));
         const take = ensureFrame().arena.take;
         const vertexBlocks = shaderVertexBlocks(model, program, pieces.vertex, take);
-        const pixelBlocks = [pixelUniformsOf(model, take, mipsApplied), take(64), take(16)];
+        const pixelBlocks = [pixelUniformsOf(model, take, mipsApplied, pieces.tail), take(64),
+            take(16)];
         return {
             version: undefined,
             contentVersion: 0,
@@ -5854,14 +6156,17 @@ export function createRenderer(options){
             }, { shaderCoordinates: true }).stages.map(stage=>varyingLocation(D3DDECLUSAGE.TEXCOORD,
                 stage.texCoordIndex & COORD_SET_MASK)))]
             : [];
+        const planes = clipStateOf(clippingOf(model, { clipDistances }));
         /** @type {import('../d3d9/wgsl.js').TranslatedShader} */
         const vertex = translationOf(/** @type {object} */ (program.vertexShader),
             `vs:${shapes}${flat ? '|flat' : ''}${points
-                ? `|p${points.sprite ? 's' : ''}w${spriteSets.join(',')}` : ''}`,
+                ? `|p${points.sprite ? 's' : ''}w${spriteSets.join(',')}` : ''}`
+                + (planes ? `|k${planes.count}${planes.distances ? 'd' : 'v'}` : ''),
             ()=>translateShader(
                 /** @type {import('../d3d9/shader.js').ParsedShader} */ (program.vertex),
                 { inputs: layout.shapes, flatColours: flat,
-                    ...(points ? { points, alsoWrite: spriteSets } : {}) }));
+                    ...(points ? { points, alsoWrite: spriteSets } : {}),
+                    ...(planes ? { clip: planes } : {}) }));
         if (vertex.error)
         {
             skip('program');
@@ -5885,7 +6190,7 @@ export function createRenderer(options){
         const state = {
             ...pipelineStateOf(model, {
                 fvf: 0, topology, ...formatsOf(model), stages: cascade.stages, lighting: null,
-                fog: fogApplied,
+                fog: fogApplied, clipDistances,
             }),
             vertexShader: program.vertexId,
             pixelShader: -1,
@@ -5893,6 +6198,8 @@ export function createRenderer(options){
         const pixel = fixedFragmentStage(state, vertex.outputs);
         counters.prepared.built++;
         return {
+            // What the fragment stage's block carries past the cascade's rows.
+            tail: tailOf(state),
             // What `record` asks the pipeline for once a frame by.
             pipelineFrame: null,
             pipelineIndex: 0,
@@ -6036,6 +6343,12 @@ export function createRenderer(options){
                 isAffine(transformOf(model, D3DTS.PROJECTION)) ? 1 : 0,
             ], (vertex.fogRegister + 1) * 4);
         }
+        // The user planes, as set: a vertex shader's are in clip space.
+        if (vertex.clipRegister !== undefined)
+        {
+            blocks[0].set(clipPlanesOf(model, clipMaskOf(model), null, clipScratch),
+                vertex.clipRegister * 4);
+        }
         return blocks;
     };
 
@@ -6046,9 +6359,11 @@ export function createRenderer(options){
      * generated coordinate.
      *
      * @param {RenderModel} model @param {(floats: number) => Float32Array} take
+     * @param {import('../d3d9/wgsl.js').TranslatedShader} vertex  The stage, for
+     *     how many registers it reads and where its clip planes go.
      */
-    const hybridBlocks = (model, take)=>{
-        const floats = take(HYBRID_CONSTANTS.COUNT * 4);
+    const hybridBlocks = (model, take, vertex)=>{
+        const floats = take(vertex.constants * 4);
         const world = transformOf(model, D3DTS.WORLD);
         const view = transformOf(model, D3DTS.VIEW);
         const worldView = multiplyMatrices(world, view);
@@ -6084,6 +6399,13 @@ export function createRenderer(options){
             dwordToFloat(rs('POINTSCALE_A')), dwordToFloat(rs('POINTSCALE_B')),
             dwordToFloat(rs('POINTSCALE_C')), model.viewport.rect.height,
         ], HYBRID_CONSTANTS.POINT_SCALE * 4);
+        // The user planes through the world, into the vertex's own space,
+        // where the stage takes their distances.
+        if (vertex.clipRegister !== undefined)
+        {
+            floats.set(clipPlanesOf(model, clipMaskOf(model), world, clipScratch),
+                vertex.clipRegister * 4);
+        }
         return [floats, take(64), take(16)];
     };
 
@@ -7034,6 +7356,14 @@ export function createRenderer(options){
             }
             block.set(formedCameraNormal, UNIFORM_AT.cameraNormalMatrix);
         }
+        // The user planes go through this draw's world, as the position does,
+        // and are set apart from any state the preparation is named by.
+        const mask = prepared.state.clipPlanes ?? 0;
+        if (mask !== 0)
+        {
+            const planes = clipPlanesOf(model, mask, formedWorld, clipScratch);
+            block.set(planes, block.length - planes.length);
+        }
         return block;
     };
 
@@ -7048,6 +7378,8 @@ export function createRenderer(options){
     const formedWorldViewProjection = new Float32Array(16);
     const formedNormal = new Float32Array(16);
     const formedCameraNormal = new Float32Array(16);
+    /** Where a draw's planes are formed before they go into its block: six at most. */
+    const clipScratch = new Float32Array(24);
     let normalFormed = false;
     let cameraNormalFormed = false;
 
@@ -7238,6 +7570,8 @@ export function createRenderer(options){
             stages: cascade.stages,
             lighting,
             fog: fogApplied,
+            clipping: !layout.preTransformed,
+            clipDistances,
         });
         // `layout` and `textures` are the frame dump's, and are handed back
         // rather than worked out again there: both are already in hand and
@@ -7253,7 +7587,8 @@ export function createRenderer(options){
             topology,
             state,
             uniforms: EMPTY_BLOCK,
-            template: uniformsOf(model, lighting, undefined, mipsApplied),
+            template: uniformsOf(model, lighting, undefined, mipsApplied,
+                vertexTailOf(state, layout.preTransformed)),
             packedLights: lighting ? enabledLights(model) : null,
             stageBindings,
             lighting,
@@ -7340,6 +7675,15 @@ export function createRenderer(options){
         }
         return bound;
     };
+
+    /**
+     * Stream zero's buffer bound at `start` bytes: the shared whole binding
+     * at zero, which is every draw of a stream whose offset is whole
+     * vertices, and a binding of its own otherwise.
+     *
+     * @param {any} gpu @param {number} start
+     */
+    const streamBinding = (gpu, start)=>(start === 0 ? wholeBinding(gpu) : { gpu, offset: start });
 
     /** @type {WeakMap<object, Map<number, { gpu: any, offset: number, format: string }>>} */
     const indexBindings = new WeakMap();
@@ -8106,12 +8450,13 @@ export function createRenderer(options){
             const streamBuffer = stream.buffer ? bufferFor(stream.buffer).gpu : null;
             // The bytes this draw reads must survive a later lock of the same
             // buffer in this frame, which is what makes such a lock rename.
-            // Stream zero's offset is in the first vertex here, as the
-            // binding below starts the buffer at zero.
-            const from = startVertex * stream.stride;
+            // Stream zero's whole vertices of offset are in the first vertex
+            // here, and the binding below starts the buffer at the rest.
+            const start = streamBuffer ? streamZeroStart(model) : 0;
+            const from = start + startVertex * stream.stride;
             streamBuffer?.markRead(from, from + count * stream.stride);
             record(model, prepared, {
-                vertices: { gpu: streamBuffer?.gpu ?? zeroBuffer().gpu, offset: 0 },
+                vertices: { gpu: streamBuffer?.gpu ?? zeroBuffer().gpu, offset: start },
                 ...(rewrite
                     ? expandedGeometry(type, ascending(count), startVertex, fill)
                     : { indices: null, count, first: startVertex }),
@@ -8122,8 +8467,8 @@ export function createRenderer(options){
             }
             else if (dumping())
             {
-                const vertices = readMemory(stream.buffer.base + startVertex * stream.stride,
-                    count * stream.stride);
+                const vertices = readMemory(stream.buffer.base + start
+                    + startVertex * stream.stride, count * stream.stride);
                 dumpDraw(model, prepared, vertices, stream.stride, null);
                 noteDumpVertices(prepared, vertices, startVertex * stream.stride, stream.stride);
             }
@@ -8185,7 +8530,8 @@ export function createRenderer(options){
                 const order = indicesFrom(bufferFor(model.indices).gpu.bytes(byteOffset,
                     count * format.bytes), format.bytes);
                 const vertexBytes = bufferFor(stream.buffer).gpu;
-                const base = (stream.offset ?? 0) + model.baseVertexIndex * stream.stride;
+                // The base vertex carries the offset's whole vertices already.
+                const base = streamZeroStart(model) + model.baseVertexIndex * stream.stride;
                 record(model, prepared, {
                     vertices: scratchVertices.write(gatheredPoints((first, many)=>
                         vertexBytes.bytes(base + first * stream.stride, many * stream.stride),
@@ -8198,9 +8544,10 @@ export function createRenderer(options){
             }
             const streamBuffer = bufferFor(stream.buffer).gpu;
             const indexBuffer = bufferFor(model.indices).gpu;
+            const start = streamZeroStart(model);
             if (minIndex !== undefined && numVertices !== undefined)
             {
-                const from = (model.baseVertexIndex + minIndex) * stream.stride;
+                const from = start + (model.baseVertexIndex + minIndex) * stream.stride;
                 streamBuffer.markRead(from, from + numVertices * stream.stride);
             }
             else
@@ -8208,7 +8555,7 @@ export function createRenderer(options){
                 streamBuffer.markRead();
             }
             indexBuffer.markRead(byteOffset, byteOffset + count * format.bytes);
-            const vertices = wholeBinding(streamBuffer.gpu);
+            const vertices = streamBinding(streamBuffer.gpu, start);
             if (list === undefined)
             {
                 const geometry = scratchGeometry;

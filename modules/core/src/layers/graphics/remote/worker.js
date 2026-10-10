@@ -56,6 +56,7 @@ import { createBorrower } from './lending.js';
 import { playedDirect3D } from './direct3d.js';
 import { playedOpengl } from './opengl.js';
 import { playedDirect3D7 } from './d3d7.js';
+import { gpuFeaturesOf } from '../webgpu/features.js';
 
 /** @type {Record<string, (services: any) => any>} */
 const FACTORIES = { d3d8: createDirect3D8, d3d9: createDirect3D9 };
@@ -292,9 +293,7 @@ export function serveGraphics(scope, deps){
         {
             throw new Error('no GPU adapter answered requestAdapter in the graphics worker');
         }
-        const features = ['texture-compression-bc', 'depth-clip-control']
-            .filter(feature=>adapter.features.has(feature));
-        const device = await adapter.requestDevice({ requiredFeatures: features });
+        const device = await adapter.requestDevice({ requiredFeatures: gpuFeaturesOf(adapter) });
         device.lost?.then((/** @type {{ reason?: string }} */ info)=>{
             if (info?.reason === 'destroyed')
             {

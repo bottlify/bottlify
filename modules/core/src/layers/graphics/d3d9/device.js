@@ -279,7 +279,7 @@ export const DEFAULT_CAPS = Object.freeze({
     pixelShaderVersion: Object.freeze({ major: 3, minor: 0 }),
     // None: the renderer clips against no user plane, and a plane a program
     // sets and finds not clipping is worse than a plane it is refused.
-    maxUserClipPlanes: 0,
+    maxUserClipPlanes: 6,
     maxActiveLights: 8,
     maxTextureWidth: 4096,
     maxTextureHeight: 4096,
@@ -1465,6 +1465,10 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         get lights(){
             return lights;
         },
+        // The user clip planes, which D3DRS_CLIPPLANEENABLE says are in force.
+        get clipPlanes(){
+            return clipPlanes;
+        },
         get lightsVersion(){
             return lightsVersion;
         },
@@ -1624,13 +1628,13 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
     };
 
     /**
-     * How many vertices into its buffer stream zero starts.
+     * How many whole vertices into its buffer stream zero starts.
      *
-     * D3D9's stream binding carries a byte offset D3D8's does not, and the
-     * renderer reads a stream from its beginning -- so the offset is folded
-     * into the first vertex instead, which is exact whenever it divides by the
-     * stride. An offset that does not divide describes a vertex straddling the
-     * stride, which is not a stream a fixed-function draw can read at all.
+     * D3D9's stream binding carries a byte offset D3D8's does not. The whole
+     * vertices of it are folded into the first vertex, and the renderer binds
+     * the buffer at what is left (`streamZeroBias`). WebGPU binds a vertex
+     * buffer only at a multiple of four bytes, so a remainder that is not one
+     * is the one offset refused.
      *
      * @returns {number | null} null when the binding is unusable
      */
@@ -1655,13 +1659,15 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 + ` (FVF 0x${(vertexDeclaration.fvf ?? 0).toString(16)})`);
             return null;
         }
-        if (source.offset % source.stride !== 0)
+        const bias = Math.floor(source.offset / source.stride);
+        if ((source.offset - bias * source.stride) % 4 !== 0)
         {
-            report('draw-offset', `a draw from stream 0 at offset ${source.offset}, not a whole`
-                + ` vertex of stride ${source.stride}, was refused`);
+            report('draw-offset', `a draw from stream 0 at offset ${source.offset}, stride`
+                + ` ${source.stride}, was refused: what is left past whole vertices is not`
+                + ' a whole number of four bytes');
             return null;
         }
-        return source.offset / source.stride;
+        return bias;
     };
 
     /**
@@ -4324,7 +4330,8 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
          * @param {{ passes?: number }} out  Written only on success.
          */
         ValidateDevice(out){
-            const hr = pixelShader ? D3D_OK : validateStages(stageStatesFor, STAGE_COUNT);
+            const hr = pixelShader ? D3D_OK
+                : validateStages(stageStatesFor, STAGE_COUNT, { temp: true, constant: true });
             if (hr === D3D_OK)
             {
                 out.passes = 1;

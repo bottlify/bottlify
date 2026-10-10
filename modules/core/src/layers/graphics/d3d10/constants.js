@@ -394,6 +394,7 @@ export const IID = Object.freeze({
     IDXGIDeviceSubObject: '{3D3E0379-F9DE-4D58-BB6C-18D62992F1A6}',
     IDXGIResource: '{035F3AB4-482E-4E50-B41F-8A7F8BD8960B}',
     IDXGISurface: '{CAFCB56C-6AC3-4889-BF47-9E23BBD260EC}',
+    IDXGISurface1: '{4AE63092-6327-4C1B-80AE-BFE12EA32B86}',
     IDXGIOutput: '{AE02EEDB-C735-4690-8D52-5A8DC20213AA}',
     IDXGIAdapter: '{2411E7E1-12AC-4CCF-BD14-9798E8534DC0}',
     IDXGIAdapter1: '{29038F61-3839-4626-91FD-086879011A05}',
@@ -661,6 +662,12 @@ export const D3D10_SRV_DIMENSION = Object.freeze({
     TEXTURE2DMSARRAY: 7,
     TEXTURE3D: 8,
     TEXTURECUBE: 9,
+});
+
+/** Direct3D 10.1's shader-resource dimensions: those of 10.0 and the cube array. */
+export const D3D10_1_SRV_DIMENSION = Object.freeze({
+    ...D3D10_SRV_DIMENSION,
+    TEXTURECUBEARRAY: 10,
 });
 
 export const D3D10_PRIMITIVE_TOPOLOGY = Object.freeze({

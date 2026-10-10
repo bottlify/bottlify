@@ -9,8 +9,9 @@ import assert from 'node:assert/strict';
 import { DXGI_FORMAT, DXGI_MODE_SCALING, DXGI_MODE_SCANLINE_ORDER, DXGI_SWAP_EFFECT,
     DXGI_USAGE } from './constants.js';
 import {
-    DXGI_MODE_DESC, DXGI_SAMPLE_DESC, DXGI_SWAP_CHAIN_DESC, readModeDesc, readSampleDesc,
-    readSwapChainDesc, readU32, writeModeDesc, writeSampleDesc, writeSwapChainDesc, writeU32,
+    DXGI_MODE_DESC, DXGI_SAMPLE_DESC, DXGI_SWAP_CHAIN_DESC, VIEW_UNION, readModeDesc,
+    readSampleDesc, readSwapChainDesc, readU32, readViewDesc, writeModeDesc, writeSampleDesc,
+    writeSwapChainDesc, writeU32, writeViewDesc,
 } from './structs.js';
 
 /** @param {number} [size] */
@@ -169,4 +170,56 @@ test('writing a description touches nothing outside it', ()=>{
     });
     assert.equal(memory.bytes[base - 1], 0xcd, 'the byte before the structure');
     assert.equal(memory.bytes[base + DXGI_SWAP_CHAIN_DESC.SIZE], 0xcd, 'the byte after it');
+});
+
+/**
+ * The unions as the SDK header declares them (d3d10.h): the multisampled
+ * array's range starts at the union's first dword, where every other array
+ * dimension has a mip member first, and a volume's render-target range is in
+ * W slices.
+ */
+test('a view description is read and written by the members of its own dimension', ()=>{
+    const memory = createMemory();
+    const STALE = 0xcdcdcdcd;
+    /** @param {number} at @param {number[]} words */
+    const place = (at, words)=>words.forEach((word, index)=>writeU32(memory, at + index * 4,
+        word));
+    /** @param {number} at @param {number} count */
+    const words = (at, count)=>Array.from({ length: count }, (_, index)=>readU32(memory,
+        at + index * 4));
+
+    place(0, [28, 4, 3, STALE, STALE]);
+    assert.deepEqual(readViewDesc(memory, 0, VIEW_UNION.RENDER_TARGET),
+        { Format: 28, ViewDimension: 4, MipSlice: 3 }, 'TEXTURE2D: one mip slice');
+    place(0, [28, 7, 1, 2, STALE]);
+    assert.deepEqual(readViewDesc(memory, 0, VIEW_UNION.RENDER_TARGET),
+        { Format: 28, ViewDimension: 7, FirstArraySlice: 1, ArraySize: 2 }, 'TEXTURE2DMSARRAY');
+    place(0, [28, 8, 1, 2, 3]);
+    assert.deepEqual(readViewDesc(memory, 0, VIEW_UNION.RENDER_TARGET),
+        { Format: 28, ViewDimension: 8, MipSlice: 1, FirstWSlice: 2, WSize: 3 }, 'TEXTURE3D');
+    place(0, [45, 6, 1, 2, 3]);
+    assert.deepEqual(readViewDesc(memory, 0, VIEW_UNION.DEPTH_STENCIL),
+        { Format: 45, ViewDimension: 6, FirstArraySlice: 1, ArraySize: 2 },
+        'a depth view\'s TEXTURE2DMSARRAY is 6');
+    place(0, [28, 9, 1, 2, STALE, STALE]);
+    assert.deepEqual(readViewDesc(memory, 0, VIEW_UNION.SHADER_RESOURCE),
+        { Format: 28, ViewDimension: 9, MostDetailedMip: 1, MipLevels: 2 }, 'TEXTURECUBE');
+    place(0, [2, 1, 4, 8, STALE, STALE]);
+    assert.deepEqual(readViewDesc(memory, 0, VIEW_UNION.SHADER_RESOURCE),
+        { Format: 2, ViewDimension: 1, ElementOffset: 4, ElementWidth: 8 }, 'BUFFER');
+    place(0, [28, 10, 1, 2, 3, 4]);
+    assert.deepEqual(readViewDesc(memory, 0, VIEW_UNION.SHADER_RESOURCE),
+        { Format: 28, ViewDimension: 10 }, 'no cube array before Direct3D 10.1');
+    assert.deepEqual(readViewDesc(memory, 0, VIEW_UNION.SHADER_RESOURCE1), { Format: 28,
+        ViewDimension: 10, MostDetailedMip: 1, MipLevels: 2, First2DArrayFace: 3, NumCubes: 4 });
+
+    place(0, Array(7).fill(STALE));
+    writeViewDesc(memory, 0, VIEW_UNION.RENDER_TARGET,
+        { Format: 28, ViewDimension: 7, FirstArraySlice: 1, ArraySize: 2 });
+    assert.deepEqual(words(0, 6), [28, 7, 1, 2, 0, STALE],
+        'twenty bytes, the range first, nothing past the structure');
+    writeViewDesc(memory, 0, VIEW_UNION.SHADER_RESOURCE,
+        { Format: 28, ViewDimension: 5, MostDetailedMip: 1, MipLevels: 2, FirstArraySlice: 3,
+            ArraySize: 4 });
+    assert.deepEqual(words(0, 7), [28, 5, 1, 2, 3, 4, STALE], 'twenty-four bytes');
 });

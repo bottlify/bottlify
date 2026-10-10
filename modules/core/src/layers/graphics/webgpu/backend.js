@@ -689,6 +689,16 @@ export function createBackend(options){
         destroySurface,
 
         /**
+         * Whether the device was made with an optional feature: what a
+         * renderer may then ask of it, where it has another way otherwise.
+         *
+         * @param {string} name
+         */
+        hasFeature(name){
+            return device.features?.has?.(name) === true;
+        },
+
+        /**
          * What has been recorded so far is cut off and queued for replay as
          * one frame -- at a present, or at a flush or read-back that sends
          * the recording before one. Renames after this retire backings that

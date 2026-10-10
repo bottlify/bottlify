@@ -137,6 +137,7 @@ const D3DPMISCCAPS_CULLNONE = 0x00000010;
 const D3DPMISCCAPS_CULLCW = 0x00000020;
 const D3DPMISCCAPS_CULLCCW = 0x00000040;
 const D3DPMISCCAPS_COLORWRITEENABLE = 0x00000080;
+const D3DPMISCCAPS_TSSARGTEMP = 0x00000400;
 const D3DPMISCCAPS_BLENDOP = 0x00000800;
 
 const D3DPRASTERCAPS_DITHER = 0x00000001;
@@ -181,15 +182,21 @@ const FILTER_CAPS = 0x03030300 | 0x00000400 | 0x04000000;
 /** KEEP through DECR, every operation the pipeline maps; Direct3D 8 has no two-sided set. */
 const STENCIL_CAPS = 0xff;
 const D3DPRASTERCAPS_ZBIAS = 0x00004000;
+const D3DPRASTERCAPS_MIPMAPLODBIAS = 0x00002000;
 const D3DPRASTERCAPS_ANISOTROPY = 0x00020000;
 
 const D3DPTADDRESSCAPS_WRAP = 0x00000001;
 const D3DPTADDRESSCAPS_MIRROR = 0x00000002;
 const D3DPTADDRESSCAPS_CLAMP = 0x00000004;
+const D3DPTADDRESSCAPS_BORDER = 0x00000008;
 const D3DPTADDRESSCAPS_INDEPENDENTUV = 0x00000010;
-/** Border and mirror-once are folded into clamp and mirror by the sampler, so neither is promised. */
+const D3DPTADDRESSCAPS_MIRRORONCE = 0x00000020;
+/**
+ * Every mode: border and mirror-once, which no WebGPU sampler has, are the
+ * shader's over a clamping sampler (`addressVariantOf` in the renderer).
+ */
 const ADDRESS_CAPS = D3DPTADDRESSCAPS_WRAP | D3DPTADDRESSCAPS_MIRROR | D3DPTADDRESSCAPS_CLAMP
-    | D3DPTADDRESSCAPS_INDEPENDENTUV;
+    | D3DPTADDRESSCAPS_BORDER | D3DPTADDRESSCAPS_INDEPENDENTUV | D3DPTADDRESSCAPS_MIRRORONCE;
 
 const D3DLINECAPS_TEXTURE = 0x00000001;
 const D3DLINECAPS_ZTEST = 0x00000002;
@@ -2455,15 +2462,16 @@ export function createDirect3D8Seam(
                 | D3DDEVCAPS_DRAWPRIMITIVES2EX | D3DDEVCAPS_EXECUTESYSTEMMEMORY
                 | D3DDEVCAPS_TEXTUREVIDEOMEMORY | D3DDEVCAPS_TEXTURENONLOCALVIDMEM
                 | D3DDEVCAPS_CANRENDERAFTERFLIP,
+            // The stages' temporary register is the generated cascade's own.
             PrimitiveMiscCaps: D3DPMISCCAPS_CULLNONE | D3DPMISCCAPS_CULLCW
                 | D3DPMISCCAPS_CULLCCW | D3DPMISCCAPS_MASKZ
-                | D3DPMISCCAPS_COLORWRITEENABLE | D3DPMISCCAPS_BLENDOP,
-            // D3DRS_ZBIAS and MAXANISOTROPY are read; no level bias, which the
-            // sampler does not read.
+                | D3DPMISCCAPS_COLORWRITEENABLE | D3DPMISCCAPS_BLENDOP | D3DPMISCCAPS_TSSARGTEMP,
+            // D3DRS_ZBIAS and MAXANISOTROPY are read, and the level bias, which
+            // the shader adds where no WebGPU sampler takes one.
             RasterCaps: D3DPRASTERCAPS_DITHER | D3DPRASTERCAPS_ZTEST
                 | D3DPRASTERCAPS_FOGVERTEX | D3DPRASTERCAPS_FOGTABLE | D3DPRASTERCAPS_FOGRANGE
                 | D3DPRASTERCAPS_WFOG | D3DPRASTERCAPS_ZFOG | D3DPRASTERCAPS_ZBIAS
-                | D3DPRASTERCAPS_ANISOTROPY,
+                | D3DPRASTERCAPS_ANISOTROPY | D3DPRASTERCAPS_MIPMAPLODBIAS,
             // Every comparison a depth test can ask for; the backend maps them
             // one to one onto its own.
             ZCmpCaps: ALL_COMPARE_CAPS,
@@ -2499,8 +2507,8 @@ export function createDirect3D8Seam(
                 | D3DVTXPCAPS_DIRECTIONALLIGHTS | D3DVTXPCAPS_POSITIONALLIGHTS
                 | D3DVTXPCAPS_LOCALVIEWER,
             MaxActiveLights: caps.maxActiveLights ?? 8,
-            // Nothing clips against a program's planes or blends by vertex
-            // weights, which is what Direct3D 9 answers for the same reason.
+            // The renderer clips by six of a program's planes; nothing blends
+            // by vertex weights, which is what Direct3D 9 answers too.
             MaxUserClipPlanes: caps.maxUserClipPlanes ?? 0,
             MaxVertexBlendMatrices: caps.maxVertexBlendMatrices ?? 0,
             MaxVertexBlendMatrixIndex: caps.maxVertexBlendMatrixIndex ?? 0,

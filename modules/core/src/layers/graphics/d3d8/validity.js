@@ -287,8 +287,9 @@ export const TEXTURE_OP_CAPS = [...COMBINED_OPS]
     .reduce((caps, op)=>(caps | (1 << (op - 1))) >>> 0, 0);
 
 /**
- * The argument sources the combiner reads: diffuse, current, texture, factor,
- * specular.
+ * The argument sources the combiner reads in every version: diffuse, current,
+ * texture, factor, specular. The temporary register and the stage constant
+ * are a version's own (`validateStages`).
  *
  * @type {Set<number>}
  */
@@ -310,13 +311,17 @@ const MIP_FILTERS = new Set([D3DTEXF.NONE, D3DTEXF.POINT, D3DTEXF.LINEAR]);
  *
  * @param {(stage: number) => Map<number, number>} stageStates
  * @param {number} stageCount
- * @param {{ filters?: boolean }} [options]  whether the stages hold filters in
- *        the D3DTEXF numbering, which Direct3D 7's do not
+ * @param {{ filters?: boolean, temp?: boolean, constant?: boolean }} [options]
+ *        `filters`: whether the stages hold filters in the D3DTEXF numbering,
+ *        which Direct3D 7's do not. `temp`: D3DTA_TEMP is read, Direct3D 8's
+ *        and 9's; `constant`: D3DTA_CONSTANT is, Direct3D 9's alone.
  * @returns {number} HRESULT
  */
 export function validateStages(stageStates, stageCount, options = {}){
     /** @param {number} arg */
-    const readable = arg=>COMBINED_SOURCES.has(arg & D3DTA.SELECTMASK);
+    const readable = arg=>COMBINED_SOURCES.has(arg & D3DTA.SELECTMASK)
+        || (options.temp === true && (arg & D3DTA.SELECTMASK) === D3DTA.TEMP)
+        || (options.constant === true && (arg & D3DTA.SELECTMASK) === D3DTA.CONSTANT);
     for (let stage = 0; stage < stageCount; stage++)
     {
         const states = stageStates(stage);

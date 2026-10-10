@@ -30,11 +30,12 @@
 
 import { attachCom } from './com.js';
 import {
-    ALL_REMAINING, D3D10_BIND, D3D10_CPU_ACCESS, D3D10_DSV_DIMENSION, D3D10_MAP,
-    D3D10_MAP_FLAG_DO_NOT_WAIT, D3D10_RESOURCE_DIMENSION, D3D10_RTV_DIMENSION, D3D10_SRV_DIMENSION,
-    D3D10_USAGE, DXGI_ERROR_WAS_STILL_DRAWING, DXGI_USAGE, E_INVALIDARG, FORMAT_INFO, FORMAT_KIND,
-    IID, S_OK,
+    ALL_REMAINING, D3D10_BIND, D3D10_CPU_ACCESS, D3D10_MAP,
+    D3D10_MAP_FLAG_DO_NOT_WAIT, D3D10_RESOURCE_DIMENSION, D3D10_RESOURCE_MISC,
+    D3D10_USAGE, DXGI_ERROR_INVALID_CALL, DXGI_ERROR_WAS_STILL_DRAWING, DXGI_FORMAT, DXGI_USAGE,
+    E_INVALIDARG, FORMAT_INFO, FORMAT_KIND, IID, S_OK,
 } from './constants.js';
+import { VIEW_UNION } from './structs.js';
 import { fullMipChainLength, levelExtent, resolveViewFormat } from './validity.js';
 
 /**
@@ -69,7 +70,21 @@ const VIEW_SHAPE = Object.freeze({
  *             noOverwrite: boolean) => void} unmap
  * @property {(resource: any) => Promise<void> | null} [pending]
  *     The GPU work a map of this resource has to wait for, if any.
+ * @property {(resource: any) => Promise<void> | null} [readBack]
+ *     The GPU's copy of the first subresource brought into the host bytes,
+ *     settled when it has arrived; null when the host bytes are current.
  */
+
+/**
+ * The formats GDI draws into as they are: four bytes a pixel, blue first,
+ * the fourth byte unused -- a 32-bit DIB.
+ *
+ * @type {ReadonlySet<number>}
+ */
+const DC_FORMATS = new Set([
+    DXGI_FORMAT.B8G8R8A8_UNORM, DXGI_FORMAT.B8G8R8A8_UNORM_SRGB, DXGI_FORMAT.B8G8R8A8_TYPELESS,
+    DXGI_FORMAT.B8G8R8X8_UNORM, DXGI_FORMAT.B8G8R8X8_UNORM_SRGB, DXGI_FORMAT.B8G8R8X8_TYPELESS,
+]);
 
 /**
  * @typedef {Object} ResourceOptions
@@ -129,6 +144,7 @@ export function createResource(options){
     /** @type {Map<number, number>} subresource -> the map type it is held under */
     const mapped = new Map();
     let evictionPriority = 0;
+    let dcHeld = false;
 
     return attachCom({
         dimension: options.dimension,
@@ -183,6 +199,47 @@ export function createResource(options){
                     mapType === D3D10_MAP.WRITE_DISCARD,
                     mapType === D3D10_MAP.WRITE_NO_OVERWRITE);
             }
+        },
+
+        /**
+         * The surface's pixels opened to GDI (IDXGISurface1::GetDC): only a
+         * texture made GDI-compatible, of one subresource and one sample, in
+         * a format GDI draws as it is, and only once at a time and never
+         * while it is mapped (d3d10_1.c:712-744). Unless the program
+         * discards them, the pixels are what the GPU last drew, which
+         * `ready` waits for.
+         *
+         * @param {boolean} discard
+         * @returns {{ hr: number, data?: Uint8Array, rowPitch?: number,
+         *             ready?: Promise<void> | null }}
+         */
+        OpenDC(discard){
+            const gdi = ((options.desc.MiscFlags ?? 0) & D3D10_RESOURCE_MISC.GDI_COMPATIBLE) !== 0;
+            if (!gdi || dcHeld || mapped.size > 0 || subresources !== 1
+                || !DC_FORMATS.has(options.desc.Format)
+                || (options.desc.SampleDesc?.Count ?? 1) !== 1)
+            {
+                return { hr: DXGI_ERROR_INVALID_CALL };
+            }
+            dcHeld = true;
+            const ready = discard ? null : options.storage.readBack?.(this) ?? null;
+            const held = options.storage.map(this, 0);
+            return { hr: S_OK, data: held.data, rowPitch: held.rowPitch, ready };
+        },
+
+        /**
+         * GDI done with the pixels: what it drew goes to the GPU.
+         *
+         * @returns {number}
+         */
+        CloseDC(){
+            if (!dcHeld)
+            {
+                return DXGI_ERROR_INVALID_CALL;
+            }
+            dcHeld = false;
+            options.storage.unmap(this, 0, false, false);
+            return S_OK;
         },
 
         /** @param {{ desc?: any }} out */
@@ -289,8 +346,27 @@ function defaultDimensionName(resource, dimensions){
     {
         return dimensions[shape.single] === undefined ? null : shape.single;
     }
-    const name = resource.desc.ArraySize > 1 ? shape.array : shape.single;
+    // A cube's obvious view is a cube where the kind has one -- a shader reads
+    // it as one -- and its six faces as an array where it has not.
+    if (isCube(resource) && dimensions.TEXTURECUBE !== undefined)
+    {
+        return 'TEXTURECUBE';
+    }
+    const name = isMultisampled(resource)
+        ? (resource.desc.ArraySize > 1 ? 'TEXTURE2DMSARRAY' : 'TEXTURE2DMS')
+        : resource.desc.ArraySize > 1 ? shape.array : shape.single;
     return dimensions[name] === undefined ? null : name;
+}
+
+/** @param {any} resource */
+function isMultisampled(resource){
+    return (resource.desc.SampleDesc?.Count ?? 1) > 1;
+}
+
+/** @param {any} resource */
+function isCube(resource){
+    return resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE2D
+        && ((resource.desc.MiscFlags ?? 0) & D3D10_RESOURCE_MISC.TEXTURECUBE) !== 0;
 }
 
 /**
@@ -324,6 +400,18 @@ function dimensionSuitsResource(resource, name){
     {
         return name === 'TEXTURE3D';
     }
+    // A cube view needs a texture made as a cube; a cube can also be viewed
+    // as the six slices of a two-dimensional array it is.
+    if (name.startsWith('TEXTURECUBE'))
+    {
+        return isCube(resource);
+    }
+    // A texture of several samples is viewed only by sample; one of a single
+    // sample may still be viewed through a multisampled dimension.
+    if (isMultisampled(resource) && !name.startsWith('TEXTURE2DMS'))
+    {
+        return false;
+    }
     // Every name for a shape starts with that shape: TEXTURE2D, TEXTURE2DARRAY,
     // TEXTURE2DMS and TEXTURE2DMSARRAY all view a 2D texture, while TEXTURE1D
     // and TEXTURE3D never do.
@@ -335,16 +423,49 @@ function dimensionSuitsResource(resource, name){
  * @property {any} resource
  * @property {any} desc                 Null asks for the default view.
  * @property {Record<string, number>} dimensions
+ * @property {Readonly<Record<string, readonly string[]>>} members
+ *     The union members each dimension has; a field of the description that is
+ *     not one of its dimension's members is not looked at.
  * @property {number} bindFlag          The bind flag the resource must carry.
- * @property {boolean} [mipRange]       A shader resource view names a range of levels.
  */
 
 /**
+ * @typedef {Object} ViewRange  What a view reaches, whatever its dimension calls it.
+ * @property {number} mip      The first mip level.
+ * @property {number} levels   How many levels.
+ * @property {number} first    The first array slice, or depth slice of a volume.
+ * @property {number} count    How many.
+ */
+
+/**
+ * A range of `available` things, asked as a first one and a count where all
+ * ones means "to the end".
+ *
+ * @param {number} first
+ * @param {number} requested
+ * @param {number} available
+ * @returns {number | null} the count, or null if the range does not fit
+ */
+function sliceCountOf(first, requested, available){
+    const count = requested === ALL_REMAINING ? available - first : requested;
+    if (first >= available || count < 1 || first + count > available)
+    {
+        return null;
+    }
+    return count;
+}
+
+/**
  * The whole of view validation, in one place because all three view kinds run
- * exactly these checks and differ only in their dimension enumeration.
+ * exactly these checks and differ only in their dimension enumeration and in
+ * which members each dimension's union has: a dimension without an array range
+ * views one slice, one without a mip count views one level, and a multisampled
+ * one views level zero.
  *
  * @param {ViewRequest} request
- * @returns {any | null} the resolved description, or null if the view is refused
+ * @returns {{ desc: any, dimensionName: string, range: ViewRange | null } | null}
+ *     the description as the view reports it and what it reaches, or null if
+ *     the view is refused
  */
 export function resolveViewDesc(request){
     const { resource, desc, dimensions } = request;
@@ -356,13 +477,15 @@ export function resolveViewDesc(request){
     {
         // A buffer has no shape to infer a view from, so a null description is
         // not "the obvious one" but a request that cannot be answered.
-        return desc ? resolveBufferViewDesc(resource, desc, dimensions) : null;
+        const reported = desc ? resolveBufferViewDesc(resource, desc, dimensions) : null;
+        return reported ? { desc: reported, dimensionName: 'BUFFER', range: null } : null;
     }
 
     const name = desc
         ? nameOfDimension(desc.ViewDimension, dimensions)
         : defaultDimensionName(resource, dimensions);
-    if (!name || name === 'UNKNOWN' || !dimensionSuitsResource(resource, name))
+    const members = name ? request.members[name] : undefined;
+    if (!name || !members || name === 'UNKNOWN' || !dimensionSuitsResource(resource, name))
     {
         return null;
     }
@@ -373,41 +496,68 @@ export function resolveViewDesc(request){
         return null;
     }
 
-    const mipSlice = desc ? (desc.MipSlice ?? desc.MostDetailedMip ?? 0) : 0;
-    if (mipSlice >= resource.desc.MipLevels)
+    /** @param {string} member @param {number} fallback */
+    const asked = (member, fallback)=>(desc ? desc[member] ?? fallback : fallback);
+    /** @type {Record<string, number>} */
+    const values = {};
+
+    const mipMember = members.includes('MostDetailedMip') ? 'MostDetailedMip' : 'MipSlice';
+    const mip = members.includes(mipMember) ? asked(mipMember, 0) : 0;
+    if (mip >= resource.desc.MipLevels)
     {
         return null;
+    }
+    values[mipMember] = mip;
+    let levels = 1;
+    if (members.includes('MipLevels'))
+    {
+        const count = sliceCountOf(mip, asked('MipLevels', ALL_REMAINING),
+            resource.desc.MipLevels);
+        if (count === null)
+        {
+            return null;
+        }
+        levels = count;
+        values.MipLevels = levels;
     }
 
-    const available = availableSlices(resource, mipSlice);
-    const firstSlice = desc ? (desc.FirstArraySlice ?? desc.FirstWSlice ?? 0) : 0;
-    const requested = desc ? (desc.ArraySize ?? desc.WSize ?? ALL_REMAINING) : ALL_REMAINING;
-    const sliceCount = requested === ALL_REMAINING ? available - firstSlice : requested;
-    if (firstSlice >= available || sliceCount < 1 || firstSlice + sliceCount > available)
+    let first = 0;
+    let count = 1;
+    for (const [firstMember, countMember] of [['FirstArraySlice', 'ArraySize'],
+        ['FirstWSlice', 'WSize']])
     {
-        return null;
+        if (!members.includes(firstMember))
+        {
+            continue;
+        }
+        first = asked(firstMember, 0);
+        const fits = sliceCountOf(first, asked(countMember, ALL_REMAINING),
+            availableSlices(resource, mip));
+        if (fits === null)
+        {
+            return null;
+        }
+        count = fits;
+        values[firstMember] = first;
+        values[countMember] = count;
+    }
+    if (resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D
+        && !members.includes('FirstWSlice'))
+    {
+        count = availableSlices(resource, mip);
+    }
+    if (name === 'TEXTURECUBE')
+    {
+        count = 6;
     }
 
-    const resolved = {
-        Format: format,
-        ViewDimension: dimensions[name],
-        dimensionName: name,
-        MipSlice: mipSlice,
-        FirstArraySlice: firstSlice,
-        ArraySize: sliceCount,
-    };
-    if (!request.mipRange)
+    /** @type {Record<string, number>} */
+    const reported = { Format: format, ViewDimension: dimensions[name] };
+    for (const member of members)
     {
-        return resolved;
+        reported[member] = values[member];
     }
-    const levels = desc && desc.MipLevels !== undefined && desc.MipLevels !== ALL_REMAINING
-        ? desc.MipLevels
-        : resource.desc.MipLevels - mipSlice;
-    if (levels < 1 || mipSlice + levels > resource.desc.MipLevels)
-    {
-        return null;
-    }
-    return { ...resolved, MostDetailedMip: mipSlice, MipLevels: levels };
+    return { desc: reported, dimensionName: name, range: { mip, levels, first, count } };
 }
 
 /**
@@ -425,12 +575,12 @@ function resolveBufferViewDesc(resource, desc, dimensions){
     // for the view's format to be a cast *of*: it only has to name a real,
     // concrete format. This is the one view whose format stands alone.
     const info = FORMAT_INFO[desc.Format];
-    if (!info || info.kind === FORMAT_KIND.TYPELESS || desc.ElementWidth < 1)
-    {
-        return null;
-    }
     const offset = desc.ElementOffset ?? 0;
-    if ((offset + desc.ElementWidth) * info.bytesPerPixel > resource.desc.ByteWidth)
+    const width = desc.ElementWidth;
+    // The range is elements of the view's format, and every one of them has
+    // to lie in the buffer; a width that is missing is no width at all.
+    if (!info || info.kind === FORMAT_KIND.TYPELESS || !(width >= 1)
+        || (offset + width) * info.bytesPerPixel > resource.desc.ByteWidth)
     {
         return null;
     }
@@ -439,7 +589,7 @@ function resolveBufferViewDesc(resource, desc, dimensions){
         ViewDimension: dimensions.BUFFER,
         dimensionName: 'BUFFER',
         ElementOffset: offset,
-        ElementWidth: desc.ElementWidth,
+        ElementWidth: width,
     };
 }
 
@@ -448,6 +598,7 @@ function resolveBufferViewDesc(resource, desc, dimensions){
  * @property {any} resource
  * @property {any} desc              The already-resolved description.
  * @property {string} dimensionName  The shape the view looks at, by its enumeration name.
+ * @property {ViewRange | null} range  What it reaches; null for a buffer's view.
  * @property {string} iid
  * @property {readonly string[]} [also]  Later versions of the interface it answers to.
  * @property {() => void} retainDevice
@@ -461,6 +612,7 @@ function resolveBufferViewDesc(resource, desc, dimensions){
 export function createView(options){
     return attachCom({
         dimensionName: options.dimensionName,
+        range: options.range,
 
         /** @param {{ desc?: any }} out */
         GetDesc(out){
@@ -499,24 +651,21 @@ export function createView(options){
     });
 }
 
-/** The three view kinds, each with its own dimension enumeration and bind flag. */
+/** The three view kinds, each with its own dimension enumeration, union and bind flag. */
 export const VIEW_KINDS = Object.freeze({
     RENDER_TARGET: Object.freeze({
-        dimensions: D3D10_RTV_DIMENSION,
+        union: VIEW_UNION.RENDER_TARGET,
         bindFlag: D3D10_BIND.RENDER_TARGET,
-        mipRange: false,
         iid: IID.ID3D10RenderTargetView,
     }),
     DEPTH_STENCIL: Object.freeze({
-        dimensions: D3D10_DSV_DIMENSION,
+        union: VIEW_UNION.DEPTH_STENCIL,
         bindFlag: D3D10_BIND.DEPTH_STENCIL,
-        mipRange: false,
         iid: IID.ID3D10DepthStencilView,
     }),
     SHADER_RESOURCE: Object.freeze({
-        dimensions: D3D10_SRV_DIMENSION,
+        union: VIEW_UNION.SHADER_RESOURCE,
         bindFlag: D3D10_BIND.SHADER_RESOURCE,
-        mipRange: true,
         iid: IID.ID3D10ShaderResourceView,
         also: Object.freeze([IID.ID3D10ShaderResourceView1]),
     }),
@@ -539,7 +688,7 @@ export function textureInterfaces(desc, textureIid, dimension){
         IID.IDXGIDeviceSubObject, IID.IDXGIResource, textureIid];
     const single = dimension !== D3D10_RESOURCE_DIMENSION.TEXTURE3D
         && desc.MipLevels === 1 && (desc.ArraySize ?? 1) === 1;
-    return single ? [...base, IID.IDXGISurface] : base;
+    return single ? [...base, IID.IDXGISurface, IID.IDXGISurface1] : base;
 }
 
 /**

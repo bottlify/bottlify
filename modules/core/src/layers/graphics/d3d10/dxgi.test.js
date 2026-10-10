@@ -8,10 +8,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     D3D10_BIND, D3D10_DRIVER_TYPE, D3D10_SDK_VERSION, DXGI_ERROR_INVALID_CALL,
-    DXGI_ERROR_NOT_FOUND, DXGI_FORMAT, DXGI_SWAP_EFFECT, DXGI_USAGE, E_NOINTERFACE, IID, S_OK,
+    DXGI_ERROR_NOT_FOUND, DXGI_FORMAT, DXGI_SWAP_EFFECT, DXGI_USAGE, E_INVALIDARG, E_NOINTERFACE,
+    IID, S_OK,
 } from './constants.js';
 import {
-    CreateDXGIFactory, CreateDXGIFactory1, createFactory, defaultSwapChainDesc,
+    CreateDXGIFactory, CreateDXGIFactory1, createFactory, defaultSwapChainDesc, outputModes,
 } from './dxgi.js';
 import { D3D10CreateDevice } from './device.js';
 
@@ -444,18 +445,232 @@ test('presenting advances the buffer and is counted', ()=>{
     assertFullyReleased(device, 'the device');
 });
 
-test('nothing here goes fullscreen, and the target is null when it says so', ()=>{
-    const device = createDevice();
+test('a fullscreen swap chain says so, names its output, and takes the screen at its mode'
+    + ' (test_create_swapchain, dxgi.c:2036-2075; test_set_fullscreen, 2990-3000)', ()=>{
+    /** @type {any[][]} */
+    const taken = [];
+    let display = { width: 1920, height: 1080 };
+    /**
+     * @param {number} width @param {number} height @param {any} where
+     */
+    const resolution = (width, height, where)=>{
+        taken.push([width, height, where]);
+        display = { width, height };
+    };
+    const device = createDevice({ factoryOptions: { display: ()=>display, resolution } });
+    /** @param {any} swapChain */
+    const state = swapChain=>{
+        /** @type {{ fullscreen?: boolean, target?: any }} */
+        const out = { fullscreen: true, target: 'untouched' };
+        assert.equal(swapChain.GetFullscreenState(out), S_OK);
+        /** @type {{ desc?: any }} */
+        const described = {};
+        swapChain.GetDesc(described);
+        assert.equal(described.desc.windowed, !out.fullscreen, 'GetDesc agrees');
+        const target = out.target;
+        target?.release();
+        return { fullscreen: out.fullscreen, target };
+    };
+    /** @type {{ output?: any }} */
+    const containing = {};
+
+    /** @type {{ swapChain?: any }} */
+    const windowed = {};
+    assert.equal(device.factory().CreateSwapChain(device, swapChainDesc(), windowed), S_OK);
+    assert.deepEqual(state(windowed.swapChain), { fullscreen: false, target: null },
+        'a windowed swap chain names no output');
+    assert.equal(taken.length, 0, 'and takes nothing');
+    windowed.swapChain.GetContainingOutput(containing);
+    containing.output.release();
+
+    // Asked fullscreen: made fullscreen, at its buffers' size, on its window.
+    /** @type {{ swapChain?: any }} */
+    const full = {};
+    const desc = swapChainDesc({ windowed: false });
+    desc.bufferDesc.width = 800;
+    desc.bufferDesc.height = 600;
+    assert.equal(device.factory().CreateSwapChain(device, desc, full), S_OK);
+    const chain = full.swapChain;
+    assert.deepEqual(state(chain), { fullscreen: true, target: containing.output },
+        'its target is the output it is on');
+    assert.deepEqual([...taken],
+        [[800, 600, { window: 0x1234, fullscreen: true, announce: true }]]);
+
+    // A mode change while fullscreen takes the screen at the new mode.
+    assert.equal(chain.ResizeTarget({ width: 1024, height: 768, refreshNumerator: 60,
+        refreshDenominator: 1, format: 0, scanlineOrdering: 0, scaling: 0 }), S_OK);
+    assert.deepEqual(taken.at(-1)?.slice(0, 2), [1024, 768]);
+    assert.equal(chain.ResizeTarget(null), DXGI_ERROR_INVALID_CALL);
+
+    // Windowed again: the desktop's mode comes back.
+    assert.equal(chain.SetFullscreenState(false, null), S_OK);
+    assert.deepEqual(state(chain), { fullscreen: false, target: null });
+    assert.deepEqual(taken.at(-1), [1920, 1080, { window: 0x1234, fullscreen: false }]);
+    assert.equal(chain.SetFullscreenState(false, null), S_OK, 'already windowed');
+    const before = taken.length;
+
+    // And fullscreen again, on its own output or none named; another is refused.
+    assert.equal(chain.SetFullscreenState(true, containing.output), S_OK);
+    assert.equal(state(chain).fullscreen, true);
+    assert.equal(taken.length, before + 1);
+    assert.equal(chain.SetFullscreenState(true, {}), DXGI_ERROR_INVALID_CALL);
+    assert.equal(chain.SetFullscreenState(false, null), S_OK);
+
+    chain.release();
+    windowed.swapChain.release();
+    assertFullyReleased(device, 'the device');
+});
+
+test('a windowed swap chain\'s ResizeTarget leaves the window as it is and says so', ()=>{
+    /** @type {string[]} */
+    const divergences = [];
+    const device = createDevice({ divergence: (/** @type {string} */ api,
+        /** @type {string} */ detail)=>divergences.push(`${api}: ${detail}`) });
     /** @type {{ swapChain?: any }} */
     const created = {};
     assert.equal(device.factory().CreateSwapChain(device, swapChainDesc(), created), S_OK);
+    assert.equal(created.swapChain.ResizeTarget({ width: 320, height: 200 }), S_OK);
+    assert.ok(divergences.some(line=>line.includes('ResizeTarget')), divergences.join('\n'));
+    created.swapChain.release();
+    assertFullyReleased(device, 'the device');
+});
 
-    /** @type {{ fullscreen?: boolean, target?: any }} */
-    const out = { fullscreen: true, target: 'untouched' };
-    assert.equal(created.swapChain.GetFullscreenState(out), S_OK);
-    assert.equal(out.fullscreen, false);
-    assert.equal(out.target, null, 'a windowed swap chain names no output');
+test('a swap chain asked for at zero by zero takes its window\'s client area, and eight where'
+    + ' the window has none (test_create_swapchain, dxgi.c:2119-2186)', ()=>{
+    /** @type {Record<number, { width: number, height: number }>} */
+    const clients = { 0x10: { width: 206, height: 184 }, 0x20: { width: 0, height: 0 } };
+    /** @type {number[]} */
+    const measured = [];
+    const device = createDevice({
+        factoryOptions: { windowClientSize: (/** @type {number} */ window)=>{
+            measured.push(window);
+            return clients[window];
+        } },
+    });
+    /** @param {number} outputWindow @param {number} width @param {number} height */
+    const made = (outputWindow, width, height)=>{
+        /** @type {{ swapChain?: any }} */
+        const created = {};
+        const desc = swapChainDesc({ outputWindow });
+        desc.bufferDesc.width = width;
+        desc.bufferDesc.height = height;
+        assert.equal(device.factory().CreateSwapChain(device, desc, created), S_OK);
+        /** @type {{ desc?: any }} */
+        const out = {};
+        created.swapChain.GetDesc(out);
+        /** @type {{ buffer?: any }} */
+        const buffer = {};
+        assert.equal(created.swapChain.GetBuffer(0, IID.ID3D10Texture2D, buffer), S_OK);
+        const extent = [out.desc.bufferDesc.width, out.desc.bufferDesc.height,
+            buffer.buffer.desc.Width, buffer.buffer.desc.Height];
+        buffer.buffer.release();
+        created.swapChain.release();
+        return extent;
+    };
+    assert.deepEqual(made(0x10, 0, 0), [206, 184, 206, 184], 'the client area, and the buffer');
+    assert.deepEqual(made(0x20, 0, 0), [8, 8, 8, 8], 'an empty client area');
+    assert.deepEqual(made(0x10, 0, 50), [206, 50, 206, 50], 'only the side asked for as zero');
+    measured.length = 0;
+    assert.deepEqual(made(0x10, 64, 32), [64, 32, 64, 32]);
+    assert.deepEqual(measured, [], 'a window is measured only when a side is zero');
+    assertFullyReleased(device, 'the device');
+});
 
+test('a swap chain is made at a sample count its device makes textures at, and at no other',
+    ()=>{
+        const device = createDevice();
+        /** @param {number} count @param {number} quality */
+        const made = (count, quality)=>{
+            /** @type {{ swapChain?: any }} */
+            const created = {};
+            const hr = device.factory().CreateSwapChain(device,
+                swapChainDesc({ sampleDesc: { count, quality } }), created);
+            return { hr, swapChain: created.swapChain };
+        };
+        const four = made(4, 0);
+        assert.equal(four.hr, S_OK);
+        /** @type {{ buffer?: any }} */
+        const buffer = {};
+        assert.equal(four.swapChain.GetBuffer(0, IID.ID3D10Texture2D, buffer), S_OK);
+        assert.deepEqual(buffer.buffer.desc.SampleDesc, { Count: 4, Quality: 0 },
+            'the back buffer is multisampled');
+        buffer.buffer.release();
+        four.swapChain.release();
+        for (const [count, quality] of [[2, 0], [4, 1], [0, 0], [64, 0]])
+        {
+            assert.deepEqual(made(count, quality), { hr: E_INVALIDARG, swapChain: null },
+                `${count} samples at quality ${quality}`);
+        }
+        assertFullyReleased(device, 'the device');
+    });
+
+test('a present that only tests shows, counts and rotates nothing'
+    + ' (test_swapchain_present_count, dxgi.c:8519-8524)', async()=>{
+    /** @type {any[]} */
+    const shown = [];
+    const device = createDevice();
+    const present = device.present;
+    device.present = (/** @type {any} */ buffer)=>{
+        shown.push(buffer);
+        return present.call(device, buffer);
+    };
+    /** @type {{ swapChain?: any }} */
+    const created = {};
+    assert.equal(device.factory().CreateSwapChain(device, swapChainDesc({
+        bufferCount: 2, swapEffect: DXGI_SWAP_EFFECT.SEQUENTIAL,
+    }), created), S_OK);
+    const swapChain = created.swapChain;
+    assert.equal(await swapChain.Present(0, 0), S_OK);
+    assert.equal(await swapChain.Present(0, 1), S_OK, 'DXGI_PRESENT_TEST');
+    /** @type {{ count?: number }} */
+    const presents = {};
+    swapChain.GetLastPresentCount(presents);
+    assert.equal(presents.count, 1);
+    assert.equal(swapChain.currentBackBufferIndex(), 1);
+    assert.equal(shown.length, 1, 'one frame went to the device');
+    swapChain.release();
+    assertFullyReleased(device, 'the device');
+});
+
+test('a swap chain is made only in a format it can be shown in (test_create_swapchain,'
+    + ' dxgi.c:2100-2108)', ()=>{
+    const device = createDevice();
+    /** @param {number} format @param {boolean} windowed */
+    const made = (format, windowed = true)=>{
+        /** @type {{ swapChain?: any }} */
+        const created = {};
+        const desc = swapChainDesc({ windowed });
+        desc.bufferDesc.format = format;
+        const hr = device.factory().CreateSwapChain(device, desc, created);
+        created.swapChain?.release();
+        return [hr, created.swapChain ?? null];
+    };
+    for (const format of [DXGI_FORMAT.R8G8B8A8_UNORM, DXGI_FORMAT.R8G8B8A8_UNORM_SRGB,
+        DXGI_FORMAT.B8G8R8A8_UNORM, DXGI_FORMAT.B8G8R8A8_UNORM_SRGB,
+        DXGI_FORMAT.R16G16B16A16_FLOAT, DXGI_FORMAT.R10G10B10A2_UNORM])
+    {
+        assert.equal(made(format)[0], S_OK, `format ${format}`);
+    }
+    for (const format of [DXGI_FORMAT.UNKNOWN, DXGI_FORMAT.R8G8B8A8_TYPELESS,
+        DXGI_FORMAT.BC5_UNORM, DXGI_FORMAT.R32_FLOAT])
+    {
+        assert.deepEqual(made(format), [E_INVALIDARG, null], `format ${format}`);
+    }
+    assert.deepEqual(made(DXGI_FORMAT.UNKNOWN, false), [E_INVALIDARG, null], 'fullscreen too');
+    const size = { width: 1024, height: 768 };
+    assert.deepEqual([DXGI_FORMAT.R16G16B16A16_FLOAT, DXGI_FORMAT.R10G10B10A2_UNORM,
+        DXGI_FORMAT.R32_FLOAT].map(format=>outputModes(size, format).length > 0),
+    [true, true, false], 'an output lists modes in the formats a swap chain is shown in');
+
+    /** @type {{ swapChain?: any }} */
+    const created = {};
+    assert.equal(device.factory().CreateSwapChain(device, swapChainDesc(), created), S_OK);
+    assert.equal(created.swapChain.ResizeBuffers(0, 0, 0, DXGI_FORMAT.BC5_UNORM, 0),
+        E_INVALIDARG);
+    /** @type {{ desc?: any }} */
+    const out = {};
+    created.swapChain.GetDesc(out);
+    assert.equal(out.desc.bufferDesc.format, DXGI_FORMAT.R8G8B8A8_UNORM, 'kept as it was');
     created.swapChain.release();
     assertFullyReleased(device, 'the device');
 });

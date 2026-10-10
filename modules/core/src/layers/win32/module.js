@@ -255,6 +255,7 @@ export function createWin32Module(){
             'memory',
             'loader',
             'filesystem',
+            'media',
             'log',
         ]),
 

@@ -18,7 +18,11 @@ import {
 } from './constants.js';
 import { D3D10CreateDevice, D3D10CreateDeviceAndSwapChain } from './device.js';
 import { defaultSwapChainDesc } from './dxgi.js';
-import { passThroughVertexShader, solidPixelShader } from './shader-fixtures.js';
+import {
+    assemble, dclInputSiv, dclOutputSiv, o, passThroughVertexShader, ret, solidPixelShader, utof,
+    v,
+} from './shader-fixtures.js';
+import { COMPONENT_TYPE, SHADER_KIND, SYSTEM_VALUE } from './dxbc.js';
 
 /** @param {object} [options] */
 function createDevice(options = {}){
@@ -1076,7 +1080,8 @@ test('an input layout needs elements and a signature to match them against', ()=
     /** @type {{ layout?: any }} */
     const out = {};
     const signature = passThroughVertexShader();
-    assert.equal(device.CreateInputLayout([], signature, out), E_INVALIDARG);
+    assert.equal(device.CreateInputLayout([], signature, out), E_INVALIDARG,
+        'no elements feed nothing, and this shader reads POSITION0');
     assert.equal(device.CreateInputLayout([element], null, out), E_INVALIDARG);
     assert.equal(device.CreateInputLayout([{ ...element, SemanticName: '' }], signature,
         out), E_INVALIDARG);
@@ -1894,10 +1899,18 @@ test('the compressed, packed and typeless formats report what this device does w
         'a 32-bit float is loaded, not filtered');
     assert.ok(support(DXGI_FORMAT.R16_FLOAT) & 0x2, 'a one-channel vertex element');
     assert.ok(support(DXGI_FORMAT.R8G8_UINT) & 0x2);
+    // display_format_support (d3d10core.c:54-63): the four required, the BGRA
+    // pair allowed; nothing else is shown.
     for (const format of [DXGI_FORMAT.R8G8B8A8_UNORM, DXGI_FORMAT.R8G8B8A8_UNORM_SRGB,
-        DXGI_FORMAT.B8G8R8A8_UNORM, DXGI_FORMAT.B8G8R8A8_UNORM_SRGB])
+        DXGI_FORMAT.B8G8R8A8_UNORM, DXGI_FORMAT.B8G8R8A8_UNORM_SRGB,
+        DXGI_FORMAT.R16G16B16A16_FLOAT, DXGI_FORMAT.R10G10B10A2_UNORM])
     {
         assert.ok(support(format) & 0x80000, `format ${format} can be displayed`);
+    }
+    for (const format of [DXGI_FORMAT.R8G8B8A8_TYPELESS, DXGI_FORMAT.B8G8R8X8_UNORM,
+        DXGI_FORMAT.R32G32B32A32_FLOAT])
+    {
+        assert.ok(!(support(format) & 0x80000), `format ${format} is not displayed`);
     }
     for (const format of [DXGI_FORMAT.R1_UNORM, DXGI_FORMAT.B5G6R5_UNORM,
         DXGI_FORMAT.B5G5R5A1_UNORM])
@@ -2054,5 +2067,230 @@ test('a shader and an input layout answer for their device', ()=>{
     assert.equal(wrong.shader, null);
     assert.equal(device.CreatePixelShader(new Uint8Array([0xff, 0xfe, 0, 3]), wrong),
         E_INVALIDARG, 'a Shader Model 3 blob is no container');
+    assertFullyReleased(device);
+});
+
+test('a buffer view without an element count is refused, not made over nothing', ()=>{
+    const device = createDevice();
+    /** @type {{ resource?: any }} */
+    const buffer = {};
+    assert.equal(device.CreateBuffer({ ByteWidth: 64, Usage: D3D10_USAGE.DEFAULT,
+        BindFlags: D3D10_BIND.SHADER_RESOURCE, CPUAccessFlags: 0, MiscFlags: 0 }, null, buffer),
+    S_OK);
+    /** @type {{ view?: any }} */
+    const out = {};
+    assert.equal(device.CreateShaderResourceView(buffer.resource, {
+        Format: DXGI_FORMAT.R32_FLOAT, ViewDimension: D3D10_SRV_DIMENSION.BUFFER,
+        ElementOffset: 0 }, out), E_INVALIDARG);
+    assert.equal(out.view, null);
+});
+
+test('a layout of no elements feeds a vertex shader that reads only system values', ()=>{
+    const device = createDevice();
+    const vertexId = assemble({
+        kind: SHADER_KIND.VERTEX,
+        inputs: [{ name: 'SV_VERTEXID', systemValue: SYSTEM_VALUE.VERTEX_ID, register: 0,
+            componentType: COMPONENT_TYPE.UINT }],
+        outputs: [{ name: 'SV_POSITION', systemValue: SYSTEM_VALUE.POSITION, register: 0 }],
+        instructions: [dclInputSiv(v(0), SYSTEM_VALUE.VERTEX_ID),
+            dclOutputSiv(o(0), SYSTEM_VALUE.POSITION), utof(o(0), v(0)), ret()],
+    });
+    /** @type {{ layout?: any }} */
+    const empty = {};
+    assert.equal(device.CreateInputLayout([], vertexId, empty), S_OK);
+    /** @type {{ layout?: any }} */
+    const none = {};
+    assert.equal(device.CreateInputLayout(null, vertexId, none), S_OK);
+    assert.deepEqual([empty.layout.elements, none.layout.elements], [[], []]);
+    empty.layout.release();
+    none.layout.release();
+    assertFullyReleased(device);
+});
+
+test('multisample quality levels answer as Windows does at the edges'
+    + ' (test_check_multisample_quality_levels, d3d10core.c:10613-10679)', ()=>{
+    const device = createDevice();
+    const RGBA8 = DXGI_FORMAT.R8G8B8A8_UNORM;
+    /** @param {number} format @param {number} count */
+    const check = (format, count)=>{
+        const out = { levels: 0xdeadbeef };
+        return [device.CheckMultisampleQualityLevels(format, count, out), out.levels];
+    };
+    assert.deepEqual(check(RGBA8, 0), [E_FAIL, 0], 'no samples');
+    assert.deepEqual(check(RGBA8, 1), [S_OK, 1]);
+    assert.deepEqual(check(RGBA8, 4), [S_OK, 1], 'four samples, the count WebGPU has');
+    assert.deepEqual(check(DXGI_FORMAT.R8G8B8A8_TYPELESS, 4), [S_OK, 1],
+        'a typeless family, as test_multisample_resolve asks');
+    assert.deepEqual(check(DXGI_FORMAT.R24G8_TYPELESS, 4), [S_OK, 1], 'a depth family');
+    assert.deepEqual(check(DXGI_FORMAT.D32_FLOAT, 4), [S_OK, 1]);
+    assert.deepEqual(check(RGBA8, 2), [S_OK, 0], 'two samples WebGPU does not have');
+    assert.deepEqual(check(RGBA8, 15), [S_OK, 0]);
+    assert.equal(check(RGBA8, 32)[0], S_OK);
+    assert.deepEqual(check(RGBA8, 33), [E_FAIL, 0], 'past the API\'s 32');
+    assert.deepEqual(check(RGBA8, 64), [E_FAIL, 0]);
+    assert.deepEqual(check(DXGI_FORMAT.BC3_UNORM, 2), [S_OK, 0]);
+    assert.deepEqual(check(DXGI_FORMAT.BC3_UNORM, 4), [S_OK, 0], 'blocks are never drawn into');
+    assert.deepEqual(check(DXGI_FORMAT.R32G32B32A32_FLOAT, 4), [S_OK, 0],
+        'a format WebGPU does not multisample');
+    assert.deepEqual(check(DXGI_FORMAT.UNKNOWN, 2), [S_OK, 0]);
+    assert.deepEqual(check(65536, 2), [E_INVALIDARG, 0xdeadbeef], 'no format at all');
+    assert.equal(device.CheckMultisampleQualityLevels(RGBA8, 2, null), E_INVALIDARG);
+    assertFullyReleased(device);
+});
+
+test('a texture is made at the sample counts the device reports and no other'
+    + ' (test_create_texture2d, d3d10core.c:2159-2177)', ()=>{
+    const device = createDevice();
+    const ms = createTexture2D(device, { SampleDesc: { Count: 4, Quality: 0 } });
+    assert.deepEqual(ms.desc.SampleDesc, { Count: 4, Quality: 0 });
+    ms.release();
+    /** @param {object} overrides */
+    const refused = overrides=>{
+        /** @type {{ resource?: any }} */
+        const out = { resource: 'untouched' };
+        const hr = device.CreateTexture2D({ ...TEXTURE_2D, ...overrides }, null, out);
+        return [hr, out.resource];
+    };
+    for (const [overrides, why] of /** @type {[object, string][]} */ ([
+        [{ SampleDesc: { Count: 4, Quality: 1 } }, 'one quality level, and this asks the second'],
+        [{ SampleDesc: { Count: 2, Quality: 0 } }, 'a count the device reported none of'],
+        [{ SampleDesc: { Count: 15, Quality: 0 } }, 'fifteen samples'],
+        [{ SampleDesc: { Count: 4, Quality: 0 }, MipLevels: 2 }, 'a multisampled mip chain'],
+        [{ SampleDesc: { Count: 4, Quality: 0 }, MipLevels: 0 }, 'the full chain of 512'],
+        [{ SampleDesc: { Count: 4, Quality: 0 }, Usage: D3D10_USAGE.STAGING, BindFlags: 0,
+            CPUAccessFlags: D3D10_CPU_ACCESS.READ }, 'a multisampled staging texture'],
+    ]))
+    {
+        assert.deepEqual(refused(overrides), [E_INVALIDARG, null], why);
+    }
+    assertFullyReleased(device);
+});
+
+test('a multisampled texture array is refused and says why: WebGPU has none', ()=>{
+    /** @type {string[]} */
+    const divergences = [];
+    const device = createDevice({ divergence: (/** @type {string} */ api,
+        /** @type {string} */ detail)=>divergences.push(`${api}: ${detail}`) });
+    /** @type {{ resource?: any }} */
+    const out = {};
+    assert.equal(device.CreateTexture2D({ ...TEXTURE_2D, ArraySize: 2,
+        SampleDesc: { Count: 4, Quality: 0 } }, null, out), E_INVALIDARG);
+    assert.ok(divergences.some(line=>line.includes('multisampled texture array')),
+        divergences.join('\n'));
+    assertFullyReleased(device);
+});
+
+test('a multisampled texture\'s default views look at it by sample, and no other dimension'
+    + ' does', ()=>{
+    const device = createDevice();
+    const ms = createTexture2D(device, { SampleDesc: { Count: 4, Quality: 0 },
+        BindFlags: D3D10_BIND.RENDER_TARGET | D3D10_BIND.SHADER_RESOURCE });
+    /** @type {{ view?: any }} */
+    const rtv = {};
+    assert.equal(device.CreateRenderTargetView(ms, null, rtv), S_OK);
+    /** @type {{ desc?: any }} */
+    const described = {};
+    rtv.view.GetDesc(described);
+    assert.equal(described.desc.ViewDimension, D3D10_RTV_DIMENSION.TEXTURE2DMS);
+    /** @type {{ view?: any }} */
+    const srv = {};
+    assert.equal(device.CreateShaderResourceView(ms, null, srv), S_OK);
+    srv.view.GetDesc(described);
+    assert.equal(described.desc.ViewDimension, D3D10_SRV_DIMENSION.TEXTURE2DMS);
+    /** @type {{ view?: any }} */
+    const flat = {};
+    assert.equal(device.CreateRenderTargetView(ms, { Format: 0,
+        ViewDimension: D3D10_RTV_DIMENSION.TEXTURE2D, MipSlice: 0 }, flat), E_INVALIDARG);
+    rtv.view.release();
+    srv.view.release();
+    ms.release();
+    assertFullyReleased(device);
+});
+
+test('the combined entry points answer with the swap chain\'s own failure and hand back'
+    + ' neither object (test_create_device, d3d10_1.c:249-266)', ()=>{
+    for (const [window, format, expected] of [
+        [0, DXGI_FORMAT.R8G8B8A8_UNORM, DXGI_ERROR_INVALID_CALL],
+        [0x1234, DXGI_FORMAT.BC5_UNORM, E_INVALIDARG],
+    ])
+    {
+        const desc = { ...defaultSwapChainDesc(), outputWindow: window };
+        desc.bufferDesc = { ...desc.bufferDesc, format };
+        /** @type {{ swapChain?: any }} */
+        const chain = { swapChain: 'untouched' };
+        /** @type {{ device?: any }} */
+        const device = { device: 'untouched' };
+        assert.equal(D3D10CreateDeviceAndSwapChain(null, D3D10_DRIVER_TYPE.HARDWARE, null, 0,
+            D3D10_SDK_VERSION, desc, chain, device), expected, `window ${window}, ${format}`);
+        assert.deepEqual([chain.swapChain, device.device], [null, null]);
+    }
+});
+
+test('a shadow map\'s formats say what each is for: the depth format draws depth, the view that'
+    + ' reads it compares (D3D10 format support; test_format_support, d3d10core.c:13827)', ()=>{
+    const device = createDevice();
+    /** @param {number} format */
+    const support = format=>{
+        /** @type {{ support?: number }} */
+        const out = {};
+        assert.equal(device.CheckFormatSupport(format, out), S_OK, `format ${format}`);
+        return /** @type {number} */ (out.support);
+    };
+    const [TEXTURE2D, COMPARISON, DEPTH_STENCIL, BUFFER] = [0x20, 0x400, 0x10000, 0x1];
+    for (const format of [DXGI_FORMAT.D24_UNORM_S8_UINT, DXGI_FORMAT.D32_FLOAT,
+        DXGI_FORMAT.D16_UNORM])
+    {
+        const bits = support(format);
+        assert.ok(bits & DEPTH_STENCIL && bits & TEXTURE2D, `${format} is a depth texture`);
+        assert.ok(!(bits & COMPARISON), `${format} is never bound to a shader`);
+        assert.ok(!(bits & BUFFER), `${format} is never a buffer's element`);
+    }
+    for (const format of [DXGI_FORMAT.R24_UNORM_X8_TYPELESS, DXGI_FORMAT.R32_FLOAT,
+        DXGI_FORMAT.R16_UNORM, DXGI_FORMAT.R32_FLOAT_X8X24_TYPELESS])
+    {
+        const bits = support(format);
+        assert.ok(bits & TEXTURE2D && bits & COMPARISON, `${format} reads depth to compare`);
+    }
+    assert.ok(!(support(DXGI_FORMAT.R8G8B8A8_UNORM) & COMPARISON));
+    assertFullyReleased(device);
+});
+
+test('an A8 texture is drawn into, as test_render_a8 draws (d3d10core.c:18552), and mips are'
+    + ' generated in every format the GPU makes them in', ()=>{
+    const device = createDevice();
+    /** @param {number} format */
+    const support = format=>{
+        /** @type {{ support?: number }} */
+        const out = {};
+        device.CheckFormatSupport(format, out);
+        return /** @type {number} */ (out.support);
+    };
+    assert.ok(support(DXGI_FORMAT.A8_UNORM) & 0x4000, 'RENDER_TARGET');
+    createTexture2D(device, { Format: DXGI_FORMAT.A8_UNORM }).release();
+    for (const format of [DXGI_FORMAT.R8G8B8A8_UNORM, DXGI_FORMAT.R16G16B16A16_FLOAT,
+        DXGI_FORMAT.R10G10B10A2_UNORM, DXGI_FORMAT.R8_UNORM])
+    {
+        assert.ok(support(format) & 0x2000, `MIP_AUTOGEN for ${format}`);
+    }
+    assert.ok(!(support(DXGI_FORMAT.R32G32B32A32_FLOAT) & 0x2000), 'not a 32-bit float');
+    assertFullyReleased(device);
+});
+
+test('the multisample bits follow the quality levels: a four-sample target, resolved and read'
+    + ' where it is colour', ()=>{
+    const device = createDevice();
+    /** @param {number} format */
+    const support = format=>{
+        /** @type {{ support?: number }} */
+        const out = {};
+        device.CheckFormatSupport(format, out);
+        return /** @type {number} */ (out.support);
+    };
+    const [RESOLVE, RENDERTARGET, LOAD] = [0x40000, 0x200000, 0x400000];
+    assert.equal(support(DXGI_FORMAT.R8G8B8A8_UNORM) & (RESOLVE | RENDERTARGET | LOAD),
+        RESOLVE | RENDERTARGET | LOAD);
+    assert.equal(support(DXGI_FORMAT.D24_UNORM_S8_UINT) & (RESOLVE | RENDERTARGET | LOAD),
+        RENDERTARGET, 'depth is drawn at four samples and never resolved');
+    assert.equal(support(DXGI_FORMAT.R32G32B32A32_FLOAT) & (RESOLVE | RENDERTARGET | LOAD), 0);
     assertFullyReleased(device);
 });

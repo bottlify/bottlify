@@ -82,13 +82,20 @@ export const D3DTOP = Object.freeze({
     LERP: 26,
 });
 
-/** D3DTA, where a stage argument comes from. The low three bits select. */
+/**
+ * D3DTA, where a stage argument comes from. The low three bits select. TEMP
+ * is a register a stage may write instead of the current colour
+ * (D3DTSS_RESULTARG), zero until one does; CONSTANT, Direct3D 9's, is the
+ * stage's own D3DTSS_CONSTANT.
+ */
 export const D3DTA = Object.freeze({
     DIFFUSE: 0,
     CURRENT: 1,
     TEXTURE: 2,
     TFACTOR: 3,
     SPECULAR: 4,
+    TEMP: 5,
+    CONSTANT: 6,
     SELECTMASK: 0x7,
     COMPLEMENT: 0x10,
     ALPHAREPLICATE: 0x20,
@@ -160,6 +167,102 @@ export const D3DMCS = Object.freeze({ MATERIAL: 0, COLOR1: 1, COLOR2: 2 });
 
 /** D3DLIGHTTYPE. */
 export const D3DLIGHT = Object.freeze({ POINT: 1, SPOT: 2, DIRECTIONAL: 3 });
+
+/**
+ * Where a pair of programmable stages carries user clip-plane distances when
+ * the device cannot clip by them itself: two locations no translated shader
+ * uses, since a vertex shader's position semantic is the position builtin
+ * and never a varying, and below the location the pixel stage's front-facing
+ * input takes from the inter-stage limit.
+ */
+export const CLIP_LOCATION = 12;
+
+/**
+ * What a vertex stage's position is clipped by beside the view volume:
+ * D3DRS_CLIPPLANEENABLE's planes, in index order.
+ *
+ * @typedef {Object} ClipState
+ * @property {number} count       How many are enabled: one to six.
+ * @property {boolean} distances  Whether the device clips by distances it is
+ *     given (WebGPU's `clip-distances`). Otherwise each distance travels as a
+ *     varying, interpolated as the rasteriser would, and the fragment stage
+ *     discards where one is below zero.
+ */
+
+/**
+ * The vertex stage's half of the user clip planes: the output fields and the
+ * lines that write them, from each enabled plane's distance.
+ *
+ * @param {ClipState} clip
+ * @param {(plane: number) => string} distance  WGSL for the nth enabled plane's.
+ * @param {number} [location]  The first location a varying may take.
+ * @returns {{ fields: string[], lines: string[], locations: number[] }}
+ */
+export function clipOutputs(clip, distance, location = CLIP_LOCATION){
+    if (clip.distances)
+    {
+        return {
+            fields: [`    @builtin(clip_distances) clipDistances: array<f32, ${clip.count}>,`],
+            lines: Array.from({ length: clip.count },
+                (_, plane)=>`    out.clipDistances[${plane}] = ${distance(plane)};`),
+            locations: [],
+        };
+    }
+    // Four distances a varying; one past the last enabled plane is a
+    // distance of one, which clips nothing.
+    const groups = Math.ceil(clip.count / 4);
+    return {
+        fields: Array.from({ length: groups },
+            (_, group)=>`    @location(${location + group}) clip${group}: vec4f,`),
+        lines: Array.from({ length: groups }, (_, group)=>`    out.clip${group} = vec4f(${
+            [0, 1, 2, 3].map(at=>(group * 4 + at < clip.count ? distance(group * 4 + at) : '1.0'))
+                .join(', ')});`),
+        locations: Array.from({ length: groups }, (_, group)=>location + group),
+    };
+}
+
+/**
+ * The fragment stage's half: where the device clips, nothing; otherwise the
+ * varyings `clipOutputs` wrote and a discard where any distance is below
+ * zero. Written at the end of the stage, after everything that samples.
+ *
+ * @param {ClipState | null | undefined} clip
+ * @param {string} input  The fragment's input structure.
+ * @param {number} [location]
+ * @returns {{ fields: string[], lines: string[], locations: number[] }}
+ */
+export function clipInputs(clip, input, location = CLIP_LOCATION){
+    if (!clip || clip.distances)
+    {
+        return { fields: [], lines: [], locations: [] };
+    }
+    const groups = Math.ceil(clip.count / 4);
+    const below = Array.from({ length: groups },
+        (_, group)=>`any(${input}.clip${group} < vec4f(0.0))`).join(' || ');
+    return {
+        fields: Array.from({ length: groups },
+            (_, group)=>`    @location(${location + group}) clip${group}: vec4f,`),
+        lines: [`    if (${below})`, '    {', '        discard;', '    }'],
+        locations: Array.from({ length: groups }, (_, group)=>location + group),
+    };
+}
+
+/**
+ * The clip state a pipeline state asks for, or null: `clipPlanes` is
+ * D3DRS_CLIPPLANEENABLE's enabled bits, and `clipDistances` whether the
+ * device clips by them.
+ *
+ * @param {{ clipPlanes?: number, clipDistances?: boolean }} state
+ * @returns {ClipState | null}
+ */
+export function clipStateOf(state){
+    let count = 0;
+    for (let bits = state.clipPlanes ?? 0; bits !== 0; bits &= bits - 1)
+    {
+        count++;
+    }
+    return count === 0 ? null : { count, distances: state.clipDistances === true };
+}
 
 /**
  * One light, as the uniform block carries it.
@@ -314,6 +417,19 @@ export function argumentsRead(op, arg1, arg2, arg0 = /** @type {number} */ (D3DT
 }
 
 /**
+ * Whether any stage of a cascade reads an argument from `source` (D3DTA, its
+ * select bits), through the operations that read it.
+ *
+ * @param {readonly import('./pipeline.js').StageKey[]} stages @param {number} source
+ */
+export function stagesRead(stages, source){
+    return stages.some(stage=>[
+        ...argumentsRead(stage.colorOp, stage.colorArg1, stage.colorArg2, stage.colorArg0),
+        ...argumentsRead(stage.alphaOp, stage.alphaArg1, stage.alphaArg2, stage.alphaArg0),
+    ].some(arg=>(arg & D3DTA.SELECTMASK) === source));
+}
+
+/**
  * The WGSL expression for one stage argument.
  *
  * @param {number} arg
@@ -333,6 +449,8 @@ function argument(arg, stageIndex, coordinate, specular = 'input.specular',
         [D3DTA.TEXTURE]: texture,
         [D3DTA.TFACTOR]: 'uniforms.textureFactor',
         [D3DTA.SPECULAR]: specular,
+        [D3DTA.TEMP]: 'temp',
+        [D3DTA.CONSTANT]: `uniforms.stageConstant[${stageIndex}]`,
     }[arg & D3DTA.SELECTMASK];
 
     if (source === undefined)
@@ -753,6 +871,14 @@ export function generateFixedFunction(state, layout){
     {
         varyings.push(`    @location(${location}) fogAmount: f32,`);
     }
+    // User clip planes, in the space the block's rows put them in: the
+    // vertex's own, so the distance needs no transform of the position. A
+    // pre-transformed vertex has no space to clip in, and is not clipped.
+    const clip = layout.preTransformed ? null : clipStateOf(state);
+    const clipped = clip ? clipOutputs(clip,
+        plane=>`dot(uniforms.clipPlane[${plane}], vec4f(vertex.position, 1.0))`,
+        location + (carriedFog ? 1 : 0)) : null;
+    const discarded = clip ? clipInputs(clip, 'input', location + (carriedFog ? 1 : 0)) : null;
 
     const inputs = layout.attributes
         .map(attribute=>`    @location(${attribute.shaderLocation}) `
@@ -811,37 +937,44 @@ export function generateFixedFunction(state, layout){
     // promises two modules the same position from the same computation only
     // under the attribute -- which has no effect where the struct is the
     // fragment's input.
-    const code = `${lightCount === 0 ? '' : LIGHT_STRUCT}${uniformStruct(lightCount)}
+    const code = `${clip?.distances ? 'enable clip_distances;\n' : ''}${lightCount === 0 ? ''
+        : LIGHT_STRUCT}${uniformStruct(lightCount, vertexTailOf(state, layout.preTransformed))}
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 ${functionDeclarations(lighting, vertexFog || fogSource === FOG_SOURCE.TABLE
         ? state.fogMode : D3DFOG.NONE, vertexFog)}${samplerDeclarations(dimensionsOf(state), 0, 1)}
 ${keys.some(key=>key !== null) ? 'var<private> colourKeyed: bool = false;\n' : ''}${
     sampleFunctions(state.stages.length, state.stages.map((stage, index)=>(generated[index]
-        ? { projected: stage.projected ?? 0 } : null)), keys, dimensionsOf(state), onesOf(state))}
+        ? { projected: stage.projected ?? 0 } : null)), keys, dimensionsOf(state), onesOf(state),
+    state.stages)}
 struct VertexIn {
 ${inputs}
 };
 
 struct VertexOut {
     @builtin(position) @invariant position: vec4f,
+${[...varyings, ...clipped?.fields ?? []].join('\n')}
+};
+${clip?.distances ? `
+struct FragmentIn {
+    @builtin(position) position: vec4f,
 ${varyings.join('\n')}
 };
-
+` : ''}
 @vertex
 fn vertexMain(vertex: VertexIn${cornerInput}) -> VertexOut {
     var out: VertexOut;
 ${position}
 ${pixelCentre}${unclipped}
 ${pointLines.join('\n')}
-${[...assignments, ...fogAmount].join('\n')}
+${[...assignments, ...fogAmount, ...clipped?.lines ?? []].join('\n')}
     return out;
 }
 
 @fragment
-fn fragmentMain(input: VertexOut) -> @location(0) vec4f {
+fn fragmentMain(input: ${clip?.distances ? 'FragmentIn' : 'VertexOut'}) -> @location(0) vec4f {
 ${fragmentBody(state, specularEnable, undefined, undefined,
         flat ? 'vec4f(input.specular.rgb, input.specularAlpha)' : 'input.specular',
-        points?.sprite === true)}
+        points?.sprite === true)}${discarded?.lines.length ? `\n${discarded.lines.join('\n')}` : ''}
     return current;
 }
 `;
@@ -855,12 +988,50 @@ ${fragmentBody(state, specularEnable, undefined, undefined,
 }
 
 /**
+ * What a draw's block carries past its lights, which only a draw that reads
+ * it declares: every stage's D3DTSS_CONSTANT, eight rows, where a stage reads
+ * D3DTA_CONSTANT. The renderer lays it as `uniformTailOf` says.
+ *
+ * @typedef {Object} UniformTail
+ * @property {boolean} stageConstants
+ * @property {number} [clipPlanes]  How many user clip planes follow, in the
+ *     vertex's own space: one row each, for a fixed vertex stage that clips.
+ */
+
+/**
+ * The tail a state's block carries.
+ *
+ * @param {import('./pipeline.js').PipelineState} state
+ * @returns {UniformTail}
+ */
+export function tailOf(state){
+    return { stageConstants: stagesRead(state.stages, D3DTA.CONSTANT) };
+}
+
+/**
+ * The tail of the block a fixed vertex stage reads for a state: `tailOf`'s,
+ * and the clip planes when the state clips and the vertex is not
+ * pre-transformed.
+ *
+ * @param {import('./pipeline.js').PipelineState} state
+ * @param {boolean} preTransformed
+ * @returns {UniformTail}
+ */
+export function vertexTailOf(state, preTransformed){
+    const clip = preTransformed ? null : clipStateOf(state);
+    return { ...tailOf(state), clipPlanes: clip?.count ?? 0 };
+}
+
+/**
  * The block the fixed-function stages read, as WGSL declares it; the layout
- * `UNIFORM_AT` in the renderer is this struct's.
+ * `UNIFORM_AT` in the renderer is this struct's, and the tail after the
+ * lights `uniformTailOf`'s.
  *
  * @param {number} lightCount
+ * @param {UniformTail} [tail]
  */
-function uniformStruct(lightCount){
+function uniformStruct(lightCount, tail = { stageConstants: false }){
+    const planes = tail.clipPlanes ?? 0;
     return `struct Uniforms {
     worldViewProjection: mat4x4f,
     world: mat4x4f,
@@ -885,7 +1056,9 @@ function uniformStruct(lightCount){
     cameraNormalMatrix: mat4x4f,
     point: vec4f,
     pointScale: vec4f,${lightCount === 0 ? '' : `
-    lights: array<Light, ${lightCount}>,`}
+    lights: array<Light, ${lightCount}>,`}${tail.stageConstants ? `
+    stageConstant: array<vec4f, 8>,` : ''}${planes === 0 ? '' : `
+    clipPlane: array<vec4f, ${planes}>,`}
 };`;
 }
 
@@ -944,9 +1117,14 @@ specular = 'input.specular', sprite = false)
      * @type {{ offset: string, luminance: string | null } | null}
      */
     let bumped = null;
+    // The temporary register, only where a stage reads or writes it.
+    const temp = stagesRead(state.stages, D3DTA.TEMP)
+        || state.stages.some(stage=>stage.resultArg === D3DTA.TEMP);
+    const registers = ['    var current = input.diffuse;',
+        ...(temp ? ['    var temp = vec4f(0.0);'] : [])];
     const stages = state.stages.length === 0
         ? '    var current = input.diffuse;'
-        : ['    var current = input.diffuse;', ...state.stages.map((stage, index)=>{
+        : [...registers, ...state.stages.map((stage, index)=>{
             // The set the program bound, not the stage's own number: two stages
             // sharing one set is the ordinary way a detail or lightmap pass is
             // written, and reading set N for stage N samples a varying the
@@ -1004,9 +1182,12 @@ specular = 'input.specular', sprite = false)
                 stage.alphaArg0, texture);
             // Each stage's result is held to [0, 1] before the next reads it,
             // as the fixed function's registers hold it: a sum past one or a
-            // difference below zero is not carried into the stage after.
-            return `    current = vec4f(saturate((${color}).rgb), `
-                + `${alpha === null ? '(current).a' : `saturate((${alpha}).a)`});`;
+            // difference below zero is not carried into the stage after. It
+            // goes to the register D3DTSS_RESULTARG names, the current colour
+            // or the temporary one.
+            const target = stage.resultArg === D3DTA.TEMP ? 'temp' : 'current';
+            return `    ${target} = vec4f(saturate((${color}).rgb), `
+                + `${alpha === null ? `(${target}).a` : `saturate((${alpha}).a)`});`;
         })].join('\n');
 
     // The specular colour is added after the cascade and before the fog, which
@@ -1105,15 +1286,20 @@ export function fixedFragmentStage(state, written){
         }
         carried.push(`    input.fogAmount = ${has(10) ? 'in.fog.x' : has(1) ? 'in.v1.a' : '0.0'};`);
     }
+    // A vertex shader's clip distances, where the device does not clip by
+    // them, arrive as the translation wrote them (`clipOutputs`).
+    const discarded = clipInputs(clipStateOf(state), 'in');
+    fields.push(...discarded.fields);
     const members = ['    diffuse: vec4f,', '    specular: vec4f,',
         ...Array.from({ length: sets },
             (_, set)=>`    texCoord${set}: ${wide.has(set) ? 'vec4f' : 'vec2f'},`),
         ...(carriedFog ? ['    fogAmount: f32,'] : [])];
-    const wgsl = `${uniformStruct(0)}
+    const wgsl = `${uniformStruct(0, tailOf(state))}
 @group(1) @binding(0) var<uniform> uniforms: Uniforms;
 ${functionDeclarations(null, fogSource === FOG_SOURCE.TABLE ? state.fogMode : D3DFOG.NONE)}${
     samplerDeclarations(dimensionsOf(state), 2, 0)}
-${sampleFunctions(state.stages.length, [], [], dimensionsOf(state), onesOf(state))}
+${sampleFunctions(state.stages.length, [], [], dimensionsOf(state), onesOf(state),
+        state.stages)}
 struct PsIn {
 ${fields.join('\n')}
 };
@@ -1126,14 +1312,16 @@ ${members.join('\n')}
 fn ps_main(in: PsIn) -> @location(0) vec4f {
     var input: Carried;
 ${carried.join('\n')}
-${fragmentBody(state, state.specularEnable === true, [], 'in.position')}
+${fragmentBody(state, state.specularEnable === true, [], 'in.position')}${
+    discarded.lines.length ? `\n${discarded.lines.join('\n')}` : ''}
     return current;
 }
 `;
     return {
         wgsl, entry: 'ps_main',
         samplers: state.stages.map((stage, index)=>({ index, type: stage.dimension ?? '2d' })),
-        inputs: [], outputs: [], reads: written.filter(location=>location <= 10),
+        inputs: [], outputs: [],
+        reads: [...written.filter(location=>location <= 10), ...discarded.locations],
         constants: 0, error: null,
     };
 }
@@ -1184,6 +1372,61 @@ const ADDRESS_FUNCTION = `fn addressCoordinate(t: f32, mode: u32, texels: f32) -
 `;
 
 /**
+ * A stage's level of detail before it is held to the levels allowed: from the
+ * derivatives `dx` and `dy` its sample function takes, plus D3DSAMP_MIPMAPLODBIAS
+ * where the stage has one -- added before the clamp, as the sampler adds it, so
+ * it moves the choice between magnification and minification too. A stage
+ * without a bias is written as it always was.
+ *
+ * @param {number} [bias]
+ * @returns {string}
+ */
+function levelOfDetail(bias){
+    const derived = '0.5 * log2(max(max(dot(dx, dx), dot(dy, dy)), 1.0e-12))';
+    return bias ? `${derived} + ${literalOf(bias)}` : derived;
+}
+
+/**
+ * One coordinate as D3DTADDRESS_MIRRORONCE folds it on an axis whose bit is
+ * in `mask` (1 u, 2 v, 4 w): about zero once, its magnitude, which the clamp
+ * the stage's flags carry for that axis then holds -- a texture repeated once
+ * mirrored and then its edge. An axis without the bit is written as it was.
+ *
+ * @param {string} coordinate @param {number} mask @param {number} axis
+ * @returns {string}
+ */
+function mirroredAxis(coordinate, mask, axis){
+    return (mask & axis) !== 0 ? `abs(${coordinate})` : coordinate;
+}
+
+/**
+ * A stage's sample under D3DTADDRESS_BORDER: the stage's border colour where
+ * its coordinate lies outside [0, 1] on an axis in the mode, the sample taken
+ * at the clamped edge elsewhere. Without a border, the sample as it was.
+ *
+ * @param {string} read  The sample, a vec4f.
+ * @param {{ mask: number, colour: number } | undefined} border
+ *     The axes (1 u, 2 v, 4 w) and D3DSAMP_BORDERCOLOR as a D3DCOLOR.
+ * @param {string} raw  The coordinate before addressing.
+ * @param {number} axes  How many components it has.
+ * @returns {string}
+ */
+function bordered(read, border, raw, axes){
+    if (!border || (border.mask & ((1 << axes) - 1)) === 0)
+    {
+        return read;
+    }
+    const outside = ['x', 'y', 'z'].slice(0, axes)
+        .filter((_, axis)=>(border.mask & (1 << axis)) !== 0)
+        .map(axis=>`${raw}.${axis} < 0.0 || ${raw}.${axis} > 1.0`)
+        .join(' || ');
+    const channel = (/** @type {number} */ shift)=>literalOf(((border.colour >>> shift) & 0xff)
+        / 255);
+    return `select(${read}, vec4f(${channel(16)}, ${channel(8)}, ${channel(0)}, ${channel(24)}),`
+        + ` ${outside})`;
+}
+
+/**
  * The sampling of one stage, with the stage's sampler state read from the
  * block: address modes, point filtering by snapping to texel centres, and the
  * mip mode as an explicit level. The derivatives are taken from the raw
@@ -1204,9 +1447,14 @@ const ADDRESS_FUNCTION = `fn addressCoordinate(t: f32, mode: u32, texels: f32) -
  *     components, and is sampled by `cubeSample` or `volumeSample`.
  * @param {readonly number[]} [ones]
  *     Per stage, the channels its texture samples as one (`sampledWithOnes`).
+ * @param {readonly import('./pipeline.js').StageKey[]} [stages]
+ *     The stages themselves, for what only some of them ask: a level-of-detail
+ *     bias (`lodBias`), written into that stage's sample alone.
  * @returns {string}
  */
-function sampleFunctions(count, generated = [], keys = [], dimensions = [], ones = []){
+function sampleFunctions(count, generated = [], keys = [], dimensions = [], ones = [],
+    stages = [])
+{
     if (count === 0)
     {
         return '';
@@ -1217,11 +1465,12 @@ function sampleFunctions(count, generated = [], keys = [], dimensions = [], ones
     {
         const flags = index < 3 ? `uniforms.stage${index}` : '0u';
         const dimension = dimensions[index] ?? '2d';
+        const lod = levelOfDetail(stages[index]?.lodBias);
         if (dimension !== '2d')
         {
             lines.push(dimension === 'cube'
-                ? cubeSample(index, flags, ones[index])
-                : volumeSample(index, flags, ones[index]));
+                ? cubeSample(index, flags, ones[index], lod)
+                : volumeSample(index, flags, ones[index], lod, stages[index]));
             continue;
         }
         // The stage's texture transform, as Direct3D applies it to a
@@ -1232,6 +1481,8 @@ function sampleFunctions(count, generated = [], keys = [], dimensions = [], ones
         // and a projected one is divided here, per pixel, as the rasteriser
         // does it.
         const generation = generated[index] ?? null;
+        const stage = stages[index];
+        const mirrorOnce = stage?.mirrorOnce ?? 0;
         const transformed = generation
             ? `    let raw = ${generation.projected === 3 ? 'carried.xy / carried.z'
                 : generation.projected === 4 ? 'carried.xy / carried.w' : 'carried.xy'};\n`
@@ -1249,7 +1500,7 @@ ${transformed}    let flags = ${flags};
     let dx = dpdx(raw * size);
     let dy = dpdy(raw * size);
     let levels = f32(textureNumLevels(texture${index}));
-    let lod = clamp(0.5 * log2(max(max(dot(dx, dx), dot(dy, dy)), 1.0e-12)),
+    let lod = clamp(${lod},
         f32((flags >> 8u) & 0xffu), max(levels - 1.0, 0.0));
     let mipMode = (flags >> 6u) & 3u;
     var level = 0.0;
@@ -1259,8 +1510,10 @@ ${transformed}    let flags = ${flags};
         level = lod;
     }
     let levelSize = max(floor(size / exp2(floor(level))), vec2f(1.0));
-    var uv = vec2f(addressCoordinate(raw.x, flags & 3u, levelSize.x),
-        addressCoordinate(raw.y, (flags >> 2u) & 3u, levelSize.y));
+    var uv = vec2f(addressCoordinate(${mirroredAxis('raw.x', mirrorOnce, 1)}, flags & 3u,`
+            + ` levelSize.x),
+        addressCoordinate(${mirroredAxis('raw.y', mirrorOnce, 2)}, (flags >> 2u) & 3u,`
+            + ` levelSize.y));
     var point = (flags >> 4u) & 1u;
     if (lod > 0.0) {
         point = (flags >> 5u) & 1u;
@@ -1269,7 +1522,7 @@ ${transformed}    let flags = ${flags};
         uv = (floor(uv * levelSize) + 0.5) / levelSize;
     }
 ${keyTest(index, keys[index] ?? null)
-}    return ${read};
+}    return ${bordered(read, stage?.border, 'raw', 2)};
 }
 `);
     }
@@ -1285,8 +1538,9 @@ ${keyTest(index, keys[index] ?? null)
  * two minor components over the major one are that face's coordinates.
  *
  * @param {number} index @param {string} flags @param {number} [ones]
+ * @param {string} [lod]  The unclamped level of detail (`levelOfDetail`).
  */
-function cubeSample(index, flags, ones){
+function cubeSample(index, flags, ones, lod = levelOfDetail()){
     const read = sampledWithOnes(
         `textureSampleLevel(texture${index}, sampler${index}, towards, level)`, ones);
     return `fn sampleStage${index}(direction: vec3f) -> vec4f {
@@ -1297,7 +1551,7 @@ function cubeSample(index, flags, ones){
     let dx = dpdx(direction) / major * size * 0.5;
     let dy = dpdy(direction) / major * size * 0.5;
     let levels = f32(textureNumLevels(texture${index}));
-    let lod = clamp(0.5 * log2(max(max(dot(dx, dx), dot(dy, dy)), 1.0e-12)),
+    let lod = clamp(${lod},
         f32((flags >> 8u) & 0xffu), max(levels - 1.0, 0.0));
     let mipMode = (flags >> 6u) & 3u;
     var level = f32((flags >> 8u) & 0xffu);
@@ -1333,8 +1587,11 @@ function cubeSample(index, flags, ones){
  * with the third's address mode in bits 16-17 of the stage's flags.
  *
  * @param {number} index @param {string} flags @param {number} [ones]
+ * @param {string} [lod]  The unclamped level of detail (`levelOfDetail`).
+ * @param {import('./pipeline.js').StageKey} [stage]  For its mirror-once and border axes.
  */
-function volumeSample(index, flags, ones){
+function volumeSample(index, flags, ones, lod = levelOfDetail(), stage = undefined){
+    const mirrorOnce = stage?.mirrorOnce ?? 0;
     const read = sampledWithOnes(
         `textureSampleLevel(texture${index}, sampler${index}, uvw, level)`, ones);
     return `fn sampleStage${index}(raw: vec3f) -> vec4f {
@@ -1343,7 +1600,7 @@ function volumeSample(index, flags, ones){
     let dx = dpdx(raw * size);
     let dy = dpdy(raw * size);
     let levels = f32(textureNumLevels(texture${index}));
-    let lod = clamp(0.5 * log2(max(max(dot(dx, dx), dot(dy, dy)), 1.0e-12)),
+    let lod = clamp(${lod},
         f32((flags >> 8u) & 0xffu), max(levels - 1.0, 0.0));
     let mipMode = (flags >> 6u) & 3u;
     var level = f32((flags >> 8u) & 0xffu);
@@ -1353,9 +1610,12 @@ function volumeSample(index, flags, ones){
         level = lod;
     }
     let levelSize = max(floor(size / exp2(floor(level))), vec3f(1.0));
-    var uvw = vec3f(addressCoordinate(raw.x, flags & 3u, levelSize.x),
-        addressCoordinate(raw.y, (flags >> 2u) & 3u, levelSize.y),
-        addressCoordinate(raw.z, (flags >> 16u) & 3u, levelSize.z));
+    var uvw = vec3f(addressCoordinate(${mirroredAxis('raw.x', mirrorOnce, 1)}, flags & 3u,`
+        + ` levelSize.x),
+        addressCoordinate(${mirroredAxis('raw.y', mirrorOnce, 2)}, (flags >> 2u) & 3u,`
+        + ` levelSize.y),
+        addressCoordinate(${mirroredAxis('raw.z', mirrorOnce, 4)}, (flags >> 16u) & 3u,`
+        + ` levelSize.z));
     var point = (flags >> 4u) & 1u;
     if (lod > 0.0) {
         point = (flags >> 5u) & 1u;
@@ -1363,7 +1623,7 @@ function volumeSample(index, flags, ones){
     if (point == 1u) {
         uvw = (floor(uvw * levelSize) + 0.5) / levelSize;
     }
-    return ${read};
+    return ${bordered(read, stage?.border, 'raw', 3)};
 }
 `;
 }

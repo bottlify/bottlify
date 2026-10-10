@@ -56,7 +56,7 @@ outward-facing action) or for a wait a rule imposes, and say what waits on what.
   ```
   log → nothing          cpu, filesystem, media → log          memory → cpu, log
   kernel, loader → cpu, memory, log                 bridge → cpu, kernel, memory, log
-  win32 → bridge, kernel, memory, loader, filesystem, log
+  win32 → bridge, kernel, memory, loader, filesystem, media, log
   graphics, audio, input → win32, bridge, memory
   ```
 - **Derived from the specification, not a reference implementation**: contract (ABI, signatures,
