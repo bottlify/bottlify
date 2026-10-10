@@ -818,13 +818,14 @@ export function createRenderer(services){
             diverge(`a view of a typeless texture as format ${desc.Format} reads it as`
                 + ` ${chosen.format}: WebGPU does not reinterpret one type as another`);
         }
+        const dimension = resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D
+            ? '3d'
+            : isCube ? 'cube' : array ? '2d-array' : '2d';
         const created = backing.texture.createView({
             label: `d3d10:view:${chosen.format ?? chosen.aspect}`,
             ...(chosen.format ? { format: chosen.format } : {}),
             ...(chosen.aspect ? { aspect: chosen.aspect } : {}),
-            dimension: resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D
-                ? '3d'
-                : isCube ? 'cube' : array ? '2d-array' : '2d',
+            dimension,
             baseMipLevel: view.range.mip,
             mipLevelCount: view.range.levels,
             baseArrayLayer: resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D
@@ -834,7 +835,7 @@ export function createRenderer(services){
                 ? 1
                 : view.range.count,
         });
-        gpu = { view: created, sampleType: sampleTypeOf(chosen.format, chosen.aspect) };
+        gpu = { view: created, sampleType: sampleTypeOf(chosen.format, chosen.aspect), dimension };
         views.set(view, gpu);
         return gpu;
     };
@@ -1499,6 +1500,14 @@ export function createRenderer(services){
                 {
                     diverge(`a ${gpu.sampleType} texture bound where the shader reads a`
                         + ` ${entry.texture.sampleType} one is read as an empty texture`);
+                    return { binding: entry.binding, resource: fallback.view(entry.texture) };
+                }
+                // WebGPU refuses the whole bind group over a view of another
+                // shape, where Direct3D leaves only that read undefined.
+                if (gpu && gpu.dimension !== entry.texture.viewDimension)
+                {
+                    diverge(`a ${gpu.dimension} view bound where the shader reads a`
+                        + ` ${entry.texture.viewDimension} one is read as an empty texture`);
                     return { binding: entry.binding, resource: fallback.view(entry.texture) };
                 }
                 return {

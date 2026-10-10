@@ -31,7 +31,7 @@
 import { attachCom } from './com.js';
 import {
     ALL_REMAINING, D3D10_BIND, D3D10_CPU_ACCESS, D3D10_MAP,
-    D3D10_MAP_FLAG_DO_NOT_WAIT, D3D10_RESOURCE_DIMENSION,
+    D3D10_MAP_FLAG_DO_NOT_WAIT, D3D10_RESOURCE_DIMENSION, D3D10_RESOURCE_MISC,
     D3D10_USAGE, DXGI_ERROR_WAS_STILL_DRAWING, DXGI_USAGE, E_INVALIDARG, FORMAT_INFO, FORMAT_KIND,
     IID, S_OK,
 } from './constants.js';
@@ -290,8 +290,20 @@ function defaultDimensionName(resource, dimensions){
     {
         return dimensions[shape.single] === undefined ? null : shape.single;
     }
+    // A cube's obvious view is a cube where the kind has one -- a shader reads
+    // it as one -- and its six faces as an array where it has not.
+    if (isCube(resource) && dimensions.TEXTURECUBE !== undefined)
+    {
+        return 'TEXTURECUBE';
+    }
     const name = resource.desc.ArraySize > 1 ? shape.array : shape.single;
     return dimensions[name] === undefined ? null : name;
+}
+
+/** @param {any} resource */
+function isCube(resource){
+    return resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE2D
+        && ((resource.desc.MiscFlags ?? 0) & D3D10_RESOURCE_MISC.TEXTURECUBE) !== 0;
 }
 
 /**
@@ -324,6 +336,12 @@ function dimensionSuitsResource(resource, name){
     if (resource.dimension === D3D10_RESOURCE_DIMENSION.TEXTURE3D)
     {
         return name === 'TEXTURE3D';
+    }
+    // A cube view needs a texture made as a cube; a cube can also be viewed
+    // as the six slices of a two-dimensional array it is.
+    if (name.startsWith('TEXTURECUBE'))
+    {
+        return isCube(resource);
     }
     // Every name for a shape starts with that shape: TEXTURE2D, TEXTURE2DARRAY,
     // TEXTURE2DMS and TEXTURE2DMSARRAY all view a 2D texture, while TEXTURE1D
@@ -458,6 +476,10 @@ export function resolveViewDesc(request){
         && !members.includes('FirstWSlice'))
     {
         count = availableSlices(resource, mip);
+    }
+    if (name === 'TEXTURECUBE')
+    {
+        count = 6;
     }
 
     /** @type {Record<string, number>} */

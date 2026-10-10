@@ -1800,3 +1800,54 @@ test('a shader-resource view binds the levels and slices its dimension names, an
             bound(17).baseArrayLayer, bound(17).arrayLayerCount], ['2d', 2, 1, 0, 1]);
         assert.deepEqual(h.divergences, []);
     });
+
+test('a cube texture\'s view binds as a cube of six faces, and a view of another shape than'
+    + ' the shader reads is replaced', async()=>{
+    const h = harness();
+    const { device } = h;
+    bindTriangle(h, TRIANGLE, [0, 0, 1, 1]);
+    /** @type {{ shader?: any }} */
+    const ps = {};
+    assert.equal(device.CreatePixelShader(assemble({
+        kind: SHADER_KIND.PIXEL,
+        outputs: [{ name: 'SV_TARGET', systemValue: SYSTEM_VALUE.TARGET, register: 0 }],
+        instructions: [
+            dclResource(0, RESOURCE_DIMENSION.TEXTURECUBE, RETURN_TYPE.FLOAT),
+            dclResource(1, RESOURCE_DIMENSION.TEXTURECUBE, RETURN_TYPE.FLOAT),
+            dclResource(2, RESOURCE_DIMENSION.TEXTURE2D, RETURN_TYPE.FLOAT),
+            dclOutput(o(0)), ld(o(0), r(0), t(2)), ret(),
+        ],
+    }), ps), S_OK);
+    device.PSSetShader(ps.shader);
+    /** @type {{ resource?: any }} */
+    const texture = {};
+    assert.equal(device.CreateTexture2D({ ...TEXTURE_2X2, MipLevels: 2, ArraySize: 6,
+        MiscFlags: D3D10_RESOURCE_MISC.TEXTURECUBE }, null, texture), S_OK);
+    /** @type {{ view?: any }} */
+    const whole = {};
+    assert.equal(device.CreateShaderResourceView(texture.resource, null, whole), S_OK);
+    /** @type {{ view?: any }} */
+    const level = {};
+    assert.equal(device.CreateShaderResourceView(texture.resource, { Format: 0,
+        ViewDimension: 9, MostDetailedMip: 1, MipLevels: 1 }, level), S_OK);
+    device.PSSetShaderResources(0, [whole.view, level.view, whole.view]);
+    device.Draw(3, 0);
+    await h.present();
+    assert.equal(h.gpu.count('draw'), 1);
+    const group = h.gpu.of('createBindGroup').find((/** @type {any} */ call)=>
+        call.descriptor.label === 'd3d10:ps');
+    /** @param {number} binding */
+    const bound = binding=>group.descriptor.entries
+        .find((/** @type {any} */ entry)=>entry.binding === binding).resource;
+    assert.deepEqual([bound(16).viewDescriptor.dimension, bound(16).viewDescriptor.baseMipLevel,
+        bound(16).viewDescriptor.mipLevelCount, bound(16).viewDescriptor.arrayLayerCount],
+    ['cube', 0, 2, 6]);
+    assert.equal(bound(16).texture, bound(17).texture, 'the program\'s texture');
+    assert.deepEqual([bound(17).viewDescriptor.dimension, bound(17).viewDescriptor.baseMipLevel,
+        bound(17).viewDescriptor.mipLevelCount], ['cube', 1, 1]);
+    assert.notEqual(bound(18).texture, bound(16).texture,
+        'a cube where the shader reads a plane is not bound');
+    assert.equal(bound(18).viewDescriptor.dimension, '2d');
+    assert.ok(diverged(h, 'a cube view bound where the shader reads a 2d one'),
+        h.divergences.join('\n'));
+});

@@ -34,7 +34,7 @@ import {
 } from './d3d10.js';
 import {
     D3D10_BIND, D3D10_CPU_ACCESS, D3D10_DRIVER_TYPE, D3D10_MAP, D3D10_PRIMITIVE_TOPOLOGY,
-    D3D10_MAP_FLAG_DO_NOT_WAIT, D3D10_QUERY, D3D10_SDK_VERSION, D3D10_USAGE,
+    D3D10_MAP_FLAG_DO_NOT_WAIT, D3D10_QUERY, D3D10_RESOURCE_MISC, D3D10_SDK_VERSION, D3D10_USAGE,
     DXGI_ERROR_INVALID_CALL, DXGI_FORMAT,
     DXGI_SWAP_EFFECT, DXGI_USAGE, E_INVALIDARG, IID, S_OK,
 } from '../d3d10/constants.js';
@@ -2038,5 +2038,27 @@ test('shader-resource views: Wine\'s table of descriptions, each read by its own
         [v(1, 1, RGBA8), [RGBA8_TL, TEX_3D, 0, 1]],
         [v(1, 1, RGBA8), [0, TEX_3D, 0, 2]],
         [v(1, 1, RGBA8), [0, TEX_3D, 1, 1]],
+    ]);
+});
+
+test('a cube texture is viewed as a cube, by default or asked (test_create_shader_resource_view,'
+    + ' d3d10core.c:3573-3577, 3611-3613)', ()=>{
+    const cube = (/** @type {number} */ mips)=>({ mips, slices: 6, format: RGBA8,
+        misc: D3D10_RESOURCE_MISC.TEXTURECUBE });
+    const TEX_CUBE = 9;
+    runViewTable('srv', 'CreateShaderResourceView', D3D10_BIND.SHADER_RESOURCE, [
+        [cube(1), null, [RGBA8, TEX_CUBE, 0, 1]],
+        [cube(2), null, [RGBA8, TEX_CUBE, 0, 2]],
+        [cube(2), [0, TEX_CUBE, 0, ALL], [RGBA8, TEX_CUBE, 0, 2]],
+        [cube(2), [0, TEX_CUBE, 0, 1], [RGBA8, TEX_CUBE, 0, 1]],
+        [cube(2), [0, TEX_CUBE, 1, 1], [RGBA8, TEX_CUBE, 1, 1]],
+        // Its six faces are still a two-dimensional array.
+        [cube(1), [0, 5, 0, 1, 2, 4], [RGBA8, 5, 0, 1, 2, 4]],
+    ], [
+        [cube(1), [RGBA8, TEX_CUBE, 0, 0]],
+        [cube(1), [RGBA8, TEX_CUBE, 0, 2]],
+        [cube(1), [RGBA8, TEX_CUBE, 1, 1]],
+        [{ mips: 1, slices: 1, format: RGBA8, volume: true }, [RGBA8, TEX_CUBE, 0, 1]],
+        [{ mips: 1, slices: 6, format: RGBA8 }, [RGBA8, TEX_CUBE, 0, 1]],
     ]);
 });
