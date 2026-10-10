@@ -8094,8 +8094,11 @@ export async function createApp(options){
         processes.set(process, built);
         names.set(built, process);
         images.set(built, extra?.imagePath ?? '');
-        processIds.set(built, extra?.processId ?? FIRST_PROCESS_ID);
-        translationPool?.addProcess(extra?.processId ?? FIRST_PROCESS_ID, {
+        // The run's first process has no extra and the run's own id
+        // (`runProcessId`), as the machine it is built with numbers it.
+        const id = extra?.processId ?? options.processId ?? FIRST_PROCESS_ID;
+        processIds.set(built, id);
+        translationPool?.addProcess(id, {
             lend: (port, token)=>built.lendTranslator(port, token),
             recall: token=>built.recallTranslator(token),
         }).catch(()=>{});
@@ -8110,7 +8113,8 @@ export async function createApp(options){
      */
     const retire = async ended=>{
         standing.delete(ended);
-        translationPool?.removeProcess(processIds.get(ended) ?? FIRST_PROCESS_ID);
+        translationPool?.removeProcess(processIds.get(ended)
+            ?? options.processId ?? FIRST_PROCESS_ID);
         await classTable.ended(names.get(ended));
         processes.delete(names.get(ended));
         names.delete(ended);
