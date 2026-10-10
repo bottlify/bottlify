@@ -992,9 +992,11 @@ export function createRecording(options){
         const call = (...args)=>{
             const count = args.length;
             // A read of a surface a copy back from the GPU is still filling
-            // waits for it, then is made.
+            // waits for it, then is made: a lock or a DC on it, and a copy out
+            // of it or of its texture, which moves the bytes it holds here.
             const filling = name === 'LockRect' || name === 'GetDC' ? readbacks.get(target)
-                : undefined;
+                : name === 'UpdateSurface' || name === 'UpdateTexture'
+                    ? readbacks.get(unwrap(args[0])) : undefined;
             if (filling)
             {
                 return filling.then(()=>call(...args));
@@ -1253,11 +1255,22 @@ export function createRecording(options){
                 const into = applied[1];
                 const filled = Promise.resolve(ask(name))
                     .then(()=>{}, ()=>{});
-                readbacks.set(into, filled);
+                // A texture's level is read through its texture as well; the
+                // copies back are answered in order, so the last one asked is
+                // the one to wait for.
+                const filledNow = [into, into.container].filter(
+                    one=>one !== null && typeof one === 'object');
+                for (const one of filledNow)
+                {
+                    readbacks.set(one, filled);
+                }
                 filled.then(()=>{
-                    if (readbacks.get(into) === filled)
+                    for (const one of filledNow)
                     {
-                        readbacks.delete(into);
+                        if (readbacks.get(one) === filled)
+                        {
+                            readbacks.delete(one);
+                        }
                     }
                 });
                 return typeof result === 'object' ? answerOf(result) : result;
