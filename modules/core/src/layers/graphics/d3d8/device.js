@@ -2462,7 +2462,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         ValidateDevice(out){
             const hr = boundPixelShader !== 0
                 ? D3D_OK
-                : validateStages(stageStatesFor, STAGE_COUNT);
+                : validateStages(stageStatesFor, STAGE_COUNT, { temp: true });
             if (hr === D3D_OK)
             {
                 out.passes = 1;

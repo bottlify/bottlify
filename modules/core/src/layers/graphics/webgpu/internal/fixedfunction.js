@@ -82,13 +82,20 @@ export const D3DTOP = Object.freeze({
     LERP: 26,
 });
 
-/** D3DTA, where a stage argument comes from. The low three bits select. */
+/**
+ * D3DTA, where a stage argument comes from. The low three bits select. TEMP
+ * is a register a stage may write instead of the current colour
+ * (D3DTSS_RESULTARG), zero until one does; CONSTANT, Direct3D 9's, is the
+ * stage's own D3DTSS_CONSTANT.
+ */
 export const D3DTA = Object.freeze({
     DIFFUSE: 0,
     CURRENT: 1,
     TEXTURE: 2,
     TFACTOR: 3,
     SPECULAR: 4,
+    TEMP: 5,
+    CONSTANT: 6,
     SELECTMASK: 0x7,
     COMPLEMENT: 0x10,
     ALPHAREPLICATE: 0x20,
@@ -314,6 +321,19 @@ export function argumentsRead(op, arg1, arg2, arg0 = /** @type {number} */ (D3DT
 }
 
 /**
+ * Whether any stage of a cascade reads an argument from `source` (D3DTA, its
+ * select bits), through the operations that read it.
+ *
+ * @param {readonly import('./pipeline.js').StageKey[]} stages @param {number} source
+ */
+export function stagesRead(stages, source){
+    return stages.some(stage=>[
+        ...argumentsRead(stage.colorOp, stage.colorArg1, stage.colorArg2, stage.colorArg0),
+        ...argumentsRead(stage.alphaOp, stage.alphaArg1, stage.alphaArg2, stage.alphaArg0),
+    ].some(arg=>(arg & D3DTA.SELECTMASK) === source));
+}
+
+/**
  * The WGSL expression for one stage argument.
  *
  * @param {number} arg
@@ -333,6 +353,8 @@ function argument(arg, stageIndex, coordinate, specular = 'input.specular',
         [D3DTA.TEXTURE]: texture,
         [D3DTA.TFACTOR]: 'uniforms.textureFactor',
         [D3DTA.SPECULAR]: specular,
+        [D3DTA.TEMP]: 'temp',
+        [D3DTA.CONSTANT]: `uniforms.stageConstant[${stageIndex}]`,
     }[arg & D3DTA.SELECTMASK];
 
     if (source === undefined)
@@ -811,7 +833,7 @@ export function generateFixedFunction(state, layout){
     // promises two modules the same position from the same computation only
     // under the attribute -- which has no effect where the struct is the
     // fragment's input.
-    const code = `${lightCount === 0 ? '' : LIGHT_STRUCT}${uniformStruct(lightCount)}
+    const code = `${lightCount === 0 ? '' : LIGHT_STRUCT}${uniformStruct(lightCount, tailOf(state))}
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 ${functionDeclarations(lighting, vertexFog || fogSource === FOG_SOURCE.TABLE
         ? state.fogMode : D3DFOG.NONE, vertexFog)}${samplerDeclarations(dimensionsOf(state), 0, 1)}
@@ -856,12 +878,33 @@ ${fragmentBody(state, specularEnable, undefined, undefined,
 }
 
 /**
+ * What a draw's block carries past its lights, which only a draw that reads
+ * it declares: every stage's D3DTSS_CONSTANT, eight rows, where a stage reads
+ * D3DTA_CONSTANT. The renderer lays it as `uniformTailOf` says.
+ *
+ * @typedef {Object} UniformTail
+ * @property {boolean} stageConstants
+ */
+
+/**
+ * The tail a state's block carries.
+ *
+ * @param {import('./pipeline.js').PipelineState} state
+ * @returns {UniformTail}
+ */
+export function tailOf(state){
+    return { stageConstants: stagesRead(state.stages, D3DTA.CONSTANT) };
+}
+
+/**
  * The block the fixed-function stages read, as WGSL declares it; the layout
- * `UNIFORM_AT` in the renderer is this struct's.
+ * `UNIFORM_AT` in the renderer is this struct's, and the tail after the
+ * lights `uniformTailOf`'s.
  *
  * @param {number} lightCount
+ * @param {UniformTail} [tail]
  */
-function uniformStruct(lightCount){
+function uniformStruct(lightCount, tail = { stageConstants: false }){
     return `struct Uniforms {
     worldViewProjection: mat4x4f,
     world: mat4x4f,
@@ -886,7 +929,8 @@ function uniformStruct(lightCount){
     cameraNormalMatrix: mat4x4f,
     point: vec4f,
     pointScale: vec4f,${lightCount === 0 ? '' : `
-    lights: array<Light, ${lightCount}>,`}
+    lights: array<Light, ${lightCount}>,`}${tail.stageConstants ? `
+    stageConstant: array<vec4f, 8>,` : ''}
 };`;
 }
 
@@ -945,9 +989,14 @@ specular = 'input.specular', sprite = false)
      * @type {{ offset: string, luminance: string | null } | null}
      */
     let bumped = null;
+    // The temporary register, only where a stage reads or writes it.
+    const temp = stagesRead(state.stages, D3DTA.TEMP)
+        || state.stages.some(stage=>stage.resultArg === D3DTA.TEMP);
+    const registers = ['    var current = input.diffuse;',
+        ...(temp ? ['    var temp = vec4f(0.0);'] : [])];
     const stages = state.stages.length === 0
         ? '    var current = input.diffuse;'
-        : ['    var current = input.diffuse;', ...state.stages.map((stage, index)=>{
+        : [...registers, ...state.stages.map((stage, index)=>{
             // The set the program bound, not the stage's own number: two stages
             // sharing one set is the ordinary way a detail or lightmap pass is
             // written, and reading set N for stage N samples a varying the
@@ -1005,9 +1054,12 @@ specular = 'input.specular', sprite = false)
                 stage.alphaArg0, texture);
             // Each stage's result is held to [0, 1] before the next reads it,
             // as the fixed function's registers hold it: a sum past one or a
-            // difference below zero is not carried into the stage after.
-            return `    current = vec4f(saturate((${color}).rgb), `
-                + `${alpha === null ? '(current).a' : `saturate((${alpha}).a)`});`;
+            // difference below zero is not carried into the stage after. It
+            // goes to the register D3DTSS_RESULTARG names, the current colour
+            // or the temporary one.
+            const target = stage.resultArg === D3DTA.TEMP ? 'temp' : 'current';
+            return `    ${target} = vec4f(saturate((${color}).rgb), `
+                + `${alpha === null ? `(${target}).a` : `saturate((${alpha}).a)`});`;
         })].join('\n');
 
     // The specular colour is added after the cascade and before the fog, which
@@ -1110,7 +1162,7 @@ export function fixedFragmentStage(state, written){
         ...Array.from({ length: sets },
             (_, set)=>`    texCoord${set}: ${wide.has(set) ? 'vec4f' : 'vec2f'},`),
         ...(carriedFog ? ['    fogAmount: f32,'] : [])];
-    const wgsl = `${uniformStruct(0)}
+    const wgsl = `${uniformStruct(0, tailOf(state))}
 @group(1) @binding(0) var<uniform> uniforms: Uniforms;
 ${functionDeclarations(null, fogSource === FOG_SOURCE.TABLE ? state.fogMode : D3DFOG.NONE)}${
     samplerDeclarations(dimensionsOf(state), 2, 0)}

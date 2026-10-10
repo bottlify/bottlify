@@ -219,6 +219,13 @@ test('the texture stages validate when the combiner draws them, and name what it
     set(0, D3DTSS.ALPHAOP, 4);
     set(0, D3DTSS.ALPHAARG2, 6);
     assert.equal(validate(), UNSUPPORTEDALPHAARG, 'D3DTA_CONSTANT, read by MODULATE');
+    // The temporary register is Direct3D 8's and 9's, the stage constant 9's
+    // alone; Direct3D 7, which validates with neither, has no such argument.
+    assert.equal(validateStages(stage=>stages[stage], 8, { temp: true }), UNSUPPORTEDALPHAARG);
+    assert.equal(validateStages(stage=>stages[stage], 8, { temp: true, constant: true }), D3D_OK);
+    set(0, D3DTSS.COLORARG1, 5);
+    assert.equal(validateStages(stage=>stages[stage], 8, { temp: true, constant: true }), D3D_OK,
+        'D3DTA_TEMP');
     reset();
     set(1, D3DTSS.COLOROP, 1);
     set(2, D3DTSS.COLOROP, 22);

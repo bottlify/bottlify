@@ -147,6 +147,8 @@ function argumentValue(arg, sources){
         [D3DTA.TEXTURE]: sources.texture,
         [D3DTA.TFACTOR]: sources.textureFactor,
         [D3DTA.SPECULAR]: sources.specular,
+        [D3DTA.TEMP]: sources.temp,
+        [D3DTA.CONSTANT]: sources.constant,
     }[arg & D3DTA.SELECTMASK];
 
     if (base === undefined)
@@ -213,15 +215,22 @@ function applyOp(op, a, b, current){
  * generated shader does too: a stage that is off is absent, not a neutral one,
  * because "neutral" is only neutral for some operations.
  *
+ * A stage whose D3DTSS_RESULTARG is D3DTA_TEMP writes the temporary register,
+ * zero until then, and leaves the current colour, which is what the cascade
+ * ends with, as it was. `sources.stageConstants` is each stage's
+ * D3DTSS_CONSTANT, which D3DTA_CONSTANT reads.
+ *
  * @param {import('./pipeline.js').StageKey[]} stages
  * @param {any} sources
  * @returns {{ r: number, g: number, b: number, a: number }}
  */
 export function runStages(stages, sources){
     let current = sources.diffuse;
-    for (const stage of stages)
+    let temp = { r: 0, g: 0, b: 0, a: 0 };
+    for (const [index, stage] of stages.entries())
     {
-        const context = { ...sources, current };
+        const context = { ...sources, current, temp,
+            constant: sources.stageConstants?.[index] };
         // Only the slots the operation reads are resolved: an unread one is
         // allowed to hold a stale value this engine cannot spell, and the
         // shader never builds it either.
@@ -231,12 +240,21 @@ export function runStages(stages, sources){
                 : { r: 0, g: 0, b: 0, a: 0 });
         const [a1, a2] = resolve(argumentsRead(stage.colorOp, stage.colorArg1, stage.colorArg2));
         const [b1, b2] = resolve(argumentsRead(stage.alphaOp, stage.alphaArg1, stage.alphaArg2));
-        current = {
-            r: applyOp(stage.colorOp, a1.r, a2.r, current.r),
-            g: applyOp(stage.colorOp, a1.g, a2.g, current.g),
-            b: applyOp(stage.colorOp, a1.b, a2.b, current.b),
-            a: applyOp(stage.alphaOp, b1.a, b2.a, current.a),
+        const into = stage.resultArg === D3DTA.TEMP ? temp : current;
+        const result = {
+            r: applyOp(stage.colorOp, a1.r, a2.r, into.r),
+            g: applyOp(stage.colorOp, a1.g, a2.g, into.g),
+            b: applyOp(stage.colorOp, a1.b, a2.b, into.b),
+            a: applyOp(stage.alphaOp, b1.a, b2.a, into.a),
         };
+        if (stage.resultArg === D3DTA.TEMP)
+        {
+            temp = result;
+        }
+        else
+        {
+            current = result;
+        }
     }
     return current;
 }

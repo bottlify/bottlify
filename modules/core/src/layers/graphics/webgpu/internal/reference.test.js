@@ -245,6 +245,40 @@ test('5a. a select reads only its own slot, whichever slot that is', ()=>{
         'argument two, and the unreadable slot one never resolved');
 });
 
+test('5c. a stage that writes the temporary register leaves the current colour for the rest',
+    ()=>{
+        // D3DTSS_RESULTARG D3DTA_TEMP: stage 0 puts the factor in the
+        // temporary register and the current colour is still the diffuse; stage
+        // 1 adds the two; stage 2 writes its constant into the register again,
+        // which nothing reads, and the cascade ends with the current colour.
+        const result = runStages([
+            { colorOp: D3DTOP.SELECTARG1, colorArg1: D3DTA.TFACTOR, colorArg2: D3DTA.CURRENT,
+                alphaOp: D3DTOP.SELECTARG1, alphaArg1: D3DTA.TFACTOR, alphaArg2: D3DTA.CURRENT,
+                texCoordIndex: 0, resultArg: D3DTA.TEMP },
+            { colorOp: D3DTOP.ADD, colorArg1: D3DTA.CURRENT, colorArg2: D3DTA.TEMP,
+                alphaOp: D3DTOP.SELECTARG1, alphaArg1: D3DTA.CONSTANT, alphaArg2: D3DTA.CURRENT,
+                texCoordIndex: 0 },
+            { colorOp: D3DTOP.SELECTARG1, colorArg1: D3DTA.CONSTANT, colorArg2: D3DTA.CURRENT,
+                alphaOp: D3DTOP.SELECTARG1, alphaArg1: D3DTA.CONSTANT, alphaArg2: D3DTA.CURRENT,
+                texCoordIndex: 0, resultArg: D3DTA.TEMP },
+        ], {
+            diffuse: solid(0, 64, 0, 255),
+            specular: solid(0, 0, 0, 0),
+            texture: solid(0, 0, 0),
+            textureFactor: solid(200, 0, 16, 9),
+            stageConstants: [solid(0, 0, 0, 0), solid(1, 2, 3, 77), solid(255, 255, 255, 255)],
+        });
+        assert.deepEqual([result.r, result.g, result.b, result.a], [200, 64, 16, 77]);
+        // The register starts at zero.
+        const unwritten = runStages([{ colorOp: D3DTOP.ADD, colorArg1: D3DTA.TEMP,
+            colorArg2: D3DTA.DIFFUSE, alphaOp: D3DTOP.SELECTARG1, alphaArg1: D3DTA.TEMP,
+            alphaArg2: D3DTA.DIFFUSE, texCoordIndex: 0 }], {
+            diffuse: solid(5, 6, 7, 8), specular: solid(0, 0, 0, 0), texture: solid(0, 0, 0),
+            textureFactor: solid(0, 0, 0),
+        });
+        assert.deepEqual([unwritten.r, unwritten.g, unwritten.b, unwritten.a], [5, 6, 7, 0]);
+    });
+
 test('5b. an argument modifier replicates alpha and inverts, in that order', ()=>{
     // The two modifiers compose, and the order is the API's: replicate, then
     // invert. Reversed, the inversion happens on the colour and is then thrown

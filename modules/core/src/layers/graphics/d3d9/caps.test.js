@@ -143,6 +143,8 @@ test('what the renderer does not do is not claimed', ()=>{
     assert.equal(words.VolumeTextureAddressCaps, words.TextureAddressCaps);
     assert.equal(words.TextureAddressCaps & (0x00000008 | 0x00000020), 0x00000028,
         'BORDER and MIRRORONCE, which the shader makes over a clamping sampler');
+    assert.equal(words.PrimitiveMiscCaps & (0x00000400 | 0x00008000), 0x00008400,
+        'TSSARGTEMP and PERSTAGECONSTANT, the generated cascade\'s registers');
     assert.equal(words.MaxVolumeExtent, 256);
     assert.equal(words.NumSimultaneousRTs, 1);
     assert.equal(words.StretchRectFilterCaps, 0x03000300,

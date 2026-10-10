@@ -677,6 +677,46 @@ test('a mirror-once axis is folded before its clamp, a border axis selects its c
         assert.ok(volume.includes('vec4f(1.0, 1.0, 1.0, 1.0), raw.x < 0.0 || raw.x > 1.0);'));
     });
 
+test('a stage writes the temporary register its RESULTARG names, and reads it and its constant',
+    ()=>{
+        const stage = (/** @type {object} */ over)=>({
+            colorOp: D3DTOP.SELECTARG1, colorArg1: D3DTA.TFACTOR, colorArg2: D3DTA.CURRENT,
+            alphaOp: D3DTOP.SELECTARG1, alphaArg1: D3DTA.TFACTOR, alphaArg2: D3DTA.CURRENT,
+            texCoordIndex: 0, ...over,
+        });
+        const code = generate(baseState({ stages: [stage({ resultArg: D3DTA.TEMP }),
+            stage({ colorOp: D3DTOP.ADD, colorArg2: D3DTA.TEMP,
+                alphaArg1: D3DTA.CONSTANT })] })).code;
+        assert.ok(code.includes('    var current = input.diffuse;\n    var temp = vec4f(0.0);\n'));
+        assert.ok(code.includes('    temp = vec4f(saturate((uniforms.textureFactor).rgb),'
+            + ' saturate((uniforms.textureFactor).a));'));
+        assert.ok(code.includes('    current = vec4f(saturate((uniforms.textureFactor'
+            + ' + temp).rgb), saturate((uniforms.stageConstant[1]).a));'));
+        assert.ok(code.includes('    stageConstant: array<vec4f, 8>,\n};'),
+            'the constants past the lights, where a stage reads one');
+        assert.ok(code.indexOf('stageConstant: array') > code.indexOf('pointScale: vec4f'));
+
+        // Without either, the source declares neither.
+        const plain = generate(baseState({ stages: [stage({})] })).code;
+        assert.ok(!plain.includes('temp') && !plain.includes('stageConstant'));
+        assert.equal(generate(baseState({ stages: [stage({ colorArg2: D3DTA.TEMP,
+            alphaArg2: D3DTA.CONSTANT })] })).code, plain, 'an unread slot shapes nothing');
+
+        // Lit, the constants follow the lights.
+        const lit = generate(baseState({ fvf: LIT_FVF, lighting: lighting(),
+            stages: [stage({ colorArg1: D3DTA.CONSTANT })] })).code;
+        assert.ok(lit.includes(
+            '    lights: array<Light, 1>,\n    stageConstant: array<vec4f, 8>,'));
+
+        // The fragment stage over a vertex shader declares the same block.
+        const fragment = fixedFragmentStage(baseState({ fvf: 0, vertexShader: 1,
+            stages: [stage({ colorArg1: D3DTA.CONSTANT, resultArg: D3DTA.TEMP })] }), [0]);
+        assert.equal(fragment.error, null);
+        assert.ok(fragment.wgsl.includes('    stageConstant: array<vec4f, 8>,'));
+        assert.ok(fragment.wgsl.includes(
+            '    temp = vec4f(saturate((uniforms.stageConstant[0]).rgb)'));
+    });
+
 test('a stage puts its coordinate through its own texture transform before sampling', ()=>{
     // Direct3D applies D3DTS_TEXTURE0..7 to (u, v, 1) for a two-coordinate
     // set: two dot products against the rows the block carries, computed

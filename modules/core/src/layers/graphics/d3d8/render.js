@@ -53,14 +53,14 @@ import {
     FOG_RANGE_LOCATION, HYBRID_CONSTANTS, VERTEX_SAMPLER_BINDING, fixedVertexStage, translateShader,
     varyingLocation,
 } from '../d3d9/wgsl.js';
-import { D3DVERTEXTEXTURESAMPLER0 } from '../d3d9/samplerstates.js';
+import { D3DTSS9, D3DVERTEXTEXTURESAMPLER0 } from '../d3d9/samplerstates.js';
 import { D3DDECLUSAGE } from '../d3d9/declaration.js';
 import { OPCODE, REGISTER, SHADER_KIND } from '../d3d9/shader.js';
 import { decodeS3tc } from '../webgpu/internal/s3tc.js';
 import { storedToHalves } from '../d3d9/half.js';
 import { passedSamples, reachableArea } from '../webgpu/internal/occlusion.js';
 import {
-    fixedFragmentStage, generates, generationOf, readsNormal,
+    fixedFragmentStage, generates, generationOf, readsNormal, tailOf,
 } from '../webgpu/internal/fixedfunction.js';
 import { FOG_SOURCE, fogSourceOf, pipelineKey } from '../webgpu/internal/pipeline.js';
 
@@ -1058,6 +1058,9 @@ function putDword(block, at, dword){
  *     POINTSIZE, POINTSIZE_MIN, POINTSIZE_MAX, then POINTSCALE_A, B, C and the
  *     viewport's height: eight floats.
  * @property {readonly Light[]} [lights]
+ * @property {ArrayLike<number>} [stageConstants]
+ *     Every stage's D3DTSS_CONSTANT as four floats, eight stages: past the
+ *     lights, for a draw whose stages read D3DTA_CONSTANT (`tailOf`).
  */
 
 /**
@@ -1120,7 +1123,8 @@ const wordsOver = storage=>{
 export function uniformBlock(values, take = floats=>new Float32Array(floats)){
     const at = UNIFORM_AT;
     const lights = values.lights ?? [];
-    const block = take(UNIFORM_FLOATS + lights.length * LIGHT_FLOATS);
+    const tail = UNIFORM_FLOATS + lights.length * LIGHT_FLOATS;
+    const block = take(tail + (values.stageConstants ? STAGE_CONSTANT_FLOATS : 0));
     block.set(asFloats(values.worldViewProjection), at.worldViewProjection);
     block.set(asFloats(values.world ?? IDENTITY_FLOATS), at.world);
     block.set(values.viewport.offset, at.viewportOffset);
@@ -1166,7 +1170,30 @@ export function uniformBlock(values, take = floats=>new Float32Array(floats)){
     {
         packLight(block, at.lights + index * LIGHT_FLOATS, lights[index]);
     }
+    if (values.stageConstants)
+    {
+        block.set(values.stageConstants, tail);
+    }
     return block;
+}
+
+/** The floats every stage's constant takes past the lights: a row a stage. */
+const STAGE_CONSTANT_FLOATS = STAGE_COUNT * 4;
+
+/**
+ * Every stage's D3DTSS_CONSTANT, as the block's tail carries it.
+ *
+ * @param {RenderModel} model
+ * @returns {Float32Array}
+ */
+function stageConstantsOf(model){
+    const floats = new Float32Array(STAGE_CONSTANT_FLOATS);
+    for (let stage = 0; stage < STAGE_COUNT; stage++)
+    {
+        const colour = colorToFloats(model.stageStates(stage).get(D3DTSS9.CONSTANT) ?? 0);
+        floats.set([colour.r, colour.g, colour.b, colour.a], stage * 4);
+    }
+    return floats;
 }
 
 /**
@@ -1548,9 +1575,11 @@ export function lightingOf(model, layout){
  * @param {RenderModel} model
  * @param {(floats: number) => Float32Array} [take]
  * @param {boolean} [mips]
+ * @param {import('../webgpu/internal/fixedfunction.js').UniformTail} [tail]
+ *     What the block carries past the lights, as the stages' shader declares it.
  * @returns {Float32Array}
  */
-export function pixelUniformsOf(model, take, mips = true){
+export function pixelUniformsOf(model, take, mips = true, tail = undefined){
     const rs = (/** @type {string} */ name)=>model.renderStates.get(D3DRS[name]) ?? 0;
     PIXEL_FOG[0] = dwordToFloat(rs('FOGSTART'));
     PIXEL_FOG[1] = dwordToFloat(rs('FOGEND'));
@@ -1565,6 +1594,7 @@ export function pixelUniformsOf(model, take, mips = true){
         alphaRef: rs('ALPHAREF'),
         stages: stageFlags(model, mips),
         textureTransforms: stageTransforms(model),
+        ...(tail?.stageConstants ? { stageConstants: stageConstantsOf(model) } : {}),
     }, take);
 }
 
@@ -1576,9 +1606,11 @@ const PIXEL_FOG = [0, 1, 1];
  * @param {import('../webgpu/internal/pipeline.js').LightingState | null} [lighting]
  * @param {(floats: number) => Float32Array} [take]  Where the block's floats come from.
  * @param {boolean} [mips]  False pins every sample to the top level.
+ * @param {import('../webgpu/internal/fixedfunction.js').UniformTail} [tail]
+ *     What the block carries past the lights, as the draw's shader declares it.
  * @returns {Float32Array} the block an ordinary draw carries
  */
-export function uniformsOf(model, lighting, take, mips = true){
+export function uniformsOf(model, lighting, take, mips = true, tail = undefined){
     const rs = (/** @type {string} */ name)=>model.renderStates.get(D3DRS[name]) ?? 0;
     const world = transformOf(model, D3DTS.WORLD);
     const view = transformOf(model, D3DTS.VIEW);
@@ -1620,6 +1652,7 @@ export function uniformsOf(model, lighting, take, mips = true){
         // said, so a block that carried lights it does not know about would be
         // read past its own end.
         lights: lighting ? enabledLights(model) : [],
+        ...(tail?.stageConstants ? { stageConstants: stageConstantsOf(model) } : {}),
     }, take);
 }
 
@@ -1842,6 +1875,7 @@ export function stageCascade(model, layout, how = {}){
             alphaArg2: get(D3DTSS.ALPHAARG2),
             ...arguments0(get),
             ...bumpOf(get),
+            ...resultOf(get),
             texCoordIndex,
             // A projected generated coordinate is divided by its third or
             // fourth component at the sample, which is the count's last.
@@ -1980,6 +2014,21 @@ function bumpOf(get){
     return { bump: [D3DTSS.BUMPENVMAT00, D3DTSS.BUMPENVMAT01, D3DTSS.BUMPENVMAT10,
         D3DTSS.BUMPENVMAT11, D3DTSS.BUMPENVLSCALE, D3DTSS.BUMPENVLOFFSET]
         .map(state=>dwordToFloat(get(state))) };
+}
+
+/**
+ * Where a stage writes, only for one that writes the temporary register: a
+ * bump stage writes nothing, and every other the current colour unless
+ * D3DTSS_RESULTARG says D3DTA_TEMP.
+ *
+ * @param {(state: number)=>number} get
+ * @returns {{ resultArg?: number }}
+ */
+function resultOf(get){
+    const op = get(D3DTSS.COLOROP);
+    return op !== D3DTOP.BUMPENVMAP && op !== D3DTOP.BUMPENVMAPLUMINANCE
+        && (get(D3DTSS.RESULTARG) & D3DTA_SELECTMASK) === D3DTA.TEMP
+        ? { resultArg: D3DTA.TEMP } : {};
 }
 
 /**
@@ -5918,7 +5967,8 @@ export function createRenderer(options){
         }));
         const take = ensureFrame().arena.take;
         const vertexBlocks = shaderVertexBlocks(model, program, pieces.vertex, take);
-        const pixelBlocks = [pixelUniformsOf(model, take, mipsApplied), take(64), take(16)];
+        const pixelBlocks = [pixelUniformsOf(model, take, mipsApplied, pieces.tail), take(64),
+            take(16)];
         return {
             version: undefined,
             contentVersion: 0,
@@ -6031,6 +6081,8 @@ export function createRenderer(options){
         const pixel = fixedFragmentStage(state, vertex.outputs);
         counters.prepared.built++;
         return {
+            // What the fragment stage's block carries past the cascade's rows.
+            tail: tailOf(state),
             // What `record` asks the pipeline for once a frame by.
             pipelineFrame: null,
             pipelineIndex: 0,
@@ -7391,7 +7443,7 @@ export function createRenderer(options){
             topology,
             state,
             uniforms: EMPTY_BLOCK,
-            template: uniformsOf(model, lighting, undefined, mipsApplied),
+            template: uniformsOf(model, lighting, undefined, mipsApplied, tailOf(state)),
             packedLights: lighting ? enabledLights(model) : null,
             stageBindings,
             lighting,

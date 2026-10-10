@@ -4326,7 +4326,8 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
          * @param {{ passes?: number }} out  Written only on success.
          */
         ValidateDevice(out){
-            const hr = pixelShader ? D3D_OK : validateStages(stageStatesFor, STAGE_COUNT);
+            const hr = pixelShader ? D3D_OK
+                : validateStages(stageStatesFor, STAGE_COUNT, { temp: true, constant: true });
             if (hr === D3D_OK)
             {
                 out.passes = 1;

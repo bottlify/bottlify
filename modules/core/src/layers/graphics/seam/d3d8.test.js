@@ -1797,6 +1797,8 @@ test('every capability claimed is one the renderer honours', ()=>{
     assert.equal(caps.MaxVertexBlendMatrices, 0, 'no vertex blending');
     assert.equal(caps.TextureAddressCaps & (0x00000008 | 0x00000020), 0x00000028,
         'a border colour and mirror-once, which the shader makes over a clamping sampler');
+    assert.equal(caps.PrimitiveMiscCaps & 0x00000400, 0x00000400,
+        'D3DPMISCCAPS_TSSARGTEMP, the generated cascade\'s temporary register');
     assert.equal(caps.RasterCaps & 0x00010000, 0x00010000,
         'D3DPRASTERCAPS_FOGRANGE: range fog fades by the distance from the eye');
 

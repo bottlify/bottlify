@@ -1742,3 +1742,37 @@ test('a border and a mirror-once axis reach a shader pair\'s reads and the fixed
         vs.shader.release();
         ps.shader.release();
     });
+
+test('a stage writes the temporary register and reads its own constant, which its block carries',
+    async()=>{
+        // D3DTSS_RESULTARG (28) D3DTA_TEMP; D3DTSS_CONSTANT (32), read as D3DTA_CONSTANT (6).
+        const h = harness();
+        h.device.SetTexture(0, null);
+        const set = (/** @type {number} */ stage, /** @type {number} */ state,
+            /** @type {number} */ value)=>assert.equal(
+            h.device.SetTextureStageState(stage, state, value), D3D_OK);
+        set(0, D3DTSS.COLOROP, 2);
+        set(0, D3DTSS.COLORARG1, 6);
+        set(0, D3DTSS.ALPHAOP, 2);
+        set(0, D3DTSS.ALPHAARG1, 6);
+        set(0, 28, 5);
+        set(0, 32, 0x80402010);
+        set(1, D3DTSS.COLOROP, 7);
+        set(1, D3DTSS.COLORARG1, 1);
+        set(1, D3DTSS.COLORARG2, 5);
+        set(1, D3DTSS.ALPHAOP, 2);
+        set(1, D3DTSS.ALPHAARG1, 1);
+        set(1, 32, 0xff00ff00);
+        /** @type {{ passes?: number }} */
+        const validated = {};
+        assert.equal(h.device.ValidateDevice(validated), D3D_OK, 'the combiner draws both');
+        await h.draw();
+        assert.deepEqual(h.reports, []);
+        const [fragment] = modulesOf(h, 'fixed-function:');
+        assert.ok(fragment.includes('    temp = vec4f(saturate((uniforms.stageConstant[0]).rgb),'));
+        assert.ok(fragment.includes('    current = vec4f(saturate((current + temp).rgb),'));
+        const floats = new Float32Array(h.boundBytes(h.groupsOfDraw().get(0), 0).buffer);
+        assert.equal(floats.length, UNIFORM_FLOATS + 32, 'every stage\'s constant past the block');
+        assert.deepEqual([...floats.subarray(UNIFORM_FLOATS, UNIFORM_FLOATS + 8)],
+            [0x40, 0x20, 0x10, 0x80, 0, 0xff, 0, 0xff].map(byte=>Math.fround(byte / 255)));
+    });
