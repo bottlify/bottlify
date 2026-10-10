@@ -155,9 +155,10 @@ function displayDevice(screen){
  * @param {import('../kernel32/versions.js').WindowsVersion} windows
  * @param {{ width: number, height: number, bitsPerPixel: number }} screen
  * @param {import('../advapi32/registry.js').DirectXRelease} [directx]  Absent, 9.0c.
+ * @param {number} [physicalMemory]  The bytes GlobalMemoryStatusEx calls physical.
  * @returns {DxDiagNode}
  */
-export function dxDiagTree(windows, screen, directx = DIRECTX_RELEASES[9]){
+export function dxDiagTree(windows, screen, directx = DIRECTX_RELEASES[9], physicalMemory = 0){
     const [major, minor, release, build] = directx.version.split('.');
     /** @type {Record<string, DxDiagProperty>} */
     const systemInfo = {
@@ -171,6 +172,14 @@ export function dxDiagTree(windows, screen, directx = DIRECTX_RELEASES[9]){
         szDirectXVersionEnglish: text(`${major}.${minor}.${release.padStart(4, '0')}.${build}`),
         bDebug: bool(false),
         szWindowsDir: text('C:\\WINDOWS'),
+        // The memory as GlobalMemoryStatusEx reports it, its 64-bit counts
+        // written in decimal as BSTRs, which is how DxDiag gives them: a
+        // program that checks the RAM here and finds no property reads none.
+        // Nothing is paged out, so the page file is the memory, all free.
+        ullPhysicalMemory: text(String(physicalMemory)),
+        ullUsedPageFile: text('0'),
+        ullAvailPageFile: text(String(physicalMemory)),
+        szPhysicalMemoryEnglish: text(`${Math.floor(physicalMemory / 0x100000)}MB RAM`),
     };
     /** @type {(properties: Record<string, DxDiagProperty>) => DxDiagNode} */
     const node = properties=>({ properties: new Map(Object.entries(properties)),
@@ -199,6 +208,7 @@ export function dxDiagTree(windows, screen, directx = DIRECTX_RELEASES[9]){
  * @property {{ width: number, height: number, bitsPerPixel: number }} [screen]
  *           The desktop, as GDI and the drawing layer see it; read when a
  *           provider is initialised.
+ * @property {number} [physicalMemory]  The bytes GlobalMemoryStatusEx calls physical.
  * @property {(api: string, detail: string) => void} [divergence]
  */
 
@@ -415,7 +425,7 @@ export function registerDxDiagClasses(host){
                             }
                             tree = dxDiagTree(host.windows,
                                 host.screen ?? { width: 640, height: 480, bitsPerPixel: 32 },
-                                host.directx);
+                                host.directx, host.physicalMemory ?? 0);
                             return S_OK;
                         } },
                     /** HRESULT GetRootContainer(IDxDiagContainer **ppInstance) */
