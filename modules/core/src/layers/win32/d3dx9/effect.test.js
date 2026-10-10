@@ -586,6 +586,27 @@ test('parameters are described and hold their defaults as D3DX lays them out', a
     assert.equal(g.text(g.u32(sOut)), 'other');
 });
 
+test('a string array sized by its list has that many elements, each its string', async()=>{
+    // Battlefield 2's renderer walks `string reqVertexElement[] = {...}` by
+    // the description's element count; an open length read as 0xffffffff.
+    const g = guest();
+    const fx = await g.effect('string names[] = {"Position", "Normal"};\n'
+        + 'float4 ps() : COLOR { return 1; }\n'
+        + 'technique t { pass p { PixelShader = compile ps_2_0 ps(); } }\n');
+    const names = await g.handle(fx, 'names');
+    assert.equal((await g.desc(fx, names)).elements, 2);
+    const out = g.out();
+    for (const [index, text] of /** @type {[number, string][]} */ ([[0, 'Position'],
+        [1, 'Normal']]))
+    {
+        const element = await g.call(fx, 'GetParameterElement', names, index);
+        assert.ok(element);
+        assert.equal(await g.call(fx, 'GetString', element, out), D3D_OK);
+        assert.equal(g.text(g.u32(out)), text);
+    }
+    assert.equal(await g.call(fx, 'GetParameterElement', names, 2), 0);
+});
+
 test('the setters and getters convert as D3DX does, and refuse the wrong shape', async()=>{
     const g = guest();
     const fx = await g.effect(VALUES);
