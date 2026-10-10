@@ -3286,34 +3286,45 @@ export function createRenderer(options){
      */
     const countLighting = (model, prepared)=>{
         const layout = prepared.layout;
-        if (!layout)
-        {
-            // A draw through shaders: what its vertex stage lights and how is
-            // in the shader, not in the state this counts.
-            return;
-        }
-        const lighting = prepared.lighting;
-        const tally = counters.lighting;
         const fogMode = (model.renderStates.get(D3DRS.FOGENABLE) ?? 0) !== 0
             ? ((model.renderStates.get(D3DRS.FOGTABLEMODE) ?? 0)
                 || (model.renderStates.get(D3DRS.FOGVERTEXMODE) ?? 0))
             : 0;
         if (fogMode !== 0)
         {
-            tally.fog.modes.add(fogMode);
-            tally.fog[layout.preTransformed ? 'preTransformed' : 'transformed']++;
             frameStats.fogged++;
             // Read every fogged draw, kept as one short string per frame. The
             // sampled sets below stop at the first few hundred draws of a run,
             // so they describe how a program started and cannot show a setting
             // it changed to later. A scene that washes towards the fog colour
             // and stays there is precisely that, and this is what can see it.
-            frameStats.fog = prepared.fogSetting ??= fogSettingOf(model);
+            // A shader draw is marked: its vertex fog is the shader's own, and
+            // its table fog is taken over the depth its projection says.
+            // Built once a preparation, which starts with none.
+            if (!prepared.fogSetting)
+            {
+                prepared.fogSetting = fogSettingOf(model) + (layout ? ''
+                    : `/vs${isAffine(transformOf(model, D3DTS.PROJECTION)) ? 'z' : 'w'}`);
+            }
+            frameStats.fog = prepared.fogSetting;
             // And how many draws ran under each setting: a program fogs its
             // sky, its ground and its interface differently, and a frame that
             // goes wrong is one where a draw ran under another draw's fog --
             // which only a count per setting can show.
             frameStats.fogs.set(frameStats.fog, (frameStats.fogs.get(frameStats.fog) ?? 0) + 1);
+        }
+        if (!layout)
+        {
+            // A draw through shaders: what its vertex stage lights and how is
+            // in the shader, not in the state the rest counts.
+            return;
+        }
+        const lighting = prepared.lighting;
+        const tally = counters.lighting;
+        if (fogMode !== 0)
+        {
+            tally.fog.modes.add(fogMode);
+            tally.fog[layout.preTransformed ? 'preTransformed' : 'transformed']++;
         }
         // The samples below are text, built per draw, and a frame has hundreds
         // of draws: they are built for the first few hundred fogged draws only.
@@ -7547,7 +7558,12 @@ export function createRenderer(options){
         const processing = model.stageProcessing;
         if (processing.program && (processing.vertexShader !== 0 || processing.pixelShader !== 0))
         {
-            return prepareProgram(model, stride, topology, processing.program);
+            const prepared = prepareProgram(model, stride, topology, processing.program);
+            if (prepared)
+            {
+                countLighting(model, prepared);
+            }
+            return prepared;
         }
         if (processing.vertexShader !== 0)
         {

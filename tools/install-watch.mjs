@@ -535,7 +535,8 @@ setInterval(async()=>{
                     shown: graphics.worker?.frames, dropped: graphics.worker?.dropped,
                     drawn: device?.frames, replays: device?.timing?.replays,
                     failures: device?.failures, last: last && `#${last.index} ${last.draws}`
-                        + ` draws ${last.clears} clears ${last.target}`,
+                        + ` draws ${last.clears} clears ${last.target}`
+                        + (last.fogs ? ` fog ${last.fogs}` : ''),
                 }));
             }
             for (const line of describeWindows(win32.windows ?? []))
