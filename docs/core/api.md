@@ -100,6 +100,7 @@ Everything below crosses to the engine's worker by `postMessage`, so every value
 | `answerMessageBox(id, button)` | Answers a `message-box` event with the id of the button pressed. |
 | `input.attach(canvas, { pointerLock? })`, `input.detach()` | Capture keyboard, mouse and gamepads from the canvas, or stop. |
 | `input.send(event)`, `input.poll()` | Send an input event yourself; poll the gamepads (call once a frame). |
+| `input.route()` | Clicks and key taps driven from outside, a step at a time: `click(x, y, { button? })` and `key(code, frames?)` queue, `tick()` sends the next step and returns how many are left (call it once a frame, or on a timer for a program that does not present). A click pushes the pointer far up and left, then on the next step moves it from the corner to the point and presses, and releases on the step after, so a program that moves a cursor of its own by relative motion (DirectInput) clicks where the window's pointer is, wherever it had put its cursor. |
 | `audio.memory()`, `audio.format()` | The output's shared table and `{ sampleRate, channels }`, for the `AudioWorkletNode`. |
 | `adapter` | `{ vendor, architecture, description }` of the GPU the engine opened. |
 | `canvas`, `host` | The viewport and where the engine runs. |

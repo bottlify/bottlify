@@ -341,12 +341,14 @@ function visit(value, bind){
  * @returns {{ root: any, allocated: (address: number, bytes: number) => void,
  *     freed: (address: number) => void,
  *     writing: (address: number, length: number) => void,
+ *     settled: () => Promise<void> | null,
  *     wrote: (address: number, bytes: Uint8Array) => void,
  *     read: (address: number, bytes: Uint8Array) => void, outward: (value: any) => any,
  *     adopt: (object: object) => void }}
  *     `allocated` and `freed` are told every allocation the recorded device
  *     makes and gives back, `writing` every write it is about to make into guest
- *     memory and `wrote` every one it made,
+ *     memory and `wrote` every one it made; `settled` is when every answer
+ *     asked for so far has come, null when none is outstanding;
  *     and `read` -- by a device that reads the program's memory at the call
  *     rather than through its locks -- every read, whose bytes the played
  *     device is sent ahead of the call; `outward` is a value of the device's
@@ -360,6 +362,25 @@ export function createRecording(options){
     const windowMemory = options.windowMemory ?? readMemory;
     const { writer } = transport;
     const lender = transport.lender ?? null;
+    /**
+     * The answers asked for and not yet come: the played side writes what it
+     * read back into guest memory ahead of each, at addresses the recorded
+     * device gave out when it was asked.
+     *
+     * @type {Set<Promise<unknown>>}
+     */
+    const unanswered = new Set();
+    /** @param {string} name */
+    const ask = name=>{
+        const reply = transport.called(WAIT.ANSWER, name);
+        if (reply instanceof Promise)
+        {
+            unanswered.add(reply);
+            const done = ()=>unanswered.delete(reply);
+            reply.then(done, done);
+        }
+        return reply;
+    };
     /** @param {ShippedKind} kind @param {{ bytes: Uint8Array }[]} ranges */
     const shippedAs = (kind, ranges)=>{
         if (transport.shipped && ranges.length > 0)
@@ -1230,7 +1251,7 @@ export function createRecording(options){
             if (name === 'GetRenderTargetData' && applied[1])
             {
                 const into = applied[1];
-                const filled = Promise.resolve(transport.called(WAIT.ANSWER, name))
+                const filled = Promise.resolve(ask(name))
                     .then(()=>{}, ()=>{});
                 readbacks.set(into, filled);
                 filled.then(()=>{
@@ -1246,7 +1267,7 @@ export function createRecording(options){
                 const asking = { reply: /** @type {PlayedAnswer | null} */ (null),
                     frame: framesRecorded, asked: Promise.resolve() };
                 counts.set(target, asking);
-                asking.asked = Promise.resolve(transport.called(WAIT.ANSWER, name)).then(played=>{
+                asking.asked = Promise.resolve(ask(name)).then(played=>{
                     // Still this measurement's; an answer that is not a count
                     // yet is asked again at the next poll.
                     if (counts.get(target) === asking)
@@ -1274,7 +1295,7 @@ export function createRecording(options){
                 return played.answer;
             };
             const reply = /** @type {PlayedAnswer | Promise<PlayedAnswer>} */ (
-                transport.called(WAIT.ANSWER, name));
+                ask(name));
             return reply instanceof Promise ? reply.then(take) : take(reply);
         };
         return call;
@@ -1414,6 +1435,10 @@ export function createRecording(options){
             }
         },
         writing: (address, length)=>claim(address, length),
+        settled(){
+            return unanswered.size === 0 ? null
+                : Promise.allSettled([...unanswered]).then(()=>{});
+        },
         wrote(address, bytes){
             if (depth > 0)
             {

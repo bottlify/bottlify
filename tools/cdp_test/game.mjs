@@ -1189,6 +1189,16 @@ function describe(result, context, calls, symbols){
     }
 
     say(`  frames presented: ${result.presents ?? 0}`);
+    if ((result.inputs ?? []).length > 0)
+    {
+        // What the route sent and on which present, so a click that did not
+        // land can be told from one that was never sent.
+        say(`  input sent: ${result.inputs.map((/** @type {any} */ one)=>`#${one.present} ${
+            one.kind === 'pointerMove' ? `move ${one.x},${one.y} by ${one.dx},${one.dy}`
+                : one.kind === 'pointerButton' ? `${one.button} ${one.down ? 'down' : 'up'}`
+                    : `${one.kind} ${one.code ?? one.text ?? ''}${one.down === false ? ' up' : ''}`
+        }`).join('; ')}`);
+    }
     // How the page read the sound: the shared table a worklet reads, or the ring.
     say(`  sound drained through: ${result.drain ?? '?'}`);
     if (result.steady)
@@ -1855,7 +1865,9 @@ the run as it stands: ${path}`;
             frames: (result.presentTimes ?? []).filter((/** @type {number} */ at)=>at >= one.from
                 && at < one.from + one.windowMs).length,
         }));
-        const shot = await cdp.send('Page.captureScreenshot', { format: 'png' }, sessionId);
+        // The whole page: a picture taller than the window is cut off otherwise.
+        const shot = await cdp.send('Page.captureScreenshot',
+            { format: 'png', captureBeyondViewport: true }, sessionId);
         writeFileSync(shotPath, Buffer.from(shot.data, 'base64'));
         // The last presented frame as the engine read it back, beside the
         // page's screenshot: the screenshot is what the compositor showed at

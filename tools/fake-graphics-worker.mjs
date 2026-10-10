@@ -15,6 +15,12 @@ import { serveGraphics } from '../modules/core/src/layers/graphics/remote/worker
 import { createFakeDevice } from '../modules/core/src/layers/graphics/webgpu/internal/fake-device.js';
 
 const gpu = createFakeDevice();
+// The fake keeps every call it was given, bytes and all, for a test to look
+// at; a run minutes long would hold gigabytes of it and hide what the code
+// under it holds. Nothing reads the log here.
+setInterval(()=>{
+    gpu.calls.length = 0;
+}, 1000).unref();
 Object.assign(gpu.device, { queue: gpu.queue, features: new Set(),
     createSampler: (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor }) });
 /** @type {{ postMessage: (message: any, transfer?: any[]) => void, onmessage: any }} */

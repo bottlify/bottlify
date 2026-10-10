@@ -108,6 +108,15 @@ export function recordedDirect3D(factory, services, transport){
         },
         free: (/** @type {number} */ address)=>{
             recording?.freed(address);
+            // A read-back the played side has not answered yet is written
+            // where the program's surface was: given back now, the heap could
+            // hand the span to someone else before those pixels land on it.
+            const settled = recording?.settled();
+            if (settled)
+            {
+                settled.then(()=>services.free?.(address));
+                return;
+            }
             services.free?.(address);
         },
         writeMemory: write && ((/** @type {number} */ address, /** @type {Uint8Array} */ bytes)=>{

@@ -449,6 +449,7 @@
  * @property {number} workerMs         Emitting and encoding the translation worker did,
  *     reported apart from `translateMs`, which is the engine thread's own.
  * @property {number} moduleBytes      Wasm bytes built this run.
+ * @property {number} [batchModulesHeld]  Stored batches' instances still reachable (held weakly).
  * @property {number} handoffMisses    Hybrid: slices the emulator ran through translated code.
  */
 

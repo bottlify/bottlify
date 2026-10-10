@@ -43,6 +43,7 @@ import { PageFlag, createPageTable } from './pages.js';
 import { createSharedCode } from './shared-code.js';
 import { Tables, tablesSize } from './layout.js';
 import { blockCounts, resetBlockCounts, topBlocks } from './block-profile.js';
+import { createWeakInstances } from './weak-instances.js';
 import {
     CACHE_VERSION, cacheKey, moduleKey, packRegion, seedRecords, unpackRegion,
 } from './cache.js';
@@ -1362,6 +1363,12 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             // from its instance -- takes an index as an unplaced module's does.
             placed.baseGlobal.value = 0x80000000 | 0;
             placedOf.delete(placed.instance);
+            // Emptied too: a function left in a cell holds its whole instance,
+            // and a range no module takes again held its module for the run.
+            for (let index = placed.base; index < placed.base + placed.arms; index++)
+            {
+                table?.set(index, null);
+            }
             freeRanges.push({ base: placed.base, arms: placed.arms });
         }
     };
@@ -1404,12 +1411,18 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         }
     };
 
-    /** Instances of the batch modules this run has, by their store key, so a
-     * stored region finds its batch's module already instantiated.
-     * ponytail: kept for the run; a batch whose regions are all dropped stays
-     * until the machine goes -- an eviction when a title's churn shows in memory.
-     * @type {Map<string, WebAssembly.Instance>} */
-    const batchInstances = new Map();
+    /**
+     * Instances of the batch modules this run has, by their store key, so a
+     * stored region finds its batch's module already instantiated -- held
+     * weakly. What keeps a batch's instance is a region of it still in the
+     * table; one a relink took every region from is garbage, and with a store
+     * this map held every one of them for the run: each relink a module of
+     * thousands of regions again, past a gigabyte of modules in a level load.
+     * A record found here is pinned to its instance (`settle`) until it is
+     * published, since the instance may go between the look and the use.
+     */
+    /** @type {ReturnType<typeof createWeakInstances<WebAssembly.Instance>>} */
+    const batchInstances = createWeakInstances();
     /** Batch modules instantiated since the last relink began. */
     let modulesSinceRelink = 0;
     /** The running regions a relink still has to gather, or null between relinks.
@@ -2495,6 +2508,16 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 one.cached = null;
             }
         }
+        else if (cached.moduleKey !== undefined)
+        {
+            // Its batch's instance, held until the region is published.
+            one.batchInstance = batchInstances.get(cached.moduleKey);
+            if (one.batchInstance === undefined)
+            {
+                counts.missNoModule++;
+                one.cached = null;
+            }
+        }
         if (one.cached !== null)
         {
             counts.cacheHits++;
@@ -2598,7 +2621,9 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             // once for every region of it; a record with a module of its own
             // is that module alone.
             const key = one.cached.moduleKey;
-            let instance = key === undefined ? undefined : batchInstances.get(key);
+            let instance = key === undefined ? undefined
+                : one.batchInstance ?? batchInstances.get(key);
+            one.batchInstance = undefined;
             if (instance === undefined)
             {
                 instance = instantiate(key === undefined ? one.cached.module : one.moduleBytes)
@@ -3380,8 +3405,12 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 inFlightMs: counts.inFlightMs,
                 behindMs: counts.behindMs,
                 queueMax: counts.queueMax,
+                // Every module's bytes made in the run, relinks included -- not
+                // what is held; `batchModulesHeld` is the stored batches' instances
+                // still reachable.
                 moduleBytes: counts.moduleBytes,
                 modules: counts.modules,
+                batchModulesHeld: batchInstances.live(),
                 translatedShare: counted > 0 ? corkRetired / counted : 0,
                 retired: corkRetired,
                 cacheHits: counts.cacheHits,

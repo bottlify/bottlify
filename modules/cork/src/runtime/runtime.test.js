@@ -1336,6 +1336,43 @@ test('the miss count is per top, so a flood at a served top cannot withhold anot
         assert.ok(m.runtime.entryOf(CODE, 1) >= 0);
     });
 
+test('with a store, a relinked region runs through collections, its batches held weakly',
+    async()=>{
+        // The stored batches' instances are held weakly (`weak-instances.js`):
+        // what keeps a relinked region's code is its own module, not the map.
+        const { memoryTranslationStore } = await import('./cache.js');
+        const { setFlagsFromString } = await import('node:v8');
+        const { runInNewContext } = await import('node:vm');
+        setFlagsFromString('--expose-gc');
+        const gc = /** @type {() => void} */ (runInNewContext('gc'));
+        const settle = ()=>new Promise(resolve=>setTimeout(resolve, 0));
+        const m = machine({ relinkAfter: 1, store: memoryTranslationStore(), bundleId: 'test' });
+        m.write(CODE + 0x100, [0x43, 0xeb, 0x01, 0x90, 0x49, 0xf4]);
+        m.runtime.noteHot(CODE + 0x104);
+        m.runtime.noteHot(CODE + 0x104);
+        await m.runtime.translatePending();
+        await settle();
+        m.runtime.noteHot(CODE + 0x100, 0, 64);
+        await m.runtime.translatePending();
+        await settle();
+        await m.runtime.translatePending();
+        await settle();
+        assert.ok((m.runtime.diagnostics().relinked ?? 0) >= 2, 'relinked');
+        for (let round = 0; round < 3; round++)
+        {
+            await settle();
+            gc();
+        }
+        await settle();
+        assert.ok((m.runtime.diagnostics().batchModulesHeld ?? 0) >= 1, 'the running one is held');
+        m.setReg(1, 5);
+        m.setReg(3, 0);
+        const exit = m.runtime.run(m.runtime.entryOf(CODE + 0x100), 100);
+        assert.equal(exit.kind, 'halt');
+        assert.equal(m.reg(3), 1);
+        assert.equal(m.reg(1), 4);
+    });
+
 test('a relink gathers the running regions into one module; an entry another region'
     + ' holds keeps running that region\'s code', async()=>{
     // B at CODE+0x104: dec ecx; hlt. A at CODE+0x100: inc ebx; jmp CODE+0x104 -- A holds a

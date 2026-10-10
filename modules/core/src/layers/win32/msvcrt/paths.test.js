@@ -159,6 +159,9 @@ test('the operations answer zero for success and -1 for failure', ()=>{
 test('remove and rename act on the volume, and _access asks whether it exists', ()=>{
     const { memory, files, table } = build();
     assert.equal(table._access.handler([memory.put('C:\\game\\data.mpq'), 0]), 0);
+    assert.equal(table._waccess.handler([memory.putWide('C:\\game\\data.mpq'), 0]), 0);
+    assert.equal(table._waccess.handler([memory.putWide('C:\\game\\none.mpq'), 0]), -1);
+    assert.equal(table._waccess.handler([0, 0]), -1, 'no path');
     assert.equal(table.rename.handler(
         [memory.put('C:\\game\\data.mpq'), memory.put('C:\\game\\old.mpq')]), 0);
     assert.equal(table._access.handler([memory.put('C:\\game\\data.mpq'), 0]), -1);
