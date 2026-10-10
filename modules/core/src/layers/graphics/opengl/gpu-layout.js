@@ -559,6 +559,20 @@ export function clientReads(slots, min, max){
 }
 
 /**
+ * The locked range a draw reads inside, or null: GL_EXT_compiled_vertex_array
+ * promises its arrays do not change while locked, so a renderer may read the
+ * whole range once and draw every pass from that. A draw reaching outside it
+ * is read as any other.
+ *
+ * @param {{ lock?: { first: number, count: number, epoch: number } | null }} request
+ * @param {number} min @param {number} max  the vertices the draw reaches
+ */
+export function lockedFor(request, min, max){
+    const lock = request.lock;
+    return lock && min >= lock.first && max < lock.first + lock.count ? lock : null;
+}
+
+/**
  * The list indices of a draw whose vertices are numbered `first` onward,
  * through an index list when it has one: what a non-list mode is drawn with.
  *

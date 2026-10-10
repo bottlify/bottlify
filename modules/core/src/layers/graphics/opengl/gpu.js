@@ -49,8 +49,8 @@ import { identity, invert, multiply, transpose } from './matrix.js';
 import { normalMatrix } from './lighting.js';
 import { FACE_STRIDE, createTextureObject, levelKey } from './objects.js';
 import {
-    CANONICAL_LAYOUT, clientReads, expandIndices, isList, packVertices, planLayout, scanIndices,
-    topologyOf,
+    CANONICAL_LAYOUT, clientReads, expandIndices, isList, lockedFor, packVertices, planLayout,
+    scanIndices, topologyOf,
 } from './gpu-layout.js';
 import {
     FRAGMENT_PROGRAM_BINDING, FRAGMENT_PROGRAM_GROUP, VARYING_TEXCOORDS,
@@ -276,6 +276,8 @@ function describeCensus(texture){
  * @property {readonly import('./gpu-layout.js').ArrayRequest[]} arrays
  * @property {(address: number, length: number) => Uint8Array} read   client memory
  * @property {(name: number) => import('./objects.js').BufferObject | undefined} bufferObject
+ * @property {{ first: number, count: number, epoch: number } | null} [lock]
+ *     GL_EXT_compiled_vertex_array's locked range, while the arrays are locked
  */
 
 /**
@@ -373,6 +375,8 @@ export function createGpuRenderer(services){
      * @property {number} id
      * @property {string[]} dump     the frame's lines, when one was asked for
      * @property {Set<string>} dumped  the program texts the dump already holds
+     * @property {Map<string, any>} locked  the locked ranges this frame copied
+     *     (`lockedFor`), by epoch, slot base and stride
      * @property {{ draws: number, clears: number, copies: number, refused: number,
      *               skipped: number, cut: number, merged: number }} counts
      */
@@ -1037,6 +1041,9 @@ export function createGpuRenderer(services){
         {
             recording = {
                 commands: [], pipelines: [], slots: new Map(), id: nextFrame++, dump: [],
+                // The locked ranges this frame copied, by epoch, slot base and stride.
+                /** @type {Map<string, any>} */
+                locked: new Map(),
                 dumped: new Set(),
                 counts: {
                     draws: 0, clears: 0, copies: 0, refused: 0, skipped: 0, cut: 0, merged: 0,
@@ -2099,9 +2106,27 @@ export function createGpuRenderer(services){
         }
         const min = scanned ? scanned.min : request.first;
         const max = scanned ? scanned.max : request.first + request.count - 1;
-        const { from, reads } = clientReads(layout.slots, min, max);
+        // A draw inside a locked range reads the whole range, once an epoch
+        // and frame: the passes of a surface drawn from it bind that copy.
+        const lock = lockedFor(request, min, max);
+        const { from, reads } = lock
+            ? clientReads(layout.slots, lock.first, lock.first + lock.count - 1)
+            : clientReads(layout.slots, min, max);
         const slots = layout.slots.map((slot, index)=>{
             const read = reads[index];
+            if (read && lock)
+            {
+                const copies = recordingOf(context).locked;
+                const key = `${lock.epoch}:${slot.base}:${slot.stride}`;
+                const kept = copies.get(key);
+                if (kept)
+                {
+                    return kept;
+                }
+                const copy = scratchVertices.write(request.read(read.at, read.length));
+                copies.set(key, copy);
+                return copy;
+            }
             if (read)
             {
                 return scratchVertices.write(request.read(read.at, read.length));

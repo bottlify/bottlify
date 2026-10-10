@@ -188,8 +188,10 @@ export function installArrayCalls(context, kernel){
     pointers.color.normalised = 1;
     pointers.secondary.normalised = 1;
     let clientActive = 0;
-    /** @type {{ first: number, count: number } | null} */
+    /** @type {{ first: number, count: number, epoch: number } | null} */
     let locked = null;
+    /** How many locks the arrays have had: the epoch the next one is. */
+    let lockEpoch = 0;
 
     /** @param {string} name @returns {import('./arrays.js').ArrayPointer} */
     const pointerOf = name=>(name === 'texCoord' ? texCoordPointers[clientActive] : pointers[name]);
@@ -544,6 +546,7 @@ export function installArrayCalls(context, kernel){
             count,
             indices,
             arrays,
+            lock: locked,
             read: view ? (at, n)=>view(at, n) : ()=>new Uint8Array(0),
             bufferObject: name=>kernel.shareGroup().buffers.objects.get(name),
         });
@@ -1047,10 +1050,11 @@ export function installArrayCalls(context, kernel){
                 setError(GL.INVALID_OPERATION);
                 return;
             }
-            // Nothing is cached: the arrays are read at every draw anyway,
-            // so the lock is only the promise the program made, kept so that
-            // the unlock and the queries answer as they should.
-            locked = { first, count };
+            // The program's promise that the arrays in the range do not
+            // change until the unlock: each lock is a new epoch, and a
+            // renderer copies the range once an epoch rather than at every
+            // pass of a multi-pass surface drawn from it.
+            locked = { first, count, epoch: ++lockEpoch };
             setState(GL.ARRAY_ELEMENT_LOCK_FIRST, [first]);
             setState(GL.ARRAY_ELEMENT_LOCK_COUNT, [count]);
         },

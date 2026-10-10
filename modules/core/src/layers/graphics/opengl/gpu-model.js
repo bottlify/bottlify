@@ -17,13 +17,19 @@
  * knows the bytes the twin's renderer will.
  */
 
-import { clientReads, planLayout, scanIndices } from './gpu-layout.js';
+import { clientReads, lockedFor, planLayout, scanIndices } from './gpu-layout.js';
 
 export function createModelRenderer(){
     /** @type {WeakMap<object, { width: number, height: number }>} */
     const drawables = new WeakMap();
     let frames = 0;
     const settled = Promise.resolve();
+    /**
+     * The locked ranges read this frame, as `gpu.js` keeps their copies: a
+     * pass drawn from one reads nothing more, and nothing more is sent.
+     * @type {Set<string>}
+     */
+    const lockedRead = new Set();
     /** Draws assembled vertex by vertex, as `gpu.js` counts them. */
     const assembled = { draws: 0, vertices: 0, byReason: /** @type {Record<string, number>} */ ({}) };
 
@@ -71,13 +77,27 @@ export function createModelRenderer(){
                 ? scanIndices(indices.bytes, indices.type, request.count) : null;
             const min = scanned ? scanned.min : request.first;
             const max = scanned ? scanned.max : request.first + request.count - 1;
-            for (const read of clientReads(layout.slots, min, max).reads)
-            {
-                if (read)
+            const lock = lockedFor(request, min, max);
+            const { reads } = lock
+                ? clientReads(layout.slots, lock.first, lock.first + lock.count - 1)
+                : clientReads(layout.slots, min, max);
+            layout.slots.forEach((slot, index)=>{
+                const read = reads[index];
+                if (!read)
                 {
-                    request.read(read.at, read.length);
+                    return;
                 }
-            }
+                if (lock)
+                {
+                    const key = `${lock.epoch}:${slot.base}:${slot.stride}`;
+                    if (lockedRead.has(key))
+                    {
+                        return;
+                    }
+                    lockedRead.add(key);
+                }
+                request.read(read.at, read.length);
+            });
             return true;
         },
 
@@ -103,6 +123,7 @@ export function createModelRenderer(){
                 return null;
             }
             frames++;
+            lockedRead.clear();
             return { width: target.width, height: target.height };
         },
 

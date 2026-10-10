@@ -1854,3 +1854,27 @@ test('a ranged draw starts at its first vertex by the base vertex, not in the or
         assert.deepEqual(order, [0, 1, 2, 0, 2, 3], 'the shared order, unwritten by either draw');
     }
 });
+
+test('the passes drawn inside one array lock read the locked range once', async()=>{
+    // GL_EXT_compiled_vertex_array: a multi-pass surface draws the same
+    // arrays once a pass, and was copied once a pass.
+    const r = rig();
+    const { context } = r;
+    triangle(r, 0x1000);
+    context.glEnableClientState(GL.VERTEX_ARRAY);
+    context.glVertexPointer(3, GL.FLOAT, STRIDE, 0x1000);
+    r.words(0x2000, [0, 1, 2]);
+    context.glLockArraysEXT(0, 3);
+    context.glDrawElements(GL.TRIANGLES, 3, GL.UNSIGNED_INT, 0x2000);
+    context.glDrawElements(GL.TRIANGLES, 3, GL.UNSIGNED_INT, 0x2000);
+    context.glUnlockArraysEXT();
+    context.glDrawElements(GL.TRIANGLES, 3, GL.UNSIGNED_INT, 0x2000);
+    await r.swap();
+    const copies = r.gpu.of('writeBuffer')
+        .filter(w=>/gl-scratch-vertices/.test(w.buffer.descriptor.label));
+    const bytes = copies.reduce((sum, w)=>sum + w.size, 0);
+    assert.equal(bytes, 2 * 3 * STRIDE,
+        'once for the two locked passes, once for the unlocked draw');
+    const indices = r.gpu.of('drawIndexed').reduce((sum, call)=>sum + call.args[0], 0);
+    assert.equal(indices, 9, 'every pass drawn, joined or not');
+});
