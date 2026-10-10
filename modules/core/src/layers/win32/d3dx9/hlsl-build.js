@@ -26,6 +26,7 @@
  */
 
 import { TargetError, USAGE } from './hlsl-ir.js';
+import * as hm from './hlsl-math.js';
 
 /** @typedef {import('./hlsl-ir.js').Src} Src */
 /** @typedef {import('./hlsl-ir.js').VReg} VReg */
@@ -92,9 +93,9 @@ const FOLD = {
     lrp: v=>f32(f32(v[0] * f32(v[1] - v[2])) + v[2]),
     rcp: v=>(v[0] === 0 ? Infinity : f32(1 / v[0])),
     rsq: v=>(v[0] === 0 ? Infinity : f32(1 / Math.sqrt(Math.abs(v[0])))),
-    exp: v=>f32(2 ** v[0]),
-    pow: v=>f32(Math.abs(v[0]) ** v[1]),
-    log: v=>(v[0] === 0 ? -Infinity : f32(Math.log2(Math.abs(v[0])))),
+    exp: v=>f32(hm.exp2(v[0])),
+    pow: v=>f32(hm.pow(Math.abs(v[0]), v[1])),
+    log: v=>(v[0] === 0 ? -Infinity : f32(hm.log2(Math.abs(v[0])))),
 };
 
 /**
@@ -862,7 +863,7 @@ export function createBuilder(profile){
         const values = literal(a);
         if (values)
         {
-            return { cos: imm(values.map(x=>Math.cos(x))), sin: imm(values.map(x=>Math.sin(x))) };
+            return { cos: imm(values.map(x=>hm.cos(x))), sin: imm(values.map(x=>hm.sin(x))) };
         }
         const turns = mad(a, num(1 / TWO_PI, a.w), num(0.5, a.w));
         const reduced = mad(frc(turns), num(TWO_PI, a.w), num(-Math.PI, a.w));

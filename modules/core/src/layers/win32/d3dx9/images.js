@@ -33,6 +33,8 @@ export const IFF = Object.freeze({ BMP: 0, JPG: 1, TGA: 2, PNG: 3, DDS: 4 });
  * @property {number} format       The D3DFORMAT the file holds its texels in (D3DXIMAGE_INFO's).
  * @property {number} mipLevels    Levels the file holds.
  * @property {Level[]} levels      Largest first; uncompressed ones already in the working form.
+ * @property {Level[][]} [faces]   A cube map's six faces, +X, -X, +Y, -Y, +Z, -Z, each its
+ *                                 levels as `levels` holds them; `levels` is the first face's.
  */
 
 /** An image this module cannot read: D3DXERR_INVALIDDATA, with the reason. */
@@ -66,8 +68,45 @@ export function readImage(bytes){
     return readTga(bytes);
 }
 
+/**
+ * A bitmap as an RT_BITMAP resource holds it -- its BITMAPINFOHEADER or
+ * BITMAPCOREHEADER, colour table and bits, with no file header -- made the
+ * file it would be on disk, whose header says where the bits start: after the
+ * info header, the three masks a 40-byte header with BI_BITFIELDS has, and the
+ * colour table (biClrUsed entries, or all 2^bits of a palette that names none).
+ *
+ * @param {Uint8Array} dib
+ * @returns {Uint8Array}
+ */
+export function bitmapFile(dib){
+    const view = viewOf(dib);
+    const headerSize = dib.length >= 4 ? view.getUint32(0, true) : 0;
+    const core = headerSize === 12;
+    if ((!core && headerSize < 40) || dib.length < headerSize)
+    {
+        throw new ImageError('a bitmap resource shorter than its header');
+    }
+    const bits = view.getUint16(core ? 10 : 14, true);
+    const compression = core ? 0 : view.getUint32(16, true);
+    const used = core ? 0 : view.getUint32(32, true);
+    const colours = bits <= 8 ? used || 1 << bits : used;
+    const offset = 14 + headerSize + (compression === 3 && headerSize === 40 ? 12 : 0)
+        + colours * (core ? 3 : 4);
+    const file = new Uint8Array(14 + dib.length);
+    const header = new DataView(file.buffer);
+    file.set([0x42, 0x4d]);
+    header.setUint32(2, file.length, true);
+    header.setUint32(10, offset, true);
+    file.set(dib, 14);
+    return file;
+}
+
 /** @param {Uint8Array} bytes */
 const viewOf = bytes=>new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+
+/** DDS_HEADER's dwCaps2: a cube map, and the bits of its six faces. */
+const DDSCAPS2_CUBEMAP = 0x200;
+const DDSCAPS2_ALL_FACES = 0xfc00;
 
 /** DDS_PIXELFORMAT flags. */
 const DDPF = { ALPHAPIXELS: 0x1, ALPHA: 0x2, FOURCC: 0x4, RGB: 0x40, LUMINANCE: 0x20000 };
@@ -164,9 +203,11 @@ function readDds(bytes){
     const flags = view.getUint32(8, true);
     const mipCount = (flags & 0x20000) ? Math.max(1, view.getUint32(28, true)) : 1;
     const caps2 = view.getUint32(112, true);
-    if (caps2 & 0x200)
+    const cube = (caps2 & DDSCAPS2_CUBEMAP) !== 0;
+    if (cube && (caps2 & DDSCAPS2_ALL_FACES) !== DDSCAPS2_ALL_FACES)
     {
-        throw new ImageError('a cube map: not a 2D texture');
+        // A face left out would be a face of nothing; D3DX's cube textures have six.
+        throw new ImageError('a cube map without all six faces');
     }
     if ((caps2 & 0x200000) && view.getUint32(24, true) > 1)
     {
@@ -181,31 +222,40 @@ function readDds(bytes){
     {
         throw new ImageError(`a DDS of format ${format}: not read yet`);
     }
-    /** @type {Level[]} */
-    const levels = [];
+    /** @type {Level[][]} */
+    const faces = [];
     let at = 128;
-    for (let level = 0; level < mipCount; level++)
+    for (let face = 0; face < (cube ? 6 : 1); face++)
     {
-        const w = Math.max(1, width >> level);
-        const h = Math.max(1, height >> level);
-        const layout = layoutOf(format, w, h);
-        const size = layout.rowBytes * layout.rows;
-        if (at + size > bytes.length)
+        /** @type {Level[]} */
+        const levels = [];
+        for (let level = 0; level < mipCount; level++)
         {
-            if (level === 0)
+            const w = Math.max(1, width >> level);
+            const h = Math.max(1, height >> level);
+            const layout = layoutOf(format, w, h);
+            const size = layout.rowBytes * layout.rows;
+            if (at + size > bytes.length)
             {
-                throw new ImageError('a DDS file cut short');
+                // A face's levels follow the one before's whole chain, so a cube
+                // map cut anywhere has its later faces at unknown places.
+                if (level === 0 || cube)
+                {
+                    throw new ImageError('a DDS file cut short');
+                }
+                break;
             }
-            break;
+            const data = bytes.subarray(at, at + size);
+            levels.push(isCompressed(format)
+                ? { width: w, height: h, format, data }
+                : { width: w, height: h, format: FMT.A8R8G8B8,
+                    data: decodeTexels(format, data, w, h) });
+            at += size;
         }
-        const data = bytes.subarray(at, at + size);
-        levels.push(isCompressed(format)
-            ? { width: w, height: h, format, data }
-            : { width: w, height: h, format: FMT.A8R8G8B8,
-                data: decodeTexels(format, data, w, h) });
-        at += size;
+        faces.push(levels);
     }
-    return { fileFormat: IFF.DDS, width, height, format, mipLevels: mipCount, levels };
+    return { fileFormat: IFF.DDS, width, height, format, mipLevels: mipCount,
+        levels: faces[0], ...(cube ? { faces } : {}) };
 }
 
 /** @param {Uint8Array} bytes @returns {Image} */

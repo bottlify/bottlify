@@ -1450,6 +1450,10 @@ export function createWin32Module(){
                         /** @param {number} address @param {number} length @param {boolean} open */
                         pageAccess: (address, length, open)=>
                             memory.pageAccess?.(address, length, open) === true,
+                        systemCounts: ()=>({
+                            processes: Math.max(1, (kernel.processes?.all() ?? []).length),
+                            threads: Math.max(1, kernel.threads().length),
+                        }),
                     }),
                     ...createProcessFunctions({
                         performanceFrequency: config?.performanceFrequency,
@@ -2155,6 +2159,8 @@ export function createWin32Module(){
                         libraries['KERNEL32.dll'].K32EmptyWorkingSet.handler(args) },
                     GetProcessMemoryInfo: { argBytes: 12, handler: (/** @type {number[]} */ args)=>
                         libraries['KERNEL32.dll'].K32GetProcessMemoryInfo.handler(args) },
+                    GetPerformanceInfo: { argBytes: 8, handler: (/** @type {number[]} */ args)=>
+                        libraries['KERNEL32.dll'].K32GetPerformanceInfo.handler(args) },
                 },
 
                 'CRYPT32.dll': createCrypt32Functions({
@@ -2377,7 +2383,47 @@ export function createWin32Module(){
                     glyph: (/** @type {number} */ code, /** @type {any} */ font)=>
                         config?.graphics?.glyph?.(code, font) ?? null,
                     callGuest: call=>bridge.callGuest(call),
-                    currentThread: ()=>kernel.currentThread() })),
+                    currentThread: ()=>kernel.currentThread(),
+                    // The FromFile and FromResource functions read the same
+                    // volume and modules the program does; SaveToFile writes it.
+                    readFile: async path=>{
+                        const entry = volume.stat(path);
+                        const node = entry && !entry.isDirectory
+                            ? volume.open(path, { read: true }) : null;
+                        if (!entry || !node)
+                        {
+                            return null;
+                        }
+                        try
+                        {
+                            return await volume.read(node, 0, entry.size);
+                        }
+                        finally
+                        {
+                            volume.close(node);
+                        }
+                    },
+                    writeFile: (path, bytes)=>{
+                        const node = volume.open(path,
+                            { read: false, write: true, create: true, truncate: true });
+                        if (!node)
+                        {
+                            return false;
+                        }
+                        try
+                        {
+                            return volume.write(node, 0, bytes) === bytes.length;
+                        }
+                        finally
+                        {
+                            volume.close(node);
+                        }
+                    },
+                    resource: (module, name, type)=>{
+                        const entry = modules.findResource?.(module, type, name) ?? null;
+                        const base = modules.moduleBase?.(module) ?? 0;
+                        return entry ? readMemory(base + entry.rva, entry.size) : null;
+                    } })),
 
                 'WINSPOOL.DRV': createSpoolerFunctions({ setLastError: setError, readMemory,
                     writeMemory }),

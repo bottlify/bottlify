@@ -16,8 +16,14 @@ const D3DERR_INVALIDCALL = 0x8876086c;
 const OPEN = 0x1111;
 const CLOSE = 0x2222;
 
-/** A guest with a heap, a place for COM objects, and an include that serves some files. */
-function guest(files = {}){
+/**
+ * A guest with a heap, a place for COM objects, and an include that serves some
+ * files; the files and RT_RCDATA resources the host reads are `disk`'s.
+ *
+ * @param {Record<string, string>} [files]
+ * @param {Record<string, string>} [disk]  By path, and resources by `module:name`.
+ */
+function guest(files = {}, disk = {}){
     const memory = new Uint8Array(0x100000);
     const view = new DataView(memory.buffer);
     let free = 0x20000;
@@ -32,6 +38,12 @@ function guest(files = {}){
     const fns = /** @type {any} */ (createD3dxFunctions({
         readMemory: (address, length)=>memory.subarray(address, address + length),
         writeMemory: (address, bytes)=>memory.set(bytes, address),
+        readFile: async path=>{
+            opened.push(`disk:${path}`);
+            return path in disk ? Uint8Array.from(disk[path], c=>c.charCodeAt(0)) : null;
+        },
+        resource: (module, name, type)=>(type === 10 && `${module}:${name}` in disk
+            ? Uint8Array.from(disk[`${module}:${name}`], c=>c.charCodeAt(0)) : null),
         heap: { allocate: bytes=>{
             const at = free;
             free += bytes + 15 & ~15;
@@ -271,6 +283,48 @@ test('D3DXAssembleShader expands the program\'s macros and names the bad line', 
     assert.equal(g.view.getUint32(out, true), 0, 'no shader');
     assert.match(/** @type {string} */ (g.text(out + 4)), /^memory\(4\): error: [^\n]*\n$/,
         'one error, on the bad line; the macros expanded');
+});
+
+test('D3DXAssembleShaderFromFile reads the file, its includes from beside it when the program'
+    + ' gives no ID3DXInclude; a file not there answers D3DXERR_INVALIDDATA', async()=>{
+    const g = guest({}, { 'shaders\\tint.psh': 'ps_2_0\n#include "body.inc"\n',
+        'shaders\\body.inc': ASSEMBLY.replace('ps_2_0', '') });
+    const out = 0x800;
+    assert.equal(g.fns.D3DXAssembleShaderFromFileA.argBytes, 24);
+    assert.equal(await g.fns.D3DXAssembleShaderFromFileA.handler([g.put('shaders\\tint.psh'), 0, 0,
+        0, out, out + 4]), 0);
+    assert.deepEqual(g.opened, ['disk:shaders\\tint.psh', 'disk:shaders\\body.inc']);
+    const tokens = words(g.buffer(out), g.memory);
+    assert.equal(tokens[0], 0xffff0200);
+    const wide = 0xc00;
+    [...'none.psh\0'].forEach((c, i)=>g.view.setUint16(wide + i * 2, c.charCodeAt(0), true));
+    g.view.setUint32(out, 0xdead, true);
+    assert.equal(await g.fns.D3DXAssembleShaderFromFileW.handler([wide, 0, 0, 0, out, out + 4]),
+        0x88760b59);
+    assert.equal(g.view.getUint32(out, true), 0, 'no shader');
+    assert.equal(g.fns.D3DXAssembleShaderFromFileA.handler([0, 0, 0, 0, out, out + 4]),
+        D3DERR_INVALIDCALL);
+});
+
+test('the shader functions read a file or an RT_RCDATA resource as the in-memory form reads its'
+    + ' data', async()=>{
+    const g = guest({}, { 'p.hlsl': PIXEL, '4194304:7': ASSEMBLY });
+    const out = 0x800;
+    assert.equal(g.fns.D3DXCompileShaderFromFileA.argBytes, 36);
+    assert.equal(g.fns.D3DXCompileShaderFromResourceA.argBytes, 40);
+    assert.equal(g.fns.D3DXPreprocessShaderFromFileA.argBytes, 20);
+    assert.equal(g.fns.D3DXAssembleShaderFromResourceW.argBytes, 28);
+    assert.equal(await g.fns.D3DXCompileShaderFromFileA.handler([g.put('p.hlsl'), 0, 0,
+        g.put('main'), g.put('ps_2_0'), 0, out, out + 4, out + 8]), 0);
+    assert.equal(words(g.buffer(out), g.memory)[0], 0xffff0200);
+    assert.notEqual(g.view.getUint32(out + 8, true), 0, 'a constant table');
+    assert.equal(await g.fns.D3DXAssembleShaderFromResourceA.handler([0x400000, 7, 0, 0, 0, out,
+        out + 4]), 0);
+    assert.equal(await g.fns.D3DXPreprocessShaderFromFileA.handler([g.put('p.hlsl'), 0, 0, out,
+        out + 4]), 0);
+    assert.match(/** @type {string} */ (g.text(out)), /tex2D\(Diffuse, uv\) \* Tint/);
+    assert.equal(await g.fns.D3DXCompileShaderFromResourceA.handler([0x400000, 8, 0, 0, 0,
+        g.put('ps_2_0'), 0, out, out + 4, out + 8]), 0x88760b59, 'no such resource');
 });
 
 test('D3DXDisassembleShader lists what D3DXAssembleShader wrote, and refuses what is no shader',

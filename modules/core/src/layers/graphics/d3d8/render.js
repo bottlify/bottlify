@@ -50,8 +50,10 @@ import {
     constantBlocks, createProgramCache, samplerDimension, shapeKey, vertexLayoutOf,
 } from '../webgpu/internal/programmable.js';
 import {
-    FOG_RANGE_LOCATION, HYBRID_CONSTANTS, fixedVertexStage, translateShader, varyingLocation,
+    FOG_RANGE_LOCATION, HYBRID_CONSTANTS, VERTEX_SAMPLER_BINDING, fixedVertexStage, translateShader,
+    varyingLocation,
 } from '../d3d9/wgsl.js';
+import { D3DVERTEXTEXTURESAMPLER0 } from '../d3d9/samplerstates.js';
 import { D3DDECLUSAGE } from '../d3d9/declaration.js';
 import { decodeS3tc } from '../webgpu/internal/s3tc.js';
 import { toHalf } from '../d3d9/half.js';
@@ -2089,7 +2091,34 @@ export function pipelineStateOf(model, shape){
         ...(shape.depthFormat !== undefined && hasStencil(shape.depthFormat)
             && (model.renderStates.get(STENCIL_RS.ENABLE) ?? 0) !== 0
             ? { stencil: stencilOf(model) } : {}),
+        ...blendConstantOf(model),
     };
+}
+
+/** D3DBLEND_BLENDFACTOR and D3DBLEND_INVBLENDFACTOR, Direct3D 9's alone. */
+const CONSTANT_FACTORS = new Set([14, 15]);
+
+/**
+ * The colour D3DRS_BLENDFACTOR names, for a blend that reads it. It is a
+ * state of the pass in WebGPU, not of the pipeline, so it travels with the
+ * draw and stays out of the pipeline's key; a draw that does not read it
+ * carries none, and the pass keeps whatever the last one set.
+ *
+ * @param {any} model
+ * @returns {{ blendConstant?: number }}
+ */
+function blendConstantOf(model){
+    const rs = (/** @type {number} */ state)=>model.renderStates.get(state) ?? 0;
+    if (rs(D3DRS.ALPHABLENDENABLE) === 0)
+    {
+        return {};
+    }
+    const separate = rs(D3DRS9.SEPARATEALPHABLENDENABLE) !== 0;
+    const factors = [rs(D3DRS.SRCBLEND), rs(D3DRS.DESTBLEND),
+        ...(separate ? [rs(D3DRS9.SRCBLENDALPHA), rs(D3DRS9.DESTBLENDALPHA)] : [])];
+    return factors.some(factor=>CONSTANT_FACTORS.has(factor))
+        ? { blendConstant: (model.renderStates.get(D3DRS9.BLENDFACTOR) ?? 0xffffffff) >>> 0 }
+        : {};
 }
 
 /** The stencil render states, the same numbers in Direct3D 8 and 9. */
@@ -5121,6 +5150,7 @@ export function createRenderer(options){
         }
         const made = samplerPlan.map((/** @type {any} */ planned, /** @type {number} */ index)=>({
             stage: planned.stage,
+            binding: planned.binding,
             texture: boundTextures[index],
             record: boundTextures[index] ? textures.get(boundTextures[index]) : null,
             view: boundViews[index],
@@ -5474,15 +5504,26 @@ export function createRenderer(options){
                 `vertex stage of shader ${program.vertexId} was not drawn: ${vertex.error}`);
             return null;
         }
-        const samplerPlan = pixel.samplers.map((/** @type {any} */ entry)=>{
-            const lod = lodOf(model.textures.get(entry.index));
+        // A vertex shader's sampler n is D3DVERTEXTEXTURESAMPLER0 + n, bound
+        // after the pixel samplers from VERTEX_SAMPLER_BINDING on.
+        /** @param {any} entry @param {number} stage @param {number} binding */
+        const planOf = (entry, stage, binding)=>{
+            const lod = lodOf(model.textures.get(stage));
             return {
-                stage: entry.index,
+                stage,
+                binding,
                 dimension: samplerDimension(entry.type),
                 lod,
-                sampler: programSamplerFor(model.stageStates(entry.index), lod),
+                sampler: programSamplerFor(model.stageStates(stage), lod),
             };
-        });
+        };
+        const samplerPlan = [
+            ...pixel.samplers.map((/** @type {any} */ entry, /** @type {number} */ at)=>
+                planOf(entry, entry.index, at * 2)),
+            ...(vertex.samplers ?? []).map((/** @type {any} */ entry, /** @type {number} */ at)=>
+                planOf(entry, D3DVERTEXTEXTURESAMPLER0 + entry.index,
+                    VERTEX_SAMPLER_BINDING + at * 2)),
+        ];
         const state = {
             ...pipelineStateOf(model, {
                 fvf: 0, topology, ...formatsOf(model), stages: [], lighting: null,
@@ -6354,15 +6395,15 @@ export function createRenderer(options){
      * list of bindings, which a draw that binds what the one before bound
      * shares with it.
      *
-     * @param {{ view: any, sampler: any }[]} samplerBindings
+     * @param {{ view: any, sampler: any, binding?: number }[]} samplerBindings
      */
     const samplerEntriesOf = samplerBindings=>{
         let entries = samplerEntries.get(samplerBindings);
         if (entries === undefined)
         {
             entries = samplerBindings.flatMap((bound, index)=>[
-                { binding: index * 2, resource: bound.view },
-                { binding: index * 2 + 1, resource: bound.sampler },
+                { binding: bound.binding ?? index * 2, resource: bound.view },
+                { binding: (bound.binding ?? index * 2) + 1, resource: bound.sampler },
             ]);
             samplerEntries.set(samplerBindings, entries);
         }
@@ -8556,17 +8597,24 @@ export function createRenderer(options){
     }
 
     /**
-     * The stencil reference a draw under the stencil test compares with: a
-     * state of the pass rather than of the pipeline, so set with each such
-     * draw.
+     * The stencil reference and blend constant a draw compares with and
+     * blends by: states of the pass rather than of the pipeline, so set with
+     * each draw that reads them.
      *
      * @param {any} pass @param {any} command
      */
-    function referStencil(pass, command){
+    function referPassState(pass, command){
         const stencil = command.state?.stencil;
         if (stencil)
         {
             pass.setStencilReference(stencil.ref);
+        }
+        const constant = command.state?.blendConstant;
+        if (constant !== undefined)
+        {
+            // D3DCOLOR is ARGB in a DWORD.
+            pass.setBlendConstant({ r: (constant >>> 16 & 0xff) / 255, g: (constant >>> 8 & 0xff) / 255,
+                b: (constant & 0xff) / 255, a: (constant >>> 24) / 255 });
         }
     }
 
@@ -8579,7 +8627,7 @@ export function createRenderer(options){
     function replayProgram(pass, pipeline, command){
         const program = command.program;
         pass.setPipeline(pipeline.gpu);
-        referStencil(pass, command);
+        referPassState(pass, command);
         pass.setBindings(0, pipeline.bindGroupLayouts[0],
             blockEntries(pass, program.vertexBlocks));
         pass.setBindings(1, pipeline.bindGroupLayouts[1],
@@ -8796,7 +8844,7 @@ export function createRenderer(options){
                 }
             }
             pass.setPipeline(pipeline.gpu);
-            referStencil(pass, command);
+            referPassState(pass, command);
             // Bound at once and kept by nothing, unless a check keeps it.
             const block = command.check
                 ? pass.uniforms(command.uniforms)
@@ -8857,7 +8905,7 @@ export function createRenderer(options){
                     pass.setScissor(scissor);
                 }
                 pass.setPipeline(pipeline.gpu);
-                referStencil(pass, command);
+                referPassState(pass, command);
                 pass.setBindings(0, pipeline.bindGroupLayout, entries);
                 pass.setVertexBuffer(0, command.vertices.gpu, command.vertices.offset);
                 bindStreams(pass, command);

@@ -101,9 +101,18 @@ test('a device that advertises shaders fills the fields a program checks alongsi
 
 test('the default device advertises the model the renderer draws whole', ()=>{
     const words = capabilityWords(DEFAULT_CAPS);
-    assert.equal(words.VertexShaderVersion, 0xfffe0200);
-    assert.equal(words.PixelShaderVersion, 0xffff0200);
-    assert.ok(words.MaxVertexShaderConst >= 96);
+    assert.equal(words.VertexShaderVersion, 0xfffe0300);
+    assert.equal(words.PixelShaderVersion, 0xffff0300);
+    assert.ok(words.MaxVertexShaderConst >= 256);
+    // Model 3's floor: what a program checks before it takes the 3.0 path.
+    assert.equal(words.VS20Caps_Caps & 1, 1, 'D3DVS20CAPS_PREDICATION');
+    assert.equal(words.VS20Caps_DynamicFlowControlDepth, 24);
+    assert.equal(words.VS20Caps_StaticFlowControlDepth, 4);
+    assert.equal(words.PS20Caps_Caps, 0x1f);
+    assert.equal(words.PS20Caps_NumInstructionSlots, 512);
+    assert.ok(words.MaxVertexShader30InstructionSlots >= 512);
+    assert.ok(words.MaxPixelShader30InstructionSlots >= 512);
+    assert.notEqual(words.VertexTextureFilterCaps, 0, 'vertex textures are read');
 });
 
 test('table fog is claimed over both depths it is taken over', ()=>{
@@ -117,12 +126,14 @@ test('table fog is claimed over both depths it is taken over', ()=>{
 test('what the renderer does not do is not claimed', ()=>{
     const words = capabilityWords(DEFAULT_CAPS);
     assert.equal(words.TextureOpCaps, 0x03feffff, 'the operations the combiner draws');
-    assert.equal(words.StencilCaps, 0, 'no stencil test in the pipeline');
+    assert.equal(words.StencilCaps, 0x1ff, 'every stencil operation, and two-sided stencil');
     assert.equal(words.RasterCaps & 0x00010000, 0x00010000, 'D3DPRASTERCAPS_FOGRANGE');
     assert.equal(words.MaxUserClipPlanes, 0, 'no clipping against user planes');
     assert.equal(words.RasterCaps & 0x01000000, 0x01000000,
         'D3DPRASTERCAPS_SCISSORTEST: draws and clears are cut to the scissor');
-    assert.equal(words.StencilCaps & 0x100, 0, 'no two-sided stencil');
+    assert.equal(words.RasterCaps & 0x06020000, 0x06020000,
+        'DEPTHBIAS, SLOPESCALEDEPTHBIAS and ANISOTROPY, which the pipeline and sampler read');
+    assert.equal(words.RasterCaps & 0x00002000, 0, 'no MIPMAPLODBIAS, which nothing reads');
     assert.equal(words.TextureCaps & 0x10800, 0x10800,
         'cube maps and their chains, which the renderer samples');
     assert.equal(words.CubeTextureFilterCaps, words.TextureFilterCaps);
@@ -133,7 +144,7 @@ test('what the renderer does not do is not claimed', ()=>{
     assert.equal(words.NumSimultaneousRTs, 1);
     assert.equal(words.StretchRectFilterCaps, 0x03000300,
         'point and linear, minifying and magnifying');
-    assert.equal(words.MaxAnisotropy, 1);
+    assert.equal(words.MaxAnisotropy, 16, 'WebGPU\'s ceiling');
     assert.equal(words.Caps2 & 0x00020000, 0, 'no full-screen gamma');
     assert.equal(words.Caps2 & 0x40000000, 0x40000000,
         'D3DCAPS2_CANAUTOGENMIPMAP: the renderer makes the levels');

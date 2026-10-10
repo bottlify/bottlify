@@ -824,10 +824,16 @@ export async function buildEffect(source, options = {}){
         {
             continue;
         }
-        const model = shapeOf(g.type, g.decl.type, g.name, g.semantic,
+        const objectInit = objectInits.get(g.decl) ?? null;
+        // `string list[] = {...}`: the checker never saw the list, taken out
+        // above, so the length it leaves open is the list's. An open length
+        // reaching the description would read as four billion elements.
+        const type = g.type.kind === 'array' && g.type.length < 0 && objectInit
+            ? { ...g.type, length: objectInit.kind === 'initlist' ? objectInit.items.length : 1 }
+            : g.type;
+        const model = shapeOf(type, g.decl.type, g.name, g.semantic,
             g.mods.includes('shared') ? PARAMETER.SHARED : 0);
         model.annotations = annotationsOf(g.decl.annotations);
-        const objectInit = objectInits.get(g.decl) ?? null;
         if (g.init)
         {
             const value = module.evaluateConstant(g.init);

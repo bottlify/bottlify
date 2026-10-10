@@ -176,6 +176,7 @@ export function versionToken(kind, major, minor){
  * @property {string} name
  * @property {number} control      The opcode-specific control bits, e.g. a comparison.
  * @property {boolean} predicated
+ * @property {Operand} [predicate]  The p0 component a predicated instruction runs under.
  * @property {boolean} coissue
  * @property {Operand | null} dest
  * @property {Operand[]} sources
@@ -353,17 +354,6 @@ export function parseShader(tokens){
             instructions.push(instruction);
             continue;
         }
-        if (instruction.predicated)
-        {
-            // The predicate register comes first, before the destination,
-            // and is a source like any other.
-            const predicate = readOperand();
-            if (!predicate)
-            {
-                return stop('predicated without a predicate', start);
-            }
-            instruction.sources.push(predicate);
-        }
         if (info.dest > 0)
         {
             const dest = readOperand();
@@ -372,6 +362,18 @@ export function parseShader(tokens){
                 return stop(`${info.name} without a destination`, start);
             }
             instruction.dest = dest;
+        }
+        if (instruction.predicated)
+        {
+            // The predicate token follows the destination (there is none on
+            // breakp, callnz and if, which read it as their own source), and
+            // is kept apart from the sources it would otherwise shift.
+            const predicate = readOperand();
+            if (!predicate)
+            {
+                return stop('predicated without a predicate', start);
+            }
+            instruction.predicate = predicate;
         }
         if (modelTwo)
         {

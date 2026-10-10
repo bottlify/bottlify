@@ -236,6 +236,7 @@ function lookUp(table, value, what){
  *     A point list, which WebGPU draws only a pixel wide: each point is drawn
  *     as a quad of its size instead, its vertex read once an instance.
  * @property {StencilState} [stencil]
+ * @property {number} [blendConstant]  D3DRS_BLENDFACTOR, a D3DCOLOR; set on the pass, not keyed.
  *     D3DRS_STENCILENABLE on a target with a stencil: absent, no stencil test.
  */
 

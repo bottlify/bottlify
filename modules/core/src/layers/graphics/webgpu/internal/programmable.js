@@ -26,6 +26,7 @@
  */
 
 import { pipelineDescriptor, pipelineKey, vertexBuffersOf } from './pipeline.js';
+import { VERTEX_SAMPLER_BINDING } from '../../d3d9/wgsl.js';
 
 /**
  * D3DDECLTYPE → the WebGPU vertex format, and the shape the shader reads.
@@ -233,9 +234,14 @@ export function createProgramCache({ backend }){
     let built = 0;
     let reused = 0;
 
-    /** @param {readonly string[]} dimensions  Each sampler's: '2d', 'cube' or '3d'. */
-    const layoutsFor = dimensions=>{
-        const key = dimensions.join(',');
+    /**
+     * @param {readonly string[]} dimensions  Each pixel sampler's: '2d', 'cube' or '3d'.
+     * @param {readonly string[]} [vertexDimensions]  Each vertex sampler's, bound
+     *     from VERTEX_SAMPLER_BINDING on.
+     */
+    const layoutsFor = (dimensions, vertexDimensions = [])=>{
+        const key = vertexDimensions.length > 0
+            ? `${dimensions.join(',')}|v${vertexDimensions.join(',')}` : dimensions.join(',');
         const samplerCount = dimensions.length;
         const existing = layouts.get(key);
         if (existing)
@@ -258,6 +264,15 @@ export function createProgramCache({ backend }){
             samplerEntries.push(
                 { binding: index * 2 + 1, visibility: FRAGMENT_STAGE, sampler: {} });
         }
+        vertexDimensions.forEach((dimension, index)=>{
+            // A vertex texture is read at a level, never filtered between texels'
+            // derivatives, so it binds as a plain sampled texture like the rest.
+            samplerEntries.push({ binding: VERTEX_SAMPLER_BINDING + index * 2,
+                visibility: VERTEX_STAGE,
+                texture: dimension === '2d' ? {} : { viewDimension: dimension } });
+            samplerEntries.push({ binding: VERTEX_SAMPLER_BINDING + index * 2 + 1,
+                visibility: VERTEX_STAGE, sampler: {} });
+        });
         const groups = [
             constants(VERTEX_STAGE),
             constants(FRAGMENT_STAGE),
@@ -298,6 +313,8 @@ export function createProgramCache({ backend }){
                 ]);
                 const descriptor = pipelineDescriptor(state, null);
                 const bound = layoutsFor(program.pixel.samplers.map(
+                    (/** @type {{ type: string }} */ entry)=>samplerDimension(entry.type)),
+                (program.vertex.samplers ?? []).map(
                     (/** @type {{ type: string }} */ entry)=>samplerDimension(entry.type)));
                 return {
                     bindGroupLayouts: bound.groups,
@@ -333,7 +350,7 @@ export function createProgramCache({ backend }){
  * @typedef {Object} ProgramSource
  *     What a programmable pipeline is built from.
  * @property {string} key   Names the shader pair and the layout, for the cache.
- * @property {{ wgsl: string, entry: string }} vertex
+ * @property {{ wgsl: string, entry: string, samplers?: { index: number, type: string }[] }} vertex
  * @property {{ wgsl: string, entry: string, samplers: { index: number, type: string }[] }} pixel
  * @property {VertexInputLayout} layout
  */

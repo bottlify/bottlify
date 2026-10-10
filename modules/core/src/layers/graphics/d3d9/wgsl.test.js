@@ -129,7 +129,9 @@ test('the arithmetic instructions become the statements they mean', ()=>{
             'r0 = d3dNrm4(c[1]);'],
         ['sincos', [op(OPCODE.SINCOS, 4), dst(r, 0), src(c, 1), src(c, 2), src(c, 3)],
             'r0 = vec4f(cos(c[1].x), sin(c[1].x), 0.0, 0.0);'],
-        ['mova', [op(OPCODE.MOVA, 2), dst(REGISTER.ADDR, 0), src(c, 1)], 'a0 = round(c[1]);'],
+        // floor(x + 0.5), as the documented pseudo-code and the reference machine round.
+        ['mova', [op(OPCODE.MOVA, 2), dst(REGISTER.ADDR, 0), src(c, 1)],
+            'a0 = floor(c[1] + vec4f(0.5));'],
         ['expp', [op(OPCODE.EXPP, 2), dst(r, 0), src(c, 1)], 'r0 = vec4f(exp2(c[1].w));'],
         ['logp', [op(OPCODE.LOGP, 2), dst(r, 0), src(c, 1)], 'r0 = vec4f(d3dLog(c[1].w));'],
     ]);
@@ -139,6 +141,18 @@ test('the arithmetic instructions become the statements they mean', ()=>{
         assert.equal(translated.error, null, `${name} translates`);
         assertLine(translated.wgsl, line);
     }
+});
+
+test('vs_1_1 loads the address register with mov, which floors', ()=>{
+    // The register is read through i32(), which truncates towards zero: a
+    // copied -0.5 would index the register above the one Windows reads.
+    const parsed = parseShader([versionToken(SHADER_KIND.VERTEX, 1, 1), ...dclInput(0, 0),
+        op(OPCODE.MOV, 2), dst(REGISTER.ADDR, 0), src(REGISTER.CONST, 1),
+        op(OPCODE.MOV, 2), dst(REGISTER.RASTOUT, 0), src(REGISTER.INPUT, 0), END_TOKEN]);
+    assert.equal(parsed.error, null);
+    const translated = translateShader(parsed);
+    assert.equal(translated.error, null);
+    assertLine(translated.wgsl, 'a0 = floor(c[1]);');
 });
 
 test('the pixel-stage instructions become the statements they mean', ()=>{
@@ -610,17 +624,129 @@ test('a co-issued cnd of 1.1 to 1.3 takes its second source', ()=>{
     assert.ok(phased.wgsl.includes('> vec4f(0.5)'), 'ps_1_4 compares');
 });
 
-test('what is not translated is reported rather than emitted wrong', ()=>{
-    const predicated = vertexBody([
-        (op(OPCODE.MOV, 3) | (1 << 28)) >>> 0, src(REGISTER.PREDICATE, 0), dst(REGISTER.TEMP, 0),
-        src(REGISTER.CONST, 0),
+test('a predicated write keeps each component its predicate is false for', ()=>{
+    // setp_gt p0, c0, c1, then (p0) mov r0, c2 and (!p0.y) add r1, c2, c3.
+    const translated = vertexBody([
+        op(OPCODE.SETP, 3, 1), dst(REGISTER.PREDICATE, 0), src(REGISTER.CONST, 0),
+        src(REGISTER.CONST, 1),
+        (op(OPCODE.MOV, 3) | (1 << 28)) >>> 0, dst(REGISTER.TEMP, 0), src(REGISTER.PREDICATE, 0),
+        src(REGISTER.CONST, 2),
+        (op(OPCODE.ADD, 4) | (1 << 28)) >>> 0, dst(REGISTER.TEMP, 1),
+        src(REGISTER.PREDICATE, 0, 0x55, 13), src(REGISTER.CONST, 2), src(REGISTER.CONST, 3),
     ]);
-    assert.match(predicated.error ?? '', /predicated/);
-    const called = vertexBody([op(OPCODE.CALL, 1), src(REGISTER.LABEL, 3)]);
-    assert.match(called.error ?? '', /subroutines/);
-    const setp = vertexBody([op(OPCODE.SETP, 3, 1), dst(REGISTER.PREDICATE, 0),
-        src(REGISTER.CONST, 0), src(REGISTER.CONST, 1)]);
-    assert.match(setp.error ?? '', /predicated/);
+    assert.equal(translated.error, null);
+    assertLine(translated.wgsl,
+        '{ let _t = c[0] > c[1]; p0 = vec4<bool>(_t.x, _t.y, _t.z, _t.w); }');
+    assertLine(translated.wgsl, 'r0 = select(r0, c[2], p0);');
+    assertLine(translated.wgsl, 'r1 = select(r1, (c[2] + c[3]), (!p0.yyyy));');
+    assertLine(translated.wgsl, 'var p0: vec4<bool> = vec4<bool>(false);');
+});
+
+test('breakp and callnz read one component of the predicate', ()=>{
+    const translated = vertexBody([
+        op(OPCODE.REP, 1), src(REGISTER.CONSTINT, 0),
+        op(OPCODE.BREAKP, 1), src(REGISTER.PREDICATE, 0, 0xaa),
+        op(OPCODE.ENDREP, 0),
+        op(OPCODE.CALLNZ, 2), src(REGISTER.LABEL, 1), src(REGISTER.PREDICATE, 0, 0xff, 13),
+        op(OPCODE.RET, 0),
+        op(OPCODE.LABEL, 1), src(REGISTER.LABEL, 1),
+        op(OPCODE.MOV, 2), dst(REGISTER.TEMP, 2), src(REGISTER.CONST, 4),
+        op(OPCODE.RET, 0),
+    ]);
+    assert.equal(translated.error, null);
+    assertLine(translated.wgsl, 'if (p0.z) { break; }');
+    assertLine(translated.wgsl, 'if ((!p0.w)) {');
+    assertLine(translated.wgsl, 'r2 = c[4];');
+});
+
+test('a subroutine is inlined at each call, and its ret leaves it from inside a loop', ()=>{
+    // call l0 twice; l0: rep i0 { if b0 { ret } add r0, r0, c0 } ret.
+    const parsed = parseShader([VS_2_0, ...dclInput(0, 0),
+        op(OPCODE.CALL, 1), src(REGISTER.LABEL, 0),
+        op(OPCODE.CALL, 1), src(REGISTER.LABEL, 0),
+        op(OPCODE.MOV, 2), dst(REGISTER.RASTOUT, 0), src(REGISTER.TEMP, 0),
+        op(OPCODE.RET, 0),
+        op(OPCODE.LABEL, 1), src(REGISTER.LABEL, 0),
+        op(OPCODE.REP, 1), src(REGISTER.CONSTINT, 0),
+        op(OPCODE.IF, 1), src(REGISTER.CONSTBOOL, 0),
+        op(OPCODE.RET, 0),
+        op(OPCODE.ENDIF, 0),
+        op(OPCODE.ADD, 3), dst(REGISTER.TEMP, 0), src(REGISTER.TEMP, 0), src(REGISTER.CONST, 0),
+        op(OPCODE.ENDREP, 0),
+        op(OPCODE.RET, 0),
+        END_TOKEN]);
+    assert.equal(parsed.error, null);
+    const translated = translateShader(parsed);
+    assert.equal(translated.error, null);
+    assert.equal(translated.wgsl.split('r0 = (r0 + c[0]);').length - 1, 2,
+        'inlined at both calls');
+    assertLine(translated.wgsl, 'var _ret0 = false;');
+    assertLine(translated.wgsl, '_ret0 = true;');
+    assertLine(translated.wgsl, 'if (_ret0) { break; }');
+    assertLine(translated.wgsl, 'var _ret1 = false;');
+    assert.ok(!translated.wgsl.includes('return out;\n    out.oPos'),
+        'main\'s ret ends nothing early');
+});
+
+test('vs_3_0 writes o[aL + n] and ps_3_0 reads v[aL + n] through arrays of the file', ()=>{
+    const output = (/** @type {number} */ usage, /** @type {number} */ register)=>[
+        op(OPCODE.DCL, 2), (0x80000000 | usage) >>> 0, dst(REGISTER.OUTPUT, register)];
+    // loop aL, i0; mov o[aL + 1], c0; endloop; mov o0, v0.
+    const vertex = translateShader(parseShader([VS_3_0, ...dclInput(0, 0),
+        ...output(D3DDECLUSAGE.POSITION, 0), ...output(D3DDECLUSAGE.TEXCOORD, 1),
+        ...output(D3DDECLUSAGE.TEXCOORD, 2),
+        op(OPCODE.LOOP, 2), src(REGISTER.LOOP, 0), src(REGISTER.CONSTINT, 0),
+        op(OPCODE.MOV, 3), (dst(REGISTER.OUTPUT, 1) | RELATIVE) >>> 0, src(REGISTER.LOOP, 0),
+        src(REGISTER.CONST, 0),
+        op(OPCODE.ENDLOOP, 0),
+        op(OPCODE.MOV, 2), dst(REGISTER.OUTPUT, 0), src(REGISTER.INPUT, 0),
+        END_TOKEN]));
+    assert.equal(vertex.error, null);
+    assertLine(vertex.wgsl, 'oRel[1 + aL] = c[0];');
+    assertLine(vertex.wgsl, 'oRel[0] = v0;');
+    assertLine(vertex.wgsl, 'out.oPos = oRel[0];');
+    assertLine(vertex.wgsl, 'out.o2 = oRel[2];');
+
+    const pixel = translateShader(parseShader([PS_3_0,
+        op(OPCODE.DCL, 2), (0x80000000 | D3DDECLUSAGE.TEXCOORD) >>> 0, dst(REGISTER.INPUT, 0),
+        op(OPCODE.DCL, 2), (0x80000000 | (1 << 16) | D3DDECLUSAGE.TEXCOORD) >>> 0,
+        dst(REGISTER.INPUT, 1),
+        op(OPCODE.LOOP, 2), src(REGISTER.LOOP, 0), src(REGISTER.CONSTINT, 0),
+        op(OPCODE.ADD, 4), dst(REGISTER.TEMP, 0), src(REGISTER.TEMP, 0),
+        (src(REGISTER.INPUT, 0) | RELATIVE) >>> 0, src(REGISTER.LOOP, 0),
+        op(OPCODE.ENDLOOP, 0),
+        op(OPCODE.MOV, 2), dst(REGISTER.COLOROUT, 0), src(REGISTER.TEMP, 0),
+        END_TOKEN]));
+    assert.equal(pixel.error, null);
+    assertLine(pixel.wgsl, 'let vIn = array<vec4f, 10>(in.v0, in.v1, vec4f(0.0), vec4f(0.0),'
+        + ' vec4f(0.0), vec4f(0.0), vec4f(0.0), vec4f(0.0), vec4f(0.0), vec4f(0.0));');
+    assertLine(pixel.wgsl, 'r0 = (r0 + vIn[0 + aL]);');
+});
+
+test('a call nobody can answer is refused by name', ()=>{
+    const missing = vertexBody([op(OPCODE.CALL, 1), src(REGISTER.LABEL, 3)]);
+    assert.match(missing.error ?? '', /l3, which the shader does not define/);
+    const recursive = vertexBody([
+        op(OPCODE.CALL, 1), src(REGISTER.LABEL, 0),
+        op(OPCODE.RET, 0),
+        op(OPCODE.LABEL, 1), src(REGISTER.LABEL, 0),
+        op(OPCODE.CALL, 1), src(REGISTER.LABEL, 0),
+        op(OPCODE.RET, 0),
+    ]);
+    assert.match(recursive.error ?? '', /recursive call to l0/);
+});
+
+test('an inner loop\'s aL gives the outer loop its own back', ()=>{
+    const translated = vertexBody([
+        op(OPCODE.LOOP, 2), src(REGISTER.LOOP, 0), src(REGISTER.CONSTINT, 0),
+        op(OPCODE.LOOP, 2), src(REGISTER.LOOP, 0), src(REGISTER.CONSTINT, 1),
+        op(OPCODE.ENDLOOP, 0),
+        op(OPCODE.ADD, 3), dst(REGISTER.TEMP, 0), src(REGISTER.TEMP, 0), src(REGISTER.CONST, 0),
+        op(OPCODE.ENDLOOP, 0),
+    ]);
+    assert.equal(translated.error, null);
+    assertLine(translated.wgsl, 'let _aL1 = aL;');
+    assertLine(translated.wgsl, 'aL = _aL1;');
 });
 
 test('a declared input takes the shape the declaration gives, and a missing one the default', ()=>{

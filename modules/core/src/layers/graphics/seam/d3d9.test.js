@@ -377,11 +377,11 @@ test('the root makes a device and describes itself in the shape the header gives
     h.box.services.writeMemory(caps, new Uint8Array(D3DCAPS9.SIZE).fill(0xcd));
     assert.equal(h.device(device, 'GetDeviceCaps', [caps]), D3D_OK);
     assert.equal(h.fields.readU32(caps + D3DCAPS9.DeviceType), D3DDEVTYPE.HAL);
-    assert.equal(h.fields.readU32(caps + D3DCAPS9.VertexShaderVersion), 0xfffe0200);
-    assert.equal(h.fields.readU32(caps + D3DCAPS9.PixelShaderVersion), 0xffff0200);
+    assert.equal(h.fields.readU32(caps + D3DCAPS9.VertexShaderVersion), 0xfffe0300);
+    assert.equal(h.fields.readU32(caps + D3DCAPS9.PixelShaderVersion), 0xffff0300);
     assert.equal(h.fields.readU32(caps + D3DCAPS9.MaxTextureWidth), 4096);
     assert.equal(h.fields.readU32(caps + D3DCAPS9.NumSimultaneousRTs), 1);
-    assert.equal(h.fields.readU32(caps + D3DCAPS9.MaxPixelShader30InstructionSlots), 0,
+    assert.equal(h.fields.readU32(caps + D3DCAPS9.MaxPixelShader30InstructionSlots), 512,
         'the last field was written, so nothing past it was');
     assert.equal(h.fields.readF32(caps + D3DCAPS9.MaxPointSize), 64);
     assert.equal(h.device(device, 'GetDeviceCaps', [0]), D3DERR_INVALIDCALL);

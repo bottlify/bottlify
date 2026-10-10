@@ -76,6 +76,9 @@ const D3DPRASTERCAPS_FOGRANGE = 0x00010000;
 const D3DPRASTERCAPS_WFOG = 0x00100000;
 const D3DPRASTERCAPS_ZFOG = 0x00200000;
 const D3DPRASTERCAPS_SCISSORTEST = 0x01000000;
+const D3DPRASTERCAPS_ANISOTROPY = 0x00020000;
+const D3DPRASTERCAPS_SLOPESCALEDEPTHBIAS = 0x02000000;
+const D3DPRASTERCAPS_DEPTHBIAS = 0x04000000;
 
 /** NEVER, LESS, EQUAL, LESSEQUAL, GREATER, NOTEQUAL, GREATEREQUAL, ALWAYS. */
 const ALL_COMPARE_CAPS = 0x000000ff;
@@ -103,9 +106,19 @@ const D3DPTFILTERCAPS_MIPFPOINT = 0x00010000;
 const D3DPTFILTERCAPS_MIPFLINEAR = 0x00020000;
 const D3DPTFILTERCAPS_MAGFPOINT = 0x01000000;
 const D3DPTFILTERCAPS_MAGFLINEAR = 0x02000000;
+const D3DPTFILTERCAPS_MINFANISOTROPIC = 0x00000400;
+const D3DPTFILTERCAPS_MAGFANISOTROPIC = 0x04000000;
+const D3DVS20CAPS_PREDICATION = 0x00000001;
+/** D3DPS20CAPS_ARBITRARYSWIZZLE, GRADIENTINSTRUCTIONS, PREDICATION, NODEPENDENTREADLIMIT, NOTEXINSTRUCTIONLIMIT. */
+const PS20_MODEL_3_CAPS = 0x1f;
+
 const FILTER_CAPS = D3DPTFILTERCAPS_MINFPOINT | D3DPTFILTERCAPS_MINFLINEAR
     | D3DPTFILTERCAPS_MIPFPOINT | D3DPTFILTERCAPS_MIPFLINEAR
-    | D3DPTFILTERCAPS_MAGFPOINT | D3DPTFILTERCAPS_MAGFLINEAR;
+    | D3DPTFILTERCAPS_MAGFPOINT | D3DPTFILTERCAPS_MAGFLINEAR
+    | D3DPTFILTERCAPS_MINFANISOTROPIC | D3DPTFILTERCAPS_MAGFANISOTROPIC;
+
+/** KEEP through DECR, every operation the pipeline maps, and the counter-clockwise set. */
+const STENCIL_CAPS = 0x1ff;
 
 const D3DPTADDRESSCAPS_WRAP = 0x00000001;
 const D3DPTADDRESSCAPS_MIRROR = 0x00000002;
@@ -176,11 +189,12 @@ export function capabilityWords(caps, identity = {}){
         PrimitiveMiscCaps: D3DPMISCCAPS_MASKZ | D3DPMISCCAPS_CULLNONE | D3DPMISCCAPS_CULLCW
             | D3DPMISCCAPS_CULLCCW | D3DPMISCCAPS_COLORWRITEENABLE | D3DPMISCCAPS_BLENDOP
             | D3DPMISCCAPS_SEPARATEALPHABLEND,
-        // No depth bias, no anisotropy, no level bias: the renderer reads none
-        // of those states.
+        // Depth bias and anisotropy are the pipeline's and the sampler's; no
+        // level bias, which the sampler does not read.
         RasterCaps: D3DPRASTERCAPS_DITHER | D3DPRASTERCAPS_ZTEST | D3DPRASTERCAPS_FOGVERTEX
             | D3DPRASTERCAPS_FOGTABLE | D3DPRASTERCAPS_FOGRANGE | D3DPRASTERCAPS_WFOG
-            | D3DPRASTERCAPS_ZFOG | D3DPRASTERCAPS_SCISSORTEST,
+            | D3DPRASTERCAPS_ZFOG | D3DPRASTERCAPS_SCISSORTEST | D3DPRASTERCAPS_ANISOTROPY
+            | D3DPRASTERCAPS_DEPTHBIAS | D3DPRASTERCAPS_SLOPESCALEDEPTHBIAS,
         ZCmpCaps: ALL_COMPARE_CAPS,
         SrcBlendCaps: BLEND_CAPS,
         DestBlendCaps: BLEND_CAPS,
@@ -207,15 +221,14 @@ export function capabilityWords(caps, identity = {}){
         MaxVolumeExtent: caps.maxVolumeExtent,
         MaxTextureRepeat: 8192,
         MaxTextureAspectRatio: caps.maxTextureWidth,
-        MaxAnisotropy: 1,
+        MaxAnisotropy: caps.maxAnisotropy,
         MaxVertexW: caps.maxVertexW,
         GuardBandLeft: -1e9,
         GuardBandTop: -1e9,
         GuardBandRight: 1e9,
         GuardBandBottom: 1e9,
         ExtentsAdjust: 0,
-        // The pipeline has no stencil test, so no stencil operation is promised.
-        StencilCaps: 0,
+        StencilCaps: STENCIL_CAPS,
         FVFCaps: D3DFVFCAPS_PSIZE | 8,
         TextureOpCaps: TEXTURE_OP_CAPS,
         MaxTextureBlendStages: caps.maxTextureBlendStages,
@@ -254,16 +267,24 @@ export function capabilityWords(caps, identity = {}){
         // StretchRect stretches on the GPU, point or linear: D3DPTFILTERCAPS_MINFPOINT,
         // MINFLINEAR, MAGFPOINT and MAGFLINEAR.
         StretchRectFilterCaps: 0x00000100 | 0x00000200 | 0x01000000 | 0x02000000,
-        VS20Caps_Caps: 0,
-        VS20Caps_DynamicFlowControlDepth: 0,
+        // Model 3's floor, which the translator meets whole: predication,
+        // dynamic flow 24 deep and static flow 4, arbitrary swizzles,
+        // gradients and no limit on dependent reads or texture instructions.
+        VS20Caps_Caps: vs.major >= 3 ? D3DVS20CAPS_PREDICATION : 0,
+        VS20Caps_DynamicFlowControlDepth: vs.major >= 3 ? 24 : 0,
         VS20Caps_NumTemps: vs.major >= 2 ? 32 : 0,
-        VS20Caps_StaticFlowControlDepth: 0,
-        PS20Caps_Caps: 0,
-        PS20Caps_DynamicFlowControlDepth: 0,
+        VS20Caps_StaticFlowControlDepth: vs.major >= 3 ? 4 : 0,
+        PS20Caps_Caps: ps.major >= 3 ? PS20_MODEL_3_CAPS : 0,
+        PS20Caps_DynamicFlowControlDepth: ps.major >= 3 ? 24 : 0,
         PS20Caps_NumTemps: ps.major >= 2 ? 32 : 0,
-        PS20Caps_StaticFlowControlDepth: 0,
-        PS20Caps_NumInstructionSlots: ps.major >= 2 ? 96 : 0,
-        VertexTextureFilterCaps: 0,
+        PS20Caps_StaticFlowControlDepth: ps.major >= 3 ? 4 : 0,
+        PS20Caps_NumInstructionSlots: ps.major >= 3 ? 512 : ps.major >= 2 ? 96 : 0,
+        // A vertex texture is read through the sampler its states make,
+        // point or linear.
+        VertexTextureFilterCaps: vs.major >= 3
+            ? D3DPTFILTERCAPS_MINFPOINT | D3DPTFILTERCAPS_MINFLINEAR
+                | D3DPTFILTERCAPS_MAGFPOINT | D3DPTFILTERCAPS_MAGFLINEAR
+            : 0,
         MaxVShaderInstructionsExecuted: vs.major >= 2 ? 65535 : 0,
         MaxPShaderInstructionsExecuted: ps.major >= 2 ? 65535 : 0,
         MaxVertexShader30InstructionSlots: vs.major >= 3 ? 512 : 0,

@@ -64,6 +64,7 @@ export const SAMPLER_BYTES = [[64, 128, 192, 255], [255, 32, 96, 160], [16, 240,
  * @property {number} [samplers]
  * @property {string[]} [special]    Instructions with forms of their own, by name.
  * @property {boolean} [flow]        Whether to try if, rep and loop blocks.
+ * @property {boolean} [predicated]  Whether p0 exists: setp, predicated writes, if p0, breakp.
  */
 
 /** @param {() => number} next @param {string} r @param {string} s */
@@ -107,10 +108,10 @@ export const PROFILES = {
         tail: ['mov oPos, r0', 'mov oT0, r1', 'mov oD0, r3'],
     },
     vs_3_0: {
-        name: 'vs_3_0', vertex: true, flow: true,
-        special: ['pow', 'lit', 'm4x4', 'm3x3', 'sincos3'],
+        name: 'vs_3_0', vertex: true, flow: true, predicated: true,
+        special: ['pow', 'lit', 'm4x4', 'm3x3', 'sincos3', 'texldl'],
         head: ['dcl_position v0', 'dcl_texcoord0 v1', 'dcl_color v2', 'dcl_position o0',
-            'dcl_texcoord0 o1', 'dcl_color o2'],
+            'dcl_texcoord0 o1', 'dcl_color o2', 'dcl_2d s0', 'dcl_2d s1'],
         init: ['mov r0, v0', 'mov r1, v1', 'mov r2, c0', 'mov r3, v2'],
         temps: ['r0', 'r1', 'r2', 'r3'], reads: ['v0', 'v1', 'v2', 'c1', 'c2', 'c3', 'c9'],
         masks: MASKS, swizzles: SWIZZLES, scalars: SCALARS,
@@ -133,7 +134,7 @@ export const PROFILES = {
         sourceForms: [plain, plain, negated], tail: ['mov oC0, r0'],
     },
     ps_3_0: {
-        name: 'ps_3_0', vertex: false, samplers: 2, flow: true,
+        name: 'ps_3_0', vertex: false, samplers: 2, flow: true, predicated: true,
         special: ['pow', 'sincos3', 'texkill', 'dsx', 'dsy', 'vpos', 'vface'],
         head: ['dcl_texcoord0 v0', 'dcl_texcoord1 v1', 'dcl_color0 v2', 'dcl vPos.xy', 'dcl vFace',
             'dcl_2d s0', 'dcl_2d s1'],
@@ -205,6 +206,19 @@ function instruction(p, next){
     {
         return block(p, next);
     }
+    if (p.predicated && next() < 0.15)
+    {
+        // Under the predicate, or a fresh comparison into some of it.
+        if (next() < 0.3)
+        {
+            return [`setp_${pick(next, ['gt', 'lt', 'ge', 'le', 'eq', 'ne'])}`
+                + ` p0${pick(next, MASKS)}, ${source(false)}, ${source(false)}`];
+        }
+        const guard = `(${next() < 0.4 ? '!' : ''}p0${pick(next, ['', '.x', '.y', '.z', '.w',
+            '.wzyx', '.xxyy'])})`;
+        return instruction({ ...p, predicated: false, flow: false, special: [] }, next)
+            .filter(line=>!line.startsWith('+')).map(line=>`${guard} ${line}`);
+    }
     const kind = pick(next, kinds);
     const op = pick(next, /** @type {any} */ (p)[kind]);
     const mod = pick(next, p.dmods);
@@ -239,6 +253,7 @@ function special(p, next, name, source, dest){
         case 'sincos3':
             return [`sincos ${temp()}${pick(next, ['.x', '.y', '.xy'])}, ${source(true)}`];
         case 'texkill': return [`texkill ${pick(next, p.temps)}`];
+        case 'texldl': return [`texldl ${dest()}, ${source(false)}, s${Math.floor(next() * 2)}`];
         case 'dsx': return [`dsx ${dest()}, ${source(false)}`];
         case 'dsy': return [`dsy ${dest()}, ${source(false)}`];
         case 'vpos': return [`add ${dest()}, vPos.xyxy, ${source(false)}`];
@@ -267,8 +282,20 @@ function block(p, next){
         return lines;
     };
     const temp = pick(next, p.temps);
-    switch (Math.floor(next() * 5))
+    switch (Math.floor(next() * 7))
     {
+        case 5:
+            if (p.predicated && next() < 0.5)
+            {
+                const component = pick(next, ['.x', '.y', '.z', '.w']);
+                return next() < 0.5
+                    ? [`if ${next() < 0.5 ? '!' : ''}p0${component}`, ...inner(), 'endif']
+                    : ['rep i0', ...inner(), `breakp ${next() < 0.5 ? '!' : ''}p0${component}`,
+                        ...inner(), 'endrep'];
+            }
+            return [`call l${Math.floor(next() * SUBROUTINES)}`];
+        case 6: return [`callnz l${Math.floor(next() * SUBROUTINES)}, ${next() < 0.5 ? '!' : ''}`
+            + `b${Math.floor(next() * 4)}`];
         case 0: return [`if b${Math.floor(next() * 4)}`, ...inner(), 'endif'];
         case 1: return [`if b${Math.floor(next() * 4)}`, ...inner(), 'else', ...inner(), 'endif'];
         case 2:
@@ -280,10 +307,48 @@ function block(p, next){
     }
 }
 
+/** The subroutines a profile with flow control has, l0 and l1. */
+const SUBROUTINES = 2;
+
 /**
- * @param {Profile} p @param {string[]} body
+ * The bodies of the subroutines: a few instructions, a ret from inside a
+ * branch or a loop now and then, and l1 calling l0.
+ *
+ * @param {Profile} p @param {() => number} next
+ * @returns {string[][]}
  */
-const programText = (p, body)=>[p.name, ...p.head, ...p.init, ...body, ...p.tail].join('\n');
+function subroutines(p, next){
+    const plainOne = ()=>instruction({ ...p, flow: false, special: [] }, next)
+        .filter(line=>!line.startsWith('+'));
+    return Array.from({ length: SUBROUTINES }, (_, k)=>{
+        const lines = [...plainOne(), ...plainOne()];
+        const temp = pick(next, p.temps);
+        const roll = next();
+        if (roll < 0.3)
+        {
+            lines.splice(1, 0, `if b${Math.floor(next() * 4)}`, ...plainOne(), 'ret', 'endif');
+        }
+        else if (roll < 0.6)
+        {
+            lines.push('rep i0', ...plainOne(), `if_gt ${temp}.x, c1.y`, 'ret', 'endif',
+                ...plainOne(), 'endrep');
+        }
+        if (k > 0 && next() < 0.5)
+        {
+            lines.push('call l0');
+        }
+        return lines;
+    });
+}
+
+/**
+ * @param {Profile} p @param {string[]} body @param {string[][]} [subs]
+ */
+const programText = (p, body, subs = [])=>[p.name, ...p.head, ...p.init, ...body, ...p.tail,
+    ...(subs.length > 0
+        ? ['ret', ...subs.flatMap((lines, k)=>[`label l${k}`, ...lines, 'ret'])]
+        : []),
+].join('\n');
 
 /**
  * @typedef {Object} GateCase
@@ -314,21 +379,37 @@ const programText = (p, body)=>[p.name, ...p.head, ...p.init, ...body, ...p.tail
 export function buildCase(profile, seed, length = 10){
     const p = PROFILES[profile];
     const next = generator(seed);
+    // Subroutines only where the version has them and the bodies assemble.
+    let subs = p.flow ? subroutines(p, next) : [];
+    try
+    {
+        assemble(programText(p, [], subs));
+    }
+    catch {
+        subs = [];
+    }
     /** @type {string[]} */
-    const body = [];
+    const body = p.predicated ? [`setp_${pick(next, ['gt', 'lt', 'ge'])} p0, r0, c1`] : [];
     for (let tries = 0; body.length < length && tries < length * 20; tries++)
     {
         const candidate = instruction(p, next);
+        // Every varying is the same at the three corners, so the machine
+        // takes each derivative as zero; vPos is the one input that moves.
+        const lines = [...body, ...candidate, ...subs.flat()].join('\n');
+        if (/\bds[xy]\b/.test(lines) && /vPos/.test(lines))
+        {
+            continue;
+        }
         try
         {
-            assemble(programText(p, [...body, ...candidate]));
+            assemble(programText(p, [...body, ...candidate], subs));
             body.push(...candidate);
         }
         catch {
             // Not a shader this version allows: not taken.
         }
     }
-    const text = programText(p, body);
+    const text = programText(p, body, subs);
     const tokens = assemble(text);
 
     const ps1 = profile.startsWith('ps_1_');

@@ -91,7 +91,10 @@ const ELEMENTS = [
 ];
 const STRIDE = 24;
 
-/** @param {{ dumpDraws?: boolean, refusePipeline?: (descriptor: any) => string | null }} [options] */
+/**
+ * @param {{ dumpDraws?: boolean, refusePipeline?: (descriptor: any) => string | null,
+ *     model?: number }} [options]
+ */
 function harness(options = {}){
     const gpu = createFakeDevice({ refusePipeline: options.refusePipeline });
     /** @type {string[]} */
@@ -106,8 +109,8 @@ function harness(options = {}){
     let next = RAM_BASE;
     const d3d = createDirect3D9({
         backend,
-        vertexShaderVersion: { major: 2, minor: 0 },
-        pixelShaderVersion: { major: 2, minor: 0 },
+        vertexShaderVersion: { major: options.model ?? 2, minor: 0 },
+        pixelShaderVersion: { major: options.model ?? 2, minor: 0 },
         readMemory: (address, length)=>ram.slice(address - RAM_BASE, address - RAM_BASE + length),
         createSampler: descriptor=>({ kind: 'sampler', descriptor }),
         allocate: bytes=>{
@@ -365,6 +368,63 @@ test('a ps_1_1 reads each stage as bound, projects as the stage asks, and bumps 
         h.vb.release();
         assert.equal(h.device.release(), 0);
     });
+
+test('a vertex shader reads the texture at D3DVERTEXTEXTURESAMPLER0 through texldl', async()=>{
+    const h = harness({ model: 3 });
+    const output = (/** @type {number} */ usage, /** @type {number} */ register)=>[
+        op(OPCODE.DCL, 2), (0x80000000 | usage) >>> 0, dst(REGISTER.OUTPUT, register)];
+    /** @type {{ shader?: any }} */
+    const vs = {};
+    /** @type {{ shader?: any }} */
+    const ps = {};
+    // vs_3_0: dcl_2d s0; texldl o2, v0, s0; mov o0, v0; mov o1, v0.
+    assert.equal(h.device.CreateVertexShader([
+        versionToken(SHADER_KIND.VERTEX, 3, 0),
+        ...dclInput(D3DDECLUSAGE.POSITION, 0),
+        ...output(D3DDECLUSAGE.POSITION, 0),
+        ...output(D3DDECLUSAGE.TEXCOORD, 1),
+        ...output(D3DDECLUSAGE.COLOR, 2),
+        op(OPCODE.DCL, 2), (2 << 27) >>> 0, dst(REGISTER.SAMPLER, 0),
+        op(OPCODE.TEXLDL, 3), dst(REGISTER.OUTPUT, 2), src(REGISTER.INPUT, 0),
+        src(REGISTER.SAMPLER, 0),
+        op(OPCODE.MOV, 2), dst(REGISTER.OUTPUT, 0), src(REGISTER.INPUT, 0),
+        op(OPCODE.MOV, 2), dst(REGISTER.OUTPUT, 1), src(REGISTER.INPUT, 0),
+        END_TOKEN,
+    ], vs), D3D_OK);
+    assert.equal(h.device.CreatePixelShader(PIXEL_SHADER, ps), D3D_OK);
+    h.device.SetVertexShader(vs.shader);
+    h.device.SetPixelShader(ps.shader);
+    /** @type {{ texture?: any }} */
+    const displacement = {};
+    assert.equal(h.device.CreateTexture(4, 4, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED,
+        displacement), D3D_OK);
+    assert.equal(h.device.SetTexture(0, h.texture), D3D_OK);
+    assert.equal(h.device.SetTexture(257, displacement.texture), D3D_OK);
+    await h.draw();
+    assert.deepEqual(h.reports, []);
+
+    const vertexModule = h.gpu.of('createShaderModule')
+        .find((/** @type {any} */ call)=>call.descriptor.code.includes('@vertex'));
+    assert.ok(vertexModule.descriptor.code.includes('@binding(32) var tex0: texture_2d<f32>;'));
+    assert.ok(vertexModule.descriptor.code.includes('textureSampleLevel(tex0, samp0,'));
+    const layout = h.gpu.of('createBindGroupLayout').map((/** @type {any} */ call)=>call.descriptor)
+        .find((/** @type {any} */ one)=>String(one.label).startsWith('samplers:'));
+    assert.deepEqual(layout.entries.map((/** @type {any} */ entry)=>
+        [entry.binding, entry.visibility]), [[0, 2], [1, 2], [32, 1], [33, 1]]);
+    const entries = h.groupsOfDraw().get(2).descriptor.entries;
+    const vertexView = entries.find((/** @type {any} */ entry)=>entry.binding === 32).resource;
+    assert.equal(vertexView.texture.descriptor.size.width, 4, 'the 4x4 bound at sampler 257');
+    assert.equal(entries.find((/** @type {any} */ entry)=>entry.binding === 0).resource
+        .texture.descriptor.size.width, 2, 'the pixel stage keeps its own 2x2');
+
+    h.device.SetTexture(0, null);
+    h.device.SetTexture(257, null);
+    h.device.SetVertexShader(null);
+    h.device.SetPixelShader(null);
+    vs.shader.release();
+    ps.shader.release();
+    displacement.texture.release();
+});
 
 test('a sampler declared a cube binds the cube map\'s cube view, and nothing of another kind',
     async()=>{

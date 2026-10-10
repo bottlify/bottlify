@@ -266,6 +266,33 @@ function pageRunner(){
         .filter((/** @type {any} */ m)=>m.type === 'error')
         .map((/** @type {any} */ m)=>`${m.lineNum}:${m.linePos} ${m.message}`);
 
+    /** @type {Record<string, string>} */
+    const DIMENSIONS = { 'texture_2d<f32>': '2d', 'texture_cube<f32>': 'cube',
+        'texture_3d<f32>': '3d' };
+    /**
+     * Each sampler's 1x1 texture of known bytes and a sampler for it, view and
+     * sampler in turn: filtering and levels give back exactly those bytes.
+     *
+     * @param {any} device @param {any} plan
+     */
+    const samplerResourcesOf = (device, plan)=>plan.samplers.flatMap((/** @type {any} */ s)=>{
+        const dimension = DIMENSIONS[s.type] ?? '2d';
+        const layers = dimension === 'cube' ? 6 : 1;
+        const texture = device.createTexture({
+            size: [1, 1, layers], format: 'rgba8unorm',
+            dimension: dimension === '3d' ? '3d' : '2d',
+            usage: TEXTURE_BINDING | TEXTURE_COPY_DST,
+        });
+        const bytes = plan.samplerBytes[s.index % plan.samplerBytes.length];
+        for (let layer = 0; layer < layers; layer++)
+        {
+            device.queue.writeTexture({ texture, origin: [0, 0, layer] },
+                new Uint8Array(bytes), { bytesPerRow: 4 }, [1, 1, 1]);
+        }
+        return [texture.createView({ dimension }), device.createSampler({
+            magFilter: 'linear', minFilter: 'linear' })];
+    });
+
     /** @param {any} device @param {any} plan */
     const runVertex = async(device, plan)=>{
         const module = device.createShaderModule({ code: plan.wgsl });
@@ -274,9 +301,15 @@ function pageRunner(){
         {
             return { error: `compile: ${errors.join('; ')}` };
         }
+        // A vertex shader's samplers sit from binding 32 on, as the translator binds them.
+        const vertexSamplers = plan.samplers.flatMap((/** @type {any} */ s, /** @type {number} */ at)=>[
+            { binding: 32 + at * 2, visibility: COMPUTE,
+                texture: { sampleType: 'float', viewDimension: DIMENSIONS[s.type] ?? '2d' } },
+            { binding: 33 + at * 2, visibility: COMPUTE, sampler: { type: 'filtering' } },
+        ]);
         const layouts = [constantsLayout(device, COMPUTE),
             device.createBindGroupLayout({ entries: [] }),
-            device.createBindGroupLayout({ entries: [] }),
+            device.createBindGroupLayout({ entries: vertexSamplers }),
             device.createBindGroupLayout({ entries: [
                 { binding: 0, visibility: COMPUTE, buffer: { type: 'read-only-storage' } },
                 { binding: 1, visibility: COMPUTE, buffer: { type: 'storage' } },
@@ -292,7 +325,10 @@ function pageRunner(){
         pass.setPipeline(pipeline);
         pass.setBindGroup(0, constantsGroup(device, layouts[0], plan));
         pass.setBindGroup(1, device.createBindGroup({ layout: layouts[1], entries: [] }));
-        pass.setBindGroup(2, device.createBindGroup({ layout: layouts[2], entries: [] }));
+        const vertexResources = samplerResourcesOf(device, plan);
+        pass.setBindGroup(2, device.createBindGroup({ layout: layouts[2],
+            entries: vertexSamplers.map((/** @type {any} */ entry, /** @type {number} */ at)=>(
+                { binding: entry.binding, resource: vertexResources[at] })) }));
         pass.setBindGroup(3, device.createBindGroup({ layout: layouts[3], entries: [
             { binding: 0, resource: { buffer: buffer(device, plan.feed.flat(), STORAGE) } },
             { binding: 1, resource: { buffer: outBuffer } },
@@ -314,9 +350,7 @@ function pageRunner(){
         {
             return { error: `compile: ${errors.join('; ')}` };
         }
-        /** @type {Record<string, string>} */
-        const dims = { 'texture_2d<f32>': '2d', 'texture_cube<f32>': 'cube',
-            'texture_3d<f32>': '3d' };
+        const dims = DIMENSIONS;
         const samplerEntries = plan.samplers.flatMap((/** @type {any} */ s, /** @type {number} */ at)=>[
             { binding: at * 2, visibility: FRAGMENT,
                 texture: { sampleType: 'float', viewDimension: dims[s.type] ?? '2d' } },
@@ -336,23 +370,7 @@ function pageRunner(){
         });
         const target = device.createTexture({ size: [1, 1], format: 'rgba32float',
             usage: RENDER_ATTACHMENT | TEXTURE_COPY_SRC });
-        const samplerResources = plan.samplers.flatMap((/** @type {any} */ s)=>{
-            const dimension = dims[s.type] ?? '2d';
-            const layers = dimension === 'cube' ? 6 : 1;
-            const texture = device.createTexture({
-                size: [1, 1, layers], format: 'rgba8unorm',
-                dimension: dimension === '3d' ? '3d' : '2d',
-                usage: TEXTURE_BINDING | TEXTURE_COPY_DST,
-            });
-            const bytes = plan.samplerBytes[s.index % plan.samplerBytes.length];
-            for (let layer = 0; layer < layers; layer++)
-            {
-                device.queue.writeTexture({ texture, origin: [0, 0, layer] },
-                    new Uint8Array(bytes), { bytesPerRow: 4 }, [1, 1, 1]);
-            }
-            return [texture.createView({ dimension }), device.createSampler({
-                magFilter: 'linear', minFilter: 'linear' })];
-        });
+        const samplerResources = samplerResourcesOf(device, plan);
         const encoder = device.createCommandEncoder();
         const pass = encoder.beginRenderPass({ colorAttachments: [{
             view: target.createView(), loadOp: 'clear', storeOp: 'store',
@@ -518,6 +536,25 @@ async function main(){
             { url: `http://127.0.0.1:${server.port}/sandbox/shader-gate.html` });
         const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
         await cdp.send('Runtime.enable', {}, sessionId);
+        // A new target answers on about:blank first, where there is no
+        // navigator.gpu; the runner goes in once the gate's own page is up.
+        for (let tries = 0; ; tries++)
+        {
+            const loaded = await cdp.send('Runtime.evaluate', {
+                expression: 'location.pathname.endsWith(\'shader-gate.html\')'
+                    + ' && document.readyState === \'complete\'',
+                returnByValue: true,
+            }, sessionId);
+            if (loaded.result?.value === true)
+            {
+                break;
+            }
+            if (tries > 100)
+            {
+                throw new Error('the gate page did not load');
+            }
+            await new Promise(done=>setTimeout(done, 100));
+        }
         await cdp.send('Runtime.evaluate', { expression: `(${pageRunner.toString()})(); null` },
             sessionId);
         for (const profile of profiles)

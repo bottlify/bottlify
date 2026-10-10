@@ -457,6 +457,29 @@ test('gethostbyaddr names the loopback with this host, and getservbyname reads t
         ['gethostbyaddr', 'getservbyname'], 'and both resolve by ordinal');
 });
 
+test('getservbyport finds a service by its port in network order', ()=>{
+    // Ordinal 56 in both libraries: the port the program passes is already
+    // htons'd, and the answer is getservbyname's record.
+    const fx = fixture();
+    const view = new DataView(fx.bytes.buffer);
+    /** @param {number} at */
+    const text = at=>decodeAnsi(fx.bytes.subarray(at, fx.bytes.indexOf(0, at)));
+    const servent = fx.call('getservbyport', [0x1500, 0]);
+    assert.notEqual(servent, 0);
+    assert.equal(text(view.getUint32(servent, true)), 'ftp');
+    assert.equal(view.getUint16(servent + 8, false), 21);
+    assert.equal(text(view.getUint32(servent + 12, true)), 'tcp');
+    fx.put(NAME2, 'UDP');
+    const domain = fx.call('getservbyport', [0x3500, NAME2]);
+    assert.equal(text(view.getUint32(domain, true)), 'domain');
+    assert.equal(text(view.getUint32(domain + 12, true)), 'udp');
+    assert.equal(fx.call('getservbyport', [0x1500, NAME2]), 0, 'ftp is not listed for udp');
+    assert.equal(fx.call('WSAGetLastError', []), 11004, 'WSANO_DATA');
+    assert.equal(fx.call('getservbyport', [0x3930, 0]), 0, 'port 12345 is no service');
+    assert.deepEqual([fx.winsock.ordinals.wsock32[56], fx.winsock.ordinals.ws2_32[56]],
+        ['getservbyport', 'getservbyport']);
+});
+
 test('a resolved name is named in the hostent by the bytes it was asked by', async()=>{
     // The name is read as Windows-1252, where 0x80 is the euro sign and 0x99
     // the trade mark, and h_name goes back in that page.
@@ -540,10 +563,15 @@ test('an ordinal whose function does not exist is not offered at all', ()=>{
     // does not implement. What is exported is the intersection, computed rather
     // than maintained, so the two cannot drift apart.
     const fx = fixture();
-    assert.equal(WSOCK32_ORDINALS[56], 'getservbyport', 'the reference still records it');
-    assert.equal(56 in fx.winsock.ordinals.wsock32, false, 'and it is not offered');
-    assert.ok(Object.keys(fx.winsock.ordinals.wsock32).length
-        < Object.keys(WSOCK32_ORDINALS).length, 'something was filtered out');
+    for (const [library, reference] of /** @type {[string, Record<string, string>][]} */ ([
+        ['wsock32', WSOCK32_ORDINALS], ['ws2_32', WS2_32_ORDINALS]]))
+    {
+        const offered = /** @type {Record<string, string>} */ (
+            /** @type {any} */ (fx.winsock.ordinals)[library]);
+        assert.deepEqual(Object.keys(offered), Object.keys(reference)
+            .filter(ordinal=>reference[ordinal] in fx.winsock.sockets),
+        `${library} offers exactly the reference entries that exist`);
+    }
     assert.equal(fx.winsock.ordinals.wsock32[52], 'gethostbyname',
         'while what does exist survives');
     // The 1.1 window-message resolver is imported by number by audio
