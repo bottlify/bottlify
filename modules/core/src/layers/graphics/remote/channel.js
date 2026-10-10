@@ -177,7 +177,7 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
      * Of those bytes, the guest memory copied into them, by what copied it --
      * what a lend of buffers, or of anything else, would have left in place.
      */
-    const shipped = { buffers: 0, surfaces: 0, reads: 0, writes: 0 };
+    const shipped = { buffers: 0, surfaces: 0, reads: 0, writes: 0, dynamic: 0 };
     /** The calls the batches are made of, by method: how many, and their bytes. */
     /** @type {Map<string, { count: number, bytes: number }>} */
     const byMethod = new Map();

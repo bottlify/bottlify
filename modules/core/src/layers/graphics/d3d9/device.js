@@ -75,6 +75,7 @@ import { createAdditionalChain } from './swapchain.js';
 import { runCommands } from './commands.js';
 import { validateStages } from '../d3d8/validity.js';
 import { processStreams } from '../d3d8/process.js';
+import { reportDynamicReads } from '../d3d8/drawn.js';
 import { decodeFvf } from '../webgpu/internal/vertexformat.js';
 import { fullTarget, viewportState } from '../webgpu/internal/viewport.js';
 import { formatTraits } from '../webgpu/internal/textures.js';
@@ -476,6 +477,10 @@ const isDepthFormat = format=>FORMAT_INFO[format] !== undefined && FORMAT_INFO[f
  *     waits.
  * @property {boolean} [renderedElsewhere]  the device records for one that draws in
  *     another thread, which makes the GPU's copies there
+ * @property {(buffer: any, from: number, to: number) => void} [drawsFrom]
+ *     Told the bytes of each dynamic buffer a draw reads (`drawn.js`), by a
+ *     device that records for one drawing elsewhere, which has to be sent
+ *     what the program wrote there after the unlock.
  */
 
 /**
@@ -498,7 +503,7 @@ export function createDirect3D9(options = {}){
         backend, readMemory, windowMemory, writeMemory, createSampler, allocate: guestMemory,
         free: giveBack, divergence, dumpDraws, dumpEvery, liveDump, maxDraws, skipTexture,
         probeTexture, fog, mips, driverRules, onDeviceLost, gamma, frameQueued, renderedElsewhere,
-        keepMemory, rereadBuffers, ...caps
+        keepMemory, rereadBuffers, drawsFrom, ...caps
     } = options;
     /** @type {DeviceCaps} */
     const resolved = { ...DEFAULT_CAPS, ...caps, fullscreenGamma: gamma?.applies() === true };
@@ -511,7 +516,7 @@ export function createDirect3D9(options = {}){
         free: keepMemory === true ? undefined : giveBack, divergence, dumpDraws, dumpEvery,
         liveDump, maxDraws, skipTexture,
         probeTexture, fog, mips, driverRules, onDeviceLost, gamma, frameQueued, renderedElsewhere,
-        rereadBuffers,
+        rereadBuffers, drawsFrom,
     };
     if (backend && !readMemory)
     {
@@ -1693,6 +1698,31 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             return null;
         }
         return bias;
+    };
+
+    /**
+     * The streams a draw reads, for `drawsFrom`: those its declaration names,
+     * or stream zero's for a vertex format.
+     *
+     * @returns {{ buffer: any, offset: number, stride: number, whole: boolean }[]}
+     */
+    const drawnStreams = ()=>{
+        const elements = vertexDeclaration.declaration?.elements;
+        const read = elements && vertexDeclaration.fvf === 0
+            ? new Set(elements.map((/** @type {any} */ e)=>e.Stream)) : [0];
+        const drawn = [];
+        for (const index of read)
+        {
+            const bound = streams.get(index);
+            if (bound?.buffer)
+            {
+                // D3DSTREAMSOURCE_INSTANCEDATA: read once per instance.
+                const whole = ((streamFrequencies.get(index) ?? 1) & 0x80000000) !== 0;
+                drawn.push({ buffer: bound.buffer, offset: bound.offset, stride: bound.stride,
+                    whole });
+            }
+        }
+        return drawn;
     };
 
     /**
@@ -3201,6 +3231,11 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 return D3DERR_INVALIDCALL;
             }
             noteUndrawable();
+            if (services.drawsFrom)
+            {
+                reportDynamicReads(services.drawsFrom, drawnStreams(), startVertex,
+                    vertexCountOf(type, primitiveCount));
+            }
             renderer?.drawPrimitive(model, type, startVertex + bias, primitiveCount);
             return D3D_OK;
         },
@@ -3226,6 +3261,11 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             }
             noteUndrawable();
             baseVertexIndex = base + bias;
+            if (services.drawsFrom)
+            {
+                reportDynamicReads(services.drawsFrom, drawnStreams(), base + minIndex, numVertices,
+                    indices, startIndex, vertexCountOf(type, primitiveCount));
+            }
             renderer?.drawIndexedPrimitive(model, type, startIndex, primitiveCount, minIndex,
                 numVertices);
             return D3D_OK;

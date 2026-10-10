@@ -119,6 +119,11 @@ export function recordedDirect3D(factory, services, transport){
             }
             services.free?.(address);
         },
+        // A draw from a dynamic buffer sends what the program wrote there
+        // after the unlock: the played side's copy of guest memory has only
+        // what was sent.
+        drawsFrom: (/** @type {any} */ buffer, /** @type {number} */ from, /** @type {number} */ to)=>
+            recording?.drawsFrom(buffer, from, to),
         writeMemory: write && ((/** @type {number} */ address, /** @type {Uint8Array} */ bytes)=>{
             recording?.writing(address, bytes.length);
             write(address, bytes);

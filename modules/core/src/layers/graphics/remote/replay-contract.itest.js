@@ -147,6 +147,8 @@ function rig(version, way, caps = {}){
     /** Plays what is held, for an answer the program waits on. */
     let release = ()=>{};
     let close = ()=>{};
+    /** The guest bytes the batches carried, by what copied them; null where nothing is batched. @type {() => Record<string, number> | null} */
+    let shipped = ()=>null;
     /** @type {any} */
     let d3d;
     if (way === 'direct')
@@ -220,6 +222,7 @@ function rig(version, way, caps = {}){
                     await turns(2);
                 }
             };
+            shipped = ()=>sender.shippedBytes();
             d3d = recordedDirect3D(factory, services, sender);
         }
         else
@@ -244,10 +247,11 @@ function rig(version, way, caps = {}){
                 port1.close();
                 port2.close();
             };
+            shipped = ()=>sender.shippedBytes();
             d3d = recordedDirect3D(factory, services, sender);
         }
     }
-    return { version, way, d3d, gpu, memory, settle, release, close };
+    return { version, way, d3d, gpu, memory, settle, release, close, shipped };
 }
 
 /**
@@ -864,6 +868,112 @@ test('Direct3D 9: buffers locked plain, with DISCARD and with NOOVERWRITE, drawn
         await run.call('Release device', ()=>device.release());
         await run.look('end');
     });
+});
+
+/**
+ * A dynamic buffer locked with DISCARD and unlocked at once, then written
+ * through the pointer the lock gave and drawn from, as a game that skins its
+ * models into one does: a dynamic buffer's memory stays the buffer's after
+ * the unlock, as a driver keeps it. Each frame writes four quads, draws them
+ * every way a draw names its vertices -- from a start vertex, from a base and
+ * a minimum index, and in Direct3D 9 from a run of the command ring -- and
+ * writes one again between two draws of it. What the batches carry of it
+ * after its first draw is what was written, not the buffer.
+ *
+ * @param {8 | 9} version
+ */
+const writtenAfterUnlock = version=>async(/** @type {ReturnType<typeof runner>} */ run)=>{
+    const { device, indices } = version === 9 ? await device9(run) : await device8(run);
+    const length = 1024 * STRIDE;
+    /** @type {{ buffer?: any }} */
+    const dynamic = {};
+    await run.call('CreateVertexBuffer dynamic', ()=>device.CreateVertexBuffer(length,
+        D3DUSAGE.DYNAMIC | D3DUSAGE.WRITEONLY, FVF_LIT, D3DPOOL.DEFAULT, dynamic), [dynamic]);
+    if (version === 9)
+    {
+        await run.call('SetFVF', ()=>device.SetFVF(FVF_LIT));
+        await run.call('SetStreamSource', ()=>device.SetStreamSource(0, dynamic.buffer, 0,
+            STRIDE));
+        await run.call('SetIndices', ()=>device.SetIndices(indices));
+    }
+    else
+    {
+        await run.call('SetVertexShader', ()=>device.SetVertexShader(FVF_LIT));
+        await run.call('SetStreamSource', ()=>device.SetStreamSource(0, dynamic.buffer, STRIDE));
+    }
+    await run.call('SetRenderState LIGHTING', ()=>device.SetRenderState(D3DRS.LIGHTING, 0));
+    /** @type {number[]} */
+    const carried = [];
+    for (let frame = 0; frame < 4; frame++)
+    {
+        await run.call('BeginScene', ()=>device.BeginScene());
+        await run.call('Clear', ()=>device.Clear(0, null, D3DCLEAR.TARGET | D3DCLEAR.ZBUFFER,
+            0xff000030 + frame, 1, 0));
+        /** @type {{ pBits?: number }} */
+        const locked = {};
+        await run.call(`Lock DISCARD ${frame}`, ()=>dynamic.buffer.Lock(0, 0, locked,
+            D3DLOCK.DISCARD), [locked]);
+        await run.call(`Unlock ${frame}`, ()=>dynamic.buffer.Unlock());
+        const at = /** @type {number} */ (locked.pBits);
+        // Quads spread over the buffer, a different place each frame.
+        const quads = [0, 1, 2, 3].map(quad=>(quad * 200 + frame * 12) * 4);
+        quads.forEach((first, quad)=>writeVertices(run, at + first * STRIDE, 4 * frame + quad + 3));
+        await run.call(`DrawPrimitive ${frame}`, ()=>device.DrawPrimitive(D3DPT.TRIANGLESTRIP,
+            quads[0], 2));
+        if (version === 9)
+        {
+            await run.call(`DrawIndexedPrimitive ${frame}`, ()=>device.DrawIndexedPrimitive(
+                D3DPT.TRIANGLELIST, quads[1], 0, 4, 0, 2));
+            const records = new Uint32Array([
+                ...record(commandSlot('DrawPrimitive'), [D3DPT.TRIANGLESTRIP, quads[2], 2]),
+                ...record(commandSlot('DrawIndexedPrimitive'), [D3DPT.TRIANGLELIST, quads[3], 0,
+                    4, 0, 2]),
+            ]);
+            await run.call(`commands ${frame}`, ()=>device.commands(new Uint8Array(
+                records.buffer)));
+        }
+        else
+        {
+            await run.call(`SetIndices ${frame}`, ()=>device.SetIndices(indices, quads[1]));
+            await run.call(`DrawIndexedPrimitive ${frame}`, ()=>device.DrawIndexedPrimitive(
+                D3DPT.TRIANGLELIST, 0, 4, 0, 2));
+            await run.call(`SetIndices high ${frame}`, ()=>device.SetIndices(indices,
+                quads[3] - 2));
+            await run.call(`DrawIndexedPrimitive by its minimum ${frame}`,
+                ()=>device.DrawIndexedPrimitive(D3DPT.TRIANGLELIST, 0, 6, 0, 2));
+        }
+        // The first quad again, written between two draws of it.
+        writeVertices(run, at + quads[0] * STRIDE, 4 * frame + 40);
+        await run.call(`DrawPrimitive again ${frame}`, ()=>device.DrawPrimitive(
+            D3DPT.TRIANGLESTRIP, quads[0], 2));
+        await run.call('EndScene', ()=>device.EndScene());
+        await run.call('Present', ()=>device.Present());
+        await run.call('idle', ()=>device.idle());
+        await run.look(`frame ${frame}`);
+        const bytes = run.on.shipped();
+        if (bytes)
+        {
+            carried.push(bytes.buffers + bytes.dynamic);
+        }
+    }
+    // The first frame sends the buffer once, at its unlock and at its first
+    // draw; after it, a frame sends what it wrote -- five quads, each within
+    // a word and a span's gap of its own bytes.
+    for (let frame = 1; frame < carried.length; frame++)
+    {
+        const sent = carried[frame] - carried[frame - 1];
+        assert.ok(sent <= 5 * (4 * STRIDE + 8), `frame ${frame} carried ${sent} bytes of the`
+            + ` buffer, ${length} long`);
+    }
+    await run.call('Release dynamic', ()=>dynamic.buffer.release());
+    await run.call('Release device', ()=>device.release());
+    await run.look('end');
+};
+
+test('Direct3D 9 and 8: a dynamic buffer written after its unlock draws, through every way,'
+    + ' what was written, and carries only that', async()=>{
+    await same(9, writtenAfterUnlock(9));
+    await same(8, writtenAfterUnlock(8));
 });
 
 test('Direct3D 9: textures of every kind -- levels, a rectangle, DISCARD, cube faces,'

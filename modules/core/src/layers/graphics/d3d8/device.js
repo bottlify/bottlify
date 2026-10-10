@@ -51,6 +51,7 @@ import { GAMMA_RAMP_ENTRIES } from './structs.js';
 import { DEFAULT_RENDER_STATES, createDefaultRenderStates } from './renderstates.js';
 import { createDefaultStageStates } from './stagestates.js';
 import { IDENTITY, STAGE_COUNT, createRenderer, sameLight, vertexCountOf } from './render.js';
+import { reportDynamicReads } from './drawn.js';
 import { applyBlock, captureBlock, emptyBlock, fillBlock } from './stateblock.js';
 import { processStreams } from './process.js';
 import { POSITION_MASK, decodeFvf } from '../webgpu/internal/vertexformat.js';
@@ -304,6 +305,10 @@ function isTransformType(type){
  *     Told of every frame a present queues; what it answers is what the
  *     present waits on before it answers the program. Absent, a present never
  *     waits.
+ * @property {(buffer: any, from: number, to: number) => void} [drawsFrom]
+ *     Told the bytes of each dynamic buffer a draw reads (`drawn.js`), by a
+ *     device that records for one drawing elsewhere, which has to be sent
+ *     what the program wrote there after the unlock.
  */
 
 /**
@@ -401,7 +406,8 @@ export function createDirect3D8(options = {}){
     const {
         backend, readMemory, windowMemory, writeMemory, createSampler, allocate: guestMemory,
         free: giveBack, dumpDraws, dumpEvery, liveDump, maxDraws, divergence, skipTexture,
-        probeTexture, fog, mips, nanProbe, driverRules, onDeviceLost, gamma, frameQueued, ...caps
+        probeTexture, fog, mips, nanProbe, driverRules, onDeviceLost, gamma, frameQueued, drawsFrom,
+        ...caps
     } = options;
     /** @type {DeviceCaps} */
     const resolved = { ...DEFAULT_CAPS, ...caps, fullscreenGamma: gamma?.applies() === true };
@@ -409,7 +415,7 @@ export function createDirect3D8(options = {}){
     const services = {
         backend, readMemory, windowMemory, writeMemory, createSampler, allocate: guestMemory,
         free: giveBack, dumpDraws, dumpEvery, liveDump, maxDraws, divergence, skipTexture,
-        probeTexture, fog, mips, nanProbe, driverRules, onDeviceLost, gamma, frameQueued,
+        probeTexture, fog, mips, nanProbe, driverRules, onDeviceLost, gamma, frameQueued, drawsFrom,
     };
     if (backend && !readMemory)
     {
@@ -2145,6 +2151,11 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             {
                 return D3DERR_INVALIDCALL;
             }
+            if (services.drawsFrom)
+            {
+                reportDynamicReads(services.drawsFrom, streams.values(), startVertex,
+                    vertexCountOf(type, primitiveCount));
+            }
             if (renderer)
             {
                 renderer.drawPrimitive(model, type, startVertex, primitiveCount);
@@ -2171,6 +2182,11 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             }
             // Nothing to draw from is nothing drawn, not a failure (Wine's d3d8
             // test_draw_primitive).
+            if (services.drawsFrom && stream(0).buffer && indices)
+            {
+                reportDynamicReads(services.drawsFrom, streams.values(), baseVertexIndex + minIndex,
+                    numVertices, indices, startIndex, vertexCountOf(type, primitiveCount));
+            }
             if (renderer && stream(0).buffer && indices)
             {
                 renderer.drawIndexedPrimitive(model, type, startIndex, primitiveCount, minIndex,

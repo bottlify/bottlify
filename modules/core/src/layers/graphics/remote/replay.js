@@ -24,6 +24,7 @@
  */
 
 import { OP, SECTION, SERVICE_REF, WAIT, createReader, createSite } from './wire.js';
+import { changedSpans } from '../webgpu/internal/changed.js';
 
 /**
  * The calls whose answer the played device holds back while it has too many
@@ -311,9 +312,10 @@ function visit(value, bind){
 /**
  * What copied guest bytes into a record: a buffer's unlock, a texture's or a
  * surface's (a lent one is the lender's to count), what a call read out of
- * the program's memory, or what one wrote into it here.
+ * the program's memory, what one wrote into it here, or what a draw reads of
+ * a dynamic buffer that the program wrote after its unlock.
  *
- * @typedef {'buffers' | 'surfaces' | 'reads' | 'writes'} ShippedKind
+ * @typedef {'buffers' | 'surfaces' | 'reads' | 'writes' | 'dynamic'} ShippedKind
  */
 
 /**
@@ -344,6 +346,7 @@ function visit(value, bind){
  *     settled: () => Promise<void> | null,
  *     wrote: (address: number, bytes: Uint8Array) => void,
  *     read: (address: number, bytes: Uint8Array) => void, outward: (value: any) => any,
+ *     drawsFrom: (buffer: any, from: number, to: number) => void,
  *     adopt: (object: object) => void }}
  *     `allocated` and `freed` are told every allocation the recorded device
  *     makes and gives back, `writing` every write it is about to make into guest
@@ -351,7 +354,9 @@ function visit(value, bind){
  *     asked for so far has come, null when none is outstanding;
  *     and `read` -- by a device that reads the program's memory at the call
  *     rather than through its locks -- every read, whose bytes the played
- *     device is sent ahead of the call; `outward` is a value of the device's
+ *     device is sent ahead of the call; `drawsFrom` the bytes of a dynamic
+ *     buffer a draw reads, of which what the program wrote since they were
+ *     last sent goes ahead of the call; `outward` is a value of the device's
  *     as the caller is given it; `adopt` numbers an object of another model,
  *     unwrapped, as the next the played side binds -- what the call just
  *     recorded answered there
@@ -428,6 +433,37 @@ export function createRecording(options){
     let reads = null;
     /** How deep in calls the program is: a call the device makes back through the caller is part of its own. */
     let depth = 0;
+    /**
+     * What the played side's memory holds of each dynamic buffer a draw has
+     * read, by the buffer: it is what was last sent of it, by its unlocks
+     * and by draws (`drawsFrom`), and a draw sends only what differs from it.
+     *
+     * @type {WeakMap<object, { base: number, bytes: Uint8Array }>}
+     */
+    const sentOf = new WeakMap();
+    /** What the current call's draws read of dynamic buffers that had changed. @type {{ address: number, bytes: Uint8Array }[] | null} */
+    let drawn = null;
+    /**
+     * Where a buffer's bytes in guest memory differ from what was sent of
+     * them, made what is sent: four bytes at a time against the copy on this
+     * side, since it runs for every draw from such a buffer.
+     *
+     * @param {{ base: number, bytes: Uint8Array }} sent
+     * @param {number} from @param {number} to  in the buffer
+     * @param {{ address: number, bytes: Uint8Array }[]} into
+     */
+    const changedSince = (sent, from, to, into)=>{
+        const now = windowMemory(sent.base + from, to - from);
+        const spans = changedSpans(now, sent.bytes.subarray(from, to));
+        for (let index = 0; index < spans.length; index += 2)
+        {
+            const start = from + spans[index];
+            const end = from + spans[index + 1];
+            sent.bytes.set(now.subarray(spans[index], spans[index + 1]), start);
+            into.push({ address: sent.base + start, bytes: sent.bytes.subarray(start, end) });
+        }
+        return into;
+    };
 
     /**
      * Numbers an object, under itself and under its proxy, so that either is
@@ -1097,7 +1133,19 @@ export function createRecording(options){
                 }
                 else
                 {
-                    const unlocked = ranges.flatMap(range=>rangeFrom(range));
+                    // A dynamic buffer a draw has read is known on the other
+                    // side, so its unlock sends only what differs: a program
+                    // that unlocks all of a large one every frame sends what
+                    // it wrote, not the buffer.
+                    const sent = sentOf.get(target);
+                    const unlocked = sent && sent.base === /** @type {any} */ (target).base
+                        ? ranges.flatMap(range=>{
+                            const from = range.address - sent.base;
+                            const to = from + extentOf(range.address, range.length);
+                            return from >= 0 && to <= sent.bytes.length
+                                ? changedSince(sent, from, to, []) : rangeFrom(range);
+                        })
+                        : ranges.flatMap(range=>rangeFrom(range));
                     shippedAs('buffers', unlocked);
                     shipped = [...shipped ?? [], ...unlocked];
                 }
@@ -1105,6 +1153,7 @@ export function createRecording(options){
             allocs = null;
             writes = null;
             reads = null;
+            drawn = null;
             depth++;
             let result;
             let failed = true;
@@ -1120,13 +1169,20 @@ export function createRecording(options){
                 const made = /** @type {number[] | null} */ (allocs);
                 const wrote = /** @type {{ address: number, bytes: Uint8Array }[] | null} */ (writes);
                 const read = /** @type {{ address: number, bytes: Uint8Array }[] | null} */ (reads);
+                const drew = /** @type {{ address: number, bytes: Uint8Array }[] | null} */ (drawn);
                 allocs = null;
                 writes = null;
                 reads = null;
+                drawn = null;
                 if (read)
                 {
                     shippedAs('reads', read);
                     shipped = shipped ? [...shipped, ...read] : read;
+                }
+                if (drew)
+                {
+                    shippedAs('dynamic', drew);
+                    shipped = shipped ? [...shipped, ...drew] : drew;
                 }
                 // Whatever the call did, the record is finished, so the next
                 // one starts where it should.
@@ -1477,6 +1533,24 @@ export function createRecording(options){
         adopt(object){
             ADOPTED.add(object);
             numbers.set(object, next++);
+        },
+        drawsFrom(buffer, from, to){
+            const base = buffer?.base;
+            if (typeof base !== 'number' || depth === 0)
+            {
+                return;
+            }
+            const sent = sentOf.get(buffer);
+            if (!sent || sent.base !== base)
+            {
+                // What the played side holds of the buffer is not known until
+                // something is sent of all of it: once, at its first draw.
+                const bytes = readMemory(base, buffer.length);
+                sentOf.set(buffer, { base, bytes });
+                (drawn ??= []).push({ address: base, bytes });
+                return;
+            }
+            changedSince(sent, from, to, drawn ??= []);
         },
         read(address, bytes){
             // Written into the record when the call is finished, before the
