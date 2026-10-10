@@ -320,8 +320,11 @@ export function serveGraphics(scope, deps){
         const refusals = new Map();
         device.addEventListener?.('uncapturederror', (/** @type {any} */ event)=>{
             const message = String(event.error?.message ?? event.error).replace(/\s+/g, ' ');
-            const seen = (refusals.get(message) ?? 0) + 1;
-            refusals.set(message, seen);
+            // Counted by what it says, not by which frame it names: the
+            // encoder's label carries the frame's number.
+            const kind = message.replace(/\d+/g, '#');
+            const seen = (refusals.get(kind) ?? 0) + 1;
+            refusals.set(kind, seen);
             if (seen > 1 && seen % 256 !== 0)
             {
                 return;

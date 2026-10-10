@@ -340,10 +340,11 @@ test('a validation error of the worker\'s GPU is sent on, once and then every 25
     assert.equal(listeners.length, 1, 'the worker listens');
     for (let time = 0; time < 300; time++)
     {
-        listeners[0]({ error: { message: 'Invalid  CommandBuffer\n is invalid.' } });
+        listeners[0]({ error: {
+            message: `Invalid  CommandBuffer "frame#${time}"\n is invalid.` } });
     }
     assert.deepEqual(posted.filter(message=>message.type === 'refused'), [
-        { type: 'refused', message: 'Invalid CommandBuffer is invalid.', seen: 1 },
-        { type: 'refused', message: 'Invalid CommandBuffer is invalid.', seen: 256 },
-    ]);
+        { type: 'refused', message: 'Invalid CommandBuffer "frame#0" is invalid.', seen: 1 },
+        { type: 'refused', message: 'Invalid CommandBuffer "frame#255" is invalid.', seen: 256 },
+    ], 'counted alike whichever frame it names');
 });
