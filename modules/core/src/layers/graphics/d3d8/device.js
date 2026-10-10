@@ -1424,7 +1424,26 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         {
             return D3DERR_INVALIDCALL;
         }
+        drew(renderTarget);
         return D3D_OK;
+    };
+
+    /**
+     * How many times each surface may have been drawn into, cleared or copied
+     * into on the GPU. A device whose drawing is played elsewhere keeps it for
+     * whoever answers a copy out of a render target from the target's memory:
+     * the memory is still the GPU's picture while this has not moved since it
+     * was read back (`remote/direct3d.js`, `createTargetReads`).
+     *
+     * @type {WeakMap<object, number>}
+     */
+    const drawnInto = new WeakMap();
+    /** @param {any} surface */
+    const drew = surface=>{
+        if (surface)
+        {
+            drawnInto.set(surface, (drawnInto.get(surface) ?? 0) + 1);
+        }
     };
 
     /**
@@ -1784,6 +1803,14 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
          * target's size a viewport must lie within, the clip planes, and the
          * shaders bound, each taken for its handle alone while it lives.
          */
+        /**
+         * How many times a surface may have been drawn into on the GPU; see
+         * `drawnInto`.
+         *
+         * @param {object} surface
+         */
+        drawnInto: surface=>drawnInto.get(surface) ?? 0,
+
         ringState(){
             const declared = isShaderHandle(boundVertexShader) || (boundVertexShader & 0xe) !== 0;
             const target = renderTarget ? describe(renderTarget) : null;
@@ -2076,6 +2103,10 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             if (rects && rectCount === 0)
             {
                 return D3D_OK;
+            }
+            if ((flags & D3DCLEAR.TARGET) !== 0)
+            {
+                drew(renderTarget);
             }
             if (renderer)
             {
@@ -3020,6 +3051,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             {
                 return hr;
             }
+            drew(destination);
             const whole = { left: 0, top: 0, right: from.Width, bottom: from.Height };
             const copies = chosen && targets
                 ? chosen.map((rect, index)=>({ rect, at: targets[index] }))

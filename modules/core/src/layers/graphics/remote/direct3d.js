@@ -140,10 +140,6 @@ export function recordedDirect3D(factory, services, transport){
 /** D3DLOCK_READONLY. */
 const LOCK_READONLY = 0x10;
 
-/** What may draw into the render targets bound: a run of the command ring among them. */
-const DRAWING = new Set(['commands', 'DrawPrimitive', 'DrawIndexedPrimitive', 'DrawPrimitiveUP',
-    'DrawIndexedPrimitiveUP', 'DrawRectPatch', 'DrawTriPatch', 'Clear']);
-
 /** Copies into a surface, by the argument that is the destination. */
 const COPIES_INTO = /** @type {Record<string, number>} */ ({
     CopyRects: 3, UpdateSurface: 2, StretchRect: 2, ColorFill: 0,
@@ -157,60 +153,34 @@ const COPIES_INTO = /** @type {Record<string, number>} */ ({
  * program waits for it. A program that copies the same target every frame
  * without drawing into it in between -- a small target read back to keep the
  * GPU from running frames ahead, which is what it is for -- waited each time
- * for an answer it already had. Until something may have drawn into the target,
- * copied into it or written it through a lock, its memory is still the GPU's
- * picture, and the copy is made from it here, byte for byte what the renderer
- * would have answered.
+ * for an answer it already had. Until the device says something has drawn,
+ * cleared or copied into the target (its `drawnInto`), and nothing has written
+ * it through a lock, its memory is still the GPU's picture, and the copy is made
+ * from it here, byte for byte what the renderer would have answered.
  *
- * Kept for one recorded root: the targets bound are its, and a Reset forgets
- * every target.
+ * Kept for one recorded root: a Reset forgets every target.
  */
 export function createTargetReads(){
-    /** Targets read back and not touched since. @type {WeakSet<object>} */
-    let fresh = new WeakSet();
-    /** The render target at each index, as SetRenderTarget left it. @type {any[]} */
-    const bound = [];
-    /** Back buffers the program has been given: Present may leave them anything. */
-    const backBuffers = new Set();
+    /** What each target's `drawnInto` was when it was last read back. @type {WeakMap<object, number>} */
+    let readAt = new WeakMap();
     /** @param {any} surface */
     const touched = surface=>{
         if (surface && typeof surface === 'object')
         {
-            fresh.delete(surface);
+            readAt.delete(surface);
         }
     };
+    /** @param {any} device @param {any} surface */
+    const drawn = (device, surface)=>(typeof device?.drawnInto === 'function'
+        ? device.drawnInto(surface) : null);
     return {
         /**
-         * What a call the recorded device made changed.
+         * What a call the recorded device made changed that the device does not
+         * count itself: writes through a lock or a context, a Reset.
          *
          * @param {any} target @param {string} name @param {any[]} args
          */
         observe(target, name, args){
-            if (name === 'SetRenderTarget')
-            {
-                // Direct3D 9 names an index first; Direct3D 8's one target is
-                // kept when it is given none.
-                if (typeof args[0] === 'number')
-                {
-                    bound[args[0]] = args[1] ?? null;
-                }
-                else if (args[0])
-                {
-                    bound[0] = args[0];
-                }
-                return;
-            }
-            if (DRAWING.has(name))
-            {
-                if (bound.length === 0)
-                {
-                    // Drawing before any target was named draws into the back
-                    // buffer, which this does not know by sight.
-                    fresh = new WeakSet();
-                }
-                bound.forEach(touched);
-                return;
-            }
             const into = COPIES_INTO[name];
             if (into !== undefined)
             {
@@ -222,23 +192,9 @@ export function createTargetReads(){
                 touched(target);
                 return;
             }
-            if (name === 'GetBackBuffer')
-            {
-                const surface = args[args.length - 1]?.surface ?? args[args.length - 1]?.backBuffer;
-                if (surface)
-                {
-                    backBuffers.add(surface);
-                }
-                return;
-            }
-            if (name === 'Present')
-            {
-                backBuffers.forEach(touched);
-                return;
-            }
             if (name === 'Reset' || name === 'UpdateTexture')
             {
-                fresh = new WeakSet();
+                readAt = new WeakMap();
             }
         },
 
@@ -249,14 +205,19 @@ export function createTargetReads(){
          * @param {any} target @param {string} name @param {any[]} args
          */
         answered(target, name, args){
-            if (name === 'CopyRects' && fresh.has(args[0]))
+            if (name !== 'CopyRects')
+            {
+                return answeredByRenderer(target, name, args);
+            }
+            const now = drawn(target, args[0]);
+            if (now !== null && readAt.get(args[0]) === now)
             {
                 return false;
             }
             const asked = answeredByRenderer(target, name, args);
-            if (asked && name === 'CopyRects')
+            if (asked && now !== null)
             {
-                fresh.add(args[0]);
+                readAt.set(args[0], now);
             }
             return asked;
         },

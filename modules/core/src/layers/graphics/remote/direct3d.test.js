@@ -16,27 +16,28 @@ const surface = (/** @type {number} */ usage)=>({
 });
 const target = ()=>surface(1);
 
-test('a copy out of a target untouched since its last read-back is made here', ()=>{
+/** A device that counts what was drawn into each surface, as the Direct3D 8 one does. */
+const counting = ()=>{
+    const drawn = new Map();
+    return {
+        drawnInto: (/** @type {object} */ one)=>drawn.get(one) ?? 0,
+        draw: (/** @type {object} */ one)=>drawn.set(one, (drawn.get(one) ?? 0) + 1),
+    };
+};
+
+test('a copy out of a target nothing has drawn into since its last read-back is made here', ()=>{
     const reads = createTargetReads();
     const fence = target();
-    const back = target();
     const image = surface(0);
-    const device = {};
+    const device = counting();
     const copy = ()=>reads.answered(device, 'CopyRects', [fence, null, 0, image, null]);
-    reads.observe(device, 'SetRenderTarget', [back, null]);
 
-    assert.equal(copy(), true, 'the first is the renderer\'s');
+    assert.equal(copy(), true, 'the first is the renderer');
     assert.equal(copy(), false, 'the second has its answer in the target already');
-    // Bound and unbound with nothing drawn: still the same picture.
-    reads.observe(device, 'SetRenderTarget', [fence, null]);
-    reads.observe(device, 'SetRenderTarget', [back, null]);
-    reads.observe(device, 'commands', []);
-    assert.equal(copy(), false, 'drawing into another target leaves it');
-
-    reads.observe(device, 'SetRenderTarget', [fence, null]);
-    reads.observe(device, 'Clear', [0, null, 1, 0, 1, 0]);
-    reads.observe(device, 'SetRenderTarget', [back, null]);
-    assert.equal(copy(), true, 'cleared while bound: asked again');
+    device.draw(image);
+    assert.equal(copy(), false, 'drawing into another surface leaves it');
+    device.draw(fence);
+    assert.equal(copy(), true, 'drawn into: asked again');
     assert.equal(copy(), false);
 
     reads.observe(device, 'CopyRects', [image, null, 0, fence, null]);
@@ -49,20 +50,12 @@ test('a copy out of a target untouched since its last read-back is made here', (
     assert.equal(copy(), true, 'a Reset forgets every target');
 });
 
-test('drawing before any target is named may draw into any read-back target', ()=>{
+test('a device that counts nothing has every copy answered by the renderer', ()=>{
     const reads = createTargetReads();
-    const back = target();
-    const image = surface(0);
-    const device = {};
-    const copy = ()=>reads.answered(device, 'CopyRects', [back, null, 0, image, null]);
+    const fence = target();
+    const copy = ()=>reads.answered({}, 'CopyRects', [fence, null, 0, surface(0), null]);
     assert.equal(copy(), true);
-    reads.observe(device, 'DrawPrimitive', [4, 0, 2]);
-    assert.equal(copy(), true, 'the back buffer is drawn into without being named');
-    reads.observe(device, 'GetBackBuffer', [0, 0, { surface: back }]);
-    reads.observe(device, 'SetRenderTarget', [target(), null]);
-    assert.equal(copy(), false);
-    reads.observe(device, 'Present', [null, null, 0, null]);
-    assert.equal(copy(), true, 'a back buffer after Present is asked again');
+    assert.equal(copy(), true);
 });
 
 test('a copy out of what is not a render target is never the renderer\'s', ()=>{
