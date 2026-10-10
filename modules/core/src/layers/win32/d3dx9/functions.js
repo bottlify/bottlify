@@ -49,6 +49,7 @@ import { createConstantTableObjects } from './constants.js';
 import { createShaderSemantics } from './semantics.js';
 import { createMeshFunctions } from './mesh.js';
 import { createMeshObjects } from './mesh-object.js';
+import { createShapes } from './shapes.js';
 import { createDeclarationFunctions } from './fvf.js';
 import { preprocess, preprocessTracked } from './preprocess.js';
 import { compileShader } from './hlsl-compile.js';
@@ -80,13 +81,8 @@ const IID_ID3DXBUFFER = '{8BA5FB08-5195-40E2-AC58-0D989C3A0102}';
 const NOT_BUILT = {
     D3DXCleanMesh: [24, 3, 5],
     D3DXComputeNormalMap: [24],
-    D3DXCreateBox: [24, 4, 5],
-    D3DXCreateCylinder: [32, 6, 7],
-    D3DXCreatePolygon: [20, 3, 4],
-    D3DXCreateSphere: [24, 4, 5],
     D3DXCreateTeapot: [12, 1, 2],
     D3DXCreateTextA: [32, 5, 6],
-    D3DXCreateTorus: [28, 5, 6],
     D3DXSimplifyMesh: [28, 6],
     D3DXUVAtlasPartition: [68, 11, 12, 13, 14],
     D3DXValidMesh: [12, 2],
@@ -721,6 +717,9 @@ export function createD3dxFunctions(host, options = {}){
 
         /** See mesh-object.js. */
         ...meshes.exports,
+
+        /** See shapes.js. */
+        ...createShapes(host, meshes, { giveBuffer }),
 
         /** See fvf.js. */
         ...createDeclarationFunctions(host),
