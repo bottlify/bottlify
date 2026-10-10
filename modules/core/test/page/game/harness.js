@@ -25,6 +25,7 @@
 
 import { createApp } from '../../../src/app.js';
 import { placeHooks, watchFrom } from '../../../src/host/serve.js';
+import { openGraphicsWorker } from '../../../src/host/graphics-worker.js';
 import {
     SLOTS, GLOBAL_HEADER_INT32, SLOT_HEADER_INT32, SLOT_BYTES, ARENA_OFFSET, ARENA_BYTES,
     slotHeaderOffset, slotPcmOffset, createSeam, mixBlock,
@@ -1405,6 +1406,16 @@ export function createHarness(canvas, how = {}){
         {
             return { ok: false, gpu: false, reason: handle.reason };
         }
+        // The player draws in a graphics worker of its own and keeps only the
+        // devices' state on the program's thread; a run asked to measure what
+        // a player's machine does takes the same split.
+        const graphicsWorker = request.graphicsWorker
+            ? await openGraphicsWorker({ frames: 'pixels' }) : null;
+        if (graphicsWorker && !graphicsWorker.worker)
+        {
+            const why = 'reason' in graphicsWorker ? graphicsWorker.reason : '';
+            return { ok: false, gpu: false, reason: `graphics worker: ${why}` };
+        }
 
         // Optional, and asked for anyway: without it a program's cinematic is a
         // graph with nothing in it, which is a real state of a machine and not the
@@ -1628,6 +1639,7 @@ export function createHarness(canvas, how = {}){
             device: {
                 device: handle.device,
                 queue: handle.device.queue,
+                ...graphicsWorker?.worker ? { worker: graphicsWorker.worker } : {},
                 // Who made the hardware, for the program that asks before deciding
                 // how much to ask of it.
                 adapter: handle.adapter,
@@ -1887,6 +1899,11 @@ export function createHarness(canvas, how = {}){
             created: graphics.created ?? [],
             // count:bytes:hash of every compressed block handed to OpenGL.
             compressedTextures: graphics.seam?.compressedTextures ?? null,
+            // Of OpenGL's host time, what playing each call's ring took and
+            // what the calls themselves did; and what posting the batches took.
+            openglMs: graphics.seam ? { ring: graphics.seam.openglRingMs,
+                calls: graphics.seam.openglCallMs } : null,
+            sentToWorker: graphics.worker?.sent ?? null,
             imageDigests: graphics.seam?.imageDigests ?? [],
             keptImages: graphics.seam?.keptImages ?? [],
             imageTimes: graphics.seam?.imageTimes ?? [],
