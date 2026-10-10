@@ -2056,3 +2056,18 @@ test('a shader and an input layout answer for their device', ()=>{
         E_INVALIDARG, 'a Shader Model 3 blob is no container');
     assertFullyReleased(device);
 });
+
+test('a buffer view without an element count is refused, not made over nothing', ()=>{
+    const device = createDevice();
+    /** @type {{ resource?: any }} */
+    const buffer = {};
+    assert.equal(device.CreateBuffer({ ByteWidth: 64, Usage: D3D10_USAGE.DEFAULT,
+        BindFlags: D3D10_BIND.SHADER_RESOURCE, CPUAccessFlags: 0, MiscFlags: 0 }, null, buffer),
+    S_OK);
+    /** @type {{ view?: any }} */
+    const out = {};
+    assert.equal(device.CreateShaderResourceView(buffer.resource, {
+        Format: DXGI_FORMAT.R32_FLOAT, ViewDimension: D3D10_SRV_DIMENSION.BUFFER,
+        ElementOffset: 0 }, out), E_INVALIDARG);
+    assert.equal(out.view, null);
+});

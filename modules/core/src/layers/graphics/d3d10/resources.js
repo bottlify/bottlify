@@ -506,12 +506,12 @@ function resolveBufferViewDesc(resource, desc, dimensions){
     // for the view's format to be a cast *of*: it only has to name a real,
     // concrete format. This is the one view whose format stands alone.
     const info = FORMAT_INFO[desc.Format];
-    if (!info || info.kind === FORMAT_KIND.TYPELESS || desc.ElementWidth < 1)
-    {
-        return null;
-    }
     const offset = desc.ElementOffset ?? 0;
-    if ((offset + desc.ElementWidth) * info.bytesPerPixel > resource.desc.ByteWidth)
+    const width = desc.ElementWidth;
+    // The range is elements of the view's format, and every one of them has
+    // to lie in the buffer; a width that is missing is no width at all.
+    if (!info || info.kind === FORMAT_KIND.TYPELESS || !(width >= 1)
+        || (offset + width) * info.bytesPerPixel > resource.desc.ByteWidth)
     {
         return null;
     }
@@ -520,7 +520,7 @@ function resolveBufferViewDesc(resource, desc, dimensions){
         ViewDimension: dimensions.BUFFER,
         dimensionName: 'BUFFER',
         ElementOffset: offset,
-        ElementWidth: desc.ElementWidth,
+        ElementWidth: width,
     };
 }
 

@@ -2062,3 +2062,51 @@ test('a cube texture is viewed as a cube, by default or asked (test_create_shade
         [{ mips: 1, slices: 6, format: RGBA8 }, [RGBA8, TEX_CUBE, 0, 1]],
     ]);
 });
+
+test('a buffer view\'s first element and element count come through the seam, are held to the'
+    + ' buffer, and read back (test_create_shader_resource_view, d3d10core.c:3658-3666;'
+    + ' test_buffer_srv, 15039-15044)', ()=>{
+    const h = seamed();
+    const { device } = h.createDeviceAndSwapChain();
+    /** @param {number} bytes */
+    const buffer = bytes=>{
+        const out = h.box.place([0]);
+        assert.equal(h.device(device, 'CreateBuffer', [h.box.place([bytes, D3D10_USAGE.DEFAULT,
+            D3D10_BIND.SHADER_RESOURCE, 0, 0]), 0, out]), S_OK);
+        return h.box.memory.readU32(out);
+    };
+    /**
+     * @param {number} resource @param {number} format
+     * @param {number} first @param {number} count
+     */
+    const view = (resource, format, first, count)=>{
+        const out = h.box.place([0xdeadbeef]);
+        const hr = h.device(device, 'CreateShaderResourceView', [resource,
+            h.box.place([format, 1, first, count, STALE, STALE]), out]);
+        return { hr, view: h.box.memory.readU32(out) };
+    };
+    const RGBA32F = DXGI_FORMAT.R32G32B32A32_FLOAT;
+    const kilobyte = buffer(1024);
+    const whole = view(kilobyte, RGBA32F, 0, 64);
+    assert.equal(whole.hr, S_OK, 'sixty-four sixteen-byte elements fill a kilobyte');
+    const part = view(kilobyte, RGBA32F, 4, 8);
+    assert.equal(part.hr, S_OK);
+    assert.deepEqual(reportedViewDesc(h, 'srv', part.view).words, [RGBA32F, 1, 4, 8, 0, 0]);
+    assert.deepEqual(/** @type {any} */ (h.publisher.objectAt(part.view)).range, null,
+        'a buffer view has no levels or slices');
+    /** @type {{ desc?: any }} */
+    const held = {};
+    /** @type {any} */ (h.publisher.objectAt(part.view)).GetDesc(held);
+    assert.deepEqual([held.desc.ElementOffset, held.desc.ElementWidth], [4, 8],
+        'what the renderer hands the shader as the view\'s first element and count');
+
+    // Wine's offset buffers: the range ends exactly at the buffer's end.
+    assert.equal(view(buffer(320), DXGI_FORMAT.R8G8B8A8_UNORM, 64, 16).hr, S_OK);
+    assert.equal(view(buffer(260), DXGI_FORMAT.R8_UNORM, 256, 4).hr, S_OK);
+    // One element past it, or none at all, is no view.
+    for (const [first, count] of [[60, 8], [0, 65], [64, 1], [0, 0]])
+    {
+        const refused = view(kilobyte, RGBA32F, first, count);
+        assert.deepEqual([refused.hr, refused.view], [E_INVALIDARG, 0], `${first}+${count}`);
+    }
+});
