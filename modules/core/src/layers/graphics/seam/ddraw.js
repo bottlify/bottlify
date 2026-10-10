@@ -122,7 +122,10 @@ const DDGAMMARAMP_BYTES = 3 * 256 * 2;
 /** A pointer argument the call could not use: the generic COM refusal. */
 const E_INVALIDARG = 0x80070057;
 
-/** What the caps report as video memory: a round number nothing here measures. */
+/**
+ * What the caps report as video memory where the graphics layer names no
+ * figure (`videoMemory`): a round number nothing here measures.
+ */
 const VIDEO_MEMORY = 256 << 20;
 
 /** The surfaces CreateSurface builds and the places it puts them. */
@@ -281,6 +284,8 @@ const S3TC_OF_FOURCC = Object.freeze({
  * @param {(ms: number, run: () => void) => void} [deps.schedule]
  *        How a wait for the vertical blank is woken.
  * @param {() => import('./adapter.js').AdapterIdentity | null} [deps.identity]
+ * @param {() => number | null} [deps.videoMemory]  The card's memory in bytes, as the
+ *        graphics layer reports it to every API; null keeps this seam's own figure.
  *        The hardware behind the display, as the assembling caller knows it.
  * @param {import('../webgpu/internal/presenter.js').DisplayGamma} [deps.gamma]
  *        Where a primary surface's gamma ramp reaches the picture.
@@ -301,7 +306,7 @@ export function createDirectDrawSeam(
         extraInterfaces = [], extraSurfaceInterfaces = [], now = ()=>performance.now(),
         schedule = (ms, run)=>{
             setTimeout(run, ms);
-        }, identity, gamma, deactivated, deactivations, resolution, divergence },
+        }, identity, videoMemory, gamma, deactivated, deactivations, resolution, divergence },
 )
 {
     const fields = createFields(memory);
@@ -1327,8 +1332,8 @@ export function createDirectDrawSeam(
             dwCKeyCaps: DDCKEYCAPS_SRCBLT | DDCKEYCAPS_DESTBLT,
             dwPalCaps: DDPCAPS_8BIT | DDPCAPS_PRIMARYSURFACE | DDPCAPS_ALLOW256,
             dwZBufferBitDepths: DDBD_16 | DDBD_32,
-            dwVidMemTotal: VIDEO_MEMORY,
-            dwVidMemFree: VIDEO_MEMORY,
+            dwVidMemTotal: videoMemory?.() ?? VIDEO_MEMORY,
+            dwVidMemFree: videoMemory?.() ?? VIDEO_MEMORY,
             ddsOldCaps: SURFACE_CAPS,
         });
         if (size >= DDCAPS.SIZE)
@@ -1722,7 +1727,7 @@ export function createDirectDrawSeam(
             {
                 if ((pointer >>> 0) !== 0)
                 {
-                    fields.writeU32(pointer >>> 0, VIDEO_MEMORY);
+                    fields.writeU32(pointer >>> 0, videoMemory?.() ?? VIDEO_MEMORY);
                 }
             }
             return DD_OK;

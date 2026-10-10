@@ -555,6 +555,8 @@ export const ID3D10DEVICE1_SLOTS = /** @type {[string, number][]} */ ([
  *                     displayHeight?: number }} [screen]
  *     The desktop user32 reports, which DXGI's one output shows.
  * @property {() => import('./adapter.js').AdapterIdentity | null} [identity]
+ * @property {() => number | null} [videoMemory]  The card's memory in bytes, as the
+ *           graphics layer reports it to every API; null keeps this seam's own figure.
  *     The hardware behind the GPU, which DXGI's adapter reports as Direct3D 9's does.
  * @property {import('../d3d10/dxgi.js').FactoryOptions['resolution']} [resolution]
  *     Told the mode a fullscreen swap chain takes the screen at, as Direct3D 9 tells it.
@@ -566,7 +568,7 @@ export const ID3D10DEVICE1_SLOTS = /** @type {[string, number][]} */ ([
  * @param {Deps} deps
  */
 export function createDirect3D10Seam({ publisher, memory, allocate, free, deviceOptions,
-    factoryOptions: given, screen, identity, resolution, gdi })
+    factoryOptions: given, screen, identity, videoMemory, resolution, gdi })
 {
     const fields = createFields(memory);
     /** @type {import('../d3d10/dxgi.js').FactoryOptions} */
@@ -858,9 +860,9 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
             DeviceId: held.desc.DeviceId,
             SubSysId: held.desc.SubSysId,
             Revision: held.desc.Revision,
-            DedicatedVideoMemory: REPORTED_VIDEO_MEMORY,
+            DedicatedVideoMemory: videoMemory?.() ?? REPORTED_VIDEO_MEMORY,
             DedicatedSystemMemory: 0,
-            SharedSystemMemory: REPORTED_VIDEO_MEMORY,
+            SharedSystemMemory: videoMemory?.() ?? REPORTED_VIDEO_MEMORY,
             AdapterLuidLow: 1,
             AdapterLuidHigh: 0,
         });

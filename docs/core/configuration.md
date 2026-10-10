@@ -92,6 +92,7 @@ publishing). The tables list only the settings that are data. `memory` and `load
 | `maxFrameLatency` | 3 | Frames the GPU may still be drawing when `Present` returns; 0 for no bound. |
 | `maxFps` | 60 | Passed to the presenter; not applied yet ([limits.md](limits.md#graphics)). |
 | `choice` | every API | `createApp`'s `graphicsApi`: which roots are built ([api.md](api.md)). |
+| `videoMemory` | the choice's | Megabytes of video memory every API reports (DirectDraw's caps and `GetAvailableVidMem`, Direct3D 8/9's `GetAvailableTextureMem`, DXGI's adapter description). Absent, the `graphicsApi` preset's era: 64 for DirectX 7, 128 for 8, 256 for 9, 1024 for 10, 256 for OpenGL and for no choice. |
 | `raster` | `true` | `false` leaves OpenGL primitives drawn without a GPU unrasterised, for measurement. |
 | `lendMemory` | `true` | With a graphics worker and shared guest memory: what a Direct3D 8 or 9 program unlocks is read by the worker in place instead of copied to it. `false` copies it, for measurement. |
 | `guestCode` | `true` | Direct3D 8 and 9 keep the state a program sets, the calls it makes in order and the counts of its references in guest memory, and answer its getters there, so most calls never cross to the host. `false` traps every call, as before they did: a fault that goes away with it is in that guest code. |

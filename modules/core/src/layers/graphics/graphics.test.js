@@ -952,3 +952,21 @@ test('a hidden cooperative window leaves the picture to the program\'s topmost s
     assert.deepEqual(uncoveredRegion([shownDialog, button, game], 0x16, true, screen), [],
         'a shown cooperative window under the game window is covered as before');
 });
+
+test('the card\'s memory is the choice\'s era, and a configured figure overrides it', async()=>{
+    const MB = 1024 * 1024;
+    /** @param {any} config */
+    const reported = async config=>{
+        const api = await graphicsModule.create(config, hostWith(fakeMemory()));
+        const figures = { module: api.videoMemory() };
+        await graphicsModule.dispose();
+        return figures;
+    };
+    assert.equal((await reported({ choice: 'directx7' })).module, 64 * MB);
+    assert.equal((await reported({ choice: 'directx8' })).module, 128 * MB);
+    assert.equal((await reported({ choice: 'directx9' })).module, 256 * MB);
+    assert.equal((await reported({ choice: 'directx10' })).module, 1024 * MB);
+    assert.equal((await reported({})).module, 256 * MB, 'no choice is a DirectX 9 card');
+    const configured = await reported({ choice: 'directx10', videoMemory: 512 });
+    assert.equal(configured.module, 512 * MB, 'the configuration names the figure');
+});

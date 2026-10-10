@@ -80,6 +80,8 @@ export { DEVICE_STATE, LIGHT_ENABLED };
 /**
  * @typedef {Object} DeviceCaps
  * @property {number} maxPointSize     Decides the POINTSIZE_MAX default.
+ * @property {number} [videoMemory]  Bytes GetAvailableTextureMem reports: the card's
+ *           memory as the graphics layer gives every API.
  * @property {boolean} [compressedTextures]  Whether an upload keeps DXT blocks as BC
  *           on the GPU (true) or decodes them to `bgra8unorm` (false); every DXT
  *           format is creatable either way.
@@ -1595,7 +1597,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
 
         /** @returns {number} bytes, rounded the way this call always reports them */
         GetAvailableTextureMem(){
-            return AVAILABLE_TEXTURE_MEMORY;
+            return caps.videoMemory ?? AVAILABLE_TEXTURE_MEMORY;
         },
 
         /**

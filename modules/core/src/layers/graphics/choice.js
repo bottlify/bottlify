@@ -20,14 +20,22 @@
  * @property {readonly string[]} libraries  The system libraries the bottle has.
  * @property {readonly string[]} apis       The roots the drawing layer builds.
  * @property {'7' | '8' | '9' | null} directx  The release reported; null keeps the default.
+ * @property {number} videoMemory  Megabytes of video memory the card reports: a card
+ *     of the choice's era. A program sizes its texture budget, and picks its
+ *     settings, from it -- and some refuse a card below what they were made for.
  */
 
+/** What a machine with no choice reports, a DirectX 9 card's. */
+export const DEFAULT_VIDEO_MEMORY = 256;
+
 /** DirectX 7 is DirectDraw, which carries Direct3D 7 and every one before it. */
-const DIRECTX7 = { libraries: ['DDRAW.dll'], apis: ['ddraw'] };
+const DIRECTX7 = { libraries: ['DDRAW.dll'], apis: ['ddraw'], videoMemory: 64 };
 const DIRECTX8 = {
-    libraries: [...DIRECTX7.libraries, 'D3D8.dll'], apis: [...DIRECTX7.apis, 'd3d8'] };
+    libraries: [...DIRECTX7.libraries, 'D3D8.dll'], apis: [...DIRECTX7.apis, 'd3d8'],
+    videoMemory: 128 };
 const DIRECTX9 = {
-    libraries: [...DIRECTX8.libraries, 'D3D9.dll'], apis: [...DIRECTX8.apis, 'd3d9'] };
+    libraries: [...DIRECTX8.libraries, 'D3D9.dll'], apis: [...DIRECTX8.apis, 'd3d9'],
+    videoMemory: DEFAULT_VIDEO_MEMORY };
 
 /** @type {Readonly<Record<GraphicsChoice, GraphicsStack>>} */
 export const GRAPHICS_CHOICES = Object.freeze({
@@ -37,9 +45,9 @@ export const GRAPHICS_CHOICES = Object.freeze({
     // Vista and later still report 9.0c in the registry.
     directx10: Object.freeze({
         libraries: [...DIRECTX9.libraries, 'D3D10.dll', 'D3D10_1.dll', 'DXGI.dll'],
-        apis: [...DIRECTX9.apis, 'd3d10'], directx: '9' }),
+        apis: [...DIRECTX9.apis, 'd3d10'], directx: '9', videoMemory: 1024 }),
     opengl: Object.freeze({ libraries: ['OPENGL32.dll', 'GLU32.dll'], apis: ['opengl'],
-        directx: null }),
+        directx: null, videoMemory: DEFAULT_VIDEO_MEMORY }),
 });
 
 /**

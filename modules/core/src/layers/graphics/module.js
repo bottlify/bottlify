@@ -20,7 +20,7 @@ import {
     viewOf,
 } from './gdi/surface.js';
 import { textExtent } from './gdi/text.js';
-import { GRAPHICS_CHOICES, graphicsChoice } from './choice.js';
+import { DEFAULT_VIDEO_MEMORY, GRAPHICS_CHOICES, graphicsChoice } from './choice.js';
 
 /**
  * A window as the window manager lists it: enough to know where it is on
@@ -223,6 +223,12 @@ export function createGraphicsModule(){
             // libraries alone are built. Refused before anything else if unknown.
             const choice = graphicsChoice(config?.choice);
             const stack = choice ? GRAPHICS_CHOICES[choice] : null;
+            // The card's memory, in bytes: the configuration's figure where it
+            // names one, else the choice's era, else a DirectX 9 card's. Every
+            // API reports this one figure; a program that asks two of them
+            // and compares is asking whether it is on one card.
+            const videoMemory = (Number.isFinite(config?.videoMemory) && config.videoMemory > 0
+                ? config.videoMemory : stack?.videoMemory ?? DEFAULT_VIDEO_MEMORY) * 1024 * 1024;
             const memory = host.requireApi('memory');
             const win32 = host.requireApi('win32');
             const bridge = host.requireApi('bridge');
@@ -472,6 +478,7 @@ export function createGraphicsModule(){
                     // texture in its own code -- once the configuration says the
                     // path is safe to take on this build.
                     compressedTextures: gatedCompressedTextures(caps),
+                    videoMemory,
                     // Asked for only when this build has a GPU, as Direct3D 9's
                     // is: a device made in a headless assembly still keeps and
                     // answers every state a program sets.
@@ -524,6 +531,7 @@ export function createGraphicsModule(){
                     // art to load. A device told no decompresses on its own CPU, in
                     // emulated x86, and hands over surfaces four times the size.
                     compressedTextures: gatedCompressedTextures(caps),
+                    videoMemory,
                     backend: device && !remote ? api.backend() : undefined,
                     readMemory: services.readMemory,
                     // The copies between surfaces (UpdateSurface, StretchRect,
@@ -706,6 +714,9 @@ export function createGraphicsModule(){
                  *     | null}
                  */
                 adapter: ()=>device?.adapter ?? null,
+
+                /** The card's memory in bytes, as every API reports it. */
+                videoMemory: ()=>videoMemory,
 
                 /**
                  * Shows a surface the guest owns.
@@ -1223,6 +1234,7 @@ export function createGraphicsModule(){
                 backend: guarded('backend', api.backend),
                 available: guarded('available', api.available),
                 adapter: guarded('adapter', api.adapter),
+                videoMemory: guarded('videoMemory', api.videoMemory),
                 present: guarded('present', api.present),
                 screen: guarded('screen', api.screen),
                 create: guarded('create', api.create),
