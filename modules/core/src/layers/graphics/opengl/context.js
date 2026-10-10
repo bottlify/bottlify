@@ -1324,7 +1324,7 @@ export function createGlContext(options = {}){
                 // and still run.
                 return;
             }
-            primitive.vertices.push({ ...currentVertex(), position: [x, y, z, w] });
+            primitive.vertices.push(immediateVertex(x, y, z, w));
         },
 
         /**
@@ -1735,6 +1735,29 @@ export function createGlContext(options = {}){
             normal: [...record(GL.CURRENT_NORMAL).values],
             texCoord: [...side.texCoords[0]],
             texCoords: side.texCoords.map((/** @type {number[]} */ coords)=>[...coords]),
+            fogCoord: record(GL.CURRENT_FOG_COORDINATE).values[0],
+        };
+    }
+
+    /**
+     * A vertex glVertex makes: its position, and the current attributes by
+     * reference -- each record's values and each unit's coordinates are
+     * replaced whole on a change, never written in place (`currentAttributes`),
+     * so the vertex keeps what they were. Only the list of units is copied,
+     * since a unit's entry in it is replaced on its own. Copying every array
+     * of every vertex was a dozen allocations a vertex in immediate mode.
+     *
+     * @param {number} x @param {number} y @param {number} z @param {number} w
+     */
+    function immediateVertex(x, y, z, w){
+        const side = kernel.side;
+        return {
+            position: [x, y, z, w],
+            color: record(GL.CURRENT_COLOR).values,
+            secondary: record(GL.CURRENT_SECONDARY_COLOR).values,
+            normal: record(GL.CURRENT_NORMAL).values,
+            texCoord: side.texCoords[0],
+            texCoords: side.texCoords.slice(),
             fogCoord: record(GL.CURRENT_FOG_COORDINATE).values[0],
         };
     }

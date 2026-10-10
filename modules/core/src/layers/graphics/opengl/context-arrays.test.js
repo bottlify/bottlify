@@ -220,3 +220,39 @@ test('a draw assembled vertex by vertex is counted, with why it was', ()=>{
     context.glEnd();
     assert.deepEqual(noted, [['refused', 3], ['immediate', 3]]);
 });
+
+test('an immediate vertex keeps the attributes current at its glVertex, whatever comes after', ()=>{
+    // It holds the current values by reference, which is right only while a
+    // change replaces them whole: a write in place would repaint the vertices
+    // before it.
+    /** @type {any[][]} */
+    const drawn = [];
+    /** @type {any} */
+    const gpu = {
+        attach: ()=>{}, attached: ()=>true, drawArrays: ()=>false,
+        draw: (/** @type {any} */ c, /** @type {any} */ s, /** @type {number} */ m,
+            /** @type {any[]} */ vertices)=>drawn.push(vertices),
+        clear: ()=>{}, copyToTexture: ()=>{}, present: ()=>null,
+        settled: ()=>Promise.resolve(), diagnostics: ()=>({}),
+    };
+    /** @type {any} */
+    const context = createGlContext({
+        memory: { read: ()=>new Uint8Array(0), write: ()=>{} }, gpu,
+    });
+    context.attach({ width: 8, height: 8, doubleBuffered: true, depthBits: 24 });
+    context.glBegin(GL.TRIANGLES);
+    context.glColor4f(1, 0, 0, 1);
+    context.glTexCoord2f(0.25, 0.5);
+    context.glVertex3f(0, 0, 0);
+    context.glColor4f(0, 1, 0, 1);
+    context.glTexCoord2f(0.75, 1);
+    context.glVertex3f(1, 0, 0);
+    context.glVertex3f(0, 1, 0);
+    context.glEnd();
+    const [first, second, third] = drawn[0];
+    assert.deepEqual([...first.color], [1, 0, 0, 1]);
+    assert.deepEqual([...first.texCoords[0]].slice(0, 2), [0.25, 0.5]);
+    assert.deepEqual([...second.color], [0, 1, 0, 1]);
+    assert.deepEqual([...second.texCoords[0]].slice(0, 2), [0.75, 1]);
+    assert.equal(third.color, second.color, 'unchanged between them: the same values, shared');
+});
