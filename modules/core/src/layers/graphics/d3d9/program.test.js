@@ -1856,3 +1856,33 @@ test('a shader draw into a texture bound to its own sampler samples the placehol
         (/** @type {any} */ command)=>command.kind === 'draw');
     assert.equal(draw.program.samplerBindings[0].placeholder, true);
 });
+
+test('table fog through a vertex shader is taken over the depth, whatever the projection set',
+    async()=>{
+        // The fixed projection is not the shader's, so it says nothing of what
+        // the shader's w is: with FOGTABLEMODE set, a draw through a vertex
+        // shader is fogged by its z (Wine's fog rules: table fog uses the Z
+        // value no matter what vertex type; its fog_with_shader_test draws
+        // the curve over the depth). A program that sets its range for depth,
+        // 0 to 1, under a perspective projection was fogged whole over w.
+        const h = harness();
+        /** @type {{ shader?: any }} */
+        const vs = {};
+        /** @type {{ shader?: any }} */
+        const ps = {};
+        assert.equal(h.device.CreateVertexShader(VERTEX_SHADER, vs), D3D_OK);
+        assert.equal(h.device.CreatePixelShader(PIXEL_SHADER, ps), D3D_OK);
+        h.device.SetVertexShader(vs.shader);
+        h.device.SetPixelShader(ps.shader);
+        h.device.SetTransform(D3DTS.PROJECTION,
+            [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 1, 0, 0, -1, 0]);
+        h.device.SetRenderState(D3DRS.FOGENABLE, 1);
+        h.device.SetRenderState(D3DRS.FOGTABLEMODE, 3);
+        h.device.SetRenderState(D3DRS.FOGSTART, floatToDword(0));
+        h.device.SetRenderState(D3DRS.FOGEND, floatToDword(1));
+        await h.draw();
+        const floats = new Float32Array(h.boundBytes(h.groupsOfDraw().get(0), 0).buffer);
+        // The range is the block's last register: start, end, density, and
+        // whether the depth is z.
+        assert.deepEqual([...floats.subarray(floats.length - 4)], [0, 1, 1, 1], 'density 1 by default');
+    });

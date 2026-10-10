@@ -3282,16 +3282,15 @@ export function createRenderer(options){
 
     /**
      * Where a shader draw's fog comes from, for the frame's account: table fog
-     * and the depth its projection has it taken over (`/vstz`, `/vstw`), or
-     * vertex fog and whether the vertex shader writes oFog (`/vsv+`, `/vsv-`;
-     * one that writes none is fogged whole).
+     * (`/vst`, over the depth), or vertex fog and whether the vertex shader
+     * writes oFog (`/vsv+`, `/vsv-`; one that writes none is fogged whole).
      *
      * @param {RenderModel} model
      */
     const shaderFogOf = model=>{
         if (fogOf(model).source === FOG_SOURCE.TABLE)
         {
-            return `/vst${isAffine(transformOf(model, D3DTS.PROJECTION)) ? 'z' : 'w'}`;
+            return '/vst';
         }
         const vertex = model.stageProcessing.program?.vertex;
         const writes = vertex?.instructions.some((/** @type {any} */ instruction)=>
@@ -6405,7 +6404,11 @@ export function createRenderer(options){
         if (vertex.fogRegister !== undefined)
         {
             // What the fixed vertex stage reads for the same: the colour,
-            // then the curve's range, as `hybridVertexBlocks` writes them.
+            // then the curve's range, as `hybridVertexBlocks` writes them --
+            // over the depth, always: the fixed projection is not the
+            // shader's, so it says nothing of what the shader's w is, and
+            // table fog through a vertex shader is taken over z (Wine's fog
+            // rules; fog_with_shader_test draws the curve over the depth).
             const rs = (/** @type {string} */ name)=>model.renderStates.get(D3DRS[name]) ?? 0;
             const fogColour = colorToFloats(rs('FOGCOLOR'));
             blocks[0].set([fogColour.r, fogColour.g, fogColour.b, fogColour.a],
@@ -6414,7 +6417,7 @@ export function createRenderer(options){
                 dwordToFloat(rs('FOGSTART')),
                 dwordToFloat(rs('FOGEND')),
                 dwordToFloat(rs('FOGDENSITY')),
-                isAffine(transformOf(model, D3DTS.PROJECTION)) ? 1 : 0,
+                1,
             ], (vertex.fogRegister + 1) * 4);
         }
         // The user planes, as set: a vertex shader's are in clip space.
