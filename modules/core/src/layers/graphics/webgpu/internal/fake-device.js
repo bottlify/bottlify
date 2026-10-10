@@ -60,10 +60,21 @@ export function createFakeDevice(options = {}){
      * first: the one rule kept here is the one a draw breaks without any other
      * sign, a texture sampled in a pass that also renders into it, which makes
      * the encoder's whole command buffer invalid and its submit do nothing.
+     * Each is also dispatched as an `uncapturederror`, as a device does.
      *
      * @type {string[]}
      */
     const errors = [];
+    /** @type {((event: any) => void)[]} */
+    const errorListeners = [];
+    /** @param {string} message */
+    const refuse = message=>{
+        errors.push(message);
+        for (const listener of errorListeners)
+        {
+            listener({ error: { message } });
+        }
+    };
     let nextId = 0;
 
     /** @param {string} kind @param {any} extra @returns {any} */
@@ -245,7 +256,7 @@ export function createFakeDevice(options = {}){
             if (both && !encoder.invalid)
             {
                 encoder.invalid = true;
-                errors.push(`[Texture "${both.resource.texture.descriptor?.label ?? ''}"] usage`
+                refuse(`[Texture "${both.resource.texture.descriptor?.label ?? ''}"] usage`
                     + ' (TextureBinding|RenderAttachment) includes writable usage and another'
                     + ' usage in the same synchronization scope.');
             }
@@ -385,6 +396,13 @@ export function createFakeDevice(options = {}){
     const device = {
         calls,
         features: new Set(options.features ?? []),
+        /** @param {string} type @param {(event: any) => void} listener */
+        addEventListener(type, listener){
+            if (type === 'uncapturederror')
+            {
+                errorListeners.push(listener);
+            }
+        },
         createTexture,
         createCommandEncoder,
         createShaderModule,
@@ -471,7 +489,7 @@ export function createFakeDevice(options = {}){
                 // refuses it: none of its copies or clears land.
                 if (buffer.encoder?.invalid)
                 {
-                    errors.push('[Invalid CommandBuffer] is invalid.');
+                    refuse('[Invalid CommandBuffer] is invalid.');
                     continue;
                 }
                 for (const copy of buffer.deferred ?? [])

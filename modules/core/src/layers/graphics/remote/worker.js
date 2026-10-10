@@ -312,6 +312,27 @@ export function serveGraphics(scope, deps){
                 client.postMessage(lostWith);
             }
         });
+        // A validation error drops the whole frame it was in and says so
+        // only here, where a page's console does not reach: it goes to the
+        // threads that show this worker's frames, the first time a message is
+        // seen and then every 256th, as the device repeats it every frame.
+        /** @type {Map<string, number>} */
+        const refusals = new Map();
+        device.addEventListener?.('uncapturederror', (/** @type {any} */ event)=>{
+            const message = String(event.error?.message ?? event.error).replace(/\s+/g, ' ');
+            const seen = (refusals.get(message) ?? 0) + 1;
+            refusals.set(message, seen);
+            if (seen > 1 && seen % 256 !== 0)
+            {
+                return;
+            }
+            const refused = { type: 'refused', message, seen };
+            scope.postMessage(refused);
+            for (const client of clients)
+            {
+                client.postMessage(refused);
+            }
+        });
         const backend = createBackend({ device, queue: device.queue,
             presentTo: (/** @type {any} */ frame)=>present(device, frame) });
         const latency = createFrameLatency({ queue: device.queue, lost: device.lost });
