@@ -465,6 +465,14 @@ export function createStdioFunctions(host){
                     { progress });
                 if (!progress.starved || ended)
                 {
+                    // The scan read up to the end of the file -- a trailing
+                    // space in the format looks past the last line feed --
+                    // and the read that came back empty marks the stream, as
+                    // fgetc's does, so a loop on the feof macro ends.
+                    if (ended)
+                    {
+                        raise(stream, IOEOF);
+                    }
                     stores.forEach(apply=>apply());
                     stream.pushback.push(...[...encodeAnsi(text.slice(progress.consumed))]
                         .reverse());

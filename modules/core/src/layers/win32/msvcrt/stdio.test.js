@@ -1146,6 +1146,27 @@ test('fscanf consumes what its scan reads and leaves the rest for the next read'
     assert.equal(fns.fscanf.handler([stream, format, buffer]), -1, 'EOF at the end');
 });
 
+test('fscanf whose trailing space reads to the end of the file marks the stream for feof', ()=>{
+    // A loop `while (!feof(f)) fscanf(f, "%s %d\n", ...)` ends on the record's
+    // _IOEOF, which the CRT sets when the whitespace directive's read finds the
+    // end; a scan that stops before it leaves the flag clear.
+    const { memory, fns } = build();
+    const path = memory.put('C:\\lines.txt');
+    const writer = fns.fopen.handler([path, memory.put('wb')]);
+    fns.fwrite.handler([memory.put('a 1\r\nb 2\r\n'), 1, 10, writer]);
+    fns.fclose.handler([writer]);
+    const stream = fns.fopen.handler([path, memory.put('r')]);
+    const word = memory.allocate(16);
+    const number = memory.allocate(4);
+    const format = memory.put('%s %d\n');
+    assert.equal(fns.fscanf.handler([stream, format, word, number]), 2);
+    assert.equal(memory.u32(stream + 12) & 0x10, 0, 'the next line is still ahead');
+    assert.equal(fns.fscanf.handler([stream, format, word, number]), 2);
+    assert.deepEqual([memory.text(word), memory.i32(number)], ['b', 2]);
+    assert.equal(memory.u32(stream + 12) & 0x10, 0x10, 'the record says the file ended');
+    assert.equal(fns.feof.handler([stream]), 0x10);
+});
+
 test('_fsopen and _wfsopen are fopen and _wfopen with a share flag that changes nothing', ()=>{
     const { memory, fns, text } = runtime({ 'C:\\in.txt': 'abc' });
     const input = fns._fsopen.handler([memory.put('C:\\in.txt'), memory.put('rb'), 0x40]);

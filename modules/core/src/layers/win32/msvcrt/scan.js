@@ -330,14 +330,22 @@ export function runScan(input, format, nextPointer, store, options = {}){
         }
 
         const field = limit === Infinity ? input.slice(at) : input.slice(at, at + limit);
-        if (field.length < limit)
-        {
-            starved = true;
-        }
+        /**
+         * Whether more input could have changed what a number read: it ran to
+         * the end of what there is, or all that follows it could still begin
+         * its exponent, fraction or prefix. A caller reading a stream a line
+         * at a time reads on only then, and not to the end of the file for
+         * every number in the format.
+         *
+         * @param {{ end: number } | null} scanned
+         */
+        const short = scanned=>field.length < limit
+            && (scanned === null || /^[eEpPxX+-.]{0,2}$/.test(field.slice(scanned.end)));
 
         if ('eEfgGaA'.includes(conversion))
         {
             const scanned = scanFloat(field);
+            starved ||= short(scanned);
             if (scanned === null)
             {
                 return stop();
@@ -360,6 +368,7 @@ export function runScan(input, format, nextPointer, store, options = {}){
         const base = /** @type {Record<string, number>} */ ({ d: 10, u: 10, i: 0, o: 8, x: 16,
             X: 16 })[conversion] ?? 16;
         const scanned = scanInteger(field, pointer ? 16 : base, true, !pointer);
+        starved ||= short(scanned);
         if (scanned === null)
         {
             return stop();
