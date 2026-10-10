@@ -99,6 +99,9 @@ export function outputModes(size, format){
         }));
 }
 
+/** DXGI_PRESENT_TEST: a present that only asks whether it would be shown. */
+const DXGI_PRESENT_TEST = 0x1;
+
 /**
  * @typedef {Object} OutputConfig
  * @property {string} deviceName
@@ -574,6 +577,13 @@ function createSwapChain(requested, device, factory, windowClientSize){
             if (syncInterval > 4 || flags < 0)
             {
                 return DXGI_ERROR_INVALID_CALL;
+            }
+            // A test asks only whether a present would be shown: nothing is
+            // presented, counted or rotated, and the window is never occluded
+            // here.
+            if ((flags & DXGI_PRESENT_TEST) !== 0)
+            {
+                return S_OK;
             }
             presentCount++;
             currentBuffer = (currentBuffer + 1) % Math.max(1, desc.bufferCount);

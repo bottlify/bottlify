@@ -529,3 +529,31 @@ test('a swap chain is made at a sample count its device makes textures at, and a
         }
         assertFullyReleased(device, 'the device');
     });
+
+test('a present that only tests shows, counts and rotates nothing'
+    + ' (test_swapchain_present_count, dxgi.c:8519-8524)', async()=>{
+    /** @type {any[]} */
+    const shown = [];
+    const device = createDevice();
+    const present = device.present;
+    device.present = (/** @type {any} */ buffer)=>{
+        shown.push(buffer);
+        return present.call(device, buffer);
+    };
+    /** @type {{ swapChain?: any }} */
+    const created = {};
+    assert.equal(device.factory().CreateSwapChain(device, swapChainDesc({
+        bufferCount: 2, swapEffect: DXGI_SWAP_EFFECT.SEQUENTIAL,
+    }), created), S_OK);
+    const swapChain = created.swapChain;
+    assert.equal(await swapChain.Present(0, 0), S_OK);
+    assert.equal(await swapChain.Present(0, 1), S_OK, 'DXGI_PRESENT_TEST');
+    /** @type {{ count?: number }} */
+    const presents = {};
+    swapChain.GetLastPresentCount(presents);
+    assert.equal(presents.count, 1);
+    assert.equal(swapChain.currentBackBufferIndex(), 1);
+    assert.equal(shown.length, 1, 'one frame went to the device');
+    swapChain.release();
+    assertFullyReleased(device, 'the device');
+});
