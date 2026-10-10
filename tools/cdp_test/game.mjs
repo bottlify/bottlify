@@ -1865,7 +1865,9 @@ the run as it stands: ${path}`;
             frames: (result.presentTimes ?? []).filter((/** @type {number} */ at)=>at >= one.from
                 && at < one.from + one.windowMs).length,
         }));
-        const shot = await cdp.send('Page.captureScreenshot', { format: 'png' }, sessionId);
+        // The whole page: a picture taller than the window is cut off otherwise.
+        const shot = await cdp.send('Page.captureScreenshot',
+            { format: 'png', captureBeyondViewport: true }, sessionId);
         writeFileSync(shotPath, Buffer.from(shot.data, 'base64'));
         // The last presented frame as the engine read it back, beside the
         // page's screenshot: the screenshot is what the compositor showed at
