@@ -2525,7 +2525,7 @@ static u32 runInteger(u32 budget)
             if (opsize != 4) LEAVE(W_UNSUPPORTED);
             u32 at = regs[4];
             READ_CHECK(at, 4);
-            u32 v = *(u32 *)(ram + at), w = 0xcd5 | DF | (1u << 11) | (1u << 18) | (1u << 21);
+            u32 v = *(u32 *)(ram + at), w = 0xcd5 | DF | (1u << 11) | (1u << 14) | (1u << 18) | (1u << 21);
             regs[4] = at + 4;
             lk = 0;
             fl = (fl & ~w) | (v & w) | 2;

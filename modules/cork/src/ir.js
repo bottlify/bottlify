@@ -638,11 +638,12 @@ export function evaluate(instruction, state){
         {
             const value = pop(size);
             // The reserved bit 1 always reads set; IF, IOPL and the rest of
-            // the system bits are not a user program's to change here. AC
-            // and ID are: a program finds CPUID by flipping ID, and one that
-            // cannot sees no CPUID and takes its generic code. The word form
-            // writes the low sixteen bits alone.
-            const writable = (0xcd5 | DF | (1 << 11) | (1 << 18) | (1 << 21))
+            // the system bits are not a user program's to change here. NT,
+            // AC and ID are: the 386 probe sets NT, the 486 probe flips AC and
+            // the CPUID probe flips ID, and a program that sees none of them
+            // takes itself for a 286 without CPUID and runs its generic code.
+            // The word form writes the low sixteen bits alone.
+            const writable = (0xcd5 | DF | (1 << 11) | (1 << 14) | (1 << 18) | (1 << 21))
                 & (size === 2 ? 0xffff : -1);
             state.eflags = ((state.eflags & ~writable) | (value & writable) | 2) >>> 0;
             return;

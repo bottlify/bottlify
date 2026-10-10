@@ -224,6 +224,18 @@ test('popf changes the ID and AC bits, so the CPUID probe finds CPUID', ()=>{
     assert.equal((r.state.reg[0] ^ r.state.reg[1]) >>> 0, 0x240000, 'the model');
 });
 
+test('popfw sets NT, so the 386 probe does not take the CPU for a 286', ()=>{
+    // mov cx, 0xf000; push cx; popfw; pushfw; pop ax; and ax, 0xf000; hlt --
+    // Intel's processor probe: on a 286 bits 12-15 never set, on anything
+    // later NT (bit 14) does from user mode, IOPL staying as the system has it.
+    const r = both([0x66, 0xb9, 0x00, 0xf0, 0x66, 0x51, 0x66, 0x9d, 0x66, 0x9c, 0x66, 0x58,
+        0x66, 0x25, 0x00, 0xf0, 0xf4]);
+    assert.equal(r.exit.kind, 3);
+    agree(r);
+    assert.equal(r.m.reg('eax') & 0xf000, 0x4000, 'translated: NT alone');
+    assert.equal(r.state.reg[0] & 0xf000, 0x4000, 'the model: NT alone');
+});
+
 test('popfw loads the low sixteen bits of EFLAGS alone, so AC and ID stay', ()=>{
     // push word 0x0003 (CF and the reserved bit); popfw -- with AC and ID set
     // before: the word form writes bits 0-15, and they are above them. Then
