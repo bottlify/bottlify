@@ -648,3 +648,16 @@ test('ps_1_1 compares through cnd on r0.a, as fxc does', async()=>{
     assert.deepEqual(run([-0.25, 0, 0, 0], [0, 0, 0.5, 0]), [0.5, 0.5, 0.5, 0.5]);
     assert.deepEqual(run([0, 0, 0, 0], [0, 0, 0, 0]), [0, 0, 0, 0]);
 });
+
+test('a typedef\'s name constructs the type it names, as a cast to it does', async()=>{
+    // `typedef vector<half, 4> vec4;` then `vec4(v.xyz, 1)`, the way an effect of the
+    // period spells its types.
+    const result = await compile(`typedef vector<half, 4> vec4; typedef vector<half, 2> vec2;
+        float4 main(float4 v : COLOR0) : COLOR0 { vec2 h = vec2(v.x, 0.5);
+            return vec4(h, v.z, 1) + (vec4)0; }`, 'ps_2_0');
+    assert.equal(result.ok, true, result.messages);
+    assert.deepEqual(shade(result, [0.25, 0.5, 0.75, 1]), [0.25, 0.5, 0.75, 1]);
+    const strukt = await compile(`struct S { float4 a; };
+        float4 main() : COLOR0 { S s = S(1, 2, 3, 4); return s.a; }`, 'ps_2_0');
+    assert.equal(strukt.ok, false, 'a structure is not constructed by its name');
+});

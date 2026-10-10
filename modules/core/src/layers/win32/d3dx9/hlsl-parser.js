@@ -1058,6 +1058,13 @@ export function parse(source, file = 'memory'){
             type.pos = token.pos;
             return { kind: 'construct', type, args: parseArguments(), pos: token.pos };
         }
+        // `typedef vector<half, 4> vec4;` then `vec4(p, 1)`: fxc takes a typedef's name as
+        // a constructor of the type it names, as it takes it in a cast.
+        if (typeNames.has(token.text) && isPunct('('))
+        {
+            return { kind: 'construct', type: { cls: 'named', name: token.text, pos: token.pos },
+                args: parseArguments(), pos: token.pos };
+        }
         if (isPunct('('))
         {
             return { kind: 'call', callee: { kind: 'ident', name: token.text, pos: token.pos },
