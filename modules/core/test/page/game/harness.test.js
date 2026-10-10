@@ -279,3 +279,63 @@ test('a seeded file reaches the volume as the bytes it was, at the path it was g
     assert.equal(file.path, 'C:\\App\\base\\demos\\bench.demo');
     assert.deepEqual([...file.bytes], [...bytes]);
 });
+
+test('a route\'s clicks move a cursor kept by relative motion to where they are aimed', ()=>{
+    // DirectInput's mouse: the program starts its cursor in the middle, adds
+    // every motion to it, stops it at the screen's edges, and puts it back
+    // in the middle whenever it likes.
+    const app = fakeApp();
+    /** @type {import('./harness.js').PresentState} */
+    const state = { presented: null, pointerDown: false, pointerAt: { x: 0, y: 0 },
+        gaps: [], times: [], lastPresent: 0, firstPresent: 0, presents: 0 };
+    const request = { clicks: [{ x: 672, y: 528, after: 2 }, { x: 132, y: 174, after: 5 }] };
+    const cursor = { x: 512, y: 384 };
+    /** @type {{ x: number, y: number }[]} */
+    const pressedAt = [];
+    /** @param {any[]} messages */
+    const take = messages=>{
+        for (const message of messages)
+        {
+            if (message.kind === 'pointerMove')
+            {
+                cursor.x = Math.min(1023, Math.max(0, cursor.x + message.dx));
+                cursor.y = Math.min(767, Math.max(0, cursor.y + message.dy));
+            }
+            if (message.kind === 'pointerButton' && message.down)
+            {
+                pressedAt.push({ ...cursor });
+            }
+        }
+    };
+    for (let frame = 0; frame < 8; frame++)
+    {
+        if (frame === 4)
+        {
+            cursor.x = 512;
+            cursor.y = 384;
+        }
+        const from = app.sent.length;
+        presentFrame(app, request, state, {});
+        take(app.sent.slice(from));
+    }
+    assert.deepEqual(pressedAt, [{ x: 672, y: 528 }, { x: 132, y: 174 }]);
+    assert.equal(state.inputs?.filter(sent=>sent.kind === 'pointerButton').length, 4,
+        'every press and release is in the record');
+});
+
+test('timed clicks that come due on the same present go one after the other', ()=>{
+    // The first present came before a load that held the screen past both.
+    const app = fakeApp();
+    /** @type {import('./harness.js').PresentState} */
+    const state = { presented: null, pointerDown: false, pointerAt: { x: 0, y: 0 },
+        gaps: [], times: [], lastPresent: 0, firstPresent: 0, presents: 0 };
+    const request = { clicks: [{ x: 10, y: 10, after: -1, afterSeconds: 0 },
+        { x: 20, y: 20, after: -1, afterSeconds: 0 }] };
+    for (let frame = 0; frame < 8; frame++)
+    {
+        presentFrame(app, request, state, {});
+    }
+    const buttons = (state.inputs ?? []).filter(sent=>sent.kind === 'pointerButton')
+        .map(sent=>`${sent.present}:${sent.down ? 'down' : 'up'}`);
+    assert.deepEqual(buttons, ['2:down', '3:up', '5:down', '6:up']);
+});

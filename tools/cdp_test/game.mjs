@@ -1189,6 +1189,16 @@ function describe(result, context, calls, symbols){
     }
 
     say(`  frames presented: ${result.presents ?? 0}`);
+    if ((result.inputs ?? []).length > 0)
+    {
+        // What the route sent and on which present, so a click that did not
+        // land can be told from one that was never sent.
+        say(`  input sent: ${result.inputs.map((/** @type {any} */ one)=>`#${one.present} ${
+            one.kind === 'pointerMove' ? `move ${one.x},${one.y} by ${one.dx},${one.dy}`
+                : one.kind === 'pointerButton' ? `${one.button} ${one.down ? 'down' : 'up'}`
+                    : `${one.kind} ${one.code ?? one.text ?? ''}${one.down === false ? ' up' : ''}`
+        }`).join('; ')}`);
+    }
     // How the page read the sound: the shared table a worklet reads, or the ring.
     say(`  sound drained through: ${result.drain ?? '?'}`);
     if (result.steady)

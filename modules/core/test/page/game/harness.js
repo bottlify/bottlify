@@ -32,6 +32,12 @@ import {
 } from '../../../src/layers/audio/output/mix.js';
 
 /** How much of each unbounded collection survives the trip back out. */
+/**
+ * Further than any screen is wide or tall: the motion that takes a cursor a
+ * program moves by relative motion into the top left corner.
+ */
+const CORNER = 1 << 16;
+
 const LIMITS = {
     // Output whole: a conformance test prints three pieces per failed check,
     // and 400 ended Wine's d3d8 visual at its 130th.
@@ -866,6 +872,7 @@ export function schedulePresses(app, request, say = ()=>{}){
  * @property {any} presented          The last frame this run presented.
  * @property {boolean} pointerDown    Whether the held pointer's button is down.
  * @property {{ x: number, y: number }} pointerAt  Where the last click left it.
+ * @property {any[]} [inputs]          The pointer and key messages sent, each with its present.
  * @property {number[]} gaps          Milliseconds between one present and the next.
  * @property {number[]} times         Each present's wall-clock time (ms since the epoch), so a
  *                                    driver can count the frames inside a window of its own.
@@ -1020,28 +1027,54 @@ export function presentFrame(app, request, state, frame){
     for (const timed of [request.clicks, request.keys, request.typed, request.pasted,
         request.looks])
     {
+        // In their order, each on a present after the one before it has
+        // finished: a load that holds the screen for longer than the gap
+        // between two of them would otherwise have them all come due on the
+        // same present -- two presses and then two releases, one click.
+        let free = 0;
         for (const action of timed ?? [])
         {
             if (action.afterSeconds !== undefined && action.after < 0
-                && now - state.firstPresent >= action.afterSeconds * 1000)
+                && now - state.firstPresent >= action.afterSeconds * 1000
+                && state.presents >= free)
             {
                 action.after = state.presents;
             }
+            if (action.after < 0)
+            {
+                break;
+            }
+            // A click takes three presents (`clicks` below), a key its frames
+            // and one to let go, anything else one.
+            const span = timed === request.clicks ? 3
+                : 'frames' in action ? (action.frames ?? 1) + 1 : 2;
+            free = Math.max(free, action.after + span);
         }
     }
+    // Every pointer and key message this harness sends, with the present it
+    // went on: a route that did not do what it should says here whether the
+    // press, the release or the motion never left.
+    const send = (/** @type {any} */ message)=>{
+        state.inputs ??= [];
+        if (state.inputs.length < LIMITS.samples)
+        {
+            state.inputs.push({ present: state.presents, ...message });
+        }
+        app.input.send(message);
+    };
     // A pointer the run asked to hold somewhere, put there every frame: a
     // program that hit-tests the cursor against its own controls draws a
     // different cursor over one than over none, and this page has no mouse
     // of its own to hold still.
     if (request.pointer)
     {
-        app.input.send({ kind: 'pointerMove',
+        send({ kind: 'pointerMove',
             x: request.pointer.x, y: request.pointer.y,
             dx: request.pointer.dx ?? 0, dy: request.pointer.dy ?? 0 });
         if (request.pointer.down && !state.pointerDown)
         {
             state.pointerDown = true;
-            app.input.send({ kind: 'pointerButton', button: 'left', down: true });
+            send({ kind: 'pointerButton', button: 'left', down: true });
         }
     }
     // A click, a frame long, once the program has drawn a number of frames:
@@ -1049,20 +1082,32 @@ export function presentFrame(app, request, state, frame){
     // person's click reaches a program that reads the button once a frame.
     for (const click of request.clicks ?? [])
     {
+        if (click.after < 0)
+        {
+            // Timed, and not yet due.
+            continue;
+        }
+        // A program that keeps a cursor of its own and moves it by relative
+        // motion -- DirectInput's mouse -- puts it wherever it likes, the
+        // middle of a menu it has just opened as often as not. Pushed far up
+        // and left first it stops in the corner, and the motion from there to
+        // the click takes it to the same point as this harness's pointer,
+        // whatever the program. A frame apart: a program that adds a frame's
+        // motion up before it stops the cursor at an edge would take the two
+        // together for a push into the corner.
         if (state.presents === click.after)
         {
-            // With the motion that would have brought a pointer there from
-            // where it was: a program that reads the mouse as relative motion
-            // moves its own cursor by it.
-            app.input.send({ kind: 'pointerMove',
-                x: click.x, y: click.y,
-                dx: click.x - state.pointerAt.x, dy: click.y - state.pointerAt.y });
-            state.pointerAt = { x: click.x, y: click.y };
-            app.input.send({ kind: 'pointerButton', button: 'left', down: true });
+            send({ kind: 'pointerMove', x: 0, y: 0, dx: -CORNER, dy: -CORNER });
         }
         if (state.presents === click.after + 1)
         {
-            app.input.send({ kind: 'pointerButton', button: 'left', down: false });
+            send({ kind: 'pointerMove', x: click.x, y: click.y, dx: click.x, dy: click.y });
+            state.pointerAt = { x: click.x, y: click.y };
+            send({ kind: 'pointerButton', button: 'left', down: true });
+        }
+        if (state.presents === click.after + 2)
+        {
+            send({ kind: 'pointerButton', button: 'left', down: false });
         }
     }
     // A key press, held for one presented frame and released on the next, the
@@ -1073,11 +1118,11 @@ export function presentFrame(app, request, state, frame){
     {
         if (state.presents === key.after)
         {
-            app.input.send({ kind: 'key', code: key.code, down: true });
+            send({ kind: 'key', code: key.code, down: true });
         }
         if (state.presents === key.after + (key.frames ?? 1))
         {
-            app.input.send({ kind: 'key', code: key.code, down: false });
+            send({ kind: 'key', code: key.code, down: false });
         }
     }
     // Mouse motion without a button, the same every frame for a stretch: how
@@ -1087,7 +1132,7 @@ export function presentFrame(app, request, state, frame){
         if (turn.after >= 0 && state.presents >= turn.after
             && state.presents < turn.after + turn.frames)
         {
-            app.input.send({ kind: 'pointerMove', x: state.pointerAt.x, y: state.pointerAt.y,
+            send({ kind: 'pointerMove', x: state.pointerAt.x, y: state.pointerAt.y,
                 dx: turn.dx, dy: turn.dy });
         }
     }
@@ -1103,12 +1148,12 @@ export function presentFrame(app, request, state, frame){
         if (index >= 0 && index < typed.text.length)
         {
             const character = typed.text[index];
-            app.input.send({ kind: 'key', code: codeOf(character), down: true });
-            app.input.send({ kind: 'text', text: character });
+            send({ kind: 'key', code: codeOf(character), down: true });
+            send({ kind: 'text', text: character });
         }
         if (index >= 1 && index <= typed.text.length)
         {
-            app.input.send({ kind: 'key', code: codeOf(typed.text[index - 1]), down: false });
+            send({ kind: 'key', code: codeOf(typed.text[index - 1]), down: false });
         }
     }
     // Pasted text: on the clipboard first, then the Control-V a program
@@ -1118,14 +1163,14 @@ export function presentFrame(app, request, state, frame){
     {
         if (state.presents === pasted.after)
         {
-            app.input.send({ kind: 'paste', text: pasted.text });
-            app.input.send({ kind: 'key', code: 'ControlLeft', down: true });
-            app.input.send({ kind: 'key', code: 'KeyV', down: true });
+            send({ kind: 'paste', text: pasted.text });
+            send({ kind: 'key', code: 'ControlLeft', down: true });
+            send({ kind: 'key', code: 'KeyV', down: true });
         }
         else if (state.presents === pasted.after + 1)
         {
-            app.input.send({ kind: 'key', code: 'KeyV', down: false });
-            app.input.send({ kind: 'key', code: 'ControlLeft', down: false });
+            send({ kind: 'key', code: 'KeyV', down: false });
+            send({ kind: 'key', code: 'ControlLeft', down: false });
         }
     }
 }
@@ -1431,6 +1476,7 @@ export function createHarness(canvas, how = {}){
         presentState.presented = null;
         presentState.pointerDown = false;
         presentState.pointerAt = { x: 0, y: 0 };
+        presentState.inputs = [];
         /** @type {any} */
         const collected = { failures: [], missing: [], output: [], events: [], shaders: [],
             divergences: [] };
@@ -1975,6 +2021,7 @@ export function createHarness(canvas, how = {}){
         result.recorded = request.record ? app.recordedSession?.().events ?? [] : [];
         result.divergences = collected.divergences;
         result.errors = errors;
+        result.inputs = presentState.inputs ?? [];
         result.presentGaps = presentState.gaps.slice();
         result.presentTimes = presentState.times.slice();
         result.steady = presentState.steady ?? null;
