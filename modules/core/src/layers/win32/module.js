@@ -1184,7 +1184,8 @@ export function createWin32Module(){
             // and a configuration tool how much video memory there is.
             registerDxDiagClasses({
                 registry: com, vtables: comVtables, heap, readMemory, writeMemory, readWideString,
-                windows, directx, screen: config?.screen, divergence: config?.divergence,
+                windows, directx, screen: config?.screen, physicalMemory: arena.size,
+                divergence: config?.divergence,
             });
 
             // JScript and VBScript, the Active Scripting engines a host -- an

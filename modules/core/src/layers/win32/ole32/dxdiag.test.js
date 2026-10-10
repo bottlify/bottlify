@@ -21,6 +21,8 @@ const E_INVALIDARG = 0x80070057 | 0;
 const CO_E_NOTINITIALIZED = 0x800401f0 | 0;
 const VT_UI4 = 19;
 const VT_BSTR = 8;
+const VT_BOOL = 11;
+const VT_I4 = 3;
 
 /** @param {{ width: number, height: number, bitsPerPixel: number }} [screen] */
 function setup(screen){
@@ -61,6 +63,7 @@ function setup(screen){
         },
         windows: windowsVersion('winxp'),
         screen,
+        physicalMemory: 512 * 0x100000,
         divergence: (api, detail)=>reported.push(`${api}: ${detail}`),
     });
     /** @param {number} at */
@@ -156,6 +159,18 @@ test('the SDK\'s way of asking which DirectX this is reads 9, 0 and c from DxDia
     assert.equal(host.wideAt(english.value), '4.09.0000.0904', 'the version the registry names');
     assert.deepEqual(prop('dwOSMajorVersion'), { vt: VT_UI4, value: 5 });
     assert.deepEqual(prop('dwOSMinorVersion'), { vt: VT_UI4, value: 1 });
+
+    // A game's own requirements check reads the RAM here, as a decimal BSTR.
+    const memory = prop('ullPhysicalMemory');
+    assert.equal(memory.vt, VT_BSTR);
+    assert.equal(host.wideAt(memory.value), String(512 * 0x100000),
+        'the total GlobalMemoryStatusEx reports');
+    assert.equal(host.wideAt(prop('ullAvailPageFile').value), String(512 * 0x100000));
+    assert.equal(host.wideAt(prop('ullUsedPageFile').value), '0');
+    assert.equal(host.wideAt(prop('szPhysicalMemoryEnglish').value), '512MB RAM');
+    // And whether the SDK's debug runtimes are in, which they are not.
+    assert.deepEqual(prop('bIsD3DDebugRuntime'), { vt: VT_BOOL, value: 0 });
+    assert.deepEqual(prop('nD3DDebugLevel'), { vt: VT_I4, value: 0 });
 });
 
 test('Initialize wants the block\'s own size and the dx9 header, and the root waits for it', ()=>{

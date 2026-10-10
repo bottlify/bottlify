@@ -495,6 +495,19 @@ test('a declared cursor space scales motion, so a viewport sweep spans the space
         'the far corner of the viewport is the far corner of the declared space');
 });
 
+test('a cursor pinned to a point by its clip still moves DirectInput at scale one', ()=>{
+    const h = harness({ bounds: ()=>({ width: 640, height: 480 }) });
+    // A program drawing its own cursor from DirectInput pins the system one
+    // to a pixel at the centre; that rectangle is no space to scale into.
+    h.router.clip({ left: 320, top: 240, right: 321, bottom: 241 });
+    h.mouse.mouseState();
+    h.send({ kind: 'pointerMove', dx: -110, dy: 10 });
+    const moved = h.mouse.mouseState();
+    assert.equal(moved.x, -110, 'the relative device reports the raw motion');
+    assert.equal(moved.y, 10);
+    assert.deepEqual(h.router.cursor(), { x: 320, y: 240 }, 'the system cursor stays pinned');
+});
+
 test('with no declared cursor space, motion maps straight into the viewport, unchanged', ()=>{
     const h = harness({ bounds: ()=>({ width: 640, height: 480 }) });
     h.send({ kind: 'pointerMove', x: 320, y: 240 });
