@@ -517,6 +517,13 @@ export function translateShader(parsed, options = {}){
      * @type {Map<number, { usage: number, usageIndex: number }>}
      */
     const semantics = new Map();
+    // vs_3_0 may index its outputs by aL (o[aL + n]), and ps_3_0 its inputs
+    // (v[aL + n]); WGSL cannot index a struct's fields, so such a shader
+    // keeps the file as an array and copies it to or from the fields.
+    const indexedOutputs = vertex && major >= 3 && parsed.instructions.some(instruction=>
+        instruction.dest?.type === REGISTER.OUTPUT && instruction.dest.relative);
+    const indexedInputs = !vertex && major >= 3 && parsed.instructions.some(instruction=>
+        instruction.sources.some(operand=>operand.type === REGISTER.INPUT && operand.relative));
     /** @type {Map<number, string>} def'd constants, as WGSL literals */
     const defined = new Map();
     /** Whether an indexed constant read may land on a def'd register. */
@@ -610,7 +617,7 @@ export function translateShader(parsed, options = {}){
                     return `v${index}`;
                 }
                 pixelInputs.add(index);
-                return `in.v${index}`;
+                return indexedInputs ? `vIn[${index}${relative}]` : `in.v${index}`;
             case REGISTER.CONST:
                 if (defined.has(index) && !relative)
                 {
@@ -670,6 +677,10 @@ export function translateShader(parsed, options = {}){
             case REGISTER.OUTPUT:
                 if (vertex && major >= 3)
                 {
+                    if (indexedOutputs)
+                    {
+                        return `oRel[${index}${relative}]`;
+                    }
                     // The output declared as the position is the position.
                     return semantics.get(index)?.usage === D3DDECLUSAGE.POSITION
                         ? 'out.oPos'
@@ -1535,6 +1546,14 @@ export function translateShader(parsed, options = {}){
         filling.push(instruction);
     }
     translateBody(main, returnsEarly(main));
+    if (indexedOutputs)
+    {
+        for (const [index, declaration] of semantics)
+        {
+            body.push(declaration.usage === D3DDECLUSAGE.POSITION
+                ? `    out.oPos = oRel[${index}];` : `    out.o${index} = oRel[${index}];`);
+        }
+    }
 
     if (blocks.length > 0)
     {
@@ -1567,6 +1586,16 @@ export function translateShader(parsed, options = {}){
 
     /** @type {string[]} */
     const declarations = [];
+    if (indexedOutputs)
+    {
+        declarations.push('    var oRel: array<vec4f, 12>;');
+    }
+    if (indexedInputs)
+    {
+        // Every input register the shader declared, the rest reading zero.
+        declarations.push(`    let vIn = array<vec4f, 10>(${Array.from({ length: 10 }, (_, index)=>
+            (pixelInputs.has(index) ? `in.v${index}` : 'vec4f(0.0)')).join(', ')});`);
+    }
     for (const name of [...used].sort())
     {
         declarations.push(name === 'aL' ? '    var aL: i32 = 0;'

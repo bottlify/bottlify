@@ -688,6 +688,41 @@ test('a subroutine is inlined at each call, and its ret leaves it from inside a 
         'main\'s ret ends nothing early');
 });
 
+test('vs_3_0 writes o[aL + n] and ps_3_0 reads v[aL + n] through arrays of the file', ()=>{
+    const output = (/** @type {number} */ usage, /** @type {number} */ register)=>[
+        op(OPCODE.DCL, 2), (0x80000000 | usage) >>> 0, dst(REGISTER.OUTPUT, register)];
+    // loop aL, i0; mov o[aL + 1], c0; endloop; mov o0, v0.
+    const vertex = translateShader(parseShader([VS_3_0, ...dclInput(0, 0),
+        ...output(D3DDECLUSAGE.POSITION, 0), ...output(D3DDECLUSAGE.TEXCOORD, 1),
+        ...output(D3DDECLUSAGE.TEXCOORD, 2),
+        op(OPCODE.LOOP, 2), src(REGISTER.LOOP, 0), src(REGISTER.CONSTINT, 0),
+        op(OPCODE.MOV, 3), (dst(REGISTER.OUTPUT, 1) | RELATIVE) >>> 0, src(REGISTER.LOOP, 0),
+        src(REGISTER.CONST, 0),
+        op(OPCODE.ENDLOOP, 0),
+        op(OPCODE.MOV, 2), dst(REGISTER.OUTPUT, 0), src(REGISTER.INPUT, 0),
+        END_TOKEN]));
+    assert.equal(vertex.error, null);
+    assertLine(vertex.wgsl, 'oRel[1 + aL] = c[0];');
+    assertLine(vertex.wgsl, 'oRel[0] = v0;');
+    assertLine(vertex.wgsl, 'out.oPos = oRel[0];');
+    assertLine(vertex.wgsl, 'out.o2 = oRel[2];');
+
+    const pixel = translateShader(parseShader([PS_3_0,
+        op(OPCODE.DCL, 2), (0x80000000 | D3DDECLUSAGE.TEXCOORD) >>> 0, dst(REGISTER.INPUT, 0),
+        op(OPCODE.DCL, 2), (0x80000000 | (1 << 16) | D3DDECLUSAGE.TEXCOORD) >>> 0,
+        dst(REGISTER.INPUT, 1),
+        op(OPCODE.LOOP, 2), src(REGISTER.LOOP, 0), src(REGISTER.CONSTINT, 0),
+        op(OPCODE.ADD, 4), dst(REGISTER.TEMP, 0), src(REGISTER.TEMP, 0),
+        (src(REGISTER.INPUT, 0) | RELATIVE) >>> 0, src(REGISTER.LOOP, 0),
+        op(OPCODE.ENDLOOP, 0),
+        op(OPCODE.MOV, 2), dst(REGISTER.COLOROUT, 0), src(REGISTER.TEMP, 0),
+        END_TOKEN]));
+    assert.equal(pixel.error, null);
+    assertLine(pixel.wgsl, 'let vIn = array<vec4f, 10>(in.v0, in.v1, vec4f(0.0), vec4f(0.0),'
+        + ' vec4f(0.0), vec4f(0.0), vec4f(0.0), vec4f(0.0), vec4f(0.0), vec4f(0.0));');
+    assertLine(pixel.wgsl, 'r0 = (r0 + vIn[0 + aL]);');
+});
+
 test('a call nobody can answer is refused by name', ()=>{
     const missing = vertexBody([op(OPCODE.CALL, 1), src(REGISTER.LABEL, 3)]);
     assert.match(missing.error ?? '', /l3, which the shader does not define/);
