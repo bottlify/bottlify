@@ -3281,6 +3281,25 @@ export function createRenderer(options){
     };
 
     /**
+     * Where a shader draw's fog comes from, for the frame's account: table fog
+     * and the depth its projection has it taken over (`/vstz`, `/vstw`), or
+     * vertex fog and whether the vertex shader writes oFog (`/vsv+`, `/vsv-`;
+     * one that writes none is fogged whole).
+     *
+     * @param {RenderModel} model
+     */
+    const shaderFogOf = model=>{
+        if (fogOf(model).source === FOG_SOURCE.TABLE)
+        {
+            return `/vst${isAffine(transformOf(model, D3DTS.PROJECTION)) ? 'z' : 'w'}`;
+        }
+        const vertex = model.stageProcessing.program?.vertex;
+        const writes = vertex?.instructions.some((/** @type {any} */ instruction)=>
+            instruction.dest?.type === REGISTER.RASTOUT && instruction.dest.index === 1);
+        return vertex ? `/vsv${writes ? '+' : '-'}` : '/ps';
+    };
+
+    /**
      * @param {RenderModel} model
      * @param {PreparedDraw} prepared
      */
@@ -3303,8 +3322,7 @@ export function createRenderer(options){
             // Built once a preparation, which starts with none.
             if (!prepared.fogSetting)
             {
-                prepared.fogSetting = fogSettingOf(model) + (layout ? ''
-                    : `/vs${isAffine(transformOf(model, D3DTS.PROJECTION)) ? 'z' : 'w'}`);
+                prepared.fogSetting = fogSettingOf(model) + (layout ? '' : shaderFogOf(model));
             }
             frameStats.fog = prepared.fogSetting;
             // And how many draws ran under each setting: a program fogs its
