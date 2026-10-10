@@ -107,3 +107,36 @@ test('other image formats, cube textures and missing pointers are refused', asyn
     assert.equal(r.call(without.D3DXSaveTextureToFileA, [name, IFF_DDS, texture, 0]),
         E_NOTIMPL, 'nowhere to write a file');
 });
+
+test('a surface is saved as one level: its rectangle, or all of it, read through its lock',
+    async()=>{
+        const { r, saver, texture, written, given, name } = setup();
+        const [top] = r.objects.get(texture).surfaces;
+        assert.equal(saver.D3DXSaveSurfaceToFileA.argBytes, 20);
+        assert.equal(await r.call(saver.D3DXSaveSurfaceToFileA, [name, IFF_DDS, top, 0, 0]), 0);
+        const whole = readImage(/** @type {Uint8Array} */ (written.get('shot.dds')));
+        assert.deepEqual([whole.width, whole.height, whole.mipLevels], [4, 2, 1]);
+
+        const rect = r.heap.allocate(16);
+        [1, 0, 3, 2].forEach((v, i)=>r.view.setUint32(rect + i * 4, v, true));
+        const out = r.heap.allocate(4);
+        assert.equal(await r.call(saver.D3DXSaveSurfaceToFileInMemory, [out, IFF_DDS, top, 0,
+            rect]), 0);
+        const part = readImage(given[0]);
+        assert.deepEqual([part.width, part.height], [2, 2]);
+        // The surface fixture locks at the surface's start whatever the rectangle; the
+        // rows are read at its pitch, the rectangle's width of them.
+        assert.deepEqual([...given[0].subarray(128, 136)], [0, 1, 2, 3, 4, 5, 6, 7]);
+        assert.deepEqual([...given[0].subarray(136, 140)], [16, 17, 18, 19], 'the next row');
+        assert.deepEqual(r.calls.filter(c=>c[0] === 'LockRect').at(-1)?.slice(2), [rect, 0x10],
+            'the rectangle locked, only to read');
+
+        [3, 0, 5, 2].forEach((v, i)=>r.view.setUint32(rect + i * 4, v, true));
+        assert.equal(await r.call(saver.D3DXSaveSurfaceToFileInMemory, [out, IFF_BMP, top, 0,
+            rect]), D3DERR_INVALIDCALL, 'a rectangle past the edge');
+        assert.equal(r.view.getUint32(out, true), 0);
+        const wide = r.heap.allocate(32);
+        [...'w.bmp\0'].forEach((c, i)=>r.view.setUint16(wide + i * 2, c.charCodeAt(0), true));
+        assert.equal(await r.call(saver.D3DXSaveSurfaceToFileW, [wide, IFF_BMP, top, 0, 0]), 0);
+        assert.equal(readImage(/** @type {Uint8Array} */ (written.get('w.bmp'))).width, 4);
+    });

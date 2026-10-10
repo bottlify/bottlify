@@ -67,34 +67,6 @@ const D3DERR_INVALIDCALL = 0x8876086c;
 const IID_ID3DXBUFFER = '{8BA5FB08-5195-40E2-AC58-0D989C3A0102}';
 
 /**
- * What an image file is, by its signature, as D3DX's loaders tell them apart.
- *
- * @param {Uint8Array} head  Its first four bytes.
- * @returns {string}
- */
-function imageKind(head){
-    const text = String.fromCharCode(...head);
-    if (text === 'DDS ')
-    {
-        return 'DDS';
-    }
-    if (text.startsWith('BM'))
-    {
-        return 'BMP';
-    }
-    if (head[0] === 0xff && head[1] === 0xd8)
-    {
-        return 'JPEG';
-    }
-    if (text === 'PNG')
-    {
-        return 'PNG';
-    }
-    const bytes = [...head].map(b=>b.toString(16).padStart(2, '0')).join(' ');
-    return `unrecognised, perhaps TGA: ${bytes}`;
-}
-
-/**
  * The facilities this surface does not build: each one's argument width, in
  * bytes, then which of its arguments are out-pointers it leaves null -- a
  * caller that does not check the answer finds no object rather than whatever
@@ -115,8 +87,6 @@ const NOT_BUILT = {
     D3DXCreateTeapot: [12, 1, 2],
     D3DXCreateTextA: [32, 5, 6],
     D3DXCreateTorus: [28, 5, 6],
-    D3DXSaveSurfaceToFileA: [20],
-    D3DXSaveSurfaceToFileInMemory: [20, 0],
     D3DXSimplifyMesh: [28, 6],
     D3DXUVAtlasPartition: [68, 11, 12, 13, 14],
     D3DXValidMesh: [12, 2],
@@ -417,14 +387,7 @@ export function createD3dxFunctions(host, options = {}){
                         host.writeMemory(args[at] >>> 0, new Uint8Array(4));
                     }
                 }
-                // An image named by what it is, so a report says which decoders a
-                // program wants: the first bytes of the data it handed over.
-                const dataAt = args[name.endsWith('InMemoryEx') ? 1 : 0] >>> 0;
-                const image = name.endsWith('InMemoryEx') || name.endsWith('FileInMemory')
-                    ? ` (${imageKind(host.readMemory(dataAt, 4))})`
-                    : '';
-                host.divergence?.(name,
-                    `answered E_NOTIMPL: nothing is built on a device here${image}`);
+                host.divergence?.(name, 'answered E_NOTIMPL: nothing is built on a device here');
                 return E_NOTIMPL;
             },
         }])),

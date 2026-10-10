@@ -4,13 +4,14 @@
  * See LICENSE for details
  */
 
-import { TEXTURE, createDeviceCalls } from './device.js';
+import { SURFACE, TEXTURE, createDeviceCalls } from './device.js';
 import { IFF } from './images.js';
 import { FMT, decodeTexels, isCompressed, isSupported, layoutOf } from './pixels.js';
 
 /**
- * D3DXSaveTextureToFile and D3DXSaveTextureToFileInMemory: a texture of the
- * program's read through its levels' locks and written as an image file.
+ * D3DXSaveTextureToFile, D3DXSaveSurfaceToFile and their InMemory forms: a
+ * texture of the program's read through its levels' locks, or a rectangle of
+ * a surface through the surface's, and written as an image file.
  *
  * DDS keeps every level as the texture holds it, in its own format: the
  * formats with a documented mask layout described by their masks, the
@@ -196,25 +197,58 @@ export function createTextureSaver(host, buffers){
     const { u32, method } = createDeviceCalls(host);
 
     /**
-     * The file a texture makes in an image format, or the HRESULT that says why not.
+     * A level's or a surface's area as an image file can keep it: its rows'
+     * layout, or the HRESULT that says why not.
      *
-     * @param {string} api @param {number} texture @param {number} fileFormat
-     * @param {number} palette @param {any} thread
+     * @param {string} api @param {number} fileFormat @param {number} format
+     * @param {number} width @param {number} height
+     * @returns {{ rowBytes: number, rows: number } | number}
+     */
+    const layoutFor = (api, fileFormat, format, width, height)=>{
+        const layout = rowsOf(format, width, height);
+        if (!layout || (fileFormat !== IFF.DDS && !isSupported(format) && format !== FMT.P8))
+        {
+            host.divergence?.(api, `a texture of format ${format} is not written as `
+                + `image file format ${fileFormat}: answered E_NOTIMPL`);
+            return E_NOTIMPL;
+        }
+        return layout;
+    };
+
+    /**
+     * The rows of a locked area, packed.
+     *
+     * @param {number} locked  The D3DLOCKED_RECT.
+     * @param {{ rowBytes: number, rows: number }} layout
+     */
+    const rowsAt = (locked, layout)=>{
+        const pitch = u32(locked);
+        const bits = u32(locked + 4);
+        const bytes = new Uint8Array(layout.rowBytes * layout.rows);
+        for (let row = 0; row < layout.rows; row++)
+        {
+            bytes.set(host.readMemory(bits + row * pitch, layout.rowBytes), row * layout.rowBytes);
+        }
+        return bytes;
+    };
+
+    /**
+     * The file some levels make in an image format, or the HRESULT that says
+     * why not: DDS keeps them all, BMP and DIB the first.
+     *
+     * @param {string} api @param {number} fileFormat @param {number} palette
+     * @param {(scratch: number) => Promise<{ format: number, levels: { width: number,
+     *     height: number, bytes: Uint8Array }[] } | number>} readLevels
+     *     The levels read through their locks; scratch has room for a
+     *     D3DSURFACE_DESC and a D3DLOCKED_RECT after it.
      * @returns {Promise<Uint8Array | number>}
      */
-    const encode = async(api, texture, fileFormat, palette, thread)=>{
+    const encode = async(api, fileFormat, palette, readLevels)=>{
         await null;
         if (fileFormat !== IFF.DDS && fileFormat !== IFF.BMP && fileFormat !== IFF_DIB)
         {
             host.divergence?.(api, `image file format ${fileFormat} is not written: answered `
                 + 'E_NOTIMPL');
-            return E_NOTIMPL;
-        }
-        const type = await method(thread, texture, TEXTURE.GetType, []);
-        if (type !== D3DRTYPE_TEXTURE)
-        {
-            host.divergence?.(api, `a resource of type ${type} (a cube or volume texture) is not `
-                + 'written: answered E_NOTIMPL');
             return E_NOTIMPL;
         }
         const heap = /** @type {NonNullable<SaveHost['heap']>} */ (host.heap);
@@ -225,49 +259,12 @@ export function createTextureSaver(host, buffers){
         }
         try
         {
-            const count = fileFormat === IFF.DDS
-                ? await method(thread, texture, TEXTURE.GetLevelCount, []) : 1;
-            /** @type {{ width: number, height: number, bytes: Uint8Array }[]} */
-            const levels = [];
-            /** @type {number} */
-            let format = FMT.UNKNOWN;
-            for (let level = 0; level < count; level++)
+            const read = await readLevels(scratch);
+            if (typeof read === 'number')
             {
-                const described = await method(thread, texture, TEXTURE.GetLevelDesc,
-                    [level, scratch]);
-                if (described !== D3D_OK)
-                {
-                    return described;
-                }
-                format = u32(scratch);
-                const width = u32(scratch + 24);
-                const height = u32(scratch + 28);
-                const layout = rowsOf(format, width, height);
-                if (!layout || (fileFormat !== IFF.DDS && !isSupported(format)
-                    && format !== FMT.P8))
-                {
-                    host.divergence?.(api, `a texture of format ${format} is not written as `
-                        + `image file format ${fileFormat}: answered E_NOTIMPL`);
-                    return E_NOTIMPL;
-                }
-                const locked = scratch + SURFACE_DESC_BYTES;
-                const answer = await method(thread, texture, TEXTURE.LockRect,
-                    [level, locked, 0, D3DLOCK_READONLY]);
-                if (answer !== D3D_OK)
-                {
-                    return answer;
-                }
-                const pitch = u32(locked);
-                const bits = u32(locked + 4);
-                const bytes = new Uint8Array(layout.rowBytes * layout.rows);
-                for (let row = 0; row < layout.rows; row++)
-                {
-                    bytes.set(host.readMemory(bits + row * pitch, layout.rowBytes),
-                        row * layout.rowBytes);
-                }
-                await method(thread, texture, TEXTURE.UnlockRect, [level]);
-                levels.push({ width, height, bytes });
+                return read;
             }
+            const { format, levels } = read;
             if (fileFormat === IFF.DDS)
             {
                 return writeDds(format, levels);
@@ -288,6 +285,96 @@ export function createTextureSaver(host, buffers){
         }
     };
 
+    /**
+     * A texture's levels, read through their locks: all of them for DDS.
+     *
+     * @param {string} api @param {number} texture @param {number} fileFormat @param {any} thread
+     * @returns {(scratch: number) => Promise<{ format: number, levels: { width: number,
+     *     height: number, bytes: Uint8Array }[] } | number>}
+     */
+    const textureLevels = (api, texture, fileFormat, thread)=>async scratch=>{
+        const type = await method(thread, texture, TEXTURE.GetType, []);
+        if (type !== D3DRTYPE_TEXTURE)
+        {
+            host.divergence?.(api, `a resource of type ${type} (a cube or volume texture) is not `
+                + 'written: answered E_NOTIMPL');
+            return E_NOTIMPL;
+        }
+        const count = fileFormat === IFF.DDS
+            ? await method(thread, texture, TEXTURE.GetLevelCount, []) : 1;
+        /** @type {{ width: number, height: number, bytes: Uint8Array }[]} */
+        const levels = [];
+        /** @type {number} */
+        let format = FMT.UNKNOWN;
+        for (let level = 0; level < count; level++)
+        {
+            const described = await method(thread, texture, TEXTURE.GetLevelDesc,
+                [level, scratch]);
+            if (described !== D3D_OK)
+            {
+                return described;
+            }
+            format = u32(scratch);
+            const width = u32(scratch + 24);
+            const height = u32(scratch + 28);
+            const layout = layoutFor(api, fileFormat, format, width, height);
+            if (typeof layout === 'number')
+            {
+                return layout;
+            }
+            const locked = scratch + SURFACE_DESC_BYTES;
+            const answer = await method(thread, texture, TEXTURE.LockRect,
+                [level, locked, 0, D3DLOCK_READONLY]);
+            if (answer !== D3D_OK)
+            {
+                return answer;
+            }
+            levels.push({ width, height, bytes: rowsAt(locked, layout) });
+            await method(thread, texture, TEXTURE.UnlockRect, [level]);
+        }
+        return { format, levels };
+    };
+
+    /**
+     * A surface's rectangle -- all of it for a null one -- read through its lock.
+     *
+     * @param {string} api @param {number} surface @param {number} rect
+     * @param {number} fileFormat @param {any} thread
+     * @returns {(scratch: number) => Promise<{ format: number, levels: { width: number,
+     *     height: number, bytes: Uint8Array }[] } | number>}
+     */
+    const surfaceLevel = (api, surface, rect, fileFormat, thread)=>async scratch=>{
+        const described = await method(thread, surface, SURFACE.GetDesc, [scratch]);
+        if (described !== D3D_OK)
+        {
+            return described;
+        }
+        const format = u32(scratch);
+        const [full, tall] = [u32(scratch + 24), u32(scratch + 28)];
+        const [left, top, right, bottom] = (rect >>> 0) === 0 ? [0, 0, full, tall]
+            : [0, 4, 8, 12].map(at=>u32((rect >>> 0) + at) | 0);
+        if (left < 0 || top < 0 || right > full || bottom > tall || right <= left
+            || bottom <= top)
+        {
+            return D3DERR_INVALIDCALL;
+        }
+        const layout = layoutFor(api, fileFormat, format, right - left, bottom - top);
+        if (typeof layout === 'number')
+        {
+            return layout;
+        }
+        const locked = scratch + SURFACE_DESC_BYTES;
+        const answer = await method(thread, surface, SURFACE.LockRect,
+            [locked, rect >>> 0, D3DLOCK_READONLY]);
+        if (answer !== D3D_OK)
+        {
+            return answer;
+        }
+        const bytes = rowsAt(locked, layout);
+        await method(thread, surface, SURFACE.UnlockRect, []);
+        return { format, levels: [{ width: right - left, height: bottom - top, bytes }] };
+    };
+
     /** @param {number} at @param {boolean} wide */
     const pathAt = (at, wide)=>{
         if (!wide)
@@ -302,13 +389,15 @@ export function createTextureSaver(host, buffers){
     };
 
     /**
-     * @param {string} api @param {boolean} wide
+     * D3DXSaveTextureToFile and D3DXSaveSurfaceToFile: the file made, then written whole.
+     *
+     * @param {string} api @param {boolean} wide @param {boolean} surface
      * @returns {{ argBytes: number, handler: (args: number[]) => number | Promise<number> }}
      */
-    const toFile = (api, wide)=>({
-        argBytes: 16,
-        handler: ([file, fileFormat, texture, palette])=>{
-            if ((file >>> 0) === 0 || (texture >>> 0) === 0 || !host.callGuest || !host.heap)
+    const toFile = (api, wide, surface)=>({
+        argBytes: surface ? 20 : 16,
+        handler: ([file, fileFormat, source, palette, rect])=>{
+            if ((file >>> 0) === 0 || (source >>> 0) === 0 || !host.callGuest || !host.heap)
             {
                 return D3DERR_INVALIDCALL;
             }
@@ -319,7 +408,10 @@ export function createTextureSaver(host, buffers){
                 host.divergence?.(api, `no file can be written here: ${path} answered E_NOTIMPL`);
                 return E_NOTIMPL;
             }
-            return encode(api, texture >>> 0, fileFormat >>> 0, palette, host.currentThread?.())
+            const thread = host.currentThread?.();
+            return encode(api, fileFormat >>> 0, palette, surface
+                ? surfaceLevel(api, source >>> 0, rect, fileFormat >>> 0, thread)
+                : textureLevels(api, source >>> 0, fileFormat >>> 0, thread))
                 .then(async made=>{
                     if (typeof made === 'number')
                     {
@@ -330,37 +422,65 @@ export function createTextureSaver(host, buffers){
         },
     });
 
+    /**
+     * D3DXSaveTextureToFileInMemory and D3DXSaveSurfaceToFileInMemory: the file
+     * made, in an ID3DXBuffer.
+     *
+     * @param {string} api @param {boolean} surface
+     * @returns {{ argBytes: number, handler: (args: number[]) => number | Promise<number> }}
+     */
+    const toMemory = (api, surface)=>({
+        argBytes: surface ? 20 : 16,
+        handler: ([out, fileFormat, source, palette, rect])=>{
+            if ((out >>> 0) !== 0)
+            {
+                host.writeMemory(out >>> 0, new Uint8Array(4));
+            }
+            if ((out >>> 0) === 0 || (source >>> 0) === 0 || !host.callGuest || !host.heap)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            const thread = host.currentThread?.();
+            return encode(api, fileFormat >>> 0, palette, surface
+                ? surfaceLevel(api, source >>> 0, rect, fileFormat >>> 0, thread)
+                : textureLevels(api, source >>> 0, fileFormat >>> 0, thread))
+                .then(made=>(typeof made === 'number' ? made
+                    : buffers.giveBuffer(out >>> 0, made)));
+        },
+    });
+
     return {
         /**
          * HRESULT D3DXSaveTextureToFileA(LPCSTR pDestFile,
          *     D3DXIMAGE_FILEFORMAT DestFormat, LPDIRECT3DBASETEXTURE9 pSrcTexture,
          *     CONST PALETTEENTRY *pSrcPalette)
          */
-        D3DXSaveTextureToFileA: toFile('D3DXSaveTextureToFileA', false),
+        D3DXSaveTextureToFileA: toFile('D3DXSaveTextureToFileA', false, false),
         /** The same, the name wide. */
-        D3DXSaveTextureToFileW: toFile('D3DXSaveTextureToFileW', true),
+        D3DXSaveTextureToFileW: toFile('D3DXSaveTextureToFileW', true, false),
 
         /**
          * HRESULT D3DXSaveTextureToFileInMemory(LPD3DXBUFFER *ppDestBuf,
          *     D3DXIMAGE_FILEFORMAT DestFormat, LPDIRECT3DBASETEXTURE9 pSrcTexture,
          *     CONST PALETTEENTRY *pSrcPalette)
          */
-        D3DXSaveTextureToFileInMemory: {
-            argBytes: 16,
-            /** @param {number[]} args */
-            handler: ([out, fileFormat, texture, palette])=>{
-                if ((out >>> 0) !== 0)
-                {
-                    host.writeMemory(out >>> 0, new Uint8Array(4));
-                }
-                if ((out >>> 0) === 0 || (texture >>> 0) === 0 || !host.callGuest || !host.heap)
-                {
-                    return D3DERR_INVALIDCALL;
-                }
-                return encode('D3DXSaveTextureToFileInMemory', texture >>> 0, fileFormat >>> 0,
-                    palette, host.currentThread?.()).then(made=>(typeof made === 'number' ? made
-                    : buffers.giveBuffer(out >>> 0, made)));
-            },
-        },
+        D3DXSaveTextureToFileInMemory: toMemory('D3DXSaveTextureToFileInMemory', false),
+
+        /**
+         * HRESULT D3DXSaveSurfaceToFileA(LPCSTR pDestFile, D3DXIMAGE_FILEFORMAT DestFormat,
+         *     LPDIRECT3DSURFACE9 pSrcSurface, CONST PALETTEENTRY *pSrcPalette,
+         *     CONST RECT *pSrcRect)
+         *
+         * The surface's rectangle, the whole surface for a null one, as one level.
+         */
+        D3DXSaveSurfaceToFileA: toFile('D3DXSaveSurfaceToFileA', false, true),
+        /** The same, the name wide. */
+        D3DXSaveSurfaceToFileW: toFile('D3DXSaveSurfaceToFileW', true, true),
+        /**
+         * HRESULT D3DXSaveSurfaceToFileInMemory(LPD3DXBUFFER *ppDestBuf,
+         *     D3DXIMAGE_FILEFORMAT DestFormat, LPDIRECT3DSURFACE9 pSrcSurface,
+         *     CONST PALETTEENTRY *pSrcPalette, CONST RECT *pSrcRect)
+         */
+        D3DXSaveSurfaceToFileInMemory: toMemory('D3DXSaveSurfaceToFileInMemory', true),
     };
 }
