@@ -114,6 +114,11 @@ export function parsePath(text){
         throw fsError(ErrorCode.INVALID_PATH, 'An empty path names nothing');
     }
 
+    if (text.startsWith('\\\\?\\'))
+    {
+        return parseLiteral(text);
+    }
+
     let rest = text;
     /** @type {string | null} */
     let drive = null;
@@ -160,6 +165,34 @@ export function parsePath(text){
     }
 
     return { drive, rooted, components, device: null, wildcard };
+}
+
+/**
+ * A path in the Win32 file namespace, `\\?\C:\a\b`: handed on as written, with
+ * none of the parsing a plain path gets -- the backslash alone divides it, a
+ * trailing dot or space stays, `.` and `..` are names rather than steps, and a
+ * reserved name is a file, not a device. Only a drive under it is mounted here.
+ *
+ * @param {string} text
+ * @returns {ParsedPath}
+ */
+function parseLiteral(text){
+    const after = text.slice(4);
+    if (!/^[A-Za-z]:(\\|$)/.test(after))
+    {
+        throw fsError(ErrorCode.INVALID_PATH, `"${text}" addresses a namespace we do not mount`);
+    }
+    const components = after.slice(2).split('\\').filter(part=>part.length > 0);
+    for (const part of components)
+    {
+        // `/` is not a divider here but a character, and one no name can hold.
+        if (!usableName(part) || part.includes('/') || part === '.' || part === '..')
+        {
+            throw fsError(ErrorCode.INVALID_PATH, `"${part}" is not a usable path component`);
+        }
+    }
+    return { drive: after[0].toUpperCase(), rooted: true, components, device: null,
+        wildcard: components.some(hasWildcard) };
 }
 
 /**

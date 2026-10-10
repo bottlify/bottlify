@@ -791,3 +791,40 @@ test('WINTRUST reads the file from the volume and judges it against the configur
         await win32Module.dispose();
         await filesystemModule.dispose();
     });
+
+test('a \\\\?\\ path reaches the volume\'s files as the plain path does', async()=>{
+    // A program that builds its paths in the Win32 file namespace -- a profile folder under
+    // My Documents, created a level at a time -- finds and makes what a plain path finds.
+    const filesystem = await filesystemModule.create({});
+    const thread = { id: 1 };
+    const { bytes, libraries, lastError } = await build({
+        filesystem,
+        kernel: { currentThread: ()=>thread },
+        bridge: { callerThread: ()=>thread },
+    });
+    const kernel32 = libraries['KERNEL32.dll'];
+    let next = 0x1000;
+    /** @param {string} text */
+    const wide = text=>{
+        const at = next;
+        [...text, '\0'].forEach((ch, i)=>{
+            bytes[at + i * 2] = ch.charCodeAt(0) & 0xff;
+            bytes[at + i * 2 + 1] = ch.charCodeAt(0) >> 8;
+        });
+        next += text.length * 2 + 0x10;
+        return at;
+    };
+    const ERROR_ALREADY_EXISTS = 183;
+    const FILE_ATTRIBUTE_DIRECTORY = 0x10;
+    assert.equal(kernel32.CreateDirectoryW.handler([wide('C:\\Profiles'), 0]), 1);
+    assert.equal(kernel32.CreateDirectoryW.handler([wide('\\\\?\\C:\\Profiles'), 0]), 0);
+    assert.equal(lastError(), ERROR_ALREADY_EXISTS);
+    assert.equal(kernel32.CreateDirectoryW.handler([wide('\\\\?\\C:\\Profiles\\Default'), 0]),
+        1, `made, last error ${lastError()}`);
+    assert.equal(kernel32.GetFileAttributesW.handler([wide('C:\\Profiles\\Default')]) & 0x10,
+        FILE_ATTRIBUTE_DIRECTORY);
+    assert.equal(kernel32.GetFileAttributesW.handler([wide('\\\\?\\C:\\Profiles/Default')]),
+        0xffffffff, 'a slash is no separator there');
+    await win32Module.dispose();
+    await filesystemModule.dispose();
+});

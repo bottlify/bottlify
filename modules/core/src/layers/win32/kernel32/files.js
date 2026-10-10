@@ -562,6 +562,12 @@ export function createFileFunctions(host){
         {
             return '';
         }
+        // The Win32 file namespace turns the parsing off: no slash is a
+        // separator and no dot a step. The filesystem reads it so itself.
+        if (name.startsWith('\\\\?\\'))
+        {
+            return name;
+        }
         const written = driveRelative(name.replace(/\//g, '\\'));
         const rooted = isAbsolute(written) ? written : underCurrentDirectory(written);
         // A UNC path's root is its leading pair of separators; anything else
@@ -1363,6 +1369,19 @@ export function createFileFunctions(host){
         if (asked === '')
         {
             return fail(ERROR_INVALID_PARAMETER);
+        }
+        // A path in the Win32 file namespace is already as full as it gets, and
+        // is handed back as written: that namespace turns all parsing off.
+        if (asked.startsWith('\\\\?\\'))
+        {
+            const result = text.write(buffer >>> 0, size, asked);
+            if (result === asked.length)
+            {
+                const at = asked.lastIndexOf(SEPARATOR);
+                writeDwordIf(filePart >>> 0, asked.endsWith(SEPARATOR)
+                    ? 0 : (buffer >>> 0) + (at + 1) * text.unit);
+            }
+            return result;
         }
         const resolved = text.path(name);
         // A caller that wrote a trailing separator meant a directory and gets
