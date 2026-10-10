@@ -20,9 +20,10 @@
  *
  * The ones that build something on a device go through the program's own
  * device's methods: a texture from an image file (`texture.js`), an effect
- * (`effect.js`). Those not built yet -- a mesh, a shape -- answer E_NOTIMPL with
- * the argument width still declared, their out-pointers null, and say so where
- * divergences are told.
+ * (`effect.js`), a mesh (`mesh-object.js`, `shapes.js`). Those not built yet --
+ * the teapot, text, simplification, a UV atlas, a normal map -- answer
+ * E_NOTIMPL with the argument width still declared, their out-pointers null,
+ * and say so where divergences are told.
  *
  * Matrices are row-major, sixteen floats, `m[row * 4 + col]` -- the layout
  * D3DXMATRIX has in memory and the one every function here reads and writes.
