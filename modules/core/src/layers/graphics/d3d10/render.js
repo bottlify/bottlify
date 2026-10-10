@@ -43,7 +43,7 @@ import {
 import { levelExtent } from './validity.js';
 import { passedSamples, reachableArea } from '../webgpu/internal/occlusion.js';
 import {
-    BINDING, BUFFER_VIEW_FORMATS, STAGE, linkProgram, translateShader,
+    BINDING, BUFFER_VIEW_FORMATS, NO_PIXEL_SHADER, STAGE, linkProgram, translateShader,
 } from './wgsl.js';
 import { LockFlags } from '../webgpu/internal/buffers.js';
 
@@ -1047,8 +1047,15 @@ export function createRenderer(services){
 
     // --- shaders and pipelines ---
 
-    /** @param {any} shader a shader object holding a parsed container */
+    /**
+     * @param {any} shader a shader object holding a parsed container, or null
+     *     for the pixel stage of a draw that binds none
+     */
     const translationOf = shader=>{
+        if (!shader)
+        {
+            return NO_PIXEL_SHADER;
+        }
         let translation = translations.get(shader);
         if (!translation)
         {
@@ -2045,7 +2052,9 @@ export function createRenderer(services){
                 counters.skipped.noViewport++;
                 return;
             }
-            if (!pipeline.stages.vs.shader || !pipeline.stages.ps.shader)
+            // Without a pixel shader the draw still runs: it writes depth and
+            // stencil and no render target, as a depth-only pass expects.
+            if (!pipeline.stages.vs.shader)
             {
                 counters.skipped.noShader++;
                 return;

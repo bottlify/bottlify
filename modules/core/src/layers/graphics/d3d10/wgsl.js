@@ -231,6 +231,33 @@ export const HELPERS = Object.freeze({
  * @property {string[]} helpers                    HELPERS the body calls, callees first.
  */
 
+/**
+ * The pixel stage of a draw with no pixel shader bound. Direct3D still
+ * rasterises such a draw -- a depth pre-pass or a shadow map is drawn this way
+ * -- and writes depth and stencil, but no render target; this stage reads
+ * nothing and writes nothing, so linked with any vertex shader its fragment
+ * entry point is empty and every target's write mask is zero.
+ *
+ * @type {Readonly<TranslatedShader>}
+ */
+export const NO_PIXEL_SHADER = Object.freeze({
+    kind: SHADER_KIND.PIXEL,
+    inputs: [],
+    outputs: [],
+    constantBuffers: [],
+    textures: [],
+    samplers: [],
+    temps: 0,
+    indexableTemps: [],
+    immediateConstants: [],
+    body: [],
+    inputRegisters: 0,
+    outputRegisters: 0,
+    writesDepth: false,
+    unsupported: [],
+    helpers: [],
+});
+
 /** @param {number} mask @returns {string} the components a mask names */
 function maskComponents(mask){
     return COMPONENT.filter((_, index)=>(mask & (1 << index)) !== 0).join('');

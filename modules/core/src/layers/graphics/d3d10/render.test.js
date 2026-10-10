@@ -431,7 +431,7 @@ test('a second frame with the same state reuses the pipeline and draws again', a
     assert.equal(h.device.diagnostics().pipelines, 1);
 });
 
-test('a draw with no viewport, no target or no shader draws nothing and is counted', async()=>{
+test('a draw with no viewport, target or vertex shader draws nothing and is counted', async()=>{
     const h = harness();
     bindTriangle(h, TRIANGLE, [1, 0, 0, 1]);
     h.device.RSSetViewports([]);
@@ -439,7 +439,7 @@ test('a draw with no viewport, no target or no shader draws nothing and is count
     h.device.RSSetViewports([{
         TopLeftX: 0, TopLeftY: 0, Width: 8, Height: 8, MinDepth: 0, MaxDepth: 1,
     }]);
-    h.device.PSSetShader(null);
+    h.device.VSSetShader(null);
     h.device.Draw(3, 0);
     h.device.OMSetRenderTargets([], null);
     h.device.Draw(3, 0);
@@ -1850,4 +1850,38 @@ test('a cube texture\'s view binds as a cube of six faces, and a view of another
     assert.equal(bound(18).viewDescriptor.dimension, '2d');
     assert.ok(diverged(h, 'a cube view bound where the shader reads a 2d one'),
         h.divergences.join('\n'));
+});
+
+test('a draw with no pixel shader writes depth and no render target (test_depth_bias,'
+    + ' d3d10core.c:16160-16169)', async()=>{
+    const h = harness();
+    const { device } = h;
+    bindTriangle(h, TRIANGLE, [1, 0, 0, 1]);
+    /** @type {{ resource?: any }} */
+    const depth = {};
+    assert.equal(device.CreateTexture2D({ ...TEXTURE_2X2, Width: h.width, Height: h.height,
+        Format: DXGI_FORMAT.D32_FLOAT, BindFlags: D3D10_BIND.DEPTH_STENCIL }, null, depth),
+    S_OK);
+    /** @type {{ view?: any }} */
+    const dsv = {};
+    assert.equal(device.CreateDepthStencilView(depth.resource, null, dsv), S_OK);
+    // As Wine's test binds them: the back buffer's view stays, beside the depth.
+    device.OMSetRenderTargets([h.renderTargetView], dsv.view);
+    device.PSSetShader(null);
+    device.Draw(3, 0);
+    await h.present();
+    assert.equal(h.gpu.count('draw'), 1, 'the draw runs');
+    assert.deepEqual(h.device.diagnostics().skipped,
+        { noViewport: 0, noTarget: 0, noShader: 0, untranslatable: 0, pipeline: 0 });
+    const pipeline = h.gpu.of('createRenderPipeline').at(-1).descriptor;
+    assert.equal(pipeline.depthStencil.format, 'depth32float');
+    assert.equal(pipeline.depthStencil.depthWriteEnabled, true);
+    assert.deepEqual(pipeline.fragment.targets.map((/** @type {any} */ target)=>
+        target.writeMask), [0], 'the render target is bound and not written');
+    const fragment = h.gpu.of('createShaderModule').find((/** @type {any} */ call)=>
+        call.module === pipeline.fragment.module).descriptor.code;
+    assert.equal(fragment,
+        'diagnostic(off, derivative_uniformity);\n@fragment fn fragmentMain() {\n}',
+        'a fragment stage that reads and writes nothing');
+    assert.deepEqual(h.divergences, []);
 });
