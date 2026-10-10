@@ -65,7 +65,7 @@ function plainOf(services){
  *     waits: Record<string, { count: number, ms: number, maxMs: number }>, behind: number[],
  *     readBack: { sent: number, shared: number }, lent: Record<string, number>,
  *     sent: { batches: number, bytes: number, ms: number }, shipped: Record<string, number>,
- *     calls: string }}
+ *     calls: string, answers: string }}
  *     diagnostics  `waits`: what the program's thread waited on the worker for, by call;
  *     `readBack`: the bytes the worker wrote into guest memory, sent here to be written or
  *     written in shared memory in place; `lent`: the unlocked bytes lent to the worker rather
@@ -189,6 +189,7 @@ function join(worker, connection){
                     // One GPU, told once, by whichever connection shows it.
                     showing(connections)?.refused(data.message, data.seen);
                     break;
+
                 default:
                     break;
             }
@@ -385,6 +386,7 @@ export function connectGraphicsWorker(options){
             }
             return { roots: ports.length, frames, dropped, waits,
                 behind: senders.map(sender=>sender.behind()), readBack: { ...readBack },
+                answers: senders.map(sender=>sender.answers()).join(' '),
                 sent: senders.reduce((sum, sender)=>{
                     const { batches, bytes, ms } = sender.sent();
                     return { batches: sum.batches + batches, bytes: sum.bytes + bytes,

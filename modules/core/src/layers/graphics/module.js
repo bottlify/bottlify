@@ -1288,6 +1288,8 @@ export function createGraphicsModule(){
                     // Whether Direct3D 8 and 9 draw in the graphics worker, and
                     // how many roots it plays.
                     worker: instance.remote ? instance.remote.diagnostics() : null,
+                    // Kept flat, where a report drops the structure above.
+                    workerAnswers: instance.remote ? instance.remote.diagnostics().answers : null,
                     seam: instance.seam.diagnostics(),
                     // State the program set in the guest, and the calls that never
                     // crossed: the saving is a number here, not a belief.
