@@ -52,6 +52,13 @@ const VK_F10 = 0x79;
 /** The three keys whose low bit reports a toggle rather than a press. */
 const TOGGLE_KEYS = new Set([VK_CAPITAL, VK_NUMLOCK, VK_SCROLL]);
 
+/**
+ * The narrowest clip that is a space a cursor travels rather than a pin: a
+ * program that reads DirectInput and draws its own cursor clips the system one
+ * to a point, often a single pixel, and no screen it draws is this small.
+ */
+const PIN_EXTENT = 16;
+
 /** What a mouse message's wParam says is held. */
 const MK = Object.freeze({
     LBUTTON: 0x0001,
@@ -426,9 +433,12 @@ export function createInputRouter(
         // the space the program reckons the cursor in (what it declared with
         // ClipCursor). Declared smaller than the viewport, the same sweep must
         // cover the same fraction of each; undeclared, the two spaces are one.
-        const scaleX = clip && box && box.width > 0
+        // A clip a few pixels across declares no space: it pins the cursor so
+        // the program can keep its own from DirectInput's motion, which on
+        // hardware no clip ever scales.
+        const scaleX = clip && box && box.width > 0 && clip.right - clip.left >= PIN_EXTENT
             ? (clip.right - clip.left) / box.width : 1;
-        const scaleY = clip && box && box.height > 0
+        const scaleY = clip && box && box.height > 0 && clip.bottom - clip.top >= PIN_EXTENT
             ? (clip.bottom - clip.top) / box.height : 1;
 
         // Relative motion in real-viewport pixels is what DirectInput reports
