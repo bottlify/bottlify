@@ -1371,10 +1371,23 @@ test('what this build cannot do says so in the slot rather than in a crash', ()=
     assert.equal(h.box.memory.readU32(outAndBeyond), 0, 'the sixth argument is the out');
     assert.equal(h.box.memory.readU32(outAndBeyond + 4), 0xfeedface,
         'the caller\'s next stack word is not an argument');
-    assert.equal(h.swapChain(swapChain, 'SetFullscreenState', [1, 0]), 0x887a0022,
-        'DXGI_ERROR_NOT_CURRENTLY_AVAILABLE: the display belongs to the page');
+    // Fullscreen as a Direct3D 9 device has it, and its target handed back.
+    assert.equal(h.swapChain(swapChain, 'SetFullscreenState', [1, 0]), S_OK);
+    const stateAt = h.box.place([0, 0xdeadbeef]);
+    assert.equal(h.swapChain(swapChain, 'GetFullscreenState', [stateAt, stateAt + 4]), S_OK);
+    assert.equal(h.box.memory.readU32(stateAt), 1);
+    const target = h.box.memory.readU32(stateAt + 4);
+    const containingAt = h.box.place([0]);
+    assert.equal(h.swapChain(swapChain, 'GetContainingOutput', [containingAt]), S_OK);
+    assert.equal(target, h.box.memory.readU32(containingAt), 'the output it is on');
+    assert.equal(h.swapChain(swapChain, 'GetFullscreenState', [stateAt, 0]), S_OK,
+        'with no room for the target');
+    h.box.call(target, 2);
+    h.box.call(target, 2);
     assert.equal(h.swapChain(swapChain, 'SetFullscreenState', [0, 0]), S_OK);
-    const modes = h.box.place([7]);
+    assert.equal(h.swapChain(swapChain, 'GetFullscreenState', [stateAt, stateAt + 4]), S_OK);
+    assert.deepEqual([h.box.memory.readU32(stateAt), h.box.memory.readU32(stateAt + 4)], [0, 0]);
+    const modes = h.box.place([7, 0, 0, 0, 0, 0, 0]);
     assert.equal(h.swapChain(swapChain, 'ResizeTarget', [modes]), S_OK);
     assert.equal(h.swapChain(swapChain, 'ResizeTarget', [0]), DXGI_ERROR_INVALID_CALL);
     assert.equal(h.device(device, 'ResolveSubresource', [0, 0, 0, 0, 0]), 0,

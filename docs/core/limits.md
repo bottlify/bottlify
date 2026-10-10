@@ -81,6 +81,10 @@ differently raises a `divergence` event naming the API.
   `CheckMultisampleQualityLevels` answers one quality level at four for the colour and depth
   formats WebGPU multisamples, and none at two, eight or any other count. A multisampled texture array is refused. A resolve, and the
   present of a multisampled swap chain, average the four samples equally.
+- A DXGI swap chain goes fullscreen as a Direct3D 9 device does: the reported display becomes
+  its mode and its window is placed over the whole of it. Going windowed again gives the display
+  its mode back but leaves the window where fullscreen put it, and `ResizeTarget` on a windowed
+  swap chain does not resize the window.
 - A lost GPU device is not recovered: `Present` and `Reset` answer `D3DERR_DEVICELOST`
   (`D3DERR_DEVICEREMOVED` on 9Ex) and no new frames arrive.
 - DXT textures are decoded on the CPU unless `graphics.compressedTextures` is on and the GPU has

@@ -445,18 +445,92 @@ test('presenting advances the buffer and is counted', ()=>{
     assertFullyReleased(device, 'the device');
 });
 
-test('nothing here goes fullscreen, and the target is null when it says so', ()=>{
-    const device = createDevice();
+test('a fullscreen swap chain says so, names its output, and takes the screen at its mode'
+    + ' (test_create_swapchain, dxgi.c:2036-2075; test_set_fullscreen, 2990-3000)', ()=>{
+    /** @type {any[][]} */
+    const taken = [];
+    let display = { width: 1920, height: 1080 };
+    /**
+     * @param {number} width @param {number} height @param {any} where
+     */
+    const resolution = (width, height, where)=>{
+        taken.push([width, height, where]);
+        display = { width, height };
+    };
+    const device = createDevice({ factoryOptions: { display: ()=>display, resolution } });
+    /** @param {any} swapChain */
+    const state = swapChain=>{
+        /** @type {{ fullscreen?: boolean, target?: any }} */
+        const out = { fullscreen: true, target: 'untouched' };
+        assert.equal(swapChain.GetFullscreenState(out), S_OK);
+        /** @type {{ desc?: any }} */
+        const described = {};
+        swapChain.GetDesc(described);
+        assert.equal(described.desc.windowed, !out.fullscreen, 'GetDesc agrees');
+        const target = out.target;
+        target?.release();
+        return { fullscreen: out.fullscreen, target };
+    };
+    /** @type {{ output?: any }} */
+    const containing = {};
+
+    /** @type {{ swapChain?: any }} */
+    const windowed = {};
+    assert.equal(device.factory().CreateSwapChain(device, swapChainDesc(), windowed), S_OK);
+    assert.deepEqual(state(windowed.swapChain), { fullscreen: false, target: null },
+        'a windowed swap chain names no output');
+    assert.equal(taken.length, 0, 'and takes nothing');
+    windowed.swapChain.GetContainingOutput(containing);
+    containing.output.release();
+
+    // Asked fullscreen: made fullscreen, at its buffers' size, on its window.
+    /** @type {{ swapChain?: any }} */
+    const full = {};
+    const desc = swapChainDesc({ windowed: false });
+    desc.bufferDesc.width = 800;
+    desc.bufferDesc.height = 600;
+    assert.equal(device.factory().CreateSwapChain(device, desc, full), S_OK);
+    const chain = full.swapChain;
+    assert.deepEqual(state(chain), { fullscreen: true, target: containing.output },
+        'its target is the output it is on');
+    assert.deepEqual([...taken],
+        [[800, 600, { window: 0x1234, fullscreen: true, announce: true }]]);
+
+    // A mode change while fullscreen takes the screen at the new mode.
+    assert.equal(chain.ResizeTarget({ width: 1024, height: 768, refreshNumerator: 60,
+        refreshDenominator: 1, format: 0, scanlineOrdering: 0, scaling: 0 }), S_OK);
+    assert.deepEqual(taken.at(-1)?.slice(0, 2), [1024, 768]);
+    assert.equal(chain.ResizeTarget(null), DXGI_ERROR_INVALID_CALL);
+
+    // Windowed again: the desktop's mode comes back.
+    assert.equal(chain.SetFullscreenState(false, null), S_OK);
+    assert.deepEqual(state(chain), { fullscreen: false, target: null });
+    assert.deepEqual(taken.at(-1), [1920, 1080, { window: 0x1234, fullscreen: false }]);
+    assert.equal(chain.SetFullscreenState(false, null), S_OK, 'already windowed');
+    const before = taken.length;
+
+    // And fullscreen again, on its own output or none named; another is refused.
+    assert.equal(chain.SetFullscreenState(true, containing.output), S_OK);
+    assert.equal(state(chain).fullscreen, true);
+    assert.equal(taken.length, before + 1);
+    assert.equal(chain.SetFullscreenState(true, {}), DXGI_ERROR_INVALID_CALL);
+    assert.equal(chain.SetFullscreenState(false, null), S_OK);
+
+    chain.release();
+    windowed.swapChain.release();
+    assertFullyReleased(device, 'the device');
+});
+
+test('a windowed swap chain\'s ResizeTarget leaves the window as it is and says so', ()=>{
+    /** @type {string[]} */
+    const divergences = [];
+    const device = createDevice({ divergence: (/** @type {string} */ api,
+        /** @type {string} */ detail)=>divergences.push(`${api}: ${detail}`) });
     /** @type {{ swapChain?: any }} */
     const created = {};
     assert.equal(device.factory().CreateSwapChain(device, swapChainDesc(), created), S_OK);
-
-    /** @type {{ fullscreen?: boolean, target?: any }} */
-    const out = { fullscreen: true, target: 'untouched' };
-    assert.equal(created.swapChain.GetFullscreenState(out), S_OK);
-    assert.equal(out.fullscreen, false);
-    assert.equal(out.target, null, 'a windowed swap chain names no output');
-
+    assert.equal(created.swapChain.ResizeTarget({ width: 320, height: 200 }), S_OK);
+    assert.ok(divergences.some(line=>line.includes('ResizeTarget')), divergences.join('\n'));
     created.swapChain.release();
     assertFullyReleased(device, 'the device');
 });

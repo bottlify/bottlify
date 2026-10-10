@@ -550,18 +550,21 @@ export const ID3D10DEVICE1_SLOTS = /** @type {[string, number][]} */ ([
  *     The desktop user32 reports, which DXGI's one output shows.
  * @property {() => import('./adapter.js').AdapterIdentity | null} [identity]
  *     The hardware behind the GPU, which DXGI's adapter reports as Direct3D 9's does.
+ * @property {import('../d3d10/dxgi.js').FactoryOptions['resolution']} [resolution]
+ *     Told the mode a fullscreen swap chain takes the screen at, as Direct3D 9 tells it.
  */
 
 /**
  * @param {Deps} deps
  */
 export function createDirect3D10Seam({ publisher, memory, allocate, free, deviceOptions,
-    factoryOptions: given, screen, identity })
+    factoryOptions: given, screen, identity, resolution })
 {
     const fields = createFields(memory);
     /** @type {import('../d3d10/dxgi.js').FactoryOptions} */
     const factoryOptions = {
         ...(screen ? { display: ()=>screen() } : {}),
+        ...(resolution ? { resolution } : {}),
         ...(identity ? { vendorId: ()=>describeAdapter(identity()).vendorId } : {}),
         ...given,
     };
@@ -1018,9 +1021,15 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
             return handBack(held.buffer, texture2DInterfaces, id, out);
         },
         /** @param {any} swapChain @param {number[]} args */
-        SetFullscreenState: (swapChain, [fullscreen])=>
-            swapChain.SetFullscreenState(fullscreen !== 0),
-        /** @param {any} swapChain @param {number[]} args */
+        SetFullscreenState: (swapChain, [fullscreen, target])=>
+            swapChain.SetFullscreenState(fullscreen !== 0,
+                (target >>> 0) === 0 ? null : publisher.objectAt(target)),
+        /**
+         * The target is a reference of the caller's, and released here when
+         * the caller left no room for it.
+         *
+         * @param {any} swapChain @param {number[]} args
+         */
         GetFullscreenState: (swapChain, [fullscreenAt, targetAt])=>{
             /** @type {{ fullscreen?: boolean, target?: any }} */
             const held = {};
@@ -1029,7 +1038,15 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
             {
                 fields.writeU32(fullscreenAt, held.fullscreen ? 1 : 0);
             }
-            if ((targetAt >>> 0) !== 0)
+            if ((targetAt >>> 0) === 0)
+            {
+                held.target?.release();
+            }
+            else if (held.target)
+            {
+                handBack(held.target, outputInterfaces, IID.IDXGIOutput, targetAt);
+            }
+            else
             {
                 fields.writeU32(targetAt, 0);
             }
@@ -1050,13 +1067,10 @@ export function createDirect3D10Seam({ publisher, memory, allocate, free, device
         ResizeBuffers: (swapChain, [count, width, height, format, flags])=>
             swapChain.ResizeBuffers(count >>> 0, width >>> 0, height >>> 0, format >>> 0,
                 flags >>> 0),
-        /**
-         * A windowed swap chain's target is its window, which the page sizes:
-         * the mode is taken and nothing else changes.
-         *
-         * @param {any} swapChain @param {number[]} args
-         */
-        ResizeTarget: (swapChain, [mode])=>((mode >>> 0) === 0 ? DXGI_ERROR_INVALID_CALL : S_OK),
+        /** @param {any} swapChain @param {number[]} args */
+        ResizeTarget: (swapChain, [mode])=>swapChain.ResizeTarget((mode >>> 0) === 0
+            ? null
+            : readModeDesc(memory, mode >>> 0)),
         /** @param {any} swapChain @param {number[]} args */
         GetContainingOutput: (swapChain, [out])=>{
             if ((out >>> 0) === 0)

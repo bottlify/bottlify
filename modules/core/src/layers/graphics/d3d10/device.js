@@ -1897,6 +1897,16 @@ export function createDevice(options = {}){
             return options.backend ? options.frameQueued?.(submitted) ?? null : null;
         },
 
+        /**
+         * Where DXGI says what it accepted and did not do, as the device's own
+         * calls say it.
+         *
+         * @param {string} detail
+         */
+        diverge(detail){
+            diverge(detail);
+        },
+
         /** @returns {Promise<void>} settled when every presented frame has been submitted */
         idle(){
             return renderer.idle();

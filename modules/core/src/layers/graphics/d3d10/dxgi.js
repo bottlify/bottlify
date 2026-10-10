@@ -29,10 +29,11 @@
  *   is talking to. Answering for both makes that test meaningless.
  *
  * One more asymmetry that looks like an inconsistency and is not: creating a
- * swap chain reports its refusals as `DXGI_ERROR_INVALID_CALL`, while reading a
- * description into a null pointer reports `E_INVALIDARG`. The first is DXGI
- * saying the request cannot be honoured, the second is the plain
- * bad-argument code, and programs do distinguish them.
+ * swap chain reports a request it cannot honour -- no window, a buffer count
+ * its swap effect does not take -- as `DXGI_ERROR_INVALID_CALL`, while a
+ * format or sample count nothing could show, and reading a description into
+ * a null pointer, report `E_INVALIDARG`, the plain bad-argument code.
+ * Programs do distinguish them.
  *
  * The machine arrives injected: adapters, outputs and the size of a window are
  * configuration, so the whole of this file runs headless in a test.
@@ -49,9 +50,6 @@ import {
 } from './validity.js';
 import { REFRESH_HZ, displayModes } from '../../win32/user32/display.js';
 import { VIDEO_ADAPTER_NAME } from '../../win32/devices.js';
-
-/** DXGI_ERROR_NOT_CURRENTLY_AVAILABLE: what the browser has no way to give. */
-const DXGI_ERROR_NOT_CURRENTLY_AVAILABLE = 0x887a0022;
 
 /**
  * @typedef {Object} ModeFields
@@ -128,6 +126,12 @@ const DXGI_PRESENT_TEST = 0x1;
  *     The desktop the machine's one output shows, as user32 reports it.
  * @property {() => number} [vendorId]
  *     The PCI vendor of the machine's one adapter, as Direct3D 9 reports it.
+ * @property {(width: number, height: number,
+ *             where: { window: number, fullscreen: boolean, announce?: boolean }) => void}
+ *     [resolution]
+ *     Told the mode a swap chain takes the screen at, and the window it takes
+ *     with it, as a Direct3D 9 device tells it: the reported display becomes
+ *     that mode, and a fullscreen window is placed over it.
  */
 
 /**
@@ -265,7 +269,9 @@ export function createFactory(options = {}, secondVersion = false){
                 out.swapChain = null;
                 return E_INVALIDARG;
             }
-            out.swapChain = createSwapChain(desc, device, factory, windowClientSize);
+            out.swapChain = createSwapChain(desc, device, factory, {
+                windowClientSize, resolution: options.resolution, display: options.display,
+            });
             return S_OK;
         },
 
@@ -552,22 +558,50 @@ function extentFromWindow(width, height, client){
  * @param {import('./structs.js').SwapChainFields} requested
  * @param {any} device
  * @param {any} factory
- * @param {(window: number) => { width: number, height: number }} windowClientSize
+ * @param {{ windowClientSize: (window: number) => { width: number, height: number },
+ *           resolution?: FactoryOptions['resolution'],
+ *           display?: FactoryOptions['display'] }} services
  */
-function createSwapChain(requested, device, factory, windowClientSize){
-    // Nothing here takes the display for itself, so a swap chain asked for
-    // fullscreen is made windowed and says so, as one made while fullscreen
-    // is unavailable is.
+function createSwapChain(requested, device, factory, services){
+    const { windowClientSize } = services;
     const asked = copySwapChainDesc(requested);
     let desc = {
         ...asked,
-        windowed: true,
         bufferDesc: {
             ...asked.bufferDesc,
             ...extentFromWindow(asked.bufferDesc.width, asked.bufferDesc.height,
                 ()=>windowClientSize(asked.outputWindow)),
         },
     };
+    /**
+     * The desktop's mode before the swap chain took the screen, given back
+     * when it leaves.
+     *
+     * @type {{ width: number, height: number } | null}
+     */
+    let desktop = null;
+
+    /**
+     * Fullscreen the way this engine has it, which is the way a Direct3D 9
+     * device has it: the reported display is the mode, and the window is
+     * placed over all of it and told its size. The page shows that window
+     * whole; nothing is taken from the browser.
+     *
+     * @param {number} width @param {number} height
+     */
+    const takeScreen = (width, height)=>{
+        if (desktop === null)
+        {
+            const shown = services.display?.();
+            desktop = shown ? { width: shown.width, height: shown.height } : null;
+        }
+        services.resolution?.(width, height, { window: desc.outputWindow, fullscreen: true,
+            announce: true });
+    };
+    if (!desc.windowed)
+    {
+        takeScreen(desc.bufferDesc.width, desc.bufferDesc.height);
+    }
     /** @type {Map<number, any>} */
     let buffers = new Map();
     let outstanding = 0;
@@ -713,15 +747,67 @@ function createSwapChain(requested, device, factory, windowClientSize){
         },
 
         /**
-         * Going fullscreen is refused the way DXGI refuses it when the display
-         * cannot be had just now; going windowed is where the swap chain
-         * already is.
+         * Fullscreen takes the screen at the back buffer's size, on this
+         * adapter's one output; windowed gives the desktop's mode back. The
+         * window stays where fullscreen placed it: nothing here keeps the
+         * rectangle it had before.
          *
          * @param {boolean} fullscreen
+         * @param {any} [target]  An output, or null for the containing one.
          * @returns {number}
          */
-        SetFullscreenState(fullscreen){
-            return fullscreen ? DXGI_ERROR_NOT_CURRENTLY_AVAILABLE : S_OK;
+        SetFullscreenState(fullscreen, target = null){
+            if (fullscreen && target)
+            {
+                /** @type {{ output?: any }} */
+                const held = {};
+                device.adapter().EnumOutputs(0, held);
+                held.output?.release();
+                if (target !== held.output)
+                {
+                    return DXGI_ERROR_INVALID_CALL;
+                }
+            }
+            if (fullscreen === !desc.windowed)
+            {
+                return S_OK;
+            }
+            desc = { ...desc, windowed: !fullscreen };
+            if (fullscreen)
+            {
+                takeScreen(desc.bufferDesc.width, desc.bufferDesc.height);
+            }
+            else if (desktop)
+            {
+                services.resolution?.(desktop.width, desktop.height,
+                    { window: desc.outputWindow, fullscreen: false });
+                desktop = null;
+            }
+            return S_OK;
+        },
+
+        /**
+         * A new mode for the target: fullscreen, the screen is taken at it;
+         * windowed, the window would be resized to it, which nothing here can
+         * do yet.
+         *
+         * @param {ModeFields} mode
+         * @returns {number}
+         */
+        ResizeTarget(mode){
+            if (!mode)
+            {
+                return DXGI_ERROR_INVALID_CALL;
+            }
+            if (!desc.windowed)
+            {
+                takeScreen(mode.width || desc.bufferDesc.width,
+                    mode.height || desc.bufferDesc.height);
+                return S_OK;
+            }
+            device.diverge('ResizeTarget on a windowed swap chain leaves its window the'
+                + ' size it is');
+            return S_OK;
         },
 
         /**
@@ -743,10 +829,15 @@ function createSwapChain(requested, device, factory, windowClientSize){
             {
                 return E_INVALIDARG;
             }
-            // Nothing here goes exclusive: a browser has no mode to set, so the
-            // answer is windowed and there is no target output to report.
-            out.fullscreen = false;
+            out.fullscreen = !desc.windowed;
             out.target = null;
+            if (out.fullscreen)
+            {
+                /** @type {{ output?: any }} */
+                const held = {};
+                device.adapter().EnumOutputs(0, held);
+                out.target = held.output ?? null;
+            }
             return S_OK;
         },
 
