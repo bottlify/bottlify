@@ -86,7 +86,7 @@ differently raises a `divergence` event naming the API.
   stride is refused.
 - Direct3D 9's 32-bit float formats are kept as half floats, and A16B16G16R16/G16R16 as half
   floats of their value.
-- The engine's own `d3dx9` reads BMP, DDS, TGA and PNG images, not JPEG; `D3DXCreateTeapot`,
+- The engine's own `d3dx9` reads BMP, DDS, TGA, PNG and JPEG images; `D3DXCreateTeapot`,
   `D3DXCreateTextA`, `D3DXSimplifyMesh`, `D3DXUVAtlasPartition` and `D3DXComputeNormalMap` answer
   `E_NOTIMPL`.
 - No DirectX redistributables ship with the engine: a program brings `d3dx9_*`, XAudio2 and the rest

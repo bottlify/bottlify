@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { IFF, ImageError, readImage } from './images.js';
 import { FMT } from './pixels.js';
+import { FLAT, block, encode } from '../../media/internal/jpeg.fixture.js';
 
 /** @param {number[]} bytes @param {number} at @param {number} value @param {number} size */
 function put(bytes, at, value, size){
@@ -157,6 +158,21 @@ test('a palette-indexed DDS reads its texels through the palette, alpha from peF
     assert.deepEqual([...image.levels[0].data], [100, 150, 200, 255, 30, 20, 10, 40]);
     assert.throws(()=>readImage(Uint8Array.from([...header, ...palette.slice(0, 100)])),
         /palette/);
+});
+
+test('a JPEG is read through the media decoder, its YCbCr made RGB', ()=>{
+    // DC 40 with a quantiser of 1 is a level of 133 (jpeg.test.js); Cr DC 320 is +40.
+    const grey = readImage(encode({ width: 8, height: 8, quant: FLAT,
+        components: [{ h: 1, v: 1, blocks: [block(40)] }] }));
+    assert.equal(grey.fileFormat, IFF.JPG);
+    assert.equal(grey.format, FMT.L8);
+    assert.deepEqual([...grey.levels[0].data.subarray(0, 4)], [133, 133, 133, 255]);
+    const colour = readImage(encode({ width: 8, height: 8, quant: FLAT, components: [
+        { h: 1, v: 1, blocks: [block(40)] }, { h: 1, v: 1, blocks: [block(0)] },
+        { h: 1, v: 1, blocks: [block(320)] }] }));
+    assert.equal(colour.format, FMT.R8G8B8);
+    // Y 133, Cb 0, Cr +40: red 133 + 1.402 * 40, green 133 - 0.714136 * 40, blue 133.
+    assert.deepEqual([...colour.levels[0].data.subarray(0, 4)], [133, 104, 189, 255]);
 });
 
 test('what the loader does not read is refused by name', ()=>{
