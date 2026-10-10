@@ -664,6 +664,10 @@ test('an accelerator table is six bytes to an entry, not eight', ()=>{
     memory.bytes.set([FVIRTKEY, 0, 0x70, 0, 0x11, 0x11], ACCEL);
     memory.bytes.set([FVIRTKEY, 0, 0x71, 0, 0x22, 0x22], ACCEL + 6);
     const table = fns.CreateAcceleratorTableA.handler([ACCEL, 2]);
+    assert.equal(fns.CreateAcceleratorTableW.argBytes, 8);
+    const wideTable = fns.CreateAcceleratorTableW.handler([ACCEL, 2]);
+    assert.equal(fns.CopyAcceleratorTableA.handler([wideTable, 0, 0]), 2,
+        'the W form reads the same six-byte entries');
 
     memory.putU32s(MSG, [hwnd, WM_KEYDOWN, 0x71, 0]);
     assert.equal(fns.TranslateAcceleratorA.handler([hwnd, table, MSG]), 1);

@@ -41,6 +41,15 @@ function setup(initial){
             }
             return decodeAnsi(memory.subarray(address, end));
         },
+        readWideString: (address, maxLength)=>{
+            let text = '';
+            for (let at = address; text.length < maxLength && (memory[at] | memory[at + 1]) !== 0;
+                at += 2)
+            {
+                text += String.fromCharCode(memory[at] | (memory[at + 1] << 8));
+            }
+            return text;
+        },
         writeMemory: (address, bytes)=>memory.set(bytes, address),
         files: {
             /** @param {string} path */
@@ -139,9 +148,26 @@ test('names in the upper half of the ANSI page keep their bytes, the header\'s l
         [0x43, 0x3a, 0x5c, 0x80, 0x5c, ...[...'SETUP.DL'].map(c=>c.charCodeAt(0)), 0x99, 0]);
 });
 
+test('LZOpenFileW opens a UTF-16 name as LZOpenFileA does, its OFSTRUCT path in ANSI', ()=>{
+    const { fns, memory } = setup({ 'C:\\TEMP\\SETUP.DL_': PACKED });
+    const name = 0x1800;
+    const text = 'C:\\TEMP\\SETUP.DLL';
+    for (let i = 0; i <= text.length; i++)
+    {
+        memory[name + i * 2] = i < text.length ? text.charCodeAt(i) : 0;
+        memory[name + i * 2 + 1] = 0;
+    }
+    const OFSTRUCT = 0x1000;
+    assert.equal(fns.LZOpenFileW.handler([name, OFSTRUCT, OF_EXIST]), 1,
+        'found through the underscore spelling');
+    assert.equal(String.fromCharCode(...memory.subarray(OFSTRUCT + 8, OFSTRUCT + 25)),
+        'C:\\TEMP\\SETUP.DL_');
+    assert.ok(fns.LZOpenFileW.handler([name, OFSTRUCT, OF_READ]) > 0);
+});
+
 test('every function declares the stack its arguments occupy', ()=>{
     const { fns } = setup({});
     assert.deepEqual(
         Object.fromEntries(Object.entries(fns).map(([name, entry])=>[name, entry.argBytes])),
-        { LZOpenFileA: 12, LZCopy: 8, LZClose: 4, GetExpandedNameA: 8 });
+        { LZOpenFileA: 12, LZOpenFileW: 12, LZCopy: 8, LZClose: 4, GetExpandedNameA: 8 });
 });

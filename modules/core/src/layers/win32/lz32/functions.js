@@ -43,6 +43,7 @@ const MAX_PATH = 260;
 /**
  * @typedef {Object} LzHost
  * @property {(address: number, maxLength: number) => string} readCString
+ * @property {(address: number, maxLength: number) => string} [readWideString]
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {any} files  The volume, as `vfs.js` speaks it.
  */
@@ -105,6 +106,53 @@ export function createLzFunctions(host){
         host.writeMemory(address, bytes);
     };
 
+    /**
+     * LZOpenFile's work once the name is read, whichever width it came in.
+     * @param {string} asked @param {number} reopen @param {number} style
+     */
+    const openFile = (asked, reopen, style)=>{
+        const mode = style & 0xffff;
+        if ((mode & OF_DELETE) !== 0)
+        {
+            return files.remove(asked) ? 1 : LZERROR_BADINHANDLE;
+        }
+        if ((mode & OF_CREATE) !== 0)
+        {
+            if (!store(asked, new Uint8Array(0)))
+            {
+                return LZERROR_BADOUTHANDLE;
+            }
+            const handle = next++;
+            open.set(handle, { path: asked, content: null, writable: true });
+            writeOfStruct(reopen >>> 0, asked);
+            return handle;
+        }
+        let path = asked;
+        let bytes = load(path);
+        if (bytes === null && asked.length > 0)
+        {
+            path = `${asked.slice(0, -1)}_`;
+            bytes = load(path);
+        }
+        if (bytes === null)
+        {
+            return LZERROR_BADINHANDLE;
+        }
+        if ((mode & OF_EXIST) !== 0)
+        {
+            writeOfStruct(reopen >>> 0, path);
+            return 1;
+        }
+        const handle = next++;
+        open.set(handle, {
+            path,
+            content: expand(bytes),
+            writable: (mode & (OF_WRITE | OF_READWRITE)) !== 0,
+        });
+        writeOfStruct(reopen >>> 0, path);
+        return handle;
+    };
+
     return {
         /**
          * INT LZOpenFileA(LPSTR lpFileName, LPOFSTRUCT lpReOpenBuf, WORD wStyle)
@@ -117,49 +165,21 @@ export function createLzFunctions(host){
         LZOpenFileA: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([name, reopen, style])=>{
-                const asked = host.readCString(name >>> 0, MAX_PATH);
-                const mode = style & 0xffff;
-                if ((mode & OF_DELETE) !== 0)
-                {
-                    return files.remove(asked) ? 1 : LZERROR_BADINHANDLE;
-                }
-                if ((mode & OF_CREATE) !== 0)
-                {
-                    if (!store(asked, new Uint8Array(0)))
-                    {
-                        return LZERROR_BADOUTHANDLE;
-                    }
-                    const handle = next++;
-                    open.set(handle, { path: asked, content: null, writable: true });
-                    writeOfStruct(reopen >>> 0, asked);
-                    return handle;
-                }
-                let path = asked;
-                let bytes = load(path);
-                if (bytes === null && asked.length > 0)
-                {
-                    path = `${asked.slice(0, -1)}_`;
-                    bytes = load(path);
-                }
-                if (bytes === null)
-                {
-                    return LZERROR_BADINHANDLE;
-                }
-                if ((mode & OF_EXIST) !== 0)
-                {
-                    writeOfStruct(reopen >>> 0, path);
-                    return 1;
-                }
-                const handle = next++;
-                open.set(handle, {
-                    path,
-                    content: expand(bytes),
-                    writable: (mode & (OF_WRITE | OF_READWRITE)) !== 0,
-                });
-                writeOfStruct(reopen >>> 0, path);
-                return handle;
-            },
+            handler: ([name, reopen, style])=>openFile(host.readCString(name >>> 0, MAX_PATH),
+                reopen, style),
+        },
+
+        /**
+         * INT LZOpenFileW(LPWSTR lpFileName, LPOFSTRUCT lpReOpenBuf, WORD wStyle)
+         *
+         * LZOpenFileA for a UTF-16 name; the OFSTRUCT's path stays ANSI, as
+         * the structure has no wide form.
+         */
+        LZOpenFileW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([name, reopen, style])=>openFile(
+                host.readWideString?.(name >>> 0, MAX_PATH) ?? '', reopen, style),
         },
 
         /**

@@ -2033,7 +2033,8 @@ export function createWin32Module(){
                     directx: directx?.version,
                 }),
 
-                'LZ32.dll': createLzFunctions({ readCString, writeMemory, files: volume }),
+                'LZ32.dll': createLzFunctions({
+                    readCString, readWideString, writeMemory, files: volume }),
 
                 // The Patch API's applying half: the delta patches a Windows
                 // Installer patch's PatchFiles action and setups apply.

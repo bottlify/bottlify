@@ -496,6 +496,25 @@ test('the wide reads answer what the A reads answer, in UTF-16 and counted in ch
     assert.equal(fns.GetPrivateProfileStringW.handler([0, 0, 0, OUT, 64, FILE]),
         'Startup\0Other\0'.length);
     assert.equal(readBack(OUT, 15), 'Startup\0Other\0\0');
+    assert.equal(fns.GetPrivateProfileSectionNamesW.argBytes, 12);
+    assert.equal(fns.GetPrivateProfileSectionNamesW.handler([OUT, 64, FILE]),
+        'Startup\0Other\0'.length);
+    assert.equal(readBack(OUT, 15), 'Startup\0Other\0\0');
+
+    assert.equal(fns.GetPrivateProfileSectionW.argBytes, 16);
+    wide(SECTION, 'Other');
+    assert.equal(fns.GetPrivateProfileSectionW.handler([SECTION, OUT, 64, FILE]),
+        'Key=Value\0'.length);
+    assert.equal(readBack(OUT, 11), 'Key=Value\0\0');
+
+    assert.equal(fns.WritePrivateProfileSectionW.argBytes, 12);
+    wide(SECTION, 'Added');
+    const LIST = wide(DEFAULT, 'A=1\0B=2\0');
+    assert.equal(fns.WritePrivateProfileSectionW.handler([SECTION, LIST, FILE]), 1);
+    assert.equal(fns.GetPrivateProfileSectionW.handler([SECTION, OUT, 64, FILE]),
+        'A=1\0B=2\0'.length);
+    assert.equal(readBack(OUT, 9), 'A=1\0B=2\0\0');
+    wide(SECTION, 'startup');
 
     assert.equal(fns.GetPrivateProfileIntW.argBytes, 16);
     wide(KEY, 'FolderCount');

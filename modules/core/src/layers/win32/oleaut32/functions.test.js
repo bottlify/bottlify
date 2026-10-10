@@ -1663,3 +1663,45 @@ test('the operators and conversions are bound to the ordinals Windows gives them
         assert.equal(OLEAUT32_ORDINALS[Number(ordinal)], name, ordinal);
     }
 });
+
+test('DispCallFunc pushes each argument as its type occupies the stack', async()=>{
+    setUp();
+    /** @type {{ entry: number, args: number[] }[]} */
+    const seen = [];
+    fx = createAutomationFunctions({
+        ...host,
+        /** @param {number} entry @param {number[]} args */
+        call: (entry, args)=>{
+            seen.push({ entry, args });
+            return Promise.resolve(0x1234);
+        },
+    });
+    const object = 0x2000;
+    host.putU32(object, 0x2100);
+    host.putU32(0x2100 + 12, 0x77000);
+    const TYPES = 0x2200;
+    const POINTERS = 0x2300;
+    const I4 = 0x2400;
+    const R8 = 0x2410;
+    const RESULT = 0x2500;
+    host.bytes.set([3, 0, 5, 0], TYPES);
+    host.putU32(POINTERS, I4);
+    host.putU32(POINTERS + 4, R8);
+    host.putU32(I4 + 8, 42);
+    host.putU32(R8 + 8, 0x11111111);
+    host.putU32(R8 + 12, 0x22222222);
+    assert.equal(fx.DispCallFunc.argBytes, 32);
+    assert.equal(await settled('DispCallFunc', [object, 12, 4, 3, 2, TYPES, POINTERS, RESULT]), 0);
+    assert.deepEqual(seen, [{ entry: 0x77000, args: [object, 42, 0x11111111, 0x22222222] }]);
+    assert.equal(host.bytes[RESULT], 3, 'VT_I4');
+    assert.equal(new DataView(host.bytes.buffer).getUint32(RESULT + 8, true), 0x1234);
+
+    assert.equal(await settled('DispCallFunc', [0, 0x55000, 4, 0, 0, 0, 0, 0]), 0,
+        'no instance: oVft is the function');
+    assert.deepEqual(seen[1], { entry: 0x55000, args: [] });
+    assert.equal(call('DispCallFunc', [0, 0x55000, 4, 5, 0, 0, 0, RESULT]), 0x80020008,
+        'a double comes back in ST0, which the call does not hand over: DISP_E_BADVARTYPE');
+    assert.equal(OLEAUT32_ORDINALS[146], 'DispCallFunc');
+    assert.equal(OLEAUT32_ORDINALS[420], 'OleCreateFontIndirect');
+    assert.equal(fx.OleCreateFontIndirect.argBytes, 12);
+});

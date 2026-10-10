@@ -264,6 +264,26 @@ export function createServiceFunctions(host){
     };
 
     /**
+     * OpenService once the name is read, in either width.
+     * @param {number} manager @param {string | null} name
+     */
+    const openService = (manager, name)=>{
+        if (!held(manager, 'manager'))
+        {
+            return fail(ERROR_INVALID_HANDLE);
+        }
+        if (!name)
+        {
+            return fail(ERROR_INVALID_NAME);
+        }
+        if (!serviceKey(name))
+        {
+            return fail(ERROR_SERVICE_DOES_NOT_EXIST);
+        }
+        return open({ kind: 'service', name });
+    };
+
+    /**
      * EnumServicesStatusExA and W: the services the database holds, in name
      * order, each with its type and -- no service ever runs here -- stopped.
      * As many as fit are written, their names after the records; with room
@@ -400,22 +420,16 @@ export function createServiceFunctions(host){
         OpenServiceA: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([manager, nameAddress])=>{
-                if (!held(manager, 'manager'))
-                {
-                    return fail(ERROR_INVALID_HANDLE);
-                }
-                const name = text(nameAddress, MAX_SERVICE_NAME);
-                if (!name)
-                {
-                    return fail(ERROR_INVALID_NAME);
-                }
-                if (!serviceKey(name))
-                {
-                    return fail(ERROR_SERVICE_DOES_NOT_EXIST);
-                }
-                return open({ kind: 'service', name });
-            },
+            handler: ([manager, nameAddress])=>
+                openService(manager, text(nameAddress, MAX_SERVICE_NAME)),
+        },
+
+        /** SC_HANDLE OpenServiceW(SC_HANDLE hSCManager, LPCWSTR lpServiceName, DWORD dwDesiredAccess) */
+        OpenServiceW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([manager, nameAddress])=>
+                openService(manager, groupNamed(nameAddress, true) ?? null),
         },
 
         /**
