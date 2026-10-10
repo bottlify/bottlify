@@ -84,6 +84,7 @@ import { createIphlpapiFunctions } from './iphlpapi/functions.js';
 import { createCrypt32Functions } from './crypt32/functions.js';
 import { createAdvpackFunctions } from './advpack/functions.js';
 import { SFC_ORDINALS, createSfcFunctions } from './sfc/functions.js';
+import { createDbghelpFunctions } from './dbghelp/functions.js';
 import { createCfgmgrFunctions } from './cfgmgr32/functions.js';
 import { createMsvfwFunctions } from './msvfw32/functions.js';
 import { createAvifilFunctions } from './avifil32/functions.js';
@@ -1706,6 +1707,7 @@ export function createWin32Module(){
                         byBase: base=>modules.byBase(base),
                         setLastError: setError,
                         imagePath: ()=>modules.imagePath(),
+                        list: ()=>modules.list?.() ?? [],
                         // Reading a library off the volume belongs to whoever
                         // assembled the process, so it is passed straight through.
                         // Without it LoadLibrary can only answer for what is
@@ -2161,7 +2163,23 @@ export function createWin32Module(){
                         libraries['KERNEL32.dll'].K32GetProcessMemoryInfo.handler(args) },
                     GetPerformanceInfo: { argBytes: 8, handler: (/** @type {number[]} */ args)=>
                         libraries['KERNEL32.dll'].K32GetPerformanceInfo.handler(args) },
+                    ...Object.fromEntries(['EnumProcessModules', 'GetModuleFileNameExA',
+                        'GetModuleFileNameExW', 'GetModuleBaseNameA', 'GetModuleBaseNameW',
+                        'GetModuleInformation'].map(name=>[name, {
+                        // Four arguments, each of them.
+                        argBytes: 16,
+                        handler: (/** @type {number[]} */ args)=>
+                            libraries['KERNEL32.dll'][`K32${name}`].handler(args),
+                    }])),
                 },
+
+                // The debug help library with no symbol files: what a crash
+                // reporter walks the faulting stack with.
+                'DBGHELP.dll': createDbghelpFunctions({
+                    writeMemory, readMemory,
+                    modules: ()=>modules.list?.() ?? [],
+                    setLastError: setError,
+                }),
 
                 'CRYPT32.dll': createCrypt32Functions({
                     readMemory, writeMemory, readWideString, setLastError: setError,

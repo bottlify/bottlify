@@ -345,3 +345,66 @@ test('GetDllDirectory answers as the path calls do', ()=>{
     assert.equal(String.fromCharCode(...new Uint16Array(bytes.slice(0x200, 0x210).buffer)),
         'C:\\Libs\0');
 });
+
+test('K32EnumProcessModules hands out the image first and the bytes all of them take', ()=>{
+    const { host, lastError } = hostFor({
+        lookup: { 'game.exe': 0x400000, 'engine.dll': 0x10000000 },
+    });
+    /** @type {Map<number, Uint8Array>} */
+    const written = new Map();
+    const fns = createModuleFunctions({
+        ...host,
+        list: ()=>[
+            { base: 0x400000, path: 'C:\\App\\game.exe' },
+            { base: 0x10000000, path: 'C:\\App\\engine.dll' },
+        ],
+        /** @param {number} address @param {Uint8Array} bytes */
+        writeMemory: (address, bytes)=>{ written.set(address, bytes); },
+    });
+    const u32 = (/** @type {number} */ address, at = 0)=>
+        new DataView(/** @type {Uint8Array} */ (written.get(address)).buffer).getUint32(at, true);
+    const enumerate = fns.K32EnumProcessModules;
+    assert.equal(enumerate.argBytes, 16);
+    // The sizing call: nothing fits, the whole is still said.
+    assert.equal(enumerate.handler([0xffffffff, 0x500, 0, 0x600]), 1);
+    assert.equal(written.has(0x500), false);
+    assert.equal(u32(0x600), 8);
+    assert.equal(enumerate.handler([0xffffffff, 0x500, 4, 0x600]), 1);
+    assert.equal(written.get(0x500)?.length, 4);
+    assert.equal(u32(0x500), 0x400000);
+    assert.equal(enumerate.handler([0xffffffff, 0x500, 8, 0x600]), 1);
+    assert.deepEqual([u32(0x500), u32(0x500, 4)], [0x400000, 0x10000000]);
+    assert.equal(enumerate.handler([0xffffffff, 0x500, 8, 0]), 0);
+    assert.equal(lastError(), 998, 'ERROR_NOACCESS');
+});
+
+test('K32GetModuleFileNameEx and K32GetModuleBaseName answer a path and its file name', ()=>{
+    const { host, lastError } = hostFor({ lookup: { 'engine.dll': 0x10000000 } });
+    /** @type {Map<number, Uint8Array>} */
+    const written = new Map();
+    const fns = createModuleFunctions({
+        ...host,
+        /** @param {string | null} name */
+        find: name=>name === null ? record('speedDemo.exe', 0x400000) : host.find(name),
+        /** @param {number} address @param {Uint8Array} bytes */
+        writeMemory: (address, bytes)=>{ written.set(address, bytes); },
+    });
+    const ansi = (/** @type {number} */ address)=>
+        String.fromCharCode(...(written.get(address) ?? []));
+    const image = [0xffffffff, 0, 0x500, 260];
+    const engine = [0xffffffff, 0x10000000, 0x500, 260];
+    assert.equal(fns.K32GetModuleFileNameExA.handler(image), 20);
+    assert.equal(ansi(0x500), 'C:\\App\\speedDemo.exe\0');
+    assert.equal(fns.K32GetModuleBaseNameA.handler(image), 13);
+    assert.equal(ansi(0x500), 'speedDemo.exe\0');
+    assert.equal(fns.K32GetModuleBaseNameA.handler(engine), 10);
+    assert.equal(ansi(0x500), 'engine.dll\0');
+    // Cut to the buffer, the terminator inside it.
+    assert.equal(fns.K32GetModuleBaseNameA.handler([0xffffffff, 0x10000000, 0x500, 4]), 3);
+    assert.equal(ansi(0x500), 'eng\0');
+    assert.equal(fns.K32GetModuleBaseNameW.handler(engine), 10);
+    const wide = written.get(0x500) ?? new Uint8Array(4);
+    assert.deepEqual([...wide.subarray(0, 4)], [0x65, 0, 0x6e, 0]);
+    assert.equal(fns.K32GetModuleFileNameExA.handler([0xffffffff, 0x20000000, 0x500, 260]), 0);
+    assert.equal(lastError(), 6, 'ERROR_INVALID_HANDLE');
+});
