@@ -700,10 +700,13 @@ export function translateShader(parsed, options = {}){
             case REGISTER.MISCTYPE:
                 // Direct3D 9 puts a pixel's centre on whole coordinates, the
                 // first pixel's vPos being (0, 0); WebGPU's position is the
-                // centre half a pixel on.
+                // centre half a pixel on. vFace is positive for a front face,
+                // which Direct3D winds clockwise on screen; the pipeline's
+                // front face is WebGPU's counter-clockwise, as the cull modes
+                // are mapped, so front_facing is Direct3D's back.
                 return index === 0
                     ? 'vec4f(in.vPos.xy - 0.5, 0.0, 1.0)'
-                    : 'vec4f(select(-1.0, 1.0, in.vFace))';
+                    : 'vec4f(select(1.0, -1.0, in.vFace))';
             case REGISTER.PREDICATE:
                 used.add('p0');
                 return 'p0';

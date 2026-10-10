@@ -407,7 +407,7 @@ test('model 3 names its outputs and inputs by declared semantic', ()=>{
         END_TOKEN]));
     assert.equal(ps.error, null);
     assertLine(ps.wgsl, `@location(${varyingLocation(D3DDECLUSAGE.TEXCOORD, 2)}) v5: vec4f,`);
-    assertLine(ps.wgsl, 'oC1 = vec4f(select(-1.0, 1.0, in.vFace));');
+    assertLine(ps.wgsl, 'oC1 = vec4f(select(1.0, -1.0, in.vFace));');
     assertLine(ps.wgsl, '@location(1) oC1: vec4f,');
 });
 

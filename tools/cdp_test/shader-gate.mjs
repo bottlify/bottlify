@@ -152,7 +152,8 @@ export function pagePlan(c){
             + ` array<vec4f, ${Math.max(1, ins.length)}>;`,
         '@vertex',
         'fn gate_vs(@builtin(vertex_index) corner: u32) -> GateVarying {',
-        '    var corners = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));',
+        // Clockwise on screen: a front face to Direct3D, as the machine is told.
+        '    var corners = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(-1.0, 3.0), vec2f(3.0, -1.0));',
         '    var out: GateVarying;',
         '    out.gatePos = vec4f(corners[corner], 0.5, 1.0);',
         ...ins.map((f, at)=>`    out.${f.field} = ${narrow(f.type, `gateIn[${at}]`)};`),
