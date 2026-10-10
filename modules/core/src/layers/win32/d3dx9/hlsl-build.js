@@ -1020,9 +1020,11 @@ export function createBuilder(profile){
             // coordinate is moved into one there, as fxc does.
             const from = src.kind === 'imm' || src.kind === 'const'
                 ? emit('mov', coord.w, [src]).src : src;
+            /** @type {Src} */
+            const dividedByW = { .../** @type {import('./hlsl-ir.js').SrcInput} */ (src),
+                mod: 'dw' };
             instrs.push({ op: 'texld', dest: { kind: 'reg', reg, mask: 15 },
-                srcs: [projected ? { ...from, mod: 'dw' } : from,
-                    { kind: 'sampler', cst: sampler }] });
+                srcs: [projected ? dividedByW : from, { kind: 'sampler', cst: sampler }] });
         }
         return vec({ kind: 'reg', reg, swz: [0, 1, 2, 3] });
     };
