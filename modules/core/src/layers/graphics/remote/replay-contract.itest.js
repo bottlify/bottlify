@@ -530,6 +530,16 @@ async function divergences(version, scenario, ways = WAYS, caps = {}){
     await scenario(direct);
     /** @type {string[]} */
     const found = [];
+    // A frame the GPU refused draws nothing, whichever side it is on, and
+    // the two sides would agree on what they asked of it all the same.
+    /** @param {string} side @param {any} on */
+    const refused = (side, on)=>{
+        if (on.gpu.errors.length > 0)
+        {
+            found.push(`[${side}] the GPU refused: ${on.gpu.errors[0]}`);
+        }
+    };
+    refused('direct', direct.on);
     for (const way of ways)
     {
         const played = runner(rig(version, way, caps));
@@ -541,6 +551,7 @@ async function divergences(version, scenario, ways = WAYS, caps = {}){
         {
             played.on.close();
         }
+        refused(way, played.on);
         const answers = parting(direct.seen, played.seen, 'what the program saw');
         if (answers)
         {

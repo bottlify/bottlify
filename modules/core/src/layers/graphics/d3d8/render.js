@@ -6762,7 +6762,7 @@ export function createRenderer(options){
         command.pipeline = prepared.pipelineIndex;
         command.state = prepared.state;
         command.uniforms = prepared.uniforms;
-        command.stageBindings = prepared.stageBindings;
+        command.stageBindings = unsampledTargets(model, prepared.stageBindings);
         command.program = prepared.program;
         command.vertices = geometry.vertices;
         command.indices = geometry.indices;
@@ -6774,6 +6774,54 @@ export function createRenderer(options){
         command.check = undefined;
         frame.commands.push(command);
     };
+
+    /**
+     * A draw's bindings with any texture it is drawing into put out of reach.
+     *
+     * Direct3D lets a texture stay bound to a stage while a level of it is the
+     * render target or the depth buffer; what such a draw samples is undefined
+     * there, and it draws. WebGPU refuses a pass that samples a texture it
+     * renders into, and with it the whole frame's command buffer: a program that
+     * leaves its target bound on a stage -- whether or not the stage is read --
+     * showed nothing at all, the last frame it drew before standing on the
+     * screen for good. The stage samples the placeholder instead, which is
+     * what an unbound stage reads, and that is said once.
+     *
+     * @param {RenderModel} model
+     * @param {{ view: any, sampler: any, placeholder?: boolean, record?: any,
+     *     texture?: any }[]} bindings  a preparation's, which other draws share
+     */
+    const unsampledTargets = (model, bindings)=>{
+        const target = model.renderTarget ? textures.get(model.renderTarget) ?? null : null;
+        const depth = model.depthStencil ? textures.get(model.depthStencil) ?? null : null;
+        if (target === null && depth === null)
+        {
+            return bindings;
+        }
+        let safe = bindings;
+        for (let index = 0; index < bindings.length; index++)
+        {
+            const sampled = bindings[index].record;
+            if (!sampled || (sampled !== target && sampled !== depth))
+            {
+                continue;
+            }
+            if (safe === bindings)
+            {
+                safe = bindings.slice();
+            }
+            safe[index] = { ...bindings[index], record: null, placeholder: true,
+                view: placeholderView(textureDimensionOf(bindings[index].texture)) };
+            if (divergence && !targetSampledReported)
+            {
+                targetSampledReported = true;
+                divergence('Direct3D', 'a draw samples the texture it draws into: the stage'
+                    + ' reads the placeholder, as WebGPU draws nothing that does both');
+            }
+        }
+        return safe;
+    };
+    let targetSampledReported = false;
 
     /** A draw command of the one shape every draw is recorded in. */
     const blankDraw = ()=>({
