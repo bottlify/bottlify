@@ -35,7 +35,10 @@ const problems = [];
 for (const name of files)
 {
     const path = join(DIRECTORY, name);
-    const lines = readFileSync(path, 'utf8').split('\n');
+    // Split on CRLF too: a Windows checkout's lines end in \r, which `.`
+    // does not match, so no comment was taken out and every `/**` read as a
+    // power.
+    const lines = readFileSync(path, 'utf8').split(/\r?\n/);
     lines.forEach((line, index)=>{
         const code = line.replace(/\/\*.*?\*\//g, '').replace(/\/\/.*$/, '')
             .replace(/^\s*\/?\*.*$/, '');
