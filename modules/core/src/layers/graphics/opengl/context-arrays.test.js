@@ -137,23 +137,37 @@ test('the aliasing table\'s other pairs are one array too', ()=>{
         .map((/** @type {any} */ a)=>a.name), ['attrib7']);
 });
 
-test('a lit draw reaches the device in its lit colour, not its current one', ()=>{
-    // The device's shader has no lights. A model lit by the fixed pipeline,
-    // drawn with the current colour black as a program that lights it leaves
-    // it, came out black.
+test('a lit draw reaches the device as it is, with the lighting its shader lights it by', ()=>{
+    // The device's vertex stage lights a draw (`wgsl.js` lightingFunction).
+    // Lit here as well, each vertex was assembled and lit on the program's
+    // thread on every draw -- and lit twice once the device lit it again.
     /** @type {any[][]} */
     const drawn = [];
+    /** @type {any[]} */
+    const scenes = [];
+    /** @type {any[]} */
+    const arrays = [];
     /** @type {any} */
     const gpu = {
-        attach: ()=>{}, attached: ()=>true, drawArrays: ()=>false,
-        draw: (/** @type {any} */ c, /** @type {any} */ s, /** @type {number} */ m,
-            /** @type {any[]} */ vertices)=>drawn.push(vertices),
+        attach: ()=>{}, attached: ()=>true,
+        drawArrays: (/** @type {any} */ c, /** @type {any} */ request,
+            /** @type {() => any} */ scene)=>
+        {
+            arrays.push(scene());
+            return true;
+        },
+        draw: (/** @type {any} */ c, /** @type {() => any} */ scene, /** @type {number} */ m,
+            /** @type {any[]} */ vertices)=>
+        {
+            drawn.push(vertices);
+            scenes.push(scene());
+        },
         clear: ()=>{}, copyToTexture: ()=>{}, present: ()=>null,
         settled: ()=>Promise.resolve(), diagnostics: ()=>({}),
     };
     /** @type {any} */
     const context = createGlContext({
-        memory: { read: ()=>new Uint8Array(0), write: ()=>{} }, gpu,
+        memory: { read: ()=>new Uint8Array(64), write: ()=>{} }, gpu,
     });
     context.attach({ width: 8, height: 8, doubleBuffered: true, depthBits: 24 });
     context.glEnable(GL.LIGHTING);
@@ -166,9 +180,14 @@ test('a lit draw reaches the device in its lit colour, not its current one', ()=
     context.glVertex3f(0, 1, 0);
     context.glEnd();
     assert.equal(drawn.length, 1);
-    // LIGHT0's default: white diffuse along +z onto a surface facing it, under
-    // the default material's 0.8 diffuse and 0.2 scene ambient.
-    const [r, g, b] = drawn[0][0].color;
-    // 0.2 x 0.2 ambient + 0.8 x 1 diffuse.
-    assert.deepEqual([r, g, b].map(v=>v.toFixed(2)), ['0.84', '0.84', '0.84']);
+    assert.deepEqual(drawn[0][0].color, [0, 0, 0, 1], 'its own colour, not one lit here');
+    assert.deepEqual(drawn[0][0].normal, [0, 0, 1], 'and its normal, for the shader');
+    assert.equal(scenes[0].lighting.lights.length, 1, 'the scene lights it by LIGHT0');
+
+    // A draw by arrays is the device's too, lit or not.
+    context.glEnableClientState(GL.VERTEX_ARRAY);
+    context.glVertexPointer(3, GL.FLOAT, 0, 0);
+    context.glDrawArrays(GL.TRIANGLES, 0, 3);
+    assert.equal(arrays.length, 1, 'taken as arrays, not assembled vertex by vertex');
+    assert.notEqual(arrays[0].lighting, null);
 });

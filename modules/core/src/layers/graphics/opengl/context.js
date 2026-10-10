@@ -35,7 +35,7 @@
 import { GL } from './constants.js';
 import { EXTENSION_FUNCTIONS } from './extensions.js';
 import {
-    copyOf, createMatrixStacks, frustum, identity, multiply, ortho, rotation, scaling, transform,
+    copyOf, createMatrixStacks, frustum, identity, multiply, ortho, rotation, scaling,
     translation,
 } from './matrix.js';
 import { createShareGroup } from './objects.js';
@@ -362,12 +362,14 @@ export function createGlContext(options = {}){
         scissorBox,
         stacks,
         drawVertices,
-        // A draw by arrays reaches the device only when it is neither being
-        // compiled into a list -- a list holds vertices, not pointers -- nor
-        // lit by the fixed pipeline, which is done on the processor, nor
-        // refused by the renderer for a shape it cannot bind.
+        // A draw by arrays reaches the device unless it is being compiled
+        // into a list -- a list holds vertices, not pointers -- or refused by
+        // the renderer for a shape it cannot bind. A lit one too: the
+        // device's vertex stage lights it (`wgsl.js` lightingFunction), where
+        // assembling and lighting each vertex here held the program's thread
+        // on every draw.
         drawArrays: gpu
-            ? request=>(compiling || !attached || scenes.litFixed()
+            ? request=>(compiling || !attached
                 ? false
                 : gpu.drawArrays(context, request, scenes.scene))
             : null,
@@ -1774,25 +1776,10 @@ export function createGlContext(options = {}){
     }
 
     /**
-     * The vertices with the fixed pipeline's lit colour in place of their own.
-     * The device's shader has no lights: a lit draw is lit here, per vertex,
-     * as the processor's rasteriser lights it, or it reaches the screen in
-     * the current colour -- black for a program that lights everything.
-     * ponytail: the separate specular colour is not carried; add it to the
-     * vertex's secondary when a program separates it.
+     * A draw of vertices assembled here. On a device they go as they are, with
+     * their own colours and normals: the device's vertex stage lights them, as
+     * it lights a draw by arrays (`wgsl.js` lightingFunction).
      *
-     * @param {any[]} vertices
-     */
-    function litVertices(vertices){
-        const built = scenes.scene();
-        const modelview = stacks.modelview.current;
-        return vertices.map(vertex=>({
-            ...vertex,
-            color: built.lit(vertex, transform(modelview, vertex.position)),
-        }));
-    }
-
-    /**
      * @param {number} mode
      * @param {any[]} vertices
      */
@@ -1805,8 +1792,7 @@ export function createGlContext(options = {}){
         {
             if (attached)
             {
-                gpu.draw(context, scenes.scene, mode,
-                    scenes.litFixed() ? litVertices(vertices) : vertices);
+                gpu.draw(context, scenes.scene, mode, vertices);
             }
             return;
         }

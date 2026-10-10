@@ -12,9 +12,9 @@ import { parseProgram } from './arb-program.js';
 import { VARYING_TEXCOORDS, emitVertex } from './arb-wgsl.js';
 import { CANONICAL_LAYOUT } from './gpu-layout.js';
 import {
-    UNIFORM, clearDescriptor, clearKey, copyKey, drawDescriptor, drawKey, generateClear,
+    LIGHTS, UNIFORM, clearDescriptor, clearKey, copyKey, drawDescriptor, drawKey, generateClear,
     sameKeyInputs,
-    generateCopy, generateDraw, generateShow, showDescriptor,
+    generateCopy, generateDraw, generateShow, lightingStateOf, showDescriptor, writeLighting,
 } from './wgsl.js';
 
 /**
@@ -279,7 +279,11 @@ test('the uniform block layout the shader declares is the one the renderer fills
     assert.equal(UNIFORM.envColor, UNIFORM.texCoord + VARYING_TEXCOORDS * 4,
         'the current values run to every coordinate set the varyings carry');
     assert.equal(UNIFORM.fogColor, UNIFORM.envColor + 4 * 4);
-    assert.equal(UNIFORM.floats, UNIFORM.misc + 4);
+    assert.equal(UNIFORM.lightModelAmbient, UNIFORM.misc + 4);
+    assert.equal(UNIFORM.material, UNIFORM.lightModelAmbient + 4);
+    assert.equal(UNIFORM.lights, UNIFORM.material + 5 * 4);
+    assert.equal(UNIFORM.floats, UNIFORM.lights + LIGHTS * 24,
+        'a light is six vectors: three colours, position, spot, attenuation');
     assert.equal(UNIFORM.floats % 4, 0);
 });
 
@@ -575,4 +579,51 @@ test('a binding the GPU path cannot answer refuses the module by name', ()=>{
         '!!ARBvp1.0\nPARAM m = state.material.ambient;\nMOV result.position, m;\nEND\n') }));
     assert.equal(generated.code, '');
     assert.match(/** @type {string} */ (generated.programs?.error), /state\.material\.ambient/);
+});
+
+test('a lit draw lights in its vertex stage, keyed apart from the same draw unlit', ()=>{
+    const lighting = { lights: 2, localViewer: true, normalise: true, separateSpecular: false,
+        colourMaterial: 3 };
+    const lit = generateDraw(state({ lighting }));
+    const unlit = generateDraw(state());
+    assert.match(lit.code, /fn glLit\(/);
+    assert.match(lit.code, /out\.color = glLit\(eyePosition, vec4f\(vertex\.normal, 0\.0\)\.xyz, out\.color\);/,
+        'the vertex normal, the colour its own until lit');
+    assert.match(lit.code, /i < 2u/, 'as many lights as are enabled');
+    assert.match(lit.code, /let ambient = colour;/, 'the colour material stands for ambient');
+    assert.match(lit.code, /let specular = uniforms\.material\[3\];/);
+    assert.doesNotMatch(unlit.code, /glLit/);
+    assert.notEqual(drawKey(state({ lighting })), drawKey(state()));
+    assert.notEqual(drawKey(state({ lighting })),
+        drawKey(state({ lighting: { ...lighting, lights: 3 } })));
+    assert.equal(sameKeyInputs(state({ lighting }), state({ lighting: { ...lighting } })), true);
+    assert.equal(sameKeyInputs(state({ lighting }), state()), false);
+});
+
+test('the lighting goes into the block where the shader reads it', ()=>{
+    const light = {
+        ambient: [0.1, 0.2, 0.3, 1], diffuse: [1, 1, 1, 1], specular: [0, 0, 0, 1],
+        position: [1, 2, 3, 1], spotDirection: [0, 0, -2], spotExponent: 4, spotCutoff: 60,
+        constantAttenuation: 1, linearAttenuation: 0.5, quadraticAttenuation: 0.25,
+    };
+    const scene = {
+        material: { ambient: [0.2, 0.2, 0.2, 1], diffuse: [0.8, 0.8, 0.8, 1],
+            specular: [0, 0, 0, 1], emission: [0, 0, 0, 1], shininess: 10 },
+        model: { ambient: [0.2, 0.2, 0.2, 1], localViewer: false, separateSpecular: true },
+        lights: [light, { ...light, spotCutoff: 180 }],
+        normalMatrix: [1, 0, 0, 0, 1, 0, 0, 0, 1], normalise: false,
+        colourMaterial: /** @type {('ambient' | 'diffuse')[]} */ (['ambient', 'diffuse']),
+    };
+    assert.deepEqual(lightingStateOf(scene), { lights: 2, localViewer: false, normalise: false,
+        separateSpecular: true, colourMaterial: 3 });
+    assert.equal(lightingStateOf(null), null);
+    const block = new Float32Array(UNIFORM.floats);
+    writeLighting(block, scene);
+    assert.equal(block[UNIFORM.material + 16], 10, 'shininess');
+    const at = UNIFORM.lights;
+    assert.deepEqual(Array.from(block.slice(at + 16, at + 20)), [0, 0, -1, 4],
+        'the spot direction in unit length, then its exponent');
+    assert.ok(Math.abs(block[at + 20] - 0.5) < 1e-6, 'the cosine of a 60 degree cone');
+    assert.deepEqual(Array.from(block.slice(at + 24 + 19, at + 24 + 21)), [0, -2],
+        'no cone: no exponent, and a cosine no angle reaches');
 });
