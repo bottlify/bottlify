@@ -307,8 +307,10 @@ function parse(argv){
             : null,
         // A run that reads a gigabyte of bundle over HTTP one block at a time
         // is slower than one reading a local file, and the page cannot be asked
-        // how it is doing while it runs.
-        waitMs: number('--wait', 900) * 1000,
+        // how it is doing while it runs. A run timed by `--run-seconds` answers
+        // only once its time is up, so the wait is at least that and the
+        // report's read-back after it.
+        waitMs: number('--wait', Math.max(900, number('--run-seconds', 0) + 300)) * 1000,
         calls: number('--calls', 40),
         // Every host call written to a file. The ring in a report holds the end
         // of a run, and what a program decided it decided long before that.
