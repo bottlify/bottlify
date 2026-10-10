@@ -343,6 +343,7 @@ export function createGraphicsLibraries(
         extraInterfaces: [d3d7.interface, ...d3dLegacy.interfaces],
         extraSurfaceInterfaces: d3dLegacy.surfaceInterfaces,
         identity: ()=>graphics.adapter?.() ?? null,
+        divergence,
         gamma,
         deactivated,
         deactivations,
