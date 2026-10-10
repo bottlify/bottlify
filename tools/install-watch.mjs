@@ -102,6 +102,14 @@ const shotsAt = argv.includes('--shots') ? argv[argv.indexOf('--shots') + 1] : n
 const all = flag=>argv.flatMap((argument, index)=>argument === flag && index + 1 < argv.length
     ? [argv[index + 1]] : []);
 const traceAt = number('--trace', 0);
+// `--dump-at S`: S seconds in, the next frame with draws written down by the
+// devices the graphics worker plays (`--worker`), every draw with its state,
+// shaders and textures, into `--dump-to` (dump.txt by default) once the
+// worker has sent it.
+const dumpAt = number('--dump-at', 0);
+const dumpTo = argv.includes('--dump-to') ? argv[argv.indexOf('--dump-to') + 1] : 'dump.txt';
+let dumpAsked = false;
+let dumpWritten = false;
 // `--trace-box`: the trace printed when the first message box is shown --
 // the calls that led a setup to the error it reports, which a fixed time
 // misses when the box's moment moves from run to run.
@@ -535,6 +543,19 @@ setInterval(async()=>{
             // is a device that stopped replaying, and only these say so.
             const graphics = metrics('graphics');
             const device = graphics.seam?.device;
+            if (dumpAt > 0 && !dumpAsked && Number(seconds()) >= dumpAt)
+            {
+                dumpAsked = true;
+                app.debug.dumpFrames(1);
+                console.log(seconds(), 'DUMP asked');
+            }
+            else if (dumpAsked && !dumpWritten && app.debug.dumped())
+            {
+                dumpWritten = true;
+                const { lines, frame } = app.debug.dumped();
+                writeFileSync(dumpTo, `${lines.join('\n')}\n`);
+                console.log(seconds(), 'DUMP', dumpTo, `frame ${frame}`, lines.length, 'lines');
+            }
             if (device || graphics.worker)
             {
                 const last = device?.recentFrames?.at(-1);

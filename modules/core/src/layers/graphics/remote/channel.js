@@ -412,6 +412,13 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
         methodBytes: ()=>[...byMethod].map(([name, { count, bytes }])=>({ name, count, bytes }))
             .sort((a, b)=>b.bytes - a.bytes),
 
+        /**
+         * The diagnostics asked of the played side and those it answered, as
+         * "told/asked": a device table that stops changing while frames go on
+         * is told here whether its answers stopped coming back.
+         */
+        answers: ()=>`${told}/${asked}`,
+
         /** The calls waited on, by name, with the milliseconds they took. */
         waits: ()=>Object.fromEntries([...waits].map(([name, sum])=>[name, {
             count: sum.count, ms: Math.round(sum.ms), maxMs: Math.round(sum.maxMs),

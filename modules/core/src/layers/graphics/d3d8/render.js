@@ -2736,9 +2736,11 @@ const CLEAR_STRIDE = 20;
  *     under. Off by default: it transforms every vertex of every draw a second
  *     time on the processor, which is a cost an ordinary run must not pay.
  * @property {number} [dumpEvery]
- * @property {{ dumpFrames: number }} [liveDump]
+ * @property {{ dumpFrames: number,
+ *     written?: (lines: string[], frame: number) => void }} [liveDump]
  *     Set on a running program to have its next frames with draws written
- *     down as `dumpDraws` writes them; counts down as they are.
+ *     down as `dumpDraws` writes them; counts down as they are, and the last
+ *     of them is handed to `written`.
  *     The same account for every this-many-th presented frame, the last
  *     `DUMPS_KEPT` of them kept: a picture wrong in one frame of a few is
  *     caught with its draws, where the last frame alone misses it. Its first
@@ -8954,9 +8956,12 @@ export function createRenderer(options){
             {
                 lastDump = parts;
             }
+            /** The last frame a running program asked for, handed over once replayed. */
+            let handOver = null;
             if (liveDump !== null && liveDump.dumpFrames > 0 && written)
             {
                 liveDump.dumpFrames--;
+                handOver = liveDump.dumpFrames === 0 ? parts : null;
             }
             if (dumpEvery > 0 && written && counters.frames % dumpEvery === 0)
             {
@@ -9009,6 +9014,15 @@ export function createRenderer(options){
             chain = chain.then(()=>replay(recorded, surface)).then(()=>{
                 submittedFrames = replayed;
             }).catch(failure);
+            if (handOver !== null)
+            {
+                // After the replay, which appends what the GPU was given to
+                // each line; handed to whoever asked, since a table read a
+                // report later may be another device's by then.
+                const lines = handOver;
+                // Numbered as the frame history numbers it.
+                chain = chain.then(()=>liveDump?.written?.(joinDump(lines), replayed - 1));
+            }
             if (released.size > 0)
             {
                 const bound = new Set(model.textures.values());

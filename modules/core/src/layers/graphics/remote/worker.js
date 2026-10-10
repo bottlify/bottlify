@@ -97,7 +97,18 @@ export function serveGraphics(scope, deps){
      * Direct3D 8 and 9 device here writes its next frames down while this is
      * above zero.
      */
-    const liveDump = { dumpFrames: 0 };
+    const liveDump = {
+        dumpFrames: 0,
+        /** @param {string[]} lines @param {number} frame */
+        written: (lines, frame)=>{
+            const dumped = { type: 'dumped', lines, frame };
+            scope.postMessage(dumped);
+            for (const client of clients)
+            {
+                client.postMessage(dumped);
+            }
+        },
+    };
 
     /**
      * The newest frame each process presented and not yet sent, kept in a

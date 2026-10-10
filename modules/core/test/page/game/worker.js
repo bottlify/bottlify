@@ -114,6 +114,21 @@ self.onmessage = ({ data })=>{
                 self.postMessage({ type: 'answer', id: data.id, value });
             });
             break;
+        case 'dumpFrames':
+            try
+            {
+                self.postMessage({ type: 'answer', id: data.id,
+                    value: harness?.dumpFrames(data.frames) ?? 0 });
+            }
+            catch (e){
+                self.postMessage({ type: 'answer', id: data.id,
+                    value: String(e instanceof Error ? e.message : e) });
+            }
+            break;
+        case 'lastDumped':
+            self.postMessage({ type: 'answer', id: data.id,
+                value: harness?.lastDumped() ?? null });
+            break;
         case 'standing':
             (harness ? harness.standing(data.list) : Promise.resolve(null)).then(value=>{
                 self.postMessage({ type: 'answer', id: data.id, value });
