@@ -7779,14 +7779,21 @@ export function createRenderer(options){
          * @param {any} surface a d3d8 surface
          * @returns {Promise<{ width: number, height: number, data: Uint8Array }>}
          */
-        readSurface(surface){
+        readSurface(surface, ahead = false){
             const gpu = surfaceFor(surface);
             const recorded = ensureFrame();
             recording = null;
             recorded.cut = backend.markPresent();
             recorded.dump = dump;
-            const read = chain.then(()=>replay(recorded, null, gpu));
-            chain = read.then(()=>undefined, failure);
+            /** @type {() => void} */
+            let onQueue = ()=>{};
+            const queued = new Promise(resolve=>{
+                onQueue = ()=>resolve(undefined);
+            });
+            const read = chain.then(()=>replay(recorded, null, gpu, ahead ? onQueue : null));
+            // A read nothing waits for yet holds the next frame only until
+            // its copy is on the queue, not until its bytes come back.
+            chain = (ahead ? Promise.race([queued, read]) : read).then(()=>undefined, failure);
             return /** @type {Promise<any>} */ (read);
         },
 
@@ -8445,9 +8452,10 @@ export function createRenderer(options){
      * @param {any} recorded
      * @param {any} surface what to present, or null for a flush
      * @param {any} [snapshot] a backend surface to read back after the replay
+     * @param {(() => void) | null} [submitted] told once the frame is on the queue
      * @returns {Promise<any>} the snapshot's pixels, when one was asked for
      */
-    async function replay(recorded, surface, snapshot = null){
+    async function replay(recorded, surface, snapshot = null, submitted = null){
         const pipelines = await Promise.allSettled(recorded.pipelines);
         const frame = backend.beginFrame({ cut: recorded.cut });
         // A frame counts when a query is open as it starts or opens in it,
@@ -8527,6 +8535,7 @@ export function createRenderer(options){
             // becomes every frame after it, and the only symptom is a picture
             // that stopped changing while the counters keep climbing.
             frame.end();
+            submitted?.();
         }
         lastFrame = recorded.commands;
         if (counted && occlusion)

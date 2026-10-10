@@ -787,7 +787,8 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             return undefined;
         }
         return {
-            readBack: surface=>renderer.readSurface(surface).then(
+            /** @param {any} surface @param {boolean} [ahead] read before anything waits for it */
+            readBack: (surface, ahead = false)=>renderer.readSurface(surface, ahead).then(
                 (/** @type {{ data: Uint8Array }} */ pixels)=>{
                     writePixels(surface, pixels.data, write);
                 }),
@@ -1482,35 +1483,28 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
     };
 
     /**
-     * Render targets a copy has read back, by what `drawnInto` said when their
-     * memory last took the GPU's picture. A program that reads a target back
-     * every frame -- a fence against the GPU running ahead -- reads one drawn
-     * in the frame before, so each is read back again as a frame is presented,
-     * and the copy finds the picture in its memory rather than waiting on the
-     * GPU for it. Where the drawing is played for a device elsewhere, that
-     * device is told (`services.readBackAhead`) and answers its own copy.
+     * Render targets a copy has read back, with the last read issued for each:
+     * which `drawnInto` it took and when its bytes are in memory. A program
+     * that reads a target back every frame -- a fence against the GPU running
+     * ahead -- reads one drawn in the frame before, so each is read again as a
+     * frame is presented, and the copy waits on that read rather than issuing
+     * its own. Every choice turns on the counts alone, never on whether a read
+     * has come back yet, so a device that plays a recording asks its GPU for
+     * exactly what a device drawing for itself asks. Where the drawing is
+     * played for a device elsewhere, that device is told
+     * (`services.readBackAhead`) and answers its own copy.
      *
-     * The version is set once the bytes are in memory; a read on its way is
-     * marked so it is not asked twice.
-     *
-     * @type {Map<object, number>}
+     * @type {Map<object, { version: number, read: Promise<void> }>}
      */
     const readsAhead = new Map();
-    /** @type {Set<object>} */
-    const readingAhead = new Set();
-    /** @param {any} surface @param {number} version @param {any} pixels */
-    const readInto = (surface, version, pixels)=>{
-        readingAhead.add(surface);
-        return pixels.readBack(surface).then(()=>{
-            readingAhead.delete(surface);
-            if (readsAhead.has(surface))
-            {
-                readsAhead.set(surface, version);
-            }
-        }, (/** @type {unknown} */ error)=>{
-            readingAhead.delete(surface);
-            throw error;
-        });
+    /**
+     * @param {any} surface @param {number} version @param {any} pixels
+     * @param {boolean} [ahead]
+     */
+    const readInto = (surface, version, pixels, ahead = false)=>{
+        const read = pixels.readBack(surface, ahead);
+        readsAhead.set(surface, { version, read });
+        return read;
     };
     const readAhead = ()=>{
         const pixels = readsAhead.size > 0 ? targetPixels() : undefined;
@@ -1519,13 +1513,13 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             return;
         }
         const tell = services.readBackAhead ?? (()=>{});
-        for (const [surface, version] of readsAhead)
+        for (const [surface, last] of readsAhead)
         {
             const now = drawnInto.get(surface) ?? 0;
-            if (now !== version && !readingAhead.has(surface))
+            if (now !== last.version)
             {
                 const at = /** @type {any} */ (surface).base;
-                readInto(surface, now, pixels).then(()=>tell(at, now), ()=>{});
+                readInto(surface, now, pixels, true).then(()=>tell(at, now), ()=>{});
             }
         }
     };
@@ -3154,18 +3148,12 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 ? targetPixels() : undefined;
             if (pixels)
             {
-                // Read back ahead and not drawn into since: its memory is
-                // already the GPU's picture.
+                // A read of this drawing already issued -- ahead, or by the
+                // copy before -- is waited on rather than asked again.
                 const now = drawnInto.get(source) ?? 0;
-                if (readsAhead.get(source) === now && !readingAhead.has(source))
-                {
-                    return describeMoves();
-                }
-                if (!readsAhead.has(source))
-                {
-                    readsAhead.set(source, -1);
-                }
-                return readInto(source, now, pixels).then(describeMoves);
+                const last = readsAhead.get(source);
+                return (last && last.version === now ? last.read
+                    : readInto(source, now, pixels)).then(describeMoves);
             }
             return describeMoves();
         },
