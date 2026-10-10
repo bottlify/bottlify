@@ -1529,7 +1529,9 @@ export async function game(options){
             video: options.video,
             dumpDraws: options.dumpDraws,
             // A window a person watches shows every frame as it comes, not the last at the end.
-            live: options.headed,
+            // Shown on the page as they come: a headed run's window, and what
+            // --shots-every takes pictures of.
+            live: options.headed || options.shotsEvery > 0,
             dumpEvery: options.dumpEvery || undefined,
             profileCalls: options.profileCalls,
             maxDraws: options.maxDraws,
