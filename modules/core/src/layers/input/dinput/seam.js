@@ -806,6 +806,8 @@ export function createDirectInput(
     const owners = new WeakMap();
     /** @type {WeakMap<object, { window: number, background: boolean }>} */
     const cooperation = new WeakMap();
+    /** Each device's last Acquire answer, for the diagnostics. @type {WeakMap<object, number>} */
+    const acquireAnswers = new WeakMap();
 
     /**
      * A user name a program passes, in its width; no name and an empty one
@@ -981,8 +983,10 @@ export function createDirectInput(
             if (level && !level.background && level.window !== 0 && front !== undefined
                 && front !== level.window)
             {
+                acquireAnswers.set(device, DIERR_OTHERAPPHASPRIO);
                 return DIERR_OTHERAPPHASPRIO;
             }
+            acquireAnswers.set(device, DI_OK);
             device.acquire();
             if (device.kind === MOUSE && device.exclusive)
             {
@@ -2247,6 +2251,19 @@ export function createDirectInput(
                 buffered: devices.get(guid).bufferSize,
                 queued: devices.get(guid).queued,
             })),
+            // The same, flat, where a report drops the list: each device's
+            // kind, whether the program holds it, and what waits in its buffer.
+            held: [...devices.values()].map(device=>{
+                const level = cooperation.get(device);
+                const answer = acquireAnswers.get(device);
+                return `${device.kind}:${device.acquired ? 'acquired' : 'not acquired'}`
+                    + `:${device.queued ?? 0}`
+                    + (level ? `:window ${level.window.toString(16)}`
+                        + `${level.background ? ' background' : ' foreground'}`
+                        + `${device.exclusive ? ' exclusive' : ''}` : ':no level')
+                    + (answer === undefined ? '' : `:acquire ${(answer >>> 0).toString(16)}`);
+            }).join(' '),
+            foreground: foreground?.()?.toString(16) ?? 'unknown',
             published: publisher.count(),
             // How often a program asked what devices there are. A program that
             // enumerates and then creates nothing is the question this answers.
