@@ -1235,11 +1235,13 @@ specular = 'input.specular', sprite = false, table = tableFog(position))
  *
  * @param {import('./pipeline.js').PipelineState} state
  * @param {readonly number[]} written  The vertex stage's varying locations.
+ * @param {{ tableFogOverDepth?: boolean }} [options]  Table fog over the
+ *     depth even where the shader wrote oFog, as later drivers take it.
  * @returns {{ wgsl: string, entry: string, samplers: { index: number, type: string }[],
  *     inputs: never[], outputs: never[], reads: number[], constants: number,
  *     error: string | null }}
  */
-export function fixedFragmentStage(state, written){
+export function fixedFragmentStage(state, written, options = {}){
     const has = (/** @type {number} */ location)=>written.includes(location);
     /** @type {string[]} */
     const fields = ['    @builtin(position) position: vec4f,'];
@@ -1282,7 +1284,8 @@ export function fixedFragmentStage(state, written){
     // Table fog runs its curve over the shader's oFog when it wrote one, and
     // over the depth otherwise: the fixed projection says nothing of the
     // shader's w (decisions.md, table fog through a vertex shader).
-    const tableOverFog = fogSource === FOG_SOURCE.TABLE && has(10);
+    const tableOverFog = fogSource === FOG_SOURCE.TABLE && has(10)
+        && options.tableFogOverDepth !== true;
     if ((carriedFog || tableOverFog) && has(10))
     {
         fields.push('    @location(10) fog: vec4f,');

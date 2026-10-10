@@ -375,8 +375,10 @@ written against earlier drivers that took the curve over oFog, and set their ran
 Cry writes oFog as one minus its own visibility and sets a LINEAR table range of 0 to 1: over
 the depth every terrain pixel of a level came out the fog colour (measured 2026-10-10, browser,
 graphics worker, SwiftShader); over oFog the range gives back the program's own factor. A shader
-without oFog keeps Wine's answer. Revisit if a program is found that writes oFog and sets its
-table range for depth. *2026-10-10.*
+without oFog keeps Wine's answer. A program written for later drivers, which take the curve
+over the depth whatever the shader wrote, runs with the graphics setting `driverRules: 'current'`
+(docs/core/configuration.md); `'legacy'` is the default, since the programs that leave fog to
+this stage at all are of the earlier generation. *2026-10-10.*
 
 ## B. From measured optimisation work
 

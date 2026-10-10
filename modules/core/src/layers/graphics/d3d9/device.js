@@ -458,6 +458,7 @@ const isDepthFormat = format=>FORMAT_INFO[format] !== undefined && FORMAT_INFO[f
  * @property {string} [skipTexture]
  * @property {string} [probeTexture]
  * @property {boolean} [fog]
+ * @property {'legacy' | 'current'} [driverRules]  The renderer's (`createRenderer`).
  * @property {boolean} [mips]
  * @property {(watcher: () => void) => () => void} [onDeviceLost]
  *     Calls the watcher once the GPU underneath is gone for good, at once if it
@@ -492,7 +493,8 @@ export function createDirect3D9(options = {}){
     const {
         backend, readMemory, windowMemory, writeMemory, createSampler, allocate: guestMemory,
         free: giveBack, divergence, dumpDraws, dumpEvery, liveDump, maxDraws, skipTexture,
-        probeTexture, fog, mips, onDeviceLost, gamma, frameQueued, renderedElsewhere, ...caps
+        probeTexture, fog, mips, driverRules, onDeviceLost, gamma, frameQueued, renderedElsewhere,
+        ...caps
     } = options;
     /** @type {DeviceCaps} */
     const resolved = { ...DEFAULT_CAPS, ...caps, fullscreenGamma: gamma?.applies() === true };
@@ -500,7 +502,7 @@ export function createDirect3D9(options = {}){
     const services = {
         backend, readMemory, windowMemory, writeMemory, createSampler, allocate: guestMemory,
         free: giveBack, divergence, dumpDraws, dumpEvery, liveDump, maxDraws, skipTexture,
-        probeTexture, fog, mips, onDeviceLost, gamma, frameQueued, renderedElsewhere,
+        probeTexture, fog, mips, driverRules, onDeviceLost, gamma, frameQueued, renderedElsewhere,
     };
     if (backend && !readMemory)
     {
@@ -900,6 +902,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             probeTexture: services.probeTexture,
             fog: services.fog,
             mips: services.mips,
+            driverRules: services.driverRules,
             compressedTextures: caps.compressedTextures,
         })
         : null;

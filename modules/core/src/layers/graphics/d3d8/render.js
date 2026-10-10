@@ -2756,6 +2756,10 @@ const CLEAR_STRIDE = 20;
  *     shader it would run with D3DRS_FOGENABLE clear, which is how a picture
  *     washed towards the fog colour is told apart from one washed by something
  *     else -- two runs then differ by fog and nothing else.
+ * @property {'legacy' | 'current'} [driverRules]  Which generation of
+ *     drivers a behaviour Direct3D left to them follows where they changed
+ *     it (decisions.md A43): 'legacy', the default, the shader-model-1 era's;
+ *     'current', what later drivers and Wine's conformance tests do.
  * @property {boolean} [nanProbe]  Every pixel a shader made NaN or infinite is
  *     drawn magenta: where a picture goes black on one GPU and not another.
  * @property {boolean} [mips]
@@ -2788,6 +2792,7 @@ export function createRenderer(options){
     const createSampler = options.createSampler ?? null;
     const dumpDraws = options.dumpDraws === true;
     const nanProbe = options.nanProbe === true;
+    const tableFogOverDepth = options.driverRules === 'current';
     const dumpEvery = Math.max(0, Math.floor(options.dumpEvery ?? 0));
     // Asked for on a running program: the next frames with draws are written
     // down as `dumpDraws` writes them, without the texture copies only a run
@@ -5991,11 +5996,12 @@ export function createRenderer(options){
                     + pointKey
                     + (sampling.vertexOnes ? `|o${onesKey(sampling.vertexOnes)}` : '')
                     + (sampling.vertexVariants ? `|s${variantsKey(sampling.vertexVariants)}` : '')
-                    + clipKey,
+                    + clipKey + (tableFogOverDepth ? '|zfog' : ''),
                 ()=>translateShader(
                     /** @type {import('../d3d9/shader.js').ParsedShader} */ (program.vertex),
                     { inputs: layout.shapes, alsoWrite: missing, flatColours: flat,
                         fogSource: fog.source, ...(points ? { points } : {}),
+                        ...(tableFogOverDepth ? { tableFogOverDepth } : {}),
                         ...(sampling.vertexOnes ? { ones: sampling.vertexOnes } : {}),
                         ...(sampling.vertexVariants
                             ? { sampling: sampling.vertexVariants } : {}),
@@ -6268,7 +6274,7 @@ export function createRenderer(options){
             vertexShader: program.vertexId,
             pixelShader: -1,
         };
-        const pixel = fixedFragmentStage(state, vertex.outputs);
+        const pixel = fixedFragmentStage(state, vertex.outputs, { tableFogOverDepth });
         counters.prepared.built++;
         return {
             // What the fragment stage's block carries past the cascade's rows.

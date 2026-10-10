@@ -940,6 +940,9 @@ test('a vertex shader over the fixed pixel stage is fogged by what it wrote, or 
     const depth = fixedFragmentStage(state({ fogSource: FOG_SOURCE.TABLE }), [0, 1]).wgsl;
     assert.ok(depth.includes('clamp(fogFactorOf(in.position.z), 0.0, 1.0)'));
     assert.doesNotMatch(depth, /in\.fog\b/);
+    const later = fixedFragmentStage(state({ fogSource: FOG_SOURCE.TABLE }), [0, 1, 10],
+        { tableFogOverDepth: true }).wgsl;
+    assert.ok(later.includes('clamp(fogFactorOf(in.position.z), 0.0, 1.0)'));
 });
 
 test('a pre-transformed vertex takes its fog factor from the specular alpha', ()=>{

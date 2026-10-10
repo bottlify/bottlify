@@ -288,7 +288,7 @@ import { createInputRoute } from './layers/input/route.js';
  * @property {any} [device]          The GPU to draw on, when there is one.
  * @property {{ presenter?: any, compressedTextures?: boolean, maxFrameLatency?: number,
  *     lendMemory?: boolean, guestCode?: boolean, guestTraps?: string[], worker?: any,
- *     display?: (frame: any) => void }}
+ *     driverRules?: 'legacy' | 'current', display?: (frame: any) => void }}
  *           [graphics]
  *           The graphics layer's configuration (docs/core/configuration.md,
  *           graphics), forwarded to it as given: `compressedTextures`

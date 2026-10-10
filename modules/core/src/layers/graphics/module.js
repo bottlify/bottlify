@@ -506,6 +506,7 @@ export function createGraphicsModule(){
                     fog: device?.fog,
                     mips: device?.mips,
                     nanProbe: device?.nanProbe,
+                    driverRules: config?.driverRules,
                     onDeviceLost,
                     // Where a full-screen device's gamma ramp is shown.
                     gamma: displayGamma,
@@ -546,6 +547,7 @@ export function createGraphicsModule(){
                     fog: device?.fog,
                     mips: device?.mips,
                     nanProbe: device?.nanProbe,
+                    driverRules: config?.driverRules,
                     onDeviceLost,
                     gamma: displayGamma,
                     frameQueued,

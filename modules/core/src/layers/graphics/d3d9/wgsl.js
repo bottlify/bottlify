@@ -586,7 +586,8 @@ function returnsEarly(list){
  *     fog?: number, fogSource?: number, flatColours?: boolean,
  *     stageDimensions?: readonly string[], projectedBy?: readonly string[],
  *     points?: { sprite: boolean }, alphaTest?: number, nanProbe?: boolean,
- *     ones?: readonly number[], sampling?: readonly (SamplerVariant | undefined)[],
+ *     tableFogOverDepth?: boolean, ones?: readonly number[],
+ *     sampling?: readonly (SamplerVariant | undefined)[],
  *     clip?: import('../webgpu/internal/fixedfunction.js').ClipState }} [options]
  *        For a vertex shader, the shape of each v# the declaration supplies,
  *        by register. Absent means every declared input arrives as four
@@ -602,7 +603,10 @@ function returnsEarly(list){
  *        which is where Direct3D applies it. Only a draw whose vertex stage
  *        is the fixed one can promise the varying, so only it is fogged.
  *        `fogSource` FOG_SOURCE.TABLE evaluates the curve per pixel instead,
- *        over the range the vertex stage carries at `FOG_RANGE_LOCATION`.
+ *        over the range the vertex stage carries at `FOG_RANGE_LOCATION`:
+ *        over the shader's oFog where it wrote one, as drivers of the
+ *        shader-model-1 generation did (decisions.md A43), and over the
+ *        depth with `tableFogOverDepth`, as later ones do.
  *        `points` draws a vertex shader's point list as quads, sized by the
  *        shader's oPts or the state's size, and with a sprite every
  *        coordinate set it writes is the quad's own.
@@ -1887,9 +1891,9 @@ export function translateShader(parsed, options = {}){
                     + ` o${FOG_RANGE_LOCATION}: vec4f,`);
                 outputs.push(FOG_RANGE_LOCATION);
                 // A w of 2 tells the pixel stage the curve runs over the
-                // shader's oFog rather than the depth (decisions.md, table fog
-                // through a vertex shader).
-                body.push(`    out.o${FOG_RANGE_LOCATION} = ${wrote
+                // shader's oFog rather than the depth (decisions.md A43).
+                const overFog = wrote && options.tableFogOverDepth !== true;
+                body.push(`    out.o${FOG_RANGE_LOCATION} = ${overFog
                     ? `vec4f(c[${fogRegister + 1}].xyz, 2.0)` : `c[${fogRegister + 1}]`};`);
             }
         }

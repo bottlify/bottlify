@@ -1100,6 +1100,12 @@ test('a vertex shader carries fog to the pixel stage: its oFog, or all fog witho
     assertLine(tableWrites.wgsl, `out.o${FOG_RANGE_LOCATION} = vec4f(c[${
         /** @type {number} */ (tableWrites.fogRegister) + 1}].xyz, 2.0);`);
     assertLine(table.wgsl, `out.oFog = vec4f(0.0, c[${table.fogRegister}].rgb);`);
+    // Later drivers take it over the depth all the same.
+    const later = translateShader(shader([
+        op(OPCODE.MOV, 2), dst(REGISTER.RASTOUT, 1, 0x1), src(REGISTER.CONST, 0),
+    ]), { fogSource: FOG_SOURCE.TABLE, tableFogOverDepth: true });
+    assertLine(later.wgsl, `out.o${FOG_RANGE_LOCATION} = c[${
+        /** @type {number} */ (later.fogRegister) + 1}];`);
 
     // And the pixel shader fogs by any source, with no curve set as well.
     const pixel = translateShader(parseShader([PS_2_0, ...dclInput(10, 0),
