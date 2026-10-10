@@ -93,6 +93,35 @@ const UNCOMPRESSED_PIXEL_BYTES = {
 };
 
 /**
+ * The colour formats core WebGPU -- no optional feature asked for -- filters
+ * through a sampler, and blends into as a target (the specification's texture
+ * format capabilities table). Every compressed format is filtered too, and
+ * none is a target. What stands out is what is missing: the 32-bit floats,
+ * which are filtered and blended only with `float32-filterable` and
+ * `float32-blendable`, and the integer formats, which are neither.
+ */
+const FILTERABLE = new Set([
+    'r8unorm', 'r8snorm', 'r16float', 'rg8unorm', 'rg8snorm', 'rg16float', 'rgba8unorm',
+    'rgba8unorm-srgb', 'rgba8snorm', 'bgra8unorm', 'bgra8unorm-srgb', 'rgb10a2unorm',
+    'rg11b10ufloat', 'rgba16float',
+]);
+const BLENDABLE = new Set([
+    'r8unorm', 'r16float', 'rg8unorm', 'rg16float', 'rgba8unorm', 'rgba8unorm-srgb',
+    'bgra8unorm', 'bgra8unorm-srgb', 'rgb10a2unorm', 'rgba16float',
+]);
+
+/**
+ * @param {string} format  a WebGPU colour format
+ * @returns {{ filterable: boolean, blendable: boolean }} what core WebGPU does with it
+ */
+export function formatTraits(format){
+    return {
+        filterable: FILTERABLE.has(format) || blockInfo(format).compressed,
+        blendable: BLENDABLE.has(format),
+    };
+}
+
+/**
  * @param {string} format
  * @returns {{ blockWidth: number, blockHeight: number, bytesPerBlock: number,
  *             compressed: boolean }}

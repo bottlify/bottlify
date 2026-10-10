@@ -53,6 +53,8 @@ import {
 } from '../webgpu/internal/reference.js';
 import { generateFixedFunction } from '../webgpu/internal/fixedfunction.js';
 import { FOG_SOURCE } from '../webgpu/internal/pipeline.js';
+import { formatTraits } from '../webgpu/internal/textures.js';
+import { FORMAT_INFO, isCompressed } from '../d3d9/constants.js';
 import { toHalf } from '../d3d9/half.js';
 
 /**
@@ -4063,6 +4065,22 @@ test('a wide format is half floats by its channel count, red first, converted on
     {
         assert.equal(gpuFormatOf(format, 64, 64, true), gpu, `format ${format}`);
         assert.deepEqual(halvesOf(expandTexels(format, texels, 2)), halves, `format ${format}`);
+    }
+});
+
+test('every format a surface is drawn into is one core WebGPU filters and blends into', ()=>{
+    // Narrowing the 32-bit floats is what keeps this true; a mapping onto
+    // `rgba32float` without float32-blendable needs the pipeline to drop the
+    // blend it cannot make, and CheckDeviceFormat to stop offering it.
+    for (const [key, info] of Object.entries(FORMAT_INFO))
+    {
+        const format = Number(key);
+        if (info.depth || info.signed || info.video || isCompressed(format))
+        {
+            continue;
+        }
+        const traits = formatTraits(gpuFormatOf(format, 64, 64, true));
+        assert.deepEqual(traits, { filterable: true, blendable: true }, `format ${format}`);
     }
 });
 

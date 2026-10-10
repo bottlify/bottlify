@@ -887,6 +887,25 @@ test('an HDR format is a texture of every kind and a render target, filtered and
     }
 });
 
+test('CheckDeviceFormat answers filtering and blending as the surface\'s GPU format does', ()=>{
+    const d3d = createDirect3D9();
+    // Sampled through a filter, and never drawn into: a bump map and a
+    // compressed texture.
+    for (const format of [D3DFMT.V8U8, D3DFMT.DXT1])
+    {
+        assert.equal(d3d.CheckDeviceFormat(QUERY_FILTER, D3DRTYPE.TEXTURE, format), D3D_OK);
+        assert.equal(d3d.CheckDeviceFormat(QUERY_POSTPIXELSHADER_BLENDING, D3DRTYPE.TEXTURE,
+            format), D3DERR_NOTAVAILABLE);
+    }
+    for (const format of [D3DFMT.A8R8G8B8, D3DFMT.R5G6B5, D3DFMT.R16F, D3DFMT.R32F])
+    {
+        assert.equal(d3d.CheckDeviceFormat(D3DUSAGE.RENDERTARGET | QUERY_FILTER
+            | QUERY_POSTPIXELSHADER_BLENDING, D3DRTYPE.TEXTURE, format), D3D_OK);
+    }
+    assert.equal(d3d.CheckDeviceFormat(QUERY_POSTPIXELSHADER_BLENDING, D3DRTYPE.SURFACE,
+        D3DFMT.D24S8), D3DERR_NOTAVAILABLE, 'nothing blends into depth');
+});
+
 test('a render target and a depth stencil released to nothing while set live on until replaced',
     ()=>{
         const device = createDevice();

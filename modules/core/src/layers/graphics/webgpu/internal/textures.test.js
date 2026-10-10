@@ -10,6 +10,7 @@ import {
     COPY_BYTES_PER_ROW_ALIGNMENT,
     blockInfo,
     createTextureUploader,
+    formatTraits,
     repackRows,
 } from './textures.js';
 import { createFakeDevice } from './fake-device.js';
@@ -230,4 +231,20 @@ test('every upload is reported with its size, staged or direct', ()=>{
     assert.deepEqual(seen.map(record=>record.staged), [false, true]);
     assert.deepEqual(seen.map(record=>record.bytes), [256, 1024],
         'the staged upload costs the padded size, which is what actually travels');
+});
+
+test('core WebGPU filters and blends the half floats, and neither the 32-bit floats', ()=>{
+    for (const format of ['r16float', 'rg16float', 'rgba16float', 'bgra8unorm', 'rgb10a2unorm'])
+    {
+        assert.deepEqual(formatTraits(format), { filterable: true, blendable: true }, format);
+    }
+    for (const format of ['r32float', 'rg32float', 'rgba32float', 'rgba16uint', 'r32sint'])
+    {
+        assert.deepEqual(formatTraits(format), { filterable: false, blendable: false }, format);
+    }
+    // Sampled and filtered, never a target: the signed and the compressed formats.
+    for (const format of ['rgba8snorm', 'bc1-rgba-unorm', 'bc3-rgba-unorm'])
+    {
+        assert.deepEqual(formatTraits(format), { filterable: true, blendable: false }, format);
+    }
 });
