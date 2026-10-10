@@ -60,6 +60,8 @@ import {
 
 /** A page: the block and the ring each take pages of their own. */
 const RING_PAGE = 4096;
+/** How many calls into the host one timed call stands for (`ringMs`, `callMs`). */
+const TIMED_EVERY = 16;
 
 /**
  * Every core export of OPENGL32.dll, grouped by how many stack words it
@@ -1999,12 +2001,33 @@ export function createOpengl(services){
     }
     // Every call into the host plays what the ring holds first, so that it
     // meets the context the program left.
+    // One call in TIMED_EVERY is timed, its two halves apart: what the ring
+    // it plays costs and what the call itself does, each standing for that
+    // many calls -- the split the bridge's own sample of a crossing lacks.
+    let untilTimed = TIMED_EVERY;
+    const timed = { ringMs: 0, callMs: 0 };
     for (const entry of Object.values(table))
     {
         const handler = entry.handler;
         entry.handler = args=>{
+            if (--untilTimed > 0)
+            {
+                drain();
+                return handler(args);
+            }
+            untilTimed = TIMED_EVERY;
+            const began = performance.now();
             drain();
-            return handler(args);
+            const drained = performance.now();
+            try
+            {
+                return handler(args);
+            }
+            finally
+            {
+                timed.ringMs += (drained - began) * TIMED_EVERY;
+                timed.callMs += (performance.now() - drained) * TIMED_EVERY;
+            }
         };
     }
 
@@ -2104,6 +2127,10 @@ export function createOpengl(services){
         diagnostics: ()=>({
             contexts: contexts.size,
             commandCalls: ringCalls,
+            // Estimated from one call in TIMED_EVERY; a call that waits is
+            // timed to the moment it hands back its promise.
+            ringMs: Math.round(timed.ringMs),
+            callMs: Math.round(timed.callMs),
             // What a program reached for and did not get is the most useful
             // thing this layer can say about a run that drew nothing.
             unimplemented: Object.fromEntries(unimplemented),

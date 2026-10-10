@@ -799,6 +799,10 @@ export function createGraphicsLibraries(
             imageTimes: opengl ? opengl.diagnostics().imageTimes : [],
             // OpenGL calls the command ring carried past the bridge.
             openglCommandCalls: opengl ? opengl.diagnostics().commandCalls : 0,
+            // Of the host time OpenGL's entry points took, what playing the
+            // ring before each cost and what the calls themselves did.
+            openglRingMs: opengl ? opengl.diagnostics().ringMs : 0,
+            openglCallMs: opengl ? opengl.diagnostics().callMs : 0,
             vulkan: vulkan?.diagnostics() ?? null,
         }),
 

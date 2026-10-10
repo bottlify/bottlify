@@ -172,7 +172,7 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
     /** Calls since the clock was last read. */
     let unchecked = 0;
     /** The batches posted, and their bytes. */
-    const sent = { batches: 0, bytes: 0 };
+    const sent = { batches: 0, bytes: 0, ms: 0 };
     /**
      * Of those bytes, the guest memory copied into them, by what copied it --
      * what a lend of buffers, or of anything else, would have left in place.
@@ -193,6 +193,8 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
         sent.bytes += buffer.byteLength;
         post({ type: 'calls', buffer }, [buffer]);
         lender?.sent();
+        // What taking and posting the batch cost the program's thread.
+        sent.ms += now() - sentAt;
     };
     const due = ()=>{
         if (!pending)

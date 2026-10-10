@@ -64,13 +64,14 @@ function plainOf(services){
  * @property {() => { roots: number, frames: number, dropped: number,
  *     waits: Record<string, { count: number, ms: number, maxMs: number }>, behind: number[],
  *     readBack: { sent: number, shared: number }, lent: Record<string, number>,
- *     sent: { batches: number, bytes: number }, shipped: Record<string, number>,
+ *     sent: { batches: number, bytes: number, ms: number }, shipped: Record<string, number>,
  *     calls: string }}
  *     diagnostics  `waits`: what the program's thread waited on the worker for, by call;
  *     `readBack`: the bytes the worker wrote into guest memory, sent here to be written or
  *     written in shared memory in place; `lent`: the unlocked bytes lent to the worker rather
  *     than copied, those taken into the stash first, and the claims that waited; `sent`: the
- *     batches of calls posted to the worker and their bytes, copied guest memory included;
+ *     batches of calls posted to the worker, their bytes, copied guest memory included, and
+ *     the milliseconds taking and posting them cost this thread;
  *     `shipped`: that guest memory by what copied it -- buffers' unlocks, surfaces' (lent ones
  *     aside), what calls read out of guest memory and what they wrote into it; `calls`: the
  *     methods whose records fill the batches, the heaviest first
@@ -376,9 +377,10 @@ export function connectGraphicsWorker(options){
             return { roots: ports.length, frames, dropped, waits,
                 behind: senders.map(sender=>sender.behind()), readBack: { ...readBack },
                 sent: senders.reduce((sum, sender)=>{
-                    const { batches, bytes } = sender.sent();
-                    return { batches: sum.batches + batches, bytes: sum.bytes + bytes };
-                }, { batches: 0, bytes: 0 }),
+                    const { batches, bytes, ms } = sender.sent();
+                    return { batches: sum.batches + batches, bytes: sum.bytes + bytes,
+                        ms: Math.round(sum.ms + ms) };
+                }, { batches: 0, bytes: 0, ms: 0 }),
                 // The guest bytes copied into those batches, by what copied
                 // them: what lending buffers would have left in place.
                 shipped: senders.reduce((sum, sender)=>{
