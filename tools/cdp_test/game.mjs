@@ -28,7 +28,8 @@
  *                                  [--cpu-profile SECONDS] [--heap-profile [old]]
  *                                  [--export-translations FILE]
  *                                  [--watch SECONDS] [--press LABEL|LABEL... [--press-settle MS]]
- *                                  [--route] [--shots-every SECONDS] [--control PORT] [--dump-at SECONDS]
+ *                                  [--route] [--shots-every SECONDS] [--dump-at SECONDS]
+ *                                  [--control PORT]
  *
  * `--watch S` is for a program that does not present, an installer above
  * all: every S seconds the desktop it paints with GDI is written as a PNG,
@@ -84,7 +85,8 @@ const REPO_ROOT = resolve(TOOL_ROOT, '..', '..');
  * Orders for a run while it goes on, on http://127.0.0.1:PORT:
  *
  *   /shot                    the frame presented last, as a PNG; answers the path
- *   /click?x=&y=&hold=MS     a left click at the program's pixels
+ *   /click?x=&y=&hold=MS&settle=MS  a left click at the program's pixels, settle
+ *                            after the move (300 ms) and hold the button (120 ms)
  *   /move?x=&y=              the pointer moved there
  *   /key?code=Enter&hold=MS  a key press, by KeyboardEvent.code
  *   /eval?js=EXPR            an expression's value in the page (window.__bottlify__)
@@ -108,6 +110,9 @@ function serveControl(port, page){
         click: async query=>{
             await send({ kind: 'pointerMove', x: Number(query.get('x')),
                 y: Number(query.get('y')), dx: 0, dy: 0 });
+            // A game that reads where the pointer is a frame after its button
+            // clicks where it was before the move: the move is let settle.
+            await hold(Number(query.get('settle') ?? 300));
             await send({ kind: 'pointerButton', button: 'left', down: true });
             await hold(Number(query.get('hold') ?? 120));
             return send({ kind: 'pointerButton', button: 'left', down: false });
