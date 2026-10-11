@@ -8,12 +8,13 @@
  * dplayx — DirectPlay: the session object, the service-provider list and the
  * lobby a matchmaking client launches a program through.
  *
- * This machine installs no DirectPlay service provider, so the provider list
- * is empty and a session object over a named provider cannot be made
- * (DPERR_UNAVAILABLE). Over GUID_NULL the session object is made unbound, as
- * Windows makes it, every call answering DPERR_UNINITIALIZED until a
- * connection is chosen; a program makes one this way and asks it for
- * IDirectPlay4 to learn which DirectX it runs on. The lobby object is made, because a
+ * DirectPlayCreate over a named provider makes nothing (DPERR_UNAVAILABLE):
+ * the program enumerates DirectPlayEnumerate's list, and it is empty. Over
+ * GUID_NULL the session object is made unbound, as Windows makes it, every
+ * call answering DPERR_UNINITIALIZED until a connection is chosen; a program
+ * makes one this way and asks it for IDirectPlay4 to learn which DirectX it
+ * runs on. Its EnumConnections offers TCP/IP, over which it hosts a session on
+ * this machine (session.js). The lobby object is made, because a
  * program asks it at start-up whether a lobby client launched it; it was not,
  * and the lobby answers DPERR_NOTLOBBIED, which the program takes as "start
  * normally". The library is linked by number: its header gives no names in
@@ -21,6 +22,7 @@
  */
 
 import { createComObject } from '../ole32/objects.js';
+import { sessionDefinition } from './session.js';
 
 /** dplay.h: MAKE_HRESULT(1, _FACDP = 0x877, code). */
 const dpError = (/** @type {number} */ code)=>(0x88770000 | code) >>> 0;
@@ -103,42 +105,56 @@ const PLAY4 = 'AddPlayerToGroup 12 Close 4 CreateGroup 24 CreatePlayer 28 Delete
     + 'GetPlayerAccount 20 GetPlayerFlags 12 GetGroupOwner 12 SetGroupOwner 12 SendEx 40 '
     + 'GetMessageQueue 24 CancelMessage 12 CancelPriority 16';
 
-/** @param {string} list @param {number} count */
-const playMethods = (list, count)=>{
-    const words = list.split(' ');
-    return Array.from({ length: count }, (_, i)=>{
-        const name = words[2 * i];
-        return {
-            name,
-            argBytes: Number(words[2 * i + 1]),
-            // No provider to bind, and no connection to enumerate.
-            invoke: ()=>(name === 'EnumConnections' ? DP_OK
-                : name === 'Initialize' || name === 'InitializeConnection' ? DPERR_UNAVAILABLE
-                    : DPERR_UNINITIALIZED),
-        };
-    });
-};
+/** dplay.h: IDirectPlay, then 2, 2A, 3, 3A, 4, 4A, each with whether its strings are wide. */
+export const PLAY_INTERFACES = Object.freeze(/** @type {[string, string, number, boolean][]} */ ([
+    ['{5454E9A0-DB65-11CE-921C-00AA006C4972}', PLAY1, 22, false],
+    ['{2B74F7C0-9154-11CF-A9CD-00AA006886E3}', PLAY4, 29, true],
+    ['{9D460580-A822-11CF-960C-0080C7534E82}', PLAY4, 29, false],
+    ['{133EFE40-32DC-11D0-9CFB-00A0C90A43CB}', PLAY4, 39, true],
+    ['{133EFE41-32DC-11D0-9CFB-00A0C90A43CB}', PLAY4, 39, false],
+    ['{0AB1C530-4745-11D1-A7A1-0000F803ABFC}', PLAY4, 50, true],
+    ['{0AB1C531-4745-11D1-A7A1-0000F803ABFC}', PLAY4, 50, false],
+]).map(([id, list, count, wide])=>({ id, list, count, wide })));
 
-/** dplay.h: IDirectPlay, then 2, 2A, 3, 3A, 4, 4A. */
-export const PLAY_INTERFACES = Object.freeze(/** @type {[string, string, number][]} */ ([
-    ['{5454E9A0-DB65-11CE-921C-00AA006C4972}', PLAY1, 22],
-    ['{2B74F7C0-9154-11CF-A9CD-00AA006886E3}', PLAY4, 29],
-    ['{9D460580-A822-11CF-960C-0080C7534E82}', PLAY4, 29],
-    ['{133EFE40-32DC-11D0-9CFB-00A0C90A43CB}', PLAY4, 39],
-    ['{133EFE41-32DC-11D0-9CFB-00A0C90A43CB}', PLAY4, 39],
-    ['{0AB1C530-4745-11D1-A7A1-0000F803ABFC}', PLAY4, 50],
-    ['{0AB1C531-4745-11D1-A7A1-0000F803ABFC}', PLAY4, 50],
-]).map(([id, list, count])=>({ id, methods: playMethods(list, count) })));
+/** dplay.h / dplobby.h: the classes CoCreateInstance makes them as. */
+export const CLSID_DIRECTPLAY = '{D1EB6D20-8923-11D0-9D97-00A0C90A43CB}';
+export const CLSID_DIRECTPLAY_LOBBY = '{2FE8F810-B2A5-11D0-A787-0000F803ABFC}';
 
 /** @param {number} revision */
 const lobbyMethods = revision=>LOBBY_METHODS
     .slice(0, revision === 1 ? 11 : revision === 2 ? 12 : LOBBY_METHODS.length)
     .map(([name, argBytes, answer])=>({ name, argBytes, invoke: ()=>answer }));
 
+/** The lobby object, every revision of it. */
+const lobbyDefinition = ()=>({
+    interfaces: LOBBY_INTERFACES.map((id, index)=>({
+        id, methods: lobbyMethods(1 + (index >> 1)),
+    })),
+});
+
+/**
+ * dplayx registers both objects as COM classes, and a program built against
+ * DirectX 6 and later makes them with CoCreateInstance rather than through the
+ * library's exports -- the session object unbound, exactly as DirectPlayCreate
+ * over GUID_NULL makes it. A program that is refused the class takes it that
+ * DirectPlay is not installed, and may refuse even a game nobody else joins.
+ *
+ * @param {{ registerClass: (clsid: string,
+ *     factory: () => import('../ole32/objects.js').ComClassDefinition | null) => void }} registry
+ * @param {import('./session.js').SessionHost} host
+ */
+export function registerDplayClasses(registry, host){
+    registry.registerClass(CLSID_DIRECTPLAY, ()=>sessionDefinition(host, PLAY_INTERFACES));
+    registry.registerClass(CLSID_DIRECTPLAY_LOBBY, lobbyDefinition);
+}
+
 /**
  * @typedef {Object} DplayHost
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, length: number) => Uint8Array} readMemory
+ * @property {(bytes: number) => number} [allocate]
+ * @property {(entry: number, args: number[], thread?: any) => Promise<number>} [callGuest]
+ * @property {() => any} [callerThread]
  * @property {{ publish: (object: import('../ole32/objects.js').ComObject,
  *             interfaceId: string) => number }} vtables
  */
@@ -175,11 +191,7 @@ export function createDplayFunctions(host){
             {
                 return DPERR_INVALIDPARAMS;
             }
-            const object = createComObject('{2FE8F810-B2A5-11D0-A787-0000F803ABFC}', {
-                interfaces: LOBBY_INTERFACES.map((id, index)=>({
-                    id, methods: lobbyMethods(1 + (index >> 1)),
-                })),
-            });
+            const object = createComObject(CLSID_DIRECTPLAY_LOBBY, lobbyDefinition());
             const pointer = host.vtables.publish(object, LOBBY_INTERFACES[wide ? 0 : 1]) >>> 0;
             writeU32(out, pointer);
             return pointer === 0 ? 0x8007000e : DP_OK;
@@ -221,8 +233,8 @@ export function createDplayFunctions(host){
                 {
                     return DPERR_UNAVAILABLE;
                 }
-                const object = createComObject('{D1EB6D20-8923-11D0-9D97-00A0C90A43CB}',
-                    { interfaces: [...PLAY_INTERFACES] });
+                const object = createComObject(CLSID_DIRECTPLAY,
+                    sessionDefinition(host, PLAY_INTERFACES));
                 const pointer = host.vtables.publish(object, PLAY_INTERFACES[0].id) >>> 0;
                 writeU32(out, pointer);
                 return pointer === 0 ? 0x8007000e : DP_OK;

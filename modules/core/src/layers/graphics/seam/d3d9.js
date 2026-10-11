@@ -785,8 +785,10 @@ export function createDirect3D9Seam(
      */
     const textureFamily = (id, slots, methods, guests = {})=>[
         describeResource(id, slots, methods, guests, retire),
-        describeResource(IID_IDirect3DBaseTexture9, IDIRECT3DBASETEXTURE9_SLOTS, methods),
-        describeResource(IID_IDirect3DResource9, IDIRECT3DRESOURCE9_SLOTS, methods),
+        { ...describeResource(IID_IDirect3DBaseTexture9, IDIRECT3DBASETEXTURE9_SLOTS, methods),
+            sharedWith: id },
+        { ...describeResource(IID_IDirect3DResource9, IDIRECT3DRESOURCE9_SLOTS, methods),
+            sharedWith: id },
     ];
     const textureInterfaces = textureFamily(IID_IDirect3DTexture9, IDIRECT3DTEXTURE9_SLOTS,
         textureMethods, guestsBut('levels', allocate
@@ -1026,8 +1028,8 @@ export function createDirect3D9Seam(
         describe(IID_IDirect3DVertexDeclaration9, IDIRECT3DVERTEXDECLARATION9_SLOTS, {
             GetDevice: getDevice,
             /**
-             * The count pointer is required; the element pointer is optional
-             * and, when given, must have room for the count already there.
+             * The count pointer is required; the element pointer is optional,
+             * and when given it takes every element, whatever count was there.
              *
              * @param {any} declaration @param {number[]} args
              */
@@ -1038,8 +1040,7 @@ export function createDirect3D9Seam(
                 }
                 /** @type {{ elements?: any[], count?: number }} */
                 const held = {};
-                const hr = declaration.GetDeclaration(held,
-                    (elements >>> 0) === 0 ? null : fields.readU32(count >>> 0));
+                const hr = declaration.GetDeclaration(held, (elements >>> 0) !== 0);
                 fields.writeU32(count >>> 0, held.count ?? 0);
                 if (hr === D3D_OK && held.elements)
                 {

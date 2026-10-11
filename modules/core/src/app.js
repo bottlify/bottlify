@@ -1566,6 +1566,23 @@ export function resolveLibraryPath(name, imagePath){
     return `${imagePath.slice(0, imagePath.lastIndexOf('\\') + 1)}${name}`;
 }
 
+/**
+ * The file LoadLibrary looks for under a name: one whose last component has no
+ * extension gets `.dll`, and a trailing dot says "no extension" and is dropped.
+ * A program that asks for `rglsw` means `rglsw.dll`.
+ *
+ * @param {string} name
+ * @returns {string}
+ */
+export function withLibraryExtension(name){
+    if (name.endsWith('.'))
+    {
+        return name.slice(0, -1);
+    }
+    const file = name.slice(Math.max(name.lastIndexOf('\\'), name.lastIndexOf('/')) + 1);
+    return file.includes('.') ? name : `${name}.dll`;
+}
+
 /** Where Windows looks for a bare library name after the program's own directory. */
 const SYSTEM_LIBRARY_DIRECTORIES = ['C:\\WINDOWS\\system32\\', 'C:\\WINDOWS\\'];
 
@@ -1581,19 +1598,27 @@ const SYSTEM_DIRECTORY = 'WINDOWS\\system32';
  * name with a directory in it names its one place and is looked for nowhere
  * else.
  *
+ * `ours` drops the system directories: for a name the engine's own table
+ * already answers, the system's copy is the engine's, and a runtime an
+ * installer put there is not loaded beside it. Two of one library in a process
+ * -- the installed D3DX compiling an effect our D3DX is then asked to read --
+ * is a format neither side shares.
+ *
  * @param {string} name
  * @param {string} imagePath
  * @param {string} [currentDirectory]
+ * @param {{ ours?: boolean }} [how]
  * @returns {string[]}
  */
-export function libraryCandidates(name, imagePath, currentDirectory){
+export function libraryCandidates(name, imagePath, currentDirectory, how = {}){
     const first = resolveLibraryPath(name, imagePath);
     if (first !== `${imagePath.slice(0, imagePath.lastIndexOf('\\') + 1)}${name}`
         || /[\\/]/.test(name))
     {
         return [first];
     }
-    const places = [first, ...SYSTEM_LIBRARY_DIRECTORIES.map(directory=>directory + name)];
+    const places = [first,
+        ...how.ours ? [] : SYSTEM_LIBRARY_DIRECTORIES.map(directory=>directory + name)];
     if (currentDirectory)
     {
         const inCurrent = `${currentDirectory.replace(/\\$/, '')}\\${name}`;
@@ -5001,13 +5026,14 @@ async function buildApp(options){
      * same module as it is, as Wine's loader test has it. A program, as against
      * a library, is loaded the same way whatever the flags say.
      *
-     * @param {string} name
+     * @param {string} requested  The name as asked for, with or without its extension.
      * @param {number} [flags]
      * @param {any} [thread]  Whose LoadLibrary this answers, for a library loaded
      *     as another's dependency: by then the processor is someone else's.
      * @returns {number | Promise<number>}
      */
-    const loadLibraryAtRuntime = (name, flags = 0, thread = undefined)=>{
+    const loadLibraryAtRuntime = (requested, flags = 0, thread = undefined)=>{
+        const name = withLibraryExtension(requested);
         if ((flags & LOAD_AS_DATA) !== 0)
         {
             return loadAsData(name, flags);
@@ -5045,7 +5071,7 @@ async function buildApp(options){
         const loaded = findModule(name);
         const candidates = searchesBesideProgram(isKnownDll(name), Boolean(loaded?.file))
             ? libraryCandidates(name, options.imagePath ?? 'C:\\app.exe',
-                filesystem.currentDirectory())
+                filesystem.currentDirectory(), { ours: loaded !== null })
             : [];
         if (candidates.length > 0)
         {

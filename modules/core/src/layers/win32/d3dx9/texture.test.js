@@ -523,6 +523,26 @@ test('D3DXGetImageInfoFromFile describes the file it names; D3DXLoadSurfaceFromF
     assert.deepEqual(texels(wide), [3, 3, 3, 3, 4, 4, 4, 4], 'the whole image, point sampled');
 });
 
+test('D3DXGetImageInfoFromFileInMemory describes a volume DDS; a 2D loader refuses it', async()=>{
+    // A program reads the info first and makes its texture from what it says;
+    // refused, the info stayed unwritten and the texture was asked in format 0.
+    const file = dds([new Array(16 * 3).fill(7)]);
+    const view = new DataView(file.buffer);
+    view.setUint32(8, view.getUint32(8, true) | 0x800000, true);
+    view.setUint32(24, 3, true);
+    view.setUint32(112, 0x200000, true);
+    const { r, string, call } = exported({ files: { 'v.dds': file } });
+    const data = r.heap.allocate(file.length);
+    r.memory.set(file, data);
+    const info = r.heap.allocate(28);
+    assert.equal(await call('D3DXGetImageInfoFromFileInMemory', [data, file.length, info]), 0);
+    assert.deepEqual(Array.from({ length: 7 }, (_, i)=>r.view.getUint32(info + i * 4, true)),
+        [2, 2, 3, 1, FMT.A8R8G8B8, 4 /* D3DRTYPE_VOLUMETEXTURE */, 4]);
+    const out = r.heap.allocate(4);
+    assert.equal(await call('D3DXCreateTextureFromFileA', [r.device, string('v.dds'), out]),
+        D3DXERR_INVALIDDATA);
+});
+
 test('a palette-indexed DDS becomes A8R8G8B8, keeping the alpha its palette holds', async()=>{
     // P8's palette entries carry an alpha in peFlags; the nearest format with room for
     // it is A8R8G8B8, and D3DXIMAGE_INFO still names the file's own P8.

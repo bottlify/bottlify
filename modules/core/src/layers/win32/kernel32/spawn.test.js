@@ -540,6 +540,25 @@ test('ReadProcessMemory reads this process, and of a child only what was written
     assert.equal(fns.ReadProcessMemory.argBytes, 20);
 });
 
+test('ReadProcessMemory of this process where nothing is mapped is ERROR_PARTIAL_COPY', ()=>{
+    // A crash handler walks the stack through it wherever a frame pointer
+    // leads; the read faulted the engine instead of answering FALSE.
+    const host = fakeHost({ files: [] });
+    const read = host.readMemory;
+    host.readMemory = (/** @type {number} */ address, /** @type {number} */ length)=>{
+        if (address >= 0x900)
+        {
+            throw new Error(`Unmapped read at 0x${address.toString(16)}`);
+        }
+        return read(address, length);
+    };
+    const fns = createSpawnFunctions(host);
+    host.view.setUint32(0x700, 0xaaaaaaaa, true);
+    assert.equal(fns.ReadProcessMemory.handler([CURRENT_PROCESS, 0x971, 0x600, 4, 0x700]), 0);
+    assert.equal(host.view.getUint32(0x700, true), 0, 'nothing read');
+    assert.equal(host.errors.at(-1), 299);
+});
+
 test('a STARTUPINFO\'s output and error files are handed to the child, the parent\'s own', ()=>{
     // winetest hands each test its log this way and reads what the test wrote.
     const host = fakeHost({ files: ['C:\\App\\test.exe'] });

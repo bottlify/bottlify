@@ -987,6 +987,45 @@ test('a control of a class the program registered is the window of that class', 
         METER_PROC, 'a system-class control keeps the system procedure, not its own');
 });
 
+test('a registered-class control is created under the name its template gives', async()=>{
+    // A splash control loads its picture from WM_CREATE with
+    // FindResource(hInstance, lpszName, ...): an ordinal title reaches it as
+    // "#id", the string form of that ordinal, and a text title as the text.
+    const PICTURE_PROC = 0x403000;
+    const CLASS_STRUCT = 0x10800;
+    const CLASS_NAME = 0x10900;
+    const WM_CREATE = 0x0001;
+    let next = 0x13000;
+    /** @type {string[]} */
+    const names = [];
+    const { memory, fns } = setup({
+        allocate: (/** @type {number} */ size)=>{
+            const at = next;
+            next += (size + 15) & ~15;
+            return at;
+        },
+        dispatch: (_wndProc, message)=>{
+            if (message.message === WM_CREATE)
+            {
+                const name = memory.u32(message.lParam + 0x24);
+                names.push(name < 0x10000 ? `ordinal ${name}` : memory.readCString(name, 64));
+            }
+            return message.message === 0x0081 ? 1 : 0;
+        },
+    });
+    memory.putString(CLASS_NAME, 'picture');
+    memory.writeMemory(CLASS_STRUCT, new Uint8Array(new Uint32Array([
+        0, PICTURE_PROC, 0, 0, HINSTANCE, 0, 0, 0, 0, CLASS_NAME,
+    ]).buffer));
+    assert.notEqual(fns.RegisterClassA.handler([CLASS_STRUCT]), 0);
+    putTemplate(memory, [
+        { id: 201, x: 4, y: 8, cx: 30, cy: 4, className: 'Picture', titleOrdinal: 105 },
+        { id: 202, x: 4, y: 14, cx: 30, cy: 4, className: 'Picture', title: 'Splash' },
+    ]);
+    await fns.CreateDialogIndirectParamA.handler([HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0]);
+    assert.deepEqual(names, ['#105', 'Splash']);
+});
+
 test('WM_INITDIALOG carries the parameter the caller passed', ()=>{
     /** @type {number[]} */
     const params = [];

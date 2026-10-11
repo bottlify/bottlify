@@ -283,6 +283,41 @@ test('RtlVerifyVersionInfo compares against the version the process block holds'
     assert.equal(fns.RtlVerifyVersionInfo.argBytes, 16);
 });
 
+test('NtQueryObject lists the object types whatever handle is given', ()=>{
+    // Wine's test_query_object_types: asked with NULL, the size first, then
+    // the list; each name follows its entry, and the next entry starts past
+    // the name rounded to a pointer. A protection walks it for DebugObject.
+    const host = fakeHost({ blocks: false });
+    const fns = createQueryFunctions(host);
+
+    assert.equal(fns.NtQueryObject.handler([0, 3, BUFFER, 4, RETURN_LENGTH]),
+        STATUS.INFO_LENGTH_MISMATCH);
+    const needed = host.view.getUint32(RETURN_LENGTH, true);
+    assert.ok(needed > 4 && BUFFER + needed <= host.bytes.length, `size ${needed}`);
+
+    assert.equal(fns.NtQueryObject.handler([0, 3, BUFFER, needed, RETURN_LENGTH]),
+        STATUS.SUCCESS);
+    const count = host.view.getUint32(BUFFER, true);
+    /** @type {string[]} */
+    const names = [];
+    let entry = BUFFER + 4;
+    for (let i = 0; i < count; i++)
+    {
+        const length = host.view.getUint16(entry, true);
+        const maximum = host.view.getUint16(entry + 2, true);
+        const text = host.view.getUint32(entry + 4, true);
+        assert.equal(text, entry + 0x60, 'the name follows its entry');
+        assert.equal(maximum, length + 2, 'and is terminated');
+        assert.equal(host.bytes[entry + 0x52], i + 2, 'types are numbered from two');
+        names.push(String.fromCharCode(...new Uint16Array(
+            host.bytes.slice(text, text + length).buffer)));
+        assert.equal(host.view.getUint32(entry + 8, true), 0, 'no objects counted');
+        entry = text + ((maximum + 3) & ~3);
+    }
+    assert.equal(entry, BUFFER + needed, 'the entries fill the size told');
+    assert.ok(names.includes('DebugObject') && names.includes('File'), names.join());
+});
+
 test('NtQueryObject answers the basic class for a handle that names something', ()=>{
     /** @type {string[]} */
     const said = [];

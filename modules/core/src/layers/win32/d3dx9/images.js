@@ -37,6 +37,8 @@ export const IFF = Object.freeze({ BMP: 0, JPG: 1, TGA: 2, PNG: 3, DDS: 4 });
  * @property {Level[]} levels      Largest first; uncompressed ones already in the working form.
  * @property {Level[][]} [faces]   A cube map's six faces, +X, -X, +Y, -Y, +Z, -Z, each its
  *                                 levels as `levels` holds them; `levels` is the first face's.
+ * @property {number} [depth]      A volume's slices: the volume is described, not read, and
+ *                                 `levels` is empty.
  */
 
 /** An image this module cannot read: D3DXERR_INVALIDDATA, with the reason. */
@@ -303,14 +305,18 @@ function readDds(bytes){
         // A face left out would be a face of nothing; D3DX's cube textures have six.
         throw new ImageError('a cube map without all six faces');
     }
-    if ((caps2 & 0x200000) && view.getUint32(24, true) > 1)
-    {
-        throw new ImageError('a volume: not a 2D texture');
-    }
+    const depth = (caps2 & 0x200000) ? view.getUint32(24, true) : 0;
     const format = ddsFormat(new DataView(bytes.buffer, bytes.byteOffset + 76, 32));
     if (format === 0 || format === 0x30315844 /* DX10 */)
     {
         throw new ImageError('a DDS pixel format this loader does not know');
+    }
+    if (depth > 1)
+    {
+        // What D3DXGetImageInfo answers of one -- its depth and that it is a
+        // volume -- is in the header; no loader here makes a volume texture.
+        return { fileFormat: IFF.DDS, width, height, depth, format, mipLevels: mipCount,
+            levels: [] };
     }
     const indexed = format === FMT.P8;
     if (!indexed && !isSupported(format))

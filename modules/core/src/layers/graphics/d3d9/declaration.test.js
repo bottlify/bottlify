@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { D3DERR_INVALIDCALL, D3D_OK } from './constants.js';
 import { createReferenceCount } from './resources.js';
 import {
-    D3DDECLMETHOD, D3DDECLTYPE, D3DDECLUSAGE, D3DERR_MOREDATA, MAX_DECLARATION_LENGTH,
+    D3DDECLMETHOD, D3DDECLTYPE, D3DDECLUSAGE, MAX_DECLARATION_LENGTH,
     createVertexDeclaration, declarationEnd, elementsOfFvf, fixedFunctionLayoutOf, fvfOfElements,
     strideOf,
     validateElements,
@@ -152,7 +152,7 @@ test('validation refuses what the header puts out of range', ()=>{
             { index }))), D3DERR_INVALIDCALL, 'more elements than a declaration holds');
 });
 
-test('a declaration reads back with its sentinel, and says when the room was too small', ()=>{
+test('a declaration reads back with its sentinel', ()=>{
     const elements = [
         element(D3DDECLUSAGE.POSITION, D3DDECLTYPE.FLOAT3, 0),
         element(D3DDECLUSAGE.COLOR, D3DDECLTYPE.D3DCOLOR, 12),
@@ -166,12 +166,8 @@ test('a declaration reads back with its sentinel, and says when the room was too
     assert.equal(out.elements, undefined, 'asking for the count copies nothing');
 
     out = {};
-    assert.equal(declaration.GetDeclaration(out, 2), D3DERR_MOREDATA);
-    assert.equal(out.count, 3, 'the needed count is reported with the refusal');
-    assert.equal(out.elements, undefined);
-
-    out = {};
-    assert.equal(declaration.GetDeclaration(out, 3), D3D_OK);
+    assert.equal(declaration.GetDeclaration(out, true), D3D_OK);
+    assert.equal(out.count, 3);
     assert.deepEqual(out.elements, [...elements, declarationEnd()]);
 
     // What was made from is not what the elements happen to describe.

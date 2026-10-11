@@ -14,7 +14,8 @@ import assert from 'node:assert/strict';
 import {
     createMacrotask, groupBlocks, idleWait, inParallel, pacedYield, pageIsHidden, placePatches,
     withReadAhead, withWindow, refetchedIn,
-    resolveLibraryPath, startDirectoryOf, libraryCandidates, timedWait, pagePacing,
+    resolveLibraryPath, startDirectoryOf, libraryCandidates, withLibraryExtension, timedWait,
+    pagePacing,
     PAGE_YIELD_MS,
     PENDING_YIELD_MS,
     retryingFetch,
@@ -540,6 +541,22 @@ test('a bare name is looked for beside the executable, then where the system kee
         'D:\\DirectX\\dsetup.dll');
     assert.equal(libraryCandidates('dsetup.dll', IMAGE, 'C:\\App\\').length, 3,
         'the program\'s own directory is not searched twice');
+    // A name the engine's table already answers: the program's own copy still
+    // wins, the system's is the engine's.
+    assert.deepEqual(libraryCandidates('d3dx9_24.dll', IMAGE, undefined, { ours: true }),
+        ['C:\\App\\d3dx9_24.dll']);
+});
+
+test('a library name without an extension is looked for as a .dll', ()=>{
+    // LoadLibrary appends the default extension when the name has none and
+    // drops a trailing dot, which says the file has none.
+    assert.equal(withLibraryExtension('rglsw'), 'rglsw.dll');
+    assert.equal(withLibraryExtension('C:\\Game\\render'), 'C:\\Game\\render.dll');
+    assert.equal(withLibraryExtension('plugins.d\\snd'), 'plugins.d\\snd.dll',
+        'a dot in a directory is not the file\'s extension');
+    assert.equal(withLibraryExtension('glide2x.dll'), 'glide2x.dll');
+    assert.equal(withLibraryExtension('driver.drv'), 'driver.drv');
+    assert.equal(withLibraryExtension('noext.'), 'noext');
 });
 
 test('a redistributable runtime is answered by the engine whoever brought a copy', ()=>{

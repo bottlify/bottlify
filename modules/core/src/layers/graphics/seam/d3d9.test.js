@@ -814,7 +814,12 @@ test('a surface names its container: its texture, its swap chain, or its device'
         0xce]);
     const base = containerOf(level);
     assert.equal(base.hr, D3D_OK, 'IDirect3DBaseTexture9');
+    // The same pointer, as single inheritance lays it out: D3DX casts a base
+    // texture back to the texture by its type and calls GetLevelDesc through it.
+    assert.equal(base.pointer, texture, 'the base texture is the texture');
     assert.equal(h.box.call(base.pointer, slot(IDIRECT3DTEXTURE9_SLOTS, 'GetLevelCount')), 1);
+    assert.equal(h.box.call(base.pointer, slot(IDIRECT3DTEXTURE9_SLOTS, 'GetLevelDesc'),
+        [0, out]), D3D_OK);
     h.release(base.pointer);
     putGuid(h, iid, [0x0cfbaf3a, 0x9ff6, 0x429a, 0x99, 0xb3, 0xa2, 0x79, 0x6a, 0xf8, 0xb8,
         0x9b]);
@@ -1032,12 +1037,12 @@ test('a declaration is read from the guest to its sentinel and written back with
     assert.equal(call('GetDeclaration', [0, count]), D3D_OK);
     assert.equal(h.fields.readU32(count), 3, 'sentinel included');
 
+    // The count passed in is not read (Wine's test_get_declaration passes
+    // 0x1337c0de): a program that leaves it unset still gets every element.
     const copy = 0x3300;
-    h.fields.writeU32(count, 2);
-    assert.equal(call('GetDeclaration', [copy, count]), 0x8876086d, 'D3DERR_MOREDATA');
-    assert.equal(h.fields.readU32(count), 3, 'and the count needed is reported');
-    h.fields.writeU32(count, 3);
+    h.fields.writeU32(count, 0);
     assert.equal(call('GetDeclaration', [copy, count]), D3D_OK);
+    assert.equal(h.fields.readU32(count), 3);
     assert.deepEqual(h.box.services.readMemory(copy, 3 * D3DVERTEXELEMENT9.SIZE),
         h.box.services.readMemory(elements, 3 * D3DVERTEXELEMENT9.SIZE));
 
@@ -2141,4 +2146,30 @@ test('a level asked for with no pointer to put it in is refused and takes no ref
     assert.equal(h.release(texture), 0, 'the texture\'s last Release is its last');
     assert.equal(h.release(device), 0);
     h.release(root);
+});
+
+test('every slot of a texture\'s table, and of its other kinds\', is something to call', ()=>{
+    // A slot left zero sends whoever calls it -- D3DX's OnLostDevice asking a
+    // texture parameter its level's pool -- to guest address zero.
+    for (const shadow of [false, true])
+    {
+        const h = seamed({ shadow });
+        const root = h.create();
+        const { device } = h.createDevice(root);
+        const out = 0x3000;
+        for (const [name, args, slots] of /** @type {[string, number[], [string, number][]][]} */ ([
+            ['CreateTexture', [8, 8, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, out, 0],
+                IDIRECT3DTEXTURE9_SLOTS],
+            ['CreateTexture', [8, 8, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.DEFAULT, out, 0],
+                IDIRECT3DTEXTURE9_SLOTS],
+        ]))
+        {
+            assert.equal(h.device(device, name, args), D3D_OK);
+            const object = h.box.memory.readU32(out);
+            const table = h.box.memory.readU32(object);
+            const zero = slots.map(([method], i)=>[method, h.box.memory.readU32(table + i * 4)])
+                .filter(([, address])=>address === 0).map(([method])=>method);
+            assert.deepEqual(zero, [], `${name} ${args[5]}, shadow: ${shadow}`);
+        }
+    }
 });

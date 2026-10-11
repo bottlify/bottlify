@@ -354,6 +354,23 @@ test('a processor fault becomes an exception a program can handle', async()=>{
     assert.equal(m.get(record + RECORD.INFORMATION), 1, 'error code bit 1 says it was a write');
 });
 
+test('an instruction the processor refused is traced with its bytes', async()=>{
+    // UD2 a protection raises on purpose and an opcode the translator lacks
+    // both arrive as vector 6; only the bytes tell them apart.
+    const m = machine({ answer: ()=>Disposition.CONTINUE_EXECUTION });
+    /** @type {string[]} */
+    const said = [];
+    const seh = createSeh({ ...m.host, trace: (/** @type {string} */ line)=>said.push(line) });
+    m.registerFrames([0x51000]);
+    m.host.writeMemory(0x41000, new Uint8Array([0x0f, 0x0b, 0xeb, 0x07, 0x22, 0x22, 0x22, 0x00]));
+
+    await seh.onFault({ vector: 6, eip: 0x41000, errorCode: null },
+        { ...m.registers(), eip: 0x41000 });
+
+    assert.ok(said.some(line=>line.includes('at 0x41000 (0f 0b eb 07 22 22 22 00)')),
+        said.join('\n'));
+});
+
 test('a fault\'s context holds the registers the faulting code had', async()=>{
     // The stub that reported the fault has moved the stack and spent two
     // registers; the handler has to see the program's, not the stub's.

@@ -140,3 +140,13 @@ and distance slots, the filters -- are taken from the behaviour of RARLAB's free
 source, whose licence permits using it to handle RAR archives but not to recreate the compression
 algorithm. It is used as knowledge only, no code from it is carried into this repository, and the
 reader only unpacks.
+
+## The PKWARE DCL implode format -- used as a specification
+
+- Source: the format as Mark Adler's `blast.c` (zlib's `contrib/blast`, zlib license,
+  https://github.com/madler/zlib/tree/develop/contrib/blast) documents it: the header bytes,
+  the bit order, the inverted Huffman codes and the three fixed tables' code lengths, which
+  `modules/installer/src/stirling.js` carries as the same run-length-packed constants, and the
+  test vector `stirling.test.js` checks
+- No code is copied; the decoder is original work under the MPL
+- License: zlib (the tables are data of the format, reproduced with acknowledgement)

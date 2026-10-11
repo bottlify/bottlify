@@ -489,12 +489,9 @@ export function fixedFunctionLayoutOf(declaration){
  * @property {number} refCount
  * @property {() => number} addRef
  * @property {() => number} release
- * @property {(out: { elements?: VertexElement[], count?: number }, room?: number | null)
+ * @property {(out: { elements?: VertexElement[], count?: number }, copy?: boolean)
  *            => number} GetDeclaration
  */
-
-/** D3DERR_MOREDATA: the caller's array is too short, and the count says how long it must be. */
-export const D3DERR_MOREDATA = 0x8876086d;
 
 /** Declaration ids are never reused: a pipeline keyed by one must not find another. */
 let lastDeclarationId = 0;
@@ -519,27 +516,22 @@ export function createVertexDeclaration(options){
         release: ()=>options.count.release(),
 
         /**
-         * The elements, sentinel included, and how many that is.
-         *
-         * `room` is how many elements the caller has space for, or null for a
-         * caller only asking how many there are. Too little room reports the
-         * count anyway, with the code that says the array was too short.
+         * The elements, sentinel included, and how many that is; `copy` false
+         * for a caller only asking how many. The count a caller passes in is
+         * not read: Windows writes the whole declaration whatever it says
+         * (Wine's d3d9 test_get_declaration passes 0x1337c0de), and a program
+         * that leaves it unset expects the elements.
          *
          * @param {{ elements?: VertexElement[], count?: number }} out
-         * @param {number | null} [room]
+         * @param {boolean} [copy]
          */
-        GetDeclaration(out, room = null){
+        GetDeclaration(out, copy = false){
             const all = [...elements, declarationEnd()];
             out.count = all.length;
-            if (room === null)
+            if (copy)
             {
-                return D3D_OK;
+                out.elements = all;
             }
-            if (room < all.length)
-            {
-                return D3DERR_MOREDATA;
-            }
-            out.elements = all;
             return D3D_OK;
         },
     };

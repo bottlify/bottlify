@@ -127,6 +127,66 @@ const OBJECT_BASIC = Object.freeze({
     SIZE: 0x38,
 });
 
+const OBJECT_TYPES_INFORMATION = 3;
+
+/**
+ * OBJECT_TYPE_INFORMATION as a 32-bit process reads it: the name's
+ * UNICODE_STRING, twelve counts, the invalid attributes, the generic
+ * mapping, the valid access, four bytes of flags and the type's index, the
+ * pool type and two charges. Each entry's name follows it, and the next
+ * entry starts at the name's maximum length rounded up to a pointer.
+ */
+const OBJECT_TYPE = Object.freeze({
+    NAME_LENGTH: 0x00,
+    NAME_MAXIMUM: 0x02,
+    NAME_BUFFER: 0x04,
+    TYPE_INDEX: 0x52,
+    SIZE: 0x60,
+});
+
+/**
+ * The object types the kernel has, in Windows XP's order. The list is the
+ * answer to ObjectTypesInformation; nothing keeps per-type counts, and a
+ * protection that walks it for DebugObject reads none.
+ */
+const OBJECT_TYPE_NAMES = Object.freeze([
+    'Type', 'Directory', 'SymbolicLink', 'Token', 'Process', 'Thread', 'Job',
+    'DebugObject', 'Event', 'EventPair', 'Mutant', 'Callback', 'Semaphore', 'Timer',
+    'Profile', 'KeyedEvent', 'WindowStation', 'Desktop', 'Section', 'Key', 'Port',
+    'WaitablePort', 'Adapter', 'Controller', 'Device', 'Driver', 'IoCompletion',
+    'File', 'WmiGuid',
+]);
+
+/**
+ * OBJECT_TYPES_INFORMATION at a guest address: the count, then each type.
+ *
+ * @param {number} at
+ * @returns {Uint8Array}
+ */
+function objectTypes(at){
+    const align = (/** @type {number} */ n)=>(n + 3) & ~3;
+    const size = OBJECT_TYPE_NAMES.reduce(
+        (total, name)=>total + OBJECT_TYPE.SIZE + align((name.length + 1) * 2), 4);
+    const struct = new Uint8Array(size);
+    const view = new DataView(struct.buffer);
+    view.setUint32(0, OBJECT_TYPE_NAMES.length, true);
+    let entry = 4;
+    OBJECT_TYPE_NAMES.forEach((name, index)=>{
+        const text = entry + OBJECT_TYPE.SIZE;
+        view.setUint16(entry + OBJECT_TYPE.NAME_LENGTH, name.length * 2, true);
+        view.setUint16(entry + OBJECT_TYPE.NAME_MAXIMUM, (name.length + 1) * 2, true);
+        view.setUint32(entry + OBJECT_TYPE.NAME_BUFFER, (at + text) >>> 0, true);
+        // Windows numbers the types from two: zero and one are never a type.
+        struct[entry + OBJECT_TYPE.TYPE_INDEX] = index + 2;
+        for (let i = 0; i < name.length; i++)
+        {
+            view.setUint16(text + i * 2, name.charCodeAt(i), true);
+        }
+        entry = text + align((name.length + 1) * 2);
+    });
+    return struct;
+}
+
 /** STANDARD_RIGHTS_ALL | SPECIFIC_RIGHTS_ALL: every right any object has. */
 const ALL_ACCESS = 0x001fffff;
 
@@ -558,14 +618,28 @@ export function createQueryFunctions(host){
          * NTSTATUS NtQueryObject(HANDLE Handle, OBJECT_INFORMATION_CLASS Class,
          *                        PVOID Information, ULONG Length, PULONG ReturnLength)
          *
-         * Only the basic class. The handle table keeps neither the access a
-         * handle was opened with nor how many handles share an object, so a
-         * handle is answered with every right and counts of one, and says so.
+         * The basic class and the list of object types. The handle table
+         * keeps neither the access a handle was opened with nor how many
+         * handles share an object, so a handle is answered with every right
+         * and counts of one, and says so. The types are the system's and name
+         * no handle: Windows ignores the one given, and a protection asks with
+         * NULL and takes a refusal for a debugger hiding its objects.
          */
         NtQueryObject: {
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([handle, infoClass, buffer, length, returnLength])=>{
+                if ((infoClass >>> 0) === OBJECT_TYPES_INFORMATION)
+                {
+                    const types = objectTypes(buffer >>> 0);
+                    writeU32If(returnLength >>> 0, types.length);
+                    if ((length >>> 0) < types.length || buffer === 0)
+                    {
+                        return STATUS.INFO_LENGTH_MISMATCH;
+                    }
+                    host.writeMemory(buffer >>> 0, types);
+                    return STATUS.SUCCESS;
+                }
                 const named = handle >>> 0;
                 if (named !== CURRENT_PROCESS && named !== CURRENT_THREAD
                     && (host.handleType?.(named) ?? null) === null)

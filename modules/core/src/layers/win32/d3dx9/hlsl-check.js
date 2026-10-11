@@ -1453,6 +1453,26 @@ export function check(program, options = {}){
 
     // ---- control flow ----------------------------------------------------------------------
 
+    /**
+     * Whether a test reads a uniform parameter of the function, which each call
+     * passes as a constant.
+     *
+     * @param {any} e @returns {boolean}
+     */
+    const specialised = e=>{
+        if (!e || typeof e !== 'object')
+        {
+            return false;
+        }
+        if (e.kind === 'ident' && e.sym?.kind === 'param' && e.sym.mods?.includes('uniform'))
+        {
+            return true;
+        }
+        return Object.entries(e).some(([key, value])=>key !== 'sym' && key !== 'type'
+            && (Array.isArray(value) ? value.some(specialised)
+                : value !== null && typeof value === 'object' && specialised(value)));
+    };
+
     /** Whether a loop test is the constant true. @param {any} t */
     /** @type {(t: any) => boolean} */
     const alwaysTrue = t=>t === null || (t.kind === 'bool' && t.value)
@@ -1491,8 +1511,15 @@ export function check(program, options = {}){
             case 'if': {
                 const a = flow(s.then);
                 const b = s.else ? flow(s.else) : { normal: true, brk: false, cont: false };
-                return { normal: a.normal || b.normal, brk: a.brk || b.brk,
-                    cont: a.cont || b.cont };
+                // A test of a uniform parameter is a constant in every specialisation
+                // of the function, so only the branch it picks there is ever taken:
+                // fxc accepts `if (VERSION == 13) return ...; else if (VERSION >= 14)
+                // return ...;` with no final else. Unknown here which one, the end is
+                // taken as reached only if both may reach it.
+                // ponytail: a specialisation whose value picks the empty branch is not
+                // refused at its call, as fxc refuses it; it falls off the end.
+                const either = specialised(s.test) ? a.normal && b.normal : a.normal || b.normal;
+                return { normal: either, brk: a.brk || b.brk, cont: a.cont || b.cont };
             }
             case 'for':
             case 'while': {

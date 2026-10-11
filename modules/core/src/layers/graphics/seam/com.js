@@ -40,6 +40,11 @@ import { IUNKNOWN_METHODS, IID_IUNKNOWN } from '../../win32/ole32/objects.js';
  *           The interface does not derive from IUnknown, so its table starts
  *           with its own first method. Nothing can Release such a pointer: it
  *           lives as long as whatever handed it out says it does.
+ * @property {string} [sharedWith]
+ *           The interface this one is a front part of, whose pointer answers for
+ *           it: a texture asked for IDirect3DBaseTexture9 hands back itself, as
+ *           single inheritance lays it out, so a caller that casts it back to the
+ *           texture by its type finds the texture's whole table.
  * @property {(target: any, pointers: Iterable<number>) => void} [released]
  *           Told when the program lets go of the object's last reference,
  *           while its pointers still name it: state the guest set by pointer
@@ -156,6 +161,11 @@ function adapt(api, interfaces, onGone, onReferenced, onForgotten, cells){
             if (!descriptor)
             {
                 return null;
+            }
+            const whole = descriptor.sharedWith ? declared.get(descriptor.sharedWith) : null;
+            if (whole)
+            {
+                return { id, sharedWith: whole.id, methods: methodsFor(whole) };
             }
             return { id, methods: methodsFor(descriptor) };
         },

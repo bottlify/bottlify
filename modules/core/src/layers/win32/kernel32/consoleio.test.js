@@ -122,6 +122,13 @@ test('no console is made, none is a screen buffer, and the one page is the one t
         fns.AllocConsole.argBytes], [4, 8, 0]);
 });
 
+test('no console is attached, because no process has one', ()=>{
+    const { fns, errors } = setup();
+    assert.equal(fns.AttachConsole.handler(), 0);
+    assert.equal(errors.at(-1), 6, 'ERROR_INVALID_HANDLE');
+    assert.equal(fns.AttachConsole.argBytes, 4);
+});
+
 test('the screen buffer\'s calls and writing input are refused as for a handle that is no console',
     ()=>{
         /** @type {string[]} */

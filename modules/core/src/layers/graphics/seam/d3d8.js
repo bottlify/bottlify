@@ -706,8 +706,10 @@ export function createDirect3D8Seam(
     const textureInterfaces = [
         describeResource(IID_IDirect3DTexture8, IDIRECT3DTEXTURE8_SLOTS, textureMethods,
             textureGuests, retire),
-        describeResource(IID_IDirect3DBaseTexture8, IDIRECT3DBASETEXTURE8_SLOTS, textureMethods),
-        describeResource(IID_IDirect3DResource8, IDIRECT3DRESOURCE8_SLOTS, textureMethods),
+        { ...describeResource(IID_IDirect3DBaseTexture8, IDIRECT3DBASETEXTURE8_SLOTS,
+            textureMethods), sharedWith: IID_IDirect3DTexture8 },
+        { ...describeResource(IID_IDirect3DResource8, IDIRECT3DRESOURCE8_SLOTS, textureMethods),
+            sharedWith: IID_IDirect3DTexture8 },
     ];
 
     // A cube map: the base texture's methods, then each of its own naming a
@@ -758,9 +760,10 @@ export function createDirect3D8Seam(
     const cubeTextureInterfaces = [
         describeResource(IID_IDirect3DCubeTexture8, IDIRECT3DCUBETEXTURE8_SLOTS, cubeTextureMethods,
             {}, retire),
-        describeResource(IID_IDirect3DBaseTexture8, IDIRECT3DBASETEXTURE8_SLOTS,
-            cubeTextureMethods),
-        describeResource(IID_IDirect3DResource8, IDIRECT3DRESOURCE8_SLOTS, cubeTextureMethods),
+        { ...describeResource(IID_IDirect3DBaseTexture8, IDIRECT3DBASETEXTURE8_SLOTS,
+            cubeTextureMethods), sharedWith: IID_IDirect3DCubeTexture8 },
+        { ...describeResource(IID_IDirect3DResource8, IDIRECT3DRESOURCE8_SLOTS, cubeTextureMethods),
+            sharedWith: IID_IDirect3DCubeTexture8 },
     ];
 
     /**
@@ -884,9 +887,10 @@ export function createDirect3D8Seam(
     const volumeTextureInterfaces = [
         describeResource(IID_IDirect3DVolumeTexture8, IDIRECT3DVOLUMETEXTURE8_SLOTS,
             volumeTextureMethods, {}, retire),
-        describeResource(IID_IDirect3DBaseTexture8, IDIRECT3DBASETEXTURE8_SLOTS,
-            volumeTextureMethods),
-        describeResource(IID_IDirect3DResource8, IDIRECT3DRESOURCE8_SLOTS, volumeTextureMethods),
+        { ...describeResource(IID_IDirect3DBaseTexture8, IDIRECT3DBASETEXTURE8_SLOTS,
+            volumeTextureMethods), sharedWith: IID_IDirect3DVolumeTexture8 },
+        { ...describeResource(IID_IDirect3DResource8, IDIRECT3DRESOURCE8_SLOTS,
+            volumeTextureMethods), sharedWith: IID_IDirect3DVolumeTexture8 },
     ];
 
     /**

@@ -1162,6 +1162,8 @@ test('each kind of state goes to its setter, with its value as the device takes 
     assert.deepEqual(g.diverged, []);
     const texture = g.object({ kind: 'texture', pool: 1 });
     await g.call(fx, 'SetTexture', g.put('tex'), texture);
+    // The reference SetTexture takes is not a state the pass sets.
+    g.calls.length = 0;
     assert.equal(await g.call(fx, 'Begin', 0, 1), D3D_OK);
     assert.equal(await g.call(fx, 'BeginPass', 0), D3D_OK);
     const f = (/** @type {number} */ x)=>new Uint32Array(Float32Array.of(x).buffer)[0];

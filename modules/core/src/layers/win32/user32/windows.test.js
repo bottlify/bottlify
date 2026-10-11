@@ -759,6 +759,16 @@ test('ShowWindow answers with the visibility it found, not the one it set', ()=>
     assert.equal(fns.ShowWindow.handler([0x9999, SW_SHOW]), 0, 'no window, nothing to report');
 });
 
+test('ShowWindowAsync on the caller\'s own window is ShowWindow, answer included', ()=>{
+    const { fns, hwnd } = withWindow();
+
+    assert.equal(fns.ShowWindowAsync.argBytes, 8);
+    assert.equal(fns.ShowWindowAsync.handler([hwnd, SW_SHOW]), 0, 'it was created hidden');
+    assert.equal(fns.IsWindowVisible.handler([hwnd]), 1, 'and is shown at once');
+    assert.equal(fns.ShowWindowAsync.handler([hwnd, SW_HIDE]), 1);
+    assert.equal(fns.ShowWindowAsync.handler([0x9999, SW_SHOW]), 0, 'no window');
+});
+
 test('a top-level window\'s menu bar comes out of its client area, as AdjustWindowRect adds it',
     ()=>{
         // user32's window tests: the client rectangle mapped to the screen

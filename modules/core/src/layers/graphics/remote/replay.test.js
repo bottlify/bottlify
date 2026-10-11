@@ -102,6 +102,7 @@ function toy(sides){
                         return count.destroyed;
                     },
                     Touch: ()=>D3D_OK,
+                    reachable: ()=>!count.destroyed,
                     addRef: ()=>count.addRef(),
                     release: ()=>count.release(),
                 };
@@ -171,14 +172,16 @@ function toyAcross(lend){
     const buffers = createLendingBuffers();
     const played = playedDirect3D(toy(sides), { ...services,
         borrow: createBorrower({ ...buffers, memory: ram }) });
-    const receiver = createReceiver({ played, post: ()=>{} });
+    /** What the played side said back. @type {any[]} */
+    const said = [];
+    const receiver = createReceiver({ played, post: message=>said.push(message) });
     /** @type {any[]} */
     const sent = [];
     const sender = createSender({ post: message=>sent.push(message), later: ()=>{},
         lending: lend ? { ...buffers, memory: ram } : null });
     const root = recordedDirect3D(toy(sides), services, sender);
     return {
-        root, ram, sender,
+        root, ram, sender, said,
         played: sides.find(side=>side.played),
         /** The played side plays what was sent. */
         play(){
@@ -276,6 +279,26 @@ test('a played object the program no longer counts is not held by the player', a
     owned.thing.addRef();
     play();
     assert.deepEqual(alive.map((/** @type {WeakRef<any>} */ one)=>one.deref().value), [2, 1], 'and calls still reach them');
+});
+
+test('a played object collected after it was destroyed is answered as unreachable', async()=>{
+    // The bridge asks again whether an interface it held at a count of zero
+    // can still be called; asked of a slot the player had emptied, the call
+    // stopped the played device.
+    const { root, played, play, said } = toyAcross(false);
+    /** @type {{ thing?: any }} */
+    const out = {};
+    root.CreateCounted(out);
+    assert.equal(out.thing.release(), 0);
+    play();
+    await new Promise(resolve=>setImmediate(resolve));
+    v8.setFlagsFromString('--expose-gc');
+    /** @type {() => void} */ (vm.runInNewContext('gc'))();
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(played.counted[0].deref(), undefined, 'collected on the played side');
+    out.thing.reachable();
+    play();
+    assert.deepEqual(said.filter(message=>message.type === 'failed'), []);
 });
 
 test('one method called on many objects of a kind defines its structures\' shapes once', ()=>{

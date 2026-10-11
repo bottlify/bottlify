@@ -78,5 +78,46 @@ export function createDeviceCalls(host){
             entry: u32(u32(object) + slot * 4), args: [object >>> 0, ...rest],
             ...(thread === undefined ? {} : { thread }),
         }).then(answer=>answer >>> 0);
-    return { u32, putU32s, method };
+    /**
+     * A NUL-ended string, narrow or wide, of at most `max` characters, read a
+     * page at a time: a name near the end of its region -- one on the stack's
+     * last page -- ends before the region does, and a fixed-size read past it
+     * faulted the caller.
+     *
+     * @param {number} at @param {boolean} [wide] @param {number} [max]
+     */
+    const string = (at, wide = false, max = 4096)=>{
+        const width = wide ? 2 : 1;
+        /** @type {number[]} */
+        const units = [];
+        let address = at >>> 0;
+        while (units.length < max)
+        {
+            const room = Math.min((max - units.length) * width, 0x1000 - (address & 0xfff));
+            let bytes;
+            try
+            {
+                bytes = host.readMemory(address, room);
+            }
+            catch (e){
+                if (units.length === 0 && address === (at >>> 0))
+                {
+                    throw e;
+                }
+                break;
+            }
+            for (let i = 0; i + width <= bytes.length; i += width)
+            {
+                const unit = wide ? bytes[i] | (bytes[i + 1] << 8) : bytes[i];
+                if (unit === 0)
+                {
+                    return String.fromCharCode(...units);
+                }
+                units.push(unit);
+            }
+            address += room;
+        }
+        return String.fromCharCode(...units);
+    };
+    return { u32, putU32s, method, string };
 }

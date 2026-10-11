@@ -8,8 +8,14 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     DPERR_INVALIDPARAMS, DPERR_NOTLOBBIED, DPERR_UNAVAILABLE, DPERR_UNINITIALIZED,
-    DPLAYX_ORDINALS, DP_OK, LOBBY_INTERFACES, PLAY_INTERFACES, createDplayFunctions,
+    CLSID_DIRECTPLAY, CLSID_DIRECTPLAY_LOBBY, DPLAYX_ORDINALS, DP_OK, LOBBY_INTERFACES,
+    PLAY_INTERFACES, createDplayFunctions, registerDplayClasses,
 } from './functions.js';
+import { createComObject, createComRegistry } from '../ole32/objects.js';
+import {
+    DPERR_BUFFERTOOSMALL, DPERR_NOMESSAGES, DPERR_NOSESSIONS, DPSPGUID_TCPIP, guidBytes,
+    sessionDefinition,
+} from './session.js';
 
 const make = ()=>{
     const memory = new Uint8Array(64).fill(0xcc);
@@ -79,5 +85,79 @@ test('GUID_NULL makes an unbound session object with every revision of IDirectPl
     assert.equal(play4[49].argBytes, 40);
     assert.equal(play4[49].invoke(object, []), DPERR_UNINITIALIZED);
     assert.equal(play4.find((/** @type {any} */ m)=>m.name === 'EnumConnections')
-        .invoke(object, []), DP_OK);
+        .invoke(object, [0, 0, 0, 0]), DPERR_INVALIDPARAMS);
+});
+
+test('CoCreateInstance makes the session object unbound and the lobby, as the exports do', ()=>{
+    const registry = createComRegistry();
+    registerDplayClasses(registry,
+        { writeMemory: ()=>{}, readMemory: (_, length)=>new Uint8Array(length) });
+    const play = /** @type {any} */ (registry.create(CLSID_DIRECTPLAY.toLowerCase()));
+    assert.ok(play);
+    const counts = PLAY_INTERFACES.map(({ id })=>play.interfaceFor(id).methods.length - 3);
+    assert.deepEqual(counts, [22, 29, 29, 39, 39, 50, 50]);
+    const play4 = play.interfaceFor(PLAY_INTERFACES[6].id).methods;
+    assert.equal(play4.find((/** @type {any} */ m)=>m.name === 'Open').invoke(play, []),
+        DPERR_UNINITIALIZED);
+    const lobby = /** @type {any} */ (registry.create(CLSID_DIRECTPLAY_LOBBY));
+    assert.ok(lobby);
+    for (const id of LOBBY_INTERFACES)
+    {
+        assert.ok(lobby.interfaceFor(id), id);
+    }
+    const connect = lobby.interfaceFor(LOBBY_INTERFACES[5]).methods
+        .find((/** @type {any} */ m)=>m.name === 'Connect');
+    assert.equal(connect.invoke(lobby, []), DPERR_NOTLOBBIED);
+});
+
+test('bound to TCP/IP, a session hosted here carries messages between its local players', async()=>{
+    const memory = new Uint8Array(0x4000);
+    const dv = new DataView(memory.buffer);
+    let heapTop = 0x2000;
+    /** @type {number[][]} */
+    const callbacks = [];
+    const play = createComObject(CLSID_DIRECTPLAY, sessionDefinition({
+        writeMemory: (at, bytes)=>memory.set(bytes, at),
+        readMemory: (at, length)=>memory.slice(at, at + length),
+        allocate: bytes=>(heapTop += bytes) - bytes,
+        callGuest: async(entry, args)=>(callbacks.push([entry, ...args]), 1),
+    }, PLAY_INTERFACES));
+    const methods = /** @type {any} */ (play.interfaceFor(PLAY_INTERFACES[6].id)).methods;
+    const call = (/** @type {string} */ name, /** @type {number[]} */ args)=>
+        methods.find((/** @type {any} */ m)=>m.name === name).invoke(play, args);
+
+    assert.equal(await call('EnumConnections', [0, 0x401000, 7, 1]), DP_OK);
+    assert.equal(callbacks.length, 1);
+    const [entry, spGuid, connection, connectionSize, , , context] = callbacks[0];
+    assert.equal(entry, 0x401000);
+    assert.equal(context, 7);
+    assert.equal(connectionSize, 36);
+    assert.deepEqual(memory.slice(spGuid, spGuid + 16), guidBytes(DPSPGUID_TCPIP));
+    assert.deepEqual(memory.slice(connection + 20, connection + 36), guidBytes(DPSPGUID_TCPIP));
+
+    assert.equal(call('Open', [0x100, 2]), DPERR_UNINITIALIZED, 'unbound until a connection');
+    assert.equal(call('InitializeConnection', [connection, 0]), DP_OK);
+    assert.equal(call('Open', [0x100, 1]), DPERR_NOSESSIONS, 'nothing elsewhere to join');
+    dv.setUint32(0x100, 80, true);
+    assert.equal(call('Open', [0x100, 2]), DP_OK);
+
+    assert.equal(call('CreatePlayer', [0x200, 0, 0, 0, 0, 0]), DP_OK);
+    assert.equal(call('CreatePlayer', [0x204, 0, 0, 0, 0, 0]), DP_OK);
+    const [one, two] = [dv.getUint32(0x200, true), dv.getUint32(0x204, true)];
+    assert.notEqual(one, two);
+
+    memory.set([1, 2, 3], 0x300);
+    assert.equal(call('Send', [one, 0, 0, 0x300, 3]), DP_OK, 'to all: the other player');
+    dv.setUint32(0x410, 1, true);
+    assert.equal(call('Receive', [0x400, 0x404, 1, 0x500, 0x410]), DPERR_BUFFERTOOSMALL);
+    assert.equal(dv.getUint32(0x410, true), 3);
+    assert.equal(call('Receive', [0x400, 0x404, 1, 0x500, 0x410]), DP_OK);
+    assert.deepEqual([...memory.slice(0x500, 0x503)], [1, 2, 3]);
+    assert.deepEqual([dv.getUint32(0x400, true), dv.getUint32(0x404, true)], [one, two]);
+    assert.equal(call('Receive', [0x400, 0x404, 1, 0x500, 0x410]), DPERR_NOMESSAGES);
+
+    dv.setUint32(0x610, 0, true);
+    assert.equal(call('GetSessionDesc', [0, 0x610]), DPERR_BUFFERTOOSMALL);
+    assert.equal(call('GetSessionDesc', [0x700, 0x610]), DP_OK);
+    assert.equal(dv.getUint32(0x700 + 44, true), 2, 'two players in it');
 });

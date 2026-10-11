@@ -536,7 +536,14 @@ export function createSeh(host){
         // return address -- the call's own place -- is the only lead.
         const caller = (what.address >>> 0) < 0x10000 && host.isMapped(registers.esp >>> 0)
             ? `, called from ${hex(readU32(registers.esp >>> 0))}` : '';
-        host.trace?.(`exception ${hex(what.code)} at ${hex(what.address)}${caller}, `
+        // An instruction the processor refused is named by its bytes: a
+        // deliberate trap and an opcode the translator lacks look alike
+        // otherwise.
+        const refused = what.code === STATUS.ILLEGAL_INSTRUCTION
+            && host.isMapped(what.address >>> 0)
+            ? ` (${[...host.readMemory(what.address >>> 0, 8)]
+                .map(byte=>byte.toString(16).padStart(2, '0')).join(' ')})` : '';
+        host.trace?.(`exception ${hex(what.code)} at ${hex(what.address)}${refused}${caller}, `
             + `${frames.length} frame(s)${damaged ? ', chain damaged' : ''}`);
 
         for (const { frame, handler } of frames)
