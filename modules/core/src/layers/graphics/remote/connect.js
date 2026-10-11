@@ -73,7 +73,8 @@ function plainOf(services){
  *     batches of calls posted to the worker, their bytes, copied guest memory included, and
  *     the milliseconds taking and posting them cost this thread;
  *     `shipped`: that guest memory by what copied it -- buffers' unlocks, surfaces' (lent ones
- *     aside), what calls read out of guest memory and what they wrote into it; `calls`: the
+ *     aside), what calls read out of guest memory and what they wrote into it, and the bytes
+ *     of dynamic buffers draws compared to find what to send (`compared`); `calls`: the
  *     methods whose records fill the batches, the heaviest first
  * @property {() => Promise<void>} answered
  *     settles once every root's played device has answered the diagnostics asked of it so

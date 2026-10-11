@@ -245,7 +245,7 @@ test('the bytes sent to the played side are counted by what sent them: a buffer\
         play();
         // A lent surface goes as its address; its bytes are the lender's count.
         assert.deepEqual(sender.shippedBytes(), { buffers: 16, surfaces: lend ? 0 : 16, reads: 0,
-            writes: 4, dynamic: 0 }, `lent: ${lend}`);
+            writes: 4, dynamic: 0, compared: 0 }, `lent: ${lend}`);
     }
 });
 

@@ -1923,6 +1923,10 @@ export function createHarness(canvas, how = {}){
             openglMs: graphics.seam ? { ring: graphics.seam.openglRingMs,
                 calls: graphics.seam.openglCallMs } : null,
             sentToWorker: graphics.worker?.sent ?? null,
+            // Of those bytes, the guest memory copied in by what copied it, and
+            // the calls whose records the batches hold, heaviest first.
+            shippedToWorker: graphics.worker?.shipped ?? null,
+            callsToWorker: graphics.worker?.calls ?? null,
             imageDigests: graphics.seam?.imageDigests ?? [],
             keptImages: graphics.seam?.keptImages ?? [],
             imageTimes: graphics.seam?.imageTimes ?? [],

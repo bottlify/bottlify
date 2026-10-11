@@ -402,8 +402,11 @@ function parse(argv){
             {
                 return [];
             }
-            const [code, atMs] = argv[index + 1].split(',');
-            return [{ code, atMs: Number(atMs) }];
+            // `Code,ms,holdMs`: held that long -- a program that polls its
+            // keyboard once a frame misses a tap shorter than its frame.
+            const [code, atMs, holdMs] = argv[index + 1].split(',');
+            return [{ code, atMs: Number(atMs),
+                ...(holdMs === undefined ? {} : { holdMs: Number(holdMs) }) }];
         }),
         // Key taps in the program's own keyboard codes, after that many
         // presented frames each, as `Code,after`: pressed on one frame and
@@ -977,6 +980,16 @@ function describe(result, context, calls, symbols){
             const { batches, bytes, ms } = graphics.sentToWorker;
             say(`    to the graphics worker: ${batches} batches, ${bytes} bytes, posting them`
                 + ` ${ms} ms`);
+            if (graphics.shippedToWorker)
+            {
+                say(`      guest memory in them: ${Object.entries(graphics.shippedToWorker)
+                    .map(([kind, count])=>`${kind} ${count}`).join(', ')}`);
+            }
+            if (graphics.callsToWorker)
+            {
+                const heaviest = graphics.callsToWorker.split(' | ').slice(0, 8);
+                say(`      by call: ${heaviest.join(' | ')}`);
+            }
         }
         if (graphics.compressedTextures)
         {
