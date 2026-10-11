@@ -1566,6 +1566,23 @@ export function resolveLibraryPath(name, imagePath){
     return `${imagePath.slice(0, imagePath.lastIndexOf('\\') + 1)}${name}`;
 }
 
+/**
+ * The file LoadLibrary looks for under a name: one whose last component has no
+ * extension gets `.dll`, and a trailing dot says "no extension" and is dropped.
+ * A program that asks for `rglsw` means `rglsw.dll`.
+ *
+ * @param {string} name
+ * @returns {string}
+ */
+export function withLibraryExtension(name){
+    if (name.endsWith('.'))
+    {
+        return name.slice(0, -1);
+    }
+    const file = name.slice(Math.max(name.lastIndexOf('\\'), name.lastIndexOf('/')) + 1);
+    return file.includes('.') ? name : `${name}.dll`;
+}
+
 /** Where Windows looks for a bare library name after the program's own directory. */
 const SYSTEM_LIBRARY_DIRECTORIES = ['C:\\WINDOWS\\system32\\', 'C:\\WINDOWS\\'];
 
@@ -5001,13 +5018,14 @@ async function buildApp(options){
      * same module as it is, as Wine's loader test has it. A program, as against
      * a library, is loaded the same way whatever the flags say.
      *
-     * @param {string} name
+     * @param {string} requested  The name as asked for, with or without its extension.
      * @param {number} [flags]
      * @param {any} [thread]  Whose LoadLibrary this answers, for a library loaded
      *     as another's dependency: by then the processor is someone else's.
      * @returns {number | Promise<number>}
      */
-    const loadLibraryAtRuntime = (name, flags = 0, thread = undefined)=>{
+    const loadLibraryAtRuntime = (requested, flags = 0, thread = undefined)=>{
+        const name = withLibraryExtension(requested);
         if ((flags & LOAD_AS_DATA) !== 0)
         {
             return loadAsData(name, flags);
