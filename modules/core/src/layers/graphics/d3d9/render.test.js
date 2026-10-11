@@ -1083,6 +1083,38 @@ test('a fixed-function draw reads a member in another stream from that stream', 
     vertices.buffer.release();
 });
 
+test('a stream zero far into its buffer beside another stream at its start draws, both read from where they are bound', async()=>{
+    // Stream zero's offset is folded into the first vertex, which moves every
+    // stream that steps with it; folded whole, a stream 1 bound at zero was
+    // asked to start before its buffer and the draw was dropped.
+    const h = harness({ width: 8, height: 8 });
+    const { device } = h;
+    colourFirstDeclaration(device, 1);
+    /** @type {{ buffer?: any }} */
+    const colours = {};
+    assert.equal(device.CreateVertexBuffer(12, 0, 0, D3DPOOL.MANAGED, colours), D3D_OK);
+    assert.equal(device.SetStreamSource(1, colours.buffer, 0, 4), D3D_OK);
+    /** @type {{ buffer?: any }} */
+    const vertices = {};
+    assert.equal(device.CreateVertexBuffer(120, 0, 0, D3DPOOL.MANAGED, vertices), D3D_OK);
+    assert.equal(device.SetStreamSource(0, vertices.buffer, 60, 20), D3D_OK);
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+    assert.equal(device.EndScene(), D3D_OK);
+    await h.present();
+
+    assert.equal(device.diagnostics().skipped.stream, 0, 'the draw is made');
+    const draw = device.diagnostics().lastFrame.filter(
+        (/** @type {any} */ command)=>command.kind === 'draw').at(-1);
+    // Vertex v of the draw reads stream zero at 60 + 20 v and stream 1 at 4 v:
+    // where each is bound, and the first vertex every stream steps from.
+    const further = draw.streams.find((/** @type {any} */ one)=>one.slot === 1);
+    assert.equal(draw.vertices.offset + draw.first * 20, 60, 'stream zero from its offset');
+    assert.equal(further.offset + draw.first * 4, 0, 'stream 1 from its start');
+    colours.buffer.release();
+    vertices.buffer.release();
+});
+
 test('a NOOVERWRITE lock over what a queued draw reads from another stream renames it', async()=>{
     // A program that keeps vertices from frame to frame -- a skinning cache --
     // writes its next stretch under NOOVERWRITE, and a frame's draws read at

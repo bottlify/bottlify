@@ -1477,6 +1477,10 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         get indices(){
             return indices;
         },
+        /** How many vertices of stream zero's offset the draw being made folded into its first. */
+        get streamZeroBias(){
+            return foldedBias;
+        },
         get baseVertexIndex(){
             return baseVertexIndex;
         },
@@ -1668,6 +1672,8 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
      *
      * @returns {number | null} null when the binding is unusable
      */
+    /** The whole vertices the last draw folded into its first (`streamBias`), for the renderer. */
+    let foldedBias = 0;
     const streamBias = ()=>{
         // Read, not made: `stream` keeps an entry for the index it is asked,
         // and a state block of everything captures every entry there is.
@@ -1678,6 +1684,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         const elements = vertexDeclaration.declaration?.elements ?? [];
         if (vertexDeclaration.fvf === 0 && !elements.some((/** @type {any} */ e)=>e.Stream === 0))
         {
+            foldedBias = 0;
             return 0;
         }
         if (!source?.buffer || !(source.stride > 0))
@@ -1689,7 +1696,22 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 + ` (FVF 0x${(vertexDeclaration.fvf ?? 0).toString(16)})`);
             return null;
         }
-        const bias = Math.floor(source.offset / source.stride);
+        // The first vertex moves every stream that steps with it, so no more
+        // vertices are folded than each further stream the declaration reads
+        // has whole in its own offset: one bound at its start beside a stream
+        // zero far into a shared buffer would otherwise begin before its
+        // buffer, and the renderer dropped the draw.
+        let bias = Math.floor(source.offset / source.stride);
+        for (const element of vertexDeclaration.fvf === 0 ? elements : [])
+        {
+            const further = element.Stream === 0 ? null : streams.get(element.Stream);
+            const instanced = ((streamFrequencies.get(element.Stream) ?? 1)
+                & STREAMSOURCE_INSTANCEDATA) !== 0;
+            if (further?.buffer && further.stride > 0 && !instanced)
+            {
+                bias = Math.min(bias, Math.floor(further.offset / further.stride));
+            }
+        }
         if ((source.offset - bias * source.stride) % 4 !== 0)
         {
             report('draw-offset', `a draw from stream 0 at offset ${source.offset}, stride`
@@ -1697,6 +1719,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 + ' a whole number of four bytes');
             return null;
         }
+        foldedBias = bias;
         return bias;
     };
 

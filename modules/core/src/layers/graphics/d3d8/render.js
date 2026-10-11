@@ -1514,6 +1514,8 @@ function inverseRotation(view){
  *     The scissor rectangle, where the API has one; D3DRS_SCISSORTESTENABLE
  *     says whether draws are cut to it.
  * @property {any} indices
+ * @property {number} [streamZeroBias]  The whole vertices of stream zero's offset the device
+ *     folded into the draw's first vertex; absent where it folds none.
  * @property {number} baseVertexIndex
  * @property {import('../webgpu/contract.js').ViewportState} viewport
  * @property {any} renderTarget
@@ -4360,12 +4362,16 @@ export function createRenderer(options){
 
     /**
      * How many vertices stream zero's offset was folded into the first
-     * vertex as, which a device with offsets does before a buffer draw.
+     * vertex as, which a device with offsets does before a buffer draw: the
+     * device's own count when it gives one (`streamZeroBias` on the model),
+     * for the two must be the same number.
      *
      * @param {RenderModel} model
      */
-    const streamZeroBias = model=>(model.stream.stride > 0
-        ? Math.floor((model.stream.offset ?? 0) / model.stream.stride) : 0);
+    const streamZeroBias = model=>(typeof model.streamZeroBias === 'number'
+        ? model.streamZeroBias
+        : model.stream.stride > 0
+            ? Math.floor((model.stream.offset ?? 0) / model.stream.stride) : 0);
 
     /**
      * Where stream zero's buffer is bound: what is left of its offset past
