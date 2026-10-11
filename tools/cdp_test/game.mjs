@@ -1535,6 +1535,14 @@ export async function game(options){
         headed: options.headed,
         extraFlags: [...options.jsFlags ? [`--js-flags=${options.jsFlags}`] : [],
             ...options.chromeFlags] });
+    // A run stopped by a signal takes its browser with it: one left behind
+    // goes on running the title, and every run after it is measured beside it.
+    for (const signal of /** @type {const} */ (['SIGTERM', 'SIGINT']))
+    {
+        process.once(signal, ()=>{
+            shutdown(browser).finally(()=>process.exit(128 + (signal === 'SIGINT' ? 2 : 15)));
+        });
+    }
     mkdirSync(REPORTS_DIR, { recursive: true });
 
     const pageUrl = `http://127.0.0.1:${server.port}/sandbox/test/page/game/index.html`
