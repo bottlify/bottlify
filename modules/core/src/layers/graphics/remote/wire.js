@@ -61,12 +61,8 @@ const ARRAYS = [Uint8Array, Int8Array, Uint16Array, Int16Array, Uint32Array, Int
 /** @type {Map<Function, number>} */
 const KINDS = new Map(ARRAYS.map((type, kind)=>[type, kind]));
 
-/**
- * What a call record holds after its arguments, one bit each. `LENT` is guest
- * memory the call's draws read, lent rather than copied (`lending.js`): the
- * played side reads it in place before it plays the call.
- */
-export const SECTION = { ALLOCS: 1, REPLIES: 2, SHIP: 4, WROTE: 8, LENT: 16 };
+/** What a call record holds after its arguments, one bit each. */
+export const SECTION = { ALLOCS: 1, REPLIES: 2, SHIP: 4, WROTE: 8 };
 
 /** How the caller waits for a call: not at all, for its answer, or when the played side holds it. */
 export const WAIT = { NONE: 0, ANSWER: 1, PACED: 2 };
@@ -712,15 +708,6 @@ export function createReader({ ref, service }){
                             for (let index = 0; index < wrote; index++)
                             {
                                 call.wrote.push(memory());
-                            }
-                        }
-                        if (sections & SECTION.LENT)
-                        {
-                            const lent = u32();
-                            call.lent = [];
-                            for (let index = 0; index < lent; index++)
-                            {
-                                call.lent.push({ address: u32(), length: u32(), slot: u32() });
                             }
                         }
                         call.wait = u8();

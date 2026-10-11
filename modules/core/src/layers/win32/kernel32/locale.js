@@ -812,10 +812,19 @@ export function createLocaleFunctions(host){
     const systemLocales = flags=>((flags & ~LCID_ALTERNATE_SORTS) === 0 && flags !== 0 ? []
         : [LCID_EN_US.toString(16).toUpperCase().padStart(8, '0')]);
 
-    /** @param {number} locale */
+    /**
+     * The locale there is, under its own LCID or a placeholder for the default
+     * -- LOCALE_NEUTRAL (0) among them, which Windows takes as the user's, as
+     * ConvertDefaultLocale does. A C runtime asks GetLocaleInfoW(0, ...) to see
+     * whether the wide functions work, and a failure there sent it to ask again
+     * at every call.
+     *
+     * @param {number} locale
+     */
     const isOurLocale = locale=>locale === LCID_EN_US
         || locale === LOCALE_USER_DEFAULT
-        || locale === LOCALE_SYSTEM_DEFAULT;
+        || locale === LOCALE_SYSTEM_DEFAULT
+        || locale === 0;
 
     /**
      * The two-call protocol these three share: with a count of zero, the room

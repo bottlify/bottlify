@@ -335,8 +335,9 @@ test('a child in a worker of its own mixes on the run\'s table in a span its par
         storage: { load: async()=>({ files: [{ path: 'C:\\a.exe', bytes: child }] }) },
     });
     t.after(()=>app.dispose());
+    // The arena is the run's sound output's, which this thread keeps.
     const arenaFree = ()=>app.diagnostics().find((/** @type {any} */ layer)=>
-        layer.name === 'audio').metrics.arenaFree;
+        layer.name === 'system-audio').metrics.arenaFree;
     /** @type {number[]} */
     const parentFree = [];
     /** @type {any[]} */
@@ -453,9 +454,19 @@ test('where processes run at once, the run\'s own program runs in a worker of it
     assert.equal(new TextDecoder().decode(app.files.read('C:\\note.txt')), 'kept',
         'the session\'s files are on the run\'s volume, here');
     assert.ok(app.registry().root, 'the registry is the run\'s, here');
-    const cpu = app.diagnostics().find((/** @type {any} */ layer)=>layer.name === 'cpu');
-    assert.ok(cpu?.metrics.instructions > 0,
+    const tables = app.diagnostics();
+    /** @param {string} name */
+    const table = name=>tables.find((/** @type {any} */ layer)=>layer.name === name);
+    assert.ok(table('cpu')?.metrics.instructions > 0,
         'the run\'s processor table is the program\'s, as it ended in its worker');
+    // The program's journal -- its phases and frames -- and its sound are what
+    // a reader wants under their names, as where it runs on the engine thread;
+    // this thread's journal and sound output are beside them.
+    assert.ok(Array.isArray(table('log')?.metrics.topPhases)
+        && table('log').metrics.topPhases.some((/** @type {string} */ phase)=>
+            phase.startsWith('guest ')), 'the program\'s phases are the run\'s log');
+    assert.ok(table('system-log'), 'this thread\'s journal is beside it');
+    assert.ok(table('audio') && table('system-audio'), 'and so is each one\'s sound');
 });
 
 test('a program in a worker of its own is built from a library of the bundle no block of which'

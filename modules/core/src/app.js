@@ -1189,6 +1189,14 @@ const IDLE_SPINS_BEFORE_TIMER = 4;
 const IDLE_LOOK_MS = 4;
 
 /**
+ * How often the run loop pumps the sound at most: what the pump does --
+ * position notifications, a buffer's volume and pan carried over, a queue
+ * track topped up -- waits a millisecond at most, against a device that
+ * reads on its own clock and a ring that holds 200 ms.
+ */
+const SOUND_PUMP_MS = 1;
+
+/**
  * What the run loop is waiting on when it cannot go straight on, and how.
  *
  * A range request, a message queue with nothing in it, and some other host call
@@ -6240,6 +6248,8 @@ async function buildApp(options){
             // the host, which are the same shape from here and want opposite
             // waits.
             let spun = 0;
+            /** When the sound was last pumped (`SOUND_PUMP_MS`). */
+            let pumpedAt = -Infinity;
             while (worked < maxTurns && !expired())
             {
                 if (paused)
@@ -6293,10 +6303,13 @@ async function buildApp(options){
                     // to compose a frame or collect its garbage. Topping the
                     // ring up first is what keeps it from draining empty in that
                     // gap -- heard as a click in otherwise steady sound.
-                    journal.begin('pump', journal.PhaseKind.HOST);
-                    sound?.pump();
-                    journal.end('pump');
-
+                    //
+                    // Once a SOUND_PUMP_MS, though, not once a turn: a ring
+                    // topped up a millisecond ago is as full as it gets, and
+                    // a machine whose threads wait out a deadline turns --
+                    // and yields -- tens of thousands of times a second, a
+                    // pump each, 8 % of a game's thread, all doing nothing.
+                    //
                     // A caller parked on a queue of the guest's own is a
                     // suspended call too, but the guest answers it, at the look
                     // every turn gives it below: what is left waits on the
@@ -6307,6 +6320,14 @@ async function buildApp(options){
                     const turnYield = pacing.yield({
                         suspended: onHost, fetching, idlers: queued, spun,
                     });
+                    const pumpAt = performance.now();
+                    if (sound && pumpAt - pumpedAt >= SOUND_PUMP_MS)
+                    {
+                        pumpedAt = pumpAt;
+                        journal.begin('pump', journal.PhaseKind.HOST);
+                        sound.pump();
+                        journal.end('pump');
+                    }
                     if (turnYield)
                     {
                         journal.begin('yield', journal.PhaseKind.HOST);
@@ -7558,6 +7579,15 @@ function portableOptions(options){
 }
 
 /**
+ * The table of the journal a machine writes on this thread: the system's,
+ * where the program's own journal is in a worker and its table is `log`.
+ *
+ * @param {any[]} tables
+ */
+const journalOf = tables=>tables.find(table=>table.name === 'system-log')
+    ?? tables.find(table=>table.name === 'log');
+
+/**
  * The call areas a run's journal starts with switched off; see `buildApp`.
  */
 const CALLS_OFF = Object.freeze({
@@ -7646,8 +7676,16 @@ async function buildSystemHost(deps){
      * @type {any[]}
      */
     let programTables = [];
-    /** The tables this thread keeps for the run: its journal and its sound output. */
-    const ownTables = new Set(['log', 'audio', 'windows']);
+    /**
+     * The tables this thread keeps for the run -- its journal, its sound
+     * output, the window manager -- under the names a program's own tables
+     * have where it runs on this thread. The program's journal and sound
+     * (its phases, frames, pumps, buffers) are what a reader of a run wants
+     * under those names, as with one process; this thread's go beside them,
+     * always under the name given here, so a name says whose table it is.
+     */
+    const ownTables = new Map([['log', 'system-log'], ['audio', 'system-audio'],
+        ['windows', 'windows']]);
 
     return {
         log: {
@@ -7794,9 +7832,10 @@ async function buildSystemHost(deps){
                 { name: 'audio', status: 'ready', metrics: output.diagnostics() },
                 { name: 'windows', status: 'ready',
                     metrics: system.windows.manager.diagnostics() }];
-            const theirs = programTables.filter(table=>!ownTables.has(table.name));
+            const theirs = programTables.filter(table=>ownTables.get(table.name) !== table.name);
             const named = new Set(theirs.map(table=>table.name));
-            return [...own.filter(table=>!named.has(table.name)), ...theirs];
+            return [...own.map(table=>({ ...table, name: ownTables.get(table.name) ?? table.name }))
+                .filter(table=>!named.has(table.name)), ...theirs];
         },
         /** The program's tables as it ended. @param {any[] | undefined} tables */
         ended: tables=>{
@@ -8324,9 +8363,7 @@ export async function createApp(options){
      * machine built next to continue from.
      */
     const noteLogSequence = ()=>{
-        const written = current.diagnostics()
-            .find((/** @type {any} */ layer)=>layer.name === 'log')
-            ?.metrics?.journal?.written;
+        const written = journalOf(current.diagnostics())?.metrics?.journal?.written;
         if (typeof written === 'number')
         {
             logSequence = written;
@@ -9356,9 +9393,7 @@ export async function createApp(options){
             // wrote it still stands. The child's journal continues from
             // here, so the cursor a reader is holding points into it rather
             // than past the end of a block that started over.
-            const written = line.current.diagnostics()
-                .find((/** @type {any} */ layer)=>layer.name === 'log')
-                ?.metrics?.journal?.written;
+            const written = journalOf(line.current.diagnostics())?.metrics?.journal?.written;
             if (typeof written === 'number')
             {
                 logSequence = written;
