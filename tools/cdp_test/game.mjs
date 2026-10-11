@@ -402,8 +402,11 @@ function parse(argv){
             {
                 return [];
             }
-            const [code, atMs] = argv[index + 1].split(',');
-            return [{ code, atMs: Number(atMs) }];
+            // `Code,ms,holdMs`: held that long -- a program that polls its
+            // keyboard once a frame misses a tap shorter than its frame.
+            const [code, atMs, holdMs] = argv[index + 1].split(',');
+            return [{ code, atMs: Number(atMs),
+                ...(holdMs === undefined ? {} : { holdMs: Number(holdMs) }) }];
         }),
         // Key taps in the program's own keyboard codes, after that many
         // presented frames each, as `Code,after`: pressed on one frame and
