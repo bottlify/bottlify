@@ -295,7 +295,6 @@ None yet.
 - **Decision.** Reverted; the bytes compared stay counted (`shipped.compared`). What would pay is
   comparing less: knowing which pages the program wrote, an experiment of its own.
 
-<<<<<<< HEAD
 ### 2026-10-11 -- an unlock of a dynamic vertex buffer that sends and uploads nothing
 
 - **Idea.** Every draw from a dynamic vertex buffer takes the bytes it reads from guest memory
@@ -336,7 +335,7 @@ None yet.
 - **Correctness.** Not checked beyond the frame rate.
 - **Decision.** Left out of `review`; with cork to measure (exits, invalidations, the guest
   profile on Far Cry in a level) before it comes back.
-=======
+
 ### 2026-10-11 -- patched code sites formed apart, and store-dropped regions formed again with copies
 
 - **Idea.** A mixer that turns a voice on or off writes a jump over the voice's block (or the
@@ -360,4 +359,3 @@ None yet.
   splitting the loop made more regions and more interpreted entries, not fewer.
 - **Decision.** Both reverted. What paid was the interpreter's own speed on MMX: the wasm tier
   runs the MMX forms (the every-call case 38.6 s to 3.1 s).
->>>>>>> 48ed9f87 (cork interpreter tier in wasm: the MMX forms run there, not one at a time in JavaScript)
