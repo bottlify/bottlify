@@ -26,6 +26,11 @@
 import { OP, SECTION, SERVICE_REF, WAIT, createReader, createSite } from './wire.js';
 import { changedSpans } from '../webgpu/internal/changed.js';
 
+/** D3DUSAGE_DYNAMIC. */
+const DYNAMIC = 0x200;
+/** D3DRTYPE_VERTEXBUFFER. */
+const VERTEX_BUFFER = 6;
+
 /**
  * The calls whose answer the played device holds back while it has too many
  * frames in flight, and the caller with it.
@@ -1138,14 +1143,26 @@ export function createRecording(options){
                     // that unlocks all of a large one every frame sends what
                     // it wrote, not the buffer.
                     const sent = sentOf.get(target);
-                    const unlocked = sent && sent.base === /** @type {any} */ (target).base
-                        ? ranges.flatMap(range=>{
-                            const from = range.address - sent.base;
-                            const to = from + extentOf(range.address, range.length);
-                            return from >= 0 && to <= sent.bytes.length
-                                ? changedSince(sent, from, to, []) : rangeFrom(range);
-                        })
-                        : ranges.flatMap(range=>rangeFrom(range));
+                    const lazy = (/** @type {any} */ (target).usage & DYNAMIC) !== 0
+                        && /** @type {any} */ (target).type === VERTEX_BUFFER;
+                    // A dynamic vertex buffer's draws send what they read
+                    // (`drawsFrom`), whenever the program wrote it, so its
+                    // unlock sends nothing: a program that locks a whole
+                    // skinning buffer with DISCARD every frame sent -- or
+                    // compared -- all of it here.
+                    /** @param {Locked} range */
+                    const sendOf = range=>{
+                        if (lazy)
+                        {
+                            return [];
+                        }
+                        const from = sent && sent.base === /** @type {any} */ (target).base
+                            ? range.address - sent.base : -1;
+                        const to = from + extentOf(range.address, range.length);
+                        return sent && from >= 0 && to <= sent.bytes.length
+                            ? changedSince(sent, from, to, []) : rangeFrom(range);
+                    };
+                    const unlocked = ranges.flatMap(sendOf);
                     shippedAs('buffers', unlocked);
                     shipped = [...shipped ?? [], ...unlocked];
                 }
