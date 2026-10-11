@@ -264,7 +264,11 @@ export function createCommandReader(deps){
     let taken = 0;
     const zero = new Uint8Array(4);
     return {
-        take(){
+        /**
+         * @param {() => void} [before]  run once the ring is found to hold calls,
+         *     before they are made
+         */
+        take(before){
             if (readWord(block + SHADOW.DRAWS_PENDING) !== 0)
             {
                 // Lowered before the head is read: a draw written after this
@@ -301,6 +305,7 @@ export function createCommandReader(deps){
             }
             if (whole > 0)
             {
+                before?.();
                 taken += take(new Uint8Array(words.buffer, words.byteOffset, whole * 4));
             }
             tail += whole * 4;
@@ -1808,6 +1813,9 @@ export function createShadow(deps){
      * @type {Set<number>}
      */
     const lockedInGuest = new Set();
+    /** Locks the host took and let go of in a block (`noteLocked`), beside the routines' counts. */
+    let hostTaken = 0;
+    let hostReleased = 0;
     /** The textures with a block. @type {WeakMap<object, { block: number }>} */
     const textureBlocks = new WeakMap();
     /** The surfaces with a block. @type {WeakMap<object, number>} */
@@ -2137,6 +2145,15 @@ export function createShadow(deps){
      * at its unlock.
      */
     const settleHeld = ()=>{
+        // Every lock taken and every one let go of is counted -- by the
+        // routines that made it, or by `noteLocked` for the host's -- so the
+        // difference is what is held. None, and the usual entry costs two
+        // words instead of a look at every buffer the guest ever let go of.
+        if (readWord(address + SHADOW.LOCK_CALLS) + hostTaken
+            === readWord(address + SHADOW.UNLOCK_CALLS) + hostReleased)
+        {
+            return;
+        }
         for (const block of lockedInGuest)
         {
             if (!blocks.has(block))
@@ -2183,7 +2200,6 @@ export function createShadow(deps){
 
     /** The command ring's reader, once the block has one. @type {ReturnType<typeof createCommandReader> | null} */
     let commandReader = null;
-    const takeCommands = ()=>commandReader?.take();
 
     /**
      * Replays the locks and unlocks of buffers the guest let go of since the
@@ -2374,8 +2390,10 @@ export function createShadow(deps){
             }
             if (commands !== 0)
             {
-                settleHeld();
-                takeCommands();
+                // Held buffers only when the ring has calls that may read
+                // them: settling at every entry read every held range again
+                // at each of thousands of host calls a frame.
+                commandReader?.take(settleHeld);
             }
         },
 
@@ -2512,6 +2530,21 @@ export function createShadow(deps){
                 return;
             }
             entry.hostLocked = locked;
+            // The routines count only the locks and unlocks they make; one
+            // the host makes is counted here, so that what is held can be
+            // told from the four numbers (`settleHeld`).
+            const was = readWord(block + BUFFER.LOCKED) !== 0;
+            if (was !== locked)
+            {
+                if (locked)
+                {
+                    hostTaken++;
+                }
+                else
+                {
+                    hostReleased++;
+                }
+            }
             deps.writeMemory(block + BUFFER.LOCKED, dwordBytes(locked ? 1 : 0));
             // Never cleared: a lock claims only its own range, and what was
             // lent elsewhere in the buffer may still be unread.
