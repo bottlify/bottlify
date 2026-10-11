@@ -1367,8 +1367,9 @@ done:
  * value (a single widened, a signalling NaN quieted as the host's conversion
  * quiets it) and rounded back, a NaN result the first NaN operand's, quieted,
  * or the negative indefinite, and a memory operand read or written whole
- * before anything lands. The MMX forms (an `mm` operand puts the x87 stack
- * in the MMX state) and maskmovdqu are left to the JavaScript tier.
+ * before anything lands. The MMX forms are the integer ones on the low
+ * quadword of an x87 register's slot, as the model reads `f80bits` (`mmx`
+ * below); maskmovq and maskmovdqu are left to the JavaScript tier.
  */
 typedef union { u8 b[16]; u16 h[8]; u32 w[4]; u64 q[2]; i16 sh[8]; i32 sw[4]; } V128;
 
@@ -1623,6 +1624,170 @@ static void packedShift(V128 *d, u32 kind, u32 element, u32 amount)
     } while (0)
 
 /*
+ * MMX, as ir-simd.js models it: an `mm` register is the low quadword of the
+ * physical x87 register's slot (the model's `f80bits`), a write takes the
+ * register's exact-integer mark off, and an instruction with an `mm` operand
+ * leaves the stack in the MMX state -- top zero, every register held -- as
+ * the model's `mmxState` does after it. The interpreter ran each of them in
+ * JavaScript, one instruction a crossing: a software mixer's loop interpreted
+ * while its translation was formed again cost most of a frame.
+ */
+static inline u64 getMm(u32 r) { return *(u64 *)(x87Regs + (r & 7) * 16); }
+static inline void setMm(u32 r, u64 v)
+{
+    *(u64 *)(x87Regs + (r & 7) * 16) = v;
+    exactMarks &= ~(1u << (r & 7));
+}
+
+/* The opcodes after 0F whose unprefixed form is an MMX one modelled here. */
+static inline u32 mmxForm(u32 op2)
+{
+    if (op2 == 0x6c || op2 == 0x6d) return 0;
+    if ((PACKED_INT[op2 >> 5] >> (op2 & 31)) & 1) return 1;
+    switch (op2)
+    {
+    case 0x6e: case 0x6f: case 0x70: case 0x71: case 0x72: case 0x73: case 0x7e: case 0x7f:
+    case 0xc4: case 0xc5: case 0xd1: case 0xd2: case 0xd3: case 0xd7: case 0xe1: case 0xe2:
+    case 0xe7: case 0xf1: case 0xf2: case 0xf3:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+/*
+ * One MMX instruction past its addressing bytes (*len at the immediate, if
+ * any): the operation the 66 form has, on the low quadwords, where it is the
+ * same; the high unpacks from the high doublewords moved down, the packs from
+ * both operands in one register's two quadwords.
+ */
+static u32 mmx(u32 op2, u32 reg, u32 rm, u32 mem, u32 ea, u32 imm, u32 *len)
+{
+    u32 code = X_DONE;
+    V128 a, b;
+    a.q[1] = 0;
+    b.q[1] = 0;
+    /* The source: the mm register, or `width` bytes of memory zero-extended. */
+#define MM_SOURCE(v, width) do { \
+        if (mem) { X_READ(ea, (width)); \
+            (v).q[0] = (width) == 8 ? *(u64 *)(ram + ea) : (width) == 4 ? *(u32 *)(ram + ea) \
+                : *(u16 *)(ram + ea); } \
+        else (v).q[0] = getMm(rm); \
+        (v).q[1] = 0; \
+    } while (0)
+    switch (op2)
+    {
+    case 0x6e:
+        /* movd mm, r/m32 */
+        if (mem) { X_READ(ea, 4); a.q[0] = *(u32 *)(ram + ea); }
+        else a.q[0] = regs[rm];
+        setMm(reg, a.q[0]);
+        break;
+    case 0x7e:
+        /* movd r/m32, mm */
+        if (mem) { X_WRITE(ea, 4); *(u32 *)(ram + ea) = (u32)getMm(reg); }
+        else regs[rm] = (u32)getMm(reg);
+        break;
+    case 0x6f:
+        /* movq mm, mm/m64 */
+        MM_SOURCE(b, 8);
+        setMm(reg, b.q[0]);
+        break;
+    case 0x7f: case 0xe7:
+        /* movq mm/m64, mm; movntq m64, mm */
+        if (op2 == 0xe7 && !mem) { code = X_LEAVE; break; }
+        if (mem) { X_WRITE(ea, 8); *(u64 *)(ram + ea) = getMm(reg); }
+        else setMm(rm, getMm(reg));
+        break;
+    case 0x70:
+        /* pshufw mm, mm/m64, imm8 */
+        MM_SOURCE(b, 8);
+        *len += 1;
+        for (u32 i = 0; i < 4; i++) a.h[i] = b.h[(imm >> (i * 2)) & 3];
+        setMm(reg, a.q[0]);
+        break;
+    case 0x71: case 0x72: case 0x73:
+    {
+        /* psrl /2, psra /4, psll /6 by an immediate; 73 has no psra */
+        if (mem || !(reg == 2 || reg == 6 || (reg == 4 && op2 != 0x73))) { code = X_LEAVE; break; }
+        a.q[0] = getMm(rm);
+        *len += 1;
+        packedShift(&a, reg, op2 == 0x71 ? 2 : op2 == 0x72 ? 4 : 8, imm);
+        setMm(rm, a.q[0]);
+        break;
+    }
+    case 0xd1: case 0xd2: case 0xd3: case 0xe1: case 0xe2: case 0xf1: case 0xf2: case 0xf3:
+    {
+        /* The shifts by mm/m64's quadword. */
+        u32 element = (op2 & 3) == 1 ? 2 : (op2 & 3) == 2 ? 4 : 8;
+        u32 kind = op2 >= 0xf0 ? 6 : op2 >= 0xe0 ? 4 : 2;
+        MM_SOURCE(b, 8);
+        a.q[0] = getMm(reg);
+        packedShift(&a, kind, element, b.q[0] > 0xffffffffull ? 64 : (u32)b.q[0]);
+        setMm(reg, a.q[0]);
+        break;
+    }
+    case 0xc4:
+    {
+        /* pinsrw mm, r32/m16, imm8 */
+        u32 v;
+        if (mem) { X_READ(ea, 2); v = *(u16 *)(ram + ea); }
+        else v = regs[rm];
+        *len += 1;
+        a.q[0] = getMm(reg);
+        a.h[imm & 3] = (u16)v;
+        setMm(reg, a.q[0]);
+        break;
+    }
+    case 0xc5:
+        /* pextrw r32, mm, imm8 */
+        if (mem) { code = X_LEAVE; break; }
+        *len += 1;
+        b.q[0] = getMm(rm);
+        regs[reg] = b.h[imm & 3];
+        break;
+    case 0xd7:
+    {
+        /* pmovmskb r32, mm */
+        if (mem) { code = X_LEAVE; break; }
+        b.q[0] = getMm(rm);
+        u32 mask = 0;
+        for (u32 i = 0; i < 8; i++) mask |= (u32)(b.b[i] >> 7) << i;
+        regs[reg] = mask;
+        break;
+    }
+    default:
+        a.q[0] = getMm(reg);
+        MM_SOURCE(b, 8);
+        if (op2 == 0x68 || op2 == 0x69 || op2 == 0x6a)
+        {
+            /* The high doublewords, moved down to be unpacked as the low ones are. */
+            a.q[0] >>= 32;
+            b.q[0] >>= 32;
+            op2 -= 8;
+        }
+        else if (op2 == 0x63 || op2 == 0x67 || op2 == 0x6b)
+        {
+            /* Both operands in one register, packed against itself: the low
+             * quadword of the result is the first's lanes and then the second's. */
+            a.q[1] = b.q[0];
+            b = a;
+        }
+        packedInt(op2, &a, &b);
+        setMm(reg, a.q[0]);
+        break;
+    }
+#undef MM_SOURCE
+done:
+    if (code == X_DONE)
+    {
+        *x87TopAt = 0;
+        *x87EmptyAt = 0;
+    }
+    return code;
+}
+
+/*
  * One SSE instruction, at p (0F and the byte after it past the prefixes), taken
  * as x87 is. Nothing runs before a form is known to be modelled, so X_LEAVE
  * leaves the state as it was.
@@ -1633,6 +1798,14 @@ static u32 sse(const u8 *p)
     u32 len, seg, key, lock;
     prefixed(p, &len, &seg, &key, &lock);
     if (lock) return X_LEAVE;
+    if (key == 0 && p[len] == 0x77)
+    {
+        /* emms: every register empty, the top as it was */
+        *x87EmptyAt = 0xff;
+        xWrite = NONE;
+        xLen = len + 1;
+        return X_DONE;
+    }
     u32 op2 = p[len++], modrm = p[len], ea = 0, mem = modrm < 0xc0, reg = (modrm >> 3) & 7;
     u32 rm = modrm & 7;
     if (mem) ea = memoryOperand(p, &len, seg);
@@ -1642,6 +1815,11 @@ static u32 sse(const u8 *p)
     V128 a, b;
     /* The immediate, for the forms that have one, after the addressing bytes. */
     u32 imm = p[len];
+    if (key == 0 && mmxForm(op2))
+    {
+        code = mmx(op2, reg, rm, mem, ea, imm, &len);
+        goto done;
+    }
     switch (op2)
     {
     case 0x10: case 0x11:

@@ -294,3 +294,27 @@ None yet.
 - **Correctness.** The replay contract gate passed in every way, lent ways included.
 - **Decision.** Reverted; the bytes compared stay counted (`shipped.compared`). What would pay is
   comparing less: knowing which pages the program wrote, an experiment of its own.
+
+### 2026-10-11 -- patched code sites formed apart, and store-dropped regions formed again with copies
+
+- **Idea.** A mixer that turns a voice on or off writes a jump over the voice's block (or the
+  load back) at the block's head, inside its whole loop's region, which every such change
+  drops. (1) Sites a program's own store has changed (`patched` of `formRegion`) end every
+  region that reaches them, and the region headed by one is its one block, so a change drops
+  that block alone. (2) Instead, a region the program's store dropped is formed again with
+  copies, so its loop's head has an entry the interpreter meets at the loop's next turn.
+- **Workload.** A synthetic of the mixer's shape (`dfxlike4`): eight voice blocks of MMX in a
+  1024-turn loop, called 2000 times, an indirect call a turn, the position's overflow returning
+  through a pushed address into the block's head, four voices jumped over, one voice toggled
+  every N calls; the cork host in Node 22 alone, three runs of the baseline, one of each idea.
+- **Values.** Baseline (after `e7ae7813`): toggled every call 38.6 s, every 8 calls 12.5 s,
+  every 64 calls 0.76 s. (1): 39.0 s, 33.9 s, 29.3 s -- the regions after each site, and the
+  rest of the loop, ran on the interpreter. (2): 39.2 s, 10.9 s, 2.83 s; the dropped regions
+  had no closed blocks (`closed` empty), so the copies changed nothing that counted.
+  Noise floor: not measured.
+- **Machine.** A 4-core x86-64 Linux VM (Firecracker), Node 22. Power plan: not recorded.
+- **Why it did not pay.** In this host every region formed again is compiled at once on the
+  thread, so a change costs its regions' compile, and the turns between run interpreted;
+  splitting the loop made more regions and more interpreted entries, not fewer.
+- **Decision.** Both reverted. What paid was the interpreter's own speed on MMX: the wasm tier
+  runs the MMX forms (the every-call case 38.6 s to 3.1 s).
