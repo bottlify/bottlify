@@ -6,7 +6,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { arenaRegion, createHeapAllocator, createHeapFunctions } from './heap.js';
+import { arenaRegion, createAddressIndex, createHeapAllocator, createHeapFunctions }
+    from './heap.js';
 
 const HEAP_ZERO_MEMORY = 0x8;
 const HEAP_REALLOC_IN_PLACE_ONLY = 0x10;
@@ -1479,6 +1480,53 @@ test('the VirtualQuery answer for an arena page outside every reservation is the
             assert.deepEqual(arenaRegion(allocator, page, base, base + size,
                 one=>one.owner === reserve), walked(allocator, page, base + size, reservations),
             `seed ${seed}, step ${step}, page 0x${page.toString(16)}`);
+        }
+    }
+});
+
+test('the address index answers what one sorted array answers, across splits and emptied'
+    + ' runs', ()=>{
+    const index = createAddressIndex();
+    /** @type {{ address: number }[]} */
+    const model = [];
+    let seed = 0x2f6e2b1;
+    const next = ()=>{
+        seed = (seed * 1103515245 + 12345) >>> 0;
+        return seed;
+    };
+    /** @param {number} address */
+    const modelAtOrBefore = address=>{
+        let found;
+        for (const block of model)
+        {
+            if (block.address <= address)
+            {
+                found = block;
+            }
+        }
+        return found;
+    };
+    for (let step = 0; step < 20000; step++)
+    {
+        const address = (next() % 4000) * 8;
+        const present = model.findIndex(block=>block.address === address);
+        if (present < 0 && next() % 3 !== 0)
+        {
+            const block = /** @type {any} */ ({ address });
+            index.insert(block);
+            model.splice(model.findIndex(one=>one.address > address) >>> 0, 0, block);
+        }
+        else if (present >= 0)
+        {
+            index.remove(address);
+            model.splice(present, 1);
+        }
+        const probe = (next() % 4100) * 8 - 64;
+        assert.equal(index.atOrBefore(probe), modelAtOrBefore(probe), `step ${step} at ${probe}`);
+        if (step % 500 === 0)
+        {
+            assert.deepEqual([...index.above(probe)], model.filter(block=>block.address > probe),
+                `step ${step} above ${probe}`);
         }
     }
 });

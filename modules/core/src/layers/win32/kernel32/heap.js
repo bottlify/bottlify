@@ -294,6 +294,121 @@ export function arenaRegion(allocator, page, arenaBase, arenaEnd, isReservation)
     return { free: false, end: first > page && first + PAGE_SIZE <= arenaEnd ? first : arenaEnd };
 }
 
+/** The blocks of a run of the address index (`createAddressIndex`) before it is split. */
+const ADDRESS_RUN = 512;
+
+/**
+ * Blocks in address order, kept as sorted runs: placing or freeing one moves
+ * the blocks of its run alone, and the block at or below an address is two
+ * binary searches away.
+ */
+export function createAddressIndex(){
+    /** @type {HeapBlock[][]} */
+    const runs = [];
+    /** The last run whose first block starts at or below `address`, or -1. @param {number} address */
+    const runOf = address=>{
+        let low = 0;
+        let high = runs.length;
+        while (low < high)
+        {
+            const mid = (low + high) >>> 1;
+            if (runs[mid][0].address <= address)
+            {
+                low = mid + 1;
+            }
+            else
+            {
+                high = mid;
+            }
+        }
+        return low - 1;
+    };
+    /** The first block of `run` starting above `address`. @param {HeapBlock[]} run @param {number} address */
+    const after = (run, address)=>{
+        let low = 0;
+        let high = run.length;
+        while (low < high)
+        {
+            const mid = (low + high) >>> 1;
+            if (run[mid].address <= address)
+            {
+                low = mid + 1;
+            }
+            else
+            {
+                high = mid;
+            }
+        }
+        return low;
+    };
+    return {
+        /** @param {HeapBlock} block */
+        insert(block){
+            if (runs.length === 0)
+            {
+                runs.push([block]);
+                return;
+            }
+            const at = Math.max(runOf(block.address), 0);
+            const run = runs[at];
+            run.splice(after(run, block.address), 0, block);
+            if (run.length > ADDRESS_RUN * 2)
+            {
+                runs.splice(at + 1, 0, run.splice(ADDRESS_RUN));
+            }
+        },
+        /** @param {number} address */
+        remove(address){
+            const at = runOf(address);
+            if (at < 0)
+            {
+                return;
+            }
+            const run = runs[at];
+            const index = after(run, address) - 1;
+            if (index >= 0 && run[index].address === address)
+            {
+                run.splice(index, 1);
+                if (run.length === 0)
+                {
+                    runs.splice(at, 1);
+                }
+            }
+        },
+        /** @param {number} address @returns {HeapBlock | undefined} */
+        atOrBefore(address){
+            const at = runOf(address);
+            if (at < 0)
+            {
+                return undefined;
+            }
+            const run = runs[at];
+            return run[after(run, address) - 1];
+        },
+        /** The blocks starting above `address`, in order. @param {number} address */
+        *above(address){
+            let at = runOf(address);
+            let index = 0;
+            if (at < 0)
+            {
+                at = 0;
+            }
+            else
+            {
+                index = after(runs[at], address);
+            }
+            for (; at < runs.length; at++, index = 0)
+            {
+                const run = runs[at];
+                for (; index < run.length; index++)
+                {
+                    yield run[index];
+                }
+            }
+        },
+    };
+}
+
 /**
  * An allocator over one byte range.
  *
@@ -332,31 +447,15 @@ export function createHeapAllocator({ base, size }){
     // The live blocks by address, for the block an interior address falls in:
     // VirtualAlloc's commit, VirtualQuery, VirtualProtect and VirtualFree each
     // ask, and a walk over every block (and every null left behind) cost 50 to
-    // 100 microseconds a call in a title with thousands of reservations.
-    /** @type {HeapBlock[]} */
-    const byAddress = [];
-    /** The index of the first block starting above `address`. @param {number} address */
-    const above = address=>{
-        let low = 0;
-        let high = byAddress.length;
-        while (low < high)
-        {
-            const mid = (low + high) >>> 1;
-            if (byAddress[mid].address <= address)
-            {
-                low = mid + 1;
-            }
-            else
-            {
-                high = mid;
-            }
-        }
-        return low;
-    };
+    // 100 microseconds a call in a title with thousands of reservations. In
+    // runs of at most twice ADDRESS_RUN blocks: one sorted array moved every
+    // block above the one placed or freed, and a title with a quarter of a
+    // million live blocks spent half its engine thread in those moves.
+    const byAddress = createAddressIndex();
     /** @param {HeapBlock} block */
     const placed = block=>{
         live.set(block.address, block);
-        byAddress.splice(above(block.address), 0, block);
+        byAddress.insert(block);
     };
     let liveBlocks = 0;
     let liveSpans = 0;
@@ -571,7 +670,7 @@ export function createHeapAllocator({ base, size }){
                 return false;
             }
             live.set(address, null);
-            byAddress.splice(above(address) - 1, 1);
+            byAddress.remove(address);
             liveBlocks--;
             forget();
             let spanBase = block.address;
@@ -605,7 +704,7 @@ export function createHeapAllocator({ base, size }){
          * @returns {HeapBlock | null}
          */
         blockContaining(address){
-            const block = byAddress[above(address) - 1];
+            const block = byAddress.atOrBefore(address);
             return block !== undefined && address < block.address + block.capacity ? block : null;
         },
 
@@ -615,7 +714,7 @@ export function createHeapAllocator({ base, size }){
          * @param {number} address
          * @returns {HeapBlock | null}
          */
-        blockAtOrBefore: address=>byAddress[above(address) - 1] ?? null,
+        blockAtOrBefore: address=>byAddress.atOrBefore(address) ?? null,
 
         /**
          * The live blocks starting above an address, in address order.
@@ -624,10 +723,7 @@ export function createHeapAllocator({ base, size }){
          * @returns {Generator<HeapBlock>}
          */
         *blocksAbove(address){
-            for (let i = above(address); i < byAddress.length; i++)
-            {
-                yield byAddress[i];
-            }
+            yield* byAddress.above(address);
         },
 
         /**
