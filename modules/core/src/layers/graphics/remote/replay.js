@@ -1739,6 +1739,13 @@ export function createPlayer({ root, ship, read, borrow }){
             replies = call.replies ?? [];
             playing = /** @type {string} */ (call.m);
             const args = /** @type {any[]} */ (call.a);
+            // A slot is emptied only once its object said it was destroyed and
+            // was collected, and a destroyed object is reachable through no
+            // pointer: the bridge asks again of one it held at a count of zero.
+            if (target === undefined && playing === 'reachable')
+            {
+                return call.wait === WAIT.ANSWER ? { answer: false, outs: args } : false;
+            }
             if (playing === REFS_TO)
             {
                 const counted = refsTo(target, args[0]);

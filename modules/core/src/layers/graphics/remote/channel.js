@@ -442,7 +442,10 @@ export function createReceiver({ played, post }){
     /** @param {unknown} error */
     const fail = error=>{
         failed = true;
-        post({ type: 'failed', message: error instanceof Error ? error.message : String(error) });
+        // The stack goes with it: the played side's own frames are the only
+        // account of where a call it could not play stopped.
+        post({ type: 'failed', message: error instanceof Error
+            ? `${error.message}\n${error.stack ?? ''}` : String(error) });
     };
 
     /** @param {any} call @param {any} answered */
