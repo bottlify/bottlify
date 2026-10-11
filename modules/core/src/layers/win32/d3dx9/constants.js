@@ -244,8 +244,12 @@ export function createConstantTableObjects(host){
     };
     const dword = (/** @type {number} */ value)=>Uint8Array.of(value & 0xff, value >> 8 & 0xff,
         value >> 16 & 0xff, value >>> 24);
-    const f32 = (/** @type {number} */ address)=>new DataView(
-        host.readMemory(address >>> 0, 4).slice().buffer).getFloat32(0, true);
+    const f32Word = new Uint32Array(1);
+    const f32View = new Float32Array(f32Word.buffer);
+    const f32 = (/** @type {number} */ address)=>{
+        f32Word[0] = u32(address);
+        return f32View[0];
+    };
     const readString = (/** @type {number} */ address)=>{
         let text = '';
         for (let at = address >>> 0; text.length < 256; at++)

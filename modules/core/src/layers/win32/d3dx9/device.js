@@ -58,8 +58,17 @@ export const SURFACE = Object.freeze({ GetDesc: 12, LockRect: 13, UnlockRect: 14
  * @param {DeviceHost} host
  */
 export function createDeviceCalls(host){
-    /** @param {number} at */
-    const u32 = at=>new DataView(host.readMemory(at >>> 0, 4).slice().buffer).getUint32(0, true);
+    /**
+     * Read from the bytes the host hands back, not a copy of them: an effect's
+     * setters read a word at a time, and a buffer made for each word was most of
+     * their cost.
+     *
+     * @param {number} at
+     */
+    const u32 = at=>{
+        const bytes = host.readMemory(at >>> 0, 4);
+        return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
+    };
     /** @param {number} at @param {number[]} values */
     const putU32s = (at, values)=>{
         const bytes = new Uint8Array(values.length * 4);

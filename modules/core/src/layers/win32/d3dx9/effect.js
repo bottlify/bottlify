@@ -285,10 +285,19 @@ export function createEffects(host, helpers, options = {}){
     const heap = ()=>/** @type {NonNullable<EffectHost['heap']>} */ (host.heap);
     /** @param {number} at @param {number} value */
     const putU32 = (at, value)=>putU32s(at, [value]);
+    // One word seen both ways, so a conversion allocates nothing.
+    const bitsWord = new Uint32Array(1);
+    const floatWord = new Float32Array(bitsWord.buffer);
     /** @param {number} value */
-    const asFloat = value=>new DataView(Uint32Array.of(value >>> 0).buffer).getFloat32(0, true);
+    const asFloat = value=>{
+        bitsWord[0] = value >>> 0;
+        return floatWord[0];
+    };
     /** @param {number} value */
-    const floatBits = value=>new Uint32Array(Float32Array.of(value).buffer)[0];
+    const floatBits = value=>{
+        floatWord[0] = value;
+        return bitsWord[0];
+    };
     /** A NUL-ended string, at most 4 KB. @param {number} at */
     const cString = at=>string(at);
     /** @param {number} at */
@@ -629,7 +638,11 @@ export function createEffects(host, helpers, options = {}){
     // ---- what a value set reads and a get writes --------------------------------------
 
     /** @param {number} at @param {number} count */
-    const words = (at, count)=>Array.from({ length: count }, (_, i)=>u32(at + i * 4));
+    const words = (at, count)=>{
+        const bytes = host.readMemory(at >>> 0, count * 4);
+        const view = new DataView(bytes.buffer, bytes.byteOffset, count * 4);
+        return Array.from({ length: count }, (_, i)=>view.getUint32(i * 4, true));
+    };
 
     /** @param {Param} p */
     const numeric = p=>p.model.cls === PC.SCALAR || p.model.cls === PC.VECTOR
