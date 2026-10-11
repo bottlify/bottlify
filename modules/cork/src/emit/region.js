@@ -2195,6 +2195,26 @@ export class RegionEmitter {
     }
 
     /**
+     * Into the block after this one, as a jump there is taken: the x87
+     * registers moved to the locals that block is compiled for, or, where it
+     * is compiled for another top than the one arriving (a region's own entry,
+     * a block compiled for a guessed top), a leave before it. The edge of a
+     * conditional branch that is not taken is such an edge too: the block
+     * after it may have been reached first, by another way, with the registers
+     * exchanged otherwise.
+     *
+     * @param {number} index  the block fallen into @param {number} start  its address
+     */
+    fallThrough(index, start){
+        if (this.x87.active && !x87Edge(this, index))
+        {
+            this.exitAt(start, Exit.UNTRANSLATED);
+            return;
+        }
+        this.fallInto(index);
+    }
+
+    /**
      * Before falling through into the block after this one: a block that
      * takes windows from this one past its entry test.
      *
@@ -2542,17 +2562,7 @@ export class RegionEmitter {
                 this.charge();
                 if (next && next.start === exit.targets[0])
                 {
-                    if (this.x87.active && !x87Edge(this, after))
-                    {
-                        // The next block is compiled for another top than the
-                        // one arriving here (a region's own entry, reached by
-                        // fall-through): leave before entering it.
-                        this.exitAt(exit.targets[0], Exit.UNTRANSLATED);
-                    }
-                    else
-                    {
-                        this.fallInto(after);
-                    }
+                    this.fallThrough(after, exit.targets[0]);
                     return;
                 }
                 this.jumpTo(exit.targets[0]);
@@ -2584,7 +2594,7 @@ export class RegionEmitter {
                     this.closeSelfLoop();
                     if (next && next.start === notTaken)
                     {
-                        this.fallInto(after);
+                        this.fallThrough(after, notTaken);
                         return;
                     }
                     this.jumpTo(notTaken);
@@ -2596,7 +2606,7 @@ export class RegionEmitter {
                 this.close();
                 if (next && next.start === notTaken)
                 {
-                    this.fallInto(after);
+                    this.fallThrough(after, notTaken);
                     return;
                 }
                 this.jumpTo(notTaken);

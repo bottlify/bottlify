@@ -13,8 +13,10 @@
  * and records, per block, the top and the permutation `fxch` left (an
  * exchange costs no code: two registers swap the locals that hold them,
  * and an edge into a block that expects them the other way round moves
- * them). A block reached with two different tops is cut: it leaves for
- * the other executor before running anything.
+ * them). A block reached with two different tops, or with none the tracker
+ * knows, is compiled for a top it guesses and tests the machine's at its
+ * start, leaving for the other executor when the top is another
+ * (`trackRegion`).
  *
  * What is dynamic: the empty mask (a push clears a bit, a pop sets one),
  * the status word's condition and exception bits, and a dirty mask of the
@@ -256,9 +258,21 @@ export function topAfterCall(block, top){
 
 /**
  * The tracker over a region: the state at each block's start, propagated
- * from the entry along the region's edges; a block met with two different
- * states is cut (null). The entry block's state is the identity mapping at
- * `entryTop`.
+ * from the entry along the region's edges. The entry block's state is the
+ * identity mapping at `entryTop`.
+ *
+ * A block met with two different tops is not given up: it keeps the state
+ * that reached it first -- which it has already handed on -- and an edge
+ * that arrives with another top leaves at the block instead (`x87Edge`), as
+ * one into the entry does. A block reached with no state known -- past a
+ * call that leaves the region, past an instruction the tracker cannot
+ * follow -- is compiled for a top it guesses: the one a call's return is
+ * taken to leave (`topAfterCall`), or else the entry's, with the registers in
+ * their own locals. Both are `guarded`: each tests the top the machine has at
+ * its start and leaves for the host when it is another (`x87BlockStart`), as
+ * the code after a wasm call does, and seeds its successors as the entry
+ * does. Only when `guess` is off is such a block cut (null), left to the
+ * other executor whole.
  *
  * With `callReturn` a call that leaves the region (`callsOut`) is a wasm call
  * the region goes on after: an edge to its return address, the top the
@@ -269,10 +283,13 @@ export function topAfterCall(block, top){
  * @param {import('../region.js').Region} region
  * @param {number} entryTop
  * @param {boolean} [callReturn]
- * @returns {{ states: (StackState | null)[], cut: Set<number>, ends: (StackState | null)[] }}
- *     `ends`: the state at each block's end (null when the block is cut or tracking stops in it)
+ * @param {boolean} [guess]
+ * @returns {{ states: (StackState | null)[], cut: Set<number>, ends: (StackState | null)[],
+ *     guarded: Map<number, number> }}
+ *     `ends`: the state at each block's end (null when the block is cut or tracking stops in
+ *     it); `guarded`: the blocks compiled for a guessed top, by index, with that top
  */
-export function trackRegion(region, entryTop, callReturn = false){
+export function trackRegion(region, entryTop, callReturn = false, guess = true){
     const blocks = region.blocks;
     const count = blocks.length;
     const index = new Map(blocks.map((block, i)=>[block.start, i]));
@@ -320,88 +337,157 @@ export function trackRegion(region, entryTop, callReturn = false){
     /** By call block, its return address's block when the call is a wasm call. */
     const returnOf = blocks.map(block=>(callReturn && callsOut(block, index)
         ? index.get(block.exit.next) ?? -1 : -1));
-
-    // A fixed point rather than one forward sweep. A block met with two
-    // different tops is cut, and a cut block seeds nothing -- so the sweep is
-    // repeated whenever a cut is found, this time not letting the cut block
-    // hand its state to a successor that another, agreeing predecessor should
-    // decide. Without the repetition the first predecessor to arrive poisoned
-    // the join: a block was cut after it had already propagated, and the join
-    // kept a state the region could no longer justify. At most one round per
-    // block, since every round that does not stop the loop adds a cut.
-    for (let round = 0; round <= count; round++)
-    {
-        /** @type {(StackState | null | undefined)[]} */
-        const pending = new Array(count).fill(undefined);
-        const seen = new Set();
-        pending[entry] = { top: entryTop, slot: [0, 1, 2, 3, 4, 5, 6, 7] };
-        const work = [entry];
-        ends = new Array(count).fill(null);
-        let addedCut = false;
-        while (work.length > 0)
+    /**
+     * The blocks the propagation starts from, each with its state: the entry,
+     * and every block guarded. None of them is cut by an edge that arrives
+     * with another top.
+     *
+     * @type {Map<number, StackState>}
+     */
+    const seeds = new Map([[entry, { top: entryTop, slot: [0, 1, 2, 3, 4, 5, 6, 7] }]]);
+    /** @type {Map<number, number>} */
+    const guarded = new Map();
+    /** By block, the call block whose return address it is, or -1. */
+    const callerOf = new Array(count).fill(-1);
+    blocks.forEach((block, i)=>{
+        const j = block.exit.kind === 'call' ? index.get(block.exit.next) : undefined;
+        if (j !== undefined && callerOf[j] < 0)
         {
-            const i = /** @type {number} */ (work.shift());
-            if (seen.has(i) || cut.has(i) || pending[i] === undefined)
-            {
-                continue;
-            }
-            seen.add(i);
-            let state = /** @type {StackState | null} */ (pending[i]);
-            for (const instruction of blocks[i].instructions)
-            {
-                if (state === null)
-                {
-                    break;
-                }
-                state = step(instruction, state);
-            }
-            ends[i] = state;
-            if (state === null)
-            {
-                // Tracking stopped inside the block: its successors are not
-                // reached from here with a known state; whatever else reaches
-                // them decides. (The block itself exits before the instruction.)
-                continue;
-            }
-            const after = returnOf[i];
-            for (const j of after >= 0 ? [...successors(i), after] : successors(i))
-            {
-                const known = pending[j];
-                const arriving = j === after ? { top: topAfterCall(blocks[j], state.top),
-                    slot: [0, 1, 2, 3, 4, 5, 6, 7] } : state;
-                if (known === undefined)
-                {
-                    pending[j] = cloneState(arriving);
-                    work.push(j);
-                }
-                else if (known !== null && known.top !== state.top)
-                {
-                    if (j === entry)
-                    {
-                        // The region's own entry block is compiled for the
-                        // top the region was formed at, whatever other path
-                        // reaches it: the edge that arrives with a different
-                        // top leaves at the entry (see `x87Edge`), and the
-                        // runtime forms a region there for the top it has.
-                        // Cutting the entry instead would publish no entry at
-                        // all and the miss would repeat forever.
-                        continue;
-                    }
-                    // Two tops meet: the block cannot be compiled for both.
-                    cut.add(j);
-                    pending[j] = null;
-                    addedCut = true;
-                }
-                // A different permutation with the same top is fixed on the edge.
-            }
+            callerOf[j] = i;
         }
-        states = pending.map((state, i)=>cut.has(i) ? null : state ?? null);
-        if (!addedCut)
+    });
+    // A block met with two tops is guarded as the propagation meets it. What
+    // no tracked edge reaches is guessed after, and the propagation run again
+    // from it: a pass for each such block in a chain of them, at most.
+    for (let pass = 0; pass <= count; pass++)
+    {
+        ({ states, ends } = propagate(seeds));
+        if (!guess)
+        {
+            break;
+        }
+        let added = false;
+        for (let j = 0; j < count; j++)
+        {
+            if (states[j] !== null || seeds.has(j) || blocks[j].instructions.length === 0)
+            {
+                continue;
+            }
+            const caller = callerOf[j];
+            const end = caller < 0 ? null : ends[caller];
+            const top = end === null ? entryTop : topAfterCall(blocks[j], end.top);
+            guarded.set(j, top);
+            seeds.set(j, { top, slot: [0, 1, 2, 3, 4, 5, 6, 7] });
+            added = true;
+        }
+        if (!added)
         {
             break;
         }
     }
-    return { states, cut, ends };
+    return { states, cut, ends, guarded };
+
+    /**
+     * Every state the seeds reach, as a fixed point. With `guess`, a block
+     * two tops meet at joins the seeds (`from`) with the first.
+     *
+     * @param {Map<number, StackState>} from
+     */
+    function propagate(from){
+        // A fixed point rather than one forward sweep. A block met with two
+        // different tops is cut, and a cut block seeds nothing -- so the sweep is
+        // repeated whenever a cut is found, this time not letting the cut block
+        // hand its state to a successor that another, agreeing predecessor should
+        // decide. Without the repetition the first predecessor to arrive poisoned
+        // the join: a block was cut after it had already propagated, and the join
+        // kept a state the region could no longer justify. At most one round per
+        // block, since every round that does not stop the loop adds a cut.
+        for (let round = 0; round <= count; round++)
+        {
+            /** @type {(StackState | null | undefined)[]} */
+            const pending = new Array(count).fill(undefined);
+            const seen = new Set();
+            for (const [at, state] of from)
+            {
+                pending[at] = cloneState(state);
+            }
+            const work = [...from.keys()];
+            ends = new Array(count).fill(null);
+            let addedCut = false;
+            while (work.length > 0)
+            {
+                const i = /** @type {number} */ (work.shift());
+                if (seen.has(i) || cut.has(i) || pending[i] === undefined)
+                {
+                    continue;
+                }
+                seen.add(i);
+                let state = /** @type {StackState | null} */ (pending[i]);
+                for (const instruction of blocks[i].instructions)
+                {
+                    if (state === null)
+                    {
+                        break;
+                    }
+                    state = step(instruction, state);
+                }
+                ends[i] = state;
+                if (state === null)
+                {
+                    // Tracking stopped inside the block: its successors are not
+                    // reached from here with a known state; whatever else reaches
+                    // them decides. (The block itself exits before the instruction.)
+                    continue;
+                }
+                const after = returnOf[i];
+                for (const j of after >= 0 ? [...successors(i), after] : successors(i))
+                {
+                    const known = pending[j];
+                    const arriving = j === after ? { top: topAfterCall(blocks[j], state.top),
+                        slot: [0, 1, 2, 3, 4, 5, 6, 7] } : state;
+                    if (known === undefined)
+                    {
+                        pending[j] = cloneState(arriving);
+                        work.push(j);
+                    }
+                    else if (known !== null && known.top !== state.top)
+                    {
+                        if (from.has(j))
+                        {
+                            // The region's own entry block is compiled for the
+                            // top the region was formed at, whatever other path
+                            // reaches it: the edge that arrives with a different
+                            // top leaves at the entry (see `x87Edge`), and the
+                            // runtime forms a region there for the top it has.
+                            // Cutting the entry instead would publish no entry at
+                            // all and the miss would repeat forever. A guarded
+                            // block keeps its top the same way.
+                            continue;
+                        }
+                        if (guess)
+                        {
+                            // The state that came first is the block's, and was
+                            // handed on already: the block tests the top instead.
+                            from.set(j, cloneState(known));
+                            guarded.set(j, known.top);
+                            continue;
+                        }
+                        // Two tops meet: the block cannot be compiled for both.
+                        cut.add(j);
+                        pending[j] = null;
+                        addedCut = true;
+                    }
+                    // A different permutation with the same top is fixed on the edge.
+                }
+            }
+            states = pending.map((state, i)=>cut.has(i) ? null : state ?? null);
+            if (!addedCut)
+            {
+                break;
+            }
+        }
+        return { states, ends };
+    }
 }
 
 /**
@@ -845,6 +931,8 @@ export function planStack(region, states, cut, speculate, callReturn = false){
  * @property {(StackState | null)[]} states
  * @property {(StackState | null)[]} ends   the state at each block's end, for a loop onto itself
  * @property {Set<number>} cut
+ * @property {Map<number, number>} guarded  the blocks compiled for a top the tracker guessed,
+ *     with that top: each tests the machine's at its start (`x87BlockStart`)
  * @property {StackState | null} current   the state at the current point of emission
  * @property {StackState | null} landed   where the registers are after the last `x87Edge`
  *     moved them: `current` describes them only until then
@@ -923,8 +1011,8 @@ export function regionHasMmx(region, leaveOut){
  * each block start knows and each entry tests. Null for a region with no x87.
  *
  * @typedef {{ hasMmx: boolean, tracksExact: boolean, states: (StackState | null)[],
- *     ends: (StackState | null)[], cut: Set<number>, shapes: Shape[],
- *     needs: (Shape | null)[] } | null} X87Analysis
+ *     ends: (StackState | null)[], cut: Set<number>, guarded: Map<number, number>,
+ *     shapes: Shape[], needs: (Shape | null)[] } | null} X87Analysis
  */
 
 /**
@@ -949,11 +1037,11 @@ export function analyseX87(region, leaveOut, entryTop, checked, callReturn = fal
     const tracksExact = !hasMmx
         && any(({ op, operands })=>op === 'fild' && operands[1].size === 8)
         && any(({ op, operands })=>(op === 'fistp' || op === 'fisttp') && operands[0].size === 8);
-    const { states, cut, ends } = trackRegion(region, entryTop, callReturn);
+    const { states, cut, ends, guarded } = trackRegion(region, entryTop, callReturn);
     const { known: shapes, needs } = hasMmx
         ? { known: region.blocks.map(()=>NOTHING), needs: [] }
         : planStack(region, states, cut, !checked, callReturn);
-    return { hasMmx, tracksExact, states, ends, cut, shapes, needs };
+    return { hasMmx, tracksExact, states, ends, cut, guarded, shapes, needs };
 }
 
 /**
@@ -979,14 +1067,14 @@ export function prepareX87(e, entryTop, checked = false,
     {
         return {
             active: false, hasMmx: false, base: 0, form: -1, temp: 0, temp2: 0, temp3: 0,
-            states: [], ends: [], cut: new Set(), current: null, landed: null,
+            states: [], ends: [], cut: new Set(), guarded: new Map(), current: null, landed: null,
             controlWritten: false, checkedPrecision: -1, known: unknown(), shapes: [], needs: [],
             stack: NOTHING,
             guards: 0, relaxedReads: 0, tracksExact: false, exact: 0, exactNaN: 0, shadow: [],
             dyn: -1,
         };
     }
-    const { hasMmx, tracksExact, states, ends, cut, shapes, needs } = analysis;
+    const { hasMmx, tracksExact, states, ends, cut, guarded, shapes, needs } = analysis;
     const base = e.localTypes.length + STATE_PARAMS;
     // The eight registers, three scratch locals, and a fused compare's operands.
     for (let k = 0; k < 13; k++)
@@ -1022,7 +1110,8 @@ export function prepareX87(e, entryTop, checked = false,
         instruction=>CONTROL_WRITERS.has(instruction.op)));
     return {
         active: true, hasMmx, base, form, temp: base + 8, temp2: base + 9, temp3: base + 10,
-        states, ends, cut, current: null, landed: null, controlWritten, checkedPrecision: -1,
+        states, ends, cut, guarded, current: null, landed: null, controlWritten,
+        checkedPrecision: -1,
         known: unknown(), shapes, needs, stack: NOTHING, guards: 0, relaxedReads: 0,
         tracksExact, exact: 0, exactNaN: 0, shadow, dyn,
     };
@@ -1291,6 +1380,22 @@ export function x87BlockStart(e, index){
         x.current = null;
         x.stack = NOTHING;
         return false;
+    }
+    const top = x.guarded.get(index);
+    if (top !== undefined)
+    {
+        // Compiled for a top no path of the region settles (`trackRegion`).
+        // An edge from tracked code with another top leaves before it jumps
+        // (`x87Edge`); what reaches this test with another top -- an entry
+        // through the dispatch, an edge from code whose stack the region no
+        // longer follows -- has the registers in their own locals and the top
+        // local the machine's. Another top leaves for the host before
+        // anything of the block runs, as a call's return does (`x87AfterCall`).
+        x.current = null;
+        e.b.localGet(Local.x87Top).i32const(top).op(I32.ne);
+        e.openGuard('otherTop', EMPTY);
+        e.exitAt(e.region.blocks[index].start, Exit.UNTRANSLATED);
+        e.close();
     }
     x.current = x.states[index] === null ? null : cloneState(/** @type {StackState} */ (x.states[index]));
     x.stack = x.shapes[index] ?? NOTHING;

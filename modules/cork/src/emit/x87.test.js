@@ -95,27 +95,43 @@ test('the tracker: pushes, pops and the exchange as a permutation', ()=>{
         'ST0 (register 7) and ST2 (register 1) swap locals');
 });
 
-test('the tracker over a region cuts a block met with two tops', ()=>{
+test('the tracker compiles a block met with two tops for one of them, and cuts it only when'
+    + ' told not to guess', ()=>{
     // 1000: fld1            top 7
     // 1002: jz 1006         taken: 1006 with top 7
     // 1004: fld1            top 6, falling into 1006
-    // 1006: hlt             met with 7 and 6: cut
+    // 1006: hlt             met with 7 and 6
     const m = createTestMachine();
     m.write(CODE, [0xd9, 0xe8, 0x74, 0x02, 0xd9, 0xe8, 0xf4]);
     const region = formRegion(a=>new Uint8Array(m.memory.buffer)[m.layout.ramBase + a], CODE);
-    const { states, cut } = trackRegion(region, 0);
-    assert.equal(states[0]?.top, 0);
     const at = region.blocks.findIndex(block=>block.start === 0x1006);
     assert.ok(at >= 0);
-    assert.ok(cut.has(at), `the join block is cut; states ${JSON.stringify(states)}`);
+    const { states, cut, guarded } = trackRegion(region, 0);
+    assert.equal(states[0]?.top, 0);
+    assert.ok(!cut.has(at), 'the join block is not cut');
+    assert.equal(guarded.get(at), 7, 'compiled for the first predecessor\'s top, of a tie');
+    assert.deepEqual(states[at], { top: 7, slot: [0, 1, 2, 3, 4, 5, 6, 7] });
     const other = region.blocks.findIndex(block=>block.start === 0x1004);
     assert.equal(states[other]?.top, 7,
         'the fall-through block is entered with the first push done');
-    // Run it: the cut block leaves for the other executor at its start.
-    m.setReg('esp', 0x80000);
-    const exit = m.runProgram(CODE);
-    assert.equal(exit.kind, 3, 'a second region, compiled for the top met, finishes the program');
-    assert.equal(exit.regions, 2);
+    const strict = trackRegion(region, 0, false, false);
+    assert.ok(strict.cut.has(at), 'without guessing the join block is cut');
+    assert.equal(strict.guarded.size, 0);
+    // Run it both ways: with the branch taken the join is reached with its
+    // own top and the region halts; falling through it is reached with the
+    // other, leaves at its test, and a second region compiled for that top
+    // finishes the program.
+    for (const [zf, top, regions] of [[true, 7, 1], [false, 6, 2]])
+    {
+        const n = createTestMachine();
+        n.write(CODE, [0xd9, 0xe8, 0x74, 0x02, 0xd9, 0xe8, 0xf4]);
+        n.setReg('esp', 0x80000);
+        n.setEflags(zf ? 0x42 : 0x2);
+        const exit = n.runProgram(CODE);
+        assert.equal(exit.kind, 3, `ZF ${zf}: halted`);
+        assert.equal(exit.regions, regions, `ZF ${zf}: regions`);
+        assert.equal(new DataView(n.memory.buffer).getUint8(n.layout.x87Top), top, `ZF ${zf}: top`);
+    }
 });
 
 test('the tracker seeds the entry block, wherever it lies in address order', ()=>{
@@ -145,15 +161,16 @@ test('the tracker seeds the entry block, wherever it lies in address order', ()=
     const { states } = trackRegion(region, 7);
     assert.equal(states[entry]?.top, 7, 'the entry block carries the top it was formed at');
     assert.equal(states[0]?.top, 0, 'the loop body is tracked from the back edge, balanced');
-    // Run the loop: the region at the return address retires the store the
-    // mistargeted seed refused, and the program halts.
+    // Run the loop: the region at the return address retires the store, and
+    // the program halts.
     m.setReg('esp', 0x80000);
     m.setReg('ecx', 1000);
     const exit = m.runProgram(CODE, { leafCalls: false });
     assert.equal(exit.kind, 3, `left out ${[...exit.unsupported]}`);
     assert.equal(exit.regions, 3, 'the loop, the callee, the return address at its top');
-    assert.deepEqual([...exit.unsupported], [['dd 1d', 1]],
-        'the one refusal of the first formation, while the return top was unknown');
+    assert.deepEqual([...exit.unsupported], [],
+        'the first formation compiles the return address for the top the call is taken to'
+        + ' leave, rather than leaving its store out');
     assert.equal(exit.retired, 6001);
     assert.equal(m.reg('ecx'), 0);
     assert.equal(new DataView(m.memory.buffer).getFloat64(m.layout.ramBase + DATA, true), 1);
