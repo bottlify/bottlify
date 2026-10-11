@@ -541,6 +541,14 @@ sequenceDiagram
   Methods are stdcall, with the interface pointer as the first argument on the stack.
 - **Callbacks** — a window procedure, a COM callback, `DllMain`. The bridge stops the thread, builds a
   frame on the program's stack and runs the program's code until it returns into a sentinel trap.
+  A host call that calls the program back many times in a row -- a D3DX effect's pass setting each
+  state through the program's own state manager -- is written as steps (`bridge.drive`): a generator
+  that yields each guest call. The bridge then sends the thread into each routine in the slice the
+  call came in and takes its answer at the sentinel there, with no park and no turn of the run loop
+  between them. It is off by default (`driveGuestCalls`): in a game's frame a committed pass cost
+  several times what it costs through promises, for a reason not yet found, and the bridge's
+  `driveMs` and `driveCallMs` split that time between the steps and the guest. Off, the same steps
+  run through promises; `effect-steps.itest.js` holds the two to the same results.
 - **Some code lives in program memory directly.** Some exports are ready x86 machine code: msvcrt and
   kernel32 functions, and handing out small heap blocks (up to 1 KiB). They run with no trap, at
   cork's speed, and only what they cannot handle themselves goes to the bridge.

@@ -53,6 +53,9 @@ const mode = modeOf(query.get('mode'));
 const executors = Number(query.get('executors') ?? 0) || mode.executors || undefined;
 const corkConfig = query.has('cork')
     ? { ...mode.cork, ...JSON.parse(query.get('cork')) } : mode.cork ?? null;
+// `drive=1`: host calls written as steps call the guest in the slice they came
+// in (`driveGuestCalls`), off by default, for an A/B of the same run.
+const drive = query.get('drive') === '1';
 
 /**
  * Reloads the page in mode `name`, the bottle kept and any override dropped;
@@ -86,7 +89,8 @@ for (const name of Object.keys(MODES))
     modes.append(button);
 }
 console.log(`bottlify: mode ${mode.name}, ${executors ?? 1} executor(s), cork`
-    + ` ${JSON.stringify(corkConfig ?? {})}; bottlifyMode() lists the modes`);
+    + ` ${JSON.stringify(corkConfig ?? {})}, drive ${drive ? 'on' : 'off'};`
+    + ' bottlifyMode() lists the modes');
 const base = `/bundles/${encodeURIComponent(id ?? '')}`;
 const canvas = document.getElementById('screen');
 const start = document.getElementById('start');
@@ -125,6 +129,7 @@ async function play(){
         id,
         ...executors ? { executors } : {},
         ...corkConfig ? { cork: { config: corkConfig } } : {},
+        ...drive ? { driveGuestCalls: true } : {},
         audio: { drained: true, sampleRate: audio.sampleRate,
             ...(sound ? { port: sound.port2 } : {}) },
     });
