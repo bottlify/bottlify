@@ -541,6 +541,7 @@ export function createDialogFunctions(options){
                 id: extended ? template.u32(at + item.id) & 0xffff : template.u16(at + item.id),
                 className: '',
                 title: '',
+                createName: '',
                 image: 0,
                 data: 0,
             };
@@ -550,6 +551,10 @@ export function createDialogFunctions(options){
             const titleAt = (address + template.at) >>> 0;
             const title = template.nameOrOrdinal();
             control.title = title.name ?? '';
+            // What the control's CREATESTRUCT names it: an ordinal title is
+            // passed as "#id", the spelling FindResource and LoadImage read as
+            // that ordinal.
+            control.createName = title.ordinal !== null ? `#${title.ordinal}` : control.title;
             // What a static showing a picture loads it by: the ordinal, or the
             // name where it lies in the template.
             control.image = title.ordinal ?? (title.name ? titleAt : 0);
@@ -790,11 +795,11 @@ export function createDialogFunctions(options){
                     dialog.defaultId = control.id & 0xffff;
                 }
                 controls.push(record);
-                // The class and title are in the template, not in guest
-                // memory, so the CREATESTRUCT names neither: a procedure that
-                // reads them there finds NULL. The ceiling on this.
-                return after(record.wndProc !== 0 ? announce(record, [extended, 0, 0, style,
-                    placed.x, placed.y, placed.width, placed.height,
+                // The class is in the template, not in guest memory, so the
+                // CREATESTRUCT does not name it: a procedure that reads it
+                // there finds NULL. The ceiling on this.
+                return after(record.wndProc !== 0 ? announce(record, [extended, 0,
+                    control.createName, style, placed.x, placed.y, placed.width, placed.height,
                     dialog.hwnd, control.id, instance >>> 0, control.data], false, thread) : 0,
                 ()=>after(picture(record, control, instance >>> 0, thread),
                     ()=>createFrom(index + 1)));

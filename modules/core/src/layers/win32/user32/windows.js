@@ -3064,6 +3064,20 @@ export function createWindowFunctions(host){
     };
 
     /**
+     * A name as a terminated string in the call's encoding.
+     * @param {string} text @param {boolean} unicode @returns {Uint8Array}
+     */
+    const nameIn = (text, unicode)=>{
+        const encoded = unicode
+            ? new Uint8Array(Uint16Array.from({ length: text.length },
+                (_, i)=>text.charCodeAt(i)).buffer)
+            : encodeAnsi(text);
+        const bytes = new Uint8Array(encoded.length + (unicode ? 2 : 1));
+        bytes.set(encoded);
+        return bytes;
+    };
+
+    /**
      * Tells a new window's procedure that it exists.
      *
      * This is not a courtesy. A window procedure does its setup in WM_CREATE --
@@ -3081,14 +3095,20 @@ export function createWindowFunctions(host){
      * The CREATESTRUCT holds the caller's own name pointers, so it is in the
      * encoding of the call, and reaches the procedure converted to its own.
      *
-     * @param {any} record @param {number[]} args
+     * A window name given as text rather than a pointer -- what a dialog
+     * template holds, which is not in guest memory -- is written behind the
+     * structure, in the call's encoding, and lpszName points at it.
+     *
+     * @param {any} record @param {Array<number | string>} args
      * @param {boolean} [unicode]  Whether the call's names are wide strings.
      * @param {unknown} [caller]  Whose call this answers, when the caller has
      *     awaited before making the window.
      */
     const announce = (record, args, unicode = false, caller = undefined)=>{
-        const [exStyle, className, windowName, style, x, y, width, height,
-            parent, menu, instance, params] = args;
+        const [exStyle, className, , style, x, y, width, height,
+            parent, menu, instance, params] = /** @type {number[]} */ (args);
+        const givenName = args[2];
+        const nameBytes = typeof givenName === 'string' ? nameIn(givenName, unicode) : null;
         // Named once, before anything is awaited: a call made after the hook
         // has answered is answering a call the bridge has already let go of.
         const thread = caller ?? host.callerThread?.();
@@ -3156,7 +3176,8 @@ export function createWindowFunctions(host){
         }
         // The CREATESTRUCT, and behind it the two words a CBT hook is handed
         // that point at it.
-        const create = host.allocate(CREATESTRUCTA.SIZE + CBT_CREATEWNDA.SIZE);
+        const nameAt = CREATESTRUCTA.SIZE + CBT_CREATEWNDA.SIZE;
+        const create = host.allocate(nameAt + (nameBytes?.length ?? 0));
         if (create === 0)
         {
             settle();
@@ -3175,12 +3196,16 @@ export function createWindowFunctions(host){
         put(CREATESTRUCTA.y, record.y);
         put(CREATESTRUCTA.x, record.x);
         put(CREATESTRUCTA.style, style);
-        put(CREATESTRUCTA.lpszName, windowName);
+        put(CREATESTRUCTA.lpszName, nameBytes === null ? Number(givenName) : create + nameAt);
         put(CREATESTRUCTA.lpszClass, className);
         put(CREATESTRUCTA.dwExStyle, asked);
         put(CREATESTRUCTA.SIZE + CBT_CREATEWNDA.lpcs, create);
         put(CREATESTRUCTA.SIZE + CBT_CREATEWNDA.hwndInsertAfter, 0);
         host.writeMemory(create, bytes);
+        if (nameBytes !== null)
+        {
+            host.writeMemory(create + nameAt, nameBytes);
+        }
         void width;
         void height;
         void x;
