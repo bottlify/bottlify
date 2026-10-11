@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { changedSpans } from './changed.js';
+import { changedSpans, createCompared } from './changed.js';
 
 /**
  * The same answer byte by byte: every changed byte is in a span, and a span
@@ -86,4 +86,50 @@ test('equal runs answer no span; one change answers one span around it', ()=>{
     assert.deepEqual(changedSpans(a, b), [1000, 1012], 'near changes are one span, in words');
     a[3000] = 1;
     assert.deepEqual(changedSpans(a, b), [1000, 1012, 3000, 3004], 'far ones are two');
+});
+
+test('a range is compared once in a pause, and each draw takes only what is new of its own', ()=>{
+    const compared = createCompared();
+    const a = {};
+    const b = {};
+    assert.deepEqual(compared.take(a, 100, 200), [100, 200]);
+    assert.deepEqual(compared.take(a, 100, 200), [], 'the same range again: nothing');
+    assert.deepEqual(compared.take(a, 150, 300), [200, 300], 'the part past it');
+    assert.deepEqual(compared.take(a, 0, 400), [0, 100, 300, 400], 'both sides of it');
+    assert.deepEqual(compared.take(a, 50, 350), []);
+    assert.deepEqual(compared.take(b, 120, 130), [120, 130], 'another buffer is its own');
+    assert.deepEqual(compared.take(a, 600, 700), [600, 700]);
+    assert.deepEqual(compared.take(a, 500, 650), [500, 600], 'a gap before a range');
+    compared.clear();
+    assert.deepEqual(compared.take(a, 100, 200), [100, 200], 'a new pause compares again');
+});
+
+test('the ranges taken are exactly what was not taken before, against a byte map', ()=>{
+    let seed = 11;
+    const random = ()=>{
+        seed = (seed * 1103515245 + 12345) >>> 0;
+        return seed / 0x100000000;
+    };
+    const compared = createCompared();
+    const key = {};
+    const seen = new Uint8Array(2000);
+    for (let round = 0; round < 3000; round++)
+    {
+        const from = Math.floor(random() * 1900);
+        const to = from + 1 + Math.floor(random() * 100);
+        const open = compared.take(key, from, to);
+        const expected = new Uint8Array(2000);
+        for (let at = from; at < to; at++)
+        {
+            expected[at] = seen[at] ? 0 : 1;
+            seen[at] = 1;
+        }
+        const got = new Uint8Array(2000);
+        for (let index = 0; index < open.length; index += 2)
+        {
+            assert.ok(open[index] < open[index + 1], 'a range is not empty');
+            got.fill(1, open[index], open[index + 1]);
+        }
+        assert.deepEqual(got, expected, `round ${round}: [${from}, ${to}) took ${open}`);
+    }
 });

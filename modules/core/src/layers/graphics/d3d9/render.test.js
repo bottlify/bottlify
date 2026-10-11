@@ -36,6 +36,7 @@ import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 import { FVF } from '../webgpu/internal/vertexformat.js';
 import { UNIFORM_AT } from '../d3d8/render.js';
+import { commandSlot } from './commands.js';
 import { D3DDECLTYPE, D3DDECLUSAGE } from './declaration.js';
 import {
     blendPixel, clear as referenceClear, createReferenceSurface, toBase64,
@@ -76,9 +77,14 @@ function harness(options = {}){
     });
     const ram = new Uint8Array(RAM_SIZE);
     let next = RAM_BASE;
+    /** Every read of guest memory the device made, as [address, length]. @type {number[][]} */
+    const reads = [];
     const d3d = createDirect3D9({
         backend,
-        readMemory: (address, length)=>ram.slice(address - RAM_BASE, address - RAM_BASE + length),
+        readMemory: (address, length)=>{
+            reads.push([address, length]);
+            return ram.slice(address - RAM_BASE, address - RAM_BASE + length);
+        },
         createSampler: descriptor=>({ kind: 'sampler', descriptor }),
         allocate: bytes=>{
             const address = next;
@@ -99,6 +105,7 @@ function harness(options = {}){
     }, out), D3D_OK);
 
     return {
+        reads,
         gpu,
         presented,
         device: out.device,
@@ -435,6 +442,54 @@ test('models written into a dynamic buffer after its unlock, or inside the lock,
             .filter((/** @type {any} */ call)=>call.buffer === buffer);
         assert.equal(writes.length, 1, `frame ${frame}: one write of the buffer, not one a model`);
     }
+    created.buffer.release();
+});
+
+test('draws in one run of the command ring compare a dynamic buffer\'s range once, not once a'
+    + ' draw', async()=>{
+    // The program does not run while a run of the ring is played, so its
+    // memory cannot change between the draws in it: a game that names a whole
+    // buffer as every draw's vertices compared all of it at every draw.
+    const h = harness({ width: 8, height: 8 });
+    const { device } = h;
+    const DRAWS = 10;
+    /** @type {{ buffer?: any }} */
+    const created = {};
+    assert.equal(device.CreateVertexBuffer(DRAWS * 3 * TRIANGLE_STRIDE,
+        D3DUSAGE.DYNAMIC | D3DUSAGE.WRITEONLY, FVF_TRIANGLE, D3DPOOL.DEFAULT, created), D3D_OK);
+    /** @type {{ pBits?: number }} */
+    const locked = {};
+    assert.equal(created.buffer.Lock(0, 0, locked, D3DLOCK.DISCARD), D3D_OK);
+    assert.equal(created.buffer.Unlock(), D3D_OK);
+    const at = /** @type {number} */ (locked.pBits);
+    const length = DRAWS * 3 * TRIANGLE_STRIDE;
+    for (let index = 0; index < DRAWS * 3; index++)
+    {
+        h.write(at + index * TRIANGLE_STRIDE, vertex(1 + index % 5, 1 + index % 3,
+            argb(0, 0, 255)));
+    }
+    assert.equal(device.SetStreamSource(0, created.buffer, 0, TRIANGLE_STRIDE), D3D_OK);
+    assert.equal(device.SetFVF(FVF_TRIANGLE), D3D_OK);
+    assert.equal(device.BeginScene(), D3D_OK);
+    /** @param {number[]} args */
+    const draw = args=>[commandSlot('DrawPrimitive'), (2 + args.length) * 4, ...args];
+    // Every draw reads the whole buffer: the first vertex and all the triangles.
+    const records = new Uint32Array(Array.from({ length: DRAWS },
+        ()=>draw([D3DPT.TRIANGLELIST, 0, DRAWS])).flat());
+    const bytesRead = ()=>h.reads.filter(([address])=>address >= at && address < at + length)
+        .reduce((sum, [, size])=>sum + size, 0);
+    const before = bytesRead();
+    assert.equal(device.commands(new Uint8Array(records.buffer)), DRAWS);
+    assert.equal(bytesRead() - before, length, 'the buffer read once in the run');
+    // Outside a run each draw is a call of its own: the program may have run
+    // before it, so it compares again.
+    assert.equal(device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, DRAWS), D3D_OK);
+    assert.equal(bytesRead() - before, 2 * length, 'and again for a draw made on its own');
+    assert.equal(device.EndScene(), D3D_OK);
+    await h.present();
+    const draws = h.device.diagnostics().lastFrame.filter(
+        (/** @type {any} */ command)=>command.kind === 'draw');
+    assert.equal(draws.length, DRAWS + 1);
     created.buffer.release();
 });
 
