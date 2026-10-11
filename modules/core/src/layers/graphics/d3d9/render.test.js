@@ -1083,7 +1083,7 @@ test('a fixed-function draw reads a member in another stream from that stream', 
     vertices.buffer.release();
 });
 
-test('a stream zero far into its buffer beside another stream at its start draws, both read from where they are bound', async()=>{
+test('a stream zero deep in its buffer beside another at its start draws', async()=>{
     // Stream zero's offset is folded into the first vertex, which moves every
     // stream that steps with it; folded whole, a stream 1 bound at zero was
     // asked to start before its buffer and the draw was dropped.
