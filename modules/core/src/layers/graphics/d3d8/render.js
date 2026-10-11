@@ -2792,19 +2792,6 @@ const CLEAR_STRIDE = 20;
 /** D3DUSAGE_DYNAMIC: a buffer the program keeps writing. */
 const D3DUSAGE_DYNAMIC = 0x200;
 
-/** D3DRTYPE_VERTEXBUFFER, which tells a vertex buffer from an index one. */
-const VERTEX_BUFFER = 6;
-
-/**
- * Whether a buffer's draws take what they read from guest memory themselves
- * (`readHeld`), so its unlock need not: a dynamic vertex buffer. Index
- * buffers are read by the draws without that comparison.
- *
- * @param {any} buffer
- */
-const lazyBuffer = buffer=>((buffer?.usage ?? 0) & D3DUSAGE_DYNAMIC) !== 0
-    && buffer.type === VERTEX_BUFFER;
-
 /**
  * @param {RendererOptions} options
  * @returns {any}
@@ -8285,23 +8272,13 @@ export function createRenderer(options){
                 return;
             }
             const held = entry.held;
-            entry.held = null;
-            if (lazyBuffer(buffer))
-            {
-                // Every draw from a dynamic vertex buffer takes the bytes it
-                // reads from guest memory itself (`readHeld`), whenever the
-                // program wrote them: reading and uploading all the lock
-                // covered here as well was a few megabytes a frame for a
-                // program that locks a whole skinning buffer with DISCARD.
-                entry.gpu.abandon(held);
-                return;
-            }
             // The bytes go straight into the staging copy: a window is
             // enough, and the copy a read makes was a measured share of a
             // frame in a match, where a program refills its buffers every
             // draw.
             held.data.set(windowMemory(buffer.base + held.offset, held.length));
             entry.gpu.unlock(held);
+            entry.held = null;
         },
 
         /**
@@ -9002,11 +8979,6 @@ export function createRenderer(options){
                 const vertexBytes = bufferFor(stream.buffer).gpu;
                 // The base vertex carries the offset's whole vertices already.
                 const base = streamZeroStart(model) + model.baseVertexIndex * stream.stride;
-                if (minIndex !== undefined && numVertices !== undefined)
-                {
-                    readHeld(stream.buffer, vertexBytes, base + minIndex * stream.stride,
-                        base + (minIndex + numVertices) * stream.stride);
-                }
                 record(model, prepared, {
                     vertices: scratchVertices.write(gatheredPoints((first, many)=>
                         vertexBytes.bytes(base + first * stream.stride, many * stream.stride),
