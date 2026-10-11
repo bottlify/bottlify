@@ -25,10 +25,9 @@ import { fileURLToPath } from 'node:url';
  *
  * The executables are committed, so a test run needs none of this: run it
  * after changing a source, with clang, lld-link and llvm-dlltool on the PATH.
- * `/Brepro` keeps the output byte-identical from one build to the next. Named
- * fixtures alone are built when names are given.
+ * `/Brepro` keeps the output byte-identical from one build to the next.
  *
- *     node scripts/build-fixtures.mjs [name...]
+ *     node scripts/build-fixtures.mjs
  */
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
@@ -98,12 +97,6 @@ const IMPORTS = {
     'GDI32.dll': {
         undecorated: ['CreateSolidBrush@4'],
     },
-    'D3D9.dll': {
-        undecorated: ['Direct3DCreate9@4'],
-    },
-    'd3dx9_26.dll': {
-        undecorated: ['D3DXCreateEffect@36'],
-    },
     'msvcrt.dll': {
         undecorated: [
             '__CxxFrameHandler3', '_CxxThrowException@8', '_except_handler3', 'qsort',
@@ -135,17 +128,7 @@ const PROGRAMS = [
     { name: 'activate', source: 'activate.c', cxx: false },
     { name: 'windows', source: 'windows.c', cxx: false },
     { name: 'overlap', source: 'overlap.c', cxx: false },
-    { name: 'effect', source: 'effect.c', cxx: false },
 ];
-
-/** The fixtures named on the command line, or every one. */
-const named = process.argv.slice(2);
-const unknown = named.filter(name=>!PROGRAMS.some(program=>program.name === name));
-if (unknown.length > 0)
-{
-    throw new Error(`no fixture named ${unknown.join(', ')}`);
-}
-const chosen = named.length > 0 ? PROGRAMS.filter(({ name })=>named.includes(name)) : PROGRAMS;
 
 /**
  * @param {string} tool
@@ -190,7 +173,7 @@ try
     run('clang', ['--target=i686-pc-windows-msvc', '-c', join(SOURCES, 'support.c'),
         '-o', support]);
 
-    for (const { name, source, cxx } of chosen)
+    for (const { name, source, cxx } of PROGRAMS)
     {
         const object = join(work, `${name}.obj`);
         run('clang', [

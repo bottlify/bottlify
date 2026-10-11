@@ -122,9 +122,6 @@ import { createInputRoute } from './layers/input/route.js';
  *     Nobody is at the screen -- a silent install run from a terminal: every modal dialog and
  *     message box is put to `answer` (a terminal prompt, say), or without one answered with its
  *     default button as Enter would, and each answer is reported as a divergence.
- * @property {boolean} [driveGuestCalls]  Host calls written as steps (`bridge.drive`) call the
- *     guest in the slice they came in, rather than parking the thread for each guest call
- *     and resuming it a turn later. On by default; off is the promise path the gate holds it to.
  * @property {boolean} [profileCalls]  Time every host call as a phase of its own, for a
  *                                     report's cost per API; two clock readings a call.
  * @property {() => boolean} [pageHidden]
@@ -3613,7 +3610,6 @@ async function buildApp(options){
             // Costly and off unless asked for; see the dispatcher.
             traceStrings: options.traceStrings ?? false,
             callPhases: options.profileCalls ?? false,
-            driveGuestCalls: options.driveGuestCalls ?? true,
             record: options.record ?? 0,
             onCall: (/** @type {any} */ call)=>{
                 journalCall(call);

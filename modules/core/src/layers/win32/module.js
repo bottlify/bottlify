@@ -2419,7 +2419,6 @@ export function createWin32Module(){
                     glyph: (/** @type {number} */ code, /** @type {any} */ font)=>
                         config?.graphics?.glyph?.(code, font) ?? null,
                     callGuest: call=>bridge.callGuest(call),
-                    drive: steps=>bridge.drive(steps),
                     currentThread: ()=>kernel.currentThread(),
                     // The FromFile and FromResource functions read the same
                     // volume and modules the program does; SaveToFile writes it.
