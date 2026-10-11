@@ -453,6 +453,20 @@ export async function createRemoteApp(wiring){
              * @param {string} [mode] @returns {Promise<string>}
              */
             bufferLocks: (mode = '')=>request('debug.bufferLocks', [mode]),
+            /**
+             * Drops every draw that samples these textures from now on --
+             * `t12,t40` as a frame dump names them, '' none.
+             *
+             * @param {string} [ids] @returns {Promise<string>}
+             */
+            skipTexture: (ids = '')=>request('debug.skipTexture', [ids]),
+            /**
+             * How occlusion counts are answered from now on: '' as counted,
+             * 'visible' as if every sample passed.
+             *
+             * @param {string} [mode] @returns {Promise<string>}
+             */
+            occlusion: (mode = '')=>request('debug.occlusion', [mode]),
         },
         /** @returns {Promise<{ count: number, history: import('./messages.js').Presented[] }>} */
         presented: ()=>request('presented'),

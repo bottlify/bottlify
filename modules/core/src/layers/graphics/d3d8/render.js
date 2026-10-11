@@ -78,6 +78,9 @@ const D3DRENDERSTATE_COLORKEYENABLE = 41;
  */
 const ZERO_STREAM_BYTES = 2048;
 
+/** A count no draw of a frame could fall short of: what `occlusion: 'visible'` answers. */
+const OCCLUSION_ALL_VISIBLE = 0x00ffffff;
+
 /** A stage state's DWORD, as the D3D8 header lays it out. */
 const D3DTA_SELECTMASK = D3DTA.SELECTMASK;
 
@@ -2743,7 +2746,7 @@ const CLEAR_STRIDE = 20;
  *     Every draw reads the bytes it reaches from guest memory again, held
  *     lock or not -- a debugging aid, for a program that writes a buffer
  *     outside its locks.
- * @property {{ dumpFrames: number, bufferLocks?: string, skipTexture?: string,
+ * @property {{ dumpFrames: number, bufferLocks?: string, skipTexture?: string, occlusion?: string,
  *     written?: (lines: string[], frame: number) => void }} [liveDump]
  *     Set on a running program to have its next frames with draws written
  *     down as `dumpDraws` writes them; counts down as they are, and the last
@@ -8688,6 +8691,12 @@ export function createRenderer(options){
             if (count.value !== null)
             {
                 return { state: 'done', value: count.value };
+            }
+            if (liveDump?.occlusion === 'visible')
+            {
+                // Asked on a running program: every count as if all its
+                // samples passed, to see what the program hides by its counts.
+                return { state: 'done', value: OCCLUSION_ALL_VISIBLE };
             }
             if (flush && recording && count.recording === recording)
             {

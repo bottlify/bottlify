@@ -103,6 +103,8 @@ export function serveGraphics(scope, deps){
         bufferLocks: '',
         /** Textures whose draws are dropped (`app.debug.skipTexture`), `t12,t40`; '' none. */
         skipTexture: '',
+        /** How occlusion counts are answered (`app.debug.occlusion`): '' as counted, 'visible' all passed. */
+        occlusion: '',
         /** @param {string[]} lines @param {number} frame */
         written: (lines, frame)=>{
             const dumped = { type: 'dumped', lines, frame };
@@ -510,6 +512,10 @@ export function serveGraphics(scope, deps){
                 if ('skipTexture' in data)
                 {
                     liveDump.skipTexture = String(data.skipTexture ?? '');
+                }
+                if ('occlusion' in data)
+                {
+                    liveDump.occlusion = String(data.occlusion ?? '');
                 }
                 break;
             case 'client':

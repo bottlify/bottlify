@@ -7965,6 +7965,21 @@ function liveDumpOf(worker){
             worker.postMessage({ type: 'debug', skipTexture: ids });
             return ids;
         },
+        /**
+         * How the worker's devices answer occlusion counts from now on: ''
+         * as counted, 'visible' as if every sample passed -- what a program
+         * culls by its counts shows up.
+         *
+         * @param {string} [mode]
+         */
+        occlusion: (mode = '')=>{
+            if (!worker)
+            {
+                throw new Error('occlusion: this run draws without a graphics worker');
+            }
+            worker.postMessage({ type: 'debug', occlusion: mode });
+            return mode;
+        },
         dumped: ()=>last,
     };
 }
