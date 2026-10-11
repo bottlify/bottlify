@@ -79,6 +79,7 @@ import { isParkedCall } from './parking.js';
  * @property {boolean} hook
  * @property {number} target
  * @property {Map<number, number>} [callers]  Sampled crossings by return address.
+ * @property {Map<string, number>} [chains]  The same, by the two callers above it.
  * @property {boolean} site
  * @property {number} trampoline
  * @property {number} resume
@@ -146,6 +147,7 @@ const FORWARDED = 5;
 const EAX = 0;
 const ECX = 1;
 const ESP = 4;
+const EBP = 5;
 
 /** How far a pointer argument is read for the text it may point at. */
 const PEEK_LIMIT = 96;
@@ -577,6 +579,28 @@ class Dispatcher {
             this.spanWords = new Array(count).fill(0);
         }
         return this.spanWords;
+    }
+
+    /**
+     * The return addresses of the two frames an EBP chain names from `ebp`,
+     * as text; a frame outside mapped memory ends it.
+     *
+     * @param {number} ebp
+     */
+    frameChain(ebp){
+        const found = [];
+        let frame = ebp >>> 0;
+        while (found.length < 2 && frame !== 0)
+        {
+            const region = this.memory.find?.(frame);
+            if (!region || frame + 8 > region.base + region.size)
+            {
+                break;
+            }
+            found.push(`0x${(this.memory.readU32(frame + 4) >>> 0).toString(16)}`);
+            frame = this.memory.readU32(frame) >>> 0;
+        }
+        return found.join('<');
     }
 
     /**
@@ -1060,6 +1084,15 @@ class Dispatcher {
             {
                 callers.set(hostReturn, (callers.get(hostReturn) ?? 0) + 1);
             }
+            // And the two callers above it, by the frame chain: the caller is
+            // often a wrapper that sixty places call, and the loop is in one.
+            const chain = this.frameChain(regs === null
+                ? this.cpu.readReg32('ebp') : regs[EBP] >>> 0);
+            const chains = entry.chains ??= new Map();
+            if (chains.has(chain) || chains.size < CALLERS_KEPT)
+            {
+                chains.set(chain, (chains.get(chain) ?? 0) + 1);
+            }
         }
         // Copied, because a handler that writes through a pointer can
         // change what the arguments describe before anyone reads them.
@@ -1474,7 +1507,9 @@ class Dispatcher {
                     Math.round(entry.sampledMs * TRAP_SAMPLE)}ms${entry.callers
                     ? ` from ${[...entry.callers].sort((a, b)=>b[1] - a[1]).slice(0, 3)
                         .map(([from, count])=>`0x${(from >>> 0).toString(16)}x${count}`)
-                        .join(',')}` : ''}`),
+                        .join(',')}` : ''}${entry.chains
+                    ? ` via ${[...entry.chains].sort((a, b)=>b[1] - a[1]).slice(0, 3)
+                        .map(([chain, count])=>`${chain}x${count}`).join(',')}` : ''}`),
         };
     }
 
