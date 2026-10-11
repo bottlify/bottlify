@@ -1598,19 +1598,27 @@ const SYSTEM_DIRECTORY = 'WINDOWS\\system32';
  * name with a directory in it names its one place and is looked for nowhere
  * else.
  *
+ * `ours` drops the system directories: for a name the engine's own table
+ * already answers, the system's copy is the engine's, and a runtime an
+ * installer put there is not loaded beside it. Two of one library in a process
+ * -- the installed D3DX compiling an effect our D3DX is then asked to read --
+ * is a format neither side shares.
+ *
  * @param {string} name
  * @param {string} imagePath
  * @param {string} [currentDirectory]
+ * @param {{ ours?: boolean }} [how]
  * @returns {string[]}
  */
-export function libraryCandidates(name, imagePath, currentDirectory){
+export function libraryCandidates(name, imagePath, currentDirectory, how = {}){
     const first = resolveLibraryPath(name, imagePath);
     if (first !== `${imagePath.slice(0, imagePath.lastIndexOf('\\') + 1)}${name}`
         || /[\\/]/.test(name))
     {
         return [first];
     }
-    const places = [first, ...SYSTEM_LIBRARY_DIRECTORIES.map(directory=>directory + name)];
+    const places = [first,
+        ...how.ours ? [] : SYSTEM_LIBRARY_DIRECTORIES.map(directory=>directory + name)];
     if (currentDirectory)
     {
         const inCurrent = `${currentDirectory.replace(/\\$/, '')}\\${name}`;
@@ -5063,7 +5071,7 @@ async function buildApp(options){
         const loaded = findModule(name);
         const candidates = searchesBesideProgram(isKnownDll(name), Boolean(loaded?.file))
             ? libraryCandidates(name, options.imagePath ?? 'C:\\app.exe',
-                filesystem.currentDirectory())
+                filesystem.currentDirectory(), { ours: loaded !== null })
             : [];
         if (candidates.length > 0)
         {

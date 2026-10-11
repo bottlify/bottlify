@@ -541,6 +541,10 @@ test('a bare name is looked for beside the executable, then where the system kee
         'D:\\DirectX\\dsetup.dll');
     assert.equal(libraryCandidates('dsetup.dll', IMAGE, 'C:\\App\\').length, 3,
         'the program\'s own directory is not searched twice');
+    // A name the engine's table already answers: the program's own copy still
+    // wins, the system's is the engine's.
+    assert.deepEqual(libraryCandidates('d3dx9_24.dll', IMAGE, undefined, { ours: true }),
+        ['C:\\App\\d3dx9_24.dll']);
 });
 
 test('a library name without an extension is looked for as a .dll', ()=>{
