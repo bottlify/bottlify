@@ -364,8 +364,8 @@ test('a dynamic buffer written after its unlock draws what was written', async()
     created.buffer.release();
 });
 
-test('models written one after another into a dynamic buffer after its unlock draw each its own'
-    + ' vertices, and the buffer goes to the queue once a frame', async()=>{
+test('models written into a dynamic buffer after its unlock, or inside the lock, draw each its'
+    + ' own vertices, and the buffer goes to the queue once a frame', async()=>{
     // A skinning buffer: locked with DISCARD and unlocked once a frame, then
     // each model's vertices written through the pointer and drawn. A write to
     // the queue at every draw was a trip to the GPU for every model.
@@ -383,18 +383,34 @@ test('models written one after another into a dynamic buffer after its unlock dr
         /** @type {{ pBits?: number }} */
         const locked = {};
         assert.equal(created.buffer.Lock(0, 0, locked, D3DLOCK.DISCARD), D3D_OK);
-        assert.equal(created.buffer.Unlock(), D3D_OK);
         const at = /** @type {number} */ (locked.pBits);
         const before = h.gpu.of('writeBuffer').length;
         /** @type {number[][][]} */
         const models = [];
-        assert.equal(device.BeginScene(), D3D_OK);
-        for (let model = 0; model < MODELS; model++)
-        {
+        /** @param {number} model */
+        const write = model=>{
             const corners = [[1 + model % 3, 1], [7, 1 + frame], [1, 4 + model % 2]];
             corners.forEach(([x, y], index)=>h.write(at + (model * 3 + index) * TRIANGLE_STRIDE,
                 vertex(x, y, argb(0, 0, 255))));
             models.push(corners);
+        };
+        // The second frame writes its models inside the lock, as a program
+        // that does not keep the pointer does.
+        if (frame === 1)
+        {
+            for (let model = 0; model < MODELS; model++)
+            {
+                write(model);
+            }
+        }
+        assert.equal(created.buffer.Unlock(), D3D_OK);
+        assert.equal(device.BeginScene(), D3D_OK);
+        for (let model = 0; model < MODELS; model++)
+        {
+            if (frame === 0)
+            {
+                write(model);
+            }
             assert.equal(device.DrawPrimitive(D3DPT.TRIANGLELIST, model * 3, 1), D3D_OK);
         }
         assert.equal(device.EndScene(), D3D_OK);
@@ -402,9 +418,18 @@ test('models written one after another into a dynamic buffer after its unlock dr
         const draws = h.device.diagnostics().lastFrame.filter(
             (/** @type {any} */ command)=>command.kind === 'draw');
         assert.equal(draws.length, MODELS);
-        draws.forEach((/** @type {any} */ draw, /** @type {number} */ model)=>assert.deepEqual(
-            queuedTriangle(h, draw).map(point=>[point.x, point.y]), models[model],
-            `frame ${frame}: model ${model} reads what was written for it`));
+        // What the GPU's buffer holds once the frame is submitted: the
+        // queue's writes and the copies a rename made, as the fake device
+        // applies them.
+        draws.forEach((/** @type {any} */ draw, /** @type {number} */ model)=>{
+            const held = draw.vertices.gpu.bytes;
+            const view = new DataView(held.buffer, held.byteOffset + draw.vertices.offset);
+            const corners = [0, 1, 2].map(index=>[
+                view.getFloat32((draw.first + index) * TRIANGLE_STRIDE, true),
+                view.getFloat32((draw.first + index) * TRIANGLE_STRIDE + 4, true)]);
+            assert.deepEqual(corners, models[model],
+                `frame ${frame}: model ${model} reads what was written for it`);
+        });
         const buffer = draws[0].vertices.gpu;
         const writes = h.gpu.of('writeBuffer').slice(before)
             .filter((/** @type {any} */ call)=>call.buffer === buffer);
