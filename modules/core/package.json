@@ -63,7 +63,7 @@
     "build:guest-code": "node scripts/build-guest-code.mjs",
     "fetch:video-decoder": "node scripts/fetch-video-decoder.mjs",
     "fetch:zstd": "node scripts/fetch-zstd.mjs",
-    "check:boundaries": "node scripts/check-boundaries.mjs && node scripts/check-thread-after-await.mjs && node scripts/check-deterministic-math.mjs",
+    "check:boundaries": "node scripts/check-boundaries.mjs && node scripts/check-thread-after-await.mjs && node scripts/check-deterministic-math.mjs && node scripts/check-link-handlers.mjs",
     "check:package": "node scripts/check-package.mjs",
     "typecheck": "tsc --project jsconfig.json",
     "test": "node --test --test-timeout=60000 \"src/**/*.test.js\" \"scripts/**/*.test.js\" \"test/**/*.test.js\"",
