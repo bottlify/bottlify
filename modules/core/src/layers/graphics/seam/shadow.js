@@ -321,6 +321,9 @@ export function createCommandReader(deps){
 /** What the host clears a word of the block with; never written to. */
 const ZERO_WORD = new Uint8Array(4);
 
+/** D3DUSAGE_DYNAMIC. */
+const D3DUSAGE_DYNAMIC = 0x200;
+
 /** A lock for reading has nothing to remember; the host takes it. */
 const D3DLOCK_READONLY = 0x10;
 /**
@@ -1690,6 +1693,7 @@ export const stageStateMirror = types=>[
  * @property {number} length
  * @property {number} type        D3DRTYPE, which says which interface it is published as.
  * @property {number} refCount
+ * @property {number} [usage]     D3DUSAGE, of which DYNAMIC says it may be held locked while drawn.
  * @property {() => number} release
  * @property {(offset: number, size: number, out: { pBits?: number }, flags?: number) => number
  *     } Lock
@@ -1797,6 +1801,13 @@ export function createShadow(deps){
     const blocks = new Map();
     /** @type {WeakMap<object, number>} */
     const blockOf = new WeakMap();
+    /**
+     * The blocks of buffers the guest has locked and unlocked itself: the ones
+     * that can be held locked in the guest across a host entry.
+     *
+     * @type {Set<number>}
+     */
+    const lockedInGuest = new Set();
     /** The textures with a block. @type {WeakMap<object, { block: number }>} */
     const textureBlocks = new WeakMap();
     /** The surfaces with a block. @type {WeakMap<object, number>} */
@@ -2115,6 +2126,61 @@ export function createShadow(deps){
     };
 
 
+    /**
+     * What the guest has written into buffers it still holds locked reaches
+     * the device before the ring's calls are made: a draw in the ring may
+     * read it. A buffer is settled at its unlock, and a host entry while it
+     * was still locked -- another call between two quads of one lock -- made
+     * the ring's draws of it before what they read was there.
+     * ponytail: dynamic buffers and those the guest has unlocked once are
+     * looked at; any other held across an entry on its first lock is settled
+     * at its unlock.
+     */
+    const settleHeld = ()=>{
+        for (const block of lockedInGuest)
+        {
+            if (!blocks.has(block))
+            {
+                lockedInGuest.delete(block);
+                continue;
+            }
+            flushHeld(block);
+        }
+    };
+
+    /**
+     * What the guest has written so far into a buffer it holds locked, sent
+     * through a lock and unlock on the host; the range stays in the block for
+     * the unlock to send again with what is written after, less its DISCARD,
+     * which this has done. The host keeps no lock of its own: a draw it made
+     * of a locked buffer reads the locked range as guest memory holds it at
+     * the draw, and a draw from the ring is made after the program wrote on.
+     *
+     * @param {number} block
+     */
+    const flushHeld = block=>{
+        const entry = blocks.get(block);
+        if (!entry || entry.hostLocked)
+        {
+            return;
+        }
+        const words = readWords(block, BUFFER.SIZE / 4);
+        const from = words[BUFFER.FROM / 4];
+        const to = words[BUFFER.TO / 4];
+        const flags = words[BUFFER.LOCK_FLAGS / 4];
+        if (words[BUFFER.LOCKED / 4] === 0 || to <= from)
+        {
+            return;
+        }
+        if (entry.buffer.Lock(from, to - from, {}, flags) === 0)
+        {
+            entry.buffer.Unlock();
+            markLent(block);
+        }
+        deps.writeMemory(block + BUFFER.LOCK_FLAGS,
+            new Uint8Array(new Uint32Array([flags & ~D3DLOCK_DISCARD]).buffer));
+    };
+
     /** The command ring's reader, once the block has one. @type {ReturnType<typeof createCommandReader> | null} */
     let commandReader = null;
     const takeCommands = ()=>commandReader?.take();
@@ -2138,6 +2204,7 @@ export function createShadow(deps){
         unlockCalls = words[1];
         for (const buffer of words.subarray(3))
         {
+            lockedInGuest.add(buffer);
             settle(buffer);
         }
         deps.writeMemory(address + SHADOW.RING_HEAD, ZERO_WORD);
@@ -2307,6 +2374,7 @@ export function createShadow(deps){
             }
             if (commands !== 0)
             {
+                settleHeld();
                 takeCommands();
             }
         },
@@ -2337,6 +2405,12 @@ export function createShadow(deps){
             deps.writeMemory(block,
                 dwordsBytes([0, buffer.base, buffer.length, 0, 0, 0, 0, owner, 0]));
             blocks.set(block, { buffer, hostLocked: false });
+            // A dynamic buffer is the kind a program holds locked while it
+            // draws from it, from its very first lock.
+            if (((buffer.usage ?? 0) & D3DUSAGE_DYNAMIC) !== 0)
+            {
+                lockedInGuest.add(block);
+            }
             blockOf.set(buffer, block);
             return block;
         },
