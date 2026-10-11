@@ -118,6 +118,8 @@ const D3DLOCK_NOOVERWRITE = 0x1000;
 const D3DQUERYTYPE_OCCLUSION = 9;
 /** What GetData answers while the count is not back. */
 const S_FALSE = 1;
+/** D3DISSUE_END: the flag that closes a measurement. */
+const D3DISSUE_END = 1;
 const D3DLOCK_DISCARD = 0x2000;
 
 /**
@@ -287,6 +289,16 @@ function visit(value, bind){
  * @typedef {Object} PlayedAnswer
  * @property {any} answer
  * @property {any[]} outs
+ * @property {OcclusionCount[]} [counts]  beside an occlusion query's answer,
+ *     the other occlusion counts the played side already holds
+ */
+
+/**
+ * An occlusion query's count the played side holds: the query's number, how
+ * many ENDs it has played on it -- the measurement the count is of -- and
+ * the count.
+ *
+ * @typedef {[number, number, number]} OcclusionCount
  */
 
 /**
@@ -855,6 +867,43 @@ export function createRecording(options){
      * world drawn without its light.
      */
     let framesRecorded = 0;
+    /**
+     * The ENDs recorded on each occlusion query, and the queries by number: a
+     * count the played side sends beside another's answer is taken for a
+     * query only if it is of the measurement the program last closed.
+     *
+     * @type {WeakMap<object, number>}
+     */
+    const ends = new WeakMap();
+    /** @type {Map<number, WeakRef<object>>} */
+    const occlusionQueries = new Map();
+    /**
+     * Counts sent beside an answer, held as answers: a program that waits on
+     * its queries one after another -- polling each until it is counted --
+     * crossed to the played side and back for every one, where the GPU had
+     * counted them all in one read.
+     *
+     * @param {object} asked  the query whose answer they came with
+     * @param {OcclusionCount[] | undefined} given
+     */
+    const takeCounts = (asked, given)=>{
+        for (const [number, ended, value] of given ?? [])
+        {
+            const query = occlusionQueries.get(number)?.deref();
+            if (!query)
+            {
+                occlusionQueries.delete(number);
+                continue;
+            }
+            if (query === asked || (ends.get(query) ?? 0) !== ended
+                || counts.get(query)?.reply)
+            {
+                continue;
+            }
+            counts.set(query, { reply: { answer: 0, outs: [{ value }] }, frame: framesRecorded,
+                asked: Promise.resolve() });
+        }
+    };
 
     /**
      * The system-memory surfaces a GetRenderTargetData is still filling, each
@@ -1320,6 +1369,12 @@ export function createRecording(options){
             {
                 // A new measurement: what was counted before is not its count.
                 counts.delete(target);
+                if (/** @type {any} */ (target).type === D3DQUERYTYPE_OCCLUSION
+                    && (applied[0] & D3DISSUE_END) !== 0 && result === 0)
+                {
+                    ends.set(target, (ends.get(target) ?? 0) + 1);
+                    occlusionQueries.set(number, new WeakRef(target));
+                }
             }
             if (!mayAnswer || !answered(target, name, applied))
             {
@@ -1370,6 +1425,7 @@ export function createRecording(options){
                             counts.delete(target);
                         }
                     }
+                    takeCounts(target, played.counts);
                 }, ()=>{
                     counts.delete(target);
                 });
@@ -1679,6 +1735,41 @@ export function createPlayer({ root, ship, read, borrow }){
     let allocs = [];
     /** The call being played, for what a failure says. @type {string} */
     let playing = '';
+    /**
+     * The ENDs played on each occlusion query, by its number: what a count
+     * sent beside another query's answer is said to be of.
+     *
+     * @type {Map<number, number>}
+     */
+    const occlusionEnds = new Map();
+    /**
+     * The counts the played device holds for the occlusion queries but one,
+     * each with the END it is of.
+     *
+     * @param {number} asked
+     * @returns {OcclusionCount[]}
+     */
+    const heldCounts = asked=>{
+        /** @type {OcclusionCount[]} */
+        const held = [];
+        for (const [number, ended] of occlusionEnds)
+        {
+            const query = objectAt(number);
+            if (!query)
+            {
+                occlusionEnds.delete(number);
+                continue;
+            }
+            /** @type {{ value?: number }} */
+            const count = {};
+            if (number !== asked && query.GetData(count, 4, 0) === 0
+                && typeof count.value === 'number')
+            {
+                held.push([number, ended, count.value]);
+            }
+        }
+        return held;
+    };
     /** @type {any[]} */
     let replies = [];
     /**
@@ -1779,6 +1870,15 @@ export function createPlayer({ root, ship, read, borrow }){
                 : target[playing](...args);
             holdAsCounted(call.t, target);
             bindAll(answer, handsOut(playing) ? args : NOTHING, bind);
+            const occlusion = target?.type === D3DQUERYTYPE_OCCLUSION;
+            if (occlusion && playing === 'Issue' && (args[0] & D3DISSUE_END) !== 0
+                && answer === 0)
+            {
+                occlusionEnds.set(call.t, (occlusionEnds.get(call.t) ?? 0) + 1);
+            }
+            /** What goes beside an answer: for an occlusion count, the others held. */
+            const beside = occlusion && playing === 'GetData' && call.wait === WAIT.ANSWER
+                ? ()=>({ counts: heldCounts(call.t) }) : ()=>({});
             if (allocs.length > 0)
             {
                 // What the played device answered says which way it went: a
@@ -1802,7 +1902,7 @@ export function createPlayer({ root, ship, read, borrow }){
             {
                 const settled = answer.then(value=>{
                     move(args);
-                    return { answer: value, outs: args };
+                    return { answer: value, outs: args, ...beside() };
                 });
                 if (call.wait === WAIT.ANSWER)
                 {
@@ -1812,7 +1912,7 @@ export function createPlayer({ root, ship, read, borrow }){
             }
             // An unwaited call's answer is what a carrier that is asked for
             // it after the call -- what a device says of itself -- passes on.
-            return call.wait === WAIT.ANSWER ? { answer, outs: args } : answer;
+            return call.wait === WAIT.ANSWER ? { answer, outs: args, ...beside() } : answer;
         },
         object: objectAt,
         allocate(){

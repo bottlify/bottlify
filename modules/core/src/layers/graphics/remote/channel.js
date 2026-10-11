@@ -17,7 +17,7 @@
  * has caught up -- the bound on how far behind the program the pictures are.
  *
  * Sender to receiver:  { type: 'calls', buffer }       a batch, as `wire.js` writes it
- * Receiver to sender:  { type: 'answer', serial, answer, outs }
+ * Receiver to sender:  { type: 'answer', serial, answer, outs, counts? }
  *                      { type: 'presented', count }
  *                      { type: 'diagnostics', diagnostics }
  *                                                      what a device said of itself when asked
@@ -331,7 +331,8 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
                 {
                     const resolve = waiting.get(message.serial);
                     waiting.delete(message.serial);
-                    resolve?.({ answer: message.answer, outs: message.outs ?? [] });
+                    resolve?.({ answer: message.answer, outs: message.outs ?? [],
+                        counts: message.counts });
                     break;
                 }
                 case 'diagnostics':
@@ -452,9 +453,10 @@ export function createReceiver({ played, post }){
 
     /** @param {any} call @param {any} answered */
     const reply = (call, answered)=>{
-        /** @param {{ answer: any, outs: any[] }} settled */
+        /** @param {import('./replay.js').PlayedAnswer} settled */
         const send = settled=>post({ type: 'answer', serial: call.serial,
-            answer: crossable(settled.answer), outs: crossable(settled.outs) });
+            answer: crossable(settled.answer), outs: crossable(settled.outs),
+            counts: settled.counts });
         if (answered instanceof Promise)
         {
             answered.then(send, fail);

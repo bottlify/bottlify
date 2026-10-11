@@ -970,6 +970,50 @@ test('an occlusion count is asked of the renderer without waiting, and taken whe
         assert.equal(await later, D3D_OK);
     });
 
+test('the counts the renderer holds come beside one query\'s answer, each for its own measurement',
+    async t=>{
+        // A program that waits on its queries one after another crossed to the
+        // played side and back for each, where the GPU had counted them all
+        // in one read: two hundred round trips a frame.
+        const d3d = acrossAPort({ writeMemory: ()=>{} });
+        t.after(()=>d3d.close());
+        /** @type {{ device?: any }} */
+        const out = {};
+        assert.equal(d3d.CreateDevice({ swapEffect: D3DSWAPEFFECT.DISCARD, backBufferCount: 1,
+            backBufferWidth: 8, backBufferHeight: 8, backBufferFormat: D3DFMT.X8R8G8B8 }, out),
+        D3D_OK);
+        const D3DISSUE_END = 1;
+        const D3DISSUE_BEGIN = 2;
+        const S_FALSE = 1;
+        const queries = [0, 1, 2].map(()=>{
+            /** @type {{ query?: any }} */
+            const made = {};
+            assert.equal(out.device.CreateQuery(D3DQUERYTYPE.OCCLUSION, made), D3D_OK);
+            assert.equal(made.query.Issue(D3DISSUE_BEGIN), D3D_OK);
+            assert.equal(made.query.Issue(D3DISSUE_END), D3D_OK);
+            return made.query;
+        });
+        /** @type {{ value?: number }} */
+        const count = {};
+        assert.equal(queries[0].GetData(count, 4, 0), S_FALSE, 'asked');
+        // The third's measurement closed again after the ask: the count the
+        // answer brings for it is of the one before.
+        assert.equal(queries[2].Issue(D3DISSUE_END), D3D_OK);
+        let answer = S_FALSE;
+        for (let tries = 0; tries < 50 && answer === S_FALSE; tries++)
+        {
+            await new Promise(resolve=>setTimeout(resolve, 5));
+            answer = queries[0].GetData(count, 4, 0);
+        }
+        assert.equal(answer, D3D_OK);
+        /** @type {{ value?: number }} */
+        const beside = {};
+        assert.equal(queries[1].GetData(beside, 4, 0), D3D_OK, 'came beside the first');
+        assert.equal(beside.value, 0);
+        assert.equal(queries[2].GetData(beside, 4, 0), S_FALSE,
+            'a count of a measurement closed since is not this one\'s');
+    });
+
 test('a surface a read-back is still filling keeps its memory until the pixels have landed',
     async()=>{
         // The program let go of a system-memory surface right after asking
