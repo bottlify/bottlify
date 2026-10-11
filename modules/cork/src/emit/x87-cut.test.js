@@ -5,10 +5,11 @@
  */
 
 /**
- * A block reached with two x87 tops is cut: compiled as an exit at its start,
- * which leaves the stack words as the way to it left them. The block emitted
- * just before it -- one that ends in a `ret` or a `hlt`, its pushes and pops
- * written on its own ways out -- must not reach into that exit.
+ * A block reached with two x87 tops is compiled for one of them and tests the
+ * machine's at its start: the way in with the other leaves there, the stack
+ * words as that way left them, and the way in with its own runs it. The block
+ * emitted just before it -- one that ends in a `ret` or a `hlt`, its pushes
+ * and pops written on its own ways out -- must not reach into either.
  */
 
 import { test } from 'node:test';
@@ -20,7 +21,8 @@ const CODE = 0x1000;
 
 /**
  * test eax, eax; jz J; cmp ecx, 5; je X; fld1; jmp C; J: jmp C; X: fld1; <end>; C: hlt --
- * C is reached at top 7 and at top 0, so it is cut; X, the block before it, never runs.
+ * C is reached at top 7 and at top 0, and compiled for one of them; X, the
+ * block before it, never runs.
  *
  * @param {number[]} end  X's last instruction
  */
@@ -53,16 +55,25 @@ const ENDS = [['hlt', [0xf4]], ['ret', [0xc3]]];
 
 for (const [name, end] of ENDS)
 {
-    test(`a cut block leaves the stack as its way in left it, not as the ${name} before it`, ()=>{
+    test(`a block met with two tops leaves or runs with the stack its way in left, not the`
+        + ` ${name} before it`, ()=>{
         const C = CODE + program(end).length - 1;
-        const empty = run(program(end), 0);
-        assert.equal(empty.exit.kind, Exit.UNTRANSLATED);
-        assert.equal(empty.eip, C, 'left at the cut block');
+        // C is compiled for the top that reaches it first; whichever way in
+        // brings the other leaves at its test.
+        const ways = [[0, 0, 0xff], [1, 7, 0x7f]].map(([eax, top, empty])=>
+            ({ ...run(program(end), eax), top, empty, eax }));
+        assert.deepEqual(ways.map(way=>way.exit.kind).sort(), [Exit.UNTRANSLATED, Exit.HALT].sort(),
+            'one way in runs C, the other leaves at its test');
+        for (const way of ways)
+        {
+            if (way.exit.kind === Exit.UNTRANSLATED)
+            {
+                assert.equal(way.eip, C, `eax ${way.eax}: left at the block`);
+            }
+        }
+        const [empty, pushed] = ways.map(way=>run(program(end), way.eax));
         assert.equal(empty.top, 0, 'nothing pushed on the way taken');
         assert.equal(empty.empty, 0xff);
-        const pushed = run(program(end), 1);
-        assert.equal(pushed.exit.kind, Exit.UNTRANSLATED);
-        assert.equal(pushed.eip, C);
         assert.equal(pushed.top, 7, 'fld1 on the way taken');
         assert.equal(pushed.empty, 0x7f);
     });

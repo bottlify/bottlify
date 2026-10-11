@@ -4428,8 +4428,12 @@ export function createRenderer(options){
             // game that skins its models into one after unlocking it drew
             // every model in the pose of the frame before. What the guest's
             // memory holds now against what was sent: a difference is sent.
-            // Four bytes at a time, and only the spans that differ are sent: it
-            // runs for every draw from such a buffer.
+            // Four bytes at a time, and only the spans that differ are taken:
+            // it runs for every draw from such a buffer. They wait in the
+            // buffer's copy for the frame's end, which uploads every buffer
+            // written once, before the frame's draws are submitted: a write
+            // to the queue at each draw was a trip to the GPU a model, and
+            // ordered nothing the one at the end does not.
             const now = windowMemory(source.base + from, to - from);
             const spans = changedSpans(now, gpu.bytes(from, to - from));
             if (spans.length > 0)
@@ -4440,7 +4444,6 @@ export function createRenderer(options){
                 {
                     gpu.rewrite(from + spans[index], now.subarray(spans[index], spans[index + 1]));
                 }
-                gpu.flush();
             }
             return;
         }
@@ -4454,8 +4457,8 @@ export function createRenderer(options){
         {
             return;
         }
+        // Uploaded at the frame's end with the rest, as above.
         gpu.rewrite(start, windowMemory(source.base + start, end - start));
-        gpu.flush();
     };
 
     /**

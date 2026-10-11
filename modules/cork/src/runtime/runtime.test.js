@@ -145,15 +145,16 @@ test('a region compiled for single leaves once another precision is seen, and th
 
 test('a formed-in leaf two tops reach takes an exchanged stack as it is', async()=>{
     // F is called with two values on the stack and then with one, so its
-    // block is cut and runs on the machine's own top; the first call follows
+    // block is compiled for the first top and tests it; the first call follows
     // an fxch, which the block holds as swapped locals. Doom 3's normal maps went
     // through _ftol2 this way, and the exchange stored back unswapped turned
-    // every flat texel's 128 into 0.
+    // every flat texel's 128 into 0. F stores what it pops, one after another.
     const m = machine();
     const view = new DataView(m.memory.buffer);
     view.setUint8(m.layout.x87Empty, 0xff);
     view.setUint16(m.layout.x87Control, 0x27f, true);
     const F = CODE + 0x100;
+    const OUT = 0x2000;
     m.write(CODE, [
         0xd9, 0xe8,                           // fld1
         0xd9, 0xee,                           // fldz
@@ -162,21 +163,30 @@ test('a formed-in leaf two tops reach takes an exchanged stack as it is', async(
         0xe8, 0xf0, 0, 0, 0,                  // call F              one
         0xf4,                                 // hlt
     ]);
-    m.write(F, [0xdd, 0xd8, 0xc3]);           // F: fstp st0; ret
+    m.write(F, [0xdd, 0x1b, 0x83, 0xc3, 0x08, 0xc3]); // F: fstp qword [ebx]; add ebx, 8; ret
     m.setReg(4, 0x80000);
+    m.setReg(3, OUT);
     m.runtime.noteHot(CODE, 0);
     await m.runtime.translatePending();
-    const exit = m.runtime.run(m.runtime.entryOf(CODE, 0), 100);
-    // F ran inside the region and popped st0; the region leaves at the
-    // second call, whose block the tracking does not reach with a state.
-    assert.equal(exit.kind, 'untranslated');
-    assert.equal(exit.retired, 6, 'fld1, fldz, fxch, call, fstp, ret');
-    assert.equal(m.eip(), CODE + 11);
+    let eip = CODE;
+    for (let run = 0; run < 10 && eip !== CODE + 17; run++)
+    {
+        const top = view.getUint8(m.layout.x87Top);
+        if (m.runtime.entryOf(eip, top) < 0)
+        {
+            m.runtime.noteHot(eip, top);
+            await m.runtime.translatePending();
+        }
+        m.runtime.run(m.runtime.entryOf(eip, top), 100);
+        eip = m.eip();
+    }
+    assert.equal(eip, CODE + 17, 'past the hlt');
     assert.equal(m.reg(4), 0x80000);
-    const top = view.getUint8(m.layout.x87Top);
-    assert.equal(top, 7);
-    assert.equal(view.getFloat64(m.layout.x87 + top * 16, true), 0,
-        'F popped the 1 the fxch brought up, and the 0 is left');
+    assert.equal(view.getUint8(m.layout.x87Top), 0);
+    assert.equal(view.getUint8(m.layout.x87Empty), 0xff);
+    assert.equal(view.getFloat64(m.layout.ramBase + OUT, true), 1,
+        'the first call popped the 1 the fxch brought up');
+    assert.equal(view.getFloat64(m.layout.ramBase + OUT + 8, true), 0, 'and the second the 0');
 });
 
 test('a spent budget at an inlined return charges the callee once', async()=>{
@@ -1264,30 +1274,32 @@ test('the diagnostics histogram names the untranslated exits and why each target
         assert.equal(exits[0].count, 3);
     });
 
-test('a return block the tracker cannot reach gets a region of its own, not a broken entry',
-    async()=>{
-        // The call leaves: made as a wasm call, its return block is reached across it.
-        const m = machine({ callReturn: false });
-        const RA = CODE + 7;
-        // fninit; call F (elsewhere); RA: mov eax, [0x2000]; fld dword [0x2000];
-        // fstp st0; hlt -- the integer head emits, the x87 is refused, so the
-        // block would be a partial entry of the caller's region at its own top
-        // and shadow every later attempt to compile it.
-        m.write(CODE, [0xdb, 0xe3, 0xe8, 0x39, 0, 0, 0, 0xa1, 0, 0x20, 0, 0,
-            0xd9, 0x05, 0, 0x20, 0, 0, 0xdd, 0xd8, 0xf4]);
-        m.setReg(4, 0x80000);
-        m.runtime.noteHot(CODE);
-        assert.equal(await m.runtime.translatePending(), 1);
-        assert.ok(m.runtime.entryOf(CODE) >= 0, 'the entry runs');
-        assert.equal(m.runtime.entryOf(RA), -1, 'the return block has no entry of its own');
-        assert.equal(await m.runtime.translatePending(), 1,
-            'the miss queued a region of its own');
-        assert.ok(m.runtime.entryOf(RA) >= 0, 'compiled for the top the machine has');
-        const exit = m.runtime.run(m.runtime.entryOf(RA), 100);
-        assert.equal(exit.kind, 'halt');
-        // The fld pushed, the fstp st0 popped: the stack is as the call left it.
-        assert.equal(new DataView(m.memory.buffer).getUint8(m.layout.x87Top), 0);
-    });
+test('a return block the tracker cannot reach is compiled whole for a top it tests, not a'
+    + ' partial entry', async()=>{
+    // The call leaves: made as a wasm call, its return block is reached across it.
+    const m = machine({ callReturn: false });
+    const RA = CODE + 7;
+    // fninit; call F (elsewhere); RA: mov eax, [0x2000]; fld dword [0x2000];
+    // fstp st0; hlt -- were the x87 refused, the integer head alone would
+    // be an entry of the caller's region at its own top and shadow every
+    // later attempt to compile the block. It is compiled whole instead, for
+    // the top the call is taken to leave, which it tests.
+    m.write(CODE, [0xdb, 0xe3, 0xe8, 0x39, 0, 0, 0, 0xa1, 0, 0x20, 0, 0,
+        0xd9, 0x05, 0, 0x20, 0, 0, 0xdd, 0xd8, 0xf4]);
+    m.setReg(4, 0x80000);
+    m.runtime.noteHot(CODE);
+    assert.equal(await m.runtime.translatePending(), 1);
+    assert.ok(m.runtime.entryOf(CODE) >= 0, 'the entry runs');
+    assert.ok(m.runtime.entryOf(RA, 0) >= 0, 'the return block is an entry at the call\'s top');
+    assert.equal(m.runtime.entryOf(RA, 3), -1, 'and at no other');
+    const refused = Object.keys(m.runtime.diagnostics().refused);
+    assert.ok(!refused.includes('d9 05') && !refused.includes('dd d8'),
+        `its x87 is not left out: ${refused}`);
+    const exit = m.runtime.run(m.runtime.entryOf(RA, 0), 100);
+    assert.equal(exit.kind, 'halt');
+    // The fld pushed, the fstp st0 popped: the stack is as the call left it.
+    assert.equal(new DataView(m.memory.buffer).getUint8(m.layout.x87Top), 0);
+});
 
 test('a second x87 top at an entry is a miss of its own, not done for every top',
     async()=>{
