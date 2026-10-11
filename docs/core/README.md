@@ -36,6 +36,9 @@ The page needs:
   runs on. Without it the engine runs `compatible`: the log is read by asking the engine instead
   of from shared memory, guest memory is the engine's alone, and sound is mixed on the engine's
   thread and posted to the worklet.
+- **`Document-Policy: js-profiling`** on the page and on every worker script, only for
+  `sampleJs`: the browser grants its JavaScript sampler to a document or worker served with it.
+  Without it the `js` diagnostics table says the sampler was refused; nothing else changes.
 
 ## Which mode, and why
 

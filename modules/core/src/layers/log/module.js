@@ -436,6 +436,11 @@ export function createLogModule(){
                     topPhases: profile.phases.slice(0, TOP_PHASES).map((/** @type {any} */ row)=>
                         `${row.name} ${row.kind} x${row.count} self=${row.selfMs.toFixed(3)}`
                         + ` worst=${row.worstMs.toFixed(3)}`),
+                    // Every phase's self time together, the top sixteen's and the
+                    // rest's: wall time minus this is time no phase accounted for,
+                    // which the top sixteen alone would overstate.
+                    phasesSelfMs: profile.phases.reduce((/** @type {number} */ sum,
+                        /** @type {any} */ row)=>sum + row.selfMs, 0),
                 },
                 issues: [...instance.issues],
             };

@@ -79,6 +79,7 @@ Everything below crosses to the engine's worker by `postMessage`, so every value
 | `log` | `{ categories?, capacity?, bytes? }` | — | Call areas recorded from the first instruction (`{ 'call.gpu': 'trace' }`), and the journal's size: `capacity` records, `bytes` of ring (1 MiB). |
 | `traceStrings` | boolean | `false` | Keep the text an argument points at in the journal. |
 | `profileCalls` | boolean | `false` | Time every host call as a phase of its own. |
+| `sampleJs` | boolean | `false` | Run the browser's JavaScript sampler on the engine's thread, in 2 s windows; its top functions are the `js` diagnostics table. A few percent of the thread (not measured here). Needs `Document-Policy: js-profiling` (see [the README](README.md)). |
 | `record` | number | 0 | How many events at the bridge to keep for a replay. |
 | `hooks` | `HookSpec[]` | — | Watches placed in front of routines inside the program's own modules as they load. |
 | `watch` | `{ libraries, strings }` | — | Watch calls from one guest module into another, by library and ordinal. |
