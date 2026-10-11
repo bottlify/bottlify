@@ -29,6 +29,7 @@
  * overridden by naming one.
  */
 
+import { launcherPlan } from './is5stub.js';
 import { windowsChoice } from './windows.js';
 
 /** Where the distribution is put so the guest can read its own file. */
@@ -163,9 +164,15 @@ export function prefixOptions(media, under = {}){
             files.push({ path: `${MEDIA_DIRECTORY}\\${file.name}`, bytes: file.bytes });
         }
     }
+    // A 16-bit launcher is not run: what it would leave and start is put
+    // there instead, and its engine is the program started.
+    const directory = path.slice(0, path.lastIndexOf('\\'));
+    const launcher = launcherPlan(media.bytes, directory, (media.files ?? []).map(file=>({
+        name: file.name.slice(file.name.lastIndexOf('\\') + 1), bytes: file.bytes })));
+    files.push(...launcher?.files ?? []);
     return {
-        executable: media.bytes,
-        imagePath: path,
+        executable: launcher?.executable ?? media.bytes,
+        imagePath: launcher?.imagePath ?? path,
         // No bundle is mounted, so the volume is the writable layer and nothing
         // else. `storage` is how something gets in there before the first
         // instruction, which is exactly when the distribution has to be there.

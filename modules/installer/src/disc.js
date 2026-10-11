@@ -28,6 +28,7 @@
  */
 
 import { isIsoImage, openIso, rangeReader } from '@bottlify/core/iso';
+import { launcherPlan } from './is5stub.js';
 import { silentOptions } from './silent.js';
 import { windowsChoice } from './windows.js';
 
@@ -248,16 +249,27 @@ export async function discOptions(media, under = {}){
                 + 'on the disc, and there is no setup.exe at its root');
     }
 
-    const executable = await bytesOf(program);
-    const imagePath = `${DISC_LETTER}:\\${program.path}`;
-    const commandLine = entry.arguments === ''
+    const programBytes = await bytesOf(program);
+    const programPath = `${DISC_LETTER}:\\${program.path}`;
+    const programDirectory = programPath.slice(0, programPath.lastIndexOf('\\'));
+    const programFolder = program.path.slice(0, program.path.length - program.name.length);
+    // A 16-bit InstallShield launcher is not run: what it would leave and
+    // start is seeded instead, and its engine is the program started.
+    const launcher = launcherPlan(programBytes, programDirectory, await Promise.all(iso.entries
+        .filter(item=>!item.directory && /^(_inst32i\.ex_|setup\.lid)$/i.test(item.name)
+            && item.path.slice(0, item.path.length - item.name.length).toLowerCase()
+                === programFolder.toLowerCase())
+        .map(async item=>({ name: item.name, bytes: await bytesOf(item) }))));
+    const executable = launcher?.executable ?? programBytes;
+    const imagePath = launcher?.imagePath ?? programPath;
+    const commandLine = launcher || entry.arguments === ''
         ? `"${imagePath}"` : `"${imagePath}" ${entry.arguments}`;
     // Windows starts a disc's autorun program in the disc's root, wherever on
     // the disc the program lives, and launchers lean on it: a menu in a
     // subfolder looks for the setup beside autorun.inf by a relative name. A
     // program a person picked starts where it lives, as Explorer starts it.
     const startDirectory = entry.from === 'asked' && program.path.includes('\\')
-        ? imagePath.slice(0, imagePath.lastIndexOf('\\')) : `${DISC_LETTER}:\\`;
+        ? programDirectory : `${DISC_LETTER}:\\`;
 
     /** @type {import('./silent.js').SilentOptions | null} */
     let unattended = null;
@@ -286,12 +298,12 @@ export async function discOptions(media, under = {}){
         commandLine,
         startDirectory,
         discs: [{ image: media.disc, letter: DISC_LETTER }],
-        // Nothing is seeded: the disc is its own drive, and the prefix beneath
-        // the program starts empty. An unattended run's answers are
-        // `unattended.seeded`, put on the volume by whoever runs it, as
-        // `silentOptions`'s are.
-        storage: { load: async()=>[] },
-        seeded: [],
+        // The disc is its own drive, and the prefix beneath the program starts
+        // empty but for what a 16-bit launcher would have left. An unattended
+        // run's answers are `unattended.seeded`, put on the volume by whoever
+        // runs it, as `silentOptions`'s are.
+        storage: { load: async()=>launcher?.files ?? [] },
+        seeded: launcher?.files.map(file=>file.path) ?? [],
         label: iso.volume.label,
         entry,
         unattended,
