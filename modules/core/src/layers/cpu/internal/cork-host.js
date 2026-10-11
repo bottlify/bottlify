@@ -1571,6 +1571,8 @@ export function createCorkHost(config){
         jitCacheSize: ()=>0,
         compiledModules: ()=>runtime.counters().modules,
         interpretedSteps: ()=>0,
+        /** The instructions the interpreter tier in wasm retired, for a gate that judges it. */
+        wasmRetired: ()=>wasmRetired,
         instructionStats: ()=>null,
         profile: {
             available: ()=>false,

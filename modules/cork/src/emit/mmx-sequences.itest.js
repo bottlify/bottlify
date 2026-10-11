@@ -119,3 +119,46 @@ test('MMX saturating, multiplying, unpacking and shifting forms leave what the i
     // A gate that translated nothing judged the interpreter against itself.
     assert.ok(share > 0.9, `only ${share.toFixed(3)} of the instructions ran translated`);
 });
+
+test('MMX forms on the interpreter tier in wasm leave what the instruction model'
+    + ' leaves', async()=>{
+    // Nothing translatable, the wasm tier from the first instruction: every
+    // instruction the subject runs is the tier's, or one it leaves to the
+    // JavaScript interpreter -- which must be none of the pool's.
+    const judge = createJudge({ pool: POOL, cork: { wasmInterpreter: true,
+        wasmInterpreterAfter: 0, interpretRange: [0, 0xffffffff] } });
+    const next = random(SEED ^ 0x77);
+    /** @type {string[]} */
+    const failures = [];
+    let judged = 0;
+    let diverged = 0;
+    for (let index = 0; index < COUNT; index++)
+    {
+        const length = 2 + Math.floor(next() * 11);
+        const body = Array.from({ length }, ()=>Math.floor(next() * POOL.length));
+        const result = await judge.judge(body, []);
+        if (result === null)
+        {
+            continue;
+        }
+        judged++;
+        if (result.divergences.length > 0)
+        {
+            diverged++;
+            if (failures.length < 20)
+            {
+                failures.push(`seed ${SEED ^ 0x77} #${index} ${namesOf(body)}: `
+                    + result.divergences.slice(0, 4).map(one=>
+                        `${one.name} ${String(one.expected)} != ${String(one.actual)}`).join('; '));
+            }
+        }
+    }
+    const share = judge.tierShare();
+    console.log(`MMX sequences on the wasm tier: ${judged} judged, ${diverged} diverged,`
+        + ` ${share.toFixed(3)} of the subject's instructions the tier's`);
+    assert.ok(judged > COUNT * 0.9, `only ${judged} of ${COUNT} sequences ran`);
+    assert.equal(diverged, 0, `${diverged} diverged:\n${failures.join('\n')}`);
+    // A tier that left the MMX forms to the JavaScript interpreter judged it
+    // against itself.
+    assert.ok(share > 0.9, `only ${share.toFixed(3)} of the instructions ran on the tier`);
+});

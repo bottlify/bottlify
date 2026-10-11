@@ -67,6 +67,7 @@ const MEMORY = 4 << 20;
  *     halted: () => boolean,
  *     wake: () => void,
  *     cork: () => ReturnType<typeof import('../runtime/runtime.js').createCorkRuntime>,
+ *     wasmRetired?: () => number,
  * }} CorkHost
  */
 
@@ -136,12 +137,15 @@ export function createJudge({ pool = undefined, cork = {}, executor = undefined 
     let published = 0;
     let bySubject = 0;
     let byTranslator = 0;
+    let byTier = 0;
 
     return {
         /** Sequences the translator published an entry for. */
         published: ()=>published,
         /** Instructions the translator ran, over the instructions the subject ran. */
         share: ()=>(bySubject > 0 ? byTranslator / bySubject : 0),
+        /** Instructions the interpreter tier in wasm ran, over the instructions the subject ran. */
+        tierShare: ()=>(bySubject > 0 ? byTier / bySubject : 0),
         diagnostics: ()=>runtime.diagnostics(),
         /**
          * Runs one sequence on the model and on the translator, from one
@@ -186,8 +190,10 @@ export function createJudge({ pool = undefined, cork = {}, executor = undefined 
             const made = await runtime.translatePending();
             published += made > 0 ? 1 : 0;
             const before = runtime.diagnostics().retired;
+            const tierBefore = translator.wasmRetired?.() ?? 0;
             const result = replaySlice({ oracle, subject, state, instructions, spans: SPANS });
             byTranslator += runtime.diagnostics().retired - before;
+            byTier += (translator.wasmRetired?.() ?? 0) - tierBefore;
             bySubject += result.retiredSubject;
             return result;
         },
