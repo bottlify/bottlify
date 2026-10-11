@@ -2828,7 +2828,7 @@ export function createDirect3D9Seam(
      * @param {number} address @param {number} flags D3DENUM_*
      */
     const writeAdapterIdentifier = (address, flags)=>{
-        const { vendorId, description } = describeAdapter(identity?.() ?? null);
+        const { vendorId, deviceId, description } = describeAdapter(identity?.() ?? null);
         const block = new Uint8Array(D3DADAPTER_IDENTIFIER9.FIELDS);
         /** @param {string} text @param {number} at @param {number} room */
         const ascii = (text, at, room)=>{
@@ -2843,6 +2843,7 @@ export function createDirect3D9Seam(
         const view = new DataView(block.buffer);
         view.setUint32(D3DADAPTER_IDENTIFIER9.DriverVersion + 4, 0x00010000, true);
         view.setUint32(D3DADAPTER_IDENTIFIER9.VendorId, vendorId, true);
+        view.setUint32(D3DADAPTER_IDENTIFIER9.DeviceId, deviceId, true);
         block.set(ADAPTER_GUID, D3DADAPTER_IDENTIFIER9.DeviceIdentifier);
         view.setUint32(D3DADAPTER_IDENTIFIER9.WHQLLevel,
             (flags & D3DENUM_NO_WHQL_LEVEL) !== 0 ? 0 : 1, true);

@@ -2338,7 +2338,7 @@ export function createDirect3D8Seam(
      * @param {number} address @param {number} flags D3DENUM_*
      */
     const writeAdapterIdentifier = (address, flags)=>{
-        const { vendorId, description } = describeAdapter(identity?.() ?? null);
+        const { vendorId, deviceId, description } = describeAdapter(identity?.() ?? null);
         const block = new Uint8Array(D3DADAPTER_IDENTIFIER8.FIELDS);
         /** @param {string} text @param {number} at */
         const ascii = (text, at)=>{
@@ -2354,6 +2354,7 @@ export function createDirect3D8Seam(
         // high dword, and a program that prints it prints something sane.
         view.setUint32(D3DADAPTER_IDENTIFIER8.DriverVersion + 4, 0x00010000, true);
         view.setUint32(D3DADAPTER_IDENTIFIER8.VendorId, vendorId, true);
+        view.setUint32(D3DADAPTER_IDENTIFIER8.DeviceId, deviceId, true);
         block.set(ADAPTER_GUID, D3DADAPTER_IDENTIFIER8.DeviceIdentifier);
         // Certified unless the caller said not to ask: the flag exists because
         // asking took seconds on real Windows, and a program that passes it

@@ -130,6 +130,11 @@ import { createInputRoute } from './layers/input/route.js';
  *     found (bridge `driveMs` is what to read).
  * @property {boolean} [profileCalls]  Time every host call as a phase of its own, for a
  *                                     report's cost per API; two clock readings a call.
+ * @property {'nvidia' | 'amd'} [adapterAs]  Tell programs of a known card of this
+ *     vendor (`PRESENTED_CARDS` in `layers/graphics/seam/adapter.js`), by its PCI ids
+ *     and with its shader model, in place of the browser's adapter: a program that
+ *     picks its render path from the cards it knows takes its weakest on one it does
+ *     not. The adapter's name stays Bottlify's.
  * @property {boolean} [sampleJs]  Keep the browser's sampler of this thread's JavaScript
  *     running and report what it spends its time in, function by function, as the
  *     `js` table (`host/js-samples.js`). Needs `Document-Policy: js-profiling` on
@@ -3916,6 +3921,11 @@ async function buildApp(options){
             device: options.device
                 ? {
                     ...options.device,
+                    // A card the program is told of in place of the browser's
+                    // adapter, by the adapterAs option (`seam/adapter.js`).
+                    adapter: options.adapterAs
+                        ? { ...options.device.adapter, presentAs: options.adapterAs }
+                        : options.device.adapter,
                     /** @param {any} frame */
                     presentTo: frame=>{
                         // A frame runs from one present to the next, so the

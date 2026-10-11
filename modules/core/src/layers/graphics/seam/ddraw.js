@@ -1358,7 +1358,7 @@ export function createDirectDrawSeam(
      * @param {number} address @param {boolean} withWhql
      */
     const writeDeviceIdentifier = (address, withWhql)=>{
-        const { vendorId, description } = describeAdapter(identity?.() ?? null);
+        const { vendorId, deviceId, description } = describeAdapter(identity?.() ?? null);
         const block = new Uint8Array(withWhql
             ? DDDEVICEIDENTIFIER2.SIZE
             : DDDEVICEIDENTIFIER2.dwWHQLLevel);
@@ -1375,6 +1375,7 @@ export function createDirectDrawSeam(
         // Version 1.0.0.0: the product word is the LARGE_INTEGER's high dword.
         view.setUint32(DDDEVICEIDENTIFIER2.liDriverVersion + 4, 0x00010000, true);
         view.setUint32(DDDEVICEIDENTIFIER2.dwVendorId, vendorId, true);
+        view.setUint32(DDDEVICEIDENTIFIER2.dwDeviceId, deviceId, true);
         block.set(ADAPTER_GUID, DDDEVICEIDENTIFIER2.guidDeviceIdentifier);
         if (withWhql)
         {
