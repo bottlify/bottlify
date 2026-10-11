@@ -930,3 +930,17 @@ float4 f(float4 v, float s){ return saturate(v) + saturate(s); }
     assert.equal(stmt.right.operand ? stmt.right.operand.target.kind : stmt.right.target.kind,
         'user');
 });
+
+test('a function whose paths a uniform parameter picks is not refused for one it lacks', ()=>{
+    // Each call passes the parameter as a constant and fxc specialises the
+    // function: a chain with no final else, as an engine's shadow lookup has it,
+    // compiles. A test of an ordinary parameter is still refused.
+    const shadow = 'float f(float x, uniform int VERSION = 13){\n'
+        + '  if (VERSION == 13) { return x; }\n'
+        + '  else if (VERSION == 14) { return 2 * x; }\n'
+        + '  else if (VERSION >= 20) { if (x > 0) return 1; else return 0; }\n}';
+    assert.deepEqual(errors(shadow), []);
+    assert.deepEqual(errors('float f(float x, int VERSION){\n'
+        + '  if (VERSION == 13) { return x; }\n}'),
+    ["X3507: 'f': Not all control paths return a value"]);
+});

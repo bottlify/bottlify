@@ -48,6 +48,7 @@ const D3DPOOL_SYSTEMMEM = 2;
 const D3DUSAGE_DYNAMIC = 0x200;
 const D3DRTYPE_TEXTURE = 3;
 const D3DRTYPE_CUBETEXTURE = 5;
+const D3DRTYPE_VOLUMETEXTURE = 4;
 const RT_BITMAP = 2;
 const RT_RCDATA = 10;
 
@@ -136,7 +137,7 @@ function formatFromFile(file){
  * @param {TextureHost} host
  */
 export function createTextureLoader(host){
-    const { u32, putU32s, method: call } = createDeviceCalls(host);
+    const { u32, putU32s, method: call, string } = createDeviceCalls(host);
 
     /**
      * Writes D3DXIMAGE_INFO.
@@ -144,8 +145,9 @@ export function createTextureLoader(host){
      * @param {number} at @param {import('./images.js').Image} image
      */
     const writeInfo = (at, image)=>{
-        putU32s(at, [image.width, image.height, 1, image.mipLevels, image.format,
-            image.faces ? D3DRTYPE_CUBETEXTURE : D3DRTYPE_TEXTURE, image.fileFormat]);
+        putU32s(at, [image.width, image.height, image.depth ?? 1, image.mipLevels, image.format,
+            image.depth ? D3DRTYPE_VOLUMETEXTURE : image.faces ? D3DRTYPE_CUBETEXTURE
+                : D3DRTYPE_TEXTURE, image.fileFormat]);
     };
 
     /**
@@ -153,17 +155,7 @@ export function createTextureLoader(host){
      *
      * @param {number} at @param {boolean} wide
      */
-    const stringAt = (at, wide)=>{
-        if (!wide)
-        {
-            const bytes = host.readMemory(at >>> 0, 1024);
-            const end = bytes.indexOf(0);
-            return String.fromCharCode(...bytes.subarray(0, end < 0 ? bytes.length : end));
-        }
-        const units = new Uint16Array(host.readMemory(at >>> 0, 2048).slice().buffer);
-        const end = units.indexOf(0);
-        return String.fromCharCode(...units.subarray(0, end < 0 ? units.length : end));
-    };
+    const stringAt = (at, wide)=>string(at, wide, 1024);
 
     /**
      * The ways to an image file's bytes, each null when there are none.
@@ -261,6 +253,23 @@ export function createTextureLoader(host){
     };
 
     /**
+     * The image a loader makes a texture or a surface of: a volume, which
+     * only D3DXGetImageInfo describes, is refused.
+     *
+     * @param {string} api @param {Uint8Array | null | Promise<Uint8Array | null>} found
+     * @returns {Promise<import('./images.js').Image | number>}
+     */
+    const flatImageOf = async(api, found)=>{
+        const image = await imageOf(api, found);
+        if (typeof image !== 'number' && image.depth)
+        {
+            host.divergence?.(api, 'answered D3DXERR_INVALIDDATA: a volume: not a 2D texture');
+            return D3DXERR_INVALIDDATA;
+        }
+        return image;
+    };
+
+    /**
      * D3DXGetImageInfoFromFile's family: the description of an image wherever
      * it is.
      *
@@ -309,7 +318,7 @@ export function createTextureLoader(host){
      * @returns {Promise<number>}
      */
     const build = async(api, device, found, ask, cube, thread)=>{
-        const image = await imageOf(api, found);
+        const image = await flatImageOf(api, found);
         if (typeof image === 'number')
         {
             return image;
@@ -730,7 +739,7 @@ export function createTextureLoader(host){
         /** @type {{ texels: Uint8Array, width: number, left: number, top: number } | null} */
         let picked = null;
         return intoSurface(api, dest, destRect, colorKey, async()=>{
-            const image = await imageOf(api, found);
+            const image = await flatImageOf(api, found);
             if (typeof image === 'number')
             {
                 return image;

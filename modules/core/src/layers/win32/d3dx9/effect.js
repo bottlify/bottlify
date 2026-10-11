@@ -270,7 +270,7 @@ export function createEffects(host, helpers, options = {}){
     const handles = new Map();
     /** The clock that dates parameter writes and pass applications. */
     let clock = 1;
-    const { u32, putU32s, method } = createDeviceCalls(host);
+    const { u32, putU32s, method, string } = createDeviceCalls(host);
     const heap = ()=>/** @type {NonNullable<EffectHost['heap']>} */ (host.heap);
     /** @param {number} at @param {number} value */
     const putU32 = (at, value)=>putU32s(at, [value]);
@@ -279,22 +279,9 @@ export function createEffects(host, helpers, options = {}){
     /** @param {number} value */
     const floatBits = value=>new Uint32Array(Float32Array.of(value).buffer)[0];
     /** A NUL-ended string, at most 4 KB. @param {number} at */
-    const cString = at=>{
-        const bytes = host.readMemory(at >>> 0, 4096);
-        const end = bytes.indexOf(0);
-        let text = '';
-        for (const byte of bytes.subarray(0, end < 0 ? bytes.length : end))
-        {
-            text += String.fromCharCode(byte);
-        }
-        return text;
-    };
+    const cString = at=>string(at);
     /** @param {number} at */
-    const wideString = at=>{
-        const units = new Uint16Array(host.readMemory(at >>> 0, 1024).slice().buffer);
-        const end = units.indexOf(0);
-        return String.fromCharCode(...units.subarray(0, end < 0 ? units.length : end));
-    };
+    const wideString = at=>string(at, true, 512);
     /** Text as D3DX's strings are: a byte a character, then a NUL. @param {string} text */
     const encode = text=>Uint8Array.from([...text, '\0'], c=>c.charCodeAt(0) & 0xff);
     /** @param {Uint8Array} bytes */
@@ -716,6 +703,21 @@ export function createEffects(host, helpers, options = {}){
         ? method(thread, pointer, 1, []) : 0)).then(()=>D3D_OK);
 
     /**
+     * A texture parameter's words set. D3DX holds a reference on each texture it
+     * is given (Wine's set_value); this layer does not.
+     * ponytail: no reference is held -- an AddRef and a Release are a guest call
+     * each, and a scene that sets a texture per draw parked its thread on every
+     * one, the frame rate going to zero. Hold them once a reference can be taken
+     * on the host.
+     *
+     * @param {Param} p @param {number[]} given
+     */
+    const setTextures = (p, given)=>{
+        writeWords(p, given.map(word=>word >>> 0));
+        return D3D_OK;
+    };
+
+    /**
      * The value setters and getters of ID3DXBaseEffect, in vtable order, for any
      * object whose state is an effect or a compiler.
      *
@@ -747,6 +749,10 @@ export function createEffects(host, helpers, options = {}){
                         at ? cString(at) : ''));
                     touched(p);
                     return D3D_OK;
+                }
+                if (isTexture(p.model.type))
+                {
+                    return setTextures(p, given);
                 }
                 writeWords(p, given);
                 return D3D_OK;
@@ -975,11 +981,7 @@ export function createEffects(host, helpers, options = {}){
                 {
                     return D3DERR_INVALIDCALL;
                 }
-                if (wordsOf(p)[0] !== (texture >>> 0))
-                {
-                    writeWords(p, [texture >>> 0]);
-                }
-                return D3D_OK;
+                return setTextures(p, [texture >>> 0]);
             } },
             /** HRESULT GetTexture(D3DXHANDLE, LPDIRECT3DBASETEXTURE9 *) */
             objectGetter('GetTexture', isTexture),
@@ -2102,6 +2104,22 @@ export function createEffects(host, helpers, options = {}){
             {
                 continue;
             }
+            // A word that names no object -- its table has no GetLevelDesc --
+            // is said and left, not called through.
+            let slot = 0;
+            try
+            {
+                slot = u32(u32(texture) + TEXTURE_GETLEVELDESC * 4);
+            }
+            catch (e){
+                void e;
+            }
+            if (slot === 0)
+            {
+                host.divergence?.('ID3DXEffect::OnLostDevice', `parameter ${p.model.name} holds`
+                    + ` 0x${(texture >>> 0).toString(16)}, which is no texture: left as it is`);
+                continue;
+            }
             const pool = await withBytes(new Uint8Array(32), async at=>{
                 const answer = await method(thread, texture, TEXTURE_GETLEVELDESC, [0, at]);
                 return answer === D3D_OK ? u32(at + 12) : -1;
@@ -2115,6 +2133,20 @@ export function createEffects(host, helpers, options = {}){
         {
             for (const block of t.saved.values())
             {
+                let release = 0;
+                try
+                {
+                    release = u32(u32(block) + UNKNOWN_RELEASE * 4);
+                }
+                catch (e){
+                    void e;
+                }
+                if (release === 0)
+                {
+                    host.divergence?.('ID3DXEffect::OnLostDevice', `technique ${t.model.name}`
+                        + ` saved 0x${(block >>> 0).toString(16)}, which is no state block`);
+                    continue;
+                }
                 await method(thread, block, UNKNOWN_RELEASE, []);
             }
             t.saved.clear();
@@ -2410,6 +2442,12 @@ export function createEffects(host, helpers, options = {}){
         const shader = { pointer: 0, pixel: model.pixel, ok: false, tokensAt: 0, bindings: [] };
         if (!model.tokens)
         {
+            // Said with the compiler's own first error: a technique left
+            // invalid by it is otherwise only "a shader did not compile".
+            const first = model.messages.split('\n').find(line=>/error/i.test(line))
+                ?? model.messages.split('\n')[0];
+            host.divergence?.('D3DXCreateEffect', `the ${model.profile} shader of`
+                + ` '${model.entry}' did not compile: ${first || 'no message'}`);
             return shader;
         }
         const bytes = new Uint8Array(model.tokens.buffer, model.tokens.byteOffset,
