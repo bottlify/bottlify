@@ -118,6 +118,8 @@ const D3DLOCK_NOOVERWRITE = 0x1000;
 const D3DQUERYTYPE_OCCLUSION = 9;
 /** What GetData answers while the count is not back. */
 const S_FALSE = 1;
+/** How many batches the played side goes without a present before it looks at its objects at zero. */
+const SWEEP_BATCHES = 64;
 const D3DLOCK_DISCARD = 0x2000;
 
 /**
@@ -1633,6 +1635,9 @@ export function createPlayer({ root, ship, read, borrow }){
      * @type {Set<number>}
      */
     const uncounted = new Set();
+    /** Whether a present was played since `uncounted` was last looked at, and the batches since. */
+    let presentedSinceSweep = false;
+    let batchesSinceSweep = 0;
     /**
      * After a call on one, or a batch: held weakly once destroyed.
      *
@@ -1744,6 +1749,10 @@ export function createPlayer({ root, ship, read, borrow }){
             allocs = call.allocs ?? [];
             replies = call.replies ?? [];
             playing = /** @type {string} */ (call.m);
+            if (playing === 'Present')
+            {
+                presentedSinceSweep = true;
+            }
             const args = /** @type {any[]} */ (call.a);
             // A slot is emptied only once its object said it was destroyed and
             // was collected, and a destroyed object is reachable through no
@@ -1811,9 +1820,18 @@ export function createPlayer({ root, ship, read, borrow }){
         },
         read: (buffer, each)=>{
             reader.read(buffer, each);
-            for (const number of uncounted)
+            // Looked at once a frame, or every so many batches for a program
+            // that is not presenting: what it decides is only when a
+            // destroyed object is let go, and a look after every batch went
+            // through thousands of them hundreds of times a second.
+            if (presentedSinceSweep || ++batchesSinceSweep >= SWEEP_BATCHES)
             {
-                holdAsCounted(number, objects[number]);
+                presentedSinceSweep = false;
+                batchesSinceSweep = 0;
+                for (const number of uncounted)
+                {
+                    holdAsCounted(number, objects[number]);
+                }
             }
         },
     };
