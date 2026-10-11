@@ -208,6 +208,18 @@ export function createConsoleIoFunctions(host){
         },
         FreeConsole: { argBytes: 0, handler: ()=>1 },
 
+        /**
+         * BOOL AttachConsole(DWORD dwProcessId): no process here has a
+         * console, so there is none to attach to -- ERROR_INVALID_HANDLE, what
+         * Windows answers for a parent started without one. A GUI program
+         * asks with ATTACH_PARENT_PROCESS to print to the shell it came from
+         * and carries on without.
+         */
+        AttachConsole: {
+            argBytes: 4,
+            handler: ()=>fail(ERROR_INVALID_HANDLE),
+        },
+
 
         /** HWND GetConsoleWindow(void): there is no console, so no window of one */
         GetConsoleWindow: { argBytes: 0, handler: ()=>0 },

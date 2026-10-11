@@ -6556,6 +6556,22 @@ export function createWindowFunctions(host){
         },
 
         /**
+         * BOOL ShowWindowAsync(HWND hWnd, int nCmdShow)
+         *
+         * Only asynchronous for a window another thread owns; every window
+         * here is pumped by the one message loop that would run it, so it is
+         * ShowWindow, answer included, as Windows gives for the caller's own.
+         */
+        ShowWindowAsync: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([hwnd, cmdShow])=>{
+                const record = live(hwnd);
+                return record ? showWindow(record, cmdShow | 0) : 0;
+            },
+        },
+
+        /**
          * BOOL CloseWindow(HWND hWnd)
          *
          * Minimises, despite its name; a program that means to be rid of a
