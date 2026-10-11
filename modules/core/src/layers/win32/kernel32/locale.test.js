@@ -1152,3 +1152,13 @@ test('GetGeoInfo answers for the machine\'s own location, by the types Windows X
         ERROR_INVALID_PARAMETER, ERROR_INVALID_PARAMETER]);
     assert.deepEqual(said, ['GetGeoInfo'], 'the coordinates\' refusal said once');
 });
+
+test('GetLocaleInfo takes LOCALE_NEUTRAL (0) as the user\'s locale, as Windows does: a C'
+    + ' runtime probes GetLocaleInfoW(0, LOCALE_ILANGUAGE, NULL, 0) for the wide functions', ()=>{
+    const host = fakeHost();
+    const fns = createLocaleFunctions(host);
+    const ILANGUAGE = 0x0001;
+    assert.equal(fns.GetLocaleInfoW.handler([0, ILANGUAGE, 0, 0]), 5, '"0409" and its terminator');
+    assert.equal(fns.GetLocaleInfoA.handler([0, ILANGUAGE, 0x100, 8]), 5);
+    assert.equal(new TextDecoder().decode(host.bytes.subarray(0x100, 0x104)), '0409');
+});
