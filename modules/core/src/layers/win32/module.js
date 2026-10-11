@@ -88,7 +88,7 @@ import { createDbghelpFunctions } from './dbghelp/functions.js';
 import { createCfgmgrFunctions } from './cfgmgr32/functions.js';
 import { createMsvfwFunctions } from './msvfw32/functions.js';
 import { createAvifilFunctions } from './avifil32/functions.js';
-import { DPLAYX_ORDINALS, createDplayFunctions } from './dplayx/functions.js';
+import { DPLAYX_ORDINALS, createDplayFunctions, registerDplayClasses } from './dplayx/functions.js';
 import { createIostreamFunctions } from './msvcirt/functions.js';
 import { formatToString } from './msvcrt/format.js';
 import { createDsetupFunctions } from './dsetup/functions.js';
@@ -1188,6 +1188,17 @@ export function createWin32Module(){
                 divergence: config?.divergence,
             });
 
+            // DirectPlay's session and lobby objects, which a program makes
+            // through COM as often as through dplayx's exports.
+            /** @type {import('./dplayx/session.js').SessionHost} */
+            const dplayHost = {
+                writeMemory, readMemory,
+                allocate: bytes=>heap.allocate(bytes),
+                callGuest: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
+                callerThread: ()=>bridge.callerThread(),
+            };
+            registerDplayClasses(com, dplayHost);
+
             // JScript and VBScript, the Active Scripting engines a host -- an
             // installer's script, a page, a configuration tool -- asks COM for,
             // both on one host of the scripting interfaces.
@@ -2210,9 +2221,7 @@ export function createWin32Module(){
 
                 // DirectPlay with no service provider, and a lobby that did
                 // not launch the program.
-                'DPLAYX.dll': createDplayFunctions({
-                    writeMemory, readMemory, vtables: comVtables,
-                }),
+                'DPLAYX.dll': createDplayFunctions({ ...dplayHost, vtables: comVtables }),
 
                 // The rich edit classes are always registered; these are the
                 // libraries a program loads before it makes one.
