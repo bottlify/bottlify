@@ -3368,11 +3368,6 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             {
                 return D3DERR_INVALIDCALL;
             }
-            if (services.drawsFrom)
-            {
-                // It reads its source vertices as a draw does.
-                reportDynamicReads(services.drawsFrom, drawnStreams(), start, vertices);
-            }
             return processStreams({
                 memory: { readMemory: services.readMemory, writeMemory: services.writeMemory },
                 model,

@@ -391,22 +391,6 @@ export function createDynamicBuffer(options){
         flush,
 
         /**
-         * A lock given back with nothing taken from it: the bytes stay as the
-         * buffer's copy has them, and nothing goes to the queue. For a buffer
-         * whose draws take what they read themselves (a dynamic one, through
-         * `rewrite`), so an unlock of a few megabytes a frame costs nothing.
-         *
-         * @param {import('../contract.js').BufferLock} lock
-         */
-        abandon(lock){
-            if (!held || lock !== held)
-            {
-                throw new Error(`Unlock of "${label}" without a matching lock`);
-            }
-            held = null;
-        },
-
-        /**
          * Bytes put into the live backing as they are, renaming nothing and
          * asking nothing of the draws that read it: for bytes inside a lock
          * still held, which no draw recorded before the lock reads.
