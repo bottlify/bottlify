@@ -7507,6 +7507,15 @@ function portableOptions(options){
 }
 
 /**
+ * The table of the journal a machine writes on this thread: the system's,
+ * where the program's own journal is in a worker and its table is `log`.
+ *
+ * @param {any[]} tables
+ */
+const journalOf = tables=>tables.find(table=>table.name === 'system-log')
+    ?? tables.find(table=>table.name === 'log');
+
+/**
  * The call areas a run's journal starts with switched off; see `buildApp`.
  */
 const CALLS_OFF = Object.freeze({
@@ -7595,8 +7604,16 @@ async function buildSystemHost(deps){
      * @type {any[]}
      */
     let programTables = [];
-    /** The tables this thread keeps for the run: its journal and its sound output. */
-    const ownTables = new Set(['log', 'audio', 'windows']);
+    /**
+     * The tables this thread keeps for the run -- its journal, its sound
+     * output, the window manager -- under the names a program's own tables
+     * have where it runs on this thread. The program's journal and sound
+     * (its phases, frames, pumps, buffers) are what a reader of a run wants
+     * under those names, as with one process; this thread's go beside them,
+     * always under the name given here, so a name says whose table it is.
+     */
+    const ownTables = new Map([['log', 'system-log'], ['audio', 'system-audio'],
+        ['windows', 'windows']]);
 
     return {
         log: {
@@ -7743,9 +7760,10 @@ async function buildSystemHost(deps){
                 { name: 'audio', status: 'ready', metrics: output.diagnostics() },
                 { name: 'windows', status: 'ready',
                     metrics: system.windows.manager.diagnostics() }];
-            const theirs = programTables.filter(table=>!ownTables.has(table.name));
+            const theirs = programTables.filter(table=>ownTables.get(table.name) !== table.name);
             const named = new Set(theirs.map(table=>table.name));
-            return [...own.filter(table=>!named.has(table.name)), ...theirs];
+            return [...own.map(table=>({ ...table, name: ownTables.get(table.name) ?? table.name }))
+                .filter(table=>!named.has(table.name)), ...theirs];
         },
         /** The program's tables as it ended. @param {any[] | undefined} tables */
         ended: tables=>{
@@ -8273,9 +8291,7 @@ export async function createApp(options){
      * machine built next to continue from.
      */
     const noteLogSequence = ()=>{
-        const written = current.diagnostics()
-            .find((/** @type {any} */ layer)=>layer.name === 'log')
-            ?.metrics?.journal?.written;
+        const written = journalOf(current.diagnostics())?.metrics?.journal?.written;
         if (typeof written === 'number')
         {
             logSequence = written;
@@ -9305,9 +9321,7 @@ export async function createApp(options){
             // wrote it still stands. The child's journal continues from
             // here, so the cursor a reader is holding points into it rather
             // than past the end of a block that started over.
-            const written = line.current.diagnostics()
-                .find((/** @type {any} */ layer)=>layer.name === 'log')
-                ?.metrics?.journal?.written;
+            const written = journalOf(line.current.diagnostics())?.metrics?.journal?.written;
             if (typeof written === 'number')
             {
                 logSequence = written;

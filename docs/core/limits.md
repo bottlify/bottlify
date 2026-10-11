@@ -26,8 +26,9 @@ differently raises a `divergence` event naming the API.
   the engine's thread keeps open, and puts what it makes there; a batch's lookups cross the link
   together, one wait for the batch. It places no hooks (`hooks`, `watchImport`), and reaches no
   network transport the page handed in (`win32.network`).
-  The run's diagnostics are the program's tables as it last answered, with the journal and the
-  sound output the engine's thread keeps.
+  The run's diagnostics are the program's tables as it last answered -- its `log` (phases, frames)
+  and `audio` among them, as with one process -- with the engine's thread's own journal and sound
+  output beside them as `system-log` and `system-audio`.
 - The run's translation workers are a pool (`cork.pool`): each process is lent one, and more only
   while its translation lags and a trial shows they make it go faster. On a machine whose cores a
   loading game already keeps busy -- four cores, measured -- a second worker makes loading slower,
