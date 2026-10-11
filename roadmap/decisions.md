@@ -698,3 +698,20 @@ first instruction. Absent, the runtime treats the system as one without side-by-
 and runs. Removed on 2026-09-09 (16110a45), added back by an export audit on 2026-10-08
 (884102c9) and Gothic 3 met R6034 at vcomp.dll that day; kernel32's system.test.js now fails
 if the names come back. *2026-10-08.*
+
+**A periodic multimedia timer that has fallen more than a period behind fires once, not once per
+tick missed.** Its next due time moves to the first tick of the same grid still to come, and the
+ticks passed over are counted (`multimediaTimers.skipped`). Re-armed from its due time alone, a
+callback slower than its period owed more ticks with every one, and the time-critical timer
+thread took the processor at every turn: Delta Force's 33 ms timer was measured 2.3 s behind
+and still falling, the main thread getting what was left. What Windows does with ticks a late
+callback missed was not measured. *2026-10-11.*
+
+**A run-time LoadLibrary of a name the engine's table answers does not load the system
+directory's copy beside it.** Static imports and a loaded library's own dependencies already
+took the table's module, which is mapped from the start; only LoadLibrary searched the system
+directory first, so a process could hold an installer's d3dx9_24.dll beside ours -- the
+installed effect compiler then made fx_2_0 bytecode our D3DXCreateEffect was asked to read
+(Battlefield 2). A copy beside the program still wins. This narrows the 2026-09-26 entry above
+(the installed runtime in `system32` is what loads): for a name the table answers, it is not,
+whichever way the library is reached. *2026-10-11.*
