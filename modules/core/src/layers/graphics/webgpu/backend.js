@@ -1228,6 +1228,17 @@ export function createBackend(options){
          *
          * @returns {import('./contract.js').PresentedFrame | null}
          */
+        /**
+         * Settled when the GPU has done everything submitted so far, or null
+         * where the queue cannot say.
+         *
+         * @returns {Promise<void> | null}
+         */
+        workDone(){
+            return typeof queue.onSubmittedWorkDone === 'function'
+                ? queue.onSubmittedWorkDone() : null;
+        },
+
         lastPresented(){
             return lastPresented;
         },

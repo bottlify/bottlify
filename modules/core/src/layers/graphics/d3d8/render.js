@@ -2741,7 +2741,7 @@ const CLEAR_STRIDE = 20;
  *     Every draw reads the bytes it reaches from guest memory again, held
  *     lock or not -- a debugging aid, for a program that writes a buffer
  *     outside its locks.
- * @property {{ dumpFrames: number, bufferLocks?: string,
+ * @property {{ dumpFrames: number, bufferLocks?: string, skipTexture?: string,
  *     written?: (lines: string[], frame: number) => void }} [liveDump]
  *     Set on a running program to have its next frames with draws written
  *     down as `dumpDraws` writes them; counts down as they are, and the last
@@ -2812,7 +2812,10 @@ export function createRenderer(options){
     const divergence = options.divergence ?? null;
     // One id or several, comma-separated: a picture painted by a family of
     // draws is only removed by removing the family.
-    const skipTextures = new Set((options.skipTexture ?? '').split(',').filter(Boolean));
+    const fixedSkips = new Set((options.skipTexture ?? '').split(',').filter(Boolean));
+    /** The textures whose draws are dropped: the device's own, or what a running program was given. */
+    const skipTextures = ()=>(liveDump?.skipTexture
+        ? new Set(liveDump.skipTexture.split(',').filter(Boolean)) : fixedSkips);
     const probeTexture = options.probeTexture ?? null;
     const compressedTextures = options.compressedTextures === true;
     // A device made with `clip-distances` clips by the distances a vertex
@@ -3046,7 +3049,7 @@ export function createRenderer(options){
      * targets back sees, of which the GPU's own part is only some.
      */
     const timing = { replays: 0, replayMs: 0, worstReplayMs: 0, readBacks: 0, readBackMs: 0,
-        worstReadBackMs: 0 };
+        worstReadBackMs: 0, gpuFrames: 0, gpuMs: 0, worstGpuMs: 0 };
     const clock = ()=>(typeof performance === 'undefined' ? Date.now() : performance.now());
 
     const counters = {
@@ -7738,6 +7741,14 @@ export function createRenderer(options){
         if (processing.program && (processing.vertexShader !== 0 || processing.pixelShader !== 0))
         {
             const prepared = prepareProgram(model, stride, topology, processing.program);
+            const skipped = skipTextures();
+            if (prepared && skipped.size > 0 && prepared.program?.samplerBindings?.some(
+                (/** @type {any} */ binding)=>!binding.placeholder
+                    && skipped.has(textures.get(binding.texture)?.id ?? '')))
+            {
+                skip('texture');
+                return null;
+            }
             if (prepared)
             {
                 countLighting(model, prepared);
@@ -7829,8 +7840,9 @@ export function createRenderer(options){
         const cascade = stageCascade(model, layout, { onesOf: onesOfTexture });
         keyStages(model, cascade);
         reportCascade(cascade);
-        if (skipTextures.size > 0 && cascade.textures.some(
-            texture=>texture && skipTextures.has(textures.get(texture)?.id ?? '')))
+        const skipped = skipTextures();
+        if (skipped.size > 0 && cascade.textures.some(
+            texture=>texture && skipped.has(textures.get(texture)?.id ?? '')))
         {
             skip('texture');
             return null;
@@ -9528,6 +9540,15 @@ export function createRenderer(options){
             timing.replays++;
             timing.replayMs += took;
             timing.worstReplayMs = Math.max(timing.worstReplayMs, took);
+            // How far the GPU runs behind what was handed to it: an answer
+            // that needs the GPU -- a count, a read back -- waits that long.
+            const submitted = clock();
+            backend.workDone?.()?.then(()=>{
+                const behind = clock() - submitted;
+                timing.gpuFrames++;
+                timing.gpuMs += behind;
+                timing.worstGpuMs = Math.max(timing.worstGpuMs, behind);
+            }, ()=>{});
         }
         lastFrame = recorded.commands;
         if (counted && occlusion)

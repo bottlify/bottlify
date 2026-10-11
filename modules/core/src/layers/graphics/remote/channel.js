@@ -121,21 +121,32 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
      * how many, and the milliseconds from the call to its answer -- what turns
      * two threads drawing side by side into one waiting on the other.
      *
-     * @type {Map<string, { count: number, ms: number, maxMs: number }>}
+     * @type {Map<string, { count: number, ms: number, maxMs: number, queuedMs: number,
+     *     heldMs: number, backMs: number }>}
      */
     const waits = new Map();
     /** @param {string} name @param {number} since */
-    const waited = (name, since)=>{
+    /**
+     * @param {string} name @param {number} since
+     * @param {{ queued?: number, held?: number, back?: number }} [parts]  where an
+     *     answer's time went: its batch on the way there, the played side holding
+     *     it, and on the way back
+     */
+    const waited = (name, since, parts)=>{
         const ms = now() - since;
-        const held = waits.get(name) ?? { count: 0, ms: 0, maxMs: 0 };
+        const held = waits.get(name) ?? { count: 0, ms: 0, maxMs: 0, queuedMs: 0, heldMs: 0,
+            backMs: 0 };
         held.count++;
         held.ms += ms;
         held.maxMs = Math.max(held.maxMs, ms);
+        held.queuedMs += parts?.queued ?? 0;
+        held.heldMs += parts?.held ?? 0;
+        held.backMs += parts?.back ?? 0;
         waits.set(name, held);
     };
     let pending = false;
     let serial = 0;
-    /** @type {Map<number, (reply: any) => void>} */
+    /** @type {Map<number, (reply: any, parts?: { queued?: number, held?: number, back?: number }) => void>} */
     const waiting = new Map();
     let presents = 0;
     let presented = 0;
@@ -193,7 +204,7 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
         const buffer = writer.take();
         sent.batches++;
         sent.bytes += buffer.byteLength;
-        post({ type: 'calls', buffer }, [buffer]);
+        post({ type: 'calls', buffer, at: shared() }, [buffer]);
         lender?.sent();
         // What taking and posting the batch cost the program's thread.
         sent.ms += now() - sentAt;
@@ -258,8 +269,8 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
                 writer.u32(number);
                 flush();
                 const since = now();
-                return new Promise(resolve=>waiting.set(number, reply=>{
-                    waited(name, since);
+                return new Promise(resolve=>waiting.set(number, (reply, parts)=>{
+                    waited(name, since, parts);
                     resolve(reply);
                 }));
             }
@@ -331,7 +342,9 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
                 {
                     const resolve = waiting.get(message.serial);
                     waiting.delete(message.serial);
-                    resolve?.({ answer: message.answer, outs: message.outs ?? [] });
+                    resolve?.({ answer: message.answer, outs: message.outs ?? [] }, {
+                        queued: message.queued, held: message.held,
+                        back: typeof message.at === 'number' ? shared() - message.at : undefined });
                     break;
                 }
                 case 'diagnostics':
@@ -424,9 +437,18 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
         /** The calls waited on, by name, with the milliseconds they took. */
         waits: ()=>Object.fromEntries([...waits].map(([name, sum])=>[name, {
             count: sum.count, ms: Math.round(sum.ms), maxMs: Math.round(sum.maxMs),
+            queuedMs: Math.round(sum.queuedMs), heldMs: Math.round(sum.heldMs),
+            backMs: Math.round(sum.backMs),
         }])),
     };
 }
+
+/**
+ * Milliseconds on a clock both threads read alike: each thread's own clock
+ * starts when that thread did.
+ */
+const shared = ()=>(typeof performance === 'undefined' ? Date.now()
+    : performance.timeOrigin + performance.now());
 
 /**
  * The played side.
@@ -450,11 +472,12 @@ export function createReceiver({ played, post }){
             ? `${error.message}\n${error.stack ?? ''}` : String(error) });
     };
 
-    /** @param {any} call @param {any} answered */
-    const reply = (call, answered)=>{
+    /** @param {any} call @param {any} answered @param {number} queued @param {number} began */
+    const reply = (call, answered, queued, began)=>{
         /** @param {{ answer: any, outs: any[] }} settled */
         const send = settled=>post({ type: 'answer', serial: call.serial,
-            answer: crossable(settled.answer), outs: crossable(settled.outs) });
+            answer: crossable(settled.answer), outs: crossable(settled.outs),
+            queued, held: shared() - began, at: shared() });
         if (answered instanceof Promise)
         {
             answered.then(send, fail);
@@ -481,9 +504,12 @@ export function createReceiver({ played, post }){
             {
                 return;
             }
+            const arrived = shared();
+            const queued = typeof message.at === 'number' ? arrived - message.at : 0;
             try
             {
                 played.read(message.buffer, call=>{
+                    const began = shared();
                     const answer = played.play(call);
                     if (call.m === 'diagnostics')
                     {
@@ -491,7 +517,7 @@ export function createReceiver({ played, post }){
                     }
                     else if (call.wait === WAIT.ANSWER)
                     {
-                        reply(call, answer);
+                        reply(call, answer, queued, began);
                     }
                     else if (call.wait === WAIT.PACED)
                     {

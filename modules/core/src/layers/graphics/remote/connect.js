@@ -373,16 +373,21 @@ export function connectGraphicsWorker(options){
         },
         answered: ()=>Promise.all(senders.map(sender=>sender.answered())).then(()=>{}),
         diagnostics: ()=>{
-            /** @type {Record<string, { count: number, ms: number, maxMs: number }>} */
+            /** @type {Record<string, { count: number, ms: number, maxMs: number, queuedMs: number,
+             *     heldMs: number, backMs: number }>} */
             const waits = {};
             for (const sender of senders)
             {
                 for (const [name, held] of Object.entries(sender.waits()))
                 {
-                    const sum = waits[name] ??= { count: 0, ms: 0, maxMs: 0 };
+                    const sum = waits[name] ??= { count: 0, ms: 0, maxMs: 0, queuedMs: 0, heldMs: 0,
+                        backMs: 0 };
                     sum.count += held.count;
                     sum.ms += held.ms;
                     sum.maxMs = Math.max(sum.maxMs, held.maxMs);
+                    sum.queuedMs += held.queuedMs ?? 0;
+                    sum.heldMs += held.heldMs ?? 0;
+                    sum.backMs += held.backMs ?? 0;
                 }
             }
             return { roots: ports.length, frames, dropped, waits,

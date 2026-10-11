@@ -4,6 +4,7 @@
  * See LICENSE for details
  */
 
+import { createJsSampler } from './host/js-samples.js';
 import { fitFrame, isShown, placementOf, stretchFrame } from './letterbox.js';
 import { assembleModules } from './core.js';
 import { createEvents } from './events.js';
@@ -124,6 +125,10 @@ import { createInputRoute } from './layers/input/route.js';
  *     default button as Enter would, and each answer is reported as a divergence.
  * @property {boolean} [profileCalls]  Time every host call as a phase of its own, for a
  *                                     report's cost per API; two clock readings a call.
+ * @property {boolean} [sampleJs]  Keep the browser's sampler of this thread's JavaScript
+ *     running and report what it spends its time in, function by function, as the
+ *     `js` table (`host/js-samples.js`). Needs `Document-Policy: js-profiling` on
+ *     the page and the worker scripts; off by default.
  * @property {() => boolean} [pageHidden]
  *     Whether nobody is looking at this run. A hidden page's timers are clamped
  *     by the browser, which stops the machine rather than slowing it, so the
@@ -6114,6 +6119,7 @@ async function buildApp(options){
     kernel.refreshClockWith?.(()=>creditClock());
 
     const breathe = createMacrotask();
+    const jsSampler = options.sampleJs ? createJsSampler() : null;
     const pacing = options.pacing ?? pagePacing({
         macrotask: breathe,
         hidden: options.pageHidden ?? pageIsHidden,
@@ -7323,6 +7329,13 @@ async function buildApp(options){
             ...options.system?.windows?.manager ? [{ name: 'windows', status: 'ready',
                 metrics: options.system.windows.manager.diagnostics() }] : [],
             {
+                name: 'js',
+                version: '0.1.0',
+                status: 'ready',
+                metrics: jsSampler?.snapshot()
+                    ?? { measured: false, reason: 'off: the sampleJs option' },
+            },
+            {
                 name: 'app',
                 version: '0.1.0',
                 status: 'ready',
@@ -7489,6 +7502,7 @@ async function buildApp(options){
                 blocks?.stop();
             }
             breathe.close();
+            jsSampler?.stop();
             return core.dispose().then(()=>{
                 if (ownsTranslationStore)
                 {
@@ -7919,6 +7933,21 @@ function liveDumpOf(worker){
             }
             worker.postMessage({ type: 'debug', bufferLocks: mode });
             return mode;
+        },
+        /**
+         * Drops every draw that samples one of these textures from now on --
+         * `t12,t40` as a frame dump names them, '' none -- so two frames
+         * differ by those draws and nothing else.
+         *
+         * @param {string} [ids]
+         */
+        skipTexture: (ids = '')=>{
+            if (!worker)
+            {
+                throw new Error('skipTexture: this run draws without a graphics worker');
+            }
+            worker.postMessage({ type: 'debug', skipTexture: ids });
+            return ids;
         },
         dumped: ()=>last,
     };

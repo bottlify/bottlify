@@ -101,6 +101,8 @@ export function serveGraphics(scope, deps){
         dumpFrames: 0,
         /** How buffer locks are taken (`app.debug.bufferLocks`): '' as asked, 'rename' always renaming. */
         bufferLocks: '',
+        /** Textures whose draws are dropped (`app.debug.skipTexture`), `t12,t40`; '' none. */
+        skipTexture: '',
         /** @param {string[]} lines @param {number} frame */
         written: (lines, frame)=>{
             const dumped = { type: 'dumped', lines, frame };
@@ -504,6 +506,10 @@ export function serveGraphics(scope, deps){
                 if ('bufferLocks' in data)
                 {
                     liveDump.bufferLocks = String(data.bufferLocks ?? '');
+                }
+                if ('skipTexture' in data)
+                {
+                    liveDump.skipTexture = String(data.skipTexture ?? '');
                 }
                 break;
             case 'client':
