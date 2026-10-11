@@ -152,7 +152,7 @@ test('setting a format makes a declaration, the same one each time, that reports
     assert.equal(first.declaration.fvf, FVF_XYZ_DIFFUSE);
     /** @type {{ count?: number, elements?: any[] }} */
     const read = {};
-    first.declaration.GetDeclaration(read, 8);
+    first.declaration.GetDeclaration(read, true);
     assert.deepEqual(read.elements?.slice(0, 2), [
         element(D3DDECLUSAGE.POSITION, D3DDECLTYPE.FLOAT3, 0),
         element(D3DDECLUSAGE.COLOR, D3DDECLTYPE.D3DCOLOR, 12),
