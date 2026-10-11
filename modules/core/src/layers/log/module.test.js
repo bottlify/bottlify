@@ -138,6 +138,9 @@ test('the phase table is long enough to hold the loop and the calls together', a
     }
 
     assert.equal((logModule.diagnostics().metrics?.topPhases ?? []).length, 16);
+    // The phases past the sixteenth still count toward the total: what no
+    // phase covered is wall time minus all of them, not minus the ones listed.
+    assert.equal(logModule.diagnostics().metrics?.phasesSelfMs, 20 * 5);
     await logModule.dispose();
 });
 

@@ -95,6 +95,8 @@ export function createJsSampler(options = {}){
     let stopped = typeof Sampler !== 'function';
     /** @type {ReturnType<typeof setTimeout> | undefined} */
     let timer;
+    /** @type {any} */
+    let running = null;
 
     const window = ()=>{
         if (stopped)
@@ -115,8 +117,10 @@ export function createJsSampler(options = {}){
             stopped = true;
             return;
         }
+        running = sampler;
         const began = now();
         timer = setTimeout(()=>{
+            running = null;
             sampler.stop().then((/** @type {any} */ trace)=>{
                 last = { measured: true, windowMs: Math.round(now() - began),
                     ...summarise(trace, top) };
@@ -132,6 +136,10 @@ export function createJsSampler(options = {}){
         stop: ()=>{
             stopped = true;
             clearTimeout(timer);
+            // The browser's sampler keeps sampling until told otherwise, the
+            // window's timer gone or not.
+            running?.stop().catch(()=>{});
+            running = null;
         },
     };
 }
