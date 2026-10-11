@@ -412,15 +412,10 @@ flowchart LR
   registers.
 - **Memory and self-modifying code.** Outside precise mode reads are not checked: the address simply
   wraps into the program's memory. Every write checks the page's flag byte. When the program writes
-  where translated code lies on a page, the region exits. The first such write drops all of that
-  page's translations; the regions formed there afterwards keep a copy of every byte they were
-  formed from, and a later write drops only those whose bytes it actually changed -- a mixer that
-  rewrites its voice patches with the bytes already there keeps its code, and the code it drops is
-  asked for again at once. The bounds of the code are kept to 32 bytes, so a write to data next to
-  code does not count as a write into code. A page that loses its translations 8 times within
-  100 ms is marked volatile (`VOLATILE`) and interpreted for 2 s, twice as long each time it is
-  marked again, then translated again. With several executors a page still loses all its
-  translations on every such write.
+  where translated code lies on a page, the region exits and all of that page's translations are
+  dropped. The bounds of the code are kept to 32 bytes, so a write to data next to code does not count
+  as a write into code. A page that has lost its translations 8 times is marked volatile
+  (`VOLATILE`), and its code is only interpreted from then on.
 - **Several executors of a process** (stage 3 of `roadmap/v2/`, `createApp`'s `executors`). Each
   thread has an executor of its own, where its translations are: the process's first thread runs on
   the process's own, each later one on the other executor fewest live threads call theirs. A turn

@@ -30,7 +30,7 @@ const le = value=>[value & 0xff, value >> 8 & 0xff, value >> 16 & 0xff, value >>
  *
  * @param {number[]} writer @param {number} esp
  * @returns {Promise<{ a: boolean, b: boolean, c: boolean, exits: string[] }>}  whether each
- *     translation was entered after every run of the writer
+ *     translation is still entered
  */
 async function afterWriting(writer, esp){
     const layout = ownLayout({ ramSize: 16 << 20, hashSlots: 1 << 16 });
@@ -69,21 +69,17 @@ async function afterWriting(writer, esp){
     view().setUint32(layout.regs + 4 * 4, esp, true);
     /** @type {string[]} */
     const exits = [];
-    // Looked at after each run, before the next forms what a drop asked for again.
-    const kept = { a: true, b: true, c: true };
     for (let eip = WRITER; exits.length < 20;)
     {
         exits.push(await run(eip));
-        kept.a &&= runtime.entryOf(A, 0) >= 0;
-        kept.b &&= runtime.entryOf(B, 0) >= 0;
-        kept.c &&= runtime.entryOf(C, 0) >= 0;
         if (exits[exits.length - 1] === 'halt')
         {
             break;
         }
         eip = view().getUint32(layout.eip, true);
     }
-    return { ...kept, exits };
+    return { a: runtime.entryOf(A, 0) >= 0, b: runtime.entryOf(B, 0) >= 0,
+        c: runtime.entryOf(C, 0) >= 0, exits };
 }
 
 test('a rep stos over code on two pages drops both pages\' translations', async()=>{

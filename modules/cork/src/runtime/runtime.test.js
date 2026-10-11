@@ -539,64 +539,6 @@ test('a store into a code page leaves stale and drops the page\'s regions', asyn
     assert.equal(d.exits.stale, 1);
 });
 
-test('a store into code drops only the regions whose bytes it changed, and asks for them again',
-    async()=>{
-        const m = machine({ precise: true });
-        m.write(CODE, COUNTDOWN);
-        // mov byte [0x1008], 0x90; hlt -- over the loop's hlt
-        m.write(CODE + 0x100, [0xc6, 0x05, 0x08, 0x10, 0, 0, 0x90, 0xf4]);
-        // mov byte [0x1008], 0xf4; hlt -- the hlt back
-        m.write(CODE + 0x200, [0xc6, 0x05, 0x08, 0x10, 0, 0, 0xf4, 0xf4]);
-        for (const at of [CODE, CODE + 0x100, CODE + 0x200])
-        {
-            m.runtime.noteHot(at);
-        }
-        assert.equal(await m.runtime.translatePending(), 3);
-        // The page's first store into code: its regions kept no copy of their
-        // bytes, and every one goes -- and is asked for again at once.
-        assert.equal(m.runtime.run(m.runtime.entryOf(CODE + 0x100), 1000).kind, 'stale');
-        assert.equal(m.runtime.diagnostics().regions, 0);
-        assert.equal(await m.runtime.translatePending(), 3, 'formed again without a new note');
-        // The same byte again: nothing changed, nothing goes.
-        assert.equal(m.runtime.run(m.runtime.entryOf(CODE + 0x100), 1000).kind, 'stale');
-        let d = m.runtime.diagnostics();
-        assert.equal(d.regions, 3);
-        assert.equal(d.storesKept, 1);
-        assert.equal(d.invalidations, 3);
-        // Another byte: the loop's region, made of it, goes; the writers stay.
-        assert.equal(m.runtime.run(m.runtime.entryOf(CODE + 0x200), 1000).kind, 'stale');
-        d = m.runtime.diagnostics();
-        assert.equal(d.invalidations, 4);
-        assert.equal(m.runtime.entryOf(CODE), -1);
-        assert.notEqual(m.runtime.entryOf(CODE + 0x100), -1);
-        assert.notEqual(m.runtime.entryOf(CODE + 0x200), -1);
-        assert.equal(await m.runtime.translatePending(), 1);
-        m.setReg(1, 0);
-        assert.equal(m.runtime.run(m.runtime.entryOf(CODE), 100000).kind, 'halt',
-            'the loop as its bytes are now');
-    });
-
-test('a volatile page is translated again once its hold is over', async()=>{
-    const m = machine({ volatileAfter: 3, volatileHoldMs: 0 });
-    m.write(CODE, COUNTDOWN);
-    for (let i = 0; i < 3; i++)
-    {
-        m.runtime.noteHot(CODE);
-        await m.runtime.translatePending();
-        assert.notEqual(m.runtime.entryOf(CODE), -1, `round ${i}`);
-        m.runtime.invalidatePage(CODE >>> 12);
-    }
-    let d = m.runtime.diagnostics();
-    assert.equal(d.volatilePages, 1);
-    assert.equal(d.volatileNow, 1);
-    // The hold is over at the next turn of the translator, and the code that
-    // was dropped there is formed again without the interpreter asking.
-    assert.equal(await m.runtime.translatePending(), 1);
-    assert.notEqual(m.runtime.entryOf(CODE), -1);
-    d = m.runtime.diagnostics();
-    assert.equal(d.volatileNow, 0);
-});
-
 test('outside precise a store into a code page leaves before it for the host, nothing stored',
     async()=>{
         const m = machine();

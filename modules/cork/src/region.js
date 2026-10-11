@@ -76,10 +76,6 @@ import { decode } from './decode/decoder.js';
  *                                       ones a worker forming it again may, and no others
  * @property {SwitchTable[]} [tables]    the switch tables its jumps go through, read as data
  * @property {string} hash               of the decoded bytes, for the cache
- * @property {{ start: number, bytes: Uint8Array }[]} [sources]  every byte forming read, as
- *                                       it read them: its blocks, and what it looked at past
- *                                       them -- a callee, a jump's target, a table
- *                                       (`sourcesOf`)
  * @property {Map<string, number>} refused   opcode → times a refusal cut a block
  */
 
@@ -482,18 +478,6 @@ export function formRegion(read, entry,
         return yes;
     };
     const source = read;
-    /** The bytes read, as `[start, end)` spans in the order met. @type {[number, number][]} */
-    const spans = [];
-    /** @param {number} address @param {number} length */
-    const noteRead = (address, length)=>{
-        const last = spans[spans.length - 1];
-        if (last !== undefined && address >= last[0] && address <= last[1])
-        {
-            last[1] = Math.max(last[1], address + length);
-            return;
-        }
-        spans.push([address, address + length]);
-    };
     read = address=>{
         const page = address >>> 12;
         if (page !== lastTouched)
@@ -501,7 +485,6 @@ export function formRegion(read, entry,
             lastTouched = page;
             touched.add(page);
         }
-        noteRead(address, 1);
         return source(address);
     };
     /** @param {number} address */
@@ -516,7 +499,6 @@ export function formRegion(read, entry,
             else
             {
                 // Decoded for another region: its bytes are read here all the same.
-                noteRead(address, 'length' in decoded ? Math.max(decoded.length, 1) : 1);
                 for (let page = address >>> 12;
                     page <= (address + ('length' in decoded ? Math.max(decoded.length, 1) : 1)
                         - 1) >>> 12; page++)
@@ -863,35 +845,8 @@ export function formRegion(read, entry,
         formable: granted,
         tables,
         hash: hashRegion(read, { blocks: ordered, tables }),
-        sources: copiesOf(source, spans),
         refused,
     };
-}
-
-/**
- * The bytes of `spans`, merged where they meet, as `read` answers now.
- *
- * @param {(address: number) => number} read @param {[number, number][]} spans
- * @returns {{ start: number, bytes: Uint8Array }[]}
- */
-function copiesOf(read, spans){
-    const sorted = [...spans].sort((a, b)=>a[0] - b[0]);
-    /** @type {[number, number][]} */
-    const merged = [];
-    for (const [start, end] of sorted)
-    {
-        const last = merged[merged.length - 1];
-        if (last !== undefined && start <= last[1])
-        {
-            last[1] = Math.max(last[1], end);
-        }
-        else
-        {
-            merged.push([start, end]);
-        }
-    }
-    return merged.map(([start, end])=>({ start,
-        bytes: Uint8Array.from({ length: end - start }, (_, at)=>read(start + at)) }));
 }
 
 /**

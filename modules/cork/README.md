@@ -149,9 +149,7 @@ something, and measure it.
 | `maxBatchRegions` | 256 | The most one batch takes when the queue is deep. | As above. |
 | `loadingBatch`, `loadingShare` | 16, 0.25 | While the translation worker loads, the largest batch emitted on the main thread and the share of time it may take. | Lower for smoother starts, higher to translate earlier. |
 | `inFlightMs` | 10000 | How long a batch may be with a worker before it is given up. | Lower only in tests. |
-| `volatileAfter` | 8 | Writes that drop one page's code, within `volatileWindowMs`, before the page is left to the interpreter. A write that leaves the bytes as they were drops nothing. | Higher for a program that rewrites code often but runs it long; lower if it keeps rewriting. |
-| `volatileWindowMs` | 100 | The window `volatileAfter` counts in. | Longer to give up on a page rewritten less often. |
-| `volatileHoldMs` | 2000 | How long a volatile page is interpreted before it is translated again; doubles each time it is left again. | Longer for code that keeps changing for good. |
+| `volatileAfter` | 8 | Invalidations of one page before its code is left to the interpreter for good. | Higher for a program that rewrites code often but runs it long; lower if it keeps rewriting. |
 | `worker` | on where `Worker` exists | Emit and compile in translation workers. | `false` translates on the calling thread: simpler, but every batch stalls it. |
 | `workerUrl` | beside the runtime | Where `translator.worker.js` is. | When a bundler moves it. |
 | `translators` | 1 | Workers the runtime opens itself; 0 when a host's pool lends them. | More when cores are spare and loading translates a lot. |

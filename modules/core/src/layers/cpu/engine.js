@@ -197,11 +197,8 @@
  *     first instruction.
  * @property {number} [newTargetWork]  What a jump target new to a host counts as against
  *     `wasmInterpreterAfter`. Default 128.
- * @property {number} [volatileAfter]  Writes that drop one page's code, within
- *     `volatileWindowMs` of each other, before the page is left to the interpreter. Default 8.
- * @property {number} [volatileWindowMs]  The window those writes are counted in. Default 100.
- * @property {number} [volatileHoldMs]  How long a page is left to the interpreter before it is
- *     translated again, twice as long each time it is left again. Default 2000.
+ * @property {number} [volatileAfter]  Invalidations of one page before its code is left to the
+ *     interpreter for good. Default 8.
  * @property {boolean} [undoLog]  A differential build: every store's old bytes recorded, so a
  *     slice can be replayed. Default false.
  * @property {boolean} [countTransfers]  A diagnostic: transfers between regions through the hash
@@ -425,10 +422,7 @@
  * @property {{ address: number, count: number, shared: boolean, entry: number,
  *     bytes: number }[]} [topBlocks]  The forty most executed, with the region each is in.
  * @property {number} invalidations    Regions discarded by a write.
- * @property {number} volatilePages    Times a page written so often was left to the interpreter.
- * @property {number} [volatileNow]     The pages left to the interpreter now.
- * @property {number} [storesKept]      Stores into code that changed no byte a region on the page
- *     was formed from, and dropped none.
+ * @property {number} volatilePages    Pages written so often they are no longer translated.
  * @property {number} [dropped]        Regions dropped at publication because a page moved.
  * @property {number} [queued]         Candidates noted and not yet formed.
  * @property {number} [barren]         Candidate keys a region formed nothing at.
@@ -501,9 +495,6 @@
  * @property {(adapter: TranslatorPort) => void} [detachTranslator]  The same worker asked
  *     back: it takes no batch from then on, and goes once the one it holds is answered.
  * @property {(page: number) => void} invalidatePage  A host or guest write into code.
- * @property {(address: number, size: number, own?: boolean) => void} stored  A write over
- *     `[address, address + size)`: the regions made of a byte it changed go; `own` when it is
- *     the program's own store, met by the host's interpreter.
  * @property {(address: number, size: number) => void} codeWritten  A write into code this
  *     executor met: its translations of the pages go, and the process's other executors are
  *     told (`sharedCode`).
