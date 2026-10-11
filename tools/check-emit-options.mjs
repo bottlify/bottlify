@@ -79,8 +79,10 @@ function keysOf(text){
     return keys;
 }
 
-const runtime = readFileSync(RUNTIME, 'utf8');
-const built = readFileSync(BUILT, 'utf8');
+// A checkout with CRLF line ends reads the same as one with LF: the texts
+// below are found by their lines.
+const runtime = readFileSync(RUNTIME, 'utf8').replace(/\r\n/g, '\n');
+const built = readFileSync(BUILT, 'utf8').replace(/\r\n/g, '\n');
 const given = keysOf(body(runtime, 'const emitOptions = ()=>({'));
 /** A function's whole text, from its name to the brace that closes it. @param {string} name */
 const functionText = name=>{
