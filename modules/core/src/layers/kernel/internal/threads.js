@@ -192,6 +192,9 @@ export function createScheduler(options){
     let boosts = 0;
     /** Slices ended early for a thread of higher priority that came due. */
     let preemptions = 0;
+    /** What became of turns a host call's answer could have continued (`pick`). */
+    const hostTurns = { continued: 0, outranked: 0, starved: 0, late: 0, waits: 0, ticks: 0,
+        unanswered: 0 };
     /** What the last slice retired, for a thread's account of whom it followed. */
     let lastSlice = 0;
     /** Whether a slice is running: a wake outside one has no slice to end. */
@@ -557,6 +560,36 @@ export function createScheduler(options){
         if (candidates.length > 1)
         {
             const at = now();
+            // A thread whose slice ended on a host call that has answered goes
+            // on, as a call into the host and back is one call on Windows, not
+            // a wait: a host call that runs guest code -- D3DX applying a pass
+            // through the device's methods -- otherwise handed the processor
+            // to every other ready thread for a whole slice each, per call.
+            // Unless someone has starved or outranks it.
+            const resumed = candidates.find(thread=>thread.hostContinues);
+            if (resumed)
+            {
+                resumed.hostContinues = false;
+                const others = candidates.filter(thread=>thread !== resumed);
+                if (others.some(thread=>at - thread.readySince >= starvation))
+                {
+                    hostTurns.starved++;
+                }
+                else if (others.some(thread=>absolutePriority(thread.priority)
+                    > absolutePriority(resumed.priority)))
+                {
+                    hostTurns.outranked++;
+                }
+                else
+                {
+                    hostTurns.continued++;
+                    return resumed;
+                }
+            }
+            else if (threads.some(thread=>thread.hostContinues && thread.awaitingHost))
+            {
+                hostTurns.late++;
+            }
             /** @param {any} thread */
             const rank = thread=>(at - thread.readySince >= starvation
                 ? STARVED
@@ -997,6 +1030,9 @@ export function createScheduler(options){
             instructions += cpu.runSlice(ATOMIC_STEP);
         }
         account(next, instructions, began, from, cpu.eip?.() ?? 0);
+        // A slice that ended on a host call still answering: the answer is the
+        // thread's own call, and once it comes the thread goes on (`pick`).
+        next.hostContinues = next.awaitingHost === true;
         return { ran: next, instructions, switched };
     };
 
@@ -1286,6 +1322,21 @@ export function createScheduler(options){
          *
          * @returns {{ ran: any | null, instructions: number, switched: boolean }}
          */
+        /**
+         * How a turn's wait for its thread's host answer went (the run loop's):
+         * the microtasks it took, or that none came in the ones allowed.
+         *
+         * @param {number} ticks @param {boolean} answered
+         */
+        noteHostAnswer(ticks, answered){
+            hostTurns.waits++;
+            hostTurns.ticks += ticks;
+            if (!answered)
+            {
+                hostTurns.unanswered++;
+            }
+        },
+
         runOnce(){
             const remotes = cpu.executors?.() ?? [];
             if (remotes.length > 0)
@@ -1639,6 +1690,7 @@ export function createScheduler(options){
                 // never yields, which a program does not mean to do.
                 boosts,
                 preemptions,
+                hostTurns: { ...hostTurns },
                 // Slices given to the process's other executors, and the most
                 // that ran at once: zero and zero where it has one.
                 executorSlices,

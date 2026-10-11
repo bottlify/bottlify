@@ -503,6 +503,14 @@ const MAX_CONCURRENT_REQUESTS = 6;
  */
 const IDLE_CHECK_MS = 50;
 
+/**
+ * Microtasks a turn waits for a host call's answer before the next thread is
+ * picked: a call that runs guest code chains a few promises before it builds
+ * the frame. The limit is not measured yet: `hostTurns` counts the ticks taken and the
+ * waits that ran out.
+ */
+const HOST_ANSWER_TICKS = 64;
+
 /** How many of the hottest sampled addresses a report carries the code around. */
 const HOT_CODE_SAMPLES = 64;
 
@@ -6533,6 +6541,23 @@ async function buildApp(options){
                         throw fail('guest', e);
                     }
                     journal.end('guest', { instructions: step.instructions ?? 0 });
+
+                    // A slice that ended on a host call: an answer due in a few
+                    // microtasks -- a host call running guest code builds its
+                    // frame a promise or two later -- is let arrive now. The loop
+                    // otherwise awaits only when nothing is ready, and a thread
+                    // parked on an answer already made waited until every other
+                    // thread had nothing to do.
+                    if (step.ran?.awaitingHost)
+                    {
+                        let tick = 0;
+                        while (tick < HOST_ANSWER_TICKS && step.ran.awaitingHost)
+                        {
+                            await null;
+                            tick++;
+                        }
+                        kernel.noteHostAnswer?.(tick, !step.ran.awaitingHost);
+                    }
 
                     spun = step.instructions === 0 ? spun + 1 : 0;
 

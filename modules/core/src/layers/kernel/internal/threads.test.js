@@ -867,3 +867,37 @@ test('a thread woken between slices ends no slice', ()=>{
     sched.wake(worker);
     assert.equal(cpu.stops, 0);
 });
+
+test('a thread whose slice ended on a host call goes on once it is answered', ()=>{
+    // A host call that runs guest code -- D3DX applying a pass through the
+    // device's methods -- parks the thread until the frame is built; it went
+    // behind every other ready thread for a whole slice each, per call.
+    const cpu = fakeCpu();
+    let clock = 0;
+    const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), now: ()=>clock,
+        quantum: 5000 });
+    const main = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
+    sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'audio' });
+    // Main's slice ends parked on the host...
+    cpu.runSlice = ()=>{
+        main.awaitingHost = true;
+        return 65;
+    };
+    assert.equal(sched.runOnce().ran.name, 'main');
+    cpu.runSlice = max=>Math.min(max, 1000);
+    // ...whose answer arrives before the next pick.
+    main.awaitingHost = false;
+    assert.equal(sched.runOnce().ran.name, 'main', 'the answered call goes on');
+    assert.equal(sched.runOnce().ran.name, 'audio', 'and the turn after is the queue\'s again');
+
+    // A thread passed over past the starvation bound still comes first.
+    cpu.runSlice = ()=>{
+        main.awaitingHost = true;
+        return 65;
+    };
+    sched.runOnce();
+    main.awaitingHost = false;
+    cpu.runSlice = max=>Math.min(max, 1000);
+    clock += 10_000;
+    assert.equal(sched.runOnce().ran.name, 'audio', 'starved, it is not passed over again');
+});
