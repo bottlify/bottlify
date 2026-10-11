@@ -110,6 +110,10 @@ const IN_GUEST = [[inGuest, COMPILED], [matrix, MATRIX], [vector, VECTOR],
  * @property {(call: { entry: number, args: number[], thread?: any })
  *     => Promise<number>} [callGuest]
  *           A call into the guest -- a device's own method, from a constant table's setter.
+ * @property {(steps: Generator<{ entry: number, args?: number[], thread?: any }, any, number>)
+ *     => any} [drive]
+ *           Steps that call the guest, run by the bridge in the slice the call came in
+ *           (`bridge.drive`); what a handler returns in place of a promise.
  * @property {() => any} [currentThread]
  *           Whose call is in flight: a call into the guest made after an await names it.
  * @property {(font: any) => any} [fontMetrics]

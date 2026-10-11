@@ -8,6 +8,7 @@ import { Convention, calleeCleanup } from './internal/conventions.js';
 import { createParking } from './internal/parking.js';
 import { createDispatcher } from './internal/dispatch.js';
 import { createCallbacks } from './internal/callback.js';
+import { driven, isDriven, stepsThroughPromises } from './internal/drive.js';
 import { createVtables } from './internal/vtable.js';
 
 /**
@@ -105,7 +106,10 @@ export function createBridgeModule(){
              * own dispatcher, parking and vtables.
              *
              * @type {{ dispatcher: any, parking: any, callbacks: any, vtables: any,
-             *          failure: Error | null, disposed: boolean }}
+             *          failure: Error | null, disposed: boolean,
+             *          drive: { steps: number, ms: number, worstMs: number, worst: string,
+             *              call: string, calls: number, callMs: number, worstCallMs: number,
+             *              worstCall: string } }}
              */
             const state = {
                 dispatcher: null,
@@ -114,7 +118,13 @@ export function createBridgeModule(){
                 vtables: null,
                 failure: null,
                 disposed: false,
+                // The steps run from the sentinel (`drive`): outside every
+                // crossing's phase, and so, unmeasured, taken for the guest's.
+                drive: { steps: 0, ms: 0, worstMs: 0, worst: '', call: '', calls: 0, callMs: 0,
+                    worstCallMs: 0, worstCall: '' },
             };
+            const driveProfiler = import.meta.BOTTLIFY_DIAGNOSTICS !== false
+                ? /** @type {any} */ (host.requireApi('log')) : null;
 
             // What actually happened at this seam, in order, so that a session can
             // be replayed later without the machine it came from. A crash here is
@@ -165,10 +175,15 @@ export function createBridgeModule(){
              * A handler that has not finished: the thread is stopped, and told where
              * to pick up its own code once the answer arrives.
              *
-             * @param {Promise<number>} answer
+             * @param {Promise<number> | import('./internal/drive.js').Driven} answer
              * @param {any} frame
              */
             const suspend = (answer, frame)=>{
+                if (isDriven(answer))
+                {
+                    driveNow(answer, frame);
+                    return;
+                }
                 const thread = kernel.currentThread();
                 // Everything wanted of the frame is taken now: it describes this
                 // call only until the dispatcher's next one.
@@ -200,6 +215,89 @@ export function createBridgeModule(){
                     (/** @type {Error} */ error)=>{
                         state.failure ??= error;
                     });
+            };
+
+            /**
+             * Steps a handler answered with (`drive`), run in the slice its call
+             * came in: each guest call it asks for is entered at once, and its
+             * return to the sentinel runs the next step at once, until the
+             * steps answer and the thread returns from the host call with it.
+             * The host call is booked as suspended meanwhile, as a promise's
+             * is, so a callback that waits or calls the host again finds it.
+             *
+             * @param {import('./internal/drive.js').Driven} token
+             * @param {any} frame
+             */
+            const driveNow = (token, frame)=>{
+                const thread = kernel.currentThread();
+                const { name, restingStack, hostReturn, freeStack } = frame;
+                record({ t: 'drive', name, thread: thread?.name });
+                state.drive.call = name;
+                // From the call's first guest routine to its answer: the steps'
+                // own time (`ms`) and the guest's between them.
+                const driveBegan = performance.now();
+                state.callbacks.suspended(thread, { name, restingStack, hostReturn });
+                /**
+                 * @param {import('./internal/drive.js').GuestCall} call
+                 * @param {number} [stackAtRest]
+                 */
+                const enter = (call, stackAtRest)=>state.callbacks.callNow({
+                    thread, entry: call.entry, args: call.args ?? [], stackAtRest, by: name,
+                    onReturn: step,
+                });
+                /** @param {number} returned */
+                function step(returned){
+                    /** @type {IteratorResult<import('./internal/drive.js').GuestCall, any>} */
+                    let next;
+                    try
+                    {
+                        next = token.steps.next(returned);
+                    }
+                    catch (e){
+                        // As a promise's rejection: whoever drives the machine is
+                        // told, and the thread waits on an answer that never comes.
+                        kernel.holdThread();
+                        state.failure ??= /** @type {Error} */ (e);
+                        return;
+                    }
+                    if (!next.done)
+                    {
+                        enter(next.value);
+                        return;
+                    }
+                    const value = next.value;
+                    const callMs = performance.now() - driveBegan;
+                    const drive = state.drive;
+                    drive.calls++;
+                    drive.callMs += callMs;
+                    if (callMs > drive.worstCallMs)
+                    {
+                        drive.worstCallMs = callMs;
+                        drive.worstCall = name;
+                    }
+                    record({ t: 'finish', name, thread: thread?.name });
+                    token.onDone?.(isReturning(value) ? value.value : value);
+                    if (isContinuation(value) || isReturning(value))
+                    {
+                        // What else they set is applied where a promise's is: on
+                        // the thread's resume.
+                        kernel.holdThread();
+                        if (isContinuation(value))
+                        {
+                            state.callbacks.transfer(thread, value.registers, value.below);
+                        }
+                        else
+                        {
+                            state.callbacks.finish(thread, value.value | 0, value.registers);
+                        }
+                        return;
+                    }
+                    state.callbacks.finishNow(thread, value | 0);
+                }
+                // The first call from where the call in flight left the stack;
+                // the rest from where it rests, as `callGuest` builds them.
+                enter(/** @type {import('./internal/drive.js').GuestCall} */ (token.first),
+                    freeStack);
             };
 
             // Reading the thread's last error belongs to win32, which sits above
@@ -242,6 +340,36 @@ export function createBridgeModule(){
                 }
                 if (id === state.callbacks.sentinel())
                 {
+                    const thread = kernel.currentThread();
+                    if (state.callbacks.returnsNow(thread))
+                    {
+                        // A routine steps sent the thread into: the next step
+                        // runs here, and the thread goes on in this slice.
+                        record({ t: 'returned', thread: thread?.name });
+                        // The handler's next step runs here, as host work in
+                        // the guest's slice: its own phase, or a report reads
+                        // it as the guest's.
+                        driveProfiler?.begin('drive', 'host');
+                        const began = performance.now();
+                        try
+                        {
+                            state.callbacks.returned(thread);
+                        }
+                        finally
+                        {
+                            const ms = performance.now() - began;
+                            const drive = state.drive;
+                            drive.steps++;
+                            drive.ms += ms;
+                            if (ms > drive.worstMs)
+                            {
+                                drive.worstMs = ms;
+                                drive.worst = drive.call;
+                            }
+                            driveProfiler?.end('drive');
+                        }
+                        return;
+                    }
                     // A guest callback has returned. Stop the thread before reading
                     // its answer: the sentinel stub is about to `ret` into whatever
                     // the callback left on the stack, which is not code.
@@ -556,6 +684,23 @@ export function createBridgeModule(){
                 },
 
                 /**
+                 * What a handler returns to call the guest step by step: `steps`
+                 * yields `{ entry, args }` for each call and is handed back what
+                 * it returned (EAX, signed); what it returns is the call's
+                 * answer. The bridge runs them in the slice the call came in
+                 * (see `internal/drive.js`); with `driveGuestCalls` off, through
+                 * promises, as `callGuest` would -- the second path the gate
+                 * compares them with.
+                 *
+                 * @param {import('./internal/drive.js').Steps} steps
+                 */
+                drive(steps){
+                    return config?.driveGuestCalls === false || !live()
+                        ? stepsThroughPromises(steps, call=>this.callGuest(call))
+                        : driven(steps);
+                },
+
+                /**
                  * What an asynchronous handler resolves with when the call it is
                  * answering does not return: the thread continues at `registers`,
                  * and every host call and guest callback it was inside below the
@@ -847,6 +992,17 @@ export function createBridgeModule(){
                     ...instance.parking.diagnostics(),
                     ...instance.callbacks.diagnostics(),
                     ...instance.vtables ? instance.vtables.diagnostics() : {},
+                    driveSteps: instance.drive.steps,
+                    driveMs: Math.round(instance.drive.ms),
+                    driveWorstMs: Math.round(instance.drive.worstMs * 1000) / 1000,
+                    driveWorst: instance.drive.worst,
+                    // Calls driven past their first step, and the time from each
+                    // one's first guest routine to its answer: less `driveMs`,
+                    // the guest's own between the steps.
+                    driveCalls: instance.drive.calls,
+                    driveCallMs: Math.round(instance.drive.callMs),
+                    driveWorstCallMs: Math.round(instance.drive.worstCallMs * 1000) / 1000,
+                    driveWorstCall: instance.drive.worstCall,
                     failure: instance.failure ? instance.failure.message : null,
                 },
             };

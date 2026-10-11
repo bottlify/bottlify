@@ -6,6 +6,7 @@
 
 import { calleeCleanup, registerArgumentCount } from './conventions.js';
 import { isParkedCall } from './parking.js';
+import { isDriven } from './drive.js';
 
 /**
  * A trap becomes a host call.
@@ -277,7 +278,8 @@ const NO_ERROR = ()=>0;
  * @param {any} deps.cpu       For the registers a call frame is read from.
  * @param {any} deps.memory    For the stack itself, so a wild ESP is caught here.
  * @param {any} deps.parking   Brackets each handler and issues the parked token.
- * @param {(answer: Promise<number>, frame: any) => void} [deps.suspend]
+ * @param {(answer: Promise<number> | import('./drive.js').Driven, frame: any) => void}
+ *     [deps.suspend]
  * @param {() => number} [deps.now]  The clock call rates are measured by;
  *        performance.now unless a test keeps its own.
  *        What to do with a handler that has not finished; wired by the module.
@@ -347,7 +349,7 @@ class Dispatcher {
         this.memory = memory;
         /** @type {any} */
         this.parking = parking;
-        /** @type {((answer: Promise<number>, frame: any) => void) | null} */
+        /** @type {((answer: Promise<number> | import('./drive.js').Driven, frame: any) => void) | null} */
         this.suspend = deps.suspend ?? null;
 
         /**
@@ -981,6 +983,15 @@ class Dispatcher {
         if (onCall !== null && this.sinks(entry))
         {
             const asked = { ...this.recordAt(at), thread: frame.thread?.name ?? null };
+            if (isDriven(result))
+            {
+                result.onDone = (/** @type {number} */ value)=>{
+                    asked.result = `0x${(value >>> 0).toString(16)} (was waiting)`;
+                    onCall(asked);
+                };
+                this.suspend(result, frame);
+                return;
+            }
             result.then((/** @type {number} */ value)=>{
                 asked.result = `0x${(value >>> 0).toString(16)} (was waiting)`;
                 onCall(asked);
@@ -1183,6 +1194,26 @@ class Dispatcher {
             {
                 kinds[at] = PARKED_KIND;
                 late = true;
+            }
+            else if (isDriven(result))
+            {
+                // Steps: the first runs here, while the call still holds the
+                // processor. Steps that call the guest for nothing answer now,
+                // as a plain handler does; the rest the bridge runs on in this
+                // slice.
+                const first = result.steps.next();
+                if (first.done)
+                {
+                    result = first.value;
+                    kinds[at] = ANSWERED;
+                    this.answers[at] = Number(result);
+                }
+                else
+                {
+                    result.first = first.value;
+                    kinds[at] = WAITING;
+                    late = true;
+                }
             }
             else if (typeof (/** @type {any} */ (result))?.then === 'function')
             {
