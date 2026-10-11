@@ -216,6 +216,35 @@ export const POINT = Object.freeze({ x: 0x00, y: 0x04, SIZE: 0x08 });
  */
 export const D3DLOCKED_RECT = Object.freeze({ Pitch: 0x00, pBits: 0x04, SIZE: 0x08 });
 
+/**
+ * A rectangle lock -- a surface's, a texture level's, a cube face's -- with
+ * its D3DLOCKED_RECT written to `out` once it is taken. A lock of something a
+ * GetRenderTargetData is still filling settles only when the pixels are in
+ * guest memory, so the answer may be a promise, and the structure is written
+ * when it resolves: written only for a plain answer, the caller read a stale
+ * pointer and the pixels it asked for never reached it.
+ *
+ * @param {{ writeStruct: (address: number, layout: any, values: any) => void }} fields
+ * @param {number} out
+ * @param {(locked: { Pitch?: number, pBits?: number }) => number | Promise<number>} lock
+ * @returns {number | Promise<number>}
+ */
+export function lockRectInto(fields, out, lock){
+    /** @type {{ Pitch?: number, pBits?: number }} */
+    const locked = {};
+    /** @param {number} hr */
+    const answer = hr=>{
+        if (hr === 0 && (out >>> 0) !== 0)
+        {
+            fields.writeStruct(out >>> 0, D3DLOCKED_RECT,
+                { Pitch: locked.Pitch ?? 0, pBits: locked.pBits ?? 0 });
+        }
+        return hr;
+    };
+    const hr = lock(locked);
+    return hr instanceof Promise ? hr.then(answer) : answer(hr);
+}
+
 /** D3DSURFACE_DESC as Direct3D 8 declares it. */
 export const D3DSURFACE_DESC8 = Object.freeze({
     Format: 0x00,

@@ -1194,6 +1194,16 @@ test('Direct3D 9: the copies between surfaces -- UpdateSurface, UpdateTexture, S
                 D3DLOCK.READONLY), [pixels]);
             run.bytes('read-back pixels', /** @type {number} */ (pixels.pBits), 32 * 32 * 4);
             await run.call('UnlockRect read-back', ()=>readBack.surface.UnlockRect());
+            // Read back into a texture's level and read through the texture.
+            await run.call('GetRenderTargetData into a texture again', ()=>device
+                .GetRenderTargetData(back.surface, readLevel.surface));
+            /** @type {{ pBits?: number, Pitch?: number }} */
+            const levelPixels = {};
+            await run.call('LockRect read-back texture', ()=>readTexture.texture.LockRect(0,
+                levelPixels, null, D3DLOCK.READONLY), [levelPixels]);
+            run.bytes('read-back texture pixels', /** @type {number} */ (levelPixels.pBits),
+                32 * 32 * 4);
+            await run.call('UnlockRect read-back texture', ()=>readTexture.texture.UnlockRect(0));
             /** @type {{ pBits?: number, Pitch?: number }} */
             const plainBytes = {};
             await run.call('LockRect plain video', ()=>plainVideo.surface.LockRect(plainBytes,

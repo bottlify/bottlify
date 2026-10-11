@@ -13,7 +13,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    D3DLIGHT7, D3DVIEWPORT8, createFields, createLightReader, dwordsOf, floatsOf, intsOf, putLight,
+    D3DLIGHT7, D3DVIEWPORT8, createFields, createLightReader, dwordsOf, floatsOf, intsOf,
+    lockRectInto, putLight,
 } from './structs.js';
 
 /**
@@ -231,4 +232,21 @@ test('a light is read as the fields read it, and the same dwords again are the s
     assert.equal(moved.Position.x, 7);
     assert.equal(first.Position.x, 1.5, 'a light answered before is not written into');
     assert.equal(read(a, 1, 16), moved);
+});
+
+test('a rectangle lock writes its D3DLOCKED_RECT now or once it settles', async()=>{
+    /** @type {any[]} */
+    const written = [];
+    const fields = { writeStruct: (/** @type {number} */ address, /** @type {any} */ _layout,
+        /** @type {any} */ values)=>written.push([address, values]) };
+    /** @param {any} locked */
+    const take = locked=>Object.assign(locked, { Pitch: 256, pBits: 0x1000 });
+    assert.equal(lockRectInto(fields, 0x40, locked=>(take(locked), 0)), 0);
+    // A lock of a level a read back is still filling settles later.
+    const later = (/** @type {any} */ locked)=>Promise.resolve().then(()=>(take(locked), 0));
+    assert.equal(await lockRectInto(fields, 0x80, later), 0);
+    assert.equal(lockRectInto(fields, 0xc0, ()=>0x8876086c), 0x8876086c);
+    assert.equal(lockRectInto(fields, 0, locked=>(take(locked), 0)), 0);
+    assert.deepEqual(written, [[0x40, { Pitch: 256, pBits: 0x1000 }],
+        [0x80, { Pitch: 256, pBits: 0x1000 }]]);
 });

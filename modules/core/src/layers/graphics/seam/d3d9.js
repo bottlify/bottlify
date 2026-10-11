@@ -29,7 +29,7 @@
 
 import { IDIRECT3D9_SLOTS, describe } from './vtables.js';
 import {
-    D3DBOX, D3DDISPLAYMODE, D3DLIGHT7, D3DLOCKED_BOX, D3DLOCKED_RECT, D3DPRESENT_PARAMETERS9,
+    D3DBOX, D3DDISPLAYMODE, D3DLIGHT7, D3DLOCKED_BOX, lockRectInto, D3DPRESENT_PARAMETERS9,
     POINT, RECT, createFields, createLightReader, dwordsOf, floatsOf, intsOf, putLight, putMaterial,
 } from './structs.js';
 import {
@@ -552,25 +552,8 @@ export function createDirect3D9Seam(
             return hr;
         },
         /** @param {any} surface @param {number[]} args */
-        LockRect: (surface, [out, rect, flags])=>{
-            /** @type {any} */
-            const locked = {};
-            /** @param {number} hr */
-            const answer = hr=>{
-                if (hr === D3D_OK && (out >>> 0) !== 0)
-                {
-                    fields.writeStruct(out >>> 0, D3DLOCKED_RECT, {
-                        Pitch: locked.Pitch ?? 0,
-                        pBits: locked.pBits ?? 0,
-                    });
-                }
-                return hr;
-            };
-            // A render target's lock settles once its pixels are back in
-            // guest memory; the caller waits, and reads the rectangle then.
-            const hr = surface.LockRect(locked, readRect(rect), flags >>> 0);
-            return hr instanceof Promise ? hr.then(answer) : answer(hr);
-        },
+        LockRect: (surface, [out, rect, flags])=>lockRectInto(fields, out,
+            locked=>surface.LockRect(locked, readRect(rect), flags >>> 0)),
         /** @param {any} surface */
         UnlockRect: surface=>surface.UnlockRect(),
         /** @param {any} surface @param {number[]} args */
@@ -717,19 +700,8 @@ export function createDirect3D9Seam(
             return hr;
         },
         /** @param {any} texture @param {number[]} args */
-        LockRect: (texture, [level, out, rect, flags])=>{
-            /** @type {any} */
-            const locked = {};
-            const hr = texture.LockRect(level >>> 0, locked, readRect(rect), flags >>> 0);
-            if (hr === D3D_OK && (out >>> 0) !== 0)
-            {
-                fields.writeStruct(out >>> 0, D3DLOCKED_RECT, {
-                    Pitch: locked.Pitch ?? 0,
-                    pBits: locked.pBits ?? 0,
-                });
-            }
-            return hr;
-        },
+        LockRect: (texture, [level, out, rect, flags])=>lockRectInto(fields, out,
+            locked=>texture.LockRect(level >>> 0, locked, readRect(rect), flags >>> 0)),
         /** @param {any} texture @param {number[]} args */
         UnlockRect: (texture, [level])=>texture.UnlockRect(level >>> 0),
         /** @param {any} texture @param {number[]} args */
@@ -757,20 +729,9 @@ export function createDirect3D9Seam(
             return hr;
         },
         /** @param {any} texture @param {number[]} args */
-        LockRect: (texture, [face, level, out, rect, flags])=>{
-            /** @type {any} */
-            const locked = {};
-            const hr = texture.LockCubeRect(face >>> 0, level >>> 0, locked, readRect(rect),
-                flags >>> 0);
-            if (hr === D3D_OK && (out >>> 0) !== 0)
-            {
-                fields.writeStruct(out >>> 0, D3DLOCKED_RECT, {
-                    Pitch: locked.Pitch ?? 0,
-                    pBits: locked.pBits ?? 0,
-                });
-            }
-            return hr;
-        },
+        LockRect: (texture, [face, level, out, rect, flags])=>lockRectInto(fields, out,
+            locked=>texture.LockCubeRect(face >>> 0, level >>> 0, locked, readRect(rect),
+                flags >>> 0)),
         /** @param {any} texture @param {number[]} args */
         UnlockRect: (texture, [face, level])=>texture.UnlockCubeRect(face >>> 0, level >>> 0),
         /** @param {any} texture @param {number[]} args */
