@@ -48,60 +48,76 @@ export const ADAPTER_GUID = Uint8Array.from([
  * @property {string} [vendor]        WebGPU's vendor word, e.g. "nvidia".
  * @property {string} [architecture]  WebGPU's architecture word, e.g. "ampere".
  * @property {string} [description]   A human-readable name, when the browser gives one.
- * @property {string} [presentAs]     A card from `PRESENTED_CARDS` to be told of in its
- *     place (the `adapterAs` option): a program that picks its render path from a card
- *     database it knows only those vendors' cards in.
+ * @property {string} [profile]       One of `GPU_PROFILES`, the profile the adapter is
+ *     shown with (the `gpuProfile` option); absent, it is shown as the browser's.
  */
 
 /**
- * Cards a program may be told of, for `presentAs`: their PCI vendor and
- * device ids and the shader model they had. A program knows the cards of its
- * own years -- one it does not know falls to its weakest path, a 2004 one
- * taking a GeForce 6800 for a TNT2 -- and expects the card it knows to have
- * that card's shaders: told of a Radeon 9800 with model 3 beside it, a 2004
- * shader compiler asked for the device's newest profile knows none and fails.
- *
- * @type {Readonly<Record<string, { vendorId: number, deviceId: number,
- *     shaderModel: Readonly<{ major: number, minor: number }> }>>}
+ * @typedef {{ major: number, minor: number }} ShaderVersion
+ * @typedef {{ vendorId: number, deviceId: number, vertexShader: ShaderVersion,
+ *     pixelShader: ShaderVersion }} GpuProfile
  */
-export const PRESENTED_CARDS = Object.freeze({
-    // GeForce 6800.
-    nvidia: Object.freeze({ vendorId: 0x10de, deviceId: 0x0040,
-        shaderModel: Object.freeze({ major: 3, minor: 0 }) }),
-    // Radeon 9800 Pro: a card the programs of its years and after know.
-    amd: Object.freeze({ vendorId: 0x1002, deviceId: 0x4e48,
-        shaderModel: Object.freeze({ major: 2, minor: 0 }) }),
+
+/** @param {number} major @param {number} minor @returns {ShaderVersion} */
+const version = (major, minor)=>Object.freeze({ major, minor });
+
+/**
+ * The profiles the adapter may be shown with, by shader model: each the PCI
+ * vendor and device ids of a card of that model and its shader versions.
+ *
+ * A program that picks its render path from a card database knows the cards
+ * of its own years. One it does not know falls to its weakest path -- a 2004
+ * one took a GeForce 6800 for a TNT2 -- and the card it knows has to come with
+ * that card's shaders: shown a Radeon 9800 with model 3 beside it, a 2004
+ * shader compiler asked for the device's newest profile knew none and failed.
+ * So each is a card the programs of its years and after know.
+ *
+ * @type {Readonly<Record<string, GpuProfile>>}
+ */
+export const GPU_PROFILES = Object.freeze({
+    // GeForce4 Ti 4600.
+    sm1: Object.freeze({ vendorId: 0x10de, deviceId: 0x0250,
+        vertexShader: version(1, 1), pixelShader: version(1, 3) }),
+    // Radeon 9800 Pro.
+    sm2: Object.freeze({ vendorId: 0x1002, deviceId: 0x4e48,
+        vertexShader: version(2, 0), pixelShader: version(2, 0) }),
+    // GeForce 7800 GTX.
+    sm3: Object.freeze({ vendorId: 0x10de, deviceId: 0x0091,
+        vertexShader: version(3, 0), pixelShader: version(3, 0) }),
+    // GeForce 8800 GTX: model 4 under Direct3D 10, 3.0 under Direct3D 9.
+    sm4: Object.freeze({ vendorId: 0x10de, deviceId: 0x0191,
+        vertexShader: version(3, 0), pixelShader: version(3, 0) }),
 });
 
 /**
- * The device caps a presented card brings with it: its shader versions, or
- * nothing for an adapter told of as itself.
+ * The Direct3D 9 caps a profile brings: its shader versions, or nothing for an
+ * adapter shown as the browser's.
  *
  * @param {AdapterIdentity | null | undefined} known
- * @returns {{ vertexShaderVersion?: { major: number, minor: number },
- *     pixelShaderVersion?: { major: number, minor: number } }}
+ * @returns {{ vertexShaderVersion?: ShaderVersion, pixelShaderVersion?: ShaderVersion }}
  */
-export function presentedCaps(known){
-    const card = PRESENTED_CARDS[known?.presentAs ?? ''];
-    return card
-        ? { vertexShaderVersion: card.shaderModel, pixelShaderVersion: card.shaderModel }
+export function profileCaps(known){
+    const profile = GPU_PROFILES[known?.profile ?? ''];
+    return profile
+        ? { vertexShaderVersion: profile.vertexShader, pixelShaderVersion: profile.pixelShader }
         : {};
 }
 
 /**
- * The PCI vendor id and the description a program is shown for an adapter:
- * the vendor the browser's adapter has, which a program's card database is
- * keyed by, and the machine's own name for its video adapter.
+ * The PCI vendor and device ids and the description a program is shown for
+ * the adapter: its profile's card, or the vendor the browser's adapter has --
+ * which a program's card database is keyed by -- and the machine's own name
+ * for its video adapter either way.
  *
  * @param {AdapterIdentity | null} known
  * @returns {{ vendorId: number, deviceId: number, description: string }}
  */
 export function describeAdapter(known){
-    const presented = PRESENTED_CARDS[known?.presentAs ?? ''];
+    const profile = GPU_PROFILES[known?.profile ?? ''];
     return {
-        vendorId: presented?.vendorId
+        vendorId: profile?.vendorId
             ?? PCI_VENDOR_IDS[(known?.vendor ?? '').toLowerCase()] ?? 0,
-        deviceId: presented?.deviceId ?? 0,
+        deviceId: profile?.deviceId ?? 0,
         description: VIDEO_ADAPTER_NAME,
     };
 }

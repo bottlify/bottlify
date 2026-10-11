@@ -229,14 +229,16 @@ test('a bottle\'s settings change in its manifest, and nothing its upload made d
                 body: JSON.stringify(body),
             });
         const response = await send({ title: 'Renamed', labels: ['demo', 'benchmark'],
-            status: 'start-only', kind: 'application', windows: 'win7', graphics: 'directx9' });
+            status: 'start-only', kind: 'application', windows: 'win7', graphics: 'directx9',
+            shaders: 'sm2' });
         assert.equal(response.status, 200);
         const written = JSON.parse(
             await readFile(join(host.root, 'settled', 'manifest.json'), 'utf8'));
         assert.deepEqual(
             [written.title, written.labels, written.status, written.kind, written.windows,
-                written.graphics],
-            ['Renamed', ['demo', 'benchmark'], 'start-only', 'application', 'win7', 'directx9']);
+                written.graphics, written.shaders],
+            ['Renamed', ['demo', 'benchmark'], 'start-only', 'application', 'win7', 'directx9',
+                'sm2']);
         assert.equal(written.entry, 'game.exe', 'the entry is the upload\'s');
         assert.ok(written.bundle.sha256, 'and so is the bundle record');
 

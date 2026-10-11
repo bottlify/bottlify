@@ -715,3 +715,15 @@ installed effect compiler then made fx_2_0 bytecode our D3DXCreateEffect was ask
 (Battlefield 2). A copy beside the program still wins. This narrows the 2026-09-26 entry above
 (the installed runtime in `system32` is what loads): for a name the table answers, it is not,
 whichever way the library is reached. *2026-10-11.*
+
+**The video adapter is shown with a profile: a known card of a shader model, by its PCI ids and
+with its shader versions; the launcher shows model 2 (a Radeon 9800 Pro) unless a bottle
+chooses another.** The adapter keeps its own name. A program that picks its render path from a
+card database knows the cards of its years and takes its weakest path on one it does not: shown
+the browser's vendor (Apple, or none) with device id zero, Far Cry took a GeForce 4 path with
+pixel shaders 1.1; shown a GeForce 6800 it took a TNT2 one with no pixel shaders; shown a Radeon
+9800 with model 3 beside it, its 2004 Cg compiler, asked for the newest profile, knew none and
+failed. Model 2 is the card most games of DirectX 9's years know; a title that wants another
+gets it from the bottle's "Shader profile" (`gpuProfile` sm1-sm4, or `host` for the browser's
+vendor and model 3, the engine's own default). Which card real Windows reports is the card's;
+none was measured against hardware. *2026-10-12.*

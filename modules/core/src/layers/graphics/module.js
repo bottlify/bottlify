@@ -8,7 +8,7 @@ import { createBackend } from './webgpu/backend.js';
 import { createDirectDraw } from './ddraw/objects.js';
 import { createDirect3D8 } from './d3d8/device.js';
 import { createDirect3D9 } from './d3d9/device.js';
-import { presentedCaps } from './seam/adapter.js';
+import { profileCaps } from './seam/adapter.js';
 import { connectGraphicsWorker } from './remote/connect.js';
 import { createGraphicsLibraries } from './seam/exports.js';
 import { createOpengl } from './opengl/exports.js';
@@ -529,8 +529,8 @@ export function createGraphicsModule(){
                 /** @returns {any} */
                 d3d9: (/** @type {any} */ caps)=>direct3d('d3d9', createDirect3D9, {
                     ...caps,
-                    // A card the program is told of has that card's shaders.
-                    ...presentedCaps(device?.adapter),
+                    // The adapter shown with a profile has that profile's shaders.
+                    ...profileCaps(device?.adapter),
                     // The same configuration-and-adapter answer Direct3D 8 gets:
                     // Direct3D 9 put the question in CheckDeviceFormat rather than
                     // a cap bit, and a title that never asks still expects its DXT
