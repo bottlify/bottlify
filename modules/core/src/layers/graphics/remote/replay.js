@@ -843,18 +843,9 @@ export function createRecording(options){
      * the program for the replay of everything recorded before the ask, every
      * frame -- tens of milliseconds, a quarter of a second at worst.
      *
-     * @type {WeakMap<object, { reply: PlayedAnswer | null, frame: number,
-     *     asked: Promise<void> }>}
+     * @type {WeakMap<object, { reply: PlayedAnswer | null }>}
      */
     const counts = new WeakMap();
-    /**
-     * Presents recorded so far. A count asked in one frame and polled in a
-     * later one is waited for: hardware has counted by then, and a program
-     * that asks every frame and reads the frame after never saw a count when
-     * the renderer answered later than that -- a sun it thought hidden, a
-     * world drawn without its light.
-     */
-    let framesRecorded = 0;
 
     /**
      * The system-memory surfaces a GetRenderTargetData is still filling, each
@@ -1066,17 +1057,12 @@ export function createRecording(options){
             // A poll of an occlusion count already asked is answered here and
             // recorded nowhere: the played side has nothing to do with it, and
             // a program polls hundreds of thousands of times a minute.
-            if (name === 'Present')
-            {
-                framesRecorded++;
-            }
             const known = name === 'GetData' ? counts.get(target) : undefined;
             if (known)
             {
                 if (!known.reply)
                 {
-                    return framesRecorded > known.frame
-                        ? known.asked.then(()=>call(...args)) : S_FALSE;
+                    return S_FALSE;
                 }
                 for (let index = 0; index < count; index++)
                 {
@@ -1353,10 +1339,9 @@ export function createRecording(options){
             }
             if (name === 'GetData' && /** @type {any} */ (target)?.type === D3DQUERYTYPE_OCCLUSION)
             {
-                const asking = { reply: /** @type {PlayedAnswer | null} */ (null),
-                    frame: framesRecorded, asked: Promise.resolve() };
+                const asking = { reply: /** @type {PlayedAnswer | null} */ (null) };
                 counts.set(target, asking);
-                asking.asked = Promise.resolve(ask(name)).then(played=>{
+                Promise.resolve(ask(name)).then(played=>{
                     // Still this measurement's; an answer that is not a count
                     // yet is asked again at the next poll.
                     if (counts.get(target) === asking)
