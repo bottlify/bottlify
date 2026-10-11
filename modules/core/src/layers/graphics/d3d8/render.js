@@ -59,7 +59,7 @@ import { OPCODE, REGISTER, SHADER_KIND } from '../d3d9/shader.js';
 import { decodeS3tc } from '../webgpu/internal/s3tc.js';
 import { storedToHalves } from '../d3d9/half.js';
 import { passedSamples, reachableArea } from '../webgpu/internal/occlusion.js';
-import { changedSpans } from '../webgpu/internal/changed.js';
+import { changedSpans, createCompared } from '../webgpu/internal/changed.js';
 import {
     CLIP_LOCATION, clipStateOf, fixedFragmentStage, generates, generationOf, readsNormal, tailOf,
     vertexTailOf,
@@ -4416,6 +4416,11 @@ export function createRenderer(options){
         }
     };
 
+    /** What draws compared of dynamic buffers in the run of the ring being played. */
+    const compared = createCompared();
+    /** Whether a run of the ring is being played (`pause`). */
+    let pausing = false;
+
     /**
      * A draw from a buffer the program still holds locked reads what the
      * program has written there so far: the locked part of what it reaches is
@@ -4447,15 +4452,24 @@ export function createRenderer(options){
             // written once, before the frame's draws are submitted: a write
             // to the queue at each draw was a trip to the GPU a model, and
             // ordered nothing the one at the end does not.
-            const now = windowMemory(source.base + from, to - from);
-            const spans = changedSpans(now, gpu.bytes(from, to - from));
-            if (spans.length > 0)
+            // In a run of the command ring a range is compared once, however
+            // many draws read it: the program does not run in between.
+            const open = pausing ? compared.take(source, from, to) : [from, to];
+            for (let part = 0; part < open.length; part += 2)
             {
-                const stale = counters.shapes.staleDraws;
-                stale[source.length] = (stale[source.length] ?? 0) + 1;
-                for (let index = 0; index < spans.length; index += 2)
+                const start = open[part];
+                const length = open[part + 1] - start;
+                const now = windowMemory(source.base + start, length);
+                const spans = changedSpans(now, gpu.bytes(start, length));
+                if (spans.length > 0)
                 {
-                    gpu.rewrite(from + spans[index], now.subarray(spans[index], spans[index + 1]));
+                    const stale = counters.shapes.staleDraws;
+                    stale[source.length] = (stale[source.length] ?? 0) + 1;
+                    for (let index = 0; index < spans.length; index += 2)
+                    {
+                        gpu.rewrite(start + spans[index],
+                            now.subarray(spans[index], spans[index + 1]));
+                    }
                 }
             }
             return;
@@ -8218,6 +8232,17 @@ export function createRenderer(options){
         Uint32Array.from({ length: count }, (_, index)=>index);
 
     return {
+        /**
+         * A run of the command ring begins (true) or ends (false): the
+         * program does not run until it ends, so its memory stands still.
+         *
+         * @param {boolean} on
+         */
+        pause(on){
+            pausing = on;
+            compared.clear();
+        },
+
         /**
          * The program is about to write into a buffer's storage in guest
          * memory. The backend's lock is taken now, under the same flags, so

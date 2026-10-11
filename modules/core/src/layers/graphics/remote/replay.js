@@ -24,7 +24,7 @@
  */
 
 import { OP, SECTION, SERVICE_REF, WAIT, createReader, createSite } from './wire.js';
-import { changedSpans } from '../webgpu/internal/changed.js';
+import { changedSpans, createCompared } from '../webgpu/internal/changed.js';
 
 /** D3DUSAGE_DYNAMIC. */
 const DYNAMIC = 0x200;
@@ -448,6 +448,12 @@ export function createRecording(options){
     const sentOf = new WeakMap();
     /** What the current call's draws read of dynamic buffers that had changed. @type {{ address: number, bytes: Uint8Array }[] | null} */
     let drawn = null;
+    /**
+     * What the current call's draws compared: the program does not run until
+     * the call is done -- a run of the command ring among them -- so a range
+     * is compared once in it, however many draws read it.
+     */
+    const compared = createCompared();
     /**
      * Where a buffer's bytes in guest memory differ from what was sent of
      * them, made what is sent: four bytes at a time against the copy on this
@@ -1171,6 +1177,10 @@ export function createRecording(options){
             writes = null;
             reads = null;
             drawn = null;
+            if (depth === 0)
+            {
+                compared.clear();
+            }
             depth++;
             let result;
             let failed = true;
@@ -1564,10 +1574,15 @@ export function createRecording(options){
                 // something is sent of all of it: once, at its first draw.
                 const bytes = readMemory(base, buffer.length);
                 sentOf.set(buffer, { base, bytes });
+                compared.take(buffer, 0, buffer.length);
                 (drawn ??= []).push({ address: base, bytes });
                 return;
             }
-            changedSince(sent, from, to, drawn ??= []);
+            const open = compared.take(buffer, from, to);
+            for (let part = 0; part < open.length; part += 2)
+            {
+                changedSince(sent, open[part], open[part + 1], drawn ??= []);
+            }
         },
         read(address, bytes){
             // Written into the record when the call is finished, before the

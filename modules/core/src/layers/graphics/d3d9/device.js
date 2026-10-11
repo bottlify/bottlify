@@ -2256,11 +2256,19 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
          * @returns {number} how many calls were made
          */
         commands(records, objects = []){
-            return runCommands(/** @type {any} */ (device), records, objects, (name, hr)=>report(
-                `commands:${name}`, name === 'commands'
-                    ? 'a command ring held a record its routines could not have written'
-                    : `${name} made in the guest was answered D3D_OK; the device answers ${
-                        hr.toString(16)}`));
+            renderer?.pause(true);
+            try
+            {
+                return runCommands(/** @type {any} */ (device), records, objects, (name, hr)=>report(
+                    `commands:${name}`, name === 'commands'
+                        ? 'a command ring held a record its routines could not have written'
+                        : `${name} made in the guest was answered D3D_OK; the device answers ${
+                            hr.toString(16)}`));
+            }
+            finally
+            {
+                renderer?.pause(false);
+            }
         },
 
         BeginScene(){

@@ -1779,11 +1779,19 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
          * @returns {number} how many calls were made
          */
         commands(records, objects = []){
-            return D3D8_COMMANDS.runCommands(device, records, objects, (name, hr)=>reportOnce(
-                `commands:${name}`, name === 'commands'
-                    ? 'a command ring held a record its routines could not have written'
-                    : `${name} made in the guest was answered D3D_OK; the device answers ${
-                        hr.toString(16)}`));
+            renderer?.pause(true);
+            try
+            {
+                return D3D8_COMMANDS.runCommands(device, records, objects, (name, hr)=>reportOnce(
+                    `commands:${name}`, name === 'commands'
+                        ? 'a command ring held a record its routines could not have written'
+                        : `${name} made in the guest was answered D3D_OK; the device answers ${
+                            hr.toString(16)}`));
+            }
+            finally
+            {
+                renderer?.pause(false);
+            }
         },
 
         /** What the renderer has done and declined to do. Null without a backend. */

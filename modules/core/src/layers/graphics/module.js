@@ -537,6 +537,9 @@ export function createGraphicsModule(){
                     videoMemory,
                     backend: device && !remote ? api.backend() : undefined,
                     readMemory: services.readMemory,
+                    // What a draw from a dynamic buffer compares, in place: as a
+                    // copy, it was most of a frame in a game that skins into one.
+                    windowMemory: services.windowMemory,
                     // The copies between surfaces (UpdateSurface, StretchRect,
                     // GetRenderTargetData) move bytes only through this; the
                     // seam makes none of them itself.

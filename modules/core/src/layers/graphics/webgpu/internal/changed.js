@@ -90,3 +90,94 @@ export function changedSpans(now, was, gap = 64){
     }
     return spans;
 }
+
+/**
+ * The ranges of each buffer compared since a pause began, so a range is
+ * compared once in it however many draws read it: while the program does not
+ * run -- a run of the command ring played, one call made -- its memory cannot
+ * change, and a game that names a whole buffer as every draw's vertices
+ * compared the whole of it once a draw.
+ *
+ * @returns {{ take: (key: object, from: number, to: number) => number[],
+ *     clear: () => void }}
+ *     `take` answers the parts of `[from, to)` not compared yet in this pause,
+ *     flat as `changedSpans` answers, and counts them compared from now
+ */
+export function createCompared(){
+    /** By buffer, its compared ranges: sorted, apart, flat. @type {Map<object, number[]>} */
+    let compared = new Map();
+    return {
+        take(key, from, to){
+            const ranges = compared.get(key);
+            if (!ranges)
+            {
+                compared.set(key, [from, to]);
+                return [from, to];
+            }
+            /** @type {number[]} */
+            const open = [];
+            let at = from;
+            for (let index = 0; index < ranges.length && at < to; index += 2)
+            {
+                const start = ranges[index];
+                const end = ranges[index + 1];
+                if (end <= at)
+                {
+                    continue;
+                }
+                if (start >= to)
+                {
+                    break;
+                }
+                if (start > at)
+                {
+                    open.push(at, start);
+                }
+                at = Math.max(at, end);
+            }
+            if (at < to)
+            {
+                open.push(at, to);
+            }
+            if (open.length > 0)
+            {
+                // Merged in: the union of what was there and [from, to).
+                /** @type {number[]} */
+                const merged = [];
+                let placed = false;
+                for (let index = 0; index <= ranges.length; index += 2)
+                {
+                    let start = index < ranges.length ? ranges[index] : Infinity;
+                    let end = index < ranges.length ? ranges[index + 1] : Infinity;
+                    if (!placed && from <= start)
+                    {
+                        [start, end] = [from, to];
+                        index -= 2;
+                        placed = true;
+                    }
+                    if (start === Infinity)
+                    {
+                        break;
+                    }
+                    const last = merged.length - 1;
+                    if (last > 0 && start <= merged[last])
+                    {
+                        merged[last] = Math.max(merged[last], end);
+                    }
+                    else
+                    {
+                        merged.push(start, end);
+                    }
+                }
+                compared.set(key, merged);
+            }
+            return open;
+        },
+        clear(){
+            if (compared.size > 0)
+            {
+                compared = new Map();
+            }
+        },
+    };
+}
