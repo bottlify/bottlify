@@ -171,7 +171,7 @@ test('a stream that cannot be read says where it stopped', ()=>{
         .error ?? '', /without a destination/);
 });
 
-test('a create refuses the wrong kind, a broken stream and a version past the device', ()=>{
+test('a create refuses the wrong kind, a broken stream and a model past the device', ()=>{
     const two = { major: 2, minor: 0 };
     assert.equal(validateShader(TRANSFORM_VS, SHADER_KIND.VERTEX, two), D3D_OK);
     assert.equal(validateShader(TRANSFORM_VS, SHADER_KIND.PIXEL, two), D3DERR_INVALIDCALL,
@@ -180,8 +180,13 @@ test('a create refuses the wrong kind, a broken stream and a version past the de
         D3DERR_INVALIDCALL, 'no end token');
     assert.equal(validateShader([versionToken(SHADER_KIND.VERTEX, 3, 0), END_TOKEN],
         SHADER_KIND.VERTEX, two), D3DERR_INVALIDCALL, 'vs_3_0 on a vs_2_0 device');
+    // 2.1 is the 2_x profiles, model 2.0 with its extended caps: the ones a
+    // card advertising 2.0 and more than its floor (GeForce FX, Radeon X800)
+    // was made to run, and a compiler picks from those caps.
     assert.equal(validateShader([versionToken(SHADER_KIND.VERTEX, 2, 1), END_TOKEN],
-        SHADER_KIND.VERTEX, two), D3DERR_INVALIDCALL, 'vs_2_x on a vs_2_0 device');
+        SHADER_KIND.VERTEX, two), D3D_OK, 'vs_2_x on a vs_2_0 device');
+    assert.equal(validateShader([versionToken(SHADER_KIND.PIXEL, 2, 1), END_TOKEN],
+        SHADER_KIND.PIXEL, two), D3D_OK, 'and ps_2_x');
     assert.equal(validateShader([VS_1_1, END_TOKEN], SHADER_KIND.VERTEX, two), D3D_OK,
         'an older shader on a newer device');
     assert.equal(validateShader([VS_1_1, END_TOKEN], SHADER_KIND.VERTEX, { major: 0, minor: 0 }),
