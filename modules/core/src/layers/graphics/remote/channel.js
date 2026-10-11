@@ -175,9 +175,11 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
     const sent = { batches: 0, bytes: 0, ms: 0 };
     /**
      * Of those bytes, the guest memory copied into them, by what copied it --
-     * what a lend of buffers, or of anything else, would have left in place.
+     * what a lend of buffers, or of anything else, would have left in place --
+     * and `compared`, the bytes of dynamic buffers draws compared to find what
+     * to copy, which cost this thread a read of each whether or not it sent any.
      */
-    const shipped = { buffers: 0, surfaces: 0, reads: 0, writes: 0, dynamic: 0 };
+    const shipped = { buffers: 0, surfaces: 0, reads: 0, writes: 0, dynamic: 0, compared: 0 };
     /** The calls the batches are made of, by method: how many, and their bytes. */
     /** @type {Map<string, { count: number, bytes: number }>} */
     const byMethod = new Map();

@@ -306,7 +306,8 @@ function visit(value, bind){
  *     promise of one), and for a paced call a promise when the caller is held
  * @property {() => void} recorded  a record that is not a call was written
  * @property {(kind: ShippedKind, bytes: number) => void} [shipped]
- *     bytes of guest memory just copied into the record, by what copied them
+ *     bytes of guest memory just copied into the record, by what copied them, or (`compared`)
+ *     compared to find what to copy
  * @property {(name: string, bytes: number) => void} [recordedCall]
  *     a call's record is whole, this many bytes of the batch, copies included
  * @property {import('./lending.js').Lender | null} [lender]
@@ -320,7 +321,7 @@ function visit(value, bind){
  * the program's memory, what one wrote into it here, or what a draw reads of
  * a dynamic buffer that the program wrote after its unlock.
  *
- * @typedef {'buffers' | 'surfaces' | 'reads' | 'writes' | 'dynamic'} ShippedKind
+ * @typedef {'buffers' | 'surfaces' | 'reads' | 'writes' | 'dynamic' | 'compared'} ShippedKind
  */
 
 /**
@@ -449,6 +450,13 @@ export function createRecording(options){
     /** What the current call's draws read of dynamic buffers that had changed. @type {{ address: number, bytes: Uint8Array }[] | null} */
     let drawn = null;
     /**
+     * What the current call's draws read of dynamic buffers, lent: the played
+     * side reads it before it plays the call.
+     *
+     * @type {{ address: number, length: number, slot: number }[] | null}
+     */
+    let borrowed = null;
+    /**
      * What the current call's draws compared: the program does not run until
      * the call is done -- a run of the command ring among them -- so a range
      * is compared once in it, however many draws read it.
@@ -474,6 +482,43 @@ export function createRecording(options){
             into.push({ address: sent.base + start, bytes: sent.bytes.subarray(start, end) });
         }
         return into;
+    };
+
+    /**
+     * What a draw reads of a dynamic buffer, where guest memory is shared:
+     * lent, not compared. The played side reads it in place when it plays the
+     * call, so this thread neither compares nor copies it, and a draw sees
+     * what the buffer holds then -- as a GPU reading the program's memory
+     * would. A lock that lets the program write the range again claims it
+     * first (`claim`), as it does an unlock's lend. What is lent is not
+     * what the played side was last sent, so what was kept of that is
+     * dropped: an unlock after it sends what it locked, not a difference
+     * from a copy that is no longer the played side's. A range with no
+     * room to lend is copied whole.
+     *
+     * @param {any} buffer @param {number} base @param {number} from @param {number} to
+     */
+    const lendDrawn = (buffer, base, from, to)=>{
+        const open = compared.take(buffer, from, to);
+        if (open.length === 0)
+        {
+            return;
+        }
+        sentOf.delete(buffer);
+        for (let part = 0; part < open.length; part += 2)
+        {
+            const address = base + open[part];
+            const length = open[part + 1] - open[part];
+            const slot = /** @type {import('./lending.js').Lender} */ (lender).lend(address, length);
+            if (slot >= 0)
+            {
+                (borrowed ??= []).push({ address, length, slot });
+            }
+            else
+            {
+                (drawn ??= []).push(...rangeFrom({ address, length }));
+            }
+        }
     };
 
     /**
@@ -1177,6 +1222,7 @@ export function createRecording(options){
             writes = null;
             reads = null;
             drawn = null;
+            borrowed = null;
             if (depth === 0)
             {
                 compared.clear();
@@ -1197,10 +1243,13 @@ export function createRecording(options){
                 const wrote = /** @type {{ address: number, bytes: Uint8Array }[] | null} */ (writes);
                 const read = /** @type {{ address: number, bytes: Uint8Array }[] | null} */ (reads);
                 const drew = /** @type {{ address: number, bytes: Uint8Array }[] | null} */ (drawn);
+                const lentNow = /** @type {{ address: number, length: number, slot: number }[] | null} */ (
+                    borrowed);
                 allocs = null;
                 writes = null;
                 reads = null;
                 drawn = null;
+                borrowed = null;
                 if (read)
                 {
                     shippedAs('reads', read);
@@ -1215,7 +1264,8 @@ export function createRecording(options){
                 // one starts where it should.
                 const shipping = shipped !== null && shipped.length > 0;
                 writer.u8((made ? SECTION.ALLOCS : 0) | (replies ? SECTION.REPLIES : 0)
-                    | (shipping ? SECTION.SHIP : 0) | (wrote ? SECTION.WROTE : 0));
+                    | (shipping ? SECTION.SHIP : 0) | (wrote ? SECTION.WROTE : 0)
+                    | (lentNow ? SECTION.LENT : 0));
                 if (made)
                 {
                     writer.u32(made.length);
@@ -1240,6 +1290,16 @@ export function createRecording(options){
                 {
                     writeMemory(wrote);
                     shippedAs('writes', wrote);
+                }
+                if (lentNow)
+                {
+                    writer.u32(lentNow.length);
+                    for (const { address, length, slot } of lentNow)
+                    {
+                        writer.u32(address);
+                        writer.u32(length);
+                        writer.u32(slot);
+                    }
                 }
                 // Which calls the batches are made of, for a report; a batch
                 // sent while the record was written leaves it uncounted.
@@ -1567,6 +1627,11 @@ export function createRecording(options){
             {
                 return;
             }
+            if (lender)
+            {
+                lendDrawn(buffer, base, from, to);
+                return;
+            }
             const sent = sentOf.get(buffer);
             if (!sent || sent.base !== base)
             {
@@ -1579,9 +1644,15 @@ export function createRecording(options){
                 return;
             }
             const open = compared.take(buffer, from, to);
+            let length = 0;
             for (let part = 0; part < open.length; part += 2)
             {
                 changedSince(sent, open[part], open[part + 1], drawn ??= []);
+                length += open[part + 1] - open[part];
+            }
+            if (length > 0)
+            {
+                transport.shipped?.('compared', length);
             }
         },
         read(address, bytes){
@@ -1730,6 +1801,26 @@ export function createPlayer({ root, ship, read, borrow }){
         }
     };
 
+    /**
+     * Guest memory lent to this side, read into the memory its device reads.
+     *
+     * @param {{ address: number, length: number, slot: number }[] | undefined} lent
+     */
+    const borrowAll = lent=>{
+        if (!lent)
+        {
+            return;
+        }
+        if (!borrow)
+        {
+            throw new Error('remote: guest memory lent to a side that cannot read it');
+        }
+        for (const { address, length, slot } of lent)
+        {
+            borrow(slot, address, length, bytes=>ship(address, bytes));
+        }
+    };
+
     return {
         play(call){
             const target = /** @type {any} */ (objectAt(call.t));
@@ -1745,14 +1836,7 @@ export function createPlayer({ root, ship, read, borrow }){
             }
             if (call.op === OP.LENT)
             {
-                if (!borrow)
-                {
-                    throw new Error('remote: guest memory lent to a side that cannot read it');
-                }
-                for (const { address, length, slot } of call.lent ?? [])
-                {
-                    borrow(slot, address, length, bytes=>ship(address, bytes));
-                }
+                borrowAll(call.lent);
                 return undefined;
             }
             if (call.op !== OP.CALL)
@@ -1767,6 +1851,8 @@ export function createPlayer({ root, ship, read, borrow }){
             {
                 ship(address, bytes);
             }
+            // What its draws read, lent: read now, when it is played.
+            borrowAll(call.lent);
             allocs = call.allocs ?? [];
             replies = call.replies ?? [];
             playing = /** @type {string} */ (call.m);

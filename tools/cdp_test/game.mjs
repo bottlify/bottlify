@@ -977,6 +977,16 @@ function describe(result, context, calls, symbols){
             const { batches, bytes, ms } = graphics.sentToWorker;
             say(`    to the graphics worker: ${batches} batches, ${bytes} bytes, posting them`
                 + ` ${ms} ms`);
+            if (graphics.shippedToWorker)
+            {
+                say(`      guest memory in them: ${Object.entries(graphics.shippedToWorker)
+                    .map(([kind, count])=>`${kind} ${count}`).join(', ')}`);
+            }
+            if (graphics.callsToWorker)
+            {
+                const heaviest = graphics.callsToWorker.split(' | ').slice(0, 8);
+                say(`      by call: ${heaviest.join(' | ')}`);
+            }
         }
         if (graphics.compressedTextures)
         {
