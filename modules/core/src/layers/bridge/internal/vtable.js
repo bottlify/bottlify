@@ -4,7 +4,6 @@
  * See LICENSE for details
  */
 
-import { isDriven } from './drive.js';
 import { Convention } from './conventions.js';
 
 /**
@@ -473,9 +472,9 @@ export function createVtables({ memory, register, heap }){
                 }
                 // A method that has to call back into guest code answers with a
                 // promise, and the dispatcher parks the caller until it
-                // settles, or with steps the bridge runs. Coercing either here
-                // would hand the guest a zero -- which is S_OK -- while the
-                // work it was waiting for had not started.
+                // settles. Coercing it here would hand the guest a zero --
+                // which is S_OK -- while the work it was waiting for had not
+                // started.
                 return thenableOrDword(method.invoke(object, args));
         }
     }
@@ -501,7 +500,7 @@ export function createVtables({ memory, register, heap }){
      * @param {any} answer
      */
     const thenableOrDword = answer=>(
-        typeof answer?.then === 'function' || isDriven(answer) ? answer : answer | 0);
+        typeof answer?.then === 'function' ? answer : answer | 0);
 
     /**
      * QueryInterface, which is where identity is decided: the guest hands us a

@@ -163,117 +163,6 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
         }
     }
 
-    /**
-     * Builds a callback's frame below where the thread's stack rests and
-     * records it: what `call` and `callNow` both do before sending the thread.
-     *
-     * @param {{ thread: any, entry: number, args: number[], stackAtRest?: number, by: string,
-     *     settle: (value: number) => void, now: boolean }} call
-     * @returns {number} the frame's base, the stack the routine starts on
-     */
-    function enter({ thread, entry, args, stackAtRest, by, settle, now }){
-        if (!thread)
-        {
-            throw new Error('bridge: a guest callback needs a thread to run on');
-        }
-        if (sentinelId === null)
-        {
-            throw new Error('bridge: the callback sentinel was never reserved');
-        }
-        // A routine at address zero is not a routine. Sending the guest
-        // there produces a fault at 0x00000000 that reads exactly like the
-        // program's own null call, when in fact we chose the address -- and
-        // which of our calls chose it is gone by the time anyone reads the
-        // report. So it is refused here, named.
-        if ((entry >>> 0) === 0)
-        {
-            throw new Error(`bridge: ${by} asked to run guest code at address zero`);
-        }
-
-        // The call in flight decides where the frame goes, and the callback
-        // frames only answer when there is none.
-        //
-        // The other way round is a stack corruption with no symptom at the
-        // moment it happens. A window procedure that subclasses another
-        // calls back into the guest from inside a callback, and the
-        // innermost callback frame's base is where the *outer* procedure's
-        // frame began -- which that procedure is by now standing well below,
-        // using every byte in between. Building the new frame there writes
-        // the sentinel and the arguments over its live locals and its return
-        // address. The inner call returns perfectly; the outer one then
-        // returns to whatever the overwrite left, never reaches the
-        // sentinel, and the host call waiting on it is never answered. The
-        // thread is parked for ever and the program stops with nothing to
-        // say for itself.
-        const resting = stackAtRest ?? restingStack(thread);
-        if (resting === undefined)
-        {
-            throw new Error('bridge: a guest callback must know where the thread\'s stack is');
-        }
-
-        // The frame the callback will find: its return address at the top,
-        // its arguments above that, and one spare dword above those. Built
-        // below everything already in use, so an outer frame is still
-        // intact when this one unwinds.
-        //
-        // The spare is the sentinel's. A stdcall callback pops its own
-        // arguments on the way out, which leaves ESP exactly where the frame
-        // began; the sentinel stub then parks the thread by writing the park
-        // address at ESP and returning through it. Without the spare that
-        // write lands on the first live dword above the frame -- a saved
-        // register, or the return address of the procedure that made the
-        // suspended call -- and the procedure returns into the park loop
-        // once its call is answered, with nothing to say for itself.
-        const frameBase = resting - 4 * (args.length + 2);
-        // And it has to land on this thread's own stack. Three separate
-        // defects have written a callback frame onto a stack belonging to
-        // another thread -- each time because the resting position was read
-        // from something that had moved on while a handler awaited -- and
-        // every one of them was silent at the moment it happened, surfacing
-        // much later as a return into an address that holds no code. There
-        // is no legitimate reason for a frame to be anywhere else, so the
-        // fourth instance stops here and says whose stack it was about to
-        // write on instead of corrupting it.
-        if (thread.stackLimit !== undefined
-            && (frameBase < thread.stackLimit || frameBase > thread.stackTop))
-        {
-            throw new Error(`bridge: a callback frame for ${thread.name} at`
-                + ` 0x${(frameBase >>> 0).toString(16)} is outside its stack`
-                + ` (0x${(thread.stackLimit >>> 0).toString(16)}`
-                + `..0x${(thread.stackTop >>> 0).toString(16)})`);
-        }
-        memory.writeU32(frameBase, sentinelAddress);
-        args.forEach((value, index)=>memory.writeU32(frameBase + 4 + index * 4, value));
-
-        const frames = callbackFrames(thread);
-        calls++;
-        deepest = Math.max(deepest, frames.length + 1);
-        started.push({ entry: entry >>> 0, by, thread: thread.name });
-        if (started.length > STARTED_RING)
-        {
-            started.shift();
-        }
-        frames.push({ frameBase, extent: frameBase + 4 * (args.length + 2), settle, epoch, now });
-        // Off to run guest code, whatever it was doing before.
-        thread.awaitingHost = false;
-        return frameBase;
-    }
-
-    /**
-     * The callback frame a return to the sentinel at `esp` comes back from:
-     * the innermost one not wholly below it (see `returned`).
-     *
-     * @param {any[]} frames @param {number} esp
-     */
-    const returningFrame = (frames, esp)=>{
-        let at = frames.length - 1;
-        while (at > 0 && frames[at].extent <= esp)
-        {
-            at--;
-        }
-        return at >= 0 ? frames[at] : undefined;
-    };
-
     return {
         /**
          * Takes the sentinel's slot in the stub table.
@@ -374,47 +263,99 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
          * @returns {Promise<number>}
          */
         call({ thread, entry, args = [], stackAtRest, by = 'somewhere', registers }){
+            if (!thread)
+            {
+                throw new Error('bridge: a guest callback needs a thread to run on');
+            }
+            if (sentinelId === null)
+            {
+                throw new Error('bridge: the callback sentinel was never reserved');
+            }
+            // A routine at address zero is not a routine. Sending the guest
+            // there produces a fault at 0x00000000 that reads exactly like the
+            // program's own null call, when in fact we chose the address -- and
+            // which of our calls chose it is gone by the time anyone reads the
+            // report. So it is refused here, named.
+            if ((entry >>> 0) === 0)
+            {
+                throw new Error(`bridge: ${by} asked to run guest code at address zero`);
+            }
+
+            // The call in flight decides where the frame goes, and the callback
+            // frames only answer when there is none.
+            //
+            // The other way round is a stack corruption with no symptom at the
+            // moment it happens. A window procedure that subclasses another
+            // calls back into the guest from inside a callback, and the
+            // innermost callback frame's base is where the *outer* procedure's
+            // frame began -- which that procedure is by now standing well below,
+            // using every byte in between. Building the new frame there writes
+            // the sentinel and the arguments over its live locals and its return
+            // address. The inner call returns perfectly; the outer one then
+            // returns to whatever the overwrite left, never reaches the
+            // sentinel, and the host call waiting on it is never answered. The
+            // thread is parked for ever and the program stops with nothing to
+            // say for itself.
+            const resting = stackAtRest ?? restingStack(thread);
+            if (resting === undefined)
+            {
+                throw new Error('bridge: a guest callback must know where the thread\'s stack is');
+            }
+
+            // The frame the callback will find: its return address at the top,
+            // its arguments above that, and one spare dword above those. Built
+            // below everything already in use, so an outer frame is still
+            // intact when this one unwinds.
+            //
+            // The spare is the sentinel's. A stdcall callback pops its own
+            // arguments on the way out, which leaves ESP exactly where the frame
+            // began; the sentinel stub then parks the thread by writing the park
+            // address at ESP and returning through it. Without the spare that
+            // write lands on the first live dword above the frame -- a saved
+            // register, or the return address of the procedure that made the
+            // suspended call -- and the procedure returns into the park loop
+            // once its call is answered, with nothing to say for itself.
+            const frameBase = resting - 4 * (args.length + 2);
+            // And it has to land on this thread's own stack. Three separate
+            // defects have written a callback frame onto a stack belonging to
+            // another thread -- each time because the resting position was read
+            // from something that had moved on while a handler awaited -- and
+            // every one of them was silent at the moment it happened, surfacing
+            // much later as a return into an address that holds no code. There
+            // is no legitimate reason for a frame to be anywhere else, so the
+            // fourth instance stops here and says whose stack it was about to
+            // write on instead of corrupting it.
+            if (thread.stackLimit !== undefined
+                && (frameBase < thread.stackLimit || frameBase > thread.stackTop))
+            {
+                throw new Error(`bridge: a callback frame for ${thread.name} at`
+                    + ` 0x${(frameBase >>> 0).toString(16)} is outside its stack`
+                    + ` (0x${(thread.stackLimit >>> 0).toString(16)}`
+                    + `..0x${(thread.stackTop >>> 0).toString(16)})`);
+            }
+            memory.writeU32(frameBase, sentinelAddress);
+            args.forEach((value, index)=>memory.writeU32(frameBase + 4 + index * 4, value));
+
+            const frames = callbackFrames(thread);
+            calls++;
+            deepest = Math.max(deepest, frames.length + 1);
+            started.push({ entry: entry >>> 0, by, thread: thread.name });
+            if (started.length > STARTED_RING)
+            {
+                started.shift();
+            }
+
             /** @type {(value: number) => void} */
             let settle = ()=>{};
             const answer = new Promise(resolve=>{
                 settle = resolve;
             });
-            const frameBase = enter({ thread, entry, args, stackAtRest, by, settle, now: false });
+            frames.push({ frameBase, extent: frameBase + 4 * (args.length + 2), settle, epoch });
+
             kernel.scheduleResume(thread, { eip: entry, esp: frameBase, registers });
+            // Off to run guest code, whatever it was doing before.
+            thread.awaitingHost = false;
             return answer;
-        },
-
-        /**
-         * Sends the thread on the processor into a guest routine now, in the
-         * slice it is running: no park, no resume at a later turn. Its return
-         * to the sentinel hands `onReturn` what it answered, in that slice
-         * too (see `returnsNow`). Only for the thread whose trap is being
-         * handled.
-         *
-         * @param {Object} call
-         * @param {any} call.thread
-         * @param {number} call.entry
-         * @param {number[]} [call.args]
-         * @param {number} [call.stackAtRest]
-         * @param {string} [call.by]
-         * @param {(value: number) => void} call.onReturn
-         */
-        callNow({ thread, entry, args = [], stackAtRest, by = 'somewhere', onReturn }){
-            const frameBase = enter({ thread, entry, args, stackAtRest, by, settle: onReturn,
-                now: true });
-            cpu.writeReg32('esp', frameBase);
-            cpu.writeReg32('eip', entry);
-        },
-
-        /**
-         * Whether the return to the sentinel the thread has just made is from
-         * a routine `callNow` started, whose answer is taken in this slice.
-         *
-         * @param {any} thread
-         */
-        returnsNow(thread){
-            const frame = returningFrame(callbackFrames(thread), cpu.readReg32('esp') >>> 0);
-            return frame?.now === true;
         },
 
         /**
@@ -492,32 +433,6 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
                 returnValue,
                 ...Object.keys(rest).length > 0 ? { registers: rest } : {},
             });
-        },
-
-        /**
-         * A host call the thread on the processor is making has its answer,
-         * and the thread goes back to its own code in this slice: EAX, and
-         * where the call's stub would have returned with the stack it pops.
-         *
-         * @param {any} thread @param {number} returnValue
-         */
-        finishNow(thread, returnValue){
-            const call = hostCalls(thread).pop();
-            if (!call)
-            {
-                throw new Error('bridge: a host call finished that was never suspended');
-            }
-            pending--;
-            thread.awaitingHost = false;
-            if (answered)
-            {
-                const open = answered.settle;
-                answered = null;
-                open();
-            }
-            cpu.writeReg32('eax', returnValue >>> 0);
-            cpu.writeReg32('esp', call.restingStack);
-            cpu.writeReg32('eip', call.hostReturn);
         },
 
         /**

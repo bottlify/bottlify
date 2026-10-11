@@ -148,10 +148,6 @@ const COLOR_SCALE = 255;
  * @property {{ allocate: (bytes: number) => number, free: (address: number) => any }} [heap]
  * @property {(call: { entry: number, args: number[], thread?: any }) => Promise<number>}
  *     [callGuest]
- * @property {(steps: Steps) => any} [drive]
- *     Steps run by the bridge in the slice the call came in: what BeginPass and
- *     CommitChanges answer with, so a pass's states reach the program's state
- *     manager without a turn of the run loop for each.
  * @property {() => any} [currentThread]
  * @property {(path: string) => Promise<Uint8Array | null> | Uint8Array | null} [readFile]
  *     A file's bytes, for the FromFile functions; without it they are refused.
@@ -162,13 +158,6 @@ const COLOR_SCALE = 255;
  *     defines: [string, string][], flags: number, source: string,
  *     included: Record<string, string>, messages: string, tokens: Uint32Array | null })
  *     => void} [shaderCompiled]
- */
-
-/**
- * Steps of a host call that calls the guest: each guest call yielded, what it
- * returned handed back (EAX, signed), the answer returned.
- *
- * @typedef {Generator<{ entry: number, args: number[], thread?: any }, any, number>} Steps
  */
 
 /**
@@ -1351,79 +1340,11 @@ export function createEffects(host, helpers, options = {}){
      * @param {EffectState} effect @param {any} thread @param {string} name
      * @param {number[]} args @param {boolean} [direct]  Past the state manager.
      */
-    const set = function*(effect, thread, name, args, direct = false){
+    const set = (effect, thread, name, args, direct = false)=>{
         const [deviceSlot, managerSlot] = SETTERS[name];
-        return yield* methodStep(thread, effect.manager && !direct ? effect.manager
-            : effect.device, effect.manager && !direct ? managerSlot : deviceSlot, args);
-    };
-
-    /**
-     * A method of a COM object in guest memory as a step: its answer as an
-     * unsigned HRESULT.
-     *
-     * @param {any} thread @param {number} object @param {number} slot @param {number[]} rest
-     * @returns {Steps}
-     */
-    const methodStep = function*(thread, object, slot, rest){
-        const answer = yield { entry: u32(u32(object) + slot * 4), args: [object >>> 0, ...rest],
-            ...(thread === undefined ? {} : { thread }) };
-        return answer >>> 0;
-    };
-
-    /**
-     * Steps run through promises, each guest call through `callGuest`: for a
-     * host that cannot drive them, and for an async caller of its own.
-     *
-     * @param {Steps} steps
-     * @returns {Promise<any>}
-     */
-    const stepsThroughPromises = async steps=>{
-        // Begun once the handler has returned and its caller is parked, as these
-        // calls always were on this path: nothing of the guest runs inside it.
-        await null;
-        /** @type {number | undefined} */
-        let returned;
-        for (;;)
-        {
-            const next = steps.next(/** @type {number} */ (returned));
-            if (next.done)
-            {
-                return next.value;
-            }
-            returned = await /** @type {NonNullable<EffectHost['callGuest']>} */ (
-                host.callGuest)(next.value);
-        }
-    };
-
-    /**
-     * What a handler answers with for steps: the bridge's to run in the slice,
-     * or a promise where the host has no bridge to.
-     *
-     * @param {Steps} steps
-     */
-    const answerWith = steps=>(host.drive ? host.drive(steps) : stepsThroughPromises(steps));
-
-    /**
-     * Bytes in the heap for the length of the steps given them, freed after.
-     *
-     * @param {Uint8Array} bytes @param {(at: number) => Steps} use
-     * @returns {Steps}
-     */
-    const withBytesStep = function*(bytes, use){
-        const at = heap().allocate(Math.max(bytes.length, 4));
-        if (at === 0)
-        {
-            return E_OUTOFMEMORY;
-        }
-        try
-        {
-            host.writeMemory(at, bytes);
-            return yield* use(at);
-        }
-        finally
-        {
-            heap().free(at);
-        }
+        return effect.manager && !direct
+            ? method(thread, effect.manager, managerSlot, args)
+            : method(thread, effect.device, deviceSlot, args);
     };
 
     /**
@@ -1537,9 +1458,9 @@ export function createEffects(host, helpers, options = {}){
      * @param {boolean} all   Whether to set what has not changed too.
      * @param {any} thread
      * @param {number} keep   What a recording leaves out: D3DXFX_DONOTSAVE* flags.
-     * @returns {Steps}
+     * @returns {Promise<number>}
      */
-    const applyState = function*(effect, pass, state, unit, all, thread, keep){
+    const applyState = async(effect, pass, state, unit, all, thread, keep)=>{
         const value = valueOf(effect, pass, state);
         if (!value)
         {
@@ -1555,25 +1476,25 @@ export function createEffects(host, helpers, options = {}){
         switch (kind)
         {
             case 'render':
-                return yield* set(effect, thread, 'SetRenderState', [state.op, first]);
+                return set(effect, thread, 'SetRenderState', [state.op, first]);
             case 'stage':
-                return yield* set(effect, thread, 'SetTextureStageState', [index, state.op, first]);
+                return set(effect, thread, 'SetTextureStageState', [index, state.op, first]);
             case 'sampler':
                 if (keep & FX.DONOTSAVESAMPLERSTATE)
                 {
                     return D3D_OK;
                 }
-                return yield* set(effect, thread, 'SetSamplerState', [unit < 0 ? index : unit,
-                    state.op, first]);
+                return set(effect, thread, 'SetSamplerState', [unit < 0 ? index : unit, state.op,
+                    first]);
             case 'texture':
-                return yield* set(effect, thread, 'SetTexture', [unit < 0 ? index : unit, first]);
+                return set(effect, thread, 'SetTexture', [unit < 0 ? index : unit, first]);
             case 'setsampler': {
                 const p = value.param;
                 if (!p || !isSampler(p.model.type) || (keep & FX.DONOTSAVESAMPLERSTATE))
                 {
                     return D3D_OK;
                 }
-                return yield* applySampler(effect, pass, p, index, all, thread, keep);
+                return applySampler(effect, pass, p, index, all, thread, keep);
             }
             case 'vs':
             case 'ps': {
@@ -1585,21 +1506,21 @@ export function createEffects(host, helpers, options = {}){
                 const changed = all || value.dirty;
                 if (changed)
                 {
-                    const answer = yield* set(effect, thread, kind === 'vs' ? 'SetVertexShader'
+                    const answer = await set(effect, thread, kind === 'vs' ? 'SetVertexShader'
                         : 'SetPixelShader', [shader?.pointer ?? 0]);
                     if (answer !== D3D_OK)
                     {
                         return answer;
                     }
                 }
-                return shader?.pointer
-                    ? yield* applyConstants(effect, pass, shader, changed, thread, keep) : D3D_OK;
+                return shader?.pointer ? applyConstants(effect, pass, shader, changed, thread, keep)
+                    : D3D_OK;
             }
             case 'transform':
-                return yield* withBytesStep(u32Bytes(padded(value.words, 16)), at=>set(effect,
-                    thread, 'SetTransform', [state.op + (state.index < 0 ? 0 : state.index), at]));
+                return withBytes(u32Bytes(padded(value.words, 16)), at=>set(effect, thread,
+                    'SetTransform', [state.op + (state.index < 0 ? 0 : state.index), at]));
             case 'lightenable':
-                return yield* set(effect, thread, 'LightEnable', [index, first ? 1 : 0]);
+                return set(effect, thread, 'LightEnable', [index, first ? 1 : 0]);
             case 'light': {
                 const light = effect.lights[index] ?? (effect.lights[index] = new Uint8Array(104));
                 // Position and direction are three floats; the colours four.
@@ -1615,9 +1536,9 @@ export function createEffects(host, helpers, options = {}){
                 effect.materialUpdated = true;
                 return D3D_OK;
             case 'fvf':
-                return yield* set(effect, thread, 'SetFVF', [first]);
+                return set(effect, thread, 'SetFVF', [first]);
             case 'npatch':
-                return yield* set(effect, thread, 'SetNPatchMode', [first]);
+                return set(effect, thread, 'SetNPatchMode', [first]);
             default: {
                 const target = CONSTANT_STATES[kind];
                 if (!target)
@@ -1626,8 +1547,8 @@ export function createEffects(host, helpers, options = {}){
                 }
                 const [setter, perRegister] = target;
                 const count = Math.max(1, Math.ceil(value.words.length / perRegister));
-                return yield* withBytesStep(u32Bytes(padded(value.words, count * perRegister)),
-                    at=>set(effect, thread, setter, [index, at, count]));
+                return withBytes(u32Bytes(padded(value.words, count * perRegister)), at=>set(
+                    effect, thread, setter, [index, at, count]));
             }
         }
     };
@@ -1642,11 +1563,11 @@ export function createEffects(host, helpers, options = {}){
      * @param {EffectState} effect @param {Pass | null} pass @param {Param} p
      * @param {number} unit @param {boolean} all @param {any} thread @param {number} keep
      */
-    const applySampler = function*(effect, pass, p, unit, all, thread, keep){
+    const applySampler = async(effect, pass, p, unit, all, thread, keep)=>{
         let answer = D3D_OK;
         for (const state of p.model.samplers[0] ?? [])
         {
-            const result = yield* applyState(effect, pass, state, unit, all, thread, keep);
+            const result = await applyState(effect, pass, state, unit, all, thread, keep);
             answer = result !== D3D_OK ? result : answer;
         }
         return answer;
@@ -1659,7 +1580,7 @@ export function createEffects(host, helpers, options = {}){
      * @param {EffectState} effect @param {Pass | null} pass @param {Shader} shader
      * @param {boolean} all @param {any} thread @param {number} keep
      */
-    const applyConstants = function*(effect, pass, shader, all, thread, keep){
+    const applyConstants = async(effect, pass, shader, all, thread, keep)=>{
         let answer = D3D_OK;
         for (const { constant, param } of shader.bindings)
         {
@@ -1682,7 +1603,7 @@ export function createEffects(host, helpers, options = {}){
                         continue;
                     }
                     const unit = constant.index + k + (shader.pixel ? 0 : VERTEX_SAMPLER_BASE);
-                    const result = yield* applySampler(effect, pass, element, unit, all || dirty,
+                    const result = await applySampler(effect, pass, element, unit, all || dirty,
                         thread, keep);
                     answer = result !== D3D_OK ? result : answer;
                 }
@@ -1692,7 +1613,7 @@ export function createEffects(host, helpers, options = {}){
             {
                 continue;
             }
-            const result = yield* storeConstant(effect, shader, constant, param, thread);
+            const result = await storeConstant(effect, shader, constant, param, thread);
             answer = result !== D3D_OK ? result : answer;
         }
         return answer;
@@ -1703,9 +1624,9 @@ export function createEffects(host, helpers, options = {}){
      *
      * @param {EffectState} effect @param {Shader} shader @param {Constant} constant
      * @param {Param} param @param {any} thread
-     * @returns {Steps}
+     * @returns {Promise<number>}
      */
-    const storeConstant = function*(effect, shader, constant, param, thread){
+    const storeConstant = async(effect, shader, constant, param, thread)=>{
         if (constant.cls === PC.STRUCT || constant.members.length > 0)
         {
             let answer = D3D_OK;
@@ -1723,7 +1644,7 @@ export function createEffects(host, helpers, options = {}){
                     const p = holder.members.find(m=>m.model.name === member.name);
                     if (p)
                     {
-                        const result = yield* storeConstant(effect, shader, { ...member,
+                        const result = await storeConstant(effect, shader, { ...member,
                             index: member.index + e * span }, p, thread);
                         answer = result !== D3D_OK ? result : answer;
                     }
@@ -1758,8 +1679,8 @@ export function createEffects(host, helpers, options = {}){
             }
         }
         const setter = CONSTANT_SETTERS[constant.set][shader.pixel ? 1 : 0];
-        return yield* withBytesStep(new Uint8Array(bytes.buffer, 0, units * 4), at=>set(effect,
-            thread, setter, [constant.index, at, count]));
+        return withBytes(new Uint8Array(bytes.buffer, 0, units * 4), at=>set(effect, thread,
+            setter, [constant.index, at, count]));
     };
 
     /**
@@ -1768,19 +1689,19 @@ export function createEffects(host, helpers, options = {}){
      * @param {EffectState} effect @param {Pass} pass @param {boolean} all @param {any} thread
      * @param {number} [keep]
      */
-    const applyPass = function*(effect, pass, all, thread, keep = 0){
+    const applyPass = async(effect, pass, all, thread, keep = 0)=>{
         const now = clock++;
         let answer = D3D_OK;
         for (const state of pass.model.states)
         {
-            const result = yield* applyState(effect, pass, state, -1, all, thread, keep);
+            const result = await applyState(effect, pass, state, -1, all, thread, keep);
             answer = result !== D3D_OK ? result : answer;
         }
         for (let i = 0; i < effect.lights.length; i++)
         {
             if (effect.lightsUpdated & (1 << i))
             {
-                const result = yield* withBytesStep(effect.lights[i], at=>set(effect, thread,
+                const result = await withBytes(effect.lights[i], at=>set(effect, thread,
                     'SetLight', [i, at]));
                 answer = result !== D3D_OK ? result : answer;
             }
@@ -1788,8 +1709,8 @@ export function createEffects(host, helpers, options = {}){
         effect.lightsUpdated = 0;
         if (effect.materialUpdated)
         {
-            const result = yield* withBytesStep(effect.material, at=>set(effect, thread,
-                'SetMaterial', [at]));
+            const result = await withBytes(effect.material, at=>set(effect, thread, 'SetMaterial',
+                [at]));
             answer = result !== D3D_OK ? result : answer;
         }
         effect.materialUpdated = false;
@@ -1929,8 +1850,8 @@ export function createEffects(host, helpers, options = {}){
             {
                 return D3D_OK;
             }
-            return answerWith(saveState(effect, t, flags & (FX.DONOTSAVESHADERSTATE
-                | FX.DONOTSAVESAMPLERSTATE), host.currentThread?.()));
+            return saveState(effect, t, flags & (FX.DONOTSAVESHADERSTATE
+                | FX.DONOTSAVESAMPLERSTATE), host.currentThread?.());
         } },
         /** HRESULT BeginPass(UINT Pass) */
         { name: 'BeginPass', argBytes: 8, invoke: (object, [index])=>{
@@ -1947,14 +1868,14 @@ export function createEffects(host, helpers, options = {}){
             effect.materialUpdated = false;
             effect.active = pass;
             const thread = host.currentThread?.();
-            return answerWith(function*(){
-                const answer = yield* applyPass(effect, pass, true, thread);
-                if (answer !== D3D_OK && effect.active === pass)
-                {
-                    effect.active = null;
-                }
-                return answer;
-            }());
+            return Promise.resolve().then(()=>applyPass(effect, pass, true, thread))
+                .then(answer=>{
+                    if (answer !== D3D_OK && effect.active === pass)
+                    {
+                        effect.active = null;
+                    }
+                    return answer;
+                });
         } },
         /** HRESULT CommitChanges() */
         { name: 'CommitChanges', argBytes: 4, invoke: object=>{
@@ -1965,7 +1886,7 @@ export function createEffects(host, helpers, options = {}){
                 return D3D_OK;
             }
             const thread = host.currentThread?.();
-            return answerWith(applyPass(effect, pass, false, thread));
+            return Promise.resolve().then(()=>applyPass(effect, pass, false, thread));
         } },
         /** HRESULT EndPass() */
         { name: 'EndPass', argBytes: 4, invoke: object=>{
@@ -1993,10 +1914,8 @@ export function createEffects(host, helpers, options = {}){
                 return D3D_OK;
             }
             const thread = host.currentThread?.();
-            return answerWith(function*(){
-                yield* methodStep(thread, block, STATEBLOCK.Apply, []);
-                return D3D_OK;
-            }());
+            return Promise.resolve().then(()=>method(thread, block, STATEBLOCK.Apply, []))
+                .then(()=>D3D_OK);
         } },
         /** HRESULT GetDevice(LPDIRECT3DDEVICE9 *) */
         { name: 'GetDevice', argBytes: 8, invoke: (object, [out])=>{
@@ -2132,7 +2051,8 @@ export function createEffects(host, helpers, options = {}){
      *
      * @param {EffectState} effect @param {Technique} t @param {number} keep @param {any} thread
      */
-    const saveState = function*(effect, t, keep, thread){
+    const saveState = async(effect, t, keep, thread)=>{
+        await null;
         let block = t.saved.get(keep) ?? 0;
         if (!block)
         {
@@ -2140,14 +2060,14 @@ export function createEffects(host, helpers, options = {}){
             effect.manager = 0;
             try
             {
-                yield* methodStep(thread, effect.device, DEVICE_MORE.BeginStateBlock, []);
+                await method(thread, effect.device, DEVICE_MORE.BeginStateBlock, []);
                 for (const pass of t.passes)
                 {
-                    yield* applyPass(effect, pass, true, thread, keep);
+                    await applyPass(effect, pass, true, thread, keep);
                 }
-                block = Number(yield* withBytesStep(new Uint8Array(4), function*(at){
-                    const answer = yield* methodStep(thread, effect.device,
-                        DEVICE_MORE.EndStateBlock, [at]);
+                block = Number(await withBytes(new Uint8Array(4), async at=>{
+                    const answer = await method(thread, effect.device, DEVICE_MORE.EndStateBlock,
+                        [at]);
                     return answer === D3D_OK ? u32(at) : 0;
                 }));
             }
@@ -2162,7 +2082,7 @@ export function createEffects(host, helpers, options = {}){
         }
         if (block)
         {
-            yield* methodStep(thread, block, STATEBLOCK.Capture, []);
+            await method(thread, block, STATEBLOCK.Capture, []);
         }
         return D3D_OK;
     };
