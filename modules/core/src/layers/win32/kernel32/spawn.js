@@ -838,7 +838,18 @@ export function createSpawnFunctions(host){
                 let bytes;
                 if ((handle >>> 0) === CURRENT_PROCESS)
                 {
-                    bytes = count === 0 ? new Uint8Array(0) : host.readMemory(from, count).slice();
+                    // A range that leaves mapped memory is ERROR_PARTIAL_COPY, not a
+                    // fault: a crash handler walks stacks through here, reading
+                    // wherever a frame pointer leads.
+                    try
+                    {
+                        bytes = count === 0 ? new Uint8Array(0)
+                            : host.readMemory(from, count).slice();
+                    }
+                    catch (e){
+                        void e;
+                        bytes = null;
+                    }
                 }
                 else
                 {
