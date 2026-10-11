@@ -168,13 +168,6 @@ export async function serveProcess(start){
     const plainTables = ()=>plainOf(tables, message=>[{ name: 'diagnostics', status: 'error',
         metrics: { error: message } }]);
     handlers.report = { diagnostics: ()=>(app ? plainTables() : null) };
-    // What the page asks of the process it drives, as it would of a machine on
-    // its own thread: pausing it, and looking inside it.
-    handlers.control = {
-        pause: ()=>app?.pause(),
-        resume: ()=>app?.resume(),
-        stop: ()=>app?.stop(),
-    };
     handlers.facade = {
         /** @param {string} path  a member of the machine, `debug.read` @param {any[]} args */
         call: async(path, args)=>{
