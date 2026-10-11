@@ -3371,6 +3371,8 @@ export function createWin32Module(){
                 waveDevices: ()=>winmm.diagnostics(),
                 /** The thread those devices call back on: whether it exists, and what it is doing. */
                 waveThread: ()=>waveNotices.diagnostics(),
+                /** The multimedia timers: each one's period and how far behind it is. */
+                multimediaTimers: ()=>mmTimers.diagnostics(),
                 /**
                  * How many sections were entered and left without crossing into
                  * the host, and how many crossings the contended ones cost.
@@ -3572,6 +3574,7 @@ export function createWin32Module(){
                     ioCompletionWaits: current ? current.ioCompletionWaits() : [],
                     waveDevices: current ? current.waveDevices() : [],
                     waveThread: current ? current.waveThread() : null,
+                    multimediaTimers: current ? current.multimediaTimers() : null,
                     criticalSections: current ? current.criticalSections() : null,
                     messages: current ? current.messages() : {},
                     // What is left of the one arena everything the guest is handed
