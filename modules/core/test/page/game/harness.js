@@ -1377,6 +1377,8 @@ export function createHarness(canvas, how = {}){
     let frameReport = null;
     /** @type {any} */
     let running = null;
+    /** Ends the run being made now, as though its time were up. @type {(() => void) | null} */
+    let endRun = null;
     /** What the run in progress has said so far, for `standing`. @type {string[]} */
     let runningEvents = [];
     /** The frames `snapFrame` asked for, being read back, by frame. @type {Map<number, Promise<any>>} */
@@ -1785,10 +1787,15 @@ export function createHarness(canvas, how = {}){
         const started = performance.now();
         try
         {
-            result.exitCode = await app.run({
+            // A driver's stop ends the run here, as its time running out
+            // would, whatever the machine does with being stopped.
+            const stopped = new Promise(done=>{
+                endRun = ()=>done(-1);
+            });
+            result.exitCode = await Promise.race([app.run({
                 maxTurns: request.maxTurns ?? 200000,
                 timeoutMs: request.maxMs ?? null,
-            });
+            }), stopped]);
             result.stopped = `exited with ${result.exitCode}`;
             result.ok = true;
         }
@@ -2057,7 +2064,7 @@ export function createHarness(canvas, how = {}){
         },
         // The run ended now, as though its time were up: the report follows.
         stop: ()=>{
-            running?.stop();
+            endRun?.();
             return running !== null;
         },
         // The frame presented last, read back from the device while the run
