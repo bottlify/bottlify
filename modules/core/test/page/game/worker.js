@@ -138,6 +138,13 @@ self.onmessage = ({ data })=>{
             self.postMessage({ type: 'answer', id: data.id,
                 value: harness?.journalRecent(data.count) ?? [] });
             break;
+        case 'input':
+            self.postMessage({ type: 'answer', id: data.id,
+                value: harness?.input(data.event) ?? false });
+            break;
+        case 'stop':
+            self.postMessage({ type: 'answer', id: data.id, value: harness?.stop() ?? false });
+            break;
         case 'clearLog':
             sentLines = 0;
             self.postMessage({ type: 'answer', id: data.id,

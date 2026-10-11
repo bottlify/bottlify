@@ -156,6 +156,8 @@ if (inWorker)
     namespace.lastDumped = ()=>ask('lastDumped');
     namespace.journalRecent = (/** @type {number} */ count)=>ask('journalRecent', { count });
     namespace.standing = (/** @type {string | undefined} */ list)=>ask('standing', { list });
+    namespace.input = (/** @type {any} */ event)=>ask('input', { event });
+    namespace.stop = ()=>ask('stop');
     namespace.clearLog = ()=>{
         callLog.length = 0;
         return ask('clearLog');
@@ -174,6 +176,8 @@ else
     namespace.lastDumped = harness.lastDumped;
     namespace.journalRecent = harness.journalRecent;
     namespace.standing = harness.standing;
+    namespace.input = harness.input;
+    namespace.stop = harness.stop;
     namespace.clearLog = harness.clearLog;
     namespace.errors = harness.errors;
 

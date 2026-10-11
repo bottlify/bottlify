@@ -28,7 +28,7 @@
  *                                  [--cpu-profile SECONDS] [--heap-profile [old]]
  *                                  [--export-translations FILE]
  *                                  [--watch SECONDS] [--press LABEL|LABEL... [--press-settle MS]]
- *                                  [--route] [--shots-every SECONDS] [--dump-at SECONDS]
+ *                                  [--route] [--shots-every SECONDS] [--control PORT] [--dump-at SECONDS]
  *
  * `--watch S` is for a program that does not present, an installer above
  * all: every S seconds the desktop it paints with GDI is written as a PNG,
@@ -43,6 +43,7 @@ import { deflateSync } from 'node:zlib';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync }
     from 'node:fs';
 import { tmpdir } from 'node:os';
+import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -78,6 +79,67 @@ const afterOf = text=>{
     return { after: Number(text) || 30 };
 };
 const REPO_ROOT = resolve(TOOL_ROOT, '..', '..');
+
+/**
+ * Orders for a run while it goes on, on http://127.0.0.1:PORT:
+ *
+ *   /shot                    the frame presented last, as a PNG; answers the path
+ *   /click?x=&y=&hold=MS     a left click at the program's pixels
+ *   /move?x=&y=              the pointer moved there
+ *   /key?code=Enter&hold=MS  a key press, by KeyboardEvent.code
+ *   /eval?js=EXPR            an expression's value in the page (window.__bottlify__)
+ *   /stop                    the run ended now, as though its time were up
+ *
+ * @param {number} port
+ * @param {{ shot: () => Promise<string | null>,
+ *     evaluate: (expression: string) => Promise<any> }} page
+ */
+function serveControl(port, page){
+    /** @param {any} event */
+    const send = event=>page.evaluate(`window.__bottlify__.input(${JSON.stringify(event)})`);
+    const hold = (/** @type {number} */ ms)=>new Promise(done=>{
+        setTimeout(done, ms);
+    });
+    /** @type {Record<string, (query: URLSearchParams) => Promise<any>>} */
+    const orders = {
+        shot: ()=>page.shot(),
+        move: async query=>send({ kind: 'pointerMove', x: Number(query.get('x')),
+            y: Number(query.get('y')), dx: 0, dy: 0 }),
+        click: async query=>{
+            await send({ kind: 'pointerMove', x: Number(query.get('x')),
+                y: Number(query.get('y')), dx: 0, dy: 0 });
+            await send({ kind: 'pointerButton', button: 'left', down: true });
+            await hold(Number(query.get('hold') ?? 120));
+            return send({ kind: 'pointerButton', button: 'left', down: false });
+        },
+        key: async query=>{
+            const code = query.get('code') ?? '';
+            await send({ kind: 'key', code, down: true });
+            await hold(Number(query.get('hold') ?? 120));
+            return send({ kind: 'key', code, down: false });
+        },
+        eval: query=>page.evaluate(query.get('js') ?? 'null'),
+        stop: ()=>page.evaluate('window.__bottlify__.stop()'),
+    };
+    const server = createServer((request, response)=>{
+        const url = new URL(request.url ?? '/', 'http://localhost');
+        const order = orders[url.pathname.slice(1)];
+        if (!order)
+        {
+            response.writeHead(404).end(`orders: ${Object.keys(orders).join(' ')}\n`);
+            return;
+        }
+        order(url.searchParams).then(value=>{
+            response.writeHead(200, { 'content-type': 'application/json' })
+                .end(`${JSON.stringify(value ?? null)}\n`);
+        }, error=>{
+            response.writeHead(500).end(`${String(error?.message ?? error)}\n`);
+        });
+    });
+    server.listen(port, '127.0.0.1');
+    console.log(`  control: http://127.0.0.1:${port}/ (shot click move key eval stop)`);
+    return server;
+}
 const PACKAGE_DIR = join(REPO_ROOT, 'modules', 'core');
 const BUNDLES_DIR = join(REPO_ROOT, 'bundles');
 const REPORTS_DIR = join(TOOL_ROOT, 'reports');
@@ -268,6 +330,10 @@ function parse(argv){
         // the report as game-<stamp>-snap.png: a demo's frame N in every run.
         snapFrame: number('--snap-frame', 0),
         shotsEvery: number('--shots-every', 0),
+        // `--control PORT`: the run takes orders over HTTP while it goes on
+        // (`serveControl`), so a screen is walked by looking at it, not by
+        // guessing when it comes.
+        control: number('--control', 0),
         dumpAt: number('--dump-at', 0),
         snapFromStart: argv.includes('--snap-from-start'),
         // With it, this many frames from it, --snap-every apart, each written
@@ -1780,6 +1846,34 @@ export async function game(options){
         // `--shots-every S`: the page as it stands every S seconds, written at
         // once, so a run that never comes back still leaves what it showed.
         const shotsStamp = new Date().toISOString().replace(/[:.]/g, '-');
+        /**
+         * The frame presented last, read back from the device -- the page's
+         * own canvas shows nothing while a run goes on headless -- written
+         * as a PNG named by the second it was taken at.
+         *
+         * @returns {Promise<string | null>} its path, or null before any frame
+         */
+        const takeShot = async()=>{
+            const at = Math.round((Date.now() - startedAt) / 1000);
+            const answer = await cdp.send('Runtime.evaluate', {
+                expression: 'window.__bottlify__.frameShot()', returnByValue: true,
+                awaitPromise: true }, sessionId);
+            const shot = answer?.result?.value;
+            if (!shot)
+            {
+                console.log(`  shot at ${at} s: no frame presented yet`);
+                return null;
+            }
+            const bytes = Buffer.from(shot.pixels, 'base64');
+            // Read back as RGBA whatever the surface's format.
+            const image = toPng(shot.width, shot.height, toBgra(bytes));
+            const path = join(REPORTS_DIR,
+                `game-${shotsStamp}-at-${String(at).padStart(5, '0')}s.png`);
+            writeFileSync(path, image);
+            console.log(`  shot at ${at} s: ${path} (frame ${shot.frameIndex}`
+                + ` of ${shot.presents} presented)`);
+            return path;
+        };
         let shooting = false;
         const shotsTimer = options.shotsEvery > 0
             ? setInterval(()=>{
@@ -1788,29 +1882,20 @@ export async function game(options){
                     return;
                 }
                 shooting = true;
-                const at = Math.round((Date.now() - startedAt) / 1000);
-                // The frame presented last, read back from the device: the page's
-                // own canvas shows nothing while a run goes on headless.
-                cdp.send('Runtime.evaluate', { expression: 'window.__bottlify__.frameShot()',
-                    returnByValue: true, awaitPromise: true }, sessionId).then(answer=>{
-                    const shot = answer?.result?.value;
-                    if (!shot)
-                    {
-                        console.log(`  shot at ${at} s: no frame presented yet`);
-                        return;
-                    }
-                    const bytes = Buffer.from(shot.pixels, 'base64');
-                    // Read back as RGBA whatever the surface's format.
-                    const image = toPng(shot.width, shot.height, toBgra(bytes));
-                    const path = join(REPORTS_DIR,
-                        `game-${shotsStamp}-at-${String(at).padStart(5, '0')}s.png`);
-                    writeFileSync(path, image);
-                    console.log(`  shot at ${at} s: ${path} (frame ${shot.frameIndex}`
-                        + ` of ${shot.presents} presented)`);
-                }, ()=>{}).finally(()=>{
+                takeShot().catch(()=>null).finally(()=>{
                     shooting = false;
                 });
             }, options.shotsEvery * 1000)
+            : null;
+        const control = options.control > 0
+            ? serveControl(options.control, {
+                shot: takeShot,
+                evaluate: async(/** @type {string} */ expression)=>{
+                    const answer = await cdp.send('Runtime.evaluate', { expression,
+                        returnByValue: true, awaitPromise: true }, sessionId);
+                    return answer?.result?.value ?? answer?.exceptionDetails?.text ?? null;
+                },
+            })
             : null;
         // `--dump-at S`: the next frame with draws written down S seconds in,
         // by the device that draws it -- a frame of the level rather than of
@@ -1919,6 +2004,7 @@ the run as it stands: ${path}`;
             if (shotsTimer !== null)
             {
                 clearInterval(shotsTimer);
+                control?.close();
             }
             if (dumpTimer !== null)
             {

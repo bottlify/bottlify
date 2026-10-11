@@ -2048,6 +2048,18 @@ export function createHarness(canvas, how = {}){
             return true;
         },
         frameReport: ()=>frameReport ? frameReport() : JSON.stringify({ ready: false }),
+        // What a driver sends while the run goes on (`game.mjs --control`):
+        // a pointer move, a button or a key, as the page's own input sends it.
+        /** @param {any} event */
+        input: event=>{
+            running?.input.send(event);
+            return running !== null;
+        },
+        // The run ended now, as though its time were up: the report follows.
+        stop: ()=>{
+            running?.stop();
+            return running !== null;
+        },
         // The frame presented last, read back from the device while the run
         // goes on: what a person sees at this present, so two runs can be
         // compared at the same one. The pixels are the surface's own bytes,
