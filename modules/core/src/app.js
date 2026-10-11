@@ -1181,6 +1181,14 @@ const IDLE_SPINS_BEFORE_TIMER = 4;
 const IDLE_LOOK_MS = 4;
 
 /**
+ * How often the run loop pumps the sound at most: what the pump does --
+ * position notifications, a buffer's volume and pan carried over, a queue
+ * track topped up -- waits a millisecond at most, against a device that
+ * reads on its own clock and a ring that holds 200 ms.
+ */
+const SOUND_PUMP_MS = 1;
+
+/**
  * What the run loop is waiting on when it cannot go straight on, and how.
  *
  * A range request, a message queue with nothing in it, and some other host call
@@ -6232,6 +6240,8 @@ async function buildApp(options){
             // the host, which are the same shape from here and want opposite
             // waits.
             let spun = 0;
+            /** When the sound was last pumped (`SOUND_PUMP_MS`). */
+            let pumpedAt = -Infinity;
             while (worked < maxTurns && !expired())
             {
                 if (paused)
@@ -6285,10 +6295,13 @@ async function buildApp(options){
                     // to compose a frame or collect its garbage. Topping the
                     // ring up first is what keeps it from draining empty in that
                     // gap -- heard as a click in otherwise steady sound.
-                    journal.begin('pump', journal.PhaseKind.HOST);
-                    sound?.pump();
-                    journal.end('pump');
-
+                    //
+                    // Once a SOUND_PUMP_MS, though, not once a turn: a ring
+                    // topped up a millisecond ago is as full as it gets, and
+                    // a machine whose threads wait out a deadline turns --
+                    // and yields -- tens of thousands of times a second, a
+                    // pump each, 8 % of a game's thread, all doing nothing.
+                    //
                     // A caller parked on a queue of the guest's own is a
                     // suspended call too, but the guest answers it, at the look
                     // every turn gives it below: what is left waits on the
@@ -6299,6 +6312,14 @@ async function buildApp(options){
                     const turnYield = pacing.yield({
                         suspended: onHost, fetching, idlers: queued, spun,
                     });
+                    const pumpAt = performance.now();
+                    if (sound && pumpAt - pumpedAt >= SOUND_PUMP_MS)
+                    {
+                        pumpedAt = pumpAt;
+                        journal.begin('pump', journal.PhaseKind.HOST);
+                        sound.pump();
+                        journal.end('pump');
+                    }
                     if (turnYield)
                     {
                         journal.begin('yield', journal.PhaseKind.HOST);
