@@ -904,8 +904,6 @@ const writtenAfterUnlock = version=>async(/** @type {ReturnType<typeof runner>} 
     await run.call('SetRenderState LIGHTING', ()=>device.SetRenderState(D3DRS.LIGHTING, 0));
     /** @type {number[]} */
     const carried = [];
-    /** What draws compared and copied of it, by frame. @type {number[]} */
-    const looked = [];
     for (let frame = 0; frame < 4; frame++)
     {
         await run.call('BeginScene', ()=>device.BeginScene());
@@ -956,15 +954,7 @@ const writtenAfterUnlock = version=>async(/** @type {ReturnType<typeof runner>} 
         if (bytes)
         {
             carried.push(bytes.buffers + bytes.dynamic);
-            looked.push(bytes.dynamic + bytes.compared);
         }
-    }
-    // Where guest memory is shared, what a draw reads of the buffer is lent:
-    // after the first frame, nothing of it is compared or copied for a draw.
-    if (run.on.way.endsWith('lent'))
-    {
-        assert.ok(looked.every(count=>count === looked[0]), `draws compared or copied the`
-            + ` buffer though it was lent: ${looked.join(', ')}`);
     }
     // The first frame sends the buffer once, at its unlock and at its first
     // draw; after it, a frame sends what it wrote -- five quads, each within

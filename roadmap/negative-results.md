@@ -268,3 +268,29 @@ None yet.
   is not where a draw's time goes on either side.
 - **Correctness.** Not run beyond the bench.
 - **Decision.** Reverted.
+
+### 2026-10-11 -- a draw's reads of a dynamic buffer lent to the graphics worker, not compared
+
+- **Idea.** Where guest memory is shared, the ranges draws read of dynamic vertex and index
+  buffers go to the graphics worker as lends (`lending.js`), read in place before the call is
+  played, instead of being compared with a copy on the program's thread and the differences
+  copied into the batch (`3c3e58d8`).
+- **Workload.** Call of Duty 4 demo, The Bog, `r_skinCache 1`, `tools/cdp_test/game.mjs
+  --worker --graphics-worker --coi --screen 1024x768 --run-seconds 1000`, CPU profile of the
+  program's thread from 850 s to 1000 s; one run each arm. Bundle: `cod4-demo`, hash not
+  recorded.
+- **Values.** Before (`87210346`): of 62.3 s busy, guest 33.0 s; comparison 5.74 s, recording
+  1.38 s, postMessage 3.22 s -- 0.31 s of graphics overhead per second of guest. After: of
+  46.1 s busy, guest 23.2 s; recording 3.37 s, copies of guest memory (`accessors.js`) 1.59 s,
+  postMessage 2.48 s -- 0.32 s per second of guest. Batches: 8.64 GB before, 13.63 GB after;
+  bytes copied for draws 0.87 GB before, 4.56 GB after; bytes compared 18.97 GB before, 0 after.
+  Noise floor: not measured.
+- **Machine.** Headless Chromium 141 on SwiftShader, a 4-core x86-64 Linux VM (Firecracker).
+  Power plan: not recorded.
+- **Why it did not pay.** Draws in the level read hundreds of megabytes of dynamic buffers a
+  frame (19 GB compared in the run). The stash a lend reserves room in holds 16 MB, so most
+  lends found no room and fell back to copying the range whole: the comparison became a copy
+  of the same bytes.
+- **Correctness.** The replay contract gate passed in every way, lent ways included.
+- **Decision.** Reverted; the bytes compared stay counted (`shipped.compared`). What would pay is
+  comparing less: knowing which pages the program wrote, an experiment of its own.
