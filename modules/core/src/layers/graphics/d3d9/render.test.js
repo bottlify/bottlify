@@ -364,6 +364,55 @@ test('a dynamic buffer written after its unlock draws what was written', async()
     created.buffer.release();
 });
 
+test('models written one after another into a dynamic buffer after its unlock draw each its own'
+    + ' vertices, and the buffer goes to the queue once a frame', async()=>{
+    // A skinning buffer: locked with DISCARD and unlocked once a frame, then
+    // each model's vertices written through the pointer and drawn. A write to
+    // the queue at every draw was a trip to the GPU for every model.
+    const h = harness({ width: 8, height: 8 });
+    const { device } = h;
+    const MODELS = 6;
+    /** @type {{ buffer?: any }} */
+    const created = {};
+    assert.equal(device.CreateVertexBuffer(MODELS * 3 * TRIANGLE_STRIDE,
+        D3DUSAGE.DYNAMIC | D3DUSAGE.WRITEONLY, FVF_TRIANGLE, D3DPOOL.DEFAULT, created), D3D_OK);
+    assert.equal(device.SetStreamSource(0, created.buffer, 0, TRIANGLE_STRIDE), D3D_OK);
+    assert.equal(device.SetFVF(FVF_TRIANGLE), D3D_OK);
+    for (let frame = 0; frame < 2; frame++)
+    {
+        /** @type {{ pBits?: number }} */
+        const locked = {};
+        assert.equal(created.buffer.Lock(0, 0, locked, D3DLOCK.DISCARD), D3D_OK);
+        assert.equal(created.buffer.Unlock(), D3D_OK);
+        const at = /** @type {number} */ (locked.pBits);
+        const before = h.gpu.of('writeBuffer').length;
+        /** @type {number[][][]} */
+        const models = [];
+        assert.equal(device.BeginScene(), D3D_OK);
+        for (let model = 0; model < MODELS; model++)
+        {
+            const corners = [[1 + model % 3, 1], [7, 1 + frame], [1, 4 + model % 2]];
+            corners.forEach(([x, y], index)=>h.write(at + (model * 3 + index) * TRIANGLE_STRIDE,
+                vertex(x, y, argb(0, 0, 255))));
+            models.push(corners);
+            assert.equal(device.DrawPrimitive(D3DPT.TRIANGLELIST, model * 3, 1), D3D_OK);
+        }
+        assert.equal(device.EndScene(), D3D_OK);
+        await h.present();
+        const draws = h.device.diagnostics().lastFrame.filter(
+            (/** @type {any} */ command)=>command.kind === 'draw');
+        assert.equal(draws.length, MODELS);
+        draws.forEach((/** @type {any} */ draw, /** @type {number} */ model)=>assert.deepEqual(
+            queuedTriangle(h, draw).map(point=>[point.x, point.y]), models[model],
+            `frame ${frame}: model ${model} reads what was written for it`));
+        const buffer = draws[0].vertices.gpu;
+        const writes = h.gpu.of('writeBuffer').slice(before)
+            .filter((/** @type {any} */ call)=>call.buffer === buffer);
+        assert.equal(writes.length, 1, `frame ${frame}: one write of the buffer, not one a model`);
+    }
+    created.buffer.release();
+});
+
 test('the frame record says what was cleared, what was drawn and where, and what is shown',
     async()=>{
         // The datum that decides a black or a frozen picture without a
