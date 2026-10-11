@@ -62,10 +62,14 @@ function readVector(state, operand, width, address){
     }
     else if (operand.kind === 'mm')
     {
+        // Two halves out of the BigInt, and bytes out of numbers: a BigInt
+        // operation a byte made an MMX instruction cost thirty-five integer ones.
         const word = state.f80bits[/** @type {number} */ (operand.reg)];
+        const low = Number(BigInt.asUintN(32, word));
+        const high = Number(BigInt.asUintN(32, word >> 32n));
         for (let i = 0; i < width; i++)
         {
-            out[i] = Number(word >> BigInt(i * 8) & 0xffn);
+            out[i] = (i < 4 ? low >>> (i * 8) : high >>> ((i - 4) * 8)) & 0xff;
         }
     }
     else if (operand.kind === 'reg')
@@ -110,12 +114,21 @@ function writeVector(state, operand, width, address, value){
     }
     if (operand.kind === 'mm')
     {
-        let word = 0n;
-        for (let i = width - 1; i >= 0; i--)
+        let low = 0;
+        let high = 0;
+        for (let i = Math.min(width, 8) - 1; i >= 0; i--)
         {
-            word = word << 8n | BigInt(value[i] & 0xff);
+            if (i >= 4)
+            {
+                high = (high << 8 | value[i] & 0xff) >>> 0;
+            }
+            else
+            {
+                low = (low << 8 | value[i] & 0xff) >>> 0;
+            }
         }
-        state.f80bits[/** @type {number} */ (operand.reg)] = BigInt.asIntN(64, word);
+        state.f80bits[/** @type {number} */ (operand.reg)] =
+            BigInt.asIntN(64, BigInt(high) << 32n | BigInt(low));
         state.x87Exact &= ~(1 << /** @type {number} */ (operand.reg));
         return;
     }
