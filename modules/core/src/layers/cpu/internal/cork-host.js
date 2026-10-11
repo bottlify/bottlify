@@ -477,13 +477,14 @@ export function createCorkHost(config){
     }
 
     /**
-     * Every page a host write touches is invalidated: a write into a page
-     * holding translated code drops its regions.
+     * A host write over translated code drops the regions made of a byte it
+     * changed (`stored`); one that writes the bytes already there drops none.
      *
      * @param {number} address
      * @param {number} length
+     * @param {boolean} [guest]  the program's own store, met by an interpreter
      */
-    const invalidate = (address, length)=>{
+    const invalidate = (address, length, guest = false)=>{
         if (length <= 0)
         {
             return;
@@ -494,11 +495,7 @@ export function createCorkHost(config){
             runtime.codeWritten(address, length);
             return;
         }
-        const last = (address + length - 1) >>> 12;
-        for (let page = address >>> 12; page <= last; page++)
-        {
-            runtime.invalidatePage(page);
-        }
+        runtime.stored(address, length, guest);
     };
 
     // Hotness in cork mode, counted by the interpreter itself: a start run
@@ -832,7 +829,7 @@ export function createCorkHost(config){
                 {
                     if (code === WasmExit.CODE_WRITE)
                     {
-                        invalidate(tier.exitValue(), tier.exitSize());
+                        invalidate(tier.exitValue(), tier.exitSize(), true);
                     }
                     continue;
                 }
@@ -917,7 +914,7 @@ export function createCorkHost(config){
             // An interpreted store into a page a region was translated on
             // invalidates it, as a translated store's `stale` exit does.
             onCodeWrite: (/** @type {number} */ at, /** @type {number} */ size)=>{
-                invalidate(at, size);
+                invalidate(at, size, true);
             },
         });
         const state = interpreter;
@@ -1118,7 +1115,7 @@ export function createCorkHost(config){
                     }
                     else if (code === WasmExit.CODE_WRITE)
                     {
-                        invalidate(wasmTier.exitValue(), wasmTier.exitSize());
+                        invalidate(wasmTier.exitValue(), wasmTier.exitSize(), true);
                     }
                     else if (code === WasmExit.TRAP)
                     {

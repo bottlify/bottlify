@@ -158,8 +158,18 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     const settings = {
         maxRegionBlocks: 128, maxRegionBytes: 8192, batchRegions: 32,
         maxQueued: 8192, maxBatchRegions: 256,
-        // Invalidations of one page before it is left to the other executor.
+        // Writes that drop a page's regions, inside `volatileWindowMs` of each
+        // other, before the page is left to the other executor -- for
+        // `volatileHoldMs`, twice as long each time it is left again: a mixer
+        // patching a voice in as a sound starts writes its code a few times a
+        // second for as long as the program runs, and a page left for good
+        // after its eighth sound ran interpreted from then on. The interpreter
+        // runs MMX code hundreds of times slower than its translation, so a
+        // page is left only when it is rewritten about as fast as it can be
+        // translated again: eighty times a second.
         volatileAfter: 8,
+        volatileWindowMs: 100,
+        volatileHoldMs: 2000,
         // Untranslated exits to one address before it is a candidate of the
         // translator's own: the slice sampler sees only where budgets run
         // out, and a stub reached through such exits alone never appears there.
@@ -640,6 +650,9 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      * @property {number[]} slots   entry indices
      * @property {number} table     the function's index in the table, or -1
      * @property {[number, number][]} spans   the blocks' [start, end)
+     * @property {{ start: number, bytes: Uint8Array }[]} [sources]  every byte forming read,
+     *     as it read them, kept where a store into code reached one of its pages before: a
+     *     later store there drops it only when it changes one of them (`storedInto`)
      * @property {Map<number, [number, number]>} extents  by page, the code granules its
      *     blocks cover there, [from, to)
      * @property {number} entryTop  the x87 top it was formed for
@@ -738,10 +751,59 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     const CALL_SITES_CAP = settings.callSitesKept;
     /** @type {Map<number, number>} page → times invalidated, the stamp a batch checks */
     const generation = new Map();
-    /** @type {Map<number, number>} page → times a write dropped its regions */
+    /**
+     * By page, the writes that dropped its regions: how many since `since`, the window's
+     * start, and how many times it was left volatile.
+     * @type {Map<number, { times: number, since: number, left: number }>}
+     */
     const dropped = new Map();
+    /** By volatile page, when it is translated again. @type {Map<number, number>} */
+    const volatileUntil = new Map();
+    /**
+     * By volatile page, the entries of the regions writes dropped there, with
+     * their tops: code that ran hot enough to be translated, which the
+     * interpreter's own counts -- saturated long before the page is let go --
+     * would not hand over again.
+     * @type {Map<number, Map<number, number>>}
+     */
+    const leftEntries = new Map();
+    /** The pages whose hold is over go back to the translator. */
+    const liftVolatile = ()=>{
+        if (volatileUntil.size === 0)
+        {
+            return;
+        }
+        const now = performance.now();
+        for (const [page, until] of volatileUntil)
+        {
+            if (now >= until)
+            {
+                volatileUntil.delete(page);
+                pages.clear(page, PageFlag.VOLATILE);
+                // What was asked for there while it was left formed nothing: asked
+                // again, it is translated.
+                for (const key of pageKeys.get(page) ?? [])
+                {
+                    barren.delete(key);
+                }
+                for (const [entry, top] of leftEntries.get(page) ?? [])
+                {
+                    runtimeApi?.noteHot(entry, top, 256);
+                }
+                leftEntries.delete(page);
+                const record = dropped.get(page);
+                if (record !== undefined)
+                {
+                    record.times = 0;
+                    record.since = now;
+                }
+            }
+        }
+    };
     const counts = {
         modules: 0, invalidations: 0, volatilePages: 0, dropped: 0, moduleBytes: 0,
+        // Stores into code that changed none of the bytes a region on the page was made from.
+        storesKept: 0,
         queueDrops: 0, queueEvictions: 0, emitFailures: 0,
         cacheHits: 0, cacheMisses: 0, missNoRecord: 0, missNoModule: 0, precisionSwitches: 0,
         readSwitches: 0,
@@ -928,17 +990,22 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         }
     };
 
-    /** @param {number} page */
-    const invalidatePage = page=>{
+    /**
+     * @param {number} page
+     * @param {RegionRecord[]} [only]  the regions on it that go; every one by default
+     * @returns {RegionRecord[]}  the regions that went, unless the page was left volatile
+     */
+    const invalidatePage = (page, only)=>{
         if (watched[page] === 0)
         {
-            return;
+            return [];
         }
         const on = byPage.get(page);
-        const cost = on ? on.size : 0;
-        if (on)
+        const going = only ?? (on ? [...on] : []);
+        const cost = going.length;
+        if (cost > 0)
         {
-            unpublish([...on]);
+            unpublish(going);
             counts.invalidations += cost;
         }
         const notes = pageKeys.get(page);
@@ -959,14 +1026,109 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         // on it is hot, and that is not a page that mixes code with data.
         if (cost === 0)
         {
-            return;
+            return going;
         }
-        const times = (dropped.get(page) ?? 0) + 1;
-        dropped.set(page, times);
-        if (times === settings.volatileAfter)
+        const now = performance.now();
+        let record = dropped.get(page);
+        if (record === undefined)
+        {
+            record = { times: 0, since: now, left: 0 };
+            dropped.set(page, record);
+        }
+        if (now - record.since > settings.volatileWindowMs)
+        {
+            record.times = 0;
+            record.since = now;
+        }
+        record.times++;
+        if (record.times === settings.volatileAfter && !volatileUntil.has(page))
         {
             pages.set(page, PageFlag.VOLATILE);
+            volatileUntil.set(page, now + settings.volatileHoldMs * 2 ** Math.min(record.left, 5));
+            leftEntries.set(page, new Map(going.map(one=>[one.entry, one.entryTop])));
+            record.left++;
             counts.volatilePages++;
+            return [];
+        }
+        return going;
+    };
+
+    /**
+     * Whether a byte of `sources` in `[address, end)` reads otherwise now.
+     * @param {{ start: number, bytes: Uint8Array }[]} sources @param {number} address
+     * @param {number} end
+     */
+    const sourcesChanged = (sources, address, end)=>{
+        for (const { start, bytes } of sources)
+        {
+            const from = Math.max(start, address);
+            const to = Math.min(start + bytes.length, end);
+            for (let at = from; at < to; at++)
+            {
+                if (read(at) !== bytes[at - start])
+                {
+                    return true;
+                }
+            }
+        }
+        return false;
+    };
+
+    /**
+     * Bytes at `[address, address + size)` were written while code stood on
+     * their pages. A region goes when a byte it was made from now differs:
+     * a program that writes its code over with the bytes already there -- a
+     * mixer setting every voice's patch on each call, most of them as they
+     * were -- keeps its translations, and one that changes a byte loses the
+     * regions made of that byte and no other on the page. A page with a region
+     * that kept no copy of its bytes goes whole, as every page did before its
+     * first such store; the regions formed on it again keep theirs.
+     *
+     * The page's generation moves either way, so a region in flight from it
+     * is checked again at its publication rather than trusted.
+     *
+     * @param {number} address @param {number} size
+     * @param {boolean} [own]  the program's own store, whose dropped code is asked for again
+     *     at once; a host's write (a file read, a loader) places bytes nothing has run yet,
+     *     which run first where cold code runs
+     */
+    const storedInto = (address, size, own = true)=>{
+        if (size <= 0)
+        {
+            return;
+        }
+        const end = address + size;
+        const last = (end - 1) >>> 12;
+        for (let page = address >>> 12; page <= last; page++)
+        {
+            const on = byPage.get(page);
+            // With other executors beside this one a page goes whole, as before:
+            // their stores reach this one's regions only when it next looks
+            // (`takeCodeWrites`), and keeping regions across that gap is not
+            // yet judged by the executors' gate.
+            const whole = codeShared !== null || watched[page] === 0 || on === undefined
+                || on.size === 0 || [...on].some(record=>record.sources === undefined);
+            const changed = whole ? undefined
+                : [...on].filter(record=>sourcesChanged(
+                    /** @type {{ start: number, bytes: Uint8Array }[]} */ (record.sources),
+                    address, end));
+            if (changed === undefined || changed.length > 0)
+            {
+                // Code hot enough to have been translated runs on as it is now,
+                // on the interpreter, whose counts of it are long saturated: it
+                // is asked for again at once, so the bytes written are what is
+                // translated next.
+                for (const one of invalidatePage(page, changed))
+                {
+                    if (own && codeShared === null)
+                    {
+                        runtimeApi?.noteHot(one.entry, one.entryTop, 256);
+                    }
+                }
+                continue;
+            }
+            counts.storesKept++;
+            generation.set(page, (generation.get(page) ?? 0) + 1);
         }
     };
 
@@ -1228,7 +1390,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     let storePending = false;
     let workerRequest = 0;
     /** The runtime itself, once made: what a batch's answer calls to send the next. */
-    /** @type {{ translatePending: () => Promise<number> } | null} */
+    /** @type {{ translatePending: () => Promise<number>,
+     *     noteHot: (address: number, top?: number, heat?: number) => void } | null} */
     let runtimeApi = null;
     /**
      * The host's asks for a batch that found one out. The host asks when the
@@ -1534,8 +1697,17 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         // so a region the guest ran past before this -- its lookups out, its
         // batch on the worker -- is also read again: a guest store into a page
         // whose first region was in flight is otherwise seen by nothing.
-        if (one.stamp !== stamp(region.pages)
-            || (one.waited === true && hashRegion(read, region) !== region.hash)
+        // A region that keeps the bytes it read (`storedInto`) is checked
+        // against them whatever its stamp says: another executor's store moves
+        // this one's generations only when it next looks (`takeCodeWrites`).
+        // The bytes are every one forming read, a jump's target looked past
+        // included, which its hash does not cover.
+        const keepsSources = region.sources !== undefined
+            && [...region.pages].some(page=>dropped.has(page));
+        const moved = one.stamp !== stamp(region.pages) || one.waited === true || keepsSources;
+        if ((moved && (region.sources !== undefined
+            ? sourcesChanged(region.sources, 0, 0x100000000)
+            : one.stamp !== stamp(region.pages) || hashRegion(read, region) !== region.hash))
             || (one.wide && precision !== 'wide')
             || (one.narrow && precision !== 'narrow')
             || (one.loose && !loose)
@@ -1607,6 +1779,12 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             narrow: one.narrow === true, checked: one.checked === true,
             copies: one.copies === true, closed, blocks: built.labels.length,
         };
+        if (keepsSources)
+        {
+            // A store into code met this page before: what forming read is kept,
+            // so the next store there is judged by what it changes (`storedInto`).
+            record.sources = region.sources;
+        }
         if (one.replaces !== undefined)
         {
             // Formed again with its indirect calls' callees, or with copies:
@@ -3126,11 +3304,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 const address = pages.staleAddress();
                 const size = pages.staleSize();
                 pages.clearStale();
-                const last = size > 0 ? (address + size - 1) >>> 12 : -1;
-                for (let page = address >>> 12; page <= last; page++)
-                {
-                    invalidatePage(page);
-                }
+                storedInto(address, size);
                 codeShared?.publish(address, size);
                 // The other executor's compiled page, if that is what was hit.
                 imports.dirtyCode?.(address, size);
@@ -3301,6 +3475,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
 
         /** @type {() => Promise<number>} */
         async translatePending(){
+            liftVolatile();
             if (!translatorLoading() || translatorReady())
             {
                 return translateNow();
@@ -3327,6 +3502,17 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         },
         invalidatePage,
         /**
+         * `[address, address + size)` was written over code: the regions made of
+         * a byte it changed go (`storedInto`).
+         *
+         * @param {number} address @param {number} size
+         * @param {boolean} [own]  a store of the program's own, met by the host's
+         *     interpreter, rather than the host's write
+         */
+        stored(address, size, own = false){
+            storedInto(address, size, own);
+        },
+        /**
          * A store this executor met reached code: its translations of the pages
          * go, and the other executors of the process are told theirs do.
          *
@@ -3337,11 +3523,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             {
                 return;
             }
-            const last = (address + size - 1) >>> 12;
-            for (let page = address >>> 12; page <= last; page++)
-            {
-                invalidatePage(page);
-            }
+            storedInto(address, size);
             codeShared?.publish(address, size);
         },
         /**
@@ -3359,11 +3541,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                     }
                     return;
                 }
-                const last = size > 0 ? (address + size - 1) >>> 12 : -1;
-                for (let page = address >>> 12; page <= last; page++)
-                {
-                    invalidatePage(page);
-                }
+                storedInto(address, size);
             }) ?? 0;
         },
         interpretWith(entry, entered){
@@ -3505,7 +3683,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 queueDrops: counts.queueDrops,
                 emitFailures: counts.emitFailures,
                 queueEvictions: counts.queueEvictions,
+                // Times a page was left to the other executor, and the pages left now.
                 volatilePages: counts.volatilePages,
+                volatileNow: volatileUntil.size,
+                storesKept: counts.storesKept,
                 exits: { ...exits },
                 untranslatedBy: { ...untranslatedBy },
                 // The top untranslated-exit targets over the whole run (or the
