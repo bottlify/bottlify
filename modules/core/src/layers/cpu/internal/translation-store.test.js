@@ -7,7 +7,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    createDirectoryTranslationStore, createMemoryDirectory, fileNameOf, resolveTranslationStore,
+    clearTranslations, createDirectoryTranslationStore, createMemoryDirectory, fileNameOf,
+    resolveTranslationStore,
     SEED_FORMAT, STORE_VERSION, unpackSeed,
 } from './translation-store.js';
 
@@ -691,3 +692,22 @@ test('a store whose files fail it answers and keeps nothing rather than throwing
     assert.equal(await store.get('0123456789abcdef'), null, 'nothing kept');
     assert.equal(store.getNow?.('0123456789abcdef'), null);
 });
+
+test('clearing a bundle\'s translations removes every version of them and no other bundle\'s',
+    async()=>{
+        const root = fakeDirectory();
+        const store = await createDirectoryTranslationStore(root, 'bundle');
+        await store.put('cork/1/a', new Uint8Array([1, 2, 3]));
+        await store.flush();
+        store.close();
+        const cork = await root.getDirectoryHandle('cork', { create: true });
+        await cork.getDirectoryHandle('bundle.v1', { create: true });
+        await cork.getDirectoryHandle('other.v3', { create: true });
+
+        assert.equal(await clearTranslations('bundle', root), 2);
+        assert.ok(cork.children.has('other.v3'), 'another bundle\'s stands');
+        const reopened = await createDirectoryTranslationStore(root, 'bundle');
+        assert.equal(await reopened.get('cork/1/a'), null, 'the next start translates afresh');
+        assert.equal(await clearTranslations('none', fakeDirectory()), 0,
+            'nothing kept, nothing gone');
+    });

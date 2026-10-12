@@ -23,6 +23,10 @@
  * the question rather than in the numbers.
  */
 
+// A bundle's translations are kept beside its saves in the origin's file
+// system; a launcher clears them from here, as it opens the saves.
+export { clearTranslations } from './layers/cpu/internal/translation-store.js';
+
 /** Magic and version of the packed session. */
 const MAGIC = 0x53544201; // "BTS", version 1
 
