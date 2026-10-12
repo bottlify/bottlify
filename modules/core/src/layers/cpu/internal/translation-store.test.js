@@ -242,6 +242,59 @@ test('opening a store removes the bundle\'s directories of other layout versions
     assert.ok(cork.children.has('other.v1'), 'another bundle\'s is not touched');
 });
 
+test('the local store of a bundle has one user at a time: a second run goes without',
+    async()=>{
+        // Two openings of the same files compacted under each other, and the
+        // one still reading a removed generation stopped the engine's start.
+        /** @type {Set<string>} */
+        const held = new Set();
+        const locks = {
+            /** @param {string} lockName @param {any} options @param {(lock: any) => any} body */
+            request: async(lockName, options, body)=>{
+                if (held.has(lockName))
+                {
+                    assert.equal(options.ifAvailable, true);
+                    return body(null);
+                }
+                held.add(lockName);
+                try
+                {
+                    return await body({ name: lockName });
+                }
+                finally
+                {
+                    held.delete(lockName);
+                }
+            },
+        };
+        const root = createMemoryDirectory();
+        const before = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+        Object.defineProperty(globalThis, 'navigator', { configurable: true,
+            value: { storage: { getDirectory: async()=>root }, locks } });
+        try
+        {
+            const first = await resolveTranslationStore('local', 'game');
+            assert.ok(first, 'the first run has the store');
+            assert.equal(await resolveTranslationStore('local', 'game'), null,
+                'a second, while the first holds it, runs without');
+            assert.ok(await resolveTranslationStore('local', 'other'), 'another has its own');
+            first.close?.();
+            await new Promise(done=>setTimeout(done, 0));
+            assert.ok(await resolveTranslationStore('local', 'game'), 'free again once closed');
+        }
+        finally
+        {
+            if (before)
+            {
+                Object.defineProperty(globalThis, 'navigator', before);
+            }
+            else
+            {
+                delete /** @type {any} */ (globalThis).navigator;
+            }
+        }
+    });
+
 test('the request resolves to nothing without the API, to itself as an object', async()=>{
     assert.equal(await resolveTranslationStore(null, 'x'), null);
     assert.equal(await resolveTranslationStore(undefined, 'x'), null);
@@ -610,4 +663,31 @@ test('a large seed is written a few milliseconds at a time, the thread let go be
     assert.ok(writesAtTurn !== null && writesAtTurn < 64,
         `the thread had a turn before the last record was written (${writesAtTurn})`);
     assert.deepEqual([...await store.get('cork/41/a/401010/x') ?? []], new Array(40).fill(1));
+});
+
+test('a store whose files fail it answers and keeps nothing rather than throwing', async()=>{
+    // Another user of the directory compacting it removed the generation this
+    // one read, and the engine did not start: a cache that cannot be read is
+    // a run without one.
+    const root = createMemoryDirectory();
+    const gone = Object.assign(new Error('A requested file or directory could not be found'),
+        { name: 'NotFoundError' });
+    /** @param {any} directory @returns {any} */
+    const failingRecords = directory=>({
+        ...directory,
+        getDirectoryHandle: async(/** @type {string} */ name, /** @type {any} */ options)=>
+            failingRecords(await directory.getDirectoryHandle(name, options)),
+        getFileHandle: async(/** @type {string} */ name, /** @type {any} */ options)=>{
+            if (name.startsWith('records'))
+            {
+                throw gone;
+            }
+            return directory.getFileHandle(name, options);
+        },
+    });
+    const store = await createDirectoryTranslationStore(failingRecords(root), 'game');
+    assert.equal(await store.get('0123456789abcdef'), null);
+    await store.put('0123456789abcdef', Uint8Array.of(1, 2, 3));
+    assert.equal(await store.get('0123456789abcdef'), null, 'nothing kept');
+    assert.equal(store.getNow?.('0123456789abcdef'), null);
 });
