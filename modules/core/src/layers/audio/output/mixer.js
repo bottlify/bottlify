@@ -69,7 +69,6 @@ const CAPACITY_FRAMES = OUTPUT_RATE_DEFAULT / 5;
  * @param {() => void} [options.fill]
  * @param {{ control: ArrayBufferLike, samples: ArrayBufferLike }} [options.memory]
  * @param {false} [options.shared]
- * @param {any} [options.beside]
  * @returns {ReturnType<typeof createEngineMixer>}
  */
 /**
@@ -79,7 +78,6 @@ const CAPACITY_FRAMES = OUTPUT_RATE_DEFAULT / 5;
  * @param {() => void} [options.fill]
  * @param {{ table: ArrayBufferLike }} [options.memory]
  * @param {true} options.shared
- * @param {{ arena: [number, number] | null }} [options.beside]
  * @returns {ReturnType<typeof createSharedMixer>}
  */
 /**
@@ -357,9 +355,6 @@ function createEngineMixer(
             return track;
         },
 
-        /** No arena here to lend. @returns {number} */
-        lend: ()=>-1,
-        takeBack(){},
         /** Closes every track this mixer opened. */
         close(){
             for (const track of [...tracks])
@@ -618,12 +613,8 @@ export function convert(pcm, format, rate, state){
  * @param {number} [options.sampleRate]
  * @param {() => void} [options.fill]
  * @param {{ table: ArrayBufferLike }} [options.memory]
- * @param {{ arena: [number, number] | null }} [options.beside]
- *     A process beside another on the same table rather than in its place:
- *     the other's slots are left as they are, and the arena this one mirrors
- *     its voices in is the span the other lent it, or none.
  */
-function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory, beside } = {}){
+function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory } = {}){
     const buffer = memory?.table ?? allocateTable();
     const isFresh = !memory?.table;
     const global = new Int32Array(buffer, 0, GLOBAL_HEADER_INT32);
@@ -641,7 +632,7 @@ function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory, bes
             pcm: new Uint8Array(buffer, slotPcmOffset(slot), SLOT_BYTES),
         });
     }
-    if (!isFresh && !beside)
+    if (!isFresh)
     {
         // A process replacement, not a device replacement: the parent's track
         // objects are gone with it, but their slots are still STATE_OPEN with
@@ -676,8 +667,7 @@ function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory, bes
      * free, since every slot its predecessor held is closed above.
      * @type {[number, number][]}
      */
-    const free = !arena ? [] : beside ? (beside.arena ? [[...beside.arena]] : [])
-        : [[0, ARENA_BYTES]];
+    const free = !arena ? [] : [[0, ARENA_BYTES]];
     let voices = 0;
     let refusedVoices = 0;
     /** @param {number} bytes @returns {number} the span's offset, or -1 */
@@ -921,19 +911,6 @@ function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory, bes
             };
             openVoices.add(voice);
             return voice;
-        },
-
-        /**
-         * Lends a span of this mixer's arena to a process started beside it on
-         * the same table: its offset, or -1 when no free span is that large.
-         *
-         * @param {number} bytes
-         */
-        lend: bytes=>claimSpan(bytes),
-
-        /** A lent span back, once the process it was lent to is gone. @param {number} offset @param {number} bytes */
-        takeBack(offset, bytes){
-            returnSpan(offset, bytes);
         },
 
         /**

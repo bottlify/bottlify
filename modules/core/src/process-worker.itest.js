@@ -25,6 +25,9 @@ import { buildExe } from '../../../tools/make-pe.mjs';
 import { texturedFrames } from '../../../tools/d3d9-program.mjs';
 import { waitingParent } from '../../../tools/spawn-program.mjs';
 import { createFakeDevice } from './layers/graphics/webgpu/internal/fake-device.js';
+import {
+    SLOTS, SLOT_HEADER_INT32, STATE, STATE_OPEN, slotHeaderOffset,
+} from './layers/audio/output/mix.js';
 
 /** @param {number} value */
 const u32 = value=>[0, 8, 16, 24].map(at=>(value >>> at) & 0xff);
@@ -321,37 +324,109 @@ test('a child in a worker of its own is sent the page\'s input while it stands',
         assert.ok(pressing, 'it ran in a worker of its own');
     });
 
-test('a child in a worker of its own mixes on the run\'s table in a span its parent lent it, which'
-    + ' comes back when it ends', { timeout: 120000 }, async t=>{
-    const child = buildExe({
-        imports: { 'KERNEL32.dll': ['ExitProcess'] },
-        code: ({ iat })=>[0x6a, 0, 0xff, 0x15, ...u32(iat('ExitProcess'))],
+/**
+ * A parent that opens a wave device -- a track on its output, open until it
+ * exits -- then starts `command`, waits for it and exits with its code.
+ *
+ * @param {string} command
+ */
+function soundingParent(command){
+    return buildExe({
+        imports: {
+            'WINMM.dll': ['waveOutOpen'],
+            'KERNEL32.dll': ['CreateProcessA', 'WaitForSingleObject', 'GetExitCodeProcess',
+                'ExitProcess'],
+        },
+        data: {
+            command: [...Buffer.from(command), 0],
+            // WAVEFORMATEX: PCM, two channels, 44100 Hz, 16 bits.
+            format: [1, 0, 2, 0, ...u32(44100), ...u32(44100 * 4), 4, 0, 16, 0, 0, 0],
+            wave: u32(0),
+            startup: [...u32(68), ...new Array(64).fill(0)],
+            info: new Array(16).fill(0),
+            code: u32(0),
+        },
+        codeSize: 0xa0,
+        code: ({ iat, at })=>[
+            0x6a, 0, 0x6a, 0, 0x6a, 0, 0x68, ...u32(at('format')), 0x6a, 0xff,
+            0x68, ...u32(at('wave')), 0xff, 0x15, ...u32(iat('waveOutOpen')),
+            0x68, ...u32(at('info')), 0x68, ...u32(at('startup')),
+            0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0,
+            0x68, ...u32(at('command')), 0x6a, 0,
+            0xff, 0x15, ...u32(iat('CreateProcessA')),
+            0x6a, 0xff, 0xff, 0x35, ...u32(at('info')),
+            0xff, 0x15, ...u32(iat('WaitForSingleObject')),
+            0x68, ...u32(at('code')), 0xff, 0x35, ...u32(at('info')),
+            0xff, 0x15, ...u32(iat('GetExitCodeProcess')),
+            0xff, 0x35, ...u32(at('code')),
+            0xff, 0x15, ...u32(iat('ExitProcess')),
+        ],
     });
-    const app = await createApp({
-        executable: waitingParent(),
-        imagePath: 'C:\\parent.exe',
-        engine: 'cork',
-        concurrency: 2,
-        storage: { load: async()=>({ files: [{ path: 'C:\\a.exe', bytes: child }] }) },
+}
+
+/** How many of a track table's slots are open. @param {SharedArrayBuffer} table */
+const openSlots = table=>Array.from({ length: SLOTS }, (_, slot)=>
+    Atomics.load(new Int32Array(table, slotHeaderOffset(slot), SLOT_HEADER_INT32), STATE))
+    .filter(state=>state === STATE_OPEN).length;
+
+for (const [where, programs] of /** @type {[string, string[]][]} */ ([
+    ['beside its parent', ['C:\\a.exe']],
+    // A grandchild past the run's concurrency, in its parent's worker: its
+    // table is named across the worker's channel as the worker's own is.
+    ['with a child of its own in its worker', ['C:\\a.exe', 'C:\\b.exe']],
+]))
+{
+    test(`a child in a worker of its own ${where} plays into a table of its own, named to the page`
+        + ' and let go of as it exits, and the first process\'s track stays open',
+    { timeout: 120000 }, async t=>{
+        const exits = buildExe({
+            imports: { 'KERNEL32.dll': ['ExitProcess'] },
+            code: ({ iat })=>[0x6a, 7, 0xff, 0x15, ...u32(iat('ExitProcess'))],
+        });
+        const files = programs.length === 1
+            ? [{ path: 'C:\\a.exe', bytes: exits }]
+            : [{ path: 'C:\\a.exe', bytes: waitingParent('C:\\b.exe') },
+                { path: 'C:\\b.exe', bytes: exits }];
+        const app = await createApp({
+            executable: soundingParent('C:\\a.exe'),
+            imagePath: 'C:\\parent.exe',
+            engine: 'cork',
+            concurrency: 2,
+            storage: { load: async()=>({ files }) },
+            // As a page with a worklet says: a wave device opens a track only
+            // where something plays the output.
+            audio: { drained: true },
+        });
+        t.after(()=>app.dispose());
+        const run = app.audio.memory().table;
+        assert.ok(run instanceof SharedArrayBuffer);
+        /** @type {{ id: number, table: SharedArrayBuffer }[]} */
+        const tables = [];
+        /** @type {number[]} */
+        const closed = [];
+        /** What the run's first process's table held open as each was named. @type {number[]} */
+        const firstOpen = [];
+        app.on('sound-table', (/** @type {any} */ event)=>{
+            tables.push(event);
+            firstOpen.push(openSlots(tables[0].table));
+        });
+        app.on('sound-table-closed', (/** @type {any} */ event)=>closed.push(event.id));
+
+        assert.equal(await app.run({ timeoutMs: 60000 }), 7);
+        // The run's own program is in a worker of its own too: the first
+        // named is its.
+        assert.equal(tables.length, programs.length + 1,
+            'a table for each process in a worker, and for each beside one there');
+        assert.ok(tables.every(one=>one.table instanceof SharedArrayBuffer && one.table !== run),
+            'each its own shared memory, not the run\'s');
+        assert.equal(new Set(tables.map(one=>one.table)).size, tables.length, 'no two the same');
+        assert.equal(firstOpen.at(-1), 1,
+            'the first process\'s track still open in its own table as the last process came');
+        assert.deepEqual([...closed].sort(), tables.map(one=>one.id).sort(),
+            'each let go of once its process was gone');
+        assert.equal(openSlots(run), 0, 'and nothing of theirs on the run\'s table');
     });
-    t.after(()=>app.dispose());
-    // The arena is the run's sound output's, which this thread keeps.
-    const arenaFree = ()=>app.diagnostics().find((/** @type {any} */ layer)=>
-        layer.name === 'system-audio').metrics.arenaFree;
-    /** @type {number[]} */
-    const parentFree = [];
-    /** @type {any[]} */
-    const childLayers = [];
-    app.on('process-started', ()=>parentFree.push(arenaFree()));
-    app.on('process-resumed', (/** @type {any} */ event)=>childLayers.push(event.diagnostics));
-    assert.equal(await app.run({ timeoutMs: 60000 }), 0);
-    assert.deepEqual(parentFree, [8 << 20, 8 << 20],
-        'the system lent the program eight of its sixteen MiB, and nothing more for its child');
-    assert.equal(childLayers[0]?.find((/** @type {any} */ layer)=>layer.name === 'audio')
-        ?.metrics.arenaFree, 4 << 20,
-    'the child mixed in four of the program\'s eight, on the run\'s table');
-    assert.equal(arenaFree(), 16 << 20, 'all given back once both were gone');
-});
+}
 
 for (const where of ['in its own place', 'in a worker of its own'])
 {

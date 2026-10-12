@@ -177,8 +177,7 @@ import { createInputRoute } from './layers/input/route.js';
  *     something a caller supplies.
  * @property {{ drained?: boolean, sampleRate?: number, mp3?: boolean, shared?: boolean,
  *     memory?: { control: ArrayBufferLike, samples: ArrayBufferLike }
- *         | { table: ArrayBufferLike },
- *     beside?: { arena: [number, number] | null } }} [audio]
+ *         | { table: ArrayBufferLike } }} [audio]
  *     Sound leaves through a shared track table a worklet reads, or -- with no
  *     shared memory to hand one -- a ring the engine thread mixes into itself.
  *     `drained` says that something on the other side is really reading, which
@@ -3788,10 +3787,6 @@ async function buildApp(options){
             // holds instead of orphaning it on a buffer nothing reads. Absent
             // on the first process, which makes its own.
             memory: options.audio?.memory,
-            // A process beside another on that storage rather than in its
-            // place: the arena span it was lent, and nothing of the other's
-            // closed.
-            beside: options.audio?.beside,
             // Shared memory is what a worklet needs to read the far end at
             // all, so this is an environment question answered here rather
             // than guessed inside the mixer: without it (a page that is not
@@ -7096,10 +7091,6 @@ async function buildApp(options){
          * without shared memory reads `ring()` directly).
          */
         audio: {
-            /** A span of the output's arena for a process beside this one. @param {number} bytes */
-            lend: bytes=>core.api('audio').output().lend?.(bytes) ?? -1,
-            /** @param {number} offset @param {number} bytes */
-            takeBack: (offset, bytes)=>core.api('audio').output().takeBack?.(offset, bytes),
             ring: ()=>core.api('audio').output().ring,
             table: ()=>core.api('audio').output().table,
             memory: ()=>core.api('audio').output().memory,
@@ -7669,8 +7660,9 @@ async function buildSystemHost(deps){
     system.bundle = blocks;
     await furnishVolume({ options, events, filesystem, blocks, seeded,
         registry: system.registry });
-    // The output every process plays into, each in a span of its arena lent
-    // it; the page's worklet reads the table.
+    // The run's table, which the page's worklet is handed first. No process
+    // plays into it here: each, its first one too, has a table of its own in
+    // its worker, which the run names to the page beside this one.
     const given = options.audio?.memory;
     const output = createMixer({ shared: true, sampleRate: options.audio?.sampleRate,
         memory: given && 'table' in given ? given : undefined });
@@ -7737,10 +7729,6 @@ async function buildSystemHost(deps){
             memory: ()=>journal.memory(),
         },
         audio: {
-            /** @param {number} bytes */
-            lend: bytes=>output.lend(bytes),
-            /** @param {number} offset @param {number} bytes */
-            takeBack: (offset, bytes)=>output.takeBack(offset, bytes),
             table: ()=>output.table,
             memory: ()=>output.memory,
             format: ()=>({ sampleRate: output.sampleRate, channels: output.channels }),
@@ -8467,69 +8455,33 @@ export async function createApp(options){
         return null;
     };
 
-    /**
-     * The sound a process started beside `parent` plays into: the run's
-     * output, its slots taken as free ones come, and a span of the parent's
-     * arena lent for its voices' mirrors -- the largest of four, two, one or
-     * half a mebibyte the parent has free, or none, its buffers then played
-     * through queues. Given back once the process is gone and has closed
-     * what it held.
-     *
-     * @param {any} parent
-     * @param {number} [largest]  the most it is lent
-     */
-    const lendSound = (parent, largest = 4 << 20)=>{
-        let bytes = largest;
-        let span = -1;
-        for (; bytes >= 512 << 10 && span < 0; bytes /= 2)
-        {
-            span = parent.audio?.lend?.(bytes) ?? -1;
-        }
-        bytes *= 2;
-        return {
-            options: { ...options.audio, memory: audioMemory,
-                beside: { arena: span >= 0 ? [span, bytes] : null } },
-            giveBack(){
-                if (span >= 0)
-                {
-                    try
-                    {
-                        parent.audio.takeBack(span, bytes);
-                    }
-                    catch {
-                        // The parent went before the process it lent to.
-                    }
-                    span = -1;
-                }
-            },
-        };
-    };
-
     /** The tables `ownSound` has named to the page so far. */
     let soundTables = 0;
     /**
-     * The sound of a process started beside another on this thread: a table
-     * of its own, which the page is told of and mixes with the run's
-     * (`sound-table`), and forgets once the process is gone
-     * (`sound-table-closed`) -- two processes' sound as two films' playing
-     * at once. On the run's table a process beside another was built as the
-     * one in its place, and closed every track it found open there: the
-     * parent's music went silent at its first child.
+     * The sound of a process started beside another, on this thread or in a
+     * worker of its own: a table of its own, which the page is told of and
+     * mixes with the run's (`sound-table`), and forgets once the process is
+     * gone (`sound-table-closed`) -- two processes' sound as two films'
+     * playing at once. On the run's table a process beside another was built
+     * as the one in its place, and closed every track it found open there:
+     * the parent's music went silent at its first child.
      */
     const ownSound = ()=>{
         const id = ++soundTables;
         let told = false;
+        /** @param {any} memory  the process's output's, as `audio.memory()` answers */
+        const tell = memory=>{
+            if (!told && memory && 'table' in memory)
+            {
+                told = true;
+                events.emit('sound-table', { id, table: memory.table });
+            }
+        };
         return {
-            options: { ...options.audio, memory: undefined, beside: undefined },
-            /** @param {any} built */
-            announce(built){
-                const memory = built?.audio?.memory?.();
-                if (memory && 'table' in memory)
-                {
-                    told = true;
-                    events.emit('sound-table', { id, table: memory.table });
-                }
-            },
+            options: { ...options.audio, memory: undefined },
+            /** @param {any} built  a machine on this thread */
+            announce: built=>tell(built?.audio?.memory?.()),
+            tell,
             giveBack(){
                 if (told)
                 {
@@ -8864,10 +8816,8 @@ export async function createApp(options){
      * system half answered from here across a link (`system-link.js`), its
      * output the run's. Its exit code is the answer.
      *
-     * @param {{ readImage: (path: string) => Promise<Uint8Array | null>,
-     *     sound: () => ({ options: any, giveBack: () => void } | null) }} from
-     *     its parent, as the run reaches it: where its image is read, and the
-     *     sound it lends
+     * @param {{ readImage: (path: string) => Promise<Uint8Array | null> }} from
+     *     its parent, as the run reaches it: where its image is read
      * @param {any} request
      * @param {{ link: ReturnType<typeof openLink> | null, code: number | null }} [reach]
      *     how its parent's TerminateProcess reaches it: given its link once
@@ -8956,10 +8906,22 @@ export async function createApp(options){
         const shown = display ? connectGraphicsWorker({ worker: portEnd(display.port1),
             device: options.device.device,
             presentTo: frame=>presenter.show({ ...frame, source: request.id }) }) : null;
-        // Its sound goes onto the run's table, in a span its parent lends it,
-        // where the table is shared memory a worker can be handed; elsewhere
-        // the run's sound is mixed on this thread, and the child has none.
-        const sound = from.sound();
+        // Its sound is a table of its own, made in its worker and named to
+        // the page once the worker has built it (`sound`, below), as is each
+        // table of a child that runs beside it there -- where the run's output
+        // is a table the page reads. Where it is a feed this thread posts,
+        // the child's own output is not played: a second writer of the run's
+        // ring would interleave two programs' samples.
+        const tables = audioMemory && 'table' in audioMemory
+            && typeof SharedArrayBuffer === 'function'
+            && audioMemory.table instanceof SharedArrayBuffer;
+        /**
+         * Its worker's tables named to the page, by the number the worker
+         * gave each: its own machine's 0.
+         *
+         * @type {Map<number, ReturnType<typeof ownSound>>}
+         */
+        const sounds = new Map();
         const worker = await openProcessWorker();
         translationPool?.addProcess(request.id, {
             lend: (port, token)=>worker.post({ type: 'translator', port, token }, [port]),
@@ -8975,7 +8937,21 @@ export async function createApp(options){
         {
             return await new Promise((resolve, reject)=>{
                 worker.onMessage(data=>{
-                    if (data?.type === 'exited')
+                    if (data?.type === 'sound')
+                    {
+                        if (tables && !sounds.has(data.id))
+                        {
+                            const sound = ownSound();
+                            sounds.set(data.id, sound);
+                            sound.tell({ table: data.table });
+                        }
+                    }
+                    else if (data?.type === 'sound-closed')
+                    {
+                        sounds.get(data.id)?.giveBack();
+                        sounds.delete(data.id);
+                    }
+                    else if (data?.type === 'exited')
                     {
                         resolve({ code: data.code, diagnostics: data.diagnostics,
                             systemLibraries: data.systemLibraries });
@@ -9019,8 +8995,9 @@ export async function createApp(options){
                         log: { categories: options.log?.categories,
                             capacity: options.log?.capacity, bytes: options.log?.bytes },
                         graphics: knobs,
-                        audio: sound ? Object.fromEntries(Object.entries(sound.options)
-                            .filter(([, value])=>typeof value !== 'function')) : undefined,
+                        audio: Object.fromEntries(Object.entries(options.audio ?? {})
+                            .filter(([key, value])=>key !== 'memory'
+                                && typeof value !== 'function')),
                         // The translator's store is the run's, asked across the
                         // link; the doorbell is this thread's.
                         cork: { config: { ...options.cork?.config, ...lentConfig,
@@ -9039,7 +9016,10 @@ export async function createApp(options){
             link.close();
             await answering;
             worker.terminate();
-            sound?.giveBack();
+            for (const sound of sounds.values())
+            {
+                sound.giveBack();
+            }
             shown?.dispose();
             display?.port1.close();
             presenter?.forget?.(request.id);
@@ -9159,10 +9139,10 @@ export async function createApp(options){
             const { processId, mainThreadId } = newProcessIds();
             events.emit('process-server', { image: found.path, clsid: request.clsid });
             return new Promise(resolve=>{
-                startAcross({ readImage: path=>current.readImage(path),
-                    sound: ()=>lendSound(current) },
-                { imagePath: found.path, commandLine: `${request.command.trim()} -Embedding`,
-                    id: processId, threadId: mainThreadId }, null, ended=>{
+                startAcross({ readImage: path=>current.readImage(path) }, {
+                    imagePath: found.path, commandLine: `${request.command.trim()} -Embedding`,
+                    id: processId, threadId: mainThreadId,
+                }, null, ended=>{
                     events.emit('process-server-exit', { image: found.path, code: ended.code });
                     resolve(ended.code);
                 });
@@ -9204,10 +9184,6 @@ export async function createApp(options){
             // that starts its game and exits is gone before the game's image
             // would come back from it.
             readImage: path=>current.readImage(path),
-            // Lent by the parent, and taken back there when it hears the
-            // child is gone.
-            sound: ()=>(asked.arena ? { options: { ...options.audio, memory: audioMemory,
-                beside: { arena: asked.arena } }, giveBack(){} } : null),
         }, request, code=>{
             link.call('parent', 'exited', [asked.id, code]).catch(()=>{
                 // The parent went first: nothing of it waits on the code.
@@ -9219,10 +9195,9 @@ export async function createApp(options){
     /**
      * The children this process, joined to the run from a worker of its own,
      * had the run start in workers of their own: by process id, each with
-     * the machine that asked and the sound it lent.
+     * the machine that asked.
      *
-     * @type {Map<number, { parent: any, request: any,
-     *     sound: { giveBack: () => void } | null }>}
+     * @type {Map<number, { parent: any, request: any }>}
      */
     const childrenAcross = new Map();
     options.system?.processes?.answer({
@@ -9245,7 +9220,6 @@ export async function createApp(options){
                 return;
             }
             childrenAcross.delete(id);
-            child.sound?.giveBack();
             child.parent.childExited(child.request, code);
         },
     });
@@ -9262,28 +9236,21 @@ export async function createApp(options){
      * @param {any} parent @param {any} request
      */
     const startBeside = (parent, request)=>{
-        const shared = audioMemory && 'table' in audioMemory
-            && typeof SharedArrayBuffer === 'function'
-            && audioMemory.table instanceof SharedArrayBuffer;
         if (inWorker())
         {
             startAcross({
                 readImage: path=>parent.readImage(path),
-                sound: ()=>(shared ? lendSound(parent) : null),
             }, request, code=>parent.childExited(request, code));
             return;
         }
         // A process that joined the run's system from a worker of its own has
-        // the run start its child, which counts the workers; the sound it
-        // plays into is this process's to lend, and to take back when the
-        // run says the child has gone.
+        // the run start its child, which counts the workers.
         const processesAcross = options.system?.processes;
         if (processesAcross)
         {
-            const sound = shared ? lendSound(parent) : null;
             // Known before it is asked for: the run may ask for the position of
             // a file it was handed before the call that starts it returns.
-            childrenAcross.set(request.id, { parent, request, sound });
+            childrenAcross.set(request.id, { parent, request });
             const placed = processesAcross.start({
                 imagePath: request.imagePath,
                 commandLine: request.commandLine,
@@ -9294,14 +9261,12 @@ export async function createApp(options){
                 standardFiles: request.standardFiles && Object.fromEntries(
                     Object.entries(request.standardFiles).filter(([, file])=>file)
                         .map(([which, file])=>[which, { path: file.path }])),
-                arena: sound?.options.beside.arena ?? null,
             });
             if (placed)
             {
                 return;
             }
             childrenAcross.delete(request.id);
-            sound?.giveBack();
         }
         // Running from the moment it is asked for, not from when its machine
         // is built: a parent that waits on it at once is waiting on something
@@ -9550,8 +9515,6 @@ export async function createApp(options){
         rootLibraries = [];
         startAcross({
             readImage: async()=>options.executable,
-            // Half the output's arena: the rest is for what it starts.
-            sound: ()=>lendSound(current, 8 << 20),
         }, {
             imagePath,
             commandLine: options.commandLine,

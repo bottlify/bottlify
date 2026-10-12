@@ -48,9 +48,10 @@ differently raises a `divergence` event naming the API.
   worker named is answered when polled -- with a zero timeout, or by a message wait
   (`MsgWaitForMultipleObjects`, COM's `CoWaitForMultipleHandles`), which polls -- and a wait
   that would block on such a set is refused. Its Direct3D 8 and 9 devices draw on the run's
-  graphics worker and what they present is shown as the run's frames; its sound goes onto the
-  run's track table in a span its parent lends it, where that table is shared memory (none
-  otherwise); the page's input reaches it where its windows are under the pointer or in the
+  graphics worker and what they present is shown as the run's frames; its sound goes into a
+  track table of its own, which the run names to the page (`sound-table`) and lets go of as it
+  exits (`sound-table-closed`), where the run's output is a shared table; where it is a feed,
+  its sound is not played; the page's input reaches it where its windows are under the pointer or in the
   foreground. Its DirectDraw primary and the desktop
   its windows are drawn on are sent to the engine as bytes and shown there. Its COM classes are the
   run's: it serves them to every other process and calls theirs. So is the running object table:

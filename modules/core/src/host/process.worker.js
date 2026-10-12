@@ -100,11 +100,13 @@ export const plainOf = (read, failed = ()=>null)=>{
  *     graphics?: MessagePort | null,
  *     display?: MessagePort | null, options: any, run?: any,
  *     windowCells?: Int32Array | null }} start
+ * @param {(message: any) => void} [send]  to the run, beside the link: what
+ *     the link cannot carry
  * @returns {Promise<{ code: number, diagnostics: any, systemLibraries: any }>} its exit
  *     code, its layers' diagnostics as it ended and the system libraries it knew, as
  *     plain data, or null
  */
-export async function serveProcess(start){
+export async function serveProcess(start, send){
     const { end, volume, graphics, display, options, run, windowCells = null } = start;
     /** @type {Record<string, Record<string, (...args: any[]) => any>>} */
     const handlers = {};
@@ -199,7 +201,17 @@ export async function serveProcess(start){
             // Its output is written in order with its calls, below; the rest is
             // told as it happens, and not waited on.
             relay: (/** @type {string} */ name, /** @type {any} */ payload)=>{
-                if (name !== 'output')
+                // A child beside it in this worker plays into a table of its
+                // own too, named and let go of as its own machine's is, below.
+                if (name === 'sound-table')
+                {
+                    send?.({ type: 'sound', id: payload.id, table: payload.table });
+                }
+                else if (name === 'sound-table-closed')
+                {
+                    send?.({ type: 'sound-closed', id: payload.id });
+                }
+                else if (name !== 'output')
                 {
                     link.call('events', 'emit', [name, plainEvent(payload)]).catch(()=>{});
                 }
@@ -226,6 +238,14 @@ export async function serveProcess(start){
     }
     app.attachLog((/** @type {number} */ handle, /** @type {string} */ text)=>
         ask('process', 'output', [handle, text]));
+    // Its sound is a table of its own, which the run names to the page. Shared
+    // memory crosses as a message: the link carries values as bytes. Its
+    // number is 0, which none of its children beside it here is given.
+    const sound = soundOf(app);
+    if (sound)
+    {
+        send?.({ type: 'sound', id: 0, table: sound });
+    }
     if (terminated !== null)
     {
         app.terminate(terminated);
@@ -274,6 +294,26 @@ export async function serveProcess(start){
 }
 
 /**
+ * The shared table a machine's sound output is, or null: a build with no
+ * sound layer has none, and an output with no shared memory is a ring only
+ * its own thread reads.
+ *
+ * @param {any} app
+ * @returns {SharedArrayBuffer | null}
+ */
+const soundOf = app=>{
+    try
+    {
+        const memory = app.audio?.memory?.();
+        return memory && 'table' in memory && typeof SharedArrayBuffer === 'function'
+            && memory.table instanceof SharedArrayBuffer ? memory.table : null;
+    }
+    catch {
+        return null;
+    }
+};
+
+/**
  * The pool's lendings and recalls, in the order they came, and what hands them
  * to the machine once it stands.
  * @type {any[] & { apply?: () => void }}
@@ -297,7 +337,7 @@ const bind = (listen, send)=>listen(data=>{
     {
         return;
     }
-    serveProcess(data).then(
+    serveProcess(data, send).then(
         ({ code, diagnostics, systemLibraries })=>
             send({ type: 'exited', code, diagnostics, systemLibraries }),
         (/** @type {any} */ e)=>send({ type: 'failed', message: String(e?.stack ?? e),

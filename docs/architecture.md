@@ -208,7 +208,8 @@ listings -- until that word moves; and the sharing every open is settled against
 shared memory under a lock, which a process thread settles its own opens in
 (`core/src/layers/filesystem/internal/volume-link.js`, `shared-sharing.js`). Its Direct3D devices draw on the graphics thread
 through a port of their own, its DirectDraw and GDI pictures come to the engine as bytes, its sound
-is mixed on the run's voice table in a span its parent lends it, and the page's input reaches it
+goes into a voice table of its own, which the run names to the page (`sound-table`) and the
+worklet mixes with every other process's, and the page's input reaches it
 as the run's window manager routes it (section 7). What it cannot have yet is in [`core/limits.md`](core/limits.md).
 
 **Modes.** `createApp({ mode })` says how much of this rides on shared memory, and the run's mode is
