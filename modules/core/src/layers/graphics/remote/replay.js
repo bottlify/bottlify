@@ -1649,12 +1649,13 @@ export function createRecording(options){
  * @returns {{ play: (call: import('./wire.js').ReadCall) => any, allocate: () => number,
  *     object: (number: number) => any,
  *     read: (buffer: ArrayBuffer, each: (call: import('./wire.js').ReadCall) => boolean | void)
- *         => void }}
+ *         => number | undefined }}
  *     `play` answers a waited call with its `PlayedAnswer` (or a promise of
  *     one), a paced one with the promise its device holds the caller on, and
  *     any other with what the call answered;
  *     `allocate` is the played device's, the next address its recorded call
- *     was given; `read` reads a batch of calls
+ *     was given; `read` reads a batch of calls, and answers how long the look
+ *     at the objects at a count of zero took when the batch made one
  */
 export function createPlayer({ root, ship, read, borrow }){
     /**
@@ -1927,11 +1928,17 @@ export function createPlayer({ root, ship, read, borrow }){
             {
                 presentedSinceSweep = false;
                 batchesSinceSweep = 0;
+                // Timed for the receiver's account of the worker's time: at
+                // most once a frame, so two clock readings cost nothing.
+                const began = import.meta.BOTTLIFY_DIAGNOSTICS !== false ? performance.now() : 0;
                 for (const number of uncounted)
                 {
                     holdAsCounted(number, objects[number]);
                 }
+                return import.meta.BOTTLIFY_DIAGNOSTICS !== false
+                    ? performance.now() - began : undefined;
             }
+            return undefined;
         },
     };
 }

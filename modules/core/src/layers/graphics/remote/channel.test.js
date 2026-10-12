@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createSender } from './channel.js';
+import { createReceiver, createSender } from './channel.js';
 import { WAIT } from './wire.js';
 
 /**
@@ -125,4 +125,43 @@ test('a diagnostics ask settles once the played side has answered it, the first 
     s.made.receive({ type: 'failed', message: 'gone' });
     await stopped;
     assert.equal(seen.at(-1), 'stopped', 'a played side that stopped answers nothing more');
+});
+
+test('the played side counts its batches\' time and says it with its diagnostics', ()=>{
+    // The worker has no phase profiler: where its thread went comes back with
+    // the answer to a diagnostics ask, as the batches' read time and the
+    // look at objects at zero a batch made inside it.
+    /** @type {any[]} */
+    const said = [];
+    /** What each batch's read answers: no look, a look of three milliseconds, no look. */
+    const swept = [undefined, 3, undefined];
+    let batch = 0;
+    const played = {
+        /** @param {ArrayBuffer} buffer @param {(call: any) => void} each */
+        read: (buffer, each)=>{
+            each({ m: batch === 2 ? 'diagnostics' : 'Draw', wait: batch === 2 ? WAIT.ANSWER : 0 });
+            return swept[batch++];
+        },
+        play: (/** @type {any} */ call)=>(call.m === 'diagnostics' ? { frames: 1 } : 0),
+    };
+    const receiver = createReceiver({ played: /** @type {any} */ (played),
+        post: message=>said.push(message) });
+    for (let at = 0; at < 3; at++)
+    {
+        receiver.receive({ type: 'calls', buffer: new ArrayBuffer(4) });
+    }
+    const [told] = said.filter(message=>message.type === 'diagnostics');
+    assert.deepEqual(told.diagnostics, { frames: 1 });
+    // Asked during the third batch: the two before it are in.
+    const read = told.phases['batch-read'];
+    assert.equal(read.count, 2);
+    assert.ok(read.ms >= 0);
+    assert.ok(Math.abs(read.selfMs - (read.ms - 3)) < 1e-9,
+        'the batches\' own time leaves out the look they made');
+    assert.deepEqual(told.phases['batch-sweep'], { count: 1, ms: 3 });
+
+    const s = sender(0);
+    assert.equal(s.made.phases(), null, 'nothing said yet: not measured, never zero');
+    s.made.receive(told);
+    assert.deepEqual(s.made.phases(), told.phases);
 });

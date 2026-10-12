@@ -270,6 +270,46 @@ test('weighted parent, unweighted child: self = (1 - 0.5) * 8 = 4', ()=>{
     assert.equal(parent.selfMs, 4);
 });
 
+test('phases timed only inside a timed crossing carry its weight and give it up once', ()=>{
+    // The work a host call does before the device method -- the shadow's
+    // sync and the ring it reads -- is timed exactly when the crossing is,
+    // and so stands for as many. Each row is its own self time times eight;
+    // each parent gives up what its child measured once, since the parent's
+    // eight already scales the rest. The host's rows together are the trap's
+    // whole time times eight, and the guest gives up exactly that.
+    const { profiler, at } = harness();
+    const along = { weight: 8, withParent: true };
+
+    at(0).beginFrame();
+    at(0).begin('guest', PhaseKind.GUEST);
+    at(10).begin('trap');
+    at(10.5).begin('ring-sync');
+    at(11).begin('ring-take');
+    at(11.5).begin('ring-held');
+    at(12).end('ring-held', along);
+    at(12.5).end('ring-take', along);
+    at(13).end('ring-sync', along);
+    at(14).end('trap', { weight: 8 });
+    at(100).end('guest');
+    const frame = at(100).endFrame();
+
+    const self = Object.fromEntries(profiler.snapshot().phases
+        .map((/** @type {any} */ row)=>[row.name, row.selfMs]));
+    assert.deepEqual(self, {
+        'guest': 100 - 4 * 8,
+        'trap': (4 - 2.5) * 8,
+        'ring-sync': (2.5 - 1.5) * 8,
+        'ring-take': (1.5 - 0.5) * 8,
+        'ring-held': 0.5 * 8,
+    });
+    const sync = profiler.snapshot().phases.find((/** @type {any} */ row)=>row.name === 'ring-sync');
+    assert.equal(sync.count, 8);
+    assert.equal(sync.totalMs, 2.5 * 8);
+    assert.equal(sync.worstMs, 2.5, 'the worst occurrence is one occurrence');
+    assert.equal(frame.byKind.host, 4, 'the frame measured four milliseconds of ours');
+    assert.equal(frame.byKind.host + frame.sampled.host, 32);
+});
+
 test('a frame whose one sample outweighs it never reports the guest at less than nothing', ()=>{
     // A thirty-seven millisecond crossing in a forty millisecond frame, weighed
     // as eight, stands for far more than the frame held. The frame's split is

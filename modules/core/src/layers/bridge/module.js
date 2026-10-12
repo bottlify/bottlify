@@ -938,6 +938,25 @@ export function createBridgeModule(){
                 symbolize: address=>live() ? state.dispatcher.symbolize(address) : null,
 
                 /**
+                 * A phase inside the host call being made, for what a layer
+                 * above does around the call it was asked for: timed with the
+                 * crossing, one in about thirty-two, and weighed as it is
+                 * (`Dispatcher.innerBegin`). `begin` answers 0 when it opened
+                 * nothing; `end` takes what it answered.
+                 */
+                innerPhase: Object.freeze({
+                    /** @param {string} name @returns {number} */
+                    begin: name=>(live() ? state.dispatcher.innerBegin(name) : 0),
+                    /** @param {string} name @param {number} weight */
+                    end: (name, weight)=>{
+                        if (weight !== 0)
+                        {
+                            state.dispatcher.innerEnd(name, weight);
+                        }
+                    },
+                }),
+
+                /**
                  * Gives a guest address a name for a failure report. A stub already
                  * has one; the trampoline in a synthesised module that jumps to it
                  * is a different address the guest is far more likely to be standing

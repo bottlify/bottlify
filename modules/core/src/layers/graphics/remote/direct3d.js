@@ -251,8 +251,9 @@ export function createTargetReads(){
  *     shared, reads what the recording lent (`lending.js`)
  * @returns {{ root: any, play: (call: import('./wire.js').ReadCall) => any,
  *     read: (buffer: ArrayBuffer, each: (call: import('./wire.js').ReadCall) => boolean | void)
- *         => void }}
- *     `read` reads a batch of calls for `play`
+ *         => number | undefined }}
+ *     `read` reads a batch of calls for `play`, and answers how long the look
+ *     at its objects at a count of zero took when the batch made one
  */
 export function playedDirect3D(factory, services){
     const mirror = createMirror();

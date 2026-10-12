@@ -144,6 +144,8 @@ const E_OUTOFMEMORY = 0x8007000e | 0;
  * @param {(ms: number, run: () => void) => void} [deps.schedule]
  *        How a wait for the vertical blank is woken; a host timer when none is
  *        given.
+ * @param {import('./shadow.js').ShadowPhases} [deps.phases]
+ *        Where a Direct3D 8 or 9 device's entry work is timed (`shadow.js` `sync`).
  * @param {boolean} [deps.guestCode]
  *        Whether Direct3D 8 and 9 answer and record in the guest -- the state
  *        block, the command ring, the getters and the counts -- or trap every
@@ -170,7 +172,7 @@ export function createGraphicsLibraries(
         free, exportAddress, processHeapAllocate,
         currentThread,
         scratch, render, allocate, allocateCode, divergence, cursor, resolution, windowClientSize,
-        gamma, deactivated, deactivations, now = ()=>performance.now(), guestCode = true,
+        gamma, deactivated, deactivations, now = ()=>performance.now(), guestCode = true, phases,
         guestTraps = [],
         schedule = (ms, run)=>{
             setTimeout(run, ms);
@@ -313,12 +315,13 @@ export function createGraphicsLibraries(
     const d3d8 = built('D3D8.dll', ()=>createDirect3D8Seam({
         publisher, memory, screen, allocate: guestAllocate, allocateCode: guestAllocateCode,
         traps: new Set(guestTraps), divergence, cursor, resolution,
-        windowClientSize, now,
+        windowClientSize, now, phases,
         identity: ()=>graphics.adapter?.() ?? null,
     }));
     const d3d9 = built('D3D9.dll', ()=>createDirect3D9Seam({
         publisher, memory, screen, divergence, cursor, resolution, windowClientSize, gdi, now,
-        allocate: guestAllocate, allocateCode: guestAllocateCode, traps: new Set(guestTraps),
+        phases, allocate: guestAllocate, allocateCode: guestAllocateCode,
+        traps: new Set(guestTraps),
         identity: ()=>graphics.adapter?.() ?? null,
     }));
     const d3d10 = built('D3D10.dll', ()=>createDirect3D10Seam({
