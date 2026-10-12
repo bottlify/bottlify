@@ -209,6 +209,21 @@ needs. For readable traces: `BOTTLIFY_READABLE=1 npm run build`, a build without
 whose profile names the real functions.
 
 **0a. A region's code as the game compiled it.**
+
+*Done in part (`5ecd6a38`):* a run with `blockProfile` reports `forms` — its hottest regions (up
+to 300, or 95% of the counted executions) formed again as their records were and emitted with the
+run's options and without its counts, each instruction's wasm bytes weighted by how often its
+block ran. Far Cry, the same conditions as 0b's first measurement: 283 regions held 95% of the
+executions, **33.3 wasm bytes an executed instruction** (S's static 61 over-counted). The heaviest
+forms by bytes run through: `fmul x87,[m]` 10.1% (56 B), `call [m]` 8.5% (360 B), `mov r32,[m]` 8.1%
+(24 B), `fld x87,[m]` 5.7% (31 B), the API stub's `out` 4.8% (265 B), `fstp` 4.3%, `call rel` 4.2%
+(167 B), `ret imm` 4.1% (142 B), `ret` 3.2% (171 B). The occlusion wait loop is in these numbers
+(107 M turns: its `call [m]`, `out`, `fild`, three `fmul`, `fcomp`, `fnstsw` a turn); without it
+calls and returns are ~13% of the bytes and x87 ~25%. An x87 operation in a region whose stack shape
+is known is little more than its load and its arithmetic — bytes overstate its time; a call's bytes
+are stores and loads of the state block, which they do not. The module of a region is still to come.
+
+**0a. A region's code as the game compiled it.**
 - A diagnostic query `regionCode(address)` to the runtime: the wasm bytes, the options, the blocks,
   the entries and the region's **module** (image and offset).
 - The report fills `guestByModule` (empty in Far Cry's report today): time and instructions by
