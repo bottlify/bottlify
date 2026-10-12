@@ -37,26 +37,67 @@ const [port, path] = readFileSync(`${process.env.DRIVE_PROFILE ?? 'dbg/chrome-pr
 const cdp = new CdpEndpoint(`ws://127.0.0.1:${port}${path}`);
 await cdp.open();
 
-// Workers are reached through the page that started them: auto-attach on
-// the page's session lists them as targets of their own.
+// A dedicated worker is reached through the session of whoever started it:
+// auto-attach on the page's session hands over its workers, and on each of
+// those, theirs. Their targets carry neither address nor title, so every one
+// is sampled and the thread is told by the scripts its samples ran in.
 const { targetInfos } = await cdp.send('Target.getTargets');
-const found = targetInfos.find((/** @type {any} */ info)=>thread.test(info.url));
-if (!found)
+const page = targetInfos.find((/** @type {any} */ one)=>one.type === 'page'
+    && /127.0.0.1:5180/.test(one.url));
+if (!page)
 {
-    console.log(`no target matches ${thread}; there are:\n${targetInfos.map(
-        (/** @type {any} */ info)=>`  ${info.type} ${info.url}`).join('\n')}`);
+    console.log('no launcher tab to profile');
     process.exit(1);
 }
-const { sessionId } = await cdp.send('Target.attachToTarget',
-    { targetId: found.targetId, flatten: true });
-/** @param {string} method @param {Record<string, unknown>} [params] */
-const send = (method, params = {})=>cdp.send(method, params, sessionId);
-await send('Profiler.enable');
-await send('Profiler.setSamplingInterval', { interval: 200 });
-await send('Profiler.start');
+/** @type {string[]} */
+const sessions = [];
+/** @param {string} sessionId */
+const sample = async sessionId=>{
+    await cdp.send('Target.setAutoAttach',
+        { autoAttach: true, waitForDebuggerOnStart: false, flatten: true }, sessionId);
+    await cdp.send('Profiler.enable', {}, sessionId);
+    await cdp.send('Profiler.setSamplingInterval', { interval: 200 }, sessionId);
+    await cdp.send('Profiler.start', {}, sessionId);
+    sessions.push(sessionId);
+};
+cdp.on('Target.attachedToTarget', (/** @type {any} */ event)=>{
+    if (event.targetInfo?.type === 'worker')
+    {
+        sample(event.sessionId).catch(()=>{});
+    }
+});
+const { sessionId: pageSession } = await cdp.send('Target.attachToTarget',
+    { targetId: page.targetId, flatten: true });
+await sample(pageSession);
+// The workers' sessions come as events once auto-attach is on.
+await new Promise(done=>setTimeout(done, 1500));
 await new Promise(done=>setTimeout(done, seconds * 1000));
-const { profile } = await send('Profiler.stop');
-await send('Profiler.disable');
+/** @type {any} */
+let profile = null;
+/** @type {Set<string>} */
+const scripts = new Set();
+for (const sessionId of sessions)
+{
+    // A worker may have ended meanwhile, and its session with it.
+    const taken = (await cdp.send('Profiler.stop', {}, sessionId).catch(()=>null))?.profile;
+    if (!taken)
+    {
+        continue;
+    }
+    const urls = new Set(taken.nodes.map((/** @type {any} */ node)=>
+        String(node.callFrame.url).split('/').pop()).filter(Boolean));
+    urls.forEach(url=>scripts.add(url));
+    if (!profile && [...urls].some(url=>thread.test(url)))
+    {
+        profile = taken;
+    }
+    await cdp.send('Target.detachFromTarget', { sessionId }).catch(()=>{});
+}
+if (!profile)
+{
+    console.log(`no thread ran ${thread}; the scripts sampled: ${[...scripts].join(', ')}`);
+    process.exit(1);
+}
 writeFileSync(out, JSON.stringify(profile));
 
 /** @type {Map<number, any>} */
@@ -105,7 +146,8 @@ for (const [id, count] of hits)
 /** @param {Map<string, number>} table */
 const top = table=>[...table].sort((a, b)=>b[1] - a[1]).slice(0, 25)
     .map(([name, count])=>`${(100 * count / total).toFixed(1).padStart(5)}%  ${name}`).join('\n');
-console.log(`${found.url}: ${total} samples in ${seconds} s -> ${out}`);
+console.log(`${sessions.length} threads sampled; ${thread}: ${total} samples in ${seconds} s`
+    + ` -> ${out}`);
 console.log(`\nby self time\n${top(self)}`);
 console.log(`\nby total time\n${top(inclusive)}`);
 cdp.close();
