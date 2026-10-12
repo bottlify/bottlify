@@ -197,6 +197,19 @@ const LOCAL_TYPES = [
 ];
 
 /**
+ * What a diagnostic run is told of each instruction emitted: the instruction,
+ * the bytes of wasm it and the checks its memory plan placed before it took in
+ * the region's body (its exits' code, written at the region's end, apart), and
+ * whether it had a lowering.
+ *
+ * @callback ExpansionNote
+ * @param {import('../decode/decoder.js').Instruction} instruction
+ * @param {number} bytes
+ * @param {boolean} lowered
+ * @returns {void}
+ */
+
+/**
  * What a module carries that every region function in it uses.
  *
  * @typedef {Object} ModuleContext
@@ -212,6 +225,8 @@ const LOCAL_TYPES = [
  *     tables' transfer count (a diagnostic run)
  * @property {boolean} [blockProfile] each block counts its executions in the block
  *     profile past the tables (a diagnostic run, in a memory sized for it)
+ * @property {ExpansionNote} [expansion] told each instruction's wasm bytes as it is
+ *     emitted, the checks of its memory plan with it (a diagnostic run)
  * @property {boolean} [profileCalls] an indirect call notes its address and target in the
  *     layout's call profile while the host has it on
  * @property {boolean} [flat]  every backward jump through the dispatch rather than the loops
@@ -274,10 +289,12 @@ const LOCAL_TYPES = [
  *     countTransfers?: boolean, wide?: boolean, narrow?: boolean, blockProfile?: boolean,
  *     structure?: boolean, precise?: boolean, place?: number, profileCalls?: boolean,
  *     resume?: boolean, callReturn?: boolean, looseStacks?: boolean,
- *     atomic?: boolean, checkReads?: boolean }}
- *     [options]  checkReads: an instruction that only reads tests its pages too, so a page
- *     the program cannot read faults (a reservation not committed, PAGE_NOACCESS) rather
- *     than reading RAM; atomic: locked instructions as wasm atomics (`locked.js`), for a process
+ *     atomic?: boolean, checkReads?: boolean, expansion?: ExpansionNote | null }}
+ *     [options]  expansion: told every instruction's wasm bytes as it is emitted
+ *     (`tools/cork-expansion.mjs`), in a diagnostic build only; checkReads: an
+ *     instruction that only reads tests its pages too, so a page the program cannot read
+ *     faults (a reservation not committed, PAGE_NOACCESS) rather than reading RAM;
+ *     atomic: locked instructions as wasm atomics (`locked.js`), for a process
  *     whose threads run on more than one executor; looseStacks: a store through esp alone
  *     tests no page (`emitGroupChecks`), which holds while no translated code lies on a
  *     thread's stack (the runtime's
@@ -298,7 +315,7 @@ export function prepareModule(m, layout, features, memory = {},
     { undoLog = false, hash = false, trapPort, leaveOut = new Set(), countTransfers = false,
         wide = false, narrow = false, blockProfile = false, structure = true, precise = false,
         place = 0, profileCalls = false, resume = false, callReturn = false,
-        looseStacks = false, atomic = false, checkReads = false } = {})
+        looseStacks = false, atomic = false, checkReads = false, expansion = null } = {})
 {
     m.importMemory('env', 'memory', {
         min: 1, ...(memory.maxPages === undefined ? {} : { max: memory.maxPages }),
@@ -409,6 +426,10 @@ export function prepareModule(m, layout, features, memory = {},
     if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && blockProfile)
     {
         context.blockProfile = true;
+    }
+    if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && expansion !== null)
+    {
+        context.expansion = expansion;
     }
     if (hashed)
     {
@@ -2441,11 +2462,16 @@ export class RegionEmitter {
             this.blockRetired++;
             this.instructions++;
             this.memPlan = plan.get(i) ?? null;
+            const bodyAt = this.b.length;
             if (this.memPlan !== null && this.memPlan.checks.length > 0)
             {
                 emitGroupChecks(this, this.memPlan.checks);
             }
             const done = emitInstruction(this, instruction, flagsLive);
+            if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && this.context.expansion)
+            {
+                this.context.expansion(instruction, this.b.length - bodyAt, done);
+            }
             if (done && this.memPlan !== null && this.memPlan.access !== null
                 && !this.memPlan.used)
             {
