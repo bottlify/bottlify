@@ -21,6 +21,32 @@
  */
 export function changedSpans(now, was, gap = 64){
     const length = Math.min(now.length, was.length);
+    // Two runs off a four-byte boundary by the same amount -- a draw's
+    // sixteen-bit indices from an odd first one -- are compared a byte at a
+    // time to the boundary and by words after it, not a byte at a time
+    // throughout, which is eight times as slow.
+    const skew = now.byteOffset & 3;
+    if (skew !== 0 && (was.byteOffset & 3) === skew && length > 8)
+    {
+        const head = 4 - skew;
+        const spans = changedSpans(now.subarray(0, head), was.subarray(0, head), gap);
+        const rest = changedSpans(now.subarray(head, length), was.subarray(head, length), gap);
+        for (let index = 0; index < rest.length; index += 2)
+        {
+            const start = rest[index] + head;
+            const end = rest[index + 1] + head;
+            const last = spans.length - 1;
+            if (last > 0 && start - spans[last] <= gap)
+            {
+                spans[last] = end;
+            }
+            else
+            {
+                spans.push(start, end);
+            }
+        }
+        return spans;
+    }
     /** @type {number[]} */
     const spans = [];
     let start = -1;
@@ -39,19 +65,35 @@ export function changedSpans(now, was, gap = 64){
             // reads is unchanged, and this goes four times as fast as a word
             // at a time. An equal run ends a span as the words one by one
             // would, since the gap only grows along it.
-            if ((word & 7) === 0 && word < blocks
-                && ((a[word] ^ b[word]) | (a[word + 1] ^ b[word + 1])
+            if ((word & 7) === 0 && word < blocks)
+            {
+                const differ = (a[word] ^ b[word]) | (a[word + 1] ^ b[word + 1])
                     | (a[word + 2] ^ b[word + 2]) | (a[word + 3] ^ b[word + 3])
                     | (a[word + 4] ^ b[word + 4]) | (a[word + 5] ^ b[word + 5])
-                    | (a[word + 6] ^ b[word + 6]) | (a[word + 7] ^ b[word + 7])) === 0)
-            {
-                word += 7;
-                if (start >= 0 && word - lastChanged > gapWords)
+                    | (a[word + 6] ^ b[word + 6]) | (a[word + 7] ^ b[word + 7]);
+                if (differ === 0)
                 {
-                    spans.push(start << 2, (lastChanged + 1) << 2);
-                    start = -1;
+                    word += 7;
+                    if (start >= 0 && word - lastChanged > gapWords)
+                    {
+                        spans.push(start << 2, (lastChanged + 1) << 2);
+                        start = -1;
+                    }
+                    continue;
                 }
-                continue;
+                // Inside a span that no equal run in the block could end --
+                // a model rewritten whole -- only its last change matters.
+                if (start >= 0 && word + 7 - lastChanged <= gapWords)
+                {
+                    let last = word + 7;
+                    while (a[last] === b[last])
+                    {
+                        last--;
+                    }
+                    lastChanged = last;
+                    word += 7;
+                    continue;
+                }
             }
             if (a[word] === b[word])
             {
