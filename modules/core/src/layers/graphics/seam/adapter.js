@@ -55,7 +55,12 @@ export const ADAPTER_GUID = Uint8Array.from([
 /**
  * @typedef {{ major: number, minor: number }} ShaderVersion
  * @typedef {{ vendorId: number, deviceId: number, vertexShader: ShaderVersion,
- *     pixelShader: ShaderVersion }} GpuProfile
+ *     pixelShader: ShaderVersion, rectangleBump?: boolean }} GpuProfile
+ *     `rectangleBump`: the card's driver takes a texture that is not a power
+ *     of two as a rectangle, whose coordinates are texels, and texbem adds
+ *     its offset to them unscaled -- a program written for it sets its bump
+ *     matrix in texels for such a texture, as Far Cry's NV2x path does for its
+ *     screen copy (64 and 40 for 2560x1600, against 0.025 on its R300 path).
  */
 
 /** @param {number} major @param {number} minor @returns {ShaderVersion} */
@@ -77,7 +82,7 @@ const version = (major, minor)=>Object.freeze({ major, minor });
 export const GPU_PROFILES = Object.freeze({
     // GeForce4 Ti 4600.
     sm1: Object.freeze({ vendorId: 0x10de, deviceId: 0x0250,
-        vertexShader: version(1, 1), pixelShader: version(1, 3) }),
+        vertexShader: version(1, 1), pixelShader: version(1, 3), rectangleBump: true }),
     // Radeon 9800 Pro.
     sm2: Object.freeze({ vendorId: 0x1002, deviceId: 0x4e48,
         vertexShader: version(2, 0), pixelShader: version(2, 0) }),
@@ -101,6 +106,17 @@ export function profileCaps(known){
     return profile
         ? { vertexShaderVersion: profile.vertexShader, pixelShaderVersion: profile.pixelShader }
         : {};
+}
+
+/**
+ * How the card a profile shows behaves where its driver differed from the
+ * others: nothing for an adapter shown as the browser's.
+ *
+ * @param {AdapterIdentity | null | undefined} known
+ * @returns {{ rectangleBump: boolean }}
+ */
+export function profileBehaviour(known){
+    return { rectangleBump: GPU_PROFILES[known?.profile ?? '']?.rectangleBump === true };
 }
 
 /**

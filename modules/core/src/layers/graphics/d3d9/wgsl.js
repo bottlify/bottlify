@@ -586,7 +586,7 @@ function returnsEarly(list){
  *     fog?: number, fogSource?: number, flatColours?: boolean,
  *     stageDimensions?: readonly string[], projectedBy?: readonly string[],
  *     points?: { sprite: boolean }, alphaTest?: number, nanProbe?: boolean,
- *     tableFogOverDepth?: boolean, ones?: readonly number[],
+ *     tableFogOverDepth?: boolean, rectangleBump?: boolean, ones?: readonly number[],
  *     sampling?: readonly (SamplerVariant | undefined)[],
  *     clip?: import('../webgpu/internal/fixedfunction.js').ClipState }} [options]
  *        For a vertex shader, the shape of each v# the declaration supplies,
@@ -1533,8 +1533,17 @@ export function translateShader(parsed, options = {}){
                 const stage = /** @type {import('./shader.js').Operand} */ (instruction.dest).index;
                 const bumped = src(instruction, 0);
                 const at = stageCoordinates(stage);
+                // With `rectangleBump` the offset into a texture whose sides
+                // are not powers of two is in texels, as the driver of the
+                // card shown took it: a rectangle's coordinates were texels.
+                const size = `vec2<u32>(textureDimensions(tex${stage}, 0))`;
+                const offset = options.rectangleBump
+                    ? `(${bumpOffset(stage, bumped)} / select(vec2f(1.0), vec2f(${size}),`
+                        + ` ((${size}.x & (${size}.x - 1u)) | (${size}.y & (${size}.y - 1u)))`
+                        + ' != 0u))'
+                    : bumpOffset(stage, bumped);
                 fill(stage, stageSample(stage, `vec4f(${swizzled(at, 'xy')}`
-                    + ` + ${bumpOffset(stage, bumped)}, ${swizzled(at, 'zw')})`));
+                    + ` + ${offset}, ${swizzled(at, 'zw')})`));
                 if (instruction.opcode === OPCODE.TEXBEML)
                 {
                     const luminance = bumpRegisterOf(stage, 1);

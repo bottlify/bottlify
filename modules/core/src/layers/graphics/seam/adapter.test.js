@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { GPU_PROFILES, describeAdapter, profileCaps } from './adapter.js';
+import { GPU_PROFILES, describeAdapter, profileBehaviour, profileCaps } from './adapter.js';
 import { VIDEO_ADAPTER_NAME } from '../../win32/devices.js';
 
 test('the adapter is shown with the browser\'s vendor, or with its profile\'s card', ()=>{
@@ -32,4 +32,14 @@ test('a profile brings its card\'s shader versions, model by model', ()=>{
     assert.deepEqual(profileCaps({ profile: 'sm1' }).pixelShaderVersion, { major: 1, minor: 3 });
     assert.deepEqual(profileCaps({ vendor: 'apple' }), {});
     assert.equal(Object.keys(GPU_PROFILES).join(), 'sm1,sm2,sm3,sm4');
+});
+
+test('the GeForce4 profile takes a texbem offset into a rectangle in texels, and no other', ()=>{
+    assert.deepEqual(profileBehaviour({ profile: 'sm1' }), { rectangleBump: true });
+    for (const name of ['sm2', 'sm3', 'sm4'])
+    {
+        assert.deepEqual(profileBehaviour({ profile: name }), { rectangleBump: false }, name);
+    }
+    assert.deepEqual(profileBehaviour({ vendor: 'nvidia' }), { rectangleBump: false },
+        'the browser\'s card is not taken for one of the time');
 });

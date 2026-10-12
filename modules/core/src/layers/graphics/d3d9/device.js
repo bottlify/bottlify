@@ -462,6 +462,7 @@ const isDepthFormat = format=>FORMAT_INFO[format] !== undefined && FORMAT_INFO[f
  * @property {string} [probeTexture]
  * @property {boolean} [fog]
  * @property {'legacy' | 'current'} [driverRules]  The renderer's (`createRenderer`).
+ * @property {boolean} [rectangleBump]  The renderer's (`createRenderer`).
  * @property {boolean} [keepMemory]  Released resources' memory is never given back (debugging).
  * @property {boolean} [rereadBuffers]  The renderer's (`createRenderer`).
  * @property {boolean} [mips]
@@ -503,7 +504,7 @@ export function createDirect3D9(options = {}){
         backend, readMemory, windowMemory, writeMemory, createSampler, allocate: guestMemory,
         free: giveBack, divergence, dumpDraws, dumpEvery, liveDump, maxDraws, skipTexture,
         probeTexture, fog, mips, driverRules, onDeviceLost, gamma, frameQueued, renderedElsewhere,
-        keepMemory, rereadBuffers, drawsFrom, ...caps
+        keepMemory, rereadBuffers, drawsFrom, rectangleBump, ...caps
     } = options;
     /** @type {DeviceCaps} */
     const resolved = { ...DEFAULT_CAPS, ...caps, fullscreenGamma: gamma?.applies() === true };
@@ -516,7 +517,7 @@ export function createDirect3D9(options = {}){
         free: keepMemory === true ? undefined : giveBack, divergence, dumpDraws, dumpEvery,
         liveDump, maxDraws, skipTexture,
         probeTexture, fog, mips, driverRules, onDeviceLost, gamma, frameQueued, renderedElsewhere,
-        rereadBuffers, drawsFrom,
+        rereadBuffers, drawsFrom, rectangleBump,
     };
     if (backend && !readMemory)
     {
@@ -917,6 +918,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             fog: services.fog,
             mips: services.mips,
             driverRules: services.driverRules,
+            rectangleBump: services.rectangleBump,
             rereadBuffers: services.rereadBuffers,
             compressedTextures: caps.compressedTextures,
         })

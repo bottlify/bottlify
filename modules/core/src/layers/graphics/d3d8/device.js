@@ -292,6 +292,7 @@ function isTransformType(type){
  *     program had never enabled it: a frame that clears up with it was fog.
  * @property {boolean} [nanProbe]
  * @property {'legacy' | 'current'} [driverRules]  The renderer's (`createRenderer`).
+ * @property {boolean} [rectangleBump]  The renderer's (`createRenderer`).
  * @property {boolean} [mips]
  *     Whether textures are sampled below their top level. Off, every sample
  *     comes from the top level, so a frame that changes with it was mips.
@@ -407,7 +408,7 @@ export function createDirect3D8(options = {}){
         backend, readMemory, windowMemory, writeMemory, createSampler, allocate: guestMemory,
         free: giveBack, dumpDraws, dumpEvery, liveDump, maxDraws, divergence, skipTexture,
         probeTexture, fog, mips, nanProbe, driverRules, onDeviceLost, gamma, frameQueued, drawsFrom,
-        ...caps
+        rectangleBump, ...caps
     } = options;
     /** @type {DeviceCaps} */
     const resolved = { ...DEFAULT_CAPS, ...caps, fullscreenGamma: gamma?.applies() === true };
@@ -416,6 +417,7 @@ export function createDirect3D8(options = {}){
         backend, readMemory, windowMemory, writeMemory, createSampler, allocate: guestMemory,
         free: giveBack, dumpDraws, dumpEvery, liveDump, maxDraws, divergence, skipTexture,
         probeTexture, fog, mips, nanProbe, driverRules, onDeviceLost, gamma, frameQueued, drawsFrom,
+        rectangleBump,
     };
     if (backend && !readMemory)
     {
@@ -778,6 +780,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             mips: services.mips,
             nanProbe: services.nanProbe === true,
             driverRules: services.driverRules,
+            rectangleBump: services.rectangleBump,
             compressedTextures: caps.compressedTextures,
         })
         : null;

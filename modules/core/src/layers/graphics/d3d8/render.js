@@ -2829,6 +2829,9 @@ const CLEAR_STRIDE = 20;
  *     shader it would run with D3DRS_FOGENABLE clear, which is how a picture
  *     washed towards the fog colour is told apart from one washed by something
  *     else -- two runs then differ by fog and nothing else.
+ * @property {boolean} [rectangleBump]  A texbem's offset into a texture whose
+ *     sides are not powers of two is in texels, as the driver of the card a
+ *     profile shows took it (`GpuProfile.rectangleBump`).
  * @property {'legacy' | 'current'} [driverRules]  Which generation of
  *     drivers a behaviour Direct3D left to them follows where they changed
  *     it (decisions.md A43): 'legacy', the default, the shader-model-1 era's;
@@ -2869,6 +2872,7 @@ export function createRenderer(options){
     const dumpDraws = options.dumpDraws === true;
     const nanProbe = options.nanProbe === true;
     const tableFogOverDepth = options.driverRules === 'current';
+    const rectangleBump = options.rectangleBump === true;
     const dumpEvery = Math.max(0, Math.floor(options.dumpEvery ?? 0));
     // Asked for on a running program: the next frames with draws are written
     // down as `dumpDraws` writes them, without the texture copies only a run
@@ -6171,6 +6175,7 @@ export function createRenderer(options){
         const pixel = translationOf(pixelShader,
             `ps|fog${fog.source}/${fog.mode}${flat ? '|flat' : ''}|${sampling.pixelKey}`
                 + (alphaFunc === undefined ? '' : `|a${alphaFunc}`) + (nanProbe ? '|nan' : '')
+                + (rectangleBump ? '|rb' : '')
                 + (discards ? `|k${planes.count}` : ''),
             ()=>translateShader(
                 /** @type {import('../d3d9/shader.js').ParsedShader} */ (program.pixel), {
@@ -6183,6 +6188,7 @@ export function createRenderer(options){
                     ...(sampling.pixelVariants ? { sampling: sampling.pixelVariants } : {}),
                     ...(alphaFunc === undefined ? {} : { alphaTest: alphaFunc }),
                     ...(nanProbe ? { nanProbe } : {}),
+                    ...(rectangleBump ? { rectangleBump } : {}),
                     ...(discards ? { clip: planes } : {}),
                 }));
         if (pixel.error)

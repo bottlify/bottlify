@@ -8,7 +8,7 @@ import { createBackend } from './webgpu/backend.js';
 import { createDirectDraw } from './ddraw/objects.js';
 import { createDirect3D8 } from './d3d8/device.js';
 import { createDirect3D9 } from './d3d9/device.js';
-import { profileCaps } from './seam/adapter.js';
+import { profileBehaviour, profileCaps } from './seam/adapter.js';
 import { connectGraphicsWorker } from './remote/connect.js';
 import { createGraphicsLibraries } from './seam/exports.js';
 import { createOpengl } from './opengl/exports.js';
@@ -515,6 +515,7 @@ export function createGraphicsModule(){
                     mips: device?.mips,
                     nanProbe: device?.nanProbe,
                     driverRules: config?.driverRules,
+                    ...profileBehaviour(device?.adapter),
                     keepMemory: config?.keepMemory,
                     rereadBuffers: config?.rereadBuffers,
                     onDeviceLost,
@@ -564,6 +565,7 @@ export function createGraphicsModule(){
                     mips: device?.mips,
                     nanProbe: device?.nanProbe,
                     driverRules: config?.driverRules,
+                    ...profileBehaviour(device?.adapter),
                     keepMemory: config?.keepMemory,
                     rereadBuffers: config?.rereadBuffers,
                     onDeviceLost,
