@@ -6174,6 +6174,30 @@ async function buildApp(options){
      * @type {{ gate: Promise<void>, open: () => void } | null}
      */
     let paused = null;
+    /**
+     * Stops handing out turns without ending anything; `resumeRun` continues
+     * from the same place, since no thread's state was touched.
+     */
+    const pauseRun = ()=>{
+        if (paused)
+        {
+            return;
+        }
+        /** @type {() => void} */
+        let open = ()=>{};
+        const gate = new Promise(resolve=>{
+            open = ()=>resolve(undefined);
+        });
+        paused = { gate, open };
+    };
+    const resumeRun = ()=>{
+        if (!paused)
+        {
+            return;
+        }
+        paused.open();
+        paused = null;
+    };
 
     // attachLog is sugar over the registry: the same subscription, remembered
     // by the sink the caller gave, so detaching still takes what it was given.
@@ -6739,26 +6763,8 @@ async function buildApp(options){
          * Stops handing out turns without ending anything; `resume` continues
          * from the same place, since no thread's state was touched.
          */
-        pause(){
-            if (paused)
-            {
-                return;
-            }
-            /** @type {() => void} */
-            let open = ()=>{};
-            const gate = new Promise(resolve=>{
-                open = ()=>resolve(undefined);
-            });
-            paused = { gate, open };
-        },
-        resume(){
-            if (!paused)
-            {
-                return;
-            }
-            paused.open();
-            paused = null;
-        },
+        pause: pauseRun,
+        resume: resumeRun,
         stop: ()=>cpu.stop(),
 
         /**
@@ -6999,7 +7005,11 @@ async function buildApp(options){
             },
             /** Every live window, children included, as the window manager lists them. */
             windows: ()=>win32.windows(),
-            ...liveDumpOf(options.device?.worker),
+            ...liveDumpOf(options.device?.worker, {
+                pause: pauseRun,
+                resume: resumeRun,
+                paused: ()=>paused !== null,
+            }),
             /** @param {string} name */
             register: name=>cpu.readReg32(name),
             eip: ()=>cpu.eip(),
@@ -7816,7 +7826,17 @@ async function buildSystemHost(deps){
             desktop: ()=>ask('debug.desktop'),
             /** @param {number} address @param {any} how */
             hook: (address, how)=>ask('debug.hook', [address, how]),
-            ...liveDumpOf(options.device?.worker),
+            ...liveDumpOf(options.device?.worker, {
+                pause: ()=>{
+                    pausedByCaller = true;
+                    tellAll('pause');
+                },
+                resume: ()=>{
+                    pausedByCaller = false;
+                    tellAll('resume');
+                },
+                paused: ()=>pausedByCaller,
+            }),
         },
         trace: ()=>ask('trace'),
         report: ()=>ask('report'),
@@ -7920,31 +7940,34 @@ function volumeMemory(){
  * that drew it, which a diagnostics table read a report later need not be.
  *
  * @param {any} worker  the graphics worker, when the run has one
+ * @param {{ pause: () => void, resume: () => void, paused: () => boolean }} [control]
+ *     the run's pause, which `pick` holds while it takes a frame apart
  */
-function liveDumpOf(worker){
+function liveDumpOf(worker, control){
     /** @type {{ lines: string[], frame: number } | null} */
     let last = null;
     let listening = false;
+    /** @param {number} [frames] */
+    const dumpFrames = (frames = 1)=>{
+        if (!worker)
+        {
+            throw new Error('dumpFrames: this run draws without a graphics worker');
+        }
+        if (!listening)
+        {
+            listening = true;
+            worker.addEventListener('message', (/** @type {{ data: any }} */ event)=>{
+                if (event.data?.type === 'dumped')
+                {
+                    last = { lines: event.data.lines, frame: event.data.frame };
+                }
+            });
+        }
+        worker.postMessage({ type: 'debug', dumpFrames: frames });
+        return frames;
+    };
     return {
-        /** @param {number} [frames] */
-        dumpFrames: (frames = 1)=>{
-            if (!worker)
-            {
-                throw new Error('dumpFrames: this run draws without a graphics worker');
-            }
-            if (!listening)
-            {
-                listening = true;
-                worker.addEventListener('message', (/** @type {{ data: any }} */ event)=>{
-                    if (event.data?.type === 'dumped')
-                    {
-                        last = { lines: event.data.lines, frame: event.data.frame };
-                    }
-                });
-            }
-            worker.postMessage({ type: 'debug', dumpFrames: frames });
-            return frames;
-        },
+        dumpFrames,
         /**
          * How the worker's devices take buffer locks from now on: '' as the
          * program asked, 'rename' renaming at every one.
@@ -8005,6 +8028,76 @@ function liveDumpOf(worker){
             return mode;
         },
         dumped: ()=>last,
+        /**
+         * Shows the last frame again and again, the program paused, so a cut
+         * (`maxDraws`) is seen on a picture that holds still; false stops it.
+         *
+         * @param {boolean} [on]
+         */
+        freeze: (on = true)=>{
+            if (!worker)
+            {
+                throw new Error('freeze: this run draws without a graphics worker');
+            }
+            worker.postMessage({ type: 'debug', freeze: on });
+            return on;
+        },
+        /**
+         * Which draw painted a pixel of the picture: the program is paused and
+         * the graphics worker plays its last frame again cut after fewer and
+         * fewer draws, reading the pixel back each time, halving to the first
+         * count at which it is as the scene leaves it (before the frame's
+         * post-processing). The centre -- a crosshair -- by default; the run
+         * is left paused as it was found.
+         *
+         * @param {number} [x] @param {number} [y]  the shown frame's pixels
+         * @param {{ tolerance?: number, depth?: number }} [options]  how far a
+         *     channel may differ and still be the same pixel; how many of the
+         *     draws that changed it to list, latest first (4)
+         */
+        pick: async(x, y, options = {})=>{
+            if (!worker)
+            {
+                throw new Error('pick: this run draws without a graphics worker');
+            }
+            const wasPaused = control?.paused() ?? true;
+            if (!wasPaused)
+            {
+                control?.pause();
+                // The frames on their way when it paused land first.
+                await new Promise(done=>setTimeout(done, 400));
+            }
+            try
+            {
+                return await new Promise((resolve, reject)=>{
+                    const hear = (/** @type {{ data: any }} */ event)=>{
+                        if (event.data?.type !== 'picked')
+                        {
+                            return;
+                        }
+                        worker.removeEventListener('message', hear);
+                        if (event.data.error)
+                        {
+                            reject(new Error(event.data.error));
+                        }
+                        else
+                        {
+                            resolve(event.data.result);
+                        }
+                    };
+                    worker.addEventListener('message', hear);
+                    worker.postMessage({ type: 'debug',
+                        pick: { x, y, tolerance: options.tolerance, depth: options.depth } });
+                });
+            }
+            finally
+            {
+                if (!wasPaused)
+                {
+                    control?.resume();
+                }
+            }
+        },
     };
 }
 

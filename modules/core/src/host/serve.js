@@ -463,20 +463,6 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
      */
     let graphics = null;
     /**
-     * A live switch of the graphics worker's devices (`liveDump` in
-     * `remote/worker.js`), asked by the page on a running program.
-     *
-     * @template T @param {string} name @param {T} value @returns {T}
-     */
-    const tellGraphics = (name, value)=>{
-        if (!graphics)
-        {
-            throw new Error(`${name}: this run draws without a graphics worker`);
-        }
-        graphics.worker.postMessage({ type: 'debug', [name]: value });
-        return value;
-    };
-    /**
      * A reader on *this* thread, and only where the page could not have one:
      * without shared memory the log's block cannot cross, so the answers a
      * reader would have given here are computed here and posted. With shared
@@ -895,13 +881,6 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
         // Awaited: a program in a worker of its own answers across its link.
         'debug.read': async(/** @type {number} */ address, /** @type {number} */ length)=>
             (await app.debug.read(address, length)).slice(),
-        'debug.modules': ()=>app.debug.modules(),
-        // The graphics worker is this thread's, so the asking goes to it from
-        // here; what its devices write down comes back in the next report.
-        'debug.dumpFrames': (/** @type {number} */ count = 1)=>tellGraphics('dumpFrames', count),
-        'debug.bufferLocks': (/** @type {string} */ mode = '')=>tellGraphics('bufferLocks', mode),
-        'debug.skipTexture': (/** @type {string} */ ids = '')=>tellGraphics('skipTexture', ids),
-        'debug.occlusion': (/** @type {string} */ mode = '')=>tellGraphics('occlusion', mode),
         presented: ()=>({ count: frames, history: presented.slice() }),
         /*
          * The emulator's account of where the guest ran, by address. Only the
@@ -971,7 +950,21 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
                 return;
             case 'request':
             {
-                const method = methods[message.method];
+                // `debug.<name>` is the engine's `app.debug.<name>`, whatever
+                // it is: a debugging aid is written once, there, and a page
+                // reaches it as it is.
+                const debugName = message.method.startsWith('debug.')
+                    ? message.method.slice('debug.'.length) : null;
+                const method = methods[message.method] ?? (debugName !== null
+                    ? (/** @type {any[]} */ ...args)=>{
+                        const aid = /** @type {any} */ (app)?.debug?.[debugName];
+                        if (typeof aid !== 'function')
+                        {
+                            throw new Error(`no such debugging aid: ${debugName}`);
+                        }
+                        return aid(...args);
+                    }
+                    : undefined);
                 try
                 {
                     if (!method)

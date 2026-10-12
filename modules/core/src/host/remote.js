@@ -432,42 +432,19 @@ export async function createRemoteApp(wiring){
             /** @param {string} path @param {Uint8Array} bytes @returns {Promise<void>} */
             write: (path, bytes)=>request('files.write', [path, bytes]),
         },
-        /** Guest memory and the images mapped (the local controller's `debug`), asked of the worker. */
-        debug: {
-            /** @param {number} address @param {number} length @returns {Promise<Uint8Array>} */
-            read: (address, length)=>request('debug.read', [address, length]),
-            /** @returns {Promise<{ name: string, base: number, size: number }[]>} */
-            modules: ()=>request('debug.modules'),
-            /**
-             * Writes down the next `frames` frames with draws of the running
-             * program, every draw with its shaders, stages and state, into the
-             * next report (the local controller's `debug.dumpFrames`).
-             *
-             * @param {number} [count] @returns {Promise<number>}
-             */
-            dumpFrames: (count = 1)=>request('debug.dumpFrames', [count]),
-            /**
-             * How the graphics worker's devices take buffer locks from now on:
-             * '' as the program asked, 'rename' renaming at every one.
-             *
-             * @param {string} [mode] @returns {Promise<string>}
-             */
-            bufferLocks: (mode = '')=>request('debug.bufferLocks', [mode]),
-            /**
-             * Drops every draw that samples these textures from now on --
-             * `t12,t40` as a frame dump names them, '' none.
-             *
-             * @param {string} [ids] @returns {Promise<string>}
-             */
-            skipTexture: (ids = '')=>request('debug.skipTexture', [ids]),
-            /**
-             * How occlusion counts are answered from now on: '' as counted,
-             * 'visible' as if every sample passed.
-             *
-             * @param {string} [mode] @returns {Promise<string>}
-             */
-            occlusion: (mode = '')=>request('debug.occlusion', [mode]),
-        },
+        /**
+         * The engine's debugging aids (its `app.debug`), every one of them,
+         * asked of the worker by name: one written there is here as it is,
+         * `app.debug.pick()` or `app.debug.maxDraws(400)`, each answering a
+         * promise of what it answers there.
+         *
+         * @type {Record<string, (...args: any[]) => Promise<any>>}
+         */
+        debug: new Proxy({}, {
+            get: (_, name)=>(typeof name === 'string' && name !== 'then'
+                ? (/** @type {any[]} */ ...args)=>request(`debug.${name}`, args)
+                : undefined),
+        }),
         /** @returns {Promise<{ count: number, history: import('./messages.js').Presented[] }>} */
         presented: ()=>request('presented'),
 

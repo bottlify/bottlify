@@ -2804,7 +2804,11 @@ const CLEAR_STRIDE = 20;
  *     lock or not -- a debugging aid, for a program that writes a buffer
  *     outside its locks.
  * @property {{ dumpFrames: number, bufferLocks?: string, skipTexture?: string, occlusion?: string,
- *     maxDraws?: number, written?: (lines: string[], frame: number) => void }} [liveDump]
+ *     maxDraws?: number, written?: (lines: string[], frame: number) => void,
+ *     replayLast?: (cut?: number) => boolean,
+ *     shownDraws?: () => { lines: string[], sceneDraws: number },
+ *     pick?: (x?: number, y?: number, tolerance?: number, depth?: number)
+ *         => Promise<any> }} [liveDump]
  *     Set on a running program to have its next frames with draws written
  *     down as `dumpDraws` writes them; counts down as they are, and the last
  *     of them is handed to `written`.
@@ -6920,6 +6924,159 @@ export function createRenderer(options){
         return { gpu, layout };
     };
 
+    /** The frame shown last, which a frozen run shows again (`replayLast`). @type {{ recorded: any, surface: any } | null} */
+    let lastShown = null;
+    /** Whether a replay of it is on its way, so a slow GPU is not handed a queue of them. */
+    let replayingLast = false;
+
+    /**
+     * Shows the last frame again with its draws past `cut` passed over (-1
+     * none): with the program paused, what a picture is made of can be taken
+     * apart on a picture that holds still. False when one is still on its way.
+     *
+     * @param {number} [cut]
+     */
+    const replayLast = (cut = -1)=>{
+        const shown = lastShown;
+        if (shown === null || replayingLast)
+        {
+            return false;
+        }
+        replayingLast = true;
+        chain = chain.then(()=>replay(shown.recorded, shown.surface, null, { cut }))
+            .catch(failure).finally(()=>{
+                replayingLast = false;
+            });
+        return true;
+    };
+
+    /**
+     * Which draw of the last frame painted a pixel of what it showed: the frame
+     * is played again cut after fewer and fewer draws and the pixel read back
+     * each time, halving to the first count at which it is as the scene leaves
+     * it -- before the post-processing at the frame's end, which a cut frame
+     * never reaches. The program must be paused, or the frame taken apart is
+     * not the one on the screen. The centre (a crosshair) by default.
+     *
+     * @param {number} [x] @param {number} [y]  the shown surface's pixels
+     * @param {number} [tolerance]  how far a channel may differ and be the same pixel
+     * @param {number} [depth]  how many of the draws that changed it, latest first
+     */
+    const pickDraw = async(x, y, tolerance = 6, depth = 4)=>{
+        const shown = lastShown;
+        if (shown === null)
+        {
+            throw new Error('pick: no frame has been shown');
+        }
+        const { lines, sceneDraws } = shownDraws();
+        const { width, height } = shown.surface;
+        const px = Math.min(width - 1, Math.max(0, Math.round(x ?? width / 2)));
+        const py = Math.min(height - 1, Math.max(0, Math.round(y ?? height / 2)));
+        /** @param {number} cut @returns {Promise<number[]>} red, green, blue */
+        const pixelAt = async cut=>{
+            const job = chain.then(()=>replay(shown.recorded, shown.surface, shown.surface,
+                { cut }));
+            chain = job.catch(failure);
+            const bytes = /** @type {{ data: Uint8Array }} */ (await job).data;
+            const at = (py * width + px) * 4;
+            // The shown surface is BGRA.
+            return [bytes[at + 2], bytes[at + 1], bytes[at]];
+        };
+        /**
+         * The draw that last changed the pixel among the first `count`: the
+         * smallest cut at which it is already as it is after them, less one.
+         *
+         * @param {number} count @param {number[]} after  the pixel after them
+         */
+        const lastChange = async(count, after)=>{
+            const same = (/** @type {number[]} */ pixel)=>pixel.every(
+                (value, channel)=>Math.abs(value - after[channel]) <= tolerance);
+            let low = 0;
+            let high = count;
+            while (high - low > 1)
+            {
+                const middle = (low + high) >> 1;
+                if (same(await pixelAt(middle)))
+                {
+                    high = middle;
+                }
+                else
+                {
+                    low = middle;
+                }
+            }
+            return high - 1;
+        };
+        const scene = await pixelAt(sceneDraws);
+        // The last few draws that changed it, latest first: a fog or a
+        // caustics layer blended over an object is the last, and the object
+        // is under it.
+        /** @type {{ draw: number, after: number[], line: string | null }[]} */
+        const changes = [];
+        let count = sceneDraws;
+        let after = scene;
+        while (changes.length < depth && count > 0)
+        {
+            const draw = await lastChange(count, after);
+            changes.push({ draw, after, line: lines[draw] ?? null });
+            count = draw;
+            after = await pixelAt(draw);
+        }
+        // The frame as it was, back on the screen.
+        await pixelAt(-1);
+        return { x: px, y: py, pixel: scene, sceneDraws, draw: changes[0]?.draw ?? -1,
+            line: changes[0]?.line ?? null, changes };
+    };
+
+    /**
+     * The last frame's draws as the cut counts them, one line each -- its
+     * shaders, its textures, and whether it drew into a texture rather than
+     * what was shown -- and how many come before the run of draws into
+     * textures at the frame's end, the post-processing, that a cut frame
+     * never reaches.
+     */
+    const shownDraws = ()=>{
+        if (lastShown === null)
+        {
+            return { lines: [], sceneDraws: 0 };
+        }
+        /** @type {string[]} */
+        const lines = [];
+        /** @type {boolean[]} */
+        const intoTexture = [];
+        let target = null;
+        for (const command of lastShown.recorded.commands)
+        {
+            if (command.kind === 'pass')
+            {
+                target = command.target;
+                continue;
+            }
+            if (command.kind !== 'draw')
+            {
+                continue;
+            }
+            const bound = (command.stageBindings ?? []).map((/** @type {any} */ binding)=>
+                (!binding.placeholder && binding.texture ? describeTexture(binding.texture) : '-'))
+                .join(' ');
+            const offscreen = target !== lastShown.surface;
+            intoTexture.push(offscreen);
+            lines.push(`#${lines.length} vs=${command.state?.vertexShader ?? '?'}`
+                + ` ps=${command.state?.pixelShader ?? '?'}`
+                + `${offscreen ? ' !backbuffer' : ''} [${bound}]`);
+        }
+        let at = lines.length;
+        while (at > 0 && !intoTexture[at - 1])
+        {
+            at--;
+        }
+        while (at > 0 && intoTexture[at - 1])
+        {
+            at--;
+        }
+        return { lines, sceneDraws: at > 0 ? at : lines.length };
+    };
+
     /**
      * A recorded stretch: the destination's rectangle drawn from the source's.
      *
@@ -9459,6 +9616,13 @@ export function createRenderer(options){
             chain = chain.then(()=>replay(recorded, surface)).then(()=>{
                 submittedFrames = replayed;
             }).catch(failure);
+            if (liveDump)
+            {
+                lastShown = { recorded, surface };
+                liveDump.replayLast = replayLast;
+                liveDump.shownDraws = shownDraws;
+                liveDump.pick = pickDraw;
+            }
             if (handOver !== null)
             {
                 // After the replay, which appends what the GPU was given to
@@ -9663,16 +9827,20 @@ export function createRenderer(options){
      * @param {any} recorded
      * @param {any} surface what to present, or null for a flush
      * @param {any} [snapshot] a backend surface to read back after the replay
+     * @param {{ cut: number } | null} [again]  a frame played once already,
+     *     shown again with its draws past `cut` passed over: it counts no
+     *     occlusion, reads nothing back and gives its arena back to nobody --
+     *     the first replay did, and a second would hand it to two recordings
      * @returns {Promise<any>} the snapshot's pixels, when one was asked for
      */
-    async function replay(recorded, surface, snapshot = null){
+    async function replay(recorded, surface, snapshot = null, again = null){
         const pipelines = await Promise.allSettled(recorded.pipelines);
         const began = clock();
         const frame = backend.beginFrame({ cut: recorded.cut });
         // A frame counts when a query is open as it starts or opens in it,
         // and then every pass of it can: a BEGIN may land in any of them.
-        const counts = countingQuery !== null
-            || recorded.commands.some((/** @type {any} */ command)=>command.kind === 'occlusion');
+        const counts = again === null && (countingQuery !== null
+            || recorded.commands.some((/** @type {any} */ command)=>command.kind === 'occlusion'));
         /** @type {{ slots: any[], areas: number[], touched: Set<any> } | null} */
         const occlusion = counts ? { slots: [], areas: [], touched: new Set() } : null;
         frameOcclusion = occlusion;
@@ -9686,7 +9854,7 @@ export function createRenderer(options){
         let shot = null;
         try
         {
-            replayInto(frame, pipelines, recorded, surface);
+            replayInto(frame, pipelines, recorded, surface, again?.cut ?? -1);
             if (occlusion && occlusion.touched.size > 0)
             {
                 counted = frame.occlusionResults();
@@ -9698,7 +9866,7 @@ export function createRenderer(options){
             // After the draws, so the copies see the buffers as the draws did:
             // a flush at the end of the frame lands before the whole command
             // buffer, draws and copies alike.
-            for (const command of recorded.commands)
+            for (const command of again === null ? recorded.commands : [])
             {
                 // A draw the replay passed over -- its pipeline refused -- bound
                 // no block, and there is nothing of it on the GPU to read back.
@@ -9732,7 +9900,7 @@ export function createRenderer(options){
         }
         finally
         {
-            if (recorded.arena)
+            if (recorded.arena && again === null)
             {
                 arenas.push(recorded.arena);
             }
@@ -9888,8 +10056,11 @@ export function createRenderer(options){
     /**
      * @param {any} frame @param {any[]} pipelines
      * @param {any} recorded @param {any} surface
+     * @param {number} [cut]  draws played before the rest are passed over; -1 all
      */
-    function replayInto(frame, pipelines, recorded, surface){
+    function replayInto(frame, pipelines, recorded, surface, cut = -1){
+        /** Draws reached so far, against `cut`. */
+        let drawsReached = 0;
         /**
          * A pass for the frame's draws, one its draws can count in when the
          * frame counts.
@@ -10040,6 +10211,10 @@ export function createRenderer(options){
                 scissor = command.rect;
                 drawArea = reachableArea(command.rect);
                 pass.setScissor(command.rect);
+                continue;
+            }
+            if (cut >= 0 && drawsReached++ >= cut)
+            {
                 continue;
             }
             const outcome = pipelines[command.pipeline];
