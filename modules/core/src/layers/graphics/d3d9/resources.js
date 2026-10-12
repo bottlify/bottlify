@@ -811,8 +811,8 @@ export function packColour(format, colour){
 
 /**
  * Pixels read back off the GPU -- four bytes each, blue first, or a wide
- * format's half floats, the surface's whole extent -- into the surface's guest
- * bytes, packed the way its format lays a pixel out.
+ * format's half floats or 32-bit floats, the surface's whole extent -- into
+ * the surface's guest bytes, packed the way its format lays a pixel out.
  *
  * @param {Surface} surface
  * @param {Uint8Array} pixels
@@ -829,8 +829,11 @@ export function writePixels(surface, pixels, writeMemory){
     if (wide)
     {
         // Its rows lie at its pitch with nothing between them, as the read-back's do.
-        writeMemory(surface.base,
-            halvesToStored(wide.stored, pixels, desc.Width * desc.Height * wide.channels));
+        // A device that keeps 32-bit floats whole reads them back as they are stored.
+        const count = desc.Width * desc.Height * wide.channels;
+        writeMemory(surface.base, wide.stored === 'float' && pixels.length === count * 4
+            ? pixels.subarray(0, count * 4)
+            : halvesToStored(wide.stored, pixels, count));
         return;
     }
     // A four-byte surface is laid out exactly as the read-back is, rows at

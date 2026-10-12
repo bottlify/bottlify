@@ -761,13 +761,16 @@ const TEXEL_EXPANSION = Object.freeze({
  * @param {number} format  D3DFMT
  * @param {Uint8Array} pixels
  * @param {number} count   Texels.
+ * @param {boolean} [float32]  whether the device keeps 32-bit floats whole
  * @returns {Uint8Array}
  */
-export function expandTexels(format, pixels, count){
+export function expandTexels(format, pixels, count, float32 = false){
     const wide = FORMAT_INFO[format]?.wide;
     if (wide)
     {
-        return storedToHalves(wide.stored, pixels, count * wide.channels);
+        return float32 && wide.stored === 'float'
+            ? pixels.slice(0, count * wide.channels * 4)
+            : storedToHalves(wide.stored, pixels, count * wide.channels);
     }
     const expand = TEXEL_EXPANSION[format];
     if (!expand)
@@ -785,18 +788,22 @@ const SIGNED_FORMAT = 'rgba8snorm';
  * What a wide format is drawn into and sampled from, by its channel count:
  * half floats, which every WebGPU device renders, filters and blends. 32-bit
  * floats are rendered too, but filtered and blended only with the optional
- * float32-filterable and float32-blendable features, which this backend does
- * not ask for -- and a program of the era filters and blends its HDR targets
- * wherever CheckDeviceFormat lets it. 16-bit fractions exist only behind an
- * optional feature as well. So R32F, G32R32F and A32B32G32R32F are narrowed to
- * half precision, and G16R16 and A16B16G16R16 are kept as halves of their
- * value (`storedToHalves` says what each loses), each reported once.
+ * float32-filterable and float32-blendable features -- and a program of the
+ * era filters and blends its HDR targets wherever CheckDeviceFormat lets it.
+ * 16-bit fractions exist only behind an optional feature as well. So R32F,
+ * G32R32F and A32B32G32R32F keep their 32 bits on a device with both features
+ * and are narrowed to half precision on one without; G16R16 and A16B16G16R16
+ * are kept as halves of their value (`storedToHalves` says what each loses),
+ * each reported once. Half precision is not enough for a depth a shadow map
+ * stores in R32F: eleven significant bits step by 0.0005 near 0.7, ten times
+ * the bias a program of the era compares that depth with, and every surface
+ * shadows itself in stripes.
  *
  * @type {Readonly<Record<number, string>>}
  */
-// ponytail: 32-bit floats at half precision; `r32float` and its wider kin where the
-// device has float32-filterable and float32-blendable, when a picture shows the steps.
 const HALF_FORMAT = Object.freeze({ 1: 'r16float', 2: 'rg16float', 4: 'rgba16float' });
+/** @type {Readonly<Record<number, string>>} */
+const FLOAT_FORMAT = Object.freeze({ 1: 'r32float', 2: 'rg32float', 4: 'rgba32float' });
 
 /**
  * The block-compressed formats, by the D3DFMT they arrive as.
@@ -893,9 +900,10 @@ const decodeCompressed = (bytes, kind, width, height, into)=>{
  * @param {number} width @param {number} height  the surface's base level
  * @param {boolean} compressedTextures  whether the device keeps BC blocks at all;
  *           off, every level decodes to `COLOR_FORMAT` regardless of alignment
+ * @param {boolean} [float32]  whether the device keeps 32-bit floats whole
  * @returns {string} the WebGPU format a surface of it is created as
  */
-export function gpuFormatOf(format, width, height, compressedTextures){
+export function gpuFormatOf(format, width, height, compressedTextures, float32 = false){
     const info = FORMAT_INFO[format];
     if (!info)
     {
@@ -907,7 +915,8 @@ export function gpuFormatOf(format, width, height, compressedTextures){
     }
     if (info.wide)
     {
-        return HALF_FORMAT[info.wide.channels];
+        return (float32 && info.wide.stored === 'float' ? FLOAT_FORMAT : HALF_FORMAT)[
+            info.wide.channels];
     }
     if (!info.depth)
     {
@@ -2895,6 +2904,10 @@ export function createRenderer(options){
     // stage gives it; every other draws a clipped primitive's fragments and
     // discards the ones a plane cuts away.
     const clipDistances = backend?.hasFeature?.('clip-distances') === true;
+    // A 32-bit float surface keeps its 32 bits only where it can still be
+    // filtered and blended, as half floats are everywhere.
+    const float32 = backend?.hasFeature?.('float32-filterable') === true
+        && backend?.hasFeature?.('float32-blendable') === true;
     /**
      * Nothing to add to a surface's description; said once a format, the first
      * time a wide one is kept as less than it is.
@@ -2904,7 +2917,7 @@ export function createRenderer(options){
      */
     const narrowed = format=>{
         const wide = FORMAT_INFO[format]?.wide;
-        if (!wide || !divergence)
+        if (!wide || !divergence || (float32 && wide.stored === 'float'))
         {
             return {};
         }
@@ -4779,7 +4792,8 @@ export function createRenderer(options){
             made = backend.createSurface({
                 width: desc.Width,
                 height: desc.Height,
-                format: gpuFormatOf(desc.Format, desc.Width, desc.Height, compressedTextures),
+                format: gpuFormatOf(desc.Format, desc.Width, desc.Height, compressedTextures,
+                    float32),
                 label: depth ? 'depth' : 'target',
                 ...narrowed(desc.Format),
                 // A colour target is copied into as well as out of: a program
@@ -4809,7 +4823,7 @@ export function createRenderer(options){
                     ? bytes
                     : isCompressed(desc.Format)
                         ? decodeCompressed(bytes, S3TC_OF[desc.Format], desc.Width, desc.Height)
-                        : expandTexels(desc.Format, bytes, desc.Width * desc.Height),
+                        : expandTexels(desc.Format, bytes, desc.Width * desc.Height, float32),
             }, true);
         }
         return made;
@@ -5147,9 +5161,9 @@ export function createRenderer(options){
         const depth = levelExtent(record.depth, level);
         const bytes = readMemory(held.volume.base, held.volume.slicePitch * depth);
         uploadTexels(record.gpu, {
-            format: gpuFormatOf(record.format, record.width, record.height, false),
+            format: gpuFormatOf(record.format, record.width, record.height, false, float32),
             mipLevel: level, width, height, depth,
-            texels: expandTexels(record.format, bytes, width * height * depth),
+            texels: expandTexels(record.format, bytes, width * height * depth, float32),
         }, ordered);
         (record.written ??= new Set()).add(level);
     };
@@ -5193,7 +5207,8 @@ export function createRenderer(options){
             record.gpu = backend.createSurface({
                 width: record.width,
                 height: record.height,
-                format: gpuFormatOf(record.format, record.width, record.height, compressedTextures),
+                format: gpuFormatOf(record.format, record.width, record.height, compressedTextures,
+                    float32),
                 ...narrowed(record.format),
                 mipLevelCount: record.gpuLevels,
                 ...(record.faces === 6 ? { layers: 6, dimension: 'cube' } : {}),
@@ -5221,7 +5236,7 @@ export function createRenderer(options){
             frameStats.uploads++;
             record.uploads = (record.uploads || 0) + 1;
             const gpuFormat = gpuFormatOf(record.format, record.width, record.height,
-                compressedTextures);
+                compressedTextures, float32);
             // The base level's size, not each mip's, decides the whole
             // texture's path: WebGPU already refused (and gpuFormatOf already
             // fell back) on the base alone, so every level -- mips round down
@@ -5268,7 +5283,7 @@ export function createRenderer(options){
                     ? bytes
                     : decodes
                         ? decodeCompressed(bytes, S3TC_OF[record.format], width, height, room)
-                        : expandTexels(record.format, bytes, width * height);
+                        : expandTexels(record.format, bytes, width * height, float32);
                 uploadTexels(record.gpu,
                     { format: gpuFormat, mipLevel: level, width, height, texels, layer: face },
                     ordered);
@@ -8085,7 +8100,7 @@ export function createRenderer(options){
             }
             const bytes = new Uint8Array(new Uint32Array([raw >>> 0]).buffer)
                 .subarray(0, info.bytesPerPixel);
-            const texel = expandTexels(held.format, bytes, 1);
+            const texel = expandTexels(held.format, bytes, 1, float32);
             cascade.stages[index] = {
                 ...cascade.stages[index],
                 colorKey: (texel[2] << 16) | (texel[1] << 8) | texel[0],

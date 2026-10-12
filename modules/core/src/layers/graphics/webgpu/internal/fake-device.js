@@ -29,10 +29,15 @@ const KEPT_FORMATS = /** @type {Record<string, number>} */ ({
     r16float: 2,
     rg16float: 4,
     rgba16float: 8,
+    r32float: 4,
+    rg32float: 8,
+    rgba32float: 16,
 });
 
 /** The channels a half-float format has, red first. @type {Record<string, number>} */
 const HALF_CHANNELS = { r16float: 1, rg16float: 2, rgba16float: 4 };
+/** The channels a 32-bit float format has, red first. @type {Record<string, number>} */
+const FLOAT_CHANNELS = { r32float: 1, rg32float: 2, rgba32float: 4 };
 
 /**
  * @param {{ compilationMessages?: Record<string, any[]>,
@@ -214,12 +219,16 @@ export function createFakeDevice(options = {}){
                 /** @param {number} channel */
                 const byte = channel=>Math.round(Math.max(0, Math.min(1, channel)) * 255);
                 const halves = HALF_CHANNELS[texture.format];
+                const floats = FLOAT_CHANNELS[texture.format];
                 const pixel = halves
                     ? new Uint8Array(Uint16Array.from([value.r, value.g, value.b, value.a]
                         .slice(0, halves), toHalf).buffer)
-                    : texture.format === 'bgra8unorm'
-                        ? [byte(value.b), byte(value.g), byte(value.r), byte(value.a)]
-                        : [byte(value.r), byte(value.g), byte(value.b), byte(value.a)];
+                    : floats
+                        ? new Uint8Array(Float32Array.from([value.r, value.g, value.b, value.a]
+                            .slice(0, floats)).buffer)
+                        : texture.format === 'bgra8unorm'
+                            ? [byte(value.b), byte(value.g), byte(value.r), byte(value.a)]
+                            : [byte(value.r), byte(value.g), byte(value.b), byte(value.a)];
                 deferred.push(()=>{
                     for (let at = 0; at < texture.bytes.length; at += pixel.length)
                     {
