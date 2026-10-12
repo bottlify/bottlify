@@ -228,6 +228,31 @@ whose profile names the real functions.
 These give "calls a second" and "the share of time in calls" — the size of steps 1–2's prize. Only
 these counters can say it. A counter that cannot answer writes `not measured`, never zero.
 
+*Done (`566b4fc1`):* a run with `blockProfile` counts, beside its blocks, how calls and returns went
+(formed in, wasm call, way out), a call out by why its callee was not formed in, transfers through
+the hash and `rdtsc`s; the report carries them as `mechanisms`. **First measurement**, Far Cry demo
+(bundle `ec81f9c2…`), `tools/cdp_test/game.mjs` in this repository's container: headless Chromium
+141.0.7390.37 on SwiftShader, 4 cores, power plan not recorded; one run of 420 s, counted from 340 s
+to the end (~229 s in the level), 18.8 G guest instructions in the window:
+
+| Count | In the window |
+| --- | --- |
+| calls formed in (direct and predicted) | 93.8 M |
+| calls out as wasm calls (rel / indirect) | 78.6 M / 132.3 M |
+| of which the occlusion wait loop below | 96.8 M |
+| `ret` answering its wasm call / leaving | 206.7 M / 5.5 M |
+| `rdtsc` | 96.8 M — all of them the wait loop's |
+
+The hottest code of the run was not the game's work but a wait: XRenderD3D9.dll+0x15c50 reads
+`rdtsc`, calls `IDirect3DQuery9::GetData(FLUSH)` and goes round while it answers `S_FALSE`, until a
+deadline — 96.8 M turns, a host crossing each (126 k a second, 388 ms of host time a second). On a
+software GPU the wait is long; it says nothing about cork's code, and it is taken out below.
+
+Without the wait, a call out of a region came every ~160 guest instructions, and its callee stayed
+apart because it was: an unpredicted indirect call 31%; a way out other than `ret` (an API call
+among them) 22%; a call inside a callee already formed in 22%; a full region 11%; over the block
+limit 8%; over the byte limit 6%.
+
 **0c. Crossings by thread and API.**
 - Who makes the 10 M `Wait`/`Sleep` calls: the thread and the timeout (0 or >0).
 - How many of the main thread's slices go to `turn`/`yield` because of other threads.
@@ -245,12 +270,14 @@ second and the share of time, and x87 and memory are recounted with the real opt
 
 ### Step 1 — fewer calls: forming more than leaves
 
-Today only a **leaf** is formed into a region (`leafCalls`, ≤16 blocks / 512 bytes). A call to a
-function that calls something itself is always a wasm call with a full write-back.
+*Corrected by reading the former:* a callee of ≤16 blocks / 512 bytes is already formed into its
+caller, and one level of its own calls with it (`isLeaf` with `calls`); its callees' calls go out.
+By 0b's Far Cry counts, forming could still take about half of the calls that go out today: nested
+22%, full 11%, over the limits 14%.
 
-- **1a.** A small non-leaf callee (≤N instructions, depth 2) is formed into its caller the way a
-  leaf is today. Its own calls become calls out of the caller. Its `ret` goes by `inlineReturns`.
-  One call/ret pair a level is gone. Growth is bounded by a byte budget per region.
+- **1a.** A second level: the calls of a callee formed in are formed in as well when small, within
+  a byte budget per region (nested, 22%). The limits and the region budget are re-measured against
+  code growth (full and over the limits, 25%). Growth is bounded by a byte budget per region.
 - **1b.** A singleton with a static (`test [guard]; jne; …; ret`) and thin wrappers (a `jmp`
   through an incremental-link thunk table, `r3003693f`) are a case of 1a. No code of their own,
   only a check that 1a takes them.
@@ -306,6 +333,14 @@ Goal: ≤×2 native an iteration.
 ### Step 6 — polls, crossings and the scheduler
 
 The size of the prize by 0b/0c on a plain build: R's 27% is inflated by diagnostics.
+
+*Corrected by 0b's Far Cry run:* a poll is usually a wait for something only the host, the graphics
+worker or another thread can bring — a GPU's answer, another thread's progress. A poll answered
+without crossing never lets that happen on a single executor: the answer comes later, not sooner.
+Far Cry's occlusion loop is a timed spin; what it costs is how long the answer takes, not the price
+of a turn. So for waits the lever is latency (answers sooner: counts beside answers, earlier
+readback), and the mechanism below serves only answers that are already known and do not change
+until the guest acts — a query already answered, a time read. Measure before building it.
 
 **One mechanism for polls.** Some calls a program spins on until the answer is ready, and the host
 knows the answer ahead. Guest code takes such an answer from a state word in shared memory, without
