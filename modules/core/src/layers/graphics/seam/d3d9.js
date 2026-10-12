@@ -162,11 +162,12 @@ const MAX_SHADER_DWORDS = 1 << 16;
  *     block of the state its setters write without leaving the guest.
  * @param {(bytes: number) => number} [deps.allocateCode]  Pages of their own for
  *     those setters' code.
+ * @param {import('./shadow.js').ShadowPhases} [deps.phases]  Where a device's entry work is timed.
  */
 export function createDirect3D9Seam(
     { publisher, memory, screen, divergence, cursor, resolution, identity,
         windowClientSize, gdi, now = ()=>performance.now(), allocate, allocateCode,
-        traps = new Set() },
+        traps = new Set(), phases },
 )
 {
     /** The getters a device answers in the guest, as against the calls its ring carries. */
@@ -3032,6 +3033,7 @@ export function createDirect3D9Seam(
                 writeMemory: memory.writeMemory,
                 device: held.device,
                 divergence,
+                phases,
                 name: 'IDirect3DDevice9',
                 commands: { take: records=>{
                     const objects = commandObjects(records, publisher.objectAt);

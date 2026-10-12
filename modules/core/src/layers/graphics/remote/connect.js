@@ -65,8 +65,12 @@ function plainOf(services){
  *     waits: Record<string, { count: number, ms: number, maxMs: number }>, behind: number[],
  *     readBack: { sent: number, shared: number }, lent: Record<string, number>,
  *     sent: { batches: number, bytes: number, ms: number }, shipped: Record<string, number>,
- *     calls: string, answers: string }}
- *     diagnostics  `waits`: what the program's thread waited on the worker for, by call;
+ *     calls: string, answers: string,
+ *     phases: import('./channel.js').WorkerPhases | null }}
+ *     diagnostics  `phases`: where the worker's thread spent its time on this process's
+ *     batches, summed over the roots that have answered a diagnostics ask (null before
+ *     any has, or in a build that times nothing); `waits`: what the program's thread
+ *     waited on the worker for, by call;
  *     `readBack`: the bytes the worker wrote into guest memory, sent here to be written or
  *     written in shared memory in place; `lent`: the unlocked bytes lent to the worker rather
  *     than copied, those taken into the stash first, and the claims that waited; `sent`: the
@@ -97,6 +101,33 @@ const lentOf = senders=>{
         {
             sum[key] = (sum[key] ?? 0) + value;
         }
+    }
+    return sum;
+};
+
+/**
+ * The worker's phase totals summed over every root that has reported them.
+ *
+ * @param {{ phases: () => import('./channel.js').WorkerPhases | null }[]} senders
+ * @returns {import('./channel.js').WorkerPhases | null}
+ */
+const phasesOf = senders=>{
+    /** @type {import('./channel.js').WorkerPhases | null} */
+    let sum = null;
+    for (const sender of senders)
+    {
+        const phases = sender.phases();
+        if (phases === null)
+        {
+            continue;
+        }
+        sum ??= { 'batch-read': { count: 0, ms: 0, selfMs: 0 },
+            'batch-sweep': { count: 0, ms: 0 } };
+        sum['batch-read'].count += phases['batch-read'].count;
+        sum['batch-read'].ms += phases['batch-read'].ms;
+        sum['batch-read'].selfMs += phases['batch-read'].selfMs;
+        sum['batch-sweep'].count += phases['batch-sweep'].count;
+        sum['batch-sweep'].ms += phases['batch-sweep'].ms;
     }
     return sum;
 };
@@ -392,6 +423,7 @@ export function connectGraphicsWorker(options){
             }
             return { roots: ports.length, frames, dropped, waits,
                 behind: senders.map(sender=>sender.behind()), readBack: { ...readBack },
+                phases: phasesOf(senders),
                 answers: senders.map(sender=>sender.answers()).join(' '),
                 sent: senders.reduce((sum, sender)=>{
                     const { batches, bytes, ms } = sender.sent();

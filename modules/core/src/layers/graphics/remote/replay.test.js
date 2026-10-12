@@ -174,14 +174,26 @@ function toyAcross(lend){
         borrow: createBorrower({ ...buffers, memory: ram }) });
     /** What the played side said back. @type {any[]} */
     const said = [];
-    const receiver = createReceiver({ played, post: message=>said.push(message) });
+    /** What each batch's read answered: the look at objects at zero it made, if it made one. */
+    const swept = /** @type {(number | undefined)[]} */ ([]);
+    /**
+     * @param {ArrayBuffer} buffer
+     * @param {(call: any) => boolean | void} each
+     */
+    const read = (buffer, each)=>{
+        const answered = played.read(buffer, each);
+        swept.push(answered);
+        return answered;
+    };
+    const reading = { ...played, read };
+    const receiver = createReceiver({ played: reading, post: message=>said.push(message) });
     /** @type {any[]} */
     const sent = [];
     const sender = createSender({ post: message=>sent.push(message), later: ()=>{},
         lending: lend ? { ...buffers, memory: ram } : null });
     const root = recordedDirect3D(toy(sides), services, sender);
     return {
-        root, ram, sender, said,
+        root, ram, sender, said, swept,
         played: sides.find(side=>side.played),
         /** The played side plays what was sent. */
         play(){
@@ -1035,3 +1047,20 @@ test('a surface a read-back is still filling keeps its memory until the pixels h
             d3d.close();
         }
     });
+
+test('a batch that looks at the objects at zero says how long the look took', ()=>{
+    // The look is timed for the worker's account of its time: without a
+    // present it comes every sixty-fourth batch, and only that batch answers.
+    const { root, play, swept } = toyAcross(false);
+    for (let batch = 0; batch < 64; batch++)
+    {
+        /** @type {{ thing?: any }} */
+        const out = {};
+        root.CreateThing(out);
+        play();
+    }
+    assert.equal(swept.length, 64);
+    assert.deepEqual(swept.slice(0, 63), new Array(63).fill(undefined));
+    assert.equal(typeof swept[63], 'number');
+    assert.ok(/** @type {number} */ (swept[63]) >= 0);
+});

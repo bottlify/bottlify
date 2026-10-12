@@ -519,7 +519,7 @@ export function recordedDirect3D7(ddraw, services, transport){
  *     is given but for memory: `writeMemory` is where pixels read back go
  * @returns {{ root: any, play: (call: import('./wire.js').ReadCall) => any,
  *     read: (buffer: ArrayBuffer, each: (call: import('./wire.js').ReadCall) => boolean | void)
- *         => void }}
+ *         => number | undefined }}
  */
 export function playedDirect3D7(services){
     const mirror = createMirror();

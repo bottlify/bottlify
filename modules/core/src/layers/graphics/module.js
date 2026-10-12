@@ -984,6 +984,10 @@ export function createGraphicsModule(){
                 processHeapAllocate: (/** @type {number} */ bytes)=>
                     win32.processHeapAllocate?.(bytes) ?? 0,
                 divergence: config?.divergence,
+                // Where the work a device call does before its method -- the
+                // guest's state brought to the device -- is timed, inside the
+                // host call it is part of.
+                phases: bridge.innerPhase,
                 // The address of one of OPENGL32's own exports, which only the
                 // assembling caller knows once the module is placed.
                 exportAddress: config?.exportAddress,

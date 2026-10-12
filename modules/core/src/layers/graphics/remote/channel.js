@@ -19,8 +19,10 @@
  * Sender to receiver:  { type: 'calls', buffer }       a batch, as `wire.js` writes it
  * Receiver to sender:  { type: 'answer', serial, answer, outs }
  *                      { type: 'presented', count }
- *                      { type: 'diagnostics', diagnostics }
- *                                                      what a device said of itself when asked
+ *                      { type: 'diagnostics', diagnostics, phases? }
+ *                                                      what a device said of itself when asked,
+ *                                                      and where the receiving thread's time
+ *                                                      went (`WorkerPhases`)
  *                      { type: 'wrote', writes }       guest memory the played side wrote later:
  *                                                      the bytes, or where it wrote shared memory
  *                      { type: 'divergence', api, detail }
@@ -36,6 +38,18 @@ const CHECKED_EVERY = 64;
 
 /** The least time between batches sent early for what they lend. */
 const LENT_GAP_MS = 0.25;
+
+/**
+ * Where the played side's thread spent its time, cumulative since it started:
+ * every batch read and played (`batch-read`, whose `selfMs` leaves out the
+ * look below), and the look at the objects at a count of zero a batch makes
+ * once a frame (`batch-sweep`). The worker has no phase profiler of its own;
+ * these are timed per batch, a few hundred a second, at two clock readings
+ * each, and are absent from a production bundle.
+ *
+ * @typedef {{ 'batch-read': { count: number, ms: number, selfMs: number },
+ *     'batch-sweep': { count: number, ms: number } }} WorkerPhases
+ */
 
 /**
  * A value as it can cross: the device's objects and functions left out, its
@@ -154,6 +168,8 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
     const held = [];
     /** What the played side's diagnostics said last. @type {any} */
     let diagnostics = null;
+    /** Where the played side's time went, as it said last. @type {WorkerPhases | null} */
+    let phases = null;
     let failure = /** @type {string | null} */ (null);
     /** The diagnostics asked for, and those the played side has answered. */
     let asked = 0;
@@ -349,6 +365,7 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
                 }
                 case 'diagnostics':
                     diagnostics = message.diagnostics;
+                    phases = message.phases ?? null;
                     told++;
                     hear();
                     break;
@@ -434,6 +451,9 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
          */
         answers: ()=>`${told}/${asked}`,
 
+        /** Where the played side's time went, as it said with its last diagnostics; null before. */
+        phases: ()=>phases,
+
         /** The calls waited on, by name, with the milliseconds they took. */
         waits: ()=>Object.fromEntries([...waits].map(([name, sum])=>[name, {
             count: sum.count, ms: Math.round(sum.ms), maxMs: Math.round(sum.maxMs),
@@ -459,6 +479,13 @@ const shared = ()=>(typeof performance === 'undefined' ? Date.now()
  */
 export function createReceiver({ played, post }){
     let presented = 0;
+    /** @type {WorkerPhases} */
+    const phases = { 'batch-read': { count: 0, ms: 0, selfMs: 0 },
+        'batch-sweep': { count: 0, ms: 0 } };
+    /** @returns {WorkerPhases | undefined} */
+    const phasesNow = ()=>(import.meta.BOTTLIFY_DIAGNOSTICS !== false
+        ? { 'batch-read': { ...phases['batch-read'] }, 'batch-sweep': { ...phases['batch-sweep'] } }
+        : undefined);
     /** Presents finish in their order, whatever order their answers settle in. */
     let presents = Promise.resolve();
     let failed = false;
@@ -508,12 +535,13 @@ export function createReceiver({ played, post }){
             const queued = typeof message.at === 'number' ? arrived - message.at : 0;
             try
             {
-                played.read(message.buffer, call=>{
+                const swept = played.read(message.buffer, call=>{
                     const began = shared();
                     const answer = played.play(call);
                     if (call.m === 'diagnostics')
                     {
-                        post({ type: 'diagnostics', diagnostics: crossable(answer) });
+                        post({ type: 'diagnostics', diagnostics: crossable(answer),
+                            phases: phasesNow() });
                     }
                     else if (call.wait === WAIT.ANSWER)
                     {
@@ -524,6 +552,19 @@ export function createReceiver({ played, post }){
                         present(answer);
                     }
                 });
+                if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
+                {
+                    const ms = shared() - arrived;
+                    const read = phases['batch-read'];
+                    read.count++;
+                    read.ms += ms;
+                    read.selfMs += ms - (swept ?? 0);
+                    if (swept !== undefined)
+                    {
+                        phases['batch-sweep'].count++;
+                        phases['batch-sweep'].ms += swept;
+                    }
+                }
             }
             catch (e){
                 fail(e);

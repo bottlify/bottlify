@@ -39,6 +39,12 @@ const ABSENT = /* @__PURE__ */ new Float64Array(1);
  * kind are what the clock measured. A single crossing weighed as eight would
  * otherwise show as a freeze eight times longer than it was, and a frame
  * whose one sample outweighed it would report the guest at less than nothing.
+ *
+ * A phase timed only inside a timed occurrence of its parent -- work inside
+ * a sampled crossing, timed when the crossing is -- stands for as many as its
+ * parent does and passes `withParent`: its parent gives up the time it
+ * measured once, since the parent's own weight already scales what is left.
+ * Weighed again, the parent would give up the child's time twice over.
  */
 
 /** Whose time a phase is. Attribution is by these, and nothing else. */
@@ -421,9 +427,11 @@ export function createProfiler(options){
          * already misbehaving has destroyed the evidence.
          *
          * @param {string} [name]
-         * @param {{ instructions?: number, weight?: number }} [detail]
+         * @param {{ instructions?: number, weight?: number, withParent?: boolean }} [detail]
          *     What a guest slice retired; and how many phases this one stands
-         *     for, when a caller times one in every few rather than each.
+         *     for, when a caller times one in every few rather than each --
+         *     and whether it is timed exactly when its parent is, the parent
+         *     carrying the same weight.
          * @returns {number} the phase's measured duration, unweighted
          */
         end(name, detail){
@@ -445,7 +453,8 @@ export function createProfiler(options){
             if (depth > 0)
             {
                 stack[depth - 1].children += elapsed;
-                stack[depth - 1].weighed += elapsed * weight;
+                stack[depth - 1].weighed += detail?.withParent === true
+                    ? elapsed : elapsed * weight;
             }
 
             let row = rows.get(entry.name);

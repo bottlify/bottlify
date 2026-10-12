@@ -276,10 +276,11 @@ const S_FALSE = 1;
  * @param {() => number} [deps.now]  The clock the display's raster runs on, in milliseconds.
  * @param {Set<string>} [deps.traps]  Guest routines kept as traps, by name or group
  *     (`guestsBut`).
+ * @param {import('./shadow.js').ShadowPhases} [deps.phases]  Where a device's entry work is timed.
  */
 export function createDirect3D8Seam(
     { publisher, memory, screen, allocate, allocateCode, divergence, cursor, resolution, identity,
-        windowClientSize, now = ()=>performance.now(), traps = new Set() },
+        windowClientSize, now = ()=>performance.now(), traps = new Set(), phases },
 )
 {
     /** The getters a device answers in the guest, as against the calls its ring carries. */
@@ -2651,6 +2652,7 @@ export function createDirect3D8Seam(
                     writeMemory: memory.writeMemory,
                     device: held.device,
                     divergence,
+                    phases,
                     commands: { take: records=>{
                         const made = held.device.commands(records,
                             D3D8_COMMANDS.commandObjects(records, publisher.objectAt));

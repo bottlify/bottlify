@@ -85,7 +85,7 @@ export function recordedOpengl(factory, services, transport){
  *     played contexts write outside a call goes, and nothing does today
  * @returns {{ root: any, play: (call: import('./wire.js').ReadCall) => any,
  *     read: (buffer: ArrayBuffer, each: (call: import('./wire.js').ReadCall) => boolean | void)
- *         => void }}
+ *         => number | undefined }}
  */
 export function playedOpengl(factory, services){
     const mirror = createMirror();
