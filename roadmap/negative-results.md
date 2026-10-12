@@ -137,6 +137,47 @@ evidence again.
 - **Decision.** Left at 1. `formDepth` stays a setting with its gate, for a game measurement on
   the person's machine before it is tried again.
 
+### 2026-10-12 -- predicted virtual calls (`callTargets`) on cork-bench
+
+- **Idea.** Far Cry's counts put a third of its calls out of a region at indirect calls with no
+  callee predicted; `callTargets` samples them and forms their few callees in. Its README row said
+  benchmarks of virtual calls gained 4-5x and games were slower; the plan's step 1c was to find why
+  games were slower and turn it on.
+- **Workload.** cork-bench in the browser, `--scale 10 --reps 3`, both builds, all workloads, one
+  bundle `head` of `cork2` at `08b89c40`, `callTargets` off against on, interleaved. Bundle hash:
+  not recorded.
+- **Values.** Best of three, MIPS, off / on: x87 vm 3373/3211, entities 772/814, math 1862/1925,
+  path 2331/2348, lz 4274/4258, containers 2102/2172, spread 325/348, api 729/755; sse vm
+  3255/3069, entities 753/748, math 2290/2224, path 2250/2336, lz 4514/4434, containers 2030/2115,
+  spread 341/322, api 744/790. Geomean 1507 / 1521 (1.01x). Noise: reps of one configuration and
+  workload 7.6% apart at the median, 20.5% at most (96 runs).
+- **Machine.** Headless Chromium 141.0.7390.37 on SwiftShader, a 4-core x86-64 Linux VM
+  (Firecracker). Power plan: not recorded.
+- **Why it did not pay.** `entities`, the virtual-call workload, is no faster: a node run with
+  `blockProfile` shows every one of its calls out unpredicted and the call's cost in the call and
+  return code (`call [m]` 379 bytes, `ret imm` 193), which predicting a target does not shorten
+  where the callee is not formed in. The 4-5x the README named was not reproduced here.
+- **Correctness.** Every checksum the processor's.
+- **Decision.** Left off.
+
+### 2026-10-12 -- transfers inside a placed module as direct tail calls (`dispatch`) on cork-bench
+
+- **Idea.** A node profile of `spread` put about a quarter of its wasm time in the module's shared
+  transfer (the entry hash's probe and `return_call_indirect`); `dispatch` places a module in a
+  range of the table and makes a transfer inside it a direct tail call.
+- **Workload.** As above, `dispatch` off against on.
+- **Values.** Best of three, MIPS, off / on: x87 vm 3156/3274, entities 801/814, math 1831/1890,
+  path 2335/2274, lz 4360/4515, containers 2192/2241, spread 354/347, api 770/768; sse vm
+  3200/3311, entities 782/737, math 2278/2205, path 2274/2221, lz 4494/4366, containers 2098/2078,
+  spread 346/322, api 758/751. Geomean 1530 / 1520 (0.99x). Noise: 5.3% at the median, 12.7% at
+  most (96 runs).
+- **Machine.** Headless Chromium 141.0.7390.37 on SwiftShader, a 4-core x86-64 Linux VM
+  (Firecracker). Power plan: not recorded.
+- **Why it did not pay.** Not found; the node profile's share of the transfer did not turn into
+  time Chromium saves.
+- **Correctness.** Every checksum the processor's.
+- **Decision.** Left off.
+
 ## Invalidated
 
 None yet.
