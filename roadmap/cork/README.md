@@ -400,6 +400,11 @@ over 100 ms.
 **Goal:** `readTsc` gone from the profile, about 1.5% of Far Cry's thread *(estimate: about 0.3 ms
 of a frame, of the ~2 ms to 60 FPS)*.
 
+*Corrected by 0b's Far Cry run:* every `rdtsc` of that run was the occlusion wait's (step 6): the
+time `readTsc` takes there is time spent waiting anyway, so on Far Cry this step wins nothing until
+the wait is shorter. It stays for programs that time their own work with `rdtsc`; 0b's count says
+which those are.
+
 ## 4. Checking on games
 
 - **Scenes:** one Gothic 3 scene (play, menu, load). Both arms alternate, ≥3 runs an arm. A plain
