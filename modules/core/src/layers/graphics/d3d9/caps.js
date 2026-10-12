@@ -281,13 +281,19 @@ export function capabilityWords(caps, identity = {}){
         // Model 3's floor, which the translator meets whole: predication,
         // dynamic flow 24 deep and static flow 4, arbitrary swizzles,
         // gradients and no limit on dependent reads or texture instructions.
+        // Model 2's is the floor of its own (D3DVS20_MIN_NUMTEMPS 12,
+        // D3DVS20_MIN_STATICFLOWCONTROLDEPTH 1, D3DPS20_MIN_NUMTEMPS 12), what
+        // the cards of the time reported: a compiler of the time sizes its
+        // registers by these, and Cg 1.1 given 32 temporaries for vs_2_x
+        // fails programs that compile under 12 (error C6009, measured with its
+        // own cgc on a 2004 title's vertex programs).
         VS20Caps_Caps: vs.major >= 3 ? D3DVS20CAPS_PREDICATION : 0,
         VS20Caps_DynamicFlowControlDepth: vs.major >= 3 ? 24 : 0,
-        VS20Caps_NumTemps: vs.major >= 2 ? 32 : 0,
-        VS20Caps_StaticFlowControlDepth: vs.major >= 3 ? 4 : 0,
+        VS20Caps_NumTemps: vs.major >= 3 ? 32 : vs.major >= 2 ? 12 : 0,
+        VS20Caps_StaticFlowControlDepth: vs.major >= 3 ? 4 : vs.major >= 2 ? 1 : 0,
         PS20Caps_Caps: ps.major >= 3 ? PS20_MODEL_3_CAPS : 0,
         PS20Caps_DynamicFlowControlDepth: ps.major >= 3 ? 24 : 0,
-        PS20Caps_NumTemps: ps.major >= 2 ? 32 : 0,
+        PS20Caps_NumTemps: ps.major >= 3 ? 32 : ps.major >= 2 ? 12 : 0,
         PS20Caps_StaticFlowControlDepth: ps.major >= 3 ? 4 : 0,
         PS20Caps_NumInstructionSlots: ps.major >= 3 ? 512 : ps.major >= 2 ? 96 : 0,
         // A vertex texture is read through the sampler its states make,

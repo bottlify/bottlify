@@ -165,3 +165,25 @@ test('D3DCAPS2_FULLSCREENGAMMA is claimed only where a full-screen device\'s ram
     assert.equal(capabilityWords({ ...DEFAULT_CAPS, fullscreenGamma: true }).Caps2 & 0x00020000,
         0x00020000);
 });
+
+test('a device of model 2 reports its floor in VS20Caps and PS20Caps, and model 3 its own',
+    ()=>{
+        // A compiler of the time sizes its registers by these: Cg 1.1, given 32
+        // temporaries for vs_2_x, fails vertex programs that compile under 12.
+        const model2 = capabilityWords({
+            ...DEFAULT_CAPS,
+            vertexShaderVersion: { major: 2, minor: 0 },
+            pixelShaderVersion: { major: 2, minor: 0 },
+        });
+        assert.deepEqual([model2.VS20Caps_NumTemps, model2.VS20Caps_StaticFlowControlDepth,
+            model2.VS20Caps_DynamicFlowControlDepth, model2.PS20Caps_NumTemps,
+            model2.PS20Caps_StaticFlowControlDepth, model2.PS20Caps_NumInstructionSlots],
+        [12, 1, 0, 12, 0, 96]);
+        const model3 = capabilityWords({
+            ...DEFAULT_CAPS,
+            vertexShaderVersion: { major: 3, minor: 0 },
+            pixelShaderVersion: { major: 3, minor: 0 },
+        });
+        assert.deepEqual([model3.VS20Caps_NumTemps, model3.VS20Caps_StaticFlowControlDepth,
+            model3.PS20Caps_NumTemps], [32, 4, 32]);
+    });
