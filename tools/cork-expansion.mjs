@@ -31,6 +31,7 @@
 
 import { readFileSync } from 'node:fs';
 import { regionModule } from '../modules/cork/src/region-module.js';
+import { formOf } from '../modules/cork/src/runtime/profile-forms.js';
 
 const args = process.argv.slice(2);
 /** @param {string} name @param {string | undefined} [fallback] */
@@ -100,27 +101,6 @@ const startsIn = bytes=>{
         run = 0;
     }
     return starts;
-};
-
-/**
- * A form's name: the mnemonic and its operands' kinds, so `mov r32, [m]` and
- * `mov [m], r32` are told apart and every register is one.
- *
- * @param {any} instruction
- */
-const formOf = instruction=>{
-    const kinds = (instruction.operands ?? []).map((/** @type {any} */ operand)=>{
-        switch (operand.kind ?? operand.type)
-        {
-            case 'reg': case 'register': return `r${operand.size ? operand.size * 8 : ''}`;
-            case 'mem': case 'memory': return '[m]';
-            case 'imm': case 'immediate': return 'imm';
-            case 'rel': case 'relative': return 'rel';
-            default: return String(operand.kind ?? operand.type ?? '?');
-        }
-    });
-    return `${instruction.op ?? instruction.mnemonic ?? instruction.opcode}`
-        + (kinds.length > 0 ? ` ${kinds.join(', ')}` : '');
 };
 
 /** @type {Map<number, { form: string, x86: number, wasm: number, lowered: boolean }>} */

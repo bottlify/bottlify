@@ -1921,6 +1921,27 @@ test('a block profile counts how calls and returns went, transfers and rdtscs', 
         'a run without the profile counts nothing');
 });
 
+test('a block profile says what the hot code is made of: each form\'s executions and the wasm'
+    + ' bytes they ran through, emitted without the profile\'s counts', async()=>{
+    const m = machine({ blockProfile: true });
+    m.write(CODE, COUNTDOWN);
+    m.runtime.noteHot(CODE);
+    await m.runtime.translatePending();
+    m.runtime.run(m.runtime.entryOf(CODE), 100_000);
+    const { forms } = /** @type {any} */ (m.runtime.diagnostics());
+    assert.equal(forms.regions, 1);
+    const row = (/** @type {string} */ form)=>forms.forms
+        .find((/** @type {any} */ one)=>one.form === form);
+    assert.equal(row('dec r32').executed, 1000, 'once a turn');
+    assert.equal(row('jne rel').executed, 1000);
+    assert.equal(row('mov r32, imm').executed, 1, 'the entry block, once');
+    assert.equal(row('hlt').executed, 1);
+    assert.equal(forms.executed, 2002, 'mov, a thousand dec and jnz, hlt');
+    assert.ok(row('dec r32').perInstruction > 0);
+    assert.ok(Math.abs(forms.forms.reduce((/** @type {number} */ sum, /** @type {any} */ one)=>
+        sum + one.share, 0) - 1) < 1e-9, 'the shares are of the bytes run through');
+});
+
 test('a block profile with blockProfileFrom counts only what ran after that moment', async()=>{
     const now = performance.now;
     let clock = 0;

@@ -211,7 +211,8 @@ The core also takes `cork.pool`, `cork.poolPerProcess`, `cork.poolWindowMs` and 
 **Diagnostics**: `blockProfile` and `blockProfileFrom` (execution counts per block, from a second
 on, and beside them `mechanisms`: how calls and returns went -- formed into a region, wasm calls or
 ways out, a call out by why its callee was not formed in -- transfers through the entry hash and
-`rdtsc`s), `timings` (the translator's phases timed), `traceStore` (translation store keys), `checkStale`
+`rdtsc`s -- and `forms`: each instruction form's executions and the wasm bytes the hot regions emit
+for it), `timings` (the translator's phases timed), `traceStore` (translation store keys), `checkStale`
 (regions whose bytes changed), `countTransfers`, `undoLog` (store undo log for replay). They cost
 speed; leave them off outside an investigation.
 

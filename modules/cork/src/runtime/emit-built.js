@@ -196,7 +196,7 @@ function contextKey(layout, features, options, leaveOut){
         options.precise === true, options.place === true, options.profileCalls === true,
         options.atomic === true,
         options.resume === true, options.callReturn === true, options.looseStacks === true,
-        options.checkReads === true, [...leaveOut].sort()]);
+        options.checkReads === true, options.expansion != null, [...leaveOut].sort()]);
 }
 
 /** @type {Map<string, number>} */
@@ -297,7 +297,8 @@ function sameShape(kept, shape){
  *     structure?: boolean, precise?: boolean, profileCalls?: boolean, resume?: boolean,
  *     atomic?: boolean,
  *     callReturn?: boolean, looseStacks?: boolean, checkReads?: boolean,
- *     memory?: { shared?: boolean, maxPages?: number } }}
+ *     memory?: { shared?: boolean, maxPages?: number },
+ *     expansion?: import('../emit/region.js').ExpansionNote | null }}
  *     [options]
  *     timings: `emitMs` and `encodeMs` are measured (the runtime's `timings`), else 0;
  *     precise: nothing relaxed (the runtime's `precise`); place: job i's function goes at
@@ -332,6 +333,7 @@ export function emitBatch(jobs, layout, features, options = {}, cache = undefine
         looseStacks: options.looseStacks === true,
         checkReads: options.checkReads === true,
         leaveOut,
+        expansion: options.expansion ?? null,
         ...(options.trapPort === undefined ? {} : { trapPort: options.trapPort }),
     });
     const emitAt = clock();

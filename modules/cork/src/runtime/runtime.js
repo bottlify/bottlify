@@ -43,6 +43,7 @@ import { PageFlag, createPageTable } from './pages.js';
 import { createSharedCode } from './shared-code.js';
 import { Tables, tablesSize } from './layout.js';
 import { blockCounts, mechanismCounts, resetBlockCounts, topBlocks } from './block-profile.js';
+import { profileForms } from './profile-forms.js';
 import { createWeakInstances } from './weak-instances.js';
 import {
     CACHE_VERSION, cacheKey, moduleKey, packRegion, seedRecords, unpackRegion,
@@ -54,6 +55,12 @@ import {
 
 /** @param {import('../region.js').Region} region */
 const usesX87 = region=>region.blocks.some(block=>block.instructions.some(isX87));
+
+/** A profiling run's hot forms (`hotForms`): the regions emitted again for them at most, the
+ * share of the counted executions they stop at, and how long an answer stands. */
+const FORMS_REGIONS = 300;
+const FORMS_SHARE = 0.95;
+const FORMS_EVERY_MS = 30_000;
 
 /** Exit codes by number, as the region functions answer them. */
 const KINDS = /** @type {ExitKind[]} */ (
@@ -1505,6 +1512,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
 
     // The block profile is past cork's own tables, in a memory sized for it;
     // the hybrid layout's tables are carved from the emulator's RAM.
+    /** The last `hotForms` answer and when it was taken. @type {{ at: number, forms: any } | null} */
+    let formsTaken = null;
     const profiling = import.meta.BOTTLIFY_DIAGNOSTICS !== false && settings.blockProfile === true
         && (layout.codePages ?? -1) < 0;
     let profileResetAt = import.meta.BOTTLIFY_DIAGNOSTICS !== false && profiling
@@ -1539,6 +1548,76 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         ...(settings.trapPort === undefined ? {} : { trapPort: settings.trapPort }),
         ...(sharedMemory ? { memory: sharedMemory } : {}),
     });
+
+    /**
+     * The hot code's forms in a profiling run (`profileForms`): the regions its
+     * counted blocks lie in, the most executed first, until they hold
+     * `FORMS_SHARE` of the counted executions or `FORMS_REGIONS` of them --
+     * formed again as their records were and emitted with the run's options
+     * but no counts, in this thread. Emitting hundreds of regions is no cost
+     * to take on every look at the diagnostics, so the answer stands for
+     * `FORMS_EVERY_MS`.
+     *
+     * @param {[number, number, number, number][]} blocks  `blockCounts`
+     */
+    const hotForms = blocks=>{
+        const now = performance.now();
+        if (formsTaken !== null && now - formsTaken.at < FORMS_EVERY_MS)
+        {
+            return formsTaken.forms;
+        }
+        /** @type {Map<number, number>} */
+        const executions = new Map();
+        /** @type {Map<number, number>} */
+        const byEntry = new Map();
+        let total = 0;
+        for (const [address, count, , entry] of blocks)
+        {
+            executions.set(address, count);
+            total += count;
+            if (entry >= 0)
+            {
+                byEntry.set(entry, (byEntry.get(entry) ?? 0) + count);
+            }
+        }
+        /** @type {Map<number, RegionRecord>} */
+        const hottestAt = new Map();
+        for (const record of regions)
+        {
+            if (!hottestAt.has(record.entry))
+            {
+                hottestAt.set(record.entry, record);
+            }
+        }
+        /** @type {{ region: import('../region.js').Region, entryTop: number, checked: boolean,
+         *     copies: boolean }[]} */
+        const jobs = [];
+        let held = 0;
+        for (const [entry, count] of [...byEntry].sort((a, b)=>b[1] - a[1]))
+        {
+            const record = hottestAt.get(entry);
+            if (record === undefined)
+            {
+                continue;
+            }
+            if (jobs.length >= FORMS_REGIONS || held >= total * FORMS_SHARE)
+            {
+                break;
+            }
+            held += count;
+            const called = record.targets === undefined ? {}
+                : { callTargets: new Map(record.targets) };
+            jobs.push({ region: formRegion(read, record.entry, { ...formOptions, translatable,
+                ...called }), entryTop: record.entryTop, checked: record.checked === true,
+            copies: record.copies === true });
+        }
+        const forms = { ...profileForms(jobs.map(job=>job.region), executions,
+            note=>emitBatch(jobs, layout, found, { ...emitOptions(), blockProfile: false,
+                countTransfers: false, timings: false, expansion: note })),
+        held: total > 0 ? held / total : 0 };
+        formsTaken = { at: now, forms };
+        return forms;
+    };
 
     /** Folds what the emitter left out into the run's refusal maps, the reads of
      * flags the fast default leaves undefined into theirs, and the x87 status-word
@@ -3677,7 +3756,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             return {
                 ...(import.meta.BOTTLIFY_DIAGNOSTICS !== false && blocks
                     ? { blockCounts: blocks, topBlocks: topBlocks(blocks, regions),
-                        mechanisms: mechanismCounts(view(), layout) } : {}),
+                        mechanisms: mechanismCounts(view(), layout), forms: hotForms(blocks) }
+                    : {}),
                 regions: regions.size,
                 // Counted only by a run that asked (`countTransfers`), else 0.
                 transfers: view().getUint32(layout.tables + Tables.TRANSFERS, true),

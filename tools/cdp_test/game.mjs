@@ -854,6 +854,19 @@ function describeCork(cork, say){
         say(`    mechanisms: ${Object.entries(cork.mechanisms).filter(([, n])=>n > 0)
             .map(([name, n])=>`${name}=${n}`).join(' ')}`);
     }
+    if (cork.forms)
+    {
+        // What the hot code is made of: each form's executions and wasm bytes.
+        const { forms } = cork;
+        say(`    forms: ${forms.regions} regions holding ${(100 * forms.held).toFixed(0)}% of the`
+            + ` executions, ${forms.perInstruction.toFixed(1)} wasm bytes an instruction`);
+        for (const row of forms.forms.slice(0, 25))
+        {
+            const part = `${(100 * row.share).toFixed(1)}%`;
+            say(`      ${row.form.padEnd(28)} ${String(row.executed).padStart(12)}`
+                + ` ${row.perInstruction.toFixed(0).padStart(5)} B ${part}`);
+        }
+    }
     if (cork.stalls?.length)
     {
         // The engine thread's long holds (host ms): laid beside the audio

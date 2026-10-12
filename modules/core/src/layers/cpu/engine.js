@@ -427,6 +427,12 @@
  * @property {Record<string, number>} [mechanisms]  With `blockProfile`: how calls and returns
  *     went -- formed into a region, wasm calls, or ways out -- transfers through the entry hash
  *     and `rdtsc`s, each counted by the code that took it (cork's `Mechanism`).
+ * @property {{ regions: number, held: number, executed: number, bytes: number,
+ *     perInstruction: number, forms: { form: string, executed: number, bytes: number,
+ *     perInstruction: number, share: number }[] }} [forms]  With `blockProfile`: what the hot
+ *     code is made of -- each instruction form's executions and the wasm bytes cork emits for
+ *     it in the regions the run formed (emitted again without the profile's counts), the regions
+ *     holding `held` of the counted executions.
  * @property {number} invalidations    Regions discarded by a write.
  * @property {number} volatilePages    Times a page written so often was left to the interpreter.
  * @property {number} [volatileNow]     The pages left to the interpreter now.
