@@ -224,7 +224,7 @@ test('a pointer is reported in the game\'s pixels, not the page\'s', ()=>{
     assert.deepEqual(h.drain(), [{ kind: 'pointerMove', x: 320, y: 240, dx: 1, dy: 0 }]);
 });
 
-test('a move with Control held belongs to the person and never reaches the program', ()=>{
+test('a move with right Alt held belongs to the person and never reaches the program', ()=>{
     // The way out of a title that grabs the pointer: held, the pointer is
     // free to leave; released, the next move starts afresh rather than
     // delivering the distance travelled while held.
@@ -235,9 +235,13 @@ test('a move with Control held belongs to the person and never reaches the progr
     h.drain();
     h.canvas.fire('pointermove', { clientX: 10, clientY: 10, movementX: 0, movementY: 0 });
     h.drain();
+    h.canvas.fire('keydown', { code: 'AltRight', key: 'Alt' });
+    h.drain();
     h.canvas.fire('pointermove', { clientX: 300, clientY: 300, movementX: 290, movementY: 290,
         ctrlKey: true });
     assert.deepEqual(h.drain(), [], 'nothing crossed');
+    h.canvas.fire('keyup', { code: 'AltRight', key: 'Alt' });
+    h.drain();
     h.canvas.fire('pointermove', { clientX: 301, clientY: 300, movementX: 1, movementY: 0 });
     assert.deepEqual(h.drain(), [{ kind: 'pointerMove', x: 301, y: 300, dx: 1, dy: 0 }],
         'the first free move is one pixel, not the whole way across');
@@ -444,11 +448,15 @@ test('a trackpad\'s many small deltas are one wheel notch', ()=>{
     const h = harness();
     h.canvas.fire('focus', {});
     h.drain();
-    h.canvas.fire('wheel', { deltaY: 40, deltaMode: 0 });
-    h.canvas.fire('wheel', { deltaY: 40, deltaMode: 0 });
+    // The first of a stream after a pause is a notch of its own (a Mac's
+    // mouse wheel reports a notch as a few pixels); the rest add up.
+    h.canvas.fire('wheel', { deltaY: 40, deltaMode: 0, timeStamp: 1000 });
+    assert.deepEqual(h.drain(), [{ kind: 'wheel', delta: -120 }]);
+    h.canvas.fire('wheel', { deltaY: 40, deltaMode: 0, timeStamp: 1010 });
+    h.canvas.fire('wheel', { deltaY: 40, deltaMode: 0, timeStamp: 1020 });
     assert.deepEqual(h.drain(), [], 'not yet a notch');
 
-    const event = h.canvas.fire('wheel', { deltaY: 40, deltaMode: 0 });
+    const event = h.canvas.fire('wheel', { deltaY: 40, deltaMode: 0, timeStamp: 1030 });
     assert.equal(event.prevented, true, 'the page does not scroll under the game');
     assert.deepEqual(h.drain(), [{ kind: 'wheel', delta: -120 }],
         'and a browser counts downwards the other way round');
@@ -547,3 +555,34 @@ test('a canvas drawn larger than its pixels maps back down', ()=>{
     const [seen] = h.drain();
     assert.deepEqual([seen.x, seen.y], [160, 120]);
 });
+
+test('a mouse wheel notch of a few pixels after a pause is a notch', ()=>{
+    const h = harness();
+    h.canvas.fire('focus', {});
+    h.drain();
+    h.canvas.fire('wheel', { deltaY: -4, deltaMode: 0, timeStamp: 1000 });
+    h.canvas.fire('wheel', { deltaY: -4, deltaMode: 0, timeStamp: 2000 });
+    assert.deepEqual(h.drain(), [{ kind: 'wheel', delta: 120 }, { kind: 'wheel', delta: 120 }]);
+});
+
+test('a second button pressed while one is held reaches the program, as a browser moves it',
+    ()=>{
+        // Pointer events fire pointerdown for the first press only: the left
+        // button pressed with the right held comes as a move with buttons 3.
+        const h = harness();
+        h.canvas.fire('focus', {});
+        h.drain();
+        h.canvas.fire('pointerdown', { button: 2, buttons: 2, clientX: 0, clientY: 0 });
+        h.canvas.fire('pointermove', { buttons: 3, clientX: 0, clientY: 0,
+            movementX: 0, movementY: 0 });
+        h.canvas.fire('pointermove', { buttons: 2, clientX: 0, clientY: 0,
+            movementX: 0, movementY: 0 });
+        h.canvas.fire('pointerup', { button: 2, buttons: 0, clientX: 0, clientY: 0 });
+        const buttons = h.drain().filter((/** @type {any} */ one)=>one.kind === 'pointerButton');
+        assert.deepEqual(buttons, [
+            { kind: 'pointerButton', button: 'right', down: true },
+            { kind: 'pointerButton', button: 'left', down: true },
+            { kind: 'pointerButton', button: 'left', down: false },
+            { kind: 'pointerButton', button: 'right', down: false },
+        ]);
+    });

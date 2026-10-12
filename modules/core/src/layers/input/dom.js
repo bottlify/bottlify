@@ -74,6 +74,29 @@ const CONTROL_TEXT = Object.freeze({
 
 /** `MouseEvent.button`, in the order the DOM numbers them. */
 const BUTTON_NAMES = Object.freeze(['left', 'middle', 'right', 'x1', 'x2']);
+/**
+ * Each button by its bit in PointerEvent.buttons, which orders them otherwise:
+ * left, right, middle, back, forward.
+ */
+/** @type {readonly (readonly [number, string])[]} */
+const BUTTON_BITS = Object.freeze([[1, 'left'], [2, 'right'], [4, 'middle'], [8, 'x1'],
+    [16, 'x2']]);
+/**
+ * The key held for the page's own pointer: right Alt, which a Mac keyboard has
+ * as right Option and a game of the era all but never binds, where Control is
+ * a crouch or a fire button.
+ */
+export const RELEASE_KEY = 'AltRight';
+/**
+ * Whether a key event is RELEASE_KEY: by its code, or as the right-hand Alt
+ * where a layout names the key otherwise (AltGraph, Option under another code).
+ *
+ * @param {{ code?: string, key?: string, location?: number }} e
+ */
+export const isReleaseKey = e=>e.code === RELEASE_KEY
+    || ((e.key === 'Alt' || e.key === 'AltGraph') && e.location === 2);
+/** A wheel event this long after the last one is a notch of its own, however small. */
+const WHEEL_GAP_MS = 120;
 
 /** Two Escapes closer together than this hand focus back to the page. */
 const RELEASE_WINDOW_MS = 600;
@@ -129,6 +152,11 @@ export function createDomInput({ canvas, send, pointerLock = false, resolution }
     /** @type {number | null} */
     let lastY = null;
     let restNotches = 0;
+    let lastWheel = -Infinity;
+    /** The buttons the program was last told are down, as PointerEvent.buttons bits. */
+    let heldButtons = 0;
+    /** Whether the person holds the page's own pointer (RELEASE_KEY). */
+    let releaseHeld = false;
     /** @type {number[]} */
     const padAxes = [];
     /** @type {boolean[]} */
@@ -255,6 +283,10 @@ export function createDomInput({ canvas, send, pointerLock = false, resolution }
 
     /** @param {KeyboardEvent} e */
     const onKeyDown = e=>{
+        if (isReleaseKey(e))
+        {
+            releaseHeld = true;
+        }
         if ((e.ctrlKey || e.metaKey) && e.code === 'KeyV' && !e.repeat)
         {
             releaseHeldPaste();
@@ -302,6 +334,10 @@ export function createDomInput({ canvas, send, pointerLock = false, resolution }
 
     /** @param {KeyboardEvent} e */
     const onKeyUp = e=>{
+        if (isReleaseKey(e))
+        {
+            releaseHeld = false;
+        }
         if (e.code === 'KeyV' && heldPaste)
         {
             releaseHeldPaste();
@@ -315,12 +351,15 @@ export function createDomInput({ canvas, send, pointerLock = false, resolution }
 
     /** @param {PointerEvent} e */
     const onPointerMove = e=>{
-        // A move with Control held is the person's, not the program's: the
+        // A second button pressed while one is down, or one let go while
+        // another stays, comes as a move with other buttons, not as a press.
+        syncButtons(e);
+        // A move with RELEASE_KEY held is the person's, not the program's: the
         // way out of a title that grabs the pointer and looks nowhere else,
         // to reach the page around it. The position is forgotten so that the
         // next free move starts from where it is rather than jumping the
         // distance travelled while held.
-        if (e.ctrlKey)
+        if (releaseHeld)
         {
             lastX = null;
             lastY = null;
@@ -436,7 +475,35 @@ export function createDomInput({ canvas, send, pointerLock = false, resolution }
         {
             lockPointer();
         }
-        send({ kind: 'pointerButton', button: BUTTON_NAMES[e.button] ?? '', down: true });
+        syncButtons(e, e.button, true);
+    };
+
+    /**
+     * Tells the program of every button whose state changed since it was last
+     * told: a browser fires pointerdown and pointerup for the first press and
+     * the last release only, and the presses in between as moves.
+     *
+     * @param {PointerEvent} e
+     * @param {number} [button]  the button a down or up names, held to that state
+     *     whatever `buttons` says
+     * @param {boolean} [down]
+     */
+    const syncButtons = (e, button = -1, down = false)=>{
+        let now = typeof e.buttons === 'number' ? e.buttons : heldButtons;
+        const named = BUTTON_BITS.find(([, name])=>name === BUTTON_NAMES[button]);
+        if (named)
+        {
+            now = down ? now | named[0] : now & ~named[0];
+        }
+        const changed = now ^ heldButtons;
+        heldButtons = now;
+        for (const [bit, name] of BUTTON_BITS)
+        {
+            if ((changed & bit) !== 0)
+            {
+                send({ kind: 'pointerButton', button: name, down: (now & bit) !== 0 });
+            }
+        }
     };
 
     /** @param {PointerEvent} e */
@@ -449,7 +516,7 @@ export function createDomInput({ canvas, send, pointerLock = false, resolution }
             // Nothing was captured. The button still has to be released.
         }
         moveToEventPosition(e);
-        send({ kind: 'pointerButton', button: BUTTON_NAMES[e.button] ?? '', down: false });
+        syncButtons(e, e.button, false);
     };
 
     /** @param {WheelEvent} e */
@@ -465,7 +532,12 @@ export function createDomInput({ canvas, send, pointerLock = false, resolution }
         // continuous stream of small deltas, and treating each as a full notch
         // makes every gesture a violent one.
         const notches = e.deltaMode === 0 ? e.deltaY / PIXELS_PER_NOTCH : e.deltaY;
-        const total = restNotches + notches;
+        // A wheel after a pause is a notch even when its delta is small: a
+        // Mac reports a mouse wheel's notch as a few pixels, not a hundred.
+        const alone = e.timeStamp - lastWheel > WHEEL_GAP_MS;
+        lastWheel = e.timeStamp;
+        const total = alone && Math.abs(restNotches + notches) < 1 && notches !== 0
+            ? Math.sign(notches) : restNotches + notches;
         const whole = Math.trunc(total);
         restNotches = total - whole;
         if (whole !== 0)
@@ -490,6 +562,9 @@ export function createDomInput({ canvas, send, pointerLock = false, resolution }
 
     const onBlur = ()=>{
         focused = false;
+        // Leaving releases everything held, buttons and the page's pointer key.
+        heldButtons = 0;
+        releaseHeld = false;
         canvas.style.outline = '';
         send({ kind: 'focus', gained: false });
     };
