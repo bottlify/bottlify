@@ -6,6 +6,10 @@
   [`v2/release-run.md`](v2/release-run.md) is the scenario a branch is measured by before it goes
   to main: gates, synthetic load on the executors, the benchmark against main, and titles in the
   browser in each run mode.
+- **[`cork/`](cork/README.md)** — cork's hottest regions, Gothic 3 and Far Cry first: what the
+  measurements show (calls between regions, not bodies, are what costs), the instruments to measure
+  it, and the steps — fewer and cheaper calls, polls answered without crossing to the host,
+  `rdtsc` inside wasm. In Russian, [`cork/README.ru.md`](cork/README.ru.md).
 - **[`bottles/`](bottles/README.md)** — bottles made, kept, changed and started on the device, and
   the bottle editor: entries, arguments, mode and network; the server is where a bottle is shared.
   In Russian, [`bottles/README.ru.md`](bottles/README.ru.md).
