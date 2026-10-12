@@ -7696,6 +7696,8 @@ async function buildSystemHost(deps){
             process.link.call('control', method, []).catch(()=>{});
         }
     };
+    /** Whether the run was last told to pause, for a tool that must draw a frame. */
+    let pausedByCaller = false;
     /** The canvas the page's pointer is measured on, once attached. @type {any} */
     let viewport = null;
     /**
@@ -7777,8 +7779,15 @@ async function buildSystemHost(deps){
                 return createInputRoute(event=>this.send(event));
             },
         },
-        pause: ()=>tellAll('pause'),
-        resume: ()=>tellAll('resume'),
+        pause: ()=>{
+            pausedByCaller = true;
+            tellAll('pause');
+        },
+        resume: ()=>{
+            pausedByCaller = false;
+            tellAll('resume');
+        },
+        paused: ()=>pausedByCaller,
         stop: ()=>tellAll('stop'),
         answerMessageBox: ()=>false,
         on: (/** @type {string} */ name, /** @type {(payload: any) => any} */ handler)=>
@@ -7964,6 +7973,21 @@ function liveDumpOf(worker){
             }
             worker.postMessage({ type: 'debug', skipTexture: ids });
             return ids;
+        },
+        /**
+         * Keeps the first `count` draws of every frame from now on and drops
+         * the rest, -1 none dropped: halving it finds the draw that painted a
+         * part of the picture, numbered as a frame dump numbers them.
+         *
+         * @param {number} [count]
+         */
+        maxDraws: (count = -1)=>{
+            if (!worker)
+            {
+                throw new Error('maxDraws: this run draws without a graphics worker');
+            }
+            worker.postMessage({ type: 'debug', maxDraws: count });
+            return count;
         },
         /**
          * How the worker's devices answer occlusion counts from now on: ''

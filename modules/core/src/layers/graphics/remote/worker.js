@@ -105,6 +105,8 @@ export function serveGraphics(scope, deps){
         skipTexture: '',
         /** How occlusion counts are answered (`app.debug.occlusion`): '' as counted, 'visible' all passed. */
         occlusion: '',
+        /** Draws kept a frame (`app.debug.maxDraws`), the rest dropped; -1 all. */
+        maxDraws: -1,
         /** @param {string[]} lines @param {number} frame */
         written: (lines, frame)=>{
             const dumped = { type: 'dumped', lines, frame };
@@ -516,6 +518,11 @@ export function serveGraphics(scope, deps){
                 if ('occlusion' in data)
                 {
                     liveDump.occlusion = String(data.occlusion ?? '');
+                }
+                if ('maxDraws' in data)
+                {
+                    const cut = Math.floor(Number(data.maxDraws));
+                    liveDump.maxDraws = Number.isFinite(cut) && cut >= 0 ? cut : -1;
                 }
                 break;
             case 'client':

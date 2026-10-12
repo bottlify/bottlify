@@ -1921,15 +1921,20 @@ test('a shader draw into a texture bound to its own sampler samples a copy taken
     assert.equal(binding.view.texture.descriptor.label, 'target-snapshot');
 });
 
-test('table fog through a vertex shader is taken over the depth, whatever the projection set',
-    async()=>{
-        // The fixed projection is not the shader's, so it says nothing of what
-        // the shader's w is: with FOGTABLEMODE set, a draw through a vertex
-        // shader is fogged by its z (Wine's fog rules: table fog uses the Z
-        // value no matter what vertex type; its fog_with_shader_test draws
-        // the curve over the depth). A program that sets its range for depth,
-        // 0 to 1, under a perspective projection was fogged whole over w.
-        const h = harness();
+test('table fog through a vertex shader without oFog runs over z or w as the projection says,'
+    + ' or over z by later rules', async()=>{
+    // A program of the shader-model-2 generation sets an eye-unit range for
+    // its shader draws (Far Cry's R300 path: LINEAR 30..350, no oFog) and
+    // leaves a perspective projection set for its fixed ones: its drivers
+    // took the curve over w then, as the fixed function does. Later drivers
+    // and Wine's fog rules take it over z whatever the projection
+    // (fog_with_shader_test), which is `driverRules: 'current'`.
+    /**
+     * @param {'legacy' | 'current' | undefined} driverRules
+     * @param {number[]} projection
+     */
+    const rangeOf = async(driverRules, projection)=>{
+        const h = harness({ driverRules });
         /** @type {{ shader?: any }} */
         const vs = {};
         /** @type {{ shader?: any }} */
@@ -1938,19 +1943,24 @@ test('table fog through a vertex shader is taken over the depth, whatever the pr
         assert.equal(h.device.CreatePixelShader(PIXEL_SHADER, ps), D3D_OK);
         h.device.SetVertexShader(vs.shader);
         h.device.SetPixelShader(ps.shader);
-        h.device.SetTransform(D3DTS.PROJECTION,
-            [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 1, 0, 0, -1, 0]);
+        h.device.SetTransform(D3DTS.PROJECTION, projection);
         h.device.SetRenderState(D3DRS.FOGENABLE, 1);
         h.device.SetRenderState(D3DRS.FOGTABLEMODE, 3);
-        h.device.SetRenderState(D3DRS.FOGSTART, floatToDword(0));
-        h.device.SetRenderState(D3DRS.FOGEND, floatToDword(1));
+        h.device.SetRenderState(D3DRS.FOGSTART, floatToDword(30));
+        h.device.SetRenderState(D3DRS.FOGEND, floatToDword(350));
         await h.draw();
         const floats = new Float32Array(h.boundBytes(h.groupsOfDraw().get(0), 0).buffer);
         // The range is the block's last register: start, end, density, and
         // whether the depth is z.
-        assert.deepEqual([...floats.subarray(floats.length - 4)], [0, 1, 1, 1],
-            'density 1 by default');
-    });
+        return [...floats.subarray(floats.length - 4)];
+    };
+    const perspective = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 1, 0, 0, -1, 0];
+    const affine = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+    assert.deepEqual(await rangeOf(undefined, perspective), [30, 350, 1, 0], 'over w, density 1');
+    assert.deepEqual(await rangeOf('legacy', perspective), [30, 350, 1, 0]);
+    assert.deepEqual(await rangeOf('legacy', affine), [30, 350, 1, 1], 'over z');
+    assert.deepEqual(await rangeOf('current', perspective), [30, 350, 1, 1]);
+});
 
 test('table fog through a shader that writes oFog runs over it, or over the depth by later rules',
     async()=>{

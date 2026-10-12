@@ -375,10 +375,16 @@ written against earlier drivers that took the curve over oFog, and set their ran
 Cry writes oFog as one minus its own visibility and sets a LINEAR table range of 0 to 1: over
 the depth every terrain pixel of a level came out the fog colour (measured 2026-10-10, browser,
 graphics worker, SwiftShader); over oFog the range gives back the program's own factor. A shader
-without oFog keeps Wine's answer. A program written for later drivers, which take the curve
-over the depth whatever the shader wrote, runs with the graphics setting `driverRules: 'current'`
-(docs/core/configuration.md); `'legacy'` is the default, since the programs that leave fog to
-this stage at all are of the earlier generation. *2026-10-10.*
+without oFog has the curve run over the depth as the fixed function takes it: z under an affine
+projection, w under a perspective one, by the projection set on the device. Far Cry's R300 path
+writes no oFog and sets LINEAR 30 to 350 in eye units for its shader draws, the range its NV2x
+path computes into oFog itself; over z, which never leaves 0..1, its world was drawn without
+fog and its far forest dark (reports 2026-10-12, Chrome on macOS). A program written for later
+drivers, which take the curve over z whatever the shader wrote and whatever the projection
+(Wine's `fog_with_shader_test`, measured on a GeForce 7600GS), runs with the graphics setting
+`driverRules: 'current'` (docs/core/configuration.md); `'legacy'` is the default, since the
+programs that leave fog to this stage at all are of the earlier generations. *2026-10-10,
+the case without oFog 2026-10-12.*
 
 ## B. From measured optimisation work
 

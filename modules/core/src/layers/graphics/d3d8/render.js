@@ -2804,7 +2804,7 @@ const CLEAR_STRIDE = 20;
  *     lock or not -- a debugging aid, for a program that writes a buffer
  *     outside its locks.
  * @property {{ dumpFrames: number, bufferLocks?: string, skipTexture?: string, occlusion?: string,
- *     written?: (lines: string[], frame: number) => void }} [liveDump]
+ *     maxDraws?: number, written?: (lines: string[], frame: number) => void }} [liveDump]
  *     Set on a running program to have its next frames with draws written
  *     down as `dumpDraws` writes them; counts down as they are, and the last
  *     of them is handed to `written`.
@@ -2870,7 +2870,10 @@ export function createRenderer(options){
     // down as `dumpDraws` writes them, without the texture copies only a run
     // started with `dumpDraws` makes.
     const liveDump = options.liveDump ?? null;
-    const maxDraws = options.maxDraws === undefined ? -1 : options.maxDraws;
+    const fixedMaxDraws = options.maxDraws === undefined ? -1 : options.maxDraws;
+    /** Draws kept a frame: what a running program was given, or the device's own. */
+    const maxDrawsNow = ()=>((liveDump?.maxDraws ?? -1) >= 0
+        ? /** @type {number} */ (liveDump?.maxDraws) : fixedMaxDraws);
     const divergence = options.divergence ?? null;
     // One id or several, comma-separated: a picture painted by a family of
     // draws is only removed by removing the family.
@@ -3868,6 +3871,13 @@ export function createRenderer(options){
                 + `${(model.stageStates(binding.stage)?.get(D3DTSS.TEXCOORDINDEX) ?? 0)
                     .toString(16)}@${textureTransformOf(model, binding.stage)}`).join(' ')}`
                 : '')
+            // How each bound stage is filtered and, for a 1.x bump read, the
+            // matrix its offsets go through: a reflection broken into blocks
+            // is a point-sampled offset map or a matrix far too large.
+            + ` smp=${program.samplerBindings.map((/** @type {any} */ binding)=>`${binding.stage}:`
+                + Object.values(samplerDescriptorOf(model.stageStates(binding.stage), mipsApplied))
+                    .slice(0, 6).join('/')).join(' ')}`
+            + bumpMatricesOf(model)
             + ` target=${describeTarget(model)}`
             + ` view=${model.viewport.rect.x},${model.viewport.rect.y}`
             + `+${model.viewport.rect.width}x${model.viewport.rect.height}`
@@ -3878,6 +3888,27 @@ export function createRenderer(options){
             + (held ? ` layout=${describeDeclaration(held.declaration)}`
                 + ` vc=${describeConstants(held.vertex, held.vertexConstants.floats)}`
                 + ` pc=${describeConstants(held.pixel, held.pixelConstants.floats)}` : ''));
+    };
+
+    /**
+     * The bump matrices of the stages that have one, as a dump line gives
+     * them, or nothing.
+     *
+     * @param {RenderModel} model
+     */
+    const bumpMatricesOf = model=>{
+        const stages = [];
+        for (let stage = 0; stage < STAGE_COUNT; stage++)
+        {
+            const states = model.stageStates(stage);
+            const matrix = [D3DTSS.BUMPENVMAT00, D3DTSS.BUMPENVMAT01, D3DTSS.BUMPENVMAT10,
+                D3DTSS.BUMPENVMAT11].map(state=>dwordToFloat(states.get(state) ?? 0));
+            if (matrix.some(value=>value !== 0))
+            {
+                stages.push(`${stage}:${matrix.map(round).join(',')}`);
+            }
+        }
+        return stages.length > 0 ? ` bump=${stages.join(' ')}` : '';
     };
 
     /**
@@ -6689,11 +6720,14 @@ export function createRenderer(options){
         if (vertex.fogRegister !== undefined)
         {
             // What the fixed vertex stage reads for the same: the colour,
-            // then the curve's range, as `hybridVertexBlocks` writes them --
-            // over the depth, always: the fixed projection is not the
-            // shader's, so it says nothing of what the shader's w is, and
-            // table fog through a vertex shader is taken over z (Wine's fog
-            // rules; fog_with_shader_test draws the curve over the depth).
+            // then the curve's range, as `hybridVertexBlocks` writes them.
+            // A curve the shader's oFog does not run (decisions.md A43) runs
+            // over the depth: by the drivers of the shader-model-1 and -2
+            // generations, z or w as the fixed projection says, as the fixed
+            // function's -- a program of theirs sets a range in eye units
+            // for its shader draws and leaves the projection set for its
+            // fixed ones --, and by later ones and Wine's fog rules (its
+            // fog_with_shader_test) over z, whatever the projection.
             const rs = (/** @type {string} */ name)=>model.renderStates.get(D3DRS[name]) ?? 0;
             const fogColour = colorToFloats(rs('FOGCOLOR'));
             blocks[0].set([fogColour.r, fogColour.g, fogColour.b, fogColour.a],
@@ -6702,7 +6736,7 @@ export function createRenderer(options){
                 dwordToFloat(rs('FOGSTART')),
                 dwordToFloat(rs('FOGEND')),
                 dwordToFloat(rs('FOGDENSITY')),
-                1,
+                tableFogOverDepth || isAffine(transformOf(model, D3DTS.PROJECTION)) ? 1 : 0,
             ], (vertex.fogRegister + 1) * 4);
         }
         // The user planes, as set: a vertex shader's are in clip space.
@@ -6997,7 +7031,8 @@ export function createRenderer(options){
      *     The vertices the draw reaches, for its further streams (`streamBindings`).
      */
     const record = (model, prepared, geometry, scissored = true, bias = 0, span = undefined)=>{
-        if (maxDraws >= 0 && kept >= maxDraws)
+        const cut = maxDrawsNow();
+        if (cut >= 0 && kept >= cut)
         {
             return;
         }
