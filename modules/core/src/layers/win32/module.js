@@ -1178,6 +1178,7 @@ export function createWin32Module(){
             registerWbemClasses({
                 registry: com, vtables: comVtables, heap, readMemory, writeMemory, readWideString,
                 physicalMemory: arena.size, windows: reported, divergence: config?.divergence,
+                processorMhz: config?.processorMhz,
             });
 
             // DxDiag's provider, which an installer asks which DirectX this is

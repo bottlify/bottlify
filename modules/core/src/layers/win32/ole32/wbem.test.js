@@ -303,3 +303,11 @@ test('every property kept is one its class has in Windows', ()=>{
         }
     }
 });
+
+test('the processor\'s clock speed is the rate its time-stamp counter runs at', ()=>{
+    // A program turns rdtsc deltas into seconds with it: told 1000 MHz of a
+    // counter running at 3000, everything it timed so ran three times as fast.
+    const [processor] = machineClasses({ processorMhz: 3000, windows: WINDOWS_VERSIONS.winxp })
+        .win32_processor;
+    assert.deepEqual([processor.maxclockspeed[1], processor.currentclockspeed[1]], [3000, 3000]);
+});

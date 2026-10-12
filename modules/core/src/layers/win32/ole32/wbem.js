@@ -160,11 +160,13 @@ export const WBEM_SCHEMAS = Object.fromEntries(Object.entries({
  * Each kept class's instances, each instance its properties keyed in lower
  * case, as WMI matches names without regard to it.
  *
- * @param {{ physicalMemory?: number,
+ * @param {{ physicalMemory?: number, processorMhz?: number,
  *     windows?: import('../kernel32/versions.js').WindowsVersion }} machine
+ *     `processorMhz` the rate the time-stamp counter runs at, as the registry's
+ *     `~MHz` says it: a program turns rdtsc deltas into seconds with either
  * @returns {Record<string, Record<string, WbemProperty>[]>}
  */
-export function machineClasses({ physicalMemory = 0, windows }){
+export function machineClasses({ physicalMemory = 0, processorMhz = PROCESSOR.mhz, windows }){
     const hex = (/** @type {number} */ value)=>(value >>> 0).toString(16).toUpperCase()
         .padStart(8, '0');
     // A reference names its instance by the computer, the namespace, the
@@ -231,8 +233,8 @@ export function machineClasses({ physicalMemory = 0, windows }){
             description: [CIM_STRING, PROCESSOR_IDENTIFIER],
             // CPUID leaf 1's EDX, then its EAX.
             processorid: [CIM_STRING, hex(CPUID.edx) + hex(CPUID.signature)],
-            maxclockspeed: [CIM_UINT32, PROCESSOR.mhz],
-            currentclockspeed: [CIM_UINT32, PROCESSOR.mhz],
+            maxclockspeed: [CIM_UINT32, processorMhz],
+            currentclockspeed: [CIM_UINT32, processorMhz],
             extclock: [CIM_UINT32, 100],
             processortype: [CIM_UINT16, 3], // a central processor
             upgrademethod: [CIM_UINT16, 2], // unknown
@@ -375,6 +377,7 @@ const SLOTS = {
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readWideString
  * @property {number} [physicalMemory]  What GlobalMemoryStatus reports as physical memory.
+ * @property {number} [processorMhz]  The time-stamp counter's rate, as the registry's `~MHz`.
  * @property {import('../kernel32/versions.js').WindowsVersion} [windows]
  *           The Windows the process is told it runs on.
  * @property {(api: string, detail: string) => void} [divergence]
@@ -386,7 +389,8 @@ const SLOTS = {
  * @param {WbemHost} host
  */
 export function registerWbemClasses(host){
-    const CLASSES = machineClasses({ physicalMemory: host.physicalMemory, windows: host.windows });
+    const CLASSES = machineClasses({ physicalMemory: host.physicalMemory,
+        processorMhz: host.processorMhz, windows: host.windows });
     const diverge = (/** @type {string} */ api, /** @type {string} */ detail)=>
         host.divergence?.(api, detail);
     const writeU32 = (/** @type {number} */ address, /** @type {number} */ value)=>{
