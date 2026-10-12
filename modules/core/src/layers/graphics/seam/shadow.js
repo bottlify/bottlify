@@ -2190,7 +2190,10 @@ export function createShadow(deps){
      */
     const flushHeld = block=>{
         const entry = blocks.get(block);
-        if (!entry || entry.hostLocked)
+        // One word first: of the buffers ever let go of, which this is asked
+        // about at every entry while any lock is held, nearly all are not
+        // locked, and reading each whole block was most of what it cost.
+        if (!entry || entry.hostLocked || readWord(block + BUFFER.LOCKED) === 0)
         {
             return;
         }
@@ -2207,9 +2210,15 @@ export function createShadow(deps){
             entry.buffer.Unlock();
             markLent(block);
         }
-        deps.writeMemory(block + BUFFER.LOCK_FLAGS,
-            new Uint8Array(new Uint32Array([flags & ~D3DLOCK_DISCARD]).buffer));
+        if ((flags & D3DLOCK_DISCARD) !== 0)
+        {
+            flagWord[0] = flags & ~D3DLOCK_DISCARD;
+            deps.writeMemory(block + BUFFER.LOCK_FLAGS, flagBytes);
+        }
     };
+    /** The flags word written back, without a buffer made for each. */
+    const flagWord = new Uint32Array(1);
+    const flagBytes = new Uint8Array(flagWord.buffer);
 
     /** The command ring's reader, once the block has one. @type {ReturnType<typeof createCommandReader> | null} */
     let commandReader = null;

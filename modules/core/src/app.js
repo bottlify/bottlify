@@ -63,6 +63,28 @@ import { openProcessWorker } from './host/process-worker.js';
 import { createTranslatorPool, portTranslator } from './host/pool/pool.js';
 import { createInputRoute } from './layers/input/route.js';
 
+/** FNV-1a, 32 bits: a call's number for telling its repeats apart in the journal. */
+const FNV_OFFSET = 0x811c9dc5;
+/** @param {number} hash @param {number} word */
+const hashWord = (hash, word)=>{
+    let h = hash;
+    for (let shift = 0; shift < 32; shift += 8)
+    {
+        h = Math.imul(h ^ ((word >>> shift) & 0xff), 0x01000193);
+    }
+    return h >>> 0;
+};
+/** @param {number} hash @param {string} text */
+const hashText = (hash, text)=>{
+    let h = hash;
+    for (let at = 0; at < text.length; at++)
+    {
+        h = Math.imul(h ^ text.charCodeAt(at), 0x01000193);
+    }
+    // The length too, so "ab" then "c" is not "a" then "bc".
+    return hashWord(h >>> 0, text.length);
+};
+
 /**
  * createApp — the consumer-facing entry point: run a Win32 application.
  *
@@ -3477,8 +3499,10 @@ async function buildApp(options){
     /** @type {Map<string, string>} */
     const areaCache = new Map();
     const areaOfCall = (/** @type {any} */ call)=>areaOf(call, areaCache);
-    /** @type {Map<string, { revision: number, area: string, on: boolean }>} */
+    /** @type {Map<string, { revision: number, area: string, on: boolean, seed: number }>} */
     const tracedCalls = new Map();
+    /** Each thread's name as the journal writes it, made once. @type {WeakMap<object, string>} */
+    const threadTags = new WeakMap();
     // Every process of a run names its first thread "main", so in the run's one
     // journal a later process's threads carry its image name as well.
     const callerImage = String(options.imagePath ?? '').split(/[\\/]/).pop() ?? '';
@@ -3515,7 +3539,8 @@ async function buildApp(options){
         if (traced === undefined || traced.revision !== revision)
         {
             const area = areaOfCall(call);
-            traced = { revision, area, on: journal.enabled(area, journal.Level.TRACE) };
+            traced = { revision, area, on: journal.enabled(area, journal.Level.TRACE),
+                seed: hashText(FNV_OFFSET, call.name) };
             tracedCalls.set(call.name, traced);
         }
         const category = traced.area;
@@ -3532,16 +3557,32 @@ async function buildApp(options){
         // An argument whose text was kept (traceStrings) is shown as that
         // text: a path is what a question about a failed open needs. Every
         // kept argument is written: a blit's source context is its sixth.
-        const args = (call.args ?? [])
-            .map((/** @type {number} */ value, /** @type {number} */ at)=>(
-                call.strings?.[at] ? JSON.stringify(String(call.strings[at]).slice(0, 160))
-                    : `0x${(value >>> 0).toString(16)}`))
-            .join(', ');
-        const thread = callerTag + (core.api('kernel').currentThread()?.name ?? '?');
+        const current = core.api('kernel').currentThread();
+        let thread = current ? threadTags.get(current) : undefined;
+        if (thread === undefined)
+        {
+            thread = callerTag + (current?.name ?? '?');
+            if (current)
+            {
+                threadTags.set(current, thread);
+            }
+        }
         // A thread polling for something is a loop of the same few calls,
         // written twice and then counted (`call-repeats.js`): written each
         // time, it would push out of the ring the moment it began waiting.
-        const { write, said } = callRepeats.note(thread, `${call.name}(${args}) = ${call.result}`);
+        // The calls are told apart by a number made from the name, the
+        // arguments and the answer -- a polling loop makes millions, and a
+        // line of text made for each was most of what the journal cost.
+        let key = traced.seed;
+        const values = call.args ?? [];
+        for (let at = 0; at < values.length; at++)
+        {
+            const text = call.strings?.[at];
+            key = text ? hashText(key, String(text)) : hashWord(key, values[at] >>> 0);
+        }
+        key = typeof call.result === 'number' ? hashWord(key, call.result >>> 0)
+            : hashText(key, String(call.result));
+        const { write, said } = callRepeats.note(thread, key);
         if (said)
         {
             journal.write('trace', category, said.ended
@@ -3551,6 +3592,13 @@ async function buildApp(options){
         }
         if (write)
         {
+            // An argument whose text was kept (traceStrings) is shown as that
+            // text: a path is what a question about a failed open needs.
+            const args = values
+                .map((/** @type {number} */ value, /** @type {number} */ at)=>(
+                    call.strings?.[at] ? JSON.stringify(String(call.strings[at]).slice(0, 160))
+                        : `0x${(value >>> 0).toString(16)}`))
+                .join(', ');
             journal.write('trace', category, '[{3}] {0}({1}) = {2}', call.name, args, call.result,
                 thread);
         }
