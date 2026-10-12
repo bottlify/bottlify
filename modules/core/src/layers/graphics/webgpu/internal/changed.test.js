@@ -32,6 +32,14 @@ const holds = (now, was, spans, gap)=>{
             assert.ok(start - spans[index - 1] >= 1, 'spans are apart and in order');
         }
         covered.fill(1, start, end);
+        // A span is not carried across an equal run longer than the gap:
+        // eight words tested at once still end one where a word would.
+        let equal = 0;
+        for (let at = start; at < end; at++)
+        {
+            equal = now[at] === was[at] ? equal + 1 : 0;
+            assert.ok(equal <= gap + 8, `an equal run of ${equal} inside a span, gap ${gap}`);
+        }
     }
     for (let at = 0; at < now.length; at++)
     {
@@ -40,7 +48,6 @@ const holds = (now, was, spans, gap)=>{
             assert.equal(covered[at], 1, `byte ${at} changed and is in no span`);
         }
     }
-    void gap;
 };
 
 test('the spans cover every changed byte and only runs that start and end on one', ()=>{
@@ -49,7 +56,7 @@ test('the spans cover every changed byte and only runs that start and end on one
         seed = (seed * 1103515245 + 12345) >>> 0;
         return seed / 0x100000000;
     };
-    for (let round = 0; round < 400; round++)
+    for (let round = 0; round < 3000; round++)
     {
         // Lengths and offsets that are and are not on four-byte boundaries.
         const length = Math.floor(random() * 700);
@@ -64,7 +71,7 @@ test('the spans cover every changed byte and only runs that start and end on one
         for (let change = 0; change < changes; change++)
         {
             const from = Math.floor(random() * Math.max(1, length));
-            const run = Math.floor(random() * 40);
+            const run = Math.floor(random() * (random() < 0.5 ? 6 : 120));
             for (let at = from; at < Math.min(length, from + run); at++)
             {
                 memory[offset + at] ^= 1 + Math.floor(random() * 255);
@@ -132,4 +139,14 @@ test('the ranges taken are exactly what was not taken before, against a byte map
         }
         assert.deepEqual(got, expected, `round ${round}: [${from}, ${to}) took ${open}`);
     }
+});
+
+test('an equal run of whole eight-word blocks ends a span as the words one by one would', ()=>{
+    const now = new Uint8Array(256);
+    const was = new Uint8Array(256);
+    // Changes in words 0 and 40, everything between equal and block aligned.
+    now[0] = 1;
+    now[160] = 1;
+    assert.deepEqual(changedSpans(now, was, 64), [0, 4, 160, 164]);
+    assert.deepEqual(changedSpans(now, was, 256), [0, 164], 'and keeps it within the gap');
 });
