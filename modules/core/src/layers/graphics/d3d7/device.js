@@ -105,6 +105,8 @@ const FILTER_NUMBERING = Object.freeze({
  * @property {number} [maxDraws]
  * @property {string | null} [skipTexture]  A dump id (`tN`), as `--skip-texture` names it.
  * @property {string | null} [probeTexture]
+ * @property {{ dumpFrames: number }} [liveDump]  frames to write down from now on, on
+ *     asking (app.debug.dumpFrames), as Direct3D 8 and 9 devices take it
  * @property {(ddraw: any, services: RenderServices) => any} [remote]
  *     Makes the Direct3D 7 object in this one's place, whose devices draw
  *     elsewhere (`remote/d3d7.js`).
@@ -248,6 +250,7 @@ export function createDirect3D7(ddraw, services = {}){
             maxDraws: services.maxDraws,
             skipTexture: services.skipTexture ?? null,
             probeTexture: services.probeTexture ?? null,
+            liveDump: services.liveDump,
         })
         : null;
 
@@ -963,8 +966,10 @@ export function createDirect3D7(ddraw, services = {}){
             },
 
             /**
-             * The product is the existing matrix times the new one, in the
-             * row-vector order: the new transform is applied after.
+             * The product is the given matrix times the existing one, as
+             * Direct3D documents it ("lpD3DMatrix times" the state) and Wine
+             * computes it: the given transform is applied first, inside what
+             * was there -- an object's own placement under its parent's.
              *
              * @param {number} type @param {ArrayLike<number>} matrix
              */
@@ -983,7 +988,7 @@ export function createDirect3D7(ddraw, services = {}){
                         let sum = 0;
                         for (let k = 0; k < 4; k++)
                         {
-                            sum += current[row * 4 + k] * matrix[k * 4 + column];
+                            sum += matrix[row * 4 + k] * current[k * 4 + column];
                         }
                         product[row * 4 + column] = sum;
                     }

@@ -413,6 +413,7 @@ export function serveGraphics(scope, deps){
         {
             played = playedDirect3D7({
                 ...options,
+                liveDump,
                 backend,
                 createSampler: (/** @type {any} */ descriptor)=>device.createSampler(descriptor),
                 writeMemory: wrote,

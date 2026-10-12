@@ -2711,8 +2711,9 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         },
 
         /**
-         * The current matrix times the given one, in that order: the given
-         * matrix is applied after what was there.
+         * The given matrix times the current one, as Direct3D documents it
+         * ("pMatrix times" the state) and Wine computes it: the given matrix
+         * is applied first, inside what was there.
          *
          * @param {number} type
          * @param {ArrayLike<number>} matrix
@@ -2722,7 +2723,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             {
                 return D3DERR_INVALIDCALL;
             }
-            const product = multiplyMatrices(transforms.get(type) ?? IDENTITY, matrix);
+            const product = multiplyMatrices(matrix, transforms.get(type) ?? IDENTITY);
             return setState(
                 record=>record.transforms.set(type, product),
                 ()=>transforms.set(type, product));

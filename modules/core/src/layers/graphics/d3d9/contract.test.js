@@ -513,7 +513,7 @@ test('clip planes are bounded by the capability and read back as zero until set'
     assert.equal(none.release(), 0);
 });
 
-test('a multiplied transform is the current one times the given one', ()=>{
+test('a multiplied transform is the given one times the current one', ()=>{
     const { device } = make();
     device.SetTransform(D3DTS.WORLD, [
         1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 10, 20, 30, 1,
@@ -524,8 +524,10 @@ test('a multiplied transform is the current one times the given one', ()=>{
     /** @type {{ matrix?: Float32Array }} */
     const out = {};
     device.GetTransform(D3DTS.WORLD, out);
-    // Row-vector convention: the translation goes through the scale.
-    assert.deepEqual([...(out.matrix ?? [])].slice(12), [20, 40, 60, 1]);
+    // Wine's multiply_matrix(mat, mat, matrix): the scale is applied first,
+    // inside the translation, which it leaves as it was.
+    assert.deepEqual([...(out.matrix ?? [])].slice(12), [10, 20, 30, 1]);
+    assert.equal(out.matrix?.[0], 2);
     assert.equal(device.release(), 0);
 });
 

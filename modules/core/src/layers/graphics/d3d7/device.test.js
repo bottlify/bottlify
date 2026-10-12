@@ -291,11 +291,13 @@ test('the world matrix is one here and 256 in D3D8, and a multiply composes in o
         assert.deepEqual([...(out.matrix ?? [])], scale);
     }
 
-    // World is translate; multiplying by scale is translate then scale, so
-    // the translation is doubled. The other order would leave it at five.
+    // World is translate; multiplying by scale is scale then translate, the
+    // given matrix times the one there (Wine's multiply_matrix(mat, mat,
+    // matrix)), so the translation stays at five. The other order doubles it.
     assert.equal(device.MultiplyTransform(D3DTRANSFORMSTATE.WORLD, scale), D3D_OK);
     assert.equal(device.GetTransform(D3DTRANSFORMSTATE.WORLD, out), D3D_OK);
-    assert.equal(out.matrix?.[12], 10);
+    assert.equal(out.matrix?.[12], 5);
+    assert.equal(out.matrix?.[0], 2, 'and the scale is kept');
 
     assert.equal(device.SetTransform(7, IDENTITY), DDERR_INVALIDPARAMS, 'not a transform');
     assert.equal(device.GetTransform(7, out), DDERR_INVALIDPARAMS);

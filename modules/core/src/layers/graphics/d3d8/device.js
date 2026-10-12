@@ -2043,10 +2043,9 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         },
 
         /**
-         * The transform already there, times the one given, in the order a
-         * row-vector convention multiplies them: the new matrix is applied
-         * after the old, which is what makes a chain of these read left to
-         * right.
+         * The one given times the transform already there, as Direct3D
+         * documents it ("pMatrix times" the state) and Wine computes it: the
+         * given matrix is applied first, inside what was there.
          *
          * @param {number} type
          * @param {ArrayLike<number>} matrix
@@ -2065,7 +2064,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                     let sum = 0;
                     for (let step = 0; step < 4; step++)
                     {
-                        sum += current[row * 4 + step] * matrix[step * 4 + column];
+                        sum += matrix[row * 4 + step] * current[step * 4 + column];
                     }
                     product[row * 4 + column] = sum;
                 }
