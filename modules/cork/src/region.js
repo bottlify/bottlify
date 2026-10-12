@@ -452,13 +452,16 @@ export function formShared(){
  * @param {(address: number) => number} read
  * @param {number} entry
  * @param {{ maxBlocks?: number, maxBytes?: number, leafBlocks?: number, leafBytes?: number,
+ *     formDepth?: number,
  *     switchEntries?: number,
  *     translatable?: (eip: number) => boolean, leafCalls?: boolean,
  *     callTargets?: Map<number, number[]>, shared?: FormShared,
  *     helpers?: boolean | readonly import('./helpers.js').RuntimeHelper[] }} [options]
  *     leafCalls: a small leaf callee is formed into its caller (see `isLeaf`), of
- *     `leafBlocks` blocks and `leafBytes` bytes at most; switchEntries: the most entries a
- *     switch's jump table is followed through; helpers: a
+ *     `leafBlocks` blocks and `leafBytes` bytes at most; formDepth: how many levels of
+ *     callees formed in may have direct calls of their own, formed in in turn when small
+ *     (1: a callee's callees leave; 0: only leaves are formed in); switchEntries: the most
+ *     entries a switch's jump table is followed through; helpers: a
  *     call to a compiler's runtime helper is formed as what it amounts to (helpers.js), those
  *     of RUNTIME_HELPERS or of the list given;
  *     callTargets:
@@ -471,6 +474,7 @@ export function formShared(){
 export function formRegion(read, entry,
     { maxBlocks = 128, maxBytes = 8192, translatable = ()=>true, leafCalls = true,
         callTargets, shared, helpers = true, leafBlocks = LEAF_BLOCKS, leafBytes = LEAF_BYTES,
+        formDepth = 1,
         switchEntries = SWITCH_ENTRIES } = {})
 {
     // Every page forming reads decides what it forms -- an import slot a call is predicted
@@ -813,7 +817,7 @@ export function formRegion(read, entry,
                     // A small callee is formed into its caller: the call
                     // becomes a jump inside the region, and its return, when
                     // it comes back to this call's return address, one too.
-                    const apart = leafAt(callee, depth === 0);
+                    const apart = leafAt(callee, depth < formDepth);
                     if (apart === null)
                     {
                         follow(callee, depth + 1);

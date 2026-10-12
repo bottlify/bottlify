@@ -106,6 +106,37 @@ evidence again.
   wanted them, and every one adds a read-back to the GPU's queue. Not kept.
 - Not recorded: GPU (Parallels display adapter, model not recorded), driver, power plan.
 
+### 2026-10-12 -- callees formed in two and three levels deep (`formDepth`)
+
+- **Idea.** A callee of at most 16 blocks / 512 bytes is formed into its caller with one level of
+  its own calls; its callees' calls leave as wasm calls with the state written back. Far Cry's
+  counts (`mechanisms`, `roadmap/cork/README.md` step 0b) put 22% of its calls out of a region at a
+  call inside a callee already formed in. Forming those as well (`formDepth` 2 or 3) would take
+  them in.
+- **Workload.** cork-bench in the browser (`modules/cork/bench/browser/suite.mjs --scale 10 --reps
+  3`), both builds, all eight workloads, one bundle `head` of `cork2` at `7ea60178` with the
+  setting, three configurations interleaved: `formDepth` 1 (today), 2, 3. Bundle hash: not
+  recorded.
+- **Values.** Best of three reps, MIPS, d1 / d2 / d3: x87 vm 3382/3437/3225, entities 802/806/837,
+  math 1897/1905/1927, path 2356/2366/2217, lz 4420/4419/4433, containers 2166/2180/2174, spread
+  345/356/351, api 773/736/689; sse vm 3351/3173/3281, entities 758/762/779, math 2263/2254/2312,
+  path 2063/2313/2185, lz 4333/4386/4490, containers 2106/2059/2029, spread 350/348/346, api
+  780/719/788. Geomean 1531 / 1530 (1.00x) / 1526 (1.00x). Noise: the three reps of one
+  configuration and workload differed by 13.1% at the median, 24.3% at most (144 runs). Every
+  checksum the processor's. Native beside them: geomean 4683, spread 5.3-5.7x, entities 4.6-4.9x.
+- **Machine.** Headless Chromium 141.0.7390.37 on SwiftShader, a 4-core x86-64 Linux VM
+  (Firecracker). Power plan: not recorded.
+- **Why it did not pay.** Not found. The gate's programs (`src/runtime/forming.itest.js`) show the
+  setting takes calls in (calls out 3074 / 1358 / 668 / 267 for depths 0-3 over 40 seeds), so the
+  calls go; their cost on these workloads is under the noise, or the code formed in again in every
+  caller costs what the call saved.
+- **Correctness.** The gate: 120 seeded programs of functions calling one another (`ret imm`,
+  returns moved past their caller's bytes, stores into another function's code) run interpreted,
+  with nothing formed in, leaves alone and one, two and three levels, every observable the same; a
+  mutation that took every formed `ret` back to its call failed it at seed 5.
+- **Decision.** Left at 1. `formDepth` stays a setting with its gate, for a game measurement on
+  the person's machine before it is tried again.
+
 ## Invalidated
 
 None yet.

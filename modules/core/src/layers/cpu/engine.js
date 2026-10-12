@@ -226,6 +226,8 @@
  * @property {boolean} [leafCalls]  A small leaf callee formed into its caller. Default true.
  * @property {number} [leafBlocks]  Its blocks at most. Default 16.
  * @property {number} [leafBytes]  Its bytes at most. Default 512.
+ * @property {number} [formDepth]  How many levels of callees formed in may keep direct calls
+ *     of their own, those callees formed in as well when small; 0 forms leaves alone. Default 1.
  * @property {number} [switchEntries]  Entries of a switch's jump table followed when forming.
  *     Default 1024.
  * @property {boolean} [runtimeHelpers]  A call to a compiler's runtime helper (MSVC's `_ftol2`)

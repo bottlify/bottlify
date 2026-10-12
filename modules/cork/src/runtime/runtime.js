@@ -341,6 +341,9 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         // most; and the most entries of a switch's jump table followed when forming.
         leafBlocks: 16,
         leafBytes: 512,
+        // Levels of callees formed in that may keep direct calls of their own,
+        // their small callees formed in as well (`formRegion`).
+        formDepth: 1,
         switchEntries: 1024,
         ...config,
     };
@@ -373,7 +376,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     const formOptions = { maxBlocks: settings.maxRegionBlocks,
         maxBytes: settings.maxRegionBytes, leafCalls: settings.leafCalls,
         helpers: settings.runtimeHelpers !== false, leafBlocks: settings.leafBlocks,
-        leafBytes: settings.leafBytes, switchEntries: settings.switchEntries };
+        leafBytes: settings.leafBytes, switchEntries: settings.switchEntries,
+        formDepth: settings.formDepth };
     /** @type {Set<string>} instruction classes left to the other executor */
     const leaveOut = new Set(settings.leaveOut ?? []);
     if (layout.tables + tablesSize(layout) > memory.buffer.byteLength)

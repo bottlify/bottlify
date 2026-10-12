@@ -165,6 +165,7 @@ something, and measure it.
 | `structure` | `true` | A region's loops as wasm loops. | `false` sends every back edge through the region's dispatch: much slower; for comparison only. |
 | `leafCalls` | `true` | A small leaf callee formed into its caller. | Off to rule it out. |
 | `leafBlocks`, `leafBytes` | 16, 512 | How large such a callee may be. | Larger inlines more and grows regions. |
+| `formDepth` | 1 | How many levels of callees formed in may keep direct calls of their own, their small callees formed in as well (0: leaves alone). | Deeper forms more of a call chain into one region and grows it; the region's limits bound it. |
 | `switchEntries` | 1024 | Entries of a switch's jump table followed when forming. | Larger for giant switches (interpreters); regions grow. |
 | `runtimeHelpers` | `true` | Compiler helpers such as MSVC's `_ftol2` formed as what they do. | Off to rule it out. |
 | `callReturn` | `true` | A call out of a region is a wasm call, and the region goes on after the `ret`. | Off makes every return go through the entry hash. |

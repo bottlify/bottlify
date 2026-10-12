@@ -291,6 +291,9 @@ By 0b's Far Cry counts, forming could still take about half of the calls that go
 - **1a.** A second level: the calls of a callee formed in are formed in as well when small, within
   a byte budget per region (nested, 22%). The limits and the region budget are re-measured against
   code growth (full and over the limits, 25%). Growth is bounded by a byte budget per region.
+  *Tried:* `formDepth` 2 and 3 (a setting now, with its gate `src/runtime/forming.itest.js`) took
+  the calls in and changed nothing measurable on cork-bench in Chromium (geomean 1.00x, noise 13%);
+  left at 1, in `negative-results.md`, until a game on the person's machine says otherwise.
 - **1b.** A singleton with a static (`test [guard]; jne; …; ret`) and thin wrappers (a `jmp`
   through an incremental-link thunk table, `r3003693f`) are a case of 1a. No code of their own,
   only a check that 1a takes them.
