@@ -1571,6 +1571,62 @@ function inverseRotation(view){
  * @property {{ floats: Float32Array, ints: Int32Array, bools: Uint32Array }} pixelConstants
  */
 
+/** A number of a dump line, four digits at most. @param {number} x */
+const brief = x=>String(Number(x.toPrecision(4)));
+
+/**
+ * The float constants a shader reads, as a dump line gives them: each register
+ * read by number with its four values, and the first register of each range
+ * read through the address register, whose values the line leaves out. A
+ * register the shader defines itself is its own and not listed.
+ *
+ * @param {import('../d3d9/shader.js').ParsedShader | null} shader
+ * @param {Float32Array} floats  the stage's constant file
+ */
+export function describeConstants(shader, floats){
+    if (!shader)
+    {
+        return '-';
+    }
+    /** @type {Set<number>} */
+    const defined = new Set();
+    /** @type {Set<number>} */
+    const direct = new Set();
+    /** @type {Set<number>} */
+    const relative = new Set();
+    for (const instruction of shader.instructions)
+    {
+        if (instruction.opcode === OPCODE.DEF && instruction.dest)
+        {
+            defined.add(instruction.dest.index);
+            continue;
+        }
+        for (const source of instruction.sources)
+        {
+            if (source.type === REGISTER.CONST)
+            {
+                (source.relative ? relative : direct).add(source.index);
+            }
+        }
+    }
+    const read = [...direct].filter(index=>!defined.has(index)).sort((a, b)=>a - b)
+        .map(index=>`c${index}(${Array.from(floats.subarray(index * 4, index * 4 + 4), brief)
+            .join(',')})`);
+    const ranges = [...relative].sort((a, b)=>a - b).map(index=>`c${index}[a]`);
+    return [...read, ...ranges].join(' ') || '-';
+}
+
+/**
+ * A vertex declaration as a dump line gives it: each element's stream,
+ * offset, type and usage with its index.
+ *
+ * @param {readonly import('../webgpu/internal/programmable.js').VertexElement[] | null} elements
+ */
+export function describeDeclaration(elements){
+    return elements ? elements.map(element=>`${element.Stream}:${element.Offset}`
+        + `:t${element.Type}:u${element.Usage}/${element.UsageIndex}`).join(',') : '-';
+}
+
 /**
  * @param {RenderModel} model
  * @param {number} type D3DTS
@@ -3752,6 +3808,7 @@ export function createRenderer(options){
      */
     const dumpProgram = (model, prepared, count)=>{
         const program = prepared.program;
+        const held = model.stageProcessing.program;
         // Each shader's bytecode once a run, in hex, before the first draw
         // that ran it: a program's own shaders come as bytecode, with no
         // source a report could show.
@@ -3814,7 +3871,13 @@ export function createRenderer(options){
             + ` target=${describeTarget(model)}`
             + ` view=${model.viewport.rect.x},${model.viewport.rect.y}`
             + `+${model.viewport.rect.width}x${model.viewport.rect.height}`
-            + ` [${bound}]`);
+            + ` [${bound}]`
+            // What the shaders compute from besides the textures: a picture
+            // drawn black under right shaders is a constant, or a vertex
+            // element, that reached them as zero.
+            + (held ? ` layout=${describeDeclaration(held.declaration)}`
+                + ` vc=${describeConstants(held.vertex, held.vertexConstants.floats)}`
+                + ` pc=${describeConstants(held.pixel, held.pixelConstants.floats)}` : ''));
     };
 
     /**
