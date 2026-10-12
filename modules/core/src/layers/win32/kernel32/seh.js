@@ -543,7 +543,12 @@ export function createSeh(host){
             && host.isMapped(what.address >>> 0)
             ? ` (${[...host.readMemory(what.address >>> 0, 8)]
                 .map(byte=>byte.toString(16).padStart(2, '0')).join(' ')})` : '';
-        host.trace?.(`exception ${hex(what.code)} at ${hex(what.address)}${refused}${caller}, `
+        // An access violation names the address it could not reach, and
+        // whether it read or wrote there: what a caught one was after.
+        const reached = what.code === STATUS.ACCESS_VIOLATION && what.parameters?.length === 2
+            ? ` ${what.parameters[0] ? 'writing' : 'reading'} ${hex(what.parameters[1])}` : '';
+        host.trace?.(`exception ${hex(what.code)} at ${hex(what.address)}${reached}${refused}`
+            + `${caller}, `
             + `${frames.length} frame(s)${damaged ? ', chain damaged' : ''}`);
 
         for (const { frame, handler } of frames)
