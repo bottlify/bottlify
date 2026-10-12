@@ -1831,8 +1831,8 @@ test('user clip planes: world planes through the world for the fixed stages, cli
     }
 });
 
-test('a shader draw into a texture bound to its own sampler samples the placeholder, and the frame'
-    + ' is drawn', async()=>{
+test('a shader draw into a texture bound to its own sampler samples a copy taken before it, and'
+    + ' the frame is drawn', async()=>{
     const h = harness();
     /** @type {{ shader?: any }} */
     const vs = {};
@@ -1855,7 +1855,9 @@ test('a shader draw into a texture bound to its own sampler samples the placehol
     assert.deepEqual(h.gpu.errors, [], 'the device took the frame');
     const draw = h.device.diagnostics().lastFrame.find(
         (/** @type {any} */ command)=>command.kind === 'draw');
-    assert.equal(draw.program.samplerBindings[0].placeholder, true);
+    const binding = draw.program.samplerBindings[0];
+    assert.ok(!binding.placeholder);
+    assert.equal(binding.view.texture.descriptor.label, 'target-snapshot');
 });
 
 test('table fog through a vertex shader is taken over the depth, whatever the projection set',

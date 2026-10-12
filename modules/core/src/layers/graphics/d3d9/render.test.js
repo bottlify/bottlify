@@ -1465,11 +1465,13 @@ test('StretchRect scales one target over another on the GPU, filtered as asked',
         && JSON.stringify(v).includes('6')), JSON.stringify(viewports));
 });
 
-test('a texture left bound while a level of it is the target samples the placeholder, and the'
-    + ' frame is drawn', async()=>{
-    // Direct3D draws a stage bound to the texture being rendered into, its
-    // reads undefined; WebGPU refuses the pass that does both, and with it the
-    // frame's command buffer, so the screen kept the frame before for good.
+test('a texture left bound while it is the target samples a copy of it taken before the draw,'
+    + ' and the frame is drawn', async()=>{
+    // Direct3D draws a stage bound to the texture being rendered into, and a
+    // card gives each pixel what the target held before the draw: a post
+    // effect blending a glow into the scene copy it reads relies on it, and the
+    // placeholder made its picture black. WebGPU refuses the pass that does
+    // both, and with it the frame's command buffer.
     const h = harness({ width: 8, height: 8 });
     const device = h.device;
     /** @type {{ texture?: any }} */
@@ -1503,7 +1505,16 @@ test('a texture left bound while a level of it is the target samples the placeho
     const draws = h.device.diagnostics().lastFrame
         .filter((/** @type {any} */ command)=>command.kind === 'draw');
     assert.equal(draws.length, 2);
-    assert.equal(draws[0].stageBindings[0].placeholder, true, 'the target is not sampled');
+    const snapshot = draws[0].stageBindings[0].view;
+    assert.ok(!draws[0].stageBindings[0].placeholder, 'not the placeholder');
+    assert.equal(snapshot.texture.descriptor.label, 'target-snapshot');
     assert.equal(draws[1].stageBindings[0].placeholder, false,
         'drawn elsewhere, the texture is sampled as bound');
+    const order = h.gpu.calls.filter((/** @type {any} */ call)=>call.op === 'draw'
+        || call.op === 'copyTextureToTexture');
+    assert.deepEqual(order.map((/** @type {any} */ call)=>call.op),
+        ['copyTextureToTexture', 'draw', 'draw'], 'copied before the draw that reads it');
+    assert.equal(order[0].destination.texture, snapshot.texture);
+    assert.equal(order[0].source.texture, draws[1].stageBindings[0].view.texture,
+        'the copy is of the bound texture');
 });

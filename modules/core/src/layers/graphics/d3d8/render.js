@@ -6984,13 +6984,15 @@ export function createRenderer(options){
      * A draw's bindings with any texture it is drawing into put out of reach.
      *
      * Direct3D lets a texture stay bound to a stage while a level of it is the
-     * render target or the depth buffer; what such a draw samples is undefined
-     * there, and it draws. WebGPU refuses a pass that samples a texture it
-     * renders into, and with it the whole frame's command buffer: a program that
-     * leaves its target bound on a stage -- whether or not the stage is read --
-     * showed nothing at all, the last frame it drew before standing on the
-     * screen for good. The stage samples the placeholder instead, which is
-     * what an unbound stage reads, and that is said once.
+     * render target or the depth buffer. What such a draw samples is undefined
+     * there, and hardware gives a pixel what the target held before the draw:
+     * a post effect that blends a glow into the scene copy it reads, texel for
+     * pixel, works on every card. WebGPU refuses a pass that samples a texture
+     * it renders into, and with it the whole frame's command buffer. So the
+     * target is copied, just before the draw, into a snapshot the stage reads
+     * instead -- the hardware's answer, at one copy a draw. A target with more
+     * than one level, and a depth buffer, read the placeholder (what an
+     * unbound stage reads), and that is said once.
      *
      * @param {RenderModel} model
      * @param {{ view: any, sampler: any, placeholder?: boolean, record?: any,
@@ -7015,6 +7017,13 @@ export function createRenderer(options){
             {
                 safe = bindings.slice();
             }
+            if (sampled === target && target.gpu && target.gpuLevels === 1 && target.faces === 1
+                && !target.volume)
+            {
+                safe[index] = { ...bindings[index], record: null,
+                    view: targetSnapshot(target.gpu).view };
+                continue;
+            }
             safe[index] = { ...bindings[index], record: null, placeholder: true,
                 view: placeholderView(textureDimensionOf(bindings[index].texture)) };
             if (divergence && !targetSampledReported)
@@ -7027,6 +7036,40 @@ export function createRenderer(options){
         return safe;
     };
     let targetSampledReported = false;
+    /** One snapshot texture a size and format, reused by every such draw. @type {Map<string, any>} */
+    const snapshots = new Map();
+    /**
+     * A copy of a render target as it stands, recorded at this point of the
+     * frame; the encoder closes the pass for it and reopens it loading.
+     *
+     * @param {any} surface  the target texture's GPU surface
+     */
+    const targetSnapshot = surface=>{
+        const key = `${surface.width}x${surface.height}:${surface.format}`;
+        let snapshot = snapshots.get(key);
+        if (!snapshot)
+        {
+            snapshot = backend.createSurface({
+                width: surface.width,
+                height: surface.height,
+                format: surface.format,
+                label: 'target-snapshot',
+                usage: TextureUsage.TEXTURE_BINDING | TextureUsage.COPY_DST
+                    | (dumpDraws ? TextureUsage.COPY_SRC : 0),
+            });
+            snapshots.set(key, snapshot);
+        }
+        ensureFrame().commands.push({
+            kind: 'copy',
+            source: surface,
+            destination: snapshot,
+            sourceOrigin: { x: 0, y: 0 },
+            destinationOrigin: { x: 0, y: 0 },
+            width: surface.width,
+            height: surface.height,
+        });
+        return snapshot;
+    };
 
     /** A draw command of the one shape every draw is recorded in. */
     const blankDraw = ()=>({
