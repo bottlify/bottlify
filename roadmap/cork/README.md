@@ -209,6 +209,14 @@ needs. For readable traces: `BOTTLIFY_READABLE=1 npm run build`, a build without
 whose profile names the real functions.
 
 **0a. A region's code as the game compiled it.**
+- A diagnostic query `regionCode(address)` to the runtime: the wasm bytes, the options, the blocks,
+  the entries and the region's **module** (image and offset).
+- The report fills `guestByModule` (empty in Far Cry's report today): time and instructions by
+  module, so the table in 1.2 can be built for any title, not only from DLLs read by hand.
+- The report carries the top N regions' composition by form (the `expansion` hook stays off in a
+  plain build).
+- `cork-expansion --report` reads it instead of translating statically.
+- Test: a region from the report, translated again with the same options, matches byte for byte.
 
 *Done in part (`5ecd6a38`):* a run with `blockProfile` reports `forms` — its hottest regions (up
 to 300, or 95% of the counted executions) formed again as their records were and emitted with the
@@ -222,16 +230,6 @@ forms by bytes run through: `fmul x87,[m]` 10.1% (56 B), `call [m]` 8.5% (360 B)
 calls and returns are ~13% of the bytes and x87 ~25%. An x87 operation in a region whose stack shape
 is known is little more than its load and its arithmetic — bytes overstate its time; a call's bytes
 are stores and loads of the state block, which they do not. The module of a region is still to come.
-
-**0a. A region's code as the game compiled it.**
-- A diagnostic query `regionCode(address)` to the runtime: the wasm bytes, the options, the blocks,
-  the entries and the region's **module** (image and offset).
-- The report fills `guestByModule` (empty in Far Cry's report today): time and instructions by
-  module, so the table in 1.2 can be built for any title, not only from DLLs read by hand.
-- The report carries the top N regions' composition by form (the `expansion` hook stays off in a
-  plain build).
-- `cork-expansion --report` reads it instead of translating statically.
-- Test: a region from the report, translated again with the same options, matches byte for byte.
 
 **0b. Counters of the mechanisms** (diagnostic builds only, behind a flag):
 - region entries;
