@@ -55,6 +55,12 @@ async function spawnOn(t){
         lifecycle.push(`resumed ${event.code}`));
     app.on('message-box', (/** @type {any} */ event)=>
         lifecycle.push(`box ${event.id} ${event.caption} ${JSON.stringify(event.exit)}`));
+    /** @type {any[]} */
+    const tables = [];
+    /** @type {number[]} */
+    const closed = [];
+    app.on('sound-table', (/** @type {any} */ event)=>tables.push(event));
+    app.on('sound-table-closed', (/** @type {any} */ event)=>closed.push(event.id));
 
     const code = await app.run({ timeoutMs: 60000 });
 
@@ -75,6 +81,17 @@ async function spawnOn(t){
         'child C:\\App\\spawn_child.exe', 'resumed 0',
         'box 0 spawn.exe {"code":0}',
     ], 'the game is over only when the parent is: a child ending with 0 is not it');
+    // Each child's sound is its own table, not the run's: built on the run's,
+    // a child was taken for the process in its parent's place and closed the
+    // parent's tracks, its music going silent at the first child.
+    const run = app.audio.memory();
+    if (run && 'table' in run)
+    {
+        assert.equal(tables.length, 2, 'a table for each child');
+        assert.ok(tables.every(one=>one.table !== run.table
+            && one.table instanceof SharedArrayBuffer));
+        assert.deepEqual(closed, tables.map(one=>one.id), 'and each given back as its child went');
+    }
 }
 
 /**

@@ -8505,6 +8505,41 @@ export async function createApp(options){
         };
     };
 
+    /** The tables `ownSound` has named to the page so far. */
+    let soundTables = 0;
+    /**
+     * The sound of a process started beside another on this thread: a table
+     * of its own, which the page is told of and mixes with the run's
+     * (`sound-table`), and forgets once the process is gone
+     * (`sound-table-closed`) -- two processes' sound as two films' playing
+     * at once. On the run's table a process beside another was built as the
+     * one in its place, and closed every track it found open there: the
+     * parent's music went silent at its first child.
+     */
+    const ownSound = ()=>{
+        const id = ++soundTables;
+        let told = false;
+        return {
+            options: { ...options.audio, memory: undefined, beside: undefined },
+            /** @param {any} built */
+            announce(built){
+                const memory = built?.audio?.memory?.();
+                if (memory && 'table' in memory)
+                {
+                    told = true;
+                    events.emit('sound-table', { id, table: memory.table });
+                }
+            },
+            giveBack(){
+                if (told)
+                {
+                    told = false;
+                    events.emit('sound-table-closed', { id });
+                }
+            },
+        };
+    };
+
     /**
      * Starts a class's server beside the process that asked for it, with
      * `-Embedding` after its command line as COM starts one, and runs it
@@ -8517,7 +8552,7 @@ export async function createApp(options){
      */
     const startServer = async(parent, request)=>{
         const found = await serverImage(parent, request.command);
-        const sound = lendSound(parent);
+        const sound = ownSound();
         if (!found)
         {
             events.emit('divergence', { api: 'COM',
@@ -8531,6 +8566,7 @@ export async function createApp(options){
             ...newProcessIds(),
             audio: sound.options,
         });
+        sound.announce(server);
         // A line of processes of its own: a server that starts a child and
         // waits on it, or hands over to another image, is run the way the
         // program the page started is.
@@ -8583,6 +8619,7 @@ export async function createApp(options){
         }
         noteLogSequence();
         mediaInstance = parent.media.instance() ?? mediaInstance;
+        const sound = ownSound();
         line.current = await build({
             executable: image,
             imagePath: request.imagePath,
@@ -8592,7 +8629,9 @@ export async function createApp(options){
             mainThreadId: request.threadId,
             standardFiles: request.standardFiles,
             startDirectory: request.startDirectory,
+            audio: sound.options,
         });
+        sound.announce(line.current);
         replayLogLevels();
         stand(line.current);
         bindLogLevels();
@@ -8626,6 +8665,7 @@ export async function createApp(options){
         mediaInstance = child.media.instance() ?? mediaInstance;
         await child.dispose();
         keepMemory(child);
+        sound.giveBack();
 
         line.current = parent;
         replayLogLevels();
@@ -9282,7 +9322,7 @@ export async function createApp(options){
         const running = (async()=>{
             /** @type {any} */
             let child = null;
-            const sound = lendSound(parent);
+            const sound = ownSound();
             try
             {
                 const image = await parent.readImage(request.imagePath);
@@ -9306,6 +9346,7 @@ export async function createApp(options){
                         startDirectory: request.startDirectory,
                         audio: sound.options,
                     });
+                    sound.announce(child);
                 }
             }
             catch (e){
