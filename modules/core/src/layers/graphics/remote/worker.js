@@ -105,6 +105,8 @@ export function serveGraphics(scope, deps){
         bufferLocks: '',
         /** Textures whose draws are dropped (`app.debug.skipTexture`), `t12,t40`; '' none. */
         skipTexture: '',
+        /** Shaders whose draws are dropped (`app.debug.skipShader`), `vs12,ps40`; '' none. */
+        skipShader: '',
         /** How occlusion counts are answered (`app.debug.occlusion`): '' as counted, 'visible' all passed. */
         occlusion: '',
         /** Draws kept a frame (`app.debug.maxDraws`), the rest dropped; -1 all. */
@@ -523,6 +525,10 @@ export function serveGraphics(scope, deps){
                 if ('skipTexture' in data)
                 {
                     liveDump.skipTexture = String(data.skipTexture ?? '');
+                }
+                if ('skipShader' in data)
+                {
+                    liveDump.skipShader = String(data.skipShader ?? '');
                 }
                 if ('occlusion' in data)
                 {

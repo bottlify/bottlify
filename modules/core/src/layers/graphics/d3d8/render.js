@@ -2815,7 +2815,8 @@ const CLEAR_STRIDE = 20;
  *     Every draw reads the bytes it reaches from guest memory again, held
  *     lock or not -- a debugging aid, for a program that writes a buffer
  *     outside its locks.
- * @property {{ dumpFrames: number, bufferLocks?: string, skipTexture?: string, occlusion?: string,
+ * @property {{ dumpFrames: number, bufferLocks?: string, skipTexture?: string,
+ *     skipShader?: string, occlusion?: string,
  *     maxDraws?: number, written?: (lines: string[], frame: number) => void,
  *     replayLast?: (cut?: number) => boolean,
  *     shownDraws?: () => { lines: string[], sceneDraws: number },
@@ -2884,6 +2885,11 @@ export function createRenderer(options){
     const dumpDraws = options.dumpDraws === true;
     const nanProbe = options.nanProbe === true;
     const tableFogOverDepth = options.driverRules === 'current';
+    // Under a vertex shader a 1.0 to 1.3 pixel shader's D3DTTFF_PROJECTED
+    // divides by the coordinate's w whatever count the flags name, as the
+    // drivers of that generation did (decisions.md A44); later drivers and
+    // Wine divide by the count's last component.
+    const projectByCount = options.driverRules === 'current';
     const rectangleBump = options.rectangleBump === true;
     const dumpEvery = Math.max(0, Math.floor(options.dumpEvery ?? 0));
     // Asked for on a running program: the next frames with draws are written
@@ -2901,6 +2907,8 @@ export function createRenderer(options){
     /** The textures whose draws are dropped: the device's own, or what a running program was given. */
     const skipTextures = ()=>(liveDump?.skipTexture
         ? new Set(liveDump.skipTexture.split(',').filter(Boolean)) : fixedSkips);
+    /** The shaders whose draws are dropped, `vs12,ps40` as a dump names them: a running program's. */
+    const skipShaders = ()=>new Set((liveDump?.skipShader ?? '').split(',').filter(Boolean));
     const probeTexture = options.probeTexture ?? null;
     const compressedTextures = options.compressedTextures === true;
     // A device made with `clip-distances` clips by the distances a vertex
@@ -3788,7 +3796,8 @@ export function createRenderer(options){
             // to clamp, not a triangle to drop.
             + `/clip${model.renderStates.get(D3DRS.CLIPPING) ?? 1}`
             + ` cull=${state.cullMode}`
-            + ` blend=${state.blend ? `${state.srcBlend},${state.destBlend}` : '-'}`
+            + ` blend=${state.blend ? `${state.srcBlend},${state.destBlend}`
+                + `${state.blendOp && state.blendOp !== 1 ? `/op${state.blendOp}` : ''}` : '-'}`
             + ` aTest=${state.alphaTest
                 ? `${state.alphaFunc}/${model.renderStates.get(D3DRS.ALPHAREF) ?? 0}`
                 : '-'}`
@@ -3859,6 +3868,13 @@ export function createRenderer(options){
         dump.push(`#${dump.length} program n=${count}`
             + ` vs=${state.vertexShader} ps=${state.pixelShader}`
             + ` decl=${program.declarationId}`
+            // A 1.0 to 1.3 pixel shader still reads each stage's transform
+            // flags for its projective divide: the flags as the program set them.
+            + `${(held?.pixel?.version?.major ?? 2) < 2
+                && (held?.pixel?.version?.minor ?? 4) < 4
+                ? ` ttf=${Array.from({ length: LEGACY_STAGES }, (_, stage)=>
+                    (model.stageStates(stage).get(D3DTSS.TEXTURETRANSFORMFLAGS) ?? 0).toString(16))
+                    .join(',')}` : ''}`
             // The fog stage below model 3 runs after the shader too, so a
             // program's draw is another place its numbers can be wrong.
             + ` fog=${fogSourceOf(state) === FOG_SOURCE.NONE
@@ -3867,7 +3883,8 @@ export function createRenderer(options){
             // shader, and without a pixel shader so does the stage cascade:
             // a quad drawn under them can paint nothing at all.
             + ` cw=${state.colorWrite}`
-            + ` blend=${state.blend ? `${state.srcBlend},${state.destBlend}` : '-'}`
+            + ` blend=${state.blend ? `${state.srcBlend},${state.destBlend}`
+                + `${state.blendOp && state.blendOp !== 1 ? `/op${state.blendOp}` : ''}` : '-'}`
             + ` aTest=${state.alphaTest
                 ? `${state.alphaFunc}/${model.renderStates.get(D3DRS.ALPHAREF) ?? 0}` : '-'}`
             // The depth test and the bias a layer leans on to stay in front of the surface it
@@ -6112,6 +6129,7 @@ export function createRenderer(options){
         const stageDimensions = [];
         /** @type {string[]} */
         const projectedBy = [];
+        const shaded = Boolean(program.vertex) && !projectByCount;
         for (let stage = 0; stage < LEGACY_STAGES; stage++)
         {
             stageDimensions.push(textureDimensionOf(model.textures.get(stage)));
@@ -6120,7 +6138,7 @@ export function createRenderer(options){
                 : model.stageStates(stage).get(D3DTSS.TEXTURETRANSFORMFLAGS) ?? 0;
             projectedBy.push((flags & TTFF_PROJECTED) === 0
                 ? ''
-                : PROJECTED_BY[flags & 0xff] ?? '');
+                : shaded ? 'w' : PROJECTED_BY[flags & 0xff] ?? '');
         }
         const stages = `${stageDimensions.join(',')}|${projectedBy.join(',')}`;
         return {
@@ -6992,14 +7010,18 @@ export function createRenderer(options){
         {
             throw new Error('pick: no frame has been shown');
         }
-        const { lines, sceneDraws } = shownDraws();
-        const { width, height } = shown.surface;
-        const px = Math.min(width - 1, Math.max(0, Math.round(x ?? width / 2)));
-        const py = Math.min(height - 1, Math.max(0, Math.round(y ?? height / 2)));
+        const { lines, sceneDraws, scene: read } = shownDraws();
+        // A program that draws its scene into a texture and puts it on the
+        // screen with a pass at the end is read in that texture, at the place
+        // the shown pixel scales to.
+        const { width, height } = read;
+        const px = Math.min(width - 1, Math.max(0, Math.round(
+            (x ?? shown.surface.width / 2) * width / shown.surface.width)));
+        const py = Math.min(height - 1, Math.max(0, Math.round(
+            (y ?? shown.surface.height / 2) * height / shown.surface.height)));
         /** @param {number} cut @returns {Promise<number[]>} red, green, blue */
         const pixelAt = async cut=>{
-            const job = chain.then(()=>replay(shown.recorded, shown.surface, shown.surface,
-                { cut }));
+            const job = chain.then(()=>replay(shown.recorded, shown.surface, read, { cut }));
             chain = job.catch(failure);
             const bytes = /** @type {{ data: Uint8Array }} */ (await job).data;
             const at = (py * width + px) * 4;
@@ -7062,13 +7084,16 @@ export function createRenderer(options){
     const shownDraws = ()=>{
         if (lastShown === null)
         {
-            return { lines: [], sceneDraws: 0 };
+            return { lines: [], sceneDraws: 0, scene: null };
         }
         /** @type {string[]} */
         const lines = [];
         /** @type {boolean[]} */
         const intoTexture = [];
         let target = null;
+        /** Draws by the surface they went into, and the last of each. */
+        /** @type {Map<any, { count: number, last: number }>} */
+        const into = new Map();
         for (const command of lastShown.recorded.commands)
         {
             if (command.kind === 'pass')
@@ -7080,6 +7105,10 @@ export function createRenderer(options){
             {
                 continue;
             }
+            const seen = into.get(target) ?? { count: 0, last: 0 };
+            seen.count++;
+            seen.last = lines.length;
+            into.set(target, seen);
             const bound = (command.stageBindings ?? []).map((/** @type {any} */ binding)=>
                 (!binding.placeholder && binding.texture ? describeTexture(binding.texture) : '-'))
                 .join(' ');
@@ -7098,7 +7127,20 @@ export function createRenderer(options){
         {
             at--;
         }
-        return { lines, sceneDraws: at > 0 ? at : lines.length };
+        // Where the scene went: the shown surface when draws reached it
+        // before the frame's last passes, else the surface most draws went
+        // into, to the last of them.
+        // Where the scene went: the surface most draws went into, when it is
+        // not the shown one -- a program that draws its scene into a texture
+        // and puts it on the screen with a few passes at the end.
+        const [surface, most] = [...into].sort((a, b)=>b[1].count - a[1].count)[0]
+            ?? [lastShown.surface, { count: 0, last: lines.length - 1 }];
+        if (surface && surface !== lastShown.surface
+            && most.count > (into.get(lastShown.surface)?.count ?? 0))
+        {
+            return { lines, sceneDraws: most.last + 1, scene: surface };
+        }
+        return { lines, sceneDraws: at > 0 ? at : lines.length, scene: lastShown.surface };
     };
 
     /**
@@ -8126,6 +8168,13 @@ export function createRenderer(options){
         if (processing.program && (processing.vertexShader !== 0 || processing.pixelShader !== 0))
         {
             const prepared = prepareProgram(model, stride, topology, processing.program);
+            const shaders = skipShaders();
+            if (prepared && shaders.size > 0 && (shaders.has(`vs${prepared.state.vertexShader}`)
+                || shaders.has(`ps${prepared.state.pixelShader}`)))
+            {
+                skip('program');
+                return null;
+            }
             const skipped = skipTextures();
             if (prepared && skipped.size > 0 && prepared.program?.samplerBindings?.some(
                 (/** @type {any} */ binding)=>!binding.placeholder

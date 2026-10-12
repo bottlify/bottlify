@@ -371,6 +371,50 @@ test('a ps_1_1 reads each stage as bound, projects as the stage asks, and bumps 
         assert.equal(h.device.release(), 0);
     });
 
+test('under a vertex shader a ps_1_1 projects by w whatever count the flags name, by the count'
+    + ' under current driver rules', async()=>{
+    // Prince of Persia: Warrior Within's water writes (u w, v w, w, w) from its
+    // vertex shader and sets D3DTTFF_COUNT2 | D3DTTFF_PROJECTED: drivers of
+    // its time divided by w, Wine divides by the count's last, y, and the
+    // screen it reads was drawn as stripes (decisions.md A44).
+    /** @param {'legacy' | 'current' | undefined} driverRules */
+    const divided = async driverRules=>{
+        const h = harness({ driverRules });
+        /** @type {{ shader?: any }} */
+        const vs = {};
+        /** @type {{ shader?: any }} */
+        const ps = {};
+        assert.equal(h.device.CreateVertexShader(VERTEX_SHADER, vs), D3D_OK);
+        assert.equal(h.device.CreatePixelShader([
+            versionToken(SHADER_KIND.PIXEL, 1, 1),
+            0x00000042, 0xb00f0000,
+            0x00000001, 0x800f0000, 0xb0e40000,
+            END_TOKEN,
+        ], ps), D3D_OK);
+        h.device.SetVertexShader(vs.shader);
+        h.device.SetPixelShader(ps.shader);
+        h.device.SetTexture(0, h.texture);
+        h.device.SetTextureStageState(0, D3DTSS.TEXTURETRANSFORMFLAGS, 2 | 0x100);
+        await h.draw();
+        const code = h.gpu.of('createShaderModule').map(call=>call.descriptor)
+            .find(module=>module.label.startsWith('ps:')).code;
+        h.device.SetTexture(0, null);
+        h.device.SetVertexShader(null);
+        h.device.SetPixelShader(null);
+        h.device.SetVertexDeclaration(null);
+        h.device.SetStreamSource(0, null, 0, 0);
+        vs.shader.release();
+        ps.shader.release();
+        h.texture.release();
+        h.declaration.release();
+        h.vb.release();
+        assert.equal(h.device.release(), 0);
+        return code;
+    };
+    assert.ok((await divided(undefined)).includes('(in.t0 / in.t0.w)'), 'legacy, the default');
+    assert.ok((await divided('current')).includes('(in.t0 / in.t0.y)'), 'current');
+});
+
 test('a ps_1_1 over a 2D texture and over a cube map draws through a pipeline for each',
     async()=>{
         // A 1.x read samples whatever dimension is bound at its stage, so the

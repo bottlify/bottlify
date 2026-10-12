@@ -8046,6 +8046,21 @@ function liveDumpOf(worker, control){
             return ids;
         },
         /**
+         * Drops every draw made with one of these shaders from now on --
+         * `vs12,ps40` as a frame dump names them, '' none: the effect one
+         * shader paints, found by taking it away.
+         *
+         * @param {string} [ids]
+         */
+        skipShader: (ids = '')=>{
+            if (!worker)
+            {
+                throw new Error('skipShader: this run draws without a graphics worker');
+            }
+            worker.postMessage({ type: 'debug', skipShader: ids });
+            return ids;
+        },
+        /**
          * Keeps the first `count` draws of every frame from now on and drops
          * the rest, -1 none dropped: halving it finds the draw that painted a
          * part of the picture, numbered as a frame dump numbers them.
