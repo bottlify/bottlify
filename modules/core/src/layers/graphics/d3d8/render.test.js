@@ -41,8 +41,9 @@ import {
     screenExtent, transformPosition, uniformBlock, uniformsOf, pixelUniformsOf, fogModeOf, fogOf,
     addressVariantOf, clipMaskOf, clipPlanesOf, isAffine, lodBiasOf, samplerDescriptorOf,
     stageCascade,
-    vertexCountOf,
+    vertexCountOf, describeConstants, describeDeclaration,
 } from './render.js';
+import { parseShader } from '../d3d9/shader.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 import { FVF, decodeFvf } from '../webgpu/internal/vertexformat.js';
@@ -4536,4 +4537,26 @@ test('every word of every sixteen-bit format unpacks through its table as the fo
             }
         }
     }
+});
+
+test('a program\'s dump line names the constants its shaders read and its declaration', ()=>{
+    // A picture drawn black under shaders that translate is a constant or a
+    // vertex element that reached them as zero, which only these say.
+    const bits = (/** @type {number} */ x)=>new Uint32Array(Float32Array.of(x).buffer)[0];
+    // vs_2_0: def c3, 1, 2, 3, 4; add r0, c1, c2[a0.x]; add r1, c3, c1
+    const shader = parseShader(Uint32Array.from([0xfffe0200,
+        0x05000051, 0xa00f0003, bits(1), bits(2), bits(3), bits(4),
+        0x04000002, 0x800f0000, 0xa0e40001, 0xa0e42002, 0xb0000000,
+        0x03000002, 0x800f0001, 0xa0e40003, 0xa0e40001, 0x0000ffff]));
+    assert.equal(shader.error, null);
+    const floats = new Float32Array(256 * 4);
+    floats.set([0.5, 0, 1 / 3, 2], 4);
+    assert.equal(describeConstants(shader, floats), 'c1(0.5,0,0.3333,2) c2[a]',
+        'read by number with its values, through a0 by its first register, a def left out');
+    assert.equal(describeConstants(null, floats), '-');
+    assert.equal(describeDeclaration([
+        { Stream: 0, Offset: 0, Type: 2, Usage: 0, UsageIndex: 0 },
+        { Stream: 1, Offset: 12, Type: 4, Usage: 10, UsageIndex: 1 },
+    ]), '0:0:t2:u0/0,1:12:t4:u10/1');
+    assert.equal(describeDeclaration(null), '-');
 });
