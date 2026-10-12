@@ -102,10 +102,10 @@ build.
 | anything, before it goes to main | `npm run typecheck`, `npm run lint`, `npm test`, `npm run test:integration`, `npm run check:boundaries`, `npm run build` |
 
 CI (`.github/workflows/ci.yml`) runs the full set plus `npm run cdp:probe` in a real headless
-Chrome; both jobs must be green. It runs once a day, and only if main took commits in the day
-before, or by hand (`gh workflow run ci.yml`) -- not on a push or a pull request: the repository's
-minutes are metered. So the full set above runs locally before anything goes to main; CI is that
-same set on a clean machine, a day behind at most.
+Chrome; both jobs must be green. It runs on a push to main and by hand (`gh workflow run
+ci.yml`) -- not on another branch, a pull request or a schedule: the repository's minutes are
+metered. So the full set above runs locally before anything goes to main; CI is that same set on a
+clean machine.
 
 ## Performance
 
