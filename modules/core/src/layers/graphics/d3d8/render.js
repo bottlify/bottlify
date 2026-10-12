@@ -1905,15 +1905,16 @@ function readsNormalAnywhere(stages){
 
 /**
  * Whether a stage the cascade runs generates its coordinates from the
- * vertex normal.
+ * vertex normal -- or any stage, for a pixel shader, which reads its stages'
+ * coordinates whatever their COLOROP says.
  *
- * @param {RenderModel} model
+ * @param {RenderModel} model @param {boolean} [everyStage]
  */
-function generatesFromNormal(model){
+function generatesFromNormal(model, everyStage = false){
     for (let stage = 0; stage < STAGE_COUNT; stage++)
     {
         const states = model.stageStates(stage);
-        if ((states.get(D3DTSS.COLOROP) ?? 0) === D3DTOP.DISABLE)
+        if (!everyStage && (states.get(D3DTSS.COLOROP) ?? 0) === D3DTOP.DISABLE)
         {
             return false;
         }
@@ -3801,6 +3802,14 @@ export function createRenderer(options){
                 ? ` stages=${state.stages.map((/** @type {any} */ stage)=>
                     `${stage.colorOp}(${stage.colorArg1},${stage.colorArg2})`
                     + `/${stage.alphaOp}(${stage.alphaArg1},${stage.alphaArg2})`).join(' ')}`
+                : '')
+            // A fixed vertex stage before a pixel shader makes each stage's
+            // coordinates by its index and transform, which no other field
+            // of the line shows.
+            + (state.vertexShader === -1 ? ` tci=${program.samplerBindings.map(
+                (/** @type {any} */ binding)=>`${binding.stage}:`
+                + `${(model.stageStates(binding.stage)?.get(D3DTSS.TEXCOORDINDEX) ?? 0)
+                    .toString(16)}@${textureTransformOf(model, binding.stage)}`).join(' ')}`
                 : '')
             + ` target=${describeTarget(model)}`
             + ` view=${model.viewport.rect.x},${model.viewport.rect.y}`
@@ -6138,7 +6147,12 @@ export function createRenderer(options){
         // in camera space is written by the made vertex stage whatever the
         // declaration carries under that number, since that is what the
         // fixed function hands a pixel shader.
-        const generated = program.vertex ? [] : hybridGeneration(model);
+        const generated = program.vertex ? [] : hybridGeneration(model, pixel.reads);
+        const carried = program.vertex ? [] : hybridCarried(model, pixel.reads);
+        // Where the made vertex stage takes each coordinate from, which the
+        // pipeline's key has to say: its state names no stage of a shader draw.
+        const hybridKey = program.vertex ? '' : `|g${generated.join(',')}|c${carried.map(
+            source=>(source ? `${source.set}${source.transformed ? 't' : ''}` : '')).join(',')}`;
         // The fog varyings a vertex shader's translation writes itself, below.
         const fogCarried = program.vertex && fog.source !== FOG_SOURCE.NONE
             ? [varyingLocation(D3DDECLUSAGE.FOG, 0), FOG_RANGE_LOCATION] : [];
@@ -6148,6 +6162,8 @@ export function createRenderer(options){
             (/** @type {number} */ location)=>!written.includes(location)
                 && !fogCarried.includes(location) && !clipCarried.includes(location)
                 && !generated.some((mode, set)=>mode !== 0
+                    && varyingLocation(D3DDECLUSAGE.TEXCOORD, set) === location)
+                && !carried.some((source, set)=>source
                     && varyingLocation(D3DDECLUSAGE.TEXCOORD, set) === location));
         const points = topology === POINT_QUADS ? pointsOf(model) : null;
         const pointKey = points ? `|p${points.sprite ? 's' : ''}${points.scale ? 'd' : ''}` : '';
@@ -6169,13 +6185,13 @@ export function createRenderer(options){
                             ? { sampling: sampling.vertexVariants } : {}),
                         ...(planes ? { clip: planes } : {}) }))
             : hybridStageFor(
-                `${program.declarationId}|${shapes}|w${missing.join(',')}|g${generated.join(',')}`
+                `${program.declarationId}|${shapes}|w${missing.join(',')}${hybridKey}`
                     + `|f${fog.source}/${fog.mode}${flat ? '|flat' : ''}`
                     + `${normalizeNormals ? '|normalize' : ''}${rangeFog ? '|range' : ''}`
                     + pointKey + clipKey,
                 wanted, layout.shapes, missing, generated, fog,
                 { flatColours: flat, normalizeNormals, rangeFog, ...(points ? { points } : {}),
-                    ...(planes ? { clip: planes } : {}) });
+                    ...(planes ? { clip: planes } : {}), carried });
         if (vertex.error)
         {
             skip('program');
@@ -6232,7 +6248,7 @@ export function createRenderer(options){
                 // is said, as the translations are tagged by it, so one
                 // translation pair is one pipeline.
                 key: `${state.vertexShader}/${state.pixelShader}/${program.declarationId}`
-                    + `/${shapes}/${stride}${streamsKey(layout)}`
+                    + `/${shapes}/${stride}${streamsKey(layout)}${hybridKey}`
                     + (sampling.key === '' ? '' : `|${sampling.key}`),
                 vertex, pixel, layout,
             },
@@ -6510,7 +6526,9 @@ export function createRenderer(options){
      * @param {number[]} generated
      * @param {{ source: number, mode: number }} fog  See `fogOf`.
      * @param {{ flatColours: boolean, normalizeNormals: boolean, rangeFog: boolean,
-     *     points?: import('../webgpu/internal/pipeline.js').PointState }} shading
+     *     points?: import('../webgpu/internal/pipeline.js').PointState,
+     *     clip?: import('../webgpu/internal/fixedfunction.js').ClipState,
+     *     carried?: ({ set: number, transformed: boolean } | null)[] }} shading
      *     See `fixedVertexStage`.
      */
     const hybridStageFor = (key, wanted, shapes, alsoWrite, generated, fog, shading)=>{
@@ -6526,29 +6544,65 @@ export function createRenderer(options){
     };
 
     /**
-     * Per coordinate set, the generation mode of the stage of that number,
-     * up to the last stage the cascade runs: zero for a carried set.
+     * Per coordinate set the pixel shader reads, the generation mode of the
+     * stage of that number: zero for a carried set. A pixel shader reads its
+     * stages' coordinates whatever their COLOROP says, and a program that
+     * draws through one has no reason to enable the stages it samples.
      *
-     * @param {RenderModel} model
+     * @param {RenderModel} model @param {readonly number[]} reads  the pixel stage's varyings
      */
-    const hybridGeneration = model=>{
+    const hybridGeneration = (model, reads)=>{
         /** @type {number[]} */
         const modes = [];
         for (let stage = 0; stage < STAGE_COUNT; stage++)
         {
-            const states = model.stageStates(stage);
-            if ((states.get(D3DTSS.COLOROP) ?? 0) === D3DTOP.DISABLE)
-            {
-                break;
-            }
-            const index = states.get(D3DTSS.TEXCOORDINDEX) ?? 0;
-            modes.push(generates(index) ? generationOf(index) : 0);
+            const index = model.stageStates(stage).get(D3DTSS.TEXCOORDINDEX) ?? 0;
+            modes.push(reads.includes(varyingLocation(D3DDECLUSAGE.TEXCOORD, stage))
+                && generates(index) ? generationOf(index) : 0);
         }
         while (modes.length > 0 && modes[modes.length - 1] === 0)
         {
             modes.pop();
         }
         return modes;
+    };
+
+    /**
+     * Per coordinate set a pixel shader reads, where the fixed vertex stage
+     * takes the stage of that number's coordinates from when it is not the
+     * vertex's set of that number as it stands: the set the stage's
+     * TEXCOORDINDEX names, and whether its texture transform applies. Null
+     * for a set carried through as it is, and for a generated one, which
+     * `hybridGeneration` answers for. A pixel shader reads its stages'
+     * coordinates whatever their COLOROP says.
+     *
+     * @param {RenderModel} model @param {readonly number[]} reads  the pixel stage's varyings
+     */
+    const hybridCarried = (model, reads)=>{
+        /** @type {({ set: number, transformed: boolean } | null)[]} */
+        const carried = [];
+        for (let stage = 0; stage < TRANSFORM_STAGES; stage++)
+        {
+            if (!reads.includes(varyingLocation(D3DDECLUSAGE.TEXCOORD, stage)))
+            {
+                carried.push(null);
+                continue;
+            }
+            const states = model.stageStates(stage);
+            const index = states?.get(D3DTSS.TEXCOORDINDEX) ?? 0;
+            const set = index & COORD_SET_MASK;
+            // By the flags alone: the pieces are kept by the stage states,
+            // not the transforms, and a matrix never set is the identity.
+            const transformed = !generates(index)
+                && transformApplies(states?.get(D3DTSS.TEXTURETRANSFORMFLAGS) ?? 0, false);
+            carried.push(!generates(index) && (set !== stage || transformed)
+                ? { set, transformed } : null);
+        }
+        while (carried.length > 0 && carried[carried.length - 1] === null)
+        {
+            carried.pop();
+        }
+        return carried;
     };
 
     /**
@@ -6617,7 +6671,7 @@ export function createRenderer(options){
         floats.set(model.viewport.offset, HYBRID_CONSTANTS.VIEWPORT * 4);
         floats.set(model.viewport.scale, HYBRID_CONSTANTS.VIEWPORT * 4 + 2);
         floats.set(worldView, HYBRID_CONSTANTS.WORLD_VIEW * 4);
-        if (generatesFromNormal(model))
+        if (generatesFromNormal(model, true))
         {
             floats.set(normalMatrixOf(worldView, CAMERA_NORMAL_MATRIX),
                 HYBRID_CONSTANTS.CAMERA_NORMAL * 4);

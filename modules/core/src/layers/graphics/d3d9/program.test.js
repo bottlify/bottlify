@@ -1168,6 +1168,67 @@ test('a pixel shader over fixed-function vertices generating from the normal car
         assert.equal(h.device.release(), 0);
     });
 
+/** A ps_2_0 that samples stage 1 through t1, and nothing else. */
+const STAGE_ONE_SHADER = [
+    versionToken(SHADER_KIND.PIXEL, 2, 0),
+    op(OPCODE.DCL, 2), (2 << 27) >>> 0, dst(REGISTER.SAMPLER, 1),
+    op(OPCODE.DCL, 2), 0x80000000, dst(REGISTER.TEXTURE, 1),
+    op(OPCODE.TEX, 3), dst(REGISTER.TEMP, 0), src(REGISTER.TEXTURE, 1), src(REGISTER.SAMPLER, 1),
+    op(OPCODE.MOV, 2), dst(REGISTER.COLOROUT, 0), src(REGISTER.TEMP, 0),
+    0x0000ffff,
+];
+
+test('a pixel shader over fixed-function vertices reads the coordinates of every stage it'
+    + ' samples, whatever the COLOROP of the stage, from the set and transform the stage names',
+async()=>{
+    // A pixel shader reads its stages' coordinates whatever their COLOROP
+    // says, and a program drawing through one leaves the stages it samples
+    // disabled -- stage 1 is by default. Read as the end of the cascade, a
+    // stage-1 coordinate generated in camera space was zero, and a sprite
+    // lerped by two such reads came out the flat lerp colour.
+    const h = harness();
+    /** @type {{ shader?: any }} */
+    const ps = {};
+    assert.equal(h.device.CreatePixelShader(STAGE_ONE_SHADER, ps), D3D_OK);
+    h.device.SetPixelShader(ps.shader);
+    h.device.SetTexture(1, h.texture);
+    h.device.SetTextureStageState(1, D3DTSS.TEXCOORDINDEX, 0x20001);
+    h.device.SetTextureStageState(1, D3DTSS.TEXTURETRANSFORMFLAGS, 2);
+    await h.draw();
+    assert.deepEqual(h.reports, []);
+    const t1 = varyingLocation(D3DDECLUSAGE.TEXCOORD, 1);
+    const row = HYBRID_CONSTANTS.TRANSFORMS + 4;
+    const modules = ()=>h.gpu.of('createShaderModule').map(call=>call.descriptor)
+        .filter(module=>module.label.startsWith('vs:'));
+    assert.ok(modules().some(module=>module.code.includes(
+        `out.o${t1} = vec4f(dot(c[${row}], vec4f(cameraPosition, 1.0)),`)),
+    'generated for the disabled stage the shader samples');
+
+    // Stage 1 reading the vertex's set 0 through its own transform: (u, v, 1)
+    // through stage 1's rows, not the set 1 the vertex does not have.
+    h.device.SetTextureStageState(1, D3DTSS.TEXCOORDINDEX, 0);
+    await h.draw();
+    assert.ok(modules().some(module=>module.code.includes(`let set1 = vec4f(`)
+        && module.code.includes(`.xy, 1.0, 0.0);`)
+        && module.code.includes(`out.o${t1} = vec4f(dot(c[${row}], set1),`)),
+    'set 0 through the transform of stage 1');
+    // Untransformed, the set as it stands under stage 1's number.
+    h.device.SetTextureStageState(1, D3DTSS.TEXTURETRANSFORMFLAGS, 0);
+    await h.draw();
+    assert.ok(modules().some(module=>module.code.includes(`out.o${t1} = vec4f(in.v`)),
+        'set 0 carried to t1');
+
+    h.device.SetTexture(1, null);
+    h.device.SetPixelShader(null);
+    h.device.SetVertexDeclaration(null);
+    h.device.SetStreamSource(0, null, 0, 0);
+    ps.shader.release();
+    h.texture.release();
+    h.declaration.release();
+    h.vb.release();
+    assert.equal(h.device.release(), 0);
+});
+
 test('a pixel shader over fixed-function vertices reads a coordinate the stages generate',
     async()=>{
         // Stage 0 set to D3DTSS_TCI_CAMERASPACEPOSITION with a three-coordinate
