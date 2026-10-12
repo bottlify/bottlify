@@ -633,6 +633,9 @@ flowchart TB
   `GetData` (occlusion queries included), `GetRenderTargetData`, `GetFrontBuffer(Data)`, plus `LockRect`,
   `GetDC` and `CopyRects` on a render target. And what waits is the program's thread, not the
   engine's: the bridge parks it in the scheduler, and the program's other threads keep running.
+  An occlusion query's answer brings with it every other count the renderer already holds, each
+  marked with the `Issue(END)` it belongs to. A program that waits on its queries one after another
+  pays one round trip for all the counts one GPU read brought back, not one per query.
 - **Shaders.** Direct3D 8/9 shader bytecode is parsed and translated to WGSL
   (`graphics/d3d9/shader.js`, `wgsl.js`). For the fixed-function pipeline, WGSL is generated
   (`webgpu/internal/fixedfunction.js`).

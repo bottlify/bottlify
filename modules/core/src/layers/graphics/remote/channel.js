@@ -17,7 +17,7 @@
  * has caught up -- the bound on how far behind the program the pictures are.
  *
  * Sender to receiver:  { type: 'calls', buffer }       a batch, as `wire.js` writes it
- * Receiver to sender:  { type: 'answer', serial, answer, outs }
+ * Receiver to sender:  { type: 'answer', serial, answer, outs, counts? }
  *                      { type: 'presented', count }
  *                      { type: 'diagnostics', diagnostics }
  *                                                      what a device said of itself when asked
@@ -342,7 +342,8 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
                 {
                     const resolve = waiting.get(message.serial);
                     waiting.delete(message.serial);
-                    resolve?.({ answer: message.answer, outs: message.outs ?? [] }, {
+                    resolve?.({ answer: message.answer, outs: message.outs ?? [],
+                        counts: message.counts }, {
                         queued: message.queued, held: message.held,
                         back: typeof message.at === 'number' ? shared() - message.at : undefined });
                     break;
@@ -474,10 +475,10 @@ export function createReceiver({ played, post }){
 
     /** @param {any} call @param {any} answered @param {number} queued @param {number} began */
     const reply = (call, answered, queued, began)=>{
-        /** @param {{ answer: any, outs: any[] }} settled */
+        /** @param {import('./replay.js').PlayedAnswer} settled */
         const send = settled=>post({ type: 'answer', serial: call.serial,
             answer: crossable(settled.answer), outs: crossable(settled.outs),
-            queued, held: shared() - began, at: shared() });
+            counts: settled.counts, queued, held: shared() - began, at: shared() });
         if (answered instanceof Promise)
         {
             answered.then(send, fail);
