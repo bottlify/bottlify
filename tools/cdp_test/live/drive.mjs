@@ -62,10 +62,13 @@ const [pattern = '', query = ''] = process.argv.slice(2);
 const sleep = ms=>new Promise(done=>setTimeout(done, ms));
 
 // DRIVE_HEADED=1 shows the window: a person plays in it while the endpoints
-// below look inside the same tab.
+// below look inside the same tab. DRIVE_FLAGS adds Chrome flags, space
+// separated: `--use-webgpu-adapter=swiftshader` draws in software, where a
+// virtual machine's GPU driver adds glitches of its own to the picture.
 const browser = await launchWithGpu({
     headed: process.env.DRIVE_HEADED === '1',
-    profileDir: process.env.DRIVE_PROFILE ?? 'dbg/chrome-profile' });
+    profileDir: process.env.DRIVE_PROFILE ?? 'dbg/chrome-profile',
+    extraFlags: (process.env.DRIVE_FLAGS ?? '').split(' ').filter(Boolean) });
 const cdp = new CdpEndpoint(browser.browserWs);
 await cdp.open();
 const downloads = resolve('dbg/live-downloads');
