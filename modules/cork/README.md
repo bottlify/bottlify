@@ -209,7 +209,9 @@ The core also takes `cork.pool`, `cork.poolPerProcess`, `cork.poolWindowMs` and 
 (the translation pool's thresholds) beside `config`, and `quantum` and `executors` on `createApp`.
 
 **Diagnostics**: `blockProfile` and `blockProfileFrom` (execution counts per block, from a second
-on), `timings` (the translator's phases timed), `traceStore` (translation store keys), `checkStale`
+on, and beside them `mechanisms`: how calls and returns went -- formed into a region, wasm calls or
+ways out, a call out by why its callee was not formed in -- transfers through the entry hash and
+`rdtsc`s), `timings` (the translator's phases timed), `traceStore` (translation store keys), `checkStale`
 (regions whose bytes changed), `countTransfers`, `undoLog` (store undo log for replay). They cost
 speed; leave them off outside an investigation.
 

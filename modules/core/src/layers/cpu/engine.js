@@ -424,6 +424,9 @@
  *     or -1], most executed first.
  * @property {{ address: number, count: number, shared: boolean, entry: number,
  *     bytes: number }[]} [topBlocks]  The forty most executed, with the region each is in.
+ * @property {Record<string, number>} [mechanisms]  With `blockProfile`: how calls and returns
+ *     went -- formed into a region, wasm calls, or ways out -- transfers through the entry hash
+ *     and `rdtsc`s, each counted by the code that took it (cork's `Mechanism`).
  * @property {number} invalidations    Regions discarded by a write.
  * @property {number} volatilePages    Times a page written so often was left to the interpreter.
  * @property {number} [volatileNow]     The pages left to the interpreter now.

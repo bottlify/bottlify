@@ -848,6 +848,12 @@ function describeCork(cork, say){
         say(`    hottest blocks: ${cork.topBlocks.slice(0, 20).map((/** @type {any} */ b)=>
             `${b.address.toString(16)}x${b.count}${b.shared ? '*' : ''}`).join(' ')}`);
     }
+    if (cork.mechanisms)
+    {
+        // How the profiled window's calls and returns went (cork's `Mechanism`).
+        say(`    mechanisms: ${Object.entries(cork.mechanisms).filter(([, n])=>n > 0)
+            .map(([name, n])=>`${name}=${n}`).join(' ')}`);
+    }
     if (cork.stalls?.length)
     {
         // The engine thread's long holds (host ms): laid beside the audio

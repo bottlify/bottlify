@@ -72,8 +72,63 @@ export const Tables = Object.freeze({
     // and whether another block shared the slot.
     BLOCK_SLOTS: 1 << 20,
     BLOCK_SLOT: 12,
-    BLOCK_PROFILE_SIZE: (1 << 20) * 12,
+    // Past the slots, the same run's count of each `Mechanism`, a 64-bit word
+    // each: a run of minutes makes billions of calls.
+    MECHANISMS: 32,
+    BLOCK_PROFILE_SIZE: (1 << 20) * 12 + 32 * 8,
 });
+
+/**
+ * What a profiling run (`blockProfile`) counts beside its blocks, by the word
+ * each takes past the slots (`mechanismAt`): how calls and returns went --
+ * formed into the region, a wasm call, or a way out -- and the other
+ * crossings whose cost a profile of the regions' functions cannot tell apart
+ * from the guest's own work.
+ */
+export const Mechanism = Object.freeze({
+    /** A transfer through the entry hash: a call out, or a jump to another region. */
+    TRANSFER: 0,
+    /** A direct call to a callee formed into the region: a jump. */
+    CALL_FORMED: 1,
+    /** A direct call out of the region as a wasm call (`callReturn`). */
+    CALL_REL: 2,
+    /** An indirect call out of the region as a wasm call. */
+    CALL_INDIRECT: 3,
+    /** A call that leaves the region to the host's dispatch. */
+    CALL_LEFT: 4,
+    /** An indirect call whose target was one of the callees formed in (`callTargets`). */
+    CALL_PREDICTED: 5,
+    /** A wasm call that came back other than by its `ret`: an exit gone up through it. */
+    CALL_ELSEWHERE: 6,
+    /** A `ret` back to a call whose callee is formed in: a jump. */
+    RET_FORMED: 7,
+    /** A `ret` that answered the wasm call waiting for it. */
+    RET_TO_CALL: 8,
+    /** A `ret` that left the region to the host's dispatch. */
+    RET_LEFT: 9,
+    /** An `rdtsc`, each a call into the host's clock. */
+    RDTSC: 10,
+    // A call out of its region -- a wasm call or a way out -- by why its
+    // callee was not formed in (`Apart`), so the calls forming could take in
+    // are told from the ones it cannot:
+    /** more blocks than a callee formed in may have; */
+    APART_BLOCKS: 11,
+    /** more bytes; */
+    APART_BYTES: 12,
+    /** a way out other than `ret` and direct branches (an API call among them); */
+    APART_SHAPE: 13,
+    /** a call inside a callee already formed in; */
+    APART_NESTED: 14,
+    /** an indirect call with no callee predicted; */
+    APART_UNPREDICTED: 15,
+    /** a callee that would have been formed in, but the region was full; */
+    APART_FULL: 16,
+    /** an indirect call to none of the callees predicted and formed in. */
+    APART_MISSED: 17,
+});
+
+/** The names of `Mechanism`'s counts, by index. */
+export const MECHANISM_NAMES = Object.freeze(Object.keys(Mechanism));
 
 /**
  * The entry hash's slots under a layout: its slot shift says how many.
@@ -95,6 +150,15 @@ export const tablesSize = layout=>Tables.HASH + hashSlotsOf(layout) * Tables.HAS
  * @param {{ hashShift?: number }} layout
  */
 export const blockProfileAt = layout=>tablesSize(layout);
+
+/**
+ * Where a profiling run's count of a `Mechanism` is, from the tables' start:
+ * past the block profile's slots.
+ *
+ * @param {{ hashShift?: number }} layout @param {number} mechanism
+ */
+export const mechanismAt = (layout, mechanism)=>blockProfileAt(layout)
+    + Tables.BLOCK_SLOTS * Tables.BLOCK_SLOT + mechanism * 8;
 
 /**
  * The block profile's slot for a block start: the top twenty bits of the

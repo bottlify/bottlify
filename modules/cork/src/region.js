@@ -45,11 +45,20 @@ import { decode } from './decode/decoder.js';
  * @property {import('./decode/decoder.js').Instruction[]} instructions
  * @property {{ kind: ExitKind, targets: number[], next: number, backEdge: boolean,
  *              refusal?: import('./decode/decoder.js').Refusal,
- *              table?: SwitchTable, predicted?: boolean }} exit
+ *              table?: SwitchTable, predicted?: boolean, apart?: Apart }} exit
  *   an `indirect` exit through a switch's table of addresses carries the table,
  *   and its distinct targets as `targets`; an indirect call the runtime has
  *   seen go to a few callees (`callTargets`) is `predicted`, those callees its
- *   `targets`
+ *   `targets`; a call whose callee forming did not take in says why (`apart`)
+ */
+
+/**
+ * @typedef {'blocks' | 'bytes' | 'shape' | 'nested' | 'unpredicted'} Apart
+ *   why a call's callee was not formed into its caller, for a profiling run's
+ *   counts: more blocks or bytes than a callee formed in may have; a way out of
+ *   it other than a `ret` and direct branches (an indirect jump or call, a
+ *   trap, a refusal, a page not to translate); a call of its own inside a
+ *   callee already formed in; an indirect call with no callee predicted
  */
 
 /**
@@ -100,13 +109,15 @@ const LEAF_LIMITS = Object.freeze({ blocks: LEAF_BLOCKS, bytes: LEAF_BYTES });
  * return address at run time -- so anything else (an indirect jump, a trap,
  * a refusal, a page not to translate) answers no; so does a direct call in
  * it unless `calls`, when the callee's own callees leave through the hash as
- * any call does and come back to the block after their call.
+ * any call does and come back to the block after their call. Answers null
+ * for yes, and for no why not (`Apart`).
  *
  * @param {(address: number) => import('./decode/decoder.js').Instruction
  *     | import('./decode/decoder.js').Refusal} decodeAt
  * @param {number} target
  * @param {(eip: number) => boolean} translatable @param {boolean} [calls]
  * @param {{ blocks: number, bytes: number }} [limits]  its blocks and bytes at most
+ * @returns {Apart | null}
  */
 function isLeaf(decodeAt, target, translatable, calls = false, limits = LEAF_LIMITS){
     const seen = new Set();
@@ -119,9 +130,13 @@ function isLeaf(decodeAt, target, translatable, calls = false, limits = LEAF_LIM
         {
             continue;
         }
-        if (seen.size >= limits.blocks || !translatable(start))
+        if (seen.size >= limits.blocks)
         {
-            return false;
+            return 'blocks';
+        }
+        if (!translatable(start))
+        {
+            return 'shape';
         }
         seen.add(start);
         for (let eip = start; ;)
@@ -129,12 +144,12 @@ function isLeaf(decodeAt, target, translatable, calls = false, limits = LEAF_LIM
             const decoded = decodeAt(eip);
             if ('refused' in decoded)
             {
-                return false;
+                return 'shape';
             }
             bytes += decoded.length;
             if (bytes > limits.bytes)
             {
-                return false;
+                return 'bytes';
             }
             eip = (eip + decoded.length) >>> 0;
             const exit = exitOf(decoded, eip);
@@ -157,10 +172,11 @@ function isLeaf(decodeAt, target, translatable, calls = false, limits = LEAF_LIM
                 seen.add(eip);
                 continue;
             }
-            return false;
+            return exit.kind === 'call' && seen.size < limits.blocks ? 'nested'
+                : exit.kind === 'call' ? 'blocks' : 'shape';
         }
     }
-    return true;
+    return null;
 }
 
 /**
@@ -172,7 +188,7 @@ function isLeaf(decodeAt, target, translatable, calls = false, limits = LEAF_LIM
  *
  * @param {(address: number) => number} read
  * @param {import('./decode/decoder.js').Instruction} call
- * @param {(target: number, calls: boolean) => boolean} leafAt
+ * @param {(target: number, calls: boolean) => Apart | null} leafAt
  * @returns {number[] | undefined}
  */
 function slotCallee(read, call, leafAt){
@@ -186,7 +202,7 @@ function slotCallee(read, call, leafAt){
     const slot = (operand.disp ?? 0) >>> 0;
     const target = (read(slot) | read(slot + 1) << 8 | read(slot + 2) << 16
         | read(slot + 3) << 24) >>> 0;
-    return target !== 0 && leafAt(target, false) ? [target] : undefined;
+    return target !== 0 && leafAt(target, false) === null ? [target] : undefined;
 }
 
 /**
@@ -424,7 +440,7 @@ function switchTable(read, block, blocks, most = SWITCH_ENTRIES){
  * functions, and each region decoded every callee again to test it.
  *
  * @typedef {{ decoded: Map<number, import('./decode/decoder.js').Instruction
- *     | import('./decode/decoder.js').Refusal>, leaves: Map<number, boolean> }} FormShared
+ *     | import('./decode/decoder.js').Refusal>, leaves: Map<number, Apart | null> }} FormShared
  */
 
 /** @returns {FormShared} */
@@ -551,9 +567,9 @@ export function formRegion(read, entry,
     const tables = [];
     /** `isLeaf` by callee and form, once a region (or once for every region
      * sharing it): a function called from many places is decoded once.
-     * @type {Map<number, boolean>} */
+     * @type {Map<number, Apart | null>} */
     const leaves = shared?.leaves ?? new Map();
-    /** @param {number} target @param {boolean} calls */
+    /** @param {number} target @param {boolean} calls @returns {Apart | null} */
     const leafAt = (target, calls)=>{
         const key = target * 2 + (calls ? 1 : 0);
         let leaf = leaves.get(key);
@@ -797,10 +813,19 @@ export function formRegion(read, entry,
                     // A small callee is formed into its caller: the call
                     // becomes a jump inside the region, and its return, when
                     // it comes back to this call's return address, one too.
-                    if (leafAt(callee, depth === 0))
+                    const apart = leafAt(callee, depth === 0);
+                    if (apart === null)
                     {
                         follow(callee, depth + 1);
                     }
+                    else
+                    {
+                        exit.apart ??= apart;
+                    }
+                }
+                if (exit.kind === 'indirect' && !exit.predicted)
+                {
+                    exit.apart = 'unpredicted';
                 }
             }
             break;

@@ -1893,6 +1893,34 @@ test('a block profile counts each block\'s executions: a loop\'s body its iterat
     assert.equal(topBlocks[0].shared, false);
 });
 
+test('a block profile counts how calls and returns went, transfers and rdtscs', async()=>{
+    const m = machine({ blockProfile: true });
+    // mov ecx, 100; L: mov edx, F; call edx; dec ecx; jnz L; hlt -- an indirect
+    // call out of the region, a hundred times.
+    m.write(CODE, [0xb9, 100, 0, 0, 0, 0xba, 0x00, 0x11, 0, 0, 0xff, 0xd2, 0x49, 0x75, 0xf6, 0xf4]);
+    // F: call G; ret -- G, a leaf, formed into F's region. G: rdtsc; inc eax; ret.
+    m.write(0x1100, [0xe8, 0xfb, 0, 0, 0, 0xc3]);
+    m.write(0x1200, [0x0f, 0x31, 0x40, 0xc3]);
+    m.setReg(4, 0x80000);
+    m.runtime.noteHot(CODE);
+    m.runtime.noteHot(0x1100);
+    await m.runtime.translatePending();
+    const exit = m.runtime.run(m.runtime.entryOf(CODE), 1_000_000);
+    assert.equal(exit.kind, 'halt');
+    const { mechanisms } = /** @type {any} */ (m.runtime.diagnostics());
+    assert.equal(mechanisms.CALL_INDIRECT, 100, 'call edx, a wasm call each turn');
+    assert.equal(mechanisms.TRANSFER, 100, 'each through the entry hash');
+    assert.equal(mechanisms.RET_TO_CALL, 100, 'F\'s ret answered the call waiting for it');
+    assert.equal(mechanisms.CALL_FORMED, 100, 'call G, formed into F\'s region');
+    assert.equal(mechanisms.RET_FORMED, 100, 'G\'s ret, a jump back');
+    assert.equal(mechanisms.RDTSC, 100);
+    assert.equal(mechanisms.APART_UNPREDICTED, 100, 'call edx, apart: no callee predicted');
+    assert.equal(mechanisms.CALL_REL + mechanisms.CALL_LEFT + mechanisms.RET_LEFT
+        + mechanisms.CALL_ELSEWHERE, 0, 'nothing left a region');
+    assert.equal(/** @type {any} */ (machine().runtime.diagnostics()).mechanisms, undefined,
+        'a run without the profile counts nothing');
+});
+
 test('a block profile with blockProfileFrom counts only what ran after that moment', async()=>{
     const now = performance.now;
     let clock = 0;

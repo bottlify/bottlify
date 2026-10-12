@@ -56,8 +56,12 @@ import {
     planLoop, planRegion, readsWrapped,
 } from './memory.js';
 import { importHelpers } from './helpers.js';
-import { Tables, blockProfileAt, blockSlot, hashSlotsOf } from '../runtime/layout.js';
+import { Mechanism, Tables, blockProfileAt, blockSlot, hashSlotsOf, mechanismAt }
+    from '../runtime/layout.js';
 import { ANY_TOP } from '../runtime/entries.js';
+
+/** `i64.add`, the one 64-bit operation a profiling run's counts take. */
+const I64_ADD = 0x7c;
 import { callsOut, inlineReturns } from '../region.js';
 import {
     analyseX87, floatCondition, isX87, prepareX87, sameState, x87BlockEnd, x87BlockStart,
@@ -539,6 +543,12 @@ export function finishModule(context, functions){
     b.br(0);
     b.end(); // loop
     b.end(); // found
+    if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && context.blockProfile)
+    {
+        const at = layout.tables + mechanismAt(layout, Mechanism.TRANSFER);
+        b.i32const(0).i32const(0).load('i64', { offset: at }).i64const(1n).op(I64_ADD)
+            .store('i64', { offset: at });
+    }
     if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && context.countTransfers)
     {
         const at = layout.tables + Tables.TRANSFERS;
@@ -2434,6 +2444,22 @@ export class RegionEmitter {
             .store('i32', { offset: at + 8 });
         b.i32const(0).i32const(start | 0).store('i32', { offset: at });
         this.close();
+    }
+
+    /**
+     * One more of `mechanism` in a profiling run's counts (`blockProfile`);
+     * nothing in any other.
+     *
+     * @param {number} mechanism  a `Mechanism`
+     */
+    countMechanism(mechanism){
+        if (import.meta.BOTTLIFY_DIAGNOSTICS === false || !this.context.blockProfile)
+        {
+            return;
+        }
+        const at = this.layout.tables + mechanismAt(this.layout, mechanism);
+        this.b.i32const(0).i32const(0).load('i64', { offset: at }).i64const(1n).op(I64_ADD)
+            .store('i64', { offset: at });
     }
 
     /**

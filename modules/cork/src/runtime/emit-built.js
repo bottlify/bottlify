@@ -203,6 +203,10 @@ function contextKey(layout, features, options, leaveOut){
 const EXIT_CODES = new Map(['fallthrough', 'jump', 'jcc', 'loop', 'ret', 'indirect', 'call',
     'trap', 'hlt', 'refused', 'fault', 'cut'].map((kind, code)=>[kind, code]));
 
+/** Why a call's callee stayed apart (`Apart`), as the number a shape keeps; 0 when none. */
+const APART_CODES = new Map(['blocks', 'bytes', 'shape', 'nested', 'unpredicted']
+    .map((apart, code)=>[apart, code + 1]));
+
 /**
  * Everything of a formed region the emitter reads that its bytes do not decide
  * -- its blocks' spans and exits, the bytes themselves being the hash's -- as
@@ -222,7 +226,8 @@ function shapeOf(region){
             return null;
         }
         shape.push(start, end, code, exit.next,
-            (exit.backEdge ? 1 : 0) | (exit.predicted === true ? 2 : 0), exit.targets.length,
+            (exit.backEdge ? 1 : 0) | (exit.predicted === true ? 2 : 0)
+                | (APART_CODES.get(exit.apart ?? '') ?? 0) << 2, exit.targets.length,
             ...exit.targets);
         const table = exit.table;
         if (table === undefined)

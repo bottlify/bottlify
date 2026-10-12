@@ -28,7 +28,7 @@ import { EMPTY } from '../wasm/encoder.js';
 import { I32, Kind, MASKS, SIGN_BITS, widthCode } from './flags.js';
 import { CallStack, Exit, Local, STATE_PARAMS } from './region.js';
 import { checkAccess, emitStaleExit, looseStackStore, noteStore, stackAccess } from './memory.js';
-import { pageFlagsAt } from '../runtime/layout.js';
+import { Mechanism, pageFlagsAt } from '../runtime/layout.js';
 import { PageFlag } from '../runtime/pages.js';
 import { emitSimd } from './simd.js';
 import { emitLocked, isLocked } from './locked.js';
@@ -127,6 +127,25 @@ function profileCall(e, site){
     e.close();
 }
 
+/** The `Mechanism` a call out of its region counts by why its callee stayed apart. */
+const APART = Object.freeze({
+    blocks: Mechanism.APART_BLOCKS, bytes: Mechanism.APART_BYTES, shape: Mechanism.APART_SHAPE,
+    nested: Mechanism.APART_NESTED, unpredicted: Mechanism.APART_UNPREDICTED,
+});
+
+/**
+ * A call out of the block's region, counted by why its callee was not formed
+ * in: a predicted call's target none of the callees formed in, or else a
+ * callee that would have been, the region full.
+ *
+ * @param {E} e
+ */
+function countApart(e){
+    const { apart, predicted } = e.region.blocks[e.blockIndex].exit;
+    e.countMechanism(apart !== undefined ? APART[apart]
+        : predicted === true ? Mechanism.APART_MISSED : Mechanism.APART_FULL);
+}
+
 /**
  * A call out of the region as a wasm call (`callReturn`): the return address
  * on the call stack, what the parameters do not carry written back, the
@@ -142,10 +161,13 @@ function profileCall(e, site){
  * @param {import('./region.js').RegionEmitter} e
  * @param {number} next  the return address, a block of the region
  * @param {() => void} pushTarget  pushes the callee's address
+ * @param {number} mechanism  what a profiling run counts it as (`Mechanism`)
  */
-function callAndReturn(e, next, pushTarget){
+function callAndReturn(e, next, pushTarget, mechanism){
     const { b, layout } = e;
     const depth = layout.tables + CallStack.DEPTH;
+    e.countMechanism(mechanism);
+    countApart(e);
     e.charge();
     pushTarget();
     b.localSet(Local.eip);
@@ -187,6 +209,7 @@ function callAndReturn(e, next, pushTarget){
     b.call(/** @type {number} */ (e.context.transfer)).localTee(Local.t0)
         .i32const(Exit.RETURNED).op(I32.ne);
     e.openGuard('elsewhere');
+    e.countMechanism(Mechanism.CALL_ELSEWHERE);
     // Left for the host somewhere inside: the state block holds it all.
     b.i32const(0).localGet(Local.t1).store('i32', { offset: depth });
     b.localGet(Local.t0).return();
@@ -219,6 +242,7 @@ function returnToCall(e){
         .load('i32', { offset: layout.tables + CallStack.STACK - 4 })
         .localGet(Local.eip).op(I32.eq);
     e.openIf('returns');
+    e.countMechanism(Mechanism.RET_TO_CALL);
     b.i32const(0).localGet(Local.t1).i32const(1).op(I32.sub).store('i32', { offset: depth });
     e.returnToCaller();
     e.close();
@@ -255,6 +279,7 @@ function predictCall(e){
     {
         b.localGet(Local.count).i32const(callee | 0).op(I32.eq);
         e.openIf('predicted');
+        e.countMechanism(Mechanism.CALL_PREDICTED);
         e.jumpTo(callee);
         e.close();
     }
@@ -365,6 +390,7 @@ export function emitInstruction(e, instruction, flagsLive){
             // The time-stamp counter, read through the host's import (the
             // emulator's own under hybrid, cork's clock under cork): the low
             // word to eax, the high word to edx.
+            e.countMechanism(Mechanism.RDTSC);
             b.call(e.context.rdtsc).localSet(Local.t64);
             b.localGet(Local.t64).op(I64.wrap).localSet(Local.reg);
             b.localGet(Local.t64).i64const(32n).op(I64.shrU).op(I64.wrap)
@@ -698,6 +724,7 @@ export function emitInstruction(e, instruction, flagsLive){
             {
                 // The callee is a block of this region: the block's exit jumps
                 // there. A push into code leaves first, at the callee.
+                e.countMechanism(Mechanism.CALL_FORMED);
                 if (e.staleCheck)
                 {
                     e.staleCheck = false;
@@ -715,17 +742,22 @@ export function emitInstruction(e, instruction, flagsLive){
                 }
                 callAndReturn(e, next, dst.kind === 'rel'
                     ? ()=>b.i32const(/** @type {number} */ (dst.target))
-                    : ()=>b.localGet(Local.count));
+                    : ()=>b.localGet(Local.count),
+                dst.kind === 'rel' ? Mechanism.CALL_REL : Mechanism.CALL_INDIRECT);
                 return true;
             }
             if (dst.kind === 'rel')
             {
+                e.countMechanism(Mechanism.CALL_LEFT);
+                countApart(e);
                 e.exitAt(/** @type {number} */ (dst.target), Exit.UNTRANSLATED);
             }
             else
             {
                 profileCall(e, instruction.eip);
                 predictCall(e);
+                e.countMechanism(Mechanism.CALL_LEFT);
+                countApart(e);
                 b.localGet(Local.count).localSet(Local.eip);
                 e.exitDynamic(Exit.UNTRANSLATED);
             }
@@ -746,6 +778,7 @@ export function emitInstruction(e, instruction, flagsLive){
             {
                 b.localGet(Local.eip).i32const(at).op(I32.eq);
                 e.openIf('return');
+                e.countMechanism(Mechanism.RET_FORMED);
                 e.jumpTo(at);
                 e.close();
             }
@@ -753,6 +786,7 @@ export function emitInstruction(e, instruction, flagsLive){
             {
                 returnToCall(e);
             }
+            e.countMechanism(Mechanism.RET_LEFT);
             e.exitDynamic(Exit.UNTRANSLATED);
             e.dead = true;
             return true;

@@ -11,7 +11,7 @@
  * bundle carries none of it.
  */
 
-import { Tables, blockProfileAt } from './layout.js';
+import { MECHANISM_NAMES, Tables, blockProfileAt, mechanismAt } from './layout.js';
 
 /**
  * @typedef {{ entry: number, spans: [number, number][] }} ProfiledRegion
@@ -65,6 +65,26 @@ export function resetBlockCounts(data, layout){
     {
         data.setUint32(base + slot * Tables.BLOCK_SLOT + 4, 0, true);
     }
+    for (let mechanism = 0; mechanism < Tables.MECHANISMS; mechanism++)
+    {
+        data.setBigUint64(layout.tables + mechanismAt(layout, mechanism), 0n, true);
+    }
+}
+
+/**
+ * The run's count of each `Mechanism`, by name.
+ *
+ * @param {DataView} data  over the memory the tables are in
+ * @param {{ tables: number, hashShift?: number }} layout
+ * @returns {Record<string, number>}
+ */
+export function mechanismCounts(data, layout){
+    /** @type {Record<string, number>} */
+    const out = {};
+    MECHANISM_NAMES.forEach((name, mechanism)=>{
+        out[name] = Number(data.getBigUint64(layout.tables + mechanismAt(layout, mechanism), true));
+    });
+    return out;
 }
 
 /**
