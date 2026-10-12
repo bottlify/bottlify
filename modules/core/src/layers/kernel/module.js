@@ -398,6 +398,13 @@ export function createKernelModule(){
                  * caller can tell progress from an idle system from a finished one.
                  * Once this instance is disposed there is nothing to run.
                  */
+                /** @param {number} ticks @param {boolean} answered */
+                noteHostAnswer: (ticks, answered)=>{
+                    if (live())
+                    {
+                        state.scheduler.noteHostAnswer(ticks, answered);
+                    }
+                },
                 runOnce: ()=>live()
                     ? state.scheduler.runOnce()
                     : { ran: null, instructions: 0, switched: false },

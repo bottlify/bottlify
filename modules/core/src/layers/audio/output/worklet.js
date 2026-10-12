@@ -508,8 +508,10 @@ function playVoice({ block, blockFrames, header, arena, outputRate, seam }){
 }
 
 /**
- * One output block: every slot resampled and summed into it, the block and
- * starvation counters advanced.
+ * One table's part of an output block: every slot resampled and added into it,
+ * its block and starvation counters advanced. The caller zeroes the block once
+ * and adds each process's table in turn, as two films playing at once meet only
+ * at the speaker.
  *
  * A block is starved -- the artifact a person hears as a click -- when no
  * slot had enough to fill it, exactly as the ring counted it before: an idle
@@ -520,14 +522,13 @@ function playVoice({ block, blockFrames, header, arena, outputRate, seam }){
  * @param {Int32Array} p.global          The table's `GLOBAL_HEADER_INT32` ints.
  * @param {{ header: Int32Array, pcm: Uint8Array }[]} p.slots
  * @param {Seam[]} p.seams                One per slot, same order.
- * @param {Float32Array} p.block          Zeroed by the caller or not yet used.
+ * @param {Float32Array} p.block          Added into; zeroed by the caller.
  * @param {number} p.blockFrames
  * @param {number} p.outputRate
  * @param {Uint8Array | null} [p.arena] The DMA voices' mirrors.
  * @returns {number} the most any one slot produced
  */
 function mixBlock({ global, slots, seams, block, blockFrames, outputRate, arena }){
-    block.fill(0, 0, blockFrames * 2);
     Atomics.add(global, BLOCKS, 1);
     let maxProduced = 0;
     for (let slot = 0; slot < slots.length; slot++)
@@ -609,6 +610,40 @@ function playFeed(feed, block, blockFrames){
 /* WORKLET-SHARED:END */
 
 /**
+ * @typedef {{ global: Int32Array, slots: { header: Int32Array, pcm: Uint8Array }[],
+ *     seams: Seam[], arena: Uint8Array | null }} PlayedTable
+ */
+
+/**
+ * A track table as the output reads it: its header, its slots, and the DMA
+ * voices' mirrors after the last slot -- a table made without them plays its
+ * queues alone.
+ *
+ * @param {ArrayBufferLike} table
+ * @returns {PlayedTable}
+ */
+function playedTable(table){
+    const slots = [];
+    const seams = [];
+    for (let slot = 0; slot < SLOTS; slot++)
+    {
+        slots.push({
+            header: new Int32Array(table, slotHeaderOffset(slot), SLOT_HEADER_INT32),
+            pcm: new Uint8Array(table, slotPcmOffset(slot), SLOT_BYTES),
+        });
+        seams.push(createSeam());
+    }
+    const arenaAt = GLOBAL_HEADER_BYTES + SLOTS * SLOT_STRIDE;
+    return {
+        global: new Int32Array(table, 0, GLOBAL_HEADER_INT32),
+        slots,
+        seams,
+        arena: table.byteLength >= arenaAt + ARENA_BYTES
+            ? new Uint8Array(table, arenaAt, ARENA_BYTES) : null,
+    };
+}
+
+/**
  * Blocks between two reports of a feed's progress: about ten milliseconds at
  * 48 kHz, so the engine hears often enough to keep the feed topped up, and the
  * audio thread posts a hundred small messages a second rather than one a block.
@@ -635,6 +670,14 @@ class BottlifyOutput extends AudioWorkletProcessor {
             {
                 this.running = false;
             }
+            else if (event.data?.type === 'table' && event.data.table && !this.feed)
+            {
+                this.tables.set(event.data.id, playedTable(event.data.table));
+            }
+            else if (event.data?.type === 'untable')
+            {
+                this.tables.delete(event.data.id);
+            }
             else if (event.data?.type === 'feed')
             {
                 // The engine's own end of a channel the page made, so the
@@ -647,33 +690,23 @@ class BottlifyOutput extends AudioWorkletProcessor {
                 this.feedPort = port;
             }
         };
-        /** @type {{ header: Int32Array, pcm: Uint8Array }[]} */
-        this.slots = [];
-        /** @type {Seam[]} */
-        this.seams = [];
+        /**
+         * Every table this output plays: the run's, and one for each process
+         * running beside another, which the page hands over as it starts and
+         * takes back as it goes. Each process's sound is its own, as two
+         * films playing at once are, and they meet only here.
+         *
+         * @type {Map<string | number, PlayedTable>}
+         */
+        this.tables = new Map();
         if (!table)
         {
             // No shared memory to read a table from: the engine mixes on its
             // own thread and posts the mix.
             this.feed = createFeed();
-            this.global = null;
-            this.arena = null;
             return;
         }
-        this.global = new Int32Array(table, 0, GLOBAL_HEADER_INT32);
-        for (let slot = 0; slot < SLOTS; slot++)
-        {
-            this.slots.push({
-                header: new Int32Array(table, slotHeaderOffset(slot), SLOT_HEADER_INT32),
-                pcm: new Uint8Array(table, slotPcmOffset(slot), SLOT_BYTES),
-            });
-            this.seams.push(createSeam());
-        }
-        // The DMA voices' mirrors, after the last slot; a table made without
-        // one plays its queues alone.
-        const arenaAt = GLOBAL_HEADER_BYTES + SLOTS * SLOT_STRIDE;
-        this.arena = table.byteLength >= arenaAt + ARENA_BYTES
-            ? new Uint8Array(table, arenaAt, ARENA_BYTES) : null;
+        this.tables.set('run', playedTable(table));
     }
 
     /**
@@ -710,12 +743,12 @@ class BottlifyOutput extends AudioWorkletProcessor {
             // context's: a mismatch between the two is a configuration error
             // elsewhere, and resampling against the rate the engine actually
             // assumed is what keeps this processor self-consistent regardless.
-            const global = /** @type {Int32Array} */ (this.global);
-            const outputRate = Atomics.load(global, OUTPUT_RATE);
-            mixBlock({
-                global, slots: this.slots, seams: this.seams,
-                block: this.block, blockFrames, outputRate, arena: this.arena,
-            });
+            this.block.fill(0, 0, blockFrames * 2);
+            for (const played of this.tables.values())
+            {
+                mixBlock({ ...played, block: this.block, blockFrames,
+                    outputRate: Atomics.load(played.global, OUTPUT_RATE) });
+            }
         }
         for (let channel = 0; channel < output.length; channel++)
         {

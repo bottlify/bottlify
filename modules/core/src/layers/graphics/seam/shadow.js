@@ -264,7 +264,11 @@ export function createCommandReader(deps){
     let taken = 0;
     const zero = new Uint8Array(4);
     return {
-        take(){
+        /**
+         * @param {() => void} [before]  run once the ring is found to hold calls,
+         *     before they are made
+         */
+        take(before){
             if (readWord(block + SHADOW.DRAWS_PENDING) !== 0)
             {
                 // Lowered before the head is read: a draw written after this
@@ -301,6 +305,7 @@ export function createCommandReader(deps){
             }
             if (whole > 0)
             {
+                before?.();
                 taken += take(new Uint8Array(words.buffer, words.byteOffset, whole * 4));
             }
             tail += whole * 4;
@@ -320,6 +325,9 @@ export function createCommandReader(deps){
 
 /** What the host clears a word of the block with; never written to. */
 const ZERO_WORD = new Uint8Array(4);
+
+/** D3DUSAGE_DYNAMIC. */
+const D3DUSAGE_DYNAMIC = 0x200;
 
 /** A lock for reading has nothing to remember; the host takes it. */
 const D3DLOCK_READONLY = 0x10;
@@ -1690,6 +1698,7 @@ export const stageStateMirror = types=>[
  * @property {number} length
  * @property {number} type        D3DRTYPE, which says which interface it is published as.
  * @property {number} refCount
+ * @property {number} [usage]     D3DUSAGE, of which DYNAMIC says it may be held locked while drawn.
  * @property {() => number} release
  * @property {(offset: number, size: number, out: { pBits?: number }, flags?: number) => number
  *     } Lock
@@ -1772,6 +1781,17 @@ export function settledAfter(shadow, call){
  * @property {ShadowCommands} [commands]  The methods the device's command
  *     ring carries (`commandCode`), and how the host makes one: a device
  *     without them gets no ring.
+ * @property {ShadowPhases} [phases]  Where `sync`'s time is accounted.
+ */
+
+/**
+ * The phases `sync` opens, inside the host call it runs at the start of
+ * (`bridge`'s `innerPhase`): `begin` answers 0 when the call is not one being
+ * timed, and `end` takes what `begin` answered.
+ *
+ * @typedef {Object} ShadowPhases
+ * @property {(name: string) => number} begin
+ * @property {(name: string, weight: number) => void} end
  */
 
 /**
@@ -1781,6 +1801,8 @@ export function settledAfter(shadow, call){
  */
 export function createShadow(deps){
     const { device } = deps;
+    // Nothing timed in a production bundle, and no phase looked for.
+    const phases = import.meta.BOTTLIFY_DIAGNOSTICS !== false ? deps.phases ?? null : null;
     const name = deps.name ?? 'IDirect3DDevice8';
     let address = 0;
     let refused = 0;
@@ -1797,6 +1819,16 @@ export function createShadow(deps){
     const blocks = new Map();
     /** @type {WeakMap<object, number>} */
     const blockOf = new WeakMap();
+    /**
+     * The blocks of buffers the guest has locked and unlocked itself: the ones
+     * that can be held locked in the guest across a host entry.
+     *
+     * @type {Set<number>}
+     */
+    const lockedInGuest = new Set();
+    /** Locks the host took and let go of in a block (`noteLocked`), beside the routines' counts. */
+    let hostTaken = 0;
+    let hostReleased = 0;
     /** The textures with a block. @type {WeakMap<object, { block: number }>} */
     const textureBlocks = new WeakMap();
     /** The surfaces with a block. @type {WeakMap<object, number>} */
@@ -2115,9 +2147,81 @@ export function createShadow(deps){
     };
 
 
+    /**
+     * What the guest has written into buffers it still holds locked reaches
+     * the device before the ring's calls are made: a draw in the ring may
+     * read it. A buffer is settled at its unlock, and a host entry while it
+     * was still locked -- another call between two quads of one lock -- made
+     * the ring's draws of it before what they read was there.
+     * ponytail: dynamic buffers and those the guest has unlocked once are
+     * looked at; any other held across an entry on its first lock is settled
+     * at its unlock.
+     */
+    const settleHeld = ()=>{
+        // Every lock taken and every one let go of is counted -- by the
+        // routines that made it, or by `noteLocked` for the host's -- so the
+        // difference is what is held. None, and the usual entry costs two
+        // words instead of a look at every buffer the guest ever let go of.
+        if (readWord(address + SHADOW.LOCK_CALLS) + hostTaken
+            === readWord(address + SHADOW.UNLOCK_CALLS) + hostReleased)
+        {
+            return;
+        }
+        for (const block of lockedInGuest)
+        {
+            if (!blocks.has(block))
+            {
+                lockedInGuest.delete(block);
+                continue;
+            }
+            flushHeld(block);
+        }
+    };
+
+    /**
+     * What the guest has written so far into a buffer it holds locked, sent
+     * through a lock and unlock on the host; the range stays in the block for
+     * the unlock to send again with what is written after, less its DISCARD,
+     * which this has done. The host keeps no lock of its own: a draw it made
+     * of a locked buffer reads the locked range as guest memory holds it at
+     * the draw, and a draw from the ring is made after the program wrote on.
+     *
+     * @param {number} block
+     */
+    const flushHeld = block=>{
+        const entry = blocks.get(block);
+        // One word first: of the buffers ever let go of, which this is asked
+        // about at every entry while any lock is held, nearly all are not
+        // locked, and reading each whole block was most of what it cost.
+        if (!entry || entry.hostLocked || readWord(block + BUFFER.LOCKED) === 0)
+        {
+            return;
+        }
+        const words = readWords(block, BUFFER.SIZE / 4);
+        const from = words[BUFFER.FROM / 4];
+        const to = words[BUFFER.TO / 4];
+        const flags = words[BUFFER.LOCK_FLAGS / 4];
+        if (words[BUFFER.LOCKED / 4] === 0 || to <= from)
+        {
+            return;
+        }
+        if (entry.buffer.Lock(from, to - from, {}, flags) === 0)
+        {
+            entry.buffer.Unlock();
+            markLent(block);
+        }
+        if ((flags & D3DLOCK_DISCARD) !== 0)
+        {
+            flagWord[0] = flags & ~D3DLOCK_DISCARD;
+            deps.writeMemory(block + BUFFER.LOCK_FLAGS, flagBytes);
+        }
+    };
+    /** The flags word written back, without a buffer made for each. */
+    const flagWord = new Uint32Array(1);
+    const flagBytes = new Uint8Array(flagWord.buffer);
+
     /** The command ring's reader, once the block has one. @type {ReturnType<typeof createCommandReader> | null} */
     let commandReader = null;
-    const takeCommands = ()=>commandReader?.take();
 
     /**
      * Replays the locks and unlocks of buffers the guest let go of since the
@@ -2138,9 +2242,54 @@ export function createShadow(deps){
         unlockCalls = words[1];
         for (const buffer of words.subarray(3))
         {
+            lockedInGuest.add(buffer);
             settle(buffer);
         }
         deps.writeMemory(address + SHADOW.RING_HEAD, ZERO_WORD);
+    };
+
+    /**
+     * `sync` with its parts as phases of their own, in a host call being
+     * timed: the buffers let go of, and the ring's calls with the held
+     * buffers settled before them.
+     */
+    const timedSync = ()=>{
+        const held = /** @type {ShadowPhases} */ (phases);
+        const unlocked = readWord(address + SHADOW.RING_HEAD);
+        if (unlocked !== 0)
+        {
+            const weight = held.begin('ring-unlocked');
+            try
+            {
+                settleUnlocked(unlocked);
+            }
+            finally
+            {
+                held.end('ring-unlocked', weight);
+            }
+        }
+        if (commands !== 0 && commandReader !== null)
+        {
+            const weight = held.begin('ring-take');
+            try
+            {
+                commandReader.take(()=>{
+                    const inner = held.begin('ring-held');
+                    try
+                    {
+                        settleHeld();
+                    }
+                    finally
+                    {
+                        held.end('ring-held', inner);
+                    }
+                });
+            }
+            finally
+            {
+                held.end('ring-take', weight);
+            }
+        }
     };
 
     /** The block, made and mirrored on first use. */
@@ -2300,6 +2449,22 @@ export function createShadow(deps){
             {
                 return;
             }
+            // The work every host call starts with, outside the method it was
+            // asked for: unaccounted, it was read as the call's own time, and
+            // a share of the thread that a profile found only here.
+            const weight = phases === null ? 0 : phases.begin('ring-sync');
+            if (weight !== 0)
+            {
+                try
+                {
+                    timedSync();
+                }
+                finally
+                {
+                    /** @type {ShadowPhases} */ (phases).end('ring-sync', weight);
+                }
+                return;
+            }
             const unlocked = readWord(address + SHADOW.RING_HEAD);
             if (unlocked !== 0)
             {
@@ -2307,7 +2472,10 @@ export function createShadow(deps){
             }
             if (commands !== 0)
             {
-                takeCommands();
+                // Held buffers only when the ring has calls that may read
+                // them: settling at every entry read every held range again
+                // at each of thousands of host calls a frame.
+                commandReader?.take(settleHeld);
             }
         },
 
@@ -2337,6 +2505,12 @@ export function createShadow(deps){
             deps.writeMemory(block,
                 dwordsBytes([0, buffer.base, buffer.length, 0, 0, 0, 0, owner, 0]));
             blocks.set(block, { buffer, hostLocked: false });
+            // A dynamic buffer is the kind a program holds locked while it
+            // draws from it, from its very first lock.
+            if (((buffer.usage ?? 0) & D3DUSAGE_DYNAMIC) !== 0)
+            {
+                lockedInGuest.add(block);
+            }
             blockOf.set(buffer, block);
             return block;
         },
@@ -2438,6 +2612,21 @@ export function createShadow(deps){
                 return;
             }
             entry.hostLocked = locked;
+            // The routines count only the locks and unlocks they make; one
+            // the host makes is counted here, so that what is held can be
+            // told from the four numbers (`settleHeld`).
+            const was = readWord(block + BUFFER.LOCKED) !== 0;
+            if (was !== locked)
+            {
+                if (locked)
+                {
+                    hostTaken++;
+                }
+                else
+                {
+                    hostReleased++;
+                }
+            }
             deps.writeMemory(block + BUFFER.LOCKED, dwordBytes(locked ? 1 : 0));
             // Never cleared: a lock claims only its own range, and what was
             // lent elsewhere in the buffer may still be unread.

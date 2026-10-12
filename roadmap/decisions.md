@@ -375,10 +375,16 @@ written against earlier drivers that took the curve over oFog, and set their ran
 Cry writes oFog as one minus its own visibility and sets a LINEAR table range of 0 to 1: over
 the depth every terrain pixel of a level came out the fog colour (measured 2026-10-10, browser,
 graphics worker, SwiftShader); over oFog the range gives back the program's own factor. A shader
-without oFog keeps Wine's answer. A program written for later drivers, which take the curve
-over the depth whatever the shader wrote, runs with the graphics setting `driverRules: 'current'`
-(docs/core/configuration.md); `'legacy'` is the default, since the programs that leave fog to
-this stage at all are of the earlier generation. *2026-10-10.*
+without oFog has the curve run over the depth as the fixed function takes it: z under an affine
+projection, w under a perspective one, by the projection set on the device. Far Cry's R300 path
+writes no oFog and sets LINEAR 30 to 350 in eye units for its shader draws, the range its NV2x
+path computes into oFog itself; over z, which never leaves 0..1, its world was drawn without
+fog and its far forest dark (reports 2026-10-12, Chrome on macOS). A program written for later
+drivers, which take the curve over z whatever the shader wrote and whatever the projection
+(Wine's `fog_with_shader_test`, measured on a GeForce 7600GS), runs with the graphics setting
+`driverRules: 'current'` (docs/core/configuration.md); `'legacy'` is the default, since the
+programs that leave fog to this stage at all are of the earlier generations. *2026-10-10,
+the case without oFog 2026-10-12.*
 
 ## B. From measured optimisation work
 
@@ -698,3 +704,32 @@ first instruction. Absent, the runtime treats the system as one without side-by-
 and runs. Removed on 2026-09-09 (16110a45), added back by an export audit on 2026-10-08
 (884102c9) and Gothic 3 met R6034 at vcomp.dll that day; kernel32's system.test.js now fails
 if the names come back. *2026-10-08.*
+
+**A periodic multimedia timer that has fallen more than a period behind fires once, not once per
+tick missed.** Its next due time moves to the first tick of the same grid still to come, and the
+ticks passed over are counted (`multimediaTimers.skipped`). Re-armed from its due time alone, a
+callback slower than its period owed more ticks with every one, and the time-critical timer
+thread took the processor at every turn: Delta Force's 33 ms timer was measured 2.3 s behind
+and still falling, the main thread getting what was left. What Windows does with ticks a late
+callback missed was not measured. *2026-10-11.*
+
+**A run-time LoadLibrary of a name the engine's table answers does not load the system
+directory's copy beside it.** Static imports and a loaded library's own dependencies already
+took the table's module, which is mapped from the start; only LoadLibrary searched the system
+directory first, so a process could hold an installer's d3dx9_24.dll beside ours -- the
+installed effect compiler then made fx_2_0 bytecode our D3DXCreateEffect was asked to read
+(Battlefield 2). A copy beside the program still wins. This narrows the 2026-09-26 entry above
+(the installed runtime in `system32` is what loads): for a name the table answers, it is not,
+whichever way the library is reached. *2026-10-11.*
+
+**The video adapter is shown with a profile: a known card of a shader model, by its PCI ids and
+with its shader versions; the launcher shows model 2 (a Radeon 9800 Pro) unless a bottle
+chooses another.** The adapter keeps its own name. A program that picks its render path from a
+card database knows the cards of its years and takes its weakest path on one it does not: shown
+the browser's vendor (Apple, or none) with device id zero, Far Cry took a GeForce 4 path with
+pixel shaders 1.1; shown a GeForce 6800 it took a TNT2 one with no pixel shaders; shown a Radeon
+9800 with model 3 beside it, its 2004 Cg compiler, asked for the newest profile, knew none and
+failed. Model 2 is the card most games of DirectX 9's years know; a title that wants another
+gets it from the bottle's "Shader profile" (`gpuProfile` sm1-sm4, or `host` for the browser's
+vendor and model 3, the engine's own default). Which card real Windows reports is the card's;
+none was measured against hardware. *2026-10-12.*

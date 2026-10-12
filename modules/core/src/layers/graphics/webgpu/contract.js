@@ -61,6 +61,7 @@
  *            size?: number)=>void} writeBuffer
  * @property {(destination: any, data: any, layout: any, size: any)=>void} writeTexture
  * @property {(buffers: any[])=>void} submit
+ * @property {()=>Promise<void>} [onSubmittedWorkDone]
  */
 
 /**

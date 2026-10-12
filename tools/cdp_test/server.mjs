@@ -75,6 +75,9 @@ export async function serveStatic({ sandboxDir, srcDir, extra = [], coi = false,
             res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
             res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
         }
+        // Lets a page or worker served here run the JS sampler (`sampleJs`);
+        // asked for by nothing else, so it changes nothing for a run without it.
+        res.setHeader('Document-Policy', 'js-profiling');
         const url = new URL(req.url ?? '/', 'http://localhost');
         const route = routes.find(entry=>url.pathname.startsWith(entry.prefix));
         if (!route)

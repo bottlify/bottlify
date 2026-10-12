@@ -217,6 +217,8 @@ const TRAP_SAMPLE = 32;
 /** How many return addresses each function's sampled crossings are counted at. */
 const CALLERS_KEPT = 64;
 const TRAP_WEIGHT = Object.freeze({ weight: TRAP_SAMPLE });
+/** What a phase inside a timed crossing stands for: as many as the crossing (`innerBegin`). */
+const INNER_WEIGHT = Object.freeze({ weight: TRAP_SAMPLE, withParent: true });
 
 /** How many functions the report names by the host time they took. */
 const BY_FUNCTION_KEPT = 80;
@@ -294,7 +296,8 @@ const NO_ERROR = ()=>0;
  * @param {boolean} [deps.traceStrings]
  * @param {boolean} [deps.callPhases]  Time each call as a phase of its own.
  * @param {{ begin: (name: string, kind?: string) => void,
- *            end: (name?: string, detail?: { weight?: number }) => number }} [deps.profiler]
+ *            end: (name?: string, detail?: { weight?: number, withParent?: boolean }) => number
+ *          }} [deps.profiler]
  *        Where a host call's time is accounted. Optional: this layer is
  *        testable without one, and a phase nobody reads is work nobody asked
  *        for.
@@ -465,6 +468,13 @@ class Dispatcher {
         this.untilSample = this.sampleInterval();
         /** Whether the crossing being made is a sampled one, whose caller is counted. */
         this.sampleCaller = false;
+        /**
+         * What a phase opened inside the crossing being made stands for
+         * (`innerBegin`): with every call a phase of its own, each is timed and
+         * stands for itself; otherwise only inside a timed crossing, standing
+         * for as many as it does; 0 is not timed.
+         */
+        this.innerWeight = this.phased ? 1 : 0;
 
         // Indexed by trap id: the cpu hands them out in sequence from zero.
         /** @type {(Entry | undefined)[]} */
@@ -1428,13 +1438,35 @@ class Dispatcher {
         // one slowed by leaving it so often.
         if (--this.untilSample > 0)
         {
-            this.cross(id);
+            if (this.innerWeight === 0 || this.phased)
+            {
+                this.cross(id);
+                return;
+            }
+            // An untimed crossing made from inside a timed one -- a callback
+            // into the guest that calls the host again -- times nothing
+            // inside it: what it does is in the timed crossing's own time.
+            const outer = this.innerWeight;
+            this.innerWeight = 0;
+            try
+            {
+                this.cross(id);
+            }
+            finally
+            {
+                this.innerWeight = outer;
+            }
             return;
         }
         this.untilSample = this.sampleInterval();
         this.sampleCaller = true;
         const profiler = import.meta.BOTTLIFY_DIAGNOSTICS !== false ? this.profiler : null;
         profiler?.begin('trap', 'host');
+        const outer = this.innerWeight;
+        if (profiler && !this.phased)
+        {
+            this.innerWeight = TRAP_SAMPLE;
+        }
         const began = performance.now();
         try
         {
@@ -1447,7 +1479,39 @@ class Dispatcher {
             {
                 entry.sampledMs += performance.now() - began;
             }
+            this.innerWeight = outer;
             profiler?.end('trap', TRAP_WEIGHT);
+        }
+    }
+
+    /**
+     * Opens a phase inside the host call being made, for the work a call
+     * does before or around what it was asked for: timed when the crossing
+     * is, one in about TRAP_SAMPLE, and weighed as the crossing is -- a
+     * second clock beside the crossing's would cost what sampling saves.
+     *
+     * @param {string} name
+     * @returns {number} what it stands for, to hand to `innerEnd`; 0, not opened
+     */
+    innerBegin(name){
+        const weight = this.innerWeight;
+        if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && weight !== 0)
+        {
+            /** @type {NonNullable<Dispatcher['profiler']>} */ (this.profiler).begin(name, 'host');
+            return weight;
+        }
+        return 0;
+    }
+
+    /**
+     * @param {string} name
+     * @param {number} weight  what `innerBegin` answered; 0 closes nothing
+     */
+    innerEnd(name, weight){
+        if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && weight !== 0)
+        {
+            /** @type {NonNullable<Dispatcher['profiler']>} */ (this.profiler)
+                .end(name, weight === 1 ? undefined : INNER_WEIGHT);
         }
     }
 

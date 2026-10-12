@@ -530,6 +530,119 @@ test('the crossing is timed apart from the handler it carries', ()=>{
         opened.length / 2 - 1, 'and every call is timed, the untimed crossings\' too');
 });
 
+test('work inside a call is timed with the crossing and stands for as many', ()=>{
+    // The shadow's sync runs at every host call before the device method; a
+    // clock of its own there would cost what sampling the crossing saved. It
+    // is timed when the crossing is, inside it, and carries its weight.
+    /** @type {string[]} */
+    const opened = [];
+    /** @param {boolean} callPhases @param {boolean} [profiled] */
+    const build = (callPhases, profiled = true)=>{
+        const built = machine({
+            callPhases,
+            profiler: profiled ? {
+                /** @param {string} name */
+                begin: name=>opened.push(`begin ${name}`),
+                /**
+                 * @param {string} [name]
+                 * @param {{ weight?: number, withParent?: boolean }} [detail]
+                 */
+                end: (name, detail)=>opened.push(`end ${name}`
+                    + `${detail?.weight ? ` x${detail.weight}` : ''}`
+                    + `${detail?.withParent ? ' with parent' : ''}`),
+            } : undefined,
+        });
+        const { dispatcher } = built;
+        dispatcher.register(1, {
+            name: 'TEST.dll!Draw', convention: 'stdcall', argBytes: 0, handler: ()=>{
+                const weight = dispatcher.innerBegin('ring-sync');
+                dispatcher.innerEnd('ring-sync', weight);
+                return 0;
+            },
+        });
+        return dispatcher;
+    };
+
+    const sampled = build(false);
+    for (let call = 0; call < 4000; call++)
+    {
+        sampled.dispatch(1);
+    }
+    const crossings = opened.filter(line=>line === 'begin trap').length;
+    assert.ok(crossings > 0);
+    assert.equal(opened.filter(line=>line === 'begin ring-sync').length, crossings,
+        'timed exactly when the crossing is');
+    for (let at = 0; at < opened.length; at += 4)
+    {
+        assert.deepEqual(opened.slice(at, at + 4), ['begin trap', 'begin ring-sync',
+            'end ring-sync x32 with parent', 'end trap x32']);
+    }
+
+    opened.length = 0;
+    const everyCall = build(true);
+    for (let call = 0; call < 100; call++)
+    {
+        everyCall.dispatch(1);
+    }
+    assert.equal(opened.filter(line=>line === 'end ring-sync').length, 100,
+        'with every call a phase, every call\'s work is timed and stands for itself');
+
+    opened.length = 0;
+    const none = build(false, false);
+    for (let call = 0; call < 100; call++)
+    {
+        none.dispatch(1);
+    }
+    assert.deepEqual(opened, [], 'no profiler, nothing opened');
+});
+
+test('a crossing made from inside a timed one times nothing inside it', ()=>{
+    // A callback into the guest from a timed call that calls the host again:
+    // the inner crossing is not timed, and work timed inside it would be
+    // charged to the outer one's weight -- thirty-two times what it was.
+    /** @type {string[]} */
+    const opened = [];
+    const { dispatcher } = machine({
+        profiler: {
+            /** @param {string} name */
+            begin: name=>opened.push(`begin ${name}`),
+            /** @param {string} [name] */
+            end: name=>opened.push(`end ${name}`),
+        },
+    });
+    /** @type {number[]} */
+    const untimed = [];
+    let weight = -1;
+    dispatcher.register(2, {
+        name: 'TEST.dll!Inner', convention: 'stdcall', argBytes: 0, handler: ()=>{
+            weight = dispatcher.innerBegin('ring-sync');
+            dispatcher.innerEnd('ring-sync', weight);
+            return 0;
+        },
+    });
+    dispatcher.register(1, {
+        name: 'TEST.dll!Outer', convention: 'stdcall', argBytes: 0, handler: ()=>{
+            if (opened.at(-1) === 'begin trap')
+            {
+                const before = opened.length;
+                dispatcher.dispatch(2);
+                // Only an inner crossing the sampler did not pick itself.
+                if (opened[before] !== 'begin trap')
+                {
+                    untimed.push(weight);
+                }
+            }
+            return 0;
+        },
+    });
+    for (let call = 0; call < 4000 && untimed.length < 8; call++)
+    {
+        dispatcher.dispatch(1);
+    }
+    assert.equal(untimed.length, 8);
+    assert.deepEqual(untimed, new Array(8).fill(0));
+});
+
 test('which crossing is timed does not follow the program\'s own sequence of calls', ()=>{
     // A frame's draws repeat one sequence of calls. Timing every eighth call
     // of a sequence whose length shares a factor with eight times the same

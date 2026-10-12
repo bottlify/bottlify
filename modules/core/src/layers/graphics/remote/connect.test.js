@@ -228,3 +228,34 @@ test('a frame the worker\'s GPU refused is said, with how often it was', ()=>{
         'graphics: the GPU refused a frame: Invalid CommandBuffer (x256)']);
     end.dispose();
 });
+
+test('the worker\'s phase totals are summed over the roots that said them', async()=>{
+    const worker = fakeWorker();
+    const end = connectGraphicsWorker({ worker });
+    const services = { readMemory: ()=>new Uint8Array(0), gamma: { applies: ()=>true, set(){} } };
+    const factory = (/** @type {any} */ given)=>({ given });
+    end.root('d3d9', factory, services);
+    end.root('d3d9', factory, services);
+    end.root('d3d9', factory, services);
+    assert.equal(end.diagnostics().phases, null, 'nothing said yet: not measured');
+
+    const ports = worker.posted.filter(posted=>posted.type === 'root').map(posted=>posted.port);
+    /** @param {number} read @param {number} sweep */
+    const phases = (read, sweep)=>({ 'batch-read': { count: 2, ms: read, selfMs: read - sweep },
+        'batch-sweep': { count: 1, ms: sweep } });
+    ports[0].postMessage({ type: 'diagnostics', diagnostics: {}, phases: phases(10, 4) });
+    ports[1].postMessage({ type: 'diagnostics', diagnostics: {}, phases: phases(6, 1) });
+    // The third root's played side times nothing: it is left out of the sum.
+    ports[2].postMessage({ type: 'diagnostics', diagnostics: {} });
+    await new Promise(resolve=>setTimeout(resolve, 10));
+
+    assert.deepEqual(end.diagnostics().phases, {
+        'batch-read': { count: 4, ms: 16, selfMs: 11 },
+        'batch-sweep': { count: 2, ms: 5 },
+    });
+    for (const port of ports)
+    {
+        port.close();
+    }
+    end.dispose();
+});

@@ -96,6 +96,32 @@ test('two tracks at different rates and gains come out summed', ()=>{
     assert.equal(music.playedBytes(), 4);
 });
 
+test('each process\'s table is its own, and the output plays them all at once', ()=>{
+    // Two processes, as two films playing at once: neither table holds the
+    // other's tracks, so neither can close them, and they meet only here.
+    const run = createMixer({ shared: true, sampleRate: 48000 });
+    const child = createMixer({ shared: true, sampleRate: 48000 });
+    const music = run.open({ sampleRate: 48000, channels: 1, bitsPerSample: 16 });
+    const voice = child.open({ sampleRate: 48000, channels: 1, bitsPerSample: 16 });
+    music.gain = 1;
+    voice.gain = 1;
+    music.write(pcm16([16384, 16384, 16384]));
+    voice.write(pcm16([8192, 8192, 8192]));
+
+    const Processor = loadWorkletClass();
+    const processor = new Processor({ processorOptions: { table: run.table, channels: 2 } });
+    processor.port.onmessage({ data: { type: 'table', id: 7, table: child.table } });
+    const both = [outputBlock(1)];
+    processor.process([], both);
+    assert.ok(Math.abs(both[0][0][0] - 0.75) < 1e-6, `both: ${both[0][0][0]}`);
+
+    processor.port.onmessage({ data: { type: 'untable', id: 7 } });
+    const alone = [outputBlock(1)];
+    processor.process([], alone);
+    assert.ok(Math.abs(alone[0][0][0] - 0.5) < 1e-6, `the run's alone: ${alone[0][0][0]}`);
+    assert.equal(voice.played(), 1, 'a table given back is not read again');
+});
+
 test('a track\'s balance reaches the audio thread, one side at a time', ()=>{
     const mixer = createMixer({ shared: true, sampleRate: 48000 });
     const left = mixer.open({ sampleRate: 48000, channels: 1, bitsPerSample: 16 });

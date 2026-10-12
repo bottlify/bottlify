@@ -881,25 +881,6 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
         // Awaited: a program in a worker of its own answers across its link.
         'debug.read': async(/** @type {number} */ address, /** @type {number} */ length)=>
             (await app.debug.read(address, length)).slice(),
-        'debug.modules': ()=>app.debug.modules(),
-        // The graphics worker is this thread's, so the asking goes to it from
-        // here; what its devices write down comes back in the next report.
-        'debug.dumpFrames': (/** @type {number} */ count = 1)=>{
-            if (!graphics)
-            {
-                throw new Error('dumpFrames: this run draws without a graphics worker');
-            }
-            graphics.worker.postMessage({ type: 'debug', dumpFrames: count });
-            return count;
-        },
-        'debug.bufferLocks': (/** @type {string} */ mode = '')=>{
-            if (!graphics)
-            {
-                throw new Error('bufferLocks: this run draws without a graphics worker');
-            }
-            graphics.worker.postMessage({ type: 'debug', bufferLocks: mode });
-            return mode;
-        },
         presented: ()=>({ count: frames, history: presented.slice() }),
         /*
          * The emulator's account of where the guest ran, by address. Only the
@@ -969,7 +950,21 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
                 return;
             case 'request':
             {
-                const method = methods[message.method];
+                // `debug.<name>` is the engine's `app.debug.<name>`, whatever
+                // it is: a debugging aid is written once, there, and a page
+                // reaches it as it is.
+                const debugName = message.method.startsWith('debug.')
+                    ? message.method.slice('debug.'.length) : null;
+                const method = methods[message.method] ?? (debugName !== null
+                    ? (/** @type {any[]} */ ...args)=>{
+                        const aid = /** @type {any} */ (app)?.debug?.[debugName];
+                        if (typeof aid !== 'function')
+                        {
+                            throw new Error(`no such debugging aid: ${debugName}`);
+                        }
+                        return aid(...args);
+                    }
+                    : undefined);
                 try
                 {
                     if (!method)

@@ -42,7 +42,7 @@ import { IID_IDirect3D8, IID_IDirect3DBaseTexture8, IID_IDirect3DCubeTexture8,
 import { D3DINDEXBUFFER_DESC9, D3DVERTEXBUFFER_DESC9 } from '../d3d9/structs.js';
 import { queryAs, readGuid } from './guid.js';
 import { D3DPRESENT_PARAMETERS8, D3DDISPLAYMODE, D3DVIEWPORT8, D3DCAPS8,
-    D3DSURFACE_DESC8, D3DLOCKED_RECT, D3DLIGHT7, RECT, POINT, createFields,
+    D3DSURFACE_DESC8, lockRectInto, D3DLIGHT7, RECT, POINT, createFields,
     D3DBOX, D3DLOCKED_BOX, D3DVOLUME_DESC8, createLightReader, dwordsOf, floatsOf, putLight,
     putMaterial } from './structs.js';
 import { D3DDEVTYPE, D3DFMT_INDEX, D3DRTYPE, PRIMARY_MONITOR } from '../d3d8/constants.js';
@@ -276,10 +276,11 @@ const S_FALSE = 1;
  * @param {() => number} [deps.now]  The clock the display's raster runs on, in milliseconds.
  * @param {Set<string>} [deps.traps]  Guest routines kept as traps, by name or group
  *     (`guestsBut`).
+ * @param {import('./shadow.js').ShadowPhases} [deps.phases]  Where a device's entry work is timed.
  */
 export function createDirect3D8Seam(
     { publisher, memory, screen, allocate, allocateCode, divergence, cursor, resolution, identity,
-        windowClientSize, now = ()=>performance.now(), traps = new Set() },
+        windowClientSize, now = ()=>performance.now(), traps = new Set(), phases },
 )
 {
     /** The getters a device answers in the guest, as against the calls its ring carries. */
@@ -616,25 +617,8 @@ export function createDirect3D8Seam(
             return hr;
         },
         /** @param {any} surface @param {number[]} args */
-        LockRect: (surface, [out, rect, flags])=>{
-            /** @type {any} */
-            const locked = {};
-            /** @param {number} hr */
-            const answer = hr=>{
-                if (hr === D3D_OK && (out >>> 0) !== 0)
-                {
-                    fields.writeStruct(out >>> 0, D3DLOCKED_RECT, {
-                        Pitch: locked.Pitch ?? 0,
-                        pBits: locked.pBits ?? 0,
-                    });
-                }
-                return hr;
-            };
-            // A render target's lock settles once its pixels are back in
-            // guest memory; the caller waits, and reads the rectangle then.
-            const hr = surface.LockRect(locked, readRect(rect), flags >>> 0);
-            return hr instanceof Promise ? hr.then(answer) : answer(hr);
-        },
+        LockRect: (surface, [out, rect, flags])=>lockRectInto(fields, out,
+            locked=>surface.LockRect(locked, readRect(rect), flags >>> 0)),
         /** @param {any} surface */
         UnlockRect: surface=>surface.UnlockRect(),
     }, {}, retire)];
@@ -681,19 +665,8 @@ export function createDirect3D8Seam(
         // Locking a level through the texture and through the level's own
         // surface are one lock, which is what makes taking both an error.
         /** @param {any} texture @param {number[]} args */
-        LockRect: (texture, [level, out, rect, flags])=>{
-            /** @type {any} */
-            const locked = {};
-            const hr = texture.LockRect(level >>> 0, locked, readRect(rect), flags >>> 0);
-            if (hr === D3D_OK && (out >>> 0) !== 0)
-            {
-                fields.writeStruct(out >>> 0, D3DLOCKED_RECT, {
-                    Pitch: locked.Pitch ?? 0,
-                    pBits: locked.pBits ?? 0,
-                });
-            }
-            return hr;
-        },
+        LockRect: (texture, [level, out, rect, flags])=>lockRectInto(fields, out,
+            locked=>texture.LockRect(level >>> 0, locked, readRect(rect), flags >>> 0)),
 
         /** @param {any} texture @param {number[]} args */
         UnlockRect: (texture, [level])=>texture.UnlockRect(level >>> 0),
@@ -738,20 +711,9 @@ export function createDirect3D8Seam(
             return handBack(held.surface, surfaceInterfaces, IID_IDirect3DSurface8, out >>> 0);
         },
         /** @param {any} texture @param {number[]} args */
-        LockRect: (texture, [face, level, out, rect, flags])=>{
-            /** @type {any} */
-            const locked = {};
-            const hr = texture.LockCubeRect(face >>> 0, level >>> 0, locked, readRect(rect),
-                flags >>> 0);
-            if (hr === D3D_OK && (out >>> 0) !== 0)
-            {
-                fields.writeStruct(out >>> 0, D3DLOCKED_RECT, {
-                    Pitch: locked.Pitch ?? 0,
-                    pBits: locked.pBits ?? 0,
-                });
-            }
-            return hr;
-        },
+        LockRect: (texture, [face, level, out, rect, flags])=>lockRectInto(fields, out,
+            locked=>texture.LockCubeRect(face >>> 0, level >>> 0, locked, readRect(rect),
+                flags >>> 0)),
         /** @param {any} texture @param {number[]} args */
         UnlockRect: (texture, [face, level])=>texture.UnlockCubeRect(face >>> 0, level >>> 0),
         /** @param {any} texture @param {number[]} args */
@@ -2377,7 +2339,7 @@ export function createDirect3D8Seam(
      * @param {number} address @param {number} flags D3DENUM_*
      */
     const writeAdapterIdentifier = (address, flags)=>{
-        const { vendorId, description } = describeAdapter(identity?.() ?? null);
+        const { vendorId, deviceId, description } = describeAdapter(identity?.() ?? null);
         const block = new Uint8Array(D3DADAPTER_IDENTIFIER8.FIELDS);
         /** @param {string} text @param {number} at */
         const ascii = (text, at)=>{
@@ -2393,6 +2355,7 @@ export function createDirect3D8Seam(
         // high dword, and a program that prints it prints something sane.
         view.setUint32(D3DADAPTER_IDENTIFIER8.DriverVersion + 4, 0x00010000, true);
         view.setUint32(D3DADAPTER_IDENTIFIER8.VendorId, vendorId, true);
+        view.setUint32(D3DADAPTER_IDENTIFIER8.DeviceId, deviceId, true);
         block.set(ADAPTER_GUID, D3DADAPTER_IDENTIFIER8.DeviceIdentifier);
         // Certified unless the caller said not to ask: the flag exists because
         // asking took seconds on real Windows, and a program that passes it
@@ -2689,6 +2652,7 @@ export function createDirect3D8Seam(
                     writeMemory: memory.writeMemory,
                     device: held.device,
                     divergence,
+                    phases,
                     commands: { take: records=>{
                         const made = held.device.commands(records,
                             D3D8_COMMANDS.commandObjects(records, publisher.objectAt));

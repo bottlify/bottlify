@@ -79,6 +79,7 @@ Everything below crosses to the engine's worker by `postMessage`, so every value
 | `log` | `{ categories?, capacity?, bytes? }` | — | Call areas recorded from the first instruction (`{ 'call.gpu': 'trace' }`), and the journal's size: `capacity` records, `bytes` of ring (1 MiB). |
 | `traceStrings` | boolean | `false` | Keep the text an argument points at in the journal. |
 | `profileCalls` | boolean | `false` | Time every host call as a phase of its own. |
+| `sampleJs` | boolean | `false` | Run the browser's JavaScript sampler on the engine's thread, in 2 s windows; its top functions are the `js` diagnostics table. Needs `Document-Policy: js-profiling` (see [the README](README.md)), and a window: Chrome offers the sampler to no worker, so with the engine in one the table says it is not measured. |
 | `record` | number | 0 | How many events at the bridge to keep for a replay. |
 | `hooks` | `HookSpec[]` | — | Watches placed in front of routines inside the program's own modules as they load. |
 | `watch` | `{ libraries, strings }` | — | Watch calls from one guest module into another, by library and ordinal. |
@@ -88,6 +89,17 @@ Everything below crosses to the engine's worker by `postMessage`, so every value
 | `device.*` | | | `dumpDraws`, `dumpEvery`, `maxDraws`, `skipTexture`, `probeTexture`, `keepImages`, `fog`, `mips`: per-draw dumps and one-variable-off runs of the graphics layer. |
 | `pacing` | `'page'` \| `'event'` | `'page'` | How the run loop waits in a worker: a short look every turn, or sleep until something is due. |
 | `pendingYieldMs` | number | `1` | How often, in milliseconds, the run loop gives its thread to the event loop to hear an outstanding host answer (a call parked on the device, a range in flight) while other guest threads still have work. A turn that ran nothing looks at once. Lower hears answers sooner at the cost of more trips round the event loop. |
+
+Where the engine thread's time goes is the `log` table's phases (`topPhases`, and `phasesSelfMs`
+for all of them together). A host call is the phase `trap`, timed one call in about 32 and weighed
+as all of them; the work a Direct3D 8 or 9 call does before its method is a phase inside it,
+`ring-sync`, made of `ring-unlocked` (buffers the program let go of), `ring-take` (the calls the
+program left in the command ring) and, inside that, `ring-held` (buffers still locked that those
+calls may read) -- timed with the call and weighed as it is. The graphics worker's thread has no
+phase table: `graphics.worker.phases` holds its totals since it started, `batch-read` (each batch
+of calls read and played; `selfMs` without the look below) and `batch-sweep` (the look at objects
+at a count of zero, once a frame), and is `null` until the worker has answered a diagnostics ask
+or in a build that times nothing.
 
 ## The controller
 

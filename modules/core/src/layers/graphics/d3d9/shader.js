@@ -440,7 +440,12 @@ export function validateShader(tokens, kind, supported){
     {
         return D3DERR_INVALIDCALL;
     }
-    const { major, minor } = parsed.version;
+    const { major } = parsed.version;
+    // Version 2.1 is vs_2_x and ps_2_x: model 2.0 with the extensions its
+    // VS20Caps and PS20Caps advertise, which a device of model 2.0 takes.
+    // Refused, a program whose compiler picked 2_x from those caps -- every
+    // one this device advertises past 2.0's floor -- was told no.
+    const minor = major === 2 && parsed.version.minor === 1 ? 0 : parsed.version.minor;
     if (major > supported.major || (major === supported.major && minor > supported.minor))
     {
         return D3DERR_INVALIDCALL;

@@ -152,6 +152,10 @@ if (rewritten.length > 0)
 const keepDiagnostics = process.argv.includes('--diagnostics')
     || process.env.BOTTLIFY_DIAGNOSTICS === '1';
 const DIAGNOSTICS_OFF = keepDiagnostics ? {} : { 'import.meta.BOTTLIFY_DIAGNOSTICS': 'false' };
+// `--readable` (or BOTTLIFY_READABLE=1) leaves the names as written: a CPU
+// profile of a run then names the engine's own functions rather than the
+// minifier's letters. Only for measuring; what ships is minified.
+const readable = process.argv.includes('--readable') || process.env.BOTTLIFY_READABLE === '1';
 if (keepDiagnostics)
 {
     console.log('diagnostics: kept in the bundle');
@@ -182,7 +186,7 @@ await build({
     // Shipped small and with its names mangled, and without a map that would
     // hand the source back: the source is in the repository for whoever has
     // it, and the package is the built thing.
-    minify: true,
+    minify: !readable,
     sourcemap: false,
     // The built module's own directory holds the prebuilt binaries (see
     // copyVendor) and the translator (below), so the engine finds both without
@@ -212,7 +216,7 @@ await build({
     platform: 'browser',
     target: ['es2022'],
     external: ['node:worker_threads', 'node:zlib'],
-    minify: true,
+    minify: !readable,
     sourcemap: false,
     define: DIAGNOSTICS_OFF,
     outdir: join(DIST, 'cork'),

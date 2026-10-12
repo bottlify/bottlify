@@ -19,8 +19,10 @@
  * Sender to receiver:  { type: 'calls', buffer }       a batch, as `wire.js` writes it
  * Receiver to sender:  { type: 'answer', serial, answer, outs, counts? }
  *                      { type: 'presented', count }
- *                      { type: 'diagnostics', diagnostics }
- *                                                      what a device said of itself when asked
+ *                      { type: 'diagnostics', diagnostics, phases? }
+ *                                                      what a device said of itself when asked,
+ *                                                      and where the receiving thread's time
+ *                                                      went (`WorkerPhases`)
  *                      { type: 'wrote', writes }       guest memory the played side wrote later:
  *                                                      the bytes, or where it wrote shared memory
  *                      { type: 'divergence', api, detail }
@@ -36,6 +38,18 @@ const CHECKED_EVERY = 64;
 
 /** The least time between batches sent early for what they lend. */
 const LENT_GAP_MS = 0.25;
+
+/**
+ * Where the played side's thread spent its time, cumulative since it started:
+ * every batch read and played (`batch-read`, whose `selfMs` leaves out the
+ * look below), and the look at the objects at a count of zero a batch makes
+ * once a frame (`batch-sweep`). The worker has no phase profiler of its own;
+ * these are timed per batch, a few hundred a second, at two clock readings
+ * each, and are absent from a production bundle.
+ *
+ * @typedef {{ 'batch-read': { count: number, ms: number, selfMs: number },
+ *     'batch-sweep': { count: number, ms: number } }} WorkerPhases
+ */
 
 /**
  * A value as it can cross: the device's objects and functions left out, its
@@ -121,21 +135,32 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
      * how many, and the milliseconds from the call to its answer -- what turns
      * two threads drawing side by side into one waiting on the other.
      *
-     * @type {Map<string, { count: number, ms: number, maxMs: number }>}
+     * @type {Map<string, { count: number, ms: number, maxMs: number, queuedMs: number,
+     *     heldMs: number, backMs: number }>}
      */
     const waits = new Map();
     /** @param {string} name @param {number} since */
-    const waited = (name, since)=>{
+    /**
+     * @param {string} name @param {number} since
+     * @param {{ queued?: number, held?: number, back?: number }} [parts]  where an
+     *     answer's time went: its batch on the way there, the played side holding
+     *     it, and on the way back
+     */
+    const waited = (name, since, parts)=>{
         const ms = now() - since;
-        const held = waits.get(name) ?? { count: 0, ms: 0, maxMs: 0 };
+        const held = waits.get(name) ?? { count: 0, ms: 0, maxMs: 0, queuedMs: 0, heldMs: 0,
+            backMs: 0 };
         held.count++;
         held.ms += ms;
         held.maxMs = Math.max(held.maxMs, ms);
+        held.queuedMs += parts?.queued ?? 0;
+        held.heldMs += parts?.held ?? 0;
+        held.backMs += parts?.back ?? 0;
         waits.set(name, held);
     };
     let pending = false;
     let serial = 0;
-    /** @type {Map<number, (reply: any) => void>} */
+    /** @type {Map<number, (reply: any, parts?: { queued?: number, held?: number, back?: number }) => void>} */
     const waiting = new Map();
     let presents = 0;
     let presented = 0;
@@ -143,6 +168,8 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
     const held = [];
     /** What the played side's diagnostics said last. @type {any} */
     let diagnostics = null;
+    /** Where the played side's time went, as it said last. @type {WorkerPhases | null} */
+    let phases = null;
     let failure = /** @type {string | null} */ (null);
     /** The diagnostics asked for, and those the played side has answered. */
     let asked = 0;
@@ -193,7 +220,7 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
         const buffer = writer.take();
         sent.batches++;
         sent.bytes += buffer.byteLength;
-        post({ type: 'calls', buffer }, [buffer]);
+        post({ type: 'calls', buffer, at: shared() }, [buffer]);
         lender?.sent();
         // What taking and posting the batch cost the program's thread.
         sent.ms += now() - sentAt;
@@ -258,8 +285,8 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
                 writer.u32(number);
                 flush();
                 const since = now();
-                return new Promise(resolve=>waiting.set(number, reply=>{
-                    waited(name, since);
+                return new Promise(resolve=>waiting.set(number, (reply, parts)=>{
+                    waited(name, since, parts);
                     resolve(reply);
                 }));
             }
@@ -332,11 +359,14 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
                     const resolve = waiting.get(message.serial);
                     waiting.delete(message.serial);
                     resolve?.({ answer: message.answer, outs: message.outs ?? [],
-                        counts: message.counts });
+                        counts: message.counts }, {
+                        queued: message.queued, held: message.held,
+                        back: typeof message.at === 'number' ? shared() - message.at : undefined });
                     break;
                 }
                 case 'diagnostics':
                     diagnostics = message.diagnostics;
+                    phases = message.phases ?? null;
                     told++;
                     hear();
                     break;
@@ -422,12 +452,24 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
          */
         answers: ()=>`${told}/${asked}`,
 
+        /** Where the played side's time went, as it said with its last diagnostics; null before. */
+        phases: ()=>phases,
+
         /** The calls waited on, by name, with the milliseconds they took. */
         waits: ()=>Object.fromEntries([...waits].map(([name, sum])=>[name, {
             count: sum.count, ms: Math.round(sum.ms), maxMs: Math.round(sum.maxMs),
+            queuedMs: Math.round(sum.queuedMs), heldMs: Math.round(sum.heldMs),
+            backMs: Math.round(sum.backMs),
         }])),
     };
 }
+
+/**
+ * Milliseconds on a clock both threads read alike: each thread's own clock
+ * starts when that thread did.
+ */
+const shared = ()=>(typeof performance === 'undefined' ? Date.now()
+    : performance.timeOrigin + performance.now());
 
 /**
  * The played side.
@@ -438,6 +480,13 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
  */
 export function createReceiver({ played, post }){
     let presented = 0;
+    /** @type {WorkerPhases} */
+    const phases = { 'batch-read': { count: 0, ms: 0, selfMs: 0 },
+        'batch-sweep': { count: 0, ms: 0 } };
+    /** @returns {WorkerPhases | undefined} */
+    const phasesNow = ()=>(import.meta.BOTTLIFY_DIAGNOSTICS !== false
+        ? { 'batch-read': { ...phases['batch-read'] }, 'batch-sweep': { ...phases['batch-sweep'] } }
+        : undefined);
     /** Presents finish in their order, whatever order their answers settle in. */
     let presents = Promise.resolve();
     let failed = false;
@@ -451,12 +500,12 @@ export function createReceiver({ played, post }){
             ? `${error.message}\n${error.stack ?? ''}` : String(error) });
     };
 
-    /** @param {any} call @param {any} answered */
-    const reply = (call, answered)=>{
+    /** @param {any} call @param {any} answered @param {number} queued @param {number} began */
+    const reply = (call, answered, queued, began)=>{
         /** @param {import('./replay.js').PlayedAnswer} settled */
         const send = settled=>post({ type: 'answer', serial: call.serial,
             answer: crossable(settled.answer), outs: crossable(settled.outs),
-            counts: settled.counts });
+            counts: settled.counts, queued, held: shared() - began, at: shared() });
         if (answered instanceof Promise)
         {
             answered.then(send, fail);
@@ -483,23 +532,40 @@ export function createReceiver({ played, post }){
             {
                 return;
             }
+            const arrived = shared();
+            const queued = typeof message.at === 'number' ? arrived - message.at : 0;
             try
             {
-                played.read(message.buffer, call=>{
+                const swept = played.read(message.buffer, call=>{
+                    const began = shared();
                     const answer = played.play(call);
                     if (call.m === 'diagnostics')
                     {
-                        post({ type: 'diagnostics', diagnostics: crossable(answer) });
+                        post({ type: 'diagnostics', diagnostics: crossable(answer),
+                            phases: phasesNow() });
                     }
                     else if (call.wait === WAIT.ANSWER)
                     {
-                        reply(call, answer);
+                        reply(call, answer, queued, began);
                     }
                     else if (call.wait === WAIT.PACED)
                     {
                         present(answer);
                     }
                 });
+                if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
+                {
+                    const ms = shared() - arrived;
+                    const read = phases['batch-read'];
+                    read.count++;
+                    read.ms += ms;
+                    read.selfMs += ms - (swept ?? 0);
+                    if (swept !== undefined)
+                    {
+                        phases['batch-sweep'].count++;
+                        phases['batch-sweep'].ms += swept;
+                    }
+                }
             }
             catch (e){
                 fail(e);

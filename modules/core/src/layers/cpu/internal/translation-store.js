@@ -314,6 +314,15 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
     let opening = null;
     /** The index is read and the files are this opening's, so `places` answers at once. */
     let opened = false;
+    /**
+     * Whether the files failed it -- one of them gone from under it, a write
+     * refused -- after which it answers nothing and keeps nothing: a run's
+     * translations are a cache, and losing it must not stop the run. Another
+     * user of the same directory compacting it removed the generation this
+     * one was reading, and the engine did not start ("getFile() on
+     * records.16").
+     */
+    let broken = false;
     /** Seeds on their way in, which every lookup waits for. */
     let seedsTaking = 0;
     /** The index file's length: where the next lines go. */
@@ -452,53 +461,65 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
 
     const open = ()=>{
         opening ??= (async()=>{
-            places = new Map();
             try
             {
-                const text = await textOf(await (await directory.getFileHandle(CURRENT)).getFile());
-                generation = Number.isInteger(Number(text)) && Number(text) > 0 ? Number(text) : 0;
-            }
-            catch {
-                generation = 0;
-            }
-            await openRecords();
-            let last = 0;
-            try
-            {
-                const handle = await directory.getFileHandle(generationName(INDEX, generation));
-                const text = await textOf(await handle.getFile());
-                indexEnd = new TextEncoder().encode(text).length;
-                for (const line of text.split('\n'))
+                places = new Map();
+                try
                 {
-                    const parts = line.split(' ');
-                    const [recordName, offsetText, lengthText] = parts;
-                    if (recordName === '#' && parts.length === 2)
+                    const current = await directory.getFileHandle(CURRENT);
+                    const text = await textOf(await current.getFile());
+                    generation = Number.isInteger(Number(text)) && Number(text) > 0
+                        ? Number(text) : 0;
+                }
+                catch {
+                    generation = 0;
+                }
+                await openRecords();
+                let last = 0;
+                try
+                {
+                    const handle = await directory.getFileHandle(generationName(INDEX, generation));
+                    const text = await textOf(await handle.getFile());
+                    indexEnd = new TextEncoder().encode(text).length;
+                    for (const line of text.split('\n'))
                     {
-                        // A session's mark: the lines after it are that session's.
-                        last = Math.max(last, Number(offsetText) || 0);
-                        continue;
-                    }
-                    const offset = Number(offsetText);
-                    const length = Number(lengthText);
-                    // A place past the file's end is a write the index outran
-                    // (the page went away between the two): not a record; nor
-                    // is a line cut short, which reads as a length of zero.
-                    if (parts.length === 3 && recordName && lengthText !== ''
-                        && Number.isInteger(offset) && Number.isInteger(length)
-                        && length > 0 && offset + length <= end)
-                    {
-                        places.set(recordName, { offset, length, session: last });
+                        const parts = line.split(' ');
+                        const [recordName, offsetText, lengthText] = parts;
+                        if (recordName === '#' && parts.length === 2)
+                        {
+                            // A session's mark: the lines after it are that session's.
+                            last = Math.max(last, Number(offsetText) || 0);
+                            continue;
+                        }
+                        const offset = Number(offsetText);
+                        const length = Number(lengthText);
+                        // A place past the file's end is a write the index outran
+                        // (the page went away between the two): not a record; nor
+                        // is a line cut short, which reads as a length of zero.
+                        if (parts.length === 3 && recordName && lengthText !== ''
+                            && Number.isInteger(offset) && Number.isInteger(length)
+                            && length > 0 && offset + length <= end)
+                        {
+                            places.set(recordName, { offset, length, session: last });
+                        }
                     }
                 }
+                catch {
+                    // No index yet: an empty bundle.
+                    indexEnd = 0;
+                }
+                session = last + 1;
+                await compact();
+                pendingLines.push(`# ${session}\n`);
+                opened = true;
             }
             catch {
-                // No index yet: an empty bundle.
-                indexEnd = 0;
+                // A cache that cannot be read is no cache: the run goes on
+                // without one rather than not at all.
+                broken = true;
+                places = new Map();
+                opened = true;
             }
-            session = last + 1;
-            await compact();
-            pendingLines.push(`# ${session}\n`);
-            opened = true;
         })();
         return opening;
     };
@@ -629,8 +650,19 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
     return {
         async get(key){
             await ready();
+            if (broken)
+            {
+                return null;
+            }
             const place = use(key);
-            return place ? readAt(place.offset, place.length) : null;
+            try
+            {
+                return place ? await readAt(place.offset, place.length) : null;
+            }
+            catch {
+                broken = true;
+                return null;
+            }
         },
         /**
          * The record at once, without a turn of the event loop -- through the
@@ -643,26 +675,47 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
          * @returns {Uint8Array | null | undefined}
          */
         getNow(key){
+            if (broken)
+            {
+                return null;
+            }
             if (!opened || seedsTaking > 0 || access === null)
             {
                 open();
                 return undefined;
             }
             const place = use(key);
-            return place ? readNow(place.offset, place.length) : null;
+            try
+            {
+                return place ? readNow(place.offset, place.length) : null;
+            }
+            catch {
+                broken = true;
+                return null;
+            }
         },
         /** Opens the store ahead of its first lookup: its index read, its files open. */
         prepare: ()=>open(),
         async put(key, bytes){
             await ready();
-            const offset = end;
-            end += bytes.length;
-            await appendRecords([[offset, bytes]]);
-            const recordName = fileNameOf(key);
-            /** @type {Map<string, Place>} */ (places)
-                .set(recordName, { offset, length: bytes.length, session });
-            pendingLines.push(`${recordName} ${offset} ${bytes.length}\n`);
-            await publish();
+            if (broken)
+            {
+                return;
+            }
+            try
+            {
+                const offset = end;
+                end += bytes.length;
+                await appendRecords([[offset, bytes]]);
+                const recordName = fileNameOf(key);
+                /** @type {Map<string, Place>} */ (places)
+                    .set(recordName, { offset, length: bytes.length, session });
+                pendingLines.push(`${recordName} ${offset} ${bytes.length}\n`);
+                await publish();
+            }
+            catch {
+                broken = true;
+            }
         },
         /**
          * Writes any index not yet on disk and flushes the records. `put`
@@ -694,6 +747,10 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
             const taking = (async()=>{
                 await after;
                 await open();
+                if (broken)
+                {
+                    return { taken: false, added: 0, present: 0 };
+                }
                 const bytes = await source;
                 const entries = bytes ? unpackSeed(bytes) : null;
                 if (entries === null)
@@ -878,6 +935,15 @@ export function createMemoryDirectory(){
  * without the API) answers with no store rather than a failure; an object
  * is taken as a store of the caller's own; anything falsy means none.
  *
+ * A bundle's store on the origin's file system has one user at a time: it
+ * holds the bundle's lock until it is closed, and a run that finds the lock
+ * held -- the run before it in the same tab not yet gone, a second tab --
+ * runs without one. Two users of the same files compacted under each other:
+ * one moved the records to a new generation and removed the old one while
+ * the other still read it, and the engine did not start ("could not be found
+ * ... getFile() on records.13"). A context that ends without closing lets
+ * the lock go with it.
+ *
  * @param {any} spec @param {string} name
  * @returns {Promise<TranslationStore | null>}
  */
@@ -895,11 +961,42 @@ export async function resolveTranslationStore(spec, name){
     {
         return null;
     }
+    const locks = /** @type {any} */ (globalThis).navigator?.locks;
+    /** Lets the lock go: the store's close, or a failure before there is one. */
+    let release = ()=>{};
+    if (typeof locks?.request === 'function')
+    {
+        const held = await new Promise(granted=>{
+            locks.request(`bottlify-cork:${name}`, { ifAvailable: true },
+                (/** @type {any} */ lock)=>{
+                    if (!lock)
+                    {
+                        granted(false);
+                        return undefined;
+                    }
+                    return new Promise(done=>{
+                        release = ()=>done(undefined);
+                        granted(true);
+                    });
+                }).catch(()=>granted(false));
+        });
+        if (!held)
+        {
+            return null;
+        }
+    }
     try
     {
-        return await createDirectoryTranslationStore(await storage.getDirectory(), name);
+        const store = await createDirectoryTranslationStore(await storage.getDirectory(), name);
+        const close = store.close;
+        store.close = ()=>{
+            close();
+            release();
+        };
+        return store;
     }
     catch {
+        release();
         return null;
     }
 }

@@ -97,10 +97,24 @@ export function serveGraphics(scope, deps){
      * Direct3D 8 and 9 device here writes its next frames down while this is
      * above zero.
      */
+    /** The frozen frame's timer (`freeze`), while one runs. @type {ReturnType<typeof setInterval> | undefined} */
+    let frozen;
     const liveDump = {
         dumpFrames: 0,
         /** How buffer locks are taken (`app.debug.bufferLocks`): '' as asked, 'rename' always renaming. */
         bufferLocks: '',
+        /** Textures whose draws are dropped (`app.debug.skipTexture`), `t12,t40`; '' none. */
+        skipTexture: '',
+        /** How occlusion counts are answered (`app.debug.occlusion`): '' as counted, 'visible' all passed. */
+        occlusion: '',
+        /** Draws kept a frame (`app.debug.maxDraws`), the rest dropped; -1 all. */
+        maxDraws: -1,
+        /** @type {((cut?: number) => boolean) | undefined} the device that showed last's */
+        replayLast: undefined,
+        /** @type {(() => { lines: string[], sceneDraws: number }) | undefined} */
+        shownDraws: undefined,
+        /** @type {((x?: number, y?: number, tolerance?: number, depth?: number) => Promise<any>) | undefined} */
+        pick: undefined,
         /** @param {string[]} lines @param {number} frame */
         written: (lines, frame)=>{
             const dumped = { type: 'dumped', lines, frame };
@@ -504,6 +518,46 @@ export function serveGraphics(scope, deps){
                 if ('bufferLocks' in data)
                 {
                     liveDump.bufferLocks = String(data.bufferLocks ?? '');
+                }
+                if ('skipTexture' in data)
+                {
+                    liveDump.skipTexture = String(data.skipTexture ?? '');
+                }
+                if ('occlusion' in data)
+                {
+                    liveDump.occlusion = String(data.occlusion ?? '');
+                }
+                if ('maxDraws' in data)
+                {
+                    const cut = Math.floor(Number(data.maxDraws));
+                    liveDump.maxDraws = Number.isFinite(cut) && cut >= 0 ? cut : -1;
+                }
+                if (data.pick)
+                {
+                    const { x, y, tolerance, depth } = data.pick;
+                    Promise.resolve().then(()=>{
+                        if (!liveDump.pick)
+                        {
+                            throw new Error('pick: no frame has been shown');
+                        }
+                        return liveDump.pick(x, y, tolerance, depth);
+                    }).then(result=>scope.postMessage({ type: 'picked', result }),
+                        (/** @type {any} */ e)=>scope.postMessage({ type: 'picked',
+                            error: String(e?.message ?? e) }));
+                }
+                if ('freeze' in data)
+                {
+                    // With the program paused nothing new is drawn: the last
+                    // frame is shown again, cut where `maxDraws` says, so a
+                    // picture that holds still can be taken apart draw by draw.
+                    clearInterval(frozen);
+                    frozen = undefined;
+                    if (data.freeze)
+                    {
+                        frozen = setInterval(()=>liveDump.replayLast?.(liveDump.maxDraws), 150);
+                        scope.postMessage({ type: 'frozen',
+                            ...(liveDump.shownDraws?.() ?? { lines: [], sceneDraws: 0 }) });
+                    }
                 }
                 break;
             case 'client':

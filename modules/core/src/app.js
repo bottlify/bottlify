@@ -4,6 +4,7 @@
  * See LICENSE for details
  */
 
+import { createJsSampler } from './host/js-samples.js';
 import { fitFrame, isShown, placementOf, stretchFrame } from './letterbox.js';
 import { assembleModules } from './core.js';
 import { createEvents } from './events.js';
@@ -61,6 +62,28 @@ import { objectHandlers } from './system-objects.js';
 import { openProcessWorker } from './host/process-worker.js';
 import { createTranslatorPool, portTranslator } from './host/pool/pool.js';
 import { createInputRoute } from './layers/input/route.js';
+
+/** FNV-1a, 32 bits: a call's number for telling its repeats apart in the journal. */
+const FNV_OFFSET = 0x811c9dc5;
+/** @param {number} hash @param {number} word */
+const hashWord = (hash, word)=>{
+    let h = hash;
+    for (let shift = 0; shift < 32; shift += 8)
+    {
+        h = Math.imul(h ^ ((word >>> shift) & 0xff), 0x01000193);
+    }
+    return h >>> 0;
+};
+/** @param {number} hash @param {string} text */
+const hashText = (hash, text)=>{
+    let h = hash;
+    for (let at = 0; at < text.length; at++)
+    {
+        h = Math.imul(h ^ text.charCodeAt(at), 0x01000193);
+    }
+    // The length too, so "ab" then "c" is not "a" then "bc".
+    return hashWord(h >>> 0, text.length);
+};
 
 /**
  * createApp — the consumer-facing entry point: run a Win32 application.
@@ -129,6 +152,16 @@ import { createInputRoute } from './layers/input/route.js';
  *     found (bridge `driveMs` is what to read).
  * @property {boolean} [profileCalls]  Time every host call as a phase of its own, for a
  *                                     report's cost per API; two clock readings a call.
+ * @property {'sm1' | 'sm2' | 'sm3' | 'sm4' | 'host'} [gpuProfile]  The profile the
+ *     video adapter is shown with (`GPU_PROFILES` in `layers/graphics/seam/adapter.js`):
+ *     a known card of that shader model, by its PCI ids and with its shader versions,
+ *     for a program that picks its render path from the cards it knows and takes its
+ *     weakest on one it does not. 'host' or absent, the adapter is shown with the
+ *     browser's vendor and model 3. Its name stays Bottlify's either way.
+ * @property {boolean} [sampleJs]  Keep the browser's sampler of this thread's JavaScript
+ *     running and report what it spends its time in, function by function, as the
+ *     `js` table (`host/js-samples.js`). Needs `Document-Policy: js-profiling` on
+ *     the page and the worker scripts; off by default.
  * @property {() => boolean} [pageHidden]
  *     Whether nobody is looking at this run. A hidden page's timers are clamped
  *     by the browser, which stops the machine rather than slowing it, so the
@@ -507,6 +540,14 @@ const MAX_CONCURRENT_REQUESTS = 6;
  * an idle session is not a timer running hot.
  */
 const IDLE_CHECK_MS = 50;
+
+/**
+ * Microtasks a turn waits for a host call's answer before the next thread is
+ * picked: a call that runs guest code chains a few promises before it builds
+ * the frame. The limit is not measured yet: `hostTurns` counts the ticks taken and the
+ * waits that ran out.
+ */
+const HOST_ANSWER_TICKS = 64;
 
 /** How many of the hottest sampled addresses a report carries the code around. */
 const HOT_CODE_SAMPLES = 64;
@@ -3458,8 +3499,10 @@ async function buildApp(options){
     /** @type {Map<string, string>} */
     const areaCache = new Map();
     const areaOfCall = (/** @type {any} */ call)=>areaOf(call, areaCache);
-    /** @type {Map<string, { revision: number, area: string, on: boolean }>} */
+    /** @type {Map<string, { revision: number, area: string, on: boolean, seed: number }>} */
     const tracedCalls = new Map();
+    /** Each thread's name as the journal writes it, made once. @type {WeakMap<object, string>} */
+    const threadTags = new WeakMap();
     // Every process of a run names its first thread "main", so in the run's one
     // journal a later process's threads carry its image name as well.
     const callerImage = String(options.imagePath ?? '').split(/[\\/]/).pop() ?? '';
@@ -3496,7 +3539,8 @@ async function buildApp(options){
         if (traced === undefined || traced.revision !== revision)
         {
             const area = areaOfCall(call);
-            traced = { revision, area, on: journal.enabled(area, journal.Level.TRACE) };
+            traced = { revision, area, on: journal.enabled(area, journal.Level.TRACE),
+                seed: hashText(FNV_OFFSET, call.name) };
             tracedCalls.set(call.name, traced);
         }
         const category = traced.area;
@@ -3513,16 +3557,32 @@ async function buildApp(options){
         // An argument whose text was kept (traceStrings) is shown as that
         // text: a path is what a question about a failed open needs. Every
         // kept argument is written: a blit's source context is its sixth.
-        const args = (call.args ?? [])
-            .map((/** @type {number} */ value, /** @type {number} */ at)=>(
-                call.strings?.[at] ? JSON.stringify(String(call.strings[at]).slice(0, 160))
-                    : `0x${(value >>> 0).toString(16)}`))
-            .join(', ');
-        const thread = callerTag + (core.api('kernel').currentThread()?.name ?? '?');
+        const current = core.api('kernel').currentThread();
+        let thread = current ? threadTags.get(current) : undefined;
+        if (thread === undefined)
+        {
+            thread = callerTag + (current?.name ?? '?');
+            if (current)
+            {
+                threadTags.set(current, thread);
+            }
+        }
         // A thread polling for something is a loop of the same few calls,
         // written twice and then counted (`call-repeats.js`): written each
         // time, it would push out of the ring the moment it began waiting.
-        const { write, said } = callRepeats.note(thread, `${call.name}(${args}) = ${call.result}`);
+        // The calls are told apart by a number made from the name, the
+        // arguments and the answer -- a polling loop makes millions, and a
+        // line of text made for each was most of what the journal cost.
+        let key = traced.seed;
+        const values = call.args ?? [];
+        for (let at = 0; at < values.length; at++)
+        {
+            const text = call.strings?.[at];
+            key = text ? hashText(key, String(text)) : hashWord(key, values[at] >>> 0);
+        }
+        key = typeof call.result === 'number' ? hashWord(key, call.result >>> 0)
+            : hashText(key, String(call.result));
+        const { write, said } = callRepeats.note(thread, key);
         if (said)
         {
             journal.write('trace', category, said.ended
@@ -3532,6 +3592,13 @@ async function buildApp(options){
         }
         if (write)
         {
+            // An argument whose text was kept (traceStrings) is shown as that
+            // text: a path is what a question about a failed open needs.
+            const args = values
+                .map((/** @type {number} */ value, /** @type {number} */ at)=>(
+                    call.strings?.[at] ? JSON.stringify(String(call.strings[at]).slice(0, 160))
+                        : `0x${(value >>> 0).toString(16)}`))
+                .join(', ');
             journal.write('trace', category, '[{3}] {0}({1}) = {2}', call.name, args, call.result,
                 thread);
         }
@@ -3903,6 +3970,10 @@ async function buildApp(options){
             device: options.device
                 ? {
                     ...options.device,
+                    // The profile the adapter is shown with (`seam/adapter.js`).
+                    adapter: options.gpuProfile && options.gpuProfile !== 'host'
+                        ? { ...options.device.adapter, profile: options.gpuProfile }
+                        : options.device.adapter,
                     /** @param {any} frame */
                     presentTo: frame=>{
                         // A frame runs from one present to the next, so the
@@ -6112,6 +6183,7 @@ async function buildApp(options){
     kernel.refreshClockWith?.(()=>creditClock());
 
     const breathe = createMacrotask();
+    const jsSampler = options.sampleJs ? createJsSampler() : null;
     const pacing = options.pacing ?? pagePacing({
         macrotask: breathe,
         hidden: options.pageHidden ?? pageIsHidden,
@@ -6150,6 +6222,30 @@ async function buildApp(options){
      * @type {{ gate: Promise<void>, open: () => void } | null}
      */
     let paused = null;
+    /**
+     * Stops handing out turns without ending anything; `resumeRun` continues
+     * from the same place, since no thread's state was touched.
+     */
+    const pauseRun = ()=>{
+        if (paused)
+        {
+            return;
+        }
+        /** @type {() => void} */
+        let open = ()=>{};
+        const gate = new Promise(resolve=>{
+            open = ()=>resolve(undefined);
+        });
+        paused = { gate, open };
+    };
+    const resumeRun = ()=>{
+        if (!paused)
+        {
+            return;
+        }
+        paused.open();
+        paused = null;
+    };
 
     // attachLog is sugar over the registry: the same subscription, remembered
     // by the sink the caller gave, so detaching still takes what it was given.
@@ -6561,6 +6657,23 @@ async function buildApp(options){
                     }
                     journal.end('guest', { instructions: step.instructions ?? 0 });
 
+                    // A slice that ended on a host call: an answer due in a few
+                    // microtasks -- a host call running guest code builds its
+                    // frame a promise or two later -- is let arrive now. The loop
+                    // otherwise awaits only when nothing is ready, and a thread
+                    // parked on an answer already made waited until every other
+                    // thread had nothing to do.
+                    if (step.ran?.awaitingHost)
+                    {
+                        let tick = 0;
+                        while (tick < HOST_ANSWER_TICKS && step.ran.awaitingHost)
+                        {
+                            await null;
+                            tick++;
+                        }
+                        kernel.noteHostAnswer?.(tick, !step.ran.awaitingHost);
+                    }
+
                     spun = step.instructions === 0 ? spun + 1 : 0;
 
                     // The guest ran for real, so its clock moves. Nothing else in
@@ -6698,26 +6811,8 @@ async function buildApp(options){
          * Stops handing out turns without ending anything; `resume` continues
          * from the same place, since no thread's state was touched.
          */
-        pause(){
-            if (paused)
-            {
-                return;
-            }
-            /** @type {() => void} */
-            let open = ()=>{};
-            const gate = new Promise(resolve=>{
-                open = ()=>resolve(undefined);
-            });
-            paused = { gate, open };
-        },
-        resume(){
-            if (!paused)
-            {
-                return;
-            }
-            paused.open();
-            paused = null;
-        },
+        pause: pauseRun,
+        resume: resumeRun,
         stop: ()=>cpu.stop(),
 
         /**
@@ -6958,7 +7053,11 @@ async function buildApp(options){
             },
             /** Every live window, children included, as the window manager lists them. */
             windows: ()=>win32.windows(),
-            ...liveDumpOf(options.device?.worker),
+            ...liveDumpOf(options.device?.worker, {
+                pause: pauseRun,
+                resume: resumeRun,
+                paused: ()=>paused !== null,
+            }),
             /** @param {string} name */
             register: name=>cpu.readReg32(name),
             eip: ()=>cpu.eip(),
@@ -7304,6 +7403,13 @@ async function buildApp(options){
             ...options.system?.windows?.manager ? [{ name: 'windows', status: 'ready',
                 metrics: options.system.windows.manager.diagnostics() }] : [],
             {
+                name: 'js',
+                version: '0.1.0',
+                status: 'ready',
+                metrics: jsSampler?.snapshot()
+                    ?? { measured: false, reason: 'off: the sampleJs option' },
+            },
+            {
                 name: 'app',
                 version: '0.1.0',
                 status: 'ready',
@@ -7470,6 +7576,7 @@ async function buildApp(options){
                 blocks?.stop();
             }
             breathe.close();
+            jsSampler?.stop();
             return core.dispose().then(()=>{
                 if (ownsTranslationStore)
                 {
@@ -7647,6 +7754,8 @@ async function buildSystemHost(deps){
             process.link.call('control', method, []).catch(()=>{});
         }
     };
+    /** Whether the run was last told to pause, for a tool that must draw a frame. */
+    let pausedByCaller = false;
     /** The canvas the page's pointer is measured on, once attached. @type {any} */
     let viewport = null;
     /**
@@ -7728,8 +7837,15 @@ async function buildSystemHost(deps){
                 return createInputRoute(event=>this.send(event));
             },
         },
-        pause: ()=>tellAll('pause'),
-        resume: ()=>tellAll('resume'),
+        pause: ()=>{
+            pausedByCaller = true;
+            tellAll('pause');
+        },
+        resume: ()=>{
+            pausedByCaller = false;
+            tellAll('resume');
+        },
+        paused: ()=>pausedByCaller,
         stop: ()=>tellAll('stop'),
         answerMessageBox: ()=>false,
         on: (/** @type {string} */ name, /** @type {(payload: any) => any} */ handler)=>
@@ -7758,7 +7874,17 @@ async function buildSystemHost(deps){
             desktop: ()=>ask('debug.desktop'),
             /** @param {number} address @param {any} how */
             hook: (address, how)=>ask('debug.hook', [address, how]),
-            ...liveDumpOf(options.device?.worker),
+            ...liveDumpOf(options.device?.worker, {
+                pause: ()=>{
+                    pausedByCaller = true;
+                    tellAll('pause');
+                },
+                resume: ()=>{
+                    pausedByCaller = false;
+                    tellAll('resume');
+                },
+                paused: ()=>pausedByCaller,
+            }),
         },
         trace: ()=>ask('trace'),
         report: ()=>ask('report'),
@@ -7862,31 +7988,34 @@ function volumeMemory(){
  * that drew it, which a diagnostics table read a report later need not be.
  *
  * @param {any} worker  the graphics worker, when the run has one
+ * @param {{ pause: () => void, resume: () => void, paused: () => boolean }} [control]
+ *     the run's pause, which `pick` holds while it takes a frame apart
  */
-function liveDumpOf(worker){
+function liveDumpOf(worker, control){
     /** @type {{ lines: string[], frame: number } | null} */
     let last = null;
     let listening = false;
+    /** @param {number} [frames] */
+    const dumpFrames = (frames = 1)=>{
+        if (!worker)
+        {
+            throw new Error('dumpFrames: this run draws without a graphics worker');
+        }
+        if (!listening)
+        {
+            listening = true;
+            worker.addEventListener('message', (/** @type {{ data: any }} */ event)=>{
+                if (event.data?.type === 'dumped')
+                {
+                    last = { lines: event.data.lines, frame: event.data.frame };
+                }
+            });
+        }
+        worker.postMessage({ type: 'debug', dumpFrames: frames });
+        return frames;
+    };
     return {
-        /** @param {number} [frames] */
-        dumpFrames: (frames = 1)=>{
-            if (!worker)
-            {
-                throw new Error('dumpFrames: this run draws without a graphics worker');
-            }
-            if (!listening)
-            {
-                listening = true;
-                worker.addEventListener('message', (/** @type {{ data: any }} */ event)=>{
-                    if (event.data?.type === 'dumped')
-                    {
-                        last = { lines: event.data.lines, frame: event.data.frame };
-                    }
-                });
-            }
-            worker.postMessage({ type: 'debug', dumpFrames: frames });
-            return frames;
-        },
+        dumpFrames,
         /**
          * How the worker's devices take buffer locks from now on: '' as the
          * program asked, 'rename' renaming at every one.
@@ -7901,7 +8030,122 @@ function liveDumpOf(worker){
             worker.postMessage({ type: 'debug', bufferLocks: mode });
             return mode;
         },
+        /**
+         * Drops every draw that samples one of these textures from now on --
+         * `t12,t40` as a frame dump names them, '' none -- so two frames
+         * differ by those draws and nothing else.
+         *
+         * @param {string} [ids]
+         */
+        skipTexture: (ids = '')=>{
+            if (!worker)
+            {
+                throw new Error('skipTexture: this run draws without a graphics worker');
+            }
+            worker.postMessage({ type: 'debug', skipTexture: ids });
+            return ids;
+        },
+        /**
+         * Keeps the first `count` draws of every frame from now on and drops
+         * the rest, -1 none dropped: halving it finds the draw that painted a
+         * part of the picture, numbered as a frame dump numbers them.
+         *
+         * @param {number} [count]
+         */
+        maxDraws: (count = -1)=>{
+            if (!worker)
+            {
+                throw new Error('maxDraws: this run draws without a graphics worker');
+            }
+            worker.postMessage({ type: 'debug', maxDraws: count });
+            return count;
+        },
+        /**
+         * How the worker's devices answer occlusion counts from now on: ''
+         * as counted, 'visible' as if every sample passed -- what a program
+         * culls by its counts shows up.
+         *
+         * @param {string} [mode]
+         */
+        occlusion: (mode = '')=>{
+            if (!worker)
+            {
+                throw new Error('occlusion: this run draws without a graphics worker');
+            }
+            worker.postMessage({ type: 'debug', occlusion: mode });
+            return mode;
+        },
         dumped: ()=>last,
+        /**
+         * Shows the last frame again and again, the program paused, so a cut
+         * (`maxDraws`) is seen on a picture that holds still; false stops it.
+         *
+         * @param {boolean} [on]
+         */
+        freeze: (on = true)=>{
+            if (!worker)
+            {
+                throw new Error('freeze: this run draws without a graphics worker');
+            }
+            worker.postMessage({ type: 'debug', freeze: on });
+            return on;
+        },
+        /**
+         * Which draw painted a pixel of the picture: the program is paused and
+         * the graphics worker plays its last frame again cut after fewer and
+         * fewer draws, reading the pixel back each time, halving to the first
+         * count at which it is as the scene leaves it (before the frame's
+         * post-processing). The centre -- a crosshair -- by default; the run
+         * is left paused as it was found.
+         *
+         * @param {number} [x] @param {number} [y]  the shown frame's pixels
+         * @param {{ tolerance?: number, depth?: number }} [options]  how far a
+         *     channel may differ and still be the same pixel; how many of the
+         *     draws that changed it to list, latest first (4)
+         */
+        pick: async(x, y, options = {})=>{
+            if (!worker)
+            {
+                throw new Error('pick: this run draws without a graphics worker');
+            }
+            const wasPaused = control?.paused() ?? true;
+            if (!wasPaused)
+            {
+                control?.pause();
+                // The frames on their way when it paused land first.
+                await new Promise(done=>setTimeout(done, 400));
+            }
+            try
+            {
+                return await new Promise((resolve, reject)=>{
+                    const hear = (/** @type {{ data: any }} */ event)=>{
+                        if (event.data?.type !== 'picked')
+                        {
+                            return;
+                        }
+                        worker.removeEventListener('message', hear);
+                        if (event.data.error)
+                        {
+                            reject(new Error(event.data.error));
+                        }
+                        else
+                        {
+                            resolve(event.data.result);
+                        }
+                    };
+                    worker.addEventListener('message', hear);
+                    worker.postMessage({ type: 'debug',
+                        pick: { x, y, tolerance: options.tolerance, depth: options.depth } });
+                });
+            }
+            finally
+            {
+                if (!wasPaused)
+                {
+                    control?.resume();
+                }
+            }
+        },
     };
 }
 
@@ -8426,6 +8670,41 @@ export async function createApp(options){
         };
     };
 
+    /** The tables `ownSound` has named to the page so far. */
+    let soundTables = 0;
+    /**
+     * The sound of a process started beside another on this thread: a table
+     * of its own, which the page is told of and mixes with the run's
+     * (`sound-table`), and forgets once the process is gone
+     * (`sound-table-closed`) -- two processes' sound as two films' playing
+     * at once. On the run's table a process beside another was built as the
+     * one in its place, and closed every track it found open there: the
+     * parent's music went silent at its first child.
+     */
+    const ownSound = ()=>{
+        const id = ++soundTables;
+        let told = false;
+        return {
+            options: { ...options.audio, memory: undefined, beside: undefined },
+            /** @param {any} built */
+            announce(built){
+                const memory = built?.audio?.memory?.();
+                if (memory && 'table' in memory)
+                {
+                    told = true;
+                    events.emit('sound-table', { id, table: memory.table });
+                }
+            },
+            giveBack(){
+                if (told)
+                {
+                    told = false;
+                    events.emit('sound-table-closed', { id });
+                }
+            },
+        };
+    };
+
     /**
      * Starts a class's server beside the process that asked for it, with
      * `-Embedding` after its command line as COM starts one, and runs it
@@ -8438,7 +8717,7 @@ export async function createApp(options){
      */
     const startServer = async(parent, request)=>{
         const found = await serverImage(parent, request.command);
-        const sound = lendSound(parent);
+        const sound = ownSound();
         if (!found)
         {
             events.emit('divergence', { api: 'COM',
@@ -8452,6 +8731,7 @@ export async function createApp(options){
             ...newProcessIds(),
             audio: sound.options,
         });
+        sound.announce(server);
         // A line of processes of its own: a server that starts a child and
         // waits on it, or hands over to another image, is run the way the
         // program the page started is.
@@ -8504,6 +8784,7 @@ export async function createApp(options){
         }
         noteLogSequence();
         mediaInstance = parent.media.instance() ?? mediaInstance;
+        const sound = ownSound();
         line.current = await build({
             executable: image,
             imagePath: request.imagePath,
@@ -8513,7 +8794,9 @@ export async function createApp(options){
             mainThreadId: request.threadId,
             standardFiles: request.standardFiles,
             startDirectory: request.startDirectory,
+            audio: sound.options,
         });
+        sound.announce(line.current);
         replayLogLevels();
         stand(line.current);
         bindLogLevels();
@@ -8547,6 +8830,7 @@ export async function createApp(options){
         mediaInstance = child.media.instance() ?? mediaInstance;
         await child.dispose();
         keepMemory(child);
+        sound.giveBack();
 
         line.current = parent;
         replayLogLevels();
@@ -9203,7 +9487,7 @@ export async function createApp(options){
         const running = (async()=>{
             /** @type {any} */
             let child = null;
-            const sound = lendSound(parent);
+            const sound = ownSound();
             try
             {
                 const image = await parent.readImage(request.imagePath);
@@ -9227,6 +9511,7 @@ export async function createApp(options){
                         startDirectory: request.startDirectory,
                         audio: sound.options,
                     });
+                    sound.announce(child);
                 }
             }
             catch (e){

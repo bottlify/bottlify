@@ -80,8 +80,9 @@ function storedBytes(stored, values){
     return new Uint8Array(view.buffer);
 }
 
-function harness(){
-    const gpu = createFakeDevice();
+/** @param {string[]} [features]  the optional features the device was made with */
+function harness(features = []){
+    const gpu = createFakeDevice({ features });
     const backend = createBackend({
         device: gpu.device, queue: gpu.queue, presentTo: ()=>{}, now: ()=>0,
     });
@@ -289,3 +290,86 @@ test('a lockable HDR target locks as its own format, and a stretch takes it to t
         hdr.surface.release();
         half.surface.release();
     });
+
+/** What a device with float32-filterable and float32-blendable keeps 32-bit floats as. */
+const WHOLE = [
+    { format: D3DFMT.R32F, gpu: 'r32float', channels: 1, name: 'R32F' },
+    { format: D3DFMT.G32R32F, gpu: 'rg32float', channels: 2, name: 'G32R32F' },
+    { format: D3DFMT.A32B32G32R32F, gpu: 'rgba32float', channels: 4, name: 'A32B32G32R32F' },
+];
+const FLOAT32 = ['float32-filterable', 'float32-blendable'];
+
+for (const { format, gpu, channels, name } of WHOLE)
+{
+    test(`${name}: on a device that filters and blends 32-bit floats, a texture keeps its bits`,
+        async()=>{
+            const h = harness(FLOAT32);
+            const { device } = h;
+            /** @type {{ texture?: any }} */
+            const out = {};
+            assert.equal(device.CreateTexture(2, 2, 1, 0, format, D3DPOOL.MANAGED, out), D3D_OK);
+            // A shadow map's depth and the bias it is compared with: a half
+            // steps by 0.0005 here and would lose the bias.
+            const values = Array.from({ length: 4 * channels },
+                (_, index)=>0.728 + index * 0.00005);
+            /** @type {{ pBits?: number }} */
+            const locked = {};
+            assert.equal(out.texture.LockRect(0, locked, null, 0), D3D_OK);
+            const bytes = storedBytes('float', values);
+            h.write(/** @type {number} */ (locked.pBits), bytes);
+            assert.equal(out.texture.UnlockRect(0), D3D_OK);
+            assert.equal(device.SetTexture(0, out.texture), D3D_OK);
+            await h.drawTextured();
+
+            const made = h.gpu.of('createTexture').find((/** @type {any} */ call)=>
+                call.descriptor.label === 'texture');
+            assert.equal(made.descriptor.format, gpu);
+            const upload = h.gpu.of('writeTexture').find((/** @type {any} */ call)=>
+                call.destination.texture === made.texture);
+            assert.equal(upload.layout.bytesPerRow, 2 * channels * 4);
+            assert.deepEqual([...upload.bytes], [...bytes]);
+            assert.ok(!h.reports.some(report=>report.includes(` of ${name} `)),
+                'nothing is narrowed, so nothing is reported');
+            assert.equal(device.SetTexture(0, null), D3D_OK);
+            out.texture.release();
+        });
+
+    test(`${name}: on such a device a target is read back as the 32-bit floats it holds`,
+        async()=>{
+            const h = harness(FLOAT32);
+            const { device } = h;
+            /** @type {{ surface?: any }} */
+            const back = {};
+            assert.equal(device.GetRenderTarget(0, back), D3D_OK);
+            /** @type {{ texture?: any }} */
+            const out = {};
+            assert.equal(device.CreateTexture(4, 4, 1, D3DUSAGE.RENDERTARGET, format,
+                D3DPOOL.DEFAULT, out), D3D_OK);
+            /** @type {{ surface?: any }} */
+            const level = {};
+            assert.equal(out.texture.GetSurfaceLevel(0, level), D3D_OK);
+            assert.equal(device.SetRenderTarget(0, level.surface), D3D_OK);
+            assert.equal(device.Clear(0, null, D3DCLEAR.TARGET, 0x80ff8000, 1, 0), D3D_OK);
+            /** @type {{ surface?: any }} */
+            const twin = {};
+            assert.equal(device.CreateOffscreenPlainSurface(4, 4, format, D3DPOOL.SYSTEMMEM,
+                twin), D3D_OK);
+            assert.equal(await device.GetRenderTargetData(level.surface, twin.surface), D3D_OK);
+
+            assert.ok(h.gpu.of('beginRenderPass').some((/** @type {any} */ call)=>
+                call.descriptor.colorAttachments[0].view.texture.format === gpu));
+            // 128/255 as a float, not as the half it was narrowed to before.
+            const pixel = storedBytes('float', [1, 128 / 255, 0, 128 / 255].slice(0, channels));
+            const read = h.read(twin.surface.base, 16 * pixel.length);
+            for (let at = 0; at < 16; at++)
+            {
+                assert.deepEqual([...read.subarray(at * pixel.length, (at + 1) * pixel.length)],
+                    [...pixel], `pixel ${at}`);
+            }
+            twin.surface.release();
+            assert.equal(device.SetRenderTarget(0, back.surface), D3D_OK);
+            back.surface.release();
+            level.surface.release();
+            out.texture.release();
+        });
+}

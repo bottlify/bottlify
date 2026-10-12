@@ -78,6 +78,9 @@ const D3DRENDERSTATE_COLORKEYENABLE = 41;
  */
 const ZERO_STREAM_BYTES = 2048;
 
+/** A count no draw of a frame could fall short of: what `occlusion: 'visible'` answers. */
+const OCCLUSION_ALL_VISIBLE = 0x00ffffff;
+
 /** A stage state's DWORD, as the D3D8 header lays it out. */
 const D3DTA_SELECTMASK = D3DTA.SELECTMASK;
 
@@ -758,13 +761,16 @@ const TEXEL_EXPANSION = Object.freeze({
  * @param {number} format  D3DFMT
  * @param {Uint8Array} pixels
  * @param {number} count   Texels.
+ * @param {boolean} [float32]  whether the device keeps 32-bit floats whole
  * @returns {Uint8Array}
  */
-export function expandTexels(format, pixels, count){
+export function expandTexels(format, pixels, count, float32 = false){
     const wide = FORMAT_INFO[format]?.wide;
     if (wide)
     {
-        return storedToHalves(wide.stored, pixels, count * wide.channels);
+        return float32 && wide.stored === 'float'
+            ? pixels.slice(0, count * wide.channels * 4)
+            : storedToHalves(wide.stored, pixels, count * wide.channels);
     }
     const expand = TEXEL_EXPANSION[format];
     if (!expand)
@@ -782,18 +788,22 @@ const SIGNED_FORMAT = 'rgba8snorm';
  * What a wide format is drawn into and sampled from, by its channel count:
  * half floats, which every WebGPU device renders, filters and blends. 32-bit
  * floats are rendered too, but filtered and blended only with the optional
- * float32-filterable and float32-blendable features, which this backend does
- * not ask for -- and a program of the era filters and blends its HDR targets
- * wherever CheckDeviceFormat lets it. 16-bit fractions exist only behind an
- * optional feature as well. So R32F, G32R32F and A32B32G32R32F are narrowed to
- * half precision, and G16R16 and A16B16G16R16 are kept as halves of their
- * value (`storedToHalves` says what each loses), each reported once.
+ * float32-filterable and float32-blendable features -- and a program of the
+ * era filters and blends its HDR targets wherever CheckDeviceFormat lets it.
+ * 16-bit fractions exist only behind an optional feature as well. So R32F,
+ * G32R32F and A32B32G32R32F keep their 32 bits on a device with both features
+ * and are narrowed to half precision on one without; G16R16 and A16B16G16R16
+ * are kept as halves of their value (`storedToHalves` says what each loses),
+ * each reported once. Half precision is not enough for a depth a shadow map
+ * stores in R32F: eleven significant bits step by 0.0005 near 0.7, ten times
+ * the bias a program of the era compares that depth with, and every surface
+ * shadows itself in stripes.
  *
  * @type {Readonly<Record<number, string>>}
  */
-// ponytail: 32-bit floats at half precision; `r32float` and its wider kin where the
-// device has float32-filterable and float32-blendable, when a picture shows the steps.
 const HALF_FORMAT = Object.freeze({ 1: 'r16float', 2: 'rg16float', 4: 'rgba16float' });
+/** @type {Readonly<Record<number, string>>} */
+const FLOAT_FORMAT = Object.freeze({ 1: 'r32float', 2: 'rg32float', 4: 'rgba32float' });
 
 /**
  * The block-compressed formats, by the D3DFMT they arrive as.
@@ -890,9 +900,10 @@ const decodeCompressed = (bytes, kind, width, height, into)=>{
  * @param {number} width @param {number} height  the surface's base level
  * @param {boolean} compressedTextures  whether the device keeps BC blocks at all;
  *           off, every level decodes to `COLOR_FORMAT` regardless of alignment
+ * @param {boolean} [float32]  whether the device keeps 32-bit floats whole
  * @returns {string} the WebGPU format a surface of it is created as
  */
-export function gpuFormatOf(format, width, height, compressedTextures){
+export function gpuFormatOf(format, width, height, compressedTextures, float32 = false){
     const info = FORMAT_INFO[format];
     if (!info)
     {
@@ -904,7 +915,8 @@ export function gpuFormatOf(format, width, height, compressedTextures){
     }
     if (info.wide)
     {
-        return HALF_FORMAT[info.wide.channels];
+        return (float32 && info.wide.stored === 'float' ? FLOAT_FORMAT : HALF_FORMAT)[
+            info.wide.channels];
     }
     if (!info.depth)
     {
@@ -1514,6 +1526,8 @@ function inverseRotation(view){
  *     The scissor rectangle, where the API has one; D3DRS_SCISSORTESTENABLE
  *     says whether draws are cut to it.
  * @property {any} indices
+ * @property {number} [streamZeroBias]  The whole vertices of stream zero's offset the device
+ *     folded into the draw's first vertex; absent where it folds none.
  * @property {number} baseVertexIndex
  * @property {import('../webgpu/contract.js').ViewportState} viewport
  * @property {any} renderTarget
@@ -1565,29 +1579,6 @@ function inverseRotation(view){
  * @property {{ floats: Float32Array, ints: Int32Array, bools: Uint32Array }} vertexConstants
  * @property {{ floats: Float32Array, ints: Int32Array, bools: Uint32Array }} pixelConstants
  */
-
-/** How many bytes of a level's upload are looked at to say whether it held anything. */
-const NONZERO_SAMPLES = 64;
-
-/**
- * How many of `NONZERO_SAMPLES` bytes spread evenly over `bytes` are not
- * zero: whether an upload carried the program's texels or memory nothing had
- * written, at a cost that does not grow with the texture.
- *
- * @param {Uint8Array} bytes
- */
-export function nonzeroSampled(bytes){
-    const count = Math.min(NONZERO_SAMPLES, bytes.length);
-    let nonzero = 0;
-    for (let at = 0; at < count; at++)
-    {
-        if (bytes[Math.floor(at * bytes.length / count)] !== 0)
-        {
-            nonzero++;
-        }
-    }
-    return nonzero;
-}
 
 /** A number of a dump line, four digits at most. @param {number} x */
 const brief = x=>String(Number(x.toPrecision(4)));
@@ -1979,15 +1970,16 @@ function readsNormalAnywhere(stages){
 
 /**
  * Whether a stage the cascade runs generates its coordinates from the
- * vertex normal.
+ * vertex normal -- or any stage, for a pixel shader, which reads its stages'
+ * coordinates whatever their COLOROP says.
  *
- * @param {RenderModel} model
+ * @param {RenderModel} model @param {boolean} [everyStage]
  */
-function generatesFromNormal(model){
+function generatesFromNormal(model, everyStage = false){
     for (let stage = 0; stage < STAGE_COUNT; stage++)
     {
         const states = model.stageStates(stage);
-        if ((states.get(D3DTSS.COLOROP) ?? 0) === D3DTOP.DISABLE)
+        if (!everyStage && (states.get(D3DTSS.COLOROP) ?? 0) === D3DTOP.DISABLE)
         {
             return false;
         }
@@ -2820,8 +2812,12 @@ const CLEAR_STRIDE = 20;
  *     Every draw reads the bytes it reaches from guest memory again, held
  *     lock or not -- a debugging aid, for a program that writes a buffer
  *     outside its locks.
- * @property {{ dumpFrames: number, bufferLocks?: string,
- *     written?: (lines: string[], frame: number) => void }} [liveDump]
+ * @property {{ dumpFrames: number, bufferLocks?: string, skipTexture?: string, occlusion?: string,
+ *     maxDraws?: number, written?: (lines: string[], frame: number) => void,
+ *     replayLast?: (cut?: number) => boolean,
+ *     shownDraws?: () => { lines: string[], sceneDraws: number },
+ *     pick?: (x?: number, y?: number, tolerance?: number, depth?: number)
+ *         => Promise<any> }} [liveDump]
  *     Set on a running program to have its next frames with draws written
  *     down as `dumpDraws` writes them; counts down as they are, and the last
  *     of them is handed to `written`.
@@ -2842,6 +2838,9 @@ const CLEAR_STRIDE = 20;
  *     shader it would run with D3DRS_FOGENABLE clear, which is how a picture
  *     washed towards the fog colour is told apart from one washed by something
  *     else -- two runs then differ by fog and nothing else.
+ * @property {boolean} [rectangleBump]  A texbem's offset into a texture whose
+ *     sides are not powers of two is in texels, as the driver of the card a
+ *     profile shows took it (`GpuProfile.rectangleBump`).
  * @property {'legacy' | 'current'} [driverRules]  Which generation of
  *     drivers a behaviour Direct3D left to them follows where they changed
  *     it (decisions.md A43): 'legacy', the default, the shader-model-1 era's;
@@ -2882,22 +2881,33 @@ export function createRenderer(options){
     const dumpDraws = options.dumpDraws === true;
     const nanProbe = options.nanProbe === true;
     const tableFogOverDepth = options.driverRules === 'current';
+    const rectangleBump = options.rectangleBump === true;
     const dumpEvery = Math.max(0, Math.floor(options.dumpEvery ?? 0));
     // Asked for on a running program: the next frames with draws are written
     // down as `dumpDraws` writes them, without the texture copies only a run
     // started with `dumpDraws` makes.
     const liveDump = options.liveDump ?? null;
-    const maxDraws = options.maxDraws === undefined ? -1 : options.maxDraws;
+    const fixedMaxDraws = options.maxDraws === undefined ? -1 : options.maxDraws;
+    /** Draws kept a frame: what a running program was given, or the device's own. */
+    const maxDrawsNow = ()=>((liveDump?.maxDraws ?? -1) >= 0
+        ? /** @type {number} */ (liveDump?.maxDraws) : fixedMaxDraws);
     const divergence = options.divergence ?? null;
     // One id or several, comma-separated: a picture painted by a family of
     // draws is only removed by removing the family.
-    const skipTextures = new Set((options.skipTexture ?? '').split(',').filter(Boolean));
+    const fixedSkips = new Set((options.skipTexture ?? '').split(',').filter(Boolean));
+    /** The textures whose draws are dropped: the device's own, or what a running program was given. */
+    const skipTextures = ()=>(liveDump?.skipTexture
+        ? new Set(liveDump.skipTexture.split(',').filter(Boolean)) : fixedSkips);
     const probeTexture = options.probeTexture ?? null;
     const compressedTextures = options.compressedTextures === true;
     // A device made with `clip-distances` clips by the distances a vertex
     // stage gives it; every other draws a clipped primitive's fragments and
     // discards the ones a plane cuts away.
     const clipDistances = backend?.hasFeature?.('clip-distances') === true;
+    // A 32-bit float surface keeps its 32 bits only where it can still be
+    // filtered and blended, as half floats are everywhere.
+    const float32 = backend?.hasFeature?.('float32-filterable') === true
+        && backend?.hasFeature?.('float32-blendable') === true;
     /**
      * Nothing to add to a surface's description; said once a format, the first
      * time a wide one is kept as less than it is.
@@ -2907,7 +2917,7 @@ export function createRenderer(options){
      */
     const narrowed = format=>{
         const wide = FORMAT_INFO[format]?.wide;
-        if (!wide || !divergence)
+        if (!wide || !divergence || (float32 && wide.stored === 'float'))
         {
             return {};
         }
@@ -3125,7 +3135,7 @@ export function createRenderer(options){
      * targets back sees, of which the GPU's own part is only some.
      */
     const timing = { replays: 0, replayMs: 0, worstReplayMs: 0, readBacks: 0, readBackMs: 0,
-        worstReadBackMs: 0 };
+        worstReadBackMs: 0, gpuFrames: 0, gpuMs: 0, worstGpuMs: 0 };
     const clock = ()=>(typeof performance === 'undefined' ? Date.now() : performance.now());
 
     const counters = {
@@ -3874,6 +3884,21 @@ export function createRenderer(options){
                     `${stage.colorOp}(${stage.colorArg1},${stage.colorArg2})`
                     + `/${stage.alphaOp}(${stage.alphaArg1},${stage.alphaArg2})`).join(' ')}`
                 : '')
+            // A fixed vertex stage before a pixel shader makes each stage's
+            // coordinates by its index and transform, which no other field
+            // of the line shows.
+            + (state.vertexShader === -1 ? ` tci=${program.samplerBindings.map(
+                (/** @type {any} */ binding)=>`${binding.stage}:`
+                + `${(model.stageStates(binding.stage)?.get(D3DTSS.TEXCOORDINDEX) ?? 0)
+                    .toString(16)}@${textureTransformOf(model, binding.stage)}`).join(' ')}`
+                : '')
+            // How each bound stage is filtered and, for a 1.x bump read, the
+            // matrix its offsets go through: a reflection broken into blocks
+            // is a point-sampled offset map or a matrix far too large.
+            + ` smp=${program.samplerBindings.map((/** @type {any} */ binding)=>`${binding.stage}:`
+                + Object.values(samplerDescriptorOf(model.stageStates(binding.stage), mipsApplied))
+                    .slice(0, 6).join('/')).join(' ')}`
+            + bumpMatricesOf(model)
             + ` target=${describeTarget(model)}`
             + ` view=${model.viewport.rect.x},${model.viewport.rect.y}`
             + `+${model.viewport.rect.width}x${model.viewport.rect.height}`
@@ -3884,6 +3909,27 @@ export function createRenderer(options){
             + (held ? ` layout=${describeDeclaration(held.declaration)}`
                 + ` vc=${describeConstants(held.vertex, held.vertexConstants.floats)}`
                 + ` pc=${describeConstants(held.pixel, held.pixelConstants.floats)}` : ''));
+    };
+
+    /**
+     * The bump matrices of the stages that have one, as a dump line gives
+     * them, or nothing.
+     *
+     * @param {RenderModel} model
+     */
+    const bumpMatricesOf = model=>{
+        const stages = [];
+        for (let stage = 0; stage < STAGE_COUNT; stage++)
+        {
+            const states = model.stageStates(stage);
+            const matrix = [D3DTSS.BUMPENVMAT00, D3DTSS.BUMPENVMAT01, D3DTSS.BUMPENVMAT10,
+                D3DTSS.BUMPENVMAT11].map(state=>dwordToFloat(states.get(state) ?? 0));
+            if (matrix.some(value=>value !== 0))
+            {
+                stages.push(`${stage}:${matrix.map(round).join(',')}`);
+            }
+        }
+        return stages.length > 0 ? ` bump=${stages.join(' ')}` : '';
     };
 
     /**
@@ -4443,12 +4489,16 @@ export function createRenderer(options){
 
     /**
      * How many vertices stream zero's offset was folded into the first
-     * vertex as, which a device with offsets does before a buffer draw.
+     * vertex as, which a device with offsets does before a buffer draw: the
+     * device's own count when it gives one (`streamZeroBias` on the model),
+     * for the two must be the same number.
      *
      * @param {RenderModel} model
      */
-    const streamZeroBias = model=>(model.stream.stride > 0
-        ? Math.floor((model.stream.offset ?? 0) / model.stream.stride) : 0);
+    const streamZeroBias = model=>(typeof model.streamZeroBias === 'number'
+        ? model.streamZeroBias
+        : model.stream.stride > 0
+            ? Math.floor((model.stream.offset ?? 0) / model.stream.stride) : 0);
 
     /**
      * Where stream zero's buffer is bound: what is left of its offset past
@@ -4742,7 +4792,8 @@ export function createRenderer(options){
             made = backend.createSurface({
                 width: desc.Width,
                 height: desc.Height,
-                format: gpuFormatOf(desc.Format, desc.Width, desc.Height, compressedTextures),
+                format: gpuFormatOf(desc.Format, desc.Width, desc.Height, compressedTextures,
+                    float32),
                 label: depth ? 'depth' : 'target',
                 ...narrowed(desc.Format),
                 // A colour target is copied into as well as out of: a program
@@ -4772,7 +4823,7 @@ export function createRenderer(options){
                     ? bytes
                     : isCompressed(desc.Format)
                         ? decodeCompressed(bytes, S3TC_OF[desc.Format], desc.Width, desc.Height)
-                        : expandTexels(desc.Format, bytes, desc.Width * desc.Height),
+                        : expandTexels(desc.Format, bytes, desc.Width * desc.Height, float32),
             }, true);
         }
         return made;
@@ -5110,9 +5161,9 @@ export function createRenderer(options){
         const depth = levelExtent(record.depth, level);
         const bytes = readMemory(held.volume.base, held.volume.slicePitch * depth);
         uploadTexels(record.gpu, {
-            format: gpuFormatOf(record.format, record.width, record.height, false),
+            format: gpuFormatOf(record.format, record.width, record.height, false, float32),
             mipLevel: level, width, height, depth,
-            texels: expandTexels(record.format, bytes, width * height * depth),
+            texels: expandTexels(record.format, bytes, width * height * depth, float32),
         }, ordered);
         (record.written ??= new Set()).add(level);
     };
@@ -5156,7 +5207,8 @@ export function createRenderer(options){
             record.gpu = backend.createSurface({
                 width: record.width,
                 height: record.height,
-                format: gpuFormatOf(record.format, record.width, record.height, compressedTextures),
+                format: gpuFormatOf(record.format, record.width, record.height, compressedTextures,
+                    float32),
                 ...narrowed(record.format),
                 mipLevelCount: record.gpuLevels,
                 ...(record.faces === 6 ? { layers: 6, dimension: 'cube' } : {}),
@@ -5184,7 +5236,7 @@ export function createRenderer(options){
             frameStats.uploads++;
             record.uploads = (record.uploads || 0) + 1;
             const gpuFormat = gpuFormatOf(record.format, record.width, record.height,
-                compressedTextures);
+                compressedTextures, float32);
             // The base level's size, not each mip's, decides the whole
             // texture's path: WebGPU already refused (and gpuFormatOf already
             // fell back) on the base alone, so every level -- mips round down
@@ -5231,7 +5283,7 @@ export function createRenderer(options){
                     ? bytes
                     : decodes
                         ? decodeCompressed(bytes, S3TC_OF[record.format], width, height, room)
-                        : expandTexels(record.format, bytes, width * height);
+                        : expandTexels(record.format, bytes, width * height, float32);
                 uploadTexels(record.gpu,
                     { format: gpuFormat, mipLevel: level, width, height, texels, layer: face },
                     ordered);
@@ -5243,11 +5295,6 @@ export function createRenderer(options){
                 // ones hold: a surface sampled far away comes out of those,
                 // and a level the program never wrote is sampled all the same.
                 (record.written ??= new Set()).add(level);
-                if (level === 0 && face === 0)
-                {
-                    record.sampled = nonzeroSampled(bytes);
-                    record.sampledOf = bytes.length;
-                }
                 if (width * height <= 16 && !keepsBlocks && face === 0)
                 {
                     (record.tails ??= {})[level] = [...texels];
@@ -6143,6 +6190,7 @@ export function createRenderer(options){
         const pixel = translationOf(pixelShader,
             `ps|fog${fog.source}/${fog.mode}${flat ? '|flat' : ''}|${sampling.pixelKey}`
                 + (alphaFunc === undefined ? '' : `|a${alphaFunc}`) + (nanProbe ? '|nan' : '')
+                + (rectangleBump ? '|rb' : '')
                 + (discards ? `|k${planes.count}` : ''),
             ()=>translateShader(
                 /** @type {import('../d3d9/shader.js').ParsedShader} */ (program.pixel), {
@@ -6155,6 +6203,7 @@ export function createRenderer(options){
                     ...(sampling.pixelVariants ? { sampling: sampling.pixelVariants } : {}),
                     ...(alphaFunc === undefined ? {} : { alphaTest: alphaFunc }),
                     ...(nanProbe ? { nanProbe } : {}),
+                    ...(rectangleBump ? { rectangleBump } : {}),
                     ...(discards ? { clip: planes } : {}),
                 }));
         if (pixel.error)
@@ -6217,7 +6266,12 @@ export function createRenderer(options){
         // in camera space is written by the made vertex stage whatever the
         // declaration carries under that number, since that is what the
         // fixed function hands a pixel shader.
-        const generated = program.vertex ? [] : hybridGeneration(model);
+        const generated = program.vertex ? [] : hybridGeneration(model, pixel.reads);
+        const carried = program.vertex ? [] : hybridCarried(model, pixel.reads);
+        // Where the made vertex stage takes each coordinate from, which the
+        // pipeline's key has to say: its state names no stage of a shader draw.
+        const hybridKey = program.vertex ? '' : `|g${generated.join(',')}|c${carried.map(
+            source=>(source ? `${source.set}${source.transformed ? 't' : ''}` : '')).join(',')}`;
         // The fog varyings a vertex shader's translation writes itself, below.
         const fogCarried = program.vertex && fog.source !== FOG_SOURCE.NONE
             ? [varyingLocation(D3DDECLUSAGE.FOG, 0), FOG_RANGE_LOCATION] : [];
@@ -6227,6 +6281,8 @@ export function createRenderer(options){
             (/** @type {number} */ location)=>!written.includes(location)
                 && !fogCarried.includes(location) && !clipCarried.includes(location)
                 && !generated.some((mode, set)=>mode !== 0
+                    && varyingLocation(D3DDECLUSAGE.TEXCOORD, set) === location)
+                && !carried.some((source, set)=>source
                     && varyingLocation(D3DDECLUSAGE.TEXCOORD, set) === location));
         const points = topology === POINT_QUADS ? pointsOf(model) : null;
         const pointKey = points ? `|p${points.sprite ? 's' : ''}${points.scale ? 'd' : ''}` : '';
@@ -6248,13 +6304,13 @@ export function createRenderer(options){
                             ? { sampling: sampling.vertexVariants } : {}),
                         ...(planes ? { clip: planes } : {}) }))
             : hybridStageFor(
-                `${program.declarationId}|${shapes}|w${missing.join(',')}|g${generated.join(',')}`
+                `${program.declarationId}|${shapes}|w${missing.join(',')}${hybridKey}`
                     + `|f${fog.source}/${fog.mode}${flat ? '|flat' : ''}`
                     + `${normalizeNormals ? '|normalize' : ''}${rangeFog ? '|range' : ''}`
                     + pointKey + clipKey,
                 wanted, layout.shapes, missing, generated, fog,
                 { flatColours: flat, normalizeNormals, rangeFog, ...(points ? { points } : {}),
-                    ...(planes ? { clip: planes } : {}) });
+                    ...(planes ? { clip: planes } : {}), carried });
         if (vertex.error)
         {
             skip('program');
@@ -6311,7 +6367,7 @@ export function createRenderer(options){
                 // is said, as the translations are tagged by it, so one
                 // translation pair is one pipeline.
                 key: `${state.vertexShader}/${state.pixelShader}/${program.declarationId}`
-                    + `/${shapes}/${stride}${streamsKey(layout)}`
+                    + `/${shapes}/${stride}${streamsKey(layout)}${hybridKey}`
                     + (sampling.key === '' ? '' : `|${sampling.key}`),
                 vertex, pixel, layout,
             },
@@ -6589,7 +6645,9 @@ export function createRenderer(options){
      * @param {number[]} generated
      * @param {{ source: number, mode: number }} fog  See `fogOf`.
      * @param {{ flatColours: boolean, normalizeNormals: boolean, rangeFog: boolean,
-     *     points?: import('../webgpu/internal/pipeline.js').PointState }} shading
+     *     points?: import('../webgpu/internal/pipeline.js').PointState,
+     *     clip?: import('../webgpu/internal/fixedfunction.js').ClipState,
+     *     carried?: ({ set: number, transformed: boolean } | null)[] }} shading
      *     See `fixedVertexStage`.
      */
     const hybridStageFor = (key, wanted, shapes, alsoWrite, generated, fog, shading)=>{
@@ -6605,29 +6663,65 @@ export function createRenderer(options){
     };
 
     /**
-     * Per coordinate set, the generation mode of the stage of that number,
-     * up to the last stage the cascade runs: zero for a carried set.
+     * Per coordinate set the pixel shader reads, the generation mode of the
+     * stage of that number: zero for a carried set. A pixel shader reads its
+     * stages' coordinates whatever their COLOROP says, and a program that
+     * draws through one has no reason to enable the stages it samples.
      *
-     * @param {RenderModel} model
+     * @param {RenderModel} model @param {readonly number[]} reads  the pixel stage's varyings
      */
-    const hybridGeneration = model=>{
+    const hybridGeneration = (model, reads)=>{
         /** @type {number[]} */
         const modes = [];
         for (let stage = 0; stage < STAGE_COUNT; stage++)
         {
-            const states = model.stageStates(stage);
-            if ((states.get(D3DTSS.COLOROP) ?? 0) === D3DTOP.DISABLE)
-            {
-                break;
-            }
-            const index = states.get(D3DTSS.TEXCOORDINDEX) ?? 0;
-            modes.push(generates(index) ? generationOf(index) : 0);
+            const index = model.stageStates(stage).get(D3DTSS.TEXCOORDINDEX) ?? 0;
+            modes.push(reads.includes(varyingLocation(D3DDECLUSAGE.TEXCOORD, stage))
+                && generates(index) ? generationOf(index) : 0);
         }
         while (modes.length > 0 && modes[modes.length - 1] === 0)
         {
             modes.pop();
         }
         return modes;
+    };
+
+    /**
+     * Per coordinate set a pixel shader reads, where the fixed vertex stage
+     * takes the stage of that number's coordinates from when it is not the
+     * vertex's set of that number as it stands: the set the stage's
+     * TEXCOORDINDEX names, and whether its texture transform applies. Null
+     * for a set carried through as it is, and for a generated one, which
+     * `hybridGeneration` answers for. A pixel shader reads its stages'
+     * coordinates whatever their COLOROP says.
+     *
+     * @param {RenderModel} model @param {readonly number[]} reads  the pixel stage's varyings
+     */
+    const hybridCarried = (model, reads)=>{
+        /** @type {({ set: number, transformed: boolean } | null)[]} */
+        const carried = [];
+        for (let stage = 0; stage < TRANSFORM_STAGES; stage++)
+        {
+            if (!reads.includes(varyingLocation(D3DDECLUSAGE.TEXCOORD, stage)))
+            {
+                carried.push(null);
+                continue;
+            }
+            const states = model.stageStates(stage);
+            const index = states?.get(D3DTSS.TEXCOORDINDEX) ?? 0;
+            const set = index & COORD_SET_MASK;
+            // By the flags alone: the pieces are kept by the stage states,
+            // not the transforms, and a matrix never set is the identity.
+            const transformed = !generates(index)
+                && transformApplies(states?.get(D3DTSS.TEXTURETRANSFORMFLAGS) ?? 0, false);
+            carried.push(!generates(index) && (set !== stage || transformed)
+                ? { set, transformed } : null);
+        }
+        while (carried.length > 0 && carried[carried.length - 1] === null)
+        {
+            carried.pop();
+        }
+        return carried;
     };
 
     /**
@@ -6651,11 +6745,14 @@ export function createRenderer(options){
         if (vertex.fogRegister !== undefined)
         {
             // What the fixed vertex stage reads for the same: the colour,
-            // then the curve's range, as `hybridVertexBlocks` writes them --
-            // over the depth, always: the fixed projection is not the
-            // shader's, so it says nothing of what the shader's w is, and
-            // table fog through a vertex shader is taken over z (Wine's fog
-            // rules; fog_with_shader_test draws the curve over the depth).
+            // then the curve's range, as `hybridVertexBlocks` writes them.
+            // A curve the shader's oFog does not run (decisions.md A43) runs
+            // over the depth: by the drivers of the shader-model-1 and -2
+            // generations, z or w as the fixed projection says, as the fixed
+            // function's -- a program of theirs sets a range in eye units
+            // for its shader draws and leaves the projection set for its
+            // fixed ones --, and by later ones and Wine's fog rules (its
+            // fog_with_shader_test) over z, whatever the projection.
             const rs = (/** @type {string} */ name)=>model.renderStates.get(D3DRS[name]) ?? 0;
             const fogColour = colorToFloats(rs('FOGCOLOR'));
             blocks[0].set([fogColour.r, fogColour.g, fogColour.b, fogColour.a],
@@ -6664,7 +6761,7 @@ export function createRenderer(options){
                 dwordToFloat(rs('FOGSTART')),
                 dwordToFloat(rs('FOGEND')),
                 dwordToFloat(rs('FOGDENSITY')),
-                1,
+                tableFogOverDepth || isAffine(transformOf(model, D3DTS.PROJECTION)) ? 1 : 0,
             ], (vertex.fogRegister + 1) * 4);
         }
         // The user planes, as set: a vertex shader's are in clip space.
@@ -6696,7 +6793,7 @@ export function createRenderer(options){
         floats.set(model.viewport.offset, HYBRID_CONSTANTS.VIEWPORT * 4);
         floats.set(model.viewport.scale, HYBRID_CONSTANTS.VIEWPORT * 4 + 2);
         floats.set(worldView, HYBRID_CONSTANTS.WORLD_VIEW * 4);
-        if (generatesFromNormal(model))
+        if (generatesFromNormal(model, true))
         {
             floats.set(normalMatrixOf(worldView, CAMERA_NORMAL_MATRIX),
                 HYBRID_CONSTANTS.CAMERA_NORMAL * 4);
@@ -6848,6 +6945,159 @@ export function createRenderer(options){
         return { gpu, layout };
     };
 
+    /** The frame shown last, which a frozen run shows again (`replayLast`). @type {{ recorded: any, surface: any } | null} */
+    let lastShown = null;
+    /** Whether a replay of it is on its way, so a slow GPU is not handed a queue of them. */
+    let replayingLast = false;
+
+    /**
+     * Shows the last frame again with its draws past `cut` passed over (-1
+     * none): with the program paused, what a picture is made of can be taken
+     * apart on a picture that holds still. False when one is still on its way.
+     *
+     * @param {number} [cut]
+     */
+    const replayLast = (cut = -1)=>{
+        const shown = lastShown;
+        if (shown === null || replayingLast)
+        {
+            return false;
+        }
+        replayingLast = true;
+        chain = chain.then(()=>replay(shown.recorded, shown.surface, null, { cut }))
+            .catch(failure).finally(()=>{
+                replayingLast = false;
+            });
+        return true;
+    };
+
+    /**
+     * Which draw of the last frame painted a pixel of what it showed: the frame
+     * is played again cut after fewer and fewer draws and the pixel read back
+     * each time, halving to the first count at which it is as the scene leaves
+     * it -- before the post-processing at the frame's end, which a cut frame
+     * never reaches. The program must be paused, or the frame taken apart is
+     * not the one on the screen. The centre (a crosshair) by default.
+     *
+     * @param {number} [x] @param {number} [y]  the shown surface's pixels
+     * @param {number} [tolerance]  how far a channel may differ and be the same pixel
+     * @param {number} [depth]  how many of the draws that changed it, latest first
+     */
+    const pickDraw = async(x, y, tolerance = 6, depth = 4)=>{
+        const shown = lastShown;
+        if (shown === null)
+        {
+            throw new Error('pick: no frame has been shown');
+        }
+        const { lines, sceneDraws } = shownDraws();
+        const { width, height } = shown.surface;
+        const px = Math.min(width - 1, Math.max(0, Math.round(x ?? width / 2)));
+        const py = Math.min(height - 1, Math.max(0, Math.round(y ?? height / 2)));
+        /** @param {number} cut @returns {Promise<number[]>} red, green, blue */
+        const pixelAt = async cut=>{
+            const job = chain.then(()=>replay(shown.recorded, shown.surface, shown.surface,
+                { cut }));
+            chain = job.catch(failure);
+            const bytes = /** @type {{ data: Uint8Array }} */ (await job).data;
+            const at = (py * width + px) * 4;
+            // The shown surface is BGRA.
+            return [bytes[at + 2], bytes[at + 1], bytes[at]];
+        };
+        /**
+         * The draw that last changed the pixel among the first `count`: the
+         * smallest cut at which it is already as it is after them, less one.
+         *
+         * @param {number} count @param {number[]} after  the pixel after them
+         */
+        const lastChange = async(count, after)=>{
+            const same = (/** @type {number[]} */ pixel)=>pixel.every(
+                (value, channel)=>Math.abs(value - after[channel]) <= tolerance);
+            let low = 0;
+            let high = count;
+            while (high - low > 1)
+            {
+                const middle = (low + high) >> 1;
+                if (same(await pixelAt(middle)))
+                {
+                    high = middle;
+                }
+                else
+                {
+                    low = middle;
+                }
+            }
+            return high - 1;
+        };
+        const scene = await pixelAt(sceneDraws);
+        // The last few draws that changed it, latest first: a fog or a
+        // caustics layer blended over an object is the last, and the object
+        // is under it.
+        /** @type {{ draw: number, after: number[], line: string | null }[]} */
+        const changes = [];
+        let count = sceneDraws;
+        let after = scene;
+        while (changes.length < depth && count > 0)
+        {
+            const draw = await lastChange(count, after);
+            changes.push({ draw, after, line: lines[draw] ?? null });
+            count = draw;
+            after = await pixelAt(draw);
+        }
+        // The frame as it was, back on the screen.
+        await pixelAt(-1);
+        return { x: px, y: py, pixel: scene, sceneDraws, draw: changes[0]?.draw ?? -1,
+            line: changes[0]?.line ?? null, changes };
+    };
+
+    /**
+     * The last frame's draws as the cut counts them, one line each -- its
+     * shaders, its textures, and whether it drew into a texture rather than
+     * what was shown -- and how many come before the run of draws into
+     * textures at the frame's end, the post-processing, that a cut frame
+     * never reaches.
+     */
+    const shownDraws = ()=>{
+        if (lastShown === null)
+        {
+            return { lines: [], sceneDraws: 0 };
+        }
+        /** @type {string[]} */
+        const lines = [];
+        /** @type {boolean[]} */
+        const intoTexture = [];
+        let target = null;
+        for (const command of lastShown.recorded.commands)
+        {
+            if (command.kind === 'pass')
+            {
+                target = command.target;
+                continue;
+            }
+            if (command.kind !== 'draw')
+            {
+                continue;
+            }
+            const bound = (command.stageBindings ?? []).map((/** @type {any} */ binding)=>
+                (!binding.placeholder && binding.texture ? describeTexture(binding.texture) : '-'))
+                .join(' ');
+            const offscreen = target !== lastShown.surface;
+            intoTexture.push(offscreen);
+            lines.push(`#${lines.length} vs=${command.state?.vertexShader ?? '?'}`
+                + ` ps=${command.state?.pixelShader ?? '?'}`
+                + `${offscreen ? ' !backbuffer' : ''} [${bound}]`);
+        }
+        let at = lines.length;
+        while (at > 0 && !intoTexture[at - 1])
+        {
+            at--;
+        }
+        while (at > 0 && intoTexture[at - 1])
+        {
+            at--;
+        }
+        return { lines, sceneDraws: at > 0 ? at : lines.length };
+    };
+
     /**
      * A recorded stretch: the destination's rectangle drawn from the source's.
      *
@@ -6959,7 +7209,8 @@ export function createRenderer(options){
      *     The vertices the draw reaches, for its further streams (`streamBindings`).
      */
     const record = (model, prepared, geometry, scissored = true, bias = 0, span = undefined)=>{
-        if (maxDraws >= 0 && kept >= maxDraws)
+        const cut = maxDrawsNow();
+        if (cut >= 0 && kept >= cut)
         {
             return;
         }
@@ -7063,13 +7314,15 @@ export function createRenderer(options){
      * A draw's bindings with any texture it is drawing into put out of reach.
      *
      * Direct3D lets a texture stay bound to a stage while a level of it is the
-     * render target or the depth buffer; what such a draw samples is undefined
-     * there, and it draws. WebGPU refuses a pass that samples a texture it
-     * renders into, and with it the whole frame's command buffer: a program that
-     * leaves its target bound on a stage -- whether or not the stage is read --
-     * showed nothing at all, the last frame it drew before standing on the
-     * screen for good. The stage samples the placeholder instead, which is
-     * what an unbound stage reads, and that is said once.
+     * render target or the depth buffer. What such a draw samples is undefined
+     * there, and hardware gives a pixel what the target held before the draw:
+     * a post effect that blends a glow into the scene copy it reads, texel for
+     * pixel, works on every card. WebGPU refuses a pass that samples a texture
+     * it renders into, and with it the whole frame's command buffer. So the
+     * target is copied, just before the draw, into a snapshot the stage reads
+     * instead -- the hardware's answer, at one copy a draw. A target with more
+     * than one level, and a depth buffer, read the placeholder (what an
+     * unbound stage reads), and that is said once.
      *
      * @param {RenderModel} model
      * @param {{ view: any, sampler: any, placeholder?: boolean, record?: any,
@@ -7094,6 +7347,13 @@ export function createRenderer(options){
             {
                 safe = bindings.slice();
             }
+            if (sampled === target && target.gpu && target.gpuLevels === 1 && target.faces === 1
+                && !target.volume)
+            {
+                safe[index] = { ...bindings[index], record: null,
+                    view: targetSnapshot(target.gpu).view };
+                continue;
+            }
             safe[index] = { ...bindings[index], record: null, placeholder: true,
                 view: placeholderView(textureDimensionOf(bindings[index].texture)) };
             if (divergence && !targetSampledReported)
@@ -7106,6 +7366,40 @@ export function createRenderer(options){
         return safe;
     };
     let targetSampledReported = false;
+    /** One snapshot texture a size and format, reused by every such draw. @type {Map<string, any>} */
+    const snapshots = new Map();
+    /**
+     * A copy of a render target as it stands, recorded at this point of the
+     * frame; the encoder closes the pass for it and reopens it loading.
+     *
+     * @param {any} surface  the target texture's GPU surface
+     */
+    const targetSnapshot = surface=>{
+        const key = `${surface.width}x${surface.height}:${surface.format}`;
+        let snapshot = snapshots.get(key);
+        if (!snapshot)
+        {
+            snapshot = backend.createSurface({
+                width: surface.width,
+                height: surface.height,
+                format: surface.format,
+                label: 'target-snapshot',
+                usage: TextureUsage.TEXTURE_BINDING | TextureUsage.COPY_DST
+                    | (dumpDraws ? TextureUsage.COPY_SRC : 0),
+            });
+            snapshots.set(key, snapshot);
+        }
+        ensureFrame().commands.push({
+            kind: 'copy',
+            source: surface,
+            destination: snapshot,
+            sourceOrigin: { x: 0, y: 0 },
+            destinationOrigin: { x: 0, y: 0 },
+            width: surface.width,
+            height: surface.height,
+        });
+        return snapshot;
+    };
 
     /** A draw command of the one shape every draw is recorded in. */
     const blankDraw = ()=>({
@@ -7806,7 +8100,7 @@ export function createRenderer(options){
             }
             const bytes = new Uint8Array(new Uint32Array([raw >>> 0]).buffer)
                 .subarray(0, info.bytesPerPixel);
-            const texel = expandTexels(held.format, bytes, 1);
+            const texel = expandTexels(held.format, bytes, 1, float32);
             cascade.stages[index] = {
                 ...cascade.stages[index],
                 colorKey: (texel[2] << 16) | (texel[1] << 8) | texel[0],
@@ -7829,6 +8123,14 @@ export function createRenderer(options){
         if (processing.program && (processing.vertexShader !== 0 || processing.pixelShader !== 0))
         {
             const prepared = prepareProgram(model, stride, topology, processing.program);
+            const skipped = skipTextures();
+            if (prepared && skipped.size > 0 && prepared.program?.samplerBindings?.some(
+                (/** @type {any} */ binding)=>!binding.placeholder
+                    && skipped.has(textures.get(binding.texture)?.id ?? '')))
+            {
+                skip('texture');
+                return null;
+            }
             if (prepared)
             {
                 countLighting(model, prepared);
@@ -7920,8 +8222,9 @@ export function createRenderer(options){
         const cascade = stageCascade(model, layout, { onesOf: onesOfTexture });
         keyStages(model, cascade);
         reportCascade(cascade);
-        if (skipTextures.size > 0 && cascade.textures.some(
-            texture=>texture && skipTextures.has(textures.get(texture)?.id ?? '')))
+        const skipped = skipTextures();
+        if (skipped.size > 0 && cascade.textures.some(
+            texture=>texture && skipped.has(textures.get(texture)?.id ?? '')))
         {
             skip('texture');
             return null;
@@ -8762,6 +9065,12 @@ export function createRenderer(options){
             {
                 return { state: 'done', value: count.value };
             }
+            if (liveDump?.occlusion === 'visible')
+            {
+                // Asked on a running program: every count as if all its
+                // samples passed, to see what the program hides by its counts.
+                return { state: 'done', value: OCCLUSION_ALL_VISIBLE };
+            }
             if (flush && recording && count.recording === recording)
             {
                 this.submit();
@@ -9328,6 +9637,13 @@ export function createRenderer(options){
             chain = chain.then(()=>replay(recorded, surface)).then(()=>{
                 submittedFrames = replayed;
             }).catch(failure);
+            if (liveDump)
+            {
+                lastShown = { recorded, surface };
+                liveDump.replayLast = replayLast;
+                liveDump.shownDraws = shownDraws;
+                liveDump.pick = pickDraw;
+            }
             if (handOver !== null)
             {
                 // After the replay, which appends what the GPU was given to
@@ -9516,12 +9832,6 @@ export function createRenderer(options){
                     levels: entry.levels,
                     written: [...(entry.written ?? [])].sort((left, right)=>left - right),
                     tails: entry.tails ?? {},
-                    // Of the program's bytes the last upload of the base
-                    // level read, how many of an even sample were not zero:
-                    // a texture drawn black whose bytes the device never
-                    // had reads 0 here.
-                    level0Sampled: entry.sampled === undefined ? 'not uploaded'
-                        : `${entry.sampled}/${Math.min(NONZERO_SAMPLES, entry.sampledOf ?? 0)}`,
                 })),
                 textures: [...uploaded.values()],
             }, 'lastFrame', {
@@ -9538,16 +9848,20 @@ export function createRenderer(options){
      * @param {any} recorded
      * @param {any} surface what to present, or null for a flush
      * @param {any} [snapshot] a backend surface to read back after the replay
+     * @param {{ cut: number } | null} [again]  a frame played once already,
+     *     shown again with its draws past `cut` passed over: it counts no
+     *     occlusion, reads nothing back and gives its arena back to nobody --
+     *     the first replay did, and a second would hand it to two recordings
      * @returns {Promise<any>} the snapshot's pixels, when one was asked for
      */
-    async function replay(recorded, surface, snapshot = null){
+    async function replay(recorded, surface, snapshot = null, again = null){
         const pipelines = await Promise.allSettled(recorded.pipelines);
         const began = clock();
         const frame = backend.beginFrame({ cut: recorded.cut });
         // A frame counts when a query is open as it starts or opens in it,
         // and then every pass of it can: a BEGIN may land in any of them.
-        const counts = countingQuery !== null
-            || recorded.commands.some((/** @type {any} */ command)=>command.kind === 'occlusion');
+        const counts = again === null && (countingQuery !== null
+            || recorded.commands.some((/** @type {any} */ command)=>command.kind === 'occlusion'));
         /** @type {{ slots: any[], areas: number[], touched: Set<any> } | null} */
         const occlusion = counts ? { slots: [], areas: [], touched: new Set() } : null;
         frameOcclusion = occlusion;
@@ -9561,7 +9875,7 @@ export function createRenderer(options){
         let shot = null;
         try
         {
-            replayInto(frame, pipelines, recorded, surface);
+            replayInto(frame, pipelines, recorded, surface, again?.cut ?? -1);
             if (occlusion && occlusion.touched.size > 0)
             {
                 counted = frame.occlusionResults();
@@ -9573,7 +9887,7 @@ export function createRenderer(options){
             // After the draws, so the copies see the buffers as the draws did:
             // a flush at the end of the frame lands before the whole command
             // buffer, draws and copies alike.
-            for (const command of recorded.commands)
+            for (const command of again === null ? recorded.commands : [])
             {
                 // A draw the replay passed over -- its pipeline refused -- bound
                 // no block, and there is nothing of it on the GPU to read back.
@@ -9607,7 +9921,7 @@ export function createRenderer(options){
         }
         finally
         {
-            if (recorded.arena)
+            if (recorded.arena && again === null)
             {
                 arenas.push(recorded.arena);
             }
@@ -9625,6 +9939,15 @@ export function createRenderer(options){
             timing.replays++;
             timing.replayMs += took;
             timing.worstReplayMs = Math.max(timing.worstReplayMs, took);
+            // How far the GPU runs behind what was handed to it: an answer
+            // that needs the GPU -- a count, a read back -- waits that long.
+            const submitted = clock();
+            backend.workDone?.()?.then(()=>{
+                const behind = clock() - submitted;
+                timing.gpuFrames++;
+                timing.gpuMs += behind;
+                timing.worstGpuMs = Math.max(timing.worstGpuMs, behind);
+            }, ()=>{});
         }
         lastFrame = recorded.commands;
         if (counted && occlusion)
@@ -9754,8 +10077,11 @@ export function createRenderer(options){
     /**
      * @param {any} frame @param {any[]} pipelines
      * @param {any} recorded @param {any} surface
+     * @param {number} [cut]  draws played before the rest are passed over; -1 all
      */
-    function replayInto(frame, pipelines, recorded, surface){
+    function replayInto(frame, pipelines, recorded, surface, cut = -1){
+        /** Draws reached so far, against `cut`. */
+        let drawsReached = 0;
         /**
          * A pass for the frame's draws, one its draws can count in when the
          * frame counts.
@@ -9906,6 +10232,10 @@ export function createRenderer(options){
                 scissor = command.rect;
                 drawArea = reachableArea(command.rect);
                 pass.setScissor(command.rect);
+                continue;
+            }
+            if (cut >= 0 && drawsReached++ >= cut)
+            {
                 continue;
             }
             const outcome = pipelines[command.pipeline];

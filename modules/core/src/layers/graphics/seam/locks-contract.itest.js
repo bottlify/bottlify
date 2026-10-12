@@ -81,9 +81,16 @@ const random = seed=>{
 };
 
 /**
- * @typedef {{ kind: 'lock', offset: number, length: number, flags: number, fill: number }
+ * @typedef {{ kind: 'lock', offset: number, length: number, flags: number, fill: number,
+ *         draws?: number, entries?: boolean }
  *     | { kind: 'draw', start: number, triangles: number }
  *     | { kind: 'entry' }} Step
+ *
+ * A lock with `draws` is held while the program draws from it: its range is
+ * written a part at a time, each part a triangle's three vertices drawn
+ * before the next is written, and the unlock comes after -- what a 2D layer
+ * appending quads to a dynamic buffer does. With `entries`, another call
+ * reaches the host after each of those draws, while the lock is still held.
  */
 
 /**
@@ -127,7 +134,14 @@ function generate(seed, count){
                 defined = new Uint8Array(LENGTH);
             }
             defined.fill(1, offset, offset + length);
-            steps.push({ kind: 'lock', offset, length, flags, fill: 1 + next(250) });
+            // Held through draws of what it wrote: whole triangles of its own range.
+            const draws = span >= 3 && next(3) === 0 ? Math.floor(span / 3) : 0;
+            if (draws > 0)
+            {
+                read.fill(1, offset, offset + draws * 3 * STRIDE);
+            }
+            steps.push({ kind: 'lock', offset, length, flags, fill: 1 + next(250),
+                ...(draws > 0 ? { draws, entries: next(2) === 0 } : {}) });
         }
         else if (roll < 9)
         {
@@ -235,7 +249,7 @@ function machine(version, lent = false){
     const held = new Uint8Array(LENGTH);
     /** @type {{ offset: number, length: number } | null} */
     let locking = null;
-    /** Unlocked ranges a draw has yet to lend. @type {{ offset: number, length: number }[]} */
+    /** Unlocked ranges a draw has yet to lend. @type {{ offset: number, length: number, now?: Uint8Array }[]} */
     let unlent = [];
     /**
      * What the worker plays, in order: lends (their bytes once claimed) and draws.
@@ -289,10 +303,23 @@ function machine(version, lent = false){
     const draw = device.DrawPrimitive.bind(device);
     /** @param {number} type @param {number} start @param {number} count */
     device.DrawPrimitive = (type, start, count)=>{
+        // A draw while a lock is held reads the locked range as guest memory
+        // holds it then: the renderer's `readHeld` takes it, and lent, the
+        // worker takes it with the draw (`remote/replay.js`).
+        if (locking && !lent)
+        {
+            held.set(readMemory(buffer.base + locking.offset, locking.length), locking.offset);
+        }
+        else if (locking)
+        {
+            unlent.push({ offset: locking.offset, length: locking.length,
+                now: readMemory(buffer.base + locking.offset, locking.length).slice() });
+        }
         const hr = draw(type, start, count);
         if (hr === D3D_OK && lent)
         {
-            played.push(...unlent.map(range=>({ ...range, bytes: null })), { start, count });
+            played.push(...unlent.map(range=>({ offset: range.offset, length: range.length,
+                bytes: range.now ?? null })), { start, count });
             unlent = [];
         }
         else if (hr === D3D_OK)
@@ -325,14 +352,31 @@ function machine(version, lent = false){
 }
 
 /**
- * The program's writes into what a lock handed back: the whole range, each
- * byte a function of the fill and its place, so a stale byte differs.
+ * A lock's range written -- each byte a function of the fill and its place,
+ * so a stale byte differs -- whole, or a triangle at a time with a draw of each
+ * before the next, the rest after.
  *
- * @param {(at: number, bytes: Uint8Array) => void} writeMemory
- * @param {number} at @param {number} length @param {number} fill
+ * @param {(at: number, bytes: Uint8Array) => void} writeMemory @param {number} at
+ * @param {Step & { kind: 'lock' }} step
+ * @param {(start: number, triangles: number) => void} draw
+ * @param {() => void} [entry]  a call reaching the host for another reason
  */
-const write = (writeMemory, at, length, fill)=>writeMemory(at,
-    Uint8Array.from({ length }, (unused, i)=>(fill + i * 7) & 0xff));
+const writeHeld = (writeMemory, at, step, draw, entry = ()=>{})=>{
+    const bytes = Uint8Array.from({ length: step.length }, (unused, i)=>(step.fill + i * 7) & 0xff);
+    const part = 3 * STRIDE;
+    let done = 0;
+    for (let i = 0; i < (step.draws ?? 0); i++)
+    {
+        writeMemory(at + done, bytes.subarray(done, done + part));
+        draw((step.offset + done) / STRIDE, 1);
+        done += part;
+        if (step.entries)
+        {
+            entry();
+        }
+    }
+    writeMemory(at + done, bytes.subarray(done));
+};
 
 /**
  * Every call made on the device as it comes.
@@ -348,7 +392,8 @@ function direct(version, steps, lent = false){
             /** @type {{ pBits?: number }} */
             const locked = {};
             assert.equal(buffer.Lock(step.offset, step.length, locked, step.flags), D3D_OK);
-            write(writeMemory, /** @type {number} */ (locked.pBits), step.length, step.fill);
+            writeHeld(writeMemory, /** @type {number} */ (locked.pBits), step, (start, count)=>
+                assert.equal(device.DrawPrimitive(D3DPT_TRIANGLELIST, start, count), D3D_OK));
             assert.equal(buffer.Unlock(), D3D_OK);
         }
         else if (step.kind === 'draw')
@@ -463,7 +508,19 @@ function guest(version, steps, lent = false){
             {
                 assert.equal(locked.hr, D3D_OK);
             }
-            write(writeMemory, readU32(OUT), step.length, step.fill);
+            writeHeld(writeMemory, readU32(OUT), step, (start, triangles)=>{
+                const drawn = run(DRAW, DEVICE, [D3DPT_TRIANGLELIST, start, triangles]);
+                if ('trap' in drawn)
+                {
+                    assert.equal(drawn.trap, DRAW_TRAP);
+                    assert.equal(settledAfter(shadow, ()=>device.DrawPrimitive(
+                        D3DPT_TRIANGLELIST, start, triangles)), D3D_OK);
+                }
+                else
+                {
+                    assert.equal(drawn.hr, D3D_OK);
+                }
+            }, ()=>settledAfter(shadow, ()=>D3D_OK));
             const unlocked = run(UNLOCK, BUFFER_IF, []);
             if ('trap' in unlocked)
             {

@@ -95,7 +95,10 @@ function fakeDevice(){
     };
 }
 
-/** @param {{ readU32?: boolean, commands?: boolean }} [options] */
+/**
+ * @param {{ readU32?: boolean, commands?: boolean,
+ *     phases?: import('./shadow.js').ShadowPhases }} [options]
+ */
 function machine(options = {}){
     const memory = new Uint8Array(0x40000);
     /**
@@ -150,6 +153,7 @@ function machine(options = {}){
                 },
             }
             : undefined,
+        phases: options.phases,
     });
     const view = new DataView(memory.buffer);
     return {
@@ -622,6 +626,36 @@ test('the command ring is made with the block, and its whole records are taken i
     assert.equal(m.shadow.diagnostics().refused, 1);
 });
 
+test('a buffer the guest holds locked is sent only when the ring has calls that may read it', ()=>{
+    // Sent at every entry, the held range was read again at each of
+    // thousands of host calls a frame.
+    const m = machine({ commands: true });
+    const vb = Object.assign(fakeBuffer(0x8000, 0x100), { usage: 0x200 });
+    const block = m.shadow.attachBuffer(vb);
+    const at = m.shadow.address();
+    // As the lock routine leaves it: the range, the flag, and its count.
+    m.put32(block + BUFFER.LOCKED, 1);
+    m.put32(block + BUFFER.FROM, 0);
+    m.put32(block + BUFFER.TO, 16);
+    m.put32(at + SHADOW.LOCK_CALLS, 1);
+    m.shadow.sync();
+    m.shadow.sync();
+    assert.deepEqual(vb.calls, [], 'nothing in the ring: nothing to send');
+    const ring = m.u32(at + SHADOW.COMMANDS);
+    record(7, [1, 2]).forEach((word, i)=>m.put32(ring + i * 4, word));
+    m.put32(at + SHADOW.COMMAND_HEAD, 16);
+    // The counts equal, as after an unlock the routines made: nothing is held.
+    m.put32(at + SHADOW.UNLOCK_CALLS, 1);
+    m.shadow.sync();
+    assert.deepEqual(vb.calls, [], 'no lock held: none looked at');
+    record(7, [1, 2]).forEach((word, i)=>m.put32(ring + 16 + i * 4, word));
+    m.put32(at + SHADOW.COMMAND_HEAD, 32);
+    m.put32(at + SHADOW.LOCK_CALLS, 2);
+    m.shadow.sync();
+    assert.deepEqual(vb.calls, ['lock 0+16 0x0', 'unlock'], 'sent before the calls in the ring');
+    assert.equal(m.taken.length, 2);
+});
+
 test('the ring starts over once the host has read up to a head near its end', ()=>{
     const m = machine({ commands: true });
     const at = m.shadow.address();
@@ -671,6 +705,80 @@ test('the buffers the guest let go of are settled before the ring\'s calls are m
     assert.deepEqual(m.order, ['lock', 'take 4']);
 });
 
+
+/**
+ * One entry with a buffer let go of, one still held and a call in the ring;
+ * what the buffers and the ring were given, in order.
+ *
+ * @param {import('./shadow.js').ShadowPhases} [phases]
+ */
+function entryWithEverything(phases){
+    const m = machine({ commands: true, phases });
+    const at = m.shadow.address();
+    const ring = m.u32(at + SHADOW.COMMANDS);
+    const unlocked = fakeBuffer(0x8000, 0x100);
+    const held = Object.assign(fakeBuffer(0x9000, 0x100), { usage: 0x200 });
+    const first = m.shadow.attachBuffer(unlocked);
+    const second = m.shadow.attachBuffer(held);
+    m.put32(first + BUFFER.FROM, 0);
+    m.put32(first + BUFFER.TO, 64);
+    m.put32(at + SHADOW.RING, first);
+    m.put32(at + SHADOW.RING_HEAD, 1);
+    m.put32(second + BUFFER.LOCKED, 1);
+    m.put32(second + BUFFER.FROM, 0);
+    m.put32(second + BUFFER.TO, 16);
+    // Two locks taken by the routines, one let go of: one is held.
+    m.put32(at + SHADOW.LOCK_CALLS, 2);
+    m.put32(at + SHADOW.UNLOCK_CALLS, 1);
+    record(3, [0, 2]).forEach((word, i)=>m.put32(ring + i * 4, word));
+    m.put32(at + SHADOW.COMMAND_HEAD, 16);
+    m.shadow.sync();
+    return { unlocked: unlocked.calls, held: held.calls, taken: m.taken, order: m.order };
+}
+
+test('a timed entry opens its parts as phases inside ring-sync, as an untimed one acts', ()=>{
+    // The work an entry does before the device method is the cost a profile
+    // found only with a browser's trace: each part is a phase of its own
+    // when the host call is one being timed. Timed or not, the guest's
+    // buffers and the ring are given the same things in the same order.
+    /** @type {string[]} */
+    const opened = [];
+    const timed = entryWithEverything({
+        begin: name=>(opened.push(`begin ${name}`), 32),
+        end: (name, weight)=>opened.push(`end ${name} x${weight}`),
+    });
+    assert.deepEqual(opened, [
+        'begin ring-sync',
+        'begin ring-unlocked', 'end ring-unlocked x32',
+        'begin ring-take',
+        'begin ring-held', 'end ring-held x32',
+        'end ring-take x32',
+        'end ring-sync x32',
+    ]);
+
+    opened.length = 0;
+    const untimed = entryWithEverything({
+        begin: name=>(opened.push(`begin ${name}`), 0),
+        end: name=>opened.push(`end ${name}`),
+    });
+    assert.deepEqual(opened, ['begin ring-sync'], 'an untimed call asks once and opens nothing');
+    assert.deepEqual(untimed, timed);
+    assert.deepEqual(entryWithEverything(), timed, 'nor does a shadow with no phases differ');
+    assert.ok(timed.held.length > 0 && timed.unlocked.length > 0 && timed.taken.length === 1,
+        'the entry had all three parts to do');
+});
+
+test('a timed entry with nothing let go of and no ring opens ring-sync alone', ()=>{
+    /** @type {string[]} */
+    const opened = [];
+    const m = machine({ phases: {
+        begin: name=>(opened.push(`begin ${name}`), 32),
+        end: name=>opened.push(`end ${name}`),
+    } });
+    assert.notEqual(m.shadow.address(), 0, 'the block made, so the entry has one to look at');
+    m.shadow.sync();
+    assert.deepEqual(opened, ['begin ring-sync', 'end ring-sync']);
+});
 
 /** @param {number} levels */
 const fakeTexture = levels=>({ levels });

@@ -8,6 +8,7 @@ import { createBackend } from './webgpu/backend.js';
 import { createDirectDraw } from './ddraw/objects.js';
 import { createDirect3D8 } from './d3d8/device.js';
 import { createDirect3D9 } from './d3d9/device.js';
+import { profileBehaviour, profileCaps } from './seam/adapter.js';
 import { connectGraphicsWorker } from './remote/connect.js';
 import { createGraphicsLibraries } from './seam/exports.js';
 import { createOpengl } from './opengl/exports.js';
@@ -514,6 +515,7 @@ export function createGraphicsModule(){
                     mips: device?.mips,
                     nanProbe: device?.nanProbe,
                     driverRules: config?.driverRules,
+                    ...profileBehaviour(device?.adapter),
                     keepMemory: config?.keepMemory,
                     rereadBuffers: config?.rereadBuffers,
                     onDeviceLost,
@@ -528,6 +530,8 @@ export function createGraphicsModule(){
                 /** @returns {any} */
                 d3d9: (/** @type {any} */ caps)=>direct3d('d3d9', createDirect3D9, {
                     ...caps,
+                    // The adapter shown with a profile has that profile's shaders.
+                    ...profileCaps(device?.adapter),
                     // The same configuration-and-adapter answer Direct3D 8 gets:
                     // Direct3D 9 put the question in CheckDeviceFormat rather than
                     // a cap bit, and a title that never asks still expects its DXT
@@ -561,6 +565,7 @@ export function createGraphicsModule(){
                     mips: device?.mips,
                     nanProbe: device?.nanProbe,
                     driverRules: config?.driverRules,
+                    ...profileBehaviour(device?.adapter),
                     keepMemory: config?.keepMemory,
                     rereadBuffers: config?.rereadBuffers,
                     onDeviceLost,
@@ -981,6 +986,10 @@ export function createGraphicsModule(){
                 processHeapAllocate: (/** @type {number} */ bytes)=>
                     win32.processHeapAllocate?.(bytes) ?? 0,
                 divergence: config?.divergence,
+                // Where the work a device call does before its method -- the
+                // guest's state brought to the device -- is timed, inside the
+                // host call it is part of.
+                phases: bridge.innerPhase,
                 // The address of one of OPENGL32's own exports, which only the
                 // assembling caller knows once the module is placed.
                 exportAddress: config?.exportAddress,

@@ -132,6 +132,8 @@ export function createTimerService(deps){
     let waiting = null;
     let record = 0;
     let fired = 0;
+    /** Periodic ticks passed over because the thread was behind (`advance`). */
+    let skipped = 0;
     /**
      * The one-shot timer whose routine the loop is calling. It stays in the
      * table until the loop asks again, which is when the routine has
@@ -176,6 +178,19 @@ export function createTimerService(deps){
         if (timer.period > 0)
         {
             timer.due += timer.period;
+            // Ticks already gone by are not fired back to back. A callback
+            // slower than its period otherwise owed more ticks with every one,
+            // and the time-critical thread then took the processor at every
+            // turn: a 33 ms timer measured 2.3 s behind and still falling.
+            // The next one is the first of the same grid still to come
+            // (roadmap/decisions.md).
+            const now = deps.now();
+            if (timer.due <= now)
+            {
+                const missed = Math.floor((now - timer.due) / timer.period) + 1;
+                timer.due += missed * timer.period;
+                skipped += missed;
+            }
         }
         else
         {
@@ -303,6 +318,12 @@ export function createTimerService(deps){
             waiting: waiting !== null,
             armed: timers.size,
             fired,
+            skipped,
+            // Each armed timer's period and how far its next due time lies
+            // behind now: a periodic timer whose callbacks take longer than its
+            // period falls further behind with every one.
+            timers: [...timers.values()].map(timer=>({ id: timer.id, period: timer.period,
+                behindMs: Math.round(deps.now() - timer.due) })),
         }),
     };
 }

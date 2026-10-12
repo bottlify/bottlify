@@ -740,6 +740,18 @@ test('texbem and texbeml move a stage\'s coordinates by its bump matrix', ()=>{
         + ' + c[_bump + 3].y, 0.0, 1.0), t1.a);');
     assert.equal(translateShader(parseShader([PS_1_1, 0x00000042, 0xb00f0000, END_TOKEN]))
         .bumpRegister, undefined, 'a shader that bumps nothing carries no matrix');
+
+    // The driver of a card that kept a texture whose sides are not powers of
+    // two as a rectangle took the offset in texels: divided by the texture's
+    // size there, and only there.
+    const texels = translateShader(parseShader(tokens(0x00000043)), { rectangleBump: true });
+    assert.equal(texels.error, null);
+    assertLine(texels.wgsl, 't1 = textureSample(tex1, samp1, (vec4f(in.t1.xy'
+        + ' + (vec2f(dot(t0.xy, c[_bump + 2].xz), dot(t0.xy, c[_bump + 2].yw))'
+        + ' / select(vec2f(1.0), vec2f(vec2<u32>(textureDimensions(tex1, 0))),'
+        + ' ((vec2<u32>(textureDimensions(tex1, 0)).x & (vec2<u32>(textureDimensions(tex1, 0)).x'
+        + ' - 1u)) | (vec2<u32>(textureDimensions(tex1, 0)).y & (vec2<u32>(textureDimensions(tex1,'
+        + ' 0)).y - 1u))) != 0u)), in.t1.zw)).xy);');
 });
 
 test('the texm3x rows sample, reflect, or spell a depth', ()=>{

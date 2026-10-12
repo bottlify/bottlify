@@ -504,8 +504,10 @@ function playVoice({ block, blockFrames, header, arena, outputRate, seam }){
 }
 
 /**
- * One output block: every slot resampled and summed into it, the block and
- * starvation counters advanced.
+ * One table's part of an output block: every slot resampled and added into it,
+ * its block and starvation counters advanced. The caller zeroes the block once
+ * and adds each process's table in turn, as two films playing at once meet only
+ * at the speaker.
  *
  * A block is starved -- the artifact a person hears as a click -- when no
  * slot had enough to fill it, exactly as the ring counted it before: an idle
@@ -516,14 +518,13 @@ function playVoice({ block, blockFrames, header, arena, outputRate, seam }){
  * @param {Int32Array} p.global          The table's `GLOBAL_HEADER_INT32` ints.
  * @param {{ header: Int32Array, pcm: Uint8Array }[]} p.slots
  * @param {Seam[]} p.seams                One per slot, same order.
- * @param {Float32Array} p.block          Zeroed by the caller or not yet used.
+ * @param {Float32Array} p.block          Added into; zeroed by the caller.
  * @param {number} p.blockFrames
  * @param {number} p.outputRate
  * @param {Uint8Array | null} [p.arena] The DMA voices' mirrors.
  * @returns {number} the most any one slot produced
  */
 export function mixBlock({ global, slots, seams, block, blockFrames, outputRate, arena }){
-    block.fill(0, 0, blockFrames * 2);
     Atomics.add(global, BLOCKS, 1);
     let maxProduced = 0;
     for (let slot = 0; slot < slots.length; slot++)

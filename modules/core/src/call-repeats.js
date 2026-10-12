@@ -42,10 +42,11 @@ const KEPT = 2 * MAX_PERIOD;
  */
 
 /**
- * @returns {{ note: (thread: string, key: string) => { write: boolean, said: Repeated | null } }}
+ * @returns {{ note: (thread: string, key: string | number) =>
+ *     { write: boolean, said: Repeated | null } }}
  */
 export function createCallRepeats(){
-    /** @type {Map<string, { keys: string[], period: number, calls: number }>} */
+    /** @type {Map<string, { keys: (string | number)[], period: number, calls: number }>} */
     const threads = new Map();
     return {
         /**
@@ -53,7 +54,7 @@ export function createCallRepeats(){
          * first -- one that it ended, or one that still runs.
          *
          * @param {string} thread
-         * @param {string} key  what makes two calls the same: name, arguments, answer
+         * @param {string | number} key  what makes two calls the same: name, arguments, answer
          */
         note(thread, key){
             let state = threads.get(thread);
@@ -97,7 +98,7 @@ export function createCallRepeats(){
     };
 }
 
-/** @param {string[]} keys @param {string} key */
+/** @param {(string | number)[]} keys @param {string | number} key */
 function keep(keys, key){
     keys.push(key);
     if (keys.length > KEPT)
@@ -109,7 +110,7 @@ function keep(keys, key){
 /**
  * The shortest period the newest calls repeat over the window, or 0.
  *
- * @param {string[]} keys
+ * @param {(string | number)[]} keys
  */
 function periodOf(keys){
     const count = keys.length;

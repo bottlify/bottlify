@@ -174,14 +174,26 @@ function toyAcross(lend){
         borrow: createBorrower({ ...buffers, memory: ram }) });
     /** What the played side said back. @type {any[]} */
     const said = [];
-    const receiver = createReceiver({ played, post: message=>said.push(message) });
+    /** What each batch's read answered: the look at objects at zero it made, if it made one. */
+    const swept = /** @type {(number | undefined)[]} */ ([]);
+    /**
+     * @param {ArrayBuffer} buffer
+     * @param {(call: any) => boolean | void} each
+     */
+    const read = (buffer, each)=>{
+        const answered = played.read(buffer, each);
+        swept.push(answered);
+        return answered;
+    };
+    const reading = { ...played, read };
+    const receiver = createReceiver({ played: reading, post: message=>said.push(message) });
     /** @type {any[]} */
     const sent = [];
     const sender = createSender({ post: message=>sent.push(message), later: ()=>{},
         lending: lend ? { ...buffers, memory: ram } : null });
     const root = recordedDirect3D(toy(sides), services, sender);
     return {
-        root, ram, sender, said,
+        root, ram, sender, said, swept,
         played: sides.find(side=>side.played),
         /** The played side plays what was sent. */
         play(){
@@ -958,16 +970,50 @@ test('an occlusion count is asked of the renderer without waiting, and taken whe
         assert.equal(count.value, 0);
         assert.equal(made.query.Issue(D3DISSUE_END), D3D_OK);
         assert.equal(made.query.GetData(count, 4, 0), S_FALSE, 'a new measurement is asked anew');
+    });
 
-        // Polled a frame later, the count is waited for, as hardware has
-        // counted by then: a program that reads its query the frame after
-        // asking never saw a count when the answer came later than that.
-        assert.equal(made.query.Issue(D3DISSUE_END), D3D_OK);
-        assert.equal(made.query.GetData(count, 4, 0), S_FALSE);
-        out.device.Present(null, null, 0, null);
-        const later = made.query.GetData(count, 4, 0);
-        assert.ok(later instanceof Promise, 'a frame later: waited for');
-        assert.equal(await later, D3D_OK);
+test('the counts the renderer holds come beside one query\'s answer, each for its own measurement',
+    async t=>{
+        // A program that waits on its queries one after another crossed to the
+        // played side and back for each, where the GPU had counted them all
+        // in one read: two hundred round trips a frame.
+        const d3d = acrossAPort({ writeMemory: ()=>{} });
+        t.after(()=>d3d.close());
+        /** @type {{ device?: any }} */
+        const out = {};
+        assert.equal(d3d.CreateDevice({ swapEffect: D3DSWAPEFFECT.DISCARD, backBufferCount: 1,
+            backBufferWidth: 8, backBufferHeight: 8, backBufferFormat: D3DFMT.X8R8G8B8 }, out),
+        D3D_OK);
+        const D3DISSUE_END = 1;
+        const D3DISSUE_BEGIN = 2;
+        const S_FALSE = 1;
+        const queries = [0, 1, 2].map(()=>{
+            /** @type {{ query?: any }} */
+            const made = {};
+            assert.equal(out.device.CreateQuery(D3DQUERYTYPE.OCCLUSION, made), D3D_OK);
+            assert.equal(made.query.Issue(D3DISSUE_BEGIN), D3D_OK);
+            assert.equal(made.query.Issue(D3DISSUE_END), D3D_OK);
+            return made.query;
+        });
+        /** @type {{ value?: number }} */
+        const count = {};
+        assert.equal(queries[0].GetData(count, 4, 0), S_FALSE, 'asked');
+        // The third's measurement closed again after the ask: the count the
+        // answer brings for it is of the one before.
+        assert.equal(queries[2].Issue(D3DISSUE_END), D3D_OK);
+        let answer = S_FALSE;
+        for (let tries = 0; tries < 50 && answer === S_FALSE; tries++)
+        {
+            await new Promise(resolve=>setTimeout(resolve, 5));
+            answer = queries[0].GetData(count, 4, 0);
+        }
+        assert.equal(answer, D3D_OK);
+        /** @type {{ value?: number }} */
+        const beside = {};
+        assert.equal(queries[1].GetData(beside, 4, 0), D3D_OK, 'came beside the first');
+        assert.equal(beside.value, 0);
+        assert.equal(queries[2].GetData(beside, 4, 0), S_FALSE,
+            'a count of a measurement closed since is not this one\'s');
     });
 
 test('the counts the renderer holds come beside one query\'s answer, each for its own measurement',
@@ -1089,3 +1135,20 @@ test('a surface a read-back is still filling keeps its memory until the pixels h
             d3d.close();
         }
     });
+
+test('a batch that looks at the objects at zero says how long the look took', ()=>{
+    // The look is timed for the worker's account of its time: without a
+    // present it comes every sixty-fourth batch, and only that batch answers.
+    const { root, play, swept } = toyAcross(false);
+    for (let batch = 0; batch < 64; batch++)
+    {
+        /** @type {{ thing?: any }} */
+        const out = {};
+        root.CreateThing(out);
+        play();
+    }
+    assert.equal(swept.length, 64);
+    assert.deepEqual(swept.slice(0, 63), new Array(63).fill(undefined));
+    assert.equal(typeof swept[63], 'number');
+    assert.ok(/** @type {number} */ (swept[63]) >= 0);
+});

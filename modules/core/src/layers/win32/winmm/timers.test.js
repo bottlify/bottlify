@@ -105,9 +105,25 @@ test('a periodic timer makes the thread, fires on its period, re-armed from its 
 
     // Late by five: the next due time is the period from the last, not from now.
     m.tick(15);
-    assert.equal(typeof m.ask(), 'number', 'due at 1020, and it is 1035');
+    assert.equal(typeof m.ask(), 'number', 'due at 1020, and it is 1025');
     assert.equal(m.ask(), PARKED);
     assert.equal(m.blocked[1].timed?.deadline, 1030);
+});
+
+test('a periodic timer behind by more than its period fires once, not once per tick missed', ()=>{
+    // A callback slower than its period owed more ticks with every one, and the
+    // time-critical thread then took every turn: Delta Force's 33 ms timer was
+    // measured 2.3 s behind.
+    const m = machine();
+    m.timers.set(10, 0x401000, 0, 0x0001);
+    m.ask();
+    m.tick(10);
+    m.ask();
+    m.tick(45);
+    assert.equal(typeof m.ask(), 'number', 'due at 1020, it is 1055: one call');
+    assert.equal(m.ask(), PARKED, 'and not the ones at 1030, 1040 and 1050');
+    assert.equal(m.blocked.at(-1)?.timed?.deadline, 1060, 'the next on the same grid');
+    assert.equal(m.timers.diagnostics().skipped, 3);
 });
 
 test('a one-shot timer fires once, and killing a timer takes it out of the table', ()=>{

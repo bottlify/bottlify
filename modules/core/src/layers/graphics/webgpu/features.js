@@ -14,10 +14,12 @@
  *  - depth-clip-control: a draw can leave depth unclipped (D3D10's
  *    DepthClipEnable = FALSE);
  *  - clip-distances: the user clip planes are the rasteriser's; without it a
- *    clipped draw's fragment stage discards instead.
+ *    clipped draw's fragment stage discards instead;
+ *  - float32-filterable and float32-blendable: with both, a 32-bit float
+ *    surface keeps its 32 bits; without them it is kept at half precision.
  */
-export const OPTIONAL_GPU_FEATURES = Object.freeze(
-    ['texture-compression-bc', 'depth-clip-control', 'clip-distances']);
+export const OPTIONAL_GPU_FEATURES = Object.freeze(['texture-compression-bc',
+    'depth-clip-control', 'clip-distances', 'float32-filterable', 'float32-blendable']);
 
 /**
  * The optional features an adapter has.

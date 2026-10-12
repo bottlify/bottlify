@@ -586,7 +586,7 @@ function returnsEarly(list){
  *     fog?: number, fogSource?: number, flatColours?: boolean,
  *     stageDimensions?: readonly string[], projectedBy?: readonly string[],
  *     points?: { sprite: boolean }, alphaTest?: number, nanProbe?: boolean,
- *     tableFogOverDepth?: boolean, ones?: readonly number[],
+ *     tableFogOverDepth?: boolean, rectangleBump?: boolean, ones?: readonly number[],
  *     sampling?: readonly (SamplerVariant | undefined)[],
  *     clip?: import('../webgpu/internal/fixedfunction.js').ClipState }} [options]
  *        For a vertex shader, the shape of each v# the declaration supplies,
@@ -1533,8 +1533,17 @@ export function translateShader(parsed, options = {}){
                 const stage = /** @type {import('./shader.js').Operand} */ (instruction.dest).index;
                 const bumped = src(instruction, 0);
                 const at = stageCoordinates(stage);
+                // With `rectangleBump` the offset into a texture whose sides
+                // are not powers of two is in texels, as the driver of the
+                // card shown took it: a rectangle's coordinates were texels.
+                const size = `vec2<u32>(textureDimensions(tex${stage}, 0))`;
+                const offset = options.rectangleBump
+                    ? `(${bumpOffset(stage, bumped)} / select(vec2f(1.0), vec2f(${size}),`
+                        + ` ((${size}.x & (${size}.x - 1u)) | (${size}.y & (${size}.y - 1u)))`
+                        + ' != 0u))'
+                    : bumpOffset(stage, bumped);
                 fill(stage, stageSample(stage, `vec4f(${swizzled(at, 'xy')}`
-                    + ` + ${bumpOffset(stage, bumped)}, ${swizzled(at, 'zw')})`));
+                    + ` + ${offset}, ${swizzled(at, 'zw')})`));
                 if (instruction.opcode === OPCODE.TEXBEML)
                 {
                     const luminance = bumpRegisterOf(stage, 1);
@@ -2143,7 +2152,8 @@ const TCI_CAMERASPACEREFLECTIONVECTOR = 0x30000;
  *        for the pixel shader to evaluate per pixel.
  * @param {{ flatColours?: boolean, normalizeNormals?: boolean, rangeFog?: boolean,
  *     points?: { sprite: boolean, scale: boolean },
- *     clip?: import('../webgpu/internal/fixedfunction.js').ClipState }} [options]
+ *     clip?: import('../webgpu/internal/fixedfunction.js').ClipState,
+ *     carried?: ({ set: number, transformed: boolean } | null)[] }} [options]
  *        `flatColours`: the two colour varyings flat, for D3DSHADE_FLAT, as
  *        the pixel shader must read them. `normalizeNormals`:
  *        D3DRS_NORMALIZENORMALS, whether the camera-space normal a
@@ -2154,7 +2164,13 @@ const TCI_CAMERASPACEREFLECTIONVECTOR = 0x30000;
  *        `clip`: the user clip planes, in the vertex's own space -- world
  *        planes through the world matrix, which the caller puts there -- one
  *        register each from `HYBRID_CONSTANTS.COUNT`. A pre-transformed
- *        vertex is not clipped.
+ *        vertex is not clipped. `carried`: per coordinate set, the vertex's
+ *        set the stage of that number reads (its D3DTSS_TEXCOORDINDEX) and
+ *        whether the stage's transform (`c[TRANSFORMS..]`) applies, for a
+ *        stage that reads another set than its own or transforms it: the
+ *        fixed function hands a pixel shader each stage's coordinates, not
+ *        the declaration's sets by number. A two-component set goes through
+ *        the matrix as (u, v, 1), so a translation is the third row.
  * @returns {TranslatedShader}
  */
 export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [], fog = 0,
@@ -2176,6 +2192,9 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
     let normal = 'vec3f(0.0, 0.0, 1.0)';
     let specularAlpha = '1.0';
     let pointBase = `c[${HYBRID_CONSTANTS.POINT}].x`;
+    const carried = options.carried ?? [];
+    /** The declaration's coordinate sets by number, as read and as wide. @type {Map<number, { value: string, components: number }>} */
+    const sets = new Map();
     for (const element of elements)
     {
         const shape = shapes.get(element.register) ?? FOUR_FLOATS;
@@ -2204,10 +2223,11 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
             pointBase = `${value}.x`;
         }
         else if (element.usage === D3DDECLUSAGE.TEXCOORD
-            && (generated[element.usageIndex] ?? 0) !== 0)
+            && ((generated[element.usageIndex] ?? 0) !== 0 || carried[element.usageIndex]))
         {
-            // Generated under this set's number: the carried set is not what
-            // the stage samples with.
+            // Generated, or made from a set, under this set's number: the set
+            // the declaration carries under it is not what the stage samples.
+            sets.set(element.usageIndex, { value, components: shape.components });
             continue;
         }
         else if (element.usage === D3DDECLUSAGE.COLOR || element.usage === D3DDECLUSAGE.TEXCOORD)
@@ -2215,6 +2235,10 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
             if (element.usage === D3DDECLUSAGE.COLOR && element.usageIndex === 1)
             {
                 specularAlpha = `${value}.w`;
+            }
+            if (element.usage === D3DDECLUSAGE.TEXCOORD)
+            {
+                sets.set(element.usageIndex, { value, components: shape.components });
             }
             const location = varyingLocation(element.usage, element.usageIndex);
             outputFields.push(`    @location(${location})`
@@ -2259,6 +2283,34 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
             + ` dot(c[${row + 1}], vec4f(${coordinate}, 1.0)),`
             + ` dot(c[${row + 2}], vec4f(${coordinate}, 1.0)),`
             + ` dot(c[${row + 3}], vec4f(${coordinate}, 1.0)));`);
+    }
+    for (const [stage, source] of carried.entries())
+    {
+        if (!source || (generated[stage] ?? 0) !== 0)
+        {
+            continue;
+        }
+        const location = varyingLocation(D3DDECLUSAGE.TEXCOORD, stage);
+        outputFields.push(`    @location(${location}) o${location}: vec4f,`);
+        outputs.push(location);
+        const from = sets.get(source.set);
+        if (!from)
+        {
+            // A set the vertex does not carry reads as zero.
+            body.push(`    out.o${location} = vec4f(0.0);`);
+            continue;
+        }
+        if (!source.transformed)
+        {
+            body.push(`    out.o${location} = ${from.value};`);
+            continue;
+        }
+        const extended = from.components <= 2 ? `vec4f(${from.value}.xy, 1.0, 0.0)` : from.value;
+        const row = HYBRID_CONSTANTS.TRANSFORMS + stage * 4;
+        body.push(`    let set${stage} = ${extended};`,
+            `    out.o${location} = vec4f(dot(c[${row}], set${stage}),`
+            + ` dot(c[${row + 1}], set${stage}), dot(c[${row + 2}], set${stage}),`
+            + ` dot(c[${row + 3}], set${stage}));`);
     }
     // The fog the fixed-function stage adds after the pixel shader, with the
     // colour beside it so a fogged pixel shader needs nothing but varyings to

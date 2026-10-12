@@ -120,6 +120,8 @@ const D3DQUERYTYPE_OCCLUSION = 9;
 const S_FALSE = 1;
 /** D3DISSUE_END: the flag that closes a measurement. */
 const D3DISSUE_END = 1;
+/** How many batches the played side goes without a present before it looks at its objects at zero. */
+const SWEEP_BATCHES = 64;
 const D3DLOCK_DISCARD = 0x2000;
 
 /**
@@ -855,18 +857,9 @@ export function createRecording(options){
      * the program for the replay of everything recorded before the ask, every
      * frame -- tens of milliseconds, a quarter of a second at worst.
      *
-     * @type {WeakMap<object, { reply: PlayedAnswer | null, frame: number,
-     *     asked: Promise<void> }>}
+     * @type {WeakMap<object, { reply: PlayedAnswer | null }>}
      */
     const counts = new WeakMap();
-    /**
-     * Presents recorded so far. A count asked in one frame and polled in a
-     * later one is waited for: hardware has counted by then, and a program
-     * that asks every frame and reads the frame after never saw a count when
-     * the renderer answered later than that -- a sun it thought hidden, a
-     * world drawn without its light.
-     */
-    let framesRecorded = 0;
     /**
      * The ENDs recorded on each occlusion query, and the queries by number: a
      * count the played side sends beside another's answer is taken for a
@@ -900,8 +893,7 @@ export function createRecording(options){
             {
                 continue;
             }
-            counts.set(query, { reply: { answer: 0, outs: [{ value }] }, frame: framesRecorded,
-                asked: Promise.resolve() });
+            counts.set(query, { reply: { answer: 0, outs: [{ value }] } });
         }
     };
 
@@ -1115,17 +1107,12 @@ export function createRecording(options){
             // A poll of an occlusion count already asked is answered here and
             // recorded nowhere: the played side has nothing to do with it, and
             // a program polls hundreds of thousands of times a minute.
-            if (name === 'Present')
-            {
-                framesRecorded++;
-            }
             const known = name === 'GetData' ? counts.get(target) : undefined;
             if (known)
             {
                 if (!known.reply)
                 {
-                    return framesRecorded > known.frame
-                        ? known.asked.then(()=>call(...args)) : S_FALSE;
+                    return S_FALSE;
                 }
                 for (let index = 0; index < count; index++)
                 {
@@ -1373,7 +1360,7 @@ export function createRecording(options){
                     && (applied[0] & D3DISSUE_END) !== 0 && result === 0)
                 {
                     ends.set(target, (ends.get(target) ?? 0) + 1);
-                    occlusionQueries.set(number, new WeakRef(target));
+                    occlusionQueries.set(/** @type {number} */ (number), new WeakRef(target));
                 }
             }
             if (!mayAnswer || !answered(target, name, applied))
@@ -1408,10 +1395,9 @@ export function createRecording(options){
             }
             if (name === 'GetData' && /** @type {any} */ (target)?.type === D3DQUERYTYPE_OCCLUSION)
             {
-                const asking = { reply: /** @type {PlayedAnswer | null} */ (null),
-                    frame: framesRecorded, asked: Promise.resolve() };
+                const asking = { reply: /** @type {PlayedAnswer | null} */ (null) };
                 counts.set(target, asking);
-                asking.asked = Promise.resolve(ask(name)).then(played=>{
+                Promise.resolve(ask(name)).then(played=>{
                     // Still this measurement's; an answer that is not a count
                     // yet is asked again at the next poll.
                     if (counts.get(target) === asking)
@@ -1663,12 +1649,13 @@ export function createRecording(options){
  * @returns {{ play: (call: import('./wire.js').ReadCall) => any, allocate: () => number,
  *     object: (number: number) => any,
  *     read: (buffer: ArrayBuffer, each: (call: import('./wire.js').ReadCall) => boolean | void)
- *         => void }}
+ *         => number | undefined }}
  *     `play` answers a waited call with its `PlayedAnswer` (or a promise of
  *     one), a paced one with the promise its device holds the caller on, and
  *     any other with what the call answered;
  *     `allocate` is the played device's, the next address its recorded call
- *     was given; `read` reads a batch of calls
+ *     was given; `read` reads a batch of calls, and answers how long the look
+ *     at the objects at a count of zero took when the batch made one
  */
 export function createPlayer({ root, ship, read, borrow }){
     /**
@@ -1704,6 +1691,9 @@ export function createPlayer({ root, ship, read, borrow }){
      * @type {Set<number>}
      */
     const uncounted = new Set();
+    /** Whether a present was played since `uncounted` was last looked at, and the batches since. */
+    let presentedSinceSweep = false;
+    let batchesSinceSweep = 0;
     /**
      * After a call on one, or a batch: held weakly once destroyed.
      *
@@ -1850,6 +1840,10 @@ export function createPlayer({ root, ship, read, borrow }){
             allocs = call.allocs ?? [];
             replies = call.replies ?? [];
             playing = /** @type {string} */ (call.m);
+            if (playing === 'Present')
+            {
+                presentedSinceSweep = true;
+            }
             const args = /** @type {any[]} */ (call.a);
             // A slot is emptied only once its object said it was destroyed and
             // was collected, and a destroyed object is reachable through no
@@ -1926,10 +1920,25 @@ export function createPlayer({ root, ship, read, borrow }){
         },
         read: (buffer, each)=>{
             reader.read(buffer, each);
-            for (const number of uncounted)
+            // Looked at once a frame, or every so many batches for a program
+            // that is not presenting: what it decides is only when a
+            // destroyed object is let go, and a look after every batch went
+            // through thousands of them hundreds of times a second.
+            if (presentedSinceSweep || ++batchesSinceSweep >= SWEEP_BATCHES)
             {
-                holdAsCounted(number, objects[number]);
+                presentedSinceSweep = false;
+                batchesSinceSweep = 0;
+                // Timed for the receiver's account of the worker's time: at
+                // most once a frame, so two clock readings cost nothing.
+                const began = import.meta.BOTTLIFY_DIAGNOSTICS !== false ? performance.now() : 0;
+                for (const number of uncounted)
+                {
+                    holdAsCounted(number, objects[number]);
+                }
+                return import.meta.BOTTLIFY_DIAGNOSTICS !== false
+                    ? performance.now() - began : undefined;
             }
+            return undefined;
         },
     };
 }

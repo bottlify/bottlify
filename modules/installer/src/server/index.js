@@ -19,7 +19,7 @@
  * this side can.
  *
  * A bottle already here can have what describes it changed -- its title, the
- * labels and kind the library shows, the Windows and graphics it starts with --
+ * labels and kind the library shows, the Windows, graphics and shader profile it starts with --
  * without its bytes being sent again: those fields of its manifest, and no
  * others.
  *
@@ -116,7 +116,8 @@ export function manifestChanges(asked){
         {
             fields.kind = value;
         }
-        else if ((key === 'windows' || key === 'graphics') && text && /^[a-z0-9]{1,32}$/.test(text))
+        else if ((key === 'windows' || key === 'graphics' || key === 'shaders') && text
+            && /^[a-z0-9]{1,32}$/.test(text))
         {
             fields[key] = text;
         }

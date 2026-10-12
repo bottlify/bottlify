@@ -62,12 +62,21 @@ const [pattern = '', query = ''] = process.argv.slice(2);
 const sleep = ms=>new Promise(done=>setTimeout(done, ms));
 
 // DRIVE_HEADED=1 shows the window: a person plays in it while the endpoints
-// below look inside the same tab.
+// below look inside the same tab. DRIVE_FLAGS adds Chrome flags, space
+// separated: `--use-webgpu-adapter=swiftshader` draws in software, where a
+// virtual machine's GPU driver adds glitches of its own to the picture.
 const browser = await launchWithGpu({
     headed: process.env.DRIVE_HEADED === '1',
-    profileDir: process.env.DRIVE_PROFILE ?? 'dbg/chrome-profile' });
+    profileDir: process.env.DRIVE_PROFILE ?? 'dbg/chrome-profile',
+    extraFlags: (process.env.DRIVE_FLAGS ?? '').split(' ').filter(Boolean) });
 const cdp = new CdpEndpoint(browser.browserWs);
 await cdp.open();
+// A browser closed by hand takes the driver with it: a driver left behind
+// keeps the port, and the next one cannot start.
+browser.proc.once('exit', code=>{
+    console.log(`the browser closed (${code}); the driver ends`);
+    process.exit(0);
+});
 const downloads = resolve('dbg/live-downloads');
 await mkdir(downloads, { recursive: true });
 await cdp.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: downloads });
@@ -227,8 +236,19 @@ createServer(async(request, answer)=>{
             // The devices answer what they wrote down a report later, and the
             // frames have to be drawn first: asked, waited for, and read twice.
             const frames = Math.max(1, Number(arg('frames') || 1));
+            // A paused run draws nothing to write down: it is resumed for the
+            // frames and paused again where it stood.
+            const wasPaused = await evaluate('globalThis.app.paused?.() === true');
+            if (wasPaused)
+            {
+                await evaluate('globalThis.app.resume()');
+            }
             await evaluate(`globalThis.app.debug.dumpFrames(${frames})`);
             await sleep(Number(arg('waitMs') || 1500));
+            if (wasPaused)
+            {
+                await evaluate('globalThis.app.pause()');
+            }
             const read = `(async()=>{
                 const report = await globalThis.app.report();
                 const graphics = report.engine?.diagnostics?.find(d=>d.name === 'graphics')

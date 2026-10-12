@@ -295,6 +295,47 @@ None yet.
 - **Decision.** Reverted; the bytes compared stay counted (`shipped.compared`). What would pay is
   comparing less: knowing which pages the program wrote, an experiment of its own.
 
+### 2026-10-11 -- an unlock of a dynamic vertex buffer that sends and uploads nothing
+
+- **Idea.** Every draw from a dynamic vertex buffer takes the bytes it reads from guest memory
+  itself (`readHeld`, `drawsFrom`), so its unlock need not: the unlock gives the lock back with
+  nothing taken (`abandon`), saving CoD4's whole 4.7 MB skinning-buffer unlocks (`4d3426b0`;
+  its own account: 19,718 unlocks, 28.4 s of host time, 1.4 ms each).
+- **Workload.** Far Cry demo, main menu, on the launcher (`192.168.100.22:5180`), graphics worker
+  on and off; Warcraft III: The Frozen Throne. Observed by eye in live runs, one or two each way;
+  bundle hashes not recorded.
+- **Values.** No frame rate was measured for it. Far Cry's menu: the top, left and bottom border
+  quads (2D quads appended to an 11,200-byte dynamic buffer with `Lock(NOOVERWRITE)`/`Unlock` per
+  quad, `DISCARD` at offset 0 on wrap, `DrawPrimitive` fans) flicker with it, about once a second.
+  Bisected over builds of `review`: `d9c743e1` and `edf92cd5` clean, `4d3426b0` flickers;
+  `?guestTraps=locks` (the locks as traps, the draws still in the command ring) hides it;
+  `?graphicsWorker=off` does not. Warcraft III's textures flicker the same way and
+  `?guestTraps=locks` hides it there too.
+- **Machine.** Chrome on the Parallels host and on the Windows guest (`chrome-profile-2`); GPU,
+  driver and power plan not recorded.
+- **Why it did not pay.** It traded correctness for host time: a quad read the vertices of an
+  earlier cycle of the buffer. Where exactly the GPU copy goes stale was not found; the seam gates
+  (`locks-contract`, `frames-contract`) passed with it, so they miss the case. CoD4's models draw
+  correctly without it (the user's check).
+- **Correctness.** The flicker itself; see above.
+- **Decision.** Reverted (`964f9dc5`). It comes back only with a gate case that fails on it.
+
+### 2026-10-11 -- a store into code drops only the regions whose bytes it changed
+
+- **Idea.** `80a50546` (cork): a store into translated code invalidates only the regions whose
+  bytes it changed, not every region over the page.
+- **Workload.** Far Cry demo in a level, launcher, live runs; bundle hash not recorded.
+- **Values.** Not measured with numbers: in the level the frame rate fell to about 2 fps with it.
+  `review` at `13ff4938`, `4d3426b0` reverted, `184985de`, `1f27b953`, `25aaa058` and `1b781d92`
+  taken on their own: normal frame rate; the same with `80a50546` (the cork2 merge `207a09e9`,
+  dropped unpushed): about 2 fps. One run each, the user's reading of the overlay.
+- **Machine.** Chrome on the Parallels host; GPU, driver and power plan not recorded.
+- **Why it did not pay.** Not profiled. Likely the per-store check of which bytes changed, or
+  regions dropped and rebuilt on each store, on code Far Cry writes into or beside.
+- **Correctness.** Not checked beyond the frame rate.
+- **Decision.** Left out of `review`; with cork to measure (exits, invalidations, the guest
+  profile on Far Cry in a level) before it comes back.
+
 ### 2026-10-11 -- patched code sites formed apart, and store-dropped regions formed again with copies
 
 - **Idea.** A mixer that turns a voice on or off writes a jump over the voice's block (or the
