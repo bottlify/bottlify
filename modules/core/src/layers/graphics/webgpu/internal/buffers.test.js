@@ -402,3 +402,35 @@ test('bytes written before a DISCARD are in the backing a draw after it reads', 
     assert.equal(uploads.reduce((sum, one)=>sum + one.size, 0), 512 + 256,
         'each range travels once; the rest is a copy on the GPU');
 });
+
+test('an unlock that names part of its lock sends that part alone, and nothing for none', ()=>{
+    // A renderer that compared the lock with what the buffer holds names
+    // what changed: Direct3D 7 locks a vertex buffer whole.
+    const { gpu, dynamic } = buffer(1 << 16);
+    const lock = dynamic.lock(0, 1 << 16, LockFlags.NOOVERWRITE);
+    lock.data.fill(7, 1000, 1200);
+    dynamic.unlock(lock, 1000, 1200);
+    dynamic.flush();
+    const writes = gpu.of('writeBuffer');
+    assert.equal(writes.length, 1);
+    assert.equal(writes[0].bufferOffset, 1000);
+    assert.equal(writes[0].size, 200);
+
+    dynamic.unlock(dynamic.lock(0, 1 << 16, LockFlags.NOOVERWRITE), 0, 0);
+    dynamic.flush();
+    assert.equal(gpu.of('writeBuffer').length, 1, 'an unlock that changed nothing sends nothing');
+});
+
+test('a lock that renamed a backing nothing is carried into sends all of itself', ()=>{
+    // keep: false -- the new backing's other bytes were never written, so a
+    // part named by the caller is not enough.
+    const gpu = createFakeDevice();
+    const dynamic = createDynamicBuffer({ device: gpu.device, queue: gpu.queue, size: 4096,
+        usage: 0, label: 'scratch', alignment: 4, keep: false });
+    const lock = dynamic.lock(0, 4096, LockFlags.DISCARD);
+    dynamic.unlock(lock, 100, 200);
+    dynamic.flush();
+    const writes = gpu.of('writeBuffer');
+    assert.equal(writes.at(-1).bufferOffset, 0);
+    assert.equal(writes.at(-1).size, 4096);
+});

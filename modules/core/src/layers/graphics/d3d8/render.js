@@ -780,6 +780,9 @@ export function expandTexels(format, pixels, count, float32 = false){
     return expand(pixels, count);
 }
 
+/** A buffer lock at least this long sends only the bytes its unlock finds changed. */
+const DIFFED_UNLOCK = 0x10000;
+
 /** The WebGPU format every uncompressed colour target and texture is. */
 export const COLOR_FORMAT = 'bgra8unorm';
 /** What a signed format is sampled from: its channels come back -1..1. */
@@ -8670,8 +8673,24 @@ export function createRenderer(options){
             // enough, and the copy a read makes was a measured share of a
             // frame in a match, where a program refills its buffers every
             // draw.
-            held.data.set(windowMemory(buffer.base + held.offset, held.length));
-            entry.gpu.unlock(held);
+            const now = windowMemory(buffer.base + held.offset, held.length);
+            if (held.length < DIFFED_UNLOCK)
+            {
+                held.data.set(now);
+                entry.gpu.unlock(held);
+                entry.held = null;
+                return;
+            }
+            // A large lock sends only what changed against what the buffer
+            // holds: Direct3D 7 locks a vertex buffer whole, and a program
+            // that appends a model at a time under NOOVERWRITE uploaded the
+            // whole buffer at every unlock -- 384 KB, 93,000 times, most of
+            // Dungeon Siege's engine thread.
+            const spans = changedSpans(now, held.data);
+            const from = spans.length > 0 ? spans[0] : 0;
+            const to = spans.length > 0 ? spans[spans.length - 1] : 0;
+            held.data.set(now.subarray(from, to), from);
+            entry.gpu.unlock(held, from, to);
             entry.held = null;
         },
 
