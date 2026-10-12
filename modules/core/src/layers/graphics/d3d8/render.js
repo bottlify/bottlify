@@ -1566,6 +1566,29 @@ function inverseRotation(view){
  * @property {{ floats: Float32Array, ints: Int32Array, bools: Uint32Array }} pixelConstants
  */
 
+/** How many bytes of a level's upload are looked at to say whether it held anything. */
+const NONZERO_SAMPLES = 64;
+
+/**
+ * How many of `NONZERO_SAMPLES` bytes spread evenly over `bytes` are not
+ * zero: whether an upload carried the program's texels or memory nothing had
+ * written, at a cost that does not grow with the texture.
+ *
+ * @param {Uint8Array} bytes
+ */
+export function nonzeroSampled(bytes){
+    const count = Math.min(NONZERO_SAMPLES, bytes.length);
+    let nonzero = 0;
+    for (let at = 0; at < count; at++)
+    {
+        if (bytes[Math.floor(at * bytes.length / count)] !== 0)
+        {
+            nonzero++;
+        }
+    }
+    return nonzero;
+}
+
 /** A number of a dump line, four digits at most. @param {number} x */
 const brief = x=>String(Number(x.toPrecision(4)));
 
@@ -5220,6 +5243,11 @@ export function createRenderer(options){
                 // ones hold: a surface sampled far away comes out of those,
                 // and a level the program never wrote is sampled all the same.
                 (record.written ??= new Set()).add(level);
+                if (level === 0 && face === 0)
+                {
+                    record.sampled = nonzeroSampled(bytes);
+                    record.sampledOf = bytes.length;
+                }
                 if (width * height <= 16 && !keepsBlocks && face === 0)
                 {
                     (record.tails ??= {})[level] = [...texels];
@@ -9488,6 +9516,12 @@ export function createRenderer(options){
                     levels: entry.levels,
                     written: [...(entry.written ?? [])].sort((left, right)=>left - right),
                     tails: entry.tails ?? {},
+                    // Of the program's bytes the last upload of the base
+                    // level read, how many of an even sample were not zero:
+                    // a texture drawn black whose bytes the device never
+                    // had reads 0 here.
+                    level0Sampled: entry.sampled === undefined ? 'not uploaded'
+                        : `${entry.sampled}/${Math.min(NONZERO_SAMPLES, entry.sampledOf ?? 0)}`,
                 })),
                 textures: [...uploaded.values()],
             }, 'lastFrame', {

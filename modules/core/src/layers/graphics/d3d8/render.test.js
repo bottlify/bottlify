@@ -41,7 +41,7 @@ import {
     screenExtent, transformPosition, uniformBlock, uniformsOf, pixelUniformsOf, fogModeOf, fogOf,
     addressVariantOf, clipMaskOf, clipPlanesOf, isAffine, lodBiasOf, samplerDescriptorOf,
     stageCascade,
-    vertexCountOf, describeConstants, describeDeclaration,
+    vertexCountOf, describeConstants, describeDeclaration, nonzeroSampled,
 } from './render.js';
 import { parseShader } from '../d3d9/shader.js';
 import { createBackend } from '../webgpu/backend.js';
@@ -4559,4 +4559,13 @@ test('a program\'s dump line names the constants its shaders read and its declar
         { Stream: 1, Offset: 12, Type: 4, Usage: 10, UsageIndex: 1 },
     ]), '0:0:t2:u0/0,1:12:t4:u10/1');
     assert.equal(describeDeclaration(null), '-');
+});
+
+test('an upload says how much of an even sample of its bytes was not zero', ()=>{
+    // A texture drawn black whose bytes never reached the device reads 0.
+    assert.equal(nonzeroSampled(new Uint8Array(4096)), 0);
+    const half = new Uint8Array(4096);
+    half.fill(7, 0, 2048);
+    assert.equal(nonzeroSampled(half), 32);
+    assert.equal(nonzeroSampled(Uint8Array.of(1, 0, 3)), 2, 'a level smaller than the sample');
 });
