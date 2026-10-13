@@ -91,3 +91,10 @@ In Node:
 
     node --no-liftoff modules/cork/bench/calls/run.mjs --tier turbofan --out tf.json
     node --liftoff --no-wasm-tier-up modules/cork/bench/calls/run.mjs --tier liftoff --out lo.json
+
+## Result (2026-10-13)
+
+x64 VM, TurboFan, depth 8: `params` / `state-direct` for `farcry` is 1.085 in Node 22.22.0 and
+0.959 in Chromium 141.0.7390.37, above the 0.90 of the negative branch; the function tier is not
+built. Values and conditions: `roadmap/negative-results.md`, 2026-10-13. The M4 run is recorded
+beside it when it comes.

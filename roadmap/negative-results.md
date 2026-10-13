@@ -431,3 +431,34 @@ None yet.
   splitting the loop made more regions and more interpreted entries, not fewer.
 - **Decision.** Both reverted. What paid was the interpreter's own speed on MMX: the wasm tier
   runs the MMX forms (the every-call case 38.6 s to 3.1 s).
+
+### 2026-10-13 -- every register in wasm parameters across guest calls (calling-convention bench, x64)
+
+- **Idea.** A function tier: a guest call becomes a wasm call that carries all eight registers
+  and the budget in parameters and results, instead of cork's state block, spilled registers
+  and the transfer's hash probe. Measured before building it, with the decision rule in
+  `modules/cork/bench/calls/README.md` committed before the runs (`cef7b45f`).
+- **Workload.** `modules/cork/bench/calls` at `a5022c56` (`calls.mjs` sha256 `0b74a3d39a0fd4d7…`,
+  `profiles.json` `4fd316bc3ee68f9b…`): the call shapes of the Far Cry block profile and of
+  cork-bench spread and entities, from `tools/cork-calls.mjs`; chains of depth 2, 8 and 32; arms
+  `state`, `state-direct`, `params`, `params+flags`, all ending with the same registers. 9 runs
+  of ~200 ms after 5 warming runs; nanoseconds a guest call.
+- **Values (TurboFan, depth 8, median of 9, spread = (max − min) / median).**
+  Node 22.22.0 (V8 12.4.254.21): farcry state 47.9 (17%), state-direct 39.4 (25%), params 42.7
+  (43%) -- params/state 0.892, params/state-direct 1.085; spread state 65.8 (34%), state-direct
+  56.4 (13%), params 45.7 (40%) -- 0.695, 0.809. Chromium 141.0.7390.37 headless: farcry 48.4
+  (21%), 43.2 (24%), 41.5 (25%) -- 0.857, 0.959; spread 65.9 (34%), 58.7 (22%), 50.7 (33%) --
+  0.770, 0.864. Liftoff, the other depths, entities and params+flags are in the runs' JSON and
+  were not decided on (Chromium Liftoff farcry params/state-direct 0.799, spread 0.939). The
+  Node TurboFan run overlapped for about a minute with `inspect.mjs` (one core of four); the
+  Chromium run, alone, gives the same answer. Noise floor: the spread of one arm, 13–43%.
+- **Machine.** A 4-core x86-64 Linux VM (Firecracker), Intel Xeon @ 2.80 GHz; power plan not
+  recorded. `inspect.mjs` on this V8: no argument on the stack up to 5 parameters, then one
+  `push` for each past the fifth.
+- **Why it did not pay.** On x64 V8 passes only five wasm parameters in registers; the rest go
+  through the stack at every call, which is the memory the state block uses anyway. What the
+  arms do show, inside the noise, is the transfer's probe (`state` over `state-direct`,
+  ~10–15% of a call), not the convention.
+- **Decision.** Not built: by the rule, `params` above 0.90 of `state-direct` for farcry on one
+  machine is negative (1.085 Node, 0.959 Chromium). The M4 (arm64) run is recorded when it
+  comes, and does not reopen this; a reason to come back would be a new rule.

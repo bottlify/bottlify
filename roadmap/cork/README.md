@@ -307,7 +307,9 @@ the "called" path, and everything observable is compared: registers, flags, memo
 
 ### Step 2 — cheaper calls that remain
 
-Only what 1.7 did not refute (1.5).
+Only what 1.7 did not refute (1.5). Every register in wasm parameters was measured again on
+call chains from the profiles (`modules/cork/bench/calls`, 2026-10-13) and is negative on x64
+under a rule written before the runs; this step stays inside cork's state block.
 
 - **2a. Register liveness at the continuation after a call.** A register the continuation writes
   before it reads is not loaded again after the return. For ecx/edx that is common by the ABI, but
