@@ -462,3 +462,28 @@ None yet.
 - **Decision.** Not built: by the rule, `params` above 0.90 of `state-direct` for farcry on one
   machine is negative (1.085 Node, 0.959 Chromium). The M4 (arm64) run is recorded when it
   comes, and does not reopen this; a reason to come back would be a new rule.
+
+### 2026-10-13 -- loading only what is live after a call (plan step 2a/2b), its ceiling
+
+- **Idea.** `roadmap/cork/README.md` step 2: keep cork's call, but after the return load only
+  the registers the continuation reads before it writes them, and write back before a call only
+  the dirty ones. Measured as a ceiling before any translator code: the arm `state-live` of
+  `modules/cork/bench/calls` reloads only esp and the workload's `live after a return`
+  registers and no flags, more than the step can reach. Rule committed before the run
+  (`12194b8a`, `modules/cork/bench/calls/README.md`).
+- **Workload.** The bench at `12194b8a`, depth 8, the Far Cry, spread and entities call shapes;
+  `paired.mjs`: `state` and `state-live` alternated in 15 pairs of ~200 ms runs after 3 warming
+  pairs; TurboFan (`--no-liftoff`).
+- **Values.** Ratio `state-live` / `state` per pair, median [min .. max], pairs it won: farcry
+  0.984 [0.759 .. 1.292], 10 of 15; spread 0.972 [0.780 .. 1.100], 12 of 15; entities 0.950
+  [0.847 .. 1.139], 12 of 15. A smoke run before it (3 pairs, 50 ms, farcry) gave 0.967–0.970.
+  Every pair's times are in the run's JSON (not committed).
+- **Machine.** A 4-core x86-64 Linux VM (Firecracker), Intel Xeon @ 2.80 GHz, Node 22.22.0
+  (V8 12.4.254.21); power plan not recorded. Chromium not run: the rule checks it only after
+  Node passes.
+- **Why it did not pay.** Eleven loads from the state block, hits in the first-level cache, are
+  2–5% of a call whose cost is the transfer's probe, the shadow stack and the call itself. At
+  ~13% of Far Cry's hot bytes in calls that is under 1% of its guest time.
+- **Decision.** Step 2a/2b not built (rule: median at most 0.90 and 13 of 15 pairs, for farcry
+  and spread). Step 2c (the shadow stack's depth and the budget in one comparison) is a smaller
+  part of the same call and is left with it.

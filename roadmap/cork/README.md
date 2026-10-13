@@ -309,7 +309,9 @@ the "called" path, and everything observable is compared: registers, flags, memo
 
 Only what 1.7 did not refute (1.5). Every register in wasm parameters was measured again on
 call chains from the profiles (`modules/cork/bench/calls`, 2026-10-13) and is negative on x64
-under a rule written before the runs; this step stays inside cork's state block.
+under a rule written before the runs; this step stays inside cork's state block. Its ceiling
+(only what is live loaded after a call, no flags) was then measured at 2–5% of a call, under the
+10% the rule asked: **steps 2a–2c are a dead end** (`negative-results.md`, 2026-10-13).
 
 - **2a. Register liveness at the continuation after a call.** A register the continuation writes
   before it reads is not loaded again after the return. For ecx/edx that is common by the ABI, but
