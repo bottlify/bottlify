@@ -765,8 +765,10 @@ export function emitInstruction(e, instruction, flagsLive){
             }
             else
             {
-                profileCall(e, instruction.eip);
+                // Sampled past the prediction: a call it takes costs nothing more,
+                // and the samples are the calls that still leave.
                 predictCall(e);
+                profileCall(e, instruction.eip);
                 e.countMechanism(Mechanism.CALL_LEFT);
                 countApart(e);
                 b.localGet(Local.count).localSet(Local.eip);

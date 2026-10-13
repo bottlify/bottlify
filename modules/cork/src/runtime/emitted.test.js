@@ -71,6 +71,7 @@ const EMITTED = {
     82: 'c151fd95bf630b39',
     83: '0c64d49d49b14315',
     84: '42f0f2f5d3d51fbe',
+    85: 'c02fbbd979e37202',
 };
 
 /** Features fixed rather than probed, so every host emits the same bytes. */
@@ -102,6 +103,21 @@ function digest(){
                 .update(m.toBytes());
         }
     }
+    // An indirect call predicted to two callees and sampled past them (`callTargets`,
+    // `profileCalls`), which no region of the images is: mov ecx, 16; L: mov eax, ecx;
+    // and eax, 15; call [0x1100 + eax*4]; dec ecx; jnz L; hlt; F: add edx, 1; ret;
+    // G: add edx, 3; ret.
+    const code = [0xb9, 16, 0, 0, 0, 0x89, 0xc8, 0x83, 0xe0, 0x0f, 0xff, 0x14, 0x85, 0, 0x11, 0, 0,
+        0x49, 0x75, 0xf1, 0xf4, 0x83, 0xc2, 0x01, 0xc3, 0x83, 0xc2, 0x03, 0xc3];
+    const region = formRegion(address=>code[address - 0x1000] ?? 0, 0x1000,
+        { callTargets: new Map([[0x100a, [0x1015, 0x1019]]]) });
+    const m = new ModuleBuilder();
+    const context = prepareModule(m, layout, FEATURES, {}, { hash: true, trapPort: 0xb077,
+        resume: true, callReturn: true, profileCalls: true });
+    const translation = emitRegion(context, region, { entryTop: 0, checked: false });
+    finishModule(context, [translation.functionIndex]);
+    m.exportFunction('region', translation.functionIndex);
+    hash.update('predicted:').update(m.toBytes());
     return hash.digest('hex').slice(0, 16);
 }
 

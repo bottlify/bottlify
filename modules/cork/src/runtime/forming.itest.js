@@ -10,9 +10,10 @@
  * `ret imm` with an argument pushed, a return moved past two bytes of its
  * caller, a thunk jumping on through a register, a store into another
  * function's code -- run interpreted alone, then translated with nothing formed in, with
- * leaves alone, and with one, two and three levels of callees formed in
- * (`formDepth`). Everything a program observes must come out the same: the
- * registers, the flags, its data and its code.
+ * leaves alone, with one, two and three levels of callees formed in
+ * (`formDepth`), and with the callees of calls through a register sampled and
+ * formed in behind a compare (`callTargets`). Everything a program observes
+ * must come out the same: the registers, the flags, its data and its code.
  */
 
 import { test } from 'node:test';
@@ -80,8 +81,19 @@ function program(seed){
                 }
                 else
                 {
-                    // mov edx, f; call edx -- a virtual call's shape.
-                    body.push(0xba, ...le32(FUNCTIONS + callee * SPAN), 0xff, 0xd2);
+                    // mov edx, f; call edx -- a virtual call's shape; and when a later
+                    // function returns as f does, test cl, 1; jz +5; mov edx, g before
+                    // the call: the loop's count picks one of two callees, so a site
+                    // predicted to one also misses.
+                    body.push(0xba, ...le32(FUNCTIONS + callee * SPAN));
+                    const other = returns.findIndex((how, which)=>which > callee
+                        && how === returns[callee]);
+                    if (other > 0)
+                    {
+                        body.push(0xf6, 0xc1, 0x01, 0x74, 0x05,
+                            0xba, ...le32(FUNCTIONS + other * SPAN));
+                    }
+                    body.push(0xff, 0xd2);
                 }
                 if (returns[callee] === 2)
                 {
@@ -163,6 +175,7 @@ async function run(code, config){
             data: [...m.read(DATA, 64)],
             code: code.map(([at, bytes])=>[...m.read(at, bytes.length)]),
             translated: stop.translated,
+            reforms: m.diagnostics().reforms ?? 0,
         };
     }
     finally
@@ -178,20 +191,27 @@ test('callees formed in, to any depth, run as the interpreter runs them', async(
         'one level': { formDepth: 1, hotThreshold: 2 },
         'two levels': { formDepth: 2, hotThreshold: 2 },
         'three levels': { formDepth: 3, hotThreshold: 2 },
+        // Calls through a register sampled and their callees formed in behind a
+        // compare (`callTargets`), a site due at its first sample.
+        'predicted calls': { formDepth: 1, hotThreshold: 2, callTargets: true, predictAfter: 1 },
     };
     let translated = 0;
+    let reforms = 0;
     for (let seed = 1; seed <= PROGRAMS; seed++)
     {
         const { code } = program(seed);
-        const { translated: none, ...expected } = await run(code, { hotThreshold: 1e9 });
-        assert.equal(none, 0, 'the reference ran interpreted');
+        const { translated: none, reforms: reformedNone, ...expected } = await run(code,
+            { hotThreshold: 1e9 });
+        assert.equal(none + reformedNone, 0, 'the reference ran interpreted');
         assert.equal(expected.stop, 'halt', `seed ${seed}: the program ends`);
         for (const [name, config] of Object.entries(paths))
         {
-            const { translated: ran, ...got } = await run(code, config);
+            const { translated: ran, reforms: formed, ...got } = await run(code, config);
             assert.deepEqual(got, expected, `seed ${seed}, ${name}`);
             translated += ran;
+            reforms += formed;
         }
     }
     assert.ok(translated > 0, 'the translated paths ran translated code');
+    assert.ok(reforms > 0, 'the predicted path formed regions again with their callees');
 });

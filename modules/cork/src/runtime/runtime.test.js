@@ -2417,6 +2417,47 @@ test('an indirect call sampled going to a few small callees has them formed into
     assert.equal(run(), 300, 'only H leaves, and its return comes back');
 });
 
+test('a call its prediction takes is not sampled: the calls that still leave are, and their'
+    + ' callee is formed in next', async()=>{
+    if (!probeFeatures().tailCalls)
+    {
+        return;
+    }
+    const m = machine({ countTransfers: true, callTargets: true, callReturn: false });
+    const { code, table, slots, f, g, h } = dispatchLoop(1600);
+    m.write(CODE, code);
+    m.write(table, slots.flatMap(slot=>[slot & 0xff, slot >>> 8 & 0xff, 0, 0]));
+    for (const at of [f, g, h, CODE])
+    {
+        m.runtime.noteHot(at);
+    }
+    await m.runtime.translatePending();
+    const run = ()=>{
+        m.setReg(1, 1600);
+        m.setReg(2, 0);
+        m.setReg(4, 0x80000);
+        const before = m.runtime.diagnostics().transfers ?? 0;
+        assert.equal(m.runtime.run(m.runtime.entryOf(CODE + 5), 1_000_000).kind, 'halt');
+        assert.equal(m.reg(2), 800 + 700 * 3 + 100 * 100);
+        return (m.runtime.diagnostics().transfers ?? 0) - before;
+    };
+    for (let i = 0; i < 16 && m.runtime.diagnostics().reforms === 0; i++)
+    {
+        run();
+        await m.runtime.translatePending();
+    }
+    assert.equal(run(), 300, 'F and G formed in, H leaves');
+    // H is a sixteenth of the calls, under the share a callee needs among all of
+    // them; among the calls that leave it is every one.
+    for (let i = 0; i < 400 && m.runtime.diagnostics().reforms === 1; i++)
+    {
+        run();
+        await m.runtime.translatePending();
+    }
+    assert.equal(m.runtime.diagnostics().reforms, 2);
+    assert.equal(run(), 0, 'every call formed in');
+});
+
 test('a hot indirect call is sampled though another one is always the last before a reading',
     async()=>{
         if (!probeFeatures().tailCalls)
