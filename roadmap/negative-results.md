@@ -567,3 +567,37 @@ None yet.
 - **Decision.** `callTargets` stays off by default, a choice a run makes. The three changes
   stay: they make the option do what it says (the sampling reached the sites it was missing),
   each with its test, and the gate runs its paths.
+
+### 2026-10-13 -- a call out's cost in Far Cry: a smaller entry hash, and the callee found from the call's own site
+
+- **Idea.** In a CPU profile of Far Cry in its level the module's transfer -- the entry hash's
+  probe and one indirect tail call for every call out of a module -- was 10% of the program's
+  thread, ~30 ns a transfer at ~3 million a second (a share of the time of the thread that runs
+  the program; the rate from the block profile's count a thousand instructions). Two guesses at
+  why: the hash's 12 MB missing the cache, and one indirect jump for every callee, which the
+  processor cannot predict.
+- **Workload.** The Far Cry demo bundle (`bundle.btl` sha256 `44530097b2a5a284…`) under
+  `tools/launch-probe.mjs --no-draw`, started into the level (`map fort`), one executor and a
+  translation worker, cold, a V8 CPU profile of 240 s from 600 s (`--cpu-profile`), two arms run
+  at once on the same machine; trees `110cde3b` and `eb1f9dbd`.
+- **Values, the hash.** 2^20 slots (12 MB) against 2^18 (3 MB, `hashSlots`; every one of the
+  ~200 000 entries fitted in both): the transfer 9.9% and 10.3% of the thread, regions 58.3% and
+  58.6%; MIPS in the level the same within the rows (300.3–304.3 and 295.9–307.0 at the end).
+- **Values, the site.** A call out to a known address read the slot its address hashes to from
+  its own site and, the key and the x87 top matching, called the slot's function through the
+  table from there (`eb1f9dbd`). Transfer 10.2% → 7.4% of the thread, regions 57.9% → 60.4%,
+  wasm in all 68.9% → 68.7%; guest MIPS 280.8 → 284.9 (median of 8 rows of 30 s, 601–811 s;
+  per row 0.931–1.083, ahead in 5 of 8). A loop of call sites in cork's machine did gain: 1
+  site 19.0/22.3 → 16.1/16.7 ns a call, 16 sites 24.9/24.5 → 16.4/16.7, 64 sites none
+  (36.0/40.3 against 40.0/36.7).
+- **What it showed.** A transfer table of N one-instruction callees through one site costs
+  21 ns a call at N = 1, 29 ns at 64 in order and 46 at random, 67 ns at 1024 in order and 91 at
+  random: past a few callees the cost is the jump into code far from the last, in order as much
+  as at random, and it is paid wherever the call is made from.
+- **Machine.** A 4-core x86-64 Linux VM (Firecracker), Intel Xeon @ 2.80 GHz, Node 22.22.0
+  (V8 12.4.254.21). No GPU: `draw: false`. Power plan not recorded. One pair each.
+- **Correctness.** Cork's unit tests (597), the forming gate (with the site path counted taken)
+  and the x86 corpus passed with the site's lookup.
+- **Decision.** Reverted (`fb81120b`, cache version back to 85); `hashSlots` left at 2^20.
+  Fewer calls out is what is left of this cost, and forming more in already did not pay
+  (`callTargets`, above).
