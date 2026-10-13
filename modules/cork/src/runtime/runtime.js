@@ -765,8 +765,12 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      * how its last due ended and the callees it named then -- what tells a
      * site the sampling never reaches from one whose callees did not form in.
      *
+     * At its last due, too, how many of the regions spanning it were formed with its
+     * callees (`held`, of `spanning`), and how often a region formed again for it did not
+     * take them in (`notFormed`).
+     *
      * @type {Map<number, { samples: number, dues: number, last: string, top: number[],
-     *     share: number }>}
+     *     share: number, held: number, spanning: number, notFormed: number }>}
      */
     const siteLog = new Map();
     /** @param {number} site */
@@ -774,7 +778,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         let one = siteLog.get(site);
         if (one === undefined && siteLog.size < 16384)
         {
-            one = { samples: 0, dues: 0, last: '', top: [], share: 0 };
+            one = { samples: 0, dues: 0, last: '', top: [], share: 0, held: 0, spanning: 0,
+                notFormed: 0 };
             siteLog.set(site, one);
         }
         return one;
@@ -2645,7 +2650,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      */
     const reformStep = store=>{
         /** Each region to form again: its calls' callees, and the ones new to it.
-         * @type {Map<RegionRecord, { targets: Map<number, number[]>, added: number[] }>} */
+         * @type {Map<RegionRecord, { targets: Map<number, number[]>, added: number[],
+         *     sites: number[] }>} */
         const wanted = new Map();
         for (const site of callsDue)
         {
@@ -2684,6 +2690,11 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 log.last = fresh.length === 0
                     ? (ranked.some(([, times])=>times * PREDICT_SHARE >= seen.total)
                         ? 'tried' : 'spread') : 'fresh';
+                const spanning = [...byPage.get(site >>> 12) ?? []]
+                    .filter(record=>record.spans.some(([start, end])=>site >= start && site < end));
+                log.spanning = spanning.length;
+                log.held = spanning.filter(record=>record.targets?.some(([at])=>at === site))
+                    .length;
             }
             if (fresh.length === 0)
             {
@@ -2697,21 +2708,23 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             for (const record of byPage.get(site >>> 12) ?? [])
             {
                 const one = wanted.get(record)
-                    ?? { targets: new Map(record.targets ?? []), added: [] };
+                    ?? { targets: new Map(record.targets ?? []), added: [], sites: [] };
                 const had = one.targets.get(site) ?? [];
                 const added = fresh.filter(target=>!had.includes(target))
                     .slice(0, PREDICT_CALLEES - had.length);
-                if (added.length > 0 && (record.reforms ?? 0) >= REFORMS)
-                {
-                    counts.predictReformsOut++;
-                }
-                if (added.length === 0 || (record.reforms ?? 0) >= REFORMS
+                if (added.length === 0
                     || !record.spans.some(([start, end])=>site >= start && site < end))
                 {
                     continue;
                 }
+                if ((record.reforms ?? 0) >= REFORMS)
+                {
+                    counts.predictReformsOut++;
+                    continue;
+                }
                 one.targets.set(site, [...had, ...added]);
                 one.added.push(...added);
+                one.sites.push(site);
                 wanted.set(record, one);
                 placed = true;
             }
@@ -2729,13 +2742,23 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             }
         }
         const formed = [];
-        for (const [record, { targets, added }] of wanted)
+        for (const [record, { targets, added, sites }] of wanted)
         {
             const region = formRegion(read, record.entry,
                 { ...formOptions, translatable, callTargets: targets });
             if (!region.blocks.some(block=>added.includes(block.start)))
             {
                 counts.predictNotFormed++;
+                if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
+                {
+                    sites.forEach(site=>{
+                        const log = logOf(site);
+                        if (log)
+                        {
+                            log.notFormed++;
+                        }
+                    });
+                }
                 continue;
             }
             formed.push({ region, entryTop: record.entryTop, stamp: stamp(region.pages),
