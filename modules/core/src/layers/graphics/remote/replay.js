@@ -122,6 +122,13 @@ const S_FALSE = 1;
 const D3DISSUE_END = 1;
 /** How many batches the played side goes without a present before it looks at its objects at zero. */
 const SWEEP_BATCHES = 64;
+/**
+ * How many objects at a count of zero one look takes up, the next going on
+ * where it stopped: a texture's levels sit there for as long as the texture
+ * lives, and a program holding thousands had the worker look at every one,
+ * every frame, while the queries behind them waited -- 21 ms a frame.
+ */
+export const SWEEP_SLICE = 512;
 const D3DLOCK_DISCARD = 0x2000;
 
 /**
@@ -1842,6 +1849,8 @@ export function createPlayer({ root, ship, read, borrow }){
     /** Whether a present was played since `uncounted` was last looked at, and the batches since. */
     let presentedSinceSweep = false;
     let batchesSinceSweep = 0;
+    /** Where the last look stopped (`SWEEP_SLICE`); a set's iterator follows its changes. */
+    let sweeping = uncounted.values();
     /**
      * After a call on one, or a batch: held weakly once destroyed.
      *
@@ -2100,9 +2109,19 @@ export function createPlayer({ root, ship, read, borrow }){
                 // Timed for the receiver's account of the worker's time: at
                 // most once a frame, so two clock readings cost nothing.
                 const began = import.meta.BOTTLIFY_DIAGNOSTICS !== false ? performance.now() : 0;
-                for (const number of uncounted)
+                for (let looked = 0; looked < Math.min(SWEEP_SLICE, uncounted.size); looked++)
                 {
-                    holdAsCounted(number, objects[number]);
+                    let next = sweeping.next();
+                    if (next.done)
+                    {
+                        sweeping = uncounted.values();
+                        next = sweeping.next();
+                    }
+                    if (next.done)
+                    {
+                        break;
+                    }
+                    holdAsCounted(next.value, objects[next.value]);
                 }
                 return import.meta.BOTTLIFY_DIAGNOSTICS !== false
                     ? performance.now() - began : undefined;

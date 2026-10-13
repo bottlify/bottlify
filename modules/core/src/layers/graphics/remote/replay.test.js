@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loopbackDirect3D } from './loopback.js';
-import { createMirror } from './replay.js';
+import { SWEEP_SLICE, createMirror } from './replay.js';
 import { answeredByRenderer, playedDirect3D, recordedDirect3D } from './direct3d.js';
 import { createReceiver, createSender } from './channel.js';
 import { createBorrower, createLendingBuffers } from './lending.js';
@@ -34,7 +34,7 @@ const RAM_BASE = 0x40000000;
 function toy(sides){
     return (/** @type {any} */ services)=>{
         const side = { services, played: services.backend !== undefined,
-            seen: /** @type {any[]} */ ([]), counted: /** @type {WeakRef<any>[]} */ ([]) };
+            seen: /** @type {any[]} */ ([]), counted: /** @type {WeakRef<any>[]} */ ([]), looks: 0 };
         sides.push(side);
         return {
             /** @param {{ thing?: any }} out */
@@ -99,6 +99,7 @@ function toy(sides){
                         return count.value;
                     },
                     get destroyed(){
+                        side.looks++;
                         return count.destroyed;
                     },
                     Touch: ()=>D3D_OK,
@@ -291,6 +292,27 @@ test('a played object the program no longer counts is not held by the player', a
     owned.thing.addRef();
     play();
     assert.deepEqual(alive.map((/** @type {WeakRef<any>} */ one)=>one.deref().value), [2, 1], 'and calls still reach them');
+});
+
+test('a frame\'s look at the objects at a count of zero takes up a slice of them, the next '
+    + 'going on where it stopped', ()=>{
+    // A texture's levels sit at zero for as long as it lives: a program
+    // holding thousands had the worker look at every one, every frame.
+    const { root, played, play } = toyAcross(false);
+    for (let made = 0; made < 3 * SWEEP_SLICE; made++)
+    {
+        /** @type {{ thing?: any }} */
+        const out = {};
+        root.CreateCounted(out, true);
+        out.thing.Touch();
+    }
+    play();
+    played.looks = 0;
+    root.Present();
+    play();
+    assert.ok(played.looks <= SWEEP_SLICE + 1,
+        `one look took up ${played.looks} of ${3 * SWEEP_SLICE}`);
+    assert.ok(played.looks >= SWEEP_SLICE, 'and a whole slice');
 });
 
 test('a played object collected after it was destroyed is answered as unreachable', async()=>{
