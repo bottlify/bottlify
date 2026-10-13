@@ -20,6 +20,10 @@
  *   --entry ADDRESS  where the region starts (default --at)
  *   --hash           with the entry hash and calls as wasm calls, as in a game
  *   --precise        the precise x87 (every exception flag kept)
+ *   --checked        the x87 stack checked at every instruction, not its shape once at the
+ *                    entry as a game's regions speculate
+ *   --any-precision  the x87 for any precision control, not compiled for double as a game
+ *                    that set it so has it
  *   --module         the whole module, helpers included
  */
 
@@ -37,7 +41,7 @@ const file = value('--file');
 if (hex === null && file === null)
 {
     console.error('usage: node tools/cork-wat.mjs --hex BYTES | --file PATH [--at ADDRESS]'
-        + ' [--entry ADDRESS] [--hash] [--precise] [--module]');
+        + ' [--entry ADDRESS] [--hash] [--precise] [--checked] [--any-precision] [--module]');
     process.exit(2);
 }
 const code = hex !== null
@@ -46,7 +50,8 @@ const code = hex !== null
 
 const hash = args.includes('--hash');
 const made = regionModule({ code, at, entry, hash, callReturn: hash,
-    precise: args.includes('--precise') });
+    precise: args.includes('--precise'), checked: args.includes('--checked'),
+    wide: !args.includes('--any-precision') });
 const tools = await wabt();
 // What cork's modules use beyond the first release: tail calls into other
 // regions, SIMD, shared memory and its atomics, bulk memory.
