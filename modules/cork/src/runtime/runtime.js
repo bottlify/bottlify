@@ -689,6 +689,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      * @property {number} [merged]  the merges that built it again (`MERGES_A_REGION`)
      * @property {number} [shapeMisses]  its entries' tests that failed
      * @property {[number, number[]][]} [targets]  by indirect call, the callees formed into it
+     * @property {Map<number, number[]>} [unformed]  by indirect call, the callees forming it
+     *     again did not take in (the region full): not asked of it again
      * @property {number} [reforms]  times it was formed again for its indirect calls
      */
     /** @type {Set<RegionRecord>} */
@@ -784,9 +786,6 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         }
         return one;
     };
-    /** By indirect call, the callees its regions were formed again with or failed to take,
-     * not tried again while those regions run. @type {Map<number, Set<number>>} */
-    const callTried = new Map();
     const CALL_SITES_CAP = settings.callSitesKept;
     /** @type {Map<number, number>} page → times invalidated, the stamp a batch checks */
     const generation = new Map();
@@ -849,7 +848,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         // may be; formed again with none of its new callees in; no region
         // holding it to form again.
         predictDue: 0, predictNoShare: 0, predictReformsOut: 0, predictNotFormed: 0,
-        predictNoRegion: 0,
+        predictNoRegion: 0, predictHeld: 0,
         queueDrops: 0, queueEvictions: 0, emitFailures: 0,
         cacheHits: 0, cacheMisses: 0, missNoRecord: 0, missNoModule: 0, precisionSwitches: 0,
         readSwitches: 0,
@@ -1014,12 +1013,6 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 forgetClosed(start, record);
             }
             copiesWanted.delete(record);
-            // A region formed with its calls' callees is formed without them
-            // when its code is next translated: they are sampled again.
-            for (const [site] of record.targets ?? [])
-            {
-                callTried.delete(site);
-            }
             regions.delete(record);
         }
         for (const p of touched)
@@ -2040,6 +2033,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             // Formed again with its indirect calls' callees, or with copies:
             // the old region's entries give way to this one's.
             record.targets = one.targets;
+            record.unformed = one.replaces.unformed;
             record.reforms = (one.replaces.reforms ?? 0) + (one.copying === true ? 0 : 1);
             // The same code for the merges' bounds: formed again, it would
             // otherwise start over at none.
@@ -2641,17 +2635,20 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      * callees that took a share of its calls' samples (`callTargets`), all in
      * one batch of up to `batchRegions`, and published over the one it
      * replaces when it comes back -- only when one of them was formed in, a
-     * small leaf; the others' regions are left as they are. One batch rather
-     * than one a call: each is a module the engine thread instantiates, and a
-     * round trip through the worker that new code waits behind.
+     * small leaf; the others' regions are left as they are, keeping the
+     * callees they could not take (`unformed`) so as not to be formed again for
+     * them. Each region holding a call is asked by what it has itself, not by
+     * what the call's other regions were given. One batch rather than one a
+     * call: each is a module the engine thread instantiates, and a round trip
+     * through the worker that new code waits behind.
      *
      * @param {any} store
      * @returns {boolean} whether a batch was taken this call
      */
     const reformStep = store=>{
-        /** Each region to form again: its calls' callees, and the ones new to it.
-         * @type {Map<RegionRecord, { targets: Map<number, number[]>, added: number[],
-         *     sites: number[] }>} */
+        /** Each region to form again: its calls' callees, and by call the ones new to it.
+         * @type {Map<RegionRecord, { targets: Map<number, number[]>,
+         *     added: Map<number, number[]> }>} */
         const wanted = new Map();
         for (const site of callsDue)
         {
@@ -2666,20 +2663,15 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             {
                 continue;
             }
-            let tried = callTried.get(site);
-            if (tried === undefined)
-            {
-                if (callTried.size >= CALL_SITES_CAP)
-                {
-                    callTried.clear();
-                }
-                tried = new Set();
-                callTried.set(site, tried);
-            }
             counts.predictDue++;
-            const fresh = [...seen.targets].filter(([target, times])=>
-                times * PREDICT_SHARE >= seen.total && !tried.has(target))
+            const shared = [...seen.targets].filter(([, times])=>
+                times * PREDICT_SHARE >= seen.total)
                 .sort((a, b)=>b[1] - a[1]).map(([target])=>target);
+            // Asked of each region holding the call, by what that region has: one
+            // formed after the call's first due, or formed again without it, takes
+            // its callees as the first did.
+            const spanning = [...byPage.get(site >>> 12) ?? []]
+                .filter(record=>record.spans.some(([start, end])=>site >= start && site < end));
             const log = import.meta.BOTTLIFY_DIAGNOSTICS !== false ? logOf(site) : undefined;
             if (log)
             {
@@ -2687,78 +2679,95 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 log.dues++;
                 log.top = ranked.slice(0, 4).map(([target])=>target);
                 log.share = ranked[0][1] / seen.total;
-                log.last = fresh.length === 0
-                    ? (ranked.some(([, times])=>times * PREDICT_SHARE >= seen.total)
-                        ? 'tried' : 'spread') : 'fresh';
-                const spanning = [...byPage.get(site >>> 12) ?? []]
-                    .filter(record=>record.spans.some(([start, end])=>site >= start && site < end));
                 log.spanning = spanning.length;
                 log.held = spanning.filter(record=>record.targets?.some(([at])=>at === site))
                     .length;
             }
-            if (fresh.length === 0)
+            if (shared.length === 0)
             {
                 counts.predictNoShare++;
+                if (log)
+                {
+                    log.last = 'spread';
+                }
                 continue;
             }
-            // Tried once a region holding the site is formed again for them:
-            // a site met before any region holds it -- its region not yet
-            // published, or dropped since -- is asked about at its next due.
             let placed = false;
-            for (const record of byPage.get(site >>> 12) ?? [])
+            let out = false;
+            for (const record of spanning)
             {
                 const one = wanted.get(record)
-                    ?? { targets: new Map(record.targets ?? []), added: [], sites: [] };
+                    ?? { targets: new Map(record.targets ?? []), added: new Map() };
                 const had = one.targets.get(site) ?? [];
-                const added = fresh.filter(target=>!had.includes(target))
-                    .slice(0, PREDICT_CALLEES - had.length);
-                if (added.length === 0
-                    || !record.spans.some(([start, end])=>site >= start && site < end))
+                const unformed = record.unformed?.get(site) ?? [];
+                const added = shared.filter(target=>!had.includes(target)
+                    && !unformed.includes(target)).slice(0, PREDICT_CALLEES - had.length);
+                if (added.length === 0)
                 {
                     continue;
                 }
                 if ((record.reforms ?? 0) >= REFORMS)
                 {
                     counts.predictReformsOut++;
+                    out = true;
                     continue;
                 }
                 one.targets.set(site, [...had, ...added]);
-                one.added.push(...added);
-                one.sites.push(site);
+                one.added.set(site, added);
                 wanted.set(record, one);
                 placed = true;
             }
-            if (placed)
+            if (!placed)
             {
-                fresh.forEach(target=>tried.add(target));
-            }
-            else
-            {
-                counts.predictNoRegion++;
+                // Every region holding it has its callees or cannot take them, or
+                // none holds it yet: its region not yet published, or dropped since.
+                const why = spanning.length === 0 ? 'no region' : out ? 'reforms out' : 'held';
+                if (why === 'no region')
+                {
+                    counts.predictNoRegion++;
+                }
+                else if (why === 'held')
+                {
+                    counts.predictHeld++;
+                }
                 if (log)
                 {
-                    log.last = 'no region';
+                    log.last = why;
                 }
+            }
+            else if (log)
+            {
+                log.last = 'fresh';
             }
         }
         const formed = [];
-        for (const [record, { targets, added, sites }] of wanted)
+        for (const [record, { targets, added }] of wanted)
         {
             const region = formRegion(read, record.entry,
                 { ...formOptions, translatable, callTargets: targets });
-            if (!region.blocks.some(block=>added.includes(block.start)))
+            const starts = new Set(region.blocks.map(block=>block.start));
+            let taken = false;
+            for (const [site, callees] of added)
+            {
+                const missed = callees.filter(target=>!starts.has(target));
+                taken ||= missed.length < callees.length;
+                if (missed.length > 0)
+                {
+                    // Kept by the region and the one that replaces it, so a full
+                    // region is not formed again for the same callees at every due.
+                    record.unformed ??= new Map();
+                    record.unformed.set(site, [...record.unformed.get(site) ?? [], ...missed]);
+                    const log = import.meta.BOTTLIFY_DIAGNOSTICS !== false
+                        ? logOf(site) : undefined;
+                    if (log)
+                    {
+                        log.notFormed++;
+                    }
+                }
+            }
+            if (!taken)
             {
                 counts.predictNotFormed++;
-                if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
-                {
-                    sites.forEach(site=>{
-                        const log = logOf(site);
-                        if (log)
-                        {
-                            log.notFormed++;
-                        }
-                    });
-                }
                 continue;
             }
             formed.push({ region, entryTop: record.entryTop, stamp: stamp(region.pages),
@@ -4012,7 +4021,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 storesKept: counts.storesKept,
                 prediction: { due: counts.predictDue, noShare: counts.predictNoShare,
                     reformsOut: counts.predictReformsOut, notFormed: counts.predictNotFormed,
-                    noRegion: counts.predictNoRegion,
+                    noRegion: counts.predictNoRegion, held: counts.predictHeld,
                     sites: [...siteLog].sort((a, b)=>b[1].samples - a[1].samples).slice(0, 4096)
                         .map(([site, one])=>({ site, ...one })),
                     reforms: counts.reforms },

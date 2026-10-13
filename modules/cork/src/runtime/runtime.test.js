@@ -2458,6 +2458,57 @@ test('a call its prediction takes is not sampled: the calls that still leave are
     assert.equal(run(), 0, 'every call formed in');
 });
 
+test('a region formed after its call was predicted elsewhere is formed again with the callee'
+    + ' too', async()=>{
+    if (!probeFeatures().tailCalls)
+    {
+        return;
+    }
+    // A: mov ebx, G; mov ecx, 1600; L: call F; dec ecx; jnz L; hlt -- and B the same
+    // at CODE + 0x20; F: call ebx; ret, formed into both; G: add edx, 1; ret. A's
+    // region has the call's callee formed in before B's region exists.
+    const m = machine({ countTransfers: true, callTargets: true, callReturn: false });
+    const [a, b, f, g] = [CODE, CODE + 0x20, CODE + 0x40, CODE + 0x50];
+    /** @param {number} at */
+    const caller = at=>[0xbb, ...[0, 8, 16, 24].map(shift=>g >>> shift & 0xff),
+        0xb9, 0x40, 0x06, 0, 0,
+        0xe8, ...[0, 8, 16, 24].map(shift=>(f - (at + 15)) >>> shift & 0xff),
+        0x49, 0x75, 0xf8, 0xf4];
+    m.write(a, caller(a));
+    m.write(b, caller(b));
+    m.write(f, [0xff, 0xd3, 0xc3]);
+    m.write(g, [0x83, 0xc2, 0x01, 0xc3]);
+    /** @param {number} at */
+    const run = at=>{
+        m.setReg(2, 0);
+        m.setReg(4, 0x80000);
+        const before = m.runtime.diagnostics().transfers ?? 0;
+        assert.equal(m.runtime.run(m.runtime.entryOf(at), 1_000_000).kind, 'halt');
+        assert.equal(m.reg(2), 1600);
+        return (m.runtime.diagnostics().transfers ?? 0) - before;
+    };
+    for (const at of [g, f, a])
+    {
+        m.runtime.noteHot(at);
+    }
+    await m.runtime.translatePending();
+    // A transfer each for the call through ebx, G's return, and F's return then.
+    assert.equal(run(a), 4800, 'every call through ebx a transfer, and both returns');
+    for (let i = 0; i < 64 && run(a) > 0; i++)
+    {
+        await m.runtime.translatePending();
+    }
+    assert.equal(run(a), 0, 'G formed into A\'s region');
+    m.runtime.noteHot(b);
+    await m.runtime.translatePending();
+    assert.equal(run(b), 4800, 'B\'s region formed without G');
+    for (let i = 0; i < 64 && run(b) > 0; i++)
+    {
+        await m.runtime.translatePending();
+    }
+    assert.equal(run(b), 0, 'G formed into B\'s region as well');
+});
+
 test('a hot indirect call is sampled though another one is always the last before a reading',
     async()=>{
         if (!probeFeatures().tailCalls)
