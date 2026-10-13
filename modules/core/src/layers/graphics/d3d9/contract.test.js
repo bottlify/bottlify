@@ -1066,16 +1066,16 @@ test('StretchRect converts between a format and its alpha twin, and says why it 
     assert.equal(device.release(), 0);
 });
 
-test('StretchRect between targets of a device that draws elsewhere moves no guest bytes', ()=>{
+test('StretchRect between targets drawn elsewhere, or not at all, moves no guest bytes', ()=>{
     // The played device makes the copy on the GPU, and a target's guest bytes
-    // hold no pixels to move.
-    /** @param {boolean} elsewhere */
-    const copied = elsewhere=>{
+    // hold no pixels to move; a device drawing nothing on purpose has none anywhere.
+    /** @param {{ renderedElsewhere?: boolean, drawsNothing?: boolean }} how */
+    const copied = how=>{
         const memory = new Uint8Array(1 << 20);
         let next = 0x1000;
         let writes = 0;
         const { device } = make({ services: {
-            renderedElsewhere: elsewhere,
+            ...how,
             allocate: (/** @type {number} */ bytes)=>{
                 const at = next;
                 next += (bytes + 15) & ~15;
@@ -1110,9 +1110,11 @@ test('StretchRect between targets of a device that draws elsewhere moves no gues
         device.release();
         return { between, intoTarget, intoPlain };
     };
-    assert.deepEqual(copied(false), { between: 1, intoTarget: 7, intoPlain: 7 });
-    assert.deepEqual(copied(true), { between: 0, intoTarget: 0, intoPlain: 7 },
+    assert.deepEqual(copied({}), { between: 1, intoTarget: 7, intoPlain: 7 });
+    assert.deepEqual(copied({ renderedElsewhere: true }),
+        { between: 0, intoTarget: 0, intoPlain: 7 },
         'into a target nothing moves; into a plain surface the bytes still do');
+    assert.deepEqual(copied({ drawsNothing: true }), { between: 0, intoTarget: 0, intoPlain: 7 });
 });
 
 test('GetRenderTargetData wants a system-memory twin of the target', ()=>{

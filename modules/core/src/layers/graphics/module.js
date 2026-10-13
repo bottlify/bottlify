@@ -549,7 +549,7 @@ export function createGraphicsModule(){
                     // Nothing drawn on purpose: an occlusion query answers that
                     // everything was seen, so the program culls nothing it would
                     // draw on a GPU and runs the work it would run there.
-                    occlusionVisible: !drawing,
+                    drawsNothing: !drawing,
                     readMemory: services.readMemory,
                     // What a draw from a dynamic buffer compares, in place: as a
                     // copy, it was most of a frame in a game that skins into one.

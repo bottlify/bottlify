@@ -1271,7 +1271,7 @@ test('a query answers through its vtable, and a null pointer only asks whether i
 test('drawing nothing on purpose, an occlusion query counts every pixel of the target', ()=>{
     // The graphics setting draw: false: a program that culls by these counts
     // culls nothing, and runs the work it would run on a GPU.
-    const h = seamed({ caps: { occlusionVisible: true } });
+    const h = seamed({ caps: { drawsNothing: true } });
     const root = h.create();
     const { device } = h.createDevice(root);
     const out = 0x3000;

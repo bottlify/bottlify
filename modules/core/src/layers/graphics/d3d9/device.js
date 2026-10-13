@@ -465,9 +465,10 @@ const isDepthFormat = format=>FORMAT_INFO[format] !== undefined && FORMAT_INFO[f
  * @property {boolean} [rectangleBump]  The renderer's (`createRenderer`).
  * @property {boolean} [keepMemory]  Released resources' memory is never given back (debugging).
  * @property {boolean} [rereadBuffers]  The renderer's (`createRenderer`).
- * @property {boolean} [occlusionVisible]  Nothing is drawn on purpose (the graphics
+ * @property {boolean} [drawsNothing]  Nothing is drawn on purpose (the graphics
  *     setting `draw: false`): an occlusion query without a renderer counts every
- *     pixel of the target rather than none.
+ *     pixel of the target rather than none, and a copy between two surfaces whose
+ *     pixels only a GPU would hold moves nothing.
  * @property {boolean} [mips]
  * @property {(watcher: () => void) => () => void} [onDeviceLost]
  *     Calls the watcher once the GPU underneath is gone for good, at once if it
@@ -507,7 +508,7 @@ export function createDirect3D9(options = {}){
         backend, readMemory, windowMemory, writeMemory, createSampler, allocate: guestMemory,
         free: giveBack, divergence, dumpDraws, dumpEvery, liveDump, maxDraws, skipTexture,
         probeTexture, fog, mips, driverRules, onDeviceLost, gamma, frameQueued, renderedElsewhere,
-        keepMemory, rereadBuffers, drawsFrom, rectangleBump, occlusionVisible, ...caps
+        keepMemory, rereadBuffers, drawsFrom, rectangleBump, drawsNothing, ...caps
     } = options;
     /** @type {DeviceCaps} */
     const resolved = { ...DEFAULT_CAPS, ...caps, fullscreenGamma: gamma?.applies() === true };
@@ -520,7 +521,7 @@ export function createDirect3D9(options = {}){
         free: keepMemory === true ? undefined : giveBack, divergence, dumpDraws, dumpEvery,
         liveDump, maxDraws, skipTexture,
         probeTexture, fog, mips, driverRules, onDeviceLost, gamma, frameQueued, renderedElsewhere,
-        rereadBuffers, drawsFrom, rectangleBump, occlusionVisible,
+        rereadBuffers, drawsFrom, rectangleBump, drawsNothing,
     };
     if (backend && !readMemory)
     {
@@ -4297,8 +4298,10 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 // Recording for a device that draws elsewhere, there is no
                 // renderer here to ask: the played one draws the stretch
                 // whenever both sides are its GPU's and not one texture, and
-                // the program is answered as it will be.
-                if (services.renderedElsewhere === true && drawnOnGpu(source)
+                // the program is answered as it will be. Drawing nothing on
+                // purpose, it is answered as a GPU would answer it.
+                if ((services.renderedElsewhere === true || services.drawsNothing === true)
+                    && drawnOnGpu(source)
                     && drawnOnGpu(destination) && !oneTexture(source, destination))
                 {
                     out.moves = [];
@@ -4331,8 +4334,10 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 // between two surfaces that live on the GPU is made there,
                 // and their guest bytes hold no pixels: moving them was a
                 // render target's worth of bytes copied on the program's
-                // thread for nothing.
-                if (services.renderedElsewhere === true && isGpuResident(destination))
+                // thread for nothing. Drawing nothing on purpose, there are
+                // no pixels anywhere to move.
+                if ((services.renderedElsewhere === true || services.drawsNothing === true)
+                    && isGpuResident(destination))
                 {
                     out.moves = [];
                     return D3D_OK;
@@ -4437,7 +4442,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
          * asks. An occlusion query asks how many pixels a set of draws
          * produced: the GPU's count where there is one. A device that draws
          * nothing counts none, unless it draws nothing on purpose
-         * (`occlusionVisible`, the graphics setting `draw: false`): then every
+         * (`drawsNothing`, the graphics setting `draw: false`): then every
          * pixel of the target, the one number that culls nothing the program
          * would draw on a GPU. Every other kind is the timing family, and is
          * not offered.
@@ -4677,7 +4682,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                     {
                         return D3D_OK;
                     }
-                    const target = services.occlusionVisible === true ? model.renderTarget : null;
+                    const target = services.drawsNothing === true ? model.renderTarget : null;
                     const desc = target ? describe(target) : null;
                     return answer(desc ? desc.Width * desc.Height : 0);
                 }
