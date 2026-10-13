@@ -29,7 +29,7 @@
 import { emptyCode, formRegion, formShared, hashRegion } from '../region.js';
 import { TIER_SLOT, enterRegion, mathImports } from '../emit/region.js';
 import { decode } from '../decode/decoder.js';
-import { NanRecord, SHAPE, isX87, trackRegion } from '../emit/x87.js';
+import { NanRecord, RANGE, SHAPE, isX87, trackRegion } from '../emit/x87.js';
 import { HELD, PRECISION } from '../emit/memory.js';
 import { features as probeFeatures } from '../wasm/features.js';
 import { Body, ModuleBuilder, ValType } from '../wasm/encoder.js';
@@ -260,6 +260,12 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         // a region seen under both tests at every such operation (false: every
         // region tests from the start).
         wideFirst: true,
+        // A region compiled for single precision computes its x87 arithmetic
+        // on floats in f32 where the operands are floats (`Singles` in
+        // emit/x87.js): the 24-bit result in one operation, where rounding a
+        // double's took four after it. A region whose results keep leaving the
+        // float's range is translated again rounding them (false: always).
+        floatSingles: true,
         // x87 regions compiled for the stack's shape at their entries -- which
         // registers are held and which empty -- tested once at an entry rather
         // than at every instruction; a region whose test fails `checkedAfter`
@@ -413,22 +419,32 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         return counted;
     };
     /**
-     * A formed region's precision as a job and a record carry it.
-     *
-     * @param {import('../region.js').Region} region
+     * The entries, by `keyOf`, whose single-precision results kept leaving a float's range
+     * (`RANGE`): compiled for single, they round every result from a double.
+     * @type {Set<number>}
      */
-    const precisionFlags = region=>{
+    const roundedKeys = new Set();
+    /**
+     * A formed region's precision as a job and a record carry it, and whether its
+     * single-precision arithmetic runs on floats (`floatSingles`).
+     *
+     * @param {import('../region.js').Region} region @param {number} entryTop
+     */
+    const precisionFlags = (region, entryTop)=>{
         const precision = precisionOf(region);
-        return { wide: precision === 'wide', narrow: precision === 'narrow' };
+        return { wide: precision === 'wide', narrow: precision === 'narrow',
+            floats: precision === 'narrow' && settings.floatSingles !== false
+                && !roundedKeys.has(keyOf(region.entry, entryTop)) };
     };
     /**
      * What a job's emitter is told of its precision: nothing for `mixed`, the
      * emitter's default.
      *
-     * @param {{ wide?: boolean, narrow?: boolean }} one
+     * @param {{ wide?: boolean, narrow?: boolean, floats?: boolean }} one
      */
     const precisionJob = one=>(one.wide === true ? { precision: /** @type {const} */ ('wide') }
-        : one.narrow === true ? { precision: /** @type {const} */ ('narrow') } : {});
+        : one.narrow === true ? { precision: /** @type {const} */ ('narrow'),
+            ...(one.floats === true ? { floats: true } : {}) } : {});
     /**
      * Whether regions test the pages they read (`checkReads`): from the
      * start when asked, or from the program's first fault on a page it cannot
@@ -741,6 +757,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      * @property {boolean} [linked]  its function is in a relinked module already
      * @property {boolean} [wide]  an x87 region compiled for the wide precision controls
      * @property {boolean} [narrow]  an x87 region compiled for single precision
+     * @property {boolean} [floats]  of those, one computing on floats in f32 (`floatSingles`)
      * @property {boolean} [loose]  compiled with its stores through esp untested (`looseStacks`)
      * @property {boolean} [wrapped]  compiled with its reads wrapped into RAM, untested
      * @property {boolean} [checked]  an x87 region whose entries test nothing of the stack's shape
@@ -751,6 +768,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      * @property {Placed} [module]  the placed module its table index is in (`placeModule`)
      * @property {boolean} [movedAlone]  a merge took it alone into the module calling it
      * @property {number} [merged]  the merges that built it again (`MERGES_A_REGION`)
+     * @property {number} [floatMisses]  its float results that were not the processor's
      * @property {number} [shapeMisses]  its entries' tests that failed
      * @property {[number, number[]][]} [targets]  by indirect call, the callees formed into it
      * @property {Map<number, number[]>} [unformed]  by indirect call, the callees forming it
@@ -921,7 +939,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         stackCode: 0,
         // Batches the store answered in the call that formed them, and a turn later.
         lookedUpNow: 0, lookedUpLater: 0,
-        shapeMisses: 0, shapeChecked: 0, x87RelaxedReads: 0,
+        shapeMisses: 0, shapeChecked: 0, x87RelaxedReads: 0, floatMisses: 0, floatsRounded: 0,
         // The milliseconds of translating, by the part of a batch they are:
         // `translateMs` is their sum, so a frame's own figure and the split
         // always agree.
@@ -973,9 +991,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     // precision it was not formed for (PRECISION), a stack shape it was not
     // checked for (SHAPE). One count read alone mixes them, and the held ones
     // land on addresses that are translated, which reads as a link not made.
-    const untranslatedBy = { bare: 0, held: 0, precision: 0, shape: 0, other: 0 };
+    const untranslatedBy = { bare: 0, held: 0, precision: 0, shape: 0, range: 0, other: 0 };
     /** @type {Record<number, keyof typeof untranslatedBy>} */
-    const VECTOR_NAMES = { 0: 'bare', [HELD]: 'held', [PRECISION]: 'precision', [SHAPE]: 'shape' };
+    const VECTOR_NAMES = { 0: 'bare', [HELD]: 'held', [PRECISION]: 'precision', [SHAPE]: 'shape',
+        [RANGE]: 'range' };
     /** @type {import('../../../core/src/layers/cpu/engine.js').ExitRecord} */
     const exit = { retired: 0, kind: 'untranslated', vector: 0 };
     /** @type {Record<string, number>} */
@@ -1445,6 +1464,29 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         }
     };
 
+    /**
+     * A region computing single precision on floats left before an operation whose
+     * float result is not the processor's (`RANGE`): the host ran it. One that keeps
+     * leaving -- data at a float's edge, a result past it -- goes, its entry
+     * translated again rounding every result from a double (`roundedKeys`).
+     *
+     * @param {number} eip  the operation it left before
+     */
+    const floatMissed = eip=>{
+        counts.floatMisses++;
+        const going = [...byPage.get(eip >>> 12) ?? []].filter(record=>record.floats === true
+            && record.spans.some(([from, to])=>eip >= from && eip < to)
+            && (record.floatMisses = (record.floatMisses ?? 0) + 1) >= settings.checkedAfter);
+        for (const record of going)
+        {
+            roundedKeys.add(keyOf(record.entry, record.entryTop));
+            counts.floatsRounded++;
+        }
+        if (going.length > 0)
+        {
+            unpublish(going);
+        }
+    };
     /**
      * An entry found the machine's x87 stack in another shape than its block
      * was compiled for, and the host's interpreter runs the block. A region
@@ -1988,7 +2030,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      * answer and an inline emission take the same path.
      *
      * @param {{ region: import('../region.js').Region, entryTop: number, stamp: string,
-     *     wide?: boolean, narrow?: boolean, checked?: boolean, copies?: boolean,
+     *     wide?: boolean, narrow?: boolean, floats?: boolean, checked?: boolean, copies?: boolean,
      *     loose?: boolean, wrapped?: boolean,
      *     replaces?: RegionRecord, targets?: [number, number[]][], copying?: boolean,
      *     waited?: boolean }} one
@@ -2025,6 +2067,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             : one.stamp !== stamp(region.pages) || hashRegion(read, region) !== region.hash))
             || ((one.wide === true || one.narrow === true)
                 && precisionOf(region) !== (one.wide === true ? 'wide' : 'narrow'))
+            || (one.floats === true && roundedKeys.has(keyOf(region.entry, one.entryTop)))
             || (one.loose && !loose)
             || (one.wrapped && readsChecked)
             || (one.checked !== true && checkedAt(region, one.entryTop)))
@@ -2091,7 +2134,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             entryTop: one.entryTop, hash: region.hash, labels: JSON.stringify(built.labels),
             linked: built.linked === true, wide: one.wide === true, loose: one.loose === true,
             wrapped: one.wrapped === true,
-            narrow: one.narrow === true, checked: one.checked === true,
+            narrow: one.narrow === true, floats: one.floats === true,
+            checked: one.checked === true,
             copies: one.copies === true, closed, blocks: built.labels.length,
         };
         if (keepsSources)
@@ -2254,13 +2298,14 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      * precision controls or for single, or checked, is another translation of the same
      * bytes.
      * @param {{ region: { entry: number, hash: string }, entryTop: number, wide?: boolean,
-     *     narrow?: boolean, checked?: boolean, copies?: boolean, loose?: boolean,
-     *     wrapped?: boolean }} one */
+     *     narrow?: boolean, floats?: boolean, checked?: boolean, copies?: boolean,
+     *     loose?: boolean, wrapped?: boolean }} one */
     const regionKey = one=>cacheKey({
         version: cacheVersion, features: found, variant, layoutId: layout.id,
         bundleId: settings.bundleId ?? 'unknown', entry: one.region.entry,
         hash: `${one.region.hash}-${one.entryTop}${one.wide ? '-w' : ''}`
-            + `${one.narrow ? '-n' : ''}${one.checked ? '-c' : ''}${one.copies ? '-k' : ''}`
+            + `${one.narrow ? '-n' : ''}${one.floats ? '-f' : ''}${one.checked ? '-c' : ''}`
+            + `${one.copies ? '-k' : ''}`
             + `${one.loose ? '-s' : ''}${one.wrapped === false ? '-q' : ''}`,
     });
 
@@ -2415,7 +2460,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             {
                 const one = { region: { entry: record.entry, hash: record.hash },
                     entryTop: record.entryTop, wide: record.wide, narrow: record.narrow,
-                    checked: record.checked, copies: record.copies, loose: record.loose };
+                    floats: record.floats, checked: record.checked, copies: record.copies,
+                    loose: record.loose };
                 store.put(regionKey(one), packRegion({ ...result.region,
                     module: new Uint8Array(0), moduleKey: key, linked: true },
                 cacheVersion)).catch(()=>{});
@@ -2850,7 +2896,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 continue;
             }
             formed.push({ region, entryTop: record.entryTop, stamp: stamp(region.pages),
-                cached: null, ...precisionFlags(region), loose,
+                cached: null, ...precisionFlags(region, record.entryTop), loose,
                 wrapped: !readsChecked,
                 checked: record.checked === true, copies: record.copies === true,
                 replaces: record, targets: [...targets] });
@@ -2893,7 +2939,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             const region = formRegion(read, record.entry, { ...formOptions, translatable,
                 ...called });
             formed.push({ region, entryTop: record.entryTop, stamp: stamp(region.pages),
-                cached: null, ...precisionFlags(region), loose,
+                cached: null, ...precisionFlags(region, record.entryTop), loose,
                 wrapped: !readsChecked,
                 checked: record.checked === true, copies: true, copying: true, replaces: record,
                 ...(record.targets === undefined ? {} : { targets: record.targets }) });
@@ -3268,7 +3314,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         // they said when formed.
         for (const one of unbuilt)
         {
-            Object.assign(one, precisionFlags(one.region));
+            Object.assign(one, precisionFlags(one.region, one.entryTop));
             one.loose = loose;
             one.wrapped = !readsChecked;
             one.checked = checkedAt(one.region, one.entryTop);
@@ -3462,7 +3508,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             ? null : (settings.store ?? null);
         /** @type {{ region: import('../region.js').Region, entryTop: number,
          *     stamp: string, cached: import('./cache.js').CachedRegion | null, wide?: boolean,
-         *     narrow?: boolean, checked?: boolean, moduleBytes?: Uint8Array | null,
+         *     narrow?: boolean, floats?: boolean, checked?: boolean,
+         *     moduleBytes?: Uint8Array | null,
          *     waited?: boolean, loose?: boolean, wrapped?: boolean }[]} */
         const formed = [];
         const formedAt = clock();
@@ -3536,7 +3583,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 continue;
             }
             formed.push({ region, entryTop, stamp: stamp(region.pages), cached: null,
-                ...precisionFlags(region), loose,
+                ...precisionFlags(region, entryTop), loose,
                 wrapped: !readsChecked,
                 checked: checkedAt(region, entryTop) });
             if (!usesX87(region))
@@ -3676,6 +3723,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             if (kind === 'untranslated' && code >>> 8 === PRECISION)
             {
                 precisionMissed(view().getUint32(layout.eip, true));
+            }
+            else if (kind === 'untranslated' && code >>> 8 === RANGE)
+            {
+                floatMissed(view().getUint32(layout.eip, true));
             }
             else if (kind === 'untranslated' && code >>> 8 === SHAPE)
             {
@@ -4062,6 +4113,11 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 // block's, and the regions translated checked for it.
                 shapeMisses: counts.shapeMisses,
                 shapeChecked: counts.shapeChecked,
+                // Single-precision operations on floats that left for the host because
+                // the float result was not the processor's, and the regions that kept
+                // leaving and went back to rounding from doubles (`floatSingles`).
+                floatMisses: counts.floatMisses,
+                floatsRounded: counts.floatsRounded,
                 // Translated x87 status-word reads that may see what `precise`
                 // alone keeps: where a strange result is worth a run with it.
                 x87RelaxedReads: counts.x87RelaxedReads,

@@ -184,6 +184,7 @@ something, and measure it.
 | Setting | Default | What it does | When to change it, and the risk |
 | --- | --- | --- | --- |
 | `wideFirst` | `true` | Each region compiled for the precision control it runs under, tested once a block; one seen under both tests at every rounding operation. | Off tests precision on every operation. |
+| `floatSingles` | `true` | A region compiled for single precision computes its arithmetic, square roots and loads in f32 where the operands are floats, each result the processor's 24-bit one; a result past a float's range, or a product under its smallest normal, leaves for the host to compute, and an entry that keeps leaving is compiled again rounding doubles. | Off rounds every result from a double, as before; no other effect. |
 | `x87Shapes` | `true` | Regions compiled for the stack's shape at their entries. | Off checks every register access. |
 | `checkedAfter` | 4 | Failed shape tests before a region is formed again without one. | Lower for code entered with varying stacks. |
 

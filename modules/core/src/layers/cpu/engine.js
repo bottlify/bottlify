@@ -252,6 +252,10 @@
  * @property {boolean} [wideFirst]  Each x87 region compiled for the precision control it runs
  *     under, tested once a block; one seen under both tests at every rounding operation.
  *     Default true.
+ * @property {boolean} [floatSingles]  An x87 region compiled for single precision computes its
+ *     arithmetic on floats in f32 where the operands are floats; a result past a float's range
+ *     leaves for the host, and an entry that keeps leaving is compiled again rounding doubles.
+ *     Default true.
  * @property {boolean} [x87Shapes]  x87 regions compiled for the stack's shape at their entries,
  *     tested once at an entry. Default true.
  * @property {number} [checkedAfter]  Failed shape tests before a region is formed again with no
@@ -412,6 +416,10 @@
  * @property {number} [shapeMisses]  Entries that found the x87 stack in another shape than
  *     their block was compiled for, and left for the host.
  * @property {number} [shapeChecked]  x87 regions translated again checked for it.
+ * @property {number} [floatMisses]  Single-precision operations on floats (`floatSingles`) that
+ *     left for the host, their float result not the processor's.
+ * @property {number} [floatsRounded]  Entries translated again rounding doubles after they kept
+ *     leaving so.
  * @property {number} [x87RelaxedReads]  Translated x87 status-word reads (`fnstsw` into memory or
  *     into AX not read as C0 C2 C3 alone, `fnstenv`, `fnsave`) that may see the exception flags
  *     or C1, which only a `precise` run keeps: a strange result there is worth one.

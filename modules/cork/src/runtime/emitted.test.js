@@ -74,6 +74,7 @@ const EMITTED = {
     85: 'bbc86e076a900b9f',
     86: 'eb6cfc99e139de77',
     87: '920c8f09ff12fb1b',
+    88: '9fbd07aebb029be4',
 };
 
 /** Features fixed rather than probed, so every host emits the same bytes. */
@@ -129,6 +130,22 @@ function digest(){
     finishModule(sitesContext, [atSites.functionIndex]);
     sites.exportFunction('region', atSites.functionIndex);
     hash.update('empty sites:').update(sites.toBytes());
+    // Single precision computed on floats (`floatSingles`): fmath's loop of sums of products,
+    // and game's loop of distances entered with two floats held.
+    for (const [name, entry, entryTop] of /** @type {const} */ ([['fmath-pc24.bin', 0x401050, 0],
+        ['game-pc24.bin', 0x4012e0, 6]]))
+    {
+        const image = readFileSync(new URL(name, IMAGES));
+        const loop = formRegion(address=>image[address - BASE] ?? 0, entry, {});
+        const floats = new ModuleBuilder();
+        const floatsContext = prepareModule(floats, layout, FEATURES, {}, { hash: true,
+            trapPort: 0xb077, resume: true, callReturn: true });
+        const onFloats = emitRegion(floatsContext, loop, { entryTop, checked: false,
+            precision: 'narrow', floats: true });
+        finishModule(floatsContext, [onFloats.functionIndex]);
+        floats.exportFunction('region', onFloats.functionIndex);
+        hash.update(`floats:${name}:`).update(floats.toBytes());
+    }
     return hash.digest('hex').slice(0, 16);
 }
 

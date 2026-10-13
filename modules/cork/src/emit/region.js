@@ -809,11 +809,13 @@ function addResume(m, layout, materialise, transfer){
  * @param {ModuleContext} context
  * @param {import('../region.js').Region} region
  * @param {{ entryTop?: number, checked?: boolean, copies?: boolean,
- *     precision?: X87Precision }} [options]  the x87 top the entry is compiled for; checked:
- *     the entries test nothing of the x87 stack's shape (`planStack`); copies: a structured
- *     region's blocks inside its loops are entered through copies of them (`emitCopies`) --
- *     false, they have no entry (`closed`); precision: the precision control its x87 is
- *     compiled for, the module's (`prepareModule`'s wide and narrow) by default
+ *     precision?: X87Precision, floats?: boolean }} [options]  the x87 top the entry is
+ *     compiled for; checked: the entries test nothing of the x87 stack's shape (`planStack`);
+ *     copies: a structured region's blocks inside its loops are entered through copies of
+ *     them (`emitCopies`) -- false, they have no entry (`closed`); precision: the precision
+ *     control its x87 is compiled for, the module's (`prepareModule`'s wide and narrow) by
+ *     default; floats: compiled for single, its arithmetic on floats in f32 (`Singles` in
+ *     x87.js)
  * @returns {Translation}
  */
 export function emitRegion(context, region, options = {}){
@@ -852,8 +854,8 @@ export class RegionEmitter {
      * @param {ModuleContext} context
      * @param {import('../region.js').Region} region
      * @param {{ entryTop?: number, checked?: boolean, copies?: boolean,
-     *     precision?: X87Precision, copyFunction?: boolean,
-     *     planned?: RegionPlanning | null }} [options]  copies and precision: as
+     *     precision?: X87Precision, floats?: boolean, copyFunction?: boolean,
+     *     planned?: RegionPlanning | null }} [options]  copies, precision and floats: as
      *     `emitRegion` takes them; copyFunction: this is the function of a structured region's
      *     copies (`emitCopies`); planned: what the region's own function planned of it, which
      *     the function of its copies takes rather than plan it again
@@ -861,15 +863,17 @@ export class RegionEmitter {
     constructor(context, region,
         { entryTop = 0, checked = false, copies = true, copyFunction = false,
             planned = null, precision = context.wide === true ? 'wide'
-                : context.narrow === true ? 'narrow' : 'mixed' } = {})
+                : context.narrow === true ? 'narrow' : 'mixed', floats = false } = {})
     {
         this.context = context;
         /** The region as formed, and the options, for the function of its copies. */
         this.formed = region;
-        this.options = { entryTop, checked, precision };
+        this.options = { entryTop, checked, precision, floats };
         /** Its x87 compiled for the wide precision controls, or for single (`X87Precision`). */
         this.wide = precision === 'wide';
         this.narrow = precision === 'narrow';
+        /** Compiled for single with its arithmetic on floats in f32 (`Singles` in x87.js). */
+        this.floats = this.narrow && floats;
         this.copyFunction = copyFunction;
         this.layout = context.layout;
         /** Where the layout keeps the flag record between regions, or -1. */
