@@ -26,7 +26,10 @@ import { createWriteStream, mkdirSync, writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { openBundle } from './btl.mjs';
+import { diskDirectory } from './disk-directory.mjs';
 import { createApp } from '../modules/core/src/app.js';
+import { createDirectoryTranslationStore }
+    from '../modules/core/src/layers/cpu/internal/translation-store.js';
 import { peekBytes } from '../modules/core/src/trace.js';
 import { placementOf } from '../modules/installer/src/prefix.js';
 import { modeOf } from './play/modes.js';
@@ -128,6 +131,11 @@ function parse(argv){
         // Guest RAM in megabytes, as the launcher's setting gives it.
         memory: argv.includes('--memory')
             ? Number(argv[argv.indexOf('--memory') + 1]) : undefined,
+        // A folder to keep the translator's regions in between runs, as a
+        // player's origin keeps them: the first run into it is cold, every
+        // later one warm. None: every run translates from nothing.
+        translationStore: argv.includes('--translation-store')
+            ? argv[argv.indexOf('--translation-store') + 1] : null,
     };
 }
 
@@ -460,7 +468,7 @@ function seriesRow(app, last, began){
 async function main(){
     const { id, turns, map, grep, calls, heap, profile, log, watch, peek, dump, which,
         corkConfig, series, raster, draw, corkOut, concurrency, seconds, commandLine, executors,
-        memory, mode } = parse(process.argv.slice(2));
+        memory, mode, translationStore } = parse(process.argv.slice(2));
     if (!id)
     {
         console.error('usage: node tools/launch-probe.mjs <bundle-id> [--turns N] '
@@ -506,6 +514,12 @@ async function main(){
     const sink = log ? createWriteStream(log) : null;
 
     const placement = placementOf(manifest);
+    const store = translationStore === null ? null
+        : await createDirectoryTranslationStore(diskDirectory(translationStore), id);
+    if (store !== null)
+    {
+        console.log(`  translation store: ${translationStore}`);
+    }
     let dumped = false;
     const app = await createApp({
         executable: new Uint8Array(executable),
@@ -520,6 +534,7 @@ async function main(){
             // engine thread would carry the whole emission a browser moves off it.
             worker: true, workerUrl: new URL('../modules/cork/src/runtime/translator.worker.js',
                 import.meta.url).href,
+            ...store === null ? {} : { store },
             ...corkConfig } },
         heapSize: heap,
         ...executors ? { executors } : {},
@@ -723,6 +738,12 @@ async function main(){
             .map((/** @type {number[]} */ [address, count])=>`${address.toString(16)}x${count}`)
             .join(' ')}`);
     }
+    if (store !== null && cork)
+    {
+        // Whether the run was warm: the regions found in the store against those
+        // translated anew.
+        console.log(`  translation store: ${cork.cacheHits} hits, ${cork.cacheMisses} misses`);
+    }
     if (corkOut !== null && cork)
     {
         // The profile for reading afterwards: every counted block, the call
@@ -753,6 +774,9 @@ ${text}` : `  ${JSON.stringify(failure).slice(0, 200)}`);
 
     sink?.end();
     await app.dispose();
+    // A store handed in is the caller's to close, and its index is written then.
+    await store?.flush();
+    store?.close();
     await handle.close();
 }
 
