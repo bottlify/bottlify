@@ -22,7 +22,7 @@
  *                                  [--click x,y[,after]] [--key Code[,after]] [--coi]
  *                                  [--mode NAME] [--executors N] [--cork-config JSON]
  *                                  [--graphics-worker] [--journal-calls]
- *                                  [--command-line STRING] [--windows NAME]
+ *                                  [--command-line STRING] [--args STRING] [--windows NAME]
  *                                  [--file HOST=GUEST] [--save-files]
  *                                  [--user-data-dir DIR] [--port N] [--store local] [--prefetch]
  *                                  [--cpu-profile SECONDS] [--heap-profile [old]]
@@ -262,6 +262,9 @@ function parse(argv){
         commandLine: argv.includes('--command-line')
             ? argv[argv.indexOf('--command-line') + 1]
             : null,
+        // The arguments alone, as the launcher takes them: the quoted image
+        // path goes in front, as it does for the manifest's.
+        args: argv.includes('--args') ? argv[argv.indexOf('--args') + 1] : null,
         // The Windows the title runs under, over the one its manifest names.
         windows: argv.includes('--windows') ? argv[argv.indexOf('--windows') + 1] : null,
         // Files put on the volume before the program starts, as `HOST=GUEST`:
@@ -1613,7 +1616,8 @@ export async function game(options){
             // image path the same way createApp's own default is built,
             // unless `--command-line` overrides them.
             commandLine: options.commandLine
-                ?? (manifest.commandLine ? `"${imagePath}" ${manifest.commandLine}` : undefined),
+                ?? ((options.args ?? manifest.commandLine)
+                    ? `"${imagePath}" ${options.args ?? manifest.commandLine}` : undefined),
             windows,
             sidecarHooks,
             hooks: options.watches,

@@ -40,7 +40,7 @@ node tools/cdp_test/game.mjs <bundle-id> [--wait 900] [--turns 200000] [--calls 
     [--log FILE [--log-lines N]] [--profile [QUANTUM]]
     [--dump-draws] [--max-draws N] [--skip-texture tN] [--probe tN]
     [--pointer x,y[,down]] [--click x,y[,after]] [--key Code[,after[,frames]]] [--turn dx,dy,after,frames] [--screen WxH]
-    [--run-seconds N] [--command-line STRING] [--windows NAME] [--file HOST=GUEST] [--save-files]
+    [--run-seconds N] [--command-line STRING] [--args STRING] [--windows NAME] [--file HOST=GUEST] [--save-files]
     [--profile-calls] [--no-video] [--no-fog] [--no-mips] [--trace]
     [--worker [--pacing page|event]] [--coi]
     [--user-data-dir DIR] [--port N] [--store local] [--prefetch] [--export-translations FILE]
@@ -86,6 +86,7 @@ node tools/cdp_test/game.mjs <bundle-id> [--wait 900] [--turns 200000] [--calls 
 | `--turn dx,dy,after,frames` | off | relative mouse motion of dx,dy on every presented frame from `after` for `frames` frames -- how a first-person view is turned. Repeatable |
 | `after` as `12s` | frames | any `after` above may be a time since the first presented frame instead of a frame count (`--click 520,400,12s`); a route timed in seconds survives a change in the frame rate, since the program's screens arrive on the clock |
 | `--command-line STRING` | the bundle's manifest | what the program believes it was started with, image path first: `'"C:\App\Game.exe" +set r_mode 3'`. The manifest's `commandLine` is the default, so a title's usual arguments need not be repeated |
+| `--args STRING` | the manifest's `commandLine` | the arguments alone, as the launcher takes them: the quoted image path is put in front, `--args 'map fort'` |
 | `--windows NAME` | the bundle's manifest, else `winxp` | the Windows the title runs under (`docs/core/api.md`'s `windows`): `win2000`, `winxp`, `win7` or `win10`. The manifest's `windows` is the default; any other name is refused before the browser starts. `frames.mjs` takes it too |
 | `--file HOST=GUEST` | none | a file put on the volume before the program's first instruction, from a host path to a guest one (`dbg/bench.demo=C:\App\base\demos\bench.demo`): what one run wrote, handed to the next. Repeatable |
 | `--save-files` | text | keep every file the program wrote as the bytes it wrote, whole, beside the report. Without it a file is saved as text and capped at a megabyte, which reads a log and ruins anything binary |
