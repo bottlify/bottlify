@@ -24,12 +24,11 @@
 
 import { AF, CF, DF, OF, PF, SF, ZF } from '../decode/table.js';
 import { CPUID_LEAVES } from '../cpuid.js';
-import { EMPTY, ValType } from '../wasm/encoder.js';
+import { EMPTY } from '../wasm/encoder.js';
 import { I32, Kind, MASKS, SIGN_BITS, widthCode } from './flags.js';
 import { CallStack, Exit, Local, STATE_PARAMS } from './region.js';
 import { checkAccess, emitStaleExit, looseStackStore, noteStore, stackAccess } from './memory.js';
-import { CALL_STRIDE, Mechanism, Tables, pageFlagsAt } from '../runtime/layout.js';
-import { ANY_TOP } from '../runtime/entries.js';
+import { CALL_STRIDE, Mechanism, pageFlagsAt } from '../runtime/layout.js';
 import { PageFlag } from '../runtime/pages.js';
 import { emitSimd } from './simd.js';
 import { emitLocked, isLocked } from './locked.js';
@@ -170,16 +169,12 @@ function countApart(e){
  * came, this call's entry taken off the stack. Past the stack's limit, or with
  * the budget spent, the call leaves as any call does.
  *
- * A callee at an address known here is looked for first from this site, in the
- * entry hash slot that address hashes to (`calleeFromSite`).
- *
  * @param {import('./region.js').RegionEmitter} e
  * @param {number} next  the return address, a block of the region
  * @param {() => void} pushTarget  pushes the callee's address
  * @param {number} mechanism  what a profiling run counts it as (`Mechanism`)
- * @param {number | null} [known]  the callee's address, when the call names it
  */
-function callAndReturn(e, next, pushTarget, mechanism, known = null){
+function callAndReturn(e, next, pushTarget, mechanism){
     const { b, layout } = e;
     const depth = layout.tables + CallStack.DEPTH;
     e.countMechanism(mechanism);
@@ -217,18 +212,13 @@ function callAndReturn(e, next, pushTarget, mechanism, known = null){
     }
     e.storeMemoryState();
     e.storeUncarriedState();
-    const site = known !== null && known !== 0 ? calleeFromSite(e, known) : false;
     b.localGet(Local.eip);
     for (let local = Local.budget; local < STATE_PARAMS; local++)
     {
         b.localGet(local);
     }
-    b.call(/** @type {number} */ (e.context.transfer));
-    if (site)
-    {
-        b.end();
-    }
-    b.localTee(Local.t0).i32const(Exit.RETURNED).op(I32.ne);
+    b.call(/** @type {number} */ (e.context.transfer)).localTee(Local.t0)
+        .i32const(Exit.RETURNED).op(I32.ne);
     e.openGuard('elsewhere');
     e.countMechanism(Mechanism.CALL_ELSEWHERE);
     // Left for the host somewhere inside: the state block holds it all.
@@ -244,62 +234,6 @@ function callAndReturn(e, next, pushTarget, mechanism, known = null){
     }
     b.i32const(next).localSet(Local.eip);
     e.returned = true;
-}
-
-/**
- * The first half of a call to a known address: its callee found from this site,
- * in the slot of the entry hash the address hashes to, and called through the
- * table from here, as the module's transfer would have called it -- the slot's
- * key and x87 top checked as the transfer checks them, so a callee moved, gone or
- * in a slot further on goes to the transfer, which the caller emits after the
- * `else` this opens. Every call out of a module went through the one indirect
- * jump in its transfer, which the processor cannot predict over thousands of
- * callees; a call from its own site has a jump of its own, to one callee, and
- * no hash to compute. The crossings into another placed module are counted as
- * the transfer counts them, which decides the merges.
- *
- * @param {import('./region.js').RegionEmitter} e @param {number} target
- * @returns {boolean} whether the `if` was opened (the caller closes it)
- */
-function calleeFromSite(e, target){
-    const { b, layout, context } = e;
-    const slot = layout.tables + Tables.HASH
-        + (Math.imul(target, 0x9e3779b1 | 0) >>> (layout.hashShift ?? 16)) * Tables.HASH_SLOT;
-    b.i32const(0).load('i32', { offset: slot }).i32const(target | 0).op(I32.eq);
-    b.if(ValType.i32);
-    b.i32const(0).load('i32_8u', { offset: slot + 10 }).i32const(ANY_TOP).op(I32.eq)
-        .i32const(0).load('i32_8u', { offset: slot + 10 })
-        .i32const(0).load('i32_8u', { offset: layout.x87Top }).op(I32.eq).op(I32.or);
-    b.else();
-    b.i32const(0);
-    b.end();
-    b.if(ValType.i32);
-    e.countMechanism(Mechanism.TRANSFER_SITE);
-    if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && context.countTransfers)
-    {
-        const at = layout.tables + Tables.TRANSFERS;
-        b.i32const(0).i32const(0).load('i32', { offset: at }).i32const(1).op(I32.add)
-            .store('i32', { offset: at });
-    }
-    const { placed } = context;
-    if (placed !== undefined)
-    {
-        b.i32const(0).load('i32', { offset: slot + 4 }).globalGet(placed.base).op(I32.sub)
-            .i32const(placed.arms).op(I32.geU);
-        b.if(EMPTY);
-        b.globalGet(placed.crossings).i32const(1).op(I32.add).globalSet(placed.crossings);
-        b.i32const(0).load('i32', { offset: slot + 4 }).globalSet(placed.crossedTo);
-        b.end();
-    }
-    b.i32const(0).load('i32_16u', { offset: slot + 8 });
-    for (let local = Local.budget; local < STATE_PARAMS; local++)
-    {
-        b.localGet(local);
-    }
-    b.i32const(0).load('i32', { offset: slot + 4 });
-    b.callIndirect(/** @type {number} */ (context.regionType), 0);
-    b.else();
-    return true;
 }
 
 /**
@@ -820,8 +754,7 @@ export function emitInstruction(e, instruction, flagsLive){
                 callAndReturn(e, next, dst.kind === 'rel'
                     ? ()=>b.i32const(/** @type {number} */ (dst.target))
                     : ()=>b.localGet(Local.count),
-                dst.kind === 'rel' ? Mechanism.CALL_REL : Mechanism.CALL_INDIRECT,
-                dst.kind === 'rel' ? /** @type {number} */ (dst.target) : null);
+                dst.kind === 'rel' ? Mechanism.CALL_REL : Mechanism.CALL_INDIRECT);
                 return true;
             }
             if (dst.kind === 'rel')
