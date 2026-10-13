@@ -227,6 +227,51 @@ const calleesOf = exit=>(exit.kind === 'call' || exit.kind === 'indirect' && exi
     ? exit.targets : []);
 
 /**
+ * Whether the block at `start` is a function that does nothing: a `ret` or a `ret imm16`
+ * alone, or reached from `start` through at most three blocks that are each a direct `jmp`
+ * alone -- an incremental linker's thunk to an empty method is one. A call to it returns
+ * where it was made, `esp` past the return address and the bytes the `ret` pops, and nothing
+ * else changes; the transfer through the entry hash does that without entering the region
+ * (`finishModule`). Answered as the byte a hash slot keeps for it: the jumps in the top two
+ * bits, the bytes popped in dwords plus one in the low six; 0 for anything else, among them a
+ * `ret imm16` not a multiple of four or past 248, and a `ret` or `jmp` of a word's operand
+ * size, which pops a word or jumps within the first 64 KB. A `rep ret` is a `ret`.
+ * The blocks are a region's (`blockAt`), so a store into their bytes drops the entry with it.
+ *
+ * @param {(start: number) => Block | undefined} blockAt  the region's block at an address
+ * @param {number} start
+ */
+export function emptyCode(blockAt, start){
+    let at = start;
+    for (let jumps = 0; jumps < 4; jumps++)
+    {
+        const block = blockAt(at);
+        if (block === undefined || block.instructions.length !== 1)
+        {
+            return 0;
+        }
+        const [instruction] = block.instructions;
+        if (instruction.prefixes.operand)
+        {
+            return 0;
+        }
+        if (instruction.op === 'ret')
+        {
+            const popped = instruction.operands[0]?.kind === 'imm'
+                ? /** @type {number} */ (instruction.operands[0].value) : 0;
+            return popped % 4 === 0 && popped <= 248 ? jumps << 6 | (popped / 4 + 1) : 0;
+        }
+        const [operand] = instruction.operands;
+        if (instruction.op !== 'jmp' || operand?.kind !== 'rel')
+        {
+            return 0;
+        }
+        at = /** @type {number} */ (operand.target);
+    }
+    return 0;
+}
+
+/**
  * Whether a block ends in a call that leaves its region: a direct call whose
  * callee is not formed in, or an indirect one that no prediction or table
  * formed a callee of in. Under `callReturn` such a call is a wasm call, and

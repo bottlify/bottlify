@@ -129,6 +129,8 @@ export const Mechanism = Object.freeze({
     APART_FULL: 16,
     /** an indirect call to none of the callees predicted and formed in. */
     APART_MISSED: 17,
+    /** A call to a function that does nothing, returned from in the transfer (`emptyCalls`). */
+    EMPTY_RETURN: 18,
 });
 
 /** The names of `Mechanism`'s counts, by index. */

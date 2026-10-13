@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { formRegion, inlineReturns } from './region.js';
+import { emptyCode, formRegion, inlineReturns } from './region.js';
 
 /** A region over bytes placed at `base`. @param {number[]} bytes @param {number} [base] */
 function regionOf(bytes, base = 0x1000, options = {}){
@@ -419,4 +419,50 @@ test('a switch whose index is loaded after the bound test of the memory it comes
     memory.set(0x1004, 0x04); // lea eax, [ebx + ebx*2]: eax written
     const moved = formRegion(address=>memory.get(address) ?? 0, 0x1000);
     assert.equal(moved.blocks.find(block=>block.start === 0x1008)?.exit.table, undefined);
+});
+
+/**
+ * `emptyCode` of the region formed at the first piece's address, over pieces of code placed
+ * apart. @param {[number, number[]][]} pieces
+ */
+function emptyOf(pieces){
+    const image = new Map(pieces.flatMap(([at, bytes])=>bytes.map((byte, i)=>[at + i, byte])));
+    const region = formRegion(address=>image.get(address) ?? 0xcc, pieces[0][0], {});
+    const blocks = new Map(region.blocks.map(block=>[block.start, block]));
+    return emptyCode(at=>blocks.get(at), pieces[0][0]);
+}
+
+test('a function that does nothing is marked with its jumps and the dwords its ret pops', ()=>{
+    assert.equal(emptyOf([[0x1000, [0xc3]]]), 1, 'ret');
+    assert.equal(emptyOf([[0x1000, [0xf3, 0xc3]]]), 1, 'rep ret is a ret');
+    assert.equal(emptyOf([[0x1000, [0xc2, 0x08, 0x00]]]), 3, 'ret 8: the address and two');
+    assert.equal(emptyOf([[0x1000, [0xc2, 0xf8, 0x00]]]), 63, 'ret 248, the most a slot holds');
+    // An incremental linker's thunk to an empty virtual method (Engine.dll+0x3f9b3 and its
+    // target, 0x30000000 lower: the jump is relative, the bytes the same).
+    assert.equal(emptyOf([[0x3f9b3, [0xe9, 0xd8, 0x7c, 0x43, 0x00]], [0x477690, [0xc3]]]),
+        1 << 6 | 1);
+    // Three jumps, near and short.
+    assert.equal(emptyOf([[0x1000, [0xe9, 0xfb, 0x00, 0x00, 0x00]], [0x1100, [0xeb, 0x7e]],
+        [0x1180, [0xe9, 0x7b, 0x00, 0x00, 0x00]], [0x1200, [0xc2, 0x04, 0x00]]]), 3 << 6 | 2);
+});
+
+test('anything else is not marked', ()=>{
+    const none = {
+        'four jumps': [[0x1000, [0xeb, 0x0e]], [0x1010, [0xeb, 0x0e]], [0x1020, [0xeb, 0x0e]],
+            [0x1030, [0xeb, 0x0e]], [0x1040, [0xc3]]],
+        'a jump to itself': [[0x1000, [0xeb, 0xfe]]],
+        'ret 6, not dwords': [[0x1000, [0xc2, 0x06, 0x00]]],
+        'ret 252, past the slot': [[0x1000, [0xc2, 0xfc, 0x00]]],
+        'a word ret': [[0x1000, [0x66, 0xc3]]],
+        'a word ret 4': [[0x1000, [0x66, 0xc2, 0x04, 0x00]]],
+        'a word jump': [[0x1000, [0x66, 0xe9, 0xfc, 0x00]], [0x1100, [0xc3]]],
+        'nop; ret': [[0x1000, [0x90, 0xc3]]],
+        'a jump to work': [[0x1000, [0xeb, 0x0e]], [0x1010, [0x40, 0xc3]]],
+        'a jump through memory': [[0x1000, [0xff, 0x20]]],
+        'a jump to a call': [[0x1000, [0xeb, 0x0e]], [0x1010, [0xe8, 0xeb, 0x0f, 0x00, 0x00]]],
+    };
+    for (const [name, pieces] of Object.entries(none))
+    {
+        assert.equal(emptyOf(/** @type {[number, number[]][]} */ (pieces)), 0, name);
+    }
 });

@@ -20,7 +20,7 @@ test('an entry is found by its address and answers its function and label', ()=>
     assert.equal(entries.entryOf(0x1010), b);
     assert.equal(entries.entryOf(0x1004), -1);
     assert.deepEqual(entries.at(b),
-        { eip: 0x1010, fn, label: 1, page: 1, top: 8, table: -1, slot: -1 });
+        { eip: 0x1010, fn, label: 1, page: 1, top: 8, table: -1, slot: -1, empty: 0 });
     assert.equal(entries.count(), 2);
     assert.equal(entries.add(0x1000, ()=>1, 5), a, 'an address already mapped keeps its entry');
     assert.equal(entries.at(a).label, 0);

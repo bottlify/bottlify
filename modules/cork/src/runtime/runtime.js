@@ -26,7 +26,7 @@
  * publishes code for bytes that changed while it was being compiled.
  */
 
-import { formRegion, formShared, hashRegion } from '../region.js';
+import { emptyCode, formRegion, formShared, hashRegion } from '../region.js';
 import { TIER_SLOT, enterRegion, mathImports } from '../emit/region.js';
 import { decode } from '../decode/decoder.js';
 import { NanRecord, SHAPE, isX87, trackRegion } from '../emit/x87.js';
@@ -244,6 +244,11 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         // `ret` that comes back to it, rather than a transfer through the entry
         // hash each way (`callAndReturn` in emit/integer.js).
         callReturn: true,
+        // An entry that is a function doing nothing -- a `ret`, after a thunk's
+        // jumps (`emptyCode` in region.js) -- marked in the entry hash, so a call
+        // to it returns from the transfer without entering its region
+        // (`finishModule` in emit/region.js; false: entered as any other).
+        emptyCalls: true,
         // x87 regions compiled for the precision control the program runs
         // under -- the wide ones (double, extended) until it is seen with
         // single set, single from then on until it is seen with another --
@@ -2067,6 +2072,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         {
             joinModule(record, placed);
         }
+        const blockAt = new Map(region.blocks.map(block=>[block.start, block]));
         for (const [start, label] of starts)
         {
             // An address another region's entry already holds stays that
@@ -2076,7 +2082,9 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             // a copy of a block inside a loop (a label past twice its blocks,
             // `emitCopies`) and here it is not: a run entered there goes on in
             // this region's loops rather than in a flat dispatch.
-            let slot = entries.add(start, fn, label, top, record.table);
+            const empty = settings.emptyCalls !== false
+                ? emptyCode(at=>blockAt.get(at), start) : 0;
+            let slot = entries.add(start, fn, label, top, record.table, empty);
             const held = entries.at(slot);
             const holder = recordOf.get(slot);
             if (held.fn !== fn && holder !== undefined && held.top === top
@@ -2085,7 +2093,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 entries.remove(slot);
                 recordOf.delete(slot);
                 holder.slots = holder.slots.filter(other=>other !== slot);
-                slot = entries.add(start, fn, label, top, record.table);
+                slot = entries.add(start, fn, label, top, record.table, empty);
             }
             if (entries.at(slot).fn === fn)
             {

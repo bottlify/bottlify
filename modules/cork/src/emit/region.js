@@ -57,8 +57,9 @@ import {
 } from './memory.js';
 import { importHelpers } from './helpers.js';
 import { Mechanism, Tables, blockProfileAt, blockSlot, hashSlotsOf, mechanismAt,
-    transferTargetAt }
+    pageFlagsAt, transferTargetAt }
     from '../runtime/layout.js';
+import { PageFlag } from '../runtime/pages.js';
 import { ANY_TOP } from '../runtime/entries.js';
 
 /** `i64.add`, the one 64-bit operation a profiling run's counts take. */
@@ -565,6 +566,10 @@ export function finishModule(context, functions){
         b.i32const(0).i32const(0).load('i32', { offset: at }).i32const(1).op(I32.add)
             .store('i32', { offset: at });
     }
+    if (carried && context.callReturn === true)
+    {
+        emptyReturn(context, b, slotAt, key);
+    }
     b.localGet(slotAt).load('i32_16u', { offset: 8 }).localSet(eip);
     if (placed !== undefined)
     {
@@ -637,9 +642,69 @@ export function finishModule(context, functions){
         b.i32const(Exit.UNTRANSLATED);
     }
     m.functions[transfer - m.importedFunctions] = {
-        typeIndex: regionType, locals: [ValType.i32, ValType.i32, ValType.i32], body: b.toBytes(),
-        hints: b.hints,
+        typeIndex: regionType,
+        locals: [ValType.i32, ValType.i32, ValType.i32, ValType.i32, ValType.i32],
+        body: b.toBytes(), hints: b.hints,
     };
+}
+
+/**
+ * In the transfer, at a slot whose entry is a function that does nothing (`emptyCode`, the
+ * slot's byte 11): that function's `ret`, done here when it returns to the wasm call waiting
+ * at the top of the call stack (`callAndReturn`) -- the return address the call pushed read
+ * back from the guest's stack, on pages the program can read, and found to be the one the
+ * call waits at. Then as `returnToCall` and `returnToCaller` leave it: the call taken off the
+ * stack, `esp` past the address and the bytes the `ret` pops, the registers the parameters
+ * carry in the state block beside the rest the caller left there, and the budget less the
+ * instructions run (the jumps and the `ret`) where the caller reads it. The flags, the x87
+ * and the memory are as the call left them, as the function would leave them. A `ret` to
+ * anywhere else -- a jump into the function, a return address rewritten -- enters the region
+ * as before.
+ *
+ * @param {ModuleContext} context @param {Body} b @param {number} slotAt @param {number} code
+ */
+function emptyReturn(context, b, slotAt, code){
+    const { layout } = context;
+    const esp = STATE_PARAMS + 3;
+    const depth = STATE_PARAMS + 4;
+    const flags = pageFlagsAt(layout);
+    b.localGet(slotAt).load('i32_8u', { offset: 11 }).localTee(code);
+    b.if(EMPTY);
+    b.i32const(0).load('i32', { offset: layout.tables + CallStack.DEPTH }).localTee(depth);
+    b.if(EMPTY);
+    b.i32const(0).load('i32', { offset: layout.regs + 16 }).localTee(esp);
+    b.i32const(12).op(I32.shrU).load('i32_8u', { offset: flags });
+    b.localGet(esp).i32const(3).op(I32.add).i32const(12).op(I32.shrU)
+        .load('i32_8u', { offset: flags });
+    b.op(I32.or).i32const(PageFlag.INACCESSIBLE).op(I32.and).op(I32.eqz);
+    b.if(EMPTY);
+    b.localGet(depth).i32const(2).op(I32.shl)
+        .load('i32', { offset: layout.tables + CallStack.STACK - 4 })
+        .localGet(esp).load('i32', { offset: layout.ramBase }).op(I32.eq);
+    b.if(EMPTY);
+    if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && context.blockProfile)
+    {
+        const at = layout.tables + mechanismAt(layout, Mechanism.EMPTY_RETURN);
+        b.i32const(0).i32const(0).load('i64', { offset: at }).i64const(1n).op(I64_ADD)
+            .store('i64', { offset: at });
+    }
+    b.i32const(0).localGet(depth).i32const(1).op(I32.sub)
+        .store('i32', { offset: layout.tables + CallStack.DEPTH });
+    // The low six bits are the dwords popped plus one: the return address's and the rest.
+    b.i32const(0).localGet(esp).localGet(code).i32const(63).op(I32.and).i32const(2)
+        .op(I32.shl).op(I32.add).store('i32', { offset: layout.regs + 16 });
+    for (let r = 0; r < CARRIED_REGS; r++)
+    {
+        b.i32const(0).localGet(Local.reg + r).store('i32', { offset: layout.regs + r * 4 });
+    }
+    b.i32const(0).localGet(Local.budget).localGet(code).i32const(6).op(I32.shrU)
+        .i32const(1).op(I32.add).op(I32.sub)
+        .store('i32', { offset: layout.tables + CallStack.BUDGET });
+    b.i32const(Exit.RETURNED).return();
+    b.end();
+    b.end();
+    b.end();
+    b.end();
 }
 
 /**
