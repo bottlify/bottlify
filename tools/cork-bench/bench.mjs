@@ -45,6 +45,7 @@
  * to `DIR/<name>.seed`.
  */
 
+import '../chromium-v8.mjs';
 import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';

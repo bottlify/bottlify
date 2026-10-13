@@ -51,6 +51,7 @@
  * of the functions the call spends it in.
  */
 
+import { ENGINE } from './chromium-v8.mjs';
 import { readFile } from 'node:fs/promises';
 import { Session } from 'node:inspector/promises';
 import { join, resolve } from 'node:path';
@@ -509,7 +510,8 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href)
         }
         else
         {
-            console.log(`N ${o.n}, ${o.rounds} rounds; ns a call is the median over the rounds`);
+            console.log(`N ${o.n}, ${o.rounds} rounds; ns a call is the median over the rounds;`
+                + ` ${ENGINE}`);
             console.log(table(measured.results, Object.keys(measured.trees)));
         }
     }

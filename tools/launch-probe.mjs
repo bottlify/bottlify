@@ -22,6 +22,7 @@
  *     node tools/launch-probe.mjs <bundle-id> [--turns 200000] [--mode NAME]
  */
 
+import { ENGINE } from './chromium-v8.mjs';
 import { createWriteStream, mkdirSync, writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
@@ -529,7 +530,8 @@ async function main(){
         process.exit(2);
     }
 
-    console.log(`mode: ${mode}, ${executors ?? 1} executor(s), cork ${JSON.stringify(corkConfig)}`);
+    console.log(`mode: ${mode}, ${executors ?? 1} executor(s), cork ${JSON.stringify(corkConfig)};`
+        + ` ${ENGINE}`);
     const directory = new URL(`${id}/`, BUNDLES);
     const manifest = JSON.parse(
         await readFile(new URL('manifest.json', directory), 'utf8'));

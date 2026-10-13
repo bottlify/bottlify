@@ -37,6 +37,7 @@
  * benchmark's loops do.
  */
 
+import '../chromium-v8.mjs';
 import { execFileSync } from 'node:child_process';
 import { openSync, readFileSync, readSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';

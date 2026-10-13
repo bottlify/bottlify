@@ -35,6 +35,7 @@
  * results for `--compare`, which sets two runs side by side.
  */
 
+import { ENGINE } from './chromium-v8.mjs';
 import { readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { join, resolve } from 'node:path';
@@ -648,7 +649,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href)
         else
         {
             console.log(`N ${o.n}, ${o.rounds} rounds; ns an element, the median over the`
-                + ' rounds; host: calls into the host in the last run');
+                + ` rounds; host: calls into the host in the last run; ${ENGINE}`);
             console.log(table([measured.results], ['this']));
         }
     }
