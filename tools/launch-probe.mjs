@@ -136,6 +136,11 @@ function parse(argv){
         // later one warm. None: every run translates from nothing.
         translationStore: argv.includes('--translation-store')
             ? argv[argv.indexOf('--translation-store') + 1] : null,
+        // A V8 CPU profile of the thread the program runs on, as FILE[:FROM[:FOR]]
+        // seconds of the run: translated code's own time, region by region
+        // (`r<entry>`), which counting its instructions cannot give.
+        cpuProfile: argv.includes('--cpu-profile')
+            ? argv[argv.indexOf('--cpu-profile') + 1] : null,
     };
 }
 
@@ -465,10 +470,58 @@ function seriesRow(app, last, began){
     return point;
 }
 
+/**
+ * A CPU profile of this thread from `from` seconds on for `for` seconds (to the
+ * run's end when not given), written to the file when it stops.
+ *
+ * @param {string} spec  FILE[:FROM[:FOR]]
+ */
+async function cpuProfiler(spec){
+    const [file, from = '0', length = ''] = spec.split(':');
+    const { Session } = await import('node:inspector');
+    const session = new Session();
+    session.connect();
+    /** @param {string} method @param {object} [params] @returns {Promise<any>} */
+    const post = (method, params = {})=>new Promise((resolve, reject)=>
+        session.post(method, params, (error, result)=>(error ? reject(error) : resolve(result))));
+    await post('Profiler.enable');
+    await post('Profiler.setSamplingInterval', { interval: 1000 });
+    let state = 'waiting';
+    const stop = async()=>{
+        if (state !== 'running')
+        {
+            state = 'done';
+            return;
+        }
+        state = 'done';
+        const { profile } = await post('Profiler.stop');
+        writeFileSync(file, JSON.stringify(profile));
+        console.log(`  cpu profile written to ${file}`);
+        session.disconnect();
+    };
+    setTimeout(()=>{
+        if (state !== 'waiting')
+        {
+            return;
+        }
+        state = 'running';
+        post('Profiler.start').then(()=>{
+            console.log(`  cpu profile started at ${from} s`);
+            if (length !== '')
+            {
+                setTimeout(()=>{
+                    stop();
+                }, Number(length) * 1000).unref();
+            }
+        });
+    }, Number(from) * 1000).unref();
+    return { stop };
+}
+
 async function main(){
     const { id, turns, map, grep, calls, heap, profile, log, watch, peek, dump, which,
         corkConfig, series, raster, draw, corkOut, concurrency, seconds, commandLine, executors,
-        memory, mode, translationStore } = parse(process.argv.slice(2));
+        memory, mode, translationStore, cpuProfile } = parse(process.argv.slice(2));
     if (!id)
     {
         console.error('usage: node tools/launch-probe.mjs <bundle-id> [--turns N] '
@@ -674,6 +727,7 @@ async function main(){
         app.stop();
     });
 
+    const profiling = cpuProfile === null ? null : await cpuProfiler(cpuProfile);
     let stopped;
     const began = performance.now();
     /** @type {SeriesPoint | null} */
@@ -772,6 +826,7 @@ async function main(){
 ${text}` : `  ${JSON.stringify(failure).slice(0, 200)}`);
     }
 
+    await profiling?.stop();
     sink?.end();
     await app.dispose();
     // A store handed in is the caller's to close, and its index is written then.
