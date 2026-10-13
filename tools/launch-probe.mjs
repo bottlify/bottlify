@@ -707,6 +707,13 @@ async function main(){
         console.log(`  mechanisms: ${Object.entries(cork.mechanisms).filter(([, n])=>n > 0)
             .map(([name, n])=>`${name}=${n}`).join(' ')}`);
     }
+    if (cork?.prediction?.due > 0)
+    {
+        // Indirect call prediction (`callTargets`): the sites that came due and why
+        // each was left unpredicted.
+        console.log(`  prediction: ${Object.entries(cork.prediction)
+            .map(([name, n])=>`${name}=${n}`).join(' ')}`);
+    }
     if (cork?.transferTargets?.length)
     {
         console.log(`  transfer targets: ${cork.transferTargets.slice(0, 40)

@@ -816,6 +816,11 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         modules: 0, invalidations: 0, volatilePages: 0, dropped: 0, moduleBytes: 0,
         // Stores into code that changed none of the bytes a region on the page was made from.
         storesKept: 0,
+        // Indirect call sites whose samples came due (`callTargets`), and why
+        // each was left as it was: no callee took a share of its samples, or
+        // only ones tried already; its regions formed again as often as they
+        // may be; formed again with none of its new callees in.
+        predictDue: 0, predictNoShare: 0, predictReformsOut: 0, predictNotFormed: 0,
         queueDrops: 0, queueEvictions: 0, emitFailures: 0,
         cacheHits: 0, cacheMisses: 0, missNoRecord: 0, missNoModule: 0, precisionSwitches: 0,
         readSwitches: 0,
@@ -2623,11 +2628,13 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 tried = new Set();
                 callTried.set(site, tried);
             }
+            counts.predictDue++;
             const fresh = [...seen.targets].filter(([target, times])=>
                 times * PREDICT_SHARE >= seen.total && !tried.has(target))
                 .sort((a, b)=>b[1] - a[1]).map(([target])=>target);
             if (fresh.length === 0)
             {
+                counts.predictNoShare++;
                 continue;
             }
             fresh.forEach(target=>tried.add(target));
@@ -2638,6 +2645,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 const had = one.targets.get(site) ?? [];
                 const added = fresh.filter(target=>!had.includes(target))
                     .slice(0, PREDICT_CALLEES - had.length);
+                if (added.length > 0 && (record.reforms ?? 0) >= REFORMS)
+                {
+                    counts.predictReformsOut++;
+                }
                 if (added.length === 0 || (record.reforms ?? 0) >= REFORMS
                     || !record.spans.some(([start, end])=>site >= start && site < end))
                 {
@@ -2655,6 +2666,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 { ...formOptions, translatable, callTargets: targets });
             if (!region.blocks.some(block=>added.includes(block.start)))
             {
+                counts.predictNotFormed++;
                 continue;
             }
             formed.push({ region, entryTop: record.entryTop, stamp: stamp(region.pages),
@@ -3906,6 +3918,9 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 volatilePages: counts.volatilePages,
                 volatileNow: volatileUntil.size,
                 storesKept: counts.storesKept,
+                prediction: { due: counts.predictDue, noShare: counts.predictNoShare,
+                    reformsOut: counts.predictReformsOut, notFormed: counts.predictNotFormed,
+                    reforms: counts.reforms },
                 exits: { ...exits },
                 untranslatedBy: { ...untranslatedBy },
                 // The top untranslated-exit targets over the whole run (or the
