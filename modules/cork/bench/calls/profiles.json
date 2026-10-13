@@ -1,0 +1,173 @@
+{
+ "note": "Made by tools/cork-calls.mjs from block profiles; depth is not in a block profile and is swept.",
+ "workloads": [
+  {
+   "name": "farcry",
+   "functions": 138,
+   "work": 78,
+   "indirectShare": 0.164,
+   "liveAfter": 1.42,
+   "measured": {
+    "calls": {
+     "direct": 169192169,
+     "indirect": 33124293,
+     "import": 731456
+    },
+    "instructionsPerCall": 77.9,
+    "liveAfter": {
+     "histogram": [
+      18112058,
+      114942270,
+      45514130,
+      15462665,
+      6834442,
+      1403121,
+      47164,
+      612
+     ],
+     "mean": 1.4185655638837733,
+     "undecided": [
+      1130487,
+      19298114,
+      8205351,
+      20238540,
+      37868263,
+      30359954,
+      75020324,
+      10195429
+     ],
+     "undecidedMean": 4.553199457392647
+    },
+    "liveIn": {
+     "histogram": [
+      21039939,
+      51292224,
+      23686972,
+      11610388,
+      27985163,
+      32812587,
+      763570,
+      1326
+     ],
+     "mean": 2.447463280643917
+    },
+    "calleesFor90": 138,
+    "callees": 4343,
+    "depth": "not measured"
+   },
+   "from": "Far Cry demo, map research, headless Chromium 141 on SwiftShader, blockProfile from 340 s to 569 s, cork2 566b4fc1; the occlusion wait loop (0x2b50c40-0x2b50cd2) and the API stubs (0x100000-0x140000) excluded"
+  },
+  {
+   "name": "spread",
+   "functions": 226,
+   "work": 53,
+   "indirectShare": 0.794,
+   "liveAfter": 2.29,
+   "measured": {
+    "calls": {
+     "direct": 416696,
+     "indirect": 1602960,
+     "import": 3
+    },
+    "instructionsPerCall": 53,
+    "liveAfter": {
+     "histogram": [
+      1,
+      5,
+      1432993,
+      586657,
+      0,
+      0,
+      0,
+      0
+     ],
+     "mean": 2.2904702583014136,
+     "undecided": [
+      0,
+      1,
+      409601,
+      730069,
+      549414,
+      330566,
+      5,
+      0
+     ],
+     "undecidedMean": 3.396581398020257
+    },
+    "liveIn": {
+     "histogram": [
+      0,
+      1,
+      0,
+      416695,
+      0,
+      0,
+      0,
+      0
+     ],
+     "mean": 2.9999952003378962
+    },
+    "calleesFor90": 226,
+    "callees": 257,
+    "depth": "not measured"
+   },
+   "from": "cork-bench spread, x87 build, 100 iterations, node, cork2 08b89c40"
+  },
+  {
+   "name": "entities",
+   "functions": 24,
+   "work": 52,
+   "indirectShare": 0.859,
+   "liveAfter": 2.82,
+   "measured": {
+    "calls": {
+     "direct": 307255,
+     "indirect": 1865123,
+     "import": 3
+    },
+    "instructionsPerCall": 52.1,
+    "liveAfter": {
+     "histogram": [
+      201,
+      716659,
+      4081,
+      409604,
+      1041833,
+      0,
+      0,
+      0
+     ],
+     "mean": 2.8176334873580933,
+     "undecided": [
+      0,
+      1,
+      409601,
+      1045914,
+      3,
+      409600,
+      307159,
+      100
+     ],
+     "undecidedMean": 3.612912209569421
+    },
+    "liveIn": {
+     "histogram": [
+      102336,
+      204719,
+      200,
+      0,
+      0,
+      0,
+      0,
+      0
+     ],
+     "mean": 0.6675855559714244
+    },
+    "calleesFor90": 3,
+    "callees": 5,
+    "depth": "not measured"
+   },
+   "from": "cork-bench entities, x87 build, 200 iterations, node, cork2 08b89c40; 24 functions: its 24 classes (src/entities.cpp), the indirect targets a block profile does not name"
+  }
+ ]
+}
