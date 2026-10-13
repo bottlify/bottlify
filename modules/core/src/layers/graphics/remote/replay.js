@@ -473,6 +473,13 @@ export function createRecording(options){
     /** How deep in calls the program is: a call the device makes back through the caller is part of its own. */
     let depth = 0;
     /**
+     * The parts of each object (`partOf`) an unlock has sent the bytes of:
+     * a part not among them the played side has only as it was made.
+     *
+     * @type {WeakMap<object, Set<string>>}
+     */
+    const sentParts = new WeakMap();
+    /**
      * What the played side's memory holds of each dynamic buffer a draw has
      * read, by the buffer: it is what was last sent of it, by its unlocks
      * and by draws (`drawsFrom`), and a draw sends only what differs from it.
@@ -1243,6 +1250,13 @@ export function createRecording(options){
                 if (deferring)
                 {
                     ranges.forEach(pendFor(keyOf(target)));
+                    if (ranges.length > 0)
+                    {
+                        const part = name === 'ReleaseDC' ? '' : partOf(args);
+                        const parts = sentParts.get(target) ?? new Set();
+                        parts.add(part);
+                        sentParts.set(target, parts);
+                    }
                 }
                 else
                 {
@@ -1365,8 +1379,15 @@ export function createRecording(options){
             }
             // A lock taken to read is marked so whatever the answer: a render
             // target's comes from the played device later, and an unlock with
-            // no lock on record sends the whole surface.
-            const readOnly = locking && readOnlyLock(args);
+            // no lock on record sends the whole surface. But not the first of
+            // a part the played side was never sent: what it has there is
+            // what the part held when it was made, and a managed texture's
+            // first upload takes its system copy whatever the locks said -- a
+            // program that fills a level under D3DLOCK_READONLY is drawn with
+            // what it wrote on Windows. That first one goes as a write.
+            const readOnly = locking && readOnlyLock(args)
+                && (sentParts.get(target)?.has(partOf(args)) === true
+                    || typeof (/** @type {any} */ (result))?.then === 'function');
             if (readOnly)
             {
                 const locks = lockedAt.get(target) ?? new Map();

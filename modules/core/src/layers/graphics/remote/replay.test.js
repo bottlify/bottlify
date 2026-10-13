@@ -417,7 +417,8 @@ test('what a lock let the program write is the played device\'s at the unlock', 
     assert.deepEqual(played.seen, [[1, 2, 3, 4]]);
 });
 
-test('a lock taken to read sends nothing back at its unlock; one taken to write does', ()=>{
+test('a lock taken to read sends nothing back at its unlock once the part was sent; one taken '
+    + 'to write does', ()=>{
     const { root, ram, played } = toyLoop();
     /** @type {{ thing?: any }} */
     const out = {};
@@ -426,22 +427,47 @@ test('a lock taken to read sends nothing back at its unlock; one taken to write 
     /** @type {{ pBits?: number }} */
     const locked = {};
     const D3DLOCK_READONLY = 0x10;
+    assert.equal(thing.LockRect(locked, null, 0), D3D_OK);
+    ram.set([1, 2, 3, 4], /** @type {number} */ (locked.pBits));
+    assert.equal(thing.UnlockRect(), D3D_OK);
+    thing.Peek();
+    assert.deepEqual(played.seen, [[1, 2, 3, 4]], 'written: the bytes went');
+
     assert.equal(thing.LockRect(locked, null, D3DLOCK_READONLY | 0x800), D3D_OK);
     ram.set([5, 6, 7, 8], /** @type {number} */ (locked.pBits));
     assert.equal(thing.UnlockRect(), D3D_OK);
     thing.Peek();
-    assert.deepEqual(played.seen, [[0, 0, 0, 0]], 'read, not written: nothing went');
-    assert.equal(thing.LockRect(locked, null, 0), D3D_OK);
-    assert.equal(thing.UnlockRect(), D3D_OK);
-    thing.Peek();
-    assert.deepEqual(played.seen[1], [5, 6, 7, 8], 'written: the bytes went');
+    assert.deepEqual(played.seen[1], [1, 2, 3, 4], 'read, not written: nothing went');
 
     ram.set([9, 9, 9, 9], /** @type {number} */ (locked.pBits));
     assert.equal(thing.LockRectAnswered(locked, null, D3DLOCK_READONLY), D3D_OK);
     assert.equal(thing.UnlockRect(), D3D_OK);
     thing.Peek();
-    assert.deepEqual(played.seen[2], [5, 6, 7, 8],
+    assert.deepEqual(played.seen[2], [1, 2, 3, 4],
         'read, with no address on record: still nothing went');
+});
+
+test('a part the played side was never sent goes at its first unlock, even of a lock taken to '
+    + 'read: a managed level filled under D3DLOCK_READONLY is drawn with what was written', ()=>{
+    const { root, ram, played } = toyLoop();
+    /** @type {{ thing?: any }} */
+    const out = {};
+    root.CreateThing(out);
+    const thing = out.thing;
+    /** @type {{ pBits?: number }} */
+    const locked = {};
+    const D3DLOCK_READONLY = 0x10;
+    assert.equal(thing.LockRect(locked, null, D3DLOCK_READONLY), D3D_OK);
+    ram.set([5, 6, 7, 8], /** @type {number} */ (locked.pBits));
+    assert.equal(thing.UnlockRect(), D3D_OK);
+    thing.Peek();
+    assert.deepEqual(played.seen, [[5, 6, 7, 8]], 'never sent: the bytes went');
+
+    assert.equal(thing.LockRect(locked, null, D3DLOCK_READONLY), D3D_OK);
+    ram.set([7, 7, 7, 7], /** @type {number} */ (locked.pBits));
+    assert.equal(thing.UnlockRect(), D3D_OK);
+    thing.Peek();
+    assert.deepEqual(played.seen[1], [5, 6, 7, 8], 'sent once: a read sends nothing again');
 });
 
 test('a method the caller wraps is its own: what it calls through is played once', ()=>{
