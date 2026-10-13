@@ -1487,6 +1487,82 @@ test('a combo box shows its selection and the arrow keys change it with CBN_SELC
             && code === CBN_SELCHANGE), [[500, CBN_SELCHANGE, combo]]);
     });
 
+test('a dropdown list drops a list of its own under the field, and a click there chooses',
+    async()=>{
+        // A dialog of combo boxes whose lists never dropped -- a game's
+        // configuration listing every display mode in them -- left a click
+        // nothing to do: the list is a popup of the ComboLBox class over
+        // everything, holding the mouse until a row is chosen or it is let go.
+        const CB_GETDROPPEDSTATE = 0x0157;
+        const CBN_DROPDOWN = 7;
+        const CBN_CLOSEUP = 8;
+        const CBN_SELENDOK = 9;
+        const CBN_SELENDCANCEL = 10;
+        const context = setup();
+        const dialog = await openDialog(context);
+        context.memory.putString(TEXT, 'ComboBox');
+        const combo = context.fns.CreateWindowExA.handler([0, TEXT, 0,
+            WS_CHILD | WS_VISIBLE | 0x0003, 8, 60, 100, 120, dialog, 500, HINSTANCE, 0]);
+        for (const item of ['One', 'Two', 'Three'])
+        {
+            context.memory.putString(TEXT, item);
+            context.fns.SendMessageA.handler([combo, CB_ADDSTRING, 0, TEXT]);
+        }
+        context.fns.SendMessageA.handler([combo, CB_SETCURSEL, 0, 0]);
+        const dropped = ()=>context.fns.SendMessageA.handler([combo, CB_GETDROPPEDSTATE, 0, 0]);
+        /** @param {number} hwnd */
+        const rectOf = hwnd=>{
+            context.fns.GetWindowRect.handler([hwnd, OUT]);
+            return [0, 4, 8, 12].map(at=>context.memory.u32(OUT + at) | 0);
+        };
+        const codes = ()=>context.commands().filter(([id, code])=>id === 500
+            && [CBN_SELCHANGE, CBN_DROPDOWN, CBN_CLOSEUP, CBN_SELENDOK, CBN_SELENDCANCEL]
+                .includes(code)).map(([, code])=>code);
+        const field = context.centre(combo);
+        assert.equal(dropped(), 0);
+
+        context.click(field.x, field.y);
+        await context.pump(dialog);
+        assert.equal(dropped(), 1, 'the press dropped it, and letting go on the field kept it');
+        const [, , , fieldBottom] = rectOf(combo);
+        const list = context.fns.WindowFromPoint.handler([field.x, fieldBottom + 3]);
+        assert.equal(context.fns.GetClassNameA.handler([list, OUT, 32]), 9);
+        assert.equal(context.memory.readCString(OUT, 32), 'ComboLBox');
+        const [left, top, right, bottom] = rectOf(list);
+        assert.equal(top, fieldBottom, 'right under the field');
+        assert.ok(right - left >= 100, 'as wide as the combo box');
+        const row = (bottom - top - 2) / 3;
+        assert.ok(row > 0 && Number.isInteger(row), 'every item, each a row');
+
+        context.click(field.x, top + 1 + Math.floor(row * 1.5));
+        await context.pump(dialog);
+        assert.equal(context.fns.SendMessageA.handler([combo, CB_GETCURSEL, 0, 0]), 1);
+        assert.equal(context.fns.GetWindowTextA.handler([combo, OUT, 16]), 3);
+        assert.equal(context.memory.readCString(OUT, 16), 'Two');
+        assert.equal(dropped(), 0);
+        assert.equal(context.fns.IsWindow.handler([list]), 0, 'the list goes when it closes');
+        assert.deepEqual(codes(), [CBN_DROPDOWN, CBN_SELCHANGE, CBN_SELENDOK, CBN_CLOSEUP]);
+
+        // Dropped again, a key moves through it and Escape closes it with
+        // nothing chosen; a press outside does the same.
+        context.dispatched.length = 0;
+        context.click(field.x, field.y);
+        await context.pump(dialog);
+        assert.equal(dropped(), 1);
+        context.key(WM_KEYDOWN, VK_DOWN);
+        context.key(WM_KEYDOWN, VK_ESCAPE);
+        await context.pump(dialog);
+        assert.equal(dropped(), 0);
+        assert.equal(context.fns.SendMessageA.handler([combo, CB_GETCURSEL, 0, 0]), 1);
+        context.click(field.x, field.y);
+        await context.pump(dialog);
+        context.click(right + 40, bottom + 40);
+        await context.pump(dialog);
+        assert.equal(dropped(), 0);
+        assert.deepEqual(codes(), [CBN_DROPDOWN, CBN_SELENDCANCEL, CBN_CLOSEUP,
+            CBN_DROPDOWN, CBN_SELENDCANCEL, CBN_CLOSEUP]);
+    });
+
 test('an editable combo box field takes typing and answers the edit selection', async()=>{
     const context = setup();
     const dialog = await openDialog(context);

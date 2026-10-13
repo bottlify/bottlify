@@ -79,6 +79,21 @@ test('an owned window stays above its owner, and goes up with it', ()=>{
         'raised alone, as SetWindowPos raises it: its owner stays where it was');
 });
 
+test('a window owned by a topmost one is above it, in the topmost band with it', ()=>{
+    // Half-Life's menu is a topmost dialog, and its difficulty dialog, owned
+    // by it and not topmost itself, was kept in the band beneath it: the menu
+    // went on drawing over the dialog the program waited on.
+    const manager = createWindowManager();
+    manager.publish(state(1));
+    manager.publish(state(2, { exStyle: WS_EX_TOPMOST, topmost: true }));
+    manager.publish(state(3, { owner: 2 }));
+    assert.deepEqual(order(manager), [3, 2, 1], 'over its owner, the plain window beneath both');
+    manager.raise(1);
+    assert.deepEqual(order(manager), [3, 2, 1], 'and above a plain window raised after it');
+    manager.publish(state(4, { owner: 3 }));
+    assert.deepEqual(order(manager), [4, 3, 2, 1], 'owned at one more remove, the same band');
+});
+
 test('a child is not in the order of top-level windows, and the deepest one under a point is'
     + ' found', ()=>{
     const manager = createWindowManager();

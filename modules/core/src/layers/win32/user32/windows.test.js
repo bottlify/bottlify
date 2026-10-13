@@ -29,6 +29,7 @@ const HEAP_BASE = 0x12000;
 const THREAD = { name: 'main' };
 const WH_CBT = 5;
 const WH_KEYBOARD = 2;
+const WH_MOUSE = 7;
 const HCBT_CREATEWND = 3;
 const HCBT_DESTROYWND = 4;
 const HCBT_ACTIVATE = 5;
@@ -3636,6 +3637,51 @@ test('a keyboard hook is shown every key message taken, and can discard it', ()=
         'a hook that answers nonzero takes the message away');
 });
 
+test('a mouse hook is shown every mouse message taken, with where it is, and can discard it',
+    ()=>{
+        // A game that reads its buttons in a WH_MOUSE hook saw its pointer
+        // move, through GetCursorPos, and no click land while the hook was
+        // installed and never called.
+        let refuse = false;
+        /** @type {number[][]} */
+        const shown = [];
+        /** @type {any} */
+        let functions = null;
+        const { fns, queue, memory } = setup({ heap: true, hookReply: (entry, args)=>{
+            const fields = [0, 4, 8, 12, 16].map(at=>memory.u32(args[2] + at));
+            shown.push([...args.slice(0, 2), ...fields]);
+            return refuse ? 1 : 0;
+        }, reply: (/** @type {any} */ message)=>functions.DefWindowProcA.handler(
+            [message.hwnd, message.message, message.wParam, message.lParam]) });
+        functions = fns;
+        putClass(memory);
+        fns.RegisterClassA.handler([CLASS_STRUCT]);
+        const hwnd = createWindow(fns, memory, { style: WS_VISIBLE });
+        const POINT = TEXT_BUFFER;
+        memory.putU32s(POINT, [10, 20]);
+        fns.ClientToScreen.handler([hwnd, POINT]);
+        const [x, y] = [memory.u32(POINT), memory.u32(POINT + 4)];
+        fns.SetWindowsHookExA.handler([WH_MOUSE, HOOK_PROC, 0, 1]);
+        queue.post({ hwnd: 0, message: WM_LBUTTONDOWN, wParam: 1, lParam: 0, x, y });
+        assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_NOREMOVE]), 1);
+        assert.deepEqual(shown.at(-1), [3, WM_LBUTTONDOWN, x, y, hwnd, 1, 0],
+            'HC_NOREMOVE on a look: the message, and the point on the screen, the window and '
+            + 'HTCLIENT');
+        assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 1);
+        assert.deepEqual(shown.at(-1)?.slice(0, 2), [0, WM_LBUTTONDOWN], 'HC_ACTION on the take');
+        queue.post({ hwnd: 0, message: WM_LBUTTONDOWN, wParam: 1, lParam: 0, x, y });
+        refuse = true;
+        // What is taken instead is the window's paint: the press is gone.
+        fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]);
+        assert.notEqual(memory.u32(MSG_BUFFER + MSG.message), WM_LBUTTONDOWN,
+            'a hook that answers nonzero takes the message away');
+        assert.equal(shown.at(-1)?.[0], 0, 'asked on the take');
+        queue.post({ hwnd, message: WM_KEYDOWN, wParam: 0x41, lParam: 0x001e0001 });
+        const before = shown.length;
+        assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 1);
+        assert.equal(shown.length, before, 'a key is not the mouse hook\'s');
+    });
+
 test('a CBT hook answering non-zero refuses the window before WM_CREATE', ()=>{
     const { memory, fns, dispatched } = setup({ heap: true, hookReply: ()=>1 });
     putClass(memory);
@@ -3785,10 +3831,10 @@ test('a hook of a type that is never called says so once, and is still installed
     const { memory, fns, called, divergences } = setup({ heap: true });
     putClass(memory);
     fns.RegisterClassA.handler([CLASS_STRUCT]);
-    // WH_MOUSE: a keyboard hook is called now.
-    assert.notEqual(fns.SetWindowsHookExA.handler([7, HOOK_PROC, HINSTANCE, 1]), 0);
+    // WH_GETMESSAGE: keyboard and mouse hooks are called now.
+    assert.notEqual(fns.SetWindowsHookExA.handler([3, HOOK_PROC, HINSTANCE, 1]), 0);
     assert.equal(divergences.length, 1);
-    assert.match(divergences[0], /SetWindowsHookExA: hook type 7/);
+    assert.match(divergences[0], /SetWindowsHookExA: hook type 3/);
     createWindow(fns, memory);
     assert.deepEqual(called, []);
     assert.equal(fns.SetWindowsHookExA.handler([WH_CBT, 0, HINSTANCE, 1]), 0,
@@ -5931,4 +5977,100 @@ test('only the thread that made a window may destroy it', ()=>{
     assert.equal(fns.IsWindow.handler([hwnd]), 1, 'still there');
     caller.current = { name: 'maker', id: 7 };
     assert.equal(fns.DestroyWindow.handler([hwnd]), 1, 'its own thread may');
+});
+
+test('a window uncovered by its dialog going paints, then every control the dialog lay over',
+    ()=>{
+        // Half-Life's menu: a popup that does not clip its children, its
+        // buttons drawn by their own WM_PAINT. A dialog shown over all of it
+        // and closed -- hidden, then destroyed -- left the menu's background
+        // painted and the buttons blank until the pointer passed over them.
+        const WS_POPUP = 0x80000000;
+        const RDW_VALIDATE = 0x8;
+        const RDW_NOCHILDREN = 0x40;
+        const { fns, memory } = setup({ paint: true });
+        putClass(memory);
+        fns.RegisterClassA.handler([CLASS_STRUCT]);
+        /** @param {number} parent @param {number} y */
+        const button = (parent, y)=>{
+            memory.putString(TITLE, 'button');
+            return fns.CreateWindowExA.handler([0, CLASS_NAME, TITLE, WS_CHILD | WS_VISIBLE,
+                70, y, 156, 26, parent, 0, HINSTANCE, 0]);
+        };
+        const menu = createWindow(fns, memory, { style: WS_POPUP | WS_VISIBLE,
+            x: 0, y: 0, width: 640, height: 480 });
+        const buttons = [button(menu, 180), button(menu, 212)];
+        /** @returns {number[]} */
+        const drain = ()=>{
+            const painted = [];
+            while (fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]) === 1)
+            {
+                if (memory.u32(MSG_BUFFER + MSG.message) === WM_PAINT)
+                {
+                    const target = memory.u32(MSG_BUFFER + MSG.hwnd);
+                    painted.push(target);
+                    fns.RedrawWindow.handler([target, 0, 0, RDW_VALIDATE | RDW_NOCHILDREN]);
+                }
+            }
+            return painted;
+        };
+        drain();
+        memory.putString(TITLE, 'dialog');
+        const dialog = fns.CreateWindowExA.handler([0, CLASS_NAME, TITLE,
+            WS_POPUP | WS_VISIBLE, 0, 0, 640, 480, menu, 0, HINSTANCE, 0]);
+        fns.EnableWindow.handler([menu, 0]);
+        drain();
+        fns.EnableWindow.handler([menu, 1]);
+        fns.ShowWindow.handler([dialog, SW_HIDE]);
+        fns.DestroyWindow.handler([dialog]);
+        assert.deepEqual(drain(), [menu, ...buttons], 'the menu, then its buttons');
+    });
+
+test('a dialog hidden over a window that does not clip its children erases the window, and '
+    + 'its children wait for its paint', ()=>{
+    // Half-Life's menu: its buttons paint from WM_ERASEBKGND. A dialog
+    // ended over it had every button erased -- painted -- inside EndDialog's
+    // hide, then the menu's own WM_PAINT, later, painted its background over
+    // them all (server window.c get_window_update_flags: children of windows
+    // that do not clip them "need to wait for WM_PAINT to be done in the
+    // parent first").
+    const WS_POPUP = 0x80000000;
+    const WM_ERASEBKGND = 0x0014;
+    const RDW_VALIDATE = 0x8;
+    const RDW_NOCHILDREN = 0x40;
+    const { fns, memory, dispatched } = setup({ paint: true });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const menu = createWindow(fns, memory, { style: WS_POPUP | WS_VISIBLE,
+        x: 0, y: 0, width: 640, height: 480 });
+    memory.putString(TITLE, 'button');
+    const button = fns.CreateWindowExA.handler([0, CLASS_NAME, TITLE, WS_CHILD | WS_VISIBLE,
+        70, 180, 156, 26, menu, 0, HINSTANCE, 0]);
+    /** @returns {number[]} */
+    const drain = ()=>{
+        const painted = [];
+        while (fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]) === 1)
+        {
+            if (memory.u32(MSG_BUFFER + MSG.message) === WM_PAINT)
+            {
+                const target = memory.u32(MSG_BUFFER + MSG.hwnd);
+                painted.push(target);
+                fns.RedrawWindow.handler([target, 0, 0, RDW_VALIDATE | RDW_NOCHILDREN]);
+            }
+        }
+        return painted;
+    };
+    drain();
+    memory.putString(TITLE, 'dialog');
+    const dialog = fns.CreateWindowExA.handler([0, CLASS_NAME, TITLE,
+        WS_POPUP | WS_VISIBLE, 0, 0, 640, 480, menu, 0, HINSTANCE, 0]);
+    drain();
+    dispatched.length = 0;
+    fns.ShowWindow.handler([dialog, SW_HIDE]);
+    /** @param {number} hwnd */
+    const erased = hwnd=>dispatched.filter(message=>message.hwnd === hwnd
+        && message.message === WM_ERASEBKGND).length;
+    assert.equal(erased(menu), 1, 'the menu erased before the hide returned');
+    assert.equal(erased(button), 0, 'its button not: it waits for the menu\'s paint');
+    assert.deepEqual(drain(), [menu, button], 'then the menu paints, and the button after it');
 });

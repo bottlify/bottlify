@@ -204,9 +204,12 @@ const HOST_PROCEDURE_BASE = 0x7ff00000;
 const DT_WORDBREAK = 0x0010;
 const DT_NOPREFIX = 0x0800;
 
-/** The one hook type this build calls, and the one event it calls it for. */
+/** The hook types this build calls. */
 const WH_CBT = 5;
 const WH_KEYBOARD = 2;
+const WH_MOUSE = 7;
+/** MOUSEHOOKSTRUCT: pt.x, pt.y, hwnd, wHitTestCode, dwExtraInfo. */
+const MOUSEHOOKSTRUCT_SIZE = 20;
 /** A keyboard hook's codes: the message is being taken, or only looked at. */
 const HC_ACTION = 0;
 const HC_NOREMOVE = 3;
@@ -3797,7 +3800,14 @@ export function createWindowFunctions(host){
         }
         paint.invalidate(record, offsetArea(inside, -client.left, -client.top), true, 'none');
         host.queue.dirtied?.(creatorOf(record));
-        unerased.add(record);
+        // Erased now only where its parents clip it: one inside a parent that
+        // does not waits for that parent's WM_PAINT, which paints over it --
+        // erased first, a control that paints from WM_ERASEBKGND was painted
+        // over by its window's background a moment later and stayed blank.
+        if (erasedWith(topLevelOf(record), record))
+        {
+            unerased.add(record);
+        }
     };
 
     /**
@@ -4847,7 +4857,7 @@ export function createWindowFunctions(host){
         }
         return andThen(mouseActivate(entry, thread), (/** @type {boolean} */ keep)=>(keep
             ? andThen(askCursor(entry, thread), ()=>andThen(
-                askKeyboardHooks(entry, HC_ACTION, thread),
+                askInputHooks(entry, HC_ACTION, thread),
                 (/** @type {number} */ refused)=>((refused | 0) !== 0
                     ? takeThrough(filter, thread) : entry)))
             : takeThrough(filter, thread)));
@@ -4867,6 +4877,47 @@ export function createWindowFunctions(host){
     const askKeyboardHooks = (entry, code, thread)=>(!KEY_MESSAGES.has(entry.message >>> 0)
         || chainOf(WH_KEYBOARD, thread).length === 0 ? 0
         : callHook(WH_KEYBOARD, null, [code, entry.wParam >>> 0, entry.lParam >>> 0], thread));
+
+    /**
+     * A mouse message being retrieved, shown to the thread's WH_MOUSE hooks
+     * first, as Windows shows it: the message and a MOUSEHOOKSTRUCT -- the
+     * point on the screen, the window, the hit -- with HC_ACTION or
+     * HC_NOREMOVE as for the keyboard; nonzero on HC_ACTION discards it. A
+     * program that reads its buttons in such a hook saw the pointer move,
+     * through GetCursorPos, and no click land.
+     *
+     * @param {any} entry @param {number} code @param {unknown} thread
+     * @returns {number | Promise<number>}
+     */
+    const askMouseHooks = (entry, code, thread)=>{
+        const kind = entry.message >>> 0;
+        const client = kind >= WM_MOUSEMOVE && kind <= WM_MOUSELAST;
+        const frame = kind >= WM_NCMOUSEMOVE && kind <= WM_NCMOUSELAST;
+        if (!(client || frame) || chainOf(WH_MOUSE, thread).length === 0)
+        {
+            return 0;
+        }
+        const at = (host.allocate?.(MOUSEHOOKSTRUCT_SIZE) ?? 0) >>> 0;
+        if (at === 0)
+        {
+            return 0;
+        }
+        writeU32s(host, at, [entry.x | 0, entry.y | 0, entry.hwnd >>> 0,
+            client ? HTCLIENT : entry.wParam & 0xffff, 0]);
+        return andThen(callHook(WH_MOUSE, null, [code, kind, at], thread), answer=>{
+            host.release?.(at);
+            return answer;
+        });
+    };
+
+    /**
+     * An input message being retrieved, shown to the hooks of its kind.
+     *
+     * @param {any} entry @param {number} code @param {unknown} thread
+     * @returns {number | Promise<number>}
+     */
+    const askInputHooks = (entry, code, thread)=>(KEY_MESSAGES.has(entry.message >>> 0)
+        ? askKeyboardHooks(entry, code, thread) : askMouseHooks(entry, code, thread));
 
     /**
      * The default window procedure, as every window procedure falls back on
@@ -5286,6 +5337,26 @@ export function createWindowFunctions(host){
         },
         move: (hwnd, x, y, width, height)=>/** @type {any} */ (table).MoveWindow
             .handler([hwnd, x, y, width, height, 1]),
+        clientOrigin: record=>geometry.clientOrigin(record),
+        // A window of a system class a control makes for itself -- a combo
+        // box's dropped list -- by name, as a program's CreateWindowEx
+        // names one; the name lives in guest memory for the call.
+        popup: (className, rect, owner, exStyle, style, thread)=>{
+            const name = (host.allocate?.(className.length + 1) ?? 0) >>> 0;
+            if (name === 0)
+            {
+                return 0;
+            }
+            host.writeMemory(name, Uint8Array.from([...className].map(c=>c.charCodeAt(0))));
+            host.writeMemory(name + className.length, new Uint8Array(1));
+            return andThen(createWindow([exStyle, name, 0, style, rect.x, rect.y, rect.width,
+                rect.height, owner, 0, 0, 0], false, thread), hwnd=>{
+                host.release?.(name);
+                return hwnd >>> 0;
+            });
+        },
+        show: (hwnd, command)=>/** @type {any} */ (table).ShowWindow.handler([hwnd, command]),
+        destroy: hwnd=>/** @type {any} */ (table).DestroyWindow.handler([hwnd]),
         setFocus,
         focus: focusWindow,
         setCapture: hwnd=>{
@@ -5333,6 +5404,8 @@ export function createWindowFunctions(host){
         });
         controlProcedures[definition.name] = definition.procedure;
     };
+    // The list a dropdown combo box drops, a popup of a class of its own.
+    registerSystemClass({ name: 'ComboLBox', procedure: controls.procedures.ComboLBox });
     host.registerControls?.(controlHost, controls.toolkit, registerSystemClass);
 
     // The MDI client: a built-in class whose procedure keeps a frame's document
@@ -6059,7 +6132,7 @@ export function createWindowFunctions(host){
         const entry = andThen(receiveSent(thread), ()=>(remove ? takeThrough(filter, thread)
             : andThen(placeWaiting(filter, thread), ()=>{
                 const seen = host.queue.peek(filter);
-                return seen ? andThen(askKeyboardHooks(seen, HC_NOREMOVE, thread), ()=>seen) : seen;
+                return seen ? andThen(askInputHooks(seen, HC_NOREMOVE, thread), ()=>seen) : seen;
             })));
         return andThen(entry, (/** @type {any} */ taken)=>{
             if (!taken)
@@ -6964,8 +7037,9 @@ export function createWindowFunctions(host){
          *                         DWORD dwThreadId)
          *
          * Every type is accepted, because a program installs its hooks at
-         * start-up and treats a refusal as fatal; a CBT and a keyboard hook
-         * are called, and the others say so once rather than failing silently.
+         * start-up and treats a refusal as fatal; a CBT, a keyboard and a
+         * mouse hook are called, and the others say so once rather than
+         * failing silently.
          */
         SetWindowsHookExA: {
             argBytes: 16,
@@ -6978,7 +7052,7 @@ export function createWindowFunctions(host){
                 const hook = { handle: 0, type: type | 0, proc: proc >>> 0, thread: thread >>> 0 };
                 hook.handle = host.handles.open('hook', hook);
                 hooks.push(hook);
-                if (hook.type !== WH_CBT && hook.type !== WH_KEYBOARD)
+                if (hook.type !== WH_CBT && hook.type !== WH_KEYBOARD && hook.type !== WH_MOUSE)
                 {
                     host.divergence?.('SetWindowsHookExA',
                         `hook type ${hook.type} is installed but never called`);
