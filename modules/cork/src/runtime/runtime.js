@@ -819,8 +819,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         // Indirect call sites whose samples came due (`callTargets`), and why
         // each was left as it was: no callee took a share of its samples, or
         // only ones tried already; its regions formed again as often as they
-        // may be; formed again with none of its new callees in.
+        // may be; formed again with none of its new callees in; no region
+        // holding it to form again.
         predictDue: 0, predictNoShare: 0, predictReformsOut: 0, predictNotFormed: 0,
+        predictNoRegion: 0,
         queueDrops: 0, queueEvictions: 0, emitFailures: 0,
         cacheHits: 0, cacheMisses: 0, missNoRecord: 0, missNoModule: 0, precisionSwitches: 0,
         readSwitches: 0,
@@ -2637,7 +2639,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 counts.predictNoShare++;
                 continue;
             }
-            fresh.forEach(target=>tried.add(target));
+            // Tried once a region holding the site is formed again for them:
+            // a site met before any region holds it -- its region not yet
+            // published, or dropped since -- is asked about at its next due.
+            let placed = false;
             for (const record of byPage.get(site >>> 12) ?? [])
             {
                 const one = wanted.get(record)
@@ -2657,6 +2662,15 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 one.targets.set(site, [...had, ...added]);
                 one.added.push(...added);
                 wanted.set(record, one);
+                placed = true;
+            }
+            if (placed)
+            {
+                fresh.forEach(target=>tried.add(target));
+            }
+            else
+            {
+                counts.predictNoRegion++;
             }
         }
         const formed = [];
@@ -3920,6 +3934,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 storesKept: counts.storesKept,
                 prediction: { due: counts.predictDue, noShare: counts.predictNoShare,
                     reformsOut: counts.predictReformsOut, notFormed: counts.predictNotFormed,
+                    noRegion: counts.predictNoRegion,
                     reforms: counts.reforms },
                 exits: { ...exits },
                 untranslatedBy: { ...untranslatedBy },
