@@ -1907,9 +1907,10 @@ test('a block profile counts how calls and returns went, transfers and rdtscs', 
     await m.runtime.translatePending();
     const exit = m.runtime.run(m.runtime.entryOf(CODE), 1_000_000);
     assert.equal(exit.kind, 'halt');
-    const { mechanisms } = /** @type {any} */ (m.runtime.diagnostics());
+    const { mechanisms, transferTargets } = /** @type {any} */ (m.runtime.diagnostics());
     assert.equal(mechanisms.CALL_INDIRECT, 100, 'call edx, a wasm call each turn');
     assert.equal(mechanisms.TRANSFER, 100, 'each through the entry hash');
+    assert.deepEqual(transferTargets, [[0x1100, 100]], 'all of them to F');
     assert.equal(mechanisms.RET_TO_CALL, 100, 'F\'s ret answered the call waiting for it');
     assert.equal(mechanisms.CALL_FORMED, 100, 'call G, formed into F\'s region');
     assert.equal(mechanisms.RET_FORMED, 100, 'G\'s ret, a jump back');

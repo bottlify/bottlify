@@ -857,6 +857,13 @@ function describeCork(cork, say){
         say(`    mechanisms: ${Object.entries(cork.mechanisms).filter(([, n])=>n > 0)
             .map(([name, n])=>`${name}=${n}`).join(' ')}`);
     }
+    if (cork.transferTargets?.length)
+    {
+        // Where the shared transfer's hash probe went, the most often first:
+        // the jumps between regions that no direct link took.
+        say(`    transfer targets: ${cork.transferTargets.slice(0, 40).map((/** @type {number[]} */ [
+            address, count])=>`${address.toString(16)}x${count}`).join(' ')}`);
+    }
     if (cork.forms)
     {
         // What the hot code is made of: each form's executions and wasm bytes.

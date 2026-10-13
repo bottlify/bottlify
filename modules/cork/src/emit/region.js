@@ -56,7 +56,8 @@ import {
     planLoop, planRegion, readsWrapped,
 } from './memory.js';
 import { importHelpers } from './helpers.js';
-import { Mechanism, Tables, blockProfileAt, blockSlot, hashSlotsOf, mechanismAt }
+import { Mechanism, Tables, blockProfileAt, blockSlot, hashSlotsOf, mechanismAt,
+    transferTargetAt }
     from '../runtime/layout.js';
 import { ANY_TOP } from '../runtime/entries.js';
 
@@ -548,6 +549,15 @@ export function finishModule(context, functions){
         const at = layout.tables + mechanismAt(layout, Mechanism.TRANSFER);
         b.i32const(0).i32const(0).load('i64', { offset: at }).i64const(1n).op(I64_ADD)
             .store('i64', { offset: at });
+        // And where to, by the target's slot (`blockSlot`, computed here): the
+        // address, which a collision overwrites, and the count.
+        b.localGet(eip).i32const(0x9e3779b1 | 0).op(I32.mul).i32const(12).op(I32.shrU)
+            .i32const(Tables.TRANSFER_SLOT).op(I32.mul).localTee(key);
+        b.localGet(eip).store('i32', { offset: layout.tables + transferTargetAt(layout, 0) });
+        b.localGet(key).localGet(key)
+            .load('i32', { offset: layout.tables + transferTargetAt(layout, 0) + 4 })
+            .i32const(1).op(I32.add)
+            .store('i32', { offset: layout.tables + transferTargetAt(layout, 0) + 4 });
     }
     if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && context.countTransfers)
     {

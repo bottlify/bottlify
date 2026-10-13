@@ -75,7 +75,11 @@ export const Tables = Object.freeze({
     // Past the slots, the same run's count of each `Mechanism`, a 64-bit word
     // each: a run of minutes makes billions of calls.
     MECHANISMS: 32,
-    BLOCK_PROFILE_SIZE: (1 << 20) * 12 + 32 * 8,
+    // Past the counts, the addresses the shared transfer went to by its hash
+    // probe, a slot per hashed address (`blockSlot`): the address and how
+    // many times -- the jumps between regions that no direct link took.
+    TRANSFER_SLOT: 8,
+    BLOCK_PROFILE_SIZE: (1 << 20) * 12 + 32 * 8 + (1 << 20) * 8,
 });
 
 /**
@@ -159,6 +163,15 @@ export const blockProfileAt = layout=>tablesSize(layout);
  */
 export const mechanismAt = (layout, mechanism)=>blockProfileAt(layout)
     + Tables.BLOCK_SLOTS * Tables.BLOCK_SLOT + mechanism * 8;
+
+/**
+ * Where a profiling run's slot of a transfer target is, from the tables'
+ * start: past the counts of the mechanisms.
+ *
+ * @param {{ hashShift?: number }} layout @param {number} slot  a `blockSlot`
+ */
+export const transferTargetAt = (layout, slot)=>mechanismAt(layout, Tables.MECHANISMS)
+    + slot * Tables.TRANSFER_SLOT;
 
 /**
  * The block profile's slot for a block start: the top twenty bits of the

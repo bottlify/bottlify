@@ -42,7 +42,8 @@ import { ANY_TOP, createEntries } from './entries.js';
 import { PageFlag, createPageTable } from './pages.js';
 import { createSharedCode } from './shared-code.js';
 import { Tables, tablesSize } from './layout.js';
-import { blockCounts, mechanismCounts, resetBlockCounts, topBlocks } from './block-profile.js';
+import { blockCounts, mechanismCounts, resetBlockCounts, topBlocks, transferTargets }
+    from './block-profile.js';
 import { profileForms } from './profile-forms.js';
 import { createWeakInstances } from './weak-instances.js';
 import {
@@ -3760,7 +3761,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             return {
                 ...(import.meta.BOTTLIFY_DIAGNOSTICS !== false && blocks
                     ? { blockCounts: blocks, topBlocks: topBlocks(blocks, regions),
-                        mechanisms: mechanismCounts(view(), layout), forms: hotForms(blocks) }
+                        mechanisms: mechanismCounts(view(), layout), forms: hotForms(blocks),
+                        transferTargets: transferTargets(view(), layout) }
                     : {}),
                 regions: regions.size,
                 // Counted only by a run that asked (`countTransfers`), else 0.
