@@ -472,6 +472,9 @@ const isDepthFormat = format=>FORMAT_INFO[format] !== undefined && FORMAT_INFO[f
  * @property {import('../webgpu/internal/presenter.js').DisplayGamma} [gamma]
  *     Where a full-screen device's gamma ramp reaches the picture. Absent, a
  *     ramp is kept and read back only.
+ * @property {() => void} [occlusionCounted]
+ *     Told whenever an occlusion count has come back from the GPU: where the
+ *     program is told counts across a thread, so they can go to it unasked.
  * @property {import('../webgpu/internal/latency.js').FrameQueued} [frameQueued]
  *     Told of every frame a present queues; what it answers is what the
  *     present waits on before it answers the program. Absent, a present never
@@ -504,6 +507,7 @@ export function createDirect3D9(options = {}){
         backend, readMemory, windowMemory, writeMemory, createSampler, allocate: guestMemory,
         free: giveBack, divergence, dumpDraws, dumpEvery, liveDump, maxDraws, skipTexture,
         probeTexture, fog, mips, driverRules, onDeviceLost, gamma, frameQueued, renderedElsewhere,
+        occlusionCounted,
         keepMemory, rereadBuffers, drawsFrom, rectangleBump, ...caps
     } = options;
     /** @type {DeviceCaps} */
@@ -517,6 +521,7 @@ export function createDirect3D9(options = {}){
         free: keepMemory === true ? undefined : giveBack, divergence, dumpDraws, dumpEvery,
         liveDump, maxDraws, skipTexture,
         probeTexture, fog, mips, driverRules, onDeviceLost, gamma, frameQueued, renderedElsewhere,
+        occlusionCounted,
         rereadBuffers, drawsFrom, rectangleBump,
     };
     if (backend && !readMemory)
@@ -919,6 +924,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             mips: services.mips,
             driverRules: services.driverRules,
             rectangleBump: services.rectangleBump,
+            occlusionCounted: services.occlusionCounted,
             rereadBuffers: services.rereadBuffers,
             compressedTextures: caps.compressedTextures,
         })

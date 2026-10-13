@@ -2835,6 +2835,7 @@ const CLEAR_STRIDE = 20;
  *     the default -- keeps all of them. A frame dump says which draws could
  *     have painted a region; cutting the frame short is what says which one
  *     did, because the region is either there or not at each cut.
+ * @property {() => void} [occlusionCounted]  told whenever an occlusion count has come back
  * @property {((api: string, detail: string)=>void) | null} [divergence]
  *     Where "this call succeeded and did not do all of what it promises" goes.
  * @property {boolean} [fog]
@@ -3079,11 +3080,30 @@ export function createRenderer(options){
     const settleOcclusion = count=>{
         count.value = count.total;
         count.resolve(count.total);
+        options.occlusionCounted?.();
+        if (count.endedAt !== null && count.replayedAt !== null)
+        {
+            const origin = typeof performance === 'undefined' ? 0 : performance.timeOrigin;
+            occlusionTrace.push([origin + count.endedAt, origin + count.replayedAt,
+                origin + clock()]);
+            if (occlusionTrace.length > 64)
+            {
+                occlusionTrace.shift();
+            }
+            const toReplay = count.replayedAt - count.endedAt;
+            const gpu = clock() - count.replayedAt;
+            timing.occlusions++;
+            timing.occlusionToReplayMs += toReplay;
+            timing.worstOcclusionToReplayMs = Math.max(timing.worstOcclusionToReplayMs, toReplay);
+            timing.occlusionGpuMs += gpu;
+            timing.worstOcclusionGpuMs = Math.max(timing.worstOcclusionGpuMs, gpu);
+        }
     };
     /** @returns {any} a count a BEGIN, or an END with no BEGIN, starts */
     const occlusionCount = ()=>{
         /** @type {any} */
-        const count = { total: 0, outstanding: 0, ended: false, value: null, recording: null };
+        const count = { total: 0, outstanding: 0, ended: false, value: null, recording: null,
+            endedAt: null, replayedAt: null };
         count.settled = new Promise(resolve=>{
             count.resolve = resolve;
         });
@@ -3145,9 +3165,24 @@ export function createRenderer(options){
      * from being asked to having its bytes -- the wait a program reading its
      * targets back sees, of which the GPU's own part is only some.
      */
+    /*
+     * An occlusion count's wait is two waits: from its END being recorded to
+     * the replay reaching it (the frame has to be submitted, by a present or a
+     * flush, and every frame before it played), and from there to the GPU's
+     * count coming back. Which is the longer says what an earlier answer needs.
+     */
     const timing = { replays: 0, replayMs: 0, worstReplayMs: 0, readBacks: 0, readBackMs: 0,
-        worstReadBackMs: 0, gpuFrames: 0, gpuMs: 0, worstGpuMs: 0 };
+        worstReadBackMs: 0, gpuFrames: 0, gpuMs: 0, worstGpuMs: 0, occlusions: 0,
+        occlusionToReplayMs: 0, worstOcclusionToReplayMs: 0, occlusionGpuMs: 0,
+        worstOcclusionGpuMs: 0 };
     const clock = ()=>(typeof performance === 'undefined' ? Date.now() : performance.now());
+    /**
+     * The last occlusion counts settled, each as when its END was recorded,
+     * replayed and its count came back, on the clock every thread shares.
+     *
+     * @type {[number, number, number][]}
+     */
+    const occlusionTrace = [];
 
     const counters = {
         frames: 0,
@@ -9106,6 +9141,7 @@ export function createRenderer(options){
             query.latest = count;
             const frame = ensureFrame();
             count.recording = frame;
+            count.endedAt = clock();
             frame.commands.push({ kind: 'occlusion', count, begin: false });
         },
 
@@ -9873,6 +9909,7 @@ export function createRenderer(options){
                 // the frame drew with.
                 recentFrames: frameHistory.slice(),
                 timing: { ...timing },
+                occlusionTrace: occlusionTrace.slice(),
                 // Empty unless the build asked for it; see `dumpDraws`.
                 lastDump: joinDump(lastDump),
                 // The bytecode of the shaders the dumped draws ran, each once.
@@ -10206,6 +10243,7 @@ export function createRenderer(options){
                         countingQuery = null;
                     }
                     command.count.ended = true;
+                    command.count.replayedAt = clock();
                     if (command.count.outstanding === 0)
                     {
                         settleOcclusion(command.count);

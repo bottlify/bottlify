@@ -316,6 +316,15 @@ function visit(value, bind){
  * @property {() => void} recorded  a record that is not a call was written
  * @property {(kind: ShippedKind, bytes: number) => void} [shipped]
  *     bytes of guest memory just copied into the record, by what copied them
+ * @property {(ms: number, polls: number, asks: number, beside: boolean, sentAfter: number,
+ *     trip: number, events: OcclusionEvent[]) => void} [counted]
+ *     an occlusion query was answered: this long after its END was issued, after
+ *     this many polls of the program's and asks of the played side; `beside`
+ *     when its count came with another query's answer; `sentAfter` how long
+ *     after the END the ask that brought the count went, `trip` how long it took;
+ *     `events` what happened to the measurement, in order
+ * @property {(listener: (counts: OcclusionCount[]) => void) => void} [hearCounts]
+ *     the listener is told the occlusion counts the played side sends unasked
  * @property {(name: string, bytes: number) => void} [recordedCall]
  *     a call's record is whole, this many bytes of the batch, copies included
  * @property {import('./lending.js').Lender | null} [lender]
@@ -331,6 +340,19 @@ function visit(value, bind){
  *
  * @typedef {'buffers' | 'surfaces' | 'reads' | 'writes' | 'dynamic' | 'compared'} ShippedKind
  */
+
+/**
+ * One thing that happened to an occlusion measurement on the recording side:
+ * what, when on the clock every thread shares (`performance.timeOrigin` plus
+ * `now`), and how many polls the program had made by then -- 'end', 'poll'
+ * (the first), 'ask', 'came' (with the played side's answer), 'beside' (its
+ * count come with another's), 'told'.
+ *
+ * @typedef {[kind: string, at: number, polls: number, answer?: number]} OcclusionEvent
+ */
+
+/** The time on the clock every thread shares. */
+const sharedNow = ()=>performance.timeOrigin + performance.now();
 
 /**
  * The recording side: a proxy of the root object the program is given, whose
@@ -857,7 +879,8 @@ export function createRecording(options){
      * the program for the replay of everything recorded before the ask, every
      * frame -- tens of milliseconds, a quarter of a second at worst.
      *
-     * @type {WeakMap<object, { reply: PlayedAnswer | null }>}
+     * @type {WeakMap<object, { reply: PlayedAnswer | null, beside?: boolean, sentAt?: number,
+     *     cameAt?: number }>}
      */
     const counts = new WeakMap();
     /**
@@ -871,15 +894,25 @@ export function createRecording(options){
     /** @type {Map<number, WeakRef<object>>} */
     const occlusionQueries = new Map();
     /**
+     * Each occlusion measurement the program closed and has not been told the
+     * count of: when, and how often it has asked since.
+     *
+     * @type {WeakMap<object, { at: number, polls: number, asks: number,
+     *     events: OcclusionEvent[] }>}
+     */
+    const waiting = new WeakMap();
+    const timed = import.meta.BOTTLIFY_DIAGNOSTICS !== false && Boolean(transport.counted);
+    /**
      * Counts sent beside an answer, held as answers: a program that waits on
      * its queries one after another -- polling each until it is counted --
      * crossed to the played side and back for every one, where the GPU had
      * counted them all in one read.
      *
-     * @param {object} asked  the query whose answer they came with
+     * @param {object | null} asked  the query whose answer they came with, none when sent unasked
      * @param {OcclusionCount[] | undefined} given
+     * @param {number} [sentAt] @param {number} [cameAt]  when that ask went and came back
      */
-    const takeCounts = (asked, given)=>{
+    const takeCounts = (asked, given, sentAt = 0, cameAt = 0)=>{
         for (const [number, ended, value] of given ?? [])
         {
             const query = occlusionQueries.get(number)?.deref();
@@ -893,9 +926,20 @@ export function createRecording(options){
             {
                 continue;
             }
-            counts.set(query, { reply: { answer: 0, outs: [{ value }] } });
+            counts.set(query, { reply: { answer: 0, outs: [{ value }] }, beside: true, sentAt,
+                cameAt });
+            const measured = timed ? waiting.get(query) : undefined;
+            measured?.events.push(['beside', sharedNow(), measured.polls]);
         }
     };
+
+    // The played side sends a count as soon as the GPU has it: asked for at
+    // the program's first poll, it came a crossing later, polled thousands of
+    // times in between.
+    transport.hearCounts?.(given=>{
+        const at = timed ? performance.now() : 0;
+        takeCounts(null, given, at, at);
+    });
 
     /**
      * The system-memory surfaces a GetRenderTargetData is still filling, each
@@ -1108,11 +1152,28 @@ export function createRecording(options){
             // recorded nowhere: the played side has nothing to do with it, and
             // a program polls hundreds of thousands of times a minute.
             const known = name === 'GetData' ? counts.get(target) : undefined;
+            const measured = timed && name === 'GetData' ? waiting.get(target) : undefined;
+            if (measured)
+            {
+                if (measured.polls++ === 0)
+                {
+                    measured.events.push(['poll', sharedNow(), 1]);
+                }
+            }
             if (known)
             {
                 if (!known.reply)
                 {
                     return S_FALSE;
+                }
+                if (measured && known.reply.answer === 0)
+                {
+                    waiting.delete(target);
+                    measured.events.push(['told', sharedNow(), measured.polls]);
+                    transport.counted?.(performance.now() - measured.at, measured.polls,
+                        measured.asks, known.beside === true,
+                        (known.sentAt ?? measured.at) - measured.at,
+                        (known.cameAt ?? 0) - (known.sentAt ?? 0), measured.events);
                 }
                 for (let index = 0; index < count; index++)
                 {
@@ -1356,9 +1417,15 @@ export function createRecording(options){
             {
                 // A new measurement: what was counted before is not its count.
                 counts.delete(target);
+                waiting.delete(target);
                 if (/** @type {any} */ (target).type === D3DQUERYTYPE_OCCLUSION
                     && (applied[0] & D3DISSUE_END) !== 0 && result === 0)
                 {
+                    if (timed)
+                    {
+                        waiting.set(target, { at: performance.now(), polls: 0, asks: 0,
+                            events: [['end', sharedNow(), 0]] });
+                    }
                     ends.set(target, (ends.get(target) ?? 0) + 1);
                     occlusionQueries.set(/** @type {number} */ (number), new WeakRef(target));
                 }
@@ -1395,9 +1462,18 @@ export function createRecording(options){
             }
             if (name === 'GetData' && /** @type {any} */ (target)?.type === D3DQUERYTYPE_OCCLUSION)
             {
-                const asking = { reply: /** @type {PlayedAnswer | null} */ (null) };
+                const asking = { reply: /** @type {PlayedAnswer | null} */ (null), beside: false,
+                    sentAt: timed ? performance.now() : 0, cameAt: 0 };
                 counts.set(target, asking);
+                const asked = timed ? waiting.get(target) : undefined;
+                if (asked)
+                {
+                    asked.asks++;
+                    asked.events.push(['ask', sharedNow(), asked.polls]);
+                }
                 Promise.resolve(ask(name)).then(played=>{
+                    asking.cameAt = timed ? performance.now() : 0;
+                    asked?.events.push(['came', sharedNow(), asked.polls, played.answer]);
                     // Still this measurement's; an answer that is not a count
                     // yet is asked again at the next poll.
                     if (counts.get(target) === asking)
@@ -1411,7 +1487,7 @@ export function createRecording(options){
                             counts.delete(target);
                         }
                     }
-                    takeCounts(target, played.counts);
+                    takeCounts(target, played.counts, asking.sentAt, asking.cameAt);
                 }, ()=>{
                     counts.delete(target);
                 });
@@ -1647,7 +1723,7 @@ export function createRecording(options){
  * @param {ReturnType<typeof import('./lending.js').createBorrower>} [options.borrow]
  *     the guest memory a recording lent, read in place
  * @returns {{ play: (call: import('./wire.js').ReadCall) => any, allocate: () => number,
- *     object: (number: number) => any,
+ *     object: (number: number) => any, counts: () => OcclusionCount[],
  *     read: (buffer: ArrayBuffer, each: (call: import('./wire.js').ReadCall) => boolean | void)
  *         => number | undefined }}
  *     `play` answers a waited call with its `PlayedAnswer` (or a promise of
@@ -1760,6 +1836,13 @@ export function createPlayer({ root, ship, read, borrow }){
         }
         return held;
     };
+    /**
+     * The END of each query whose count was last sent unasked, so a count goes
+     * once.
+     *
+     * @type {Map<number, number>}
+     */
+    const sentCounts = new Map();
     /** @type {any[]} */
     let replies = [];
     /**
@@ -1909,6 +1992,20 @@ export function createPlayer({ root, ship, read, borrow }){
             return call.wait === WAIT.ANSWER ? { answer, outs: args, ...beside() } : answer;
         },
         object: objectAt,
+        /**
+         * The counts the played device holds that have not been sent since
+         * their END: what goes to the recording side unasked once the GPU has
+         * counted, rather than at the program's next ask.
+         */
+        counts(){
+            const fresh = heldCounts(-1)
+                .filter(([number, ended])=>sentCounts.get(number) !== ended);
+            for (const [number, ended] of fresh)
+            {
+                sentCounts.set(number, ended);
+            }
+            return fresh;
+        },
         allocate(){
             const address = allocs.shift();
             if (address === undefined)

@@ -250,6 +250,7 @@ export function createTargetReads(){
  *     read back, which the program waits for; `borrow`, where guest memory is
  *     shared, reads what the recording lent (`lending.js`)
  * @returns {{ root: any, play: (call: import('./wire.js').ReadCall) => any,
+ *     counts: () => import('./replay.js').OcclusionCount[],
  *     read: (buffer: ArrayBuffer, each: (call: import('./wire.js').ReadCall) => boolean | void)
  *         => number | undefined }}
  *     `read` reads a batch of calls for `play`, and answers how long the look
@@ -299,6 +300,7 @@ export function playedDirect3D(factory, services){
             }
         },
         read: live.read,
+        counts: live.counts,
     };
 }
 

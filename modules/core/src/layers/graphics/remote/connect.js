@@ -65,6 +65,8 @@ function plainOf(services){
  *     waits: Record<string, { count: number, ms: number, maxMs: number }>, behind: number[],
  *     readBack: { sent: number, shared: number }, lent: Record<string, number>,
  *     sent: { batches: number, bytes: number, ms: number }, shipped: Record<string, number>,
+ *     occlusion: { counted: number, ms: number, maxMs: number, polls: number, asks: number,
+ *         beside: number, sentAfterMs: number, tripMs: number, under: number[], trace: any[] },
  *     calls: string, answers: string,
  *     phases: import('./channel.js').WorkerPhases | null }}
  *     diagnostics  `phases`: where the worker's thread spent its time on this process's
@@ -425,6 +427,17 @@ export function connectGraphicsWorker(options){
                 behind: senders.map(sender=>sender.behind()), readBack: { ...readBack },
                 phases: phasesOf(senders),
                 answers: senders.map(sender=>sender.answers()).join(' '),
+                occlusion: senders.reduce((sum, sender)=>{
+                    const one = sender.occlusion();
+                    return { counted: sum.counted + one.counted, ms: sum.ms + one.ms,
+                        maxMs: Math.max(sum.maxMs, one.maxMs), polls: sum.polls + one.polls,
+                        asks: sum.asks + one.asks, beside: sum.beside + one.beside,
+                        sentAfterMs: sum.sentAfterMs + one.sentAfterMs,
+                        tripMs: sum.tripMs + one.tripMs, trace: [...sum.trace, ...one.trace],
+                        under: one.under.map((count, index)=>count + (sum.under[index] ?? 0)) };
+                }, { counted: 0, ms: 0, maxMs: 0, polls: 0, asks: 0, beside: 0, sentAfterMs: 0,
+                    tripMs: 0, trace: /** @type {any[]} */ ([]),
+                    under: /** @type {number[]} */ ([]) }),
                 sent: senders.reduce((sum, sender)=>{
                     const { batches, bytes, ms } = sender.sent();
                     return { batches: sum.batches + batches, bytes: sum.bytes + bytes,

@@ -302,6 +302,9 @@ function isTransformType(type){
  * @property {import('../webgpu/internal/presenter.js').DisplayGamma} [gamma]
  *     Where a full-screen device's gamma ramp reaches the picture. Absent, a
  *     ramp is kept and read back only.
+ * @property {() => void} [occlusionCounted]
+ *     Told whenever an occlusion count has come back from the GPU: where the
+ *     program is told counts across a thread, so they can go to it unasked.
  * @property {import('../webgpu/internal/latency.js').FrameQueued} [frameQueued]
  *     Told of every frame a present queues; what it answers is what the
  *     present waits on before it answers the program. Absent, a present never
@@ -408,6 +411,7 @@ export function createDirect3D8(options = {}){
         backend, readMemory, windowMemory, writeMemory, createSampler, allocate: guestMemory,
         free: giveBack, dumpDraws, dumpEvery, liveDump, maxDraws, divergence, skipTexture,
         probeTexture, fog, mips, nanProbe, driverRules, onDeviceLost, gamma, frameQueued, drawsFrom,
+        occlusionCounted,
         rectangleBump, ...caps
     } = options;
     /** @type {DeviceCaps} */
@@ -417,6 +421,7 @@ export function createDirect3D8(options = {}){
         backend, readMemory, windowMemory, writeMemory, createSampler, allocate: guestMemory,
         free: giveBack, dumpDraws, dumpEvery, liveDump, maxDraws, divergence, skipTexture,
         probeTexture, fog, mips, nanProbe, driverRules, onDeviceLost, gamma, frameQueued, drawsFrom,
+        occlusionCounted,
         rectangleBump,
     };
     if (backend && !readMemory)
@@ -781,6 +786,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             nanProbe: services.nanProbe === true,
             driverRules: services.driverRules,
             rectangleBump: services.rectangleBump,
+            occlusionCounted: services.occlusionCounted,
             compressedTextures: caps.compressedTextures,
         })
         : null;

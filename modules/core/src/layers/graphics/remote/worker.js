@@ -409,6 +409,8 @@ export function serveGraphics(scope, deps){
         };
         /** @param {any} submitted */
         const frameQueued = submitted=>latency.queued(submitted);
+        /** @type {ReturnType<typeof createReceiver> | null} */
+        let receiver = null;
         /** @type {any} */
         let played;
         if (api === 'd3d7')
@@ -459,10 +461,11 @@ export function serveGraphics(scope, deps){
                     return ()=>losers.delete(watcher);
                 },
                 frameQueued,
+                occlusionCounted: ()=>receiver?.counted(),
                 gamma: options.gamma ? { applies: ()=>true, set: ()=>{} } : undefined,
             });
         }
-        const receiver = createReceiver({ played, post });
+        receiver = createReceiver({ played, post });
         port.onmessage = event=>{
             if (event.data?.type === 'close')
             {
