@@ -525,3 +525,45 @@ None yet.
   on the sites that came due could not move a share decided by which sites came due.
 - **Decision.** Knobs and leaf limits left as they were. The sampling picks its calls by a hash
   of a count across the last thousand (`cb208adb`), measured anew in a later entry.
+
+### 2026-10-13 -- indirect call prediction (`callTargets`) in Far Cry at a 44% share of its calls
+
+- **Idea.** The earlier entry's prediction, with what kept its share at 12–16% fixed: calls
+  sampled past the prediction rather than every call of a predicted site (`0f3712db`), each
+  region holding a call asked by what it has itself (`c9371c7e`), and room past a region's caps
+  for the callees the runtime predicted (`9b222a46`). The question is whether forming more of
+  the indirect calls' callees in runs the game faster.
+- **Workload.** The Far Cry demo bundle (`bundle.btl` sha256 `44530097b2a5a284…`) under
+  `tools/launch-probe.mjs --no-draw` at `9b222a46`, started into the level by its command line
+  (`map fort`), one executor and a translation worker, 900 s, guest MIPS in rows of 30 s. The two
+  arms ran at once on the same machine, so that what drifts drifts for both; cold, each arm into
+  an empty translation store (`--translation-store`), then warm from the store its cold run left
+  (on: 16215 hits, 2935 misses; off: 16164 and 2527).
+- **Share.** A run of its own with the block profile (from 600 s): `CALL_PREDICTED` 63.7M
+  against `APART_UNPREDICTED` 81.5M, 43.9% of the indirect calls predicted (12.3–16% before);
+  transfers through the shared function ~10.2 a thousand guest instructions (~11.0 before).
+- **Values, cold** (rows 541–1051 s, 18 rows, inside the level for both). On: 138.0 137.1 128.6
+  130.1 131.3 130.4 145.7 149.3 142.9 130.9 136.6 144.4 131.3 136.2 131.8 135.9 126.0 139.5 --
+  median 136.1, spread (max − min) / median 17%. Off: 141.5 125.4 135.4 143.2 137.6 127.9 135.1
+  135.7 150.5 142.4 139.6 150.7 147.9 143.0 139.7 151.5 144.3 156.8 -- median 141.9, spread 22%.
+  On / off 0.958; on ahead in 4 rows of 18. The translator did as little in the window in both.
+- **Values, warm** (rows 390–1050 s, 23 rows; the level was in by 360 s warm, by 510 s cold).
+  On: 151.0 150.0 140.5 151.3 148.9 137.4 132.0 125.0 141.4 137.5 135.5 147.6 154.1 144.3 142.2
+  156.8 149.8 147.5 153.1 154.2 146.2 150.3 146.2 -- median 147.5, spread 22%. Off: 154.6 145.9
+  148.4 142.2 141.7 141.8 150.3 136.1 143.2 150.8 155.9 153.6 149.0 150.1 142.7 151.0 154.2 150.0
+  162.2 163.0 154.4 146.6 160.3 -- median 150.1, spread 18%. On / off 0.983, by row a median of
+  0.969; on ahead in 6 rows of 23.
+- **Machine.** A 4-core x86-64 Linux VM (Firecracker), Intel Xeon @ 2.80 GHz, Node 22.22.0
+  (V8 12.4.254.21). No GPU: `draw: false`. Power plan not recorded. One pair a phase: the
+  noise floor between pairs not measured.
+- **Correctness.** Both arms reached the level and ran in it to the end; cork's unit tests
+  (597), the forming gate with its two predicted paths and the code-writes gate passed at the
+  tree measured.
+- **Why it did not pay.** The ceiling is small: the shared transfer function was ~5% of the
+  worker's time in an earlier profile of this game, and unpredicted indirect calls are about a
+  quarter of its transfers, so forming every one of them in is worth 1–2% at most. Against that
+  stand regions grown by the callees formed in, the compares before each predicted call and the
+  sampling of the calls left; which of them costs the 2–4% was not separated.
+- **Decision.** `callTargets` stays off by default, a choice a run makes. The three changes
+  stay: they make the option do what it says (the sampling reached the sites it was missing),
+  each with its test, and the gate runs its paths.
