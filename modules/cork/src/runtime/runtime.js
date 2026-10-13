@@ -908,6 +908,27 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         }
         return cachedView;
     };
+    /** @type {Uint8Array | null} */
+    let cachedBytes = null;
+    /**
+     * The guest's bytes `[address, end)` where they lie in the memory, or null
+     * where a byte is past RAM and only `read` answers it: what compares a
+     * store's range with a copy byte by byte, which through `read` was a call
+     * a byte -- tens of microseconds for half a page.
+     *
+     * @param {number} address @param {number} end
+     */
+    const guestBytes = (address, end)=>{
+        if (typeof layout.ramSize !== 'number' || address < 0 || end > layout.ramSize)
+        {
+            return null;
+        }
+        if (cachedBytes === null || cachedBytes.buffer.byteLength === 0)
+        {
+            cachedBytes = new Uint8Array(memory.buffer);
+        }
+        return cachedBytes.subarray(layout.ramBase + address, layout.ramBase + end);
+    };
     const counterWord = ()=>view().getUint32(layout.counter, true);
     const fold = ()=>{
         const word = counterWord();
@@ -1075,6 +1096,18 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         {
             const from = Math.max(start, address);
             const to = Math.min(start + bytes.length, end);
+            const now = from < to ? guestBytes(from, to) : null;
+            if (now !== null)
+            {
+                for (let k = 0, at = from - start; k < now.length; k++, at++)
+                {
+                    if (now[k] !== bytes[at])
+                    {
+                        return true;
+                    }
+                }
+                continue;
+            }
             for (let at = from; at < to; at++)
             {
                 if (read(at) !== bytes[at - start])
@@ -1116,6 +1149,12 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         const copy = pageBytes.get(page);
         if (!copy)
         {
+            const whole = guestBytes(base, base + 4096);
+            if (whole !== null)
+            {
+                pageBytes.set(page, whole.slice());
+                return true;
+            }
             const made = new Uint8Array(4096);
             for (let at = 0; at < 4096; at++)
             {
@@ -1126,7 +1165,21 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         }
         let changed = false;
         const to = Math.min(end, base + 4096);
-        for (let at = Math.max(address, base); at < to; at++)
+        const from = Math.max(address, base);
+        const current = from < to ? guestBytes(from, to) : null;
+        if (current !== null)
+        {
+            for (let k = 0, at = from - base; k < current.length; k++, at++)
+            {
+                if (copy[at] !== current[k])
+                {
+                    copy[at] = current[k];
+                    changed = true;
+                }
+            }
+            return changed;
+        }
+        for (let at = from; at < to; at++)
         {
             const now = read(at);
             if (copy[at - base] !== now)
