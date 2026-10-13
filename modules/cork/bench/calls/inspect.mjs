@@ -50,7 +50,7 @@ for (const k of [2, 4, 5, 6, 7, 8, 10, 12, 16, 20])
     const functions = text.split('--- WebAssembly code ---').filter(one=>one.includes('TurboFan'));
     const root = functions.find(one=>/index: 128\b/.test(one)) ?? functions[functions.length - 1];
     const lines = root.split('\n');
-    const call = lines.findIndex(line=>/\s(call|bl)\s/.test(line) && !/stack|Stack/.test(line)
+    const call = lines.findIndex(line=>/\s(call|bl|blr)\s/.test(line) && !/stack|Stack/.test(line)
         && lines.indexOf(line) > 20);
     const before = lines.slice(0, call < 0 ? lines.length : call);
     const loopStart = Math.max(0, before.findLastIndex(line=>/\s(j\w+|b\.\w+|b)\s.*<\+0x/.test(line)
