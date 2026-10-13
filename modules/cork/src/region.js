@@ -465,7 +465,7 @@ export function formShared(){
  * @param {number} entry
  * @param {{ maxBlocks?: number, maxBytes?: number, leafBlocks?: number, leafBytes?: number,
  *     formDepth?: number, predictedRoom?: { blocks: number, bytes: number },
- *     switchEntries?: number,
+ *     ownRoom?: { blocks: number, bytes: number }, switchEntries?: number,
  *     translatable?: (eip: number) => boolean, leafCalls?: boolean,
  *     callTargets?: Map<number, number[]>, shared?: FormShared,
  *     helpers?: boolean | readonly import('./helpers.js').RuntimeHelper[] }} [options]
@@ -482,6 +482,11 @@ export function formShared(){
  *     predictedRoom: the blocks and bytes past `maxBlocks` and `maxBytes` those callees may
  *     take, all of them together: a region full of its own function is where a hot call
  *     was left out, and the runtime asks for its callees having seen it go there;
+ *     ownRoom: the blocks and bytes past them the entry's own function may take (the caps
+ *     again unless given), the callees formed in stopping at the caps: a function the caps
+ *     cut leaves through the entry hash at every block they left out and comes back the
+ *     same way -- an interpreter's opcode handlers, the blocks its calls return to, which
+ *     a call needs in the region to be a wasm call rather than two ways out;
  *     shared: what forming found, for other regions formed over the same bytes with the
  *     same `translatable` (`formShared`)
  * @returns {Region}
@@ -490,6 +495,7 @@ export function formRegion(read, entry,
     { maxBlocks = 128, maxBytes = 8192, translatable = ()=>true, leafCalls = true,
         callTargets, shared, helpers = true, leafBlocks = LEAF_BLOCKS, leafBytes = LEAF_BYTES,
         formDepth = 1, predictedRoom = PREDICTED_ROOM,
+        ownRoom = { blocks: maxBlocks, bytes: maxBytes },
         switchEntries = SWITCH_ENTRIES } = {})
 {
     // Every page forming reads decides what it forms -- an import slot a call is predicted
@@ -704,7 +710,9 @@ export function formRegion(read, entry,
             overlapping = true;
         }
         inPredicted = predictedStarts.has(start);
-        const room = inPredicted ? predictedRoom : NO_ROOM;
+        // The entry's own function is decoded first (`pendingAt`): it may take its room
+        // past the caps, and the callees after it stop at them.
+        const room = inPredicted ? predictedRoom : depth === 0 ? ownRoom : NO_ROOM;
         if (blocks.size >= maxBlocks + room.blocks || !translatable(start))
         {
             // Not followed: whoever jumps here exits to the runtime.

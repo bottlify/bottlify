@@ -141,7 +141,8 @@ test('a refused instruction ends the block, named, and is counted by opcode', ()
 test('the caps cut the region and leave the rest as exits to the runtime', ()=>{
     // The diamond of above, with room for two blocks only.
     const bytes = [0x85, 0xc0, 0x74, 0x07, 0xbb, 1, 0, 0, 0, 0xeb, 0x05, 0xbb, 2, 0, 0, 0, 0xc3];
-    const capped = regionOf(bytes, 0x1000, { maxBlocks: 2 });
+    const none = { blocks: 0, bytes: 0 };
+    const capped = regionOf(bytes, 0x1000, { maxBlocks: 2, ownRoom: none });
     assert.equal(capped.blocks.length, 2);
     assert.deepEqual(capped.entries, [0x1000, 0x1004]);
     const second = capped.blocks[1];
@@ -150,11 +151,32 @@ test('the caps cut the region and leave the rest as exits to the runtime', ()=>{
 
     // The byte cap is looked at before each instruction, so the instruction
     // that crosses it is kept and the block is cut after it.
-    const small = regionOf(bytes, 0x1000, { maxBytes: 1 });
+    const small = regionOf(bytes, 0x1000, { maxBytes: 1, ownRoom: none });
     assert.equal(small.blocks[0].exit.kind, 'cut');
     assert.equal(small.blocks[0].exit.next, 0x1002);
     assert.equal(small.blocks[0].instructions.length, 1);
     assert.equal(small.blocks.length, 1);
+
+    // The entry's own function takes the caps again past them unless told otherwise.
+    assert.equal(regionOf(bytes, 0x1000, { maxBlocks: 1 }).blocks.length, 2);
+    assert.equal(regionOf(bytes, 0x1000, { maxBlocks: 2 }).blocks.length, 4);
+});
+
+test('a function past the caps is formed whole in its own room, its callees within the caps', ()=>{
+    // 1000: ten of inc eax; jz +0 (a block each); call F; ret. F = 1100: inc ecx; ret.
+    const code = [...Array.from({ length: 10 }, ()=>[0x40, 0x74, 0x00]).flat(),
+        0xe8, 0xdd, 0x00, 0x00, 0x00, 0xc3];
+    const image = [...code, ...Array.from({ length: 0x100 - code.length }, ()=>0xcc), 0x41, 0xc3];
+    const starts = (/** @type {object} */ options)=>regionOf(image, 0x1000, options).blocks
+        .map(block=>block.start);
+    const own = starts({ maxBlocks: 6 });
+    assert.equal(own.filter(start=>start < 0x1100).length, 12, 'eleven blocks and the return');
+    assert.equal(own.includes(0x1023), true,
+        'the block the call returns to, so the call stays a wasm call');
+    assert.equal(own.includes(0x1100), false, 'the callee finds the caps passed');
+    assert.equal(starts({ maxBlocks: 6, ownRoom: { blocks: 0, bytes: 0 } }).length, 6);
+    // Within the caps the callee is formed in as before.
+    assert.equal(starts({ maxBlocks: 16 }).includes(0x1100), true);
 });
 
 test('a page the runtime refuses is not entered, and the edge to it stays an exit', ()=>{
@@ -271,9 +293,9 @@ test('a predicted callee is formed into a region its own function fills, within 
     assert.equal(has({}), true, 'G in, past the six blocks');
     assert.equal(has({ predictedRoom: { blocks: 0, bytes: 0 } }), false, 'no room, no G');
     assert.equal(regionOf(image, 0x1000, { maxBlocks: 6, callTargets }).blocks
-        .filter(block=>block.start < 0x1100).length, 6, 'the function itself keeps the caps');
+        .filter(block=>block.start < 0x1100).length, 12, 'the function itself in its own room');
     // The room is the callees' alone: a call the runtime did not predict has none.
-    assert.equal(regionOf(image, 0x1000, { maxBlocks: 6 }).blocks.length, 6);
+    assert.equal(regionOf(image, 0x1000, { maxBlocks: 6 }).blocks.length, 12);
 });
 
 test('a call through a fixed slot predicts the leaf the slot holds', ()=>{

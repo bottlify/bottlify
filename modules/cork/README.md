@@ -161,7 +161,7 @@ something, and measure it.
 
 | Setting | Default | What it does | When to change it, and the risk |
 | --- | --- | --- | --- |
-| `maxRegionBlocks`, `maxRegionBytes` | 128, 8192 | The largest region. | Larger regions keep more in one wasm function: faster loops, longer compiles. |
+| `maxRegionBlocks`, `maxRegionBytes` | 128, 8192 | The largest region; the entry's own function may take as much again past them, the callees formed into it stop at them. | Larger regions keep more in one wasm function: faster loops, longer compiles. |
 | `structure` | `true` | A region's loops as wasm loops. | `false` sends every back edge through the region's dispatch: much slower; for comparison only. |
 | `leafCalls` | `true` | A small leaf callee formed into its caller. | Off to rule it out. |
 | `leafBlocks`, `leafBytes` | 16, 512 | How large such a callee may be. | Larger inlines more and grows regions. |
