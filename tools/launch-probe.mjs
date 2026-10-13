@@ -699,6 +699,20 @@ async function main(){
     {
         printProfile(app, samples);
     }
+    // A profiling run's account of its calls and transfers (`blockProfile`).
+    const cork = app.diagnostics().find((/** @type {any} */ layer)=>layer.name === 'cpu')
+        ?.metrics?.cork;
+    if (cork?.mechanisms)
+    {
+        console.log(`  mechanisms: ${Object.entries(cork.mechanisms).filter(([, n])=>n > 0)
+            .map(([name, n])=>`${name}=${n}`).join(' ')}`);
+    }
+    if (cork?.transferTargets?.length)
+    {
+        console.log(`  transfer targets: ${cork.transferTargets.slice(0, 40)
+            .map((/** @type {number[]} */ [address, count])=>`${address.toString(16)}x${count}`)
+            .join(' ')}`);
+    }
     await report(app, { grep, calls });
     for (const failure of failures.slice(0, 3))
     {
