@@ -150,3 +150,11 @@ reader only unpacks.
   test vector `stirling.test.js` checks
 - No code is copied; the decoder is original work under the MPL
 - License: zlib (the tables are data of the format, reproduced with acknowledgement)
+
+## wabt -- the WebAssembly text format, for a development tool
+
+- Source: the npm package `wabt` 1.0.39 (https://github.com/WebAssembly/wabt), a WebAssembly
+  build of the WebAssembly Binary Toolkit
+- Used by: `tools/cork-wat.mjs`, which prints cork's output as text (`wasm2wat`); a development
+  dependency of the repository root, not part of any module and not distributed with the product
+- License: Apache-2.0
