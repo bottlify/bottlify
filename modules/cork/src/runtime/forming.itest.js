@@ -194,6 +194,9 @@ test('callees formed in, to any depth, run as the interpreter runs them', async(
         // Calls through a register sampled and their callees formed in behind a
         // compare (`callTargets`), a site due at its first sample.
         'predicted calls': { formDepth: 1, hotThreshold: 2, callTargets: true, predictAfter: 1 },
+        // And with regions their own functions fill, the callees in the room past the caps.
+        'predicted, full': { formDepth: 1, hotThreshold: 2, callTargets: true, predictAfter: 1,
+            maxRegionBlocks: 4 },
     };
     let translated = 0;
     let reforms = 0;

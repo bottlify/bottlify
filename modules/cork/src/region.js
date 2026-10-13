@@ -101,6 +101,9 @@ const LEAF_BLOCKS = 16;
 const LEAF_BYTES = 512;
 /** How large a callee formed into its caller may be, unless forming says otherwise. */
 const LEAF_LIMITS = Object.freeze({ blocks: LEAF_BLOCKS, bytes: LEAF_BYTES });
+/** Past the caps, for the callees the runtime predicted: four of the largest leaves. */
+const PREDICTED_ROOM = Object.freeze({ blocks: 4 * LEAF_BLOCKS, bytes: 4 * LEAF_BYTES });
+const NO_ROOM = Object.freeze({ blocks: 0, bytes: 0 });
 
 /**
  * Whether the function at `target` is small enough to form into its caller:
@@ -461,7 +464,7 @@ export function formShared(){
  * @param {(address: number) => number} read
  * @param {number} entry
  * @param {{ maxBlocks?: number, maxBytes?: number, leafBlocks?: number, leafBytes?: number,
- *     formDepth?: number,
+ *     formDepth?: number, predictedRoom?: { blocks: number, bytes: number },
  *     switchEntries?: number,
  *     translatable?: (eip: number) => boolean, leafCalls?: boolean,
  *     callTargets?: Map<number, number[]>, shared?: FormShared,
@@ -476,6 +479,9 @@ export function formShared(){
  *     callTargets:
  *     by the address of an indirect call, the callees it has been seen to go to, formed in
  *     as a direct call's small callee is -- the call compares its target with each;
+ *     predictedRoom: the blocks and bytes past `maxBlocks` and `maxBytes` those callees may
+ *     take, all of them together: a region full of its own function is where a hot call
+ *     was left out, and the runtime asks for its callees having seen it go there;
  *     shared: what forming found, for other regions formed over the same bytes with the
  *     same `translatable` (`formShared`)
  * @returns {Region}
@@ -483,7 +489,7 @@ export function formShared(){
 export function formRegion(read, entry,
     { maxBlocks = 128, maxBytes = 8192, translatable = ()=>true, leafCalls = true,
         callTargets, shared, helpers = true, leafBlocks = LEAF_BLOCKS, leafBytes = LEAF_BYTES,
-        formDepth = 1,
+        formDepth = 1, predictedRoom = PREDICTED_ROOM,
         switchEntries = SWITCH_ENTRIES } = {})
 {
     // Every page forming reads decides what it forms -- an import slot a call is predicted
@@ -565,8 +571,17 @@ export function formRegion(read, entry,
     const pendingAt = [[entry], [], []];
     /** @type {Map<number, number>} */
     const depthOf = new Map([[entry, 0]]);
+    /** The starts reached through a callee `callTargets` named, which may take
+     * `predictedRoom` past the caps. @type {Set<number>} */
+    const predictedStarts = new Set();
+    /** Whether the block being decoded was reached through such a callee. */
+    let inPredicted = false;
     /** @param {number} at @param {number} depth */
     const follow = (at, depth)=>{
+        if (inPredicted)
+        {
+            predictedStarts.add(at);
+        }
         pendingAt[Math.min(depth, 2)].push(at);
         if (!((depthOf.get(at) ?? Infinity) <= depth))
         {
@@ -688,7 +703,9 @@ export function formRegion(read, entry,
         {
             overlapping = true;
         }
-        if (blocks.size >= maxBlocks || !translatable(start))
+        inPredicted = predictedStarts.has(start);
+        const room = inPredicted ? predictedRoom : NO_ROOM;
+        if (blocks.size >= maxBlocks + room.blocks || !translatable(start))
         {
             // Not followed: whoever jumps here exits to the runtime.
             continue;
@@ -710,7 +727,7 @@ export function formRegion(read, entry,
                 follow(eip, depth);
                 break;
             }
-            if (bytes >= maxBytes)
+            if (bytes >= maxBytes + room.bytes)
             {
                 block.exit = { kind: 'cut', targets: [], next: eip, backEdge: false };
                 break;
@@ -829,6 +846,10 @@ export function formRegion(read, entry,
                     const apart = leafAt(callee, depth < formDepth);
                     if (apart === null)
                     {
+                        if (exit.predicted === true && callTargets?.has(decoded.eip))
+                        {
+                            predictedStarts.add(callee);
+                        }
                         follow(callee, depth + 1);
                     }
                     else

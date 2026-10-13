@@ -258,6 +258,24 @@ test('an indirect call\'s predicted callees are formed in as a direct call\'s ar
         callTargets: new Map([[0x1000, [0x1003]]]) }).entries, [0x1000, 0x1002]);
 });
 
+test('a predicted callee is formed into a region its own function fills, within the room'
+    + ' past the caps', ()=>{
+    // 1000: call ebx; then ten of inc eax; jz +0 (a block each); ret -- twelve blocks of
+    // its own; G = 1100: add edx, 1; ret.
+    const code = [0xff, 0xd3, ...Array.from({ length: 10 }, ()=>[0x40, 0x74, 0x00]).flat(), 0xc3];
+    const image = [...code, ...Array.from({ length: 0x100 - code.length }, ()=>0xcc),
+        0x83, 0xc2, 0x01, 0xc3];
+    const callTargets = new Map([[0x1000, [0x1100]]]);
+    const has = (/** @type {object} */ options)=>regionOf(image, 0x1000,
+        { maxBlocks: 6, callTargets, ...options }).blocks.some(block=>block.start === 0x1100);
+    assert.equal(has({}), true, 'G in, past the six blocks');
+    assert.equal(has({ predictedRoom: { blocks: 0, bytes: 0 } }), false, 'no room, no G');
+    assert.equal(regionOf(image, 0x1000, { maxBlocks: 6, callTargets }).blocks
+        .filter(block=>block.start < 0x1100).length, 6, 'the function itself keeps the caps');
+    // The room is the callees' alone: a call the runtime did not predict has none.
+    assert.equal(regionOf(image, 0x1000, { maxBlocks: 6 }).blocks.length, 6);
+});
+
 test('a call through a fixed slot predicts the leaf the slot holds', ()=>{
     // 1000: call [0x3000]; ret; F = 1007: inc eax; ret; G = 1009: call F; ret
     const code = [0xff, 0x15, 0x00, 0x30, 0, 0, 0xc3, 0x40, 0xc3,
