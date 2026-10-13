@@ -48,7 +48,11 @@ const hash = args.includes('--hash');
 const made = regionModule({ code, at, entry, hash, callReturn: hash,
     precise: args.includes('--precise') });
 const tools = await wabt();
-const module = tools.readWasm(made.wasm, { readDebugNames: true });
+// What cork's modules use beyond the first release: tail calls into other
+// regions, SIMD, shared memory and its atomics, bulk memory.
+const module = tools.readWasm(made.wasm, { readDebugNames: true, tail_call: true, simd: true,
+    threads: true, bulk_memory: true, sign_extension: true, sat_float_to_int: true,
+    multi_value: true, mutable_globals: true });
 module.generateNames();
 module.applyNames();
 const text = module.toText({ foldExprs: false, inlineExport: true });
