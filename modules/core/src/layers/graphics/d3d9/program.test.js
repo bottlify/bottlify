@@ -452,8 +452,10 @@ test('a ps_1_1 over a 2D texture and over a cube map draws through a pipeline fo
         await h.device.idle();
         assert.deepEqual(h.reports, []);
 
-        assert.deepEqual(h.device.diagnostics().programs, { built: 2, reused: 2 },
+        const { latest, ...programs } = h.device.diagnostics().programs;
+        assert.deepEqual(programs, { built: 2, reused: 2 },
             'one pipeline for each dimension, each served again in the next frame');
+        assert.equal(latest.length, 2, 'both keys listed as built');
         const pixels = h.gpu.of('createShaderModule').map((/** @type {any} */ call)=>
             call.descriptor).filter((/** @type {any} */ module)=>module.label.startsWith('ps:'));
         assert.equal(pixels.length, 2);

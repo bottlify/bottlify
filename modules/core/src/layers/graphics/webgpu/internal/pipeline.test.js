@@ -300,7 +300,11 @@ test('a pipeline in flight is shared, not built twice', async()=>{
 
     assert.equal(builds, 1);
     assert.equal(first, second);
-    assert.deepEqual(cache.stats(), { built: 1, reused: 1, resident: 1 });
+    {
+        const { latest, ...counts } = cache.stats();
+        assert.deepEqual(counts, { built: 1, reused: 1, resident: 1 });
+        assert.equal(latest.length, counts.built);
+    }
 });
 
 test('a point list is drawn as quads: triangles, never culled, a point an instance', ()=>{

@@ -586,7 +586,9 @@ test('two draws with the same state compile one shader', async()=>{
 
     assert.equal(gpu.count('createShaderModule'), 1);
     assert.equal(gpu.count('createRenderPipeline'), 1);
-    assert.deepEqual(backend.diagnostics().pipelines, { built: 1, reused: 1, resident: 1 });
+    const { latest, ...counts } = backend.diagnostics().pipelines;
+    assert.deepEqual(counts, { built: 1, reused: 1, resident: 1 });
+    assert.equal(latest.length, 1, 'the one key built is listed');
 });
 
 test('a draw that differs only in a later stage gets its own pipeline', async()=>{

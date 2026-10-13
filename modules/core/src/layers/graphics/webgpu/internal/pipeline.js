@@ -153,8 +153,8 @@ function lookUp(table, value, what){
  *     D3DTTFF_PROJECTED with that count, 0 or absent for no divide.
  * @property {number[]} [bump]
  *     A BUMPENVMAP stage's matrix and luminance, as numbers: BUMPENVMAT00, 01,
- *     10, 11, BUMPENVLSCALE, BUMPENVLOFFSET. Written into the shader, so only
- *     a bump stage carries them.
+ *     10, 11, BUMPENVLSCALE, BUMPENVLOFFSET. Carried in the draw's uniform block
+ *     (`bumpEnv`), not the key, so only a bump stage carries them.
  * @property {number} [colorKey]
  *     Direct3D 7 colour keying in force on this stage's texture: the key as
  *     its texel expands, 0xRRGGBB. A texel of that colour is not drawn.
@@ -311,7 +311,9 @@ export function pipelineKey(state){
             ...(stage.colorArg0 === undefined && stage.alphaArg0 === undefined ? []
                 : [`a${stage.colorArg0 ?? 1}/${stage.alphaArg0 ?? 1}`]),
             ...(stage.colorKey === undefined ? [] : [`k${stage.colorKey}`]),
-            ...(stage.bump === undefined ? [] : [`b${stage.bump.join('/')}`]),
+            // That a stage bumps, not by how much: the matrix and luminance
+            // are the block's, so every value draws through one pipeline.
+            ...(stage.bump === undefined ? [] : ['b']),
             ...(stage.dimension === undefined ? [] : [stage.dimension]),
             ...(stage.ones === undefined ? [] : [`o${stage.ones}`]),
             ...(stage.lodBias === undefined ? [] : [`l${stage.lodBias}`]),
@@ -546,6 +548,8 @@ export function createPipelineCache(options){
     const pipelines = new Map();
     let built = 0;
     let reused = 0;
+    /** The last keys built, newest last: a key made anew every frame shows here. @type {string[]} */
+    const latest = [];
 
     return {
         /** @param {PipelineState} state @returns {Promise<any>} */
@@ -558,12 +562,17 @@ export function createPipelineCache(options){
                 return existing;
             }
             built++;
+            latest.push(key);
+            if (latest.length > 4)
+            {
+                latest.shift();
+            }
             const building = options.build(state, key);
             pipelines.set(key, building);
             return building;
         },
 
-        stats: ()=>({ built, reused, resident: pipelines.size }),
+        stats: ()=>({ built, reused, resident: pipelines.size, latest: latest.slice() }),
 
         clear(){
             pipelines.clear();

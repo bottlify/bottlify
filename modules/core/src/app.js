@@ -8061,6 +8061,22 @@ function liveDumpOf(worker, control){
             return ids;
         },
         /**
+         * Keeps the first `count` texture stages of every fixed-function draw
+         * from now on, the rest as if disabled, -1 all: the cost or the look a
+         * stage adds, found by taking it away -- the stages have no shader of
+         * the program's for `skipShader` to name.
+         *
+         * @param {number} [count]
+         */
+        stageLimit: (count = -1)=>{
+            if (!worker)
+            {
+                throw new Error('stageLimit: this run draws without a graphics worker');
+            }
+            worker.postMessage({ type: 'debug', stageLimit: count });
+            return count;
+        },
+        /**
          * Keeps the first `count` draws of every frame from now on and drops
          * the rest, -1 none dropped: halving it finds the draw that painted a
          * part of the picture, numbered as a frame dump numbers them.

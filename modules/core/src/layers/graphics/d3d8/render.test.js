@@ -4560,3 +4560,75 @@ test('a program\'s dump line names the constants its shaders read and its declar
     ]), '0:0:t2:u0/0,1:12:t4:u10/1');
     assert.equal(describeDeclaration(null), '-');
 });
+
+test('a running device asked to keep fewer texture stages draws with that many, and with all again'
+    + ' once asked for all, the state it drew with before prepared again', async()=>{
+    const liveDump = { dumpFrames: 0, stageLimit: -1 };
+    const h = harness({ liveDump });
+    const { device, gpu } = h;
+    const texture = textureFrom(h, 1, 1, D3DFMT.A8R8G8B8, Uint8Array.from([1, 2, 3, 4]));
+    assert.equal(device.SetTexture(0, texture), D3D_OK);
+    assert.equal(device.SetTexture(1, texture), D3D_OK);
+    device.SetTextureStageState(1, D3DTSS.COLOROP, D3DTOP.MODULATE);
+    device.SetTextureStageState(1, D3DTSS.ALPHAOP, D3DTOP.SELECTARG1);
+    const fvf = FVF.XYZRHW | FVF.DIFFUSE | (2 << FVF.TEXCOUNT_SHIFT);
+    assert.equal(device.SetVertexShader(fvf), D3D_OK);
+    /** The stages the frame's draw sampled, as its dump line lists them. */
+    const frame = async()=>{
+        liveDump.dumpFrames = 1;
+        assert.equal(device.BeginScene(), D3D_OK);
+        assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(36 * 3), 36),
+            D3D_OK);
+        assert.equal(device.EndScene(), D3D_OK);
+        await h.present();
+        const line = device.diagnostics().lastDump.find((/** @type {string} */ one)=>/^#0 /.test(one));
+        return (String(line).match(/#\d+:t\d+/g) ?? []).length;
+    };
+    assert.equal(await frame(), 2, 'two stages');
+    liveDump.stageLimit = 1;
+    assert.equal(await frame(), 1, 'one stage, though the program changed nothing');
+    liveDump.stageLimit = -1;
+    assert.equal(await frame(), 2, 'two again');
+    void gpu;
+});
+
+test('a bump matrix moved draw by draw draws through one pipeline, each matrix in its block',
+    async()=>{
+        // A program that animates or fades a bump-env-mapped surface sets
+        // BUMPENVMAT every draw. Written into the shader, each value was a
+        // pipeline of its own, built and compiled every frame -- a clone at the
+        // middle distance cost the GPU twenty milliseconds a frame.
+        const h = harness();
+        const { device, gpu } = h;
+        const texture = textureFrom(h, 1, 1, D3DFMT.A8R8G8B8, Uint8Array.from([1, 2, 3, 4]));
+        assert.equal(device.SetTexture(0, texture), D3D_OK);
+        assert.equal(device.SetTexture(1, texture), D3D_OK);
+        device.SetTextureStageState(0, D3DTSS.COLOROP, D3DTOP.BUMPENVMAPLUMINANCE);
+        device.SetTextureStageState(0, D3DTSS.COLORARG1, D3DTA.TEXTURE);
+        device.SetTextureStageState(1, D3DTSS.COLOROP, D3DTOP.MODULATE);
+        device.SetTextureStageState(1, D3DTSS.ALPHAOP, D3DTOP.SELECTARG1);
+        const fvf = FVF.XYZRHW | FVF.DIFFUSE | (2 << FVF.TEXCOUNT_SHIFT);
+        assert.equal(device.SetVertexShader(fvf), D3D_OK);
+        assert.equal(device.BeginScene(), D3D_OK);
+        for (const scale of [0.25, 0.5, 0.75])
+        {
+            device.SetTextureStageState(0, D3DTSS.BUMPENVMAT00, floatToDword(scale));
+            device.SetTextureStageState(0, D3DTSS.BUMPENVLSCALE, floatToDword(scale * 2));
+            assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(36 * 3), 36),
+                D3D_OK);
+        }
+        assert.equal(device.EndScene(), D3D_OK);
+        await h.present();
+        assert.equal(gpu.count('createRenderPipeline'), 1, 'one pipeline for every matrix');
+        // Each draw's block carries its own matrix, as the shader reads it.
+        const blocks = gpu.of('writeBuffer').map((/** @type {any} */ call)=>call)
+            .filter((/** @type {any} */ call)=>call.buffer.descriptor.label?.startsWith('uniforms'));
+        const floats = blocks.flatMap((/** @type {any} */ call)=>
+            [...new Float32Array(call.bytes.slice().buffer)]);
+        for (const scale of [0.25, 0.5, 0.75])
+        {
+            const index = floats.findIndex((value, at)=>value === scale
+                && floats[at + 4] === scale * 2);
+            assert.ok(index >= 0, `the block of the draw with matrix ${scale} carries it`);
+        }
+    });

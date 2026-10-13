@@ -107,6 +107,8 @@ export function serveGraphics(scope, deps){
         skipTexture: '',
         /** Shaders whose draws are dropped (`app.debug.skipShader`), `vs12,ps40`; '' none. */
         skipShader: '',
+        /** Texture stages a fixed-function draw keeps (`app.debug.stageLimit`), -1 all. */
+        stageLimit: -1,
         /** How occlusion counts are answered (`app.debug.occlusion`): '' as counted, 'visible' all passed. */
         occlusion: '',
         /** Draws kept a frame (`app.debug.maxDraws`), the rest dropped; -1 all. */
@@ -528,6 +530,10 @@ export function serveGraphics(scope, deps){
                 if ('skipTexture' in data)
                 {
                     liveDump.skipTexture = String(data.skipTexture ?? '');
+                }
+                if ('stageLimit' in data)
+                {
+                    liveDump.stageLimit = Math.floor(Number(data.stageLimit ?? -1));
                 }
                 if ('skipShader' in data)
                 {

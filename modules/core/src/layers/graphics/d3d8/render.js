@@ -1123,9 +1123,13 @@ function putDword(block, at, dword){
  * @property {ArrayLike<number>} [stageConstants]
  *     Every stage's D3DTSS_CONSTANT as four floats, eight stages: past the
  *     lights, for a draw whose stages read D3DTA_CONSTANT (`tailOf`).
+ * @property {ArrayLike<number>} [bumpEnv]
+ *     Every stage's bump matrix (BUMPENVMAT00, 01, 10, 11) and luminance
+ *     (BUMPENVLSCALE, BUMPENVLOFFSET, 0, 0), two rows a stage, eight stages:
+ *     past the constants, for a draw with a bump stage (`tailOf`).
  * @property {ArrayLike<number>} [clipPlanes]
  *     The enabled user clip planes in the vertex's own space, four floats
- *     each: past the constants, for a fixed vertex stage that clips.
+ *     each: past the bump rows, for a fixed vertex stage that clips.
  */
 
 /**
@@ -1189,7 +1193,8 @@ export function uniformBlock(values, take = floats=>new Float32Array(floats)){
     const at = UNIFORM_AT;
     const lights = values.lights ?? [];
     const tail = UNIFORM_FLOATS + lights.length * LIGHT_FLOATS;
-    const planesAt = tail + (values.stageConstants ? STAGE_CONSTANT_FLOATS : 0);
+    const bumpAt = tail + (values.stageConstants ? STAGE_CONSTANT_FLOATS : 0);
+    const planesAt = bumpAt + (values.bumpEnv ? BUMP_ENV_FLOATS : 0);
     const block = take(planesAt + (values.clipPlanes?.length ?? 0));
     block.set(asFloats(values.worldViewProjection), at.worldViewProjection);
     block.set(asFloats(values.world ?? IDENTITY_FLOATS), at.world);
@@ -1239,6 +1244,10 @@ export function uniformBlock(values, take = floats=>new Float32Array(floats)){
     if (values.stageConstants)
     {
         block.set(values.stageConstants, tail);
+    }
+    if (values.bumpEnv)
+    {
+        block.set(values.bumpEnv, bumpAt);
     }
     if (values.clipPlanes)
     {
@@ -1309,6 +1318,33 @@ const NO_PLANE = Object.freeze([0, 0, 0, 0]);
 
 /** The floats every stage's constant takes past the lights: a row a stage. */
 const STAGE_CONSTANT_FLOATS = STAGE_COUNT * 4;
+
+/** The floats every stage's bump matrix and luminance take past the constants: two rows a stage. */
+const BUMP_ENV_FLOATS = STAGE_COUNT * 8;
+
+/**
+ * Every stage's bump matrix and luminance, as the block's tail carries them.
+ *
+ * @param {RenderModel} model
+ * @returns {Float32Array}
+ */
+function bumpEnvOf(model){
+    const floats = new Float32Array(BUMP_ENV_FLOATS);
+    for (let stage = 0; stage < STAGE_COUNT; stage++)
+    {
+        const states = model.stageStates(stage);
+        const get = (/** @type {number} */ state)=>{
+            const value = dwordToFloat(states.get(state) ?? 0);
+            // A state never set reads as whatever its dword was; one that is
+            // no number moves nothing.
+            return Number.isFinite(value) ? value : 0;
+        };
+        floats.set([get(D3DTSS.BUMPENVMAT00), get(D3DTSS.BUMPENVMAT01), get(D3DTSS.BUMPENVMAT10),
+            get(D3DTSS.BUMPENVMAT11), get(D3DTSS.BUMPENVLSCALE), get(D3DTSS.BUMPENVLOFFSET), 0, 0],
+        stage * 8);
+    }
+    return floats;
+}
 
 /**
  * Every stage's D3DTSS_CONSTANT, as the block's tail carries it.
@@ -1786,6 +1822,7 @@ export function pixelUniformsOf(model, take, mips = true, tail = undefined){
         stages: stageFlags(model, mips),
         textureTransforms: stageTransforms(model),
         ...(tail?.stageConstants ? { stageConstants: stageConstantsOf(model) } : {}),
+        ...(tail?.bump ? { bumpEnv: bumpEnvOf(model) } : {}),
     }, take);
 }
 
@@ -1844,6 +1881,7 @@ export function uniformsOf(model, lighting, take, mips = true, tail = undefined)
         // read past its own end.
         lights: lighting ? enabledLights(model) : [],
         ...(tail?.stageConstants ? { stageConstants: stageConstantsOf(model) } : {}),
+        ...(tail?.bump ? { bumpEnv: bumpEnvOf(model) } : {}),
         ...(tail?.clipPlanes ? { clipPlanes: clipPlanesOf(model, clipMaskOf(model), world) } : {}),
     }, take);
 }
@@ -2034,7 +2072,8 @@ const EMPTY_BLOCK = new Float32Array(0);
  *
  * @param {RenderModel} model
  * @param {import('../webgpu/internal/vertexformat.js').VertexLayout} layout
- * @param {{ shaderCoordinates?: boolean, onesOf?: (texture: any) => number }} [how]
+ * @param {{ shaderCoordinates?: boolean, onesOf?: (texture: any) => number,
+ *     stageLimit?: number }} [how]  `stageLimit`: the stages kept, the rest as if disabled
  *     `onesOf` is the channels a texture samples as one that the GPU's texture
  *     lacks (`sampledOnes`); none when absent.
  * @returns {{ stages: import('../webgpu/internal/pipeline.js').StageKey[],
@@ -2048,7 +2087,8 @@ export function stageCascade(model, layout, how = {}){
     const textures = [];
     /** @type {CascadeTruncation | null} */
     let unbound = null;
-    for (let stage = 0; stage < STAGE_COUNT; stage++)
+    const limit = how.stageLimit ?? STAGE_COUNT;
+    for (let stage = 0; stage < Math.min(STAGE_COUNT, limit); stage++)
     {
         const states = model.stageStates(stage);
         const get = (/** @type {number} */ state)=>states.get(state) ?? 0;
@@ -2816,7 +2856,7 @@ const CLEAR_STRIDE = 20;
  *     lock or not -- a debugging aid, for a program that writes a buffer
  *     outside its locks.
  * @property {{ dumpFrames: number, bufferLocks?: string, skipTexture?: string,
- *     skipShader?: string, occlusion?: string,
+ *     skipShader?: string, occlusion?: string, stageLimit?: number,
  *     maxDraws?: number, written?: (lines: string[], frame: number) => void,
  *     replayLast?: (cut?: number) => boolean,
  *     shownDraws?: () => { lines: string[], sceneDraws: number },
@@ -2910,6 +2950,8 @@ export function createRenderer(options){
         ? new Set(liveDump.skipTexture.split(',').filter(Boolean)) : fixedSkips);
     /** The shaders whose draws are dropped, `vs12,ps40` as a dump names them: a running program's. */
     const skipShaders = ()=>new Set((liveDump?.skipShader ?? '').split(',').filter(Boolean));
+    /** How many texture stages a fixed-function draw keeps (`app.debug.stageLimit`), -1 all. */
+    const stageLimit = ()=>(typeof liveDump?.stageLimit === 'number' ? liveDump.stageLimit : -1);
     const probeTexture = options.probeTexture ?? null;
     const compressedTextures = options.compressedTextures === true;
     // A device made with `clip-distances` clips by the distances a vertex
@@ -3400,6 +3442,9 @@ export function createRenderer(options){
         const entry = textures.get(texture);
         return entry
             ? `${entry.id}:${entry.format}@${entry.width}x${entry.height}`
+                // The levels the GPU's copy holds: a chain cut to one is
+                // sampled at full size however small it is drawn.
+                + `L${entry.gpuLevels ?? entry.levels ?? 1}`
                 + `^${entry.uploads || 0}${entry.census ?? ''}`
             : 'untracked';
     };
@@ -7530,6 +7575,8 @@ export function createRenderer(options){
      * @type {PreparedDraw | null}
      */
     let preparedState = null;
+    /** The cascade cut the prepared states were made under. */
+    let preparedLimit = -1;
     /**
      * Raised whenever a texture's own bytes are marked for upload, so that a
      * preparation holding that texture's view is built again and the upload
@@ -8234,6 +8281,14 @@ export function createRenderer(options){
             skip('pixelShader');
             return null;
         }
+        // A cascade cut (app.debug.stageLimit) is no state of the program's,
+        // so nothing prepared before it changed can be reused.
+        if (stageLimit() !== preparedLimit)
+        {
+            preparedLimit = stageLimit();
+            preparedState = null;
+            preparedCache.clear();
+        }
         const version = model.drawStateVersion;
         if (preparedState !== null && version !== undefined && preparedState.version === version
             && preparedState.contentVersion === contentVersion
@@ -8306,7 +8361,8 @@ export function createRenderer(options){
                 vertexLayoutKey = `f${processing.fvf.toString(16)}s${stride}`;
             }
         }
-        const cascade = stageCascade(model, layout, { onesOf: onesOfTexture });
+        const cascade = stageCascade(model, layout, { onesOf: onesOfTexture,
+            ...(stageLimit() < 0 ? {} : { stageLimit: stageLimit() }) });
         keyStages(model, cascade);
         reportCascade(cascade);
         const skipped = skipTextures();
