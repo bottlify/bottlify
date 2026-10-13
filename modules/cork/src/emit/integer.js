@@ -28,7 +28,7 @@ import { EMPTY } from '../wasm/encoder.js';
 import { I32, Kind, MASKS, SIGN_BITS, widthCode } from './flags.js';
 import { CallStack, Exit, Local, STATE_PARAMS } from './region.js';
 import { checkAccess, emitStaleExit, looseStackStore, noteStore, stackAccess } from './memory.js';
-import { Mechanism, pageFlagsAt } from '../runtime/layout.js';
+import { CALL_STRIDE, Mechanism, pageFlagsAt } from '../runtime/layout.js';
 import { PageFlag } from '../runtime/pages.js';
 import { emitSimd } from './simd.js';
 import { emitLocked, isLocked } from './locked.js';
@@ -103,10 +103,16 @@ export function classOf(instruction){
 
 /**
  * An indirect call's address and target into the layout's call profile while
- * the runtime has it on (`callProfile`: a flag, a count, and the last sixteen
- * calls as pairs), which is how the runtime learns the callees to form into
- * the caller (`callTargets`). Off, one load and a branch; the call's target is
- * in `count`.
+ * the runtime has it on (`callProfile`: a flag, a count, and sixteen calls as
+ * pairs), which is how the runtime learns the callees to form into the caller
+ * (`callTargets`). About one call in `CALL_STRIDE` is kept, so the sixteen are
+ * spread over the last thousand calls rather than the last sixteen: those are
+ * the calls just before the slice left for the host, the same few sites every
+ * time, and a site deep in the frame was sampled a hundred thousand times
+ * less often than one beside a `Present`. Which calls is the count's golden
+ * ratio hash, not every n-th: a loop over sixteen objects sampled every
+ * sixty-fourth call would see one object only. Off, one load and a branch;
+ * the call's target is in `count`.
  *
  * @param {E} e @param {number} site
  */
@@ -121,9 +127,14 @@ function profileCall(e, site){
     e.openIf('profile');
     b.i32const(0).i32const(0).load('i32', { offset: at + 4 }).localTee(Local.t1)
         .i32const(1).op(I32.add).store('i32', { offset: at + 4 });
-    b.localGet(Local.t1).i32const(15).op(I32.and).i32const(3).op(I32.shl).localTee(Local.t1)
+    b.localGet(Local.t1).i32const(0x9e3779b1 | 0).op(I32.mul)
+        .i32const(32 - Math.log2(CALL_STRIDE)).op(I32.shrU).op(I32.eqz);
+    e.openIf('sampled');
+    b.localGet(Local.t1).i32const(Math.log2(CALL_STRIDE)).op(I32.shrU).i32const(15).op(I32.and)
+        .i32const(3).op(I32.shl).localTee(Local.t1)
         .i32const(site | 0).store('i32', { offset: at + 8 });
     b.localGet(Local.t1).localGet(Local.count).store('i32', { offset: at + 12 });
+    e.close();
     e.close();
 }
 

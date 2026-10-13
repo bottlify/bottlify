@@ -318,7 +318,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         // before a candidate, and indirect call sites tried with predicted callees.
         exitTargets: 4096,
         missesKept: 4096,
-        callSitesKept: 4096,
+        callSitesKept: 16384,
         // Merging modules a hot transfer crosses (`mergeAfter`): translated
         // instructions between two readings of the crossings, the fewest between
         // two merges, a region's share of that, and merges one region may take part in.
@@ -334,7 +334,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         predictShare: 8,
         predictCallees: 4,
         reforms: 3,
-        callWindow: 64,
+        // At a few hundred readings a second, 64 was a fifth of a second: a
+        // site taking one call in a hundred gathered ten samples in it and
+        // never came due.
+        callWindow: 1024,
         // The entry hash's load past which a block start is kept in the host's
         // map alone (its slots are the layout's, `hashSlots`).
         hashLoad: 0.75,
@@ -2571,6 +2574,13 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         if (words.getUint32(profileAt, true) === 0)
         {
             words.setUint32(profileAt + 4, 0, true);
+            // The pairs a reading takes are the ones written since: the
+            // calls kept are picked by a hash, not every n-th, so how many
+            // there are is not the count's to say.
+            for (let i = 0; i < 16; i++)
+            {
+                words.setUint32(profileAt + 8 + i * 8, 0, true);
+            }
             words.setUint32(profileAt, 1, true);
             return;
         }
@@ -2585,10 +2595,13 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 }
             }
         }
-        const count = Math.min(words.getUint32(profileAt + 4, true), 16);
-        for (let i = 0; i < count; i++)
+        for (let i = 0; i < 16; i++)
         {
             const site = words.getUint32(profileAt + 8 + i * 8, true);
+            if (site === 0)
+            {
+                continue;
+            }
             const target = words.getUint32(profileAt + 12 + i * 8, true);
             let seen = callSamples.get(site);
             if (seen === undefined)

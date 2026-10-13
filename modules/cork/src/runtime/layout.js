@@ -174,6 +174,14 @@ export const transferTargetAt = (layout, slot)=>mechanismAt(layout, Tables.MECHA
     + slot * Tables.TRANSFER_SLOT;
 
 /**
+ * About one indirect call in this many is kept in the call profile's sixteen
+ * pairs, picked by a hash of the count (`profileCall` in emit/integer.js): the
+ * pairs then hold calls spread over the last thousand rather than the last
+ * sixteen before a reading.
+ */
+export const CALL_STRIDE = 64;
+
+/**
  * The block profile's slot for a block start: the top twenty bits of the
  * address times the golden ratio.
  *

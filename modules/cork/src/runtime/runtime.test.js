@@ -2417,6 +2417,59 @@ test('an indirect call sampled going to a few small callees has them formed into
     assert.equal(run(), 300, 'only H leaves, and its return comes back');
 });
 
+test('a hot indirect call is sampled though another one is always the last before a reading',
+    async()=>{
+        if (!probeFeatures().tailCalls)
+        {
+            return;
+        }
+        // mov ecx, 1600; L: mov eax, ecx; and eax, 15; call [TABLE + eax*4]; dec ecx;
+        // jnz L; mov ecx, 16; mov ebx, H; M: call ebx; dec ecx; jnz M; hlt; F, G, H as in
+        // dispatchLoop -- the loop's call the hot one, M's sixteen calls the last
+        // before every reading: the last sixteen calls a reading took were all
+        // M's, and the loop's call never came due.
+        const m = machine({ countTransfers: true, callTargets: true, callReturn: false });
+        const table = CODE + 0x100;
+        const code = [
+            0xb9, 0x40, 0x06, 0, 0,
+            0x89, 0xc8, 0x83, 0xe0, 0x0f,
+            0xff, 0x14, 0x85, table & 0xff, table >>> 8 & 0xff, 0, 0,
+            0x49, 0x75, 0xf1,
+            0xb9, 16, 0, 0, 0,
+            0xbb, (CODE + 44) & 0xff, (CODE + 44) >>> 8 & 0xff, 0, 0,
+            0xff, 0xd3,
+            0x49, 0x75, 0xfb,
+            0xf4,
+            0x83, 0xc2, 0x01, 0xc3,
+            0x83, 0xc2, 0x03, 0xc3,
+            0x83, 0xc2, 0x64, 0xc3,
+        ];
+        const [f, g, h] = [CODE + 36, CODE + 40, CODE + 44];
+        m.write(CODE, code);
+        m.write(table, Array.from({ length: 16 }, (_, k)=>(k % 2 === 1 ? g : f))
+            .flatMap(slot=>[slot & 0xff, slot >>> 8 & 0xff, 0, 0]));
+        for (const at of [f, g, h, CODE])
+        {
+            m.runtime.noteHot(at);
+        }
+        await m.runtime.translatePending();
+        const run = ()=>{
+            m.setReg(2, 0);
+            m.setReg(4, 0x80000);
+            const before = m.runtime.diagnostics().transfers ?? 0;
+            assert.equal(m.runtime.run(m.runtime.entryOf(CODE), 1_000_000).kind, 'halt');
+            assert.equal(m.reg(2), 800 + 800 * 3 + 16 * 100);
+            return (m.runtime.diagnostics().transfers ?? 0) - before;
+        };
+        assert.equal(run(), 2 * (1600 + 16), 'every call and every return a transfer');
+        for (let i = 0; i < 32; i++)
+        {
+            run();
+            await m.runtime.translatePending();
+        }
+        assert.ok(run() < 1600, 'the loop\'s calls to F and G formed in');
+    });
+
 test('callTargets and dispatch are off unless a run asks for them', async()=>{
     if (!probeFeatures().tailCalls)
     {
@@ -2464,7 +2517,8 @@ test('an indirect call sampled only now and then is not formed again; one sample
         {
             return;
         }
-        const m = machine({ callTargets: true });
+        // A window of 64 readings, against the 140 the call is left cold for.
+        const m = machine({ callTargets: true, callWindow: 64 });
         const { code, table, slots, f, g, h } = dispatchLoop(1600);
         m.write(CODE, code);
         m.write(table, slots.flatMap(slot=>[slot & 0xff, slot >>> 8 & 0xff, 0, 0]));
