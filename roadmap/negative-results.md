@@ -631,3 +631,32 @@ None yet.
   10-228%, for its 11% on Lua; (b) is within the noise. Built instead: room past the caps for
   the entry's own function
   alone, callees still stopping at the caps (the commit after this entry).
+
+### 2026-10-13 -- x87: code a wasm call returns to tests its stack shape whatever top its region was entered at
+
+- **Idea.** `planStack` gives a block a call returns to the shape it needs, tested after the
+  call (`x87AfterCall`), only when the block's state is the region's entry state. A region
+  entered mid-loop with registers held -- cork-bench `game-pc24`'s distance loop at 0x4012e0,
+  entered at top 6 -- returns from its indirect call (`think[]`) at top 0, knows nothing of
+  the stack from there on, and so checks every push of the loop it comes back to, and the
+  float path (`floatSingles`, which needs a push known clear) never runs in it. The change
+  gave every return block its needs, tested after the call, whatever the entry.
+- **Workload.** cork-bench `game-pc24` (sha256 e2781f07...), `bench.mjs --root` of the tree
+  at `383b0b04` against the same tree with the change, `node --no-liftoff`, defaults (warm
+  20, iters 40, best of 5 reps), usPerIter; processes alternated.
+- **Values.** Ten processes an arm: base 346.6 350.6 351.4 356.7 365.5 367.5 374.7 441.1
+  465.4 467.6 (median 366.5); with the change 339.9 344.1 353.5 354.3 355.6 359.5 373.6 379.4
+  379.8 413.6 (median 357.6): -2.4%, inside the spread. An earlier five each: base median
+  329.9, change 330.7. fmath-pc24, the x87 and sse workloads: the same within noise; every eax
+  the same. A CPU profile (3 reps, 200 iters) put the 0x4012e0 region at 53.0 ms of self time
+  without and 32.5 ms with it, but the block profile shows the steady state running that loop
+  inside the region entered at 0x4010a5 (top 0), where the return block is the entry's state
+  and was tested already: the region the change speeds runs mostly while warming.
+- **Machine.** A 4-core x86-64 Linux VM (Firecracker), Intel Xeon @ 2.80 GHz, Node 22.22.0.
+  Power plan not recorded. A run's usPerIter moved by up to 35% between processes.
+- **Correctness.** Cork's unit tests (608, with a test of a callee leaving ST(7) held at the
+  same top: four shape misses, then checked, the interpreter's result) and integration tests
+  (22) passed; core's cpu layer (153) too.
+- **Decision.** Not committed: no signal over the noise on the one workload that has the
+  shape. Worth measuring again on a title whose hot loops sit in regions entered with
+  registers held.
