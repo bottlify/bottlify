@@ -249,6 +249,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         // to it returns from the transfer without entering its region
         // (`finishModule` in emit/region.js; false: entered as any other).
         emptyCalls: true,
+        // With it, a call out of a region reads its target's slot first and
+        // returns from such a function in place, without calling the transfer
+        // (`callAndReturn` in emit/integer.js).
+        emptySites: false,
         // x87 regions compiled for the precision control the program runs
         // under -- the wide ones (double, extended) until it is seen with
         // single set, single from then on until it is seen with another --
@@ -1627,6 +1631,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         place: table !== null && settings.dispatch === true,
         profileCalls: table !== null && settings.callTargets === true,
         callReturn: table !== null && settings.callReturn === true && !settings.undoLog,
+        emptySites: settings.emptySites === true && settings.emptyCalls !== false,
         resume: resumable,
         wide: precision === 'wide',
         narrow: precision === 'narrow',
@@ -2182,6 +2187,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         + (settings.precise === true ? 'P' : '') + (settings.countTransfers ? 'T' : '')
         + (settings.dispatch === true ? 'D' : '') + (settings.callTargets === true ? 'C' : '')
         + (settings.callReturn === true ? 'R' : '') + (sharedMemory ? 'M' : '')
+        + (settings.emptySites === true && settings.emptyCalls !== false ? 'E' : '')
         + (settings.atomic === true ? 'A' : '')
         + `p${(settings.trapPort ?? 0).toString(16)}`;
     /** The store key of one formed region: an x87 region compiled for the wide

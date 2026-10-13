@@ -227,6 +227,9 @@ const LOCAL_TYPES = [
  * @property {number} [undo]           the undo helper's function index, in a differential build
  * @property {boolean} [callReturn] a call out of a region is a wasm call the matching `ret`
  *     returns from (`CallStack`), where the region goes on after it
+ * @property {boolean} [emptySites] with `callReturn`, such a call looks its target up in the
+ *     entry hash first and does the `ret` of a function that does nothing in place
+ *     (`callAndReturn`)
  * @property {boolean} [countTransfers] each transfer through the hash adds one to the
  *     tables' transfer count (a diagnostic run)
  * @property {boolean} [blockProfile] each block counts its executions in the block
@@ -294,7 +297,7 @@ const LOCAL_TYPES = [
  * @param {{ undoLog?: boolean, hash?: boolean, trapPort?: number, leaveOut?: Set<string>,
  *     countTransfers?: boolean, wide?: boolean, narrow?: boolean, blockProfile?: boolean,
  *     structure?: boolean, precise?: boolean, place?: number, profileCalls?: boolean,
- *     resume?: boolean, callReturn?: boolean, looseStacks?: boolean,
+ *     resume?: boolean, callReturn?: boolean, emptySites?: boolean, looseStacks?: boolean,
  *     atomic?: boolean, checkReads?: boolean, expansion?: ExpansionNote | null }}
  *     [options]  expansion: told every instruction's wasm bytes as it is emitted
  *     (`tools/cork-expansion.mjs`), in a diagnostic build only; checkReads: an
@@ -320,7 +323,7 @@ const LOCAL_TYPES = [
 export function prepareModule(m, layout, features, memory = {},
     { undoLog = false, hash = false, trapPort, leaveOut = new Set(), countTransfers = false,
         wide = false, narrow = false, blockProfile = false, structure = true, precise = false,
-        place = 0, profileCalls = false, resume = false, callReturn = false,
+        place = 0, profileCalls = false, resume = false, callReturn = false, emptySites = false,
         looseStacks = false, atomic = false, checkReads = false, expansion = null } = {})
 {
     m.importMemory('env', 'memory', {
@@ -392,6 +395,10 @@ export function prepareModule(m, layout, features, memory = {},
     if (callReturn && hashed && !undoLog && (layout.flagRecord ?? -1) >= 0)
     {
         context.callReturn = true;
+        if (emptySites)
+        {
+            context.emptySites = true;
+        }
     }
     if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && countTransfers)
     {

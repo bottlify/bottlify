@@ -195,7 +195,8 @@ function contextKey(layout, features, options, leaveOut){
         options.wide === true, options.narrow === true, options.structure !== false,
         options.precise === true, options.place === true, options.profileCalls === true,
         options.atomic === true,
-        options.resume === true, options.callReturn === true, options.looseStacks === true,
+        options.resume === true, options.callReturn === true, options.emptySites === true,
+        options.looseStacks === true,
         options.checkReads === true, options.expansion != null, [...leaveOut].sort()]);
 }
 
@@ -296,7 +297,7 @@ function sameShape(kept, shape){
  *     leaveOut?: Set<string> | string[], wide?: boolean, narrow?: boolean,
  *     structure?: boolean, precise?: boolean, profileCalls?: boolean, resume?: boolean,
  *     atomic?: boolean,
- *     callReturn?: boolean, looseStacks?: boolean, checkReads?: boolean,
+ *     callReturn?: boolean, emptySites?: boolean, looseStacks?: boolean, checkReads?: boolean,
  *     memory?: { shared?: boolean, maxPages?: number },
  *     expansion?: import('../emit/region.js').ExpansionNote | null }}
  *     [options]
@@ -330,6 +331,7 @@ export function emitBatch(jobs, layout, features, options = {}, cache = undefine
         profileCalls: options.profileCalls === true,
         resume: options.resume === true,
         callReturn: options.callReturn === true,
+        emptySites: options.emptySites === true,
         looseStacks: options.looseStacks === true,
         checkReads: options.checkReads === true,
         leaveOut,

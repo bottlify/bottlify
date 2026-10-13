@@ -73,6 +73,7 @@ const EMITTED = {
     84: '42f0f2f5d3d51fbe',
     85: 'bbc86e076a900b9f',
     86: 'eb6cfc99e139de77',
+    87: '920c8f09ff12fb1b',
 };
 
 /** Features fixed rather than probed, so every host emits the same bytes. */
@@ -119,6 +120,15 @@ function digest(){
     finishModule(context, [translation.functionIndex]);
     m.exportFunction('region', translation.functionIndex);
     hash.update('predicted:').update(m.toBytes());
+    // The same unpredicted, its call looking for an empty callee in place (`emptySites`).
+    const plain = formRegion(address=>code[address - 0x1000] ?? 0, 0x1000, {});
+    const sites = new ModuleBuilder();
+    const sitesContext = prepareModule(sites, layout, FEATURES, {}, { hash: true,
+        trapPort: 0xb077, resume: true, callReturn: true, emptySites: true });
+    const atSites = emitRegion(sitesContext, plain, { entryTop: 0, checked: false });
+    finishModule(sitesContext, [atSites.functionIndex]);
+    sites.exportFunction('region', atSites.functionIndex);
+    hash.update('empty sites:').update(sites.toBytes());
     return hash.digest('hex').slice(0, 16);
 }
 

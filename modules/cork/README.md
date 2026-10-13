@@ -170,6 +170,7 @@ something, and measure it.
 | `runtimeHelpers` | `true` | Compiler helpers such as MSVC's `_ftol2` formed as what they do. | Off to rule it out. |
 | `callReturn` | `true` | A call out of a region is a wasm call, and the region goes on after the `ret`. | Off makes every return go through the entry hash. |
 | `emptyCalls` | `true` | A call to a function that does nothing -- a `ret` or `ret imm16`, after at most three direct jumps, as an incremental linker's thunk to an empty virtual method -- returns at the transfer, without entering a region. | Off to rule it out. |
+| `emptySites` | `false` | With `emptyCalls`, a call out of a region (outside x87 code) reads its target's slot in the entry hash first and returns from such a function in place, without calling the transfer. | A call to an empty method costs about a third of what the transfer leaves it; every other call out of a region reads one more slot, about a nanosecond. |
 | `callTargets` | `false` | Indirect calls sampled and their few small callees formed in. | Benchmarks of virtual calls gain 4-5x; games measured slower with it. |
 | `predictAfter`, `predictShare`, `predictCallees`, `reforms`, `callWindow` | 48, 8, 4, 3, 64 | With `callTargets`: samples before callees are looked at, the share a callee must take (one in this many), callees compared, times a region is formed again, the sampling window. | Tuning `callTargets`. |
 | `dispatch` | `false` | A module placed in a range of the table, a transfer inside it a direct tail call. | Measured slower in games with `callTargets`; try alone. |
@@ -213,7 +214,7 @@ The core also takes `cork.pool`, `cork.poolPerProcess`, `cork.poolWindowMs` and 
 **Diagnostics**: `blockProfile` and `blockProfileFrom` (execution counts per block, from a second
 on, and beside them `mechanisms`: how calls and returns went -- formed into a region, wasm calls or
 ways out, a call out by why its callee was not formed in, a call to an empty function returned
-from in the transfer -- transfers through the entry hash and `rdtsc`s -- and `forms`: each instruction form's executions and the wasm bytes the hot regions emit
+from in the transfer or at the call -- transfers through the entry hash and `rdtsc`s -- and `forms`: each instruction form's executions and the wasm bytes the hot regions emit
 for it), `timings` (the translator's phases timed), `traceStore` (translation store keys), `checkStale`
 (regions whose bytes changed), `countTransfers`, `undoLog` (store undo log for replay). They cost
 speed; leave them off outside an investigation.

@@ -5,7 +5,7 @@
  */
 
 /**
- * The gate of calls to functions that do nothing (`emptyCalls`): seeded
+ * The gate of calls to functions that do nothing (`emptyCalls`, `emptySites`): seeded
  * programs whose loop calls functions through method tables (`call [reg+N]`), a register,
  * a fixed slot and directly -- empty ones (`ret`, `rep ret`, `ret 4`, `ret 8`) and ones
  * that are not (`ret 6`, `nop; ret`, work, a compare, a jump on through a register), each
@@ -13,8 +13,8 @@
  * `ret` pops, the flags set before and read after, the slot the call pushed into read back,
  * an x87 value held across, and stores that turn an empty function into one that is not
  * and back and point a thunk at another body -- run interpreted alone, then translated with
- * every call entering its callee's region and returned from in the transfer, with leaves
- * formed in and not and with indirect calls predicted.
+ * every call entering its callee's region, returned from in the transfer, and returned from
+ * at the call as well, with leaves formed in and not and with indirect calls predicted.
  * Everything a program observes must come out the same: the registers, the flags, its data,
  * its stack and its code.
  */
@@ -276,6 +276,7 @@ async function run(pieces, config){
             },
             translated: stop.translated,
             inTransfer: mechanisms.EMPTY_RETURN ?? 0,
+            atCall: mechanisms.EMPTY_SITE ?? 0,
         };
     }
     finally
@@ -289,13 +290,18 @@ test('calls to functions that do nothing, returned from early, run as the interp
         const paths = {
             'entered': { emptyCalls: false, hotThreshold: 2 },
             'in the transfer': { hotThreshold: 2 },
-            'in the transfer, no leaves': { leafCalls: false, hotThreshold: 2 },
-            'in the transfer, predicted': { hotThreshold: 2, callTargets: true, predictAfter: 1 },
-            // Counted, which is other code: the short way is taken.
+            'at the call': { emptySites: true, hotThreshold: 2 },
+            'at the call, no leaves': { emptySites: true, leafCalls: false, hotThreshold: 2 },
+            'at the call, predicted': { emptySites: true, hotThreshold: 2, callTargets: true,
+                predictAfter: 1 },
+            // Counted, which is other code: the short ways are taken.
             'in the transfer, counted': { leafCalls: false, hotThreshold: 2, blockProfile: true },
+            'at the call, counted': { emptySites: true, leafCalls: false, hotThreshold: 2,
+                blockProfile: true },
         };
         let translated = 0;
         let inTransfer = 0;
+        let atCall = 0;
         for (let seed = 1; seed <= PROGRAMS; seed++)
         {
             const pieces = program(seed);
@@ -308,8 +314,10 @@ test('calls to functions that do nothing, returned from early, run as the interp
                 assert.deepEqual(got.observed, reference.observed, `seed ${seed}, ${name}`);
                 translated += got.translated;
                 inTransfer += name === 'in the transfer, counted' ? got.inTransfer : 0;
+                atCall += name === 'at the call, counted' ? got.atCall : 0;
             }
         }
         assert.ok(translated > 0, 'the translated paths ran translated code');
         assert.ok(inTransfer > 0, 'the transfer returned from empty functions');
+        assert.ok(atCall > 0, 'calls returned from empty functions in place');
     });

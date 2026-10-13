@@ -246,6 +246,9 @@
  * @property {boolean} [emptyCalls]  A call to a function that does nothing -- a `ret` or
  *     `ret imm16`, after at most three direct jumps -- returns without entering a region.
  *     Default true.
+ * @property {boolean} [emptySites]  With `emptyCalls`, a call out of a region reads its target's
+ *     slot first and returns from such a function in place, without calling the transfer.
+ *     Default false.
  * @property {boolean} [wideFirst]  x87 regions compiled for the precision control the program
  *     runs under, tested once a block. Default true.
  * @property {boolean} [x87Shapes]  x87 regions compiled for the stack's shape at their entries,

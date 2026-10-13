@@ -28,7 +28,7 @@ import { EMPTY } from '../wasm/encoder.js';
 import { I32, Kind, MASKS, SIGN_BITS, widthCode } from './flags.js';
 import { CallStack, Exit, Local, STATE_PARAMS } from './region.js';
 import { checkAccess, emitStaleExit, looseStackStore, noteStore, stackAccess } from './memory.js';
-import { CALL_STRIDE, Mechanism, pageFlagsAt } from '../runtime/layout.js';
+import { CALL_STRIDE, Mechanism, Tables, pageFlagsAt } from '../runtime/layout.js';
 import { PageFlag } from '../runtime/pages.js';
 import { emitSimd } from './simd.js';
 import { emitLocked, isLocked } from './locked.js';
@@ -169,6 +169,13 @@ function countApart(e){
  * came, this call's entry taken off the stack. Past the stack's limit, or with
  * the budget spent, the call leaves as any call does.
  *
+ * With `emptySites`, outside x87 code, the target's first slot in the entry hash
+ * is read first: a function that does nothing there (`emptyCode`, the slot's
+ * byte 11) is returned from in place -- the address just pushed popped, with
+ * the bytes its `ret` pops, and its instructions charged -- with nothing
+ * written back and no transfer called. A target held further along the probe
+ * goes through the transfer, which returns from it as well (`finishModule`).
+ *
  * @param {import('./region.js').RegionEmitter} e
  * @param {number} next  the return address, a block of the region
  * @param {() => void} pushTarget  pushes the callee's address
@@ -191,6 +198,25 @@ function callAndReturn(e, next, pushTarget, mechanism){
         e.openGuard('stale');
         e.exitDynamic(Exit.STALE);
         e.close();
+    }
+    const site = e.context.emptySites === true && !e.x87.active;
+    if (site)
+    {
+        const hash = layout.tables + Tables.HASH;
+        b.localGet(Local.eip).i32const(0x9e3779b1 | 0).op(I32.mul)
+            .i32const(layout.hashShift ?? 16).op(I32.shrU).i32const(Tables.HASH_SLOT).op(I32.mul)
+            .localTee(Local.t1).load('i32_8u', { offset: hash + 11 });
+        b.i32const(0);
+        b.localGet(Local.t1).load('i32', { offset: hash }).localGet(Local.eip).op(I32.eq);
+        b.select().localTee(Local.t1);
+        e.openIf('empty');
+        e.countMechanism(Mechanism.EMPTY_SITE);
+        // The low six bits are the dwords popped plus one, the top two the jumps before the `ret`.
+        b.localGet(Local.reg + 4).localGet(Local.t1).i32const(63).op(I32.and).i32const(2)
+            .op(I32.shl).op(I32.add).localSet(Local.reg + 4);
+        b.localGet(Local.budget).localGet(Local.t1).i32const(6).op(I32.shrU).i32const(1)
+            .op(I32.add).op(I32.sub).localSet(Local.budget);
+        b.else();
     }
     b.i32const(0).load('i32', { offset: depth }).localTee(Local.t1)
         .i32const(CallStack.LIMIT).op(I32.geU)
@@ -231,6 +257,10 @@ function callAndReturn(e, next, pushTarget, mechanism){
     if (e.x87.active)
     {
         x87AfterCall(e, next, top);
+    }
+    if (site)
+    {
+        e.close();
     }
     b.i32const(next).localSet(Local.eip);
     e.returned = true;
