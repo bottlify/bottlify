@@ -814,9 +814,11 @@ async function main(){
     if (corkOut !== null && cork)
     {
         // The profile for reading afterwards: every counted block, the call
-        // sites the prediction sampled, the mechanisms.
+        // sites the prediction sampled, the mechanisms, and what the hottest
+        // regions' instruction forms emit, weighted by how often each ran.
         writeFileSync(corkOut, JSON.stringify({ blockCounts: cork.blockCounts ?? [],
-            sites: cork.prediction?.sites ?? [], mechanisms: cork.mechanisms ?? {} }));
+            sites: cork.prediction?.sites ?? [], mechanisms: cork.mechanisms ?? {},
+            forms: cork.forms ?? null }));
         console.log(`  cork profile written to ${corkOut}`);
     }
     await report(app, { grep, calls });
