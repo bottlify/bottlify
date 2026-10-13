@@ -534,6 +534,9 @@ export function createDirect3D9(options = {}){
         get refCount(){
             return count.value;
         },
+        get destroyed(){
+            return count.destroyed;
+        },
         addRef: ()=>count.addRef(),
         release: ()=>count.release(),
 
@@ -1210,6 +1213,9 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
     const swapChain = {
         get refCount(){
             return swapChainCount.value;
+        },
+        get destroyed(){
+            return swapChainCount.destroyed;
         },
         addRef: ()=>swapChainCount.addRef(),
         release: ()=>swapChainCount.release(),
@@ -2051,6 +2057,9 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         caps,
         get refCount(){
             return count.value;
+        },
+        get destroyed(){
+            return count.destroyed;
         },
         addRef: ()=>count.addRef(),
         release: ()=>{
@@ -4600,6 +4609,9 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             type,
             get refCount(){
                 return queryCount.value;
+            },
+            get destroyed(){
+                return queryCount.destroyed;
             },
             addRef: ()=>queryCount.addRef(),
             release: ()=>queryCount.release(),

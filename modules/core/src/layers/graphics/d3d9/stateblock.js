@@ -504,6 +504,7 @@ export function applyRecord(record, view){
  * @typedef {Object} StateBlock
  * @property {StateBlockRecord} record
  * @property {number} refCount
+ * @property {boolean} destroyed  whether its last reference has gone for good
  * @property {() => number} addRef
  * @property {() => number} release
  * @property {() => number} Capture
@@ -523,6 +524,9 @@ export function createStateBlock(options){
         record: options.record,
         get refCount(){
             return options.count.value;
+        },
+        get destroyed(){
+            return options.count.destroyed;
         },
         addRef: ()=>options.count.addRef(),
         release: ()=>options.count.release(),

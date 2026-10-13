@@ -1114,6 +1114,9 @@ export function createTexture(options){
         get refCount(){
             return options.count.value;
         },
+        get destroyed(){
+            return options.count.destroyed;
+        },
         // Where guest code may count its references (`ReferenceCount.place`).
         counter: count,
         addRef: ()=>options.count.addRef(),
@@ -1547,6 +1550,9 @@ export function createVolumeTexture(options){
 
         get refCount(){
             return options.count.value;
+        },
+        get destroyed(){
+            return options.count.destroyed;
         },
         // Where guest code may count its references (`ReferenceCount.place`).
         counter: count,

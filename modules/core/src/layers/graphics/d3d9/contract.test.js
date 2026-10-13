@@ -1337,3 +1337,46 @@ test('a surface made on its own gives its storage back with its last reference',
     assert.equal(device.release(), 0);
     assert.equal(held.size, 0, 'and the device\'s own surfaces go with its last reference');
 });
+
+test('every object the device counts says whether its last reference has gone for good', ()=>{
+    // The graphics worker keeps a played object until it says it is destroyed:
+    // one that never said so -- state blocks, declarations, shaders, queries,
+    // textures -- was kept with everything it held, and a program making a
+    // state block a frame grew the worker by gigabytes.
+    const { d3d, device } = make({ caps: {
+        vertexShaderVersion: { major: 2, minor: 0 }, pixelShaderVersion: { major: 2, minor: 0 },
+    } });
+    /** @type {[string, any][]} */
+    const made = [['IDirect3D9', d3d], ['IDirect3DDevice9', device]];
+    /** @param {string} name @param {(out: any) => number} create @param {string} field */
+    const make1 = (name, create, field)=>{
+        /** @type {Record<string, any>} */
+        const out = {};
+        assert.equal(create(out), D3D_OK, name);
+        made.push([name, out[field]]);
+    };
+    make1('texture', out=>device.CreateTexture(8, 8, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, out),
+        'texture');
+    make1('cube texture', out=>device.CreateCubeTexture(8, 1, 0, D3DFMT.A8R8G8B8,
+        D3DPOOL.MANAGED, out), 'texture');
+    make1('volume texture', out=>device.CreateVolumeTexture(8, 8, 2, 1, 0, D3DFMT.A8R8G8B8,
+        D3DPOOL.MANAGED, out), 'texture');
+    make1('surface', out=>device.CreateOffscreenPlainSurface(8, 8, D3DFMT.A8R8G8B8,
+        D3DPOOL.SYSTEMMEM, out), 'surface');
+    make1('vertex buffer', out=>device.CreateVertexBuffer(64, 0, 0, D3DPOOL.MANAGED, out),
+        'buffer');
+    make1('index buffer', out=>device.CreateIndexBuffer(64, 0, D3DFMT_INDEX.INDEX16,
+        D3DPOOL.MANAGED, out), 'buffer');
+    make1('declaration', out=>device.CreateVertexDeclaration(
+        [element(0, 2, 0)], out), 'declaration');
+    make1('vertex shader', out=>device.CreateVertexShader(VS_2_0_EMPTY, out), 'shader');
+    make1('pixel shader', out=>device.CreatePixelShader(PS_2_0_EMPTY, out), 'shader');
+    make1('query', out=>device.CreateQuery(D3DQUERYTYPE.OCCLUSION, out), 'query');
+    make1('state block', out=>device.CreateStateBlock(1, out), 'block');
+    make1('swap chain', out=>device.GetSwapChain(0, out), 'swapChain');
+    for (const [name, object] of made)
+    {
+        assert.equal(typeof object?.refCount, 'number', `${name} is counted`);
+        assert.equal(typeof object.destroyed, 'boolean', `${name} says whether it is destroyed`);
+    }
+});

@@ -434,6 +434,9 @@ export function createDirect3D8(options = {}){
         get refCount(){
             return count.value;
         },
+        get destroyed(){
+            return count.destroyed;
+        },
         addRef: ()=>count.addRef(),
         release: ()=>count.release(),
 
@@ -1535,6 +1538,9 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         caps,
         get refCount(){
             return count.value;
+        },
+        get destroyed(){
+            return count.destroyed;
         },
         /**
          * The state blocks by handle, for a caller that keeps a copy of the
