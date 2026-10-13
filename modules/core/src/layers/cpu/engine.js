@@ -249,8 +249,9 @@
  * @property {boolean} [emptySites]  With `emptyCalls`, a call out of a region reads its target's
  *     slot first and returns from such a function in place, without calling the transfer.
  *     Default false.
- * @property {boolean} [wideFirst]  x87 regions compiled for the precision control the program
- *     runs under, tested once a block. Default true.
+ * @property {boolean} [wideFirst]  Each x87 region compiled for the precision control it runs
+ *     under, tested once a block; one seen under both tests at every rounding operation.
+ *     Default true.
  * @property {boolean} [x87Shapes]  x87 regions compiled for the stack's shape at their entries,
  *     tested once at an entry. Default true.
  * @property {number} [checkedAfter]  Failed shape tests before a region is formed again with no
@@ -398,16 +399,16 @@
  * @property {number} [lookedUpNow]    Batches the store answered in the call that formed them.
  * @property {number} [lookedUpLater]  Batches it answered a turn of the event loop later.
  * @property {number} [readSwitches]  1 once translated reads test their pages after a fault.
- * @property {number} [precisionSwitches]  Times x87 regions went to another precision control:
- *     from the wide ones to single, and from single to a test at every rounding operation.
+ * @property {number} [precisionSwitches]  Times an x87 entry went to another precision control,
+ *     or from one to a test at every rounding operation.
  * @property {number} [interpretedRelaxedReads]  x87 status words the interpreter tier in wasm
  *     stored (`fnstsw`) while not `precise`: reads that may see a bit only `precise` keeps.
  * @property {boolean} [looseStacks]  Whether stores through esp alone go untested: until code
  *     is translated on a thread's stack (`noteStack`).
  * @property {number} [stackCode]  Times code on a stack switched that off (once at most).
- * @property {boolean} [wide]  Whether x87 regions are still compiled for wide precision.
- * @property {'wide' | 'narrow' | 'mixed'} [precision]  The precision control new x87 regions are
- *     compiled for: the wide ones, single, or either (a test at every rounding operation).
+ * @property {{ wide: number, narrow: number, mixed: number }} [precision]  The x87 entries by
+ *     the precision control they are compiled for: the wide ones, single, or either (a test
+ *     at every rounding operation).
  * @property {number} [shapeMisses]  Entries that found the x87 stack in another shape than
  *     their block was compiled for, and left for the host.
  * @property {number} [shapeChecked]  x87 regions translated again checked for it.

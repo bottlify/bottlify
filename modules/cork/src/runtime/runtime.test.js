@@ -56,92 +56,106 @@ function machine(config = {}, ramSize = 4 << 20){
 // mov ecx, 1000; L: dec ecx; jnz L; hlt
 const COUNTDOWN = [0xb9, 0xe8, 0x03, 0, 0, 0x49, 0x75, 0xfd, 0xf4];
 
-test('single precision seen leaves a wide x87 region once, and the address is translated'
-    + ' again with the rounding', async()=>{
-    const m = machine();
+/** fld1; fld1; fadd st0, st1; fstp st0; fstp st0; hlt -- a block whose fadd rounds. */
+const ROUNDING = [0xd9, 0xe8, 0xd9, 0xe8, 0xd8, 0xc1, 0xdd, 0xd8, 0xdd, 0xd8, 0xf4];
+
+/**
+ * The x87 at a block's start, under a control word, and the block run from its
+ * entry, translated first when it has none.
+ *
+ * @param {ReturnType<typeof machine>} m @param {number} at @param {number} control
+ */
+async function runRounding(m, at, control){
     const view = new DataView(m.memory.buffer);
+    view.setUint16(m.layout.x87Control, control, true);
+    view.setUint32(m.layout.eip, at, true);
     view.setUint8(m.layout.x87Empty, 0xff);
-    // fld1; fld1; fadd st0, st1; fstp st0; fstp st0; hlt -- a rounding block, translated
-    // under double precision and run under single.
-    m.write(CODE, [0xd9, 0xe8, 0xd9, 0xe8, 0xd8, 0xc1, 0xdd, 0xd8, 0xdd, 0xd8, 0xf4]);
-    m.runtime.noteHot(CODE, 0);
-    await m.runtime.translatePending();
-    assert.equal(m.runtime.diagnostics().wide, true);
+    view.setUint8(m.layout.x87Top, 0);
+    if (m.runtime.entryOf(at, 0) < 0)
+    {
+        m.runtime.noteHot(at, 0);
+        await m.runtime.translatePending();
+    }
+    return m.runtime.run(m.runtime.entryOf(at, 0), 100);
+}
+
+test('a wide x87 region run under single leaves once, and its address is translated again'
+    + ' with the rounding', async()=>{
+    const m = machine();
+    m.write(CODE, ROUNDING);
+    assert.equal((await runRounding(m, CODE, 0x27f)).kind, 'halt');
+    assert.deepEqual(m.runtime.diagnostics().precision, { wide: 1, narrow: 0, mixed: 0 });
+    const view = new DataView(m.memory.buffer);
     view.setUint16(m.layout.x87Control, 0x07f, true);
+    view.setUint32(m.layout.eip, CODE, true);
+    view.setUint8(m.layout.x87Empty, 0xff);
     const exit = m.runtime.run(m.runtime.entryOf(CODE, 0), 100);
     assert.equal(exit.kind, 'untranslated');
     assert.equal(exit.retired, 2, 'the two fld1 ran, the fadd did not');
     assert.equal(m.eip(), CODE + 4);
     const after = m.runtime.diagnostics();
     assert.equal(after.precisionSwitches, 1);
-    assert.equal(after.wide, false);
+    assert.deepEqual(after.precision, { wide: 0, narrow: 1, mixed: 0 });
     assert.equal(m.runtime.entryOf(CODE, 0), -1, 'the wide region went');
     // Translated again, it runs to the end under single precision.
-    view.setUint32(m.layout.eip, CODE, true);
-    view.setUint8(m.layout.x87Empty, 0xff);
-    view.setUint8(m.layout.x87Top, 0);
-    m.runtime.noteHot(CODE, 0);
-    await m.runtime.translatePending();
-    assert.equal(m.runtime.run(m.runtime.entryOf(CODE, 0), 100).kind, 'halt');
+    assert.equal((await runRounding(m, CODE, 0x07f)).kind, 'halt');
     assert.equal(m.runtime.diagnostics().precisionSwitches, 1, 'once');
-    assert.equal(m.runtime.diagnostics().precision, 'narrow');
 });
 
-test('a batch formed while the machine has single set is compiled for single at once', async()=>{
-    const m = machine();
-    const view = new DataView(m.memory.buffer);
-    view.setUint8(m.layout.x87Empty, 0xff);
-    view.setUint16(m.layout.x87Control, 0x07f, true);
-    m.write(CODE, [0xd9, 0xe8, 0xd9, 0xe8, 0xd8, 0xc1, 0xdd, 0xd8, 0xdd, 0xd8, 0xf4]);
-    m.runtime.noteHot(CODE, 0);
-    await m.runtime.translatePending();
-    const before = m.runtime.diagnostics();
-    assert.equal(before.precision, 'narrow');
-    assert.equal(before.precisionSwitches, 1);
-    assert.equal(m.runtime.run(m.runtime.entryOf(CODE, 0), 100).kind, 'halt');
-    assert.equal(m.runtime.diagnostics().exits.untranslated, 0, 'no wide region to leave');
-});
+test('a region first formed while the machine has single set is compiled for single at once',
+    async()=>{
+        const m = machine();
+        m.write(CODE, ROUNDING);
+        assert.equal((await runRounding(m, CODE, 0x07f)).kind, 'halt');
+        const after = m.runtime.diagnostics();
+        assert.deepEqual(after.precision, { wide: 0, narrow: 1, mixed: 0 });
+        assert.equal(after.precisionSwitches, 0);
+        assert.equal(after.exits.untranslated, 0, 'no wide region to leave');
+    });
 
-test('a region compiled for single leaves once another precision is seen, and the address is'
-    + ' translated again with a test at every rounding instruction', async()=>{
+test('a region that runs under single and then under double is compiled for double, and one'
+    + ' that then runs under single again tests at every rounding instruction', async()=>{
     const m = machine();
-    const view = new DataView(m.memory.buffer);
-    const restart = ()=>{
-        view.setUint32(m.layout.eip, CODE, true);
-        view.setUint8(m.layout.x87Empty, 0xff);
-        view.setUint8(m.layout.x87Top, 0);
-    };
-    view.setUint16(m.layout.x87Control, 0x07f, true);
-    m.write(CODE, [0xd9, 0xe8, 0xd9, 0xe8, 0xd8, 0xc1, 0xdd, 0xd8, 0xdd, 0xd8, 0xf4]);
-    restart();
-    m.runtime.noteHot(CODE, 0);
-    await m.runtime.translatePending();
-    m.runtime.run(m.runtime.entryOf(CODE, 0), 100);
-    restart();
-    m.runtime.noteHot(CODE, 0);
-    await m.runtime.translatePending();
-    assert.equal(m.runtime.run(m.runtime.entryOf(CODE, 0), 100).kind, 'halt');
-    assert.equal(m.runtime.diagnostics().precision, 'narrow');
+    m.write(CODE, ROUNDING);
+    assert.equal((await runRounding(m, CODE, 0x07f)).kind, 'halt');
     // Double precision under the single region: it leaves before the fadd.
-    view.setUint16(m.layout.x87Control, 0x27f, true);
-    restart();
-    const exit = m.runtime.run(m.runtime.entryOf(CODE, 0), 100);
+    let exit = await runRounding(m, CODE, 0x27f);
     assert.equal(exit.kind, 'untranslated');
     assert.equal(m.eip(), CODE + 4);
+    assert.deepEqual(m.runtime.diagnostics().precision, { wide: 1, narrow: 0, mixed: 0 });
+    assert.equal(m.runtime.entryOf(CODE, 0), -1, 'the single region went');
+    assert.equal((await runRounding(m, CODE, 0x27f)).kind, 'halt');
+    // And single again: both seen, the address tests from now on.
+    exit = await runRounding(m, CODE, 0x07f);
+    assert.equal(exit.kind, 'untranslated');
     const after = m.runtime.diagnostics();
     assert.equal(after.precisionSwitches, 2);
-    assert.equal(after.precision, 'mixed');
-    assert.equal(m.runtime.entryOf(CODE, 0), -1, 'the single region went');
-    for (const control of [0x27f, 0x07f])
+    assert.deepEqual(after.precision, { wide: 0, narrow: 0, mixed: 1 });
+    for (const control of [0x27f, 0x07f, 0x37f, 0x07f])
     {
-        view.setUint16(m.layout.x87Control, control, true);
-        restart();
-        m.runtime.noteHot(CODE, 0);
-        await m.runtime.translatePending();
-        assert.equal(m.runtime.run(m.runtime.entryOf(CODE, 0), 100).kind, 'halt');
+        assert.equal((await runRounding(m, CODE, control)).kind, 'halt');
     }
     assert.equal(m.runtime.diagnostics().precisionSwitches, 2, 'and no further');
 });
+
+test('regions run under different precision controls are each compiled for their own',
+    async()=>{
+        // A renderer's code under single, a physics library's under double: one switch for
+        // the whole program left both testing at every rounding instruction.
+        const m = machine();
+        const other = CODE + 0x2000;
+        m.write(CODE, ROUNDING);
+        m.write(other, ROUNDING);
+        for (let turn = 0; turn < 4; turn++)
+        {
+            assert.equal((await runRounding(m, CODE, 0x07f)).kind, 'halt');
+            assert.equal((await runRounding(m, other, 0x27f)).kind, 'halt');
+        }
+        const after = m.runtime.diagnostics();
+        assert.deepEqual(after.precision, { wide: 1, narrow: 1, mixed: 0 });
+        assert.equal(after.precisionSwitches, 0);
+        assert.equal(after.exits.untranslated, 0, 'neither left at a rounding block');
+    });
 
 test('a formed-in leaf two tops reach takes an exchanged stack as it is', async()=>{
     // F is called with two values on the stack and then with one, so its

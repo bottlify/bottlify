@@ -287,9 +287,11 @@ function sameShape(kept, shape){
  * 219 ns a call where one module of them ran it at 6.
  *
  * @param {{ region: import('../region.js').Region, entryTop: number, checked?: boolean,
- *     copies?: boolean }[]} jobs  checked: an x87 region whose entries test nothing of the
- *     stack's shape; copies: the blocks inside a structured region's loops are entered
- *     through copies of them, where without they have no entry (`emitRegion`)
+ *     copies?: boolean, precision?: import('../emit/region.js').X87Precision }[]} jobs
+ *     checked: an x87 region whose entries test nothing of the stack's shape; copies: the
+ *     blocks inside a structured region's loops are entered through copies of them, where
+ *     without they have no entry; precision: the precision control its x87 is compiled for,
+ *     the options' wide and narrow when not given (`emitRegion`)
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
  * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean }} features
  * @param {{ undoLog?: boolean, hash?: boolean, trapPort?: number, countTransfers?: boolean,
@@ -345,7 +347,7 @@ export function emitBatch(jobs, layout, features, options = {}, cache = undefine
     const functions = jobs.map(()=>null);
     /** @type {BuiltBatch['results']} */
     const results = jobs.map((job, index)=>{
-        const { region, entryTop, checked, copies } = job;
+        const { region, entryTop, checked, copies, precision } = job;
         try
         {
             const shape = cache === undefined ? null : shapeOf(region);
@@ -369,7 +371,8 @@ export function emitBatch(jobs, layout, features, options = {}, cache = undefine
                 // The emitter adds the function only once the region is written,
                 // so a region it fails on leaves the module as it was.
                 const translation = emitRegion(context, region,
-                    { entryTop, checked: checked === true, copies: copies === true });
+                    { entryTop, checked: checked === true, copies: copies === true,
+                        ...(precision === undefined ? {} : { precision }) });
                 functionIndex = translation.functionIndex;
                 copiesIndex = translation.copiesIndex;
                 built = {
@@ -430,7 +433,8 @@ export function emitBatch(jobs, layout, features, options = {}, cache = undefine
  * `targets` are the callees its indirect calls were predicted to (`callTargets`).
  *
  * @param {{ jobs: { entry: number, entryTop: number, hash: string, checked?: boolean,
- *         copies?: boolean, targets?: [number, number[]][] }[],
+ *         copies?: boolean, precision?: import('../emit/region.js').X87Precision,
+ *         targets?: [number, number[]][] }[],
  *     pages: [number, Uint8Array][], formable?: number[],
  *     form: { maxBlocks: number, maxBytes: number, leafCalls?: boolean,
  *         helpers?: boolean } }} relink   `pages` copies of every page forming read,
@@ -472,7 +476,8 @@ export function relinkBatch({ jobs, pages, form, formable }, layout, features, o
             ...(job.targets === undefined ? {} : { callTargets: new Map(job.targets) }) });
         return region.hash === job.hash
             ? { region, entryTop: job.entryTop, checked: job.checked === true,
-                copies: job.copies === true } : null;
+                copies: job.copies === true,
+                ...(job.precision === undefined ? {} : { precision: job.precision }) } : null;
     });
     const batch = emitBatch(/** @type {{ region: any, entryTop: number }[]} */ (
         formed.filter(one=>one !== null)), layout, features, options, cache);

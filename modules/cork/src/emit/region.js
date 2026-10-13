@@ -808,10 +808,12 @@ function addResume(m, layout, materialise, transfer){
  *
  * @param {ModuleContext} context
  * @param {import('../region.js').Region} region
- * @param {{ entryTop?: number, checked?: boolean, copies?: boolean }} [options]  the x87 top
- *     the entry is compiled for; checked: the entries test nothing of the x87 stack's shape
- *     (`planStack`); copies: a structured region's blocks inside its loops are entered through
- *     copies of them (`emitCopies`) -- false, they have no entry (`closed`)
+ * @param {{ entryTop?: number, checked?: boolean, copies?: boolean,
+ *     precision?: X87Precision }} [options]  the x87 top the entry is compiled for; checked:
+ *     the entries test nothing of the x87 stack's shape (`planStack`); copies: a structured
+ *     region's blocks inside its loops are entered through copies of them (`emitCopies`) --
+ *     false, they have no entry (`closed`); precision: the precision control its x87 is
+ *     compiled for, the module's (`prepareModule`'s wide and narrow) by default
  * @returns {Translation}
  */
 export function emitRegion(context, region, options = {}){
@@ -835,25 +837,39 @@ export function emitRegion(context, region, options = {}){
  * @property {import('./memory.js').RegionPlan | null} memoryPlan  the access groups
  */
 
+/**
+ * The precision control a region's x87 arithmetic is compiled for: `wide` (double or
+ * extended, nothing rounded; a block leaves at its first rounding instruction when single is
+ * set), `narrow` (single, every result rounded; leaves when another is set) or `mixed` (a
+ * test at every rounding instruction).
+ *
+ * @typedef {'wide' | 'narrow' | 'mixed'} X87Precision
+ */
+
 /** The state the emitter keeps while writing one function. */
 export class RegionEmitter {
     /**
      * @param {ModuleContext} context
      * @param {import('../region.js').Region} region
      * @param {{ entryTop?: number, checked?: boolean, copies?: boolean,
-     *     copyFunction?: boolean, planned?: RegionPlanning | null }} [options]  copies: as
-     *     `emitRegion` takes it; copyFunction: this is the function of a structured region's
+     *     precision?: X87Precision, copyFunction?: boolean,
+     *     planned?: RegionPlanning | null }} [options]  copies and precision: as
+     *     `emitRegion` takes them; copyFunction: this is the function of a structured region's
      *     copies (`emitCopies`); planned: what the region's own function planned of it, which
      *     the function of its copies takes rather than plan it again
      */
     constructor(context, region,
         { entryTop = 0, checked = false, copies = true, copyFunction = false,
-            planned = null } = {})
+            planned = null, precision = context.wide === true ? 'wide'
+                : context.narrow === true ? 'narrow' : 'mixed' } = {})
     {
         this.context = context;
         /** The region as formed, and the options, for the function of its copies. */
         this.formed = region;
-        this.options = { entryTop, checked };
+        this.options = { entryTop, checked, precision };
+        /** Its x87 compiled for the wide precision controls, or for single (`X87Precision`). */
+        this.wide = precision === 'wide';
+        this.narrow = precision === 'narrow';
         this.copyFunction = copyFunction;
         this.layout = context.layout;
         /** Where the layout keeps the flag record between regions, or -1. */

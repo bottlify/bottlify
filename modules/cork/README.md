@@ -183,7 +183,7 @@ something, and measure it.
 
 | Setting | Default | What it does | When to change it, and the risk |
 | --- | --- | --- | --- |
-| `wideFirst` | `true` | Regions compiled for the precision control in force, tested once a block. | Off tests precision on every operation. |
+| `wideFirst` | `true` | Each region compiled for the precision control it runs under, tested once a block; one seen under both tests at every rounding operation. | Off tests precision on every operation. |
 | `x87Shapes` | `true` | Regions compiled for the stack's shape at their entries. | Off checks every register access. |
 | `checkedAfter` | 4 | Failed shape tests before a region is formed again without one. | Lower for code entered with varying stacks. |
 

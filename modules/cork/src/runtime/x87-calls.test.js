@@ -226,9 +226,13 @@ function generate(seed){
  *
  * @param {number[]} code @param {boolean} callReturn @param {number} budget
  * @param {boolean} [leafCalls]  small callees formed into their callers
+ * @param {Record<string, unknown>} [more]  the runtime's other settings
+ * @param {(diagnostics: any) => void} [done]  told the runtime's diagnostics at the `hlt`
  * @returns {Promise<Uint8Array>}  what it left in the data area
  */
-async function runProgram(code, callReturn, budget, leafCalls = false){
+async function runProgram(code, callReturn, budget, leafCalls = false, more = {},
+    done = undefined)
+{
     const layout = ownLayout({ ramSize: 16 << 20, hashSlots: 1 << 16 });
     const memory = new WebAssembly.Memory({ initial: pagesFor(layout, tablesSize(layout)) });
     const bytes = ()=>new Uint8Array(memory.buffer);
@@ -237,7 +241,7 @@ async function runProgram(code, callReturn, budget, leafCalls = false){
     view().setUint16(layout.x87Control, 0x37f, true);
     // Unless asked, no small callee formed into its caller: every call here is a call.
     /** @type {any} */
-    const config = { leafCalls, callReturn };
+    const config = { leafCalls, callReturn, ...more };
     const runtime = createCorkRuntime({
         memory, layout, config,
         read: address=>bytes()[layout.ramBase + address],
@@ -278,6 +282,7 @@ async function runProgram(code, callReturn, budget, leafCalls = false){
         }
         assert.ok(turn < 100_000 - 1, 'the program halts');
     }
+    done?.(runtime.diagnostics());
     return bytes().slice(layout.ramBase + DATA, layout.ramBase + DATA + 0x400);
 }
 
@@ -295,6 +300,30 @@ for (const [first, budget] of [[1, 10_000_000], [1001, 61]])
         }
     });
 }
+
+test('x87 regions compiled each for the precision control it runs under leave what regions'
+    + ' testing it at every rounding instruction leave', async()=>{
+    // The programs load single, double and extended in their loops and functions: an entry
+    // first formed under one meets another, leaves, is compiled for it, and for a test at
+    // every rounding instruction once it has met both (`precisionAt`).
+    const seen = { wide: 0, narrow: 0, mixed: 0, switches: 0 };
+    for (let seed = 2001; seed < 2101; seed++)
+    {
+        const code = generate(seed * 7919);
+        const testing = await runProgram(code, true, 10_000_000, true, { wideFirst: false });
+        const own = await runProgram(code, true, 10_000_000, true, {}, diagnostics=>{
+            seen.wide += diagnostics.precision.wide;
+            seen.narrow += diagnostics.precision.narrow;
+            seen.mixed += diagnostics.precision.mixed;
+            seen.switches += diagnostics.precisionSwitches;
+        });
+        assert.deepEqual(own, testing, `seed ${seed}`);
+    }
+    for (const kind of ['wide', 'narrow', 'mixed', 'switches'])
+    {
+        assert.ok(seen[/** @type {keyof typeof seen} */ (kind)] > 0, `some entry is ${kind}`);
+    }
+});
 
 test('a callee formed into its caller hands back the stack its own calls left, where the code'
     + ' after the call is cut', async()=>{

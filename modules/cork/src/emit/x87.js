@@ -1712,15 +1712,15 @@ export function emitX87(e, instruction, flagsLive){
     // one an operation. Precision control changes in a block only by its own
     // fldcw/fldenv/frstor/finit, which clear the check; an x87 region's host
     // calls leave the region.
-    if ((e.context.wide || e.context.narrow) && ROUNDS.has(op)
+    if ((e.wide || e.narrow) && ROUNDS.has(op)
         && x.checkedPrecision !== e.blockIndex)
     {
         b.localGet(Local.x87Control).i32const(0x300).op(I32.and);
-        if (e.context.wide)
+        if (e.wide)
         {
             b.op(I32.eqz);
         }
-        e.openGuard(e.context.wide ? 'single' : 'notSingle', EMPTY);
+        e.openGuard(e.wide ? 'single' : 'notSingle', EMPTY);
         // Not `exitBefore`: the exit is conditional, and the block stays an entry.
         e.blockRetired--;
         e.exitAt(instruction.eip, Exit.UNTRANSLATED, PRECISION);
@@ -2072,12 +2072,12 @@ export function emitX87(e, instruction, flagsLive){
      * and the square root are subject to it, as on the processor.
      */
     const byPrecision = ()=>{
-        if (e.context.wide)
+        if (e.wide)
         {
             // Checked at the block's first rounding instruction (`emitX87`).
             return;
         }
-        if (e.context.narrow)
+        if (e.narrow)
         {
             // Likewise, the other way round.
             roundSingle(e);
