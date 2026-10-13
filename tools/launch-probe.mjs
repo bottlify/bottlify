@@ -774,6 +774,12 @@ async function main(){
     // A profiling run's account of its calls and transfers (`blockProfile`).
     const cork = app.diagnostics().find((/** @type {any} */ layer)=>layer.name === 'cpu')
         ?.metrics?.cork;
+    if (cork)
+    {
+        // How full the entry hash ran: what sizes it (`hashSlots`) for a title.
+        console.log(`  cork entries: ${cork.entriesAll} (${cork.entries} in the hash),`
+            + ` ${cork.regions} regions, function table ${cork.tableSize}`);
+    }
     if (cork?.mechanisms)
     {
         console.log(`  mechanisms: ${Object.entries(cork.mechanisms).filter(([, n])=>n > 0)
