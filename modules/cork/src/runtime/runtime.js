@@ -769,10 +769,12 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      *
      * At its last due, too, how many of the regions spanning it were formed with its
      * callees (`held`, of `spanning`), and how often a region formed again for it did not
-     * take them in (`notFormed`).
+     * take them in (`notFormed`) -- the last such region's entry and why (`apart`, the
+     * reason forming gave, or `full`).
      *
      * @type {Map<number, { samples: number, dues: number, last: string, top: number[],
-     *     share: number, held: number, spanning: number, notFormed: number }>}
+     *     share: number, held: number, spanning: number, notFormed: number,
+     *     unformedIn: number, apart: string }>}
      */
     const siteLog = new Map();
     /** @param {number} site */
@@ -781,7 +783,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         if (one === undefined && siteLog.size < 16384)
         {
             one = { samples: 0, dues: 0, last: '', top: [], share: 0, held: 0, spanning: 0,
-                notFormed: 0 };
+                notFormed: 0, unformedIn: 0, apart: '' };
             siteLog.set(site, one);
         }
         return one;
@@ -2762,6 +2764,9 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                     if (log)
                     {
                         log.notFormed++;
+                        log.unformedIn = record.entry;
+                        log.apart = region.blocks.find(block=>block.start <= site
+                            && site < block.end)?.exit.apart ?? 'full';
                     }
                 }
             }
