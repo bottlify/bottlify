@@ -782,12 +782,14 @@ async function main(){
         console.log(`  cork entries: ${cork.entriesAll} (${cork.entries} in the hash),`
             + ` ${cork.regions} regions, function table ${cork.tableSize}`);
         // The precision control x87 entries are compiled for -- single rounds every
-        // arithmetic result, mixed tests at each -- and how often an entry found the
-        // stack in another shape.
+        // arithmetic result, mixed tests at each -- how often an entry found the stack
+        // in another shape, and how often single precision on floats left for the host
+        // and the entries that went back to rounding doubles for it (`floatSingles`).
         const precision = cork.precision ?? {};
         console.log(`  x87: entries wide ${precision.wide}, single ${precision.narrow},`
             + ` mixed ${precision.mixed} (${cork.precisionSwitches} switches),`
             + ` shape misses ${cork.shapeMisses}, checked ${cork.shapeChecked},`
+            + ` float misses ${cork.floatMisses}, rounded ${cork.floatsRounded},`
             + ` relaxed status reads ${cork.x87RelaxedReads}`);
     }
     if (cork?.mechanisms)
