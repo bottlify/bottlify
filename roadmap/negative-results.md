@@ -601,3 +601,33 @@ None yet.
 - **Decision.** Reverted (`fb81120b`, cache version back to 85); `hashSlots` left at 2^20.
   Fewer calls out is what is left of this cost, and forming more in already did not pay
   (`callTargets`, above).
+
+### 2026-10-13 -- larger regions for an interpreter: every region's caps doubled, and room only for the blocks a call returns to
+
+- **Idea.** Lua 5.1's `luaV_execute` (cork-bench `lua`) is cut by the region caps (128 blocks,
+  8192 bytes): the opcode handlers' tails past them, and the blocks its calls to
+  `luaV_gettable`, `luaD_precall` and `luaF_close` return to, are left out, so those calls
+  leave the region and their returns come back through the entry hash. Two ways to keep them:
+  (a) `maxRegionBlocks` 256 and `maxRegionBytes` 16384 for every region; (b) room past the caps
+  (64 blocks, 2048 bytes) for a block a call in the region returns to, nothing else.
+- **Workload.** cork-bench at `12d1ea54` with the `lua` image of `7e19106c` (built from the
+  same sources with a debug dump of the addons' text that the committed image leaves out), run
+  on the cork host as bench.mjs runs it (`run-cork.mjs`, not committed), the translator in the
+  same thread; frames 201-600, the median of the per-frame times; and the whole bench (21
+  workloads then, 3 reps, best rep), each arm twice.
+- **Values, Lua.** Medians of per-frame ms, four processes an arm, alternated: base 9.18, 9.03,
+  9.81, 9.73; (b) 9.14, 9.17, 9.25, 9.07; (a) 8.23, 8.52, 8.07, 8.75. Block profile over 100
+  frames: transfers through the hash 12.60 M base, 11.93 M (b), 10.13 M (a); calls leaving the
+  region 1.14 M base, 0 (b), 0 (a). (b) kept the calls but not the handlers' tails, which (a)
+  kept.
+- **Values, the bench, (a).** Steady time against base, the mean of the two runs' ratios:
+  geomean 1.089; load-x87 3.28, game-x87 1.91, calls512-scatter 1.22, fmath-x87 1.10;
+  str-x87 0.86, crc-x87 0.91. Cold time geomean 1.037. Every eax the same.
+- **Machine.** A 4-core x86-64 Linux VM (Firecracker), Intel Xeon @ 2.80 GHz, Node 22.22.0
+  (V8 12.4.254.21), branch hints read (`tools/chromium-v8.mjs`). Power plan not recorded. Run
+  to run, a whole-run mean moved by up to 15% (base 9.5-11.6 ms in one campaign); the
+  per-frame medians moved by under 9%.
+- **Decision.** Neither built. (a) cost the rest of the bench 8.9% (geomean), four workloads
+  10-228%, for its 11% on Lua; (b) is within the noise. Built instead: room past the caps for
+  the entry's own function
+  alone, callees still stopping at the caps (the commit after this entry).
