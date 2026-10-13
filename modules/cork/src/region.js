@@ -162,18 +162,27 @@ function isLeaf(decodeAt, target, translatable, calls = false, limits = LEAF_LIM
                 work.push(...exit.targets);
                 break;
             }
-            if (exit.kind === 'ret')
+            // A jump through a register or memory leaves through the entry hash
+            // from wherever it stands -- a thunk forwarding to a virtual
+            // function, a switch's table -- and what it reaches returns past
+            // the call as the callee would have: the path ends there, as at a `ret`.
+            if (exit.kind === 'ret' || (exit.kind === 'indirect' && decoded.op === 'jmp'))
             {
                 break;
             }
-            if (calls && exit.kind === 'call' && seen.size < limits.blocks)
+            // A call through a register or memory -- a virtual call, the most
+            // of what a C++ setter or accessor calls -- is a call out as any
+            // indirect call in a region is, and the callee around it forms in
+            // as one with a direct call does.
+            const call = exit.kind === 'call'
+                || (exit.kind === 'indirect' && decoded.op === 'call');
+            if (calls && call && seen.size < limits.blocks)
             {
                 // The return lands after the call: a block of its own.
                 seen.add(eip);
                 continue;
             }
-            return exit.kind === 'call' && seen.size < limits.blocks ? 'nested'
-                : exit.kind === 'call' ? 'blocks' : 'shape';
+            return call && seen.size < limits.blocks ? 'nested' : call ? 'blocks' : 'shape';
         }
     }
     return null;

@@ -6,9 +6,10 @@
 
 /**
  * The gate of forming callees into their callers: seeded programs of functions
- * calling one another -- leaves and not, `ret imm` with an argument pushed, a
- * return moved past two bytes of its caller, a store into another function's
- * code -- run interpreted alone, then translated with nothing formed in, with
+ * calling one another, directly and through a register -- leaves and not,
+ * `ret imm` with an argument pushed, a return moved past two bytes of its
+ * caller, a thunk jumping on through a register, a store into another
+ * function's code -- run interpreted alone, then translated with nothing formed in, with
  * leaves alone, and with one, two and three levels of callees formed in
  * (`formDepth`). Everything a program observes must come out the same: the
  * registers, the flags, its data and its code.
@@ -72,8 +73,16 @@ function program(seed){
                 {
                     body.push(0x50);
                 }
-                const after = at + body.length + 5;
-                body.push(0xe8, ...le32(FUNCTIONS + callee * SPAN - after));
+                if (pick(2) === 0)
+                {
+                    const after = at + body.length + 5;
+                    body.push(0xe8, ...le32(FUNCTIONS + callee * SPAN - after));
+                }
+                else
+                {
+                    // mov edx, f; call edx -- a virtual call's shape.
+                    body.push(0xba, ...le32(FUNCTIONS + callee * SPAN), 0xff, 0xd2);
+                }
                 if (returns[callee] === 2)
                 {
                     body.push(0x40, 0x40);
@@ -95,7 +104,17 @@ function program(seed){
                     body.push(0xc6, 0x05, ...le32(FUNCTIONS + pick(count) * SPAN + 2), pick(4));
             }
         }
-        body.push(...[[0xc3], [0xc2, 4, 0], [0x83, 0x04, 0x24, 0x02, 0xc3]][returns[index]]);
+        const last = count - 1;
+        if (returns[index] === 0 && index < last && returns[last] === 0 && pick(4) === 0)
+        {
+            // mov edx, f; jmp edx -- a thunk forwarding to the last function,
+            // whose `ret` returns past this one's call.
+            body.push(0xba, ...le32(FUNCTIONS + last * SPAN), 0xff, 0xe2);
+        }
+        else
+        {
+            body.push(...[[0xc3], [0xc2, 4, 0], [0x83, 0x04, 0x24, 0x02, 0xc3]][returns[index]]);
+        }
         assert.ok(body.length <= SPAN, 'a function fits its span');
         code.push([at, body]);
     }
