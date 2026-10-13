@@ -16,7 +16,7 @@ import { readFault, describeFault, hostFault } from './internal/faults.js';
 import {
     captureContext, freshThreadFpu, restoreContext, setContextEflags, setThreadBase,
 } from './internal/context.js';
-import { createSampleTable, creditSample, topSamples } from './internal/samples.js';
+import { createSampleTable, creditSample, takeDue, topSamples } from './internal/samples.js';
 import { fileNameOf } from './internal/translation-store.js';
 
 /**
@@ -213,20 +213,15 @@ export function createCpuModule(){
                 {
                     return;
                 }
-                const hotThreshold = settings.cork.hotThreshold ?? 2000;
-                for (const bucket of state.samples.buckets.values())
+                // A hot bucket is handed over at the address its last slice
+                // ended on, every time that address is a new one: a bucket
+                // ends its slices at more than one place (a loop's head, the
+                // stub it calls), and the first of them said nothing about
+                // the others. The runtime keeps what it has an entry for,
+                // has queued, or found empty.
+                for (const eip of takeDue(state.samples))
                 {
-                    // A hot bucket is handed over at the address its last slice
-                    // ended on, every time that address is a new one: a bucket
-                    // ends its slices at more than one place (a loop's head, the
-                    // stub it calls), and the first of them said nothing about
-                    // the others. The runtime keeps what it has an entry for,
-                    // has queued, or found empty.
-                    if (bucket.instructions >= hotThreshold && bucket.noted !== bucket.eip)
-                    {
-                        bucket.noted = bucket.eip;
-                        cork.noteHot(bucket.eip, state.host.x87Top());
-                    }
+                    cork.noteHot(eip, state.host.x87Top());
                 }
                 // Always: the translator queues candidates of its own (the
                 // addresses it keeps leaving for) between feeds.
@@ -976,7 +971,8 @@ export function createCpuModule(){
                     // retired charged a frame's hot loop to the call ending it.
                     if (samplingEnabled && instructions >= maxInstructions)
                     {
-                        creditSample(state.samples, machine.eip(), instructions);
+                        creditSample(state.samples, machine.eip(), instructions,
+                            settings.cork.hotThreshold ?? 2000);
                     }
                     if (samplingEnabled && instructions > 0 && settings.cork.feed === 'slice')
                     {

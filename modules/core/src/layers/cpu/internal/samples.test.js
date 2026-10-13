@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { BUCKET_CAP, createSampleTable, creditSample, topSamples } from './samples.js';
+import { BUCKET_CAP, createSampleTable, creditSample, takeDue, topSamples } from './samples.js';
 
 test('a slice at a known EIP credits that EIP\'s bucket', ()=>{
     const table = createSampleTable();
@@ -93,4 +93,30 @@ test('a bucket keeps the exact EIP it was last credited at, for a translator to 
     const [bucket] = table.buckets.values();
     assert.equal(bucket.eip, 0x10a225);
     assert.equal(bucket.noted, -1, 'nothing noted yet');
+});
+
+test('a bucket past the hot threshold is due once, at the address its last slice ended on',
+    ()=>{
+        const table = createSampleTable();
+        creditSample(table, 0x4000, 1500, 2000);
+        assert.deepEqual(takeDue(table), [], 'under the threshold');
+        creditSample(table, 0x4004, 600, 2000);
+        creditSample(table, 0x4008, 600, 2000);
+        assert.deepEqual(takeDue(table), [0x4008], 'once, at the last address');
+        creditSample(table, 0x4008, 600, 2000);
+        assert.deepEqual(takeDue(table), [], 'the same address again is nothing new');
+        creditSample(table, 0x400c, 600, 2000);
+        assert.deepEqual(takeDue(table), [0x400c], 'a new address is due again');
+    });
+
+test('a feed looks only at the buckets due, not at every bucket in the table', ()=>{
+    const table = createSampleTable();
+    for (let i = 0; i < 10_000; i++)
+    {
+        creditSample(table, i * 64, 10, 2000);
+    }
+    creditSample(table, 0x1000, 5000, 2000);
+    assert.equal(table.due.length, 1);
+    assert.deepEqual(takeDue(table), [0x1000]);
+    assert.equal(table.due.length, 0);
 });
