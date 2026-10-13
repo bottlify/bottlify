@@ -248,7 +248,8 @@ function observed({ layout, memory, size }){
     return {
         data: bytes.slice(layout.ramBase + DATA, layout.ramBase + DATA + size),
         registers: bytes.slice(layout.regs, layout.regs + 32),
-        x87: bytes.slice(layout.x87, layout.x87 + 64),
+        // Each register's double, the first eight of its sixteen bytes.
+        x87: Uint8Array.from({ length: 64 }, (_, i)=>bytes[layout.x87 + (i >> 3) * 16 + (i & 7)]),
         top: bytes[layout.x87Top],
         empty: bytes[layout.x87Empty],
         control: new DataView(memory.buffer).getUint16(layout.x87Control, true),
