@@ -98,3 +98,26 @@ x64 VM, TurboFan, depth 8: `params` / `state-direct` for `farcry` is 1.085 in No
 0.959 in Chromium 141.0.7390.37, above the 0.90 of the negative branch; the function tier is not
 built. Values and conditions: `roadmap/negative-results.md`, 2026-10-13. The M4 run is recorded
 beside it when it comes.
+
+## Step 2's ceiling: loading only what is live after a call
+
+**Status: the rule below was written and committed before the run it decides on (2026-10-13).**
+
+Plan step 2 (`roadmap/cork/README.md`) keeps cork's convention and cuts what a call site writes
+back and loads again: after the return only the registers the continuation reads before it
+writes them. The arm `state-live` is `state` that reloads only esp and the `live after a
+return` registers of the workload, and no flags: more than step 2 can reach (a region's exits
+read every register, and its flags are dead after a call only where the code says so), so its
+gain is the ceiling. Its guest results differ from the others' and are not compared.
+
+Timed by `paired.mjs`: `state` and `state-live` alternated in 15 pairs of ~200 ms runs after 3
+warming pairs, at depth 8, TurboFan; the ratio `state-live` / `state` of each pair.
+
+**Step 2a/2b goes on** to the translator only if, for both `farcry` and `spread` in Node, the
+median ratio is at most **0.90** and `state-live` is faster in at least **13 of 15** pairs (a sign
+test at about 0.004); then the same is checked in Chromium before any code. **Otherwise a dead
+end** (an entry in `roadmap/negative-results.md`): a ceiling under 10% of a call is under ~1.3% of
+Far Cry's guest time, calls being ~13% of its hot bytes (step 0a), which no game measurement
+separates from noise.
+
+    node --no-liftoff modules/cork/bench/calls/paired.mjs --tier turbofan --out paired.json

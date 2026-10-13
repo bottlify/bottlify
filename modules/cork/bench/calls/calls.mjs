@@ -377,6 +377,15 @@ function pickIndirect(b, d){
 export const ARMS = ['state', 'state-direct', 'params', 'params+flags'];
 
 /**
+ * `state` reloading after a return only esp and the registers the continuation
+ * reads first, not the flags: the most that loading only what is live after a
+ * call (plan step 2) can take off a call. Its guest results differ from the
+ * other arms' -- the registers it leaves stale are read later -- so it is
+ * timed, never compared.
+ */
+export const CEILING = 'state-live';
+
+/**
  * The module of one arm: the guest functions, then `run(iterations)` -- the
  * root loop -- and, for `state`, the shared transfer. Exports `run` and
  * `checksum`.
@@ -387,7 +396,8 @@ export function build(w, arm, seed = 1){
     const program = plan(w, seed);
     const n = program.length;
     const live = Math.max(0, Math.min(7, Math.round(w.liveAfter)));
-    const state = arm === 'state' || arm === 'state-direct';
+    const state = arm === 'state' || arm === 'state-direct' || arm === CEILING;
+    const transfers = arm === 'state' || arm === CEILING;
     const flagsInParams = arm === 'params+flags';
     /** @type {[number[], number[]][]} */
     const types = state
@@ -471,7 +481,7 @@ export function build(w, arm, seed = 1){
                 {
                     b.i32(0).get(flag(f)).store(FLAGS + f * 4);
                 }
-                if (arm === 'state')
+                if (transfers)
                 {
                     // The callee's guest address, for the transfer to look up.
                     target();
@@ -503,13 +513,25 @@ export function build(w, arm, seed = 1){
                 b.tee(t0).i32(RETURNED).op(OP.ne).op(OP.if, 0x40).i32(0).get(t0)
                     .op(OP.drop).op(OP.return).op(OP.end);
                 b.i32(0).load(BUDGET).set(budget);
-                for (let f = 0; f < 6; f++)
+                if (arm === CEILING)
                 {
-                    b.i32(0).load(FLAGS + f * 4).set(flag(f));
+                    // What the continuation reads first, and esp: the rest
+                    // taken as dead after the call, the flags too.
+                    for (const r of [4, ...[0, 1, 2, 3, 5, 6, 7].slice(0, live)])
+                    {
+                        b.i32(0).load(REGS + r * 4).set(reg(r));
+                    }
                 }
-                for (let r = 0; r < 8; r++)
+                else
                 {
-                    b.i32(0).load(REGS + r * 4).set(reg(r));
+                    for (let f = 0; f < 6; f++)
+                    {
+                        b.i32(0).load(FLAGS + f * 4).set(flag(f));
+                    }
+                    for (let r = 0; r < 8; r++)
+                    {
+                        b.i32(0).load(REGS + r * 4).set(reg(r));
+                    }
                 }
             }
             else
@@ -635,7 +657,7 @@ export function build(w, arm, seed = 1){
         functions.push({ type: 0, locals, body: b });
     }
 
-    if (arm === 'state')
+    if (transfers)
     {
         // The transfer: the entry hash probed by the guest address, the
         // region's function tail-called with its label (cork's `transfer`).
@@ -940,4 +962,54 @@ export function summary(values){
     const median = sorted[sorted.length >> 1];
     return { median, min: sorted[0], max: sorted[sorted.length - 1],
         spread: (sorted[sorted.length - 1] - sorted[0]) / median };
+}
+
+/**
+ * Two arms timed in turns, A then B, then B then A, `pairs` times: the ratio
+ * B / A of each pair, which the machine's drift between pairs does not move
+ * as it moves the runs themselves. Each arm calibrated on its own, warmed, and
+ * run for about `ms` a run.
+ *
+ * @param {Workload} w @param {string} a @param {string} b
+ * @param {{ pairs?: number, warm?: number, ms?: number, seed?: number,
+ *     now?: () => number }} [options]
+ */
+export async function measurePaired(w, a, b, { pairs = 15, warm = 3, ms = 200, seed = 1,
+    now = ()=>performance.now() } = {})
+{
+    const callsPerTurn = Math.max(2, w.depth) - 1;
+    const arms = await Promise.all([a, b].map(async arm=>{
+        const { bytes, program, roots } = build(w, arm, seed);
+        const { instance } = await WebAssembly.instantiate(bytes);
+        const run = /** @type {(n: number) => number} */ (instance.exports.run);
+        const memory = new Uint8Array(/** @type {WebAssembly.Memory} */ (instance.exports.memory)
+            .buffer);
+        const go = (/** @type {number} */ n)=>{
+            prepare(memory, program, roots, seed);
+            run(n);
+        };
+        return { go, turns: calibrate(go, ms, now) };
+    }));
+    const time = (/** @type {number} */ i)=>{
+        const { go, turns } = arms[i];
+        const start = now();
+        go(turns);
+        return (now() - start) * 1e6 / (turns * callsPerTurn);
+    };
+    for (let i = 0; i < warm; i++)
+    {
+        time(0);
+        time(1);
+    }
+    /** @type {{ a: number, b: number, ratio: number }[]} */
+    const values = [];
+    for (let i = 0; i < pairs; i++)
+    {
+        const [first, second] = i % 2 === 0 ? [0, 1] : [1, 0];
+        const one = time(first);
+        const two = time(second);
+        const [ta, tb] = first === 0 ? [one, two] : [two, one];
+        values.push({ a: ta, b: tb, ratio: tb / ta });
+    }
+    return values;
 }
