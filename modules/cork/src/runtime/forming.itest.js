@@ -176,6 +176,7 @@ async function run(code, config){
             code: code.map(([at, bytes])=>[...m.read(at, bytes.length)]),
             translated: stop.translated,
             reforms: m.diagnostics().reforms ?? 0,
+            fromSite: m.diagnostics().mechanisms?.TRANSFER_SITE ?? 0,
         };
     }
     finally
@@ -186,7 +187,9 @@ async function run(code, config){
 
 test('callees formed in, to any depth, run as the interpreter runs them', async()=>{
     const paths = {
-        'nothing formed in': { leafCalls: false, hotThreshold: 2 },
+        // Every call out, its callee found from its own site where the entry hash
+        // has it (`blockProfile` counts those).
+        'nothing formed in': { leafCalls: false, hotThreshold: 2, blockProfile: true },
         'leaves alone': { formDepth: 0, hotThreshold: 2 },
         'one level': { formDepth: 1, hotThreshold: 2 },
         'two levels': { formDepth: 2, hotThreshold: 2 },
@@ -200,21 +203,25 @@ test('callees formed in, to any depth, run as the interpreter runs them', async(
     };
     let translated = 0;
     let reforms = 0;
+    let fromSite = 0;
     for (let seed = 1; seed <= PROGRAMS; seed++)
     {
         const { code } = program(seed);
-        const { translated: none, reforms: reformedNone, ...expected } = await run(code,
-            { hotThreshold: 1e9 });
-        assert.equal(none + reformedNone, 0, 'the reference ran interpreted');
+        const { translated: none, reforms: reformedNone, fromSite: siteNone, ...expected } =
+            await run(code, { hotThreshold: 1e9 });
+        assert.equal(none + reformedNone + siteNone, 0, 'the reference ran interpreted');
         assert.equal(expected.stop, 'halt', `seed ${seed}: the program ends`);
         for (const [name, config] of Object.entries(paths))
         {
-            const { translated: ran, reforms: formed, ...got } = await run(code, config);
+            const { translated: ran, reforms: formed, fromSite: site, ...got } = await run(code,
+                config);
             assert.deepEqual(got, expected, `seed ${seed}, ${name}`);
             translated += ran;
             reforms += formed;
+            fromSite += site;
         }
     }
     assert.ok(translated > 0, 'the translated paths ran translated code');
     assert.ok(reforms > 0, 'the predicted path formed regions again with their callees');
+    assert.ok(fromSite > 0, 'calls out found their callees from their own sites');
 });

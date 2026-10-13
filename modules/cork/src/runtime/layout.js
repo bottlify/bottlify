@@ -129,6 +129,9 @@ export const Mechanism = Object.freeze({
     APART_FULL: 16,
     /** an indirect call to none of the callees predicted and formed in. */
     APART_MISSED: 17,
+    /** A call out to a known address that found its callee from its own site, in the entry
+     * hash slot that address hashes to, rather than through the module's transfer. */
+    TRANSFER_SITE: 18,
 });
 
 /** The names of `Mechanism`'s counts, by index. */
