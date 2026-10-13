@@ -642,6 +642,39 @@ test('fxtract of an infinity, a NaN, a zero and a denormal is the model\'s', ()=
     }
 });
 
+test('frndint of a negative that rounds to zero is -0 under every rounding control, as the'
+    + ' processor\'s', ()=>{
+    // [the value, what each control rounds it to: nearest, down, up, toward zero]
+    /** @type {[number, number[]][]} */
+    const cases = [
+        [-0.4, [-0, -1, -0, -0]], [-0.5, [-0, -1, -0, -0]], [-0.6, [-1, -1, -0, -0]],
+        [-1e-300, [-0, -1, -0, -0]], [-1.5, [-2, -2, -1, -1]], [0.4, [0, 0, 1, 0]],
+    ];
+    for (const [value, wants] of cases)
+    {
+        wants.forEach((want, rc)=>{
+            // fldcw [ebx+8]; fld qword [ebx]; frndint; fstp qword [ebx+16]
+            const code = [0xd9, 0x6b, 0x08, 0xdd, 0x03, 0xd9, 0xfc, 0xdd, 0x5b, 0x10];
+            /** @param {DataView} view @param {number} where */
+            const data = (view, where)=>{
+                view.setFloat64(where, value, true);
+                view.setUint16(where + 8, 0x37f | rc << 10, true);
+            };
+            const name = `frndint(${value}) under RC ${rc}`;
+            const { m, at } = onEmptyStack(code, data);
+            assert.ok(Object.is(m.view.getFloat64(at + 16, true), want), `${name}: the tier`);
+            const js = machine();
+            reset(js, [...code, 0xf4], random(5));
+            js.view.setUint8(js.layout.x87Top, 0);
+            js.view.setUint8(js.layout.x87Empty, 0xff);
+            data(js.view, at);
+            runJs(js);
+            assert.ok(Object.is(js.view.getFloat64(at + 16, true), want),
+                `${name}: the JavaScript interpreter`);
+        });
+    }
+});
+
 test('fprem and fprem1 over random operands are the model\'s remainder and bits', ()=>{
     // The tier's own long division against `remainder` in ir-x87.js, which
     // the JavaScript interpreter calls: magnitudes across the whole range,
