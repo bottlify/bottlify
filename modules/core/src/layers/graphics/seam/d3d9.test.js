@@ -54,6 +54,8 @@ import { createSystemFunctions } from '../../win32/user32/system.js';
 const D3D_OK = 0;
 const D3DERR_INVALIDCALL = 0x8876086c;
 const D3DERR_NOTAVAILABLE = 0x8876086a;
+/** A query whose answer is not ready yet. */
+const S_FALSE = 1;
 const E_NOINTERFACE = 0x80004002;
 
 /** The Ex interfaces' slots, the base interface's first. */
@@ -1261,6 +1263,30 @@ test('a query answers through its vtable, and a null pointer only asks whether i
         [0xffff0000, 0xffffffff], 'two bytes, and nothing past them');
     assert.equal(onOcclusion('GetData', [data, 8, 1]), D3D_OK);
     assert.deepEqual([h.fields.readU32(data), h.fields.readU32(data + 4)], [0, 0xffffffff]);
+    assert.equal(h.release(occlusion), 0);
+    assert.equal(h.release(device), 0);
+    h.release(root);
+});
+
+test('drawing nothing on purpose, an occlusion query counts every pixel of the target', ()=>{
+    // The graphics setting draw: false: a program that culls by these counts
+    // culls nothing, and runs the work it would run on a GPU.
+    const h = seamed({ caps: { occlusionVisible: true } });
+    const root = h.create();
+    const { device } = h.createDevice(root);
+    const out = 0x3000;
+    assert.equal(h.device(device, 'CreateQuery', [D3DQUERYTYPE.OCCLUSION, out]), D3D_OK);
+    const occlusion = h.box.memory.readU32(out);
+    /** @param {string} name @param {number[]} args */
+    const onOcclusion = (name, args)=>
+        h.box.call(occlusion, slot(IDIRECT3DQUERY9_SLOTS, name), args);
+    const data = 0x3100;
+    h.fields.writeU32(data, 0xdeadbeef);
+    assert.equal(onOcclusion('Issue', [2]), D3D_OK);
+    assert.equal(onOcclusion('GetData', [data, 4, 1]), S_FALSE, 'between BEGIN and END');
+    assert.equal(onOcclusion('Issue', [1]), D3D_OK);
+    assert.equal(onOcclusion('GetData', [data, 4, 1]), D3D_OK);
+    assert.equal(h.fields.readU32(data), 64 * 64, 'the 64 x 64 back buffer');
     assert.equal(h.release(occlusion), 0);
     assert.equal(h.release(device), 0);
     h.release(root);

@@ -465,6 +465,9 @@ const isDepthFormat = format=>FORMAT_INFO[format] !== undefined && FORMAT_INFO[f
  * @property {boolean} [rectangleBump]  The renderer's (`createRenderer`).
  * @property {boolean} [keepMemory]  Released resources' memory is never given back (debugging).
  * @property {boolean} [rereadBuffers]  The renderer's (`createRenderer`).
+ * @property {boolean} [occlusionVisible]  Nothing is drawn on purpose (the graphics
+ *     setting `draw: false`): an occlusion query without a renderer counts every
+ *     pixel of the target rather than none.
  * @property {boolean} [mips]
  * @property {(watcher: () => void) => () => void} [onDeviceLost]
  *     Calls the watcher once the GPU underneath is gone for good, at once if it
@@ -504,7 +507,7 @@ export function createDirect3D9(options = {}){
         backend, readMemory, windowMemory, writeMemory, createSampler, allocate: guestMemory,
         free: giveBack, divergence, dumpDraws, dumpEvery, liveDump, maxDraws, skipTexture,
         probeTexture, fog, mips, driverRules, onDeviceLost, gamma, frameQueued, renderedElsewhere,
-        keepMemory, rereadBuffers, drawsFrom, rectangleBump, ...caps
+        keepMemory, rereadBuffers, drawsFrom, rectangleBump, occlusionVisible, ...caps
     } = options;
     /** @type {DeviceCaps} */
     const resolved = { ...DEFAULT_CAPS, ...caps, fullscreenGamma: gamma?.applies() === true };
@@ -517,7 +520,7 @@ export function createDirect3D9(options = {}){
         free: keepMemory === true ? undefined : giveBack, divergence, dumpDraws, dumpEvery,
         liveDump, maxDraws, skipTexture,
         probeTexture, fog, mips, driverRules, onDeviceLost, gamma, frameQueued, renderedElsewhere,
-        rereadBuffers, drawsFrom, rectangleBump,
+        rereadBuffers, drawsFrom, rectangleBump, occlusionVisible,
     };
     if (backend && !readMemory)
     {
@@ -4432,10 +4435,12 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
          * Two kinds are offered. An event query asks whether the GPU has
          * caught up, and it has, as far as the program can tell, the moment it
          * asks. An occlusion query asks how many pixels a set of draws
-         * produced, which this device cannot count: it answers with every
-         * pixel of the target, the one number that never culls what should be
-         * drawn, and says so once. Every other kind is the timing family, and
-         * is not offered.
+         * produced: the GPU's count where there is one. A device that draws
+         * nothing counts none, unless it draws nothing on purpose
+         * (`occlusionVisible`, the graphics setting `draw: false`): then every
+         * pixel of the target, the one number that culls nothing the program
+         * would draw on a GPU. Every other kind is the timing family, and is
+         * not offered.
          *
          * A null out-pointer is the documented way to ask whether a kind is
          * offered at all.
@@ -4578,7 +4583,8 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         const queryCount = explicitCount();
         const occlusion = type === D3DQUERYTYPE.OCCLUSION;
         // An occlusion query counts what the GPU drew between its BEGIN and
-        // its END; a device that draws nothing counts nothing.
+        // its END; a device without one counts nothing, or, drawing nothing
+        // on purpose, the whole target.
         const counted = occlusion && renderer?.createOcclusionQuery
             ? renderer.createOcclusionQuery()
             : null;
@@ -4667,7 +4673,13 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 }
                 if (!counted)
                 {
-                    return ended ? answer(0) : D3D_OK;
+                    if (!ended)
+                    {
+                        return D3D_OK;
+                    }
+                    const target = services.occlusionVisible === true ? model.renderTarget : null;
+                    const desc = target ? describe(target) : null;
+                    return answer(desc ? desc.Width * desc.Height : 0);
                 }
                 const result = renderer.occlusionResult(counted,
                     (flags & D3DGETDATA_FLUSH) !== 0);

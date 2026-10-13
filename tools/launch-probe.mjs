@@ -110,6 +110,10 @@ function parse(argv){
         // which past a title's load is most of the thread: off, a run measures
         // the program and the layers instead (the graphics layer's `raster`).
         raster: !argv.includes('--no-raster'),
+        // Nothing drawn on purpose (the graphics setting `draw: false`): an
+        // occlusion query answers that everything was seen, so the program
+        // runs the work it would run on a GPU rather than culling all of it.
+        draw: !argv.includes('--no-draw'),
         // The program's command line, in place of the manifest's: a game
         // started straight into a level (`+map ...`) loads it and plays.
         commandLine: argv.includes('--command-line')
@@ -452,8 +456,8 @@ function seriesRow(app, last, began){
 
 async function main(){
     const { id, turns, map, grep, calls, heap, profile, log, watch, peek, dump, which,
-        corkConfig, series, raster, concurrency, seconds, commandLine, executors, memory, mode }
-        = parse(process.argv.slice(2));
+        corkConfig, series, raster, draw, concurrency, seconds, commandLine, executors, memory,
+        mode } = parse(process.argv.slice(2));
     if (!id)
     {
         console.error('usage: node tools/launch-probe.mjs <bundle-id> [--turns N] '
@@ -518,7 +522,8 @@ async function main(){
         ...executors ? { executors } : {},
         ...memory ? { memorySize: memory * 1024 * 1024 } : {},
         ...concurrency ? { concurrency } : {},
-        ...(raster ? {} : { graphics: { raster: false } }),
+        ...(raster && draw ? {} : { graphics: { ...raster ? {} : { raster: false },
+            ...draw ? {} : { draw: false } } }),
         quantum: profile > 0 ? profile : undefined,
         sample: profile > 0 ? (/** @type {number} */ eip)=>samples.push(eip) : undefined,
         // A probe is read afterwards, which is exactly when a stack string is gone.
