@@ -147,6 +147,20 @@ export function recordedDirect3D(factory, services, transport){
         answered: targets.answered,
         answers: CANDIDATES,
         observe: targets.observe,
+        // Written here only: the played side made the same copies in its own
+        // memory when it answered.
+        applyMoves: write && services.readMemory
+            ? (/** @type {any[]} */ moves)=>{
+                for (const move of moves)
+                {
+                    for (let row = 0; row < move.rows; row++)
+                    {
+                        write(move.to + row * move.toPitch,
+                            services.readMemory(move.from + row * move.fromPitch, move.rowBytes));
+                    }
+                }
+            }
+            : undefined,
     });
     return recording.root;
 }

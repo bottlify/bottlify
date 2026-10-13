@@ -2661,3 +2661,45 @@ test('Direct3D 9: an occlusion count the GPU has given reaches the recording una
         }
     }
 });
+
+test('Direct3D 8: a render target copied into an image surface answers the program at once, and'
+    + ' a lock of the surface waits for the pixels and reads what the target holds', async()=>{
+    const { d3d, release, close } = rig(8, 'held');
+    try
+    {
+        /** @type {{ device?: any }} */
+        const made = {};
+        assert.equal(await d3d.CreateDevice({ ...PARAMETERS }, made), D3D_OK);
+        const device = made.device;
+        /** @type {{ surface?: any }} */
+        const target = {};
+        assert.equal(device.CreateRenderTarget(16, 16, D3DFMT.X8R8G8B8, 0, target), D3D_OK);
+        /** @type {{ surface?: any }} */
+        const image = {};
+        assert.equal(device.CreateImageSurface(16, 16, D3DFMT.X8R8G8B8, image), D3D_OK);
+        /** @type {Record<string, any>} */
+        const old = {};
+        device.GetRenderTarget(old.target = {});
+        device.SetRenderTarget(target.surface, null);
+        device.Clear(0, null, D3DCLEAR.TARGET, 0xff336699, 1, 0);
+        device.SetRenderTarget(old.target.surface, null);
+        /** @type {{ moves?: any[] }} */
+        const held = {};
+        // Nothing is played until released: a copy that waited would be a promise.
+        const answer = device.CopyRects(target.surface, null, 0, image.surface, null, held);
+        assert.equal(answer, D3D_OK, 'answered without waiting for the twin');
+        assert.deepEqual(held.moves, [], 'the copies are made when the pixels come, not now');
+        /** @type {{ pBits?: number }} */
+        const pixels = {};
+        const locked = image.surface.LockRect(pixels, null, D3DLOCK.READONLY);
+        assert.ok(locked instanceof Promise, 'the lock waits for the copy back');
+        release();
+        assert.equal(await locked, D3D_OK);
+        assert.ok(typeof pixels.pBits === 'number');
+        image.surface.UnlockRect();
+    }
+    finally
+    {
+        close();
+    }
+});

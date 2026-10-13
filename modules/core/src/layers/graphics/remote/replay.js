@@ -362,6 +362,9 @@ const sharedNow = ()=>performance.timeOrigin + performance.now();
  * @param {Object} options
  * @param {Record<string, any>} options.root
  *     the device's root (`IDirect3D9`), made with no renderer behind it
+ * @param {(moves: any[]) => void} [options.applyMoves]
+ *     makes the copies a call describes in guest memory, as the caller would
+ *     have: for a copy back the program is answered before it is made
  * @param {(address: number, length: number) => Uint8Array} options.readMemory
  *     the guest memory the locked bytes are read from
  * @param {(address: number, length: number) => Uint8Array} [options.windowMemory]
@@ -399,7 +402,7 @@ const sharedNow = ()=>performance.timeOrigin + performance.now();
  */
 export function createRecording(options){
     const { root, readMemory, transport, answered = ()=>false, answers = new Set(),
-        observe = null } = options;
+        observe = null, applyMoves = null } = options;
     const windowMemory = options.windowMemory ?? readMemory;
     const { writer } = transport;
     const lender = transport.lender ?? null;
@@ -951,6 +954,13 @@ export function createRecording(options){
      * @type {WeakMap<object, Promise<void>>}
      */
     const readbacks = new WeakMap();
+    /**
+     * Whether a copy into this surface can be answered before it is made:
+     * one the recording can wait on later, at whatever reads it.
+     *
+     * @param {any} surface
+     */
+    const copiesBack = surface=>surface !== null && typeof surface === 'object';
 
     /**
      * What a played call wrote into a structure the caller passed, into the
@@ -1132,7 +1142,7 @@ export function createRecording(options){
             // waits for it, then is made: a lock or a DC on it, and a copy out
             // of it or of its texture, which moves the bytes it holds here.
             const filling = name === 'LockRect' || name === 'GetDC' ? readbacks.get(target)
-                : name === 'UpdateSurface' || name === 'UpdateTexture'
+                : name === 'UpdateSurface' || name === 'UpdateTexture' || name === 'CopyRects'
                     ? readbacks.get(unwrap(args[0])) : undefined;
             if (filling)
             {
@@ -1459,6 +1469,47 @@ export function createRecording(options){
                     }
                 });
                 return typeof result === 'object' ? answerOf(result) : result;
+            }
+            // A copy out of a render target is queued as GetRenderTargetData
+            // is: the program goes on, and only what reads the destination --
+            // a lock, a DC, a copy out of it -- waits for its pixels. Into a
+            // surface the GPU holds, the played device copies there and has no
+            // bytes to send at all. Waiting at the copy held the program for the
+            // replay of everything recorded before, twice a frame in a program
+            // that copies its targets.
+            if (name === 'CopyRects' && applyMoves && copiesBack(applied[3]))
+            {
+                const into = applied[3];
+                const filled = Promise.resolve(ask(name)).then(played=>{
+                    if (played.answer === 0)
+                    {
+                        applyMoves(played.outs[5]?.moves ?? []);
+                    }
+                }, ()=>{});
+                const filledNow = [into, into.container].filter(
+                    one=>one !== null && typeof one === 'object');
+                for (const one of filledNow)
+                {
+                    readbacks.set(one, filled);
+                }
+                filled.then(()=>{
+                    for (const one of filledNow)
+                    {
+                        if (readbacks.get(one) === filled)
+                        {
+                            readbacks.delete(one);
+                        }
+                    }
+                });
+                // The copies are made when the pixels come; made now, they
+                // would copy what the target's memory held before.
+                if (args[5] && typeof args[5] === 'object')
+                {
+                    args[5].moves = [];
+                }
+                // Not the recorded device's own answer: it reads the target
+                // back too, a promise the caller would wait on.
+                return result instanceof Promise ? 0 : result;
             }
             if (name === 'GetData' && /** @type {any} */ (target)?.type === D3DQUERYTYPE_OCCLUSION)
             {
