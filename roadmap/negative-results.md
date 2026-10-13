@@ -487,3 +487,41 @@ None yet.
 - **Decision.** Step 2a/2b not built (rule: median at most 0.90 and 13 of 15 pairs, for farcry
   and spread). Step 2c (the shadow stack's depth and the budget in one comparison) is a smaller
   part of the same call and is left with it.
+
+### 2026-10-13 -- indirect call prediction (`callTargets`) in Far Cry, and its knobs, while the sampling took the last calls before a reading
+
+- **Idea.** cork's optional `callTargets`: indirect calls sampled, and a callee that takes a share
+  of a site's samples formed into the regions holding the site behind a compare. Measured on a
+  game with the GPU out of the way, then the knobs that decide which sites are formed again
+  (`predictShare`, `predictCallees`, `reforms`) and the leaf limits (`LEAF_BLOCKS`, `LEAF_BYTES`
+  in `modules/cork/src/region.js`) loosened.
+- **Workload.** The Far Cry demo bundle (`bundle.btl` sha256 `44530097b2a5a284…`) under
+  `tools/launch-probe.mjs --no-draw`, started into the level by its command line (`map fort`),
+  one executor and a translation worker, cold (no translation store). The level is in by
+  330–420 s; guest MIPS in rows of the run's series from 420 s to the end of the run.
+- **Values, prediction on and off** (tree `1e368204`, no block profile, rows of 30 s, 15 rows an
+  arm, one run an arm, off first). Off: 169.8 164.5 180.2 175.4 176.8 172.2 177.4 176.0 167.9 166.0
+  166.8 169.9 166.0 158.4 163.9 -- median 169.8, spread (max − min) / median 13%. On: 166.7 160.8
+  161.0 171.8 171.7 165.7 160.1 168.9 169.5 153.9 153.4 168.5 151.4 161.6 164.8 -- median 164.8,
+  spread 12%. On / off 0.971, inside the spread of one run.
+- **Values, the knobs** (tree `80d60f6f`, block profile from 420 s, its counts over the window;
+  share = `CALL_PREDICTED` / (`CALL_PREDICTED` + `APART_UNPREDICTED`)). Defaults: 19.5M
+  predicted, 139.0M unpredicted, share 12.3%, window MIPS 127.0 136.0 136.6 135.2 129.1 129.0.
+  `predictShare` 16, `predictCallees` 8, `reforms` 8: 20.2M, 137.8M, 12.8%; MIPS 119.7 125.6
+  125.9 129.6 131.1 120.3 102.5. Leaf limits 32 blocks and 1024 bytes (a local change, not
+  committed): 18.5M, 129.4M, 12.5%; transfers through the shared function 479.0M against
+  519.9M (−8%); MIPS 128.7 125.7 128.1 122.1 134.1 123.9. One run each; the noise floor between
+  runs of one setting not measured (two runs of the defaults on neighbouring trees gave window
+  medians 137 and 120).
+- **Machine.** A 4-core x86-64 Linux VM (Firecracker), Intel Xeon @ 2.80 GHz, Node 22.22.0
+  (V8 12.4.254.21). No GPU: `draw: false`. Power plan not recorded.
+- **Correctness.** Every run reached the level (the game's own debug output says so) and ran in
+  it to the end of the run; cork's unit tests and the forming gate passed on both committed trees.
+  The leaf-limit change was checked by the run alone.
+- **Why it did not pay.** Found afterwards with a log of the sampled sites (`ac1cc0de`): a
+  reading took the sixteen pairs written last, the calls just before it, so a site called
+  right before every reading took the samples (up to 10^5 times its share of the calls), and
+  64.8% of the window's indirect call executions were at sites that never came due. Knobs that act
+  on the sites that came due could not move a share decided by which sites came due.
+- **Decision.** Knobs and leaf limits left as they were. The sampling picks its calls by a hash
+  of a count across the last thousand (`cb208adb`), measured anew in a later entry.
