@@ -781,6 +781,11 @@ async function main(){
         // How full the entry hash ran: what sizes it (`hashSlots`) for a title.
         console.log(`  cork entries: ${cork.entriesAll} (${cork.entries} in the hash),`
             + ` ${cork.regions} regions, function table ${cork.tableSize}`);
+        // The precision control x87 regions were compiled for -- single rounds every
+        // arithmetic result -- and how often an entry found the stack in another shape.
+        console.log(`  x87: precision ${cork.precision} (${cork.precisionSwitches} switches),`
+            + ` shape misses ${cork.shapeMisses}, checked ${cork.shapeChecked},`
+            + ` relaxed status reads ${cork.x87RelaxedReads}`);
     }
     if (cork?.mechanisms)
     {
