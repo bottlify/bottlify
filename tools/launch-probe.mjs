@@ -114,6 +114,9 @@ function parse(argv){
         // occlusion query answers that everything was seen, so the program
         // runs the work it would run on a GPU rather than culling all of it.
         draw: !argv.includes('--no-draw'),
+        // Where a profiling run writes cork's block counts and sampled call
+        // sites as JSON (`--cork-out FILE`).
+        corkOut: argv.includes('--cork-out') ? argv[argv.indexOf('--cork-out') + 1] : null,
         // The program's command line, in place of the manifest's: a game
         // started straight into a level (`+map ...`) loads it and plays.
         commandLine: argv.includes('--command-line')
@@ -456,8 +459,8 @@ function seriesRow(app, last, began){
 
 async function main(){
     const { id, turns, map, grep, calls, heap, profile, log, watch, peek, dump, which,
-        corkConfig, series, raster, draw, concurrency, seconds, commandLine, executors, memory,
-        mode } = parse(process.argv.slice(2));
+        corkConfig, series, raster, draw, corkOut, concurrency, seconds, commandLine, executors,
+        memory, mode } = parse(process.argv.slice(2));
     if (!id)
     {
         console.error('usage: node tools/launch-probe.mjs <bundle-id> [--turns N] '
@@ -712,13 +715,21 @@ async function main(){
         // Indirect call prediction (`callTargets`): the sites that came due and why
         // each was left unpredicted.
         console.log(`  prediction: ${Object.entries(cork.prediction)
-            .map(([name, n])=>`${name}=${n}`).join(' ')}`);
+            .filter(([, n])=>typeof n === 'number').map(([name, n])=>`${name}=${n}`).join(' ')}`);
     }
     if (cork?.transferTargets?.length)
     {
         console.log(`  transfer targets: ${cork.transferTargets.slice(0, 40)
             .map((/** @type {number[]} */ [address, count])=>`${address.toString(16)}x${count}`)
             .join(' ')}`);
+    }
+    if (corkOut !== null && cork)
+    {
+        // The profile for reading afterwards: every counted block, the call
+        // sites the prediction sampled, the mechanisms.
+        writeFileSync(corkOut, JSON.stringify({ blockCounts: cork.blockCounts ?? [],
+            sites: cork.prediction?.sites ?? [], mechanisms: cork.mechanisms ?? {} }));
+        console.log(`  cork profile written to ${corkOut}`);
     }
     await report(app, { grep, calls });
     for (const failure of failures.slice(0, 3))

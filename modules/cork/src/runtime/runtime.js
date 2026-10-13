@@ -757,6 +757,25 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     /** The calls sampled `PREDICT_AFTER` times, whose callees are looked at next: what was
      * a pass over every call sampled at each `translatePending`. @type {Set<number>} */
     const callsDue = new Set();
+    /**
+     * A diagnostic: each sampled call site's samples over the run, its dues,
+     * how its last due ended and the callees it named then -- what tells a
+     * site the sampling never reaches from one whose callees did not form in.
+     *
+     * @type {Map<number, { samples: number, dues: number, last: string, top: number[],
+     *     share: number }>}
+     */
+    const siteLog = new Map();
+    /** @param {number} site */
+    const logOf = site=>{
+        let one = siteLog.get(site);
+        if (one === undefined && siteLog.size < 16384)
+        {
+            one = { samples: 0, dues: 0, last: '', top: [], share: 0 };
+            siteLog.set(site, one);
+        }
+        return one;
+    };
     /** By indirect call, the callees its regions were formed again with or failed to take,
      * not tried again while those regions run. @type {Map<number, Set<number>>} */
     const callTried = new Map();
@@ -2583,6 +2602,14 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 callSamples.set(site, seen);
             }
             seen.targets.set(target, (seen.targets.get(target) ?? 0) + 1);
+            if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
+            {
+                const one = logOf(site);
+                if (one)
+                {
+                    one.samples++;
+                }
+            }
             if (++seen.total === PREDICT_AFTER)
             {
                 callsDue.add(site);
@@ -2634,6 +2661,17 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             const fresh = [...seen.targets].filter(([target, times])=>
                 times * PREDICT_SHARE >= seen.total && !tried.has(target))
                 .sort((a, b)=>b[1] - a[1]).map(([target])=>target);
+            const log = import.meta.BOTTLIFY_DIAGNOSTICS !== false ? logOf(site) : undefined;
+            if (log)
+            {
+                const ranked = [...seen.targets].sort((a, b)=>b[1] - a[1]);
+                log.dues++;
+                log.top = ranked.slice(0, 4).map(([target])=>target);
+                log.share = ranked[0][1] / seen.total;
+                log.last = fresh.length === 0
+                    ? (ranked.some(([, times])=>times * PREDICT_SHARE >= seen.total)
+                        ? 'tried' : 'spread') : 'fresh';
+            }
             if (fresh.length === 0)
             {
                 counts.predictNoShare++;
@@ -2671,6 +2709,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             else
             {
                 counts.predictNoRegion++;
+                if (log)
+                {
+                    log.last = 'no region';
+                }
             }
         }
         const formed = [];
@@ -3935,6 +3977,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 prediction: { due: counts.predictDue, noShare: counts.predictNoShare,
                     reformsOut: counts.predictReformsOut, notFormed: counts.predictNotFormed,
                     noRegion: counts.predictNoRegion,
+                    sites: [...siteLog].sort((a, b)=>b[1].samples - a[1].samples).slice(0, 4096)
+                        .map(([site, one])=>({ site, ...one })),
                     reforms: counts.reforms },
                 exits: { ...exits },
                 untranslatedBy: { ...untranslatedBy },
