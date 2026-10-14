@@ -722,6 +722,6 @@ None yet.
 - **Measured again.** Not on lua-x87. The Far Cry demo runs of 2026-10-14 (`--fake-gpu`, the
   engine in a worker, headless Chrome 141, 240 s windows of the engine worker's CPU profile)
   compare the tree before the whole series (`92f18dcd`) with the later commits instead.
-- **Machine.** A 4-core x86-64 Linux VM (Firecracker), Intel Xeon @ 2.80 GHz. Power plan not
-  recorded.
+- **Machine.** The invalidated runs: not recorded. The Far Cry runs: a 4-core x86-64 Linux VM,
+  Intel Xeon @ 2.10 GHz; power plan not recorded.
 - **Decision.** The change stays.
