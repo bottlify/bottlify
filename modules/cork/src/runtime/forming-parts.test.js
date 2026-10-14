@@ -317,6 +317,65 @@ test('a batch emitted here while the translator loads is one region', async()=>{
     }
 });
 
+test('a batch\'s store hits start compiling their modules a share at a call', async()=>{
+    const config = { worker: true, translators: 1, bundleId: 'test' };
+    const store = memoryTranslationStore();
+    const starts = [0x2000, 0x3000, 0x4000, 0x5000];
+    /** @param {ReturnType<typeof machine>} m */
+    const translated = m=>starts.every(at=>m.runtime.entryOf(at) >= 0);
+    // Stored a region a batch: a module of its own each.
+    const fill = machine({ ...config, store, batchRegions: 1, maxBatchRegions: 1, holdMs: 0 });
+    try
+    {
+        await untilTranslatorsLoaded(fill, 1);
+        starts.forEach((at, i)=>fill.write(at, piece(i, 100, 3).code));
+        for (const at of starts)
+        {
+            fill.runtime.noteHot(at, 0, 2);
+        }
+        await translateUntil(fill, ()=>translated(fill));
+        assert.ok(translated(fill), 'every start translated and stored');
+    }
+    finally
+    {
+        await fill.runtime.flush();
+    }
+    const m = machine({ ...config, store, batchRegions: 4, maxBatchRegions: 4, ...ONE_A_CALL });
+    // The compiles started in one run of this thread, at most: the share a call allows.
+    const compile = WebAssembly.compile;
+    let inRun = 0;
+    let most = 0;
+    WebAssembly.compile = bytes=>{
+        if (inRun++ === 0)
+        {
+            queueMicrotask(()=>{
+                inRun = 0;
+            });
+        }
+        most = Math.max(most, inRun);
+        return compile(bytes);
+    };
+    try
+    {
+        await untilTranslatorsLoaded(m, 1);
+        starts.forEach((at, i)=>m.write(at, piece(i, 100, 3).code));
+        for (const at of starts)
+        {
+            m.runtime.noteHot(at, 0, 2);
+        }
+        await translateUntil(m, ()=>translated(m));
+        assert.ok(translated(m), 'every start published from the store');
+        assert.equal(/** @type {any} */ (m.runtime.diagnostics()).compiledApart, starts.length,
+            'each hit\'s module compiled once');
+        assert.equal(most, 1, 'a module started at a time');
+    }
+    finally
+    {
+        WebAssembly.compile = compile;
+        await m.runtime.flush();
+    }
+});
+
 test('regions formed again with copies of their loops are formed a share at a call', async()=>{
     const m = machine({ worker: true, translators: 1, ...ONE_A_CALL });
     // mov ecx, 1000; L: call F; dec ecx; jnz L; hlt; F: inc edx; ret -- F is a block

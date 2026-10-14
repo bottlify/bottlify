@@ -334,10 +334,11 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
         // The engine thread's time the translator's work may take at a
         // stretch, and the share of its time over a while, where a worker is
         // wanted: a batch goes on forming in the calls after, the store's
-        // hits are compiled off the thread, they and a worker's answers are
-        // published a share's worth a call, and a call that finds the share
-        // spent does nothing until it has come back (0: a batch formed and
-        // published whole in the call that takes it or answers it). A program
+        // hits are compiled off the thread, their compiles started and they
+        // and a worker's answers published a share's worth a call, and a call
+        // that finds the share spent does nothing until it has come back (0: a
+        // batch formed and published whole in the call that takes it or
+        // answers it). A program
         // reaching code it had not run held the thread for batches formed
         // whole, a tenth of a second at a time in the runs measured -- frames
         // the guest did not run, its sound late -- where the translation is
@@ -1703,8 +1704,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
     /**
      * A region a batch publishes later (`publishOn`): it, its translation, and
      * the instance of its module -- or, for a store hit whose module this run
-     * has not instantiated, null until there is one, with the bytes to compile
-     * and what they are known by. With `relink`, `one` is a running region a
+     * has not instantiated, null, with the bytes to compile and what they are
+     * known by (`instanceFor`). With `relink`, `one` is a running region a
      * relink moves to the instance, and where the store keeps the module.
      * @typedef {{ one: any, built: any, instance: WebAssembly.Instance | null,
      *     source?: string | object, bytes?: Uint8Array,
@@ -1714,8 +1715,17 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
      * The batches waiting to be published, in order: a translator's answer,
      * or a batch's store hits and whether their modules are compiled. Until
      * they are all published no new batch goes, as while a batch's lookups are
-     * out, and they are published before a batch half formed goes on.
-     * @type {{ waiting: Waiting[], next: number, ready: boolean }[]}
+     * out, and they are published before a batch half formed goes on. A
+     * batch's store hits wait for their modules: `compile` holds those not
+     * started yet (`compileOn`), `started` the compiles under way, `compiled`
+     * those done, and `instances` those instantiated as their first region is
+     * published.
+     * @typedef {{ waiting: Waiting[], next: number, ready: boolean,
+     *     compile: { source: string | object, bytes: Uint8Array }[],
+     *     started: Promise<void>[],
+     *     compiled: Map<string | object, WebAssembly.Module | null>,
+     *     instances: Map<string | object, WebAssembly.Instance | null> }} Publishing
+     * @type {Publishing[]}
      */
     const toPublish = [];
     let workerRequest = 0;
@@ -1775,7 +1785,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
         return credit;
     };
     const sendNext = ()=>{
-        if (toPublish.length > 0 ? toPublish[0].ready
+        if (toPublish.length > 0
+            ? toPublish[0].ready || toPublish.some(batch=>batch.compile.length > 0)
             : forming !== null || owed > 0 && queue.size > 0 && batchMayGo())
         {
             runtimeApi?.translatePending().catch(()=>{});
@@ -3439,61 +3450,111 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
     /**
      * A batch's regions to publish a credit's worth a call (`publishOn`). A
      * store hit whose module this run has not instantiated waits for it to be
-     * compiled off this thread, once for every hit naming it -- by its batch's
-     * key, or by itself for a module of its own.
+     * compiled off this thread (`compileOn`), once for every hit naming it --
+     * by its batch's key, or by itself for a module of its own.
      *
      * @param {Waiting[]} waiting
      */
     const publishLater = waiting=>{
-        /** @type {Map<string | object, Promise<WebAssembly.Instance | null>>} */
-        const instances = new Map();
+        /** @type {Publishing['compile']} */
+        const compile = [];
+        /** @type {Set<string | object>} */
+        const named = new Set();
         for (const { instance, source, bytes } of waiting)
         {
-            if (instance !== null || source === undefined || bytes === undefined
-                || instances.has(source))
+            if (instance === null && source !== undefined && bytes !== undefined
+                && !named.has(source))
             {
-                continue;
+                named.add(source);
+                compile.push({ source, bytes });
             }
-            /** @param {unknown} e */
-            const failed = e=>{
-                refused.batch = (refused.batch ?? 0) + 1;
-                refused[`batch: ${String(e).slice(0, 120)}`] = 1;
-                return null;
-            };
+        }
+        toPublish.push({ waiting, next: 0, ready: compile.length === 0, compile, started: [],
+            compiled: new Map(), instances: new Map() });
+        queueMicrotask(sendNext);
+    };
+
+    /**
+     * Starts compiling the modules of the first batch with any not started, a
+     * credit's worth a call: `WebAssembly.compile` copies and hashes a module's
+     * bytes on this thread before it lets go, a dozen milliseconds for a
+     * batch's modules started at once. The batch is ready once every one of
+     * them is compiled.
+     *
+     * @returns {number} regions published: none
+     */
+    const compileOn = ()=>{
+        const batch = /** @type {Publishing} */ (toPublish.find(one=>one.compile.length > 0));
+        if (workerClosed)
+        {
+            batch.compile.length = 0;
+            batch.ready = true;
+            return 0;
+        }
+        const left = holding() ? creditNow() : Infinity;
+        if (left <= 0)
+        {
+            counts.heldBack++;
+            resumeWanted = true;
+            return 0;
+        }
+        const until = performance.now() + left;
+        while (batch.compile.length > 0)
+        {
+            const { source, bytes } = /** @type {Publishing['compile'][number]} */ (
+                batch.compile.shift());
             counts.compiledApart++;
-            instances.set(source, WebAssembly.compile(
-                /** @type {Uint8Array<ArrayBuffer>} */ (bytes)).then(module=>{
-                if (workerClosed)
-                {
-                    return null;
-                }
-                const made = instantiate(module);
-                if (made !== null && typeof source === 'string')
-                {
-                    batchInstances.set(source, made);
-                    modulesSinceRelink++;
-                }
-                return made;
-            }, failed));
+            batch.started.push(WebAssembly.compile(/** @type {Uint8Array<ArrayBuffer>} */ (bytes))
+                .then(module=>{
+                    batch.compiled.set(source, module);
+                }, (/** @type {unknown} */ e)=>{
+                    refused.batch = (refused.batch ?? 0) + 1;
+                    refused[`batch: ${String(e).slice(0, 120)}`] = 1;
+                    batch.compiled.set(source, null);
+                }));
+            if (performance.now() >= until)
+            {
+                break;
+            }
         }
-        const batch = { waiting, next: 0, ready: instances.size === 0 };
-        toPublish.push(batch);
-        if (batch.ready)
+        if (batch.compile.length > 0)
         {
-            queueMicrotask(sendNext);
+            resumeWanted = true;
+            return 0;
         }
-        else
+        Promise.all(batch.started).then(()=>{
+            batch.ready = true;
+            sendNext();
+        });
+        return 0;
+    };
+
+    /**
+     * The instance of a store hit's module, made as the first region naming it
+     * is published: made as each was compiled, a batch's modules were all
+     * instantiated in the turn the last compile came back.
+     *
+     * @param {Publishing} batch @param {string | object | undefined} source
+     * @returns {WebAssembly.Instance | null}
+     */
+    const instanceFor = (batch, source)=>{
+        if (source === undefined)
         {
-            Promise.all(waiting.map(async entry=>{
-                if (entry.instance === null && entry.source !== undefined)
-                {
-                    entry.instance = await instances.get(entry.source) ?? null;
-                }
-            })).then(()=>{
-                batch.ready = true;
-                sendNext();
-            });
+            return null;
         }
+        let made = batch.instances.get(source);
+        if (made === undefined)
+        {
+            const module = batch.compiled.get(source) ?? null;
+            made = module === null ? null : instantiate(module);
+            batch.instances.set(source, made);
+            if (made !== null && typeof source === 'string')
+            {
+                batchInstances.set(source, made);
+                modulesSinceRelink++;
+            }
+        }
+        return made;
     };
 
     /**
@@ -3528,7 +3589,9 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
                     return published;
                 }
                 any = true;
-                const { one, built, instance, relink } = batch.waiting[batch.next];
+                const entry = batch.waiting[batch.next];
+                const { one, built, relink } = entry;
+                const instance = entry.instance ?? instanceFor(batch, entry.source);
                 if (instance !== null && relink !== undefined)
                 {
                     relinkOne(one, built, instance, relink.store, relink.key);
@@ -3764,6 +3827,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
         if (toPublish[0]?.ready === true)
         {
             return publishOn();
+        }
+        if (toPublish.some(batch=>batch.compile.length > 0))
+        {
+            return compileOn();
         }
         if (forming !== null)
         {
