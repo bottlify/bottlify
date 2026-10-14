@@ -755,3 +755,33 @@ None yet.
 - **Decision.** On by default. The earlier entries stand as measured in their conditions (Node, in
   the level for 900 s, without the bound); the difference between them and this one is not
   separated yet.
+
+### 2026-10-14 -- indirect call prediction (`callTargets`) on the benchmark, on by default
+
+- **Idea.** Whether `callTargets`, on by default since `b73438e6` for Far Cry's 4-6%, costs the
+  benchmark anything, and which part of it does.
+- **Workload.** `modules/cork/bench` at ten times each workload's own length, tree `b73438e6`.
+  Chromium: `suite.mjs '{"head":{},"off":{"bundle":"head","cork":{"callTargets":false}}}' --scale
+  10 --reps 3`, the two arms alternated run by run. Node: `run.mjs --variant x87 --only spread
+  --iterations 1000`, one run each, three arms started together each round as three processes:
+  on; the same tree with the profile never switched on (`sampleCalls` leaving its flag 0); off.
+  Eight rounds.
+- **Values.** Chromium, best of three, on / off: geometric mean of the sixteen 1358 / 1361 MIPS
+  (1.00). `spread` x87 291 / 321 (runs on 291 283 266, off 321 319 305: every run on below every
+  run off), SSE 300 / 321 (on 290 300 279, off 311 321 281). The other fourteen between 0.92 and
+  1.06 either way, inside the spread of their own three runs. Node, started together, on / off
+  by round: 0.957 0.976 0.927 0.933 1.035 0.972 0.936 0.977 (median 0.965, 7 of 8 below 1); never
+  on / off: 0.973 1.012 0.964 0.979 0.994 0.938 0.988 0.938 (median 0.976). With `reforms: 0` (no
+  region formed again), run one after another, on's rate: 251 and 267 MIPS against on 267 and 246,
+  off 313 and 288.
+- **Noise.** In Node one after another, the rounds' on / off went from 0.87 to 1.15, and the
+  machine's rate drifted by a quarter within the hour (290 MIPS, then 220, the same arm; steal
+  time under 1%). Started together, within about 4%.
+- **What costs.** Not the regions formed again. The profile: about two and a half per cent is its
+  flag's load and branch on every indirect call with it switched off, about one more is the
+  sampling while it is on (one reading in two).
+- **Machine.** A 4-core x86-64 Linux VM, Intel Xeon @ 2.10 GHz; Chromium 141.0.7390.37 headless
+  (V8 14.1); Node 22.22.0. Power plan not recorded.
+- **Decision.** It stays on: Far Cry gained more than `spread` loses, and the benchmark as a whole
+  is unchanged. Sampling less often while no call comes due would cut the part paid while it is
+  on; the flag's load stays while regions carry the profile. Not tried.
