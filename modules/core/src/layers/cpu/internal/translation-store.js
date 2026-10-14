@@ -49,6 +49,9 @@ export const STORE_VERSION = 3;
 
 /** How long the records' writes may hold the thread before letting it go, in ms. */
 const WRITE_SLICE_MS = 4;
+/** The most of one record written at a time, so a record of megabytes -- a relinked
+ * module -- is let go between its pieces as two records are. */
+const WRITE_PIECE = 256 << 10;
 
 /** The file every record is appended to, and the one naming their places. */
 const RECORDS = 'records';
@@ -582,14 +585,18 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
             // writes run on the engine's own thread, and a seed's thousands
             // held it for hundreds of milliseconds while the program loaded --
             // long enough for a guest's sound mixer to miss its turns.
+            // A record of five megabytes written whole held it for twelve.
             let since = performance.now();
             for (const [offset, bytes] of writes)
             {
-                access.write(bytes, { at: offset });
-                if (performance.now() - since >= WRITE_SLICE_MS)
+                for (let at = 0; at < bytes.length; at += WRITE_PIECE)
                 {
-                    await new Promise(resolve=>setTimeout(resolve, 0));
-                    since = performance.now();
+                    access.write(bytes.subarray(at, at + WRITE_PIECE), { at: offset + at });
+                    if (performance.now() - since >= WRITE_SLICE_MS)
+                    {
+                        await new Promise(resolve=>setTimeout(resolve, 0));
+                        since = performance.now();
+                    }
                 }
             }
             return;

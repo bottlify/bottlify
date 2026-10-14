@@ -18,7 +18,8 @@ import {
  * worker gets from the origin's file system.
  *
  * @param {{ probes: number, syncReads: number, writes?: number, writeMs?: number,
- *     writables?: number }} [counter]
+ *     writables?: number, largest?: number }} [counter]  `largest`: the most bytes one
+ *     write through the synchronous handle took
  * @param {boolean} [sync]
  */
 function fakeDirectory(counter = { probes: 0, syncReads: 0 }, sync = false){
@@ -109,6 +110,7 @@ function fakeDirectory(counter = { probes: 0, syncReads: 0 }, sync = false){
                                 /** @param {Uint8Array} from @param {{ at: number }} where */
                                 write(from, { at }){
                                     counter.writes = (counter.writes ?? 0) + 1;
+                                    counter.largest = Math.max(counter.largest ?? 0, from.length);
                                     // A disk that takes its time, where a test asks.
                                     const until = performance.now() + (counter.writeMs ?? 0);
                                     while (performance.now() < until)
@@ -664,6 +666,29 @@ test('a large seed is written a few milliseconds at a time, the thread let go be
         `the thread had a turn before the last record was written (${writesAtTurn})`);
     assert.deepEqual([...await store.get('cork/41/a/401010/x') ?? []], new Array(40).fill(1));
 });
+
+test('a record of megabytes is written in pieces, the thread let go between, and reads whole',
+    async()=>{
+        // A relinked module is a record of megabytes: written whole it held
+        // the engine's thread for a dozen milliseconds in one write.
+        const counter = { probes: 0, syncReads: 0, writes: 0, writeMs: 1, largest: 0 };
+        const store = await createDirectoryTranslationStore(fakeDirectory(counter, true), 'game');
+        await store.get('cork/41/a/none');
+        const bytes = Uint8Array.from({ length: 5 << 20 }, (_, at)=>(at * 7) >>> 3);
+        let turned = false;
+        setTimeout(()=>{
+            turned = true;
+        }, 0);
+        const put = store.put('cork/41/a/module/m', bytes);
+        await new Promise(resolve=>setTimeout(resolve, 0));
+        assert.equal(await store.get('cork/41/a/module/m'), null, 'not a record until written');
+        await put;
+        assert.ok(turned);
+        assert.ok(counter.largest < bytes.length, `the largest write ${counter.largest} bytes`);
+        await store.flush();
+        assert.deepEqual(await store.get('cork/41/a/module/m'), bytes);
+        store.close();
+    });
 
 test('a store whose files fail it answers and keeps nothing rather than throwing', async()=>{
     // Another user of the directory compacting it removed the generation this
