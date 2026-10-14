@@ -785,3 +785,27 @@ None yet.
 - **Decision.** It stays on: Far Cry gained more than `spread` loses, and the benchmark as a whole
   is unchanged. Sampling less often while no call comes due would cut the part paid while it is
   on; the flag's load stays while regions carry the profile. Not tried.
+
+### 2026-10-14 -- `callTargets` in Far Cry in Chromium, its regions formed again under the credit
+
+- **Idea.** The entry above measured `callTargets` before the regions it forms again were bounded
+  by the engine thread's credit (`d96d7c1b`), and left the holds with the bound not measured.
+- **Workload.** As in that entry: the Far Cry demo bundle (`bundle.btl` sha256
+  `44530097b2a5a284…`), `tools/cdp_test/game.mjs farcry-demo --worker --coi --no-video --fake-gpu
+  --run-seconds 240 --cpu-profile 240`. Tree `b73438e6`, `--cork-config '{}'` (on, the default)
+  against `'{"callTargets":false}'`, alternated: cold on, cold off, warm on, warm off, each arm on a
+  profile of its own. During the last run (warm off) a few unit tests of a few seconds each ran
+  beside it.
+- **Values.** Guest instructions over the whole run: cold on 68.68 G in 260 s, 264.5 M/s; off
+  67.18 G in 258 s, 259.9 M/s (1.018). Warm on 70.17 G in 254 s, 276.2 M/s; off 68.45 G in 255 s,
+  268.6 M/s (1.028). One pair a phase; the noise floor about 6%, as before.
+- **The engine thread.** The translator's longest hold by its own samples: cold on 23.3 ms, off
+  27.3; warm on 16.8, off 14.2. Holds of 16 ms or more: 4 and 3 cold, 1 and 0 warm; none of 33 ms
+  or more in any run, against 32.8 ms and 14 of 16 ms or more cold with it on before the bound.
+  The slowest slices (0.7 to 1 s, in both arms) are the guest's own while the level loads.
+- **Machine.** A 4-core x86-64 Linux VM, Intel Xeon @ 2.10 GHz, headless Chromium 141.0.7390.37
+  (V8 14.1). Power plan not recorded.
+- **Correctness.** Every run ran to the end of its window; whether each reached the level was not
+  checked.
+- **Decision.** It stays on: the holds it added are gone with the bound, and every run on was
+  faster than the run off beside it.
