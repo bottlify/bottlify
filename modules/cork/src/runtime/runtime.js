@@ -163,7 +163,9 @@ export function translatorWorkerUrl(){
  * @param {EngineEnv & { features?: ReturnType<typeof probeFeatures> }} env
  * @returns {Runtime & { pages: import('./pages.js').PageTable }}
  */
-export function createCorkRuntime({ memory, layout, config = {}, read, imports, features }){
+export function createCorkRuntime({ memory, layout, config = {}, read, readBytes, imports,
+    features })
+{
     const settings = {
         maxRegionBlocks: 128, maxRegionBytes: 8192, batchRegions: 32,
         maxQueued: 8192, maxBatchRegions: 256,
@@ -462,6 +464,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         helpers: settings.runtimeHelpers !== false, leafBlocks: settings.leafBlocks,
         leafBytes: settings.leafBytes, switchEntries: settings.switchEntries,
         formDepth: settings.formDepth };
+    /** The same on this thread, with the host's copy of a span at once where it has one; a
+     * worker is sent `formOptions`, which a function cannot cross in. */
+    const formHere = readBytes === undefined ? formOptions
+        : { ...formOptions, bytesOf: readBytes };
     /** @type {Set<string>} instruction classes left to the other executor */
     const leaveOut = new Set(settings.leaveOut ?? []);
     if (layout.tables + tablesSize(layout) > memory.buffer.byteLength)
@@ -1806,7 +1812,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             held += count;
             const called = record.targets === undefined ? {}
                 : { callTargets: new Map(record.targets) };
-            jobs.push({ region: formRegion(read, record.entry, { ...formOptions, translatable,
+            jobs.push({ region: formRegion(read, record.entry, { ...formHere, translatable,
                 ...called }), entryTop: record.entryTop, checked: record.checked === true,
             copies: record.copies === true, ...precisionJob(record) });
         }
@@ -2866,7 +2872,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         for (const [record, { targets, added }] of wanted)
         {
             const region = formRegion(read, record.entry,
-                { ...formOptions, translatable, callTargets: targets });
+                { ...formHere, translatable, callTargets: targets });
             const starts = new Set(region.blocks.map(block=>block.start));
             let taken = false;
             for (const [site, callees] of added)
@@ -2936,7 +2942,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             }
             const called = record.targets === undefined ? {}
                 : { callTargets: new Map(record.targets) };
-            const region = formRegion(read, record.entry, { ...formOptions, translatable,
+            const region = formRegion(read, record.entry, { ...formHere, translatable,
                 ...called });
             formed.push({ region, entryTop: record.entryTop, stamp: stamp(region.pages),
                 cached: null, ...precisionFlags(region, record.entryTop), loose,
@@ -3537,7 +3543,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 inFlight.delete(key);
                 continue;
             }
-            const region = formRegion(read, eip, { ...formOptions, translatable, shared });
+            const region = formRegion(read, eip, { ...formHere, translatable, shared });
             // What the region calls directly lands in the same batch, so
             // the call and the return transfer without a miss -- each
             // callee at the top the call site has, which the tracker
@@ -4124,7 +4130,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 // With `checkStale`, the regions still published whose bytes no
                 // longer form as they did: translated code a write did not drop.
                 ...(settings.checkStale ? { staleRegions: [...regions]
-                    .filter(record=>formRegion(read, record.entry, { ...formOptions, translatable,
+                    .filter(record=>formRegion(read, record.entry, { ...formHere, translatable,
                         ...(record.targets === undefined
                             ? {} : { callTargets: new Map(record.targets) }) }).hash
                         !== record.hash)

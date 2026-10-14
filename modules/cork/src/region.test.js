@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync, readdirSync } from 'node:fs';
 import { emptyCode, formRegion, inlineReturns } from './region.js';
 
 /** A region over bytes placed at `base`. @param {number[]} bytes @param {number} [base] */
@@ -465,4 +466,28 @@ test('anything else is not marked', ()=>{
     {
         assert.equal(emptyOf(/** @type {[number, number[]][]} */ (pieces)), 0, name);
     }
+});
+
+test('a region\'s sources copied a span at once are the bytes read one at a time', ()=>{
+    // Every cork-bench image, a region at its start and at each block start of that one,
+    // formed with a copy of each span at once (`bytesOf`) and without: the same in every
+    // field, the sources among them.
+    const images = new URL('../../../tools/cork-bench/images/', import.meta.url);
+    let regions = 0;
+    for (const name of readdirSync(images).filter(file=>file.endsWith('.bin')))
+    {
+        const image = readFileSync(new URL(name, images));
+        const read = (/** @type {number} */ address)=>image[address - 0x401000] ?? 0;
+        /** @param {number} from @param {number} to */
+        const bytesOf = (from, to)=>Uint8Array.from({ length: to - from }, (_, at)=>
+            read(from + at));
+        const first = formRegion(read, 0x401000);
+        for (const entry of [0x401000, ...first.blocks.map(block=>block.start)])
+        {
+            assert.deepEqual(formRegion(read, entry, { bytesOf }), formRegion(read, entry),
+                `${name} at ${entry.toString(16)}`);
+            regions++;
+        }
+    }
+    assert.equal(regions, 160);
 });

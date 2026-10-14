@@ -513,7 +513,8 @@ export function formShared(){
  *     ownRoom?: { blocks: number, bytes: number }, switchEntries?: number,
  *     translatable?: (eip: number) => boolean, leafCalls?: boolean,
  *     callTargets?: Map<number, number[]>, shared?: FormShared,
- *     helpers?: boolean | readonly import('./helpers.js').RuntimeHelper[] }} [options]
+ *     helpers?: boolean | readonly import('./helpers.js').RuntimeHelper[],
+ *     bytesOf?: (start: number, end: number) => Uint8Array }} [options]
  *     leafCalls: a small leaf callee is formed into its caller (see `isLeaf`), of
  *     `leafBlocks` blocks and `leafBytes` bytes at most; formDepth: how many levels of
  *     callees formed in may have direct calls of their own, formed in in turn when small
@@ -533,7 +534,9 @@ export function formShared(){
  *     same way -- an interpreter's opcode handlers, the blocks its calls return to, which
  *     a call needs in the region to be a wasm call rather than two ways out;
  *     shared: what forming found, for other regions formed over the same bytes with the
- *     same `translatable` (`formShared`)
+ *     same `translatable` (`formShared`);
+ *     bytesOf: `[start, end)` of what `read` answers, copied at once -- the region's
+ *     `sources` are read so where given, a byte at a time through `read` otherwise
  * @returns {Region}
  */
 export function formRegion(read, entry,
@@ -541,7 +544,7 @@ export function formRegion(read, entry,
         callTargets, shared, helpers = true, leafBlocks = LEAF_BLOCKS, leafBytes = LEAF_BYTES,
         formDepth = 1, predictedRoom = PREDICTED_ROOM,
         ownRoom = { blocks: maxBlocks, bytes: maxBytes },
-        switchEntries = SWITCH_ENTRIES } = {})
+        switchEntries = SWITCH_ENTRIES, bytesOf } = {})
 {
     // Every page forming reads decides what it forms -- an import slot a call is predicted
     // through, a callee looked at for a leaf or a runtime helper -- so a worker forms the
@@ -975,18 +978,21 @@ export function formRegion(read, entry,
         formable: granted,
         tables,
         hash: hashRegion(read, { blocks: ordered, tables }),
-        sources: copiesOf(source, spans),
+        sources: copiesOf(source, spans, bytesOf),
         refused,
     };
 }
 
 /**
- * The bytes of `spans`, merged where they meet, as `read` answers now.
+ * The bytes of `spans`, merged where they meet, as `read` answers now: copied
+ * at once by `bytesOf` where the host has it -- a byte at a time, a call each,
+ * was a third of forming a region.
  *
  * @param {(address: number) => number} read @param {[number, number][]} spans
+ * @param {((start: number, end: number) => Uint8Array) | undefined} bytesOf
  * @returns {{ start: number, bytes: Uint8Array }[]}
  */
-function copiesOf(read, spans){
+function copiesOf(read, spans, bytesOf){
     const sorted = [...spans].sort((a, b)=>a[0] - b[0]);
     /** @type {[number, number][]} */
     const merged = [];
@@ -1002,8 +1008,8 @@ function copiesOf(read, spans){
             merged.push([start, end]);
         }
     }
-    return merged.map(([start, end])=>({ start,
-        bytes: Uint8Array.from({ length: end - start }, (_, at)=>read(start + at)) }));
+    return merged.map(([start, end])=>({ start, bytes: bytesOf?.(start, end)
+        ?? Uint8Array.from({ length: end - start }, (_, at)=>read(start + at)) }));
 }
 
 /**

@@ -453,6 +453,12 @@ export function createCorkHost(config){
         config: { ...(trapPort === undefined ? {} : { trapPort }), ...corkConfig,
             ...(sharedAt < 0 ? {} : { sharedCode: { at: sharedAt, index: executor } }) },
         read: (/** @type {number} */ address)=>ram[address],
+        // Past RAM's end `read` answers nothing, which a copy keeps as zeros.
+        readBytes: (/** @type {number} */ start, /** @type {number} */ end)=>{
+            const bytes = new Uint8Array(end - start);
+            bytes.set(ram.subarray(Math.min(start, ram.length), Math.min(end, ram.length)));
+            return bytes;
+        },
         imports: {
             trap: raiseTrap,
             getEflags: eflagsWord,

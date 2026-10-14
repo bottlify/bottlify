@@ -84,6 +84,9 @@
  * @property {StateLayout} layout
  * @property {EngineConfig} config
  * @property {(address: number) => number} read   One byte of guest memory.
+ * @property {(start: number, end: number) => Uint8Array} [readBytes]  The bytes `read`
+ *     answers for `[start, end)`, copied at once: what the engine keeps of a region's code
+ *     to find it rewritten, taken a byte at a time through `read` where this is absent.
  * @property {EngineImports} imports
  */
 
