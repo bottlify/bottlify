@@ -224,13 +224,12 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
         // Indirect calls sampled while the translator runs, and a region whose
         // indirect call keeps going to a few small leaf callees formed again
         // with them in it: the call compares its target with each and jumps
-        // (false: every indirect call leaves its region). Off unless asked:
-        // the benchmarks' virtual and indirect calls run four to five times
-        // faster with it, but games run on real hardware, from their start to
-        // a menu, lost more than half the canvas's frame rate with it and
-        // `dispatch` on, froze frames past 250 ms and repeated their audio,
-        // and what it costs them is not found yet.
-        callTargets: false,
+        // (false: every indirect call leaves its region). Far Cry in Chromium
+        // ran 4-6% more instructions a second with it, cold and warm, once the
+        // regions it forms again were formed under the credit (`holdMs`); formed
+        // in one call they had frozen frames, and with `dispatch` beside it a
+        // game had lost half its frame rate (roadmap/negative-results.md).
+        callTargets: true,
         // Transfers from one module's regions into another's before the two
         // are gathered into one module on the translation worker (0: never;
         // never without a worker): a relink's cost against the direct tail

@@ -725,3 +725,33 @@ None yet.
 - **Machine.** The invalidated runs: not recorded. The Far Cry runs: a 4-core x86-64 Linux VM,
   Intel Xeon @ 2.10 GHz; power plan not recorded.
 - **Decision.** The change stays.
+
+### 2026-10-14 -- indirect call prediction (`callTargets`) in Far Cry in Chromium, measured again
+
+- **Idea.** The two 2026-10-13 entries above left `callTargets` off: in Node, in the level, it ran
+  0.958 and 0.983 of the rate without it. Measured again in the browser the product runs in,
+  after its regions formed again were bounded by the engine thread's credit (`d96d7c1b`; formed in
+  one call they had held the thread for 33 ms).
+- **Workload.** The Far Cry demo bundle (`bundle.btl` sha256 `44530097b2a5a284…`) under
+  `tools/cdp_test/game.mjs farcry-demo --worker --coi --no-video --fake-gpu --run-seconds 240`, the
+  engine in a worker, the GPU a fake one that draws nothing. Tree `e5128a7c` with
+  `--cork-config '{"callTargets":true}'` against `'{}'`, alternated: cold on, cold off, warm on,
+  warm off, each arm on a browser profile of its own (its translation store). Guest instructions
+  over the whole run (about 259 s, the load included: the translator is quiet after 60 s cold and
+  30 s warm).
+- **Values.** Cold: on 68.27 G instructions in 259 s, 263.5 M/s; off 65.44 G, 253.1 M/s (on / off
+  1.041). Warm: on 68.97 G in 256 s, 269.9 M/s; off 64.67 G in 255 s, 253.7 M/s (1.064). The
+  same tree without it, run an hour before (`a24f5d9a`, same harness): 238.4 M/s cold, 244.8 warm.
+  One pair a phase; two runs off of one tree differ by up to 6%, so the noise floor is about the
+  size of the difference, and every run on was faster than every run off.
+- **The engine thread.** On, the translator's longest hold was 32.8 ms cold and 21.3 ms warm
+  (holds of 16 ms or more: 14 and 2), against 25.0 and 12.4 ms off (3 and 0), the regions formed
+  again in one call; bounded since (`d96d7c1b`), not measured again yet.
+- **Machine.** A 4-core x86-64 Linux VM, Intel Xeon @ 2.10 GHz, headless Chromium 141.0.7390.37
+  (V8 14.1). Power plan not recorded.
+- **Correctness.** Every run ran to the end of its window without the program stopping; whether
+  each reached the level was not checked. Cork's unit tests passed with the bound and with the
+  option on by default.
+- **Decision.** On by default. The earlier entries stand as measured in their conditions (Node, in
+  the level for 900 s, without the bound); the difference between them and this one is not
+  separated yet.

@@ -236,7 +236,7 @@
  * @property {boolean} [runtimeHelpers]  A call to a compiler's runtime helper (MSVC's `_ftol2`)
  *     formed as what it amounts to. Default true.
  * @property {boolean} [callTargets]  Indirect calls sampled and their few small callees formed
- *     in. Default false.
+ *     in. Default true.
  * @property {number} [predictAfter]  Samples of one call before its callees are looked at.
  *     Default 48.
  * @property {number} [predictShare]  A callee formed in takes one in this many of the call's
