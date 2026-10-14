@@ -335,11 +335,12 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
         // wanted: a batch goes on forming in the calls after, the store's
         // hits are compiled off the thread, they and a worker's answers are
         // published a share's worth a call, and a call that finds the share
-        // spent does nothing until it has come back (0: a batch formed and its hits published whole in
-        // the call that takes it). A program reaching code it had not run
-        // held the thread for batches formed whole, a tenth of a second at a
-        // time in the runs measured -- frames the guest did not run, its
-        // sound late -- where the translation is the one to wait.
+        // spent does nothing until it has come back (0: a batch formed and
+        // published whole in the call that takes it or answers it). A program
+        // reaching code it had not run held the thread for batches formed
+        // whole, a tenth of a second at a time in the runs measured -- frames
+        // the guest did not run, its sound late -- where the translation is
+        // the one to wait.
         holdMs: 4,
         holdShare: 0.5,
         // The bounded records the runtime keeps of where translated code left and
