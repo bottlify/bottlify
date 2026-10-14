@@ -47,6 +47,79 @@
  */
 export const STORE_VERSION = 3;
 
+/**
+ * Where the records are written off the thread the store answers on -- the
+ * engine's, inside a worker, where a write through the synchronous handle
+ * waits for the disk, and one held a game's frame for forty milliseconds. A
+ * record is for the runs after this one, so nothing waits for it: it is named
+ * in the index, and found, once the writer says it is on the file.
+ * @typedef {{ open: (file: any) => Promise<boolean>,
+ *     write: (writes: [number, Uint8Array][]) => Promise<void>,
+ *     flush: () => Promise<void>, close: () => void }} RecordsWriter
+ */
+
+/**
+ * A worker of the store's own that writes its records
+ * (`translation-store.writer.js`) through a handle of its own on the file,
+ * beside the store's: where a worker can be made, and the browser lets two
+ * handles stand together (`readwrite-unsafe`, which `open` answers false
+ * without). Null where no worker can be made (Node).
+ *
+ * @returns {RecordsWriter | null}
+ */
+export function openRecordsWriter(){
+    if (typeof globalThis.Worker !== 'function')
+    {
+        return null;
+    }
+    /** @type {Worker} */
+    let worker;
+    try
+    {
+        worker = new Worker(new URL('./translation-store.writer.js', import.meta.url),
+            { type: 'module' });
+    }
+    catch {
+        return null;
+    }
+    let next = 0;
+    /** @type {Map<number, (answer: { ok: boolean, message?: string }) => void>} */
+    const waiting = new Map();
+    worker.onmessage = ({ data })=>{
+        const settle = waiting.get(data?.id);
+        waiting.delete(data?.id);
+        settle?.(data);
+    };
+    worker.onerror = ()=>{
+        for (const settle of waiting.values())
+        {
+            settle({ ok: false, message: 'the records writer failed to load' });
+        }
+        waiting.clear();
+    };
+    /** @param {any} message @returns {Promise<{ ok: boolean, message?: string }>} */
+    const ask = message=>new Promise(resolve=>{
+        const id = ++next;
+        waiting.set(id, resolve);
+        worker.postMessage({ ...message, id });
+    });
+    /** @param {{ ok: boolean, message?: string }} answer */
+    const done = answer=>{
+        if (!answer.ok)
+        {
+            throw new Error(answer.message ?? 'the records writer failed');
+        }
+    };
+    return {
+        open: async file=>(await ask({ type: 'open', file })).ok,
+        write: async writes=>done(await ask({ type: 'write', writes })),
+        flush: async()=>done(await ask({ type: 'flush' })),
+        close: ()=>{
+            ask({ type: 'close' }).then(()=>worker.terminate());
+        },
+    };
+}
+
 /** How long the records' writes may hold the thread before letting it go, in ms. */
 const WRITE_SLICE_MS = 4;
 /** The most of one record written at a time, so a record of megabytes -- a relinked
@@ -288,9 +361,13 @@ async function appendAt(handle, at, bytes){
  * @param {{ keepSessions: number, compactFloor: number, cap: number,
  *     indexFloor?: number }} [limits]
  *     the ages and sizes it is kept to (tests shrink them)
+ * @param {{ writer?: () => RecordsWriter | null }} [options]  what writes the records
+ *     where the store has a synchronous handle (`openRecordsWriter`; tests give their own)
  * @returns {Promise<SeedableStore>}
  */
-export async function createDirectoryTranslationStore(root, name, limits = LIMITS){
+export async function createDirectoryTranslationStore(root, name, limits = LIMITS,
+    { writer: openWriter = openRecordsWriter } = {})
+{
     const safe = name.replace(/[^A-Za-z0-9._-]/g, '_') || 'bundle';
     const cork = await root.getDirectoryHandle('cork', { create: true });
     const directory = await cork.getDirectoryHandle(`${safe}.v${STORE_VERSION}`, { create: true });
@@ -311,6 +388,10 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
     let records = null;
     /** @type {any} */
     let access = null;
+    /** What writes the records beside `access`, once one is made; null for the store itself. */
+    /** @type {RecordsWriter | null} */
+    let writer = null;
+    let writerTried = false;
     /** Where the next record goes: the records file's size. */
     let end = 0;
     /** @type {Promise<void> | null} */
@@ -342,8 +423,21 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
         {
             try
             {
-                access = await records.createSyncAccessHandle();
+                if (!writerTried)
+                {
+                    writerTried = true;
+                    writer = openWriter();
+                }
+                access = await records.createSyncAccessHandle(writer === null ? undefined
+                    : { mode: 'readwrite-unsafe' });
                 end = access.getSize();
+                // A writer that cannot stand beside this handle leaves the
+                // writes to the store, as before there was one.
+                if (writer !== null && !await writer.open(records))
+                {
+                    writer.close();
+                    writer = null;
+                }
             }
             catch {
                 access = null;
@@ -352,6 +446,18 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
         if (access === null)
         {
             end = (await records.getFile()).size;
+        }
+    };
+
+    /** The records on the disk: the writer's flush, or the handle's. */
+    const flushRecords = async()=>{
+        if (writer !== null)
+        {
+            await writer.flush();
+        }
+        else
+        {
+            access?.flush();
         }
     };
 
@@ -546,7 +652,7 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
             {
                 dirty = false;
                 await Promise.resolve();
-                access?.flush();
+                await flushRecords();
                 const bytes = new TextEncoder().encode(pendingLines.join(''));
                 pendingLines = [];
                 const at = indexEnd;
@@ -579,6 +685,11 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
      * @param {[number, Uint8Array][]} writes  offset and bytes
      */
     const appendRecords = async writes=>{
+        if (access !== null && writer !== null)
+        {
+            await writer.write(writes);
+            return;
+        }
         if (access !== null)
         {
             // A few milliseconds at a time, the thread let go between: the
@@ -734,7 +845,7 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
             {
                 await publishing;
             }
-            access?.flush();
+            await flushRecords();
         },
         /**
          * Takes in a seed's records this store does not hold: appended, named
@@ -818,7 +929,7 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
         async exportSeed({ select } = {}){
             await ready();
             await appending;
-            access?.flush();
+            await flushRecords();
             const whole = access === null
                 ? new Uint8Array(await (await records.getFile()).arrayBuffer()) : null;
             /** @type {[string, Uint8Array][]} */
@@ -842,6 +953,8 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
         close(){
             access?.close();
             access = null;
+            writer?.close();
+            writer = null;
         },
     };
 }
