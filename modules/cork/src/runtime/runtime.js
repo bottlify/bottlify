@@ -3078,8 +3078,14 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
      */
     const copiesStep = store=>{
         const formed = [];
+        // As a batch's forming is (`holdMs`): those not reached wait for the next step.
+        const until = holding() ? performance.now() + creditNow() : Infinity;
         for (const record of copiesWanted)
         {
+            if (formed.length > 0 && performance.now() >= until)
+            {
+                break;
+            }
             copiesWanted.delete(record);
             if (!regions.has(record) || record.copies === true)
             {

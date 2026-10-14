@@ -273,3 +273,49 @@ test('a batch formed whole while the only translator is replaced waits for the o
             await m.runtime.flush();
         }
     });
+
+test('regions formed again with copies of their loops are formed a share at a call', async()=>{
+    const m = machine({ worker: true, translators: 1, ...ONE_A_CALL });
+    // mov ecx, 1000; L: call F; dec ecx; jnz L; hlt; F: inc edx; ret -- F is a block
+    // of the loop, which the region is formed with no entry into.
+    const loop = [0xb9, 0xe8, 0x03, 0, 0, 0xe8, 0x04, 0, 0, 0, 0x49, 0x75, 0xf8, 0xf4, 0x42, 0xc3];
+    const starts = [0x2000, 0x3000];
+    try
+    {
+        await untilTranslatorsLoaded(m, 1);
+        for (const at of starts)
+        {
+            m.write(at, loop);
+            m.runtime.noteHot(at, 0, 64);
+        }
+        await translateUntil(m, ()=>starts.every(at=>m.runtime.entryOf(at) >= 0));
+        assert.deepEqual(starts.map(at=>m.runtime.entryOf(at + 14)), [-1, -1]);
+        for (const at of starts)
+        {
+            for (let i = 0; i < 64; i++)
+            {
+                m.runtime.missAt?.(at + 14);
+            }
+        }
+        const copied = ()=>/** @type {any} */ (m.runtime.diagnostics()).copied;
+        for (let i = 0; i < 200 && copied() === 0; i++)
+        {
+            await turn();
+            await m.runtime.translatePending();
+        }
+        assert.equal(copied(), 1, 'one formed again in the call that found the share spent');
+        await translateUntil(m, ()=>starts.every(at=>m.runtime.entryOf(at + 14) >= 0));
+        assert.equal(copied(), 2, 'and the other in a call after');
+        for (const at of starts)
+        {
+            m.setReg(4, 0x80000);
+            m.setReg(2, 0);
+            assert.equal(m.runtime.run(m.runtime.entryOf(at), 1_000_000).kind, 'halt');
+            assert.equal(m.reg(2), 1000);
+        }
+    }
+    finally
+    {
+        await m.runtime.flush();
+    }
+});
