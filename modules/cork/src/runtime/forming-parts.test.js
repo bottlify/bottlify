@@ -15,6 +15,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { memoryTranslationStore } from './cache.js';
+import { features as probeFeatures } from '../wasm/features.js';
 import { machine, observe, piece, translateUntil, untilTranslatorsLoaded }
     from '../testing/seeded-pieces.js';
 
@@ -448,6 +449,73 @@ test('a batch\'s store hits start compiling their modules a share at a call', as
     finally
     {
         WebAssembly.compile = compile;
+        await m.runtime.flush();
+    }
+});
+
+/**
+ * At `at`: mov ecx, n; L: mov eax, ecx; and eax, 1; call [TABLE + eax*4]; dec ecx; jnz L; hlt;
+ * F: add edx, 1; ret; G: add edx, 3; ret -- an indirect call going to F and G in turn.
+ * @param {number} at
+ */
+const callingLoop = at=>{
+    const table = at + 0x100;
+    const [f, g] = [at + 21, at + 25];
+    const code = [0xb9, 0x40, 0x06, 0, 0, 0x89, 0xc8, 0x83, 0xe0, 0x01,
+        0xff, 0x14, 0x85, table & 0xff, table >>> 8 & 0xff, table >>> 16 & 0xff, 0,
+        0x49, 0x75, 0xf1, 0xf4, 0x83, 0xc2, 0x01, 0xc3, 0x83, 0xc2, 0x03, 0xc3];
+    const slots = [f, g].flatMap(slot=>[slot & 0xff, slot >>> 8 & 0xff, slot >>> 16 & 0xff, 0]);
+    return { code, table, slots, f, g };
+};
+
+test('regions formed again with their calls\' callees are formed a share at a call', async()=>{
+    if (!probeFeatures().tailCalls)
+    {
+        return; // no transfers, no calls sampled
+    }
+    // A call is due at its first sample, so both are due in one reading.
+    const m = machine({ worker: true, translators: 1, callTargets: true, callReturn: false,
+        predictAfter: 1, ...ONE_A_CALL });
+    const starts = [0x2000, 0x3000];
+    const reforms = ()=>/** @type {any} */ (m.runtime.diagnostics()).reforms;
+    /** The loop at `at`, 1600 calls: F and G 800 times each. @param {number} at */
+    const run = at=>{
+        m.setReg(1, 0);
+        m.setReg(2, 0);
+        m.setReg(4, 0x80000);
+        assert.equal(m.runtime.run(m.runtime.entryOf(at), 1_000_000).kind, 'halt');
+        assert.equal(m.reg(2), 800 + 800 * 3);
+    };
+    try
+    {
+        await untilTranslatorsLoaded(m, 1);
+        for (const at of starts)
+        {
+            const { code, table, slots, f, g } = callingLoop(at);
+            m.write(at, code);
+            m.write(table, slots);
+            for (const hot of [f, g, at])
+            {
+                m.runtime.noteHot(hot, 0, 64);
+            }
+        }
+        await translateUntil(m, ()=>starts.every(at=>m.runtime.entryOf(at) >= 0));
+        assert.equal(reforms(), 0);
+        let most = 0;
+        for (let i = 0; i < 400 && reforms() < starts.length; i++)
+        {
+            starts.forEach(run);
+            const before = reforms();
+            await m.runtime.translatePending();
+            most = Math.max(most, reforms() - before);
+            await turn();
+        }
+        assert.equal(reforms(), starts.length, 'both regions formed again');
+        assert.equal(most, 1, 'one a call');
+        starts.forEach(run);
+    }
+    finally
+    {
         await m.runtime.flush();
     }
 });

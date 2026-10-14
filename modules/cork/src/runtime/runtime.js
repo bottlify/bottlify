@@ -2928,6 +2928,15 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
     };
 
     /**
+     * Each region `reformStep` is to form again: its calls' callees, and by call
+     * the ones new to it -- kept from one step to the next while forming them
+     * all in one would hold the thread past `holdMs`.
+     * @type {Map<RegionRecord, { targets: Map<number, number[]>,
+     *     added: Map<number, number[]> }>}
+     */
+    const reformsWanted = new Map();
+
+    /**
      * The indirect calls sampled `PREDICT_AFTER` times whose callees are not
      * yet in the regions holding them: each such region formed again with the
      * callees that took a share of its calls' samples (`callTargets`), all in
@@ -2944,10 +2953,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
      * @returns {boolean} whether a batch was taken this call
      */
     const reformStep = store=>{
-        /** Each region to form again: its calls' callees, and by call the ones new to it.
-         * @type {Map<RegionRecord, { targets: Map<number, number[]>,
-         *     added: Map<number, number[]> }>} */
-        const wanted = new Map();
+        const wanted = reformsWanted;
         for (const site of callsDue)
         {
             if (wanted.size >= settings.batchRegions)
@@ -3039,8 +3045,22 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
             }
         }
         const formed = [];
+        // As a batch's forming is (`holdMs`): those not reached are formed at the next step.
+        // Formed in one call, a batch of them held the thread for thirty milliseconds.
+        const until = holding() ? performance.now() + creditNow() : Infinity;
+        let tried = 0;
         for (const [record, { targets, added }] of wanted)
         {
+            if (tried > 0 && performance.now() >= until)
+            {
+                break;
+            }
+            tried++;
+            wanted.delete(record);
+            if (!regions.has(record))
+            {
+                continue;
+            }
             const region = formRegion(read, record.entry,
                 { ...formHere, translatable, callTargets: targets });
             const starts = new Set(region.blocks.map(block=>block.start));
