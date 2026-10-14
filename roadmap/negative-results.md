@@ -709,3 +709,19 @@ None yet.
 - **Machine.** A 4-core x86-64 Linux VM (Firecracker), Intel Xeon @ 2.80 GHz. Power plan not
   recorded. Not measured on arm64, where the transfer of a float's bits costs otherwise.
 - **Decision.** The committed encoding stays: no variant is faster on either engine.
+
+### 2026-10-14 -- invalidated: the "before" of "cork: the store's hits compiled off the engine thread and published a few at a call" (3cc3e7c4)
+
+- **Reason.** The commit message's "before" arm (the store-hit run of lua-x87 in headless
+  Chrome 141, 3 runs: synchronous compiles 6-7 of 10.5-19.6 ms, `instantiateMs` 13-23, the
+  longest `translatePending` calls 6.4-10.3 ms, the longest guest slices 56-60 ms, the three
+  iterations 1641-1784 ms) was measured on an intermediate build of the change, which already
+  compiled a hit off the thread once the translation worker had loaded, not on its parent
+  (`a0ac139c`). Those values are not the parent's and are not cited again; the "after" arm was
+  measured on the commit itself.
+- **Measured again.** Not on lua-x87. The Far Cry demo runs of 2026-10-14 (`--fake-gpu`, the
+  engine in a worker, headless Chrome 141, 240 s windows of the engine worker's CPU profile)
+  compare the tree before the whole series (`92f18dcd`) with the later commits instead.
+- **Machine.** A 4-core x86-64 Linux VM (Firecracker), Intel Xeon @ 2.80 GHz. Power plan not
+  recorded.
+- **Decision.** The change stays.
