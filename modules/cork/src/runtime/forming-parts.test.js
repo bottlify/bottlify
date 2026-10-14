@@ -190,9 +190,12 @@ function heldTranslator(){
     const held = [];
     /** @type {((data: any) => void) | null} */
     let answer = null;
+    /** @type {((reason: string) => void) | null} */
+    let lost = null;
     return {
         held,
         ready: ()=>answer?.({ ready: true }),
+        lose: ()=>lost?.('gone'),
         adapter: {
             post: (/** @type {any} */ message)=>{
                 if (message?.ready !== true)
@@ -203,7 +206,9 @@ function heldTranslator(){
             onMessage: (/** @type {(data: any) => void} */ handler)=>{
                 answer = handler;
             },
-            onLost: ()=>{},
+            onLost: (/** @type {(reason: string) => void} */ handler)=>{
+                lost = handler;
+            },
             terminate: ()=>{},
         },
     };
@@ -310,7 +315,7 @@ test('a batch formed whole while the only translator is replaced waits for the o
         }
     });
 
-test('a batch emitted here while the translator loads is one region', async()=>{
+test('nothing is emitted here while the translator loads: the batch waits for it', async()=>{
     const config = { worker: true, translators: 0, batchRegions: 4, maxBatchRegions: 4,
         loadingShare: 1 };
     const starts = [0x2000, 0x3000, 0x4000];
@@ -334,22 +339,57 @@ test('a batch emitted here while the translator loads is one region', async()=>{
         lend(whole);
         await turn();
         await whole.runtime.translatePending();
-        assert.equal(translated(whole), starts.length, 'unbounded, one batch emits all three');
+        assert.equal(translated(whole), starts.length, 'unbounded, one batch emitted here');
         const loading = lend(held);
-        for (let i = 0; i < 200 && translated(held) < starts.length; i++)
+        for (let i = 0; i < 40; i++)
         {
-            const before = translated(held);
             await turn();
             await held.runtime.translatePending();
-            assert.ok(translated(held) - before <= 1, 'a region a call');
         }
-        assert.equal(translated(held), starts.length, 'each emitted here in a call of its own');
-        assert.equal(loading.held.length, 0, 'nothing waited for the translator loading');
+        assert.equal(translated(held), 0, 'nothing emitted here');
+        assert.ok(/** @type {any} */ (held.runtime.diagnostics()).formedWaiting > 0,
+            'formed, and waiting');
+        loading.ready();
+        for (let i = 0; i < 200 && loading.held.length === 0; i++)
+        {
+            await turn();
+        }
+        assert.equal(loading.held.length, 1, 'the translator loaded takes the batch');
+        assert.equal(loading.held[0].relink.jobs.length, starts.length);
     }
     finally
     {
         await whole.runtime.flush();
         await held.runtime.flush();
+    }
+});
+
+test('with no translator left, a batch emitted here is one region', async()=>{
+    const m = machine({ worker: true, translators: 0, batchRegions: 4, maxBatchRegions: 4 });
+    const starts = [0x2000, 0x3000, 0x4000];
+    const translated = ()=>starts.filter(at=>m.runtime.entryOf(at) >= 0).length;
+    try
+    {
+        const gone = heldTranslator();
+        m.runtime.attachTranslator?.(gone.adapter);
+        gone.lose();
+        starts.forEach((at, i)=>m.write(at, piece(i, 100, 3).code));
+        for (const at of starts)
+        {
+            m.runtime.noteHot(at, 0, 2);
+        }
+        for (let i = 0; i < 200 && translated() < starts.length; i++)
+        {
+            const before = translated();
+            await turn();
+            await m.runtime.translatePending();
+            assert.ok(translated() - before <= 1, 'a region a call');
+        }
+        assert.equal(translated(), starts.length, 'each emitted here in a call of its own');
+    }
+    finally
+    {
+        await m.runtime.flush();
     }
 });
 

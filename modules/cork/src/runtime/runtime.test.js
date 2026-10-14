@@ -1736,25 +1736,27 @@ test('a candidate that got an entry while it waited is not formed again', async(
     assert.equal(m.runtime.diagnostics().regions, 1, 'the loop head not a region of its own');
 });
 
-test('a batch asked for while the worker is still loading is emitted inline, not held for it',
-    async()=>{
-        const m = machine({ worker: true });
-        m.write(CODE, COUNTDOWN);
-        m.setReg(4, 0x80000);
-        try
-        {
-            // The worker is made, and is loading its modules.
-            await new Promise(resolve=>setImmediate(resolve));
-            await new Promise(resolve=>setImmediate(resolve));
-            m.runtime.noteHot(CODE, 0, 2);
-            await m.runtime.translatePending();
-            assert.ok(m.runtime.entryOf(CODE) >= 0, 'published at once');
-        }
-        finally
-        {
-            await m.runtime.flush();
-        }
-    });
+// Where the work here is bounded (`holdMs`), the batch waits for the worker instead
+// (forming-parts.test.js).
+test('a batch asked for while the worker is still loading is emitted inline, not held for it,'
+    + ' where the work here is unbounded', async()=>{
+    const m = machine({ worker: true, holdMs: 0 });
+    m.write(CODE, COUNTDOWN);
+    m.setReg(4, 0x80000);
+    try
+    {
+        // The worker is made, and is loading its modules.
+        await new Promise(resolve=>setImmediate(resolve));
+        await new Promise(resolve=>setImmediate(resolve));
+        m.runtime.noteHot(CODE, 0, 2);
+        await m.runtime.translatePending();
+        assert.ok(m.runtime.entryOf(CODE) >= 0, 'published at once');
+    }
+    finally
+    {
+        await m.runtime.flush();
+    }
+});
 
 test('a worker that cannot load is dropped and the batches are emitted inline', async()=>{
     // A worker file that throws as it loads: the worker is made, and fails after.

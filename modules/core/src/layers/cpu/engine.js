@@ -273,7 +273,8 @@
  * @property {number} [arenaBytes]  Bytes of the shared translation arena (0: none). Default
  *     48 MiB.
  * @property {number} [loadingBatch]  While the translation worker loads, the largest batch
- *     emitted on the engine thread; one region where `holdMs` bounds the work there. Default 16.
+ *     emitted on the engine thread -- none where `holdMs` bounds the work there: a batch waits
+ *     for the worker. Default 16.
  * @property {number} [loadingShare]  And the share of the time since the worker was made
  *     emitting there may take. Default 0.25.
  * @property {number} [holdMs]  Where a translation worker is wanted, the engine thread's

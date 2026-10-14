@@ -326,9 +326,9 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
         // it (a batch that never comes back is freed after a time).
         timings: false,
         // While the translation worker loads: the largest batch emitted on the
-        // engine thread (one region where the work there is bounded, `holdMs`),
-        // and the share of the time since the worker was made that emitting
-        // there may take.
+        // engine thread, and the share of the time since the worker was made
+        // that emitting there may take -- where the work there is bounded
+        // (`holdMs`), none: a batch waits for the worker.
         loadingBatch: 16,
         loadingShare: 0.25,
         // The engine thread's time the translator's work may take at a
@@ -1761,8 +1761,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
      * already translated by one (a loop's head and its cases were all hot at
      * once, and each formed the whole loop again). It is noted again should
      * its block get no entry after all. `forTranslator`: a translator was free
-     * when it was taken, so it goes to one -- emitted here only should none be
-     * left at all.
+     * when it was taken, or one was loading where the work here is bounded,
+     * so it goes to one -- emitted here only should none be left at all.
      * `lookup`: the store's answers so far (`lookUpOn`), null once the store
      * cannot answer at once.
      * @typedef {{ records: (Uint8Array | null | undefined)[] | null,
@@ -3934,17 +3934,21 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
         // batch, a quarter of what waits up to `maxBatchRegions`, so the
         // round trip through the worker and the store is paid per hundreds
         // of regions rather than per thirty-two.
-        // While the worker loads, a batch emitted here is kept small; where the
-        // work here is bounded (`holding`), it is one region, as no translator
-        // ready emits it in the call that finishes it: sixteen held the thread
-        // for fifty milliseconds while a process's first translator loaded.
+        // While the worker loads, a batch emitted here is kept small. Where the
+        // work here is bounded (`holding`), nothing is emitted here while a
+        // translator loads -- the batch waits for it, a region of a shader
+        // compiler's emitted alone held the thread for twenty-five
+        // milliseconds -- and with none to come a batch emitted here is one
+        // region, emitted in the call that finishes it.
         const inline = !translatorReady();
-        const ceiling = inline && holding() ? 1
-            : inline && translatorLoading() ? settings.loadingBatch : settings.maxBatchRegions;
+        const loading = translatorLoading();
+        const ceiling = inline && holding() && !loading ? 1
+            : inline && loading && !holding() ? settings.loadingBatch : settings.maxBatchRegions;
         const wanted = Math.min(ceiling,
             Math.max(settings.batchRegions, queue.size >> 2));
         forming = { batch: hottest(wanted), next: 0, formed: [], covered: new Set(), ceiling,
-            takenAt: performance.now(), forTranslator: freeTranslator() !== null };
+            takenAt: performance.now(),
+            forTranslator: freeTranslator() !== null || holding() && loading };
         return formOn();
     };
 
@@ -4090,13 +4094,14 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
             }
         }
         if (step.forTranslator && freeTranslator() === null
-            && translators.some(one=>!one.leaving))
+            && (translators.some(one=>!one.leaving) || awaitingLend))
         {
             // Whole, it waits for a translator: one was free when it was taken,
-            // and while it formed a pool took that one back as idle, or the
-            // run's pool had its workers between processes -- emitted here
-            // instead, a batch of hundreds of regions held the thread for a
-            // third of a second. An answer, or a translator ready, calls back.
+            // or loading, and while it formed a pool took that one back as
+            // idle, or the run's pool had its workers between processes --
+            // emitted here instead, a batch of hundreds of regions held the
+            // thread for a third of a second. An answer, or a translator
+            // ready, calls back.
             for (const one of formed)
             {
                 one.waited = true;
@@ -4451,7 +4456,9 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
         /** @type {() => Promise<number>} */
         async translatePending(){
             liftVolatile();
-            if (!translatorLoading() || translatorReady())
+            // Bounded (`holding`), nothing is emitted here while a translator
+            // loads: the share below is for emitting.
+            if (!translatorLoading() || translatorReady() || holding())
             {
                 return translateNow();
             }
