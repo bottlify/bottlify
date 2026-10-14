@@ -959,7 +959,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
         readSwitches: 0,
         stackCode: 0,
         // Batches the store answered in the call that formed them, and a turn later.
-        lookedUpNow: 0, lookedUpLater: 0,
+        lookedUpNow: 0, lookedUpLater: 0, lookedUpInPart: 0,
         // Calls that formed part of a batch and left the rest to a later one
         // (`holdMs`), that published part of a batch's store hits, and asks
         // the spent credit put off; the hits' modules compiled off this thread.
@@ -1763,9 +1763,15 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
      * its block get no entry after all. `forTranslator`: a translator was free
      * when it was taken, so it goes to one -- emitted here only should none be
      * left at all.
-     * @type {{ batch: [number, number][], next: number, formed: any[],
+     * `lookup`: the store's answers so far (`lookUpOn`), null once the store
+     * cannot answer at once.
+     * @typedef {{ records: (Uint8Array | null | undefined)[] | null,
+     *     cached: (import('./cache.js').CachedRegion | null)[], wanted: string[] | null,
+     *     modules: Map<string, Uint8Array | null>, done: boolean }} Lookup
+     * @typedef {{ batch: [number, number][], next: number, formed: any[],
      *     covered: Set<number>, ceiling: number, takenAt: number,
-     *     forTranslator: boolean } | null}
+     *     forTranslator: boolean, lookup?: Lookup | null }} Forming
+     * @type {Forming | null}
      */
     let forming = null;
     /**
@@ -3387,64 +3393,97 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
      * A batch's lookups answered at once, where the store can answer without
      * a turn of the event loop (`getNow`: a directory store in a worker reads
      * its records file through a synchronous handle). The batch is then
-     * published in the call that formed it, as without a store, where a turn
+     * published as soon as it is answered, as without a store, where a turn
      * later -- with no batch formed meanwhile -- a first run went on
      * interpreted, formed other regions and emitted more than the store
-     * saved. False, with nothing taken, when a lookup cannot be answered so.
+     * saved. Answered a credit's worth a call, the guest running between, a
+     * record or a module at a time: a batch's hundreds of records read and
+     * unpacked at once held the thread for ten milliseconds. Each region is
+     * settled once all are answered. 'later', with nothing settled, when a
+     * lookup cannot be answered so.
      *
-     * @param {any[]} formed @param {any} store
+     * @param {Forming} step @param {any} store
+     * @param {number} until  when the call's share is spent
+     * @param {boolean} any  whether the call has done work already, so it may stop at once
+     * @returns {'done' | 'part' | 'later'}
      */
-    const lookUpNow = (formed, store)=>{
+    const lookUpOn = (step, store, until, any)=>{
         if (typeof store.getNow !== 'function')
         {
-            return false;
+            return 'later';
         }
-        // A store across a link answers a batch's names at once, one wait for
-        // all of them; any other is asked a name at a time.
-        /** @type {(keys: string[]) => (Uint8Array | null | undefined)[] | undefined} */
-        const many = typeof store.getManyNow === 'function'
-            ? keys=>(keys.length === 0 ? [] : store.getManyNow(keys))
-            : keys=>keys.map(key=>store.getNow(key));
-        /** A batch module's bytes are read once for every record naming it.
-         * @type {Map<string, Uint8Array | null>} */
-        const modules = new Map();
-        /** @type {[import('./cache.js').CachedRegion | null, Uint8Array | null | undefined][]} */
-        const answers = [];
+        const { formed } = step;
+        /** @type {Lookup} */
+        const lookup = step.lookup ?? { records: null, cached: [], wanted: null,
+            modules: new Map(), done: false };
+        step.lookup = lookup;
+        if (lookup.done)
+        {
+            return 'done';
+        }
+        // A store across a link answers the batch's names in one wait; any
+        // other is asked a name at a time.
+        const linked = typeof store.getManyNow === 'function';
+        /** @type {(key: string) => Uint8Array | null | undefined} */
+        const one = linked ? key=>store.getManyNow([key])?.[0] : key=>store.getNow(key);
         try
         {
-            const records = many(formed.map(one=>regionKey(one)));
-            if (!records || records.some(bytes=>bytes === undefined))
+            if (linked && lookup.records === null)
             {
-                return false;
+                lookup.records = formed.length === 0 ? []
+                    : store.getManyNow(formed.map(region=>regionKey(region))) ?? null;
+                if (lookup.records === null || lookup.records.some(bytes=>bytes === undefined))
+                {
+                    return 'later';
+                }
             }
-            const cached = records.map(bytes=>(bytes === null || bytes === undefined
-                ? null : unpackRegion(bytes, cacheVersion)));
-            /** @type {string[]} */
-            const wanted = [...new Set(cached.map(one=>one?.moduleKey)
+            while (lookup.cached.length < formed.length)
+            {
+                if (any && performance.now() >= until)
+                {
+                    return 'part';
+                }
+                any = true;
+                const at = lookup.cached.length;
+                const bytes = lookup.records?.[at] ?? one(regionKey(formed[at]));
+                if (bytes === undefined)
+                {
+                    return 'later';
+                }
+                lookup.cached.push(bytes === null ? null : unpackRegion(bytes, cacheVersion));
+            }
+            /** A batch module's bytes are read once for every record naming it. */
+            lookup.wanted ??= [...new Set(lookup.cached.map(cached=>cached?.moduleKey)
                 .filter(/** @returns {key is string} */ key=>key !== undefined
                     && !batchInstances.has(key)))];
-            const stored = many(wanted);
-            if (!stored || stored.some(bytes=>bytes === undefined))
+            while (lookup.modules.size < lookup.wanted.length)
             {
-                return false;
-            }
-            wanted.forEach((key, i)=>{
-                const bytes = stored[i];
-                modules.set(key, bytes === null || bytes === undefined
+                if (any && performance.now() >= until)
+                {
+                    return 'part';
+                }
+                any = true;
+                const key = lookup.wanted[lookup.modules.size];
+                const bytes = one(key);
+                if (bytes === undefined)
+                {
+                    return 'later';
+                }
+                lookup.modules.set(key, bytes === null
                     ? null : unpackRegion(bytes, cacheVersion)?.module ?? null);
-            });
-            for (const one of cached)
-            {
-                const batchKey = one?.moduleKey;
-                answers.push([one, batchKey !== undefined && !batchInstances.has(batchKey)
-                    ? modules.get(batchKey) : undefined]);
             }
         }
         catch {
-            return false;
+            return 'later';
         }
-        formed.forEach((one, i)=>settle(one, ...answers[i]));
-        return true;
+        formed.forEach((region, at)=>{
+            const cached = lookup.cached[at];
+            const batchKey = cached?.moduleKey;
+            settle(region, cached, batchKey !== undefined && !batchInstances.has(batchKey)
+                ? lookup.modules.get(batchKey) ?? null : undefined);
+        });
+        lookup.done = true;
+        return 'done';
     };
 
     /**
@@ -4022,6 +4061,34 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
             resumeWanted = true;
             return 0;
         }
+        // A diagnostic run with classes left out, or with an undo log the
+        // stored modules were built without, keeps no translations.
+        const store = leaveOut.size > 0 || settings.undoLog || profiling
+            ? null : (settings.store ?? null);
+        /** @type {'done' | 'part' | 'later' | null} */
+        let looked = null;
+        if (store !== null && step.lookup !== null)
+        {
+            const lookupAt = clock();
+            looked = lookUpOn(step, store, until, step.next > first);
+            counts.lookupMs += clock() - lookupAt;
+            if (looked === 'part')
+            {
+                // The guest runs before the rest is answered: what is formed
+                // is read again when it is published.
+                for (const one of formed)
+                {
+                    one.waited = true;
+                }
+                counts.lookedUpInPart++;
+                resumeWanted = true;
+                return 0;
+            }
+            if (looked === 'later')
+            {
+                step.lookup = null;
+            }
+        }
         if (step.forTranslator && freeTranslator() === null
             && translators.some(one=>!one.leaving))
         {
@@ -4055,19 +4122,14 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
                 formed.splice(at, 1);
             }
         }
-        // A diagnostic run with classes left out, or with an undo log the
-        // stored modules were built without, keeps no translations.
-        const store = leaveOut.size > 0 || settings.undoLog || profiling
-            ? null : (settings.store ?? null);
         if (store === null)
         {
             return finishBatch(formed, null);
         }
         const lookupAt = clock();
-        if (lookUpNow(formed, store))
+        if (looked === 'done')
         {
             counts.lookedUpNow++;
-            counts.lookupMs += clock() - lookupAt;
             const published = finishBatch(formed, store);
             // A batch the store answered whole has no answer to come back
             // with, which is what sends the next one for the asks still owed:
@@ -4561,6 +4623,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
                 missNoModule: counts.missNoModule,
                 lookedUpNow: counts.lookedUpNow,
                 lookedUpLater: counts.lookedUpLater,
+                lookedUpInPart: counts.lookedUpInPart,
                 formedInPart: counts.formedInPart,
                 publishedInPart: counts.publishedInPart,
                 heldBack: counts.heldBack,

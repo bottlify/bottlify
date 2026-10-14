@@ -56,6 +56,42 @@ for (const seed of [31, 32, 33])
     });
 }
 
+/**
+ * A store that answers at once, as a directory store in a worker does through its synchronous
+ * handle (`getNow`).
+ * @returns {import('../../../core/src/layers/cpu/engine.js').TranslationStore}
+ */
+function storeNow(){
+    /** @type {Map<string, Uint8Array>} */
+    const records = new Map();
+    return {
+        get: async key=>records.get(key) ?? null,
+        getNow: key=>records.get(key) ?? null,
+        put: async(key, bytes)=>{
+            records.set(key, bytes);
+        },
+    };
+}
+
+for (const seed of [34, 35, 36])
+{
+    test(`a batch's lookups answered a record a call run as answered at once (seed ${seed})`,
+        async()=>{
+            const config = { worker: true, translators: 1, batchRegions: 4, maxBatchRegions: 4,
+                bundleId: 'test' };
+            const store = storeNow();
+            const filled = await observe(seed, { ...config, store, holdMs: 0 });
+            const whole = await observe(seed, { ...config, store, holdMs: 0 });
+            const parts = await observe(seed, { ...config, store, ...ONE_A_CALL });
+            assert.ok(!filled.runs.includes('untranslated'), 'every start translated');
+            assert.equal(whole.lookedUpInPart, 0);
+            assert.ok(whole.cacheHits > 0 && parts.cacheHits > 0, 'the store answered both');
+            assert.ok(parts.lookedUpInPart > 0, 'answers read over several calls');
+            assert.deepEqual(whole.runs, filled.runs);
+            assert.deepEqual(parts.runs, filled.runs);
+        });
+}
+
 for (const seed of [41, 42])
 {
     test(`regions a relink moves a region a call run as moved at once (seed ${seed})`,

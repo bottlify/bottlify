@@ -106,10 +106,11 @@ export function random(seed){
  *     outside (a host's pool), and how many: awaited before anything is noted
  * @returns {Promise<{ runs: string[], workerMs: number, formedInPart: number,
  *     publishedInPart: number, cacheHits: number, compiledApart: number,
- *     relinked: number }>} each start's exit kind, retired count and registers, or
- *     'untranslated'; the milliseconds translators emitted for it; the calls that formed or
- *     published part of a batch (`holdMs`); the store's hits, and their modules compiled off
- *     the thread; and the regions relinks moved
+ *     lookedUpInPart: number, relinked: number }>} each start's exit kind, retired count and
+ *     registers, or 'untranslated'; the milliseconds translators emitted for it; the calls
+ *     that formed or published part of a batch (`holdMs`); the store's hits, their modules
+ *     compiled off the thread and the calls that left a batch's answers half read; and the
+ *     regions relinks moved
  */
 export async function observe(seed, config, attach = undefined){
     const next = random(seed);
@@ -161,7 +162,8 @@ export async function observe(seed, config, attach = undefined){
         const d = /** @type {any} */ (m.runtime.diagnostics());
         return { runs, workerMs: d.workerMs ?? 0, formedInPart: d.formedInPart,
             publishedInPart: d.publishedInPart, cacheHits: d.cacheHits,
-            compiledApart: d.compiledApart, relinked: d.relinked };
+            compiledApart: d.compiledApart, lookedUpInPart: d.lookedUpInPart,
+            relinked: d.relinked };
     }
     finally
     {

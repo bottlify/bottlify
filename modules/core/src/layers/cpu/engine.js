@@ -412,8 +412,9 @@
  * @property {number} retired          Instructions retired in the engine, for a frame's share.
  * @property {number} cacheHits        Regions taken from the store.
  * @property {number} cacheMisses
- * @property {number} [lookedUpNow]    Batches the store answered in the call that formed them.
+ * @property {number} [lookedUpNow]    Batches the store answered without a turn of the event loop.
  * @property {number} [lookedUpLater]  Batches it answered a turn of the event loop later.
+ * @property {number} [lookedUpInPart]  Calls that left a batch's answers half read (`holdMs`).
  * @property {number} [readSwitches]  1 once translated reads test their pages after a fault.
  * @property {number} [precisionSwitches]  Times an x87 entry went to another precision control,
  *     or from one to a test at every rounding operation.
