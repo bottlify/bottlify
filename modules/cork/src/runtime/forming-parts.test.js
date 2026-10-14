@@ -274,6 +274,49 @@ test('a batch formed whole while the only translator is replaced waits for the o
         }
     });
 
+test('a batch emitted here while the translator loads is one region', async()=>{
+    const config = { worker: true, translators: 0, batchRegions: 4, maxBatchRegions: 4,
+        loadingShare: 1 };
+    const starts = [0x2000, 0x3000, 0x4000];
+    /** @param {ReturnType<typeof machine>} m */
+    const translated = m=>starts.filter(at=>m.runtime.entryOf(at) >= 0).length;
+    /** @param {ReturnType<typeof machine>} m */
+    const lend = m=>{
+        const loading = heldTranslator();
+        m.runtime.attachTranslator?.(loading.adapter);
+        starts.forEach((at, i)=>m.write(at, piece(i, 100, 3).code));
+        for (const at of starts)
+        {
+            m.runtime.noteHot(at, 0, 2);
+        }
+        return loading;
+    };
+    const whole = machine({ ...config, holdMs: 0 });
+    const held = machine(config);
+    try
+    {
+        lend(whole);
+        await turn();
+        await whole.runtime.translatePending();
+        assert.equal(translated(whole), starts.length, 'unbounded, one batch emits all three');
+        const loading = lend(held);
+        for (let i = 0; i < 200 && translated(held) < starts.length; i++)
+        {
+            const before = translated(held);
+            await turn();
+            await held.runtime.translatePending();
+            assert.ok(translated(held) - before <= 1, 'a region a call');
+        }
+        assert.equal(translated(held), starts.length, 'each emitted here in a call of its own');
+        assert.equal(loading.held.length, 0, 'nothing waited for the translator loading');
+    }
+    finally
+    {
+        await whole.runtime.flush();
+        await held.runtime.flush();
+    }
+});
+
 test('regions formed again with copies of their loops are formed a share at a call', async()=>{
     const m = machine({ worker: true, translators: 1, ...ONE_A_CALL });
     // mov ecx, 1000; L: call F; dec ecx; jnz L; hlt; F: inc edx; ret -- F is a block

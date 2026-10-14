@@ -326,8 +326,9 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
         // it (a batch that never comes back is freed after a time).
         timings: false,
         // While the translation worker loads: the largest batch emitted on the
-        // engine thread, and the share of the time since the worker was made
-        // that emitting there may take.
+        // engine thread (one region where the work there is bounded, `holdMs`),
+        // and the share of the time since the worker was made that emitting
+        // there may take.
         loadingBatch: 16,
         loadingShare: 0.25,
         // The engine thread's time the translator's work may take at a
@@ -3827,9 +3828,13 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
         // batch, a quarter of what waits up to `maxBatchRegions`, so the
         // round trip through the worker and the store is paid per hundreds
         // of regions rather than per thirty-two.
-        // While the worker loads, a batch emitted here is kept small.
-        const ceiling = translatorLoading() && !translatorReady()
-            ? settings.loadingBatch : settings.maxBatchRegions;
+        // While the worker loads, a batch emitted here is kept small; where the
+        // work here is bounded (`holding`), it is one region, as no translator
+        // ready emits it in the call that finishes it: sixteen held the thread
+        // for fifty milliseconds while a process's first translator loaded.
+        const inline = !translatorReady();
+        const ceiling = inline && holding() ? 1
+            : inline && translatorLoading() ? settings.loadingBatch : settings.maxBatchRegions;
         const wanted = Math.min(ceiling,
             Math.max(settings.batchRegions, queue.size >> 2));
         forming = { batch: hottest(wanted), next: 0, formed: [], covered: new Set(), ceiling,
