@@ -809,3 +809,25 @@ None yet.
   checked.
 - **Decision.** It stays on: the holds it added are gone with the bound, and every run on was
   faster than the run off beside it.
+
+### 2026-10-14 -- an indirect call with nothing to form in sampled no more (quiet calls)
+
+- **Idea.** A call whose samples came due with no callee to form in (none took an eighth, or the
+  ones that did cannot be formed in) keeps paying the profile's flag load on every call. Formed
+  again without the profile at it (`d207d7e5`), it pays nothing.
+- **Workload.** Far Cry as in the entries above, tree `d207d7e5` (quiet) against `b73438e6`
+  (without), both with `callTargets` on, alternated: cold quiet, cold without, warm quiet, warm
+  without, each arm on a profile of its own. And `spread` in Node, three arms started together as
+  three processes for eight rounds (quiet, without, `callTargets` off).
+- **Values.** Far Cry: cold 269.6 against 268.5 M/s (1.004), warm 276.2 against 270.6 (1.021), the
+  noise floor about 6%. Calls quiet: 19 cold, 20 warm, every one of them for a
+  callee not formed in (calls with no callee taking a share: none); due calls 49 and 45. The
+  translator's holds of 16 ms or more: 2 against 9 cold, 1 and 1 warm. `spread` in Node: quiet /
+  without by round 1.011 1.045 1.006 0.989 0.908 1.031 0.984 1.005 (median 1.005): there the
+  profile is read too seldom for any call to come due (34 samples over 26 calls in a run of 4 s).
+- **Machine.** A 4-core x86-64 Linux VM, Intel Xeon @ 2.10 GHz, headless Chromium 141.0.7390.37
+  (V8 14.1), Node 22.22.0. Power plan not recorded.
+- **Decision.** Kept: inside the noise in Far Cry, nothing measured against it, and a quiet call
+  pays nothing for a profile it cannot use. What the Far Cry counts point at instead: 80 to 100
+  times a run the callees a call was predicted to were found too large to form in, and those calls
+  still go through the entry hash.
