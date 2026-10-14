@@ -330,6 +330,17 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
         // that emitting there may take.
         loadingBatch: 16,
         loadingShare: 0.25,
+        // The engine thread's time forming a batch may take at a stretch, and
+        // the share of its time over a while, where a translator takes the
+        // batches: a batch goes on forming in the calls after, and a call
+        // that finds the share spent forms nothing until it has come back
+        // (0: a batch formed whole in the call that takes it). A program
+        // reaching code it had not run held the thread for batches formed
+        // whole, a tenth of a second at a time in the runs measured -- frames
+        // the guest did not run, its sound late -- where the translation is
+        // the one to wait.
+        holdMs: 4,
+        holdShare: 0.5,
         // The bounded records the runtime keeps of where translated code left and
         // what missed: targets of untranslated exits, misses per (address, top)
         // before a candidate, and indirect call sites tried with predicted callees.
@@ -945,6 +956,9 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
         stackCode: 0,
         // Batches the store answered in the call that formed them, and a turn later.
         lookedUpNow: 0, lookedUpLater: 0,
+        // Calls that formed part of a batch and left the rest to a later one
+        // (`holdMs`), and asks the spent credit put off.
+        formedInPart: 0, heldBack: 0,
         shapeMisses: 0, shapeChecked: 0, x87RelaxedReads: 0, floatMisses: 0, floatsRounded: 0,
         // The milliseconds of translating, by the part of a batch they are:
         // `translateMs` is their sum, so a frame's own figure and the split
@@ -1702,11 +1716,65 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
      */
     const batchMayGo = ()=>!storePending && !translators.some(one=>one.pending?.alone === true)
         && (freeTranslator() !== null || !translatorReady());
+    /**
+     * The batch being formed, from one call to the next while forming it whole
+     * would hold the engine thread past `holdMs`: its candidates, the next to
+     * form, and what is formed so far. Nothing else is formed or sent until it
+     * is whole, so it goes out as the one batch it would have been. `covered`
+     * holds the block starts of the regions it formed with no x87 in them,
+     * each an entry at any top once published: a candidate among them is
+     * already translated by one (a loop's head and its cases were all hot at
+     * once, and each formed the whole loop again). It is noted again should
+     * its block get no entry after all.
+     * @type {{ batch: [number, number][], next: number, formed: any[],
+     *     covered: Set<number>, ceiling: number, takenAt: number } | null}
+     */
+    let forming = null;
+    /**
+     * Whether forming is bounded (`holdMs`): only while a translator takes the
+     * batches. One emitted here holds the thread for its emitting whole
+     * whatever forming does, and a run with no worker has no frames to keep.
+     */
+    const holding = ()=>settings.holdMs > 0 && translatorReady();
+    /** The engine thread's time forming may take now (`holdMs`), refilled at
+     * `holdShare` of the time that passes, and when it was last brought up to date. */
+    let credit = settings.holdMs;
+    let creditAt = performance.now();
+    const creditNow = ()=>{
+        const now = performance.now();
+        credit = Math.min(settings.holdMs, credit + (now - creditAt) * settings.holdShare);
+        creditAt = now;
+        return credit;
+    };
     const sendNext = ()=>{
-        if (owed > 0 && queue.size > 0 && batchMayGo())
+        if (forming !== null || owed > 0 && queue.size > 0 && batchMayGo())
         {
             runtimeApi?.translatePending().catch(()=>{});
         }
+    };
+    /**
+     * Whether a call is wanted once the credit has come back to half of
+     * `holdMs` -- for a batch left half formed, or an ask the spent credit
+     * refused -- and whether one is set: the host asks again when the
+     * interpreter notes a new start, which a program running the code it has
+     * may not do for a while.
+     */
+    let resumeWanted = false;
+    let resumeArmed = false;
+    const armResume = ()=>{
+        if (!resumeWanted || resumeArmed)
+        {
+            return;
+        }
+        resumeWanted = false;
+        resumeArmed = true;
+        setTimeout(()=>{
+            resumeArmed = false;
+            if (!workerClosed)
+            {
+                sendNext();
+            }
+        }, Math.max(1, (settings.holdMs / 2 - creditNow()) / settings.holdShare));
     };
     /** The process's translation cache arena, shared with every translator it has; none
      * without a translator or where memory cannot be shared. */
@@ -3409,11 +3477,31 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
 
     /**
      * One batch: formed here, and emitted here too while no worker takes it.
-     * What `translatePending` runs, synchronously throughout.
+     * What `translatePending` runs, synchronously throughout; the time it
+     * takes is charged to the credit (`holdMs`).
      *
      * @returns {number}
      */
     const translateNow = ()=>{
+        if (!holding())
+        {
+            return translateStep();
+        }
+        const startedAt = performance.now();
+        try
+        {
+            return translateStep();
+        }
+        finally
+        {
+            creditNow();
+            credit -= performance.now() - startedAt;
+            armResume();
+        }
+    };
+
+    /** @returns {number} */
+    const translateStep = ()=>{
         if (profileAt >= 0)
         {
             sampleCalls();
@@ -3444,12 +3532,24 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
                 giveUp(translator);
             }
         }
+        if (forming !== null)
+        {
+            return formOn();
+        }
         // Every translator busy, or one holding a batch nothing may be beside:
         // the ask is owed until an answer frees one. With none ready the batch
         // is emitted here, as without a worker.
         if (!batchMayGo())
         {
             owed++;
+            return 0;
+        }
+        if (holding() && creditNow() <= 0)
+        {
+            // Forming has had its share: the ask waits until it is back.
+            owed = Math.max(owed, 1);
+            counts.heldBack++;
+            resumeWanted = true;
             return 0;
         }
         owed = Math.max(0, owed - 1);
@@ -3500,38 +3600,46 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
             ? settings.loadingBatch : settings.maxBatchRegions;
         const wanted = Math.min(ceiling,
             Math.max(settings.batchRegions, queue.size >> 2));
-        const batch = hottest(wanted);
-        const takenAt = performance.now();
-        for (const [key] of batch)
+        forming = { batch: hottest(wanted), next: 0, formed: [], covered: new Set(), ceiling,
+            takenAt: performance.now() };
+        return formOn();
+    };
+
+    /**
+     * Forms the batch `forming` holds from where it stopped, until it is whole
+     * or the call has taken the credit, and then sends it on. A candidate is
+     * taken from the queue as it is formed, so one the batch did not reach
+     * yet is a candidate as any other while the guest runs.
+     *
+     * @returns {number} regions published
+     */
+    const formOn = ()=>{
+        const step = /** @type {NonNullable<typeof forming>} */ (forming);
+        const { batch, formed, covered, ceiling, takenAt } = step;
+        const left = holding() ? creditNow() : Infinity;
+        if (left <= 0)
         {
+            counts.heldBack++;
+            resumeWanted = true;
+            return 0;
+        }
+        const until = performance.now() + left;
+        const first = step.next;
+        const formedAt = clock();
+        // Nothing runs while this call forms, so its regions share what
+        // decoding finds; the guest runs between two calls, which may write
+        // the code over.
+        const shared = formShared();
+        for (; step.next < batch.length; step.next++)
+        {
+            if (step.next > first && performance.now() >= until)
+            {
+                break;
+            }
+            const [key, eip] = batch[step.next];
             unqueue(key);
             dropKey(key);
             inFlight.set(key, takenAt);
-        }
-        // A diagnostic run with classes left out, or with an undo log the
-        // stored modules were built without, keeps no translations.
-        const store = leaveOut.size > 0 || settings.undoLog || profiling
-            ? null : (settings.store ?? null);
-        /** @type {{ region: import('../region.js').Region, entryTop: number,
-         *     stamp: string, cached: import('./cache.js').CachedRegion | null, wide?: boolean,
-         *     narrow?: boolean, floats?: boolean, checked?: boolean,
-         *     moduleBytes?: Uint8Array | null,
-         *     waited?: boolean, loose?: boolean, wrapped?: boolean }[]} */
-        const formed = [];
-        const formedAt = clock();
-        // The block starts of the regions this batch formed with no x87 in
-        // them, each an entry at any top once published: a candidate among
-        // them is already translated by one (a loop's head and its cases
-        // were all hot at once, and each formed the whole loop again). It
-        // is noted again should its block get no entry after all.
-        /** @type {Set<number>} */
-        const covered = new Set();
-        // Nothing runs while the batch is formed, so its regions share
-        // what decoding finds.
-        const shared = formShared();
-        for (let i = 0; i < batch.length; i++)
-        {
-            const [key, eip] = batch[i];
             const entryTop = key % 16;
             // A candidate that has an entry by now -- a block of a region
             // published while it waited, the return address of a call the
@@ -3570,9 +3678,6 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
                     && !batch.some(([queued])=>queued === keyOf(callee, top)))
                 {
                     batch.push([keyOf(callee, top), callee]);
-                    unqueue(keyOf(callee, top));
-                    dropKey(keyOf(callee, top));
-                    inFlight.set(keyOf(callee, top), takenAt);
                 }
             }
             for (const [opcode, times] of region.refused)
@@ -3601,6 +3706,40 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
             }
         }
         counts.formingMs += clock() - formedAt;
+        if (step.next < batch.length)
+        {
+            // The guest runs before the rest is formed: what is formed so far
+            // is read again when it is published.
+            for (const one of formed)
+            {
+                one.waited = true;
+            }
+            counts.formedInPart++;
+            resumeWanted = true;
+            return 0;
+        }
+        forming = null;
+        // A region formed by an earlier call was formed from bytes the guest
+        // may have written since: one that reads otherwise now goes, a
+        // candidate to be noted again as any other. Sent on, the translator
+        // would form it again from the bytes there now, refuse it as changed,
+        // and leave its address barren until its page was written once more.
+        for (let at = formed.length - 1; at >= 0; at--)
+        {
+            const { region, entryTop, waited } = formed[at];
+            if (waited === true && (region.sources !== undefined
+                ? sourcesChanged(region.sources, 0, 0x100000000)
+                : hashRegion(read, region) !== region.hash))
+            {
+                inFlight.delete(keyOf(region.entry, entryTop));
+                counts.dropped++;
+                formed.splice(at, 1);
+            }
+        }
+        // A diagnostic run with classes left out, or with an undo log the
+        // stored modules were built without, keeps no translations.
+        const store = leaveOut.size > 0 || settings.undoLog || profiling
+            ? null : (settings.store ?? null);
         if (store === null)
         {
             return finishBatch(formed, null);
@@ -4103,6 +4242,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
                 missNoModule: counts.missNoModule,
                 lookedUpNow: counts.lookedUpNow,
                 lookedUpLater: counts.lookedUpLater,
+                formedInPart: counts.formedInPart,
+                heldBack: counts.heldBack,
                 // Times an x87 entry moved to the other precision control or to a
                 // test at every rounding instruction (`precisionAt`).
                 precisionSwitches: counts.precisionSwitches,

@@ -104,8 +104,9 @@ export function random(seed){
  * @param {number} seed @param {Record<string, unknown>} config
  * @param {(m: ReturnType<typeof machine>) => Promise<number>} [attach]  translators lent from
  *     outside (a host's pool), and how many: awaited before anything is noted
- * @returns {Promise<{ runs: string[], workerMs: number }>} each start's exit kind, retired
- *     count and registers, or 'untranslated'; and the milliseconds translators emitted for it
+ * @returns {Promise<{ runs: string[], workerMs: number, formedInPart: number }>} each start's
+ *     exit kind, retired count and registers, or 'untranslated'; the milliseconds translators
+ *     emitted for it; and the calls that formed part of a batch (`holdMs`)
  */
 export async function observe(seed, config, attach = undefined){
     const next = random(seed);
@@ -154,7 +155,8 @@ export async function observe(seed, config, attach = undefined){
             const exit = m.runtime.run(m.runtime.entryOf(at), 1_000_000);
             return [exit.kind, exit.retired, m.reg(0), m.reg(1), m.reg(3)].join(',');
         });
-        return { runs, workerMs: /** @type {any} */ (m.runtime.diagnostics()).workerMs ?? 0 };
+        const d = /** @type {any} */ (m.runtime.diagnostics());
+        return { runs, workerMs: d.workerMs ?? 0, formedInPart: d.formedInPart };
     }
     finally
     {

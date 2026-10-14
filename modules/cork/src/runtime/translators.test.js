@@ -16,7 +16,10 @@ import { machine, observe, piece, translateUntil, untilTranslatorsLoaded }
     from '../testing/seeded-pieces.js';
 
 test('three translators take a batch each, all out at once, and each is published', async()=>{
-    const m = machine({ worker: true, translators: 3, batchRegions: 1, maxBatchRegions: 1 });
+    // With forming unbounded: a first region formed on a cold start takes the
+    // share (`holdMs`), and the asks after it wait for it to come back.
+    const m = machine({ worker: true, translators: 3, batchRegions: 1, maxBatchRegions: 1,
+        holdMs: 0 });
     try
     {
         await untilTranslatorsLoaded(m, 3);

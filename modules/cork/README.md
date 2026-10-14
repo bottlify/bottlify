@@ -148,6 +148,7 @@ something, and measure it.
 | `batchRegions` | 32 | Regions per wasm module. | Larger modules: fewer of them, longer compiles and longer stalls instantiating one. |
 | `maxBatchRegions` | 256 | The most one batch takes when the queue is deep. | As above. |
 | `loadingBatch`, `loadingShare` | 16, 0.25 | While the translation worker loads, the largest batch emitted on the main thread and the share of time it may take. | Lower for smoother starts, higher to translate earlier. |
+| `holdMs`, `holdShare` | 4, 0.5 | While a translation worker takes the batches, the engine thread's time forming a batch may take at a stretch (the rest is formed in the calls after) and the share of its time forming may take over a while. 0 forms a batch whole in one call. | Lower for smoother frames when a program reaches new code, higher to translate it sooner. |
 | `inFlightMs` | 10000 | How long a batch may be with a worker before it is given up. | Lower only in tests. |
 | `volatileAfter` | 8 | Writes that drop one page's code, within `volatileWindowMs`, before the page is left to the interpreter. A write that leaves the bytes as they were drops nothing. | Higher for a program that rewrites code often but runs it long; lower if it keeps rewriting. |
 | `volatileWindowMs` | 100 | The window `volatileAfter` counts in. | Longer to give up on a page rewritten less often. |

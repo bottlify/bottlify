@@ -276,6 +276,11 @@
  *     emitted on the engine thread. Default 16.
  * @property {number} [loadingShare]  And the share of the time since the worker was made
  *     emitting there may take. Default 0.25.
+ * @property {number} [holdMs]  While a translation worker takes the batches, the engine
+ *     thread's time forming one may take at a stretch, the rest formed in the calls after
+ *     (0: a batch formed whole in one call). Default 4.
+ * @property {number} [holdShare]  And the share of the engine thread's time forming may take
+ *     over a while. Default 0.5.
  * @property {number} [exitTargets]  Targets of untranslated exits kept. Default 4096.
  * @property {number} [missesKept]  (Address, top) miss counts kept. Default 4096.
  * @property {number} [callSitesKept]  Indirect call sites tried with predicted callees kept.
