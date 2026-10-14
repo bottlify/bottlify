@@ -828,6 +828,6 @@ None yet.
 - **Machine.** A 4-core x86-64 Linux VM, Intel Xeon @ 2.10 GHz, headless Chromium 141.0.7390.37
   (V8 14.1), Node 22.22.0. Power plan not recorded.
 - **Decision.** Kept: inside the noise in Far Cry, nothing measured against it, and a quiet call
-  pays nothing for a profile it cannot use. What the Far Cry counts point at instead: 80 to 100
-  times a run the callees a call was predicted to were found too large to form in, and those calls
-  still go through the entry hash.
+  pays nothing for a profile it cannot use. What the Far Cry counts point at instead: 50 to 103
+  times a run (91, 103, 50, 82) the callees a call was predicted to were found too large to form
+  in, and those calls still go through the entry hash.
