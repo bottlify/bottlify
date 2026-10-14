@@ -76,7 +76,7 @@ something only with a measurement beside it.
 | --- | --- | --- | --- |
 | `hashSlots` | 2^20 | Slots of the entry hash translated code looks targets up in (12 bytes each, a power of two). | A program past ~780k block starts needs more; a full hash sends its overflow through the host on every transfer. |
 | `hashLoad` | 0.75 | Share of slots live past which new entries stay out of the hash. | Higher packs more in with longer probes. |
-| `exitTargets`, `missesKept`, `callSitesKept` | 4096 each | Bounded records of exit targets, miss counts and tried call sites. | Larger for diagnostics on big programs. |
+| `exitTargets`, `missesKept`, `callSitesKept` | 4096, 4096, 16384 | Bounded records of exit targets, miss counts and tried call sites. | Larger for diagnostics on big programs. |
 | `sharedMemory` | `true` where possible | Guest memory a `SharedArrayBuffer`. | `false` keeps it private (no other executor can run on it). |
 
 **The core's host (in `@bottlify/core`)**
