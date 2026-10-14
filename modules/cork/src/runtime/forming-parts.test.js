@@ -23,13 +23,15 @@ const ONE_A_CALL = { holdMs: 1e-6 };
 
 for (const seed of [21, 22, 23, 24])
 {
-    test(`a batch formed a candidate a call runs as one formed whole (seed ${seed})`, async()=>{
+    test(`a batch formed and published a region a call runs as one formed and published whole`
+        + ` (seed ${seed})`, async()=>{
         const config = { worker: true, translators: 1, batchRegions: 4, maxBatchRegions: 4 };
         const whole = await observe(seed, { ...config, holdMs: 0 });
         const parts = await observe(seed, { ...config, ...ONE_A_CALL });
         assert.ok(!whole.runs.includes('untranslated'), 'every start translated');
         assert.equal(whole.formedInPart, 0);
         assert.ok(parts.formedInPart > 0, 'batches were formed over several calls');
+        assert.ok(parts.publishedInPart > 0, 'translators\' answers published over several');
         assert.deepEqual(parts.runs, whole.runs);
     });
 }

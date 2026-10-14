@@ -333,9 +333,9 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
         // The engine thread's time the translator's work may take at a
         // stretch, and the share of its time over a while, where a worker is
         // wanted: a batch goes on forming in the calls after, the store's
-        // hits are compiled off the thread and published a share's worth a
-        // call, and a call that finds the share spent does nothing until it
-        // has come back (0: a batch formed and its hits published whole in
+        // hits are compiled off the thread, they and a worker's answers are
+        // published a share's worth a call, and a call that finds the share
+        // spent does nothing until it has come back (0: a batch formed and its hits published whole in
         // the call that takes it). A program reaching code it had not run
         // held the thread for batches formed whole, a tenth of a second at a
         // time in the runs measured -- frames the guest did not run, its
@@ -1697,19 +1697,21 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
     // order and the waiting is never the slice's.
     let storePending = false;
     /**
-     * A store hit a batch publishes later (`publishLater`): its region, the
-     * instance of its module once there is one, and the bytes to compile and
-     * what they are known by until then.
-     * @typedef {{ one: any, instance: WebAssembly.Instance | null,
-     *     source: string | object, bytes: Uint8Array }} Waiting
+     * A region a batch publishes later (`publishOn`): it, its translation, and
+     * the instance of its module -- or, for a store hit whose module this run
+     * has not instantiated, null until there is one, with the bytes to compile
+     * and what they are known by.
+     * @typedef {{ one: any, built: any, instance: WebAssembly.Instance | null,
+     *     source?: string | object, bytes?: Uint8Array }} Waiting
      */
     /**
-     * A batch's hits waiting to be published, and whether their modules are
-     * compiled: until they are all published no new batch goes, as while its
-     * lookups are out.
-     * @type {{ waiting: Waiting[], next: number, ready: boolean } | null}
+     * The batches waiting to be published, in order: a translator's answer,
+     * or a batch's store hits and whether their modules are compiled. Until
+     * they are all published no new batch goes, as while a batch's lookups are
+     * out, and they are published before a batch half formed goes on.
+     * @type {{ waiting: Waiting[], next: number, ready: boolean }[]}
      */
-    let publishing = null;
+    const toPublish = [];
     let workerRequest = 0;
     /** The runtime itself, once made: what a batch's answer calls to send the next. */
     /** @type {{ translatePending: () => Promise<number>,
@@ -1730,7 +1732,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
      * be alone, and a translator free -- or none ready, the batch then
      * emitted here as without a worker.
      */
-    const batchMayGo = ()=>!storePending && publishing === null
+    const batchMayGo = ()=>!storePending && toPublish.length === 0
         && !translators.some(one=>one.pending?.alone === true)
         && (freeTranslator() !== null || !translatorReady());
     /**
@@ -1764,7 +1766,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
         return credit;
     };
     const sendNext = ()=>{
-        if (publishing !== null ? publishing.ready
+        if (toPublish.length > 0 ? toPublish[0].ready
             : forming !== null || owed > 0 && queue.size > 0 && batchMayGo())
         {
             runtimeApi?.translatePending().catch(()=>{});
@@ -2409,9 +2411,11 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
      * @param {import('./emit-built.js').BuiltBatch} batch
      * @param {WebAssembly.Module | null} compiled  the module, when the worker compiled it
      * @param {any} store
+     * @param {boolean} [later]  the regions published a credit's worth a call
+     *     (`publishOn`) rather than in this one
      * @returns {number} regions published
      */
-    const publishBatch = (metas, batch, compiled, store)=>{
+    const publishBatch = (metas, batch, compiled, store, later = false)=>{
         const built = batch.results.filter(result=>result.ok);
         for (let i = 0; i < metas.length; i++)
         {
@@ -2451,6 +2455,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
             counts.storeMs += clock() - storeAt;
         }
         let published = 0;
+        /** @type {Waiting[] | null} */
+        const waiting = later && instance !== null ? [] : null;
         for (let i = 0; i < metas.length; i++)
         {
             const result = batch.results[i];
@@ -2467,10 +2473,18 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
                     module: new Uint8Array(0), moduleKey: key }, cacheVersion)).catch(()=>{});
                 counts.storeMs += clock() - storeAt;
             }
-            if (instance !== null)
+            if (waiting !== null)
+            {
+                waiting.push({ one: metas[i], built: result.region, instance });
+            }
+            else if (instance !== null)
             {
                 published += applyBuilt(metas[i], result.region, instance);
             }
+        }
+        if (waiting !== null && waiting.length > 0)
+        {
+            publishLater(waiting);
         }
         return published;
     };
@@ -3128,7 +3142,12 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
         }
         else
         {
-            publishBatch(pending.metas ?? [], data.batch, data.compiled ?? null, pending.store);
+            // A credit's worth a call where the work here is bounded: a
+            // translator's batch of a hundred regions held the thread for ten
+            // milliseconds published at once. One emitted here has held it
+            // longer emitting, and is published in the call that emitted it.
+            publishBatch(pending.metas ?? [], data.batch, data.compiled ?? null, pending.store,
+                holding());
         }
         noteStall(pending.relink ? 'relink' : 'publish', publishedAt);
         sendNext();
@@ -3356,10 +3375,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
     };
 
     /**
-     * The store's hits a batch waits to publish: each with its batch's instance
-     * where this run has one, or the bytes of its module and what it is known
-     * by -- its batch's key, or itself for a module of its own -- so a module
-     * many hits name is compiled once.
+     * A batch's regions to publish a credit's worth a call (`publishOn`). A
+     * store hit whose module this run has not instantiated waits for it to be
+     * compiled off this thread, once for every hit naming it -- by its batch's
+     * key, or by itself for a module of its own.
      *
      * @param {Waiting[]} waiting
      */
@@ -3368,7 +3387,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
         const instances = new Map();
         for (const { instance, source, bytes } of waiting)
         {
-            if (instance !== null || instances.has(source))
+            if (instance !== null || source === undefined || bytes === undefined
+                || instances.has(source))
             {
                 continue;
             }
@@ -3395,11 +3415,15 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
             }, failed));
         }
         const batch = { waiting, next: 0, ready: instances.size === 0 };
-        publishing = batch;
-        if (!batch.ready)
+        toPublish.push(batch);
+        if (batch.ready)
+        {
+            queueMicrotask(sendNext);
+        }
+        else
         {
             Promise.all(waiting.map(async entry=>{
-                if (entry.instance === null)
+                if (entry.instance === null && entry.source !== undefined)
                 {
                     entry.instance = await instances.get(entry.source) ?? null;
                 }
@@ -3411,14 +3435,13 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
     };
 
     /**
-     * Publishes the hits `publishing` holds from where it stopped, until they
-     * are all published or the call has taken the credit; then the next batch
-     * may go.
+     * Publishes the batches `toPublish` holds from where it stopped, while
+     * the first is ready, until they are all published or the call has taken
+     * the credit; then the next batch may go.
      *
      * @returns {number} regions published
      */
     const publishOn = ()=>{
-        const batch = /** @type {NonNullable<typeof publishing>} */ (publishing);
         const left = holding() ? creditNow() : Infinity;
         if (left <= 0 && !workerClosed)
         {
@@ -3427,26 +3450,31 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
             return 0;
         }
         const until = performance.now() + left;
-        const first = batch.next;
         let published = 0;
-        // The machine gone, nothing is published.
-        const end = workerClosed ? batch.next : batch.waiting.length;
-        for (; batch.next < end; batch.next++)
+        let any = false;
+        while (toPublish[0]?.ready === true)
         {
-            if (batch.next > first && performance.now() >= until)
+            const batch = toPublish[0];
+            // The machine gone, nothing is published.
+            const end = workerClosed ? batch.next : batch.waiting.length;
+            for (; batch.next < end; batch.next++)
             {
-                counts.publishedInPart++;
-                resumeWanted = true;
-                return published;
+                if (any && performance.now() >= until)
+                {
+                    counts.publishedInPart++;
+                    resumeWanted = true;
+                    return published;
+                }
+                any = true;
+                const { one, built, instance } = batch.waiting[batch.next];
+                if (instance !== null)
+                {
+                    published += applyBuilt(one, built, instance);
+                }
             }
-            const { one, instance } = batch.waiting[batch.next];
-            if (instance !== null)
-            {
-                published += applyBuilt(one, one.cached, instance);
-            }
+            toPublish.shift();
         }
-        publishing = null;
-        // The asks owed while it waited: as after a batch the store answered
+        // The asks owed while they waited: as after a batch the store answered
         // whole, the next goes after this turn.
         queueMicrotask(sendNext);
         return published;
@@ -3494,7 +3522,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
                 // The guest runs before it is published; the entry holds the
                 // instance found until then, as `batchInstance` did.
                 one.waited = true;
-                waiting.push({ one, instance: instance ?? null, source: key ?? one,
+                waiting.push({ one, built: one.cached, instance: instance ?? null,
+                    source: key ?? one,
                     bytes: key === undefined ? one.cached.module : one.moduleBytes });
                 continue;
             }
@@ -3666,7 +3695,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
                 giveUp(translator);
             }
         }
-        if (publishing?.ready === true)
+        if (toPublish[0]?.ready === true)
         {
             return publishOn();
         }

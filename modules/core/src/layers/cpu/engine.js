@@ -277,9 +277,9 @@
  * @property {number} [loadingShare]  And the share of the time since the worker was made
  *     emitting there may take. Default 0.25.
  * @property {number} [holdMs]  Where a translation worker is wanted, the engine thread's
- *     time the translator's work may take at a stretch: a batch is formed over several calls
- *     and the store's hits compiled off the thread and published a few at a call (0: a batch
- *     formed and published whole in one call). Default 4.
+ *     time the translator's work may take at a stretch: a batch is formed over several calls,
+ *     the store's hits compiled off the thread, and they and a worker's answers published a
+ *     few at a call (0: a batch formed and published whole in one call). Default 4.
  * @property {number} [holdShare]  And the share of the engine thread's time that work may
  *     take over a while. Default 0.5.
  * @property {number} [exitTargets]  Targets of untranslated exits kept. Default 4096.
