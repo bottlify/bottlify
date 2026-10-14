@@ -6,13 +6,15 @@
 
 /**
  * A batch formed over several calls (`holdMs`), the guest running between
- * them: what it publishes runs as what a batch formed whole publishes (the
- * gate of the second path), and a region formed before the guest wrote its
- * code over is not what runs.
+ * them, and the store's hits compiled off the thread and published a few at a
+ * call: what they publish runs as what a batch formed and published whole
+ * publishes (the gate of the second path), and a region formed before the
+ * guest wrote its code over is not what runs.
  */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { memoryTranslationStore } from './cache.js';
 import { machine, observe, piece, translateUntil, untilTranslatorsLoaded }
     from '../testing/seeded-pieces.js';
 
@@ -29,6 +31,26 @@ for (const seed of [21, 22, 23, 24])
         assert.equal(whole.formedInPart, 0);
         assert.ok(parts.formedInPart > 0, 'batches were formed over several calls');
         assert.deepEqual(parts.runs, whole.runs);
+    });
+}
+
+for (const seed of [31, 32, 33])
+{
+    test(`the store's hits compiled apart and published a few at a call run as published at`
+        + ` once (seed ${seed})`, async()=>{
+        const config = { worker: true, translators: 1, batchRegions: 4, maxBatchRegions: 4,
+            bundleId: 'test' };
+        const store = memoryTranslationStore();
+        const filled = await observe(seed, { ...config, store, holdMs: 0 });
+        const whole = await observe(seed, { ...config, store, holdMs: 0 });
+        const parts = await observe(seed, { ...config, store, ...ONE_A_CALL });
+        assert.ok(!filled.runs.includes('untranslated'), 'every start translated');
+        assert.equal(whole.compiledApart, 0);
+        assert.ok(whole.cacheHits > 0 && parts.cacheHits > 0, 'the store answered both');
+        assert.ok(parts.compiledApart > 0, 'modules compiled off the thread');
+        assert.ok(parts.publishedInPart > 0, 'hits published over several calls');
+        assert.deepEqual(whole.runs, filled.runs);
+        assert.deepEqual(parts.runs, filled.runs);
     });
 }
 
