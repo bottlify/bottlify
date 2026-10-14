@@ -1701,9 +1701,11 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
      * A region a batch publishes later (`publishOn`): it, its translation, and
      * the instance of its module -- or, for a store hit whose module this run
      * has not instantiated, null until there is one, with the bytes to compile
-     * and what they are known by.
+     * and what they are known by. With `relink`, `one` is a running region a
+     * relink moves to the instance, and where the store keeps the module.
      * @typedef {{ one: any, built: any, instance: WebAssembly.Instance | null,
-     *     source?: string | object, bytes?: Uint8Array }} Waiting
+     *     source?: string | object, bytes?: Uint8Array,
+     *     relink?: { store: any, key: string | undefined } }} Waiting
      */
     /**
      * The batches waiting to be published, in order: a translator's answer,
@@ -2517,8 +2519,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
      * @param {import('./emit-built.js').BuiltBatch} batch
      * @param {WebAssembly.Module | null} compiled
      * @param {any} store
+     * @param {boolean} [later]  the regions moved a credit's worth a call
+     *     (`publishOn`) rather than in this one
      */
-    const applyRelink = (records, batch, compiled, store)=>{
+    const applyRelink = (records, batch, compiled, store, later = false)=>{
         if (!batch.results.some(result=>result.ok))
         {
             return;
@@ -2536,57 +2540,85 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
             key = storeModule(store, batch);
             batchInstances.set(key, instance);
         }
+        // A region left on its old module until it is moved runs the same
+        // code there: each moves on its own.
+        /** @type {Waiting[] | null} */
+        const waiting = later ? [] : null;
         for (let i = 0; i < records.length; i++)
         {
-            const record = records[i];
             const result = batch.results[i];
-            if (!result.ok || !regions.has(record)
-                || JSON.stringify(result.region.labels) !== record.labels)
+            if (!result.ok)
             {
                 continue;
             }
-            const fn = /** @type {(label: number, budget: number) => number} */ (
-                instance.exports[result.region.exportName]);
-            const placed = placedOf.get(instance);
-            if (table && record.table >= 0)
+            if (waiting !== null)
             {
-                if (placed === undefined)
+                waiting.push({ one: records[i], built: result.region, instance,
+                    relink: { store, key } });
+                continue;
+            }
+            relinkOne(records[i], result.region, instance, store, key);
+        }
+        if (waiting !== null && waiting.length > 0)
+        {
+            publishLater(waiting);
+        }
+    };
+
+    /**
+     * Moves a running region to its function in a relinked module, should it
+     * still run the code the relink formed again, and stores it as that.
+     *
+     * @param {RegionRecord} record @param {any} region  its translation in the module
+     * @param {WebAssembly.Instance} instance @param {any} store
+     * @param {string | undefined} key  where the store keeps the module
+     */
+    const relinkOne = (record, region, instance, store, key)=>{
+        if (!regions.has(record) || JSON.stringify(region.labels) !== record.labels)
+        {
+            return;
+        }
+        const fn = /** @type {(label: number, budget: number) => number} */ (
+            instance.exports[region.exportName]);
+        const placed = placedOf.get(instance);
+        if (table && record.table >= 0)
+        {
+            if (placed === undefined)
+            {
+                table.set(record.table, fn);
+            }
+            else
+            {
+                // Its index in the relinked module's range, which that
+                // module's transfers reach directly.
+                table.set(record.table, null);
+                recordAt.delete(record.table);
+                if (record.module === undefined)
                 {
-                    table.set(record.table, fn);
+                    freeTable.push(record.table);
                 }
-                else
-                {
-                    // Its index in the relinked module's range, which that
-                    // module's transfers reach directly.
-                    table.set(record.table, null);
-                    recordAt.delete(record.table);
-                    if (record.module === undefined)
-                    {
-                        freeTable.push(record.table);
-                    }
-                    leaveModule(record);
-                    record.table = placed.base + Number(result.region.exportName.slice(1));
-                    table.set(record.table, fn);
-                    recordAt.set(record.table, record);
-                    joinModule(record, placed);
-                }
+                leaveModule(record);
+                record.table = placed.base + Number(region.exportName.slice(1));
+                table.set(record.table, fn);
+                recordAt.set(record.table, record);
+                joinModule(record, placed);
             }
-            for (const slot of record.slots)
-            {
-                entries.retable(slot, fn, record.table);
-            }
-            record.linked = true;
-            counts.relinked++;
-            if (store !== null)
-            {
-                const one = { region: { entry: record.entry, hash: record.hash },
-                    entryTop: record.entryTop, wide: record.wide, narrow: record.narrow,
-                    floats: record.floats, checked: record.checked, copies: record.copies,
-                    loose: record.loose };
-                store.put(regionKey(one), packRegion({ ...result.region,
-                    module: new Uint8Array(0), moduleKey: key, linked: true },
-                cacheVersion)).catch(()=>{});
-            }
+        }
+        for (const slot of record.slots)
+        {
+            entries.retable(slot, fn, record.table);
+        }
+        record.linked = true;
+        counts.relinked++;
+        if (store !== null)
+        {
+            const one = { region: { entry: record.entry, hash: record.hash },
+                entryTop: record.entryTop, wide: record.wide, narrow: record.narrow,
+                floats: record.floats, checked: record.checked, copies: record.copies,
+                loose: record.loose };
+            store.put(regionKey(one), packRegion({ ...region,
+                module: new Uint8Array(0), moduleKey: key, linked: true },
+            cacheVersion)).catch(()=>{});
         }
     };
 
@@ -3152,16 +3184,18 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
             counts.inFlightMs += performance.now() - pending.at;
         }
         const publishedAt = clock();
+        // A credit's worth a call where the work here is bounded: a translator's
+        // batch of a hundred regions held the thread for ten milliseconds
+        // published at once, a relink of five hundred for six to fifteen. One
+        // emitted here has held it longer emitting, and is published in the
+        // call that emitted it.
         if (pending.relink)
         {
-            applyRelink(pending.relink, data.batch, data.compiled ?? null, pending.store);
+            applyRelink(pending.relink, data.batch, data.compiled ?? null, pending.store,
+                holding());
         }
         else
         {
-            // A credit's worth a call where the work here is bounded: a
-            // translator's batch of a hundred regions held the thread for ten
-            // milliseconds published at once. One emitted here has held it
-            // longer emitting, and is published in the call that emitted it.
             publishBatch(pending.metas ?? [], data.batch, data.compiled ?? null, pending.store,
                 holding());
         }
@@ -3482,8 +3516,12 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
                     return published;
                 }
                 any = true;
-                const { one, built, instance } = batch.waiting[batch.next];
-                if (instance !== null)
+                const { one, built, instance, relink } = batch.waiting[batch.next];
+                if (instance !== null && relink !== undefined)
+                {
+                    relinkOne(one, built, instance, relink.store, relink.key);
+                }
+                else if (instance !== null)
                 {
                     published += applyBuilt(one, built, instance);
                 }

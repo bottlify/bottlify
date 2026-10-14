@@ -56,6 +56,20 @@ for (const seed of [31, 32, 33])
     });
 }
 
+for (const seed of [41, 42])
+{
+    test(`regions a relink moves a region a call run as moved at once (seed ${seed})`,
+        async()=>{
+            const config = { worker: true, translators: 1, batchRegions: 2, maxBatchRegions: 2,
+                relinkAfter: 2, relinkRegions: 4 };
+            const whole = await observe(seed, { ...config, holdMs: 0 });
+            const parts = await observe(seed, { ...config, ...ONE_A_CALL });
+            assert.ok(!whole.runs.includes('untranslated'), 'every start translated');
+            assert.ok(whole.relinked > 0 && parts.relinked > 0, 'relinks moved regions');
+            assert.deepEqual(parts.runs, whole.runs);
+        });
+}
+
 /**
  * What a start runs to from cleared registers: its exit, retired count and registers.
  * @param {ReturnType<typeof machine>} m @param {number} at
