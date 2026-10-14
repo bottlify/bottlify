@@ -21,7 +21,7 @@
  *                                  [--keep-images N,M] [--watch-import LIB.dll[#ord+ord]]
  *                                  [--click x,y[,after]] [--key Code[,after]] [--coi]
  *                                  [--mode NAME] [--executors N] [--cork-config JSON]
- *                                  [--graphics-worker] [--journal-calls]
+ *                                  [--graphics-worker] [--fake-gpu] [--journal-calls]
  *                                  [--command-line STRING] [--args STRING] [--windows NAME]
  *                                  [--file HOST=GUEST] [--save-files]
  *                                  [--user-data-dir DIR] [--port N] [--store local] [--prefetch]
@@ -604,6 +604,10 @@ function parse(argv){
         // Direct3D and OpenGL drawn in a graphics worker, the program's thread
         // keeping only their state, as the player runs them.
         graphicsWorker: argv.includes('--graphics-worker'),
+        // A GPU that takes every call and draws nothing, the devices played in
+        // a graphics worker over it: what measures the engine alone, with no
+        // software rasteriser taking the machine's cores and holding it for frames.
+        fakeGpu: argv.includes('--fake-gpu'),
         // The call areas a person's report is taken with, traced from the
         // first instruction: what tracing costs a run is part of what it measures.
         journalCalls: argv.includes('--journal-calls'),
@@ -1647,6 +1651,7 @@ export async function game(options){
             quantum: options.quantum,
             executors: options.executors,
             graphicsWorker: options.graphicsWorker,
+            fakeGpu: options.fakeGpu,
             ...options.journalCalls ? { logCapacity: 100000, logCategories: {
                 'call.cpu': 'trace', 'call.gpu': 'trace', 'call.net': 'trace' } } : {},
             log: Boolean(options.log),
