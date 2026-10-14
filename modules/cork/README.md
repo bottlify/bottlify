@@ -2,51 +2,62 @@
 
 [По-русски](README.ru.md)
 
-cork runs 32-bit x86 machine code in a browser or in Node. Code that runs for the first time goes
-through an interpreter; code that turns out to run often is translated to WebAssembly in a worker
-thread, and the browser compiles it to the processor's own code. cork is the processor of
-[Bottlify](../../README.md), but it knows nothing about Windows or any other system: a system call,
-an I/O port or a fault stops the run and is handed to the program that runs cork. In Bottlify that
-is [`@bottlify/core`](../core/README.md).
+cork is a module for running x86 code (mostly 32-bit) right in the browser. It translates the
+program's machine code into WebAssembly, and the browser compiles that into native instructions.
+So one build of Bottlify runs on ordinary x86 machines and on ARM alike.
 
-Plain JavaScript and WebAssembly, no dependencies.
+cork is the processor of [Bottlify](../../README.md), and only the processor. It knows nothing
+about Windows: when the program makes a system call, writes to a port or hits a fault, cork stops
+and hands control back to whoever started it. In Bottlify that is
+[`@bottlify/core`](../core/README.md), home of the Windows API, DirectX, sound and the rest.
 
-What it runs:
+Plain JavaScript and WebAssembly, not a single dependency, at home in a browser and in Node.
 
-- 32-bit user-mode x86: integer instructions, the x87 FPU, MMX, SSE, SSE2 and SSE3 (what its
-  `cpuid` reports).
-- Code that rewrites itself. A write into translated code throws away the translations whose bytes
-  changed, and they are made again.
-- Several threads over one memory: `lock`-prefixed instructions become WebAssembly atomics.
+## What it runs
+
+- 32-bit user-mode x86: integer instructions, the x87, MMX, SSE, SSE2 and SSE3. Exactly the set
+  cork reports through `cpuid`.
+- Code that rewrites itself. When the program writes over code that is already translated, the old
+  translation is thrown away and a new one made.
+- Several threads over one memory. `lock`-prefixed instructions run as WebAssembly atomics, so
+  threads do not lose each other's writes.
 - Exact faults. A division by zero, an unknown instruction or a write to a closed page stops right
-  at the instruction, with the registers the processor would have.
+  at that instruction, with the registers a real processor would have.
 
-What it does not:
+## What it does not run
 
 - 64-bit code (planned, see [`roadmap/v2/`](../../roadmap/v2/README.md)), 16-bit code, privileged
   instructions, segments other than the `fs` and `gs` bases.
-- SSSE3 and anything newer: AVX, SSE4.
-- The x87's 80-bit precision. The FPU registers are 64-bit doubles; single and double precision
-  control are honoured, extended is treated as double. Sine, logarithm and the rest go through the
-  host's `Math`. Exception masks are not honoured: every x87 exception behaves as masked.
+- SSSE3 and anything newer: SSE4, AVX.
+- The x87's 80-bit precision. The FPU registers are plain 64-bit doubles: single and double
+  precision are honoured, extended is computed as double. Sine, logarithm and the rest come from
+  `Math`. Exception masks are not honoured: every x87 exception behaves as masked.
 
 ## Why it is fast
 
-- **It translates whole loops and functions, not single instructions.** A region (a loop, or a
-  function with the small functions it calls) becomes one WebAssembly function, and the browser's
-  optimizing compiler treats it like any other loop.
-- **Registers are local variables, memory is memory.** Inside a region the x86 registers are locals
-  of the function, so they end up in the processor's registers. The program's memory is one
-  `WebAssembly.Memory`, so `mov eax, [esi+8]` is one load, with no page tables in between.
+cork runs a program at about a third of the real processor's speed on average, and at half of it on
+tight loops. On the same bytes it is 4 to 7 times faster than v86, the best-known x86 in a browser
+(numbers below). This is where the speed comes from:
+
+- **It translates whole loops and functions, not single instructions.** A loop or a function,
+  together with the small functions it calls, becomes one WebAssembly function. We call such a
+  piece a region. The browser's compiler sees an ordinary loop in it and optimizes it like any
+  other code.
+- **Registers live in local variables.** Inside a region the x86 registers are locals of the
+  function, and the browser puts them in the processor's own registers. The program's memory is one
+  `WebAssembly.Memory`, so `mov eax, [esi+8]` is a single load with no page tables in between.
 - **Flags are worked out only where they are read.** Nearly every x86 instruction sets flags and
-  hardly anything reads them; `cmp` followed by `jl` is one comparison.
-- **Translated code stays in WebAssembly.** A jump or call from one translated region to another is
-  a call between WebAssembly functions, not a trip back to JavaScript.
-- **The program does not wait for the translator.** Translation runs in worker threads while the
-  program keeps going in the interpreter; the main thread gives the translator a few milliseconds at
-  a time at most.
-- **The second run starts warm.** Translations are kept in the browser's storage (OPFS) and loaded
-  the next time; a bundle can bring them along.
+  hardly anything reads them. A `cmp` followed by a `jl` becomes one comparison.
+- **Translated code stays in WebAssembly.** Regions go from one to another with plain calls between
+  WebAssembly functions, never through JavaScript.
+- **It guesses where virtual calls go.** cork watches where calls through a pointer actually land.
+  When a call has one or two real targets, they are built right into the region and the call
+  becomes a comparison.
+- **The program never waits for the translator.** Translation runs in worker threads while the
+  program keeps going in the interpreter. The main thread gives the translator a few milliseconds
+  at a time at most, so a game does not freeze when it reaches new code.
+- **The second run is fast from the start.** Finished translations are kept in the browser's
+  storage (OPFS) and loaded from there the next time. A bundle can bring them along.
 
 ## How it works
 
@@ -72,16 +83,16 @@ flowchart LR
   T -->|"untranslated target"| I
 ```
 
-1. **Interpreter.** New code runs in an interpreter that counts jumps to every address. An address
-   reached often enough (twice, in Bottlify) becomes a candidate for translation.
-2. **Region.** From a candidate, cork collects every block reachable by plain jumps, up to 128 blocks
-   or 8 KiB, and pulls in small functions it calls. This is a region: the unit that becomes one
-   WebAssembly function.
-3. **Translation.** Regions go to a worker in batches of 32, one WebAssembly module per batch. The
-   worker translates and compiles; the main thread keeps running the interpreter meanwhile and
-   spends at most 4 ms at a time on the translator's side of the work.
-4. **Running.** Translated regions call each other without going back to JavaScript. They leave only
-   when they have to:
+1. **Interpreter.** New code runs in the interpreter, which also counts how many times the program
+   jumps to each address. An address reached often enough (twice, in Bottlify) becomes a candidate
+   for translation.
+2. **Region.** From the candidate cork gathers every block reachable by ordinary jumps (up to 128
+   blocks or 8 KiB of code) and builds in the small functions they call.
+3. **Translation.** Regions go to the translation thread in batches of 32, each batch one
+   WebAssembly module. While the thread translates and compiles, the program keeps running in the
+   interpreter.
+4. **Running.** Translated regions call each other directly. They leave only when there is no
+   other way:
 
 ```mermaid
 %%{init: {"theme": "base", "flowchart": {"curve": "basis", "nodeSpacing": 22, "rankSpacing": 50, "padding": 10}, "themeVariables": {"fontFamily": "Inter, Segoe UI, Helvetica, Arial, sans-serif", "fontSize": "13px", "primaryColor": "#FFFFFF", "primaryBorderColor": "#2F3A40", "primaryTextColor": "#1B2328", "lineColor": "#5C6970", "edgeLabelBackground": "#FFFFFF"}}}%%
@@ -94,11 +105,11 @@ flowchart LR
   R -->|"fault"| F["Host, with the exact<br/>address and registers"]
 ```
 
-5. **Next run.** Translations are kept in the browser's storage (OPFS). A second run of the same
-   program loads them instead of translating again; a bundle can bring them along.
+5. **The next run.** Translations are kept in OPFS, so the second run of the same program just
+   loads them and translates nothing again.
 
-The program's memory is one `WebAssembly.Memory`, and address `a` of the program is `0x10000 + a`
-in it:
+All of the program's memory is one `WebAssembly.Memory`. The program's address `a` is at offset
+`0x10000 + a` in it:
 
 ```
 0x00000   registers and cork's own state (64 KiB)
@@ -108,25 +119,26 @@ in it:
 
 ## Speed
 
-[`bench/`](bench/README.md) is a 32-bit Windows program in C++ with eight workloads in the shape of
-what games do. The same `.exe` also runs directly on the processor through a small Linux loader
-(`bench/bin/peload`), so cork and the processor run the same bytes, and every run checks that both
-got the same checksum.
+[`bench/`](bench/README.md) is the yardstick: a 32-bit Windows program in C++ with eight workloads
+shaped like what games do. The very same `.exe` also runs directly on the processor through a
+small Linux loader (`bench/bin/peload`). So cork and the processor run the same bytes, and every
+run checks that both got the same checksum.
 
 Each workload ran ten times its own length, so that translation and the cold start are a few per
-cent of the run and what is measured is the translated code. Best of three. 100% is the processor:
+cent of the run and the numbers are the speed of the translated code itself. Best of three. 100%
+is the processor:
 
 | Workload | What it does | Node, x87 | Node, SSE | Chromium, x87 | Chromium, SSE |
 | --- | --- | ---: | ---: | ---: | ---: |
-| `vm` | bytecode interpreter, one big `switch` | 38% | 31% | 39% | 33% |
-| `entities` | 4096 objects, virtual calls | 23% | 26% | 22% | 21% |
-| `math` | skinning, transforms, lights | 37% | 34% | 30% | 28% |
-| `path` | A* on a 128x128 grid | 53% | 48% | 47% | 46% |
-| `lz` | LZ77, CRC, Huffman | 32% | 32% | 28% | 29% |
-| `containers` | hash table, sorts, binary search | 43% | 48% | 41% | 40% |
-| `spread` | 512 functions calling each other | 18% | 17% | 20% | 20% |
-| `api` | Windows API calls between short bits of work | 34% | 33% | 32% | 31% |
-| **all eight** (geometric mean) | | **33%** | **32%** | **31%** | **30%** |
+| `vm` | bytecode interpreter, one big `switch` | 42% | 30% | 39% | 34% |
+| `entities` | 4096 objects, virtual calls | 24% | 26% | 22% | 23% |
+| `math` | skinning, transforms, lights | 40% | 36% | 32% | 31% |
+| `path` | A* on a 128x128 grid | 50% | 53% | 49% | 48% |
+| `lz` | LZ77, CRC, Huffman | 34% | 36% | 28% | 31% |
+| `containers` | hash table, sorts, binary search | 48% | 48% | 40% | 45% |
+| `spread` | 512 functions calling each other | 16% | 15% | 18% | 18% |
+| `api` | Windows API calls between short bits of work | 43% | 30% | 33% | 35% |
+| **all eight** (geometric mean) | | **35%** | **32%** | **31%** | **32%** |
 
 ```mermaid
 %%{init: {"theme": "base", "themeVariables": {"fontFamily": "Inter, Segoe UI, Helvetica, Arial, sans-serif", "xyChart": {"plotColorPalette": "#2F6F8F, #C8742E"}}}}%%
@@ -134,43 +146,47 @@ xychart-beta
   title "Share of the processor's speed, x87 build, %"
   x-axis [vm, entities, math, path, lz, containers, spread, api]
   y-axis "%" 0 --> 100
-  bar [39, 22, 30, 47, 28, 41, 20, 32]
-  line [38, 23, 37, 53, 32, 43, 18, 34]
+  bar [39, 22, 32, 49, 28, 40, 18, 33]
+  line [42, 24, 40, 50, 34, 48, 16, 43]
 ```
 
 Bars: Chromium 141. Line: Node 22.
 
-`spread` and `entities` are the slowest: both make many calls through function pointers whose
-targets keep changing, and each such call looks its target up in a table. Tight loops over data
-(`path`, `containers`) get closest to the processor.
+`spread` and `entities` are the slowest. Both make many calls through function pointers whose
+targets keep changing. When a call has one or two real targets cork guesses them, but `spread` has
+hundreds, and each such call looks its target up in a table. Tight loops over data (`path`,
+`containers`) get closest to the processor: about half of its speed.
 
-What the translation buys, the x87 build in Node:
+What translation buys, x87 build in Node:
 
 | | Share of the processor's speed (geometric mean) |
 | --- | ---: |
 | interpreter only (`translate: false`) | 1.5% (from 0.7% to 3.7%) |
-| translated, a run of the workload's own length, translation and start included | 18% (from 6.5% to 28%) |
-| translated, ten times that length | 33% (from 18% to 53%) |
+| translated, a run of the workload's own length, translation and start included | 17% (from 6.2% to 33%) |
+| translated, ten times that length | 35% (from 16% to 50%) |
+
+Translated code is over twenty times faster than the interpreter, and even a run of a few tenths of
+a second pays for its translation many times over.
 
 ### Against v86
 
 [v86](https://github.com/copy/v86) is the best-known way to run x86 code in a browser, and it also
-translates hot code to WebAssembly. The same `bench-x87.exe` and `bench-sse.exe` ran in v86 0.5.471
-(the npm release): v86 boots Linux from its own test image, and inside it the benchmark runs through
-the same `peload` that runs it on the processor. Every checksum matched. Chromium 141, ten times the
-workloads' length, share of the processor's speed:
+translates hot code to WebAssembly. We ran the same `bench-x87.exe` and `bench-sse.exe` in it: v86
+boots Linux from its own test image, and inside it the benchmark runs through the same `peload` that
+runs it on the processor. Every checksum matched. Chromium 141, ten times the workloads' length,
+share of the processor's speed:
 
 | Workload | v86, x87 | cork, x87 | cork is faster | v86, SSE | cork, SSE | cork is faster |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| `vm` | 8.4% | 39% | 4.7x | 7.2% | 33% | 4.5x |
-| `entities` | 1.9% | 22% | 11.5x | 5.8% | 21% | 3.6x |
-| `math` | 0.7% | 30% | 46x | 4.0% | 28% | 7.1x |
-| `path` | 13.8% | 47% | 3.4x | 13.2% | 46% | 3.5x |
-| `lz` | 6.9% | 28% | 4.0x | 6.5% | 29% | 4.4x |
-| `containers` | 5.4% | 41% | 7.6x | 6.0% | 40% | 6.7x |
-| `spread` | 5.7% | 20% | 3.5x | 5.8% | 20% | 3.5x |
-| `api` | 11.1% | 32% | 2.9x | 13.5% | 31% | 2.3x |
-| **all eight** (geometric mean) | **4.9%** | **31%** | **6.3x** | **7.1%** | **30%** | **4.2x** |
+| `vm` | 7.5% | 39% | 5.2x | 7.1% | 34% | 4.8x |
+| `entities` | 1.8% | 22% | 12.4x | 5.7% | 23% | 4.1x |
+| `math` | 0.6% | 32% | 51x | 3.9% | 31% | 8.1x |
+| `path` | 13.7% | 49% | 3.6x | 12.2% | 48% | 3.9x |
+| `lz` | 6.2% | 28% | 4.6x | 6.2% | 31% | 5.0x |
+| `containers` | 5.0% | 40% | 8.1x | 5.7% | 45% | 7.9x |
+| `spread` | 5.4% | 18% | 3.3x | 5.1% | 18% | 3.5x |
+| `api` | 10.3% | 33% | 3.1x | 12.7% | 35% | 2.7x |
+| **all eight** (geometric mean) | **4.6%** | **31%** | **6.8x** | **6.8%** | **32%** | **4.7x** |
 
 ```mermaid
 %%{init: {"theme": "base", "themeVariables": {"fontFamily": "Inter, Segoe UI, Helvetica, Arial, sans-serif", "xyChart": {"plotColorPalette": "#2F6F8F, #C8742E"}}}}%%
@@ -178,52 +194,57 @@ xychart-beta
   title "Share of the processor's speed in Chromium, SSE build, %"
   x-axis [vm, entities, math, path, lz, containers, spread, api]
   y-axis "%" 0 --> 50
-  bar [33, 21, 28, 46, 29, 40, 20, 31]
-  line [7.2, 5.8, 4.0, 13.2, 6.5, 6.0, 5.8, 13.5]
+  bar [34, 23, 31, 48, 31, 45, 18, 35]
+  line [7.1, 5.7, 3.9, 12.2, 6.2, 5.7, 5.1, 12.7]
 ```
 
-Bars: cork. Line: v86. In Node the picture is the same: cork is 5.7 times faster than v86 on the
-x87 build and 3.75 times on the SSE build (geometric means).
+Bars: cork. Line: v86. Node tells the same story: on average cork is 5.9 times faster than v86 on
+the x87 build and 3.85 times on the SSE build.
 
-v86 does more for the same program. It emulates a whole computer, so the benchmark runs on top of a
-Linux kernel and every memory access goes through v86's emulated page tables; its x87 is exact
-80-bit arithmetic done in software, where cork computes in 64-bit doubles (that is most of the x87
-`math` row, which is why the chart shows the SSE build). In return v86 boots whole operating
-systems, which cork does not try to do: Bottlify runs Windows programs on its own Windows, and cork
-only has to run their code.
+To be fair, v86 does a lot more work for the same program. It emulates a whole computer, so the
+benchmark runs on top of a Linux kernel and every memory access goes through v86's emulated page
+tables. Its x87 is the real 80-bit arithmetic, done in software, where cork computes in 64-bit
+doubles: that is most of the x87 `math` row, which is why the chart shows the SSE build. In return
+v86 boots whole operating systems. cork does not try to: Bottlify runs Windows programs on its own
+Windows, and all it needs from cork is to run their code fast.
 
 <details>
 <summary>How it was measured</summary>
 
-- 2026-10-14, cork at `a24f5d9a`. Node 22.22.0 (V8 12.4); Chromium 141.0.7390.37 headless (V8
-  14.1), each run in a fresh tab and a dedicated worker of a minified build.
+- 2026-10-14, cork at `b73438e6`; the interpreter row at `a24f5d9a` (the call prediction turned on
+  between them does not touch the interpreter). Node 22.22.0 (V8 12.4); Chromium 141.0.7390.37
+  headless (V8 14.1), each run in a fresh tab and a dedicated worker of a minified build.
 - A 4-core x86-64 Linux VM, Intel Xeon @ 2.10 GHz. Power plan: not recorded.
-- `node modules/cork/bench/run.mjs --native --variant <x87|sse> --only <workload> --iterations
-  <10 x own> --reps 3`; `node modules/cork/bench/browser/suite.mjs '{"head":{}}' --scale 10 --reps
-  3`. The interpreter row and the row of the workload's own length: `run.mjs --native --variant
-  x87`, with and without `--cork '{"translate":false}'`, one run each.
-- The processor ran the workloads at 1.5 to 11.9 billion instructions a second, cork in Chromium at
-  0.3 to 3.4 billion. In Chromium the three runs of one workload were up to a fifth apart.
+- Node: `node modules/cork/bench/run.mjs --native --variant <x87|sse> --only <workload> --iterations
+  <10 x own> --reps 3`, one workload after another. Chromium: `node
+  modules/cork/bench/browser/suite.mjs '{"head":{},"off":{"bundle":"head","cork":{"callTargets":false}}}'
+  --scale 10 --reps 3`, the `head` side in the tables. The interpreter row and the row of the
+  workload's own length: `run.mjs --native --variant x87`, with and without
+  `--cork '{"translate":false}'`, one run each.
+- The processor ran the workloads at 1.7 to 12.8 billion instructions a second, cork in Chromium at
+  0.3 to 3.9 billion. In Chromium the three runs of one workload were up to a third apart (`api` on
+  SSE), most within a tenth. In Node the machine's own speed drifted by up to a quarter within the
+  hour, so neighbouring Node rows are best compared with care.
 - v86 0.5.471 from npm, with the BIOS images from its repository and `linux4.iso` from its test
   images; 512 MiB of guest memory; the files handed in over its 9p filesystem. Each workload ran as
   `peload bench-<build>.exe <workload> <10 x own>` in the guest, timed by `peload` itself (the host's
   clock around the command agreed within a few per cent). In Node, three boots and the best run; in
-  Chromium (a page, not a worker), one boot. The processor's figures for every percentage above are
-  the ones measured beside cork in Chromium.
+  Chromium (a page, not a worker), one boot. v86's percentages are taken against the same processor
+  figures as cork's in Chromium.
 
 </details>
 
 ## Running it
 
-From a terminal, Node 22 or later (`npm ci` once at the repository's root):
+From a terminal, with Node 22 or later (`npm ci` once at the repository's root):
 
 ```sh
 node modules/cork/bin/cork.mjs run program.elf --linux
 ```
 
-`cork run <file>` loads a 32-bit little-endian ELF at its own addresses, or flat code at `--at`
-(default `0x1000`), runs it from its entry, and prints why it stopped, the registers, and how many
-instructions ran and how many of them in translated code:
+`cork run <file>` loads a 32-bit little-endian ELF at its own addresses, or a piece of flat code at
+`--at` (default `0x1000`), runs it, and prints why it stopped, what is in the registers, and how
+many instructions ran, and how many of those in translated code:
 
 ```
 fib ok
@@ -242,9 +263,9 @@ eax 0x00000001  ecx 0x00000000  edx 0x00000000  ebx 0x00000000  esp 0x00ffffe4  
 | `--config '<json>'` | Settings ([`SETTINGS.md`](SETTINGS.md)). |
 | `--json` | The report as one line of JSON. |
 
-The exit status is the program's under `--linux`, 0 for a `hlt`, 1 for anything else.
+The exit status: the program's own with `--linux`, 0 after a `hlt`, 1 for anything else.
 
-The program above, which needs no C library:
+The program from the example above, which needs no C library:
 
 ```c
 // fib.c -- clang --target=i386-linux-gnu -O2 -nostdlib -static -ffreestanding -fno-pic
@@ -262,9 +283,9 @@ void _start(void){
 }
 ```
 
-`cork translate <file> --entry addr -o out.wasm` writes what cork makes of the code at an address:
-one region as a WebAssembly module, to read with `wasm2wat` or `wasm-objdump`. It imports cork's
-memory and helpers, so it does not run on its own.
+`cork translate <file> --entry addr -o out.wasm` saves the region cork forms from that address as a
+WebAssembly module of its own, to look at with `wasm2wat` or `wasm-objdump`. It does not run on its
+own: it takes its memory and helpers from cork.
 
 From JavaScript:
 
@@ -283,7 +304,7 @@ for (;;)
     const stop = await machine.run();
     if (stop.reason === 'interrupt' && stop.vector === 0x80)
     {
-        // Your system call: eip is already past the int.
+        // The system call answered here: eip is already past the int.
         machine.setReg('eax', machine.reg('eax') * 2);
         continue;
     }
@@ -294,42 +315,42 @@ await machine.dispose();
 ```
 
 `createMachine({ ramSize, config, trapPort })` gives memory, registers and `run`. `run` goes on
-until the program needs you:
+until the program needs something from outside:
 
 | `stop.reason` | What happened | Where `eip` is |
 | --- | --- | --- |
 | `halt` | `hlt` | after it |
-| `interrupt` | `int n`, `int3`, `into`; `stop.vector` is `n` | after it, as the processor pushes it |
-| `fault` | an exception: `#DE` 0, `#UD` 6, `#GP` 13 and so on; `stop.vector` | at the instruction |
-| `trap` | an `out` to the trap port (every `out` when no `trapPort` is given); `stop.value` | after it |
-| `unsupported` | an instruction cork has no model for; `stop.op` | at it |
-| `limit` | `run({ maxInstructions })` ran out (translated code may run a few past it) | wherever it was |
+| `interrupt` | `int n`, `int3`, `into`; `n` in `stop.vector` | after it, as the processor leaves it |
+| `fault` | a fault: `#DE` 0, `#UD` 6, `#GP` 13 and so on; its number in `stop.vector` | on it |
+| `trap` | an `out` to the trap port (any `out` if `trapPort` is not set); the value in `stop.value` | after it |
+| `unsupported` | an instruction cork has no model of; its name in `stop.op` | on it |
+| `limit` | `run({ maxInstructions })` ran out (translated code may go a little past) | where it stopped |
 
-`stop.retired` is how many instructions the run retired, `stop.translated` how many of them in
-translated code. The machine also has `load`, `read`, `reg` and `setReg` (the eight general
-registers, `eip`, `eflags`), `memory` (the `WebAssembly.Memory`), `layout` (where each register
-is in it), `diagnostics()` and `dispose()`. `regionModule({ code, at, entry })` is `cork
-translate` as a function.
+`stop.retired` is how many instructions ran, `stop.translated` how many of them in translated code.
+The machine also has `load`, `read`, `reg` and `setReg` (the eight general registers, `eip`,
+`eflags`), `memory` (the `WebAssembly.Memory`), `layout` (where each register is in it),
+`diagnostics()` and `dispose()`. `regionModule({ code, at, entry })` does what `cork translate`
+does, from code.
 
-Every number cork works with is a setting: [`SETTINGS.md`](SETTINGS.md). The defaults are the ones
-games were measured with.
+Every threshold and size cork works with can be set: the list is in [`SETTINGS.md`](SETTINGS.md).
+The defaults are the ones games were measured with.
 
-In Bottlify the core loads cork by URL and never imports it: `createEngine` implements the contract
-in [`engine.js`](../core/src/layers/cpu/engine.js), and the core adds Win32, threads and the
-scheduler on top. `@bottlify/core` ships a built copy; this package is needed directly only to use
-cork on its own, or to load your own build with `createApp({ cork: { moduleUrl } })`.
+Bottlify does not import cork; it loads it by URL. `createEngine` implements the contract in
+[`engine.js`](../core/src/layers/cpu/engine.js), and the core adds Win32, threads and the scheduler
+on top. `@bottlify/core` ships a built copy of cork, so this package is needed directly only to use
+cork on its own, or to load another build with `createApp({ cork: { moduleUrl } })`.
 
 ## Source
 
 | Part | Files | What it does |
 | --- | --- | --- |
-| Decoder | `src/decode/` | Bytes to instructions. Hand-written opcode tables; for every instruction it knows its operands, length, the flags it reads and writes and how it can fault. An unknown opcode is refused by name. |
-| Region builder | `src/region.js`, `src/helpers.js` | Collects a region from an entry address. Recognizes compiler helpers such as MSVC's `_ftol2` by their bytes. |
-| Emitter | `src/emit/` | A region to one WebAssembly function: integer instructions, flags, memory, x87, MMX and SSE each in a file of their own. Works on decoded instructions directly, without an intermediate language. |
-| Encoder | `src/wasm/` | WebAssembly bytes; finds out which features (SIMD, tail calls) the engine has. |
-| Runtime | `src/runtime/` | The candidate queue, batches, workers (`translator.worker.js`), the shared store of already emitted functions (`arena.js`), publishing, the entry hash, page flags, dropping code that was written over, relinking small modules into large ones. |
-| Interpreters | `src/interp.js`, `src/fast.js`, `src/interp-wasm.c` | A JavaScript interpreter for the first steps, then one compiled from C to WebAssembly. |
-| Instruction model | `src/ir.js`, `src/ir-x87.js`, `src/ir-simd.js` | A slow, plain description of what each instruction does. The JavaScript interpreter runs on it, and translated code is checked against it. |
+| Decoder | `src/decode/` | Turns bytes into instructions. The opcode tables are written by hand: for each instruction the decoder knows its operands, its length, which flags it reads and writes, and how it can fault. An unknown opcode stops it, named. |
+| Region former | `src/region.js`, `src/helpers.js` | Forms a region from an entry. Recognises compiler helpers such as MSVC's `_ftol2` by their bytes and puts what they do in place of the call. |
+| Emitter | `src/emit/` | Turns a region into one WebAssembly function: integer instructions, flags, memory, the x87, MMX and SSE, each in a file of its own. It works straight from the decoded instructions, with no intermediate language. |
+| Encoder | `src/wasm/` | Writes the WebAssembly bytes, and finds out what the engine supports (SIMD, tail calls). |
+| Runtime | `src/runtime/` | Everything around translation: the candidate queue, batches, translation workers (`translator.worker.js`), the shared memory finished code is kept in (`arena.js`), publishing, the entry hash, page flags, dropping rewritten code, indirect call prediction, gathering small modules into big ones. |
+| Interpreters | `src/interp.js`, `src/fast.js`, `src/interp-wasm.c` | An interpreter in JavaScript for the very first steps, then one built from C into WebAssembly. |
+| Instruction model | `src/ir.js`, `src/ir-x87.js`, `src/ir-simd.js` | A slow, simple account of what each instruction does. The JavaScript interpreter runs on it, and translated code is checked against it. |
 
 How cork sits in Bottlify (threads, the translation pool, several executors of one process):
 [`docs/architecture.md`](../../docs/architecture.md), section 5.
@@ -339,19 +360,19 @@ How cork sits in Bottlify (threads, the translation pool, several executors of o
 ```sh
 npm test -w @bottlify/cork                  # unit tests and gates, a minute or two
 npm run fetch:corpus                        # once: the instruction corpus
-npm run test:integration -w @bottlify/cork  # the corpus suites
+npm run test:integration -w @bottlify/cork  # the suites over the corpus
 node modules/cork/bench/run.mjs             # the benchmark (bench/README.md)
 ```
 
-- **Instruction corpus** (`npm run fetch:corpus`, pinned by `corpus-lock.json`): cases recorded on
-  real processors. Every case runs through the decoder, both interpreters and translated code, and
-  the result must match the hardware's.
-- **Sequence corpus** (`src/testing/sequences-judge.js`): generated sequences of instructions, run
-  on the instruction model and on translated code, compared bit for bit.
-- **Gates**: every fast path is compared with the slow one beside it on generated programs.
-  Translated against interpreted runs (`machine.test.js`), worker against same-thread translation
-  (`runtime/translators.test.js`), the shared arena (`runtime/arena.test.js`), a batch formed and
-  published in parts against one done at once (`runtime/forming-parts.test.js`), locked
-  instructions against the model (`emit/locked.test.js`).
+- **Instruction corpus** (`npm run fetch:corpus`, its version pinned in `corpus-lock.json`): cases
+  recorded on real processors. Each goes through the decoder, both interpreters and translated code,
+  and the result has to match the hardware.
+- **Sequence corpus** (`src/testing/sequences-judge.js`): generated chains of instructions run on
+  the model and in translated code and are compared bit for bit.
+- **Gates**: every fast path has a slow twin, and the two are compared on generated programs.
+  Translated against interpreted (`machine.test.js`), a worker's translation against one on the
+  same thread (`runtime/translators.test.js`), the shared arena (`runtime/arena.test.js`), a batch
+  formed and published in parts against one formed whole (`runtime/forming-parts.test.js`),
+  `lock`-prefixed instructions against the model (`emit/locked.test.js`).
 
-Vanilla ES modules with JSDoc, tests on `node:test`. MPL-2.0.
+Plain ES modules with JSDoc, tests on `node:test`. Licensed MPL-2.0.
