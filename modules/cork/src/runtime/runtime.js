@@ -950,9 +950,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
         // each was left as it was: no callee took a share of its samples, or
         // only ones tried already; its regions formed again as often as they
         // may be; formed again with none of its new callees in; no region
-        // holding it to form again.
+        // holding it to form again. And the calls a region was formed again
+        // without sampling (`quiet`).
         predictDue: 0, predictNoShare: 0, predictReformsOut: 0, predictNotFormed: 0,
-        predictNoRegion: 0, predictHeld: 0,
+        predictNoRegion: 0, predictHeld: 0, predictQuiet: 0,
         queueDrops: 0, queueEvictions: 0, emitFailures: 0,
         cacheHits: 0, cacheMisses: 0, missNoRecord: 0, missNoModule: 0, precisionSwitches: 0,
         readSwitches: 0,
@@ -2927,11 +2928,12 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
     };
 
     /**
-     * Each region `reformStep` is to form again: its calls' callees, and by call
-     * the ones new to it -- kept from one step to the next while forming them
-     * all in one would hold the thread past `holdMs`.
+     * Each region `reformStep` is to form again: its calls' callees, by call
+     * the ones new to it, and the calls it is to stop sampling -- kept from one
+     * step to the next while forming them all in one would hold the thread past
+     * `holdMs`.
      * @type {Map<RegionRecord, { targets: Map<number, number[]>,
-     *     added: Map<number, number[]> }>}
+     *     added: Map<number, number[]>, quiet: Set<number> }>}
      */
     const reformsWanted = new Map();
 
@@ -2943,10 +2945,15 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
      * replaces when it comes back -- only when one of them was formed in, a
      * small leaf; the others' regions are left as they are, keeping the
      * callees they could not take (`unformed`) so as not to be formed again for
-     * them. Each region holding a call is asked by what it has itself, not by
-     * what the call's other regions were given. One batch rather than one a
-     * call: each is a module the engine thread instantiates, and a round trip
-     * through the worker that new code waits behind.
+     * them. A call that has nothing more to form into a region, and none of
+     * its callees formed in there, is named in it with no callees and the
+     * region formed again without the profile at it (`quiet`): its samples
+     * would never be used, and every call paid for them, `spread` 3.5% in
+     * Node (roadmap/negative-results.md). Each region holding a call is asked
+     * by what it has itself, not by what the call's other regions were given.
+     * One batch rather than one a call: each is a module the engine thread
+     * instantiates, and a round trip through the worker that new code waits
+     * behind.
      *
      * @param {any} store
      * @returns {boolean} whether a batch was taken this call
@@ -2989,23 +2996,23 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
             if (shared.length === 0)
             {
                 counts.predictNoShare++;
-                if (log)
-                {
-                    log.last = 'spread';
-                }
-                continue;
             }
             let placed = false;
             let out = false;
+            let quieted = false;
             for (const record of spanning)
             {
-                const one = wanted.get(record)
-                    ?? { targets: new Map(record.targets ?? []), added: new Map() };
+                const one = wanted.get(record) ?? { targets: new Map(record.targets ?? []),
+                    added: new Map(), quiet: new Set() };
                 const had = one.targets.get(site) ?? [];
                 const unformed = record.unformed?.get(site) ?? [];
                 const added = shared.filter(target=>!had.includes(target)
                     && !unformed.includes(target)).slice(0, PREDICT_CALLEES - had.length);
-                if (added.length === 0)
+                // A call named with no callees is quiet here already; one with a
+                // callee formed in samples only the calls that still leave.
+                const quiet = added.length === 0 && one.targets.get(site)?.length !== 0
+                    && had.every(target=>unformed.includes(target));
+                if (added.length === 0 && !quiet)
                 {
                     continue;
                 }
@@ -3015,8 +3022,17 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
                     out = true;
                     continue;
                 }
-                one.targets.set(site, [...had, ...added]);
-                one.added.set(site, added);
+                if (quiet)
+                {
+                    one.targets.set(site, []);
+                    one.quiet.add(site);
+                    quieted = true;
+                }
+                else
+                {
+                    one.targets.set(site, [...had, ...added]);
+                    one.added.set(site, added);
+                }
                 wanted.set(record, one);
                 placed = true;
             }
@@ -3040,7 +3056,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
             }
             else if (log)
             {
-                log.last = 'fresh';
+                log.last = quieted ? 'quiet' : 'fresh';
             }
         }
         const formed = [];
@@ -3048,7 +3064,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
         // Formed in one call, a batch of them held the thread for thirty milliseconds.
         const until = holding() ? performance.now() + creditNow() : Infinity;
         let tried = 0;
-        for (const [record, { targets, added }] of wanted)
+        for (const [record, { targets, added, quiet }] of wanted)
         {
             if (tried > 0 && performance.now() >= until)
             {
@@ -3063,7 +3079,9 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
             const region = formRegion(read, record.entry,
                 { ...formHere, translatable, callTargets: targets });
             const starts = new Set(region.blocks.map(block=>block.start));
-            let taken = false;
+            // Formed without the profile at a quiet call, the region is worth
+            // publishing whether or not a callee was formed in.
+            let taken = quiet.size > 0;
             for (const [site, callees] of added)
             {
                 const missed = callees.filter(target=>!starts.has(target));
@@ -3090,6 +3108,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
                 counts.predictNotFormed++;
                 continue;
             }
+            counts.predictQuiet += quiet.size;
             formed.push({ region, entryTop: record.entryTop, stamp: stamp(region.pages),
                 cached: null, ...precisionFlags(region, record.entryTop), loose,
                 wrapped: !readsChecked,
@@ -4705,6 +4724,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
                 prediction: { due: counts.predictDue, noShare: counts.predictNoShare,
                     reformsOut: counts.predictReformsOut, notFormed: counts.predictNotFormed,
                     noRegion: counts.predictNoRegion, held: counts.predictHeld,
+                    quiet: counts.predictQuiet,
                     sites: [...siteLog].sort((a, b)=>b[1].samples - a[1].samples).slice(0, 4096)
                         .map(([site, one])=>({ site, ...one })),
                     reforms: counts.reforms },

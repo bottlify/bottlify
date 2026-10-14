@@ -111,13 +111,14 @@ export function classOf(instruction){
  * time, and a site deep in the frame was sampled a hundred thousand times
  * less often than one beside a `Present`. Which calls is the count's golden
  * ratio hash, not every n-th: a loop over sixteen objects sampled every
- * sixty-fourth call would see one object only. Off, one load and a branch;
- * the call's target is in `count`.
+ * sixty-fourth call would see one object only. Off, one load and a branch,
+ * at every call: a `quiet` call, sampled enough to know there is nothing to
+ * form in, has none. The call's target is in `count`.
  *
  * @param {E} e @param {number} site
  */
 function profileCall(e, site){
-    if (e.context.profileCalls !== true)
+    if (e.context.profileCalls !== true || e.region.blocks[e.blockIndex].exit.quiet === true)
     {
         return;
     }

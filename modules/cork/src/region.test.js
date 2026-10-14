@@ -281,6 +281,27 @@ test('an indirect call\'s predicted callees are formed in as a direct call\'s ar
         callTargets: new Map([[0x1000, [0x1003]]]) }).entries, [0x1000, 0x1002]);
 });
 
+test('an indirect call named with no callees is quiet, hashed apart, and a fixed slot still'
+    + ' predicts its callee', ()=>{
+    // 1000: call eax (ff d0)   1002: ret   F = 1003: inc eax; ret
+    const code = [0xff, 0xd0, 0xc3, 0x40, 0xc3];
+    const plain = regionOf(code);
+    const quiet = regionOf(code, 0x1000, { callTargets: new Map([[0x1000, []]]) });
+    assert.deepEqual(quiet.entries, plain.entries, 'the same blocks');
+    assert.equal(quiet.blocks[0].exit.quiet, true);
+    assert.equal(quiet.blocks[0].exit.predicted, undefined);
+    assert.equal(plain.blocks[0].exit.quiet, undefined);
+    assert.notEqual(quiet.hash, plain.hash, 'other code: no profile at the call');
+    // 1000: call [1008] (ff 15 08 10 00 00)   1006: ret   1007: int3   1008: F's address
+    // F = 100c: inc eax; ret -- the slot names F as it reads now, quiet or not.
+    const slot = [0xff, 0x15, 0x08, 0x10, 0, 0, 0xc3, 0xcc, 0x0c, 0x10, 0, 0, 0x40, 0xc3];
+    const read = regionOf(slot, 0x1000, { callTargets: new Map([[0x1000, []]]) });
+    assert.equal(read.blocks[0].exit.predicted, true);
+    assert.deepEqual(read.blocks[0].exit.targets, [0x100c]);
+    assert.equal(read.blocks[0].exit.quiet, true);
+    assert.notEqual(read.hash, regionOf(slot).hash);
+});
+
 test('a predicted callee is formed into a region its own function fills, within the room'
     + ' past the caps', ()=>{
     // 1000: call ebx; then ten of inc eax; jz +0 (a block each); ret -- twelve blocks of

@@ -45,11 +45,13 @@ import { decode } from './decode/decoder.js';
  * @property {import('./decode/decoder.js').Instruction[]} instructions
  * @property {{ kind: ExitKind, targets: number[], next: number, backEdge: boolean,
  *              refusal?: import('./decode/decoder.js').Refusal,
- *              table?: SwitchTable, predicted?: boolean, apart?: Apart }} exit
+ *              table?: SwitchTable, predicted?: boolean, apart?: Apart,
+ *              quiet?: boolean }} exit
  *   an `indirect` exit through a switch's table of addresses carries the table,
  *   and its distinct targets as `targets`; an indirect call the runtime has
  *   seen go to a few callees (`callTargets`) is `predicted`, those callees its
- *   `targets`; a call whose callee forming did not take in says why (`apart`)
+ *   `targets`, and one it has seen enough of to know it has none to form in is
+ *   `quiet`; a call whose callee forming did not take in says why (`apart`)
  */
 
 /**
@@ -524,7 +526,8 @@ export function formShared(){
  *     of RUNTIME_HELPERS or of the list given;
  *     callTargets:
  *     by the address of an indirect call, the callees it has been seen to go to, formed in
- *     as a direct call's small callee is -- the call compares its target with each;
+ *     as a direct call's small callee is -- the call compares its target with each; a call
+ *     named with none is `quiet`, its calls no longer sampled;
  *     predictedRoom: the blocks and bytes past `maxBlocks` and `maxBytes` those callees may
  *     take, all of them together: a region full of its own function is where a hot call
  *     was left out, and the runtime asks for its callees having seen it go there;
@@ -887,8 +890,16 @@ export function formRegion(read, entry,
                 // byte made a block of every byte of the padding, until the
                 // region had none left for the callees it forms in.
                 follow(exit.next, depth);
+                const listed = exit.kind !== 'indirect' ? undefined : callTargets?.get(decoded.eip);
+                // Named with no callees, the call's samples showed none worth forming
+                // in: it is sampled no more (`quiet`), a fixed slot still read.
                 const predicted = exit.kind !== 'indirect' ? undefined
-                    : callTargets?.get(decoded.eip) ?? slotCallee(read, decoded, leafAt);
+                    : listed !== undefined && listed.length > 0 ? listed
+                        : slotCallee(read, decoded, leafAt);
+                if (listed !== undefined && listed.length === 0)
+                {
+                    exit.quiet = true;
+                }
                 if (leafCalls && predicted !== undefined && predicted.length > 0)
                 {
                     exit.predicted = true;
@@ -1036,13 +1047,14 @@ function helpersOf(blocks){
 
 /**
  * A region's hash, over what decides its code: its blocks' bytes in address
- * order, the callees its predictions name and its switch tables' entries. Two
- * FNV lanes, 64 bits: the hash is what a stored translation is found by, and a
- * store -- a bundle's seed above all, made on another machine from a build of
- * the program that may differ -- must not answer for other bytes at the same
- * entry. Thirty-two bits met that at one pair in four billion, and a birthday
- * search finds such a pair in a second. Read again later, it tells a region
- * whose code was written since it was formed from one that still fits.
+ * order, the callees its predictions name, its quiet calls and its switch
+ * tables' entries. Two FNV lanes, 64 bits: the hash is what a stored
+ * translation is found by, and a store -- a bundle's seed above all, made on
+ * another machine from a build of the program that may differ -- must not
+ * answer for other bytes at the same entry. Thirty-two bits met that at one
+ * pair in four billion, and a birthday search finds such a pair in a second.
+ * Read again later, it tells a region whose code was written since it was
+ * formed from one that still fits.
  *
  * @param {(address: number) => number} read
  * @param {{ blocks: Block[], tables?: SwitchTable[] }} region  its blocks in address order
@@ -1065,9 +1077,12 @@ export function hashRegion(read, { blocks, tables = [] }){
         }
     }
     // A prediction decides blocks as a table does: its callees are hashed too.
+    // A quiet call decides code, the profile left out: hashed as a callee at 0,
+    // which no call is predicted to.
     for (const block of blocks)
     {
-        for (const target of block.exit.predicted ? block.exit.targets : [])
+        for (const target of [...block.exit.predicted ? block.exit.targets : [],
+            ...block.exit.quiet ? [0] : []])
         {
             for (let shift = 0; shift < 32; shift += 8)
             {

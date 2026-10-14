@@ -402,7 +402,14 @@
  *     emitted here meanwhile), or taking the batches.
  * @property {number} [reforms]        Regions formed again with the callees their indirect
  *     calls were sampled going to (`callTargets`).
- * @property {number} [copied]         Regions formed again with copies of the blocks inside
+ * @property {{ due: number, noShare: number, reformsOut: number, notFormed: number,
+ *     noRegion: number, held: number, quiet: number, reforms: number,
+ *     sites: object[] }} [prediction]  With `callTargets`: the indirect calls whose samples came
+ *     due, and why each was left as it was -- no callee took a share of them, its regions formed
+ *     again as often as they may be, its callees not formed in, no region holding it, or every
+ *     region having its callees -- the calls a region was formed again without sampling
+ *     (`quiet`), and the most sampled calls.
+ * @property {number} [copied]        Regions formed again with copies of the blocks inside
  *     their loops, which the machine kept coming back into there (`structure`).
  * @property {number} [crossings]      Transfers out of a running module into another,
  *     through the function table: the rest are direct tail calls.

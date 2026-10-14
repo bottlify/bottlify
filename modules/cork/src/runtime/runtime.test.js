@@ -2474,6 +2474,111 @@ test('a call its prediction takes is not sampled: the calls that still leave are
     assert.equal(run(), 0, 'every call formed in');
 });
 
+/**
+ * The loop of `dispatchLoop` over sixty-four callees, one a slot (`and eax, 63`): H_k at
+ * CODE + 0x200 + 4k adds k + 1 to edx -- an indirect call whose targets no callee takes an
+ * eighth of. Sixteen, a period the profile's sampled calls are often apart by (144 calls),
+ * gave one callee a quarter of the samples.
+ * @param {number} n
+ */
+const spreadLoop = n=>{
+    const { code, table } = dispatchLoop(n);
+    const callees = Array.from({ length: 64 }, (_, k)=>CODE + 0x200 + k * 4);
+    return { code: [...code.slice(0, 7), 0x83, 0xe0, 0x3f, ...code.slice(10, 21),
+        ...Array.from({ length: 0x200 - 21 }, ()=>0xcc),
+        ...callees.flatMap((_, k)=>[0x83, 0xc2, k + 1, 0xc3])], table, slots: callees };
+};
+
+/**
+ * A machine running a loop over an indirect call through `table`, its regions translated:
+ * `run` runs it once from the top, and `counted` once with the profile on, answering how
+ * many calls it counted.
+ * @param {object} config @param {{ code: number[], table: number, slots: number[] }} loop
+ * @param {number} sum  what the loop leaves in edx
+ */
+const profiledLoop = async(config, { code, table, slots }, sum)=>{
+    const m = machine({ callTargets: true, ...config });
+    m.write(CODE, code);
+    m.write(table, slots.flatMap(slot=>[slot & 0xff, slot >>> 8 & 0xff, 0, 0]));
+    const starts = [...new Set(slots), CODE];
+    for (const at of starts)
+    {
+        m.runtime.noteHot(at);
+    }
+    // More starts than a batch takes.
+    for (let i = 0; i < 8 && starts.some(at=>m.runtime.entryOf(at) < 0); i++)
+    {
+        await m.runtime.translatePending();
+    }
+    const profile = new DataView(m.memory.buffer);
+    const at = /** @type {number} */ (m.layout.callProfile);
+    const run = ()=>{
+        m.setReg(1, 1600);
+        m.setReg(2, 0);
+        m.setReg(4, 0x80000);
+        assert.equal(m.runtime.run(m.runtime.entryOf(CODE + 5), 1_000_000).kind, 'halt');
+        assert.equal(m.reg(2), sum);
+    };
+    const counted = async()=>{
+        if (profile.getUint32(at, true) === 0)
+        {
+            await m.runtime.translatePending();
+        }
+        assert.equal(profile.getUint32(at, true), 1, 'the profile on');
+        const before = profile.getUint32(at + 4, true);
+        run();
+        return profile.getUint32(at + 4, true) - before;
+    };
+    return { m, run, counted };
+};
+
+test('an indirect call whose callees are spread is sampled until it comes due, then formed'
+    + ' again without the profile', async()=>{
+    if (!probeFeatures().tailCalls)
+    {
+        return;
+    }
+    // Each of the sixty-four a sixty-fourth of the calls, under the eighth a callee needs.
+    const { m, run, counted } = await profiledLoop({}, spreadLoop(1600), 1600 + 25 * 2016);
+    assert.equal(await counted(), 1600, 'every call counted while the profile is on');
+    for (let i = 0; i < 64 && m.runtime.diagnostics().reforms === 0; i++)
+    {
+        run();
+        await m.runtime.translatePending();
+    }
+    const d = m.runtime.diagnostics();
+    assert.equal(d.reforms, 1);
+    assert.equal(d.prediction?.quiet, 1);
+    assert.equal(await counted(), 0, 'formed again, the call is not counted');
+    for (let i = 0; i < 16; i++)
+    {
+        run();
+        await m.runtime.translatePending();
+    }
+    assert.equal(m.runtime.diagnostics().reforms, 1, 'and never formed again for it');
+});
+
+test('an indirect call whose callees cannot be formed in is quiet once it comes due again',
+    async()=>{
+        if (!probeFeatures().tailCalls)
+        {
+            return;
+        }
+        // F and G take most calls, but no callee of more than a byte is formed in.
+        const { m, run, counted } = await profiledLoop({ leafBytes: 1 }, dispatchLoop(1600),
+            800 + 700 * 3 + 100 * 100);
+        for (let i = 0; i < 64 && m.runtime.diagnostics().reforms === 0; i++)
+        {
+            run();
+            await m.runtime.translatePending();
+        }
+        const d = m.runtime.diagnostics();
+        assert.equal(d.reforms, 1);
+        assert.equal(d.prediction?.notFormed, 1, 'first formed again with F and G, not taken');
+        assert.equal(d.prediction?.quiet, 1);
+        assert.equal(await counted(), 0);
+    });
+
 test('a region formed after its call was predicted elsewhere is formed again with the callee'
     + ' too', async()=>{
     if (!probeFeatures().tailCalls)
