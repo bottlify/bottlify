@@ -144,3 +144,85 @@ test('a batch left half formed is formed on with no further ask', async()=>{
         await m.runtime.flush();
     }
 });
+
+/**
+ * A translator lent as a pool lends one, which says it is ready and then holds
+ * every batch it is given: busy for as long as a test wants.
+ */
+function heldTranslator(){
+    /** @type {any[]} */
+    const held = [];
+    /** @type {((data: any) => void) | null} */
+    let answer = null;
+    return {
+        held,
+        ready: ()=>answer?.({ ready: true }),
+        adapter: {
+            post: (/** @type {any} */ message)=>{
+                if (message?.ready !== true)
+                {
+                    held.push(message);
+                }
+            },
+            onMessage: (/** @type {(data: any) => void} */ handler)=>{
+                answer = handler;
+            },
+            onLost: ()=>{},
+            terminate: ()=>{},
+        },
+    };
+}
+
+const turn = ()=>new Promise(resolve=>setTimeout(resolve, 5));
+
+test('a batch formed whole after the pool took its translator back waits for another one',
+    async()=>{
+        const m = machine({ worker: true, translators: 0, batchRegions: 2, maxBatchRegions: 2,
+            ...ONE_A_CALL });
+        const busy = heldTranslator();
+        const taken = heldTranslator();
+        try
+        {
+            m.runtime.attachTranslator?.(busy.adapter);
+            busy.ready();
+            m.runtime.attachTranslator?.(taken.adapter);
+            taken.ready();
+            [0x2000, 0x3000, 0x4000].forEach((at, i)=>m.write(at, piece(i, 100, 3).code));
+            m.runtime.noteHot(0x2000, 0, 64);
+            await m.runtime.translatePending();
+            assert.equal(busy.held.length, 1, 'the first batch is with the first translator');
+            m.runtime.noteHot(0x3000, 0, 2);
+            m.runtime.noteHot(0x4000, 0, 2);
+            const diagnostics = ()=>/** @type {any} */ (m.runtime.diagnostics());
+            // Asked until the credit the first batch spent has come back.
+            for (let i = 0; i < 200 && diagnostics().formedInPart === 0; i++)
+            {
+                await turn();
+                await m.runtime.translatePending();
+            }
+            assert.equal(diagnostics().formedInPart, 1, 'one of the two formed');
+            // The pool takes back the translator the batch was taken for, idle meanwhile.
+            m.runtime.detachTranslator?.(taken.adapter);
+            for (let i = 0; i < 200 && diagnostics().formedWaiting === 0; i++)
+            {
+                await turn();
+                await m.runtime.translatePending();
+            }
+            assert.ok(diagnostics().formedWaiting > 0, 'formed whole, and waiting');
+            assert.deepEqual([m.runtime.entryOf(0x3000), m.runtime.entryOf(0x4000)], [-1, -1],
+                'not emitted on this thread');
+            const lent = heldTranslator();
+            m.runtime.attachTranslator?.(lent.adapter);
+            lent.ready();
+            for (let i = 0; i < 200 && lent.held.length === 0; i++)
+            {
+                await turn();
+            }
+            assert.equal(lent.held.length, 1, 'the translator lent next takes it');
+            assert.equal(lent.held[0].relink.jobs.length, 2);
+        }
+        finally
+        {
+            await m.runtime.flush();
+        }
+    });

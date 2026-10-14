@@ -962,6 +962,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
         // (`holdMs`), that published part of a batch's store hits, and asks
         // the spent credit put off; the hits' modules compiled off this thread.
         formedInPart: 0, publishedInPart: 0, heldBack: 0, compiledApart: 0,
+        // Calls that found a batch whole and every translator busy (`holdMs`).
+        formedWaiting: 0,
         shapeMisses: 0, shapeChecked: 0, x87RelaxedReads: 0, floatMisses: 0, floatsRounded: 0,
         // The milliseconds of translating, by the part of a batch they are:
         // `translateMs` is their sum, so a frame's own figure and the split
@@ -3939,6 +3941,19 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
             resumeWanted = true;
             return 0;
         }
+        if (translatorReady() && freeTranslator() === null)
+        {
+            // Whole, it waits for a translator: one was free when it was taken,
+            // and while it formed a pool took that one back as idle -- emitted
+            // here instead, a batch of hundreds of regions held the thread for
+            // a third of a second. An answer frees one and calls back here.
+            for (const one of formed)
+            {
+                one.waited = true;
+            }
+            counts.formedWaiting++;
+            return 0;
+        }
         forming = null;
         // A region formed by an earlier call was formed from bytes the guest
         // may have written since: one that reads otherwise now goes, a
@@ -4467,6 +4482,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
                 publishedInPart: counts.publishedInPart,
                 heldBack: counts.heldBack,
                 compiledApart: counts.compiledApart,
+                formedWaiting: counts.formedWaiting,
                 // Times an x87 entry moved to the other precision control or to a
                 // test at every rounding instruction (`precisionAt`).
                 precisionSwitches: counts.precisionSwitches,
