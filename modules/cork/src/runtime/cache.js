@@ -47,18 +47,14 @@ export function cacheKey({ version, features, variant = '', layoutId, bundleId, 
 }
 
 /**
- * The key a batch module's bytes are kept under: named by what they hash to,
- * so every region record of the batch names the same bytes, and a batch of
- * other regions later never takes a record's name.
+ * What a module's bytes hash to, the last part of its `moduleKey`: two FNV-1a
+ * lanes over the bytes, 64 bits with their length beside it. Every batch of a
+ * bundle shares one namespace, and a record whose module key another batch's
+ * bytes answered would run the other batch's code.
  *
- * @param {{ version: number, features: { simd: boolean, tailCalls: boolean,
- *     defaultNaNNegative?: boolean }, variant?: string, layoutId: string, bundleId: string }} of
  * @param {Uint8Array} bytes
  */
-export function moduleKey({ version, features, variant = '', layoutId, bundleId }, bytes){
-    // Two FNV-1a lanes over the bytes, 64 bits with their length beside it:
-    // every batch of a bundle shares one namespace, and a record whose module
-    // key another batch's bytes answered would run the other batch's code.
+export function moduleDigest(bytes){
     let low = 0x811c9dc5;
     let high = 0x050c5d1f;
     for (let i = 0; i < bytes.length; i++)
@@ -66,9 +62,25 @@ export function moduleKey({ version, features, variant = '', layoutId, bundleId 
         low = Math.imul(low ^ bytes[i], 0x01000193);
         high = Math.imul(high ^ bytes[i] ^ i & 0xff, 0x01000193);
     }
-    return `cork/${version}${flagsOf(features, variant)}/${layoutId}/${bundleId}/module/`
-        + `${(high >>> 0).toString(16)}${(low >>> 0).toString(16).padStart(8, '0')}`
+    return `${(high >>> 0).toString(16)}${(low >>> 0).toString(16).padStart(8, '0')}`
         + `-${bytes.length.toString(16)}`;
+}
+
+/**
+ * The key a batch module's bytes are kept under: named by what they hash to,
+ * so every region record of the batch names the same bytes, and a batch of
+ * other regions later never takes a record's name.
+ *
+ * @param {{ version: number, features: { simd: boolean, tailCalls: boolean,
+ *     defaultNaNNegative?: boolean }, variant?: string, layoutId: string, bundleId: string }} of
+ * @param {Uint8Array} bytes
+ * @param {string} [digest]  `moduleDigest` of the bytes, where it was taken already (a
+ *     translation worker takes it: over a module of megabytes it held the engine thread)
+ */
+export function moduleKey({ version, features, variant = '', layoutId, bundleId }, bytes,
+    digest = moduleDigest(bytes))
+{
+    return `cork/${version}${flagsOf(features, variant)}/${layoutId}/${bundleId}/module/${digest}`;
 }
 
 /**

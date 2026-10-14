@@ -2404,6 +2404,26 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
             + `${one.loose ? '-s' : ''}${one.wrapped === false ? '-q' : ''}`,
     });
 
+    /** What asks a translator to digest and pack the module it answers with, where it is to be
+     * stored. @param {any} store */
+    const storeVersionFor = store=>(store === null ? {} : { storeVersion: cacheVersion });
+
+    /**
+     * Puts a batch's module in the store, as the translation worker digested
+     * and packed it where it did, and answers the key it is kept under.
+     *
+     * @param {any} store @param {import('./emit-built.js').BuiltBatch} batch
+     * @returns {string}
+     */
+    const storeModule = (store, batch)=>{
+        const key = moduleKey({ version: cacheVersion, features: found, variant,
+            layoutId: layout.id, bundleId: settings.bundleId ?? 'unknown' }, batch.module,
+        batch.digest);
+        store.put(key, batch.packed ?? packRegion({ module: batch.module, labels: [], cut: [],
+            entryTop: 0, instructions: 0 }, cacheVersion)).catch(()=>{});
+        return key;
+    };
+
     /**
      * An emitted batch: its module instantiated once, kept under its own key
      * with a record per region naming it, and every region published from it.
@@ -2445,10 +2465,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
         if (store !== null)
         {
             const storeAt = clock();
-            key = moduleKey({ version: cacheVersion, features: found, variant,
-                layoutId: layout.id, bundleId: settings.bundleId ?? 'unknown' }, batch.module);
-            store.put(key, packRegion({ module: batch.module, labels: [], cut: [], entryTop: 0,
-                instructions: 0 }, cacheVersion)).catch(()=>{});
+            key = storeModule(store, batch);
             if (instance !== null)
             {
                 batchInstances.set(key, instance);
@@ -2516,10 +2533,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
         let key;
         if (store !== null)
         {
-            key = moduleKey({ version: cacheVersion, features: found, variant,
-                layoutId: layout.id, bundleId: settings.bundleId ?? 'unknown' }, batch.module);
-            store.put(key, packRegion({ module: batch.module, labels: [], cut: [], entryTop: 0,
-                instructions: 0 }, cacheVersion)).catch(()=>{});
+            key = storeModule(store, batch);
             batchInstances.set(key, instance);
         }
         for (let i = 0; i < records.length; i++)
@@ -3094,7 +3108,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
                 alone: true };
             translator.pending = pending;
             translator.adapter.post({ id: pending.id, relink, layout, features: found,
-                options: emitOptions() }, [...copies.values()].map(bytes=>bytes.buffer));
+                options: emitOptions(), ...storeVersionFor(store) },
+            [...copies.values()].map(bytes=>bytes.buffer));
             return true;
         }
         const batch = relinkBatch(relink, layout, found, emitOptions(), emitCache);
@@ -3596,7 +3611,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
                     formable: unbuilt.flatMap(one=>[...one.region.formable ?? one.region.pages]),
                     form: formOptions,
                 },
-                layout, features: found, options: emitOptions(),
+                layout, features: found, options: emitOptions(), ...storeVersionFor(store),
             }, [...copies.values()].map(bytes=>bytes.buffer));
             return published;
         }

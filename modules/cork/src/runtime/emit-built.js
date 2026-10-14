@@ -62,6 +62,8 @@ import { openArena } from './arena.js';
  *     one per job, in order: a region the emitter failed on is left out of the module
  * @property {number} emitMs
  * @property {number} encodeMs
+ * @property {string} [digest]  `moduleDigest` of `module`, taken by a translation worker
+ * @property {Uint8Array} [packed]  and the store's record of `module` (`packRegion`)
  */
 
 /**
