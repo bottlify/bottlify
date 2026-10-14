@@ -97,11 +97,14 @@ export function openRecordsWriter(){
         }
         waiting.clear();
     };
-    /** @param {any} message @returns {Promise<{ ok: boolean, message?: string }>} */
-    const ask = message=>new Promise(resolve=>{
+    /**
+     * @param {any} message @param {Transferable[]} [transfer]
+     * @returns {Promise<{ ok: boolean, message?: string }>}
+     */
+    const ask = (message, transfer = [])=>new Promise(resolve=>{
         const id = ++next;
         waiting.set(id, resolve);
-        worker.postMessage({ ...message, id });
+        worker.postMessage({ ...message, id }, transfer);
     });
     /** @param {{ ok: boolean, message?: string }} answer */
     const done = answer=>{
@@ -112,7 +115,9 @@ export function openRecordsWriter(){
     };
     return {
         open: async file=>(await ask({ type: 'open', file })).ok,
-        write: async writes=>done(await ask({ type: 'write', writes })),
+        // The records' buffers go across, not copies of them (`appendRecords`).
+        write: async writes=>done(await ask({ type: 'write', writes },
+            [...new Set(writes.map(([, bytes])=>bytes.buffer))])),
         flush: async()=>done(await ask({ type: 'flush' })),
         close: ()=>{
             ask({ type: 'close' }).then(()=>worker.terminate());
@@ -687,7 +692,35 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
     const appendRecords = async writes=>{
         if (access !== null && writer !== null)
         {
-            await writer.write(writes);
+            // Handed over, not copied: cloned into the message, a relinked
+            // module's megabytes held the thread for ten milliseconds. A record
+            // that is the whole of its buffer is the store's from `put` on and
+            // goes across as it is; one inside a larger buffer (a seed's) is
+            // copied out. A few milliseconds' worth at a time, the thread let
+            // go between, as the writes here are.
+            /** @type {Promise<void>[]} */
+            const sent = [];
+            /** @type {[number, Uint8Array][]} */
+            let group = [];
+            let since = performance.now();
+            for (const [offset, bytes] of writes)
+            {
+                const whole = bytes.buffer instanceof ArrayBuffer && bytes.byteOffset === 0
+                    && bytes.byteLength === bytes.buffer.byteLength;
+                group.push([offset, whole ? bytes : bytes.slice()]);
+                if (performance.now() - since >= WRITE_SLICE_MS)
+                {
+                    sent.push(writer.write(group));
+                    group = [];
+                    await new Promise(resolve=>setTimeout(resolve, 0));
+                    since = performance.now();
+                }
+            }
+            if (group.length > 0)
+            {
+                sent.push(writer.write(group));
+            }
+            await Promise.all(sent);
             return;
         }
         if (access !== null)
@@ -823,12 +856,14 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
             try
             {
                 const offset = end;
-                end += bytes.length;
+                // Read first: a writer takes the bytes away.
+                const { length } = bytes;
+                end += length;
                 await appendRecords([[offset, bytes]]);
                 const recordName = fileNameOf(key);
                 /** @type {Map<string, Place>} */ (places)
-                    .set(recordName, { offset, length: bytes.length, session });
-                pendingLines.push(`${recordName} ${offset} ${bytes.length}\n`);
+                    .set(recordName, { offset, length, session });
+                pendingLines.push(`${recordName} ${offset} ${length}\n`);
                 await publish();
             }
             catch {
