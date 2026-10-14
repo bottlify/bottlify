@@ -162,6 +162,7 @@ export function createKernelModule(){
                 // Below a page the emulator cannot honour a smaller quantum anyway,
                 // so asking for one would only be a lie in the configuration.
                 quantum: config?.quantum ?? 100_000,
+                soloQuantum: config?.soloQuantum,
                 ids: config?.ids,
                 ...published(cpu, log),
             });

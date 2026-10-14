@@ -68,6 +68,9 @@ export const THREAD_STATES = ['ready', 'running', 'blocked', 'terminated'];
 /** How many seconds back the busy time by thread is kept. */
 const BUSY_SECONDS = 10;
 
+/** How far off, in guest ms, the soonest deadline must be for a turn to be a solo one. */
+const SOLO_CLEAR_MS = 16;
+
 /** A wait this short or shorter, in guest ms, is a thread working in short periods. */
 const SHORT_WAIT_MS = 20;
 
@@ -134,6 +137,9 @@ const readyNow = thread=>{
  * @param {any} options.cpu        The cpu layer's API.
  * @param {any} options.switcher   The single switch primitive.
  * @param {number} [options.quantum]  Retired instructions per turn.
+ * @param {number} [options.soloQuantum]  Retired instructions per turn of a thread no other
+ *        is ready beside, with no other executor and no deadline near (`SOLO_CLEAR_MS`); ten
+ *        quanta unless given.
  * @param {number} [options.starvation]
  *        Guest milliseconds a ready thread may be passed over before it is
  *        raised above everything for one turn. Windows uses about four seconds.
@@ -159,6 +165,7 @@ const readyNow = thread=>{
  */
 export function createScheduler(options){
     const { cpu, switcher, quantum = 100_000, now = ()=>0, skipTo = ()=>0 } = options;
+    const soloQuantum = options.soloQuantum ?? quantum * 10;
     // A gigabyte's worth of pages when nobody says: what a machine is given
     // by default, and small enough to make for every scheduler a test builds.
     const pages = options.pages ?? new Float64Array(1024 * 1024 * 1024 / PAGE + 1);
@@ -696,8 +703,9 @@ export function createScheduler(options){
      *
      * @param {any} next @param {number} instructions @param {number} began  host ms
      * @param {number} from  where the slice began @param {number} at  where it ended
+     * @param {number} [asked]  the instructions the slice was given
      */
-    const account = (next, instructions, began, from, at)=>{
+    const account = (next, instructions, began, from, at, asked = quantum)=>{
         const held = wall() - began;
         const could = Math.min(readyAtSlice.size, 3);
         parallel.ms[could] += held;
@@ -771,7 +779,7 @@ export function createScheduler(options){
         // hold the machine four times as long and say nothing, and the only
         // symptom would be a frame rate nobody could account for. Asking is
         // not knowing; this is the knowing.
-        if (instructions > quantum)
+        if (instructions > asked)
         {
             overruns++;
             if (instructions > worstSlice)
@@ -981,9 +989,10 @@ export function createScheduler(options){
      * answering the other executors at each of its crossings.
      *
      * @param {any} next
+     * @param {boolean} [shared]  whether the process has other executors
      * @returns {{ ran: any | null, instructions: number, switched: boolean }}
      */
-    const runHere = next=>{
+    const runHere = (next, shared = false)=>{
         runsOnce(next);
         const resume = resumeOf(next);
         noteGap(next);
@@ -1017,7 +1026,19 @@ export function createScheduler(options){
         }
         inSlice = true;
         mostAtOnce = Math.max(mostAtOnce, placed.size + 1);
-        let instructions = cpu.runSlice(quantum);
+        // A thread nobody else is ready beside has nobody to be fair to: its
+        // turn is longer, as the turn itself -- the host's account, the next
+        // choice, the event loop's look -- was a quarter of the time of a
+        // workload translated code ran at three billion instructions a second,
+        // for whom a quantum is 30 microseconds. A deadline coming near keeps
+        // the quantum, so a timed wait ends no later than it did. So does a
+        // process with other executors: a thread readied mid-turn would wait
+        // for its end with one of them free, and their calls into the host
+        // are answered here between turns.
+        const asked = !shared && readyAtSlice.size === 0
+            && (noDeadlineBefore === null || noDeadlineBefore - now() > SOLO_CLEAR_MS)
+            ? soloQuantum : quantum;
+        let instructions = cpu.runSlice(asked);
         inSlice = false;
         lastSlice = instructions;
         // A slice that ran out inside a routine the host placed to run
@@ -1029,7 +1050,7 @@ export function createScheduler(options){
         {
             instructions += cpu.runSlice(ATOMIC_STEP);
         }
-        account(next, instructions, began, from, cpu.eip?.() ?? 0);
+        account(next, instructions, began, from, cpu.eip?.() ?? 0, asked);
         // A slice that ended on a host call still answering: the answer is the
         // thread's own call, and once it comes the thread goes on (`pick`).
         next.hostContinues = next.awaitingHost === true;
@@ -1113,7 +1134,7 @@ export function createScheduler(options){
             const here = choose(remotes, bell);
             if (here !== null)
             {
-                const turn = runHere(here);
+                const turn = runHere(here, true);
                 const after = answerExecutors();
                 return { ran: turn.ran, instructions: turn.instructions + instructions
                     + after.instructions, switched: turn.switched };

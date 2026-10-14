@@ -267,6 +267,9 @@ const hashText = (hash, text)=>{
  *     rather than the guest's code.
  * @property {number} [quantum]  Guest instructions per scheduler turn. Lowering
  *           it is what makes `sample` a profile rather than a rumour.
+ * @property {number} [soloQuantum]  Guest instructions per turn of a thread no other is
+ *           ready beside, in a process with one executor, while no timed wait or timer is
+ *           due within 16 ms. Default ten quanta.
  * @property {number} [executors]  Executors of the program's process under cork: past
  *           the process's own thread, each a worker running one of its threads at once
  *           with the others, the locked instructions atomic (roadmap/v2, stage 3).
@@ -3627,6 +3630,9 @@ async function buildApp(options){
             // gets a turn. Lowering it is how a sampled profile gets enough
             // points to say anything; raising it costs nothing but resolution.
             quantum: options.quantum,
+            // A thread alone takes longer turns: the turn's own cost is what
+            // a short one buys nothing for (the kernel's scheduler).
+            soloQuantum: options.soloQuantum,
             // Off unless asked for: see the kernel's `preemption`.
             preemption: options.preemption,
             // Every thread gets the stack the image was linked to expect, the

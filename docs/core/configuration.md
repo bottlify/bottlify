@@ -48,6 +48,7 @@ publishing). The tables list only the settings that are data. `memory` and `load
 | Setting | Default | What it does |
 | --- | --- | --- |
 | `quantum` | 100 000 | Guest instructions per scheduler turn. |
+| `soloQuantum` | 10 quanta | Guest instructions per turn of a thread no other is ready beside, in a process with one executor, while no timed wait or timer is due within 16 ms: with nobody to share the processor with, a turn only costs the host its own bookkeeping. |
 | `preemption` | `false` | End a turn early when a thread of higher priority is due. |
 | `pendingYieldMs` | 1 | While a host answer is outstanding and other threads still run, how often the loop leaves for the event loop to hear it. |
 | `stacks` | set by `createApp` | Where thread stacks are carved from and how big each is: `base`, `size`, `limit`. |
