@@ -1749,9 +1749,12 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
      * each an entry at any top once published: a candidate among them is
      * already translated by one (a loop's head and its cases were all hot at
      * once, and each formed the whole loop again). It is noted again should
-     * its block get no entry after all.
+     * its block get no entry after all. `forTranslator`: a translator was free
+     * when it was taken, so it goes to one -- emitted here only should none be
+     * left at all.
      * @type {{ batch: [number, number][], next: number, formed: any[],
-     *     covered: Set<number>, ceiling: number, takenAt: number } | null}
+     *     covered: Set<number>, ceiling: number, takenAt: number,
+     *     forTranslator: boolean } | null}
      */
     let forming = null;
     /**
@@ -3824,7 +3827,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
         const wanted = Math.min(ceiling,
             Math.max(settings.batchRegions, queue.size >> 2));
         forming = { batch: hottest(wanted), next: 0, formed: [], covered: new Set(), ceiling,
-            takenAt: performance.now() };
+            takenAt: performance.now(), forTranslator: freeTranslator() !== null };
         return formOn();
     };
 
@@ -3941,12 +3944,14 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
             resumeWanted = true;
             return 0;
         }
-        if (translatorReady() && freeTranslator() === null)
+        if (step.forTranslator && freeTranslator() === null
+            && translators.some(one=>!one.leaving))
         {
             // Whole, it waits for a translator: one was free when it was taken,
-            // and while it formed a pool took that one back as idle -- emitted
-            // here instead, a batch of hundreds of regions held the thread for
-            // a third of a second. An answer frees one and calls back here.
+            // and while it formed a pool took that one back as idle, or the
+            // run's pool had its workers between processes -- emitted here
+            // instead, a batch of hundreds of regions held the thread for a
+            // third of a second. An answer, or a translator ready, calls back.
             for (const one of formed)
             {
                 one.waited = true;

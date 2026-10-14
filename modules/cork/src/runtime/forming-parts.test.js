@@ -226,3 +226,50 @@ test('a batch formed whole after the pool took its translator back waits for ano
             await m.runtime.flush();
         }
     });
+
+test('a batch formed whole while the only translator is replaced waits for the one loading',
+    async()=>{
+        const m = machine({ worker: true, translators: 0, batchRegions: 2, maxBatchRegions: 2,
+            ...ONE_A_CALL });
+        const first = heldTranslator();
+        try
+        {
+            m.runtime.attachTranslator?.(first.adapter);
+            first.ready();
+            [0x3000, 0x4000].forEach((at, i)=>m.write(at, piece(i, 100, 3).code));
+            m.runtime.noteHot(0x3000, 0, 2);
+            m.runtime.noteHot(0x4000, 0, 2);
+            const diagnostics = ()=>/** @type {any} */ (m.runtime.diagnostics());
+            // Taken back right after the call that formed one of the two, before
+            // the runtime's own call back forms the other.
+            for (let i = 0; i < 200 && diagnostics().formedInPart === 0; i++)
+            {
+                await turn();
+                await m.runtime.translatePending();
+            }
+            assert.equal(diagnostics().formedInPart, 1, 'one of the two formed');
+            // The pool takes the idle translator back and lends another, still loading.
+            m.runtime.detachTranslator?.(first.adapter);
+            const next = heldTranslator();
+            m.runtime.attachTranslator?.(next.adapter);
+            for (let i = 0; i < 200 && diagnostics().formedWaiting === 0; i++)
+            {
+                await turn();
+                await m.runtime.translatePending();
+            }
+            assert.ok(diagnostics().formedWaiting > 0, 'formed whole, and waiting');
+            assert.deepEqual([m.runtime.entryOf(0x3000), m.runtime.entryOf(0x4000)], [-1, -1],
+                'not emitted on this thread');
+            next.ready();
+            for (let i = 0; i < 200 && next.held.length === 0; i++)
+            {
+                await turn();
+            }
+            assert.equal(next.held.length, 1, 'the translator loaded takes it');
+            assert.equal(next.held[0].relink.jobs.length, 2);
+        }
+        finally
+        {
+            await m.runtime.flush();
+        }
+    });
