@@ -682,3 +682,30 @@ None yet.
 - **Machine.** A 4-core x86-64 Linux VM (Firecracker), Intel Xeon @ 2.80 GHz. Power plan not
   recorded.
 - **Decision.** Committed (the commit after this entry).
+
+### 2026-10-14 -- x87 single precision on floats: other encodings of the range test
+
+- **Idea.** Each f32 operation of the float path (`floatSingles`) tests its result before
+  going on: finite for a sum (`(bits & 0x7f800000) != 0x7f800000`), a normal above the
+  smallest for a product or a quotient (`(bits & 0x7fffffff) - 0x00800001 <u 0x7effffff`, a
+  zero from a zero operand aside). Tried in the float domain instead: a sum's as `r - r == 0`
+  (`sub`) and as `|r| <= FLT_MAX` (`abs`), a product's as `|r| > FLT_MIN && |r| <= FLT_MAX`
+  (`fpmul`). Two bounds beside, both wrong arithmetic: no test at all (`none`), and the exit
+  branch kept on a test of a local that never fails (`branch`).
+- **Workload.** cork-bench fmath-pc24 and game-pc24 at `6f1c8ae4`, paired in one thread
+  (`pair.mjs` in node 22.22.0 `--no-liftoff`, 40 rounds of 10; `browser.mjs --paired` in
+  Chrome 141 headless, two tabs of 40 rounds), 100 warm; the median of the rounds' ratios to
+  the committed encoding, with its quartiles. Every eax the same.
+- **Values.** node, fmath-pc24: sub 1.079 [1.005 1.133], abs 1.017 [0.965 1.089], fpmul 1.192
+  [1.099 1.276], none 0.599 [0.555 0.632], branch 0.665 [0.592 0.706]; game-pc24: sub 1.007,
+  abs 0.995, fpmul 1.018, none 0.839 [0.781 0.879], branch 0.842 [0.806 0.912]. Chrome,
+  fmath-pc24: sub 1.061, abs 1.028, fpmul 1.172, none 0.603; game-pc24: sub 1.032, abs 1.009,
+  fpmul 1.053, none 0.860.
+- **Reading.** The branches cost little (branch is within a few per cent of none); the cost is
+  the test's own operations -- the float's bits to an integer register and three or four
+  operations on them, as many again as the operation they guard in a chain of float
+  arithmetic. One test for several operations would save the branches only, and needs the
+  machine state rolled back to the first of them when it fails.
+- **Machine.** A 4-core x86-64 Linux VM (Firecracker), Intel Xeon @ 2.80 GHz. Power plan not
+  recorded. Not measured on arm64, where the transfer of a float's bits costs otherwise.
+- **Decision.** The committed encoding stays: no variant is faster on either engine.
