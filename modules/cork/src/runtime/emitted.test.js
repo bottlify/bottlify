@@ -75,6 +75,7 @@ const EMITTED = {
     86: 'eb6cfc99e139de77',
     87: '920c8f09ff12fb1b',
     88: '9fbd07aebb029be4',
+    89: '92cab94d459b71f1',
 };
 
 /** Features fixed rather than probed, so every host emits the same bytes. */
@@ -131,7 +132,8 @@ function digest(){
     sites.exportFunction('region', atSites.functionIndex);
     hash.update('empty sites:').update(sites.toBytes());
     // Single precision computed on floats (`floatSingles`): fmath's loop of sums of products,
-    // and game's loop of distances entered with two floats held.
+    // and game's loop of distances entered with two floats held, whose code after an
+    // indirect call tests the stack it needs.
     for (const [name, entry, entryTop] of /** @type {const} */ ([['fmath-pc24.bin', 0x401050, 0],
         ['game-pc24.bin', 0x4012e0, 6]]))
     {

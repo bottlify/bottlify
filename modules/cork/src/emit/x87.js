@@ -928,10 +928,12 @@ export function planStack(region, states, cut, speculate, callReturn = false){
         }
         blocks.forEach((_, i)=>{
             // A register one path needs held and another empty is not in
-            // one shape here: its checks stay.
+            // one shape here: its checks stay. A block a wasm call returns to
+            // tests the same after the call (`x87AfterCall`), whatever top the
+            // region was entered at: the callee may have left any shape.
             const { held, empty } = ahead[i];
             const both = held & empty;
-            if (entries[i] && (held | empty) !== both)
+            if ((entries[i] || returnedFrom[i].length > 0) && (held | empty) !== both)
             {
                 needs[i] = { held: held & ~both, empty: empty & ~both, c1: false };
             }
@@ -971,7 +973,7 @@ export function planStack(region, states, cut, speculate, callReturn = false){
             }
             if (returnedFrom[i].some(p=>runs[p] && own[p].end !== null))
             {
-                shape = meet(shape, entries[i] ? needs[i] ?? NOTHING : NOTHING);
+                shape = meet(shape, needs[i] ?? NOTHING);
             }
             if (!sameShape(shape, known[i]))
             {

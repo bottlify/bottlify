@@ -660,3 +660,25 @@ None yet.
 - **Decision.** Not committed: no signal over the noise on the one workload that has the
   shape. Worth measuring again on a title whose hot loops sit in regions entered with
   registers held.
+
+### 2026-10-14 -- invalidated: "x87: code a wasm call returns to tests its stack shape whatever top its region was entered at" (2026-10-13)
+
+- **Reason.** That entry compared separate processes' `usPerIter` of 40 iterations each; on
+  this machine one process's figure moves by up to 35%, and ten processes an arm could not
+  resolve a 10% change. Its explanation -- the region the change speeds runs mostly while
+  warming -- came from a block profile, which changes how regions form: without it the region
+  at 0x4012e0 is entered 1.335 times an iteration in the steady state (counted by wrapping the
+  runtime's `run`) and is its hottest (a CPU profile: 182.8 ms of self time of 4 reps x 400
+  iterations, against 107.6 ms with every region compiled for the wide controls).
+- **Measured again.** Paired in one thread (`tools/cork-bench/pair.mjs`, `browser.mjs
+  --paired`): blocks of 10 iterations alternated, 100 warm, the median of the rounds' ratios
+  with its quartiles. game-pc24, with the change against without: node 22.22.0
+  `--no-liftoff` 0.897 [0.858 0.947] (40 rounds; medians 281.4 and 254.2 us); Chrome 141 (V8
+  14.1) headless, three tabs of 40 rounds, 0.897 [0.865 0.943] (medians 260.0 and 233.5 us);
+  the same tree against itself 1.000 [0.942 1.025]. Every eax the same. The other workloads
+  within their quartiles; calls4096-order-x87 read 1.099 once, and 0.959 with the arms swapped
+  -- its control (one tree in both arms) reads 1.056, the second host slower on a workload of
+  4096 functions.
+- **Machine.** A 4-core x86-64 Linux VM (Firecracker), Intel Xeon @ 2.80 GHz. Power plan not
+  recorded.
+- **Decision.** Committed (the commit after this entry).
