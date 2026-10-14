@@ -4,8 +4,8 @@
 
 Every number cork works with is a setting. Pass them as `config` to `createMachine`,
 `--config '<json>'` to `cork run`, or `createApp({ cork: { config } })` in `@bottlify/core`. What is
-left out keeps its default. The defaults are what games were measured with: change one to try
-something, and measure it.
+left out keeps its default. The defaults are what games were measured with, so a change means
+something only with a measurement beside it.
 
 **Correctness and variants**
 
@@ -53,8 +53,8 @@ something, and measure it.
 | `callReturn` | `true` | A call out of a region is a wasm call, and the region goes on after the `ret`. | Off makes every return go through the entry hash. |
 | `emptyCalls` | `true` | A call to a function that does nothing (a `ret` or `ret imm16`, after at most three direct jumps, such as an incremental linker's thunk to an empty virtual method) returns at the transfer, without entering a region. | Off to rule it out. |
 | `emptySites` | `false` | With `emptyCalls`, a call out of a region (outside x87 code) reads its target's slot in the entry hash first and returns from such a function in place, without calling the transfer. | A call to an empty method costs about a third of what the transfer leaves it; every other call out of a region reads one more slot, about a nanosecond. |
-| `callTargets` | `true` | Indirect calls sampled and their few small callees formed in; a call found to have none worth forming in is sampled no more. | Off to rule it out. Far Cry ran 4-6% faster with it in Chromium; regions formed again for it are formed under `holdMs`. |
-| `predictAfter`, `predictShare`, `predictCallees`, `reforms`, `callWindow` | 48, 8, 4, 3, 64 | With `callTargets`: samples before callees are looked at, the share a callee must take (one in this many), callees compared, times a region is formed again, the sampling window. | Tuning `callTargets`. |
+| `callTargets` | `true` | Indirect calls sampled and their few small callees formed in; a call found to have none worth forming in is sampled no more. | Off to rule it out. Far Cry ran 2-6% faster with it in Chromium; regions formed again for it are formed under `holdMs`. |
+| `predictAfter`, `predictShare`, `predictCallees`, `reforms`, `callWindow` | 48, 8, 4, 3, 1024 | With `callTargets`: samples before callees are looked at, the share a callee must take (one in this many), callees compared, times a region is formed again, the readings of the profile a call's samples are kept for. | Tuning `callTargets`. |
 | `dispatch` | `false` | A module placed in a range of the table, a transfer inside it a direct tail call. | Measured slower in games with `callTargets`; try alone. |
 | `relinkAfter`, `relinkRegions` | 16, 512 | Batch modules published before running regions are gathered into large ones, and how many go into each (0: never). | Fewer, larger modules make transfers cheaper; gathering 4096 regions held a thread 160 ms. |
 | `mergeAfter` | 2^16 | Transfers between two modules before they are gathered into one (0: never). | Lower merges more eagerly: more rebuilding. |
@@ -105,7 +105,7 @@ The core also takes `cork.pool`, `cork.poolPerProcess`, `cork.poolWindowMs` and 
 | `countTransfers` | Transfers between regions. |
 | `undoLog` | The store's undo log, for replay. |
 
-They cost speed; leave them off outside an investigation.
+They all cost speed, so they belong in an investigation and nowhere else.
 
 **Store**
 
