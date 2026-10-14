@@ -57,7 +57,7 @@ const SPECIALS = [Infinity, -Infinity, NaN, fromBits(0x7f800001), fromBits(0xffc
 /** How many floats a program loads from: the edges twice as often as the specials. */
 const FLOAT_COUNT = 2 * ORDINARY.length + EDGES.length + SPECIALS.length;
 // Kept off a double's denormals and its largest magnitudes, where rounding a double
-// differs from the interpreter by design (README: `precise`).
+// differs from the interpreter by design (SETTINGS.md: `precise`).
 const DOUBLE_VALUES = [0.1, 1.5, -3, 1e-20, 2 ** -130, 1e20, 0.5, 1 / 3];
 const INTEGER_VALUES = [3, -100000, 7, 0, 16777217, -1];
 
@@ -258,7 +258,7 @@ function observed({ layout, memory, size }){
 }
 
 /**
- * An observation as fast code is held to it (README: `precise`): the status
+ * An observation as fast code is held to it (SETTINGS.md: `precise`): the status
  * word's bits it does not keep -- the exception flags, the stack fault, the
  * summary and busy bits, C1 -- cleared wherever the word went (the field, ax,
  * the words the program stored), and a NaN's bits, which are the host's,

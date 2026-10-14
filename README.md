@@ -3,9 +3,10 @@
 Bottlify runs Windows x86 programs and games in a browser tab, with no Windows, no plugin and
 nothing to install. It has two halves:
 
-- **cork** (`@bottlify/cork`) — our x86 → WebAssembly translator and its runtime. It translates the
-  program's machine code into wasm, which the browser compiles for the device's own processor, so
-  the same build runs on x86 and ARM machines alike. cork is a translator, not an emulator.
+- **[cork](modules/cork/README.md)** (`@bottlify/cork`) — our x86 → WebAssembly translator and its
+  runtime. It translates the program's machine code into wasm, which the browser compiles for the
+  device's own processor, so the same build runs on x86 and ARM machines alike. cork is a
+  translator, not an emulator.
 - **core** (`@bottlify/core`) — a Windows environment written from scratch in JavaScript:
   `kernel32`, `user32`, `gdi32`, DirectX, OpenGL, DirectSound, Winsock and the rest of the system
   libraries, on top of WebGPU, WebAudio and OPFS.
@@ -37,7 +38,8 @@ without any one of them, degraded but not broken.
 - [`docs/core/`](docs/core/README.md) — `@bottlify/core` for its users: the
   [API](docs/core/api.md), the [configuration](docs/core/configuration.md) and the current
   [limits](docs/core/limits.md).
-- [`modules/cork/README.md`](modules/cork/README.md) — the translator and its runtime.
+- [`modules/cork/README.md`](modules/cork/README.md) — the translator: what it runs, how it works,
+  how fast it is against the processor and v86 ([in Russian](modules/cork/README.ru.md)).
 - [`modules/networking/README.md`](modules/networking/README.md) and
   [`modules/installer/README.md`](modules/installer/README.md) — the socket relay, and adding a
   program by running its installer.

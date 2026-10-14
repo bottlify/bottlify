@@ -6,7 +6,7 @@
 
 /**
  * Every setting the runtime takes is a documented one: in the engine's
- * `EngineConfig` typedef and in the README's tables. A knob added to the
+ * `EngineConfig` typedef and in the tables of SETTINGS.md. A knob added to the
  * runtime and nowhere else is one nobody can find, and one documented and
  * gone is a setting that silently does nothing.
  */
@@ -29,9 +29,9 @@ function runtimeSettings(){
 /** Settings set by a host or the runtime for its own wiring, not a person's. */
 const WIRING = new Set(['sharedCode']);
 
-test('every runtime setting is in EngineConfig and in the README', ()=>{
+test('every runtime setting is in EngineConfig and in SETTINGS.md', ()=>{
     const typedef = read('../../core/src/layers/cpu/engine.js');
-    const readme = read('../README.md');
+    const readme = read('../SETTINGS.md');
     const names = runtimeSettings().filter(name=>!WIRING.has(name));
     assert.ok(names.length > 40, `${names.length} settings found`);
     const untyped = names.filter(name=>!typedef.includes(`[${name}]`));
@@ -39,9 +39,9 @@ test('every runtime setting is in EngineConfig and in the README', ()=>{
     assert.deepEqual({ untyped, undocumented }, { untyped: [], undocumented: [] });
 });
 
-test('every config the core\'s host reads is in EngineConfig and in the README', ()=>{
+test('every config the core\'s host reads is in EngineConfig and in SETTINGS.md', ()=>{
     const typedef = read('../../core/src/layers/cpu/engine.js');
-    const readme = read('../README.md');
+    const readme = read('../SETTINGS.md');
     const host = read('../../core/src/layers/cpu/internal/cork-host.js')
         + read('../../core/src/layers/cpu/internal/executor.worker.js')
         + read('../../core/src/layers/cpu/internal/executor.js');
