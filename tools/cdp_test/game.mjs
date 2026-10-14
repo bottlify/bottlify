@@ -818,6 +818,14 @@ function describeCork(cork, say){
             + ` relinks and ${cork.merges ?? 0} merges` : ''));
     say(`    x87 precision: ${cork.wide ? 'wide' : 'rounding'}`
         + `, switched ${cork.precisionSwitches ?? 0} times`);
+    if (cork.prediction)
+    {
+        // `callTargets`: the indirect calls whose samples came due, and what became of them.
+        const p = cork.prediction;
+        say(`    predicted calls: ${p.due} due, ${p.reforms} regions formed again, ${p.quiet ?? 0}`
+            + ` calls quiet; left as they were: no share ${p.noShare}, held ${p.held}, reforms`
+            + ` out ${p.reformsOut}, not formed ${p.notFormed}, no region ${p.noRegion}`);
+    }
     say(`    volatile pages: ${cork.volatilePages ?? 0}`
         + `  invalidations: ${cork.invalidations ?? 0}`
         + `  dropped: ${cork.dropped ?? 0}`
