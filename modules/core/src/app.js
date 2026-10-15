@@ -6753,7 +6753,10 @@ async function buildApp(options){
                     {
                         worked++;
                     }
-                    if (!step.ran)
+                    // A turn whose threads all ran on the process's other
+                    // executors is no idle machine: it came back for the clock
+                    // and the event loop, theirs still running.
+                    if (!step.ran && !step.elsewhere)
                     {
                         // Nobody is ready. When a child is waiting to be started
                         // that is not a deadlock but its turn: the parent has not

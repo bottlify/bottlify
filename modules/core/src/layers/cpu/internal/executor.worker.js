@@ -37,9 +37,28 @@ import { SPIN_MS, Said, Turn, channelOf, waitWhile } from './executor-channel.js
 const IDLE_MS = 2;
 /** The longest it goes from slice to slice without a turn of its event loop. */
 const YIELD_MS = 4;
+/**
+ * The longest it keeps a thread past its slice without a word to the process,
+ * while nothing waits for an executor (`goOn`): what the process knows of the
+ * thread -- the time it took, the instructions it retired, which a slice's end
+ * counts in a word -- is never older than this.
+ */
+const CHAIN_MS = 250;
 
 /** The executor's host, once started. @type {any} */
 let running = null;
+
+/**
+ * Where the executor's time went since it started, in milliseconds: in slices
+ * (`slicesMs`, which holds `answerWaitMs`, waiting there for the process to
+ * answer a trap or a fault, and `inChainYieldMs`, its event loop's turns while
+ * it keeps the thread), and waiting for the next slice (`idleMs`) -- what tells
+ * an executor kept running from one kept waiting on the process. `ends` counts
+ * why its slices ended.
+ */
+const spent = { startedAt: 0, slicesMs: 0, answerWaitMs: 0, idleMs: 0, slices: 0, traps: 0,
+    faults: 0, yieldMs: 0, feedMs: 0, asyncWaits: 0, inChainYieldMs: 0,
+    ends: { halted: 0, stopped: 0, faulted: 0, released: 0, chained: 0 } };
 
 /**
  * @param {ExecutorStart} start
@@ -56,8 +75,11 @@ async function serve({ engineUrl, config, memory, channel: buffer, bell }, send)
     const yieldMs = config.cork?.executorYieldMs ?? YIELD_MS;
     const channel = channelOf(buffer, bellWords, spinMs);
     host.onTrap((/** @type {number} */ value)=>{
+        const asked = performance.now();
         channel.say(Turn.TRAP, value);
         channel.await(Turn.TRAP);
+        spent.answerWaitMs += performance.now() - asked;
+        spent.traps++;
         const flags = channel.flags();
         if ((flags & Said.HALTED) !== 0)
         {
@@ -69,9 +91,12 @@ async function serve({ engineUrl, config, memory, channel: buffer, bell }, send)
         }
     });
     host.onFault((/** @type {any} */ fault)=>{
+        const asked = performance.now();
         channel.write(fault);
         channel.say(Turn.FAULT);
         channel.await(Turn.FAULT);
+        spent.answerWaitMs += performance.now() - asked;
+        spent.faults++;
         return (channel.flags() & Said.CLAIMED) !== 0;
     });
     send({ type: 'ready' });
@@ -86,8 +111,10 @@ async function serve({ engineUrl, config, memory, channel: buffer, bell }, send)
         ping.port2.postMessage(0);
     });
     let yieldedAt = performance.now();
+    spent.startedAt = yieldedAt;
     for (;;)
     {
+        const idleFrom = performance.now();
         let state = Atomics.load(words, 0);
         if (state !== Turn.RUN && state !== Turn.CLOSE)
         {
@@ -100,6 +127,7 @@ async function serve({ engineUrl, config, memory, channel: buffer, bell }, send)
         {
             // `waitAsync`: the event loop goes on meanwhile, and the
             // translations the runtime asked for come back through it.
+            spent.asyncWaits++;
             const waiting = /** @type {any} */ (Atomics).waitAsync(words, 0, state);
             if (waiting.async)
             {
@@ -112,8 +140,10 @@ async function serve({ engineUrl, config, memory, channel: buffer, bell }, send)
         {
             // Asked again and again without a pause: a turn of the event loop
             // all the same, now and then, or no translation would ever land.
+            const yieldFrom = performance.now();
             await yieldTurn();
             yieldedAt = performance.now();
+            spent.yieldMs += yieldedAt - yieldFrom;
         }
         if (state === Turn.CLOSE)
         {
@@ -121,20 +151,35 @@ async function serve({ engineUrl, config, memory, channel: buffer, bell }, send)
         }
         const budget = channel.value();
         const chained = performance.now();
+        spent.idleMs += chained - idleFrom;
+        spent.slices++;
         let retired = 0;
         try
         {
             // Slice after slice of the same thread while nothing else waits for
-            // an executor (`goOn`), its stop, halt or fault ending it, and a turn
-            // of the event loop due now and then.
+            // an executor (`goOn`), its stop, halt or fault ending it. The event
+            // loop's turn due now and then is taken in between with the thread
+            // kept: the slice's end would cost a round trip through the process,
+            // which takes it only between its own turns -- a quarter of the
+            // executor's time where nothing else waited (7-Zip's benchmark).
             for (;;)
             {
                 retired += host.runSlice(budget);
-                if (host.halted() || host.stopRequested() || host.fault() !== null
-                    || Atomics.load(bellWords, 1) !== 1
-                    || performance.now() - chained >= yieldMs)
+                const end = host.halted() ? 'halted' : host.stopRequested() ? 'stopped'
+                    : host.fault() !== null ? 'faulted'
+                        : Atomics.load(bellWords, 1) !== 1 ? 'released'
+                            : performance.now() - chained >= CHAIN_MS ? 'chained' : null;
+                if (end !== null)
                 {
+                    spent.ends[end]++;
                     break;
+                }
+                if (performance.now() - yieldedAt >= yieldMs)
+                {
+                    const yieldFrom = performance.now();
+                    await yieldTurn();
+                    yieldedAt = performance.now();
+                    spent.inChainYieldMs += yieldedAt - yieldFrom;
                 }
                 host.cork().translatePending().catch(()=>{});
             }
@@ -143,6 +188,7 @@ async function serve({ engineUrl, config, memory, channel: buffer, bell }, send)
             send({ type: 'failed', message: String(/** @type {any} */ (e)?.stack ?? e) });
             throw e;
         }
+        spent.slicesMs += performance.now() - chained;
         const fault = host.fault();
         if (fault !== null)
         {
@@ -153,7 +199,9 @@ async function serve({ engineUrl, config, memory, channel: buffer, bell }, send)
             | (fault !== null ? Said.FAULTED : 0));
         // The executor's own feed, as the process's is once a frame: what its
         // interpreters found hot is formed while it waits for the next slice.
+        const feedFrom = performance.now();
         host.cork().translatePending().catch(()=>{});
+        spent.feedMs += performance.now() - feedFrom;
     }
 }
 
@@ -172,7 +220,8 @@ function bind(listen, send){
         {
             // Between slices: what its translator did, for the process's account.
             send({ type: 'diagnostics', id: data.id,
-                value: running?.cork().diagnostics() ?? null });
+                value: running === null ? null : { ...running.cork().diagnostics(),
+                    spent: { ...spent, wallMs: performance.now() - spent.startedAt } } });
         }
     });
 }

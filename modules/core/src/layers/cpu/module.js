@@ -1286,6 +1286,7 @@ export function createCpuModule(){
                             regions: figures.regions,
                             translateMs: figures.translateMs,
                             workerBusyMs: figures.workerBusyMs,
+                            spent: figures.spent,
                         } : { index: remote.index, answer: 'not answered yet' };
                     }),
                 },

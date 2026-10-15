@@ -169,6 +169,8 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
 
     /** Whether a slice is out: started and its end not yet taken. */
     let running = false;
+    /** Whether an answer halted or stopped the slice's thread: its end is coming, not yet taken. */
+    let ending = false;
     /** What the process's side said last, which the executor's next turn ends.
      * @type {number} */
     let mine = Turn.IDLE;
@@ -177,6 +179,12 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
         index,
         /** Whether a slice is out. */
         busy: ()=>running,
+        /**
+         * Whether an answer given to its slice halted or stopped the thread and
+         * the slice's end has not been taken: the end is coming, and until it is
+         * taken the thread's state is the executor's, not the process's.
+         */
+        ending: ()=>ending,
         /**
          * Starts a slice of at most `budget` instructions on the executor's
          * block, the thread it holds; `step` answers what it raises.
@@ -226,6 +234,7 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
                         return 0;
                     });
                 });
+                ending ||= (flags & (Said.HALTED | Said.STOPPED)) !== 0;
                 mine = Turn.REPLY;
                 channel.say(Turn.REPLY, 0, flags);
                 return null;
@@ -238,6 +247,7 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
                 around(()=>{
                     flags = answer(()=>(host.offerFault(fault) ? Said.CLAIMED : 0));
                 });
+                ending ||= (flags & (Said.HALTED | Said.STOPPED)) !== 0;
                 mine = Turn.REPLY;
                 channel.say(Turn.REPLY, 0, flags);
                 return null;
@@ -247,6 +257,7 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
                 return null;
             }
             running = false;
+            ending = false;
             mine = Turn.IDLE;
             const flags = channel.flags();
             return {

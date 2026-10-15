@@ -77,6 +77,19 @@ const SHORT_WAIT_MS = 20;
 /** A short-period thread kept off the processor this long, in host ms, is counted late. */
 const LATE_GAP_MS = 40;
 
+/**
+ * The longest this executor waits, in host ms, for the others with nothing of its
+ * own to run before its turn ends: they keep their threads while nothing waits for
+ * one, and the turn's caller moves the guest's clock and looks at the event loop.
+ */
+const EXECUTORS_WAIT_MS = 4;
+
+/**
+ * The longest a turn waits, in host ms, for an executor whose thread an answer
+ * parked to give its slice back: it ends at its next instruction, a park loop's.
+ */
+const ENDING_WAIT_MS = 1000;
+
 /** The base of the normal priority class, and the two relative values pinned outside it. */
 const NORMAL_BASE = 8;
 const THREAD_PRIORITY_IDLE = -15;
@@ -820,9 +833,57 @@ export function createScheduler(options){
     /** Slices run on the other executors, and the most threads running at once, this one's included. */
     let executorSlices = 0;
     let mostAtOnce = 0;
+    /**
+     * Where this thread's time went while the process had other executors, in
+     * milliseconds: its own slices (`hereMs`, which hold the answers given at
+     * its crossings), answering the others (`answerMs`), waiting for them with
+     * nothing to run here (`waitMs`), and its caller's between turns
+     * (`betweenMs`). And the others' side of it: from each of their slices'
+     * start to its end taken here (`heldMs`, against the time the executor
+     * itself reports in its slices), and from that to its next start (`gapMs`).
+     */
+    const sharedTime = { hereMs: 0, answerMs: 0, waitMs: 0, answers: 0, turns: 0,
+        betweenMs: 0, heldMs: 0, gapMs: 0, gaps: 0,
+        // Counts by bound in ms: the gaps before another executor's next slice,
+        // and this executor's own turns.
+        gapsUnder: { '0.05': 0, '0.2': 0, '1': 0, '5': 0, '20': 0, more: 0 },
+        hereUnder: { '0.05': 0, '0.2': 0, '1': 0, '5': 0, '20': 0, more: 0 } };
+    /** @param {Record<string, number>} buckets @param {number} ms */
+    const bucket = (buckets, ms)=>{
+        const key = ms < 0.05 ? '0.05' : ms < 0.2 ? '0.2' : ms < 1 ? '1' : ms < 5 ? '5'
+            : ms < 20 ? '20' : 'more';
+        buckets[key]++;
+    };
+    /** When each other executor's last slice was taken, for the gap before its next. @type {Map<any, number>} */
+    const takenAt = new Map();
+    /** When the last shared turn returned, for the time the caller kept between turns. */
+    let sharedTurnEnd = -1;
 
     /** Set while they are answered: an answer's own trap does not answer again. */
     let answering = false;
+    /** Set while this executor's thread runs a long turn with the others free (`runHere`). */
+    let soloShared = false;
+
+    /**
+     * A thread made ready during a long turn here that one of the other
+     * executors is free to run ends the turn, so it starts there now rather
+     * than at the turn's end.
+     *
+     * @param {any} thread
+     */
+    const noteReady = thread=>{
+        if (!soloShared || !inSlice || answering || thread === current
+            || thread.state !== ThreadState.READY || thread.suspendCount > 0)
+        {
+            return;
+        }
+        if ((cpu.executors?.() ?? []).some((/** @type {any} */ remote)=>!remote.busy()
+            && allowedOn(thread, remote.index)))
+        {
+            soloShared = false;
+            cpu.stop?.();
+        }
+    };
     /** The bell's count when they were last answered. */
     let answeredAt = -1;
 
@@ -948,7 +1009,15 @@ export function createScheduler(options){
         });
         note(next, `runs on executor ${remote.index}`);
         next.state = ThreadState.RUNNING;
-        placed.set(remote, { thread: next, began: wall(), from });
+        const began = wall();
+        const taken = takenAt.get(remote);
+        if (taken !== undefined)
+        {
+            sharedTime.gapMs += began - taken;
+            sharedTime.gaps++;
+            bucket(sharedTime.gapsUnder, began - taken);
+        }
+        placed.set(remote, { thread: next, began, from });
         remote.start(quantum);
         executorSlices++;
         mostAtOnce = Math.max(mostAtOnce, placed.size + (inSlice ? 1 : 0));
@@ -972,6 +1041,7 @@ export function createScheduler(options){
         answering = true;
         let ran = null;
         let instructions = 0;
+        const from = wall();
         try
         {
             for (const [remote, on] of placed)
@@ -996,6 +1066,8 @@ export function createScheduler(options){
                     continue;
                 }
                 placed.delete(remote);
+                takenAt.set(remote, wall());
+                sharedTime.heldMs += wall() - on.began;
                 let at = 0;
                 cpu.onExecutor(remote.index, ()=>{
                     on.thread.context = cpu.captureContext();
@@ -1013,6 +1085,8 @@ export function createScheduler(options){
         finally
         {
             answering = false;
+            sharedTime.answerMs += wall() - from;
+            sharedTime.answers++;
         }
         return { ran, instructions };
     };
@@ -1065,13 +1139,17 @@ export function createScheduler(options){
         // workload translated code ran at three billion instructions a second,
         // for whom a quantum is 30 microseconds. A deadline coming near keeps
         // the quantum, so a timed wait ends no later than it did. So does a
-        // process with other executors: a thread readied mid-turn would wait
-        // for its end with one of them free, and their calls into the host
-        // are answered here between turns.
-        const asked = !shared && readyAtSlice.size === 0
+        // process whose other executors run a thread: their calls into the
+        // host are answered here between turns. With none placed, a thread
+        // readied mid-turn that one of them could take ends the turn at once
+        // (`noteReady`) -- on two executors 7-Zip's single-threaded benchmark
+        // ran a fifth slower in turns of a quantum.
+        const asked = (!shared || placed.size === 0) && readyAtSlice.size === 0
             && (noDeadlineBefore === null || noDeadlineBefore - now() > SOLO_CLEAR_MS)
             ? soloQuantum : quantum;
+        soloShared = shared && asked === soloQuantum;
         let instructions = cpu.runSlice(asked);
+        soloShared = false;
         inSlice = false;
         lastSlice = instructions;
         // A slice that ran out inside a routine the host placed to run
@@ -1145,8 +1223,13 @@ export function createScheduler(options){
             }
         }
         // A thread left without an executor waits for one to give its thread up.
+        // The one taken here is not left: it runs this turn, still ready until it does.
+        // So does an executor whose thread is wanted back -- suspended, ended
+        // by another -- as it keeps one it is let go on with past its slice.
         bell.goOn?.(candidates.length === 0
-            && waiting.every(thread=>thread.state !== ThreadState.READY));
+            && waiting.every(thread=>thread === here || thread.state !== ThreadState.READY)
+            && [...placed.values()].every(on=>on.thread.state === ThreadState.RUNNING
+                && !(on.thread.suspendCount > 0)));
         return here;
     };
 
@@ -1158,9 +1241,63 @@ export function createScheduler(options){
      * nothing to run here, the turn waits for them.
      *
      * @param {any[]} remotes
-     * @returns {{ ran: any | null, instructions: number, switched: boolean }}
+     * @returns {{ ran: any | null, instructions: number, switched: boolean,
+     *     elsewhere?: boolean }}  elsewhere: nothing ran here, the others still run
      */
     const runShared = remotes=>{
+        const turnFrom = wall();
+        if (sharedTurnEnd >= 0)
+        {
+            sharedTime.betweenMs += turnFrom - sharedTurnEnd;
+        }
+        sharedTime.turns++;
+        try
+        {
+            return takeEnding(runSharedTurn(remotes));
+        }
+        finally
+        {
+            sharedTurnEnd = wall();
+        }
+    };
+
+    /**
+     * The turn's result once every other executor whose thread waits for a
+     * host call's later answer (`awaitingHost`), or which an answer halted or
+     * stopped, has given it back: it is parked, so its slice ends at once. The
+     * answer goes on after the turn -- a promise or two on, it sends the
+     * thread into a callback or back to its caller -- and until the slice is
+     * taken the thread's state is the executor's, so what the answer set
+     * was lost when it was: a library loaded by a thread on another executor
+     * had its entry point's frame dropped and the thread returned to 0.
+     *
+     * @param {{ ran: any | null, instructions: number, switched: boolean,
+     *     elsewhere?: boolean }} turn
+     */
+    const takeEnding = turn=>{
+        const bell = cpu.executorBell();
+        const from = wall();
+        while ([...placed].some(([remote, on])=>remote.ending?.()
+            || on.thread.awaitingHost === true) && wall() - from < ENDING_WAIT_MS)
+        {
+            const seen = bell.rung();
+            const taken = answerExecutors();
+            if (taken.ran !== null)
+            {
+                turn = { ran: turn.ran ?? taken.ran, instructions: turn.instructions
+                    + taken.instructions, switched: turn.switched || turn.ran === null };
+                continue;
+            }
+            bell.wait(seen, EXECUTORS_WAIT_MS);
+        }
+        return turn;
+    };
+
+    /**
+     * @param {any[]} remotes
+     * @returns {{ ran: any | null, instructions: number, switched: boolean, elsewhere?: boolean }}
+     */
+    const runSharedTurn = remotes=>{
         expire();
         let { ran, instructions } = answerExecutors();
         const bell = cpu.executorBell();
@@ -1169,7 +1306,10 @@ export function createScheduler(options){
             const here = choose(remotes, bell);
             if (here !== null)
             {
+                const hereFrom = wall();
                 const turn = runHere(here, true);
+                sharedTime.hereMs += wall() - hereFrom;
+                bucket(sharedTime.hereUnder, wall() - hereFrom);
                 const after = answerExecutors();
                 return { ran: turn.ran, instructions: turn.instructions + instructions
                     + after.instructions, switched: turn.switched };
@@ -1203,7 +1343,20 @@ export function createScheduler(options){
             // A thread made ready runs here next round: this executor is free.
             if (runnable().length === 0)
             {
-                bell.wait(seen);
+                // Until the soonest deadline at most: an executor keeps its thread
+                // while nothing waits for one, so no word may come before a timed
+                // wait here runs out. A wait that saw none ends the turn as one
+                // the others ran (`elsewhere`), not an idle machine's: no thread
+                // of this executor's is the turn's, theirs still being run.
+                const deadline = soonest();
+                const waitFrom = wall();
+                bell.wait(seen, Math.max(0, Math.min(EXECUTORS_WAIT_MS,
+                    deadline === null ? Infinity : deadline - now())));
+                sharedTime.waitMs += wall() - waitFrom;
+                if (bell.rung() === seen)
+                {
+                    return { ran: null, instructions, switched: false, elsewhere: true };
+                }
             }
         }
     };
@@ -1290,6 +1443,7 @@ export function createScheduler(options){
                 waiters: [],
             };
             threads.push(thread);
+            noteReady(thread);
             return thread;
         },
 
@@ -1398,7 +1552,8 @@ export function createScheduler(options){
          * difference between progress, an idle system and a finished one --
          * three states that look identical if all you get back is a number.
          *
-         * @returns {{ ran: any | null, instructions: number, switched: boolean }}
+         * @returns {{ ran: any | null, instructions: number, switched: boolean,
+         *     elsewhere?: boolean }}  elsewhere: nothing ran here, the others still run
          */
         /**
          * How a turn's wait for its thread's host answer went (the run loop's):
@@ -1511,6 +1666,10 @@ export function createScheduler(options){
                 preemptions++;
                 cpu.stop?.();
             }
+            else
+            {
+                noteReady(thread);
+            }
             note(thread, `woken by ${current?.name ?? '-'}${preempts ? ' at once' : ''}`);
             if (outranks)
             {
@@ -1602,6 +1761,7 @@ export function createScheduler(options){
                 // passed over, and counting it would boost the thread over
                 // every other on its first turn back.
                 thread.readySince = now();
+                noteReady(thread);
             }
             return previous;
         },
@@ -1773,6 +1933,7 @@ export function createScheduler(options){
                 // that ran at once: zero and zero where it has one.
                 executorSlices,
                 mostAtOnce,
+                sharedTime: JSON.stringify(sharedTime),
                 recentWakes: recentWakes.slice(),
                 recentByThread: threads.filter(thread=>thread.state !== ThreadState.TERMINATED)
                     .map(thread=>`${thread.name}: ${(thread.recent ?? []).join(' > ')}`),

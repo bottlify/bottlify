@@ -369,7 +369,12 @@ There are no page tables: each 4 KiB page has one byte of flags — `INACCESSIBL
   process block, `cpuid` and the rest -- and `cpuid` answers each executor's number as its APIC
   id, so a thread pinned to a processor reads that processor's. The process's own thread runs its threads
   too, and answers the calls the others' threads make -- at each of its own crossings into the host
-  and between its turns, each caller the current thread while it is answered. An executor past the
+  and between its turns, each caller the current thread while it is answered. An executor keeps its
+  thread slice after slice while no ready thread waits for one and the process wants none back
+  (suspended, ended by another): its event loop turns in between, and the process hears of the
+  thread at most every 250 ms. The process's thread with nothing of its own to run waits for the
+  others until its soonest deadline, 4 ms at most; its own turns are long while no other executor
+  runs a thread, and a thread made ready that a free executor could take ends such a turn. An executor past the
   first is a cork host in a worker of its own over the
   process's memory
   (`core/src/layers/cpu/internal/executor.worker.js`), with its own state page, entry hash and
