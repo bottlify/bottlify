@@ -2413,6 +2413,20 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         }
         countExtents(record, 1);
         regions.add(record);
+        // With other executors, the bytes are read again now that the pages say
+        // there is code on them: a store another executor made before its check
+        // could see that is caught here, one after it by the check. Its own
+        // slices do not tell this one (`waited`), and the store moved no
+        // generation while the pages held no code.
+        if (codeShared !== null && (region.sources !== undefined
+            ? sourcesChanged(region.sources, 0, 0x100000000)
+            : hashRegion(read, region) !== region.hash))
+        {
+            unpublish([record]);
+            counts.dropped++;
+            counts.publishMs += clock() - publishAt;
+            return 0;
+        }
         counts.publishMs += clock() - publishAt;
         return 1;
     };
