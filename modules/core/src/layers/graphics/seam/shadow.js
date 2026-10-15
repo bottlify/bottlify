@@ -257,9 +257,12 @@ export function placeCommandRing(block, ring, writeMemory){
  * @param {(address: number, bytes: Uint8Array) => void} deps.writeMemory
  * @param {(records: Uint8Array) => number} deps.take  makes the calls, says how many
  * @param {(detail: string) => void} deps.refuse
+ * @param {(address: number, expected: number, value: number) => number} [deps.compareExchangeU32]
+ *     the memory's, indivisible against the guest's threads on other executors
  */
 export function createCommandReader(deps){
-    const { block, ring, readWord, readWords, writeMemory, take, refuse } = deps;
+    const { block, ring, readWord, readWords, writeMemory, take, refuse,
+        compareExchangeU32 } = deps;
     let tail = 0;
     let taken = 0;
     const zero = new Uint8Array(4);
@@ -312,10 +315,20 @@ export function createCommandReader(deps){
             if (tail === head && head > COMMAND_RING_BYTES - COMMAND_SLACK)
             {
                 // A routine between reading the head and taking its space finds
-                // the head moved and takes it again, from the start.
+                // the head moved and takes it again, from the start. One on
+                // another executor may have taken space since the head was read
+                // here: the head goes back only from where it was read, as one
+                // compare-and-swap, and otherwise the next take starts it over.
                 writeMemory(ring, new Uint8Array(head));
-                writeMemory(block + SHADOW.COMMAND_HEAD, zero);
-                tail = 0;
+                if (compareExchangeU32 === undefined)
+                {
+                    writeMemory(block + SHADOW.COMMAND_HEAD, zero);
+                    tail = 0;
+                }
+                else if (compareExchangeU32(block + SHADOW.COMMAND_HEAD, head, 0) === head)
+                {
+                    tail = 0;
+                }
             }
         },
         /** How many calls the ring has carried. */
@@ -1775,6 +1788,9 @@ export function settledAfter(shadow, call){
  * @property {(address: number) => number} [readU32]
  *     A dword read in place, for the words looked at on every call: a view
  *     per call was a measured share of a frame.
+ * @property {(address: number, expected: number, value: number) => number} [compareExchangeU32]
+ *     A dword swapped only if it holds `expected`, indivisible against the
+ *     guest's threads on the process's other executors; answers what it held.
  * @property {ShadowDevice} device
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {string} [name]  The device interface a refusal names.
@@ -2344,6 +2360,7 @@ export function createShadow(deps){
                     placeCommandRing(address, commands, deps.writeMemory);
                     commandReader = createCommandReader({ block: address, ring: commands,
                         readWord, readWords, writeMemory: deps.writeMemory,
+                        compareExchangeU32: deps.compareExchangeU32,
                         take: /** @type {ShadowCommands} */ (deps.commands).take,
                         refuse: detail=>refuse(`${name}::commands`, detail) });
                 }

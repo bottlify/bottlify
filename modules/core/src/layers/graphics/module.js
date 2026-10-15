@@ -440,6 +440,16 @@ export function createGraphicsModule(){
                 /** @param {number} address @param {Uint8Array} bytes */
                 writeMemory: (address, bytes)=>memory.writeBytes(address, bytes),
                 /**
+                 * A dword swapped only if it holds `expected`, indivisible against
+                 * the guest's threads on the process's other executors: a word
+                 * a guest routine takes with `lock cmpxchg` that the host also
+                 * moves. Answers what the word held.
+                 */
+                compareExchangeU32: typeof memory.compareExchangeU32 === 'function'
+                    ? (/** @type {number} */ address, /** @type {number} */ expected,
+                        /** @type {number} */ value)=>memory.compareExchangeU32(address, expected, value)
+                    : undefined,
+                /**
                  * Whether the guest may write `length` bytes at an address: an
                  * out-parameter the system probes before it writes through it,
                  * answering E_INVALIDARG where Windows could not write.

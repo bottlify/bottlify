@@ -7,7 +7,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    BUFFER, COMMAND, FLAG_SLOW_PATH, FLAG_STALE, SHADOW, TEXTURE, createShadow, getRenderStateCode,
+    BUFFER, COMMAND, COMMAND_RING_BYTES, FLAG_SLOW_PATH, FLAG_STALE, SHADOW, TEXTURE,
+    createCommandReader, createShadow, getRenderStateCode,
     getSurfaceLevelCode, getTextureStageStateCode, getTransformCode, lockCode, transformSlot,
     transformType, unlockCode,
 } from './shadow.js';
@@ -846,3 +847,67 @@ test('a Direct3D 9 device\'s render states, stage states and transforms are mirr
     assert.equal(view.getFloat32(at + SHADOW.TRANSFORMS + transformSlot(256) * 64 + 12 * 4,
         true), 12);
 });
+
+test('a ring started over keeps the record a routine on another executor took space for meanwhile',
+    ()=>{
+        // The host has read every record up to a head past the point where it
+        // starts the ring over; between its read and the start over, a routine
+        // on another executor takes the next eight bytes and writes a record.
+        const memory = new Uint8Array(0x20000);
+        const words = new DataView(memory.buffer);
+        const block = 0x1000;
+        const ring = 0x2000;
+        const head = COMMAND_RING_BYTES - 1024;
+        /** @param {number} at @param {number} slot */
+        const write = (at, slot)=>{
+            words.setUint32(ring + at + COMMAND.SLOT, slot, true);
+            words.setUint32(ring + at + COMMAND.BYTES, 8, true);
+        };
+        for (let at = 0; at < head; at += 8)
+        {
+            write(at, 1);
+        }
+        words.setUint32(block + SHADOW.COMMAND_HEAD, head, true);
+        let raced = false;
+        /** @type {number[]} */
+        const slots = [];
+        const reader = createCommandReader({
+            block, ring,
+            readWord: address=>words.getUint32(address, true),
+            readWords: (address, count)=>new Uint32Array(memory.slice(address, address + count * 4)
+                .buffer),
+            writeMemory: (address, bytes)=>memory.set(bytes, address),
+            compareExchangeU32: (address, expected, value)=>{
+                if (!raced)
+                {
+                    raced = true;
+                    write(head, 2);
+                    words.setUint32(block + SHADOW.COMMAND_HEAD, head + 8, true);
+                }
+                const held = words.getUint32(address, true);
+                if (held === expected)
+                {
+                    words.setUint32(address, value, true);
+                }
+                return held;
+            },
+            take: records=>{
+                const taken = new Uint32Array(records.buffer, records.byteOffset,
+                    records.byteLength >>> 2);
+                for (let i = 0; i < taken.length; i += 2)
+                {
+                    slots.push(taken[i]);
+                }
+                return taken.length / 2;
+            },
+            refuse: detail=>assert.fail(detail),
+        });
+        reader.take();
+        reader.take();
+        assert.equal(raced, true, 'the host started the ring over');
+        assert.equal(slots.length, head / 8 + 1, 'every record, the raced one with them');
+        assert.equal(slots[slots.length - 1], 2);
+        // And once nothing took space past it, the ring starts over.
+        reader.take();
+        assert.equal(words.getUint32(block + SHADOW.COMMAND_HEAD, true), 0);
+    });

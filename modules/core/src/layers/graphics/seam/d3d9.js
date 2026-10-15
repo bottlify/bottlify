@@ -3031,6 +3031,7 @@ export function createDirect3D9Seam(
                 readMemory: memory.windowMemory ?? memory.readMemory,
                 readU32: memory.readU32,
                 writeMemory: memory.writeMemory,
+                compareExchangeU32: memory.compareExchangeU32,
                 device: held.device,
                 divergence,
                 phases,

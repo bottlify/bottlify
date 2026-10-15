@@ -285,6 +285,9 @@ const LIST_TYPES = new Map([
  *           does not wire one -- and then these are read through a window and
  *           a `DataView` instead.
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {(address: number, expected: number, value: number) => number} [compareExchangeU32]
+ *     A dword swapped only if it holds `expected`, indivisible against the guest's
+ *     threads on the process's other executors.
  * @property {() => { width: number, height: number }} [screen]
  *           How big a drawable is, when nothing better can be asked.
  * @property {(hdc: number) => import('./wgl.js').DrawableInfo | null} [describeDrawable]
@@ -493,6 +496,7 @@ export function createOpengl(services){
             block, ring, readWords,
             readWord: address=>readWords(address, 1)[0],
             writeMemory: services.writeMemory,
+            compareExchangeU32: services.compareExchangeU32,
             take: records=>{
                 const calls = context.commands(records);
                 ringCalls += calls;
