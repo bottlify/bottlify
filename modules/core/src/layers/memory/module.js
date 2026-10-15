@@ -155,6 +155,28 @@ export function createMemoryModule(){
              * does nothing -- rather than dereferencing what disposal took away.
              */
             const live = ()=>!state.disposed;
+            /** The RAM as dwords, where it is shared with other threads; null where not. */
+            /** @type {Int32Array | null | undefined} */
+            let ramWords;
+            const sharedWords = ()=>{
+                if (ramWords === undefined)
+                {
+                    /** @type {Uint8Array | null} */
+                    let ram;
+                    try
+                    {
+                        ram = cpu.ramView?.() ?? null;
+                    }
+                    catch {
+                        // No machine yet: asked again next time.
+                        return null;
+                    }
+                    ramWords = ram && typeof SharedArrayBuffer === 'function'
+                        && ram.buffer instanceof SharedArrayBuffer && ram.byteOffset % 4 === 0
+                        ? new Int32Array(ram.buffer, ram.byteOffset, ram.byteLength >>> 2) : null;
+                }
+                return ramWords;
+            };
 
             current = state;
             return {
@@ -340,6 +362,39 @@ export function createMemoryModule(){
                     {
                         state.accessors.writeU32(address, value);
                     }
+                },
+                /**
+                 * The dword at `address` replaced by `value` if it is `expected`, as
+                 * one indivisible step against the threads running on other
+                 * executors where the RAM is shared; answers what it was. How the
+                 * host takes a lock the guest's own code takes with `xchg`.
+                 *
+                 * @param {number} address  4-aligned @param {number} expected
+                 * @param {number} value
+                 * @returns {number}
+                 */
+                compareExchangeU32: (address, expected, value)=>{
+                    if (!live())
+                    {
+                        return 0;
+                    }
+                    const shared = sharedWords();
+                    if (shared !== null && (address & 3) === 0)
+                    {
+                        const was = Atomics.compareExchange(shared, address >>> 2, expected | 0,
+                            value | 0) >>> 0;
+                        if (was === expected >>> 0)
+                        {
+                            state.accessors.adopt(address, 4);
+                        }
+                        return was;
+                    }
+                    const was = state.accessors.readU32(address);
+                    if (was === expected >>> 0)
+                    {
+                        state.accessors.writeU32(address, value);
+                    }
+                    return was;
                 },
                 /** @param {number} address @param {number} [limit] */
                 readCString: (address, limit)=>

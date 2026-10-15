@@ -673,6 +673,8 @@ export function createWin32Module(){
                     readBytes: (address, length)=>memory.readBytes(address, length),
                     writeBytes: (address, bytes)=>memory.writeBytes(address, bytes),
                     fillBytes: (address, value, length)=>memory.fillBytes(address, value, length),
+                    compareExchangeU32: (address, expected, value)=>
+                        memory.compareExchangeU32(address, expected, value),
                 },
             });
             const allocator = guestHeap.wrap();

@@ -31,11 +31,14 @@
  * of its word in each entry. The lock is taken with `xchg`, one instruction,
  * and the scheduler switches threads only between instructions, so a thread
  * that finds it taken is one preempted inside a few instructions of its own;
- * it does not wait but hands its call to the host. The host, which runs
- * while no guest thread does, touches a heap's cache only while its lock is
- * free, and keeps the free cells it knows of beyond that cache itself: those
- * it takes when a cache runs dry, and those a full cache hands back, from
- * which a slab whose cells are all back goes back to the arena.
+ * it does not wait but hands its call to the host. The host touches a heap's
+ * cache only while it holds the same lock, taken with one compare-and-swap:
+ * threads on the process's other executors run while it does, and a lock
+ * found free and not taken was another thread's the next instant. Where it
+ * finds the lock taken it does not wait either, and keeps the free cells it
+ * knows of beyond that cache itself: those it takes when a cache runs dry, and
+ * those a full cache hands back, from which a slab whose cells are all back
+ * goes back to the arena.
  */
 
 import { assembleTo } from './code-arena.js';
@@ -111,6 +114,8 @@ const OWN = Symbol('guest heap');
  * @property {(address: number, length: number) => Uint8Array} readBytes
  * @property {(address: number, bytes: Uint8Array) => void} writeBytes
  * @property {(address: number, value: number, length: number) => void} fillBytes
+ * @property {(address: number, expected: number, value: number) => number} [compareExchangeU32]
+ *     one indivisible step against other threads where the memory is shared
  */
 
 /**
@@ -366,8 +371,27 @@ export function createGuestHeap({ allocator, arena, memory }){
         }
     };
 
+    /**
+     * Takes the heap's lock for the host: whether it was free. What the guest's
+     * `xchg` leaves there is 1 as well.
+     *
+     * @param {HeapState} heap
+     */
+    const lock = heap=>{
+        const at = heap.handle + CONTROL.LOCK;
+        if (memory.compareExchangeU32)
+        {
+            return memory.compareExchangeU32(at, 0, 1) === 0;
+        }
+        if (memory.readU32(at) !== 0)
+        {
+            return false;
+        }
+        memory.writeU32(at, 1);
+        return true;
+    };
     /** @param {HeapState} heap */
-    const locked = heap=>memory.readU32(heap.handle + CONTROL.LOCK) !== 0;
+    const unlock = heap=>memory.writeU32(heap.handle + CONTROL.LOCK, 0);
 
     /**
      * The oldest half of a full cache back to the host.
@@ -439,7 +463,7 @@ export function createGuestHeap({ allocator, arena, memory }){
         }
         const cls = CLASS_OF[(size + 7) >>> 3];
         let address = 0;
-        if (!locked(heap))
+        if (lock(heap))
         {
             const area = classArea(heap.handle, cls);
             if (memory.readU32(area + CONTROL.COUNT) === 0)
@@ -452,6 +476,7 @@ export function createGuestHeap({ allocator, arena, memory }){
                 address = memory.readU32(area + CONTROL.ENTRIES + (count - 1) * 8);
                 memory.writeU32(area + CONTROL.COUNT, count - 1);
             }
+            unlock(heap);
         }
         if (address === 0)
         {
@@ -483,7 +508,7 @@ export function createGuestHeap({ allocator, arena, memory }){
         memory.writeU16(slot, 0);
         counts.hostFrees++;
         const { heap } = slab;
-        if (locked(heap))
+        if (!lock(heap))
         {
             slab.free.push(index);
             listPartial(slab);
@@ -499,6 +524,7 @@ export function createGuestHeap({ allocator, arena, memory }){
         memory.writeU32(area + CONTROL.ENTRIES + count * 8, slab.base + index * slab.cellSize);
         memory.writeU32(area + CONTROL.ENTRIES + count * 8 + 4, slot);
         memory.writeU32(area + CONTROL.COUNT, count + 1);
+        unlock(heap);
         return true;
     };
 
