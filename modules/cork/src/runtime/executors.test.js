@@ -74,6 +74,22 @@ test('an executor\'s layout moves its state and tables, and only those', ()=>{
     assert.throws(()=>executorLayout(own, own.tables), /not one past the first's/);
 });
 
+test('a layout of several executors names the processor each is, and one names none', ()=>{
+    const single = ownLayout({ ramSize: 1 << 20, hashSlots: 1 << 16 });
+    assert.equal(ownLayout({ ramSize: 1 << 20, hashSlots: 1 << 16, processors: 1 }).id, single.id,
+        'one processor\'s layout -- and so its stored translations -- is what it was');
+    assert.equal(single.processors, undefined);
+    const own = ownLayout({ ramSize: 1 << 20, hashSlots: 1 << 16, processors: 4 });
+    assert.deepEqual([own.processors, own.processor], [4, 0]);
+    assert.notEqual(own.id, single.id, 'cpuid answers differently in its code');
+    const base = Math.ceil((own.tables + tablesSize(own)) / PAGE) * PAGE + executorBytes(own);
+    const third = executorLayout(own, base + executorBytes(own), 3);
+    assert.deepEqual([third.processors, third.processor], [4, 3]);
+    assert.throws(()=>executorLayout(own, base, 4), /executor 4 of 4/);
+    assert.equal(executorLayout(single, base, 7).processor, undefined,
+        'a layout of one processor names none past it');
+});
+
 test('sequences translated on the third executor of a memory leave what the model leaves',
     async()=>{
         await judgeAll(createJudge({ executor: THIRD }), COUNT,

@@ -189,7 +189,7 @@ export function createCorkHost(config){
     // the start of any executor's state block: the block's views, and a
     // thread's context taken from them, are the same on every executor.
     // The entry hash's slots are the engine's own unless the config names a size.
-    const own = ownLayout({ ramSize: memorySize,
+    const own = ownLayout({ ramSize: memorySize, processors: executors,
         ...(corkConfig?.hashSlots ? { hashSlots: corkConfig.hashSlots } : {}) });
     const tables = tablesSize(own);
     // A profiling run (`blockProfile`) has the block profile past the tables,
@@ -206,7 +206,7 @@ export function createCorkHost(config){
     const executorBase = index=>(index === 0 ? 0
         : (firstPages + (index - 1) * executorPages) * 65536);
     const stateBase = executorBase(executor);
-    const layout = executor === 0 ? own : executorLayout(own, stateBase);
+    const layout = executor === 0 ? own : executorLayout(own, stateBase, executor);
     const wasmArea = layout.tables + tables + profileSize;
     // Past every executor's pages, the record they keep together of who holds
     // code where and which stores reached it (`shared-code.js`).

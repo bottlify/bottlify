@@ -820,41 +820,67 @@ export function createScheduler(options){
     let answeredAt = -1;
 
     /**
+     * Whether `thread` may run on executor `index`: the processor of that
+     * number is in its affinity mask (SetThreadAffinityMask), or it has none.
+     *
+     * @param {any} thread @param {number} index
+     */
+    const allowedOn = (thread, index)=>thread.affinityMask === undefined
+        || (thread.affinityMask >>> index & 1) === 1;
+
+    /**
      * The executor a thread runs on: where its translations are, made there
      * the first time it ran. The process's first thread is this executor's;
      * each later one goes to the executor fewest live threads call theirs,
      * one of the others before this one, which also answers their crossings.
+     * Only executors its affinity mask allows count, and a thread whose mask
+     * no longer allows its own is given another -- a program that pins a
+     * thread to each processor in turn reads each one's APIC id there.
      *
      * @param {any} thread @param {any[]} remotes
      * @returns {number} the executor's index, 0 for this one
      */
     const homeOf = (thread, remotes)=>{
-        if (thread.home !== undefined)
+        if (thread.home !== undefined && allowedOn(thread, thread.home))
         {
             return thread.home;
         }
         // This one counts a thread more than it holds: it answers the others' crossings.
         /** @type {Map<number, number>} */
-        const homed = new Map([[0, 1]]);
+        const homed = new Map();
+        if (allowedOn(thread, 0))
+        {
+            homed.set(0, 1);
+        }
         for (const remote of remotes)
         {
-            homed.set(remote.index, 0);
+            if (allowedOn(thread, remote.index))
+            {
+                homed.set(remote.index, 0);
+            }
+        }
+        if (homed.size === 0)
+        {
+            // A mask is checked against the processors when it is set; one
+            // naming none of these leaves the thread where every thread may run.
+            homed.set(0, 1);
         }
         let any = false;
         for (const other of threads)
         {
-            if (other.home !== undefined && other.state !== ThreadState.TERMINATED)
+            if (other !== thread && other.home !== undefined
+                && other.state !== ThreadState.TERMINATED && homed.has(other.home))
             {
-                homed.set(other.home, (homed.get(other.home) ?? 0) + 1);
+                homed.set(other.home, /** @type {number} */ (homed.get(other.home)) + 1);
                 any = true;
             }
         }
-        let home = 0;
+        let home = /** @type {number} */ (homed.keys().next().value);
         if (any)
         {
             for (const [index, count] of homed)
             {
-                if (count < (homed.get(home) ?? 0))
+                if (count < /** @type {number} */ (homed.get(home)))
                 {
                     home = index;
                 }
@@ -1096,15 +1122,17 @@ export function createScheduler(options){
         }
         for (const next of waiting)
         {
-            if (here === null)
+            if (here === null && allowedOn(next, 0))
             {
                 here = next;
+                continue;
             }
-            else if (free.length > 0)
+            const at = free.findIndex(one=>allowedOn(next, one.index));
+            if (at >= 0)
             {
-                place(/** @type {any} */ (free.shift()), next);
+                place(free.splice(at, 1)[0], next);
             }
-            else
+            else if (here !== null && free.length === 0)
             {
                 break;
             }
@@ -1333,6 +1361,25 @@ export function createScheduler(options){
 
         /** @returns {any[]} */
         all: ()=>[...threads],
+
+        /**
+         * The executor `thread` runs on now -- the processor it would read
+         * as its own: another executor's index while that one holds it,
+         * this one's, 0, otherwise.
+         *
+         * @param {any} thread
+         * @returns {number}
+         */
+        processorOf(thread){
+            for (const [remote, on] of placed)
+            {
+                if (on.thread === thread)
+                {
+                    return remote.index;
+                }
+            }
+            return 0;
+        },
 
         /**
          * Gives the CPU to the next ready thread and lets it run a quantum.

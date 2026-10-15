@@ -23,7 +23,7 @@
  */
 
 import { AF, CF, DF, OF, PF, SF, ZF } from '../decode/table.js';
-import { CPUID_LEAVES } from '../cpuid.js';
+import { cpuidLeaves, topologyOf } from '../cpuid.js';
 import { EMPTY } from '../wasm/encoder.js';
 import { I32, Kind, MASKS, SIGN_BITS, widthCode } from './flags.js';
 import { CallStack, Exit, Local, STATE_PARAMS } from './region.js';
@@ -395,17 +395,18 @@ export function emitInstruction(e, instruction, flagsLive){
         }
         case 'cpuid':
         {
-            // The leaves the pinned emulator answers, as constants; a leaf
-            // with no entry answers four zeros. The leaf in eax and the
-            // subleaf in ecx are saved before the four registers are cleared
-            // and the known ones set.
+            // The leaves the pinned emulator answers, as constants -- with the
+            // processors of the executor the code is translated for, whose
+            // layout it is -- and a leaf with no entry answers four zeros. The
+            // leaf in eax and the subleaf in ecx are saved before the four
+            // registers are cleared and the known ones set.
             b.localGet(Local.reg).localSet(Local.t1);
             b.localGet(Local.reg + 1).localSet(Local.t2);
             for (let index = 0; index < 4; index++)
             {
                 b.i32const(0).localSet(Local.reg + index);
             }
-            for (const [leaf, entry] of Object.entries(CPUID_LEAVES))
+            for (const [leaf, entry] of Object.entries(cpuidLeaves(topologyOf(e.layout))))
             {
                 /** @type {[string | null, import('../cpuid.js').CpuidAnswer][]} */
                 const answers = 'eax' in entry

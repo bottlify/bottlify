@@ -390,6 +390,20 @@ export function createKernelModule(){
                     state.refreshClock = refresh;
                 },
                 threads: ()=>live() ? state.scheduler.all() : [],
+                /**
+                 * The processors the machine has: the process's executors,
+                 * each a processor its threads may be pinned to.
+                 *
+                 * @returns {number}
+                 */
+                processors: ()=>cpu.processors?.() ?? 1,
+                /**
+                 * The processor `thread` runs on now: the executor holding it.
+                 *
+                 * @param {any} thread
+                 * @returns {number}
+                 */
+                processorOf: thread=>(live() ? state.scheduler.processorOf(thread) : 0),
 
                 /** @param {number} address @param {number} id */
                 writeThreadId: (address, id)=>memory.writeU32(address, id),

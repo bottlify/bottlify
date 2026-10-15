@@ -424,6 +424,18 @@ test('cpuid and rdtsc answer without a crossing', ()=>{
     assert.equal(leaf.state.reg[3], 0x00010800);
 });
 
+test('cpuid describes the processors of the state\'s layout, as translated code does', ()=>{
+    const pinned = run([0xb8, 1, 0, 0, 0, 0x0f, 0xa2], state=>{
+        state.layout = { processors: 4, processor: 2 };
+    });
+    assert.equal(pinned.state.reg[3], 0x02040800, 'four processors, APIC id 2');
+    assert.equal(pinned.state.reg[2], 0x1780a979, 'HTT set');
+    const cores = run([0xb8, 4, 0, 0, 0, 0xb9, 1, 0, 0, 0, 0x0f, 0xa2], state=>{
+        state.layout = { processors: 4, processor: 2 };
+    });
+    assert.equal(cores.state.reg[0], 0x0c000122, 'three more cores in the package');
+});
+
 test('cpuid reads a subleaf from ecx; rdrand fills a register and sets CF alone', ()=>{
     const sub = run([0xb8, 4, 0, 0, 0, 0xb9, 2, 0, 0, 0, 0x0f, 0xa2]); // leaf 4, subleaf 2
     assert.equal(sub.state.reg[0], 0x143);

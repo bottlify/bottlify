@@ -196,11 +196,14 @@ export const blockSlot = address=>Math.imul(address, 0x9e3779b1) >>> 12;
 /**
  * Cork's own layout for a memory holding `ramSize` bytes of guest RAM.
  *
- * @param {{ ramSize: number, hashSlots?: number }} options  `hashSlots`: the entry
- *     hash's, a power of two (`Tables.HASH_SLOTS` unless given)
+ * @param {{ ramSize: number, hashSlots?: number, processors?: number }} options
+ *     `hashSlots`: the entry hash's, a power of two (`Tables.HASH_SLOTS` unless given);
+ *     `processors`: the process's executors, which `cpuid` says the machine has --
+ *     a field only past one, so one processor's layout, and its translations, are
+ *     what they were
  * @returns {import('../../../core/src/layers/cpu/engine.js').StateLayout}
  */
-export function ownLayout({ ramSize, hashSlots = Tables.HASH_SLOTS }){
+export function ownLayout({ ramSize, hashSlots = Tables.HASH_SLOTS, processors = 1 }){
     if (!(hashSlots >= 1 << 10 && hashSlots <= 1 << 26 && (hashSlots & (hashSlots - 1)) === 0))
     {
         throw new Error(`cork: ${hashSlots} entry hash slots is not a power of two`
@@ -246,6 +249,7 @@ export function ownLayout({ ramSize, hashSlots = Tables.HASH_SLOTS }){
         // The entry hash's slot is the top bits of eip times the golden ratio,
         // as many as the hash has slots for.
         hashShift: 32 - Math.log2(hashSlots),
+        ...processors > 1 ? { processors, processor: 0 } : {},
     };
     return { ...fields, id: layoutId(fields) };
 }
@@ -288,14 +292,17 @@ export const executorBytes = layout=>PAGE + Math.ceil(tablesSize(layout) / PAGE)
  * constants, so a translation is the executor's own and the layout's id tells.
  * The page flags and the code granules stay the first executor's: whether a
  * page may be read, and whether a store into it reaches code some executor
- * runs, is the process's, and a store on any executor has to find it.
+ * runs, is the process's, and a store on any executor has to find it. The
+ * executor is processor `index` of the layout's (`processors`), the one `cpuid`
+ * names to code translated for it.
  *
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout  the first
  *     executor's (`ownLayout`)
  * @param {number} base
+ * @param {number} [index]  which executor: 1 for the first past the process's own
  * @returns {import('../../../core/src/layers/cpu/engine.js').StateLayout}
  */
-export function executorLayout(layout, base){
+export function executorLayout(layout, base, index = 1){
     if (base % PAGE !== 0 || base < layout.tables + tablesSize(layout))
     {
         throw new Error(`layout: an executor's page at ${base} is not one past the first's`);
@@ -311,6 +318,14 @@ export function executorLayout(layout, base){
         }
     }
     fields.tables = base + PAGE;
+    if (layout.processors !== undefined)
+    {
+        if (!(index >= 1 && index < layout.processors))
+        {
+            throw new Error(`layout: executor ${index} of ${layout.processors}`);
+        }
+        fields.processor = index;
+    }
     fields.pageFlags = pageFlagsAt(layout);
     fields.codeRanges = codeRangesAt(layout);
     return /** @type {any} */ ({ ...fields, id: layoutId(fields) });

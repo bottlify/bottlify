@@ -347,8 +347,9 @@ export function createCpuModule(){
                 // past the first a worker running its threads at once with the
                 // others (`internal/executor.js`); under cork, and with the atomic
                 // variant, which more than one needs. The kernel gives them the
-                // threads (`executors`).
-                executors: Math.max(1, config?.executors ?? 1),
+                // threads (`executors`). As many as an x86 affinity mask has bits:
+                // the program is told it has a processor for each.
+                executors: Math.min(32, Math.max(1, config?.executors ?? 1)),
             };
             // Executors past one share the program's memory with workers, which
             // only a SharedArrayBuffer allows, and a page that is not
@@ -852,6 +853,13 @@ export function createCpuModule(){
                  * @returns {any[]}
                  */
                 executors: ()=>state.remotes,
+                /**
+                 * The processors the program is told the machine has: one for
+                 * each of its executors, the process's own among them -- known
+                 * from the start, before the others are made. Only cork runs
+                 * more than one.
+                 */
+                processors: ()=>(engine === 'cork' ? settings.executors : 1),
                 /** The word their turns ring: one wait for all of them. */
                 executorBell: ()=>state.bell,
                 /**

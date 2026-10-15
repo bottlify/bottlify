@@ -73,6 +73,10 @@
  * @property {number} codePages    Wasm address of the other executor's byte-per-page
  *                                 "has compiled code" table (hybrid), or -1: a store into
  *                                 such a page leaves `stale` so its cache can be dirtied.
+ * @property {number} [processors] Cork's own: how many processors `cpuid` says the machine has
+ *     -- the process's executors -- where more than one; absent, one.
+ * @property {number} [processor]  Cork's own: which of them this layout's executor is, the
+ *     initial APIC id `cpuid` gives code running there.
  * @property {string} id           A hash of every field above.
  */
 

@@ -21,7 +21,7 @@
  */
 
 import { AF, CF, DF, OF, PF, SF, ZF, conditionReads } from './decode/table.js';
-import { cpuidLeaf } from './cpuid.js';
+import { cpuidLeaf, topologyOf } from './cpuid.js';
 import { evaluateX87, fxrstor, fxsave, isX87Op } from './ir-x87.js';
 import { evaluateSimd, isSimdOp, mmxState } from './ir-simd.js';
 
@@ -90,6 +90,8 @@ const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
  * @property {BigInt64Array} x87Shadow
  * @property {Uint32Array} xmm     the eight XMM registers, four words each
  * @property {number} mxcsr
+ * @property {{ processors?: number, processor?: number }} [layout]  the executor's
+ *     layout, whose processors `cpuid` describes; absent, one
  */
 
 /**
@@ -937,7 +939,7 @@ export function evaluate(instruction, state){
             return;
         case 'cpuid':
         {
-            const answer = cpuidLeaf(state.reg[0], state.reg[1]);
+            const answer = cpuidLeaf(state.reg[0], state.reg[1], topologyOf(state.layout));
             state.reg[0] = answer.eax;
             state.reg[1] = answer.ecx;
             state.reg[2] = answer.edx;
