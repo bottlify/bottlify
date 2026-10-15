@@ -476,6 +476,8 @@
  * @property {number} [volatileNow]     The pages left to the interpreter now.
  * @property {number} [storesKept]      Stores into code that changed no byte a region on the page
  *     was formed from, and dropped none.
+ * @property {number} [codePageCopies]  Pages whose bytes are kept to judge a later store into
+ *     none of their regions by: pages code was on when a store came.
  * @property {number} [dropped]        Regions dropped at publication because a page moved.
  * @property {number} [queued]         Candidates noted and not yet formed.
  * @property {number} [barren]         Candidate keys a region formed nothing at.

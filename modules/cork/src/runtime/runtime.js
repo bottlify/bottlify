@@ -1357,13 +1357,22 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
         const last = (end - 1) >>> 12;
         for (let page = address >>> 12; page <= last; page++)
         {
+            // No region and no candidate on the page: nothing a store there can
+            // make wrong. Nearly every host write is an answer into a stack or
+            // a buffer, and judging it would keep a copy of every page the host
+            // ever wrote -- a game's files read, page for page -- to compare
+            // the next write against.
+            if (watched[page] === 0)
+            {
+                continue;
+            }
             const on = byPage.get(page);
             // With other executors beside this one a page goes whole, as before:
             // their stores reach this one's regions only when it next looks
             // (`takeCodeWrites`), and keeping regions across that gap is not
             // yet judged by the executors' gate.
-            const whole = codeShared !== null || watched[page] === 0 || on === undefined
-                || on.size === 0 || [...on].some(record=>record.sources === undefined);
+            const whole = codeShared !== null || on === undefined || on.size === 0
+                || [...on].some(record=>record.sources === undefined);
             /** @param {any} record */
             const sourcesOf = record=>
                 /** @type {{ start: number, bytes: Uint8Array }[]} */ (record.sources);
@@ -4721,6 +4730,9 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
                 volatilePages: counts.volatilePages,
                 volatileNow: volatileUntil.size,
                 storesKept: counts.storesKept,
+                // Pages whose bytes are kept to judge a store into none of their
+                // regions by: pages code was on when the store came.
+                codePageCopies: pageBytes.size,
                 prediction: { due: counts.predictDue, noShare: counts.predictNoShare,
                     reformsOut: counts.predictReformsOut, notFormed: counts.predictNotFormed,
                     noRegion: counts.predictNoRegion, held: counts.predictHeld,

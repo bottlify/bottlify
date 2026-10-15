@@ -590,6 +590,29 @@ test('a store into code drops only the regions whose bytes it changed, and asks 
             'the loop as its bytes are now');
     });
 
+test('a host write into a page with no code keeps no copy of it; one beside code does',
+    async()=>{
+        const m = machine({ precise: true });
+        m.write(CODE, COUNTDOWN);
+        m.runtime.noteHot(CODE);
+        assert.equal(await m.runtime.translatePending(), 1);
+        // Answers into a buffer and a file read, on pages no code is on.
+        for (let i = 0; i < 100; i++)
+        {
+            m.runtime.stored(0x20000 + (i % 4) * 0x1000 + i * 4, 4);
+        }
+        m.runtime.stored(0x40000, 0x10000);
+        let d = m.runtime.diagnostics();
+        assert.equal(d.codePageCopies, 0, 'nothing kept of pages without code');
+        assert.equal(d.regions, 1);
+        assert.equal(d.invalidations, 0);
+        // Beside the loop, on its page: kept, to judge the next store there by.
+        m.runtime.stored(CODE + 0x800, 4);
+        d = m.runtime.diagnostics();
+        assert.equal(d.codePageCopies, 1);
+        assert.equal(m.runtime.entryOf(CODE), -1, 'a page met first goes whole, as before');
+    });
+
 test('a volatile page is translated again once its hold is over', async()=>{
     const m = machine({ volatileAfter: 3, volatileHoldMs: 0 });
     m.write(CODE, COUNTDOWN);
