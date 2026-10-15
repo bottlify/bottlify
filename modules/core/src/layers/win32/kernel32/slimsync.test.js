@@ -19,7 +19,11 @@ const SECTION = 0x180;
  * A kernel that records what blocks and what wakes, with a timeout the test
  * delivers itself, and a guest memory the words live in.
  */
-function setup(){
+/**
+ * @param {{ between?: () => void }} [race]  run once inside the first
+ *     compare-and-swap, before it compares: another thread's store meanwhile
+ */
+function setup(race = {}){
     const bytes = new Uint8Array(0x1000);
     /** @type {any[]} */
     const blocked = [];
@@ -57,6 +61,20 @@ function setup(){
         kernel,
         readMemory: (address, length)=>bytes.slice(address, address + length),
         writeMemory: (address, data)=>bytes.set(data, address),
+        compareExchangeU32: (/** @type {number} */ address, /** @type {number} */ expected,
+            /** @type {number} */ value)=>
+        {
+            const between = race.between;
+            race.between = undefined;
+            between?.();
+            const view = new DataView(bytes.buffer);
+            const held = view.getUint32(address, true);
+            if (held === expected)
+            {
+                view.setUint32(address, value, true);
+            }
+            return held;
+        },
         currentThread: ()=>current,
         park: ()=>PARKED,
         allocate: size=>{
@@ -203,6 +221,29 @@ test('sleeping on a condition variable with a critical section leaves the sectio
     sleep.handler([VARIABLE, SECTION, INFINITE]);
     assert.deepEqual(sectionWakes, [SECTION], 'one waiting for the section is handed it');
 });
+
+test('a thread entering the section on another executor as the sleeper leaves it is handed it',
+    ()=>{
+        // The sleeper holds the section alone (LockCount 0); between the host's
+        // read of the count and its store, another thread's `lock inc` takes it
+        // to 1 and that thread goes to wait. Leaving brings it to 0, not -1, and
+        // wakes the waiter.
+        const race = {};
+        const { bytes, fns, sectionWakes, builder, trap } = setup(race);
+        fns.SleepConditionVariableCS.guest(builder);
+        const sleep = trap('<cv-sleep-cs>');
+        const view = new DataView(bytes.buffer);
+        view.setInt32(SECTION + 4, 0, true);
+        view.setInt32(SECTION + 8, 1, true);
+        view.setInt32(SECTION + 12, 1, true);
+        Object.assign(race, { between: ()=>view.setInt32(SECTION + 4,
+            view.getInt32(SECTION + 4, true) + 1, true) });
+
+        assert.equal(sleep.handler([VARIABLE, SECTION, INFINITE]), PARKED);
+        assert.equal(view.getInt32(SECTION + 4, true), 0,
+            'one waiting, as the other\'s inc left it');
+        assert.deepEqual(sectionWakes, [SECTION], 'and it is handed the section');
+    });
 
 test('the guest code around a sleep takes the lock back, and says when the time ran out', ()=>{
     /** @param {Uint8Array} code @param {number} at @param {number} offset */

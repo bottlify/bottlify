@@ -115,6 +115,9 @@ const FILETIME_EPOCH_MS = 11644473600000;
  * @property {any} kernel                        The kernel layer's API.
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {(address: number, expected: number, value: number) => number} [compareExchangeU32]
+ *           A dword swapped only if it holds `expected`, indivisible against the
+ *           guest's threads on the process's other executors; answers what it held.
  * @property {() => any} currentThread
  * @property {(thread?: any) => any} park        Stops a thread; returns the parked token.
  * @property {ReturnType<typeof import('./critical.js').createCriticalSections>} critical

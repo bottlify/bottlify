@@ -179,6 +179,8 @@ export function executeOnceCode(at, { begin, end }){
  * @property {any} kernel
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {(address: number, expected: number, value: number) => number} [compareExchangeU32]
+ *           indivisible against the guest's threads on the process's other executors
  * @property {() => any} currentThread
  * @property {(thread?: any) => any} park
  * @property {(bytes: number) => number} allocate
@@ -382,14 +384,31 @@ export function createSlimSync(host, enterCritical){
      * @param {number} section
      */
     const leaveSection = section=>{
-        const view = new DataView(host.readMemory(section, CS.OWNING_THREAD + 4).slice().buffer);
-        const lockCount = view.getInt32(CS.LOCK_COUNT, true) - 1;
         const zero = new Uint8Array(4);
         host.writeMemory(section + CS.RECURSION_COUNT, zero);
         host.writeMemory(section + CS.OWNING_THREAD, zero);
-        const bytes = new Uint8Array(4);
-        new DataView(bytes.buffer).setInt32(0, lockCount, true);
-        host.writeMemory(section + CS.LOCK_COUNT, bytes);
+        // The count goes down as LeaveCriticalSection's `lock dec` takes it:
+        // a thread on another executor entering meanwhile takes it up with
+        // `lock inc`, and a plain store of the count read before lost that --
+        // the section read free with the thread parked on it, never woken.
+        const at = section + CS.LOCK_COUNT;
+        let lockCount;
+        for (;;)
+        {
+            const was = new DataView(host.readMemory(at, 4).slice().buffer).getInt32(0, true);
+            lockCount = (was - 1) | 0;
+            if (host.compareExchangeU32 === undefined)
+            {
+                const bytes = new Uint8Array(4);
+                new DataView(bytes.buffer).setInt32(0, lockCount, true);
+                host.writeMemory(at, bytes);
+                break;
+            }
+            if ((host.compareExchangeU32(at, was >>> 0, lockCount >>> 0) | 0) === was)
+            {
+                break;
+            }
+        }
         if (lockCount >= 0)
         {
             host.critical.wake(section);
