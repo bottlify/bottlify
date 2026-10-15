@@ -3034,6 +3034,16 @@ export function createDirect3D9Seam(
                 device: held.device,
                 divergence,
                 phases,
+                // The buffers settled and the ring played as one pause: a
+                // recording compares a dynamic buffer once in it.
+                still: work=>{
+                    if (typeof held.device.whileStill === 'function')
+                    {
+                        held.device.whileStill(work);
+                        return;
+                    }
+                    work();
+                },
                 name: 'IDirect3DDevice9',
                 commands: { take: records=>{
                     const objects = commandObjects(records, publisher.objectAt);

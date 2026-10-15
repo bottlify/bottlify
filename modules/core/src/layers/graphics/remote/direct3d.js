@@ -124,6 +124,7 @@ export function recordedDirect3D(factory, services, transport){
         // what was sent.
         drawsFrom: (/** @type {any} */ buffer, /** @type {number} */ from, /** @type {number} */ to)=>
             recording?.drawsFrom(buffer, from, to),
+        whileStill: (/** @type {() => any} */ work)=>(recording ? recording.still(work) : work()),
         writeMemory: write && ((/** @type {number} */ address, /** @type {Uint8Array} */ bytes)=>{
             recording?.writing(address, bytes.length);
             write(address, bytes);

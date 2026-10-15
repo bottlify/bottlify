@@ -486,6 +486,9 @@ const isDepthFormat = format=>FORMAT_INFO[format] !== undefined && FORMAT_INFO[f
  *     Told the bytes of each dynamic buffer a draw reads (`drawn.js`), by a
  *     device that records for one drawing elsewhere, which has to be sent
  *     what the program wrote there after the unlock.
+ * @property {(work: () => any) => any} [whileStill]  Runs `work` as one pause of
+ *     the program's (`whileStill`), for a device that records: what it compares of
+ *     guest memory in the pause it compares once.
  */
 
 /**
@@ -508,7 +511,7 @@ export function createDirect3D9(options = {}){
         backend, readMemory, windowMemory, writeMemory, createSampler, allocate: guestMemory,
         free: giveBack, divergence, dumpDraws, dumpEvery, liveDump, maxDraws, skipTexture,
         probeTexture, fog, mips, driverRules, onDeviceLost, gamma, frameQueued, renderedElsewhere,
-        keepMemory, rereadBuffers, drawsFrom, rectangleBump, drawsNothing, ...caps
+        keepMemory, rereadBuffers, drawsFrom, whileStill, rectangleBump, drawsNothing, ...caps
     } = options;
     /** @type {DeviceCaps} */
     const resolved = { ...DEFAULT_CAPS, ...caps, fullscreenGamma: gamma?.applies() === true };
@@ -521,7 +524,7 @@ export function createDirect3D9(options = {}){
         free: keepMemory === true ? undefined : giveBack, divergence, dumpDraws, dumpEvery,
         liveDump, maxDraws, skipTexture,
         probeTexture, fog, mips, driverRules, onDeviceLost, gamma, frameQueued, renderedElsewhere,
-        rereadBuffers, drawsFrom, rectangleBump, drawsNothing,
+        rereadBuffers, drawsFrom, whileStill, rectangleBump, drawsNothing,
     };
     if (backend && !readMemory)
     {
@@ -2323,6 +2326,20 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
 
         get inScene(){
             return inScene;
+        },
+
+        /**
+         * Runs `work` -- the calls a host entry makes before the program runs
+         * again -- as one pause, so that a recording compares a dynamic
+         * buffer's bytes once in it rather than at its unlock and again at
+         * each draw from it. Not a D3D method.
+         *
+         * @template T
+         * @param {() => T} work
+         * @returns {T}
+         */
+        whileStill(work){
+            return services.whileStill ? services.whileStill(work) : work();
         },
 
         /**

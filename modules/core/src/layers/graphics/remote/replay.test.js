@@ -804,6 +804,82 @@ test('a buffer locked a few bytes at a time sends those bytes at each unlock, no
             `${sent - before} bytes sent for 50 locks of 256`);
     });
 
+test('a dynamic buffer unlocked and drawn from in one pause is compared once; apart, at both',
+    ()=>{
+        // A host entry settles the buffers the guest let go of and then plays
+        // the ring's draws, the program stopped between them: the draws found
+        // again what the unlock had just compared.
+        const ram = new Uint8Array(4 << 20);
+        let next = RAM_BASE + (1 << 20);
+        const services = {
+            readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
+                ram.slice(at - RAM_BASE, at - RAM_BASE + length),
+            allocate: (/** @type {number} */ bytes)=>{
+                const at = next;
+                next += bytes + 0x100;
+                return at;
+            },
+        };
+        const played = playedDirect3D(createDirect3D9, { ...services, readMemory: true });
+        const sender = createSender({
+            post: message=>{
+                played.read(message.buffer, call=>{
+                    played.play(call);
+                });
+            },
+            later: flush=>flush(),
+        });
+        const d3d = recordedDirect3D(createDirect3D9, services, sender);
+        /** @param {number} value */
+        const ok = value=>assert.equal(value, D3D_OK);
+        /** @type {{ device?: any }} */
+        const out = {};
+        ok(d3d.CreateDevice({ swapEffect: D3DSWAPEFFECT.DISCARD, backBufferCount: 1,
+            backBufferWidth: 8, backBufferHeight: 8, backBufferFormat: D3DFMT.X8R8G8B8 }, out));
+        const device = out.device;
+        const stride = 16;
+        /** @type {{ buffer?: any }} */
+        const made = {};
+        ok(device.CreateVertexBuffer(64 * stride, 0x200, FVF.XYZ | FVF.DIFFUSE, D3DPOOL.DEFAULT,
+            made));
+        ok(device.SetStreamSource(0, made.buffer, 0, stride));
+        ok(device.SetFVF(FVF.XYZ | FVF.DIFFUSE));
+        ok(device.BeginScene());
+        /** @param {number} value */
+        const write = value=>{
+            /** @type {{ pBits?: number }} */
+            const locked = {};
+            ok(made.buffer.Lock(0, 0, locked, 0));
+            const at = /** @type {number} */ (locked.pBits) - RAM_BASE;
+            ram.fill(value, at, at + 3 * stride);
+            ok(made.buffer.Unlock());
+        };
+        const draw = ()=>ok(device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1));
+        // The first draw sends the buffer whole; from then on what differs.
+        write(1);
+        draw();
+        const compared = ()=>sender.shippedBytes().compared;
+        const unlocked = ()=>sender.shippedBytes().buffers;
+        let before = compared();
+        const sentBefore = unlocked();
+        write(2);
+        // The last call's draw compared these bytes before the program wrote them.
+        assert.equal(unlocked() - sentBefore, 3 * stride, 'apart: the unlock sends what it wrote');
+        draw();
+        assert.equal(compared() - before, 3 * stride, 'apart: the draw compares again');
+        before = compared();
+        device.whileStill(()=>{
+            write(3);
+            draw();
+        });
+        assert.equal(compared() - before, 0, 'in a pause: once, at the unlock');
+        // What the draw reads arrived all the same.
+        before = compared();
+        write(4);
+        draw();
+        assert.equal(compared() - before, 3 * stride, 'and apart again after it');
+    });
+
 test('an event query answers on the program\'s side; an occlusion query asks the renderer', ()=>{
     // An event is signalled once its end is issued, as the device without a
     // renderer signals it: a round trip only made the program wait for the

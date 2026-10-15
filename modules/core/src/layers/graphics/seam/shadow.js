@@ -1782,6 +1782,9 @@ export function settledAfter(shadow, call){
  *     ring carries (`commandCode`), and how the host makes one: a device
  *     without them gets no ring.
  * @property {ShadowPhases} [phases]  Where `sync`'s time is accounted.
+ * @property {(work: () => void) => void} [still]  Runs `work` as one pause of the
+ *     program's, which does not run until it is done: what the device compares of
+ *     guest memory in it is compared once, however many of its calls read it.
  */
 
 /**
@@ -2292,6 +2295,38 @@ export function createShadow(deps){
         }
     };
 
+    /** `sync`'s work: the buffers the guest let go of, then the ring. */
+    const syncNow = ()=>{
+        // The work every host call starts with, outside the method it was
+        // asked for: unaccounted, it was read as the call's own time, and
+        // a share of the thread that a profile found only here.
+        const weight = phases === null ? 0 : phases.begin('ring-sync');
+        if (weight !== 0)
+        {
+            try
+            {
+                timedSync();
+            }
+            finally
+            {
+                /** @type {ShadowPhases} */ (phases).end('ring-sync', weight);
+            }
+            return;
+        }
+        const unlocked = readWord(address + SHADOW.RING_HEAD);
+        if (unlocked !== 0)
+        {
+            settleUnlocked(unlocked);
+        }
+        if (commands !== 0)
+        {
+            // Held buffers only when the ring has calls that may read
+            // them: settling at every entry read every held range again
+            // at each of thousands of host calls a frame.
+            commandReader?.take(settleHeld);
+        }
+    };
+
     /** The block, made and mirrored on first use. */
     const place = ()=>{
         if (address === 0)
@@ -2449,34 +2484,14 @@ export function createShadow(deps){
             {
                 return;
             }
-            // The work every host call starts with, outside the method it was
-            // asked for: unaccounted, it was read as the call's own time, and
-            // a share of the thread that a profile found only here.
-            const weight = phases === null ? 0 : phases.begin('ring-sync');
-            if (weight !== 0)
+            // One pause of the program's: a dynamic buffer compared at its
+            // unlock is not compared again by the ring's draws from it.
+            if (deps.still)
             {
-                try
-                {
-                    timedSync();
-                }
-                finally
-                {
-                    /** @type {ShadowPhases} */ (phases).end('ring-sync', weight);
-                }
+                deps.still(syncNow);
                 return;
             }
-            const unlocked = readWord(address + SHADOW.RING_HEAD);
-            if (unlocked !== 0)
-            {
-                settleUnlocked(unlocked);
-            }
-            if (commands !== 0)
-            {
-                // Held buffers only when the ring has calls that may read
-                // them: settling at every entry read every held range again
-                // at each of thousands of host calls a frame.
-                commandReader?.take(settleHeld);
-            }
+            syncNow();
         },
 
         /**
