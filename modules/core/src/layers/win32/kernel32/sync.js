@@ -118,6 +118,8 @@ const FILETIME_EPOCH_MS = 11644473600000;
  * @property {(address: number, expected: number, value: number) => number} [compareExchangeU32]
  *           A dword swapped only if it holds `expected`, indivisible against the
  *           guest's threads on the process's other executors; answers what it held.
+ * @property {(address: number, expected: bigint, value: bigint) => bigint} [compareExchangeU64]
+ *           The same for a quadword, as `lock cmpxchg8b` takes one.
  * @property {() => any} currentThread
  * @property {(thread?: any) => any} park        Stops a thread; returns the parked token.
  * @property {ReturnType<typeof import('./critical.js').createCriticalSections>} critical

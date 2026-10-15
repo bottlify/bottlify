@@ -11,10 +11,12 @@
  * depth as a WORD and a WORD sequence that moves with every change.
  *
  * On Windows each operation is one `lock cmpxchg8b` on the header. Here each
- * is one host call, which no other guest thread can interleave with, since
- * the scheduler preempts only between instructions; the header is kept as
- * Windows keeps it, so a program that reads it -- or pushes with its own
- * compare-exchange -- finds the same words.
+ * is one host call, and the header moves by one compare-and-swap of its
+ * eight bytes (`compareExchangeU64`): a thread on another executor -- one of
+ * these on the same list, or a program's own compare-exchange -- changing it
+ * meanwhile makes the call look again. The header is kept as Windows keeps
+ * it, so a program that reads it or pushes with its own compare-exchange
+ * finds the same words.
  */
 
 /** SLIST_HEADER on a 32-bit system. */
@@ -29,6 +31,9 @@ const HEADER = Object.freeze({
  * @typedef {Object} SListHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {(address: number, expected: bigint, value: bigint) => bigint} [compareExchangeU64]
+ *           A quadword swapped only if it holds `expected`, indivisible against
+ *           the guest's threads on the process's other executors; answers what it held.
  * @property {(bytes: number) => number} allocate
  * @property {(bytes: number) => number} [allocateCode]
  *           Guest memory the processor executes, for the fastcall push.
@@ -84,17 +89,54 @@ export function createSListFunctions(host){
     };
 
     /**
+     * The header moved from what it holds to what `step` makes of it, as one
+     * `lock cmpxchg8b`: changed by another thread meanwhile, `step` looks again.
+     *
+     * @template T
+     * @param {number} header
+     * @param {(now: { next: number, depth: number, sequence: number }) =>
+     *     { header?: [number, number, number], answer: T }} step  no header: left as it is
+     * @returns {T}
+     */
+    const change = (header, step)=>{
+        for (;;)
+        {
+            const view = new DataView(host.readMemory(header, HEADER.SIZE).slice().buffer);
+            const was = view.getBigUint64(0, true);
+            const { header: next, answer } = step({
+                next: view.getUint32(HEADER.NEXT, true),
+                depth: view.getUint16(HEADER.DEPTH, true),
+                sequence: view.getUint16(HEADER.SEQUENCE, true),
+            });
+            if (next === undefined)
+            {
+                return answer;
+            }
+            const [first, depth, sequence] = next;
+            if (host.compareExchangeU64 === undefined)
+            {
+                writeHeader(header, first, depth, sequence);
+                return answer;
+            }
+            const value = BigInt(first >>> 0) | BigInt(depth & 0xffff) << 32n
+                | BigInt(sequence & 0xffff) << 48n;
+            if (host.compareExchangeU64(header, was, value) === was)
+            {
+                return answer;
+            }
+        }
+    };
+
+    /**
      * Puts the chain `first`..`last` of `count` entries on the front of the
      * list, answering the entry that was first before.
      *
      * @param {number} header @param {number} first @param {number} last @param {number} count
      */
-    const pushList = (header, first, last, count)=>{
-        const { next, depth, sequence } = readHeader(header);
-        write32(last, next);
-        writeHeader(header, first, depth + count, sequence + 1);
-        return next;
-    };
+    const pushList = (header, first, last, count)=>change(header, now=>{
+        write32(last, now.next);
+        return { header: [first, now.depth + count, now.sequence + 1], answer: now.next };
+    });
 
     /** Where the fastcall push's code was placed, once. */
     let fastPush = 0;
@@ -181,15 +223,8 @@ export function createSListFunctions(host){
         InterlockedPopEntrySList: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([header])=>{
-                const { next, depth, sequence } = readHeader(header >>> 0);
-                if (next === 0)
-                {
-                    return 0;
-                }
-                writeHeader(header >>> 0, read32(next), depth - 1, sequence + 1);
-                return next;
-            },
+            handler: ([header])=>change(header >>> 0, now=>(now.next === 0 ? { answer: 0 } : {
+                header: [read32(now.next), now.depth - 1, now.sequence + 1], answer: now.next })),
         },
 
         /**
@@ -202,15 +237,8 @@ export function createSListFunctions(host){
         InterlockedFlushSList: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([header])=>{
-                const { next, sequence } = readHeader(header >>> 0);
-                if (next === 0)
-                {
-                    return 0;
-                }
-                writeHeader(header >>> 0, 0, 0, sequence + 1);
-                return next;
-            },
+            handler: ([header])=>change(header >>> 0, now=>(now.next === 0 ? { answer: 0 } : {
+                header: [0, 0, now.sequence + 1], answer: now.next })),
         },
     };
 }

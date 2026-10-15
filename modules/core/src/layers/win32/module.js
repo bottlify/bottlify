@@ -1563,6 +1563,8 @@ export function createWin32Module(){
                         writeMemory,
                         compareExchangeU32: (address, expected, value)=>
                             memory.compareExchangeU32(address, expected, value),
+                        compareExchangeU64: (address, expected, value)=>
+                            memory.compareExchangeU64(address, expected, value),
                         currentThread: ()=>kernel.currentThread(),
                         park: (/** @type {any} */ thread)=>bridge.park(thread),
                         critical,

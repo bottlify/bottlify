@@ -97,3 +97,43 @@ test('the fastcall push moves ECX and EDX under the return address and jumps to 
     assert.equal(depth(), 1);
     assert.equal(fast.guest(builder), CODE, 'placed once');
 });
+
+test('a push that another thread\'s change overtakes looks again, and loses neither', ()=>{
+    // Between the host's read of the header and its swap, a thread on
+    // another executor pushes with its own lock cmpxchg8b: the host's swap
+    // fails, and the push is made again over what that thread left.
+    const bytes = new Uint8Array(0x400);
+    const view = new DataView(bytes.buffer);
+    /** @type {(() => void) | null} */
+    let meanwhile = null;
+    const fns = createSListFunctions({
+        readMemory: (address, length)=>bytes.subarray(address, address + length),
+        writeMemory: (address, data)=>bytes.set(data, address),
+        compareExchangeU64: (address, expected, value)=>{
+            const other = meanwhile;
+            meanwhile = null;
+            other?.();
+            const held = view.getBigUint64(address, true);
+            if (held === expected)
+            {
+                view.setBigUint64(address, value, true);
+            }
+            return held;
+        },
+        allocate: ()=>CODE,
+    });
+    fns.InitializeSListHead.handler([HEADER]);
+    meanwhile = ()=>{
+        // Their push of ITEM2 onto the empty list: next 0, depth 1, sequence 1.
+        view.setUint32(ITEM2, 0, true);
+        view.setUint32(HEADER, ITEM2, true);
+        view.setUint16(HEADER + 4, 1, true);
+        view.setUint16(HEADER + 6, 1, true);
+    };
+    assert.equal(fns.InterlockedPushEntrySList.handler([HEADER, ITEM1]), ITEM2,
+        'the entry that was first when it was made');
+    assert.equal(view.getUint32(HEADER, true), ITEM1);
+    assert.equal(view.getUint32(ITEM1, true), ITEM2, 'linked to theirs');
+    assert.equal(fns.QueryDepthSList.handler([HEADER]), 2);
+    assert.equal(view.getUint16(HEADER + 6, true), 2, 'and a sequence each');
+});
