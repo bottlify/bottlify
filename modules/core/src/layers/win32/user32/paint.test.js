@@ -55,6 +55,13 @@ test('a word wider than the rectangle is cut where it stops fitting, never at no
         DT_WORDBREAK, PROPORTIONAL);
     assert.deepEqual(narrow.map(line=>line.text), ['W', 'W'],
         'one character a line when not even one fits');
+    for (const right of [0, -10])
+    {
+        const none = layoutText('WW W', { left: 0, top: 0, right, bottom: 100 },
+            DT_WORDBREAK, PROPORTIONAL);
+        assert.deepEqual(none.map(line=>line.text), ['W', 'W ', 'W'],
+            `a rectangle ${right} wide still ends, a character a line`);
+    }
 });
 
 test('DrawIcon puts the icon\'s picture down at its size, DrawIconEx at the size asked for', ()=>{

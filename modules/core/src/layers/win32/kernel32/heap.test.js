@@ -748,6 +748,25 @@ test('pages decommitted apart are given back apart: the one between keeps its co
     assert.ok(all(host.bytes.subarray(reserved + 2 * PAGE_SIZE, reserved + 3 * PAGE_SIZE), 0));
 });
 
+test('a decommit with no size takes the whole reservation from its base and is refused inside it',
+    ()=>{
+        const { host, fns, errors } = recording();
+        const reserved = fns.VirtualAlloc.handler([0, GRANULARITY, MEM_RESERVE | MEM_COMMIT, 0x04]);
+        host.dirty(reserved, 4 * PAGE_SIZE);
+
+        // Wine's NtFreeVirtualMemory: STATUS_FREE_VM_NOT_AT_BASE, and nothing taken.
+        assert.equal(fns.VirtualFree.handler([reserved + PAGE_SIZE, 0, MEM_DECOMMIT]), 0);
+        assert.deepEqual(errors, [ERROR_INVALID_ADDRESS]);
+        fns.VirtualAlloc.handler([reserved, 4 * PAGE_SIZE, MEM_COMMIT, 0x04]);
+        assert.ok(all(host.bytes.subarray(reserved, reserved + 4 * PAGE_SIZE), 0xaa),
+            'every page keeps what it held');
+
+        assert.equal(fns.VirtualFree.handler([reserved, 0, MEM_DECOMMIT]), 1);
+        fns.VirtualAlloc.handler([reserved, 4 * PAGE_SIZE, MEM_COMMIT, 0x04]);
+        assert.ok(all(host.bytes.subarray(reserved, reserved + 4 * PAGE_SIZE), 0),
+            'from the base, all of it is given back');
+    });
+
 test('every function declares the stack it pops', ()=>{
     const { fns } = setup();
     // stdcall: the callee cleans up, so a wrong count corrupts the guest stack

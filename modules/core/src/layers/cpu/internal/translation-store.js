@@ -332,6 +332,63 @@ async function sweepOtherVersions(cork, name){
 }
 
 /**
+ * Removes a bundle's translations, every layout version of them, so its next
+ * start translates its code afresh -- for a cache a translator of an earlier
+ * build filled. Holds the bundle's lock while it does, so it never takes the
+ * files from under a run: a bundle in use is refused with an error.
+ *
+ * @param {string} name  the bundle's, as a run names its store
+ * @param {{ getDirectoryHandle: Function }} [root]  the origin's file system by default
+ * @returns {Promise<number>}  how many directories went
+ */
+export async function clearTranslations(name, root){
+    const safe = name.replace(/[^A-Za-z0-9._-]/g, '_') || 'bundle';
+    const nav = /** @type {any} */ (globalThis).navigator;
+    const base = root ?? await nav?.storage?.getDirectory?.();
+    if (!base)
+    {
+        return 0;
+    }
+    const sweep = async()=>{
+        /** @type {any} */
+        let cork;
+        try
+        {
+            cork = await base.getDirectoryHandle('cork');
+        }
+        catch {
+            return 0;
+        }
+        /** @type {string[]} */
+        const mine = [];
+        for await (const [entry] of cork.entries())
+        {
+            if (entry.startsWith(`${safe}.v`))
+            {
+                mine.push(entry);
+            }
+        }
+        for (const entry of mine)
+        {
+            await cork.removeEntry(entry, { recursive: true });
+        }
+        return mine.length;
+    };
+    if (typeof nav?.locks?.request !== 'function')
+    {
+        return sweep();
+    }
+    return nav.locks.request(`bottlify-cork:${name}`, { ifAvailable: true },
+        (/** @type {any} */ lock)=>{
+            if (!lock)
+            {
+                throw new Error('its translations are in use by a running title');
+            }
+            return sweep();
+        });
+}
+
+/**
  * Appends to a small file at a known end: the synchronous handle inside a
  * worker, the stream on the page.
  *

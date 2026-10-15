@@ -1759,9 +1759,19 @@ export function createHeapFunctions(host){
                 // read as zeroes: Windows took those pages away and gives back
                 // new ones.
                 //
-                // No size is the rest of the reservation from the page named,
-                // which from its base is the whole of it.
+                // No size is the whole reservation, and only from its base: a
+                // page inside it with no size is refused and nothing is taken
+                // (Wine's NtFreeVirtualMemory, STATUS_FREE_VM_NOT_AT_BASE).
+                // World of Warcraft's allocator decommits its pages one by one
+                // and then names the first of them with no size; taken as the
+                // rest of the reservation, that closed the MPQ hash table it
+                // had just read beside them.
                 const page = (address & ~(PAGE_SIZE - 1)) >>> 0;
+                if (size === 0 && page !== block.address)
+                {
+                    host.setLastError(ERROR_INVALID_ADDRESS);
+                    return 0;
+                }
                 const to = size === 0 ? end : roundUp(address + size, PAGE_SIZE);
                 if (to > end)
                 {

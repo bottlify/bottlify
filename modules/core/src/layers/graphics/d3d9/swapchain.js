@@ -46,6 +46,9 @@ export function createAdditionalChain(options){
         get refCount(){
             return options.count.value;
         },
+        get destroyed(){
+            return options.count.destroyed;
+        },
         addRef: ()=>options.count.addRef(),
         release(){
             const left = options.count.release();

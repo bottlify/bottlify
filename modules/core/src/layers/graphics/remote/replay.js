@@ -127,6 +127,13 @@ const S_FALSE = 1;
 const D3DISSUE_END = 1;
 /** How many batches the played side goes without a present before it looks at its objects at zero. */
 const SWEEP_BATCHES = 64;
+/**
+ * How many objects at a count of zero one look takes up, the next going on
+ * where it stopped: a texture's levels sit there for as long as the texture
+ * lives, and a program holding thousands had the worker look at every one,
+ * every frame, while the queries behind them waited -- 21 ms a frame.
+ */
+export const SWEEP_SLICE = 512;
 const D3DLOCK_DISCARD = 0x2000;
 
 /**
@@ -321,6 +328,15 @@ function visit(value, bind){
  * @property {() => void} recorded  a record that is not a call was written
  * @property {(kind: ShippedKind, bytes: number) => void} [shipped]
  *     bytes of guest memory just copied into the record, by what copied them
+ * @property {(ms: number, polls: number, asks: number, beside: boolean, sentAfter: number,
+ *     trip: number, events: OcclusionEvent[]) => void} [counted]
+ *     an occlusion query was answered: this long after its END was issued, after
+ *     this many polls of the program's and asks of the played side; `beside`
+ *     when its count came with another query's answer; `sentAfter` how long
+ *     after the END the ask that brought the count went, `trip` how long it took;
+ *     `events` what happened to the measurement, in order
+ * @property {(listener: (counts: OcclusionCount[]) => void) => void} [hearCounts]
+ *     the listener is told the occlusion counts the played side sends unasked
  * @property {(name: string, bytes: number) => void} [recordedCall]
  *     a call's record is whole, this many bytes of the batch, copies included
  * @property {import('./lending.js').Lender | null} [lender]
@@ -338,6 +354,19 @@ function visit(value, bind){
  */
 
 /**
+ * One thing that happened to an occlusion measurement on the recording side:
+ * what, when on the clock every thread shares (`performance.timeOrigin` plus
+ * `now`), and how many polls the program had made by then -- 'end', 'poll'
+ * (the first), 'ask', 'came' (with the played side's answer), 'beside' (its
+ * count come with another's), 'told'.
+ *
+ * @typedef {[kind: string, at: number, polls: number, answer?: number]} OcclusionEvent
+ */
+
+/** The time on the clock every thread shares. */
+const sharedNow = ()=>performance.timeOrigin + performance.now();
+
+/**
  * The recording side: a proxy of the root object the program is given, whose
  * every call -- and every call on what it hands out -- is made on the root and
  * recorded.
@@ -345,6 +374,9 @@ function visit(value, bind){
  * @param {Object} options
  * @param {Record<string, any>} options.root
  *     the device's root (`IDirect3D9`), made with no renderer behind it
+ * @param {(moves: any[]) => void} [options.applyMoves]
+ *     makes the copies a call describes in guest memory, as the caller would
+ *     have: for a copy back the program is answered before it is made
  * @param {(address: number, length: number) => Uint8Array} options.readMemory
  *     the guest memory the locked bytes are read from
  * @param {(address: number, length: number) => Uint8Array} [options.windowMemory]
@@ -385,7 +417,7 @@ function visit(value, bind){
  */
 export function createRecording(options){
     const { root, readMemory, transport, answered = ()=>false, answers = new Set(),
-        observe = null } = options;
+        observe = null, applyMoves = null } = options;
     const windowMemory = options.windowMemory ?? readMemory;
     const { writer } = transport;
     const lender = transport.lender ?? null;
@@ -455,6 +487,13 @@ export function createRecording(options){
     let reads = null;
     /** How deep in calls the program is: a call the device makes back through the caller is part of its own. */
     let depth = 0;
+    /**
+     * The parts of each object (`partOf`) an unlock has sent the bytes of:
+     * a part not among them the played side has only as it was made.
+     *
+     * @type {WeakMap<object, Set<string>>}
+     */
+    const sentParts = new WeakMap();
     /**
      * What the played side's memory holds of each dynamic buffer a draw has
      * read, by the buffer: it is what was last sent of it, by its unlocks
@@ -872,7 +911,8 @@ export function createRecording(options){
      * the program for the replay of everything recorded before the ask, every
      * frame -- tens of milliseconds, a quarter of a second at worst.
      *
-     * @type {WeakMap<object, { reply: PlayedAnswer | null }>}
+     * @type {WeakMap<object, { reply: PlayedAnswer | null, beside?: boolean, sentAt?: number,
+     *     cameAt?: number }>}
      */
     const counts = new WeakMap();
     /**
@@ -886,15 +926,25 @@ export function createRecording(options){
     /** @type {Map<number, WeakRef<object>>} */
     const occlusionQueries = new Map();
     /**
+     * Each occlusion measurement the program closed and has not been told the
+     * count of: when, and how often it has asked since.
+     *
+     * @type {WeakMap<object, { at: number, polls: number, asks: number,
+     *     events: OcclusionEvent[] }>}
+     */
+    const waiting = new WeakMap();
+    const timed = import.meta.BOTTLIFY_DIAGNOSTICS !== false && Boolean(transport.counted);
+    /**
      * Counts sent beside an answer, held as answers: a program that waits on
      * its queries one after another -- polling each until it is counted --
      * crossed to the played side and back for every one, where the GPU had
      * counted them all in one read.
      *
-     * @param {object} asked  the query whose answer they came with
+     * @param {object | null} asked  the query whose answer they came with, none when sent unasked
      * @param {OcclusionCount[] | undefined} given
+     * @param {number} [sentAt] @param {number} [cameAt]  when that ask went and came back
      */
-    const takeCounts = (asked, given)=>{
+    const takeCounts = (asked, given, sentAt = 0, cameAt = 0)=>{
         for (const [number, ended, value] of given ?? [])
         {
             const query = occlusionQueries.get(number)?.deref();
@@ -908,9 +958,20 @@ export function createRecording(options){
             {
                 continue;
             }
-            counts.set(query, { reply: { answer: 0, outs: [{ value }] } });
+            counts.set(query, { reply: { answer: 0, outs: [{ value }] }, beside: true, sentAt,
+                cameAt });
+            const measured = timed ? waiting.get(query) : undefined;
+            measured?.events.push(['beside', sharedNow(), measured.polls]);
         }
     };
+
+    // The played side sends a count as soon as the GPU has it: asked for at
+    // the program's first poll, it came a crossing later, polled thousands of
+    // times in between.
+    transport.hearCounts?.(given=>{
+        const at = timed ? performance.now() : 0;
+        takeCounts(null, given, at, at);
+    });
 
     /**
      * The system-memory surfaces a GetRenderTargetData is still filling, each
@@ -922,6 +983,13 @@ export function createRecording(options){
      * @type {WeakMap<object, Promise<void>>}
      */
     const readbacks = new WeakMap();
+    /**
+     * Whether a copy into this surface can be answered before it is made:
+     * one the recording can wait on later, at whatever reads it.
+     *
+     * @param {any} surface
+     */
+    const copiesBack = surface=>surface !== null && typeof surface === 'object';
 
     /**
      * What a played call wrote into a structure the caller passed, into the
@@ -1103,7 +1171,7 @@ export function createRecording(options){
             // waits for it, then is made: a lock or a DC on it, and a copy out
             // of it or of its texture, which moves the bytes it holds here.
             const filling = name === 'LockRect' || name === 'GetDC' ? readbacks.get(target)
-                : name === 'UpdateSurface' || name === 'UpdateTexture'
+                : name === 'UpdateSurface' || name === 'UpdateTexture' || name === 'CopyRects'
                     ? readbacks.get(unwrap(args[0])) : undefined;
             if (filling)
             {
@@ -1123,11 +1191,28 @@ export function createRecording(options){
             // recorded nowhere: the played side has nothing to do with it, and
             // a program polls hundreds of thousands of times a minute.
             const known = name === 'GetData' ? counts.get(target) : undefined;
+            const measured = timed && name === 'GetData' ? waiting.get(target) : undefined;
+            if (measured)
+            {
+                if (measured.polls++ === 0)
+                {
+                    measured.events.push(['poll', sharedNow(), 1]);
+                }
+            }
             if (known)
             {
                 if (!known.reply)
                 {
                     return S_FALSE;
+                }
+                if (measured && known.reply.answer === 0)
+                {
+                    waiting.delete(target);
+                    measured.events.push(['told', sharedNow(), measured.polls]);
+                    transport.counted?.(performance.now() - measured.at, measured.polls,
+                        measured.asks, known.beside === true,
+                        (known.sentAt ?? measured.at) - measured.at,
+                        (known.cameAt ?? 0) - (known.sentAt ?? 0), measured.events);
                 }
                 for (let index = 0; index < count; index++)
                 {
@@ -1187,6 +1272,13 @@ export function createRecording(options){
                 if (deferring)
                 {
                     ranges.forEach(pendFor(keyOf(target)));
+                    if (ranges.length > 0)
+                    {
+                        const part = name === 'ReleaseDC' ? '' : partOf(args);
+                        const parts = sentParts.get(target) ?? new Set();
+                        parts.add(part);
+                        sentParts.set(target, parts);
+                    }
                 }
                 else
                 {
@@ -1323,8 +1415,15 @@ export function createRecording(options){
             }
             // A lock taken to read is marked so whatever the answer: a render
             // target's comes from the played device later, and an unlock with
-            // no lock on record sends the whole surface.
-            const readOnly = locking && readOnlyLock(args);
+            // no lock on record sends the whole surface. But not the first of
+            // a part the played side was never sent: what it has there is
+            // what the part held when it was made, and a managed texture's
+            // first upload takes its system copy whatever the locks said -- a
+            // program that fills a level under D3DLOCK_READONLY is drawn with
+            // what it wrote on Windows. That first one goes as a write.
+            const readOnly = locking && readOnlyLock(args)
+                && (sentParts.get(target)?.has(partOf(args)) === true
+                    || typeof (/** @type {any} */ (result))?.then === 'function');
             if (readOnly)
             {
                 const locks = lockedAt.get(target) ?? new Map();
@@ -1385,9 +1484,15 @@ export function createRecording(options){
             {
                 // A new measurement: what was counted before is not its count.
                 counts.delete(target);
+                waiting.delete(target);
                 if (/** @type {any} */ (target).type === D3DQUERYTYPE_OCCLUSION
                     && (applied[0] & D3DISSUE_END) !== 0 && result === 0)
                 {
+                    if (timed)
+                    {
+                        waiting.set(target, { at: performance.now(), polls: 0, asks: 0,
+                            events: [['end', sharedNow(), 0]] });
+                    }
                     ends.set(target, (ends.get(target) ?? 0) + 1);
                     occlusionQueries.set(/** @type {number} */ (number), new WeakRef(target));
                 }
@@ -1422,11 +1527,61 @@ export function createRecording(options){
                 });
                 return typeof result === 'object' ? answerOf(result) : result;
             }
+            // A copy out of a render target is queued as GetRenderTargetData
+            // is: the program goes on, and only what reads the destination --
+            // a lock, a DC, a copy out of it -- waits for its pixels. Into a
+            // surface the GPU holds, the played device copies there and has no
+            // bytes to send at all. Waiting at the copy held the program for the
+            // replay of everything recorded before, twice a frame in a program
+            // that copies its targets.
+            if (name === 'CopyRects' && applyMoves && copiesBack(applied[3]))
+            {
+                const into = applied[3];
+                const filled = Promise.resolve(ask(name)).then(played=>{
+                    if (played.answer === 0)
+                    {
+                        applyMoves(played.outs[5]?.moves ?? []);
+                    }
+                }, ()=>{});
+                const filledNow = [into, into.container].filter(
+                    one=>one !== null && typeof one === 'object');
+                for (const one of filledNow)
+                {
+                    readbacks.set(one, filled);
+                }
+                filled.then(()=>{
+                    for (const one of filledNow)
+                    {
+                        if (readbacks.get(one) === filled)
+                        {
+                            readbacks.delete(one);
+                        }
+                    }
+                });
+                // The copies are made when the pixels come; made now, they
+                // would copy what the target's memory held before.
+                if (args[5] && typeof args[5] === 'object')
+                {
+                    args[5].moves = [];
+                }
+                // Not the recorded device's own answer: it reads the target
+                // back too, a promise the caller would wait on.
+                return result instanceof Promise ? 0 : result;
+            }
             if (name === 'GetData' && /** @type {any} */ (target)?.type === D3DQUERYTYPE_OCCLUSION)
             {
-                const asking = { reply: /** @type {PlayedAnswer | null} */ (null) };
+                const asking = { reply: /** @type {PlayedAnswer | null} */ (null), beside: false,
+                    sentAt: timed ? performance.now() : 0, cameAt: 0 };
                 counts.set(target, asking);
+                const asked = timed ? waiting.get(target) : undefined;
+                if (asked)
+                {
+                    asked.asks++;
+                    asked.events.push(['ask', sharedNow(), asked.polls]);
+                }
                 Promise.resolve(ask(name)).then(played=>{
+                    asking.cameAt = timed ? performance.now() : 0;
+                    asked?.events.push(['came', sharedNow(), asked.polls, played.answer]);
                     // Still this measurement's; an answer that is not a count
                     // yet is asked again at the next poll.
                     if (counts.get(target) === asking)
@@ -1440,7 +1595,7 @@ export function createRecording(options){
                             counts.delete(target);
                         }
                     }
-                    takeCounts(target, played.counts);
+                    takeCounts(target, played.counts, asking.sentAt, asking.cameAt);
                 }, ()=>{
                     counts.delete(target);
                 });
@@ -1698,7 +1853,7 @@ export function createRecording(options){
  * @param {ReturnType<typeof import('./lending.js').createBorrower>} [options.borrow]
  *     the guest memory a recording lent, read in place
  * @returns {{ play: (call: import('./wire.js').ReadCall) => any, allocate: () => number,
- *     object: (number: number) => any,
+ *     object: (number: number) => any, counts: () => OcclusionCount[],
  *     read: (buffer: ArrayBuffer, each: (call: import('./wire.js').ReadCall) => boolean | void)
  *         => number | undefined }}
  *     `play` answers a waited call with its `PlayedAnswer` (or a promise of
@@ -1745,6 +1900,8 @@ export function createPlayer({ root, ship, read, borrow }){
     /** Whether a present was played since `uncounted` was last looked at, and the batches since. */
     let presentedSinceSweep = false;
     let batchesSinceSweep = 0;
+    /** Where the last look stopped (`SWEEP_SLICE`); a set's iterator follows its changes. */
+    let sweeping = uncounted.values();
     /**
      * After a call on one, or a batch: held weakly once destroyed.
      *
@@ -1811,6 +1968,13 @@ export function createPlayer({ root, ship, read, borrow }){
         }
         return held;
     };
+    /**
+     * The END of each query whose count was last sent unasked, so a count goes
+     * once.
+     *
+     * @type {Map<number, number>}
+     */
+    const sentCounts = new Map();
     /** @type {any[]} */
     let replies = [];
     /**
@@ -1960,6 +2124,20 @@ export function createPlayer({ root, ship, read, borrow }){
             return call.wait === WAIT.ANSWER ? { answer, outs: args, ...beside() } : answer;
         },
         object: objectAt,
+        /**
+         * The counts the played device holds that have not been sent since
+         * their END: what goes to the recording side unasked once the GPU has
+         * counted, rather than at the program's next ask.
+         */
+        counts(){
+            const fresh = heldCounts(-1)
+                .filter(([number, ended])=>sentCounts.get(number) !== ended);
+            for (const [number, ended] of fresh)
+            {
+                sentCounts.set(number, ended);
+            }
+            return fresh;
+        },
         allocate(){
             const address = allocs.shift();
             if (address === undefined)
@@ -1982,9 +2160,19 @@ export function createPlayer({ root, ship, read, borrow }){
                 // Timed for the receiver's account of the worker's time: at
                 // most once a frame, so two clock readings cost nothing.
                 const began = import.meta.BOTTLIFY_DIAGNOSTICS !== false ? performance.now() : 0;
-                for (const number of uncounted)
+                for (let looked = 0; looked < Math.min(SWEEP_SLICE, uncounted.size); looked++)
                 {
-                    holdAsCounted(number, objects[number]);
+                    let next = sweeping.next();
+                    if (next.done)
+                    {
+                        sweeping = uncounted.values();
+                        next = sweeping.next();
+                    }
+                    if (next.done)
+                    {
+                        break;
+                    }
+                    holdAsCounted(next.value, objects[next.value]);
                 }
                 return import.meta.BOTTLIFY_DIAGNOSTICS !== false
                     ? performance.now() - began : undefined;

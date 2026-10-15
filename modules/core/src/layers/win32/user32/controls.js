@@ -337,6 +337,23 @@ const CBN_SETFOCUS = 3;
 const CBN_KILLFOCUS = 4;
 const CBN_EDITUPDATE = 5;
 const CBN_EDITCHANGE = 6;
+const CBN_DROPDOWN = 7;
+const CBN_CLOSEUP = 8;
+const CBN_SELENDOK = 9;
+const CBN_SELENDCANCEL = 10;
+/** The dropped list: a popup of its own over everything, never activated. */
+const WS_POPUP = 0x80000000;
+const WS_BORDER = 0x00800000;
+const WS_EX_TOPMOST = 0x00000008;
+const WS_EX_TOOLWINDOW = 0x00000080;
+const SW_SHOWNA = 8;
+const WM_DESTROY = 0x0002;
+const WM_MOUSEACTIVATE = 0x0021;
+const WM_SYSKEYDOWN = 0x0104;
+const MA_NOACTIVATE = 3;
+const VK_F4 = 0x73;
+/** How far one notch of the wheel scrolls a dropped list, in items. */
+const WHEEL_ITEMS = 3;
 
 /**
  * The notices an editing field gives its parent as text changes: an edit
@@ -542,6 +559,15 @@ export const imagePlace = (record, rect, shape)=>{
  * @property {(hwnd: number, x: number, y: number, width: number, height: number)
  *     => number | Promise<number>} [move]
  *           MoveWindow, for a control that places itself in its parent.
+ * @property {(record: any) => { x: number, y: number }} [clientOrigin]
+ *           Where its client area is on the screen.
+ * @property {(className: string, rect: { x: number, y: number, width: number,
+ *     height: number }, owner: number, exStyle: number, style: number,
+ *     thread?: unknown) => number | Promise<number>} [popup]
+ *           A window of a system class, made by name on the screen: a combo
+ *           box's dropped list. Absent, the list does not drop.
+ * @property {(hwnd: number, command: number) => number | Promise<number>} [show]
+ * @property {(hwnd: number) => number | Promise<number>} [destroy]
  * @property {(hwnd: number, thread?: unknown) => number | Promise<number>} setFocus
  * @property {() => number} focus
  * @property {(hwnd: number) => void} setCapture
@@ -2333,7 +2359,7 @@ export function createControlProcedures(host){
     /**
      * @param {any} record
      * @returns {{ items: ListItem[], current: number, top: number, itemHeight?: number,
-     *     dropDivergenceSaid?: boolean, droppedHeight?: number }}
+     *     droppedHeight?: number, droppedWidth?: number, dropped?: number, hot?: number }}
      */
     const listState = record=>{
         const state = stateOf(record);
@@ -2844,6 +2870,253 @@ export function createControlProcedures(host){
     };
 
     /**
+     * The rows a combo box's dropped list shows, and how tall each is: the
+     * height the combo box was made with is its field and its list together,
+     * and a list too short for one row still shows one.
+     *
+     * @param {any} combo
+     */
+    const droppedRows = combo=>{
+        const state = listState(combo);
+        const { hdc } = host.contextOn(combo);
+        const row = hdc !== 0 ? itemHeight(combo, hdc) : 16;
+        host.endPaint(combo, hdc);
+        const fit = Math.floor(((state.droppedHeight ?? 0) - host.clientSize(combo).height - 2)
+            / row);
+        return { row, rows: Math.max(1, Math.min(Math.max(state.items.length, 1), fit)) };
+    };
+
+    /**
+     * Drops a combo box's list: a popup of the ComboLBox class under the
+     * field, over every window, which takes the mouse until it closes and
+     * never the activation -- the dialog keeps it, and the combo box the
+     * focus and the keys. CBN_DROPDOWN goes first, so a parent that fills
+     * the list late fills it in time.
+     *
+     * @param {any} combo @param {unknown} [thread]
+     */
+    const dropList = (combo, thread)=>{
+        const state = listState(combo);
+        if ((state.dropped ?? 0) !== 0 || (combo.style & CBS_TYPEMASK) === CBS_SIMPLE
+            || !host.popup || !host.clientOrigin || disabled(combo))
+        {
+            return 0;
+        }
+        return after(notify(combo, CBN_DROPDOWN, thread), ()=>{
+            const { row, rows } = droppedRows(combo);
+            const origin = /** @type {any} */ (host.clientOrigin)(combo);
+            const size = host.clientSize(combo);
+            state.hot = state.current;
+            state.top = Math.max(0, Math.min(state.current, state.items.length - rows));
+            const rect = { x: origin.x, y: origin.y + size.height,
+                width: Math.max(size.width, state.droppedWidth ?? 0), height: rows * row + 2 };
+            return after(/** @type {any} */ (host.popup)('ComboLBox', rect,
+                combo.parent || combo.hwnd, WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+                WS_POPUP | WS_BORDER, thread), (/** @type {number} */ hwnd)=>{
+                const list = hwnd !== 0 ? host.live(hwnd) : null;
+                if (!list)
+                {
+                    return 0;
+                }
+                stateOf(list).combo = combo.hwnd;
+                list.font = combo.font;
+                state.dropped = hwnd;
+                host.invalidate(combo);
+                return after(host.show?.(hwnd, SW_SHOWNA) ?? 0, ()=>{
+                    host.setCapture(hwnd);
+                    return 0;
+                });
+            });
+        });
+    };
+
+    /**
+     * Closes a combo box's dropped list, taking the item under the pointer
+     * or the keys when `accept`: CBN_SELCHANGE for a new one, then
+     * CBN_SELENDOK or CBN_SELENDCANCEL, then CBN_CLOSEUP (Wine's combo.c
+     * CBRollUp).
+     *
+     * @param {any} combo @param {boolean} accept @param {unknown} [thread]
+     */
+    const closeList = (combo, accept, thread)=>{
+        const state = listState(combo);
+        const hwnd = state.dropped ?? 0;
+        if (hwnd === 0)
+        {
+            return 0;
+        }
+        state.dropped = 0;
+        if (host.capture() === hwnd)
+        {
+            host.releaseCapture();
+        }
+        const hot = state.hot ?? -1;
+        return after(host.destroy?.(hwnd) ?? 0, ()=>{
+            host.invalidate(combo);
+            const changed = accept && hot >= 0 && hot < state.items.length && hot !== state.current;
+            if (changed)
+            {
+                combo.title = state.items[hot].text;
+            }
+            return after(changed ? chooseItem(combo, hot, CBN_SELCHANGE, true, thread) : 0,
+                ()=>after(notify(combo, accept ? CBN_SELENDOK : CBN_SELENDCANCEL, thread),
+                    ()=>notify(combo, CBN_CLOSEUP, thread)));
+        });
+    };
+
+    /**
+     * The dropped list's rows from its top one, the one under the pointer
+     * or the keys highlighted, and a scroll bar at the side when they do
+     * not all fit.
+     *
+     * @param {any} combo @param {number} hdc @param {Rect} rect
+     */
+    const paintDropped = (combo, hdc, rect)=>{
+        const draw = /** @type {Drawing} */ (host.draw);
+        const state = listState(combo);
+        const row = itemHeight(combo, hdc);
+        const visible = Math.max(1, Math.floor((rect.bottom - rect.top) / row));
+        const bar = state.items.length > visible
+            ? { left: rect.right - ARROW_LENGTH, top: rect.top, right: rect.right,
+                bottom: rect.bottom }
+            : null;
+        const rows = bar ? { ...rect, right: bar.left } : rect;
+        draw.fill(hdc, rows, color(COLOR_WINDOW));
+        for (let index = state.top; index < state.items.length; index++)
+        {
+            const y = rows.top + (index - state.top) * row;
+            if (y >= rows.bottom)
+            {
+                break;
+            }
+            const line = { left: rows.left, top: y, right: rows.right, bottom: y + row };
+            const hot = index === state.hot;
+            if (hot)
+            {
+                draw.fill(hdc, line, color(COLOR_HIGHLIGHT));
+            }
+            draw.text(hdc, rows.left + 2, y, state.items[index].text,
+                { color: color(hot ? COLOR_HIGHLIGHTTEXT : COLOR_WINDOWTEXT), clip: line });
+        }
+        if (bar)
+        {
+            paintScrollBar(hdc, bar, true, { min: 0, max: state.items.length - 1, page: visible,
+                pos: state.top });
+        }
+    };
+
+    /**
+     * Scrolls a dropped list so its top item is `top`, as far as it goes.
+     *
+     * @param {any} combo @param {number} top @param {number} visible
+     */
+    const scrollDropped = (combo, top, visible)=>{
+        const state = listState(combo);
+        state.top = Math.max(0, Math.min(top, state.items.length - visible));
+        const list = host.live(state.dropped ?? 0);
+        if (list)
+        {
+            host.invalidate(list);
+        }
+    };
+
+    /**
+     * The ComboLBox: the list a combo box drops. It holds the mouse while it
+     * is open: the pointer over a row lights it, a press outside closes it
+     * with nothing chosen, and a release on a row chooses that row -- the
+     * press that dropped it may be held into the list and let go there.
+     *
+     * @param {any} record @param {ControlMessage} message @param {unknown} [thread]
+     */
+    const comboListProc = (record, message, thread)=>{
+        const own = stateOf(record);
+        const combo = host.live(own.combo ?? 0);
+        if (!combo)
+        {
+            return common(record, message, thread);
+        }
+        const state = listState(combo);
+        switch (message.message){
+            case WM_MOUSEACTIVATE:
+                return MA_NOACTIVATE;
+            case WM_PAINT:
+                return painting(record, (hdc, rect)=>{
+                    paintDropped(combo, hdc, rect);
+                });
+            case WM_ERASEBKGND:
+                return 1;
+            case WM_MOUSEMOVE:
+            case WM_LBUTTONDOWN:
+            case WM_LBUTTONUP: {
+                const point = pointOf(message.lParam);
+                const size = host.clientSize(record);
+                const { hdc } = host.contextOn(record);
+                const row = hdc !== 0 ? itemHeight(combo, hdc) : 16;
+                host.endPaint(record, hdc);
+                const visible = Math.max(1, Math.floor(size.height / row));
+                const bar = state.items.length > visible
+                    ? { left: size.width - ARROW_LENGTH, top: 0, right: size.width,
+                        bottom: size.height }
+                    : null;
+                const inside = point.x >= 0 && point.y >= 0 && point.x < size.width
+                    && point.y < size.height;
+                const onBar = bar !== null && inside && point.x >= bar.left;
+                if (own.dragging)
+                {
+                    if (message.message === WM_LBUTTONUP)
+                    {
+                        own.dragging = false;
+                        return 0;
+                    }
+                    const track = Math.max(1, size.height - 2 * ARROW_LENGTH);
+                    scrollDropped(combo, Math.round((point.y - ARROW_LENGTH) / track
+                        * (state.items.length - visible)), visible);
+                    return 0;
+                }
+                if (message.message === WM_LBUTTONDOWN)
+                {
+                    if (!inside)
+                    {
+                        return closeList(combo, false, thread);
+                    }
+                    if (onBar && bar)
+                    {
+                        const hit = scrollHit(bar, true, { min: 0, max: state.items.length - 1,
+                            page: visible, pos: state.top }, point.x, point.y);
+                        const step = hit === SB_LINEUP ? -1 : hit === SB_LINEDOWN ? 1
+                            : hit === SB_PAGEUP ? -visible : hit === SB_PAGEDOWN ? visible : 0;
+                        if (step === 0)
+                        {
+                            own.dragging = true;
+                        }
+                        scrollDropped(combo, state.top + step, visible);
+                        return 0;
+                    }
+                }
+                if (!inside || onBar)
+                {
+                    return 0;
+                }
+                const index = state.top + Math.floor(point.y / row);
+                if (index >= state.items.length)
+                {
+                    return 0;
+                }
+                if (index !== state.hot)
+                {
+                    state.hot = index;
+                    host.invalidate(record);
+                }
+                return message.message === WM_LBUTTONUP ? closeList(combo, true, thread) : 0;
+            }
+            case WM_CAPTURECHANGED:
+                return state.dropped === record.hwnd ? closeList(combo, false, thread) : 0;
+            default:
+                return common(record, message, thread);
+        }
+    };
+
+    /**
      * @param {any} record @param {ControlMessage} message @param {unknown} [thread]
      */
     const comboBoxProc = (record, message, thread)=>{
@@ -2878,24 +3151,43 @@ export function createControlProcedures(host){
             case WM_ERASEBKGND:
                 return 1;
             case WM_GETDLGCODE:
-                return DLGC_WANTARROWS | DLGC_WANTCHARS;
+                // A dropped list keeps Enter and Escape from the dialog: they
+                // choose and close it.
+                return DLGC_WANTARROWS | DLGC_WANTCHARS
+                    | ((state.dropped ?? 0) !== 0 ? DLGC_WANTALLKEYS : 0);
             case WM_SETFOCUS:
                 host.invalidate(record);
                 return notify(record, CBN_SETFOCUS, thread);
             case WM_KILLFOCUS:
                 host.invalidate(record);
-                return notify(record, CBN_KILLFOCUS, thread);
+                return after(closeList(record, false, thread),
+                    ()=>notify(record, CBN_KILLFOCUS, thread));
+            case WM_DESTROY:
+                return after(closeList(record, false, thread), ()=>common(record, message, thread));
+            case WM_MOUSEWHEEL: {
+                if ((state.dropped ?? 0) === 0)
+                {
+                    return common(record, message, thread);
+                }
+                const { rows } = droppedRows(record);
+                const notches = Math.trunc(((message.wParam >>> 16) << 16 >> 16) / 120);
+                scrollDropped(record, state.top - notches * WHEEL_ITEMS, rows);
+                return 0;
+            }
+            case WM_SYSKEYDOWN: {
+                const key = message.wParam & 0xff;
+                if (key !== VK_DOWN && key !== VK_UP)
+                {
+                    return common(record, message, thread);
+                }
+                return (state.dropped ?? 0) !== 0 ? closeList(record, true, thread)
+                    : dropList(record, thread);
+            }
             case WM_LBUTTONDOWN:
             case WM_LBUTTONDBLCLK: {
-                if (!state.dropDivergenceSaid)
-                {
-                    state.dropDivergenceSaid = true;
-                    host.divergence?.('ComboBox',
-                        'the list does not drop down; the arrow keys change the selection');
-                }
                 // A click in the field of an editable combo puts the caret
                 // where it landed, as a click in an edit does; one on the
-                // drop button is the drop that does not drop down.
+                // drop button, or anywhere on a dropdown list, drops the list.
                 const point = pointOf(message.lParam);
                 if (editable && point.x < host.clientSize(record).width - COMBO_BUTTON - 2)
                 {
@@ -2909,8 +3201,10 @@ export function createControlProcedures(host){
                     }
                     host.endPaint(record, hdc);
                     host.invalidate(record);
+                    return after(host.setFocus(record.hwnd, thread), ()=>0);
                 }
-                return after(host.setFocus(record.hwnd, thread), ()=>0);
+                return after(host.setFocus(record.hwnd, thread), ()=>((state.dropped ?? 0) !== 0
+                    ? closeList(record, false, thread) : dropList(record, thread)));
             }
             case WM_CHAR:
                 return editable
@@ -2919,6 +3213,31 @@ export function createControlProcedures(host){
                     : 0;
             case WM_KEYDOWN: {
                 const key = message.wParam & 0xff;
+                if (key === VK_F4)
+                {
+                    return (state.dropped ?? 0) !== 0 ? closeList(record, true, thread)
+                        : dropList(record, thread);
+                }
+                if ((state.dropped ?? 0) !== 0)
+                {
+                    // Open, the keys walk the list and Enter or Escape close it.
+                    if (key === VK_RETURN || key === VK_ESCAPE)
+                    {
+                        return closeList(record, key === VK_RETURN, thread);
+                    }
+                    const { rows } = droppedRows(record);
+                    const move = key === VK_UP ? -1 : key === VK_DOWN ? 1
+                        : key === VK_PRIOR ? -rows : key === VK_NEXT ? rows : 0;
+                    if (move !== 0 && state.items.length > 0)
+                    {
+                        state.hot = Math.max(0, Math.min(state.items.length - 1,
+                            (state.hot ?? state.current) + move));
+                        const top = state.hot < state.top ? state.hot
+                            : state.hot >= state.top + rows ? state.hot - rows + 1 : state.top;
+                        scrollDropped(record, top, rows);
+                    }
+                    return 0;
+                }
                 // In the field of an editable combo the caret keys edit the
                 // text; up and down still walk the list, as they do in every
                 // kind of combo.
@@ -2973,9 +3292,10 @@ export function createControlProcedures(host){
                 }
                 return common(record, message, thread);
             case CB_SHOWDROPDOWN:
-                return 1;
+                return after((message.wParam >>> 0) !== 0 ? dropList(record, thread)
+                    : closeList(record, false, thread), ()=>1);
             case CB_GETDROPPEDSTATE:
-                return 0;
+                return (state.dropped ?? 0) !== 0 ? 1 : 0;
             case CB_SETEXTENDEDUI:
                 return 0;
             case CB_GETEXTENDEDUI:
@@ -3465,6 +3785,7 @@ export function createControlProcedures(host){
             Edit: editProc,
             ListBox: listBoxProc,
             ComboBox: comboBoxProc,
+            ComboLBox: comboListProc,
             ScrollBar: scrollBarProc,
             '#32770': dialogProc,
         },

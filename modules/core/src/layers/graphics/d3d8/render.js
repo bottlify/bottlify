@@ -780,6 +780,9 @@ export function expandTexels(format, pixels, count, float32 = false){
     return expand(pixels, count);
 }
 
+/** A buffer lock at least this long sends only the bytes its unlock finds changed. */
+const DIFFED_UNLOCK = 0x10000;
+
 /** The WebGPU format every uncompressed colour target and texture is. */
 export const COLOR_FORMAT = 'bgra8unorm';
 /** What a signed format is sampled from: its channels come back -1..1. */
@@ -1120,9 +1123,13 @@ function putDword(block, at, dword){
  * @property {ArrayLike<number>} [stageConstants]
  *     Every stage's D3DTSS_CONSTANT as four floats, eight stages: past the
  *     lights, for a draw whose stages read D3DTA_CONSTANT (`tailOf`).
+ * @property {ArrayLike<number>} [bumpEnv]
+ *     Every stage's bump matrix (BUMPENVMAT00, 01, 10, 11) and luminance
+ *     (BUMPENVLSCALE, BUMPENVLOFFSET, 0, 0), two rows a stage, eight stages:
+ *     past the constants, for a draw with a bump stage (`tailOf`).
  * @property {ArrayLike<number>} [clipPlanes]
  *     The enabled user clip planes in the vertex's own space, four floats
- *     each: past the constants, for a fixed vertex stage that clips.
+ *     each: past the bump rows, for a fixed vertex stage that clips.
  */
 
 /**
@@ -1186,7 +1193,8 @@ export function uniformBlock(values, take = floats=>new Float32Array(floats)){
     const at = UNIFORM_AT;
     const lights = values.lights ?? [];
     const tail = UNIFORM_FLOATS + lights.length * LIGHT_FLOATS;
-    const planesAt = tail + (values.stageConstants ? STAGE_CONSTANT_FLOATS : 0);
+    const bumpAt = tail + (values.stageConstants ? STAGE_CONSTANT_FLOATS : 0);
+    const planesAt = bumpAt + (values.bumpEnv ? BUMP_ENV_FLOATS : 0);
     const block = take(planesAt + (values.clipPlanes?.length ?? 0));
     block.set(asFloats(values.worldViewProjection), at.worldViewProjection);
     block.set(asFloats(values.world ?? IDENTITY_FLOATS), at.world);
@@ -1236,6 +1244,10 @@ export function uniformBlock(values, take = floats=>new Float32Array(floats)){
     if (values.stageConstants)
     {
         block.set(values.stageConstants, tail);
+    }
+    if (values.bumpEnv)
+    {
+        block.set(values.bumpEnv, bumpAt);
     }
     if (values.clipPlanes)
     {
@@ -1306,6 +1318,33 @@ const NO_PLANE = Object.freeze([0, 0, 0, 0]);
 
 /** The floats every stage's constant takes past the lights: a row a stage. */
 const STAGE_CONSTANT_FLOATS = STAGE_COUNT * 4;
+
+/** The floats every stage's bump matrix and luminance take past the constants: two rows a stage. */
+const BUMP_ENV_FLOATS = STAGE_COUNT * 8;
+
+/**
+ * Every stage's bump matrix and luminance, as the block's tail carries them.
+ *
+ * @param {RenderModel} model
+ * @returns {Float32Array}
+ */
+function bumpEnvOf(model){
+    const floats = new Float32Array(BUMP_ENV_FLOATS);
+    for (let stage = 0; stage < STAGE_COUNT; stage++)
+    {
+        const states = model.stageStates(stage);
+        const get = (/** @type {number} */ state)=>{
+            const value = dwordToFloat(states.get(state) ?? 0);
+            // A state never set reads as whatever its dword was; one that is
+            // no number moves nothing.
+            return Number.isFinite(value) ? value : 0;
+        };
+        floats.set([get(D3DTSS.BUMPENVMAT00), get(D3DTSS.BUMPENVMAT01), get(D3DTSS.BUMPENVMAT10),
+            get(D3DTSS.BUMPENVMAT11), get(D3DTSS.BUMPENVLSCALE), get(D3DTSS.BUMPENVLOFFSET), 0, 0],
+        stage * 8);
+    }
+    return floats;
+}
 
 /**
  * Every stage's D3DTSS_CONSTANT, as the block's tail carries it.
@@ -1783,6 +1822,7 @@ export function pixelUniformsOf(model, take, mips = true, tail = undefined){
         stages: stageFlags(model, mips),
         textureTransforms: stageTransforms(model),
         ...(tail?.stageConstants ? { stageConstants: stageConstantsOf(model) } : {}),
+        ...(tail?.bump ? { bumpEnv: bumpEnvOf(model) } : {}),
     }, take);
 }
 
@@ -1841,6 +1881,7 @@ export function uniformsOf(model, lighting, take, mips = true, tail = undefined)
         // read past its own end.
         lights: lighting ? enabledLights(model) : [],
         ...(tail?.stageConstants ? { stageConstants: stageConstantsOf(model) } : {}),
+        ...(tail?.bump ? { bumpEnv: bumpEnvOf(model) } : {}),
         ...(tail?.clipPlanes ? { clipPlanes: clipPlanesOf(model, clipMaskOf(model), world) } : {}),
     }, take);
 }
@@ -2031,7 +2072,8 @@ const EMPTY_BLOCK = new Float32Array(0);
  *
  * @param {RenderModel} model
  * @param {import('../webgpu/internal/vertexformat.js').VertexLayout} layout
- * @param {{ shaderCoordinates?: boolean, onesOf?: (texture: any) => number }} [how]
+ * @param {{ shaderCoordinates?: boolean, onesOf?: (texture: any) => number,
+ *     stageLimit?: number }} [how]  `stageLimit`: the stages kept, the rest as if disabled
  *     `onesOf` is the channels a texture samples as one that the GPU's texture
  *     lacks (`sampledOnes`); none when absent.
  * @returns {{ stages: import('../webgpu/internal/pipeline.js').StageKey[],
@@ -2045,7 +2087,8 @@ export function stageCascade(model, layout, how = {}){
     const textures = [];
     /** @type {CascadeTruncation | null} */
     let unbound = null;
-    for (let stage = 0; stage < STAGE_COUNT; stage++)
+    const limit = how.stageLimit ?? STAGE_COUNT;
+    for (let stage = 0; stage < Math.min(STAGE_COUNT, limit); stage++)
     {
         const states = model.stageStates(stage);
         const get = (/** @type {number} */ state)=>states.get(state) ?? 0;
@@ -2812,7 +2855,8 @@ const CLEAR_STRIDE = 20;
  *     Every draw reads the bytes it reaches from guest memory again, held
  *     lock or not -- a debugging aid, for a program that writes a buffer
  *     outside its locks.
- * @property {{ dumpFrames: number, bufferLocks?: string, skipTexture?: string, occlusion?: string,
+ * @property {{ dumpFrames: number, bufferLocks?: string, skipTexture?: string,
+ *     skipShader?: string, occlusion?: string, stageLimit?: number,
  *     maxDraws?: number, written?: (lines: string[], frame: number) => void,
  *     replayLast?: (cut?: number) => boolean,
  *     shownDraws?: () => { lines: string[], sceneDraws: number },
@@ -2831,6 +2875,7 @@ const CLEAR_STRIDE = 20;
  *     the default -- keeps all of them. A frame dump says which draws could
  *     have painted a region; cutting the frame short is what says which one
  *     did, because the region is either there or not at each cut.
+ * @property {() => void} [occlusionCounted]  told whenever an occlusion count has come back
  * @property {((api: string, detail: string)=>void) | null} [divergence]
  *     Where "this call succeeded and did not do all of what it promises" goes.
  * @property {boolean} [fog]
@@ -2881,6 +2926,11 @@ export function createRenderer(options){
     const dumpDraws = options.dumpDraws === true;
     const nanProbe = options.nanProbe === true;
     const tableFogOverDepth = options.driverRules === 'current';
+    // Under a vertex shader a 1.0 to 1.3 pixel shader's D3DTTFF_PROJECTED
+    // divides by the coordinate's w whatever count the flags name, as the
+    // drivers of that generation did (decisions.md A44); later drivers and
+    // Wine divide by the count's last component.
+    const projectByCount = options.driverRules === 'current';
     const rectangleBump = options.rectangleBump === true;
     const dumpEvery = Math.max(0, Math.floor(options.dumpEvery ?? 0));
     // Asked for on a running program: the next frames with draws are written
@@ -2898,6 +2948,10 @@ export function createRenderer(options){
     /** The textures whose draws are dropped: the device's own, or what a running program was given. */
     const skipTextures = ()=>(liveDump?.skipTexture
         ? new Set(liveDump.skipTexture.split(',').filter(Boolean)) : fixedSkips);
+    /** The shaders whose draws are dropped, `vs12,ps40` as a dump names them: a running program's. */
+    const skipShaders = ()=>new Set((liveDump?.skipShader ?? '').split(',').filter(Boolean));
+    /** How many texture stages a fixed-function draw keeps (`app.debug.stageLimit`), -1 all. */
+    const stageLimit = ()=>(typeof liveDump?.stageLimit === 'number' ? liveDump.stageLimit : -1);
     const probeTexture = options.probeTexture ?? null;
     const compressedTextures = options.compressedTextures === true;
     // A device made with `clip-distances` clips by the distances a vertex
@@ -3068,11 +3122,30 @@ export function createRenderer(options){
     const settleOcclusion = count=>{
         count.value = count.total;
         count.resolve(count.total);
+        options.occlusionCounted?.();
+        if (count.endedAt !== null && count.replayedAt !== null)
+        {
+            const origin = typeof performance === 'undefined' ? 0 : performance.timeOrigin;
+            occlusionTrace.push([origin + count.endedAt, origin + count.replayedAt,
+                origin + clock()]);
+            if (occlusionTrace.length > 64)
+            {
+                occlusionTrace.shift();
+            }
+            const toReplay = count.replayedAt - count.endedAt;
+            const gpu = clock() - count.replayedAt;
+            timing.occlusions++;
+            timing.occlusionToReplayMs += toReplay;
+            timing.worstOcclusionToReplayMs = Math.max(timing.worstOcclusionToReplayMs, toReplay);
+            timing.occlusionGpuMs += gpu;
+            timing.worstOcclusionGpuMs = Math.max(timing.worstOcclusionGpuMs, gpu);
+        }
     };
     /** @returns {any} a count a BEGIN, or an END with no BEGIN, starts */
     const occlusionCount = ()=>{
         /** @type {any} */
-        const count = { total: 0, outstanding: 0, ended: false, value: null, recording: null };
+        const count = { total: 0, outstanding: 0, ended: false, value: null, recording: null,
+            endedAt: null, replayedAt: null };
         count.settled = new Promise(resolve=>{
             count.resolve = resolve;
         });
@@ -3134,9 +3207,24 @@ export function createRenderer(options){
      * from being asked to having its bytes -- the wait a program reading its
      * targets back sees, of which the GPU's own part is only some.
      */
+    /*
+     * An occlusion count's wait is two waits: from its END being recorded to
+     * the replay reaching it (the frame has to be submitted, by a present or a
+     * flush, and every frame before it played), and from there to the GPU's
+     * count coming back. Which is the longer says what an earlier answer needs.
+     */
     const timing = { replays: 0, replayMs: 0, worstReplayMs: 0, readBacks: 0, readBackMs: 0,
-        worstReadBackMs: 0, gpuFrames: 0, gpuMs: 0, worstGpuMs: 0 };
+        worstReadBackMs: 0, gpuFrames: 0, gpuMs: 0, worstGpuMs: 0, occlusions: 0,
+        occlusionToReplayMs: 0, worstOcclusionToReplayMs: 0, occlusionGpuMs: 0,
+        worstOcclusionGpuMs: 0 };
     const clock = ()=>(typeof performance === 'undefined' ? Date.now() : performance.now());
+    /**
+     * The last occlusion counts settled, each as when its END was recorded,
+     * replayed and its count came back, on the clock every thread shares.
+     *
+     * @type {[number, number, number][]}
+     */
+    const occlusionTrace = [];
 
     const counters = {
         frames: 0,
@@ -3354,6 +3442,9 @@ export function createRenderer(options){
         const entry = textures.get(texture);
         return entry
             ? `${entry.id}:${entry.format}@${entry.width}x${entry.height}`
+                // The levels the GPU's copy holds: a chain cut to one is
+                // sampled at full size however small it is drawn.
+                + `L${entry.gpuLevels ?? entry.levels ?? 1}`
                 + `^${entry.uploads || 0}${entry.census ?? ''}`
             : 'untracked';
     };
@@ -3785,7 +3876,8 @@ export function createRenderer(options){
             // to clamp, not a triangle to drop.
             + `/clip${model.renderStates.get(D3DRS.CLIPPING) ?? 1}`
             + ` cull=${state.cullMode}`
-            + ` blend=${state.blend ? `${state.srcBlend},${state.destBlend}` : '-'}`
+            + ` blend=${state.blend ? `${state.srcBlend},${state.destBlend}`
+                + `${state.blendOp && state.blendOp !== 1 ? `/op${state.blendOp}` : ''}` : '-'}`
             + ` aTest=${state.alphaTest
                 ? `${state.alphaFunc}/${model.renderStates.get(D3DRS.ALPHAREF) ?? 0}`
                 : '-'}`
@@ -3856,6 +3948,13 @@ export function createRenderer(options){
         dump.push(`#${dump.length} program n=${count}`
             + ` vs=${state.vertexShader} ps=${state.pixelShader}`
             + ` decl=${program.declarationId}`
+            // A 1.0 to 1.3 pixel shader still reads each stage's transform
+            // flags for its projective divide: the flags as the program set them.
+            + `${(held?.pixel?.version?.major ?? 2) < 2
+                && (held?.pixel?.version?.minor ?? 4) < 4
+                ? ` ttf=${Array.from({ length: LEGACY_STAGES }, (_, stage)=>
+                    (model.stageStates(stage).get(D3DTSS.TEXTURETRANSFORMFLAGS) ?? 0).toString(16))
+                    .join(',')}` : ''}`
             // The fog stage below model 3 runs after the shader too, so a
             // program's draw is another place its numbers can be wrong.
             + ` fog=${fogSourceOf(state) === FOG_SOURCE.NONE
@@ -3864,7 +3963,8 @@ export function createRenderer(options){
             // shader, and without a pixel shader so does the stage cascade:
             // a quad drawn under them can paint nothing at all.
             + ` cw=${state.colorWrite}`
-            + ` blend=${state.blend ? `${state.srcBlend},${state.destBlend}` : '-'}`
+            + ` blend=${state.blend ? `${state.srcBlend},${state.destBlend}`
+                + `${state.blendOp && state.blendOp !== 1 ? `/op${state.blendOp}` : ''}` : '-'}`
             + ` aTest=${state.alphaTest
                 ? `${state.alphaFunc}/${model.renderStates.get(D3DRS.ALPHAREF) ?? 0}` : '-'}`
             // The depth test and the bias a layer leans on to stay in front of the surface it
@@ -6109,6 +6209,7 @@ export function createRenderer(options){
         const stageDimensions = [];
         /** @type {string[]} */
         const projectedBy = [];
+        const shaded = Boolean(program.vertex) && !projectByCount;
         for (let stage = 0; stage < LEGACY_STAGES; stage++)
         {
             stageDimensions.push(textureDimensionOf(model.textures.get(stage)));
@@ -6117,7 +6218,7 @@ export function createRenderer(options){
                 : model.stageStates(stage).get(D3DTSS.TEXTURETRANSFORMFLAGS) ?? 0;
             projectedBy.push((flags & TTFF_PROJECTED) === 0
                 ? ''
-                : PROJECTED_BY[flags & 0xff] ?? '');
+                : shaded ? 'w' : PROJECTED_BY[flags & 0xff] ?? '');
         }
         const stages = `${stageDimensions.join(',')}|${projectedBy.join(',')}`;
         return {
@@ -6989,14 +7090,18 @@ export function createRenderer(options){
         {
             throw new Error('pick: no frame has been shown');
         }
-        const { lines, sceneDraws } = shownDraws();
-        const { width, height } = shown.surface;
-        const px = Math.min(width - 1, Math.max(0, Math.round(x ?? width / 2)));
-        const py = Math.min(height - 1, Math.max(0, Math.round(y ?? height / 2)));
+        const { lines, sceneDraws, scene: read } = shownDraws();
+        // A program that draws its scene into a texture and puts it on the
+        // screen with a pass at the end is read in that texture, at the place
+        // the shown pixel scales to.
+        const { width, height } = read;
+        const px = Math.min(width - 1, Math.max(0, Math.round(
+            (x ?? shown.surface.width / 2) * width / shown.surface.width)));
+        const py = Math.min(height - 1, Math.max(0, Math.round(
+            (y ?? shown.surface.height / 2) * height / shown.surface.height)));
         /** @param {number} cut @returns {Promise<number[]>} red, green, blue */
         const pixelAt = async cut=>{
-            const job = chain.then(()=>replay(shown.recorded, shown.surface, shown.surface,
-                { cut }));
+            const job = chain.then(()=>replay(shown.recorded, shown.surface, read, { cut }));
             chain = job.catch(failure);
             const bytes = /** @type {{ data: Uint8Array }} */ (await job).data;
             const at = (py * width + px) * 4;
@@ -7059,13 +7164,16 @@ export function createRenderer(options){
     const shownDraws = ()=>{
         if (lastShown === null)
         {
-            return { lines: [], sceneDraws: 0 };
+            return { lines: [], sceneDraws: 0, scene: null };
         }
         /** @type {string[]} */
         const lines = [];
         /** @type {boolean[]} */
         const intoTexture = [];
         let target = null;
+        /** Draws by the surface they went into, and the last of each. */
+        /** @type {Map<any, { count: number, last: number }>} */
+        const into = new Map();
         for (const command of lastShown.recorded.commands)
         {
             if (command.kind === 'pass')
@@ -7077,6 +7185,10 @@ export function createRenderer(options){
             {
                 continue;
             }
+            const seen = into.get(target) ?? { count: 0, last: 0 };
+            seen.count++;
+            seen.last = lines.length;
+            into.set(target, seen);
             const bound = (command.stageBindings ?? []).map((/** @type {any} */ binding)=>
                 (!binding.placeholder && binding.texture ? describeTexture(binding.texture) : '-'))
                 .join(' ');
@@ -7095,7 +7207,20 @@ export function createRenderer(options){
         {
             at--;
         }
-        return { lines, sceneDraws: at > 0 ? at : lines.length };
+        // Where the scene went: the shown surface when draws reached it
+        // before the frame's last passes, else the surface most draws went
+        // into, to the last of them.
+        // Where the scene went: the surface most draws went into, when it is
+        // not the shown one -- a program that draws its scene into a texture
+        // and puts it on the screen with a few passes at the end.
+        const [surface, most] = [...into].sort((a, b)=>b[1].count - a[1].count)[0]
+            ?? [lastShown.surface, { count: 0, last: lines.length - 1 }];
+        if (surface && surface !== lastShown.surface
+            && most.count > (into.get(lastShown.surface)?.count ?? 0))
+        {
+            return { lines, sceneDraws: most.last + 1, scene: surface };
+        }
+        return { lines, sceneDraws: at > 0 ? at : lines.length, scene: lastShown.surface };
     };
 
     /**
@@ -7450,6 +7575,8 @@ export function createRenderer(options){
      * @type {PreparedDraw | null}
      */
     let preparedState = null;
+    /** The cascade cut the prepared states were made under. */
+    let preparedLimit = -1;
     /**
      * Raised whenever a texture's own bytes are marked for upload, so that a
      * preparation holding that texture's view is built again and the upload
@@ -8123,6 +8250,13 @@ export function createRenderer(options){
         if (processing.program && (processing.vertexShader !== 0 || processing.pixelShader !== 0))
         {
             const prepared = prepareProgram(model, stride, topology, processing.program);
+            const shaders = skipShaders();
+            if (prepared && shaders.size > 0 && (shaders.has(`vs${prepared.state.vertexShader}`)
+                || shaders.has(`ps${prepared.state.pixelShader}`)))
+            {
+                skip('program');
+                return null;
+            }
             const skipped = skipTextures();
             if (prepared && skipped.size > 0 && prepared.program?.samplerBindings?.some(
                 (/** @type {any} */ binding)=>!binding.placeholder
@@ -8146,6 +8280,14 @@ export function createRenderer(options){
         {
             skip('pixelShader');
             return null;
+        }
+        // A cascade cut (app.debug.stageLimit) is no state of the program's,
+        // so nothing prepared before it changed can be reused.
+        if (stageLimit() !== preparedLimit)
+        {
+            preparedLimit = stageLimit();
+            preparedState = null;
+            preparedCache.clear();
         }
         const version = model.drawStateVersion;
         if (preparedState !== null && version !== undefined && preparedState.version === version
@@ -8219,7 +8361,8 @@ export function createRenderer(options){
                 vertexLayoutKey = `f${processing.fvf.toString(16)}s${stride}`;
             }
         }
-        const cascade = stageCascade(model, layout, { onesOf: onesOfTexture });
+        const cascade = stageCascade(model, layout, { onesOf: onesOfTexture,
+            ...(stageLimit() < 0 ? {} : { stageLimit: stageLimit() }) });
         keyStages(model, cascade);
         reportCascade(cascade);
         const skipped = skipTextures();
@@ -8670,8 +8813,24 @@ export function createRenderer(options){
             // enough, and the copy a read makes was a measured share of a
             // frame in a match, where a program refills its buffers every
             // draw.
-            held.data.set(windowMemory(buffer.base + held.offset, held.length));
-            entry.gpu.unlock(held);
+            const now = windowMemory(buffer.base + held.offset, held.length);
+            if (held.length < DIFFED_UNLOCK)
+            {
+                held.data.set(now);
+                entry.gpu.unlock(held);
+                entry.held = null;
+                return;
+            }
+            // A large lock sends only what changed against what the buffer
+            // holds: Direct3D 7 locks a vertex buffer whole, and a program
+            // that appends a model at a time under NOOVERWRITE uploaded the
+            // whole buffer at every unlock -- 384 KB, 93,000 times, most of
+            // Dungeon Siege's engine thread.
+            const spans = changedSpans(now, held.data);
+            const from = spans.length > 0 ? spans[0] : 0;
+            const to = spans.length > 0 ? spans[spans.length - 1] : 0;
+            held.data.set(now.subarray(from, to), from);
+            entry.gpu.unlock(held, from, to);
             entry.held = null;
         },
 
@@ -9038,6 +9197,7 @@ export function createRenderer(options){
             query.latest = count;
             const frame = ensureFrame();
             count.recording = frame;
+            count.endedAt = clock();
             frame.commands.push({ kind: 'occlusion', count, begin: false });
         },
 
@@ -9805,6 +9965,7 @@ export function createRenderer(options){
                 // the frame drew with.
                 recentFrames: frameHistory.slice(),
                 timing: { ...timing },
+                occlusionTrace: occlusionTrace.slice(),
                 // Empty unless the build asked for it; see `dumpDraws`.
                 lastDump: joinDump(lastDump),
                 // The bytecode of the shaders the dumped draws ran, each once.
@@ -10138,6 +10299,7 @@ export function createRenderer(options){
                         countingQuery = null;
                     }
                     command.count.ended = true;
+                    command.count.replayedAt = clock();
                     if (command.count.outstanding === 0)
                     {
                         settleOcclusion(command.count);

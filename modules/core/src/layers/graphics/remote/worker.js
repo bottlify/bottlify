@@ -105,6 +105,10 @@ export function serveGraphics(scope, deps){
         bufferLocks: '',
         /** Textures whose draws are dropped (`app.debug.skipTexture`), `t12,t40`; '' none. */
         skipTexture: '',
+        /** Shaders whose draws are dropped (`app.debug.skipShader`), `vs12,ps40`; '' none. */
+        skipShader: '',
+        /** Texture stages a fixed-function draw keeps (`app.debug.stageLimit`), -1 all. */
+        stageLimit: -1,
         /** How occlusion counts are answered (`app.debug.occlusion`): '' as counted, 'visible' all passed. */
         occlusion: '',
         /** Draws kept a frame (`app.debug.maxDraws`), the rest dropped; -1 all. */
@@ -407,12 +411,15 @@ export function serveGraphics(scope, deps){
         };
         /** @param {any} submitted */
         const frameQueued = submitted=>latency.queued(submitted);
+        /** @type {ReturnType<typeof createReceiver> | null} */
+        let receiver = null;
         /** @type {any} */
         let played;
         if (api === 'd3d7')
         {
             played = playedDirect3D7({
                 ...options,
+                liveDump,
                 backend,
                 createSampler: (/** @type {any} */ descriptor)=>device.createSampler(descriptor),
                 writeMemory: wrote,
@@ -456,10 +463,11 @@ export function serveGraphics(scope, deps){
                     return ()=>losers.delete(watcher);
                 },
                 frameQueued,
+                occlusionCounted: ()=>receiver?.counted(),
                 gamma: options.gamma ? { applies: ()=>true, set: ()=>{} } : undefined,
             });
         }
-        const receiver = createReceiver({ played, post });
+        receiver = createReceiver({ played, post });
         port.onmessage = event=>{
             if (event.data?.type === 'close')
             {
@@ -522,6 +530,14 @@ export function serveGraphics(scope, deps){
                 if ('skipTexture' in data)
                 {
                     liveDump.skipTexture = String(data.skipTexture ?? '');
+                }
+                if ('stageLimit' in data)
+                {
+                    liveDump.stageLimit = Math.floor(Number(data.stageLimit ?? -1));
+                }
+                if ('skipShader' in data)
+                {
+                    liveDump.skipShader = String(data.skipShader ?? '');
                 }
                 if ('occlusion' in data)
                 {

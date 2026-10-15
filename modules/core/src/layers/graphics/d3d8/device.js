@@ -302,6 +302,9 @@ function isTransformType(type){
  * @property {import('../webgpu/internal/presenter.js').DisplayGamma} [gamma]
  *     Where a full-screen device's gamma ramp reaches the picture. Absent, a
  *     ramp is kept and read back only.
+ * @property {() => void} [occlusionCounted]
+ *     Told whenever an occlusion count has come back from the GPU: where the
+ *     program is told counts across a thread, so they can go to it unasked.
  * @property {import('../webgpu/internal/latency.js').FrameQueued} [frameQueued]
  *     Told of every frame a present queues; what it answers is what the
  *     present waits on before it answers the program. Absent, a present never
@@ -411,6 +414,7 @@ export function createDirect3D8(options = {}){
         backend, readMemory, windowMemory, writeMemory, createSampler, allocate: guestMemory,
         free: giveBack, dumpDraws, dumpEvery, liveDump, maxDraws, divergence, skipTexture,
         probeTexture, fog, mips, nanProbe, driverRules, onDeviceLost, gamma, frameQueued, drawsFrom,
+        occlusionCounted,
         whileStill, rectangleBump, ...caps
     } = options;
     /** @type {DeviceCaps} */
@@ -420,6 +424,7 @@ export function createDirect3D8(options = {}){
         backend, readMemory, windowMemory, writeMemory, createSampler, allocate: guestMemory,
         free: giveBack, dumpDraws, dumpEvery, liveDump, maxDraws, divergence, skipTexture,
         probeTexture, fog, mips, nanProbe, driverRules, onDeviceLost, gamma, frameQueued, drawsFrom,
+        occlusionCounted,
         whileStill, rectangleBump,
     };
     if (backend && !readMemory)
@@ -431,6 +436,9 @@ export function createDirect3D8(options = {}){
         caps: resolved,
         get refCount(){
             return count.value;
+        },
+        get destroyed(){
+            return count.destroyed;
         },
         addRef: ()=>count.addRef(),
         release: ()=>count.release(),
@@ -784,6 +792,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             nanProbe: services.nanProbe === true,
             driverRules: services.driverRules,
             rectangleBump: services.rectangleBump,
+            occlusionCounted: services.occlusionCounted,
             compressedTextures: caps.compressedTextures,
         })
         : null;
@@ -1533,6 +1542,9 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         get refCount(){
             return count.value;
         },
+        get destroyed(){
+            return count.destroyed;
+        },
         /**
          * The state blocks by handle, for a caller that keeps a copy of the
          * device's state elsewhere and has to know what an apply changed. A
@@ -2060,10 +2072,9 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         },
 
         /**
-         * The transform already there, times the one given, in the order a
-         * row-vector convention multiplies them: the new matrix is applied
-         * after the old, which is what makes a chain of these read left to
-         * right.
+         * The one given times the transform already there, as Direct3D
+         * documents it ("pMatrix times" the state) and Wine computes it: the
+         * given matrix is applied first, inside what was there.
          *
          * @param {number} type
          * @param {ArrayLike<number>} matrix
@@ -2082,7 +2093,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                     let sum = 0;
                     for (let step = 0; step < 4; step++)
                     {
-                        sum += current[row * 4 + step] * matrix[step * 4 + column];
+                        sum += matrix[row * 4 + step] * current[step * 4 + column];
                     }
                     product[row * 4 + column] = sum;
                 }

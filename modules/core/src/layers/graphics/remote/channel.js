@@ -19,6 +19,8 @@
  * Sender to receiver:  { type: 'calls', buffer }       a batch, as `wire.js` writes it
  * Receiver to sender:  { type: 'answer', serial, answer, outs, counts? }
  *                      { type: 'presented', count }
+ *                      { type: 'counts', counts }      occlusion counts the GPU has just
+ *                                                      given, sent unasked
  *                      { type: 'diagnostics', diagnostics, phases? }
  *                                                      what a device said of itself when asked,
  *                                                      and where the receiving thread's time
@@ -35,6 +37,10 @@ import { createLender } from './lending.js';
 
 /** How many calls go between two readings of the clock for a batch the turn has kept too long. */
 const CHECKED_EVERY = 64;
+/** The milliseconds an occlusion count's wait is sorted under, the last catching the rest. */
+export const OCCLUSION_BOUNDS = Object.freeze([1, 2, 4, 8, 16, 32, 64, 128, Infinity]);
+/** How many occlusion measurements' events are kept, the latest. */
+const OCCLUSION_TRACED = 64;
 
 /** The least time between batches sent early for what they lend. */
 const LENT_GAP_MS = 0.25;
@@ -207,6 +213,18 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
      * to copy, which cost this thread a read of each whether or not it sent any.
      */
     const shipped = { buffers: 0, surfaces: 0, reads: 0, writes: 0, dynamic: 0, compared: 0 };
+    /**
+     * The occlusion counts the program was told, with how long after its END
+     * each took, the polls and asks it made meanwhile, those that came beside
+     * another's answer, and how many fell under each bound of OCCLUSION_BOUNDS.
+     */
+    const occlusion = { counted: 0, ms: 0, maxMs: 0, polls: 0, asks: 0, beside: 0,
+        sentAfterMs: 0, tripMs: 0, under: OCCLUSION_BOUNDS.map(()=>0) };
+    /** @type {((counts: import('./replay.js').OcclusionCount[]) => void)[]} */
+    const countListeners = [];
+    /** The last OCCLUSION_TRACED measurements' events, oldest first. */
+    /** @type {import('./replay.js').OcclusionEvent[][]} */
+    const occlusionTrace = [];
     /** The calls the batches are made of, by method: how many, and their bytes. */
     /** @type {Map<string, { count: number, bytes: number }>} */
     const byMethod = new Map();
@@ -333,6 +351,11 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
 
         recorded: soon,
 
+        /** @param {(counts: import('./replay.js').OcclusionCount[]) => void} listener */
+        hearCounts(listener){
+            countListeners.push(listener);
+        },
+
         /**
          * Settles once the played side has answered every diagnostics ask
          * made so far, or has stopped: a reader that asked once and waits
@@ -369,6 +392,12 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
                     phases = message.phases ?? null;
                     told++;
                     hear();
+                    break;
+                case 'counts':
+                    for (const listener of countListeners)
+                    {
+                        listener(message.counts);
+                    }
                     break;
                 case 'presented':
                     presented = message.count;
@@ -426,6 +455,40 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
 
         /** The guest bytes copied into the batches so far, by what copied them. */
         shippedBytes: ()=>({ ...shipped }),
+
+        /**
+         * The program was told an occlusion count.
+         *
+         * @param {number} ms @param {number} polls @param {number} asks @param {boolean} beside
+         * @param {number} sentAfter @param {number} trip
+         * @param {import('./replay.js').OcclusionEvent[]} [events]
+         */
+        counted(ms, polls, asks, beside, sentAfter, trip, events){
+            if (events)
+            {
+                occlusionTrace.push(events);
+                if (occlusionTrace.length > OCCLUSION_TRACED)
+                {
+                    occlusionTrace.shift();
+                }
+            }
+            occlusion.sentAfterMs += sentAfter;
+            occlusion.tripMs += trip;
+            occlusion.counted++;
+            occlusion.ms += ms;
+            occlusion.maxMs = Math.max(occlusion.maxMs, ms);
+            occlusion.polls += polls;
+            occlusion.asks += asks;
+            occlusion.beside += beside ? 1 : 0;
+            const bound = OCCLUSION_BOUNDS.findIndex(limit=>ms < limit);
+            occlusion.under[bound < 0 ? OCCLUSION_BOUNDS.length - 1 : bound]++;
+        },
+
+        /** The occlusion counts told so far; see `occlusion` above. */
+        occlusion: ()=>({ ...occlusion, ms: Math.round(occlusion.ms),
+            maxMs: Math.round(occlusion.maxMs), sentAfterMs: Math.round(occlusion.sentAfterMs),
+            tripMs: Math.round(occlusion.tripMs), under: occlusion.under.slice(),
+            trace: occlusionTrace.slice() }),
 
         /** @param {string} name @param {number} bytes */
         recordedCall(name, bytes){
@@ -525,7 +588,28 @@ export function createReceiver({ played, post }){
         }, fail);
     };
 
+    let countsDue = false;
     return {
+        /**
+         * The GPU has given an occlusion count: what the played device now
+         * holds goes to the sender, once for every count in the turn.
+         */
+        counted(){
+            if (countsDue || failed || !played.counts)
+            {
+                return;
+            }
+            countsDue = true;
+            queueMicrotask(()=>{
+                countsDue = false;
+                const counts = played.counts?.() ?? [];
+                if (counts.length > 0)
+                {
+                    post({ type: 'counts', counts });
+                }
+            });
+        },
+
         /** @param {any} message  what the sender posted */
         receive(message){
             if (message?.type !== 'calls' || failed)

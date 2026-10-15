@@ -165,9 +165,12 @@ function rig(version, way, caps = {}){
          * @type {(message: any) => void}
          */
         let toSender = ()=>{};
+        /** Told when the GPU has counted, as the worker tells its receiver. */
+        let counted = ()=>{};
         const played = playedDirect3D(factory, {
             ...caps,
             backend: backendOf(gpu),
+            occlusionCounted: ()=>counted(),
             createSampler,
             readMemory: true,
             borrow: buffers ? createBorrower({ ...buffers, memory: memory.ram, base: RAM_BASE })
@@ -207,6 +210,7 @@ function rig(version, way, caps = {}){
                 lending: buffers && { ...buffers, memory: memory.ram, base: RAM_BASE },
             });
             const receiver = createReceiver({ played, post: message=>sender.receive(message) });
+            counted = ()=>receiver.counted();
             toSender = message=>sender.receive(message);
             release = ()=>{
                 sender.flush();
@@ -236,6 +240,7 @@ function rig(version, way, caps = {}){
             });
             const receiver = createReceiver({ played,
                 post: (message, transfer)=>port2.postMessage(message, transfer ?? []) });
+            counted = ()=>receiver.counted();
             toSender = message=>port2.postMessage(message);
             port2.onmessage = event=>receiver.receive(event.data);
             port1.onmessage = event=>sender.receive(event.data);
@@ -2619,4 +2624,82 @@ test('Direct3D 8: a target drawn into every frame and read back the frame after 
         }
         await run.look('end');
     });
+});
+
+test('Direct3D 9: an occlusion count the GPU has given reaches the recording unasked, and the'
+    + ' program\'s first poll after it is answered with the count, not S_FALSE', async()=>{
+    for (const way of /** @type {const} */ (['held', 'port']))
+    {
+        const { d3d, settle, close } = rig(9, way);
+        try
+        {
+            /** @type {{ device?: any }} */
+            const made = {};
+            assert.equal(await d3d.CreateDevice({ ...PARAMETERS }, made), D3D_OK, way);
+            const device = made.device;
+            /** @type {{ query?: any }} */
+            const query = {};
+            assert.equal(device.CreateQuery(D3DQUERYTYPE.OCCLUSION, query), D3D_OK, way);
+            device.BeginScene();
+            query.query.Issue(D3DISSUE.BEGIN);
+            device.Clear(0, null, D3DCLEAR.TARGET, 0, 1, 0);
+            query.query.Issue(D3DISSUE.END);
+            device.EndScene();
+            await device.Present(null, null, 0, null);
+            // Long enough for the twin to play the frame and the GPU to count,
+            // with no poll in between: nothing has asked for the count.
+            await settle();
+            /** @type {{ value?: number }} */
+            const out = {};
+            assert.equal(await query.query.GetData(out, 4, 0), D3D_OK,
+                `${way}: the first poll finds the count already sent`);
+            assert.equal(typeof out.value, 'number', way);
+        }
+        finally
+        {
+            close();
+        }
+    }
+});
+
+test('Direct3D 8: a render target copied into an image surface answers the program at once, and'
+    + ' a lock of the surface waits for the pixels and reads what the target holds', async()=>{
+    const { d3d, release, close } = rig(8, 'held');
+    try
+    {
+        /** @type {{ device?: any }} */
+        const made = {};
+        assert.equal(await d3d.CreateDevice({ ...PARAMETERS }, made), D3D_OK);
+        const device = made.device;
+        /** @type {{ surface?: any }} */
+        const target = {};
+        assert.equal(device.CreateRenderTarget(16, 16, D3DFMT.X8R8G8B8, 0, target), D3D_OK);
+        /** @type {{ surface?: any }} */
+        const image = {};
+        assert.equal(device.CreateImageSurface(16, 16, D3DFMT.X8R8G8B8, image), D3D_OK);
+        /** @type {Record<string, any>} */
+        const old = {};
+        device.GetRenderTarget(old.target = {});
+        device.SetRenderTarget(target.surface, null);
+        device.Clear(0, null, D3DCLEAR.TARGET, 0xff336699, 1, 0);
+        device.SetRenderTarget(old.target.surface, null);
+        /** @type {{ moves?: any[] }} */
+        const held = {};
+        // Nothing is played until released: a copy that waited would be a promise.
+        const answer = device.CopyRects(target.surface, null, 0, image.surface, null, held);
+        assert.equal(answer, D3D_OK, 'answered without waiting for the twin');
+        assert.deepEqual(held.moves, [], 'the copies are made when the pixels come, not now');
+        /** @type {{ pBits?: number }} */
+        const pixels = {};
+        const locked = image.surface.LockRect(pixels, null, D3DLOCK.READONLY);
+        assert.ok(locked instanceof Promise, 'the lock waits for the copy back');
+        release();
+        assert.equal(await locked, D3D_OK);
+        assert.ok(typeof pixels.pBits === 'number');
+        image.surface.UnlockRect();
+    }
+    finally
+    {
+        close();
+    }
 });

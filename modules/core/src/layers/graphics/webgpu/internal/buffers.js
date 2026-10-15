@@ -330,6 +330,7 @@ export function createDynamicBuffer(options){
          * @returns {import('../contract.js').BufferLock}
          */
         lock(offset, length, flags){
+            const renamesBefore = renames;
             if (held)
             {
                 throw new Error(`Buffer "${label}" is already locked`);
@@ -368,22 +369,34 @@ export function createDynamicBuffer(options){
             {
                 wholeLocks++;
             }
-            held = { data: shadow.subarray(offset, offset + length), offset, length, flags };
+            held = { data: shadow.subarray(offset, offset + length), offset, length, flags,
+                renamed: renames !== renamesBefore };
             return held;
         },
 
         /**
+         * The lock's bytes travel at the next flush: all of them, or only
+         * [from, to) of them where the caller knows the rest is what the
+         * buffer already holds -- unless the lock renamed a backing nothing
+         * is carried into, whose other bytes are new and unwritten.
+         *
          * @param {import('../contract.js').BufferLock} lock
+         * @param {number} [from] @param {number} [to]  within the lock
          */
-        unlock(lock){
+        unlock(lock, from = 0, to = lock.length){
             if (!held || lock !== held)
             {
                 throw new Error(`Unlock of "${label}" without a matching lock`);
             }
-            const end = lock.offset + lock.length;
+            const narrowed = !(/** @type {any} */ (lock).renamed && options.keep === false);
+            const start = lock.offset + (narrowed ? from : 0);
+            const end = lock.offset + (narrowed ? to : lock.length);
             lockedBytes += lock.length;
-            dirtyStart = dirtyStart < 0 ? lock.offset : Math.min(dirtyStart, lock.offset);
-            dirtyEnd = Math.max(dirtyEnd, end);
+            if (end > start)
+            {
+                dirtyStart = dirtyStart < 0 ? start : Math.min(dirtyStart, start);
+                dirtyEnd = Math.max(dirtyEnd, end);
+            }
             held = null;
             touch();
         },

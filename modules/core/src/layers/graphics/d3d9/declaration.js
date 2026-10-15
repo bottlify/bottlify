@@ -487,6 +487,7 @@ export function fixedFunctionLayoutOf(declaration){
  *                          made by the program -- even when the elements
  *                          happen to describe one.
  * @property {number} refCount
+ * @property {boolean} destroyed  whether its last reference has gone for good
  * @property {() => number} addRef
  * @property {() => number} release
  * @property {(out: { elements?: VertexElement[], count?: number }, copy?: boolean)
@@ -511,6 +512,9 @@ export function createVertexDeclaration(options){
         fvf: options.fvf ?? 0,
         get refCount(){
             return options.count.value;
+        },
+        get destroyed(){
+            return options.count.destroyed;
         },
         addRef: ()=>options.count.addRef(),
         release: ()=>options.count.release(),

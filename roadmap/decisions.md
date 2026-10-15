@@ -386,6 +386,19 @@ drivers, which take the curve over z whatever the shader wrote and whatever the 
 programs that leave fog to this stage at all are of the earlier generations. *2026-10-10,
 the case without oFog 2026-10-12.*
 
+**A44 -- Under a vertex shader, a 1.0 to 1.3 pixel shader's projective read divides by w.**
+D3DTTFF_PROJECTED on a stage a `ps_1_1` to `ps_1_3` reads divides that stage's coordinates
+before the read. Without a vertex shader the divisor is the last coordinate the count names,
+which is what the fixed function produced; under a vertex shader the shader writes all four,
+and the drivers of the shader-model-1 era divided by w whatever count the flags named. Wine
+divides by the count's last component in either case. Prince of Persia: Warrior Within's water
+writes (u w, v w, w, w) from its vertex shader -- z equal to w, so that a driver dividing by
+either reads the same place -- and sets D3DTTFF_COUNT2 | D3DTTFF_PROJECTED: divided by y, the
+screen copy it refracts was read far outside itself and the water drawn in stripes; divided by
+w, as by the default here, it is water (the person's run, 2026-10-13, browser, graphics worker,
+Parallels GPU). `driverRules: 'current'` divides by the count, as later drivers and Wine do.
+*2026-10-13.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this

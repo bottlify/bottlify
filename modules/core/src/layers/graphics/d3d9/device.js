@@ -476,6 +476,9 @@ const isDepthFormat = format=>FORMAT_INFO[format] !== undefined && FORMAT_INFO[f
  * @property {import('../webgpu/internal/presenter.js').DisplayGamma} [gamma]
  *     Where a full-screen device's gamma ramp reaches the picture. Absent, a
  *     ramp is kept and read back only.
+ * @property {() => void} [occlusionCounted]
+ *     Told whenever an occlusion count has come back from the GPU: where the
+ *     program is told counts across a thread, so they can go to it unasked.
  * @property {import('../webgpu/internal/latency.js').FrameQueued} [frameQueued]
  *     Told of every frame a present queues; what it answers is what the
  *     present waits on before it answers the program. Absent, a present never
@@ -511,6 +514,7 @@ export function createDirect3D9(options = {}){
         backend, readMemory, windowMemory, writeMemory, createSampler, allocate: guestMemory,
         free: giveBack, divergence, dumpDraws, dumpEvery, liveDump, maxDraws, skipTexture,
         probeTexture, fog, mips, driverRules, onDeviceLost, gamma, frameQueued, renderedElsewhere,
+        occlusionCounted,
         keepMemory, rereadBuffers, drawsFrom, whileStill, rectangleBump, drawsNothing, ...caps
     } = options;
     /** @type {DeviceCaps} */
@@ -524,6 +528,7 @@ export function createDirect3D9(options = {}){
         free: keepMemory === true ? undefined : giveBack, divergence, dumpDraws, dumpEvery,
         liveDump, maxDraws, skipTexture,
         probeTexture, fog, mips, driverRules, onDeviceLost, gamma, frameQueued, renderedElsewhere,
+        occlusionCounted,
         rereadBuffers, drawsFrom, whileStill, rectangleBump, drawsNothing,
     };
     if (backend && !readMemory)
@@ -535,6 +540,9 @@ export function createDirect3D9(options = {}){
         caps: resolved,
         get refCount(){
             return count.value;
+        },
+        get destroyed(){
+            return count.destroyed;
         },
         addRef: ()=>count.addRef(),
         release: ()=>count.release(),
@@ -926,6 +934,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             mips: services.mips,
             driverRules: services.driverRules,
             rectangleBump: services.rectangleBump,
+            occlusionCounted: services.occlusionCounted,
             rereadBuffers: services.rereadBuffers,
             compressedTextures: caps.compressedTextures,
         })
@@ -1211,6 +1220,9 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
     const swapChain = {
         get refCount(){
             return swapChainCount.value;
+        },
+        get destroyed(){
+            return swapChainCount.destroyed;
         },
         addRef: ()=>swapChainCount.addRef(),
         release: ()=>swapChainCount.release(),
@@ -2053,6 +2065,9 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         get refCount(){
             return count.value;
         },
+        get destroyed(){
+            return count.destroyed;
+        },
         addRef: ()=>count.addRef(),
         release: ()=>{
             const before = count.value;
@@ -2732,8 +2747,9 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         },
 
         /**
-         * The current matrix times the given one, in that order: the given
-         * matrix is applied after what was there.
+         * The given matrix times the current one, as Direct3D documents it
+         * ("pMatrix times" the state) and Wine computes it: the given matrix
+         * is applied first, inside what was there.
          *
          * @param {number} type
          * @param {ArrayLike<number>} matrix
@@ -2743,7 +2759,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             {
                 return D3DERR_INVALIDCALL;
             }
-            const product = multiplyMatrices(transforms.get(type) ?? IDENTITY, matrix);
+            const product = multiplyMatrices(matrix, transforms.get(type) ?? IDENTITY);
             return setState(
                 record=>record.transforms.set(type, product),
                 ()=>transforms.set(type, product));
@@ -4621,6 +4637,9 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             type,
             get refCount(){
                 return queryCount.value;
+            },
+            get destroyed(){
+                return queryCount.destroyed;
             },
             addRef: ()=>queryCount.addRef(),
             release: ()=>queryCount.release(),

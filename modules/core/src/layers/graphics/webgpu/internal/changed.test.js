@@ -150,3 +150,13 @@ test('an equal run of whole eight-word blocks ends a span as the words one by on
     assert.deepEqual(changedSpans(now, was, 64), [0, 4, 160, 164]);
     assert.deepEqual(changedSpans(now, was, 256), [0, 164], 'and keeps it within the gap');
 });
+
+test('a block changed inside a span ends the span at its last change, not at the block\'s end',
+    ()=>{
+        const now = new Uint8Array(256);
+        const was = new Uint8Array(256);
+        // Words 0 and 9 changed: the block of words 8-15 differs at its second word only.
+        now[0] = 1;
+        now[36] = 1;
+        assert.deepEqual(changedSpans(now, was, 64), [0, 40]);
+    });

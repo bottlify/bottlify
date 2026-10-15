@@ -994,6 +994,9 @@ ${fragmentBody(state, specularEnable, undefined, undefined,
  *
  * @typedef {Object} UniformTail
  * @property {boolean} stageConstants
+ * @property {boolean} [bump]  Whether a bump stage's matrix and luminance follow,
+ *     two rows a stage, eight stages: a program changes them draw by draw,
+ *     and a shader made for each value is a pipeline built for each.
  * @property {number} [clipPlanes]  How many user clip planes follow, in the
  *     vertex's own space: one row each, for a fixed vertex stage that clips.
  */
@@ -1005,7 +1008,8 @@ ${fragmentBody(state, specularEnable, undefined, undefined,
  * @returns {UniformTail}
  */
 export function tailOf(state){
-    return { stageConstants: stagesRead(state.stages, D3DTA.CONSTANT) };
+    return { stageConstants: stagesRead(state.stages, D3DTA.CONSTANT),
+        bump: state.stages.some(stage=>stage.bump !== undefined) };
 }
 
 /**
@@ -1057,7 +1061,8 @@ function uniformStruct(lightCount, tail = { stageConstants: false }){
     point: vec4f,
     pointScale: vec4f,${lightCount === 0 ? '' : `
     lights: array<Light, ${lightCount}>,`}${tail.stageConstants ? `
-    stageConstant: array<vec4f, 8>,` : ''}${planes === 0 ? '' : `
+    stageConstant: array<vec4f, 8>,` : ''}${tail.bump ? `
+    bumpEnv: array<vec4f, 16>,` : ''}${planes === 0 ? '' : `
     clipPlane: array<vec4f, ${planes}>,`}
 };`;
 }
@@ -1144,10 +1149,13 @@ specular = 'input.specular', sprite = false, table = tableFog(position))
                 // the next stage's coordinate, and the luminance, scaled and
                 // offset, scales the next stage's texture. The stage itself
                 // leaves the running colour as it was.
-                const [m00, m01, m10, m11, scale, shift] = (stage.bump ?? [0, 0, 0, 0, 0, 0])
-                    // A state never set reads as whatever its dword was; one
-                    // that is no number has no literal.
-                    .map(value=>literalOf(Number.isFinite(value) ? value : 0));
+                // Read from the block, not written into the source: a program
+                // that moves the matrix every draw would otherwise build a
+                // pipeline every draw.
+                const matrix = `uniforms.bumpEnv[${index * 2}]`;
+                const luminance = `uniforms.bumpEnv[${index * 2 + 1}]`;
+                const [m00, m01, m10, m11, scale, shift] = [`${matrix}.x`, `${matrix}.y`,
+                    `${matrix}.z`, `${matrix}.w`, `${luminance}.x`, `${luminance}.y`];
                 const texel = `bump${index}`;
                 bumped = {
                     offset: `vec2f(${m00} * ${texel}.r + ${m10} * ${texel}.g,`

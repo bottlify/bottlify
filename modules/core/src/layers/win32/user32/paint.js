@@ -354,11 +354,17 @@ export function layoutText(text, rect, format, metrics){
                 continue;
             }
             let from = 0;
-            while (widthOf(paragraph.slice(from)) > width)
+            // Until the text is used up as well as fits: in a rectangle of
+            // negative width even nothing is too wide.
+            while (from < paragraph.length && widthOf(paragraph.slice(from)) > width)
             {
                 const end = fitting(paragraph, from);
                 let cut = paragraph.lastIndexOf(' ', end);
-                cut = cut <= from ? end : cut + 1;
+                // A line takes one character at least, however narrow the
+                // rectangle: a launcher's DrawText into a rectangle left of
+                // its own left edge made empty lines until the array of them
+                // broke.
+                cut = cut <= from ? Math.max(end, from + 1) : cut + 1;
                 lines.push({ text: paragraph.slice(from, cut), start: start + from });
                 from = cut;
             }

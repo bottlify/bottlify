@@ -223,15 +223,28 @@ test('a bump stage moves the coordinate of the next stage, and with luminance sc
                 alphaOp: D3DTOP.SELECTARG1, alphaArg1: D3DTA.TEXTURE, alphaArg2: D3DTA.CURRENT,
                 texCoordIndex: 1 },
         ] })).code;
-        const moved = 'sampleStage1((input.texCoord1 + vec2f(0.5 * bump0.r + 0.0 * bump0.g,'
-            + ' 0.0 * bump0.r + 0.25 * bump0.g)))';
+        // The matrix and the luminance are the block's, so a program moving
+        // them draw by draw draws through one pipeline.
+        const moved = 'sampleStage1((input.texCoord1 + vec2f(uniforms.bumpEnv[0].x * bump0.r'
+            + ' + uniforms.bumpEnv[0].z * bump0.g, uniforms.bumpEnv[0].y * bump0.r'
+            + ' + uniforms.bumpEnv[0].w * bump0.g)))';
         const plain = codeOf(D3DTOP.BUMPENVMAP);
         assert.ok(plain.includes('let bump0 = sampleStage0(input.texCoord0);'));
         assert.ok(plain.includes(`current = vec4f(saturate((${moved} * input.diffuse).rgb),`));
         assert.ok(!plain.includes('saturate(bump0.b'), 'no luminance without the luminance op');
         const lit = codeOf(D3DTOP.BUMPENVMAPLUMINANCE);
         assert.ok(lit.includes(
-            `(${moved} * vec4f(vec3f(saturate(bump0.b * 2.0 + -0.5)), 1.0)) * input.diffuse`));
+            `(${moved} * vec4f(vec3f(saturate(bump0.b * uniforms.bumpEnv[1].x`
+            + ' + uniforms.bumpEnv[1].y)), 1.0)) * input.diffuse'));
+        assert.ok(lit.includes('bumpEnv: array<vec4f, 16>,'), 'the block declares the rows');
+        assert.equal(generate(baseState({ fvf, stages: [{ colorOp: D3DTOP.BUMPENVMAPLUMINANCE,
+            colorArg1: D3DTA.TEXTURE, colorArg2: D3DTA.CURRENT, alphaOp: D3DTOP.SELECTARG1,
+            alphaArg1: D3DTA.CURRENT, alphaArg2: D3DTA.CURRENT, texCoordIndex: 0,
+            bump: [9, 9, 9, 9, 9, 9] }] })).code, generate(baseState({ fvf, stages: [{
+            colorOp: D3DTOP.BUMPENVMAPLUMINANCE, colorArg1: D3DTA.TEXTURE,
+            colorArg2: D3DTA.CURRENT, alphaOp: D3DTOP.SELECTARG1, alphaArg1: D3DTA.CURRENT,
+            alphaArg2: D3DTA.CURRENT, texCoordIndex: 0, bump: [1, 0, 0, 1, 0, 0] }] })).code,
+        'one source whatever the matrix');
         // A generated coordinate is four wide: the offset moves its first two.
         const generatedNext = generate(baseState({ fvf, stages: [
             { colorOp: D3DTOP.BUMPENVMAP, colorArg1: D3DTA.TEXTURE, colorArg2: D3DTA.CURRENT,

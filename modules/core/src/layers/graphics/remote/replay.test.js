@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loopbackDirect3D } from './loopback.js';
-import { createMirror } from './replay.js';
+import { SWEEP_SLICE, createMirror } from './replay.js';
 import { answeredByRenderer, playedDirect3D, recordedDirect3D } from './direct3d.js';
 import { createReceiver, createSender } from './channel.js';
 import { createBorrower, createLendingBuffers } from './lending.js';
@@ -34,7 +34,7 @@ const RAM_BASE = 0x40000000;
 function toy(sides){
     return (/** @type {any} */ services)=>{
         const side = { services, played: services.backend !== undefined,
-            seen: /** @type {any[]} */ ([]), counted: /** @type {WeakRef<any>[]} */ ([]) };
+            seen: /** @type {any[]} */ ([]), counted: /** @type {WeakRef<any>[]} */ ([]), looks: 0 };
         sides.push(side);
         return {
             /** @param {{ thing?: any }} out */
@@ -99,6 +99,7 @@ function toy(sides){
                         return count.value;
                     },
                     get destroyed(){
+                        side.looks++;
                         return count.destroyed;
                     },
                     Touch: ()=>D3D_OK,
@@ -293,6 +294,27 @@ test('a played object the program no longer counts is not held by the player', a
     assert.deepEqual(alive.map((/** @type {WeakRef<any>} */ one)=>one.deref().value), [2, 1], 'and calls still reach them');
 });
 
+test('a frame\'s look at the objects at a count of zero takes up a slice of them, the next '
+    + 'going on where it stopped', ()=>{
+    // A texture's levels sit at zero for as long as it lives: a program
+    // holding thousands had the worker look at every one, every frame.
+    const { root, played, play } = toyAcross(false);
+    for (let made = 0; made < 3 * SWEEP_SLICE; made++)
+    {
+        /** @type {{ thing?: any }} */
+        const out = {};
+        root.CreateCounted(out, true);
+        out.thing.Touch();
+    }
+    play();
+    played.looks = 0;
+    root.Present();
+    play();
+    assert.ok(played.looks <= SWEEP_SLICE + 1,
+        `one look took up ${played.looks} of ${3 * SWEEP_SLICE}`);
+    assert.ok(played.looks >= SWEEP_SLICE, 'and a whole slice');
+});
+
 test('a played object collected after it was destroyed is answered as unreachable', async()=>{
     // The bridge asks again whether an interface it held at a count of zero
     // can still be called; asked of a slot the player had emptied, the call
@@ -417,7 +439,8 @@ test('what a lock let the program write is the played device\'s at the unlock', 
     assert.deepEqual(played.seen, [[1, 2, 3, 4]]);
 });
 
-test('a lock taken to read sends nothing back at its unlock; one taken to write does', ()=>{
+test('a lock taken to read sends nothing back at its unlock once the part was sent; one taken '
+    + 'to write does', ()=>{
     const { root, ram, played } = toyLoop();
     /** @type {{ thing?: any }} */
     const out = {};
@@ -426,22 +449,47 @@ test('a lock taken to read sends nothing back at its unlock; one taken to write 
     /** @type {{ pBits?: number }} */
     const locked = {};
     const D3DLOCK_READONLY = 0x10;
+    assert.equal(thing.LockRect(locked, null, 0), D3D_OK);
+    ram.set([1, 2, 3, 4], /** @type {number} */ (locked.pBits));
+    assert.equal(thing.UnlockRect(), D3D_OK);
+    thing.Peek();
+    assert.deepEqual(played.seen, [[1, 2, 3, 4]], 'written: the bytes went');
+
     assert.equal(thing.LockRect(locked, null, D3DLOCK_READONLY | 0x800), D3D_OK);
     ram.set([5, 6, 7, 8], /** @type {number} */ (locked.pBits));
     assert.equal(thing.UnlockRect(), D3D_OK);
     thing.Peek();
-    assert.deepEqual(played.seen, [[0, 0, 0, 0]], 'read, not written: nothing went');
-    assert.equal(thing.LockRect(locked, null, 0), D3D_OK);
-    assert.equal(thing.UnlockRect(), D3D_OK);
-    thing.Peek();
-    assert.deepEqual(played.seen[1], [5, 6, 7, 8], 'written: the bytes went');
+    assert.deepEqual(played.seen[1], [1, 2, 3, 4], 'read, not written: nothing went');
 
     ram.set([9, 9, 9, 9], /** @type {number} */ (locked.pBits));
     assert.equal(thing.LockRectAnswered(locked, null, D3DLOCK_READONLY), D3D_OK);
     assert.equal(thing.UnlockRect(), D3D_OK);
     thing.Peek();
-    assert.deepEqual(played.seen[2], [5, 6, 7, 8],
+    assert.deepEqual(played.seen[2], [1, 2, 3, 4],
         'read, with no address on record: still nothing went');
+});
+
+test('a part the played side was never sent goes at its first unlock, even of a lock taken to '
+    + 'read: a managed level filled under D3DLOCK_READONLY is drawn with what was written', ()=>{
+    const { root, ram, played } = toyLoop();
+    /** @type {{ thing?: any }} */
+    const out = {};
+    root.CreateThing(out);
+    const thing = out.thing;
+    /** @type {{ pBits?: number }} */
+    const locked = {};
+    const D3DLOCK_READONLY = 0x10;
+    assert.equal(thing.LockRect(locked, null, D3DLOCK_READONLY), D3D_OK);
+    ram.set([5, 6, 7, 8], /** @type {number} */ (locked.pBits));
+    assert.equal(thing.UnlockRect(), D3D_OK);
+    thing.Peek();
+    assert.deepEqual(played.seen, [[5, 6, 7, 8]], 'never sent: the bytes went');
+
+    assert.equal(thing.LockRect(locked, null, D3DLOCK_READONLY), D3D_OK);
+    ram.set([7, 7, 7, 7], /** @type {number} */ (locked.pBits));
+    assert.equal(thing.UnlockRect(), D3D_OK);
+    thing.Peek();
+    assert.deepEqual(played.seen[1], [5, 6, 7, 8], 'sent once: a read sends nothing again');
 });
 
 test('a method the caller wraps is its own: what it calls through is played once', ()=>{

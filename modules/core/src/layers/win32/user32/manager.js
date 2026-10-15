@@ -147,10 +147,24 @@ export function createWindowManager({ cells = windowCells() } = {}){
     /**
      * Puts the order in its bands and its owners right: topmost windows above
      * the rest, and an owned window above its owner, everything else as it
-     * stood. Windows does the same after any move in the order.
+     * stood. Windows does the same after any move in the order. A window
+     * owned by a topmost one is in the topmost band with it, as SetWindowPos
+     * says of a window made topmost: "all of its owned windows are also made
+     * topmost" -- a modal dialog of a topmost window is above it, not under.
      */
     const settle = ()=>{
-        const band = (/** @type {number} */ hwnd)=>(windows.get(hwnd)?.topmost ? 1 : 0);
+        /** @param {number} hwnd @returns {number} */
+        const band = hwnd=>{
+            for (let at = windows.get(hwnd), depth = 0; at && depth < 64; depth++)
+            {
+                if (at.topmost)
+                {
+                    return 1;
+                }
+                at = at.owner ? windows.get(at.owner) : undefined;
+            }
+            return 0;
+        };
         const banded = [...order.filter(hwnd=>band(hwnd) === 0),
             ...order.filter(hwnd=>band(hwnd) === 1)];
         // An owned window below its owner goes to just above it -- its own

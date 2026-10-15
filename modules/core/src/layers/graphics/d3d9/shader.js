@@ -487,6 +487,7 @@ export function functionOf(tokens){
  * @property {Uint32Array} tokens   The function, end token included.
  * @property {ParsedShader} parsed
  * @property {number} refCount
+ * @property {boolean} destroyed  whether its last reference has gone for good
  * @property {() => number} addRef
  * @property {() => number} release
  * @property {(out: { bytes?: number, tokens?: Uint32Array }, room?: number | null) => number}
@@ -516,6 +517,9 @@ export function createShader(options){
         parsed,
         get refCount(){
             return options.count.value;
+        },
+        get destroyed(){
+            return options.count.destroyed;
         },
         addRef: ()=>options.count.addRef(),
         release: ()=>options.count.release(),
