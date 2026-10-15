@@ -130,8 +130,25 @@ export const SHADOW = {
     VALIDATED: 5224,
     VALIDATED_TABLES: 2,
     VALIDATED_SLOTS: 8,
-    SIZE: 5224 + 2 * 8 * 4,
+    /**
+     * The device's lock, as Direct3D's runtime takes its critical section
+     * round every call of a device made multithreaded: a command routine and
+     * Lock and Unlock in the guest take it with `xchg` (`HELD_GUEST`) and a
+     * routine that finds it taken leaves for the host; the host takes it
+     * (`HELD_HOST`) while it reads or writes the words the routines change.
+     * With threads on several executors a routine otherwise ran beside the
+     * host's reading of its words -- an unlock record or a locked range lost,
+     * a flag or a mirror written over -- and two routines beside each other.
+     * A routine lets it go before it leaves for the host, and before it
+     * writes through a pointer of the program's.
+     */
+    HELD: 5288,
+    SIZE: 5292,
 };
+
+/** Who holds `SHADOW.HELD`: a routine in the guest, or the host. */
+export const HELD_GUEST = 1;
+export const HELD_HOST = 2;
 
 /** The bits of `SHADOW.DRAWABLE`. */
 export const DRAW = Object.freeze({
@@ -227,6 +244,14 @@ export const FLAG_STALE = 2;
  * found no room is always followed by a start over.
  */
 export const COMMAND_RING_BYTES = 64 * 1024;
+
+/**
+ * How long the host waits for a routine to let the device's lock go before it
+ * takes it anyway: a routine holds it for some instructions, and only one
+ * whose thread faulted inside it -- through a pointer of the program's --
+ * never lets it go.
+ */
+const HELD_WAIT_MS = 200;
 const COMMAND_SLACK = 20 * 1024;
 
 /**
@@ -470,6 +495,40 @@ const prologue = (slow = 'slow', flags = FLAG_SLOW_PATH)=>[
     { jcc: 0x75, to: slow },                                 // jnz slow
 ];
 
+/**
+ * Takes the device's lock (`SHADOW.HELD`) with the device's block in `base`
+ * (a ModR/M register number), or leaves for `busy` -- the host -- when it is
+ * held: by the host, or a routine on another executor.
+ *
+ *     mov eax, HELD_GUEST
+ *     xchg [base+HELD], eax
+ *     test eax, eax
+ *     jnz busy
+ *
+ * @param {number} base @param {string} busy
+ * @returns {(number[] | { jcc: number, to: string, near?: boolean })[]}
+ */
+const takeHeld = (base, busy)=>[
+    [0xb8, ...dword(HELD_GUEST)],                            // mov eax, HELD_GUEST
+    [0x87, 0x80 | base, ...dword(SHADOW.HELD)],              // xchg [base+HELD], eax
+    [0x85, 0xc0],                                            // test eax, eax
+    { jcc: 0x75, to: busy, near: true },                     // jnz busy
+];
+
+/**
+ * Lets the device's lock go, the device's block in `base`.
+ *
+ *     mov dword [base+HELD], 0
+ *
+ * @param {number} base
+ */
+const letHeldGo = base=>[0xc7, 0x80 | base, ...dword(SHADOW.HELD), ...dword(0)];
+
+/** ModR/M register numbers. */
+const ECX = 1;
+const EDX = 2;
+const EBX = 3;
+
 /** A getter's prologue: a block the ring may have made stale is the host's too. */
 const getterPrologue = ()=>prologue('slow', FLAG_SLOW_PATH | FLAG_STALE);
 
@@ -560,20 +619,23 @@ export function getRenderStateCode(at, trap){
  * buffer's own storage; what is remembered is the range, as a union with
  * what was locked before the host last looked, and the flags.
  *
- * The cases left to the host: a lock already held (the host refuses it), a
- * lock for reading, an empty or out-of-range lock, a null out-pointer -- and,
- * while the device's command ring holds a draw the host has not made, any
- * lock but NOOVERWRITE alone: the bytes that draw reads are the buffer's until
- * then, and the host makes it before it takes the lock. A DISCARD with it
- * promises nothing about those bytes, and the buffer has one storage. So too
- * while what was unlocked may be lent to the graphics worker: the host
- * claims it before the program writes over it.
+ * The cases left to the host: the device's lock held (`SHADOW.HELD`), a lock
+ * of the buffer already held (the host refuses it), a lock for reading, an
+ * empty or out-of-range lock, a null out-pointer -- and, while the device's
+ * command ring holds a draw the host has not made, any lock but NOOVERWRITE
+ * alone: the bytes that draw reads are the buffer's until then, and the host
+ * makes it before it takes the lock. A DISCARD with it promises nothing about
+ * those bytes, and the buffer has one storage. So too while what was unlocked
+ * may be lent to the graphics worker: the host claims it before the program
+ * writes over it. The device's lock is let go before the program's pointer is
+ * written, which may fault.
  *
- *     cmp dword [ecx+LOCKED], 0
- *     jne slow
- *     test dword [esp+20], READONLY
- *     jnz slow
  *     mov edx, [ecx+DEVICE]
+ *     (take the device's lock through EDX, or slow)
+ *     cmp dword [ecx+LOCKED], 0
+ *     jne held
+ *     test dword [esp+20], READONLY
+ *     jnz held
  *     cmp dword [edx+DRAWS_PENDING], 0
  *     jne guarded
  *     cmp dword [ecx+LENT], 0
@@ -582,7 +644,7 @@ export function getRenderStateCode(at, trap){
  *     mov eax, [esp+20]
  *     and eax, NOOVERWRITE | DISCARD
  *     cmp eax, NOOVERWRITE
- *     jne slow
+ *     jne held
  *   free:
  *     mov eax, [esp+8]            ; offset
  *     mov edx, [esp+12]           ; size
@@ -592,16 +654,18 @@ export function getRenderStateCode(at, trap){
  *     sub edx, eax
  *   sized:
  *     test edx, edx
- *     jz slow
+ *     jz held
  *     add edx, eax                ; end
- *     jc slow
+ *     jc held
  *     cmp edx, [ecx+LENGTH]
- *     ja slow
+ *     ja held
  *     cmp dword [esp+16], 0
- *     je slow
+ *     je held
  *     jmp take
- *   hop:                          ; the checks above are too far from the end
- *     jmp slow                    ; for a byte's reach, so they hop through here
+ *   held:                         ; the host's, the device let go first
+ *     mov eax, [ecx+DEVICE]
+ *     mov dword [eax+HELD], 0
+ *     jmp slow
  *   take:
  *     push ebx
  *     mov ebx, [ecx+TO]
@@ -621,12 +685,13 @@ export function getRenderStateCode(at, trap){
  *   merged:
  *     mov ebx, [esp+24]           ; flags, one word further for the push
  *     or [ecx+LOCK_FLAGS], ebx
- *     mov ebx, [esp+20]           ; out
  *     add eax, [ecx+BASE]
- *     mov [ebx], eax
  *     mov dword [ecx+LOCKED], 1
  *     mov ebx, [ecx+DEVICE]
  *     inc dword [ebx+LOCK_CALLS]
+ *     mov dword [ebx+HELD], 0
+ *     mov ebx, [esp+20]           ; out
+ *     mov [ebx], eax
  *     pop ebx
  *     xor eax, eax
  *     ret 20
@@ -636,12 +701,17 @@ export function getRenderStateCode(at, trap){
  */
 export function lockCode(at, trap){
     return routine(at, trap, [
-        ...prologue('hop'),
-        [0x83, 0x79, BUFFER.LOCKED, 0x00],                       // cmp dword [ecx+12], 0
-        { jcc: 0x75, to: 'hop' },                                // jne hop
-        [0xf7, 0x44, 0x24, 0x14, ...dword(D3DLOCK_READONLY)],    // test dword [esp+20], 0x10
-        { jcc: 0x75, to: 'hop' },                                // jnz hop
+        ...prologue('early'),
+        { jcc: 0xeb, to: 'body' },                               // jmp body
+        { label: 'early' },
+        { jcc: 0xeb, to: 'slow', near: true },                   // jmp slow
+        { label: 'body' },
         [0x8b, 0x51, BUFFER.DEVICE],                             // mov edx, [ecx+28]
+        ...takeHeld(EDX, 'slow'),
+        [0x83, 0x79, BUFFER.LOCKED, 0x00],                       // cmp dword [ecx+12], 0
+        { jcc: 0x75, to: 'held' },                               // jne held
+        [0xf7, 0x44, 0x24, 0x14, ...dword(D3DLOCK_READONLY)],    // test dword [esp+20], 0x10
+        { jcc: 0x75, to: 'held' },                               // jnz held
         [0x83, 0xba, ...dword(SHADOW.DRAWS_PENDING), 0x00],      // cmp dword [edx+disp], 0
         { jcc: 0x75, to: 'guarded' },                            // jne guarded
         [0x83, 0x79, BUFFER.LENT, 0x00],                         // cmp dword [ecx+32], 0
@@ -650,7 +720,7 @@ export function lockCode(at, trap){
         [0x8b, 0x44, 0x24, 0x14],                                // mov eax, [esp+20]
         [0x25, ...dword(D3DLOCK_NOOVERWRITE | D3DLOCK_DISCARD)], // and eax, 0x3000
         [0x3d, ...dword(D3DLOCK_NOOVERWRITE)],                   // cmp eax, 0x1000
-        { jcc: 0x75, to: 'hop' },                                // jne hop
+        { jcc: 0x75, to: 'held' },                               // jne held
         { label: 'free' },
         [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
         [0x8b, 0x54, 0x24, 0x0c],                                // mov edx, [esp+12]
@@ -660,16 +730,18 @@ export function lockCode(at, trap){
         [0x29, 0xc2],                                            // sub edx, eax
         { label: 'sized' },
         [0x85, 0xd2],                                            // test edx, edx
-        { jcc: 0x74, to: 'hop' },                                // jz hop
+        { jcc: 0x74, to: 'held' },                               // jz held
         [0x01, 0xc2],                                            // add edx, eax
-        { jcc: 0x72, to: 'hop' },                                // jc hop
+        { jcc: 0x72, to: 'held' },                               // jc held
         [0x3b, 0x51, BUFFER.LENGTH],                             // cmp edx, [ecx+8]
-        { jcc: 0x77, to: 'hop' },                                // ja hop
+        { jcc: 0x77, to: 'held' },                               // ja held
         [0x83, 0x7c, 0x24, 0x10, 0x00],                          // cmp dword [esp+16], 0
-        { jcc: 0x74, to: 'hop' },                                // je hop
+        { jcc: 0x74, to: 'held' },                               // je held
         { jcc: 0xeb, to: 'take' },                               // jmp take
-        { label: 'hop' },
-        { jcc: 0xeb, to: 'slow' },                               // jmp slow
+        { label: 'held' },
+        [0x8b, 0x41, BUFFER.DEVICE],                             // mov eax, [ecx+28]
+        letHeldGo(0),                                            // mov dword [eax+HELD], 0
+        { jcc: 0xeb, to: 'slow', near: true },                   // jmp slow
         { label: 'take' },
         [0x53],                                                  // push ebx
         [0x8b, 0x59, BUFFER.TO],                                 // mov ebx, [ecx+20]
@@ -689,12 +761,13 @@ export function lockCode(at, trap){
         { label: 'merged' },
         [0x8b, 0x5c, 0x24, 0x18],                                // mov ebx, [esp+24]
         [0x09, 0x59, BUFFER.LOCK_FLAGS],                         // or [ecx+24], ebx
-        [0x8b, 0x5c, 0x24, 0x14],                                // mov ebx, [esp+20]
         [0x03, 0x41, BUFFER.BASE],                               // add eax, [ecx+4]
-        [0x89, 0x03],                                            // mov [ebx], eax
         [0xc7, 0x41, BUFFER.LOCKED, ...dword(1)],                // mov dword [ecx+12], 1
         [0x8b, 0x59, BUFFER.DEVICE],                             // mov ebx, [ecx+28]
         [0xff, 0x83, ...dword(SHADOW.LOCK_CALLS)],               // inc dword [ebx+disp]
+        letHeldGo(EBX),                                          // mov dword [ebx+HELD], 0
+        [0x8b, 0x5c, 0x24, 0x14],                                // mov ebx, [esp+20]
+        [0x89, 0x03],                                            // mov [ebx], eax
         [0x5b],                                                  // pop ebx
         [0x31, 0xc0],                                            // xor eax, eax
         [0xc2, 0x14, 0x00],                                      // ret 20
@@ -703,21 +776,25 @@ export function lockCode(at, trap){
 
 /**
  * HRESULT Unlock(this), as guest code. The buffer's block goes on the
- * device's ring for the host to find; a full ring, or no lock to release,
- * is the host's.
+ * device's ring for the host to find; the device's lock held, a full ring,
+ * or no lock to release, is the host's.
  *
- *     cmp dword [ecx+LOCKED], 0
- *     je slow
  *     mov edx, [ecx+DEVICE]
+ *     (take the device's lock through EDX, or slow)
+ *     cmp dword [ecx+LOCKED], 0
+ *     je held
  *     mov eax, [edx+RING_HEAD]
  *     cmp eax, RING_CAPACITY
- *     jae slow
+ *     jae held
  *     mov [edx + eax*4 + RING], ecx
  *     inc dword [edx+RING_HEAD]
  *     mov dword [ecx+LOCKED], 0
  *     inc dword [edx+UNLOCK_CALLS]
+ *     mov dword [edx+HELD], 0
  *     xor eax, eax
  *     ret 4
+ *   held:
+ *     mov dword [edx+HELD], 0     ; and on to the host
  *
  * @param {number} at @param {number} trap
  * @returns {Uint8Array}
@@ -725,18 +802,22 @@ export function lockCode(at, trap){
 export function unlockCode(at, trap){
     return routine(at, trap, [
         ...prologue(),
-        [0x83, 0x79, BUFFER.LOCKED, 0x00],                       // cmp dword [ecx+12], 0
-        { jcc: 0x74, to: 'slow' },                               // je slow
         [0x8b, 0x51, BUFFER.DEVICE],                             // mov edx, [ecx+28]
+        ...takeHeld(EDX, 'slow'),
+        [0x83, 0x79, BUFFER.LOCKED, 0x00],                       // cmp dword [ecx+12], 0
+        { jcc: 0x74, to: 'held' },                               // je held
         [0x8b, 0x82, ...dword(SHADOW.RING_HEAD)],                // mov eax, [edx+disp]
         [0x3d, ...dword(SHADOW.RING_CAPACITY)],                  // cmp eax, 64
-        { jcc: 0x73, to: 'slow' },                               // jae slow
+        { jcc: 0x73, to: 'held' },                               // jae held
         [0x89, 0x8c, 0x82, ...dword(SHADOW.RING)],               // mov [edx+eax*4+disp], ecx
         [0xff, 0x82, ...dword(SHADOW.RING_HEAD)],                // inc dword [edx+disp]
         [0xc7, 0x41, BUFFER.LOCKED, ...dword(0)],                // mov dword [ecx+12], 0
         [0xff, 0x82, ...dword(SHADOW.UNLOCK_CALLS)],             // inc dword [edx+disp]
+        letHeldGo(EDX),                                          // mov dword [edx+HELD], 0
         [0x31, 0xc0],                                            // xor eax, eax
         [0xc2, 0x04, 0x00],                                      // ret 4
+        { label: 'held' },
+        letHeldGo(EDX),                                          // mov dword [edx+HELD], 0
     ]);
 }
 
@@ -1235,9 +1316,13 @@ function commandChecks(shape, at){
  * Space is taken with `lock cmpxchg` on the head, so two threads never take
  * the same bytes, and a record counts once its length -- written last -- is
  * there: a host entry between any two instructions of a routine reads the
- * records before it and stops at one not yet whole.
+ * records before it and stops at one not yet whole. A device's routine runs
+ * under the device's lock (`SHADOW.HELD`), its checks and mirrors with it,
+ * and leaves for the host when it finds the lock held; a function's runs on
+ * the calling thread's own context and takes none.
  *
- *     (prologue; no ring: early)  ...  bits  ...  mirror  ...  pointer and count checks
+ *     (prologue; no ring: early)  (the device's lock, or early)
+ *     ...  bits  ...  mirror  ...  pointer and count checks (out: the lock let go)
  *     push ebx; push esi; push edi
  *     mov ebx, ecx                ; the block
  *     lea esi, [edx + ARGS + 4*args]   ; the record's length; EDX the copy's
@@ -1256,10 +1341,12 @@ function commandChecks(shape, at){
  *      rep movsd; mov edi, eax; lea esi, [edx + ARGS + 4*args]]
  *     mov [edi+BYTES], esi        ; whole
  *     [mov dword [ebx+DRAWS_PENDING], 1]
+ *     mov dword [ebx+HELD], 0
  *     pop edi; pop esi; pop ebx
  *     xor eax, eax
  *     ret 4+4*args
  *   full:
+ *     mov dword [ebx+HELD], 0
  *     pop edi; pop esi; pop ebx
  *     jmp slow
  *
@@ -1307,6 +1394,8 @@ export function commandCode(at, trap, shape){
         { label: 'early' },
         { jcc: 0xeb, to: 'slow', near: true },                   // jmp slow
         { label: 'body' },
+        // A device's; a thread's own context (OpenGL) is no other thread's.
+        ...(thread ? [] : takeHeld(ECX, 'early')),
         ...commandChecks(shape, argument=>entry + 4 * (argument - (self ? 1 : 0))),
         ...mirror,
     ];
@@ -1404,6 +1493,7 @@ export function commandCode(at, trap, shape){
     parts.push(
         { jcc: 0xeb, to: 'take' },                               // jmp take
         { label: 'out' },
+        ...(thread ? [] : [letHeldGo(ECX)]),                     // mov dword [ecx+HELD], 0
         { jcc: 0xeb, to: 'slow', near: true },                   // jmp slow
         { label: 'take' },
         [0x53, 0x56, 0x57],                                      // push ebx; push esi; push edi
@@ -1465,10 +1555,12 @@ export function commandCode(at, trap, shape){
         parts.push([0xf0, 0x83, 0x0b, FLAG_STALE]);              // lock or dword [ebx], 2
     }
     parts.push(
+        ...(thread ? [] : [letHeldGo(EBX)]),                     // mov dword [ebx+HELD], 0
         [0x5f, 0x5e, 0x5b],                                      // pop edi; pop esi; pop ebx
         [0x31, 0xc0],                                            // xor eax, eax
         [0xc2, entry - 4 + 4 * popped, 0x00],                    // ret 4*args (+4 for this)
         { label: 'full' },
+        ...(thread ? [] : [letHeldGo(EBX)]),                     // mov dword [ebx+HELD], 0
         [0x5f, 0x5e, 0x5b],                                      // pop edi; pop esi; pop ebx
         { jcc: 0xeb, to: 'slow', near: true });                  // jmp slow
     return routine(at, trap, parts);
@@ -1856,6 +1948,13 @@ export function createShadow(deps){
     const pool = { at: 0, left: 0 };
     /** The command ring's bytes in guest memory, 0 for none, and how far the host has read it. */
     let commands = 0;
+    /**
+     * How deep the host is in holding the device's lock (`SHADOW.HELD`): it
+     * is one thread, and its operations call one another.
+     */
+    let holds = 0;
+    /** Whether the ring is being taken: a mirror written from inside does not take it again. */
+    let taking = false;
 
     /** @param {number} value */
     const dwordBytes = value=>new Uint8Array(dword(value));
@@ -1902,6 +2001,53 @@ export function createShadow(deps){
     const refuse = (api, detail)=>{
         refused++;
         deps.divergence?.(api, detail);
+    };
+
+    /**
+     * The device's lock taken for the host, once, however deep its calls go:
+     * with threads on other executors a routine of theirs may hold it, for
+     * some instructions.
+     */
+    const hold = ()=>{
+        if (holds++ !== 0 || address === 0 || deps.compareExchangeU32 === undefined)
+        {
+            return;
+        }
+        const at = address + SHADOW.HELD;
+        const from = performance.now();
+        while (deps.compareExchangeU32(at, 0, HELD_HOST) !== 0)
+        {
+            if (performance.now() - from > HELD_WAIT_MS)
+            {
+                deps.writeMemory(at, dwordBytes(HELD_HOST));
+                refuse(`${name}::lock`, `a routine held the device past ${HELD_WAIT_MS} ms`
+                    + ' -- a thread that faulted inside one: taken from it');
+                break;
+            }
+        }
+    };
+    const letGo = ()=>{
+        if (--holds !== 0 || address === 0 || deps.compareExchangeU32 === undefined)
+        {
+            return;
+        }
+        deps.writeMemory(address + SHADOW.HELD, dwordBytes(0));
+    };
+    /**
+     * `work` with the device's lock held.
+     *
+     * @template T @param {() => T} work @returns {T}
+     */
+    const holding = work=>{
+        hold();
+        try
+        {
+            return work();
+        }
+        finally
+        {
+            letGo();
+        }
     };
 
     // The host writes what the getters in the guest read: what the device
@@ -2292,6 +2438,7 @@ export function createShadow(deps){
             const weight = held.begin('ring-take');
             try
             {
+                taking = true;
                 commandReader.take(()=>{
                     const inner = held.begin('ring-held');
                     try
@@ -2306,6 +2453,7 @@ export function createShadow(deps){
             }
             finally
             {
+                taking = false;
                 held.end('ring-take', weight);
             }
         }
@@ -2339,7 +2487,43 @@ export function createShadow(deps){
             // Held buffers only when the ring has calls that may read
             // them: settling at every entry read every held range again
             // at each of thousands of host calls a frame.
-            commandReader?.take(settleHeld);
+            taking = true;
+            try
+            {
+                commandReader?.take(settleHeld);
+            }
+            finally
+            {
+                taking = false;
+            }
+        }
+    };
+
+    /**
+     * `sync`'s work in one pause of the program's: a dynamic buffer compared
+     * at its unlock is not compared again by the ring's draws from it.
+     */
+    const syncAll = ()=>{
+        if (address === 0)
+        {
+            return;
+        }
+        if (deps.still)
+        {
+            deps.still(syncNow);
+            return;
+        }
+        syncNow();
+    };
+    /**
+     * Before the host writes a mirror from what the device holds: the calls
+     * other threads' routines recorded meanwhile made first, so the mirror is
+     * not put back behind them -- unless this is the ring being made.
+     */
+    const caughtUp = ()=>{
+        if (!taking)
+        {
+            syncAll();
         }
     };
 
@@ -2370,6 +2554,98 @@ export function createShadow(deps){
     };
 
 
+    /**
+     * `noteLocked`'s work, the device's lock held.
+     *
+     * @param {number} block @param {{ hostLocked: boolean }} entry @param {boolean} locked
+     */
+    const noteLockedNow = (block, entry, locked)=>{
+        entry.hostLocked = locked;
+        // The routines count only the locks and unlocks they make; one
+        // the host makes is counted here, so that what is held can be
+        // told from the four numbers (`settleHeld`).
+        const was = readWord(block + BUFFER.LOCKED) !== 0;
+        if (was !== locked)
+        {
+            if (locked)
+            {
+                hostTaken++;
+            }
+            else
+            {
+                hostReleased++;
+            }
+        }
+        deps.writeMemory(block + BUFFER.LOCKED, dwordBytes(locked ? 1 : 0));
+        // Never cleared: a lock claims only its own range, and what was
+        // lent elsewhere in the buffer may still be unread.
+        // ponytail: a lending device's DISCARD and plain locks all come to the host; clear
+        // it after a lock of the whole buffer if those traps show up in a profile.
+        if (!locked)
+        {
+            markLent(block);
+        }
+    };
+
+    /**
+     * The block brought to what the device holds: the states named, or all
+     * of it (`remirror`).
+     *
+     * @param {{ renderStates?: Iterable<number>, transforms?: Iterable<number>,
+     *     stageStates?: true | Iterable<number>, viewport?: boolean,
+     *     samplerStates?: Iterable<number> }} [touched]
+     */
+    const remirrorNow = touched=>{
+        if (!touched)
+        {
+            mirror();
+            return;
+        }
+        for (const state of touched.renderStates ?? [])
+        {
+            if (state >= 0 && state < SHADOW.RENDER_STATE_COUNT)
+            {
+                deps.writeMemory(address + SHADOW.RENDER_STATES + state * 4,
+                    dwordBytes(renderStateOf(state) ?? 0));
+            }
+        }
+        for (const type of touched.transforms ?? [])
+        {
+            refreshTransform(type);
+        }
+        if (touched.viewport)
+        {
+            mirrorViewport();
+        }
+        for (const key of touched.samplerStates ?? [])
+        {
+            const sampler = key >>> 8;
+            const type = key & 0xff;
+            if (sampler < SHADOW.SAMPLER_COUNT && type < SHADOW.SAMPLER_STATE_STRIDE)
+            {
+                deps.writeMemory(address + SHADOW.SAMPLER_STATES
+                    + (sampler * SHADOW.SAMPLER_STATE_STRIDE + type) * 4,
+                dwordBytes(samplerStateOf(sampler, type)));
+            }
+        }
+        if (touched.stageStates === true)
+        {
+            mirrorStageStates();
+            return;
+        }
+        for (const key of touched.stageStates ?? [])
+        {
+            const stage = key >>> 8;
+            const type = key & 0xff;
+            if (stage < SHADOW.STAGE_COUNT && type < SHADOW.STAGE_STATE_STRIDE)
+            {
+                const slot = stage * SHADOW.STAGE_STATE_STRIDE + type;
+                deps.writeMemory(address + SHADOW.STAGE_STATES + slot * 4,
+                    dwordBytes(stageStateOf(stage, type)));
+            }
+        }
+    };
+
     return {
         address: place,
 
@@ -2383,9 +2659,11 @@ export function createShadow(deps){
             slow = on;
             if (address !== 0)
             {
-                const flags = readWord(address + SHADOW.FLAGS) & ~FLAG_SLOW_PATH;
-                deps.writeMemory(address + SHADOW.FLAGS,
-                    dwordBytes(flags | (on ? FLAG_SLOW_PATH : 0)));
+                holding(()=>{
+                    const flags = readWord(address + SHADOW.FLAGS) & ~FLAG_SLOW_PATH;
+                    deps.writeMemory(address + SHADOW.FLAGS,
+                        dwordBytes(flags | (on ? FLAG_SLOW_PATH : 0)));
+                });
             }
         },
 
@@ -2399,8 +2677,8 @@ export function createShadow(deps){
         fresh(){
             if (address !== 0)
             {
-                deps.writeMemory(address + SHADOW.FLAGS,
-                    dwordBytes(readWord(address + SHADOW.FLAGS) & ~FLAG_STALE));
+                holding(()=>deps.writeMemory(address + SHADOW.FLAGS,
+                    dwordBytes(readWord(address + SHADOW.FLAGS) & ~FLAG_STALE)));
             }
         },
 
@@ -2418,57 +2696,12 @@ export function createShadow(deps){
          *     by (sampler << 8) | type
          */
         remirror(touched){
-            if (address === 0)
+            if (address !== 0)
             {
-                return;
-            }
-            if (!touched)
-            {
-                mirror();
-                return;
-            }
-            for (const state of touched.renderStates ?? [])
-            {
-                if (state >= 0 && state < SHADOW.RENDER_STATE_COUNT)
-                {
-                    deps.writeMemory(address + SHADOW.RENDER_STATES + state * 4,
-                        dwordBytes(renderStateOf(state) ?? 0));
-                }
-            }
-            for (const type of touched.transforms ?? [])
-            {
-                refreshTransform(type);
-            }
-            if (touched.viewport)
-            {
-                mirrorViewport();
-            }
-            for (const key of touched.samplerStates ?? [])
-            {
-                const sampler = key >>> 8;
-                const type = key & 0xff;
-                if (sampler < SHADOW.SAMPLER_COUNT && type < SHADOW.SAMPLER_STATE_STRIDE)
-                {
-                    deps.writeMemory(address + SHADOW.SAMPLER_STATES
-                        + (sampler * SHADOW.SAMPLER_STATE_STRIDE + type) * 4,
-                    dwordBytes(samplerStateOf(sampler, type)));
-                }
-            }
-            if (touched.stageStates === true)
-            {
-                mirrorStageStates();
-                return;
-            }
-            for (const key of touched.stageStates ?? [])
-            {
-                const stage = key >>> 8;
-                const type = key & 0xff;
-                if (stage < SHADOW.STAGE_COUNT && type < SHADOW.STAGE_STATE_STRIDE)
-                {
-                    const slot = stage * SHADOW.STAGE_STATE_STRIDE + type;
-                    deps.writeMemory(address + SHADOW.STAGE_STATES + slot * 4,
-                        dwordBytes(stageStateOf(stage, type)));
-                }
+                holding(()=>{
+                    caughtUp();
+                    remirrorNow(touched);
+                });
             }
         },
 
@@ -2478,7 +2711,10 @@ export function createShadow(deps){
          *
          * @param {number} type
          */
-        refreshTransform,
+        refreshTransform: type=>holding(()=>{
+            caughtUp();
+            refreshTransform(type);
+        }),
 
         /**
          * After the host made a call of the device's itself: what the command
@@ -2487,7 +2723,10 @@ export function createShadow(deps){
         settled(){
             if (address !== 0)
             {
-                mirrorCommandState();
+                holding(()=>{
+                    caughtUp();
+                    mirrorCommandState();
+                });
             }
         },
 
@@ -2497,18 +2736,10 @@ export function createShadow(deps){
          * may read them.
          */
         sync(){
-            if (address === 0)
+            if (address !== 0)
             {
-                return;
+                holding(syncAll);
             }
-            // One pause of the program's: a dynamic buffer compared at its
-            // unlock is not compared again by the ring's draws from it.
-            if (deps.still)
-            {
-                deps.still(syncNow);
-                return;
-            }
-            syncNow();
         },
 
         /**
@@ -2625,7 +2856,7 @@ export function createShadow(deps){
             const block = blockOf.get(buffer);
             if (block !== undefined)
             {
-                settle(block);
+                holding(()=>settle(block));
             }
         },
 
@@ -2643,31 +2874,7 @@ export function createShadow(deps){
             {
                 return;
             }
-            entry.hostLocked = locked;
-            // The routines count only the locks and unlocks they make; one
-            // the host makes is counted here, so that what is held can be
-            // told from the four numbers (`settleHeld`).
-            const was = readWord(block + BUFFER.LOCKED) !== 0;
-            if (was !== locked)
-            {
-                if (locked)
-                {
-                    hostTaken++;
-                }
-                else
-                {
-                    hostReleased++;
-                }
-            }
-            deps.writeMemory(block + BUFFER.LOCKED, dwordBytes(locked ? 1 : 0));
-            // Never cleared: a lock claims only its own range, and what was
-            // lent elsewhere in the buffer may still be unread.
-            // ponytail: a lending device's DISCARD and plain locks all come to the host; clear
-            // it after a lock of the whole buffer if those traps show up in a profile.
-            if (!locked)
-            {
-                markLent(block);
-            }
+            holding(()=>noteLockedNow(block, entry, locked));
         },
 
         diagnostics: ()=>({

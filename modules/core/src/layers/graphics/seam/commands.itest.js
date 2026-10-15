@@ -26,13 +26,17 @@ import {
 import { COMMANDS, commandSlot, runCommands } from '../d3d9/commands.js';
 
 const PROGRAM = 0x8000;
-const VIEWPORT = 0x8800;
-const CONSTANTS = 0x8a00;
-const ENABLE = 0x8c00;
-const STATE = 0x9100;
-const TRANSFORM = 0x9a00;
-const DRAW = 0x9300;
-const LOCK = 0x9400;
+// The routines, 2 KiB apart: a routine longer than the room left it ran into
+// the next one's bytes.
+const VIEWPORT = 0x20000;
+const CONSTANTS = 0x20800;
+const ENABLE = 0x21000;
+const STATE = 0x21800;
+const TRANSFORM = 0x22000;
+const DRAW = 0x22800;
+const LOCK = 0x23000;
+/** Where a second routine goes beside one of those. */
+const BESIDE = 0x400;
 const TRAP = 0x8e00;
 const OBJECT = 0x9000;
 const VBUF = 0x9800;
@@ -87,6 +91,7 @@ test('a command routine writes the call into the ring and leaves the rest to the
     ];
     for (const [at, code] of routines)
     {
+        assert.ok(code.length <= BESIDE, `a routine of ${code.length} bytes fits its room`);
         host.writePhysical(at, code);
     }
     host.writePhysical(TRAP, new Uint8Array([0xf4]));
@@ -316,9 +321,9 @@ test('the viewport and the sampler states a program sets in the guest are what i
             initialStack: STACK, engine: cork, cork: {},
         });
         const SET_VIEWPORT = VIEWPORT;
-        const GET_VIEWPORT = VIEWPORT + 0x100;
+        const GET_VIEWPORT = VIEWPORT + BESIDE;
         const SET_SAMPLER = CONSTANTS;
-        const GET_SAMPLER = CONSTANTS + 0x100;
+        const GET_SAMPLER = CONSTANTS + BESIDE;
         for (const [at, code] of /** @type {[number, Uint8Array][]} */ ([
             [SET_VIEWPORT, commandCode(SET_VIEWPORT, TRAP,
                 shape('SetViewport', { mirror: VIEWPORT_MIRROR }))],
@@ -393,7 +398,7 @@ test('a state block\'s Apply in the ring names the block and sends the getters t
         initialStack: STACK, engine: cork, cork: {},
     });
     const APPLY = VIEWPORT;
-    const CAPTURE = VIEWPORT + 0x100;
+    const CAPTURE = VIEWPORT + BESIDE;
     const GET = CONSTANTS;
     host.writePhysical(APPLY, commandCode(APPLY, TRAP, shape('StateBlock.Apply')));
     host.writePhysical(CAPTURE, commandCode(CAPTURE, TRAP, shape('StateBlock.Capture')));

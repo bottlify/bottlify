@@ -79,7 +79,10 @@ const slot = (slots, name)=>{
 function machine(){
     const low = new Uint8Array(1 << 20);
     const high = new Uint8Array(8 << 20);
-    let next = 0x100;
+    // Above the low addresses the tests write answers to (0x3000 and the
+    // like): a device's block placed there had a GetViewport written over its
+    // command head.
+    let next = 0x10000;
 
     /** @param {number} address */
     const block = address=>(address >= DEVICE_STORAGE
