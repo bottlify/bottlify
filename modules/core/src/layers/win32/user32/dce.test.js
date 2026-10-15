@@ -17,6 +17,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createGdiDrawing } from '../../graphics/gdi/context.js';
 import * as surfaces from '../../graphics/gdi/surface.js';
+import { createScreen } from '../../graphics/gdi/screen.js';
 import { setupBars, TEXT, HINSTANCE } from '../comctl32/bars.fixture.js';
 
 const WS_POPUP = 0x80000000 | 0;
@@ -30,7 +31,7 @@ const BLUE = 0x00ff0000;
 
 /** A program's window at the screen's corner, and a popup class with a white background. */
 async function screen(){
-    const context = setupBars({ createGdiDrawing, ...surfaces });
+    const context = setupBars({ createGdiDrawing, createScreen, ...surfaces });
     const window = await context.makeParent(200, 150);
     const name = TEXT + 256;
     context.memory.putString(name, 'popup');
@@ -90,7 +91,7 @@ const DCX_USESTYLE = 0x10000;
  * @param {number} style  The class's.
  */
 async function classed(style){
-    const context = setupBars({ createGdiDrawing, ...surfaces });
+    const context = setupBars({ createGdiDrawing, createScreen, ...surfaces });
     await context.makeParent(200, 150);
     const name = TEXT + 256;
     context.memory.putString(name, `kept${style}`);

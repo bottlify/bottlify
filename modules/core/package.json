@@ -33,6 +33,7 @@
     "./bundle": "./src/bundle.js",
     "./bundle/node": "./src/bundle-node.js",
     "./iso": "./src/iso.js",
+    "./programs": "./src/layers/win32/programs/table.js",
     "./storage": "./src/storage.js",
     "./jpeg": "./src/layers/media/internal/jpeg.js",
     "./engine.worker.js": "./dist/engine.worker.js",

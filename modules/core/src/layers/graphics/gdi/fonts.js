@@ -105,6 +105,8 @@ export const NONANTIALIASED_QUALITY = 3;
  * @property {(x: number, y: number, width: number, height: number) => void} clearRect
  * @property {(x: number, y: number, width: number, height: number) => void} fillRect
  * @property {(text: string, x: number, y: number) => void} fillText
+ * @property {(a: number, b: number, c: number, d: number, e: number, f: number) => void}
+ *           [setTransform]
  * @property {(x: number, y: number, width: number, height: number) => { data: Uint8ClampedArray }}
  *           getImageData
  */
@@ -290,13 +292,21 @@ export function createFontEngine(options = {}){
         const text = characterOf(code);
         ctx.font = face.css;
         const box = ctx.measureText(text);
-        const advance = Math.round(box.width);
+        // A face whose Windows advances are known advances by them, and its
+        // stand-in's glyph is drawn narrowed or widened to the same width: a
+        // line laid out here breaks where Windows broke it.
+        const windows = code >= 0x20 && code <= 0xff
+            ? windowsMetrics(font)?.advances[code - 0x20] : undefined;
+        const advance = windows ?? Math.round(box.width);
+        const scale = windows !== undefined && box.width > 0 ? windows / box.width : 1;
         // A line under or through the glyph spans the advance, which an
         // italic or a narrow glyph's own box need not; the box grows to it.
         const ruled = font.underline || font.strikeOut;
         const stroke = Math.max(1, Math.round(face.em / 14));
-        const left = Math.min(ruled ? 0 : Infinity, -Math.ceil(box.actualBoundingBoxLeft));
-        const right = Math.max(ruled ? advance : -Infinity, Math.ceil(box.actualBoundingBoxRight));
+        const left = Math.min(ruled ? 0 : Infinity,
+            -Math.ceil(box.actualBoundingBoxLeft * scale));
+        const right = Math.max(ruled ? advance : -Infinity,
+            Math.ceil(box.actualBoundingBoxRight * scale));
         const up = Math.max(ruled ? Math.ceil(face.em / 2) : 0,
             Math.ceil(box.actualBoundingBoxAscent));
         const down = Math.max(ruled ? 1 + stroke : 0, Math.ceil(box.actualBoundingBoxDescent));
@@ -307,7 +317,16 @@ export function createFontEngine(options = {}){
         {
             ctx.clearRect(0, 0, width, height);
             ctx.fillStyle = '#ffffff';
-            ctx.fillText(text, -left, up);
+            if (scale !== 1 && ctx.setTransform)
+            {
+                ctx.setTransform(scale, 0, 0, 1, -left, up);
+                ctx.fillText(text, 0, 0);
+                ctx.setTransform(1, 0, 0, 1, 0, 0);
+            }
+            else
+            {
+                ctx.fillText(text, -left, up);
+            }
             if (font.underline)
             {
                 ctx.fillRect(-left, up + 1, advance, stroke);

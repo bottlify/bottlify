@@ -1340,3 +1340,47 @@ test('a child takes the memory of the child before it, zeroed where that one wro
         assert.equal(codes[1], codes[0], 'the reader was given the same block, and found it zero');
         assert.equal(made, 2, 'the parent\'s memory and one more, not one per child');
     });
+
+test('a child starts from its image as it was when CreateProcess was called, gone from the disk'
+    + ' after', { timeout: 60000 }, async t=>{
+    // A setup that copies itself to a file opened delete-on-close, starts the
+    // copy and exits: the file is gone before the child is built, and Windows
+    // mapped the image at CreateProcess. Deleting it right after the call is
+    // the same order of events in one process.
+    const leaf = buildExe({
+        imports: { 'KERNEL32.dll': ['ExitProcess'] },
+        code: ({ iat })=>[0x6a, 7, 0xff, 0x15, ...u32(iat('ExitProcess'))],
+    });
+    const parent = buildExe({
+        imports: { 'KERNEL32.dll': ['CreateProcessA', 'DeleteFileA', 'WaitForSingleObject',
+            'GetExitCodeProcess', 'ExitProcess'] },
+        data: {
+            command: [...Buffer.from('C:\\App\\copy.tmp'), 0],
+            startup: [...u32(68), ...new Array(64).fill(0)],
+            info: new Array(16).fill(0),
+            code: u32(0),
+        },
+        codeSize: 0x80,
+        code: ({ iat, at })=>[
+            0x68, ...u32(at('info')), 0x68, ...u32(at('startup')),
+            0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0,
+            0x68, ...u32(at('command')), 0x6a, 0,
+            0xff, 0x15, ...u32(iat('CreateProcessA')),
+            0x68, ...u32(at('command')),
+            0xff, 0x15, ...u32(iat('DeleteFileA')),
+            0x6a, 0xff, 0xff, 0x35, ...u32(at('info')),
+            0xff, 0x15, ...u32(iat('WaitForSingleObject')),
+            0x68, ...u32(at('code')), 0xff, 0x35, ...u32(at('info')),
+            0xff, 0x15, ...u32(iat('GetExitCodeProcess')),
+            0xff, 0x35, ...u32(at('code')),
+            0xff, 0x15, ...u32(iat('ExitProcess')),
+        ],
+    });
+    const app = await createApp({
+        executable: parent,
+        imagePath: 'C:\\App\\setup.exe',
+        files: [{ path: 'C:\\App\\copy.tmp', bytes: leaf }],
+    });
+    t.after(()=>app.dispose());
+    assert.equal(await app.run({ timeoutMs: 30000 }), 7, 'the child ran and its code came back');
+});

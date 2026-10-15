@@ -7,6 +7,7 @@
 import { LockFlags, carriedRanges, createDynamicBuffer } from './internal/buffers.js';
 import { createBindingCache, createUniformPool, dynamicOffsetsOf } from './internal/bindings.js';
 import { ABSENT_PROFILER, createProfiler } from './internal/profiler.js';
+import { createGpuTimer } from './internal/gputime.js';
 import { createShaderCache } from './internal/shaders.js';
 import { blockInfo, createTextureUploader } from './internal/textures.js';
 import { fullTarget, viewportState } from './internal/viewport.js';
@@ -103,6 +104,9 @@ export function createBackend(options){
     // A measurement nothing draws by, left out of a production bundle.
     const profiler = import.meta.BOTTLIFY_DIAGNOSTICS !== false
         ? createProfiler({ now, frameHistory: options.frameHistory }) : ABSENT_PROFILER;
+    // The GPU's own time per pass, where the device can stamp it.
+    const gpuTimer = createGpuTimer({ device,
+        enabled: import.meta.BOTTLIFY_DIAGNOSTICS !== false });
     const shaders = createShaderCache({ device });
     const uniforms = createUniformPool({
         device,
@@ -396,9 +400,11 @@ export function createBackend(options){
      * @param {any} descriptor
      * @param {{ set: any, used: number } | null} [occlusion]  The frame's query
      *     set, for a pass opened with `occlusion: true`.
+     * @param {ReturnType<ReturnType<typeof createGpuTimer>['frame']>} [timing]  The
+     *     frame's pass timing, where the device stamps passes.
      * @returns {any}
      */
-    function beginPass(encoder, descriptor, occlusion = null){
+    function beginPass(encoder, descriptor, occlusion = null, timing = null){
         const { sizing: target, attachments } = colourAttachmentsOf(descriptor);
         if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
         {
@@ -411,11 +417,17 @@ export function createBackend(options){
                 }
             }
         }
+        const passLabel = descriptor.label === undefined ? `pass:${target.label}`
+            : descriptor.label;
+        // Named by its surface and size, which is what tells a shadow map
+        // from the scene and a downsample from the picture.
+        const timestampWrites = timing?.pass(`${passLabel} ${target.width}x${target.height}`);
         const raw = encoder.beginRenderPass({
-            label: descriptor.label === undefined ? `pass:${target.label}` : descriptor.label,
+            label: passLabel,
             colorAttachments: attachments,
             depthStencilAttachment: descriptor.depthStencilAttachment,
             ...(occlusion ? { occlusionQuerySet: occlusion.set } : {}),
+            ...(timestampWrites ? { timestampWrites } : {}),
         });
         profiler.count('passes');
 
@@ -856,6 +868,7 @@ export function createBackend(options){
             }
             profiler.beginFrame();
             const encoder = device.createCommandEncoder({ label: `frame#${frameIndex}` });
+            const timing = gpuTimer.frame();
             /** @type {any} */
             let currentPass = null;
             /** @type {any} */
@@ -1000,7 +1013,7 @@ export function createBackend(options){
                         };
                     }
                     currentPass = beginPass(encoder, descriptor,
-                        descriptor.occlusion ? occlusion : null);
+                        descriptor.occlusion ? occlusion : null, timing);
                     endPhase();
                     return currentPass;
                 },
@@ -1125,6 +1138,7 @@ export function createBackend(options){
                         occlusion.readback = { buffer: readback, count: occlusion.used };
                     }
 
+                    timing?.resolve(encoder);
                     const endUpload = profiler.phase('uploads');
                     for (const buffer of touchedBuffers)
                     {
@@ -1153,6 +1167,7 @@ export function createBackend(options){
 
                     const endSubmit = profiler.phase('submit');
                     queue.submit([...commands, encoder.finish()]);
+                    timing?.settle();
                     profiler.count('submits');
                     endSubmit();
 
@@ -1251,6 +1266,7 @@ export function createBackend(options){
                 shaders: shaders.stats(),
                 shaderMessages: shaders.messages(),
                 pipelines: pipelines.stats(),
+                gpuPasses: gpuTimer.stats(),
                 uniforms: uniforms.stats(),
                 buffers: [...dynamicBuffers].map(buffer=>buffer.diagnostics()),
                 frameOpen: !!(openFrame && !openFrame.ended),

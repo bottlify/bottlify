@@ -108,6 +108,13 @@ test('an archive of a copied disc\'s folder is that disc, its autorun at the roo
     const run = await discOptions(archiveDisc('demo_game.zip', entries));
     assert.equal(run.imagePath, 'D:\\setup.exe', 'started as the disc starts itself');
     assert.deepEqual(run.executable, program);
+
+    // The program picked in the archive, named by its path there, is the
+    // disc's by its path on the disc: the folder went with the rest.
+    const picked = archiveDisc('demo_game.zip', entries, 'Demo Game\\setup.exe');
+    assert.equal(picked.entry, 'setup.exe');
+    const started = await discOptions(picked, { entry: picked.entry });
+    assert.equal(started.imagePath, 'D:\\setup.exe');
 });
 
 test('an entry packed some other way, or encrypted, is refused by name', async()=>{

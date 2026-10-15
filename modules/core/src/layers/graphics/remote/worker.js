@@ -109,6 +109,8 @@ export function serveGraphics(scope, deps){
         skipShader: '',
         /** Texture stages a fixed-function draw keeps (`app.debug.stageLimit`), -1 all. */
         stageLimit: -1,
+        /** Textures whose top level a dump reads out (`app.debug.textureStats`), `t12,t40`. */
+        textureStats: '',
         /** How occlusion counts are answered (`app.debug.occlusion`): '' as counted, 'visible' all passed. */
         occlusion: '',
         /** Draws kept a frame (`app.debug.maxDraws`), the rest dropped; -1 all. */
@@ -530,6 +532,10 @@ export function serveGraphics(scope, deps){
                 if ('skipTexture' in data)
                 {
                     liveDump.skipTexture = String(data.skipTexture ?? '');
+                }
+                if ('textureStats' in data)
+                {
+                    liveDump.textureStats = String(data.textureStats ?? '');
                 }
                 if ('stageLimit' in data)
                 {

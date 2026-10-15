@@ -95,6 +95,24 @@ test('version 2 finds version 1, keeps its features, and removes it', async()=>{
         'a file both versions put down survives the older one\'s removal');
 });
 
+test('a found-products property holding no product code removes nothing', async()=>{
+    // A package's custom action blanked it with a space; read as a product, the
+    // removal failed and the whole installation with it.
+    const host = await machine(['C:\\src', 'C:\\src\\Game'], {
+        'C:\\src\\Game\\game2.0.exe': 'two', 'C:\\src\\Game\\maps.dat': 'maps',
+    });
+    /** @type {string[]} */
+    const removed = [];
+    const { code } = await run(host, product(NEW, '2.0', true), 'OLDERFOUND=" ; "', {
+        removeProduct: async(/** @type {string} */ older)=>{
+            removed.push(older);
+            return 1603;
+        },
+    });
+    assert.equal(code, 0);
+    assert.deepEqual(removed, []);
+});
+
 test('an Upgrade row\'s range: bounds inclusive only when it says so, languages in or out', ()=>{
     const v = (/** @type {string} */ version, language = 1033)=>
         ({ version: packedVersion(version), language });

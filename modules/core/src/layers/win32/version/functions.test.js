@@ -232,7 +232,7 @@ test('a system library the engine answers for has the version of the system it b
         // info.c: GetFileVersionInfoSizeA("kernel32.dll") is not zero, and a
         // block copied from it answers the root and the translation. Here
         // kernel32 is a table, not a file, and so is DirectX's ddraw -- which
-        // carries the DirectX version the registry reports.
+        // carries XP's build, DirectX being part of XP.
         const memory = new Uint8Array(0x4000);
         /** @type {number[]} */
         const errors = [];
@@ -272,7 +272,8 @@ test('a system library the engine answers for has the version of the system it b
         for (const [path, ms, ls, spelled] of /** @type {[string, number, number, string][]} */ ([
             ['kernel32.dll', 5 << 16 | 1, 2600 << 16 | 0, '5.1.2600.0'],
             ['KERNEL32', 5 << 16 | 1, 2600 << 16 | 0, '5.1.2600.0'],
-            ['C:\\WINDOWS\\system32\\ddraw.dll', 4 << 16 | 9, 0 << 16 | 904, '4.09.00.0904'],
+            // DirectX is XP's own, and its files are at the system's build.
+            ['C:\\WINDOWS\\system32\\ddraw.dll', 5 << 16 | 3, 2600 << 16 | 5512, '5.3.2600.5512'],
             // DirectX's setup library ships with the runtime and carries its version.
             ['dsetup.dll', 4 << 16 | 9, 0 << 16 | 904, '4.09.00.0904'],
             // The 16-bit USER every 32-bit Windows keeps, which a setup reads
@@ -680,8 +681,8 @@ test('VerInstallFileA without a volume reports it cannot create the file', ()=>{
         'VIF_CANNOTCREATE by its documented value');
 });
 
-test('a DirectX library\'s file names the DirectX the bottle reports', ()=>{
-    const resource = systemVersionResource('ddraw.dll', WINDOWS_VERSIONS.winxp, '4.07.00.0700');
+test('a DirectX library names the bottle\'s DirectX on a system that has none of its own', ()=>{
+    const resource = systemVersionResource('ddraw.dll', WINDOWS_VERSIONS.win2000, '4.07.00.0700');
     const text = String.fromCharCode(...new Uint16Array(resource.buffer, resource.byteOffset,
         resource.length >> 1));
     assert.ok(text.includes('4.07.00.0700'), 'FileVersion and ProductVersion');
@@ -693,6 +694,36 @@ test('a DirectX library\'s file names the DirectX the bottle reports', ()=>{
     assert.equal(fixed.getUint32(signature * 4 + 8, true), 0x00040007,
         'the fixed block\'s file version, too');
 });
+
+test('XP\'s DirectX files carry the system\'s build, newer than a DirectX 9 redistributable\'s',
+    ()=>{
+        // A setup's DXSETUP compared ddraw.dll, at 4.9.0.904, with its
+        // 5.3.1.904, found the system's older, could not back it up and asked
+        // for a restart to replace it; on XP the file is the system's own.
+        /** @param {string} name */
+        const fileVersion = name=>{
+            const resource = systemVersionResource(name, WINDOWS_VERSIONS.winxp);
+            const fixed = new DataView(resource.buffer, resource.byteOffset);
+            const signature = [...Array(resource.length >> 2).keys()]
+                .find(word=>fixed.getUint32(word * 4, true) === 0xfeef04bd) ?? -1;
+            const most = fixed.getUint32(signature * 4 + 8, true);
+            const least = fixed.getUint32(signature * 4 + 12, true);
+            return [most >>> 16, most & 0xffff, least >>> 16, least & 0xffff];
+        };
+        /** @param {number[]} a @param {number[]} b */
+        const newer = (a, b)=>{
+            const at = a.findIndex((part, index)=>part !== b[index]);
+            return at >= 0 && a[at] > b[at];
+        };
+        for (const name of ['ddraw.dll', 'dsound.dll', 'd3d8.dll', 'd3d9.dll', 'dinput.dll',
+            'dinput8.dll', 'dplayx.dll', 'dpnhpast.dll'])
+        {
+            assert.deepEqual(fileVersion(name), [5, 3, 2600, 5512], name);
+            assert.ok(newer(fileVersion(name), [5, 3, 1, 904]), `${name} over the redistributable`);
+        }
+        assert.deepEqual(fileVersion('d3dx9_30.dll'), [4, 9, 0, 904],
+            'a library XP does not ship still names the DirectX');
+    });
 
 test('the browser\'s and the player\'s files carry their versions, as the registry says them',
     ()=>{

@@ -218,6 +218,9 @@ const SLOT_CREATE_INSTANCE = 3;
 const COINIT_APARTMENTTHREADED = 0x2;
 const COINIT_DISABLE_OLE1DDE = 0x4;
 
+/** The one multithreaded apartment, as the channel tells apartments apart. */
+const MTA = Object.freeze({ multithreaded: true });
+
 /** What CoGetApartmentType answers. */
 const APTTYPE_CURRENT = 0xffffffff;
 const APTTYPE_STA = 0;
@@ -318,9 +321,10 @@ const MAX_PROGID = 255;
  *           IUnknown it got through two interfaces to decide whether they belong
  *           to one object, and two addresses for one interface fails that test
  *           however correct the object model underneath is.
- * @property {{ take: () => number, set: (pointer: number) => unknown,
+ * @property {{ take: (thread: unknown) => number,
+ *     set: (pointer: number, thread: unknown) => unknown,
  *     create: (out: number) => number }} [errors]
- *           The thread's error-information slot and CreateErrorInfo
+ *           A thread's error-information slot and CreateErrorInfo
  *           (oleaut32's), for a call's error to cross between processes.
  * @property {(code: number) => any} [raise]
  *           RpcRaiseException on the calling thread.
@@ -346,7 +350,10 @@ const MAX_PROGID = 255;
  *         => number | Promise<number>,
  *     post: (window: number, message: number) => unknown }} [apartmentWindow]
  *           A hidden window on the calling thread, for the calls another
- *           process makes on this apartment's objects.
+ *           process or apartment makes on this apartment's objects.
+ * @property {(thread: unknown) => number | Promise<number>} [modalPump]
+ *           What a thread waiting on a call into another apartment runs
+ *           meanwhile: the messages other threads sent it, and its paints.
  * @property {(entry: number, args: number[], thread: unknown) => Promise<number>} [guardedCall]
  *           A call into guest code inside a frame that takes what it raises:
  *           how a method runs for another process.
@@ -797,6 +804,11 @@ export function createOleFunctions(host){
                 destroy: array=>host.safeArray?.destroy(array),
             },
             apartmentWindow: host.apartmentWindow,
+            modalPump: host.modalPump,
+            // A single-threaded apartment is its thread; every other thread
+            // of the process is in the one multithreaded apartment.
+            apartmentOf: (/** @type {any} */ thread)=>(
+                thread?.ole32?.model === COINIT_APARTMENTTHREADED ? thread : MTA),
             catalog: { hive: host.hive, readFile: wholeFile },
             proxyStub: { factory: (iid, thread)=>proxyStubFactory(iid, thread) },
             divergence: host.divergence,
@@ -2179,12 +2191,9 @@ export function createOleFunctions(host){
      * An OBJREF read off a stream: its header first, then as much more as
      * its flags say -- a standard packet whole, or a custom one's header,
      * after which its own marshaler's data is left in the stream for it.
-     * The bare pointer CoMarshalInterThreadInterfaceInStream writes is said
-     * apart.
      *
      * @param {number} stream @param {unknown} thread
-     * @returns {Promise<{ kind: 'pointer', pointer: number }
-     *     | { kind: 'standard', bytes: Uint8Array,
+     * @returns {Promise<{ kind: 'standard', bytes: Uint8Array,
      *         decoded: NonNullable<ReturnType<typeof decodeObjref>> }
      *     | { kind: 'custom', iid: string, clsid: string } | null>}
      */
@@ -2193,10 +2202,6 @@ export function createOleFunctions(host){
         if (!head)
         {
             return null;
-        }
-        if (head.length === 4)
-        {
-            return { kind: 'pointer', pointer: wordOf(head, 0) };
         }
         if (head.length < OBJREF_HEADER_BYTES || wordOf(head, 0) !== OBJREF_SIGNATURE)
         {
@@ -4136,6 +4141,81 @@ export function createOleFunctions(host){
         },
 
         /**
+         * HRESULT CoMarshalInterThreadInterfaceInStream(REFIID riid, LPUNKNOWN pUnk,
+         *                                               LPSTREAM *ppStm)
+         *
+         * CoMarshalInterface into a stream of its own, for another thread of
+         * this process, left at its start: the object exported from the
+         * caller's apartment. A thread of another single-threaded apartment
+         * that unmarshals it holds a proxy, whose calls run in this one -- on
+         * this thread, as its message loop takes them -- while it waits in
+         * COM's modal loop; a thread of the same apartment holds the object
+         * itself. An object that marshals itself is asked to, as it is for
+         * any destination.
+         */
+        CoMarshalInterThreadInterfaceInStream: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([riid, unknown, ppStm])=>{
+                const thread = host.callerThread?.();
+                const out = ppStm >>> 0;
+                const iid = guidAt(riid);
+                if (out === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                writeU32(out, 0);
+                if ((unknown >>> 0) === 0 || iid === null)
+                {
+                    return E_INVALIDARG;
+                }
+                const made = functions.CreateStreamOnHGlobal.handler([0, 1, out]) | 0;
+                const stream = readU32(out);
+                if (made < 0 || stream === 0)
+                {
+                    return made < 0 ? made : E_OUTOFMEMORY;
+                }
+                return (async()=>{
+                    const hr = await marshalInterface(stream, riid >>> 0, iid, unknown >>> 0,
+                        [MSHCTX_INPROC, 0, 0], thread);
+                    if (hr < 0)
+                    {
+                        await callMethod(stream, SLOT_RELEASE, [], thread);
+                        writeU32(out, 0);
+                        return hr;
+                    }
+                    await callMethod(stream, SLOT_STREAM_SEEK, [0, 0, STREAM_SEEK_SET, 0], thread);
+                    return S_OK;
+                })();
+            },
+        },
+
+        /**
+         * HRESULT CoGetInterfaceAndReleaseStream(LPSTREAM pStm, REFIID iid, LPVOID *ppv)
+         *
+         * CoUnmarshalInterface off the stream, which is released whatever
+         * the answer, as the name promises.
+         */
+        CoGetInterfaceAndReleaseStream: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([stream, riid, ppv])=>{
+                const thread = host.callerThread?.();
+                const out = ppv >>> 0;
+                if (out === 0 || (stream >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                writeU32(out, 0);
+                return (async()=>{
+                    const hr = await unmarshalInterface(stream >>> 0, riid >>> 0, out, thread);
+                    await callMethod(stream >>> 0, SLOT_RELEASE, [], thread);
+                    return hr;
+                })();
+            },
+        },
+
+        /**
          * HRESULT CoGetMarshalSizeMax(ULONG *pulSize, REFIID riid, IUnknown *pUnk,
          *     DWORD dwDestContext, void *pvDestContext, DWORD mshlflags)
          *
@@ -4235,9 +4315,7 @@ export function createOleFunctions(host){
          *
          * The reference an OBJREF nobody unmarshaled carries -- or a table's,
          * which every reader took one of its own from -- given back; a custom
-         * one's, through its unmarshaler. A packet
-         * CoMarshalInterThreadInterfaceInStream wrote holds only the pointer,
-         * and nothing is owned by it.
+         * one's, through its unmarshaler.
          */
         CoReleaseMarshalData: {
             argBytes: 4,
@@ -4250,10 +4328,6 @@ export function createOleFunctions(host){
                 }
                 return (async()=>{
                     const packet = await readObjref(stream >>> 0, thread);
-                    if (packet?.kind === 'pointer')
-                    {
-                        return S_OK;
-                    }
                     if (packet?.kind === 'custom')
                     {
                         const unmarshaler = await unmarshalerFor(packet.clsid, thread);

@@ -18,7 +18,7 @@
  * is in the control's one font.
  */
 
-import { decodeAnsi } from '../kernel32/locale.js';
+import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 
 /** The classes, as riched32 (1.0), riched20 (2.0 and 3.0) and msftedit (4.1) name them. */
 export const RICHEDIT_CLASSES = ['RichEdit', 'RichEdit20A', 'RichEdit20W', 'RICHEDIT50W'];
@@ -52,12 +52,22 @@ const EM_AUTOURLDETECT = WM_USER + 91;
 const EM_GETTEXTLENGTHEX = WM_USER + 95;
 const WM_SETTEXT = 0x000c;
 const WM_PAINT = 0x000f;
+const WM_COMMAND = 0x0111;
+/** EM_SETEVENTMASK's ENM_UPDATE, and the notification it asks for. */
+const ENM_UPDATE = 0x0002;
+const EN_UPDATE = 0x0400;
 
 /** EM_STREAMIN's format flags. */
 const SF_TEXT = 0x0001;
 const SF_RTF = 0x0002;
 const SF_UNICODE = 0x0010;
 const SFF_SELECTION = 0x8000;
+/** EM_SETTEXTEX, its ST_SELECTION flag, and the code page that names UTF-16. */
+const EM_SETTEXTEX = WM_USER + 97;
+const ST_SELECTION = 0x0002;
+const CP_UNICODE = 1200;
+/** The most of a text EM_SETTEXTEX reads, against a pointer to no terminator. */
+const MAX_SET_TEXT = 1 << 22;
 
 /** The colour a rich edit's background is until EM_SETBKGNDCOLOR: COLOR_WINDOW. */
 const COLOR_WINDOW = 5;
@@ -341,23 +351,14 @@ export function createRichEditControls(host, toolkit){
     };
 
     /**
-     * EM_STREAMIN: the stream's text in place of the control's, or of its
-     * selection with SFF_SELECTION; the answer is how many characters came in.
+     * Puts text in the control: in place of the selection, the caret after
+     * it, or as the whole text, from the top. Answers how many characters.
      *
-     * @param {any} record @param {number} format @param {number} stream @param {unknown} thread
+     * @param {any} record @param {string} text @param {boolean} selection
      */
-    const streamIn = (record, format, stream, thread)=>after(readStream(stream, thread), bytes=>{
-        if (!bytes)
-        {
-            return 0;
-        }
-        const text = (format & SF_RTF) !== 0 ? rtfToText(bytes)
-            : (format & SF_UNICODE) !== 0
-                ? String.fromCharCode(...new Uint16Array(bytes.slice(0,
-                    bytes.length & ~1).buffer))
-                : decodeAnsi(bytes);
+    const place = (record, text, selection)=>{
         const state = stateOf(record);
-        if ((format & SFF_SELECTION) !== 0)
+        if (selection)
         {
             const from = Math.min(state.selStart ?? 0, state.selEnd ?? 0);
             const to = Math.max(state.selStart ?? 0, state.selEnd ?? 0);
@@ -373,6 +374,52 @@ export function createRichEditControls(host, toolkit){
         state.modified = false;
         host.invalidate(record);
         return text.length;
+    };
+
+    /**
+     * The terminated text at an address, in the code page EM_SETTEXTEX names:
+     * 1200 is UTF-16, anything else the ANSI page. RTF is read as its text.
+     *
+     * @param {number} address @param {number} codePage
+     */
+    const textAt = (address, codePage)=>{
+        const unit = codePage === CP_UNICODE ? 2 : 1;
+        /** @type {number[]} */
+        const bytes = [];
+        for (let at = address; bytes.length < MAX_SET_TEXT; at += unit)
+        {
+            const piece = host.readMemory(at, unit);
+            if (piece.every(byte=>byte === 0))
+            {
+                break;
+            }
+            bytes.push(...piece);
+        }
+        const raw = Uint8Array.from(bytes);
+        const text = unit === 2
+            ? String.fromCharCode(...new Uint16Array(raw.buffer)) : decodeAnsi(raw);
+        // RTF is ASCII, its other characters escaped; the parser reads bytes.
+        return text.startsWith('{\\rtf')
+            ? rtfToText(unit === 2 ? encodeAnsi(text) : raw) : text;
+    };
+
+    /**
+     * EM_STREAMIN: the stream's text in place of the control's, or of its
+     * selection with SFF_SELECTION; the answer is how many characters came in.
+     *
+     * @param {any} record @param {number} format @param {number} stream @param {unknown} thread
+     */
+    const streamIn = (record, format, stream, thread)=>after(readStream(stream, thread), bytes=>{
+        if (!bytes)
+        {
+            return 0;
+        }
+        const text = (format & SF_RTF) !== 0 ? rtfToText(bytes)
+            : (format & SF_UNICODE) !== 0
+                ? String.fromCharCode(...new Uint16Array(bytes.slice(0,
+                    bytes.length & ~1).buffer))
+                : decodeAnsi(bytes);
+        return place(record, text, (format & SFF_SELECTION) !== 0);
     });
 
     /**
@@ -394,6 +441,16 @@ export function createRichEditControls(host, toolkit){
                     return 0;
                 }
                 return streamIn(record, wParam, lParam >>> 0, thread);
+            case EM_SETTEXTEX: {
+                // SETTEXTEX { DWORD flags; UINT codepage } -- an installer
+                // hands its licence this way, RTF or plain; unanswered, the
+                // box stayed empty.
+                const flags = readU32(wParam >>> 0);
+                const codePage = readU32((wParam >>> 0) + 4);
+                const text = (lParam >>> 0) === 0 ? '' : textAt(lParam >>> 0, codePage);
+                place(record, text, (flags & ST_SELECTION) !== 0);
+                return 1;
+            }
             case EM_STREAMOUT:
                 // Nothing is written back out; a reader is told it got nothing.
                 return 0;
@@ -451,8 +508,16 @@ export function createRichEditControls(host, toolkit){
             case EM_HIDESELECTION:
             case EM_AUTOURLDETECT:
                 return 0;
-            case WM_SETTEXT:
             case WM_PAINT:
+                // With ENM_UPDATE the parent hears EN_UPDATE before every redraw,
+                // a scroll's too: an installer's licence page reads the box's
+                // scroll bar then, and enables "I accept" once it is at the end.
+                return ((state.eventMask ?? 0) & ENM_UPDATE) !== 0 && record.parent
+                    ? after(host.send(record.parent, WM_COMMAND,
+                        ((EN_UPDATE << 16 | record.id & 0xffff) >>> 0), record.hwnd, thread),
+                    ()=>edit(record, message, thread))
+                    : edit(record, message, thread);
+            case WM_SETTEXT:
             default:
                 return edit(record, message, thread);
         }

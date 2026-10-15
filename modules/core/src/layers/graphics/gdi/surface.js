@@ -329,6 +329,11 @@ export function createSurface(options){
         palette,
         format,
         mono: options.mono === true,
+        // Its pixels as words, a row `pitch / 4` apart from the first stored
+        // one, where each word is the pixel itself: 32 bits deep, aligned and
+        // with no channel masks to pack. Null otherwise. What lets a plain copy
+        // between two such surfaces move rows instead of pixels.
+        words: words && !channels ? words : null,
 
         /** @param {number} x @param {number} y */
         read(x, y){

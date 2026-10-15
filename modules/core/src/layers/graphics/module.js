@@ -17,10 +17,10 @@ import { createPresenter, expandRow } from './webgpu/internal/presenter.js';
 import { createGdiDrawing } from './gdi/context.js';
 import { createFontEngine } from './gdi/fonts.js';
 import {
-    createSurface, dibPitch, intersectRect, isEmptyRect, surfaceForDdb, surfaceForDibSection,
-    viewOf,
+    dibPitch, intersectRect, isEmptyRect, surfaceForDdb, surfaceForDibSection,
 } from './gdi/surface.js';
 import { textExtent } from './gdi/text.js';
+import { createScreen } from './gdi/screen.js';
 import { DEFAULT_VIDEO_MEMORY, GRAPHICS_CHOICES, graphicsChoice } from './choice.js';
 
 /**
@@ -64,24 +64,13 @@ const subtractRect = (rect, hole)=>{
 };
 
 /**
- * Where a primary surface's pixels show on the screen: its window's client
- * area -- or the whole screen in exclusive mode -- less every shown
- * top-level window above that window in z-order. Null when the program has
- * no window to own the picture, which leaves the primary shown as it is.
- *
- * The list is in the order the window manager paints: top-level windows
- * from the bottom up. A window inside another is inside its area and is
- * not counted as over it, which is what a primary without a clipper sees --
- * except in exclusive mode, where GDI paints the screen itself and a
- * control inside the program's window is drawn over the picture.
+ * The windows as a tree: whether each is shown, it and every window it is
+ * inside, and the top-level window it is in; the shown top-level windows,
+ * bottom to top.
  *
  * @param {ListedWindow[]} windows
- * @param {number} owner      The cooperative window, or zero for the topmost.
- * @param {boolean} exclusive
- * @param {import('./gdi/contract.js').Rect} screen
- * @returns {import('./gdi/contract.js').Rect[] | null}
  */
-export function uncoveredRegion(windows, owner, exclusive, screen){
+function windowTree(windows){
     const byHandle = new Map(windows.map(window=>[window.hwnd, window]));
     /** @param {ListedWindow} window @returns {ListedWindow | null} the one it is inside */
     const parentOf = window=>(window.child && window.parent
@@ -107,18 +96,55 @@ export function uncoveredRegion(windows, owner, exclusive, screen){
         return at;
     };
     const topLevels = windows.filter(window=>!window.child && shown(window));
-    // A hidden window has no place on the screen to hold the picture, and in
-    // exclusive mode a flip shows whatever the cooperative window's state: a
-    // launcher that names its own dialog, hides it and runs the game in a
-    // window of its own owns the picture through that window. Counting from
-    // the hidden one put every shown window over the picture.
+    return { byHandle, shown, topLevelOf, topLevels };
+}
+
+/**
+ * The top-level window a primary surface belongs to: the cooperative
+ * window's, else the topmost shown one; null when the program shows none.
+ *
+ * A hidden window has no place on the screen to hold the picture, and in
+ * exclusive mode a flip shows whatever the cooperative window's state: a
+ * launcher that names its own dialog, hides it and runs the game in a
+ * window of its own owns the picture through that window. Counting from
+ * the hidden one put every shown window over the picture.
+ *
+ * @param {ListedWindow[]} windows
+ * @param {number} owner  The cooperative window, or zero for the topmost.
+ * @returns {ListedWindow | null}
+ */
+export function primaryOwner(windows, owner){
+    const { byHandle, topLevelOf, topLevels } = windowTree(windows);
     const named = byHandle.get(`0x${(owner >>> 0).toString(16)}`);
     const namedTop = named ? topLevelOf(named) : null;
-    const owning = namedTop && topLevels.includes(namedTop) ? namedTop : topLevels.at(-1);
+    return namedTop && topLevels.includes(namedTop) ? namedTop : topLevels.at(-1) ?? null;
+}
+
+/**
+ * Where a primary surface's pixels show on the screen: its window's client
+ * area -- or the whole screen in exclusive mode -- less every shown
+ * top-level window above that window in z-order. Null when the program has
+ * no window to own the picture, which leaves the primary shown as it is.
+ *
+ * The list is in the order the window manager paints: top-level windows
+ * from the bottom up. A window inside another is inside its area and is
+ * not counted as over it, which is what a primary without a clipper sees --
+ * except in exclusive mode, where GDI paints the screen itself and a
+ * control inside the program's window is drawn over the picture.
+ *
+ * @param {ListedWindow[]} windows
+ * @param {number} owner      The cooperative window, or zero for the topmost.
+ * @param {boolean} exclusive
+ * @param {import('./gdi/contract.js').Rect} screen
+ * @returns {import('./gdi/contract.js').Rect[] | null}
+ */
+export function uncoveredRegion(windows, owner, exclusive, screen){
+    const owning = primaryOwner(windows, owner);
     if (!owning)
     {
         return null;
     }
+    const { shown, topLevelOf, topLevels } = windowTree(windows);
     const base = intersectRect(exclusive ? screen : owning.client, screen);
     if (isEmptyRect(base))
     {
@@ -813,57 +839,18 @@ export function createGraphicsModule(){
             });
 
             /**
-             * The desktop: one software surface the size of the display, in guest
-             * memory so the presenter can read it the way it reads a DirectDraw
-             * primary. Every window's device context is a view of it. Made on the
-             * first window context rather than at start-up, so a program that
-             * draws only through a device never pays for it, and remade if the
-             * program's display changes size under it.
-             *
-             * @type {(import('./webgpu/internal/presenter.js').PresentableSurface
-             *     & { surface: import('./gdi/contract.js').Surface }) | null}
+             * The screen, composed of the desktop's background and a surface for
+             * each top-level window (`gdi/screen.js`), in guest memory so the
+             * presenter reads it the way it reads a DirectDraw primary.
              */
-            let desktopSurface = null;
-            /**
-             * @param {number} buffer @param {number} pitch
-             * @param {{ width: number, height: number }} screen
-             */
-            const viewOfDesktop = (buffer, pitch, screen)=>createSurface({
-                width: screen.width, height: screen.height, pitch,
-                bytes: services.windowMemory(buffer, pitch * screen.height),
+            const screens = createScreen({
+                allocate: bytes=>win32.heap().allocate(bytes),
+                free: address=>config?.free?.(address),
+                bytesAt: (address, length)=>services.windowMemory(address, length),
+                size: ()=>services.screen,
+                surfaceOf: hwnd=>win32.windowSurfaceOf?.(hwnd) ?? null,
+                windows: ()=>win32.windowSurfaces?.() ?? [],
             });
-            const desktop = ()=>{
-                const screen = services.screen;
-                if (desktopSurface && (desktopSurface.width !== screen.width
-                    || desktopSurface.height !== screen.height))
-                {
-                    config?.free?.(desktopSurface.buffer);
-                    desktopSurface = null;
-                }
-                if (!desktopSurface)
-                {
-                    const pitch = dibPitch(screen.width, 32);
-                    const buffer = win32.heap().allocate(pitch * screen.height) >>> 0;
-                    if (buffer === 0)
-                    {
-                        return null;
-                    }
-                    desktopSurface = {
-                        buffer, pitch, bitCount: 32, palette: null,
-                        width: screen.width, height: screen.height,
-                        surface: viewOfDesktop(buffer, pitch, screen),
-                    };
-                }
-                else if (desktopSurface.surface.bytes.length === 0)
-                {
-                    // The emulator grew its memory, and every view of the old
-                    // buffer went with it: the pixels are still at the same
-                    // guest address, so the view is taken again over the new one.
-                    desktopSurface.surface = viewOfDesktop(desktopSurface.buffer,
-                        desktopSurface.pitch, screen);
-                }
-                return desktopSurface;
-            };
 
             // The exclusive-mode picture and its window, while one holds the
             // screen; null when the screen is the desktop's.
@@ -871,46 +858,15 @@ export function createGraphicsModule(){
             let fullScreen = null;
 
             /**
-             * Shows a DirectDraw primary surface.
-             *
-             * There is one screen. A primary belongs to a window -- the one the
-             * program named when it set its cooperative level, else its topmost
-             * -- and its pixels are that window's client area on the desktop;
-             * exclusive mode is the same window covering the screen. So
-             * presenting the primary means copying it into the desktop where
-             * the window is, minus every window above it, and showing the
-             * desktop: a dialog over the picture stays over it. A primary with
-             * nothing over it and the whole screen to itself is shown as it is,
-             * which is the common case and costs no copy; that is decided from
-             * the window list rather than from any flag.
+             * Copies the rectangles of a primary surface into a surface of the
+             * display's format, the primary's rectangle at `dx`, `dy` there.
              *
              * @param {import('./webgpu/internal/presenter.js').PresentableSurface} surface
-             * @param {number} [window]    The cooperative window, or zero.
-             * @param {boolean} [exclusive]
+             * @param {import('./gdi/contract.js').Rect[]} region  In the primary's pixels.
+             * @param {import('./gdi/screen.js').HeldSurface} target
+             * @param {number} dx @param {number} dy
              */
-            const presentPrimary = (surface, window = 0, exclusive = false)=>{
-                fullScreen = exclusive ? { surface, window } : null;
-                const screen = services.screen;
-                // A picture the GPU owns has nothing worth reading in guest
-                // memory, and a primary of another size than the screen has no
-                // place on it. The ceiling on this: such a primary is shown as
-                // it is, and anything over it is not seen.
-                const wholeScreen = { left: 0, top: 0, right: screen.width, bottom: screen.height };
-                const region = state.shown.isClaimed(surface.buffer)
-                    || surface.width !== screen.width || surface.height !== screen.height
-                    ? null
-                    : uncoveredRegion(win32.windows?.() ?? [], window, exclusive, wholeScreen);
-                if (!region || (region.length === 1 && sameRect(region[0], wholeScreen)))
-                {
-                    state.shown.present(surface);
-                    return;
-                }
-                const target = desktop();
-                if (!target)
-                {
-                    state.shown.present(surface);
-                    return;
-                }
+            const copyPrimary = (surface, region, target, dx, dy)=>{
                 const bytesPerPixel = surface.bitCount >>> 3;
                 const out = target.surface.bytes;
                 for (const rect of region)
@@ -926,13 +882,10 @@ export function createGraphicsModule(){
                     for (let y = rect.top; y < rect.bottom; y++)
                     {
                         const from = (y - rect.top) * surface.pitch;
-                        const at = target.surface.offset + y * target.pitch + rect.left * 4;
+                        const at = (y + dy) * target.pitch + (rect.left + dx) * 4;
                         if (surface.bitCount === 32)
                         {
-                            for (let byte = 0; byte < width * 4; byte++)
-                            {
-                                out[at + byte] = rows[from + byte];
-                            }
+                            out.set(rows.subarray(from, from + width * 4), at);
                             continue;
                         }
                         expandRow(rows, width, surface.bitCount, surface.palette, out, from, at);
@@ -944,7 +897,71 @@ export function createGraphicsModule(){
                         }
                     }
                 }
-                state.shown.present(target);
+            };
+
+            /**
+             * Shows a DirectDraw primary surface.
+             *
+             * A primary belongs to a window -- the one the program named when it
+             * set its cooperative level, else its topmost. Windowed, its pixels
+             * are that window's client area: they go into the window's surface,
+             * and the screen is composed with them where the window is. In
+             * exclusive mode the picture is the screen, with every window above
+             * the program's and every control inside it over the picture. A
+             * picture with nothing over it is shown as it is, which is the common
+             * case and costs no copy; that is decided from the window list rather
+             * than from any flag.
+             *
+             * @param {import('./webgpu/internal/presenter.js').PresentableSurface} surface
+             * @param {number} [window]    The cooperative window, or zero.
+             * @param {boolean} [exclusive]
+             */
+            const presentPrimary = (surface, window = 0, exclusive = false)=>{
+                fullScreen = exclusive ? { surface, window } : null;
+                const screen = services.screen;
+                // A picture the GPU owns has nothing worth reading in guest
+                // memory, and a primary of another size than the screen has no
+                // place on it. The ceiling on this: such a primary is shown as
+                // it is, and anything over it is not seen.
+                const wholeScreen = { left: 0, top: 0, right: screen.width, bottom: screen.height };
+                const usable = !state.shown.isClaimed(surface.buffer)
+                    && surface.width === screen.width && surface.height === screen.height;
+                const windows = usable ? win32.windows?.() ?? [] : [];
+                if (usable && !exclusive)
+                {
+                    const owning = primaryOwner(windows, window);
+                    const top = owning
+                        ? win32.windowSurfaceOf?.(Number(owning.hwnd)) ?? null : null;
+                    const held = top ? screens.windowSurface(top.hwnd, top.rect) : null;
+                    const client = owning ? intersectRect(owning.client, wholeScreen) : null;
+                    if (top && held && client && !isEmptyRect(client))
+                    {
+                        copyPrimary(surface, [client], held, -top.rect.left, -top.rect.top);
+                        screens.invalidate();
+                        const shown = screens.screen();
+                        if (shown)
+                        {
+                            state.shown.present({ ...shown, label: 'desktop',
+                                prepare: screens.compose });
+                            return;
+                        }
+                    }
+                }
+                const region = usable && exclusive
+                    ? uncoveredRegion(windows, window, exclusive, wholeScreen) : null;
+                const target = region ? screens.screen() : null;
+                if (!region || !target || (region.length === 1 && sameRect(region[0], wholeScreen)))
+                {
+                    state.shown.present(surface);
+                    return;
+                }
+                state.shown.present({ ...target, label: 'desktop', prepare: ()=>{
+                    screens.compose();
+                    copyPrimary(surface, region, target, 0, 0);
+                    // The picture is no window's: the screen is composed
+                    // again once it is not shown.
+                    screens.invalidate();
+                } });
             };
 
             /**
@@ -1074,6 +1091,7 @@ export function createGraphicsModule(){
                     maxDraws: device?.maxDraws,
                     skipTexture: device?.skipTexture,
                     probeTexture: device?.probeTexture,
+                    driverRules: config?.driverRules,
                     presenter: state.shown,
                 }),
 
@@ -1162,8 +1180,9 @@ export function createGraphicsModule(){
                     return cell ? textExtent(text, cell) : null;
                 },
                 /**
-                 * @param {{ kind: string, bounds?: { left: number, top: number,
-                 *     right: number, bottom: number } }} dc
+                 * @param {{ kind: string, window?: number, background?: boolean,
+                 *     bounds?: { left: number, top: number, right: number, bottom: number }
+                 *     | null }} dc
                  *     A window context names the screen rectangle it may
                  *     draw in, in screen coordinates; absent, the whole screen.
                  * @param {{ width: number, height: number, bitCount: number, bits?: number,
@@ -1175,14 +1194,7 @@ export function createGraphicsModule(){
                 surfaceFor: (dc, bitmap)=>{
                     if (dc.kind !== 'memory')
                     {
-                        const screen = desktop();
-                        if (!screen)
-                        {
-                            return null;
-                        }
-                        return viewOf(screen.surface, dc.bounds ?? {
-                            left: 0, top: 0, right: screen.width, bottom: screen.height,
-                        });
+                        return screens.surfaceFor(dc);
                     }
                     if (bitmap.pixels)
                     {
@@ -1201,32 +1213,40 @@ export function createGraphicsModule(){
                         (bitmap.pitch ?? dibPitch(bitmap.width, bitmap.bitCount)) * bitmap.height);
                     return surfaceForDibSection({ ...bitmap, bits }, bytes, bits);
                 },
-                /** The desktop's pixels, or null in a build with no heap for them. */
-                desktop: ()=>desktop()?.surface ?? null,
+                /** The screen's pixels as composed now, or null in a build with no heap for them. */
+                desktop: ()=>screens.compose()?.surface ?? null,
                 /**
-                 * Shows the desktop. Called after a paint pass rather than
-                 * after every draw; the presenter coalesces what arrives
-                 * within one flush anyway.
+                 * Shows the screen. Called after a paint pass and after a
+                 * draw; the presenter coalesces what arrives within one flush
+                 * anyway. A draw on a window or the background has the screen
+                 * composed again; one on the screen itself is shown as drawn.
+                 *
+                 * @param {{ window?: number, background?: boolean }} [dc]
                  */
-                presentDesktop: ()=>{
+                presentDesktop: dc=>{
+                    screens.drawnOn(dc);
                     // A picture that has the screen to itself is what is on it:
                     // the windows under it are not seen, and the ones over it
                     // are composed onto it, so a paint pass shows the picture
-                    // again rather than the desktop over it.
+                    // again rather than the desktop over it. The cooperative
+                    // window hidden still holds it: a launcher that hides its
+                    // dialog and loads in a window of its own leaves the last
+                    // flip on the screen, and showing the desktop instead kept
+                    // the dialog's controls drawn over the picture.
                     const held = fullScreen;
                     const owner = held && `0x${(held.window >>> 0).toString(16)}`;
                     if (held && !win32.applicationDeactivated?.()
                         && (win32.windows?.() ?? []).some(
-                            (/** @type {ListedWindow} */ listed)=>listed.visible
-                                && listed.hwnd === owner))
+                            (/** @type {ListedWindow} */ listed)=>listed.hwnd === owner))
                     {
                         presentPrimary(held.surface, held.window, true);
                         return;
                     }
-                    const screen = desktop();
+                    const screen = screens.screen();
                     if (screen)
                     {
-                        state.shown.present({ ...screen, label: 'desktop' });
+                        state.shown.present({ ...screen, label: 'desktop',
+                            prepare: screens.compose });
                     }
                 },
                 /**

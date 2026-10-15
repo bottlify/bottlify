@@ -468,6 +468,7 @@ const CS_HREDRAW = 0x0002;
 /** The style bit EnableWindow sets, and the only one it touches. */
 const WS_DISABLED = 0x08000000;
 const WS_MINIMIZE = 0x20000000;
+const WS_MAXIMIZE = 0x01000000;
 /** The metrics SPI_SETMINIMIZEDMETRICS and ArrangeIconicWindows go by. */
 const SM_ARRANGE = 56;
 const SM_CXMINIMIZED = 57;
@@ -591,6 +592,13 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
      * @param {number} hwnd
      */
     const programs = hwnd=>(hwnd !== 0 && host.isDesktop?.(live(hwnd)) ? 0 : hwnd);
+    /**
+     * The window, if the calling thread's input holds it -- its own, or one of
+     * a thread AttachThreadInput joined it to -- else zero.
+     *
+     * @param {number} hwnd
+     */
+    const callerHolds = hwnd=>(host.heldByCaller ? host.heldByCaller(hwnd) : hwnd);
 
     /**
      * ToUnicode and ToAscii, spelt once: the character the key makes under
@@ -3021,14 +3029,19 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                     return 0;
                 }
                 const SW_SHOWNORMAL = 1;
-                writeU32s(host, placement + WINDOWPLACEMENT.length,
-                    [WINDOWPLACEMENT.SIZE, 0, SW_SHOWNORMAL]);
+                const SW_SHOWMINIMIZED = 2;
+                const SW_SHOWMAXIMIZED = 3;
+                // A maximised window's normal place is where a restore puts it.
+                const normal = record.normalPlace ?? record;
+                writeU32s(host, placement + WINDOWPLACEMENT.length, [WINDOWPLACEMENT.SIZE, 0,
+                    (record.style & WS_MINIMIZE) !== 0 ? SW_SHOWMINIMIZED
+                        : (record.style & WS_MAXIMIZE) !== 0 ? SW_SHOWMAXIMIZED : SW_SHOWNORMAL]);
                 writeU32s(host, placement + WINDOWPLACEMENT.ptMinPosition, [0, 0, 0, 0]);
                 writeRect(host, placement + WINDOWPLACEMENT.rcNormalPosition, {
-                    left: record.x,
-                    top: record.y,
-                    right: record.x + record.width,
-                    bottom: record.y + record.height,
+                    left: normal.x,
+                    top: normal.y,
+                    right: normal.x + normal.width,
+                    bottom: normal.y + normal.height,
                 });
                 return 1;
             },
@@ -3045,6 +3058,12 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
                     return 0;
                 }
                 const bounds = readRect(host, placement + WINDOWPLACEMENT.rcNormalPosition);
+                if ((record.style & WS_MAXIMIZE) !== 0)
+                {
+                    record.normalPlace = { x: bounds.left, y: bounds.top,
+                        width: bounds.right - bounds.left, height: bounds.bottom - bounds.top };
+                    return 1;
+                }
                 record.x = bounds.left;
                 record.y = bounds.top;
                 record.width = bounds.right - bounds.left;
@@ -3196,7 +3215,11 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         /** BOOL IsZoomed(HWND hWnd) */
         IsZoomed: {
             argBytes: 4,
-            handler: ()=>0,
+            /** @param {number[]} args */
+            handler: ([hwnd])=>{
+                const record = live(hwnd);
+                return record && (record.style & WS_MAXIMIZE) !== 0 ? 1 : 0;
+            },
         },
 
         /** BOOL IsWindowEnabled(HWND hWnd) */
@@ -5112,7 +5135,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
          */
         GetActiveWindow: {
             argBytes: 0,
-            handler: ()=>programs(host.active?.() ?? 0),
+            handler: ()=>programs(callerHolds(host.active?.() ?? 0)),
         },
 
         /**
@@ -5138,7 +5161,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
          */
         GetFocus: {
             argBytes: 0,
-            handler: ()=>programs(host.focus?.() ?? 0),
+            handler: ()=>programs(callerHolds(host.focus?.() ?? 0)),
         },
 
         /**

@@ -1596,7 +1596,7 @@ test('the extents a DC has are read back, and a metafile is refused', ()=>{
     assert.equal(fns.GetViewportExtEx.handler([hdc, 0]), 0, 'nowhere to write');
     assert.equal(fns.GetWindowExtEx.handler([0x7777, OUT]), 0, 'not a DC');
 
-    assert.equal(fns.SetMetaFileBitsEx.handler(), 0);
+    assert.equal(fns.SetMetaFileBitsEx.handler([0, 0]), 0, 'no bits');
     assert.equal(fns.PlayMetaFile.handler([hdc, 0x7777]), 0, 'not a metafile');
     assert.equal(fns.DeleteMetaFile.handler([0x7777]), 0, 'not a metafile');
     assert.deepEqual([fns.GetViewportExtEx, fns.GetWindowExtEx, fns.SetMetaFileBitsEx,

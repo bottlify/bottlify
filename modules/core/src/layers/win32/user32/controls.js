@@ -257,12 +257,62 @@ const EDIT_MARGIN = 1;
 /** What a program that never set a limit may type: the documented default. */
 const DEFAULT_EDIT_LIMIT = 0x7ffffffe;
 
+/**
+ * A multi-line edit's text as lines, each with the index of its first
+ * character: broken at CR LF, CR or LF, and -- when it wraps -- where the
+ * next character would take the line past `room`, at the last space before
+ * that (the space staying on the line it ends) or, in a word wider than the
+ * line, at that character.
+ *
+ * @param {string} text @param {boolean} wrap @param {number} room
+ * @param {(character: string) => number} advance
+ * @returns {{ text: string, start: number }[]}
+ */
+export function wrapEditText(text, wrap, room, advance){
+    /** @type {{ text: string, start: number }[]} */
+    const lines = [];
+    let at = 0;
+    for (const paragraph of text.split(/\r\n|\r|\n/))
+    {
+        const start = at;
+        // The break itself is counted in the paragraph's length so the next
+        // line's start is right, but it is no part of any line.
+        at += paragraph.length;
+        const broke = text.slice(at, at + 2);
+        at += broke === '\r\n' ? 2 : (broke.length > 0 ? 1 : 0);
+        let from = 0;
+        while (from < (wrap ? paragraph.length : 0))
+        {
+            let width = 0;
+            let end = from;
+            while (end < paragraph.length && width + advance(paragraph[end]) <= room)
+            {
+                width += advance(paragraph[end]);
+                end++;
+            }
+            if (end >= paragraph.length)
+            {
+                break;
+            }
+            const space = paragraph.lastIndexOf(' ', end);
+            const cut = space <= from ? Math.max(end, from + 1) : space + 1;
+            lines.push({ text: paragraph.slice(from, cut), start: start + from });
+            from = cut;
+        }
+        lines.push({ text: paragraph.slice(from), start: start + from });
+    }
+    return lines;
+}
+
 /** List box styles, messages and notifications. */
 const LBS_NOTIFY = 0x0001;
 const LBS_SORT = 0x0002;
 const LBS_MULTIPLESEL = 0x0008;
 const LBS_EXTENDEDSEL = 0x0800;
 const LBS_NOSEL = 0x4000;
+/** A list box that keeps its scroll bar, disabled, when everything fits; one in columns. */
+const LBS_DISABLENOSCROLL = 0x1000;
+const LBS_MULTICOLUMN = 0x0200;
 /** An owner-drawn list box, and one that still keeps the strings it is handed. */
 const LBS_OWNERDRAW = 0x0030;
 const LBS_HASSTRINGS = 0x0040;
@@ -333,6 +383,7 @@ const CB_FINDSTRINGEXACT = 0x0158;
 const CB_SETDROPPEDWIDTH = 0x0160;
 const CB_ERR = -1;
 const CBN_SELCHANGE = 1;
+const CBN_DBLCLK = 2;
 const CBN_SETFOCUS = 3;
 const CBN_KILLFOCUS = 4;
 const CBN_EDITUPDATE = 5;
@@ -636,6 +687,51 @@ export const pointOf = lParam=>({
  */
 
 /**
+ * Where a scroll bar's parts are along it: the arrow at each end, the track
+ * between, and the thumb on it as long as the page is of the range and as far
+ * along as the position is -- none when the page holds the whole range. What
+ * the bar is painted by, a click is placed by and a drag is read by.
+ *
+ * @param {Rect} rect @param {boolean} vertical @param {ScrollBarState} held
+ * @returns {{ arrow: number, length: number, travel: number, ceiling: number,
+ *     thumb: { start: number, length: number } | null }}  `start` from the bar's start.
+ */
+export function thumbOf(rect, vertical, held){
+    const length = vertical ? rect.bottom - rect.top : rect.right - rect.left;
+    const arrow = Math.min(ARROW_LENGTH, Math.floor(length / 2));
+    const track = length - 2 * arrow;
+    const range = Math.max(1, held.max - held.min + 1);
+    const ceiling = Math.max(1, held.max - held.min - Math.max(held.page - 1, 0));
+    if (track <= 0 || (held.page > 0 && range <= held.page))
+    {
+        return { arrow, length, travel: 0, ceiling, thumb: null };
+    }
+    const thumbLength = held.page > 0
+        ? Math.max(8, Math.floor(track * Math.min(held.page, range) / range))
+        : Math.min(track, ARROW_LENGTH);
+    const travel = track - thumbLength;
+    const along = Math.max(0, Math.min(held.pos - held.min, ceiling));
+    return { arrow, length, travel, ceiling,
+        thumb: { start: arrow + Math.floor(travel * along / ceiling), length: thumbLength } };
+}
+
+/**
+ * The position a thumb dragged to `start` along the bar stands for, as
+ * SB_THUMBTRACK reports it: the nearest one, at the ends the range's.
+ *
+ * @param {Rect} rect @param {boolean} vertical @param {ScrollBarState} held
+ * @param {number} start
+ */
+export function thumbValue(rect, vertical, held, start){
+    const { arrow, travel, ceiling } = thumbOf(rect, vertical, held);
+    if (travel <= 0)
+    {
+        return held.min;
+    }
+    return held.min + Math.round(Math.max(0, Math.min(travel, start - arrow)) * ceiling / travel);
+}
+
+/**
  * The drawing and messaging the system classes share, handed to the common
  * controls so a control in comctl32 paints and tells its parent with the same
  * helpers the ones here use. Deliberately loose: it is a bag of the closures
@@ -863,15 +959,22 @@ export function createControlProcedures(host){
      * Runs a paint: BeginPaint, the drawing, EndPaint, with the drawing
      * allowed to have asked the parent something on the way.
      *
+     * The drawing is handed the client rectangle, not rcPaint: a control lays
+     * itself out in all of itself, and the context is already clipped to what
+     * needs painting. Laid out in rcPaint, a static half uncovered by a
+     * closing dropped list drew its text again from the uncovered part's edge.
+     *
      * @param {any} record
      * @param {(hdc: number, rect: Rect) => number | Promise<number> | void} paint
      */
-    const painting = (record, paint)=>after(host.beginPaint(record), ({ hdc, rect })=>{
+    const painting = (record, paint)=>after(host.beginPaint(record), ({ hdc })=>{
         if (hdc === 0 || !host.draw)
         {
             host.endPaint(record, hdc);
             return 0;
         }
+        const size = host.clientSize(record);
+        const rect = { left: 0, top: 0, right: size.width, bottom: size.height };
         return after(paint(hdc, rect), ()=>{
             host.endPaint(record, hdc);
             return 0;
@@ -1100,10 +1203,15 @@ export function createControlProcedures(host){
         }
 
         // Check boxes and radio buttons: the mark to the left of the text, or
-        // to the right of it with BS_LEFTTEXT, vertically centred.
+        // to the right of it with BS_LEFTTEXT, at the top or bottom with the
+        // text that BS_TOP or BS_BOTTOM puts there, and centred otherwise --
+        // a BS_TOP box left in the middle stood a line below its label.
         background(hdc, rect, brush, COLOR_3DFACE);
         const leftText = (record.style & BS_LEFTTEXT) !== 0;
-        const top = rect.top + Math.max(0, Math.floor((rect.bottom - rect.top - CHECK_SIZE) / 2));
+        const down = record.style & BS_VCENTER;
+        const top = down === BS_TOP ? rect.top
+            : down === BS_BOTTOM ? Math.max(rect.top, rect.bottom - CHECK_SIZE)
+                : rect.top + Math.max(0, Math.floor((rect.bottom - rect.top - CHECK_SIZE) / 2));
         const left = leftText ? rect.right - CHECK_SIZE : rect.left;
         const box = { left, top, right: left + CHECK_SIZE, bottom: top + CHECK_SIZE };
         const check = state.check ?? BST_UNCHECKED;
@@ -1496,45 +1604,50 @@ export function createControlProcedures(host){
      * The lines an edit shows, each with the index of its first character in
      * the text, so a caret position maps to a line and back. A single-line
      * edit is one line; a multi-line one breaks at CR LF and, without
-     * ES_AUTOHSCROLL, wraps at the client width.
+     * ES_AUTOHSCROLL, wraps where its text, in its font, reaches the client
+     * width -- at the last space before that, or there when a word is wider
+     * than the line. Measured on `hdc`, or on a context of the edit's own
+     * when none is given; with nothing to measure on, at a count of
+     * characters as wide as the cell.
      *
-     * @param {any} record @param {number} columns  Characters that fit across.
+     * @param {any} record @param {number} [hdc]
      * @returns {{ text: string, start: number }[]}
      */
-    const editLines = (record, columns)=>{
+    const editLines = (record, hdc = 0)=>{
         const text = record.title;
         if (!multiline(record))
         {
             return [{ text, start: 0 }];
         }
-        /** @type {{ text: string, start: number }[]} */
-        const lines = [];
-        let at = 0;
-        const wrap = (record.style & ES_AUTOHSCROLL) === 0 && columns > 0;
-        for (const paragraph of text.split(/\r\n|\r|\n/))
+        const own = hdc === 0 && host.draw ? host.contextOn(record).hdc : 0;
+        const measuring = hdc !== 0 ? hdc : own;
+        try
         {
-            const start = at;
-            // The break itself is counted in the paragraph's length so the
-            // next line's start is right, but it is no part of any line.
-            at += paragraph.length;
-            const broke = text.slice(at, at + 2);
-            at += broke === '\r\n' ? 2 : (broke.length > 0 ? 1 : 0);
-            if (!wrap || paragraph.length <= columns)
-            {
-                lines.push({ text: paragraph, start });
-                continue;
-            }
-            let from = 0;
-            while (paragraph.length - from > columns)
-            {
-                let cut = paragraph.lastIndexOf(' ', from + columns);
-                cut = cut <= from ? from + columns : cut + 1;
-                lines.push({ text: paragraph.slice(from, cut), start: start + from });
-                from = cut;
-            }
-            lines.push({ text: paragraph.slice(from), start: start + from });
+            const draw = host.draw;
+            /** @type {Map<string, number>} */
+            const widths = new Map();
+            /** @param {string} character */
+            const advance = character=>{
+                let width = widths.get(character);
+                if (width === undefined)
+                {
+                    width = draw && measuring !== 0 ? draw.measure(measuring, character).width : 1;
+                    widths.set(character, width);
+                }
+                return width;
+            };
+            const room = draw && measuring !== 0
+                ? host.clientSize(record).width - 2 * EDIT_MARGIN : editGridColumns(record);
+            return wrapEditText(text, (record.style & ES_AUTOHSCROLL) === 0 && room > 0,
+                room, advance);
         }
-        return lines;
+        finally
+        {
+            if (own !== 0)
+            {
+                host.endPaint(record, own);
+            }
+        }
     };
 
     /**
@@ -1583,7 +1696,7 @@ export function createControlProcedures(host){
             background(hdc, rect, brush, readOnly ? COLOR_3DFACE : COLOR_WINDOW);
         }
         const grid = editGrid(record, hdc);
-        const lines = editLines(record, grid.columns);
+        const lines = editLines(record, hdc);
         // The text colour the parent left in the context on WM_CTLCOLOREDIT --
         // white on the black brush of a game's name box -- as a static's; a
         // rich edit asks its parent for nothing and keeps the window text.
@@ -1662,7 +1775,7 @@ export function createControlProcedures(host){
         const draw = /** @type {Drawing} */ (host.draw);
         const state = editState(record);
         const grid = editGrid(record, hdc);
-        const lines = editLines(record, grid.columns);
+        const lines = editLines(record, hdc);
         const top = multiline(record)
             ? rect.top + EDIT_MARGIN
             : rect.top + Math.max(0, Math.floor((rect.bottom - rect.top - grid.cellHeight) / 2));
@@ -1872,7 +1985,7 @@ export function createControlProcedures(host){
     const charFromPoint = (record, hdc, x, y)=>{
         const state = editState(record);
         const grid = editGrid(record, hdc);
-        const lines = editLines(record, grid.columns);
+        const lines = editLines(record, hdc);
         const row = multiline(record)
             ? Math.min(lines.length - 1, state.firstLine + Math.max(0,
                 Math.floor((y - EDIT_MARGIN) / grid.cellHeight)))
@@ -1906,7 +2019,7 @@ export function createControlProcedures(host){
      */
     const scrollEdit = (record, lines)=>{
         const state = editState(record);
-        const total = editLines(record, editGridColumns(record)).length;
+        const total = editLines(record).length;
         const rows = editGridRows(record);
         const ceiling = Math.max(0, total - rows);
         const wanted = Math.max(0, Math.min(ceiling, state.firstLine + lines));
@@ -1945,7 +2058,7 @@ export function createControlProcedures(host){
         {
             return;
         }
-        const total = editLines(record, editGridColumns(record)).length;
+        const total = editLines(record).length;
         const held = scrollOf(record, SB_VERT_BAR);
         const next = { min: 0, max: Math.max(0, total - 1), page: editGridRows(record),
             pos: state.firstLine };
@@ -1970,7 +2083,7 @@ export function createControlProcedures(host){
      */
     const showRichBars = record=>{
         const state = editState(record);
-        const total = editLines(record, editGridColumns(record)).length;
+        const total = editLines(record).length;
         const vertical = total > editGridRows(record) ? WS_VSCROLL : 0;
         const horizontal = (state.bars & WS_HSCROLL) !== 0
             && (record.style & ES_AUTOHSCROLL) !== 0 ? WS_HSCROLL : 0;
@@ -2116,7 +2229,7 @@ export function createControlProcedures(host){
             case WM_VSCROLL: {
                 const code = message.wParam & 0xffff;
                 const rows = editGridRows(record);
-                const total = editLines(record, editGridColumns(record)).length;
+                const total = editLines(record).length;
                 const by = code === SB_LINEUP ? -1 : code === SB_LINEDOWN ? 1
                     : code === SB_PAGEUP ? -rows : code === SB_PAGEDOWN ? rows
                         : code === SB_TOP ? -total : code === SB_BOTTOM ? total
@@ -2228,9 +2341,9 @@ export function createControlProcedures(host){
                 state.modified = message.wParam !== 0;
                 return 0;
             case EM_GETLINECOUNT:
-                return Math.max(1, editLines(record, editGridColumns(record)).length);
+                return Math.max(1, editLines(record).length);
             case EM_LINEINDEX: {
-                const lines = editLines(record, editGridColumns(record));
+                const lines = editLines(record);
                 const which = (message.wParam | 0) === -1
                     ? lineNumberOf(record, state.selEnd) : message.wParam | 0;
                 return which >= 0 && which < lines.length ? lines[which].start : -1;
@@ -2240,7 +2353,7 @@ export function createControlProcedures(host){
                 return lineEndOf(record, at) - lineStartOf(record, at);
             }
             case EM_GETLINE: {
-                const lines = editLines(record, editGridColumns(record));
+                const lines = editLines(record);
                 const line = lines[message.wParam | 0];
                 const out = message.lParam >>> 0;
                 if (!line || out === 0)
@@ -2290,7 +2403,7 @@ export function createControlProcedures(host){
 
     /** @param {any} record @param {number} at @returns {number} the line the character is on */
     const lineNumberOf = (record, at)=>{
-        const lines = editLines(record, editGridColumns(record));
+        const lines = editLines(record);
         let found = 0;
         for (let index = 0; index < lines.length; index++)
         {
@@ -2303,15 +2416,15 @@ export function createControlProcedures(host){
     };
     /** @param {any} record @param {number} at */
     const lineStartOf = (record, at)=>
-        editLines(record, editGridColumns(record))[lineNumberOf(record, at)].start;
+        editLines(record)[lineNumberOf(record, at)].start;
     /** @param {any} record @param {number} at */
     const lineEndOf = (record, at)=>{
-        const line = editLines(record, editGridColumns(record))[lineNumberOf(record, at)];
+        const line = editLines(record)[lineNumberOf(record, at)];
         return line.start + line.text.length;
     };
     /** @param {any} record @param {number} at @param {number} by  Lines up or down. */
     const lineStepOf = (record, at, by)=>{
-        const lines = editLines(record, editGridColumns(record));
+        const lines = editLines(record);
         const number = lineNumberOf(record, at);
         const target = lines[Math.max(0, Math.min(lines.length - 1, number + by))];
         const column = at - lines[number].start;
@@ -2359,7 +2472,8 @@ export function createControlProcedures(host){
     /**
      * @param {any} record
      * @returns {{ items: ListItem[], current: number, top: number, itemHeight?: number,
-     *     droppedHeight?: number, droppedWidth?: number, dropped?: number, hot?: number }}
+     *     droppedHeight?: number, droppedWidth?: number, dropped?: number, hot?: number,
+     *     fieldHeight?: number, grab?: number, bars?: number }}
      */
     const listState = record=>{
         const state = stateOf(record);
@@ -2652,9 +2766,82 @@ export function createControlProcedures(host){
     };
 
     /**
+     * The rows a wheel's turn scrolls a list by: three a notch, up for a turn
+     * away, and at least one for a turn smaller than a notch, which a
+     * touchpad sends.
+     *
+     * @param {number} wParam
+     */
+    const wheelRows = wParam=>{
+        const delta = (wParam >>> 16) << 16 >> 16;
+        return -Math.sign(delta) * Math.max(1, Math.round(Math.abs(delta) * WHEEL_ITEMS / 120));
+    };
+
+    /** The rows a list box shows whole. @param {any} record */
+    const listRows = record=>Math.max(1, Math.floor(host.clientSize(record).height
+        / (listState(record).itemHeight ?? editCell(record).height)));
+
+    /**
+     * Scrolls a list box so its top item is `top`, as far as it goes.
+     *
+     * @param {any} record @param {number} top
+     */
+    const scrollList = (record, top)=>{
+        const state = listState(record);
+        const wanted = Math.max(0, Math.min(top, state.items.length - listRows(record)));
+        if (wanted !== state.top)
+        {
+            state.top = wanted;
+            host.invalidate(record);
+        }
+    };
+
+    /**
+     * A list box's own vertical bar, kept as the list box keeps it: shown
+     * only while there are more items than rows -- or, with
+     * LBS_DISABLENOSCROLL, always -- its range the items, its page the rows
+     * and its position the top item.
+     *
+     * @param {any} record
+     */
+    const syncListBar = record=>{
+        const state = listState(record);
+        // The bar it was made with, which it then shows and hides.
+        state.bars ??= record.style & WS_VSCROLL;
+        if ((state.bars & WS_VSCROLL) === 0 || (record.style & LBS_MULTICOLUMN) !== 0
+            || record.destroyed)
+        {
+            return;
+        }
+        const rows = listRows(record);
+        const needed = state.items.length > rows || (record.style & LBS_DISABLENOSCROLL) !== 0;
+        const style = ((record.style & ~WS_VSCROLL) | (needed ? WS_VSCROLL : 0)) >>> 0;
+        const held = scrollOf(record, SB_VERT_BAR);
+        const next = { min: 0, max: Math.max(0, state.items.length - 1), page: rows,
+            pos: state.top };
+        if (style === record.style && held.min === next.min && held.max === next.max
+            && held.page === next.page && held.pos === next.pos)
+        {
+            return;
+        }
+        record.style = style;
+        Object.assign(held, next, { trackPos: next.pos });
+        host.frameChanged?.(record);
+    };
+
+    /**
      * @param {any} record @param {ControlMessage} message @param {unknown} [thread]
      */
-    const listBoxProc = (record, message, thread)=>{
+    const listBoxProc = (record, message, thread)=>after(listBoxMessage(record, message, thread),
+        answer=>{
+            syncListBar(record);
+            return answer;
+        });
+
+    /**
+     * @param {any} record @param {ControlMessage} message @param {unknown} [thread]
+     */
+    const listBoxMessage = (record, message, thread)=>{
         const state = listState(record);
         const sorted = (record.style & LBS_SORT) !== 0;
         switch (message.message){
@@ -2693,20 +2880,36 @@ export function createControlProcedures(host){
             }
             case WM_KEYDOWN: {
                 const key = message.wParam & 0xff;
+                const rows = listRows(record);
                 const step = key === VK_UP ? -1 : key === VK_DOWN ? 1
-                    : key === VK_HOME ? -state.items.length : key === VK_END ? state.items.length
-                        : 0;
+                    : key === VK_PRIOR ? -rows : key === VK_NEXT ? rows
+                        : key === VK_HOME ? -state.items.length
+                            : key === VK_END ? state.items.length : 0;
                 if (step === 0)
                 {
                     return 0;
                 }
                 const index = Math.max(0, Math.min(state.items.length - 1, state.current + step));
-                if (index < state.top)
-                {
-                    state.top = index;
-                }
+                // The item chosen is scrolled into the rows that show.
+                scrollList(record, index < state.top ? index
+                    : index >= state.top + rows ? index - rows + 1 : state.top);
                 return chooseItem(record, index, LBN_SELCHANGE, false, thread);
             }
+            case WM_VSCROLL: {
+                const code = message.wParam & 0xffff;
+                const rows = listRows(record);
+                scrollList(record, code === SB_LINEUP ? state.top - 1
+                    : code === SB_LINEDOWN ? state.top + 1
+                        : code === SB_PAGEUP ? state.top - rows
+                            : code === SB_PAGEDOWN ? state.top + rows
+                                : code === SB_TOP ? 0 : code === SB_BOTTOM ? state.items.length
+                                    : code === SB_THUMBPOSITION || code === SB_THUMBTRACK
+                                        ? message.wParam >>> 16 : state.top);
+                return 0;
+            }
+            case WM_MOUSEWHEEL:
+                scrollList(record, state.top + wheelRows(message.wParam));
+                return 0;
             case LB_GETSEL: {
                 const item = state.items[message.wParam | 0];
                 return item ? (item.selected ? 1 : 0) : LB_ERR;
@@ -2769,44 +2972,95 @@ export function createControlProcedures(host){
     };
 
     /**
+     * A simple combo box's two parts, in its client area: the field at the
+     * top, as tall as a dropdown combo box's, and under it the list, which
+     * is always shown -- its rows inside its sunken edge.
+     *
+     * @param {any} record
+     */
+    const simpleParts = record=>{
+        const size = host.clientSize(record);
+        const bottom = Math.min(size.height, listState(record).fieldHeight ?? 21);
+        const list = { left: 0, top: bottom, right: size.width, bottom: size.height };
+        return { field: { left: 0, top: 0, right: size.width, bottom }, list,
+            rows: shrink(list, 2) };
+    };
+
+    /**
      * The combo box's selection field: a sunken white box with the current
-     * item's text and a drop button at the right. The list does not drop
-     * down here, which is said once.
+     * item's text and, but for a simple combo box, a drop button at the
+     * right; a simple one has its list under the field instead.
      *
      * @param {any} record @param {number} hdc @param {Rect} rect
      */
     const paintCombo = (record, hdc, rect)=>{
         const draw = /** @type {Drawing} */ (host.draw);
         const state = listState(record);
-        draw.fill(hdc, rect, color(disabled(record) ? COLOR_3DFACE : COLOR_WINDOW));
-        sunkenEdge(hdc, rect);
-        const button = { left: rect.right - 2 - COMBO_BUTTON, top: rect.top + 2,
-            right: rect.right - 2, bottom: rect.bottom - 2 };
-        draw.fill(hdc, button, color(COLOR_3DFACE));
-        buttonEdge(hdc, button, false);
-        // The arrow: a triangle four rows high, as the scroll bars draw theirs.
-        const arrowX = button.left + Math.floor((COMBO_BUTTON - 7) / 2);
-        const arrowY = button.top + Math.floor((button.bottom - button.top - 4) / 2);
-        for (let row = 0; row < 4; row++)
+        const simple = (record.style & CBS_TYPEMASK) === CBS_SIMPLE;
+        const parts = simple ? simpleParts(record) : null;
+        const box = parts ? parts.field : rect;
+        draw.fill(hdc, box, color(disabled(record) ? COLOR_3DFACE : COLOR_WINDOW));
+        sunkenEdge(hdc, box);
+        if (parts && parts.list.bottom > parts.list.top)
         {
-            draw.fill(hdc, { left: arrowX + row, top: arrowY + row, right: arrowX + 7 - row,
-                bottom: arrowY + row + 1 }, color(COLOR_BTNTEXT));
+            sunkenEdge(hdc, parts.list);
+            paintDropped(record, hdc, parts.rows, state.current);
+        }
+        const button = { left: box.right - 2 - (parts ? 0 : COMBO_BUTTON), top: box.top + 2,
+            right: box.right - 2, bottom: box.bottom - 2 };
+        if (!parts)
+        {
+            draw.fill(hdc, button, color(COLOR_3DFACE));
+            buttonEdge(hdc, button, false);
+            // The arrow: a triangle four rows high, as the scroll bars draw theirs.
+            const arrowX = button.left + Math.floor((COMBO_BUTTON - 7) / 2);
+            const arrowY = button.top + Math.floor((button.bottom - button.top - 4) / 2);
+            for (let row = 0; row < 4; row++)
+            {
+                draw.fill(hdc, { left: arrowX + row, top: arrowY + row, right: arrowX + 7 - row,
+                    bottom: arrowY + row + 1 }, color(COLOR_BTNTEXT));
+            }
         }
         const current = state.items[state.current];
         const editable = comboEditable(record);
         const text = editable ? record.title : current?.text ?? '';
-        const field = { left: rect.left + 3, top: rect.top + 2, right: button.left - 1,
-            bottom: rect.bottom - 2 };
+        const field = { left: box.left + 3, top: box.top + 2, right: button.left - 1,
+            bottom: box.bottom - 2 };
         const focused = host.focus() === record.hwnd;
-        if (focused)
+        // A drop-down list in focus shows its item selected; a drop-down
+        // combo box's field is an edit, its text typed into at a caret --
+        // filled with the selection colour, a path typed there read as one
+        // block of blue.
+        const selected = focused && !editable;
+        if (selected)
         {
             draw.fill(hdc, field, color(COLOR_HIGHLIGHT));
         }
         const metrics = draw.measure(hdc, text);
-        draw.text(hdc, field.left + 1,
-            field.top + Math.max(0, Math.floor((field.bottom - field.top - metrics.height) / 2)),
-            text, { color: color(focused ? COLOR_HIGHLIGHTTEXT
-                : disabled(record) ? COLOR_GRAYTEXT : COLOR_WINDOWTEXT), clip: field });
+        const top = field.top + Math.max(0,
+            Math.floor((field.bottom - field.top - metrics.height) / 2));
+        draw.text(hdc, field.left + 1, top, text, { color: color(selected ? COLOR_HIGHLIGHTTEXT
+            : disabled(record) ? COLOR_GRAYTEXT : COLOR_WINDOWTEXT), clip: field });
+        if (focused && editable)
+        {
+            // The edit's own selection over its text, and the caret where it ends.
+            const edit = editState(record);
+            const from = Math.max(0, Math.min(edit.selStart, edit.selEnd, text.length));
+            const to = Math.min(text.length, Math.max(edit.selStart, edit.selEnd));
+            /** @param {number} at */
+            const xOf = at=>field.left + 1 + draw.measure(hdc, text.slice(0, at)).width;
+            if (to > from)
+            {
+                const span = { left: xOf(from), top, right: Math.min(field.right, xOf(to)),
+                    bottom: top + metrics.height };
+                draw.fill(hdc, span, color(COLOR_HIGHLIGHT));
+                draw.text(hdc, span.left, top, text.slice(from, to),
+                    { color: color(COLOR_HIGHLIGHTTEXT), clip: span });
+            }
+            const at = Math.min(field.right - 1, xOf(Math.min(text.length, edit.selEnd)));
+            draw.fill(hdc, { left: at, top, right: at + 1, bottom: top + metrics.height },
+                color(COLOR_WINDOWTEXT));
+        }
     };
 
     /** A combo box message as the list box spells it, or null. @param {number} message */
@@ -2854,10 +3108,6 @@ export function createControlProcedures(host){
             record.style = (record.style & ~(WS_VSCROLL | WS_HSCROLL)) >>> 0;
             listState(record).droppedHeight = record.height;
         }
-        if ((record.style & CBS_TYPEMASK) === CBS_SIMPLE)
-        {
-            return;
-        }
         // The system font's thirteen rows where nothing can be measured.
         let rows = 13;
         if (host.draw)
@@ -2865,6 +3115,13 @@ export function createControlProcedures(host){
             const { hdc } = host.contextOn(record);
             rows = (hdc !== 0 ? host.draw.measure(hdc, 'M')?.height : null) ?? rows;
             host.endPaint(record, hdc);
+        }
+        // A simple combo box keeps its height: its list is under the field.
+        if ((record.style & CBS_TYPEMASK) === CBS_SIMPLE)
+        {
+            listState(record).fieldHeight = rows + 8;
+            host.invalidate(record);
+            return;
         }
         record.height = rows + 8;
     };
@@ -2966,12 +3223,13 @@ export function createControlProcedures(host){
 
     /**
      * The dropped list's rows from its top one, the one under the pointer
-     * or the keys highlighted, and a scroll bar at the side when they do
-     * not all fit.
+     * or the keys highlighted -- a simple combo box's, the one chosen -- and
+     * a scroll bar at the side when they do not all fit.
      *
      * @param {any} combo @param {number} hdc @param {Rect} rect
+     * @param {number} [highlight]
      */
-    const paintDropped = (combo, hdc, rect)=>{
+    const paintDropped = (combo, hdc, rect, highlight = listState(combo).hot)=>{
         const draw = /** @type {Drawing} */ (host.draw);
         const state = listState(combo);
         const row = itemHeight(combo, hdc);
@@ -2990,7 +3248,7 @@ export function createControlProcedures(host){
                 break;
             }
             const line = { left: rows.left, top: y, right: rows.right, bottom: y + row };
-            const hot = index === state.hot;
+            const hot = index === highlight;
             if (hot)
             {
                 draw.fill(hdc, line, color(COLOR_HIGHLIGHT));
@@ -3013,11 +3271,105 @@ export function createControlProcedures(host){
     const scrollDropped = (combo, top, visible)=>{
         const state = listState(combo);
         state.top = Math.max(0, Math.min(top, state.items.length - visible));
-        const list = host.live(state.dropped ?? 0);
-        if (list)
+        // A simple combo box's list is in the combo box itself.
+        host.invalidate(host.live(state.dropped ?? 0) ?? combo);
+    };
+
+    /**
+     * The rows a simple combo box's list shows, and how tall each is.
+     *
+     * @param {any} combo
+     */
+    const simpleRows = combo=>{
+        const { hdc } = host.contextOn(combo);
+        const row = hdc !== 0 ? itemHeight(combo, hdc) : 16;
+        host.endPaint(combo, hdc);
+        const { rows } = simpleParts(combo);
+        return { row, visible: Math.max(1, Math.floor((rows.bottom - rows.top) / row)) };
+    };
+
+    /**
+     * A simple combo box's list following its field as it is typed in: the
+     * first item the text begins chosen and scrolled to the top, or none
+     * (Wine's combo.c CBUpdateLBox). Nothing is said: the person chose no
+     * item.
+     *
+     * @param {any} combo
+     */
+    const followField = combo=>{
+        const state = listState(combo);
+        const text = String(combo.title).toLowerCase();
+        const index = text === '' ? -1
+            : state.items.findIndex(item=>item.text.toLowerCase().startsWith(text));
+        state.current = index;
+        if (index >= 0)
         {
-            host.invalidate(list);
+            scrollDropped(combo, index, simpleRows(combo).visible);
         }
+        host.invalidate(combo);
+    };
+
+    /**
+     * A press, a move with the thumb held, or a release in a simple combo
+     * box's list: a row is chosen as the field's text and CBN_SELCHANGE
+     * said, a double-click on one says CBN_DBLCLK, and the list's scroll bar
+     * scrolls it -- by its arrows, its track, and its thumb dragged.
+     *
+     * @param {any} combo @param {ControlMessage} message @param {unknown} [thread]
+     */
+    const simpleListMouse = (combo, message, thread)=>{
+        const state = listState(combo);
+        const point = pointOf(message.lParam);
+        const { rows } = simpleParts(combo);
+        const { row, visible } = simpleRows(combo);
+        const bar = { left: rows.right - ARROW_LENGTH, top: rows.top, right: rows.right,
+            bottom: rows.bottom };
+        const held = { min: 0, max: Math.max(0, state.items.length - 1), page: visible,
+            pos: state.top };
+        if (state.grab !== undefined)
+        {
+            scrollDropped(combo, thumbValue(bar, true, held, point.y - bar.top - state.grab),
+                visible);
+            if (message.message === WM_LBUTTONUP)
+            {
+                state.grab = undefined;
+                host.releaseCapture();
+            }
+            return 0;
+        }
+        if (message.message !== WM_LBUTTONDOWN && message.message !== WM_LBUTTONDBLCLK
+            || !contains(rows, point.x, point.y))
+        {
+            return 0;
+        }
+        if (state.items.length > visible && point.x >= bar.left)
+        {
+            const hit = scrollHit(bar, true, held, point.x, point.y);
+            if (hit === SB_THUMBTRACK)
+            {
+                state.grab = point.y - bar.top - (thumbOf(bar, true, held).thumb?.start ?? 0);
+                host.setCapture(combo.hwnd);
+                return 0;
+            }
+            scrollDropped(combo, state.top + (hit === SB_LINEUP ? -1 : hit === SB_LINEDOWN ? 1
+                : hit === SB_PAGEUP ? -visible : hit === SB_PAGEDOWN ? visible : 0), visible);
+            return 0;
+        }
+        const index = state.top + Math.floor((point.y - rows.top) / row);
+        if (index >= state.items.length)
+        {
+            return 0;
+        }
+        if (message.message === WM_LBUTTONDBLCLK)
+        {
+            return notify(combo, CBN_DBLCLK, thread);
+        }
+        if (index === state.current)
+        {
+            return 0;
+        }
+        combo.title = state.items[index].text;
+        return chooseItem(combo, index, CBN_SELCHANGE, true, thread);
     };
 
     /**
@@ -3123,6 +3475,7 @@ export function createControlProcedures(host){
         const state = listState(record);
         const sorted = (record.style & CBS_SORT) !== 0;
         const editable = comboEditable(record);
+        const simple = (record.style & CBS_TYPEMASK) === CBS_SIMPLE;
         const asList = comboAsList(message.message);
         if (asList !== null)
         {
@@ -3165,15 +3518,24 @@ export function createControlProcedures(host){
             case WM_DESTROY:
                 return after(closeList(record, false, thread), ()=>common(record, message, thread));
             case WM_MOUSEWHEEL: {
+                if (simple)
+                {
+                    scrollDropped(record, state.top + wheelRows(message.wParam),
+                        simpleRows(record).visible);
+                    return 0;
+                }
                 if ((state.dropped ?? 0) === 0)
                 {
                     return common(record, message, thread);
                 }
                 const { rows } = droppedRows(record);
-                const notches = Math.trunc(((message.wParam >>> 16) << 16 >> 16) / 120);
-                scrollDropped(record, state.top - notches * WHEEL_ITEMS, rows);
+                scrollDropped(record, state.top + wheelRows(message.wParam), rows);
                 return 0;
             }
+            case WM_MOUSEMOVE:
+            case WM_LBUTTONUP:
+                return simple ? simpleListMouse(record, message, thread)
+                    : common(record, message, thread);
             case WM_SYSKEYDOWN: {
                 const key = message.wParam & 0xff;
                 if (key !== VK_DOWN && key !== VK_UP)
@@ -3187,9 +3549,16 @@ export function createControlProcedures(host){
             case WM_LBUTTONDBLCLK: {
                 // A click in the field of an editable combo puts the caret
                 // where it landed, as a click in an edit does; one on the
-                // drop button, or anywhere on a dropdown list, drops the list.
+                // drop button, or anywhere on a dropdown list, drops the list;
+                // one in a simple combo box's list is the list's.
                 const point = pointOf(message.lParam);
-                if (editable && point.x < host.clientSize(record).width - COMBO_BUTTON - 2)
+                if (simple && point.y >= simpleParts(record).field.bottom)
+                {
+                    return after(host.setFocus(record.hwnd, thread),
+                        ()=>simpleListMouse(record, message, thread));
+                }
+                if (editable && (simple
+                    || point.x < host.clientSize(record).width - COMBO_BUTTON - 2))
                 {
                     const { hdc } = host.contextOn(record);
                     if (hdc !== 0)
@@ -3207,10 +3576,18 @@ export function createControlProcedures(host){
                     ? closeList(record, false, thread) : dropList(record, thread)));
             }
             case WM_CHAR:
-                return editable
-                    ? editCharacter(record, message.wParam & 0xffff, thread,
-                        COMBO_NOTICES, false)
-                    : 0;
+                if (!editable)
+                {
+                    return 0;
+                }
+                return after(editCharacter(record, message.wParam & 0xffff, thread,
+                    COMBO_NOTICES, false), answer=>{
+                    if (simple)
+                    {
+                        followField(record);
+                    }
+                    return answer;
+                });
             case WM_KEYDOWN: {
                 const key = message.wParam & 0xff;
                 if (key === VK_F4)
@@ -3276,6 +3653,13 @@ export function createControlProcedures(host){
                 if (index === state.current)
                 {
                     return 0;
+                }
+                if (simple)
+                {
+                    // The item chosen is scrolled into the rows that show.
+                    const { visible } = simpleRows(record);
+                    scrollDropped(record, index < state.top ? index
+                        : index >= state.top + visible ? index - visible + 1 : state.top, visible);
                 }
                 record.title = state.items[index].text;
                 return chooseItem(record, index, CBN_SELCHANGE, true, thread);
@@ -3396,40 +3780,32 @@ export function createControlProcedures(host){
             : { ...rect, left: rect.right - arrow };
         arrowButton(first, -1);
         arrowButton(last, 1);
-        const track = length - 2 * arrow;
-        const range = Math.max(1, held.max - held.min + 1);
-        if (track <= 0 || range <= Math.max(held.page, 1) && held.page > 0)
+        const { thumb: part } = thumbOf(rect, vertical, held);
+        if (!part)
         {
             return;
         }
-        const thumbLength = held.page > 0
-            ? Math.max(8, Math.floor(track * Math.min(held.page, range) / range))
-            : Math.min(track, ARROW_LENGTH);
-        const travel = track - thumbLength;
-        const ceiling = Math.max(1, held.max - held.min - Math.max(held.page - 1, 0));
-        const offset = Math.floor(travel * Math.min(held.pos - held.min, ceiling) / ceiling);
         const thumb = vertical
-            ? { ...rect, top: rect.top + arrow + offset,
-                bottom: rect.top + arrow + offset + thumbLength }
-            : { ...rect, left: rect.left + arrow + offset,
-                right: rect.left + arrow + offset + thumbLength };
+            ? { ...rect, top: rect.top + part.start, bottom: rect.top + part.start + part.length }
+            : { ...rect, left: rect.left + part.start,
+                right: rect.left + part.start + part.length };
         draw.fill(hdc, thumb, color(COLOR_3DFACE));
         buttonEdge(hdc, thumb, false);
     };
 
     /**
-     * What a click on a scroll bar means: an arrow scrolls a line, the track
-     * either side of the thumb scrolls a page. The thumb is not dragged.
+     * What a press on a scroll bar means: an arrow scrolls a line, the track
+     * either side of the thumb scrolls a page, and the thumb is taken to be
+     * dragged, SB_THUMBTRACK.
      *
      * @param {Rect} rect @param {boolean} vertical
      * @param {ScrollBarState} held
      * @param {number} x @param {number} y
-     * @returns {number} an SB_ code, or SB_ENDSCROLL for a miss
+     * @returns {number} an SB_ code, or SB_ENDSCROLL for a track with no thumb on it
      */
     const scrollHit = (rect, vertical, held, x, y)=>{
         const along = vertical ? y - rect.top : x - rect.left;
-        const length = vertical ? rect.bottom - rect.top : rect.right - rect.left;
-        const arrow = Math.min(ARROW_LENGTH, Math.floor(length / 2));
+        const { arrow, length, thumb } = thumbOf(rect, vertical, held);
         if (along < arrow)
         {
             return SB_LINEUP;
@@ -3438,19 +3814,12 @@ export function createControlProcedures(host){
         {
             return SB_LINEDOWN;
         }
-        const track = length - 2 * arrow;
-        const range = Math.max(1, held.max - held.min + 1);
-        const thumbLength = held.page > 0
-            ? Math.max(8, Math.floor(track * Math.min(held.page, range) / range))
-            : Math.min(track, ARROW_LENGTH);
-        const ceiling = Math.max(1, held.max - held.min - Math.max(held.page - 1, 0));
-        const offset = Math.floor((track - thumbLength)
-            * Math.min(held.pos - held.min, ceiling) / ceiling);
-        if (along - arrow < offset)
+        if (!thumb)
         {
-            return SB_PAGEUP;
+            return SB_ENDSCROLL;
         }
-        return along - arrow >= offset + thumbLength ? SB_PAGEDOWN : SB_ENDSCROLL;
+        return along < thumb.start ? SB_PAGEUP
+            : along >= thumb.start + thumb.length ? SB_PAGEDOWN : SB_THUMBTRACK;
     };
 
     /**
@@ -3475,15 +3844,58 @@ export function createControlProcedures(host){
                 return DLGC_WANTARROWS;
             case WM_LBUTTONDOWN: {
                 const point = pointOf(message.lParam);
-                const code = scrollHit(clientRect(record), vertical, held, point.x, point.y);
+                const rect = clientRect(record);
+                const code = scrollHit(rect, vertical, held, point.x, point.y);
                 if (code === SB_ENDSCROLL || !record.parent)
                 {
+                    return 0;
+                }
+                if (code === SB_THUMBTRACK)
+                {
+                    // Held by the thumb: the pointer's distance into it
+                    // stays as the thumb follows the pointer.
+                    const own = stateOf(record);
+                    own.grab = (vertical ? point.y : point.x)
+                        - (thumbOf(rect, vertical, held).thumb?.start ?? 0);
+                    own.tracked = held.pos;
+                    host.setCapture(record.hwnd);
                     return 0;
                 }
                 // The parent moves the position: the control only reports
                 // which way, as the real one does.
                 return host.send(record.parent, vertical ? WM_VSCROLL : WM_HSCROLL,
                     code, record.hwnd, thread);
+            }
+            case WM_MOUSEMOVE:
+            case WM_LBUTTONUP: {
+                const own = stateOf(record);
+                if (own.grab === undefined || !record.parent)
+                {
+                    return 0;
+                }
+                // SB_THUMBTRACK as the thumb moves, SB_THUMBPOSITION and
+                // SB_ENDSCROLL where it is let go; the parent sets the
+                // position.
+                const point = pointOf(message.lParam);
+                const value = thumbValue(clientRect(record), vertical, held,
+                    (vertical ? point.y : point.x) - own.grab);
+                const scroll = vertical ? WM_VSCROLL : WM_HSCROLL;
+                if (message.message === WM_MOUSEMOVE)
+                {
+                    if (value === own.tracked)
+                    {
+                        return 0;
+                    }
+                    own.tracked = value;
+                    held.trackPos = value;
+                    return host.send(record.parent, scroll, (SB_THUMBTRACK | value << 16) >>> 0,
+                        record.hwnd, thread);
+                }
+                own.grab = undefined;
+                host.releaseCapture();
+                return after(host.send(record.parent, scroll,
+                    (SB_THUMBPOSITION | value << 16) >>> 0, record.hwnd, thread),
+                ()=>host.send(record.parent, scroll, SB_ENDSCROLL, record.hwnd, thread));
             }
             case SBM_SETPOS: {
                 const previous = held.pos;

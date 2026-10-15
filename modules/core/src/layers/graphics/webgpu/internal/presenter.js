@@ -158,6 +158,9 @@ const six = value=>(value << 2) | (value >>> 4);
  * @property {number} bitCount  8, 16 or 32.
  * @property {number[] | null} palette  PALETTEENTRY dwords for an 8-bit surface.
  * @property {string} [label]   What the surface is, for the record of what was shown.
+ * @property {() => unknown} [prepare]  Brings the pixels up to date, called once a
+ *     burst is flushed and just before they are read: a composed screen is
+ *     composed once a frame, not at every draw of the burst.
  */
 
 /**
@@ -681,6 +684,7 @@ export function createPresenter(options = {}){
             counters.dropped++;
             return undefined;
         }
+        surface.prepare?.();
         const owner = from.claims.get(surface.buffer);
         if (owner)
         {
@@ -881,6 +885,8 @@ export function createPresenter(options = {}){
      * @type {Map<number, { texture: any, width: number, height: number, format: string }>}
      */
     const layers = new Map();
+    /** @type {Record<string, number>} frames shown or kept, by the process that drew them */
+    const framesFrom = {};
     /** @type {{ texture: any, width: number, height: number, format: string } | null} */
     let composed = null;
 
@@ -999,6 +1005,8 @@ export function createPresenter(options = {}){
      * @param {any} frame
      */
     const show = frame=>{
+        const from = frame.source === undefined ? 'unnamed' : String(frame.source >>> 0);
+        framesFrom[from] = (framesFrom[from] ?? 0) + 1;
         if (frame.source === undefined || !options.windows || !gpu || !queue || !screen)
         {
             showNow(frame);
@@ -1198,6 +1206,11 @@ export function createPresenter(options = {}){
         diagnostics(){
             return {
                 ...counters,
+                // Whose frames reached the canvas copy, by process, and whose
+                // pictures are kept to compose the screen of.
+                framesFrom: { ...framesFrom },
+                layers: [...layers.keys()],
+                composes: Boolean(options.windows),
                 shownBy: { ...shownBy },
                 lastBuffer,
                 pending: pending !== null,

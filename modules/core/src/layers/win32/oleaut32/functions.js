@@ -198,6 +198,8 @@ const NORM_IGNORECASE = 1;
  *           A stdcall into guest code, which is what ITypeInfo::Invoke is, and
  *           an interface's AddRef and Release are.
  * @property {() => unknown} [callerThread]  The thread whose call this is.
+ * @property {Map<unknown, number>} [errorSlots]  Each thread's error information,
+ *           shared with whoever else sets or takes it for a thread.
  * @property {() => number} [systemTimeMs]  The guest's wall clock, milliseconds
  *           since 1970: the year a date written without one is in. Without it
  *           such a date is refused, and said so.
@@ -255,8 +257,16 @@ export function createAutomationFunctions(host){
         host.writeMemory(address, bytes);
     };
 
-    /** The IErrorInfo a program last set and nothing has yet collected. */
-    let heldErrorInfo = 0;
+    /**
+     * The IErrorInfo each thread last set and has not yet collected, by the
+     * thread: one thread's error is not another's to find. An installer's
+     * script engine reads the slot after every call it makes into a library
+     * and fails the call when something is there -- a slot shared with its
+     * other threads failed calls that had succeeded.
+     *
+     * @type {Map<unknown, number>}
+     */
+    const heldErrorInfo = host.errorSlots ?? new Map();
 
     /** @param {number} low @param {number} high */
     const doubleOf = (low, high)=>{
@@ -2574,13 +2584,18 @@ export function createAutomationFunctions(host){
          * HRESULT SetErrorInfo(ULONG dwReserved, IErrorInfo *perrinfo)
          * HRESULT GetErrorInfo(ULONG dwReserved, IErrorInfo **pperrinfo)
          *
-         * The one error-information slot, per thread on Windows and one for
-         * the process here, where a single thread makes these calls. Getting
+         * The error-information slot, one per thread as on Windows. Getting
          * it hands the interface over and clears the slot, which is why a
          * caller that gets it twice finds nothing the second time; a call
          * with no reference held answers S_FALSE with a null, the documented
          * shape a caller checks before it dereferences. The reserved word must be
          * zero, E_INVALIDARG otherwise, as ole32's errorinfo tests read it.
+         *
+         * The slot holds a reference of its own: Set adds one to the object it
+         * is given and releases the one it held, and Get hands its reference
+         * to the caller. A setter releases its own at once -- InstallShield's
+         * kernel does -- and a slot that took no reference held an object
+         * already gone, whose methods the next reader called.
          */
         SetErrorInfo: {
             argBytes: 8,
@@ -2590,8 +2605,19 @@ export function createAutomationFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                heldErrorInfo = errorInfo >>> 0;
-                return S_OK;
+                const thread = host.callerThread?.() ?? null;
+                const held = heldErrorInfo.get(thread) ?? 0;
+                const given = errorInfo >>> 0;
+                if (given === 0)
+                {
+                    heldErrorInfo.delete(thread);
+                }
+                else
+                {
+                    heldErrorInfo.set(thread, given);
+                }
+                return settle({ addRef: given !== 0 ? [given] : [],
+                    release: held !== 0 ? [held] : [] }, thread, S_OK);
             },
         },
 
@@ -2603,8 +2629,9 @@ export function createAutomationFunctions(host){
                 {
                     return E_INVALIDARG;
                 }
-                const held = heldErrorInfo;
-                heldErrorInfo = 0;
+                const thread = host.callerThread?.() ?? null;
+                const held = heldErrorInfo.get(thread) ?? 0;
+                heldErrorInfo.delete(thread);
                 if ((out >>> 0) !== 0)
                 {
                     writeU32(out >>> 0, held);
@@ -2935,17 +2962,14 @@ export function createAutomationFunctions(host){
                 {
                     return at.error;
                 }
-                if ((pv >>> 0) === 0)
-                {
-                    return E_INVALIDARG;
-                }
                 const { features, elementBytes } = at.array;
                 if ((features & FADF_BSTR) !== 0)
                 {
-                    // The argument is the BSTR itself, not a pointer to one.
+                    // The argument is the BSTR itself, not a pointer to one;
+                    // NULL is the empty string, as SysStringByteLen reads it.
                     const source = pv >>> 0;
-                    const copy = allocateBstr(
-                        host.readMemory(source, byteLengthOf(source)).slice());
+                    const copy = allocateBstr(source === 0 ? new Uint8Array(0)
+                        : host.readMemory(source, byteLengthOf(source)).slice());
                     if (copy === 0)
                     {
                         return E_OUTOFMEMORY;
@@ -2958,11 +2982,19 @@ export function createAutomationFunctions(host){
                 const owed = nothingOwed();
                 if ((features & (FADF_UNKNOWN | FADF_DISPATCH)) !== 0)
                 {
-                    // Like the other types, the argument is the value itself.
-                    owed.addRef.push(pv >>> 0);
+                    // Like the other types, the argument is the value itself;
+                    // NULL empties the slot.
+                    if ((pv >>> 0) !== 0)
+                    {
+                        owed.addRef.push(pv >>> 0);
+                    }
                     releaseElement(features, at.address, owed);
                     writeU32(at.address, pv >>> 0);
                     return settle(owed, thread, S_OK);
+                }
+                if ((pv >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
                 }
                 if ((features & FADF_VARIANT) !== 0)
                 {

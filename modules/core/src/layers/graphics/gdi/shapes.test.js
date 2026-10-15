@@ -97,12 +97,16 @@ test('Rectangle outlines the half-open box and fills what is left', ()=>{
     assert.equal(surface.read(5, 4), BRUSH_PIXEL);
 });
 
-test('a null pen leaves the boundary to whatever was there', ()=>{
+test('a null pen fills from the corner, one pixel short of the right and bottom', ()=>{
+    // The documented rule: with PS_NULL the rectangle is one pixel less wide
+    // and high, the brush taking the place the outline's top and left had.
     const surface = canvas(8, 8);
     rectangle(createPainter(surface), { left: 1, top: 1, right: 5, bottom: 5 },
         NULL_PEN, BRUSH);
-    assert.equal(surface.read(1, 1), BACKGROUND);
-    assert.equal(surface.read(2, 2), BRUSH_PIXEL);
+    assert.equal(surface.read(1, 1), BRUSH_PIXEL);
+    assert.equal(surface.read(3, 3), BRUSH_PIXEL);
+    assert.equal(surface.read(4, 3), BACKGROUND);
+    assert.equal(surface.read(3, 4), BACKGROUND);
 });
 
 test('LineTo paints its start and not its endpoint', ()=>{

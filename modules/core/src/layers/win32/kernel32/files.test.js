@@ -2176,6 +2176,21 @@ test('a library this build implements stands in the system folder as a file', ()
     'a file on the volume is the file');
 });
 
+test('a library standing in the system folder is replaced by a setup that writes it', ()=>{
+    // A game's DXSETUP opened d3dx9_26.dll there to see whether it was in
+    // use, was refused, and put its copy off to a restart. Written, the name
+    // becomes the setup's file; read, it is still the engine's.
+    const { files, fns, at } = setup({ systemLibraries: ()=>['d3dx9_26.dll'] });
+    const path = 'C:\\WINDOWS\\system32\\d3dx9_26.dll';
+    assert.equal(fns.CreateFileA.handler([at(NAME, path), GENERIC_READ, 1, 0, OPEN_EXISTING,
+        0, 0]), INVALID_HANDLE_VALUE, 'nothing to read');
+    const handle = fns.CreateFileA.handler([at(NAME, path), GENERIC_WRITE, 3, 0, OPEN_EXISTING,
+        0, 0]);
+    assert.notEqual(handle, INVALID_HANDLE_VALUE, 'open to be written');
+    assert.equal(fns.CloseHandle.handler([handle]), 1);
+    assert.ok(files.stat(path)?.exists, 'and a file on the volume now');
+});
+
 test('a read through an OVERLAPPED moves a synchronous handle\'s pointer, not an overlapped one\'s',
     ()=>{
         const { memory, files, fns, open } = setup({ ports: {

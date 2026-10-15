@@ -170,13 +170,28 @@ export function createRpcFunctions(host){
          * RPC_STATUS UuidFromStringA(RPC_CSTR StringUuid, UUID *Uuid)
          *
          * The string form has no braces, unlike the one COM speaks; a NULL
-         * string is the nil UUID.
+         * string is the nil UUID. One longer than a UUID's spelling -- COM's,
+         * braces and all, which InstallShield hands it -- is not one:
+         * RPC_S_INVALID_STRING_UUID, read no further than a UUID reaches.
          */
         UuidFromStringA: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([text, out])=>uuidFromString((text >>> 0) === 0 ? null
-                : host.readCString?.(text >>> 0, UUID_STRING_LENGTH + 1) ?? '', out),
+            handler: ([text, out])=>{
+                if ((text >>> 0) === 0)
+                {
+                    return uuidFromString(null, out);
+                }
+                let spelled;
+                try
+                {
+                    spelled = host.readCString?.(text >>> 0, UUID_STRING_LENGTH + 1) ?? '';
+                }
+                catch {
+                    return RPC_S_INVALID_STRING_UUID;
+                }
+                return uuidFromString(spelled, out);
+            },
         },
 
         /** RPC_STATUS UuidFromStringW(RPC_WSTR StringUuid, UUID *Uuid) -- in UTF-16. */

@@ -359,3 +359,25 @@ None yet.
   splitting the loop made more regions and more interpreted entries, not fewer.
 - **Decision.** Both reverted. What paid was the interpreter's own speed on MMX: the wasm tier
   runs the MMX forms (the every-call case 38.6 s to 3.1 s).
+
+### 2026-10-14 -- An indexed draw's dynamic vertices compared over the range its indices name (optional)
+
+- **Idea.** A recording that sends a dynamic buffer's changed bytes with each draw
+  (`drawsFrom`) compares the draw's declared vertex range against what was sent. A Direct3D 9
+  program that declares most of a buffer as each draw's range had it compared draw after draw.
+  The idea: read the draw's indices from guest memory and compare only from the lowest vertex
+  they name to the highest, when reading them costs less than comparing the declared range.
+- **Workload.** A first-person shooter demo through the graphics worker, the first seconds of
+  its first level, the player standing. Two arms, each on its own fresh start to that spot:
+  before (`585e5774` plus the session's uncommitted tree) and the idea. Two 10 s windows each.
+  Diagnostics build.
+- **Values.** Bytes compared per frame: before 34.5 and 36.4 MB, idea 19.9 and 18.8 MB. The
+  ring replay's host time (`ring-take`): before 8.1 ms a frame, idea 6.6 ms. Frames per
+  second: before 12.6 and 18.9, idea 13.2, 13.3 and 15.9. The frame was about 53-63 ms, of
+  which the guest's code was 32-37 ms. Noise floor: the arms' own spread, 12.6-18.9 fps.
+- **Machine.** Parallels VM on Apple silicon, Windows 11, Chrome, Parallels GPU. Power plan:
+  not recorded.
+- **Why it did not pay.** The comparing it saved was about 1.5 ms of a 55 ms frame, below the
+  spread between runs; the frame is the guest's code. One screenshot of the idea's run showed
+  streaks over the road that the same spot before did not, not followed up.
+- **Decision.** Reverted, then put back the same day at the person's word (optional): what crosses to the graphics worker is what a heavy scene is bound by -- 30-55 MB/s in a fight of a third-person action demo, its worker parsing 200-260 ms of every 500 -- and less of it is the lever there. The streaks are to be checked.

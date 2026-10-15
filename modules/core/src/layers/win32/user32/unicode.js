@@ -57,8 +57,14 @@ const CB_FINDSTRINGEXACT = 0x0158;
 const ITEM_STRING_IN = new Set([LB_ADDSTRING, LB_INSERTSTRING, LB_SELECTSTRING, LB_FINDSTRING,
     LB_FINDSTRINGEXACT, CB_ADDSTRING, CB_INSERTSTRING, CB_FINDSTRING, CB_SELECTSTRING,
     CB_FINDSTRINGEXACT]);
-/** The messages whose string is a path, whatever the box keeps. */
-const PATH_IN = new Set([LB_DIR, CB_DIR]);
+/** An edit's replacement text, and the line it copies out. */
+const EM_REPLACESEL = 0x00c2;
+const EM_GETLINE = 0x00c4;
+/**
+ * The messages whose lParam is a string whatever the window keeps: a path,
+ * an edit's replacement text.
+ */
+const PATH_IN = new Set([LB_DIR, CB_DIR, EM_REPLACESEL]);
 /** The messages that fill a buffer with an item's string, and the length each is asked. */
 const ITEM_STRING_OUT = new Map([[LB_GETTEXT, LB_GETTEXTLEN], [CB_GETLBTEXT, CB_GETLBTEXTLEN]]);
 const LBS_OWNERDRAW = 0x0030;
@@ -288,6 +294,38 @@ export function translated(memory, message, toUnicode, call, style = undefined){
             return lending(memory, size, ()=>new Uint8Array(size),
                 into=>andThen(call({ ...converted, lParam: into }), ()=>writeText(memory,
                     message.lParam, readText(memory, into, toUnicode, room), room, fromUnicode)));
+        }
+        case EM_GETLINE:
+        {
+            if ((message.lParam >>> 0) === 0 || !memory.allocate)
+            {
+                return call(converted);
+            }
+            // The buffer's first word is its room, in the caller's characters.
+            // The line is fetched in the procedure's encoding, into room for as
+            // many of its characters, and copied over unterminated, as
+            // EM_GETLINE leaves it; the answer counts what the caller's
+            // buffer took.
+            const head = memory.readMemory(message.lParam >>> 0, 2);
+            const room = head[0] | head[1] << 8;
+            const size = room * 2 + 2;
+            return lending(memory, size, ()=>{
+                const bytes = new Uint8Array(size);
+                const units = toUnicode ? room : room * 2;
+                bytes[0] = units & 0xff;
+                bytes[1] = units >>> 8;
+                return bytes;
+            }, into=>andThen(call({ ...converted, lParam: into }), count=>{
+                const got = Math.max(0, count | 0);
+                const raw = memory.readMemory(into, toUnicode ? got * 2 : got);
+                const text = toUnicode
+                    ? String.fromCharCode(...new Uint16Array(raw.slice().buffer, 0, got))
+                    : decodeAnsi(raw);
+                const bytes = textBytes(text.slice(0, room), fromUnicode);
+                const written = bytes.subarray(0, bytes.length - (fromUnicode ? 2 : 1));
+                memory.writeMemory(message.lParam >>> 0, written);
+                return fromUnicode ? written.length / 2 : written.length;
+            }));
         }
         case LB_GETTEXT:
         case CB_GETLBTEXT:

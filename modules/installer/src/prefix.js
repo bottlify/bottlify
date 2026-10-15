@@ -20,17 +20,19 @@
  * answer as mounting it read-only beside the prefix and one the engine can give
  * today.
  *
- * What comes out is a tree relative to a root, because a bundle is mounted at
- * one directory and a prefix is a whole volume. The root is where the install
- * told Windows it put the application -- the InstallLocation of its uninstall
- * entry -- and, for an install that recorded none, a rule about layouts, never
- * about titles: the shallowest directory holding an executable, ignoring the
- * places the system itself lives. It is reported so a caller can disagree, and
- * overridden by naming one.
+ * What comes out is everything the installation wrote on C:, by its path from
+ * the drive's root, and the bottle is mounted back at that root: no directory
+ * is guessed to be "the" installation, so nothing a setup spread elsewhere --
+ * a shared runtime, the data beside a Bin directory, a settings file in the
+ * Windows directory -- is left behind. Only the run's scratch stays out: the
+ * temporary directories, and the distribution unpacked beside itself when the
+ * installation went somewhere else. A system library it put in system32 is
+ * carried too; the engine's own answers that name there all the same.
  */
 
 import { launcherPlan } from './is5stub.js';
 import { windowsChoice } from './windows.js';
+import { atPath, sizeOf } from './chunks.js';
 
 /** Where the distribution is put so the guest can read its own file. */
 export const MEDIA_DIRECTORY = 'C:\\Install';
@@ -45,28 +47,39 @@ export const MEDIA_DIRECTORY = 'C:\\Install';
  */
 export const REGISTRY_PATH = '.bottlify\\registry.json';
 
-/**
- * Where what the installation added to `C:\WINDOWS\system32` travels inside
- * the tree -- the libraries its DirectX setup installed, say -- beside the
- * registry. The engine mounts it back in system32 when the bottle runs (core's
- * `BOTTLE_SYSTEM_PATH`, the same path).
- */
-export const SYSTEM_PATH = '.bottlify\\system32';
+/** Where every bottle is taken from, and mounted back at. */
+export const DRIVE_ROOT = 'C:\\';
 
-/** The system directory on any drive, folded. */
-const SYSTEM32 = /^[a-z]:\\windows\\system32\\/;
+/**
+ * The places a run leaves what nothing reads again, folded: Windows' and each
+ * user's temporary directories, where a setup unpacks itself; and what a
+ * setup keeps of itself for a later repair or removal -- InstallShield's copy
+ * of the whole package, Windows Installer's cache, the maintenance engine and
+ * its script, the copies a DirectX setup leaves for File Protection and its
+ * component packages -- which only Add or Remove Programs or Windows itself
+ * ever reads, and which ran to nearly half a bottle.
+ */
+const SCRATCH = new RegExp('^c:\\\\(windows\\\\temp|temp'
+    + '|documents and settings\\\\[^\\\\]+\\\\local settings\\\\temp'
+    + '|windows\\\\downloaded installations|windows\\\\installer'
+    + '|windows\\\\system32\\\\dllcache|windows\\\\registeredpackages'
+    + '|program files\\\\installshield installation information'
+    + '|program files\\\\common files\\\\installshield)\\\\');
+
+/** A shortcut: what a setup leaves on the desktop and in the Start menu. */
+const SHORTCUT = /\.(lnk|pif|url)$/;
 
 /** Where the engine mounts a bundle that says nothing of where it belongs. */
 const DEFAULT_PLACE = 'App';
 
 /**
- * Where a bottle is mounted and its program started from: the directory its
- * installation put it in, which the manifest records as `root`, so what the
- * installation wrote about that place -- the install path in the registry, a
- * launcher's working directory -- is true of the bottle. A bottle made by
- * hand, or before the root was recorded, has none, and neither has one
- * installed on a drive other than C: -- the drive a bundle is mounted on --
- * and those go where the engine puts a bundle by default.
+ * Where a bottle is mounted and its program started from: the directory the
+ * manifest records as `root` -- the drive's root for every bottle made now,
+ * one installation directory for one made before -- so what the installation
+ * wrote about its places is true of the bottle. A bottle made by hand has
+ * none, and neither has one installed on a drive other than C: -- the drive a
+ * bundle is mounted on -- and those go where the engine puts a bundle by
+ * default.
  *
  * @param {{ entry: string, root?: unknown }} manifest
  * @returns {{ prefix: string, imagePath: string }}  `prefix` is the directory
@@ -78,15 +91,6 @@ export function placementOf(manifest){
     const prefix = onC ? onC[1].replace(/\\+$/, '') : DEFAULT_PLACE;
     return { prefix, imagePath: `C:\\${prefix ? `${prefix}\\` : ''}${manifest.entry}` };
 }
-
-/**
- * Directories a program is entitled to write to that are not part of what was
- * installed. The system's own tree is recreated by the engine, not carried.
- */
-// The system's own directories, and the copy of its setup InstallShield keeps
-// for maintenance beside the program it installed.
-const SYSTEM_ROOTS = ['windows', 'temp', 'tmp', 'program files\\common files',
-    'program files\\installshield installation information'];
 
 /**
  * @typedef {Object} MediaFile
@@ -108,34 +112,25 @@ const SYSTEM_ROOTS = ['windows', 'temp', 'tmp', 'program files\\common files',
 
 /**
  * @typedef {Object} PrefixFile
- * @property {string} path    Backslash-separated, relative to the chosen root.
- * @property {Uint8Array} bytes
+ * @property {string} path    Backslash-separated, relative to the root.
+ * @property {Uint8Array} bytes   Whole; a getter for a file of `pieces`.
+ * @property {number} [size]
+ * @property {(Uint8Array | null | undefined)[]} [pieces]  As the volume kept it (`chunks.js`).
  */
 
 /**
  * @typedef {Object} Prefix
- * @property {string} root          Absolute guest path the tree was taken from.
- * @property {PrefixFile[]} files   Everything under it, the registry and what the
- *                                  install added to system32 (`SYSTEM_PATH`) included.
- * @property {string[]} outside     Absolute paths neither the root nor system32 covers.
- * @property {string[]} [directories]  The empty directories the install made under the
- *                                  root, relative to it, which a list of files cannot carry.
- * @property {string[]} [answered]  What the install put in system32 that names a
- *                                  library the engine synthesises itself: not carried.
+ * @property {string} root          Where the tree was taken from: `DRIVE_ROOT`.
+ * @property {PrefixFile[]} files   Everything under it, the registry included.
+ * @property {string[]} outside     Absolute paths the bottle leaves: the temporary
+ *                                  directories, the unpacked distribution, other drives.
+ * @property {string[]} [directories]  The empty directories the install made, relative
+ *                                  to the root, which a list of files cannot carry.
  * @property {string | null} entry  Best guess at the program to start.
  */
 
 /** @param {string} path */
 const fold = path=>path.toLowerCase();
-
-/** A library's file name as the engine keys it: no case, `.dll` optional. @param {string} name */
-const libraryKey = name=>fold(name).replace(/\.dll$/, '');
-
-/** @param {string} path @returns {string} */
-const directoryOf = path=>{
-    const cut = path.lastIndexOf('\\');
-    return cut < 0 ? '' : path.slice(0, cut);
-};
 
 /**
  * The options `createApp` needs to run a distribution in a prefix of its own.
@@ -183,130 +178,8 @@ export function prefixOptions(media, under = {}){
 }
 
 /**
- * Picks the directory that is the installation.
- *
- * Shallowest wins, and among equals the one holding the most files, because an
- * installer that writes a shortcut into one directory and the game into another
- * has put the game in the larger. A tree with no executable anywhere has no
- * installation in it and the volume root is the honest answer.
- *
- * @param {{ path: string }[]} entries  Absolute guest paths.
- * @returns {string}
- */
-export function chooseRoot(entries){
-    /** @type {Map<string, number>} */
-    const weight = new Map();
-    for (const entry of entries)
-    {
-        const directory = directoryOf(entry.path);
-        const rest = fold(directory).replace(/^[a-z]:\\/, '');
-        if (SYSTEM_ROOTS.some(root=>rest === root || rest.startsWith(`${root}\\`)))
-        {
-            continue;
-        }
-        if (!fold(entry.path).endsWith('.exe'))
-        {
-            continue;
-        }
-        weight.set(directory, (weight.get(directory) ?? 0) + 1);
-    }
-    if (weight.size === 0)
-    {
-        return entries.length > 0 ? `${entries[0].path.slice(0, 2)}\\` : 'C:\\';
-    }
-
-    // The media's own directory holds the distribution, and what an installer
-    // unpacks beside itself there -- a self-extractor's payload, the setup it
-    // then starts -- is the distribution too, however shallow. Only when
-    // nothing went anywhere else is it the installation, as for an archive
-    // that unpacks the game itself.
-    const media = fold(`${MEDIA_DIRECTORY}\\`);
-    const elsewhere = [...weight.entries()]
-        .filter(([directory])=>!fold(`${directory}\\`).startsWith(media));
-    const depth = (/** @type {string} */ path)=>path.split('\\').length;
-    return (elsewhere.length > 0 ? elsewhere : [...weight.entries()]).sort((a, b)=>
-        depth(a[0]) - depth(b[0]) || b[1] - a[1] || (a[0] < b[0] ? -1 : 1))[0][0];
-}
-
-/** The hive's two roots an application's uninstall entry is written under. */
-const HKEY_CURRENT_USER = 0x80000001;
-const HKEY_LOCAL_MACHINE = 0x80000002;
-/** Where Add or Remove Programs finds what is installed, one subkey a program. */
-const UNINSTALL = ['software', 'microsoft', 'windows', 'currentversion', 'uninstall'];
-const REG_SZ = 1;
-const REG_EXPAND_SZ = 2;
-
-/**
- * Every InstallLocation the install recorded under an Uninstall entry: the
- * directory an installer tells Windows it put the application in, which is
- * what Add or Remove Programs shows and removes. String data is kept in the
- * ANSI page whichever entry point wrote it, so it is read as that page.
- *
- * @param {any} registry  The hive, as `toJSON` gives it.
- * @returns {string[]}
- */
-export function installLocations(registry){
-    const ansi = new TextDecoder('windows-1252');
-    /** @type {string[]} */
-    const found = [];
-    for (const { id, key } of registry?.roots ?? [])
-    {
-        if ((id >>> 0) !== HKEY_LOCAL_MACHINE && (id >>> 0) !== HKEY_CURRENT_USER)
-        {
-            continue;
-        }
-        let at = key;
-        for (const part of UNINSTALL)
-        {
-            at = (at?.keys ?? []).find((/** @type {any} */ child)=>fold(child.name) === part);
-        }
-        for (const entry of at?.keys ?? [])
-        {
-            const value = (entry.values ?? []).find((/** @type {any} */ one)=>
-                fold(one.name) === 'installlocation'
-                && (one.type === REG_SZ || one.type === REG_EXPAND_SZ));
-            const text = value ? ansi.decode(Uint8Array.from(value.data)).replace(/\0.*$/s, '')
-                .trim().replace(/[\\/]+$/, '') : '';
-            if (/^[a-z]:\\/i.test(text))
-            {
-                found.push(text);
-            }
-        }
-    }
-    return found;
-}
-
-/**
- * The installation the install itself named: of the locations its uninstall
- * entries record, the one holding the most of the executables it produced,
- * spelt as the volume spells it. Null when none holds any -- an entry that
- * names nothing this install wrote is another program's, or a location the
- * program was moved from.
- *
- * @param {{ path: string }[]} produced  Absolute guest paths.
- * @param {any} registry
- * @returns {string | null}
- */
-function recordedRoot(produced, registry){
-    let best = null;
-    let most = 0;
-    for (const location of installLocations(registry))
-    {
-        const under = fold(`${location}\\`);
-        const executables = produced.filter(file=>fold(file.path).startsWith(under)
-            && fold(file.path).endsWith('.exe'));
-        if (executables.length > most)
-        {
-            most = executables.length;
-            best = executables[0].path.slice(0, location.length);
-        }
-    }
-    return best;
-}
-
-/**
  * The entry point a bundle will be started from: the largest executable that
- * does not name itself a setup program.
+ * does not name itself a setup program, outside the Windows directory.
  *
  * A guess, corrected in the manifest by hand, which is why the manifest is a
  * separate file. The words matched are what such programs are called, not what
@@ -317,75 +190,54 @@ function recordedRoot(produced, registry){
  */
 export function guessEntry(files){
     const executables = files
-        .filter(file=>fold(file.path).endsWith('.exe'))
+        .filter(file=>fold(file.path).endsWith('.exe') && !fold(file.path).startsWith('windows\\'))
         .filter(file=>!/(unins|setup|install|patch|repair|launcher)/i.test(file.path))
-        .sort((a, b)=>b.bytes.length - a.bytes.length);
+        .sort((a, b)=>sizeOf(b) - sizeOf(a));
     return executables[0]?.path ?? null;
 }
 
 /**
- * Everything the install produced, as a tree ready to be packed.
- *
- * What it added to system32 is kept too, under `SYSTEM_PATH`: a setup puts the
- * runtime its program links against there -- the D3DX libraries a DirectX
- * setup installs -- and the program finds it there and nowhere else. A file
- * there that names a library the engine synthesises as Windows' own is left
- * out, because mounted back it would be mapped in place of the engine's.
+ * Everything the install produced on C:, as a tree ready to be packed.
  *
  * @param {Object} options
  * @param {PrefixFile[]} options.files  The writable layer, absolute guest paths.
  * @param {any} [options.registry]      The hive, as `toJSON` gives it.
  * @param {string[]} [options.seeded]   Paths put there before the run.
- * @param {string} [options.root]       Overrides the chosen root.
  * @param {string[]} [options.directories]  The empty directories the run left,
  *        absolute guest paths.
- * @param {string[]} [options.synthesised]  The libraries the engine synthesises as
- *        Windows' own, by file name (the app's `systemLibraries()`).
  * @returns {Prefix}
  */
-export function collect({ files, directories = [], registry, seeded = [], root, synthesised = [] }){
+export function collect({ files, directories = [], registry, seeded = [] }){
     const planted = new Set(seeded.map(fold));
     const produced = files.filter(file=>!planted.has(fold(file.path)));
+    const media = fold(`${MEDIA_DIRECTORY}\\`);
+    /** @param {string} path  a file's, or a directory's with its separator */
+    const onC = path=>fold(path).startsWith('c:\\') && !SCRATCH.test(fold(path))
+        && !SHORTCUT.test(fold(path));
+    // What a self-extractor unpacked beside itself is the distribution, not
+    // the installation -- unless no program went anywhere else, as for an
+    // archive that unpacks the game itself.
+    const elsewhere = produced.some(file=>onC(file.path) && !fold(file.path).startsWith(media)
+        && !fold(file.path).startsWith('c:\\windows\\') && fold(file.path).endsWith('.exe'));
+    /** @param {string} path */
+    const carried = path=>onC(path) && !(elsewhere && fold(path).startsWith(media));
 
-    // Where the install said it put the application, when it said so;
-    // otherwise the layout's own answer.
-    const chosen = root ?? recordedRoot(produced, registry) ?? chooseRoot(produced);
-    const under = fold(chosen.endsWith('\\') ? chosen : `${chosen}\\`);
-
-    const engines = new Set(synthesised.map(libraryKey));
     /** @type {PrefixFile[]} */
     const inside = [];
-    /** @type {PrefixFile[]} */
-    const system = [];
     /** @type {string[]} */
     const outside = [];
-    /** @type {string[]} */
-    const answered = [];
     for (const file of produced)
     {
-        const folded = fold(file.path);
-        const inSystem = SYSTEM32.exec(folded);
-        const name = inSystem ? file.path.slice(inSystem[0].length) : '';
-        if (inSystem && !name.includes('\\') && engines.has(libraryKey(name)))
+        if (carried(file.path))
         {
-            answered.push(file.path);
-        }
-        else if (folded.startsWith(under))
-        {
-            inside.push({ path: file.path.slice(under.length), bytes: file.bytes });
-        }
-        else if (inSystem)
-        {
-            system.push({ path: `${SYSTEM_PATH}\\${name}`, bytes: file.bytes });
+            inside.push(atPath(file, file.path.slice(DRIVE_ROOT.length)));
         }
         else
         {
             outside.push(file.path);
         }
     }
-
     const entry = guessEntry(inside);
-    inside.push(...system);
     if (registry !== undefined)
     {
         inside.push({
@@ -393,9 +245,7 @@ export function collect({ files, directories = [], registry, seeded = [], root, 
             bytes: new TextEncoder().encode(JSON.stringify(registry)),
         });
     }
-    // Only the installation's own: an empty directory elsewhere is the system's.
-    const empty = directories
-        .filter(path=>fold(path).startsWith(under))
-        .map(path=>path.slice(under.length));
-    return { root: chosen, files: inside, directories: empty, outside, answered, entry };
+    const empty = directories.filter(path=>carried(`${path}\\`))
+        .map(path=>path.slice(DRIVE_ROOT.length));
+    return { root: DRIVE_ROOT, files: inside, directories: empty, outside, entry };
 }

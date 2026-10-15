@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createGdiDrawing } from '../../graphics/gdi/context.js';
 import * as surfaces from '../../graphics/gdi/surface.js';
+import { createScreen } from '../../graphics/gdi/screen.js';
 import { setupBars as setupWith, OUT, ITEM, HINSTANCE } from './bars.fixture.js';
 import {
     TOOLBAR_CLASS, TBSTATE_ENABLED, TBSTATE_CHECKED, TBSTYLE_SEP, TBSTYLE_CHECK,
@@ -20,7 +21,7 @@ import {
 } from './toolbar.js';
 
 /** The fixture over the graphics layer's drawing engine. */
-const setupBars = ()=>setupWith({ createGdiDrawing, ...surfaces });
+const setupBars = ()=>setupWith({ createGdiDrawing, createScreen, ...surfaces });
 
 /**
  * The expectations are the toolbar's documented contract and what MFC's

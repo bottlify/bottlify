@@ -371,6 +371,17 @@ test('a pre-transformed vertex gives its RHW back as the clip w', ()=>{
         + ' vertex.position.z, 1.0) * clipW;'));
 });
 
+test('a draw that clips behind the eye takes a negative RHW as a negative w', ()=>{
+    // A vertex buffer ProcessVertices transformed with D3DVOP_CLIP was clipped
+    // by the runtime when drawn (decisions.md A45): a vertex behind the eye
+    // has a negative RHW, and as a negative w the rasteriser clips its
+    // triangle there. Taken as one, Half-Life's Direct3D world was drawn as spikes
+    // across the screen from every wall behind the camera.
+    const code = generate(baseState({ fvf: FVF.XYZRHW | FVF.DIFFUSE, clipsBehindEye: true })).code;
+    assert.ok(code.includes('let clipW = select(1.0, 1.0 / vertex.position.w,'
+        + ' vertex.position.w != 0.0);'), code);
+});
+
 test('no stages leaves the diffuse colour alone', ()=>{
     // A stage that is off is absent, not neutral: "neutral" is only an identity
     // for some operations, and emitting one for a subtract darkens the scene.

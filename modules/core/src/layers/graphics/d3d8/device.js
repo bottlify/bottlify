@@ -2206,8 +2206,10 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             // test_draw_primitive).
             if (services.drawsFrom && stream(0).buffer && indices)
             {
+                const read = services.windowMemory ?? services.readMemory;
                 reportDynamicReads(services.drawsFrom, streams.values(), baseVertexIndex + minIndex,
-                    numVertices, indices, startIndex, vertexCountOf(type, primitiveCount));
+                    numVertices, indices, startIndex, vertexCountOf(type, primitiveCount),
+                    read ? { read, base: baseVertexIndex } : undefined);
             }
             if (renderer && stream(0).buffer && indices)
             {

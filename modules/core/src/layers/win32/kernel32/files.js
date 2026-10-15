@@ -398,8 +398,11 @@ const SYSTEM_LIBRARY_SIZE = 0x10000;
  * Only for the questions a setup asks before it loads one -- is it there, what
  * are its attributes, a search for its exact name (InstallShield's UseDLL looks
  * with FindFirstFile first). A search with a wildcard lists the folder as it
- * is, and the file cannot be opened: what it holds is the engine's, not bytes
- * on a volume (decision A41).
+ * is, and the file cannot be read: what it holds is the engine's, not bytes
+ * on a volume (decision A41). Opened to be written, it becomes a file on the
+ * volume that the program writes -- a setup replacing it, as a DirectX setup
+ * replaces what it finds older -- and a program that loads the name still gets
+ * the engine's own: what a setup puts there is never in its way.
  *
  * @param {FileSystem} real @param {(() => string[]) | undefined} libraries
  * @returns {FileSystem}
@@ -425,6 +428,10 @@ function withSystemLibraries(real, libraries){
     return Object.assign(Object.create(real), {
         /** @param {string} path */
         stat: path=>real.stat(path) ?? (libraryAt(path) ? { ...entry } : null),
+        /** @param {string} path @param {any} options */
+        open: (path, options)=>real.open(path, options)
+            ?? (options?.write && !real.stat(path) && libraryAt(path)
+                ? real.open(path, { ...options, create: true }) : null),
         /** @param {string} path @param {string} pattern */
         list: (path, pattern)=>{
             const found = real.list(path, pattern);

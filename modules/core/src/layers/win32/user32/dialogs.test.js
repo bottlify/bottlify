@@ -193,12 +193,12 @@ function writer(memory, base){
  * @param {{ id: number, x: number, y: number, cx: number, cy: number, style?: number,
  *           className?: string, ordinal?: number, title?: string, titleOrdinal?: number,
  *           data?: number[] }[]} controls
- * @param {{ style?: number, menu?: string, title?: string }} [options]
+ * @param {{ style?: number, menu?: string, title?: string, x?: number, y?: number }} [options]
  */
 function putTemplate(memory, controls, options = {}){
     const template = writer(memory, TEMPLATE);
     template.u32(options.style ?? 0).u32(0).u16(controls.length);
-    template.u16(10).u16(20).u16(40).u16(20);
+    template.u16((options.x ?? 10) & 0xffff).u16((options.y ?? 20) & 0xffff).u16(40).u16(20);
     template.sz(options.menu ?? '');
     template.sz('');
     template.sz(options.title ?? 'Dialog');
@@ -852,6 +852,24 @@ test('DialogBox answers -1 for a dialog its procedure destroyed during WM_INITDI
     assert.equal(await run(), 1);
     how = 'close';
     assert.equal(await run(), 0);
+});
+
+test('a dialog of its own is moved wholly onto the screen, wherever its template put it', ()=>{
+    // A setup whose owner window was zero pixels tall at the top of the screen
+    // had a box placed above it, caption and all; the dialog manager moves a
+    // top-level dialog into the screen's area.
+    const { memory, fns } = setup();
+    putTemplate(memory, [{ id: 100, x: 2, y: 2, cx: 10, cy: 4 }], { x: -30, y: -60 });
+    const dialog = fns.CreateDialogIndirectParamA.handler([HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0]);
+    fns.GetWindowRect.handler([dialog, OUT]);
+    assert.equal(memory.u32(OUT), 0, 'left');
+    assert.equal(memory.u32(OUT + 4), 0, 'top');
+
+    putTemplate(memory, [{ id: 100, x: 2, y: 2, cx: 10, cy: 4 }], { x: 4000, y: 4000 });
+    const far = fns.CreateDialogIndirectParamA.handler([HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0]);
+    fns.GetWindowRect.handler([far, OUT]);
+    assert.ok(memory.u32(OUT + 8) <= 640 && memory.u32(OUT + 12) <= 480,
+        'nor past the right and bottom edges');
 });
 
 test('coordinates are dialog units, not pixels', ()=>{

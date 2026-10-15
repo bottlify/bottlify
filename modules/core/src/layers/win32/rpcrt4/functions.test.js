@@ -38,6 +38,35 @@ test('a UUID is made random and read back from its braceless spelling', ()=>{
     assert.deepEqual([...memory.subarray(32, 48)], new Array(16).fill(0));
 });
 
+test('a UUID spelled with COM\'s braces is no UUID string, refused rather than read on', ()=>{
+    // InstallShield 11 hands UuidFromStringA "{79896C28-...}"; the reader
+    // stopped at a UUID's length, found no terminator and failed the run.
+    const memory = new Uint8Array(128);
+    const text = '{6B29FC40-CA47-1067-B31D-00DD010662DA}';
+    for (let at = 0; at < text.length; at++)
+    {
+        memory[64 + at] = text.charCodeAt(at);
+    }
+    memory.fill(0xcc, 16, 32);
+    const fns = createRpcFunctions({
+        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        readCString: (address, max)=>{
+            let read = '';
+            for (let at = address; memory[at] !== 0; at++)
+            {
+                if (read.length >= max)
+                {
+                    throw new Error(`No NUL within ${max} bytes of 0x${address.toString(16)}`);
+                }
+                read += String.fromCharCode(memory[at]);
+            }
+            return read;
+        },
+    });
+    assert.equal(fns.UuidFromStringA.handler([64, 16]), 1705, 'RPC_S_INVALID_STRING_UUID');
+    assert.deepEqual([...memory.subarray(16, 32)], new Array(16).fill(0xcc), 'nothing written');
+});
+
 test('a UUID is spelled into a string the caller frees with RpcStringFree', ()=>{
     // Wine's rpcrt4 test_UuidFromString: UuidToStringA's string reads back
     // through UuidFromStringA as the same UUID.

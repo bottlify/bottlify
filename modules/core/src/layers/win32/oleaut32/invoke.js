@@ -416,6 +416,8 @@ export function createInvoker(host){
             const value = loadVariant(argument);
             if (value === null)
             {
+                host.divergence('ITypeInfo::Invoke', `${type.name}.${fn.name}: argument`
+                    + ` ${position} is no VARIANT it can read`);
                 return giveUp(DISP_E_TYPEMISMATCH, position);
             }
             const byref = (value.vt & VT_BYREF) !== 0;
@@ -454,6 +456,8 @@ export function createInvoker(host){
                 const laid = layOut(element, value, temporaryStrings);
                 if (laid === null)
                 {
+                    host.divergence('ITypeInfo::Invoke', `${type.name}.${fn.name}: no conversion`
+                        + ` from VARTYPE ${value.vt} to a pointer to ${element}`);
                     return giveUp(DISP_E_TYPEMISMATCH, position);
                 }
                 const bytes = new Uint8Array(laid.length * WORD);

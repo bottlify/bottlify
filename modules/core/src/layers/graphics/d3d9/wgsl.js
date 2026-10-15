@@ -2153,7 +2153,8 @@ const TCI_CAMERASPACEREFLECTIONVECTOR = 0x30000;
  * @param {{ flatColours?: boolean, normalizeNormals?: boolean, rangeFog?: boolean,
  *     points?: { sprite: boolean, scale: boolean },
  *     clip?: import('../webgpu/internal/fixedfunction.js').ClipState,
- *     carried?: ({ set: number, transformed: boolean } | null)[] }} [options]
+ *     carried?: ({ set: number, transformed: boolean } | null)[],
+ *     clipsBehindEye?: boolean }} [options]
  *        `flatColours`: the two colour varyings flat, for D3DSHADE_FLAT, as
  *        the pixel shader must read them. `normalizeNormals`:
  *        D3DRS_NORMALIZENORMALS, whether the camera-space normal a
@@ -2391,11 +2392,13 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
         fogFunctionDeclaration(vertexFog ? fog : 0, `c[${HYBRID_CONSTANTS.FOG}]`, true).trimEnd(),
         // The viewport's inverse offset and scale, as the fixed-function stage
         // applies them to a vertex given in target pixels, and its RHW back as
-        // the clip w the rasteriser interpolates by (one for none to give).
+        // the clip w the rasteriser interpolates by (one for none to give,
+        // and for a negative one unless the draw clips behind the eye, A45).
         'fn viewportPosition(vertex: vec4f) -> vec4f {',
         `    let screen = (vertex.xy + c[${HYBRID_CONSTANTS.VIEWPORT}].xy)`
             + ` * c[${HYBRID_CONSTANTS.VIEWPORT}].zw;`,
-        '    let clipW = select(1.0, 1.0 / vertex.w, vertex.w > 0.0);',
+        '    let clipW = select(1.0, 1.0 / vertex.w, vertex.w'
+            + ` ${options.clipsBehindEye === true ? '!=' : '>'} 0.0);`,
         '    return vec4f(screen.x - 1.0, screen.y + 1.0, vertex.z, 1.0) * clipW;',
         '}',
         '@vertex',

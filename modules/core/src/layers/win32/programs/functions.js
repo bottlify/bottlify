@@ -17,7 +17,7 @@
  * any program, and nothing here reaches past them.
  */
 
-import { SYSTEM_PROGRAMS } from './table.js';
+import { PROGRAMS_IN_PLACE, SYSTEM_PROGRAMS } from './table.js';
 import { encodeAnsi } from '../kernel32/locale.js';
 
 /** The longest command line Windows hands a process, in characters. */
@@ -103,6 +103,6 @@ export function createProgramFunctions(host){
         }
     };
 
-    return Object.fromEntries([...SYSTEM_PROGRAMS.values()].map(({ routine, run })=>
-        [routine, { argBytes: 0, handler: program(run) }]));
+    return Object.fromEntries([...SYSTEM_PROGRAMS.values(), ...PROGRAMS_IN_PLACE]
+        .map(({ routine, run })=>[routine, { argBytes: 0, handler: program(run) }]));
 }

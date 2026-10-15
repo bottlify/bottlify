@@ -2042,6 +2042,36 @@ export function createMetafileFunctions({ host, objects, dcOf, call, transform, 
         },
 
         /**
+         * HMETAFILE SetMetaFileBitsEx(UINT cbBuffer, const BYTE *lpData)
+         *
+         * A memory WMF from its bytes, kept as they are but for the size its
+         * header gives, which is the buffer's. Anything but a version 3
+         * memory metafile's header is ERROR_INVALID_DATA (Wine's
+         * test_SetMetaFileBits).
+         */
+        SetMetaFileBitsEx: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([size, data])=>{
+                const MEMORY_METAFILE = 1;
+                const VERSION_3 = 0x300;
+                if ((data >>> 0) === 0 || (size >>> 0) < 18 || (size & 1) !== 0)
+                {
+                    return refuse(ERROR_INVALID_DATA);
+                }
+                const bits = host.readMemory(data >>> 0, Math.min(size >>> 0, 0x10000000)).slice();
+                const header = viewOf(bits);
+                if (!isWmf(bits) || header.getUint16(0, true) !== MEMORY_METAFILE
+                    || header.getUint16(4, true) !== VERSION_3)
+                {
+                    return refuse(ERROR_INVALID_DATA);
+                }
+                header.setUint32(6, bits.length / 2, true);
+                return objects.create('metafile', { bits });
+            },
+        },
+
+        /**
          * BOOL PlayMetaFile(HDC hdc, HMETAFILE hmf)
          *
          * The WMF's records played on the DC: see `playWmf`.

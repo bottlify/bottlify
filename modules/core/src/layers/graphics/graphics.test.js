@@ -567,17 +567,49 @@ test('GDI drawing binds a memory context to the bytes of its bitmap in guest mem
     await graphicsModule.dispose();
 });
 
-test('a window context is a view of the desktop, which is presented on request', async()=>{
-    // The desktop is one surface in guest memory the size of the display; a
-    // context over a window draws into the part of it the window covers, and
-    // presenting the desktop shows that memory the way a primary surface is.
-    const ram = new Uint8Array(0x2000);
+/**
+ * A host whose heap hands out one address after another, and whose window
+ * manager answers the composition's questions from a list of top-level
+ * windows: handle, rectangle, shown, and its shape (the rectangle).
+ *
+ * @param {Uint8Array} ram
+ * @param {{ hwnd: number, rect: any, shown?: boolean }[]} tops  bottom to top
+ */
+function composingHost(ram, tops){
     const host = hostWith({
         readBytes: (/** @type {number} */ at, /** @type {number} */ n)=>ram.slice(at, at + n),
         writeBytes: ()=>{},
         window: (/** @type {number} */ at, /** @type {number} */ n)=>ram.subarray(at, at + n),
     });
-    host.requireApi('win32').heap = ()=>({ allocate: ()=>0x1000 });
+    let next = 0x1000;
+    const win32 = host.requireApi('win32');
+    win32.heap = ()=>({ allocate: (/** @type {number} */ bytes)=>{
+        const at = next;
+        next += (bytes + 15) & ~15;
+        return at;
+    } });
+    win32.windowSurfaceOf = (/** @type {number} */ hwnd)=>{
+        const top = tops.find(each=>each.hwnd === hwnd);
+        return top ? { hwnd: top.hwnd, rect: top.rect } : null;
+    };
+    win32.windowSurfaces = ()=>tops.map(each=>({ hwnd: each.hwnd, rect: each.rect,
+        shown: each.shown !== false, shape: each.shown === false ? [] : [each.rect] }));
+    return host;
+}
+
+test('a window context draws on its top-level window\'s own surface, and the screen is composed'
+    + ' of the surfaces', async()=>{
+    // As with the desktop window manager: each top-level window has pixels of
+    // its own, and the screen is the desktop's background with every shown
+    // window copied over it, bottom to top. A window over another leaves the
+    // one under it untouched, and when it goes the one under it shows again
+    // without painting anything.
+    const ram = new Uint8Array(0x4000);
+    const tops = [
+        { hwnd: 0x10, rect: { left: 1, top: 0, right: 7, bottom: 4 }, shown: true },
+        { hwnd: 0x20, rect: { left: 4, top: 1, right: 8, bottom: 3 }, shown: true },
+    ];
+    const host = composingHost(ram, tops);
     /** @type {(() => void)[]} */
     const armed = [];
     const api = await graphicsModule.create({
@@ -587,141 +619,199 @@ test('a window context is a view of the desktop, which is presented on request',
         schedule: tick=>armed.push(tick),
     }, host);
     const gdi = api.gdiDrawing();
-    const view = gdi.surfaceFor(
-        { kind: 'window', bounds: { left: 2, top: 1, right: 6, bottom: 3 } },
-        { width: 8, height: 4, bitCount: 32 });
-    assert.ok(view);
-    assert.equal(view.width, 4);
-    view.write(0, 0, 0x00ff0000);
-    assert.equal(gdi.desktop().read(2, 1), 0x00ff0000, 'landed at the client origin');
-    assert.deepEqual([...ram.subarray(0x1000 + 32 + 8, 0x1000 + 32 + 12)], [0, 0, 0xff, 0],
-        'in guest memory, as BGRX, where the presenter reads it');
+    const bitmap = { width: 8, height: 4, bitCount: 32 };
+    /** @param {number} window @param {any} bounds */
+    const viewOn = (window, bounds)=>{
+        const view = gdi.surfaceFor({ kind: 'window', window, bounds }, bitmap);
+        assert.ok(view);
+        return view;
+    };
+    const under = viewOn(0x10, tops[0].rect);
+    for (let y = 0; y < 4; y++)
+    {
+        for (let x = 0; x < 6; x++)
+        {
+            under.write(x, y, 0x00ff0000);
+        }
+    }
+    // A draw through gdi32 says so; these went straight to the pixels.
+    gdi.presentDesktop({ window: 0x10 });
+    // The window over it: its client area a pixel in from its corner.
+    viewOn(0x20, { left: 5, top: 2, right: 8, bottom: 3 }).write(0, 0, 0x000000ff);
+    const background = gdi.surfaceFor({ kind: 'window', window: 0, background: true }, bitmap);
+    assert.ok(background);
+    background.write(0, 0, 0x0000ff00);
+    // A draw through gdi32 says so; these went straight to the pixels.
+    gdi.presentDesktop({ window: 0x10 });
 
-    gdi.presentDesktop();
+    const screen = gdi.desktop();
+    assert.ok(screen);
+    assert.equal(screen.read(0, 0), 0x0000ff00, 'the background where no window is');
+    assert.equal(screen.read(1, 0), 0x00ff0000, 'the lower window');
+    assert.equal(screen.read(5, 2), 0x000000ff, 'the upper window\'s client pixel, over it');
+    assert.equal(screen.read(4, 1), 0x00000000, 'the upper window\'s own unpainted pixels');
+
+    tops.pop();
+    const again = gdi.desktop();
+    assert.equal(again?.read(5, 2), 0x00ff0000,
+        'the window gone, the one under it shows as it was, nothing painted');
+
+    // A screen context draws on the screen as shown, and it stays there until
+    // a window draws: then the screen is composed again over it.
+    viewOn(0, null).write(1, 0, 0x00ffffff);
+    gdi.presentDesktop({ window: 0 });
+    assert.equal(gdi.desktop()?.read(1, 0), 0x00ffffff, 'shown as drawn');
+    gdi.presentDesktop({ window: 0x10 });
+    assert.equal(gdi.desktop()?.read(1, 0), 0x00ff0000, 'composed over once a window drew');
     armed.shift()?.();
     const metrics = /** @type {any} */ (graphicsModule.diagnostics().metrics);
-    assert.equal(metrics.presenter.presents, 1, 'the desktop reached the presenter');
+    assert.ok(metrics.presenter.presents > 0, 'the screen reached the presenter');
     await graphicsModule.dispose();
 });
 
-test('a primary presented under a visible dialog shows through the desktop, dialog on top',
-    async()=>{
-        // One screen: the primary belongs to the program's window, and a
-        // dialog over that window stays over the picture. With nothing over
-        // it and the whole screen its own, the primary goes out as it is.
-        const ram = new Uint8Array(0x4000);
-        const host = hostWith({
-            readBytes: (/** @type {number} */ at, /** @type {number} */ n)=>ram.slice(at, at + n),
-            writeBytes: ()=>{},
-            window: (/** @type {number} */ at, /** @type {number} */ n)=>ram.subarray(at, at + n),
-        });
-        const screen = { left: 0, top: 0, right: 8, bottom: 4 };
-        const game = { hwnd: '0x10', rect: screen, client: screen, visible: true, child: false,
-            parent: null };
-        const dialog = { hwnd: '0x20', rect: { left: 2, top: 1, right: 5, bottom: 3 },
-            client: { left: 3, top: 2, right: 4, bottom: 3 }, visible: true, child: false,
-            parent: '0x10' };
-        const button = { hwnd: '0x24', rect: { left: 3, top: 2, right: 4, bottom: 3 },
-            client: { left: 3, top: 2, right: 4, bottom: 3 }, visible: true, child: true,
-            parent: '0x20' };
-        let windows = [game, dialog, button];
-        host.requireApi('win32').heap = ()=>({ allocate: ()=>0x1000 });
-        host.requireApi('win32').windows = ()=>windows;
-        /** @type {(() => void)[]} */
-        const armed = [];
-        const api = await graphicsModule.create({
-            screen: { width: 8, height: 4, bitsPerPixel: 32 },
-            now: ()=>0,
-            /** @param {() => void} tick */
-            schedule: tick=>armed.push(tick),
-        }, host);
-        const gdi = api.gdiDrawing();
-        const desktop = gdi.desktop();
-        assert.ok(desktop);
-        // The dialog's pixels, as the window manager painted them.
-        for (let y = 1; y < 3; y++)
+test('a window\'s surface follows its size, keeping what it showed at its corner', async()=>{
+    const ram = new Uint8Array(0x4000);
+    const tops = [{ hwnd: 0x10, rect: { left: 0, top: 0, right: 2, bottom: 2 }, shown: true }];
+    const api = await graphicsModule.create(
+        { screen: { width: 8, height: 4, bitsPerPixel: 32 } }, composingHost(ram, tops));
+    const gdi = api.gdiDrawing();
+    const bitmap = { width: 8, height: 4, bitCount: 32 };
+    const small = gdi.surfaceFor({ kind: 'window', window: 0x10, bounds: tops[0].rect }, bitmap);
+    assert.ok(small);
+    small.write(1, 1, 0x00ff0000);
+    tops[0].rect = { left: 0, top: 0, right: 4, bottom: 3 };
+    const large = gdi.surfaceFor({ kind: 'window', window: 0x10, bounds: tops[0].rect }, bitmap);
+    assert.ok(large);
+    assert.equal(small.bytes.length, 0, 'a view of the old surface reads as detached');
+    assert.equal(large.read(1, 1), 0x00ff0000, 'what it showed came along');
+    large.write(3, 2, 0x000000ff);
+    gdi.presentDesktop({ window: 0x10 });
+    assert.equal(gdi.desktop()?.read(3, 2), 0x000000ff);
+    await graphicsModule.dispose();
+});
+
+test('a primary is its window\'s client area windowed, and the screen with the windows above it'
+    + ' in exclusive mode', async()=>{
+    // Windowed, the picture goes into its window's surface and the screen is
+    // composed with it: a dialog over the window stays over the picture. In
+    // exclusive mode, the picture is the screen and goes out as it is with
+    // nothing over it.
+    const ram = new Uint8Array(0x8000);
+    const screen = { left: 0, top: 0, right: 8, bottom: 4 };
+    const game = { hwnd: '0x10', rect: screen, client: screen, visible: true, child: false,
+        parent: null };
+    const dialog = { hwnd: '0x20', rect: { left: 2, top: 1, right: 5, bottom: 3 },
+        client: { left: 3, top: 2, right: 4, bottom: 3 }, visible: true, child: false,
+        parent: '0x10' };
+    const tops = [{ hwnd: 0x10, rect: screen, shown: true },
+        { hwnd: 0x20, rect: dialog.rect, shown: true }];
+    const host = composingHost(ram, tops);
+    let windows = [game, dialog];
+    host.requireApi('win32').windows = ()=>windows;
+    /** @type {(() => void)[]} */
+    const armed = [];
+    const api = await graphicsModule.create({
+        screen: { width: 8, height: 4, bitsPerPixel: 32 },
+        now: ()=>0,
+        /** @param {() => void} tick */
+        schedule: tick=>armed.push(tick),
+    }, host);
+    const gdi = api.gdiDrawing();
+    const bitmap = { width: 8, height: 4, bitCount: 32 };
+    // The dialog's pixels, as the window manager painted them.
+    const face = gdi.surfaceFor({ kind: 'window', window: 0x20, bounds: dialog.rect }, bitmap);
+    assert.ok(face);
+    for (let y = 0; y < 2; y++)
+    {
+        for (let x = 0; x < 3; x++)
         {
-            for (let x = 2; x < 5; x++)
-            {
-                desktop.write(x, y, 0x00c0c0c0);
-            }
+            face.write(x, y, 0x00c0c0c0);
         }
-        // A 16-bit primary of the screen's size, solid red.
-        const primary = { buffer: 0x2000, width: 8, height: 4, pitch: 16, bitCount: 16,
-            palette: null };
-        for (let at = 0; at < 8 * 4; at++)
-        {
-            ram[0x2000 + at * 2] = 0x00;
-            ram[0x2000 + at * 2 + 1] = 0xf8;
-        }
-        const shown = ()=>{
-            const metrics = /** @type {any} */ (graphicsModule.diagnostics().metrics);
-            return metrics.presenter;
-        };
+    }
+    // A 16-bit primary of the screen's size, solid red.
+    const primary = { buffer: 0x6000, width: 8, height: 4, pitch: 16, bitCount: 16,
+        palette: null };
+    for (let at = 0; at < 8 * 4; at++)
+    {
+        ram[0x6000 + at * 2] = 0x00;
+        ram[0x6000 + at * 2 + 1] = 0xf8;
+    }
+    const shown = ()=>{
+        const metrics = /** @type {any} */ (graphicsModule.diagnostics().metrics);
+        return metrics.presenter;
+    };
+    const seamPresent = api.present;
 
-        // The same entry the ddraw seam presents a primary through.
-        const seamPresent = api.present;
-        seamPresent(primary, 0x10, false);
-        assert.equal(shown().lastBuffer, 0x1000, 'the desktop was shown, not the primary');
-        assert.equal(desktop.read(0, 0), 0x00ff0000, 'the primary landed on the desktop');
-        assert.equal(desktop.read(7, 3), 0x00ff0000);
-        assert.equal(desktop.read(2, 1), 0x00c0c0c0, 'the dialog stayed on top');
-        assert.equal(desktop.read(4, 2), 0x00c0c0c0);
-        assert.equal(desktop.read(5, 2), 0x00ff0000, 'right up to its edge');
+    seamPresent(primary, 0x10, false);
+    assert.notEqual(shown().lastBuffer, 0x6000, 'the screen was shown, not the primary');
+    let composed = gdi.desktop();
+    assert.equal(composed?.read(0, 0), 0x00ff0000, 'the primary in its window');
+    assert.equal(composed?.read(7, 3), 0x00ff0000);
+    assert.equal(composed?.read(2, 1), 0x00c0c0c0, 'the dialog stayed on top');
+    assert.equal(composed?.read(4, 2), 0x00c0c0c0);
+    assert.equal(composed?.read(5, 2), 0x00ff0000, 'right up to its edge');
 
-        // The dialog gone, the same primary is shown as it is: the desktop
-        // is not touched again.
-        windows = [game];
-        desktop.write(0, 0, 0x00000000);
-        seamPresent(primary, 0x10, false);
-        assert.equal(shown().lastBuffer, 0x2000, 'the primary itself');
-        assert.equal(desktop.read(0, 0), 0x00000000, 'without a copy');
+    // A windowed primary is the part of the screen its window's client covers.
+    windows = [{ ...game, client: { left: 1, top: 1, right: 4, bottom: 3 } }];
+    tops.pop();
+    const under = gdi.surfaceFor({ kind: 'window', window: 0x10, bounds: screen }, bitmap);
+    under?.write(0, 0, 0x00000000);
+    seamPresent(primary, 0, false);
+    composed = gdi.desktop();
+    assert.equal(composed?.read(0, 0), 0x00000000, 'outside the client area: the window\'s own');
+    assert.equal(composed?.read(1, 1), 0x00ff0000, 'inside: the primary');
 
-        // A windowed primary is the part of the screen its window covers.
-        windows = [{ ...game, client: { left: 1, top: 1, right: 4, bottom: 3 } }];
-        seamPresent(primary, 0, false);
-        assert.equal(shown().lastBuffer, 0x1000);
-        assert.equal(desktop.read(0, 0), 0x00000000, 'outside the window: untouched');
-        assert.equal(desktop.read(1, 1), 0x00ff0000, 'inside: the primary');
+    // Exclusive mode is the screen whatever the window's client area, and a
+    // hidden dialog covers nothing.
+    windows = [{ ...game, client: { left: 1, top: 1, right: 4, bottom: 3 } },
+        { ...dialog, visible: false }];
+    seamPresent(primary, 0x10, true);
+    assert.equal(shown().lastBuffer, 0x6000, 'shown as it is');
 
-        // Exclusive mode is the screen whatever the window's client area,
-        // and a hidden dialog covers nothing.
-        windows = [{ ...game, client: { left: 1, top: 1, right: 4, bottom: 3 } },
-            { ...dialog, visible: false }];
-        seamPresent(primary, 0x10, true);
-        assert.equal(shown().lastBuffer, 0x2000, 'shown as it is');
-        await graphicsModule.dispose();
-    });
+    // The last flip came while a shown window was over it: the screen is
+    // composed, the picture under the window. The window then hides and a
+    // paint pass follows: the screen is the flip again.
+    windows = [game, { ...dialog, parent: null }];
+    tops.push({ hwnd: 0x20, rect: dialog.rect, shown: true });
+    seamPresent(primary, 0x10, true);
+    armed.splice(0).forEach(tick=>tick());
+    assert.notEqual(shown().lastBuffer, 0x6000, 'the dialog over the flip');
+    windows = [game, { ...dialog, visible: false }];
+    gdi.presentDesktop();
+    assert.equal(shown().lastBuffer, 0x6000, 'the flip, without the hidden dialog');
+    await graphicsModule.dispose();
+});
 
-test('the desktop survives the emulator growing its memory under it', async()=>{
+test('a window\'s surface survives the emulator growing its memory under it', async()=>{
     // A view of the emulator's memory is a view of one buffer, and growing
     // the memory replaces the buffer: every view of the old one empties. The
-    // pixels are still at the same guest address, so the desktop takes its
+    // pixels are still at the same guest address, so the surface takes its
     // view again rather than drawing into nothing from then on.
     const memory = new WebAssembly.Memory({ initial: 1 });
     let ram = new Uint8Array(memory.buffer);
-    const host = hostWith({
-        readBytes: (/** @type {number} */ at, /** @type {number} */ n)=>ram.slice(at, at + n),
-        writeBytes: ()=>{},
-        window: (/** @type {number} */ at, /** @type {number} */ n)=>ram.subarray(at, at + n),
-    });
-    host.requireApi('win32').heap = ()=>({ allocate: ()=>0x1000 });
+    const tops = [{ hwnd: 0x10, rect: { left: 0, top: 0, right: 8, bottom: 4 }, shown: true }];
+    const host = composingHost(ram, tops);
+    host.requireApi('memory').window = (/** @type {number} */ at, /** @type {number} */ n)=>
+        ram.subarray(at, at + n);
     const api = await graphicsModule.create(
         { screen: { width: 8, height: 4, bitsPerPixel: 32 } }, host);
     const gdi = api.gdiDrawing();
-    gdi.desktop()?.write(1, 1, 0x00ff0000);
+    const bitmap = { width: 8, height: 4, bitCount: 32 };
+    const first = gdi.surfaceFor({ kind: 'window', window: 0x10, bounds: tops[0].rect }, bitmap);
+    first?.write(1, 1, 0x00ff0000);
 
     // Growing carries the contents over and leaves every old view empty.
     const stale = ram;
     memory.grow(1);
     ram = new Uint8Array(memory.buffer);
     assert.equal(stale.length, 0, 'the old view emptied');
-    const before = gdi.desktop();
-    assert.ok(before);
-    assert.equal(before.read(1, 1), 0x00ff0000, 'the pixel is where it was');
-    before.write(2, 1, 0x0000ff00);
-    assert.deepEqual([...ram.subarray(0x1000 + 32 + 8, 0x1000 + 32 + 12)], [0, 0xff, 0, 0],
-        'and a new one lands in the new buffer');
+    assert.equal(first?.bytes.length, 0, 'and so does a context\'s, which takes another');
+    const again = gdi.surfaceFor({ kind: 'window', window: 0x10, bounds: tops[0].rect }, bitmap);
+    assert.ok(again);
+    assert.equal(again.read(1, 1), 0x00ff0000, 'the pixel is where it was');
+    again.write(2, 1, 0x0000ff00);
+    gdi.presentDesktop({ window: 0x10 });
+    assert.equal(gdi.desktop()?.read(2, 1), 0x0000ff00, 'and a new one is seen on the screen');
     await graphicsModule.dispose();
 });
 

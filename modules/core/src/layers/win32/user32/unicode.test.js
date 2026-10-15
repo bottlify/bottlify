@@ -116,6 +116,38 @@ test('WM_GETTEXT answers the wide caller in its own buffer, in characters', ()=>
     assert.equal(m.lent.size, 0);
 });
 
+test('an edit\'s replacement text and the line it copies out cross converted', ()=>{
+    // A self-extractor wrote each line of its log into a wide rich edit with
+    // EM_REPLACESEL; the edit read the wide text as ANSI and showed the
+    // first letter of each line.
+    const EM_REPLACESEL = 0x00c2;
+    const EM_GETLINE = 0x00c4;
+    const m = memory();
+    m.writeMemory(0x100, textBytes('Extracting Data', true));
+    let read = '';
+    translated(m, { hwnd: 1, message: EM_REPLACESEL, wParam: 0, lParam: 0x100, unicode: true },
+        false, got=>{
+            read = m.readCString(got.lParam, 100);
+            return 0;
+        });
+    assert.equal(read, 'Extracting Data');
+
+    // The wide caller's buffer holds four characters; the ANSI procedure is
+    // handed room for its own and writes the line unterminated.
+    m.writeMemory(0x400, Uint8Array.of(4, 0, 0xee, 0xee, 0xee, 0xee, 0xee, 0xee, 0x77, 0x77));
+    const answer = translated(m, { hwnd: 1, message: EM_GETLINE, wParam: 0, lParam: 0x400,
+        unicode: true }, false, got=>{
+        const room = m.bytes[got.lParam] | m.bytes[got.lParam + 1] << 8;
+        const text = 'Café au lait'.slice(0, room);
+        m.writeMemory(got.lParam, textBytes(text, false).subarray(0, text.length));
+        return text.length;
+    });
+    assert.equal(answer, 4);
+    assert.equal(readWideString(m, 0x400, 4), 'Café');
+    assert.deepEqual([...m.bytes.subarray(0x408, 0x40a)], [0x77, 0x77], 'nothing past its room');
+    assert.equal(m.lent.size, 0);
+});
+
 test('WM_GETTEXT from an ANSI caller of a wide procedure, answered after a wait', async()=>{
     const m = memory();
     const answer = translated(m, { hwnd: 1, message: WM_GETTEXT, wParam: 16, lParam: 0x400 },

@@ -23,6 +23,10 @@
  */
 
 import { synthesiseProgram } from '../../loader/internal/synth.js';
+import { parsePe, rvaToFileOffset } from '../../loader/internal/pe.js';
+import { findResource } from '../../loader/internal/resources.js';
+import { versionStringOf } from '../version/functions.js';
+import { DSETUPERR_SUCCESS } from '../dsetup/functions.js';
 import { runMsiexec } from './msiexec.js';
 import { runRundll32 } from './rundll32.js';
 import { runRegsvr32 } from './regsvr32.js';
@@ -55,6 +59,54 @@ export const SYSTEM_PROGRAMS = new Map([
     ['notepad.exe', { routine: 'notepad', run: runNotepad,
         directories: [WINDOWS_DIRECTORY, SYSTEM_DIRECTORY] }],
 ]);
+
+/**
+ * The programs a title brings that the engine runs in their place, known by
+ * what their version block says they are rather than by a file name.
+ *
+ * DirectX's redistributable setup: DirectX 9.0c is part of this system, and
+ * the drawing layer answers every DirectX library whatever a setup copies.
+ * Run, it found XP's own DirectX files missing from the system folder, copied
+ * them in, and answered "succeeded, restart needed" -- which a game's
+ * installer stops at. In its place it puts nothing down and succeeds, with no
+ * window: the licence it shows is for files it would not install.
+ *
+ * @type {readonly { routine: string, company: string, original: string,
+ *     run: (context: import('./msiexec.js').ProgramContext) => Promise<number> }[]}
+ */
+export const PROGRAMS_IN_PLACE = [
+    { routine: 'dxsetup', company: 'Microsoft Corporation', original: 'dxsetup.exe',
+        run: async()=>DSETUPERR_SUCCESS },
+];
+
+const RT_VERSION = 16;
+
+/**
+ * The image the engine runs in place of an executable it knows by its version
+ * block (`PROGRAMS_IN_PLACE`), or null for every other.
+ *
+ * @param {Uint8Array} executable
+ * @returns {Uint8Array | null}
+ */
+export function programInPlaceOf(executable){
+    let block;
+    try
+    {
+        const image = parsePe(executable);
+        const found = findResource(executable, image, RT_VERSION, 1);
+        const at = found ? rvaToFileOffset(image, found.rva) : -1;
+        block = found && at >= 0 ? executable.subarray(at, at + found.size) : null;
+    }
+    catch {
+        return null;
+    }
+    const company = block && versionStringOf(block, 'CompanyName');
+    const original = block && versionStringOf(block, 'OriginalFilename')?.toLowerCase();
+    const program = PROGRAMS_IN_PLACE.find(each=>each.company === company
+        && each.original === original);
+    return program ? synthesiseProgram({ library: PROGRAMS_LIBRARY, routine: program.routine })
+        .bytes : null;
+}
 
 /**
  * The program a full path names, when it names one of these in the system

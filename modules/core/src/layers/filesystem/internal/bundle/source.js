@@ -126,7 +126,8 @@ export function createBundleSource({
             }
             if (folded.startsWith(from + SEPARATOR))
             {
-                return `${to}${path.slice(from.length)}`;
+                // An empty `to` is the volume's root, which takes no separator.
+                return to === '' ? path.slice(from.length + 1) : `${to}${path.slice(from.length)}`;
             }
         }
         return `${under}${path}`;

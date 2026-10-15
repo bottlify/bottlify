@@ -288,6 +288,39 @@ test('a Windows metafile closes blank, gives its bits, and plays', ()=>{
     assert.equal(fns.GetMetaFileBitsEx.argBytes, 12);
 });
 
+test('SetMetaFileBitsEx makes a metafile of a memory WMF\'s bytes, which plays', ()=>{
+    // Wine's test_SetMetaFileBits: the header's size is made the buffer's, and
+    // anything but a version 3 memory metafile is ERROR_INVALID_DATA.
+    const machine = painted(40, 40);
+    const { fns, view, dc, pixel, fill, errors } = machine;
+    const at = 0x3000;
+    const size = 18 + 14 + 6;
+    view.setUint16(at, 1, true);
+    view.setUint16(at + 2, 9, true);
+    view.setUint16(at + 4, 0x300, true);
+    view.setUint32(at + 6, 999, true);
+    view.setUint32(at + 18, 7, true);
+    view.setUint16(at + 22, META.RECTANGLE, true);
+    [20, 20, 0, 0].forEach((param, index)=>view.setInt16(at + 24 + index * 2, param, true));
+    view.setUint32(at + 32, 3, true);
+    view.setUint16(at + 36, 0, true);
+
+    const metafile = fns.SetMetaFileBitsEx.handler([size, at]);
+    assert.notEqual(metafile, 0);
+    assert.equal(fns.GetMetaFileBitsEx.handler([metafile, size, OUT]), size);
+    assert.equal(view.getUint32(OUT + 6, true), size / 2, 'its size is the buffer\'s');
+    fill(0);
+    assert.equal(fns.PlayMetaFile.handler([dc, metafile]), 1);
+    assert.equal(pixel(10, 10) & 0xffffff, WHITE_PIXEL, 'the white stock brush inside');
+    assert.equal(pixel(30, 30) & 0xffffff, 0, 'nothing outside');
+
+    assert.equal(fns.SetMetaFileBitsEx.handler([size - 1, at]), 0, 'an odd size');
+    view.setUint16(at, 2, true);
+    assert.equal(fns.SetMetaFileBitsEx.handler([size, at]), 0, 'a disk metafile');
+    assert.equal(errors.at(-1), ERROR_INVALID_DATA);
+    assert.equal(fns.SetMetaFileBitsEx.argBytes, 8);
+});
+
 test('a call no record keeps leaves nothing, and GdiComment is kept', ()=>{
     const machine = painted(4, 4);
     const { fns, bytes } = machine;

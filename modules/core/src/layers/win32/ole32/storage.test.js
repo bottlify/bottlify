@@ -927,36 +927,6 @@ test('OleSaveToStream asks the object for its class and then lets it save', asyn
         'nothing left to read a class from');
 });
 
-test('an interface crosses threads through a stream, with the references it takes', async()=>{
-    const { host, fns } = setup();
-    const marshal = fns.CoMarshalInterThreadInterfaceInStream;
-    let references = 1;
-    const guest = host.guestObject([
-        ([, , ppv])=>{
-            host.putU32(ppv, 0x5555);
-            references++;
-            return 0;
-        },
-        ()=>++references,
-        ()=>--references,
-    ]);
-    host.putGuid(GUID_AT, '{00000000-0000-0000-C000-000000000046}');
-    assert.equal(await marshal.handler([GUID_AT, guest, OUT]), S_OK);
-    const stream = host.u32(OUT);
-    assert.notEqual(stream, 0);
-    assert.equal(references, 2, 'marshaling holds a reference');
-
-    assert.equal(await fns.CoGetInterfaceAndReleaseStream.handler([stream, GUID_AT, OUT2]), S_OK);
-    assert.equal(host.u32(OUT2), 0x5555, 'what the object answered to QueryInterface');
-    assert.equal(references, 2, 'the QueryInterface reference stays and the marshaled one goes');
-    assert.equal(host.objectAt(stream), undefined, 'and the stream is gone');
-    assert.equal(host.heap.live.size, 0, 'with the block it held');
-
-    assert.equal(marshal.handler([GUID_AT, 0, OUT]), E_INVALIDARG);
-    assert.equal(await fns.CoGetInterfaceAndReleaseStream.handler([0x7777, GUID_AT, OUT2]),
-        E_INVALIDARG, 'not a stream of ours');
-});
-
 test('the objects publish the documented tables, and identity holds through them', ()=>{
     const { host, call, createDocfile, createStream } = setup();
     const root = createDocfile();

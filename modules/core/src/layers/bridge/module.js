@@ -934,6 +934,13 @@ export function createBridgeModule(){
                     : [],
                 /** @param {number} [count] */
                 recent: (count = 12)=>live() ? state.dispatcher.recent(count) : [],
+                /**
+                 * Keeps the functions named out of the ring of recent calls
+                 * (`app.debug.callRingSkip`), none with an empty list.
+                 *
+                 * @param {string[]} names @returns {string[]} the functions kept out
+                 */
+                skipInRing: names=>live() ? state.dispatcher.skipInRing(names) : [],
                 /** @param {number} address */
                 symbolize: address=>live() ? state.dispatcher.symbolize(address) : null,
 

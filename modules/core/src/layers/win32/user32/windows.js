@@ -32,12 +32,13 @@ import { createCaret } from './caret.js';
 import { createDirectoryListFunctions } from './dlgdir.js';
 import { createMdi } from './mdi.js';
 import {
-    WS_CHILD, WS_CLIPSIBLINGS, WS_DISABLED, contains, createGeometry, createdStyles, edgeFor,
-    frameRings, intersect, isEmpty,
+    WS_BORDER, WS_CAPTION, WS_CHILD, WS_CLIPSIBLINGS, WS_DISABLED, contains, createGeometry,
+    createdStyles, edgeFor, frameOf, frameRings, intersect, isEmpty,
 } from './frame.js';
 import {
     COLOR_3DDKSHADOW, COLOR_3DFACE, COLOR_3DHILIGHT, COLOR_3DSHADOW, COLOR_BTNTEXT,
     DLGWINDOWEXTRA, HTCLIENT, HTNOWHERE, HTTRANSPARENT, SB_LINEDOWN, SB_ENDSCROLL, SB_LINEUP,
+    SB_THUMBPOSITION, SB_THUMBTRACK, WM_LBUTTONUP, thumbOf, thumbValue,
     SB_PAGEDOWN, SB_PAGEUP, WM_CTLCOLORBTN, WM_CTLCOLORDLG, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX,
     WM_CTLCOLORSCROLLBAR, WM_CTLCOLORSTATIC, WM_ERASEBKGND, WM_GETTEXT,
     WM_GETTEXTLENGTH, WM_HSCROLL, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL,
@@ -76,6 +77,7 @@ const WM_SIZE = 0x0005;
 const SIZE_RESTORED = 0;
 const SIZE_MINIMIZED = 1;
 const SIZE_MAXIMIZED = 2;
+const WM_GETMINMAXINFO = 0x0024;
 const WM_WINDOWPOSCHANGED = 0x0047;
 /** In WM_WINDOWPOSCHANGED's flags: the client area kept its size, its place. */
 const SWP_NOCLIENTSIZE = 0x0800;
@@ -139,15 +141,6 @@ const SC_CLOSE = 0xf060;
 const COLOR_BACKGROUND = 1;
 
 /**
- * How long after a window leaves part of the screen the desktop paints it, in
- * milliseconds of the guest's clock: longer than a program takes to put the
- * next window where the last one was, shorter than a person notices.
- */
-const DESKTOP_REPAINT_MS = 100;
-/** The queue's name for that repaint, which a second departure joins. */
-const DESKTOP_REPAINT_KEY = 'desktop-repaint';
-
-/**
  * How long, by the guest's clock, a window waiting to paint holds back the
  * desktop's being shown after a draw: a pass a program pumps through takes a
  * few milliseconds, one it never pumps through takes for ever.
@@ -180,6 +173,17 @@ const SYSTEM_CLASSES = Object.freeze([
     { name: 'ComboBox', atom: 0x0085, windowExtra: 0, background: 0 },
     { name: '#32770', atom: 0x8002, windowExtra: DLGWINDOWEXTRA, background: COLOR_3DFACE + 1 },
 ]);
+
+/**
+ * The classes comctl32 registers on Windows, by the names it gives them:
+ * those this build has a control for are registered by it, and the others
+ * stand in as windows that answer as DefWindowProc does.
+ */
+const INERT_CLASSES = Object.freeze(['SysHeader32', 'ToolbarWindow32', 'ReBarWindow32',
+    'tooltips_class32', 'msctls_statusbar32', 'msctls_trackbar32', 'msctls_updown32',
+    'msctls_progress32', 'msctls_hotkey32', 'SysListView32', 'SysTreeView32', 'ComboBoxEx32',
+    'SysTabControl32', 'SysAnimate32', 'SysMonthCal32', 'SysDateTimePick32', 'SysIPAddress32',
+    'SysPager', 'NativeFontCtl', 'SysLink']);
 
 /**
  * The standard arrow, as LoadCursor(NULL, IDC_ARROW) names it: the cursor of
@@ -226,6 +230,35 @@ const CBT_CREATEWNDA = Object.freeze({ lpcs: 0, hwndInsertAfter: 4, SIZE: 8 });
 
 /** TranslateMessage answers for exactly these, translated or not. */
 const KEY_MESSAGES = new Set([WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP]);
+
+/**
+ * A text cut to `room` as Windows cuts a caption that does not fit
+ * (DT_END_ELLIPSIS): the longest start of it that leaves room for "...",
+ * then the dots -- or as many of them as fit. Whole when it fits.
+ *
+ * @param {string} text @param {number} room @param {(text: string) => number} width
+ */
+export function endEllipsis(text, room, width){
+    if (width(text) <= room)
+    {
+        return text;
+    }
+    let kept = text.length;
+    while (kept > 0 && width(`${text.slice(0, kept)}...`) > room)
+    {
+        kept--;
+    }
+    if (kept > 0)
+    {
+        return `${text.slice(0, kept)}...`;
+    }
+    let dots = '...';
+    while (dots.length > 0 && width(dots) > room)
+    {
+        dots = dots.slice(1);
+    }
+    return dots;
+}
 
 /**
  * Notes what a window procedure has been handed, until it gives it back.
@@ -306,6 +339,8 @@ const SW_HIDE = 0;
 const SW_SHOW = 5;
 const SW_MINIMIZE = 6;
 const SW_SHOWNA = 8;
+/** SW_MAXIMIZE as well: the one command that maximises. */
+const SW_SHOWMAXIMIZED = 3;
 /** The show commands that leave the window minimised. */
 const MINIMISING = new Set([2, SW_MINIMIZE, 7]);
 /** The show commands that bring a minimised window back: SW_SHOWNORMAL, SW_RESTORE, SW_SHOWDEFAULT. */
@@ -468,7 +503,8 @@ const MAX_WINDOW_TEXT = 1 << 16;
  *            rect: { left: number, top: number, right: number, bottom: number },
  *            client: { left: number, top: number, right: number, bottom: number },
  *            visible: boolean, className: string, title: string, parent: string | null,
- *            child: boolean, id: number, style: string, exStyle: string }[]} list
+ *            child: boolean, id: number, thread: number | null, style: string,
+ *            exStyle: string }[]} list
  *           Every live window, children included: a dialog is its controls, and
  *           a report that shows the frame and not the button under the pointer
  *           says nothing about what a click would reach.
@@ -479,6 +515,12 @@ const MAX_WINDOW_TEXT = 1 << 16;
  *           for the callers outside this layer that must answer a size a
  *           program asked for as zero -- a back buffer's, which means exactly
  *           this rectangle -- or place a picture inside a window.
+ * @property {(thread: unknown) => number | Promise<number>} modalPump
+ *           What COM's modal loop runs for a thread waiting on another apartment.
+ * @property {(hwnd: number) => { hwnd: number, rect: Rect } | null} surfaceOf
+ *           The top-level window whose surface a window draws on, and where it is.
+ * @property {() => { hwnd: number, rect: Rect, shown: boolean, shape: Rect[] }[]} surfaces
+ *           The top-level windows bottom to top, for the screen to be composed of.
  * @property {(hwnd: number, x: number, y: number, width: number, height: number,
  *     how?: { announce?: boolean }) => boolean} place
  * @property {() => number} active
@@ -1808,13 +1850,15 @@ export function createWindowFunctions(host){
     };
 
     /**
-     * The rectangles, in screen coordinates, of the windows over a window:
-     * every shown top-level window stacked above its own; each shown sibling
-     * above it, or above an ancestor, that clips its siblings -- as every
-     * top-level window does; and with WS_CLIPCHILDREN its own shown
-     * children. What its visible region leaves out, so that a window
-     * repainting itself does not draw over the dialog in front of it. A
-     * transparent window paints after what is beneath it and covers nothing.
+     * The rectangles, in screen coordinates, of the windows over a window
+     * inside its own top-level window's surface: each shown sibling above
+     * it, or above an ancestor, that clips its siblings; and with
+     * WS_CLIPCHILDREN its own shown children. What its visible region leaves
+     * out, so that a window repainting itself does not draw over the control
+     * in front of it. Another top-level window covers nothing: each draws on
+     * a surface of its own and the screen is composed of them, as with the
+     * desktop window manager. A transparent window paints after what is
+     * beneath it and covers nothing.
      *
      * @param {any} record
      * @param {boolean} [withChildren]  Whether its own children count; a move
@@ -1826,19 +1870,6 @@ export function createWindowFunctions(host){
         const covers = [];
         /** @param {any} each */
         const covering = each=>shown(each) && (each.exStyle & WS_EX_TRANSPARENT) === 0;
-        const top = topLevelOf(record);
-        let above = false;
-        for (const each of windows.values())
-        {
-            if (each === top)
-            {
-                above = true;
-            }
-            else if (above && !each.destroyed && !isChild(each) && covering(each))
-            {
-                covers.push(...geometry.shapeRects(each));
-            }
-        }
         // What a window region leaves out of it and its ancestors: nothing of
         // it is shown there, and what is beneath shows instead.
         for (let at = record; at; at = isChild(at) ? windows.get(at.parent) : null)
@@ -2265,6 +2296,31 @@ export function createWindowFunctions(host){
         });
     };
 
+    /** The threads AttachThreadInput joined, each to the ones it shares input with. */
+    /** @type {Map<number, Set<number>>} */
+    const attachedInput = new Map();
+
+    /**
+     * A window the calling thread's input holds, or zero: the active window
+     * and the focus are a thread's own, as Windows keeps them per message
+     * queue, and another thread asking is answered NULL unless
+     * AttachThreadInput joined the two (input.c test_attach_input). A setup
+     * that made its wizard while a please-wait dialog of another thread was
+     * active had it owned by that dialog, and gone with it.
+     *
+     * @param {number} hwnd
+     */
+    const heldByCaller = hwnd=>{
+        const record = live(hwnd);
+        const caller = threadIdOf(host.callerThread?.());
+        const owner = record ? creatorOf(record) : null;
+        if (!record || caller === null || owner === null || owner === caller)
+        {
+            return hwnd;
+        }
+        return attachedInput.get(caller)?.has(owner) ? hwnd : 0;
+    };
+
     /** The window that has the mouse, or zero. */
     let captured = 0;
     /** @param {number} hwnd */
@@ -2392,6 +2448,11 @@ export function createWindowFunctions(host){
         // keystroke for a window that can no longer be delivered to.
         host.queue.unregisterHotKeysFor?.(record.hwnd);
         const on = thread ?? host.callerThread?.();
+        // Windows hides the window before WM_DESTROY, so from here neither it
+        // nor a child of it is handed a WM_PAINT: a framework pumping its
+        // queue from WM_DESTROY was given one for a child already past
+        // WM_NCDESTROY, where BeginPaint fails.
+        record.dying = true;
         /** @param {number} message @returns {number | Promise<number>} */
         const tell = message=>(told === 'all' || (told === 'ncdestroy' && message === WM_NCDESTROY)
             ? send(record.hwnd, message, 0, 0, on)
@@ -3052,10 +3113,16 @@ export function createWindowFunctions(host){
             id: (style & (WS_CHILD | WS_POPUP)) === WS_CHILD ? menu >>> 0 : 0,
             menu: (style & (WS_CHILD | WS_POPUP)) === WS_CHILD ? 0 : menu >>> 0,
             wndProc: cls.wndProc,
+            // x as CW_USEDEFAULT has the system choose the place and ignore
+            // y, and nWidth the size, ignoring nHeight: the skeleton every
+            // tutorial teaches passes 0 for both, and a window taken at its
+            // word was zero pixels tall.
             x: coordinate(x, DEFAULT_ORIGIN),
-            y: coordinate(y, DEFAULT_ORIGIN),
+            y: (x >>> 0) === CW_USEDEFAULT && !isChildStyle
+                ? DEFAULT_ORIGIN : coordinate(y, DEFAULT_ORIGIN),
             width: coordinate(width, isChildStyle ? 0 : DEFAULT_WIDTH),
-            height: coordinate(height, isChildStyle ? 0 : DEFAULT_HEIGHT),
+            height: (width >>> 0) === CW_USEDEFAULT && !isChildStyle
+                ? DEFAULT_HEIGHT : coordinate(height, isChildStyle ? 0 : DEFAULT_HEIGHT),
             extra: new DataView(new ArrayBuffer(Math.max(cls.windowExtra, 0))),
         });
         // Input has to land somewhere, and what a person is looking at is the
@@ -3399,8 +3466,10 @@ export function createWindowFunctions(host){
         && a.bottom === b.bottom;
 
     /**
-     * The desktop itself, painted once in the desktop colour before the
-     * first window goes on it. Nothing else ever paints the whole screen.
+     * The desktop itself, painted in the desktop colour before the first
+     * window goes on it, and again in each display mode: its background is
+     * a surface of its own, under every window, and nothing covers or
+     * uncovers it.
      *
      * It is painted and **not presented**: the desktop colour is the window
      * manager's own background, not a picture the program drew, and the first
@@ -3411,7 +3480,8 @@ export function createWindowFunctions(host){
      * the desktop itself, and a window's frame or the uncovering of one marks
      * it painted below -- so nothing legitimate is lost.
      */
-    let desktopPainted = false;
+    /** The display size the desktop was painted at, or null. @type {string | null} */
+    let desktopPainted = null;
 
     /**
      * The desktop's own background over `area`: its picture when the host
@@ -3435,18 +3505,20 @@ export function createWindowFunctions(host){
     };
 
     const paintDesktop = ()=>{
-        if (desktopPainted || !host.screen)
+        const screen = host.screen;
+        const size = screen ? `${screen.width}x${screen.height}` : null;
+        if (!screen || desktopPainted === size)
         {
             return;
         }
-        const hdc = host.dc?.()?.get(0, null) ?? 0;
+        const hdc = host.dc?.()?.background?.() ?? 0;
         if (hdc === 0)
         {
             return;
         }
-        desktopPainted = true;
+        desktopPainted = size;
         desktopBackground(hdc,
-            [{ left: 0, top: 0, right: host.screen.width, bottom: host.screen.height }], false);
+            [{ left: 0, top: 0, right: screen.width, bottom: screen.height }], false);
         host.dc?.()?.release(0, hdc);
     };
 
@@ -3724,41 +3796,6 @@ export function createWindowFunctions(host){
     };
 
     /**
-     * The parts of the screen windows have left that the desktop has not
-     * painted over yet.
-     *
-     * @type {{ left: number, top: number, right: number, bottom: number }[]}
-     */
-    let exposed = [];
-
-    /**
-     * The desktop paints what windows left of the screen, where no window is
-     * now: what its own thread does on Windows, a moment after the window
-     * went rather than inside the call that took it away.
-     */
-    const repaintDesktop = ()=>{
-        let bare = exposed;
-        exposed = [];
-        for (const record of windows.values())
-        {
-            if (!record.destroyed && !isChild(record) && shown(record))
-            {
-                for (const piece of geometry.shapeRects(record))
-                {
-                    bare = subtractFromArea(bare, piece);
-                }
-            }
-        }
-        const hdc = bare.length > 0 ? host.dc?.()?.get(0, null) ?? 0 : 0;
-        if (hdc !== 0)
-        {
-            desktopBackground(hdc, bare, true);
-            host.dc?.()?.release(0, hdc);
-            painted();
-        }
-    };
-
-    /**
      * What of the screen a window shows, in screen coordinates: its shape,
      * inside every ancestor's client area, less what is over it -- the
      * windows above, the siblings it clips, and with `own` and
@@ -3811,53 +3848,32 @@ export function createWindowFunctions(host){
     };
 
     /**
-     * A window left part of the screen -- moved, shrank, was hidden, lowered
-     * or destroyed: each window now seen there has what it shows of it added
-     * to its update region, to erase, and nothing else is touched. Neither
-     * the windows over it, which never stopped showing, nor the rest of the
-     * windows beneath, whose pixels are still there (msg.c
-     * test_swp_paint_regions: the parent's update region is the old
-     * rectangle less the new one). The window that left, and what is inside
-     * it, are not counted.
+     * A window inside a top-level window left part of it -- moved, shrank,
+     * was hidden, lowered or destroyed: each window of that top-level window
+     * now seen there has what it shows of it added to its update region, to
+     * erase, and nothing else is touched. Neither the windows over it, which
+     * never stopped showing, nor the rest of the windows beneath, whose
+     * pixels are still there (msg.c test_swp_paint_regions: the parent's
+     * update region is the old rectangle less the new one). The window that
+     * left, and what is inside it, are not counted.
      *
-     * Where no window is now, the desktop paints; DESKTOP_REPAINT_MS later for
-     * a window that went rather than moved. A wizard that replaces its window
-     * between two pages destroys one and shows the next in the same place a
-     * few milliseconds apart, pumping messages in between; painted at once,
-     * the desktop was shown in that gap, the whole window gone for a frame at
-     * every page. A move leaves no such gap, and its trail is painted at once.
+     * A top-level window leaves nothing to paint: every top-level window and
+     * the desktop keep their own pixels, and the screen is composed of them.
      *
      * @param {import('../gdi32/rects.js').Rect[]} area  Screen coordinates.
      * @param {any} leaving  The window that left it.
-     * @param {boolean} [moved]  Whether it is still on the screen.
-     * @param {boolean} [quiet]  The desktop's part only: the program asked
-     *        for no painting of its own windows (SWP_NOREDRAW). The desktop
-     *        is no window of the program's to invalidate, and a trail of a
-     *        window left on it would stay there.
+     * @param {boolean} [quiet]  SWP_NOREDRAW: the program asked for no painting.
      */
-    const expose = (area, leaving, moved = false, quiet = false)=>{
-        if (area.length === 0)
+    const expose = (area, leaving, quiet = false)=>{
+        if (area.length === 0 || quiet || !isChild(leaving))
         {
             return;
         }
-        paintDesktop();
-        if (!isChild(leaving))
-        {
-            const waiting = !moved && (exposed.length > 0 || scheduleDesktop());
-            exposed.push(...area);
-            if (!waiting)
-            {
-                repaintDesktop();
-            }
-        }
-        if (quiet)
-        {
-            return;
-        }
+        const top = topLevelOf(leaving);
         const box = boundsOf(area);
         for (const other of paintOrder())
         {
-            if (shown(other) && !insideOf(other, leaving)
+            if (shown(other) && !insideOf(other, leaving) && topLevelOf(other) === top
                 && !isEmpty(intersect(box, geometry.shapedRect(other))))
             {
                 exposeIn(other, intersectAreas(sightOf(other), area));
@@ -3900,9 +3916,15 @@ export function createWindowFunctions(host){
     const afterChange = (watched, how = {})=>{
         const { record } = watched;
         const isShown = shown(record) && !record.destroyed;
+        // A top-level window on the screen moved, restacked, hidden or gone
+        // changes it with nothing painted: it is composed and shown again. One
+        // appearing is shown once it has painted.
+        if (!isChild(record) && watched.wasShown)
+        {
+            painted();
+        }
         const now = isShown ? sightOf(record, false) : [];
-        expose(subtractAreas(watched.occupied, now), record, how.moved === true,
-            how.quiet === true);
+        expose(subtractAreas(watched.occupied, now), record, how.quiet === true);
         if (!isShown || how.held || how.quiet)
         {
             return;
@@ -3965,19 +3987,43 @@ export function createWindowFunctions(host){
     };
 
     /**
-     * Whether all of a window is on the screen and under no other: then its
-     * pixels there are its own, and a move can take them along.
+     * Whether all of a window's pixels are its own, so that a move can take
+     * them along: a top-level window's always are, its surface being its
+     * own; a window inside one's are when it is all inside its parents and
+     * under none of its siblings.
      *
      * @param {any} record
      */
     const wholeOnScreen = record=>{
         const rect = geometry.shapedRect(record);
-        const screen = host.screen;
-        return Boolean(screen) && !isEmpty(rect) && rect.left >= 0 && rect.top >= 0
-            && rect.right <= (screen?.width ?? 0) && rect.bottom <= (screen?.height ?? 0)
-            && sameRect(geometry.visibleWindowRect(record), rect)
-            && coveringOf(record, false).every(cover=>isEmpty(intersect(cover, rect)));
+        return !isEmpty(rect) && (!isChild(record)
+            || (sameRect(geometry.visibleWindowRect(record), rect)
+                && coveringOf(record, false).every(cover=>isEmpty(intersect(cover, rect)))));
     };
+
+    /**
+     * A context on the whole of the top-level window a window is inside --
+     * the surface its pixels are in -- with the offset from the screen's
+     * coordinates to the context's.
+     *
+     * @param {any} record
+     */
+    const surfaceContext = record=>{
+        const top = topLevelOf(record);
+        const corner = geometry.windowRect(top);
+        const hdc = host.dc?.()?.get(top.hwnd, corner) ?? 0;
+        return { hdc, hwnd: top.hwnd, dx: -corner.left, dy: -corner.top };
+    };
+
+    /**
+     * Where a window is seen inside its top-level window's surface, in that
+     * surface's context: inside its parents, under none of its siblings.
+     *
+     * @param {any} record @param {{ dx: number, dy: number }} at
+     */
+    const seenIn = (record, at)=>offsetArea(coveringOf(record, false).reduce(
+        (area, cover)=>subtractFromArea(area, cover), [geometry.visibleWindowRect(record)]),
+    at.dx, at.dy);
 
     /**
      * The window a program is dragging -- moving it while it, or a window in
@@ -3996,7 +4042,8 @@ export function createWindowFunctions(host){
 
     /**
      * Asked before a window moves: whether it is being dragged, its picture
-     * taken where it still is the first time.
+     * taken where it still is the first time. A top-level window is never
+     * held: its surface goes where it goes, pixels and all.
      *
      * @param {any} record
      */
@@ -4006,13 +4053,16 @@ export function createWindowFunctions(host){
             return true;
         }
         const holder = live(captured);
-        if (!holder || !insideOf(holder, record) || !shown(record) || !draw?.snapshot)
+        if (!isChild(record) || !holder || !insideOf(holder, record) || !shown(record)
+            || !draw?.snapshot)
         {
             return false;
         }
-        const hdc = host.dc?.()?.get(0, null) ?? 0;
-        const shot = hdc !== 0 ? draw.snapshot(hdc, geometry.shapedRect(record)) : null;
-        host.dc?.()?.release(0, hdc);
+        const at = surfaceContext(record);
+        const shot = at.hdc !== 0
+            ? draw.snapshot(at.hdc, offsetArea([geometry.shapedRect(record)], at.dx, at.dy)[0])
+            : null;
+        host.dc?.()?.release(at.hwnd, at.hdc);
         if (!shot)
         {
             return false;
@@ -4029,16 +4079,19 @@ export function createWindowFunctions(host){
      * @param {any} record
      */
     const dragMove = record=>{
-        const hdc = dragged ? host.dc?.()?.get(0, null) ?? 0 : 0;
-        if (hdc === 0 || !dragged)
+        if (!dragged)
+        {
+            return;
+        }
+        const at = surfaceContext(record);
+        if (at.hdc === 0)
         {
             return;
         }
         const after = geometry.shapedRect(record);
-        draw.clip?.(hdc, coveringOf(record, false).reduce(
-            (area, cover)=>subtractFromArea(area, cover), [geometry.visibleWindowRect(record)]));
-        draw.paste(hdc, dragged.shot, after.left, after.top);
-        host.dc?.()?.release(0, hdc);
+        draw.clip?.(at.hdc, seenIn(record, at));
+        draw.paste(at.hdc, dragged.shot, after.left + at.dx, after.top + at.dy);
+        host.dc?.()?.release(at.hwnd, at.hdc);
         painted();
     };
 
@@ -4059,54 +4112,34 @@ export function createWindowFunctions(host){
 
     /**
      * A window moved, its size the same: its pixels go with it, as Windows'
-     * SetWindowPos copies a window's bits, and only what it left of the
-     * screen is painted -- by the windows under it and the desktop, which is
-     * what a move renders. Repainted instead, the window and every control
-     * in it ran the program's painting again at every step of a drag. Asked
-     * only for a window that was all on the screen and under no other
-     * (`wholeOnScreen`), whose pixels were all its own. Answers whether they
-     * moved.
+     * SetWindowPos copies a window's bits, and only what it left is painted,
+     * by the windows of its top-level window under it. A top-level window's
+     * surface moves with it and nothing is copied. Repainted instead, the
+     * window and every control in it ran the program's painting again at
+     * every step of a drag. Asked only for a window whose pixels were all its
+     * own (`wholeOnScreen`). Answers whether they moved.
      *
      * @param {any} record
      * @param {{ left: number, top: number, right: number, bottom: number }} before
      *        Its rectangle on the screen before the move.
      */
     const moveBits = (record, before)=>{
-        const hdc = draw?.scroll ? host.dc?.()?.get(0, null) ?? 0 : 0;
-        if (hdc === 0)
+        if (!isChild(record))
+        {
+            return true;
+        }
+        const at = draw?.scroll ? surfaceContext(record) : null;
+        if (!at || at.hdc === 0)
         {
             return false;
         }
         const after = geometry.shapedRect(record);
-        // Drawn only where it is seen now: inside its parents, under no window above.
-        draw.clip?.(hdc, coveringOf(record, false).reduce(
-            (area, cover)=>subtractFromArea(area, cover), [geometry.visibleWindowRect(record)]));
-        draw.scroll(hdc, before, after.left - before.left, after.top - before.top, after);
-        host.dc?.()?.release(0, hdc);
+        // Drawn only where it is seen now: inside its parents, under no sibling above.
+        draw.clip?.(at.hdc, seenIn(record, at));
+        const [from, to] = offsetArea([before, after], at.dx, at.dy);
+        draw.scroll(at.hdc, from, after.left - before.left, after.top - before.top, to);
+        host.dc?.()?.release(at.hwnd, at.hdc);
         painted();
-        return true;
-    };
-
-    /**
-     * Has the desktop paint what windows left DESKTOP_REPAINT_MS from now: on
-     * the system's own clock when the host has one -- the desktop is no
-     * thread of the program's, and on Windows its own thread paints whatever
-     * the program's are doing -- else when the queue is next looked at.
-     * False when nothing can wait.
-     */
-    const scheduleDesktop = ()=>{
-        if (host.later?.(DESKTOP_REPAINT_MS, repaintDesktop))
-        {
-            return true;
-        }
-        if (!host.queue.postLater)
-        {
-            return false;
-        }
-        host.queue.postLater(DESKTOP_REPAINT_KEY, DESKTOP_REPAINT_MS, ()=>{
-            repaintDesktop();
-            return null;
-        });
         return true;
     };
 
@@ -4160,10 +4193,12 @@ export function createWindowFunctions(host){
             draw.fill(hdc, bar, sysColor(isActive ? COLOR_ACTIVECAPTION : COLOR_INACTIVECAPTION));
             const box = closeBox(record);
             const metrics = draw.measure(hdc, 'M');
+            const clip = { ...bar, right: box ? box.left - 2 : bar.right };
             draw.text(hdc, bar.left + 4, bar.top + Math.floor((frame.caption - metrics.height) / 2),
-                record.title, {
+                endEllipsis(record.title, clip.right - bar.left - 4,
+                    text=>draw.measure(hdc, text).width), {
                     color: sysColor(isActive ? COLOR_CAPTIONTEXT : COLOR_INACTIVECAPTIONTEXT),
-                    clip: { ...bar, right: box ? box.left - 2 : bar.right },
+                    clip,
                 });
             if (box)
             {
@@ -4648,7 +4683,14 @@ export function createWindowFunctions(host){
         followPointer(x, y);
         if (kind === WM_MOUSEWHEEL)
         {
-            const target = focusWindow() || activeWindow();
+            // To the window under the pointer, as Windows 10 scrolls inactive
+            // windows by default -- a list scrolls without being clicked
+            // first -- to the one holding the mouse while one does, and to
+            // the focus over nothing that takes input.
+            const under = captured === 0 ? windowFromPoint(x, y)?.record ?? null : null;
+            const target = captured !== 0 && live(captured) ? captured
+                : under && (under.style & WS_DISABLED) === 0 ? under.hwnd
+                    : focusWindow() || activeWindow();
             return target === 0 ? message : { ...message, hwnd: target };
         }
         if (captured !== 0 && live(captured))
@@ -5095,6 +5137,11 @@ export function createWindowFunctions(host){
             case WM_VSCROLL:
             case WM_HSCROLL:
                 return scrollWindowBar(record, message);
+            case WM_MOUSEWHEEL:
+                // A wheel a child does not use goes up to its parent.
+                return isChild(record) && live(record.parent)
+                    ? send(record.parent, WM_MOUSEWHEEL, message.wParam, message.lParam, thread)
+                    : 0;
             case WM_ACTIVATE:
             case WM_NCACTIVATE:
             case WM_SHOWWINDOW:
@@ -5144,6 +5191,83 @@ export function createWindowFunctions(host){
     };
 
     /**
+     * The thumb of a window's own scroll bar dragged, as DefWindowProc drags
+     * it: the window holds the mouse, the pointer's moves are taken from the
+     * queue here and never reach the window's procedure, each new position
+     * is sent as SB_THUMBTRACK, and where the button is let go
+     * SB_THUMBPOSITION and SB_ENDSCROLL (MSDN WM_VSCROLL).
+     *
+     * @param {any} record @param {boolean} vertical
+     * @param {number} grab  How far into the thumb it was taken.
+     * @param {unknown} [thread]
+     * @returns {Promise<number>}
+     */
+    const trackThumb = async(record, vertical, grab, thread)=>{
+        const scroll = vertical ? WM_VSCROLL : WM_HSCROLL;
+        const held = scrollOf(record, vertical ? SB_VERT : SB_HORZ);
+        let value = held.pos;
+        setCapture(record.hwnd);
+        try
+        {
+            while (live(record.hwnd) && captured === record.hwnd)
+            {
+                const entry = host.queue.peek({ hwnd: ANY_WINDOW, first: WM_MOUSEMOVE,
+                    last: WM_MOUSELAST, remove: true, thread: threadIdOf(thread) });
+                if (!entry)
+                {
+                    await host.idle();
+                    await receiveSent(thread);
+                    continue;
+                }
+                const kind = entry.message >>> 0;
+                if ((kind !== WM_MOUSEMOVE && kind !== WM_LBUTTONUP)
+                    || (entry.hwnd >>> 0) !== record.hwnd)
+                {
+                    continue;
+                }
+                // The pointer in the window holding the mouse, along the bar.
+                const point = pointOf(entry.lParam);
+                const origin = geometry.clientOrigin(record);
+                const rect = geometry.windowRect(record);
+                const bar = scrollBarRect(record, vertical);
+                const along = vertical ? origin.y + point.y - rect.top - bar.top
+                    : origin.x + point.x - rect.left - bar.left;
+                const next = thumbValue(bar, vertical, held, along - grab);
+                if (kind === WM_LBUTTONUP)
+                {
+                    await send(record.hwnd, scroll, (SB_THUMBPOSITION | next << 16) >>> 0, 0,
+                        thread);
+                    await send(record.hwnd, scroll, SB_ENDSCROLL, 0, thread);
+                    break;
+                }
+                if (next !== value)
+                {
+                    value = next;
+                    held.trackPos = next;
+                    await send(record.hwnd, scroll, (SB_THUMBTRACK | next << 16) >>> 0, 0, thread);
+                    paintFrame(record);
+                    // What the scroll left to paint is painted as the thumb
+                    // goes, as Windows' loop hands WM_PAINT on while it
+                    // holds the thumb: the text follows it, not the release.
+                    await paint.updateNow(record, true, thread);
+                }
+            }
+        }
+        finally
+        {
+            if (captured === record.hwnd)
+            {
+                releaseCapture();
+            }
+        }
+        if (live(record.hwnd))
+        {
+            paintFrame(record);
+        }
+        return 0;
+    };
+
+    /**
      * What the frame's own hit test does with a click on a scroll bar: the
      * WM_VSCROLL or WM_HSCROLL the bar would send, sent to the window.
      *
@@ -5154,11 +5278,17 @@ export function createWindowFunctions(host){
         const vertical = hit === HTVSCROLL;
         const rect = geometry.windowRect(record);
         const bar = scrollBarRect(record, vertical);
-        const code = controls.helpers.scrollHit(bar, vertical,
-            scrollOf(record, vertical ? SB_VERT : SB_HORZ), x - rect.left, y - rect.top);
+        const held = scrollOf(record, vertical ? SB_VERT : SB_HORZ);
+        const code = controls.helpers.scrollHit(bar, vertical, held, x - rect.left, y - rect.top);
         if (code === SB_ENDSCROLL)
         {
             return 0;
+        }
+        if (code === SB_THUMBTRACK)
+        {
+            const along = vertical ? y - rect.top - bar.top : x - rect.left - bar.left;
+            return trackThumb(record, vertical,
+                along - (thumbOf(bar, vertical, held).thumb?.start ?? 0), thread);
         }
         return andThen(send(record.hwnd, vertical ? WM_VSCROLL : WM_HSCROLL, code, 0, thread), ()=>{
             paintFrame(record);
@@ -5407,6 +5537,31 @@ export function createWindowFunctions(host){
     // The list a dropdown combo box drops, a popup of a class of its own.
     registerSystemClass({ name: 'ComboLBox', procedure: controls.procedures.ComboLBox });
     host.registerControls?.(controlHost, controls.toolkit, registerSystemClass);
+    // The rest of the classes Windows' own libraries register, which this build
+    // has no control for: each is there all the same -- GetClassInfoEx finds
+    // it, a window of it is made and can be subclassed -- answering as
+    // DefWindowProc does, and saying so. A framework registers its own
+    // subclass of every one at start-up, and one missing stopped it there.
+    /**
+     * @param {string} name
+     * @returns {(record: any, message: DispatchedMessage, thread?: unknown)
+     *     => number | Promise<number>}
+     */
+    const inertProcedure = name=>(record, message, thread)=>{
+        if (message.message === WM_CREATE)
+        {
+            host.divergence?.(name, 'no control of this class is drawn or answers its '
+                + 'messages: the window is DefWindowProc\'s');
+        }
+        return defWindowProc(record, message, thread);
+    };
+    for (const name of INERT_CLASSES)
+    {
+        if (!systemClasses.has(name.toLowerCase()))
+        {
+            registerSystemClass({ name, procedure: inertProcedure(name) });
+        }
+    }
 
     // The MDI client: a built-in class whose procedure keeps a frame's document
     // windows, through the window manager's own calls (mdi.js).
@@ -5494,6 +5649,23 @@ export function createWindowFunctions(host){
         return record ? creatorOf(record) : null;
     });
 
+    /**
+     * Whether the window, or a parent it hangs from, is being destroyed: hidden
+     * on Windows from the moment DestroyWindow begins, and so owing no paint.
+     *
+     * @param {any} record
+     */
+    const dying = record=>{
+        for (let at = record; at; at = isChild(at) ? live(at.parent) : null)
+        {
+            if (at.dying)
+            {
+                return true;
+            }
+        }
+        return false;
+    };
+
     host.queue.paintsFrom?.(filter=>{
         const asking = filter.thread ?? null;
         // Asked at every look into a queue -- a game's loop looks a hundred
@@ -5506,7 +5678,7 @@ export function createWindowFunctions(host){
         const due = [];
         for (const record of windows.values())
         {
-            if (!paint.owesPaint(record) || record.destroyed)
+            if (!paint.owesPaint(record) || record.destroyed || dying(record))
             {
                 continue;
             }
@@ -5616,6 +5788,73 @@ export function createWindowFunctions(host){
             const record = live(hwnd);
             return record ? geometry.clientRect(record) : null;
         },
+        /**
+         * The top-level window whose surface a window's pixels are in, with
+         * its rectangle on the screen; null for the desktop, the screen, or a
+         * handle that names no window.
+         *
+         * @param {number} hwnd
+         */
+        /**
+         * What COM's modal loop does for a thread waiting on a call it made
+         * into another apartment: the messages other threads sent it run, and
+         * its windows are painted; input and other posted messages stay in its
+         * queue, as IMessageFilter's default (PENDINGMSG_WAITDEFPROCESS) leaves
+         * them. Each window is handed one WM_PAINT a look, so a procedure that
+         * never validates cannot hold the wait. Answers how many it ran.
+         *
+         * @param {unknown} thread
+         * @returns {number | Promise<number>}
+         */
+        modalPump: thread=>{
+            const id = threadIdOf(thread);
+            if (id === null)
+            {
+                return 0;
+            }
+            /** @type {Set<number>} */
+            const paintedNow = new Set();
+            const paintNext = (/** @type {number} */ ran)=>{
+                const message = host.queue.peek({ hwnd: ANY_WINDOW, first: WM_PAINT,
+                    last: WM_PAINT, remove: true, thread: id });
+                if (!message || paintedNow.has(message.hwnd))
+                {
+                    return ran;
+                }
+                paintedNow.add(message.hwnd);
+                return andThen(deliver(message, thread), ()=>paintNext(ran + 1));
+            };
+            const before = inbox.get(id)?.length ?? 0;
+            return andThen(receiveSent(thread), ()=>paintNext(before));
+        },
+        surfaceOf: hwnd=>{
+            const record = windows.get(hwnd >>> 0);
+            if (!record || record.destroyed)
+            {
+                return null;
+            }
+            const top = topLevelOf(record);
+            return { hwnd: top.hwnd, rect: geometry.windowRect(top) };
+        },
+        /**
+         * The top-level windows, bottom to top, for the screen to be composed
+         * of: each with its rectangle and, shown, the parts of it its region
+         * keeps, in screen coordinates.
+         */
+        surfaces: ()=>{
+            /** @type {{ hwnd: number, rect: Rect, shown: boolean, shape: Rect[] }[]} */
+            const out = [];
+            for (const record of windows.values())
+            {
+                if (!record.destroyed && !isChild(record))
+                {
+                    const visible = shown(record);
+                    out.push({ hwnd: record.hwnd, rect: geometry.windowRect(record),
+                        shown: visible, shape: visible ? geometry.shapeRects(record) : [] });
+                }
+            }
+            return out;
+        },
         list: ()=>[...windows.values()]
             .filter(record=>!record.destroyed)
             .map(record=>({
@@ -5635,6 +5874,8 @@ export function createWindowFunctions(host){
                 // window with an owner is still over everything below it.
                 child: isChild(record),
                 id: record.id,
+                // The thread that made it: the only one that may destroy it.
+                thread: creatorOf(record),
                 // The styles that decide how it paints beside its siblings.
                 style: `0x${(record.style >>> 0).toString(16)}`,
                 exStyle: `0x${(record.exStyle >>> 0).toString(16)}`,
@@ -5705,10 +5946,12 @@ export function createWindowFunctions(host){
         // procedure answers, the thread on the processor is somebody else.
         const thread = caller ?? host.callerThread?.();
         const minimised = (record.style & WS_MINIMIZE) !== 0;
+        const maximised = (record.style & WS_MAXIMIZE) !== 0;
         // Every minimising command is the hook's to hear, the window
-        // minimised already or not (msg.c WmMinMax_1, _3, _4), and every
-        // restoring one of a minimised window.
-        if (MINIMISING.has(cmdShow) || (RESTORED_BY.has(cmdShow) && minimised))
+        // minimised already or not (msg.c WmMinMax_1, _3, _4), every
+        // restoring one of a minimised or maximised window, and maximising.
+        if (MINIMISING.has(cmdShow) || (RESTORED_BY.has(cmdShow) && (minimised || maximised))
+            || (cmdShow === SW_SHOWMAXIMIZED && !maximised))
         {
             // Minimising and restoring are a CBT hook's to forbid; the window
             // is still shown as asked, in the state it had.
@@ -5751,6 +5994,49 @@ export function createWindowFunctions(host){
     };
 
     /**
+     * Where a window goes maximised: over its parent's client area -- the
+     * screen for a top-level window -- with its sizing edges beyond it and
+     * its caption inside, as WM_GETMINMAXINFO proposes and the procedure may
+     * change. The edges are those of the style less its border line, which
+     * leaves a caption out of them (MSDN MINMAXINFO; SM_CXMAXIMIZED).
+     *
+     * @param {any} record @param {unknown} thread
+     * @returns {{ x: number, y: number, width: number, height: number }
+     *     | Promise<{ x: number, y: number, width: number, height: number }>}
+     */
+    const maximisedPlace = (record, thread)=>{
+        const MINMAXINFO_SIZE = 40;
+        // A child's place is in its parent's client area, which starts at 0.
+        const parent = isChild(record) ? live(record.parent) : null;
+        const area = parent ? geometry.clientRect(parent)
+            : { left: 0, top: 0, right: host.screen?.width ?? DEFAULT_WIDTH,
+                bottom: host.screen?.height ?? DEFAULT_HEIGHT };
+        const style = record.style;
+        const edges = frameOf((style & WS_CAPTION) === WS_CAPTION ? style & ~WS_BORDER : style,
+            record.exStyle, (style & WS_POPUP) !== 0 && (record.menu ?? 0) !== 0);
+        const proposed = { x: -edges.left, y: -edges.top,
+            width: area.right - area.left + edges.left + edges.edge,
+            height: area.bottom - area.top + edges.top + edges.edge };
+        const at = host.allocate?.(MINMAXINFO_SIZE) ?? 0;
+        if (at === 0)
+        {
+            return proposed;
+        }
+        // ptReserved, ptMaxSize, ptMaxPosition, ptMinTrackSize, ptMaxTrackSize.
+        const metric = (/** @type {number} */ index)=>table.GetSystemMetrics.handler([index]);
+        const [SM_CXMINTRACK, SM_CYMINTRACK, SM_CXMAXTRACK, SM_CYMAXTRACK] = [34, 35, 59, 60];
+        writeU32s(host, at, [record.x, record.y, proposed.width, proposed.height,
+            proposed.x, proposed.y, metric(SM_CXMINTRACK), metric(SM_CYMINTRACK),
+            metric(SM_CXMAXTRACK), metric(SM_CYMAXTRACK)]);
+        return andThen(send(record.hwnd, WM_GETMINMAXINFO, 0, at, thread), ()=>{
+            const view = new DataView(host.readMemory(at + 8, 16).slice().buffer);
+            host.release?.(at);
+            return { width: view.getInt32(0, true), height: view.getInt32(4, true),
+                x: view.getInt32(8, true), y: view.getInt32(12, true) };
+        });
+    };
+
+    /**
      * The window next in line for the activation when the active one is
      * hidden: its owner, when that shows and takes input, else the topmost
      * other top-level window that does; none at all otherwise, and the
@@ -5787,8 +6073,14 @@ export function createWindowFunctions(host){
         const wasVisible = (record.style & WS_VISIBLE) !== 0;
         const hide = cmdShow === SW_HIDE;
         const minimised = (record.style & WS_MINIMIZE) !== 0;
+        const maximised = (record.style & WS_MAXIMIZE) !== 0;
+        // A window minimised from maximised is maximised again where it was.
+        const maximising = !keepState && cmdShow === SW_SHOWMAXIMIZED && !maximised
+            && !(minimised && record.restoresMaximised);
+        const unmaximising = !keepState && maximised && RESTORED_BY.has(cmdShow)
+            && cmdShow !== SW_SHOWMAXIMIZED;
         const stateChanges = !keepState && (MINIMISING.has(cmdShow) ? !minimised
-            : RESTORED_BY.has(cmdShow) && minimised);
+            : RESTORED_BY.has(cmdShow) && minimised) || maximising || unmaximising;
         // A command that finds the window as it asks does nothing at all, a
         // shown window not activated either; SW_SHOWNA places it whatever
         // it finds (msg.c test_ShowWindow, WmEmptySeq, WmShowNA_2).
@@ -5797,29 +6089,47 @@ export function createWindowFunctions(host){
             return wasVisible ? 1 : 0;
         }
         const flags = showFlags(record, cmdShow);
+        // Where the window goes, asked before it is told it is shown; a
+        // restore puts it back where it was before it was maximised.
+        const target = maximising ? maximisedPlace(record, thread)
+            : unmaximising ? record.normalPlace ?? null : null;
         // Sent, and then chained onto whatever follows it: a procedure the
         // bridge has to run answers with a promise, so returning this call's
         // own result before it has answered hands the host call back to the
         // guest while the guest's procedure is still pending -- and the guest
         // reuses its own stack under it. SW_SHOWNA tells it whatever it
         // found (WmSHOWNATopVisible).
-        const greeting = wasVisible === hide || cmdShow === SW_SHOWNA
+        let told = andThen(target, place=>andThen(wasVisible === hide || cmdShow === SW_SHOWNA
             ? send(record.hwnd, WM_SHOWWINDOW, hide ? 0 : 1, 0, thread)
-            : 0;
-        let told = andThen(greeting, ()=>{
+            : 0, ()=>{
             // Minimised is a state IsIconic reads back and a restore clears;
             // the window keeps its place in the picture, there being no
             // taskbar to shrink to.
             if (!keepState && MINIMISING.has(cmdShow))
             {
-                record.style = (record.style | WS_MINIMIZE) >>> 0;
+                record.restoresMaximised = maximised || (minimised && record.restoresMaximised);
+                record.style = ((record.style | WS_MINIMIZE) & ~WS_MAXIMIZE) >>> 0;
             }
             else if (!keepState && RESTORED_BY.has(cmdShow))
             {
-                record.style = (record.style & ~WS_MINIMIZE) >>> 0;
+                const back = minimised && record.restoresMaximised;
+                record.restoresMaximised = false;
+                record.style = (back || cmdShow === SW_SHOWMAXIMIZED
+                    ? (record.style & ~WS_MINIMIZE) | WS_MAXIMIZE
+                    : record.style & ~(WS_MINIMIZE | WS_MAXIMIZE)) >>> 0;
             }
-            return placeWindow([record.hwnd, 0, 0, 0, 0, 0, flags], thread);
-        });
+            if (!place)
+            {
+                return placeWindow([record.hwnd, 0, 0, 0, 0, 0, flags], thread);
+            }
+            const SWP_NOSIZE_NOMOVE = 0x0003;
+            const SWP_FRAMECHANGED = 0x0020;
+            record.normalPlace = maximising
+                ? { x: record.x, y: record.y, width: record.width, height: record.height }
+                : null;
+            return placeWindow([record.hwnd, 0, place.x, place.y, place.width, place.height,
+                (flags & ~SWP_NOSIZE_NOMOVE) | SWP_FRAMECHANGED], thread);
+        }));
         if (hide && isChild(record))
         {
             // A child hidden with the focus in it hands it to its parent.
@@ -5833,8 +6143,10 @@ export function createWindowFunctions(host){
             record.needsSize = false;
             told = andThen(told, ()=>{
                 const client = geometry.clientRect(record);
-                return andThen(send(record.hwnd, WM_SIZE, SIZE_RESTORED,
-                    ((((client.bottom - client.top) & 0xffff) << 16)
+                return andThen(send(record.hwnd, WM_SIZE, (record.style & WS_MINIMIZE) !== 0
+                    ? SIZE_MINIMIZED : (record.style & WS_MAXIMIZE) !== 0 ? SIZE_MAXIMIZED
+                        : SIZE_RESTORED,
+                ((((client.bottom - client.top) & 0xffff) << 16)
                         | ((client.right - client.left) & 0xffff)) >>> 0, thread),
                 ()=>send(record.hwnd, WM_MOVE, 0,
                     (((client.top & 0xffff) << 16) | (client.left & 0xffff)) >>> 0, thread));
@@ -6211,6 +6523,7 @@ export function createWindowFunctions(host){
             host: Object.assign(Object.create(host), {
                 focus: focusWindow, setFocus, active: activeWindow, activate,
                 capture: ()=>captured, setCapture, releaseCapture, colors: systemColors,
+                heldByCaller,
                 send, sendAcross, callProcedure, geometry, windowFromPoint, askedFromPoint,
                 isChild, repaint,
                 appear, beforeChange, afterChange, eraseShown, wholeOnScreen, moveBits, dragging,
@@ -7100,17 +7413,16 @@ export function createWindowFunctions(host){
         /**
          * BOOL AttachThreadInput(DWORD idAttach, DWORD idAttachTo, BOOL fAttach)
          *
-         * Joins two threads' input state, or parts them. The focus, the active
-         * window and the capture are one for the whole process here, which is
-         * every thread already attached to every other, so what is left is
-         * the refusal: a thread attached to itself, one that does not exist,
-         * or one that has no message queue yet -- no window made, no look at
-         * a queue -- is ERROR_INVALID_PARAMETER.
+         * Joins two threads' input state, or parts them: joined, each reads
+         * the other's active window and focus (`heldByCaller`). A thread
+         * attached to itself, one that does not exist, or one that has no
+         * message queue yet -- no window made, no look at a queue -- is
+         * ERROR_INVALID_PARAMETER.
          */
         AttachThreadInput: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([from, to])=>{
+            handler: ([from, to, attach])=>{
                 const one = from >>> 0;
                 const other = to >>> 0;
                 const exists = (/** @type {number} */ id)=>(host.threadExists
@@ -7120,6 +7432,19 @@ export function createWindowFunctions(host){
                 {
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return 0;
+                }
+                for (const [a, b] of [[one, other], [other, one]])
+                {
+                    const joined = attachedInput.get(a) ?? new Set();
+                    if (attach !== 0)
+                    {
+                        joined.add(b);
+                    }
+                    else
+                    {
+                        joined.delete(b);
+                    }
+                    attachedInput.set(a, joined);
                 }
                 return 1;
             },

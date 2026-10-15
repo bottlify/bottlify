@@ -891,11 +891,15 @@ export function generateFixedFunction(state, layout){
     // with it so the divide gives the same point: it is what the rasteriser
     // interpolates by, and a w of one everywhere interpolates a perspective
     // quad affinely. An RHW of zero or less has no w to give and is taken as
-    // one, as Windows still draws such a vertex.
+    // one, as Windows still draws such a vertex -- unless the draw clips
+    // behind the eye (`clipsBehindEye`): then a negative RHW is a vertex
+    // there, its w goes in negative, and the rasteriser clips the triangle at
+    // the eye (decisions.md A45).
     const position = layout.preTransformed
         ? '    let screen = (vertex.position.xy + uniforms.viewportOffset) '
             + '* uniforms.viewportScale;\n'
-            + '    let clipW = select(1.0, 1.0 / vertex.position.w, vertex.position.w > 0.0);\n'
+            + '    let clipW = select(1.0, 1.0 / vertex.position.w, vertex.position.w '
+            + `${state.clipsBehindEye ? '!=' : '>'} 0.0);\n`
             + '    out.position = vec4f(screen.x - 1.0, screen.y + 1.0, '
             + 'vertex.position.z, 1.0) * clipW;'
         : '    out.position = uniforms.worldViewProjection * vec4f(vertex.position, 1.0);';

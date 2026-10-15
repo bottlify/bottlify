@@ -456,3 +456,49 @@ test('TransparentBlt leaves the key out by its colour alone, one source pixel pe
         srcWidth: 2, srcHeight: 1, key: GREEN });
     assert.equal(shrunk.read(0, 0), BACKGROUND, 'shrunk, the first pixel of the box decides');
 });
+
+test('a plain copy moved a row at a time draws what the copy a pixel at a time draws', ()=>{
+    // The gate of the row path: every surface pair it takes -- separate or
+    // one surface onto itself, overlapping either way, top-down or not --
+    // against the pixel path, which a conversion that changes nothing forces.
+    let seed = 11;
+    const random = (/** @type {number} */ below)=>{
+        seed = (seed * 1103515245 + 12345) >>> 0;
+        return (seed >>> 8) % below;
+    };
+    /** @param {number} width @param {number} height @param {boolean} topDown */
+    const filled = (width, height, topDown)=>{
+        const surface = createSurface({ width, height, topDown });
+        for (let y = 0; y < height; y++)
+        {
+            for (let x = 0; x < width; x++)
+            {
+                surface.write(x, y, (random(0x1000000) | (random(256) << 24)) >>> 0);
+            }
+        }
+        return surface;
+    };
+    /** @param {any} surface */
+    const copyOf = surface=>{
+        const copy = createSurface({ width: surface.width, height: surface.height,
+            topDown: surface.topDown });
+        copy.bytes.set(surface.bytes);
+        return copy;
+    };
+    for (let round = 0; round < 400; round++)
+    {
+        const self = random(3) === 0;
+        const dest = filled(1 + random(20), 1 + random(16), random(2) === 0);
+        const src = self ? dest : filled(1 + random(20), 1 + random(16), random(2) === 0);
+        const call = { x: random(24) - 4, y: random(20) - 4, width: random(24), height: random(20),
+            srcX: random(24) - 4, srcY: random(20) - 4, rop: 0x00cc0020 };
+        const clip = random(2) === 0 ? undefined
+            : { left: random(8), top: random(8), right: 8 + random(16), bottom: 8 + random(12) };
+        const expected = copyOf(dest);
+        const expectedSrc = self ? expected : src;
+        bitBlt({ ...call, clip, dest: expected, src: expectedSrc, convert: pixel=>pixel });
+        bitBlt({ ...call, clip, dest, src });
+        assert.deepEqual([...dest.bytes], [...expected.bytes],
+            `round ${round}: ${JSON.stringify({ self, ...call, clip })}`);
+    }
+});

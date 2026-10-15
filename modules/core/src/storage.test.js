@@ -137,6 +137,19 @@ test('a session in the origin file system is kept a file to each file and read b
         [['C:\\Dir\\Ünïcode.cfg', [1]], ['C:\\save.dat', [7, 7]]]);
 });
 
+test('a session cleared is gone whole, saved games and registry, and a clear of none is no error',
+    async()=>{
+        const disk = fakeDirectory();
+        const store = opfsSession('game', async()=>disk.root);
+        await store.save({ files: [{ path: 'C:\\save.dat', bytes: new Uint8Array([7]) }],
+            registry: { roots: [] } });
+        await store.clear();
+        assert.deepEqual([...disk.entries.keys()], [], 'nothing of it left');
+        assert.deepEqual(await opfsSession('game', async()=>disk.root).load(),
+            { files: [], registry: null });
+        await store.clear();
+    });
+
 test("a session read while another holder saves into it passes over a save's swap file",
     async()=>{
         // A process the run started reads the session while its parent saves:
@@ -347,3 +360,45 @@ test('a burst of changes is saved once, after it settles, and never two at a tim
     stores.shift()?.resolve();
     await flushed;
 });
+
+test('the origin\'s storage is asked to be kept once, and a refusal keeps the session working',
+    async()=>{
+        // Best-effort storage is cleared whole when the disk runs low, saved
+        // games with it: the store asks the browser to keep it, once.
+        const disk = fakeDirectory();
+        const was = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+        let asked = 0;
+        let grant = true;
+        Object.defineProperty(globalThis, 'navigator', { configurable: true, value: {
+            storage: { getDirectory: async()=>disk.root, persist: async()=>{
+                asked++;
+                return grant;
+            } } } });
+        try
+        {
+            const store = opfsSession('game');
+            assert.equal(await store.persisted(), null, 'not asked before the store is opened');
+            await store.save({ files: [{ path: 'save.dat', bytes: Uint8Array.of(1) }],
+                registry: null });
+            await store.save({ files: [{ path: 'save.dat', bytes: Uint8Array.of(2) }],
+                registry: null });
+            assert.equal(asked, 1);
+            assert.equal(await store.persisted(), true);
+            grant = false;
+            const refused = opfsSession('other');
+            await refused.save({ files: [{ path: 'a', bytes: Uint8Array.of(3) }], registry: null });
+            assert.equal(await refused.persisted(), false);
+            assert.deepEqual([...(await refused.read('a')) ?? []], [3], 'kept all the same');
+        }
+        finally
+        {
+            if (was)
+            {
+                Object.defineProperty(globalThis, 'navigator', was);
+            }
+            else
+            {
+                delete (/** @type {any} */ (globalThis)).navigator;
+            }
+        }
+    });

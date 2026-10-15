@@ -184,6 +184,14 @@ async function framesThrough(make){
         ok(device.DrawPrimitiveVB(D3DPT.TRIANGLESTRIP, vb.buffer, 0, 4));
         ram.set(new Uint8Array(Uint16Array.from([0, 1, 2, 2, 1, frame % 4]).buffer), indices);
         ok(device.DrawIndexedPrimitiveVB(D3DPT.TRIANGLELIST, vb.buffer, 0, 4, indices, 6));
+        // Part of the buffer, as ProcessVertices writes it, and a draw told
+        // the runtime clips it: only that part goes, and the clip with it.
+        /** @type {{ data?: number }} */
+        const part = {};
+        ok(vb.buffer.LockRange(20, 40, 0, part));
+        ram.set(corners([[frame + 1, 1], [7, frame + 2]], false), /** @type {number} */ (part.data));
+        ok(vb.buffer.Unlock());
+        ok(device.DrawPrimitiveVB(D3DPT.TRIANGLESTRIP, vb.buffer, 0, 4, frame & 1));
         if (frame === 1)
         {
             depth.depthFilled(null, 0x8000);

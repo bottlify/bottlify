@@ -17,6 +17,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createGdiDrawing } from '../../graphics/gdi/context.js';
 import * as surfaces from '../../graphics/gdi/surface.js';
+import { createScreen } from '../../graphics/gdi/screen.js';
 import { setupBars, OUT } from '../comctl32/bars.fixture.js';
 
 const WS_CLIPSIBLINGS = 0x04000000;
@@ -31,7 +32,7 @@ const RCU = OUT + 0x220;
 
 /** Two overlapping static children, the second made under the first. */
 async function overlapping(){
-    const context = setupBars({ createGdiDrawing, ...surfaces });
+    const context = setupBars({ createGdiDrawing, createScreen, ...surfaces });
     await context.makeParent(300, 250);
     const hwnd2 = await context.control('static', WS_CLIPSIBLINGS | WS_BORDER, [75, 30, 100, 100]);
     const hwnd1 = await context.control('static', WS_CLIPSIBLINGS | WS_BORDER, [25, 50, 100, 100]);

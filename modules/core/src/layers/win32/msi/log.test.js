@@ -93,6 +93,8 @@ test('an installation is logged as MsiEnableLog asked, afresh or added to', asyn
     assert.match(lines[0], /^=== Logging started: \d+\/\d+\/\d{4} {2}\d+:\d\d:\d\d ===$/);
     assert.ok(lines.some(line=>/^Action \d\d:\d\d:\d\d: InstallFiles\./.test(line)),
         'each action as it starts');
+    assert.ok(lines.some(line=>/^Action ended \d\d:\d\d:\d\d: InstallFiles\. Return value 1\.$/
+        .test(line)), 'and as it ends, with what it returned: the line a failed log is read by');
     assert.ok(lines.includes(`Property(S): ProductCode = ${PRODUCT}`),
         'and the properties at the end, as the property-dump bit asks');
     assert.match(lines.at(-2) ?? '', /^=== Logging stopped: /);

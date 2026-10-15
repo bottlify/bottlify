@@ -24,12 +24,27 @@ const DYNAMIC = 0x200;
  * @param {(buffer: any, from: number, to: number) => void} drawsFrom
  * @param {Iterable<{ buffer: any, offset?: number, stride: number, whole?: boolean }>} streams
  * @param {number} first  the first vertex read @param {number} count  how many
+ * An indexed draw reads only the vertices its indices name, and a program
+ * that appends batches to one buffer often declares the rest of the buffer
+ * as the draw's range: with `read` the indices are read and the range is
+ * the lowest to the highest they name, when reading them costs less than
+ * comparing the declared range would.
+ *
  * @param {any} [indices]  the index buffer of an indexed draw
  * @param {number} [startIndex] @param {number} [indexCount]
+ * @param {{ read: (address: number, length: number) => Uint8Array, base: number }} [indexed]
+ *        guest memory as a view, and the draw's base vertex index
  */
 export function reportDynamicReads(drawsFrom, streams, first, count, indices, startIndex = 0,
-    indexCount = 0)
+    indexCount = 0, indexed = undefined)
 {
+    const named = indexed && indices ? namedRange(streams, count, indices, startIndex, indexCount,
+        indexed) : null;
+    if (named)
+    {
+        first = named.first;
+        count = named.count;
+    }
     for (const stream of streams)
     {
         const buffer = stream?.buffer;
@@ -58,3 +73,60 @@ const reportClamped = (drawsFrom, buffer, from, to)=>{
         drawsFrom(buffer, start, end);
     }
 };
+
+/** Index bytes read for each byte of vertices the scan would spare comparing, at most. */
+const SCAN_RATIO = 4;
+
+/**
+ * The vertices an indexed draw's indices name, or null when scanning them
+ * would cost as much as comparing the declared range.
+ *
+ * @param {Iterable<{ buffer: any, stride: number, whole?: boolean }>} streams
+ * @param {number} count @param {any} indices @param {number} startIndex @param {number} indexCount
+ * @param {{ read: (address: number, length: number) => Uint8Array, base: number }} indexed
+ * @returns {{ first: number, count: number } | null}
+ */
+function namedRange(streams, count, indices, startIndex, indexCount, indexed){
+    const size = indices.format === D3DFMT_INDEX.INDEX32 ? 4 : 2;
+    let declared = 0;
+    for (const stream of streams)
+    {
+        if (stream?.buffer && (stream.buffer.usage & DYNAMIC) !== 0 && !stream.whole)
+        {
+            declared += count * stream.stride;
+        }
+    }
+    const bytes = indexCount * size;
+    const at = (indices.base ?? 0) + startIndex * size;
+    if (declared < bytes * SCAN_RATIO || indexCount === 0 || typeof indices.base !== 'number'
+        || startIndex * size + bytes > indices.length)
+    {
+        return null;
+    }
+    const view = indexed.read(at, bytes);
+    if (view.length < bytes)
+    {
+        return null;
+    }
+    const words = size === 2
+        ? ((view.byteOffset & 1) === 0 ? new Uint16Array(view.buffer, view.byteOffset, indexCount)
+            : Uint16Array.from({ length: indexCount }, (_, k)=>view[k * 2] | view[k * 2 + 1] << 8))
+        : ((view.byteOffset & 3) === 0 ? new Uint32Array(view.buffer, view.byteOffset, indexCount)
+            : Uint32Array.from({ length: indexCount }, (_, k)=>(view[k * 4] | view[k * 4 + 1] << 8
+                | view[k * 4 + 2] << 16 | view[k * 4 + 3] << 24) >>> 0));
+    let low = words[0];
+    let high = words[0];
+    for (let k = 1; k < words.length; k++)
+    {
+        const index = words[k];
+        if (index < low)
+        {
+            low = index;
+        }
+        else if (index > high)
+        {
+            high = index;
+        }
+    }
+    return { first: indexed.base + low, count: high - low + 1 };
+}

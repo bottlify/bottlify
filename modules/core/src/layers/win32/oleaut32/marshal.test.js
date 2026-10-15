@@ -280,3 +280,42 @@ test('GetIDsOfNames: the names cross whole though their count comes after them, 
     await unmarshalReply(caller, method, args, request, reply);
     assert.deepEqual([caller.u32(ids), caller.u32(ids + 4)], [11, 12]);
 });
+
+test('a by-reference variant at a NULL string crosses as a cell holding NULL, and none as none',
+    async()=>{
+        // An installer's progress object is set a status text through
+        // Invoke, the argument a BSTR* whose string is still NULL. Crossed as
+        // no referent, the callee's ITypeInfo::Invoke could not read it and
+        // the property put failed with DISP_E_TYPEMISMATCH.
+        const invoke = /** @type {any} */ ((await createInterfaceCatalog({ readFile: ()=>null })
+            .describe(IID_IDISPATCH))?.methods[6]);
+        /** @param {number} reference @returns {Promise<number[]>} the callee's referent, and what it holds */
+        const crossed = async reference=>{
+            const caller = side('caller');
+            const callee = side('callee');
+            const argument = caller.allocate(16);
+            caller.writeMemory(argument, new Uint8Array(16));
+            caller.bytes[argument] = 8;
+            caller.bytes[argument + 1] = 0x40;
+            caller.put(argument + 8, reference === 0 ? 0 : caller.allocate(4));
+            if (reference !== 0)
+            {
+                caller.put(caller.u32(argument + 8), 0);
+            }
+            const params = caller.allocate(16);
+            caller.writeMemory(params, new Uint8Array(16));
+            caller.put(params, argument);
+            caller.put(params + 8, 1);
+            const riid = caller.allocate(16);
+            caller.writeMemory(riid, new Uint8Array(16));
+            const sent = await marshalRequest(caller, invoke, [2, riid, 0, 4, params, 0, 0, 0]);
+            const laid = await unmarshalRequest(callee, invoke, sent);
+            const theirs = callee.u32(laid.words[4]);
+            const referent = callee.u32(theirs + 8);
+            return [referent, referent === 0 ? 0 : callee.u32(referent)];
+        };
+        const [cell, held] = await crossed(1);
+        assert.notEqual(cell, 0, 'a cell of its own');
+        assert.equal(held, 0, 'holding NULL');
+        assert.equal((await crossed(0))[0], 0, 'no referent stays none');
+    });

@@ -135,15 +135,13 @@ async function assemble(){
             surfaceFor: (dc, bitmap)=>drawing.surfaceFor(dc, bitmap),
             fontMetrics: font=>drawing.fontMetrics(font),
             textWidth: (font, text)=>drawing.textWidth(font, text),
-            presentDesktop: ()=>drawing.presentDesktop(),
+            presentDesktop: (/** @type {any} */ dc)=>drawing.presentDesktop(dc),
         },
     });
     return {
         ram,
         view,
         fns: gdi.table,
-        /** Shows the desktop, as the window manager does at the end of a paint. */
-        present: ()=>drawing.presentDesktop(),
         /** Runs the coalesced burst the way the display tick would. */
         settle(){
             armed.splice(0).forEach(tick=>tick());
@@ -201,8 +199,7 @@ test('the palette a program wrote lands on the screen in the order it wrote it',
         // 0x00BBGGRR, so red 0x40 is the low byte here too.
         assert.equal(h.fns.GetPixel.handler([mem, 0, 0]), 0x00303440);
 
-        // The paint pass over: the desktop is shown the way EndPaint shows it.
-        h.present();
+        // The blit on the screen context showed the screen as drawn.
         h.settle();
         const bytes = h.uploaded();
         assert.deepEqual([...bytes.subarray(0, 4)], [0x30, 0x34, 0x40, 0xff],

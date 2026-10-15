@@ -152,7 +152,9 @@ const readOnlyLock = args=>{
  * @returns {number | null}
  */
 function lockedLength(name, args, out){
-    if (name === 'Lock' && typeof args[1] === 'number')
+    // A buffer's lock -- Direct3D 8's and 9's, or Direct3D 7's of a range --
+    // names its size second.
+    if ((name === 'Lock' || name === 'LockRange') && typeof args[1] === 'number')
     {
         return args[1] > 0 ? args[1] : null;
     }

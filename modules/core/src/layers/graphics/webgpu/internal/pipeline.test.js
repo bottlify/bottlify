@@ -13,7 +13,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    colorWriteMask, createPipelineCache, pipelineDescriptor, pipelineKey,
+    colorWriteMask, createBuildLog, createPipelineCache, pipelineDescriptor, pipelineKey,
 } from './pipeline.js';
 
 /** A state with every field set, so a test can change exactly one. */
@@ -301,7 +301,8 @@ test('a pipeline in flight is shared, not built twice', async()=>{
     assert.equal(builds, 1);
     assert.equal(first, second);
     {
-        const { latest, ...counts } = cache.stats();
+        const { latest, buildMs, churn, ...counts } = cache.stats();
+        assert.ok(buildMs >= 0 && Array.isArray(churn));
         assert.deepEqual(counts, { built: 1, reused: 1, resident: 1 });
         assert.equal(latest.length, counts.built);
     }
@@ -365,3 +366,19 @@ test('the stencil goes to the faces as Direct3D winds them, the masks to eight b
     assert.equal(pipelineDescriptor(baseState(), null).depthStencil.stencilFront, undefined,
         'no stencil state, no stencil test');
 });
+
+test('a key built again with one part moved names that part, and a new kind of draw names none',
+    async()=>{
+        // A value of the state written into a shader builds a pipeline for every
+        // value; the log says which part of the key keeps moving.
+        const log = createBuildLog();
+        for (const value of [1, 2, 3, 4])
+        {
+            log.built(`a|b|${value}|d`, Promise.resolve());
+        }
+        log.built('x|y|z|w|v', Promise.resolve());
+        await Promise.resolve();
+        const { churn, latest } = log.stats();
+        assert.deepEqual(churn, [{ part: 2, count: 3, from: '3', to: '4' }]);
+        assert.equal(latest.length, 4);
+    });

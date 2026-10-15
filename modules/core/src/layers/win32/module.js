@@ -84,6 +84,9 @@ import { createIphlpapiFunctions } from './iphlpapi/functions.js';
 import { createCrypt32Functions } from './crypt32/functions.js';
 import { createAdvpackFunctions } from './advpack/functions.js';
 import { SFC_ORDINALS, createSfcFunctions } from './sfc/functions.js';
+import { ODBC32_ORDINALS, createOdbcFunctions } from './odbc32/functions.js';
+import { createOleaccFunctions } from './oleacc/functions.js';
+import { createSyssetupFunctions } from './syssetup/functions.js';
 import { createDbghelpFunctions } from './dbghelp/functions.js';
 import { createCfgmgrFunctions } from './cfgmgr32/functions.js';
 import { createMsvfwFunctions } from './msvfw32/functions.js';
@@ -210,6 +213,9 @@ function directxOf(choice){
     return release;
 }
 
+/** The guest milliseconds a Sleep(0) that gives its turn away sits out. */
+const SLEEP_ZERO_ASIDE_MS = 1;
+
 /**
  * The registry a run starts from, as its first process makes it: the keys of
  * the Windows and the DirectX the machine is, and the processor at the speed
@@ -302,6 +308,14 @@ export function createWin32Module(){
 
             /** @type {Record<string, Record<string, any>>} */
             let libraries = {};
+            /**
+             * Each thread's error information: oleaut32's SetErrorInfo and
+             * GetErrorInfo, and a call between processes handing a failure
+             * back to the thread that made it.
+             *
+             * @type {Map<unknown, number>}
+             */
+            const errorSlots = new Map();
             /** @type {number | null} */
             let exitCode = null;
             /**
@@ -320,7 +334,11 @@ export function createWin32Module(){
              *     deactivations: () => number,
              *     rawInput: (report: import('./user32/rawinput.js').RawInputEvent) => void,
              *     modalLoop: import('./user32/windows.js').WindowService['modalLoop'],
-             *     painting: () => boolean, refreshContext?: (hdc: number) => void }} */
+             *     painting: () => boolean, refreshContext?: (hdc: number) => void,
+             *     surfaceOf?: (hwnd: number) => { hwnd: number, rect: any } | null,
+             *     modalPump?: (thread: unknown) => number | Promise<number>,
+             *     surfaces?: () => { hwnd: number, rect: any, shown: boolean,
+             *         shape: any[] }[] }} */
             let windowService = {
                 list: ()=>[], clientRect: ()=>null, place: ()=>false, active: ()=>0,
                 deactivated: ()=>false, deactivations: ()=>0, rawInput: ()=>{},
@@ -742,10 +760,10 @@ export function createWin32Module(){
                 // desktop, except in the middle of a paint pass, which shows it
                 // once it is over (user32's present below).
                 graphics: config?.graphics && Object.assign(Object.create(config.graphics), {
-                    presentDesktop: ()=>{
+                    presentDesktop: (/** @type {any} */ dc)=>{
                         if (!windowService.painting())
                         {
-                            config.graphics?.presentDesktop?.();
+                            config.graphics?.presentDesktop?.(dc);
                         }
                     },
                 }),
@@ -1514,6 +1532,29 @@ export function createWin32Module(){
                         /** @param {number} milliseconds */
                         sleep: milliseconds=>kernel.sleep(kernel.currentThread(), milliseconds),
                         park: ()=>bridge.park(),
+                        // Sleep(0): the rest of the turn to another thread ready to
+                        // run at the caller's priority or above, the caller behind
+                        // it; false, and nothing given, when there is none. The
+                        // caller sits out a millisecond of guest time, as
+                        // SwitchToThread does beside lower threads: the guest's
+                        // clock moves with what runs, and two threads handing
+                        // each other turns of a few instructions would move it
+                        // not at all -- every timed wait of theirs stood still.
+                        yieldTurn: ()=>{
+                            const self = kernel.currentThread();
+                            const mine = self?.priority ?? 0;
+                            const other = kernel.threads().some((/** @type {any} */ thread)=>
+                                thread !== self && thread.state === 'ready'
+                                && !thread.awaitingHost && (thread.priority ?? 0) >= mine);
+                            if (!other || !self)
+                            {
+                                return false;
+                            }
+                            kernel.block(self, 'Sleep', {
+                                deadline: kernel.clock.virtualTime() + SLEEP_ZERO_ASIDE_MS,
+                                result: 0 });
+                            return true;
+                        },
                         // Where the running thread keeps its TLS slots, read out of
                         // its own block rather than tracked here: the block is the
                         // loader's to place, and reading it back cannot drift from
@@ -1755,7 +1796,11 @@ export function createWin32Module(){
                         files: volume,
                         // The libraries this build implements, standing in the
                         // system folder for a setup that looks before it loads.
-                        systemLibraries: ()=>Object.keys(libraries)
+                        // Every layer's, not only this one's: DDRAW.dll stands
+                        // there as much as KERNEL32.dll does, and VERSION
+                        // already answers for both.
+                        systemLibraries: ()=>(/** @type {string[]} */ (
+                            modules.systemLibraries?.() ?? Object.keys(libraries)))
                             .filter(name=>name !== PROGRAMS_LIBRARY && /\.(dll|drv|ocx)$/i.test(name)),
                         directories: shellFolderDirectories(windows),
                         imagePath: ()=>modules.imagePath(),
@@ -2211,6 +2256,18 @@ export function createWin32Module(){
 
                 'SFC.dll': createSfcFunctions({ writeMemory, readCString, files: volume }),
 
+                // The ODBC Driver Manager, with no driver and no data source set up.
+                'ODBC32.dll': createOdbcFunctions({ writeMemory }),
+
+                // XP's registry of OS components, which DirectX's setup
+                // registers its exception package with.
+                'SYSSETUP.dll': createSyssetupFunctions({ readMemory, writeMemory,
+                    setLastError: setError }),
+
+                // What MFC links of Active Accessibility, which nothing here asks for.
+                'OLEACC.dll': createOleaccFunctions({ writeMemory,
+                    divergence: config?.divergence }),
+
                 // The device tree: its root alone, with no bus resources.
                 'CFGMGR32.dll': createCfgmgrFunctions({ writeMemory, readCString }),
 
@@ -2267,7 +2324,10 @@ export function createWin32Module(){
 
                 // The DirectX setup library a game's autorun asks for the
                 // installed runtime's version before it decides to install one.
-                'DSETUP.dll': createDsetupFunctions({ writeMemory, directx: directx?.version }),
+                'DSETUP.dll': createDsetupFunctions({ writeMemory, directx: directx?.version,
+                    divergence: config?.divergence, setLastError: setError,
+                    brought: ()=>modules.broughtLibrary?.('DSETUP.dll') ?? null,
+                    readFile: path=>modules.readFile?.(path) ?? Promise.resolve(null) }),
 
                 // DirectX 8.1's DirectPlay NAT helper: a version check finds
                 // DirectX 8.1 by this library being there beside d3d8.dll.
@@ -2652,6 +2712,8 @@ export function createWin32Module(){
                          *     Where on the screen the window's client area is.
                          */
                         get: (hwnd, bounds = null)=>gdi.windowContext(hwnd, bounds),
+                        /** A context on the desktop's own background, under every window. */
+                        background: ()=>gdi.windowContext(0, null, true),
                         /**
                          * @param {number} hdc
                          * @param {{ left: number, top: number, right: number,
@@ -2866,6 +2928,10 @@ export function createWin32Module(){
                     // hidden window each apartment takes other processes'
                     // calls through, as ole32's own does.
                     com: comHost,
+                    // What a thread waiting on a call into another apartment
+                    // runs meanwhile: what other threads sent it, and its paints.
+                    modalPump: (/** @type {unknown} */ thread)=>bridge.answering(thread,
+                        ()=>windowService.modalPump?.(thread) ?? 0),
                     apartmentWindow: {
                         create: handler=>apartmentWindow(handler),
                         /** @param {number} window @param {number} message */
@@ -2877,21 +2943,17 @@ export function createWin32Module(){
                     },
                     // What a failed call between processes said of itself
                     // crosses back through oleaut32's error-information slot.
+                    // The thread is named, not asked of the bridge: these run
+                    // after an await, when the call on the processor is
+                    // another thread's.
                     errors: {
-                        take: ()=>{
-                            const slot = heap.allocate(4);
-                            if (slot === 0)
-                            {
-                                return 0;
-                            }
-                            writeMemory(slot, new Uint8Array(4));
-                            libraries['OLEAUT32.dll'].GetErrorInfo.handler([0, slot]);
-                            const taken = new DataView(readMemory(slot, 4).slice().buffer)
-                                .getUint32(0, true);
-                            heap.free(slot);
+                        take: (/** @type {unknown} */ thread)=>{
+                            const taken = errorSlots.get(thread) ?? 0;
+                            errorSlots.delete(thread);
                             return taken;
                         },
-                        set: pointer=>libraries['OLEAUT32.dll'].SetErrorInfo.handler([0, pointer]),
+                        set: (/** @type {number} */ pointer, /** @type {unknown} */ thread)=>
+                            errorSlots.set(thread, pointer >>> 0),
                         create: out=>libraries['OLEAUT32.dll'].CreateErrorInfo.handler([out]),
                     },
                     // A user-marshal routine that cannot carry what it is handed
@@ -2999,6 +3061,7 @@ export function createWin32Module(){
                 }),
 
                 'OLEAUT32.dll': createAutomationFunctions({
+                    errorSlots,
                     readMemory,
                     writeMemory,
                     fillMemory,
@@ -3148,6 +3211,18 @@ export function createWin32Module(){
                 knownDlls: ()=>[...KNOWN_DLLS],
 
                 /**
+                 * The libraries answered from this table even where the
+                 * program brought its own: DirectX's setup library, which a
+                 * disc carries beside its redistributable and an installer
+                 * loads from there -- the copy installs DirectX over the
+                 * system's and asks for a restart, where this one answers
+                 * that everything is in place.
+                 *
+                 * @returns {string[]}
+                 */
+                runtimes: ()=>['DSETUP.dll'],
+
+                /**
                  * The libraries with a table here that are not Windows' own but a
                  * redistributable a setup installs -- the D3DX helpers. The
                  * table only stands in for a program that brought none; a copy
@@ -3221,6 +3296,7 @@ export function createWin32Module(){
                     'COMCTL32.dll': COMCTL32_ORDINALS,
                     'WINMM.dll': WINMM_ORDINALS,
                     'SFC.dll': SFC_ORDINALS,
+                    'ODBC32.dll': ODBC32_ORDINALS,
                     'MSI.dll': MSI_ORDINALS,
                     // A program of the 9x era imports shlwapi's wide-character
                     // wrappers by number alone.
@@ -3401,6 +3477,10 @@ export function createWin32Module(){
                  */
                 /** Every top-level window's rectangle, as the program declared it. */
                 windows: ()=>windowService.list(),
+                /** The top-level window a window draws into, for its surface. @param {number} hwnd */
+                windowSurfaceOf: hwnd=>windowService.surfaceOf?.(hwnd) ?? null,
+                /** The top-level windows bottom to top, for the screen to be composed of. */
+                windowSurfaces: ()=>windowService.surfaces?.() ?? [],
                 /** The window the program is active through, as GetForegroundWindow answers. */
                 activeWindow: ()=>windowService.active(),
 

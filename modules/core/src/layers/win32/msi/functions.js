@@ -313,6 +313,21 @@ export function createMsiFunctions(host){
     let log = null;
 
     /**
+     * What the installer notes as it goes: to the journal, and an
+     * informational line of the log file when the file takes those -- an
+     * action's end and what it returned are read there.
+     *
+     * @param {string} text
+     */
+    const note = text=>{
+        host.log?.(text);
+        if (log && (log.mode & (1 << (INSTALLMESSAGE.INFO >>> 24))) !== 0)
+        {
+            writeLog([text]);
+        }
+    };
+
+    /**
      * Adds lines to the log. The file is ANSI, as the installer writes it
      * unless a policy asks for Unicode, and is opened for each line, so a
      * line is on the volume once it is written, whatever happens next --
@@ -572,7 +587,10 @@ export function createMsiFunctions(host){
                         return name && folder ? loadDatabase(`${folder}${name}`) : null;
                     },
                     divergence: host.divergence,
-                    log: host.log,
+                    // What the engine notes is an informational line of the
+                    // log file too, when the file takes those: an action's
+                    // end and what it returned are read there.
+                    log: note,
                 },
             };
             engine = made;
@@ -730,6 +748,7 @@ export function createMsiFunctions(host){
         const module = await withString(path, name=>on(thread, ()=>host.libraries.loadAnsi(name)));
         if (!module)
         {
+            note(`Library ${path} could not be loaded.`);
             return null;
         }
         try
@@ -738,6 +757,7 @@ export function createMsiFunctions(host){
                 name=>on(thread, ()=>host.libraries.procAddress(module >>> 0, name)));
             if (!address)
             {
+                note(`Library ${path} has no export ${entry}.`);
                 return null;
             }
             return (await host.call(address >>> 0, args, thread)) >>> 0;

@@ -382,6 +382,9 @@ export function captureTrace(sources){
                 name: thread.name,
                 state: thread.state,
                 entry: thread.entry,
+                // Where it will go on: back from the call it is parked in, or
+                // the instruction it was stopped at.
+                at: describeAddress(sources, thread.parkedReturn ?? thread.context.eip),
                 // Parked in a call, a thread resumes on the stack the call
                 // left; its saved registers are the trap's.
                 stack: walkStack(sources, thread.resumeStack ?? thread.context.reg32[4],
@@ -505,7 +508,8 @@ export function formatTrace(trace){
         if (other.stack.length > 0)
         {
             lines.push(`thread ${other.name} (${other.state})`
-                + `${other.entry ? `, started at ${hex(other.entry)}` : ''}:`, ...other.stack);
+                + `${other.entry ? `, started at ${hex(other.entry)}` : ''}:`,
+            ...other.at ? [`  at ${other.at}`] : [], ...other.stack);
         }
     }
     return lines.join('\n');

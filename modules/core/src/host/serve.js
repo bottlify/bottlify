@@ -292,20 +292,43 @@ export function postAsItIs(port, message, transfer = []){
  * the answer: the machine they were written on is done, and the page
  * disposes of it next.
  *
- * @param {{ bytes: Uint8Array }[]} files
+ * @param {{ pieces: (Uint8Array | null)[] }[]} files
  * @returns {ArrayBuffer[]}
  */
 function buffersUnder(files){
     /** @type {Set<ArrayBuffer>} */
     const buffers = new Set();
-    for (const { bytes } of files)
+    for (const { pieces } of files)
     {
-        if (bytes?.buffer instanceof ArrayBuffer)
+        for (const piece of pieces)
         {
-            buffers.add(bytes.buffer);
+            if (piece?.buffer instanceof ArrayBuffer)
+            {
+                buffers.add(piece.buffer);
+            }
         }
     }
     return [...buffers];
+}
+
+/**
+ * A file of the exit as it crosses to the page: its size and the pieces the
+ * volume keeps it in, moved as they are. Made whole here, a game's 1.5 GB
+ * archive file was one allocation more than the worker could make, and its
+ * copy on the way another; the page reads it a block at a time.
+ *
+ * @param {{ path: string, bytes: Uint8Array, contents?: { size: number,
+ *     flat: Uint8Array | null, pieces: (Uint8Array | undefined)[] } }} file
+ * @returns {{ path: string, size: number, pieces: (Uint8Array | null)[] }}
+ */
+function inPieces(file){
+    const contents = file.contents;
+    if (!contents)
+    {
+        return { path: file.path, size: file.bytes.length, pieces: [file.bytes] };
+    }
+    return { path: file.path, size: contents.size, pieces: contents.flat
+        ? [contents.flat] : Array.from(contents.pieces, piece=>piece ?? null) };
 }
 
 /**
@@ -812,7 +835,7 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
             return {
                 code,
                 registry,
-                files: started?.collectOnExit ? app.session.export() : [],
+                files: started?.collectOnExit ? app.session.export().map(inPieces) : [],
                 // What an installer's output is sorted against: the libraries
                 // a bottle does not carry out of system32.
                 systemLibraries: started?.collectOnExit

@@ -33,6 +33,9 @@ import {
     MONOCHROME, colorToPixel, createSurface, intersectRect, isEmptyRect, surfaceBounds,
 } from './surface.js';
 
+/** SRCCOPY's table: the source, whatever the destination and the pattern. */
+const SRCCOPY_TABLE = 0xcc;
+
 /** SetStretchBltMode's modes. */
 export const BLACKONWHITE = 1;
 export const WHITEONBLACK = 2;
@@ -160,6 +163,36 @@ export function bitBlt(options){
     const overlapping = !!src && src.bytes === dest.bytes;
     const backwardY = overlapping && shiftY < 0;
     const backwardX = overlapping && shiftY === 0 && shiftX < 0;
+
+    // A plain copy between two surfaces whose words are their pixels moves
+    // whole rows: a pixel at a time through the operation, a menu's button
+    // cost a tenth of a millisecond to copy.
+    const srcWords = src?.words;
+    const destWords = dest.words;
+    if (table === SRCCOPY_TABLE && !mask && !convert && !usesPattern && src && srcWords
+        && destWords)
+    {
+        const run = area.right - area.left;
+        /** @param {any} surface @param {number} y */
+        const rowAt = (surface, y)=>(surface.topDown ? y : surface.height - 1 - y)
+            * (surface.pitch >>> 2);
+        for (let step = 0; step < area.bottom - area.top; step++)
+        {
+            const y = backwardY ? area.bottom - 1 - step : area.top + step;
+            const to = rowAt(dest, y) + area.left;
+            const from = rowAt(src, y + shiftY) + area.left + shiftX;
+            if (overlapping && srcWords.buffer === destWords.buffer
+                && srcWords.byteOffset === destWords.byteOffset)
+            {
+                destWords.copyWithin(to, from, from + run);
+            }
+            else
+            {
+                destWords.set(srcWords.subarray(from, from + run), to);
+            }
+        }
+        return true;
+    }
 
     for (let step = 0; step < area.bottom - area.top; step++)
     {

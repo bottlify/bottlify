@@ -627,7 +627,8 @@ test('the material, clip status and clip planes read back as copies', ()=>{
 /**
  * A device over the recording GPU, with guest memory the test owns.
  *
- * @param {{ writable?: boolean }} [options]  Whether the device may write guest memory.
+ * @param {{ writable?: boolean, driverRules?: 'legacy' | 'current' }} [options]
+ *     Whether the device may write guest memory, and the renderer's rules.
  */
 function recorded(options = {}){
     const gpu = createFakeDevice();
@@ -658,6 +659,7 @@ function recorded(options = {}){
                 ram.set(bytes, address) }
             : {}),
         createSampler: descriptor=>({ kind: 'sampler', descriptor }),
+        ...(options.driverRules ? { driverRules: options.driverRules } : {}),
         presenter: {
             claim: buffer=>claimed.push(buffer),
             release: buffer=>released.push(buffer),
@@ -1076,6 +1078,53 @@ test('recorded: a render target\'s pixels are read back into its guest bytes whe
     assert.equal(depth.release(), 0);
     assert.equal(root.release('IDirectDraw7'), 0);
     assert.ok(root.destroyed);
+});
+
+test('recorded: a buffer the runtime clips is clipped behind the eye, and under current rules '
+    + 'every draw is', async()=>{
+    // ProcessVertices with D3DVOP_CLIP leaves a vertex behind the eye with a
+    // negative RHW, and the runtime clipped the buffer's triangles when it
+    // was drawn (decisions.md A45). Taken at w one, Half-Life's Direct3D
+    // world was spikes across the screen from every wall behind the camera.
+    // The seam tells the draw; the drivers of the time drew a negative RHW
+    // in any other draw, and Wine clips it in every one.
+    /**
+     * @param {'legacy' | 'current' | undefined} driverRules
+     * @param {number} clipped  what the seam tells the draw
+     * @param {number} [clipping]  D3DRENDERSTATE_CLIPPING
+     */
+    const vertexStageOf = async(driverRules, clipped, clipping = 1)=>{
+        const f = recorded({ driverRules });
+        const { d3d, device, gpu, ram, root, target } = f;
+        const buffer = d3d.createVertexBuffer({ caps: 0, fvf: FVF_TL, numVertices: 4 }).buffer;
+        /** @type {{ data?: number, size?: number }} */
+        const lock = {};
+        assert.equal(buffer.Lock(0, lock), D3D_OK);
+        ram.set(vertices([[0, 0], [8, 0], [0, 8], [8, 8]], false),
+            /** @type {number} */ (lock.data));
+        assert.equal(buffer.Unlock(), D3D_OK);
+        assert.equal(device.SetRenderState(D3DRENDERSTATE.CLIPPING, clipping), D3D_OK);
+        assert.equal(device.BeginScene(), D3D_OK);
+        assert.equal(device.DrawPrimitiveVB(D3DPT.TRIANGLESTRIP, buffer, 0, 4, clipped), D3D_OK);
+        assert.equal(device.EndScene(), D3D_OK);
+        device.present(target.buffer);
+        await device.idle();
+        const modules = gpu.of('createShaderModule');
+        const code = modules[modules.length - 1].descriptor.code;
+        assert.equal(buffer.release(), 0);
+        assert.equal(device.release(), 0);
+        assert.equal(target.release(), 0);
+        assert.equal(root.release('IDirectDraw7'), 0);
+        return code;
+    };
+    const behindEye = 'vertex.position.w != 0.0);';
+    const atOne = 'vertex.position.w > 0.0);';
+    assert.ok((await vertexStageOf(undefined, 1)).includes(behindEye), 'a clipped buffer');
+    assert.ok((await vertexStageOf(undefined, 0)).includes(atOne), 'a buffer nothing clipped');
+    assert.ok((await vertexStageOf(undefined, 1, 0)).includes(atOne),
+        'D3DRENDERSTATE_CLIPPING off: the program promised nothing needs it');
+    assert.ok((await vertexStageOf('current', 0)).includes(behindEye),
+        'every draw, under current rules');
 });
 
 test('a fresh device has a white material, not a black one', ()=>{

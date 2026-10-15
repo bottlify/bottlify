@@ -30,6 +30,7 @@
  */
 
 import { MAGIC, HEADER_SIZE, FORMAT_VERSION, Codec, crc32 } from '@bottlify/core/bundle';
+import { blocksOf, sha256Blocks, sizeOf } from './chunks.js';
 
 /** A quarter of a mebibyte, as the Node writer uses: it decides how long a guest thread is held. */
 export const DEFAULT_BLOCK_SIZE = 1 << 18;
@@ -81,7 +82,12 @@ async function deflateRaw(bytes){
  * @returns {Promise<string>}
  */
 export async function sha256(bytes){
-    const digest = await crypto.subtle.digest('SHA-256', bytes.slice());
+    // Hashed where it lies: WebCrypto refuses only shared memory, and a copy
+    // of a game's 1.5 GB archive file was the allocation a tab could not make.
+    const shared = typeof SharedArrayBuffer === 'function'
+        && bytes.buffer instanceof SharedArrayBuffer;
+    const digest = await crypto.subtle.digest('SHA-256',
+        /** @type {Uint8Array<ArrayBuffer>} */ (shared ? bytes.slice() : bytes));
     return [...new Uint8Array(digest)].map(byte=>byte.toString(16).padStart(2, '0')).join('');
 }
 
@@ -134,9 +140,10 @@ export async function packBundle({ files, directories = [], write, onProgress,
     for (const file of files)
     {
         const firstBlock = blocks.length;
-        for (let at = 0; at < file.bytes.length; at += blockSize)
+        // A block at a time out of the file's pieces: a file of a gigabyte is
+        // never made whole here (`chunks.js`).
+        for (const block of blocksOf(file, blockSize))
         {
-            const block = file.bytes.subarray(at, Math.min(at + blockSize, file.bytes.length));
             const { codec, bytes } = await packBlock(block);
             await write(bytes);
             // Over the stored bytes: this is checked when a block arrives,
@@ -152,10 +159,10 @@ export async function packBundle({ files, directories = [], write, onProgress,
         }
         index.push({
             path: file.path,
-            size: file.bytes.length,
+            size: sizeOf(file),
             firstBlock,
             blocks: blocks.length - firstBlock,
-            sha256: await sha256(file.bytes),
+            sha256: sha256Blocks(blocksOf(file, blockSize)),
         });
     }
 

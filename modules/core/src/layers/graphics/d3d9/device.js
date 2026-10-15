@@ -3312,8 +3312,10 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             baseVertexIndex = base + bias;
             if (services.drawsFrom)
             {
+                const read = services.windowMemory ?? services.readMemory;
                 reportDynamicReads(services.drawsFrom, drawnStreams(), base + minIndex, numVertices,
-                    indices, startIndex, vertexCountOf(type, primitiveCount));
+                    indices, startIndex, vertexCountOf(type, primitiveCount),
+                    read ? { read, base } : undefined);
             }
             renderer?.drawIndexedPrimitive(model, type, startIndex, primitiveCount, minIndex,
                 numVertices);

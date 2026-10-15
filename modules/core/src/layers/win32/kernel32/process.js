@@ -155,6 +155,9 @@ const ERROR_NOACCESS = 998;
  *           pinned one is never let go.
  * @property {(milliseconds: number) => void} sleep
  * @property {() => any} park  The token that says the caller has been stopped.
+ * @property {() => boolean} [yieldTurn]  Puts the caller behind another thread ready to
+ *           run at its priority or above, for Sleep(0); false, and nothing done, when
+ *           there is none.
  * @property {() => number} [tlsBlock]  The running thread's array of TLS slots,
  *           as the compiler reaches it through FS; zero when there is none.
  *           Records that the guest asked to wait. Actually waiting is the scheduler's.
@@ -1116,13 +1119,16 @@ export function createProcessFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([milliseconds])=>{
-                // Zero yields rather than waits: it is a program saying another
-                // thread may go first, and turning it into a wait of no time
-                // would be the same thing more expensively.
+                // Zero gives the rest of the turn to another thread ready to
+                // run, and returns at once when there is none. Answered at once
+                // always, a thread polling for another's work -- WaitForSingle-
+                // Object(h, 0) then Sleep(0), round and round -- spun out its
+                // whole turn while the thread it waited for stood in the queue:
+                // millions of calls a second, and a world loading at a crawl.
                 const wait = milliseconds >>> 0;
                 if (wait === 0)
                 {
-                    return 0;
+                    return host.yieldTurn?.() ? host.park() : 0;
                 }
                 host.sleep(wait);
                 return host.park();

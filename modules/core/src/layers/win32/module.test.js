@@ -274,6 +274,16 @@ test('the KnownDLLs are the ones Windows never searches beside the program', asy
     await win32Module.dispose();
 });
 
+test('DirectX\'s setup library is answered here even where the program brought its own', async()=>{
+    // A disc's dsetup.dll installs XP's DirectX over the system's and asks for
+    // a restart a game's installer stops at; the table answers it is in place.
+    const api = await win32Module.create({}, stubHost());
+    assert.deepEqual(api.runtimes(), ['DSETUP.dll']);
+    assert.ok('DSETUP.dll' in api.libraries(), 'with a table');
+
+    await win32Module.dispose();
+});
+
 test('the D3DX helpers are the redistributables, and Windows\' own libraries are not', async()=>{
     // A bottle carries what an installation put in system32 except the
     // libraries the engine synthesises as Windows' own; these are the ones a

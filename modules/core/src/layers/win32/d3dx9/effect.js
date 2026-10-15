@@ -640,8 +640,13 @@ export function createEffects(host, helpers, options = {}){
     /** @param {number} at @param {number} count */
     const words = (at, count)=>{
         const bytes = host.readMemory(at >>> 0, count * 4);
-        const view = new DataView(bytes.buffer, bytes.byteOffset, count * 4);
-        return Array.from({ length: count }, (_, i)=>view.getUint32(i * 4, true));
+        // One copy of the words in place of a call a word: every value an
+        // effect is set comes through here, bone palettes of hundreds of words
+        // among them, many times a frame. The guest's words are little-endian
+        // as every host this runs on is; bytes not on a word boundary are
+        // copied to one first.
+        const aligned = (bytes.byteOffset & 3) === 0 ? bytes : bytes.slice();
+        return Array.from(new Uint32Array(aligned.buffer, aligned.byteOffset, count));
     };
 
     /** @param {Param} p */
