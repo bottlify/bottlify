@@ -450,6 +450,11 @@ export function createCorkHost(config){
     const runtime = createEngine({
         memory,
         layout,
+        // One translation for every executor of the process: made for the
+        // shared layout, it is the same on each, so the arena and the store
+        // keep it once whichever executor asked for it first.
+        ...(executors > 1 && typeof engine.sharedLayout === 'function'
+            ? { sharedLayout: engine.sharedLayout(own) } : {}),
         config: { ...(trapPort === undefined ? {} : { trapPort }), ...corkConfig,
             ...(sharedAt < 0 ? {} : { sharedCode: { at: sharedAt, index: executor } }) },
         read: (/** @type {number} */ address)=>ram[address],

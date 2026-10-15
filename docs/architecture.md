@@ -378,7 +378,11 @@ There are no page tables: each 4 KiB page has one byte of flags — `INACCESSIBL
   first is a cork host in a worker of its own over the
   process's memory
   (`core/src/layers/cpu/internal/executor.worker.js`), with its own state page, entry hash and
-  translations. The page flags and the code bounds are the process's: a write on any executor into
+  instances of translations. The translations themselves are the process's: made for its shared
+  layout (`sharedLayout`), which addresses the state block and the tables from two bases each
+  instance is given, their bytes are the same on every executor, and one arena of emitted functions
+  serves all the executors and their translators -- a region one of them emitted, the others take
+  from it. The page flags and the code bounds are the process's: a write on any executor into
   code any of them translated is found, the finder drops its own translations and puts the range in
   a ring in shared memory, and every other executor drops its own at its next slice
   (`cork/src/runtime/shared-code.js`). A trap or a fault on such an executor waits for the process's

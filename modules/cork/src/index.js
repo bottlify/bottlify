@@ -37,6 +37,7 @@ export {
 } from './interp-wasm.js';
 export { eflagsOf, setEflags } from './emit/flags.js';
 export { SHARED_CODE_BYTES } from './runtime/shared-code.js';
+export { createArena } from './runtime/arena.js';
 export { snapshot, restore, compare } from './testing/snapshot.js';
 export { readUndoLog, resetUndoLog, spansOf } from './emit/memory.js';
 export { slotOf } from './runtime/entries.js';

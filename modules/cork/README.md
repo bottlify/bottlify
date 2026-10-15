@@ -374,6 +374,8 @@ node modules/cork/bench/run.mjs             # the benchmark (bench/README.md)
   Translated against interpreted (`machine.test.js`), a worker's translation against one on the
   same thread (`runtime/translators.test.js`), the shared arena (`runtime/arena.test.js`), a batch
   formed and published in parts against one formed whole (`runtime/forming-parts.test.js`),
-  `lock`-prefixed instructions against the model (`emit/locked.test.js`).
+  `lock`-prefixed instructions against the model (`emit/locked.test.js`), the corpus translated
+  for a process's shared layout and run on its third executor against the hardware
+  (`emit/corpus-shared.itest.js`).
 
 Plain ES modules with JSDoc, tests on `node:test`. Licensed MPL-2.0.

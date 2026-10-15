@@ -88,6 +88,9 @@
  * @typedef {Object} EngineEnv
  * @property {WebAssembly.Memory} memory  The layer's memory (the emulator's in hybrid).
  * @property {StateLayout} layout
+ * @property {StateLayout} [sharedLayout]  Cork's own: the process's shared layout
+ *     (`sharedLayout`), translations are made for where it has several executors -- the same
+ *     bytes on all of them, each instance given this executor's bases.
  * @property {EngineConfig} config
  * @property {(address: number) => number} read   One byte of guest memory.
  * @property {(start: number, end: number) => Uint8Array} [readBytes]  The bytes `read`
@@ -278,6 +281,8 @@
  *     pool lends them). Default 1.
  * @property {number} [arenaBytes]  Bytes of the shared translation arena (0: none). Default
  *     48 MiB.
+ * @property {SharedArrayBuffer} [arena]  The arena itself, made by the host for every executor of
+ *     a process (cork's `createArena`): what one executor's translators emitted, the others take.
  * @property {number} [loadingBatch]  While the translation worker loads, the largest batch
  *     emitted on the engine thread -- none where `holdMs` bounds the work there: a batch waits
  *     for the worker. Default 16.

@@ -491,7 +491,15 @@ export function createCpuModule(){
                             entryVector: settings.entryVector,
                             initialStack: settings.initialStack,
                             thunkBase: settings.thunkBase,
-                            cork: several ? { ...settings.cork, atomic: true } : settings.cork,
+                            // Several executors share one arena, as they share one layout
+                            // for their translations (`sharedLayout`): what any of them
+                            // emitted, every other takes rather than emitting again.
+                            cork: several ? { ...settings.cork, atomic: true,
+                                ...(typeof engineModule.createArena === 'function'
+                                    && typeof SharedArrayBuffer === 'function'
+                                    && settings.cork?.arenaBytes !== 0
+                                    ? { arena: engineModule.createArena(settings.cork?.arenaBytes) }
+                                    : {}) } : settings.cork,
                             closedBelow: settings.closedBelow,
                             noExecuteBelow: settings.noExecuteBelow,
                             executors: settings.executors,

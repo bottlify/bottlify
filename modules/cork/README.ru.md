@@ -381,6 +381,8 @@ node modules/cork/bench/run.mjs             # бенчмарк (bench/README.md)
   программах. Переведённое выполнение против интерпретации (`machine.test.js`), перевод в воркере
   против перевода в том же потоке (`runtime/translators.test.js`), общая арена
   (`runtime/arena.test.js`), пачка, собранная и опубликованная по частям, против собранной разом
-  (`runtime/forming-parts.test.js`), инструкции с `lock` против модели (`emit/locked.test.js`).
+  (`runtime/forming-parts.test.js`), инструкции с `lock` против модели (`emit/locked.test.js`),
+  корпус, переведённый для общей раскладки процесса и выполненный на его третьем исполнителе,
+  против железа (`emit/corpus-shared.itest.js`).
 
 Обычные ES-модули с JSDoc, тесты на `node:test`. Лицензия MPL-2.0.

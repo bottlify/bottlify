@@ -41,7 +41,7 @@ import { openTranslationWorker } from './translator.js';
 import { ANY_TOP, createEntries } from './entries.js';
 import { PageFlag, createPageTable } from './pages.js';
 import { createSharedCode } from './shared-code.js';
-import { Tables, tablesSize } from './layout.js';
+import { Tables, basesOf, tablesSize } from './layout.js';
 import { blockCounts, mechanismCounts, resetBlockCounts, topBlocks, transferTargets }
     from './block-profile.js';
 import { profileForms } from './profile-forms.js';
@@ -163,8 +163,8 @@ export function translatorWorkerUrl(){
  * @param {EngineEnv & { features?: ReturnType<typeof probeFeatures> }} env
  * @returns {Runtime & { pages: import('./pages.js').PageTable }}
  */
-export function createCorkRuntime({ memory, layout, config = {}, read, readBytes, imports,
-    features })
+export function createCorkRuntime({ memory, layout, sharedLayout = undefined, config = {}, read,
+    readBytes, imports, features })
 {
     const settings = {
         maxRegionBlocks: 128, maxRegionBytes: 8192, batchRegions: 32,
@@ -318,6 +318,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
         // (0: each keeps a cache of its own). Shared memory is committed as
         // it fills.
         arenaBytes: 48 << 20,
+        // The arena itself, made by the host for every executor of a process
+        // (`createArena`), so what one executor's translators emitted the
+        // others take; absent, the runtime makes its own of `arenaBytes`.
+        arena: /** @type {SharedArrayBuffer | undefined} */ (undefined),
         // Diagnostic: the host clock read around the translator's phases -- the
         // milliseconds of forming, lookups, emitting, encoding, storing,
         // instantiating and publishing, and the record of long holds. Off, as a
@@ -490,6 +494,17 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
             + ` at ${layout.tables} + ${tablesSize(layout)}`);
     }
     const found = features ?? probeFeatures();
+    // The layout translations are made for: the process's shared one where it
+    // has several executors, whose bytes every executor instantiates over its
+    // own state block and tables, given as the instance's bases -- so a
+    // translation's key and its arena entries are the same on every executor;
+    // this executor's own otherwise. Whatever reads or writes the state from
+    // here, the helpers included, keeps to the executor's own (`layout`).
+    const emitLayout = sharedLayout ?? layout;
+    /** The globals an instance of a shared-layout module is given: where this executor's are. */
+    const baseGlobals = emitLayout.shared === true ? Object.fromEntries(
+        Object.entries(basesOf(layout)).map(([name, at])=>[name,
+            new WebAssembly.Global({ value: 'i32', mutable: false }, at)])) : {};
     // A shared memory links only to modules whose import says so, with a
     // maximum: every module emitted here, and the helpers, declare it.
     const sharedMemory = typeof SharedArrayBuffer === 'function'
@@ -1833,8 +1848,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
     };
     /** The process's translation cache arena, shared with every translator it has; none
      * without a translator or where memory cannot be shared. */
-    const arena = workerUrl !== null && settings.arenaBytes > 0
-        && typeof SharedArrayBuffer === 'function' ? createArena(settings.arenaBytes) : null;
+    const arena = settings.arena ?? (workerUrl !== null && settings.arenaBytes > 0
+        && typeof SharedArrayBuffer === 'function' ? createArena(settings.arenaBytes) : null);
     /** What emitting inline keeps for a relink to take again: the arena the translators
      * share, or a cache of this thread's own. */
     const emitCache = arena !== null ? arenaEmitCache(arena) : createEmitCache();
@@ -1940,7 +1955,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
             copies: record.copies === true, ...precisionJob(record) });
         }
         const forms = { ...profileForms(jobs.map(job=>job.region), executions,
-            note=>emitBatch(jobs, layout, found, { ...emitOptions(), blockProfile: false,
+            note=>emitBatch(jobs, emitLayout, found, { ...emitOptions(), blockProfile: false,
                 countTransfers: false, timings: false, expansion: note })),
         held: total > 0 ? held / total : 0 };
         formsTaken = { at: now, forms };
@@ -2077,6 +2092,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
                     memory, getEflags: imports.getEflags, trap: imports.trap,
                     rdtsc: imports.rdtsc ?? (()=>0n),
                     ...mathImports(), ...helperImports(), ...(table ? { table } : {}),
+                    ...baseGlobals,
                 },
             });
             counts.modules++;
@@ -2430,7 +2446,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
      *     narrow?: boolean, floats?: boolean, checked?: boolean, copies?: boolean,
      *     loose?: boolean, wrapped?: boolean }} one */
     const regionKey = one=>cacheKey({
-        version: cacheVersion, features: found, variant, layoutId: layout.id,
+        version: cacheVersion, features: found, variant, layoutId: emitLayout.id,
         bundleId: settings.bundleId ?? 'unknown', entry: one.region.entry,
         hash: `${one.region.hash}-${one.entryTop}${one.wide ? '-w' : ''}`
             + `${one.narrow ? '-n' : ''}${one.floats ? '-f' : ''}${one.checked ? '-c' : ''}`
@@ -2451,7 +2467,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
      */
     const storeModule = (store, batch)=>{
         const key = moduleKey({ version: cacheVersion, features: found, variant,
-            layoutId: layout.id, bundleId: settings.bundleId ?? 'unknown' }, batch.module,
+            layoutId: emitLayout.id, bundleId: settings.bundleId ?? 'unknown' }, batch.module,
         batch.digest);
         store.put(key, batch.packed ?? packRegion({ module: batch.module, labels: [], cut: [],
             entryTop: 0, instructions: 0 }, cacheVersion)).catch(()=>{});
@@ -3215,12 +3231,12 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
             const pending = { id: ++workerRequest, relink: chunk, store, at: performance.now(),
                 alone: true };
             translator.pending = pending;
-            translator.adapter.post({ id: pending.id, relink, layout, features: found,
+            translator.adapter.post({ id: pending.id, relink, layout: emitLayout, features: found,
                 options: emitOptions(), ...storeVersionFor(store) },
             [...copies.values()].map(bytes=>bytes.buffer));
             return true;
         }
-        const batch = relinkBatch(relink, layout, found, emitOptions(), emitCache);
+        const batch = relinkBatch(relink, emitLayout, found, emitOptions(), emitCache);
         counts.emitMs += batch.emitMs;
         counts.encodeMs += batch.encodeMs;
         applyRelink(chunk, batch, null, store);
@@ -3810,7 +3826,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
                     formable: unbuilt.flatMap(one=>[...one.region.formable ?? one.region.pages]),
                     form: formOptions,
                 },
-                layout, features: found, options: emitOptions(), ...storeVersionFor(store),
+                layout: emitLayout, features: found, options: emitOptions(),
+                ...storeVersionFor(store),
             }, [...copies.values()].map(bytes=>bytes.buffer));
             return published;
         }
@@ -3821,7 +3838,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, readBytes
             // program runs on without it.
             const jobs = unbuilt.map(one=>({ region: one.region, entryTop: one.entryTop,
                 checked: one.checked, copies: one.copies === true, ...precisionJob(one) }));
-            const batch = emitBatch(jobs, layout, found, emitOptions(), emitCache);
+            const batch = emitBatch(jobs, emitLayout, found, emitOptions(), emitCache);
             counts.emitMs += batch.emitMs;
             counts.encodeMs += batch.encodeMs;
             published += publishBatch(unbuilt, batch, null, store);

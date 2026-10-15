@@ -38,6 +38,7 @@ something only with a measurement beside it.
 | `workerUrl` | beside the runtime | Where `translator.worker.js` is. | When a bundler moves it. |
 | `translators` | 1 | Workers the runtime opens itself; 0 when a host's pool lends them. | More when cores are spare and loading translates a lot. |
 | `arenaBytes` | 48 MiB | The shared memory every translator of a process keeps emitted code in (0: none). | Larger for programs with many hundreds of thousands of blocks. |
+| `arena` | none | The arena itself, made by the host (`createArena`) and given to every executor of a process, whose translations share one layout (`sharedLayout`): what one emitted, the others take. Absent, the runtime makes its own of `arenaBytes`. | Set by the cpu layer for several executors; not a knob. |
 
 **What a region is and how regions meet**
 
