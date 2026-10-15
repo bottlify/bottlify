@@ -16,6 +16,20 @@ differently raises a `divergence` event naming the API.
 
 ## Processes
 
+- With several executors (`cpu.cores`), what one thread does is seen by the others as the host
+  orders it. The locked instructions, `xchg` and the kernel's own objects are atomic and ordered
+  everywhere; a plain store is ordered after the stores before it only on a host that keeps that
+  order itself (x86 does). On a host that does not -- an ARM machine -- a program passing a
+  message through plain stores alone (a flag after its payload, a spinlock released with `mov`)
+  may see the flag before the payload. Not measured on such a host yet.
+- With several executors, a store into bytes another executor is translating at that instant can
+  be missed when the store's page check came before the other set the page's code flag and the
+  store landed after it read the bytes back -- a window of a few instructions, longer (at most a
+  loop's checked turns) for a loop's stores checked once for several turns. The translation then
+  keeps the old bytes. Windows makes no promise either until the thread running the code
+  synchronises with the one writing it; here the old translation stays after that too. A store
+  made before the code was translated, or after its page was flagged, is always seen. Memory
+  another thread frees or protects meanwhile is not faulted by a loop's accesses checked before.
 - A program is told it has one processor for each of its executors (`executors`, one by default). A thread's affinity mask keeps it to those executors. Not done: a child process does not inherit its parent's narrowed process mask, a process handle other than the caller's own reads and sets the caller's mask, `NtSetInformationProcess(ProcessAffinityMask)` is accepted and ignored, and `NtQueryInformationThread`/`NtSetInformationThread` know no affinity; GetActiveProcessorCount, GetLogicalProcessorInformationEx and the processor-group calls are not exported.
 - A child started with `CreateProcess` runs while its parent waits; the parent resumes when the
   child ends. With `concurrency` 2 or 4 every process runs in a worker of its own, the program the

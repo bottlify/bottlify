@@ -76,6 +76,64 @@ const f32 = value=>{
     return [...bytes];
 };
 
+/** The opcodes of the jumps `assemble` takes, each with a 32-bit displacement after it. */
+const JUMPS = {
+    jmp: [0xe9], jz: [0x0f, 0x84], jnz: [0x0f, 0x85], jb: [0x0f, 0x82], jae: [0x0f, 0x83],
+    jbe: [0x0f, 0x86], ja: [0x0f, 0x87], jl: [0x0f, 0x8c], jge: [0x0f, 0x8d],
+};
+
+/**
+ * @typedef {number | { label: string } | { jump: keyof typeof JUMPS, to: string }} AsmPart
+ */
+
+/**
+ * Bytes, labels and jumps (always rel32, so one pass sizes them) to bytes:
+ * code with loops written without counting their offsets by hand.
+ *
+ * @param {AsmPart[]} parts
+ * @returns {number[]}
+ */
+export function assemble(parts){
+    /** @type {Map<string, number>} */
+    const labels = new Map();
+    let at = 0;
+    for (const part of parts)
+    {
+        if (typeof part === 'number')
+        {
+            at++;
+        }
+        else if ('label' in part)
+        {
+            labels.set(part.label, at);
+        }
+        else
+        {
+            at += JUMPS[part.jump].length + 4;
+        }
+    }
+    /** @type {number[]} */
+    const bytes = [];
+    for (const part of parts)
+    {
+        if (typeof part === 'number')
+        {
+            bytes.push(part);
+        }
+        else if ('jump' in part)
+        {
+            const opcode = JUMPS[part.jump];
+            const target = labels.get(part.to);
+            if (target === undefined)
+            {
+                throw new Error(`no label ${part.to}`);
+            }
+            bytes.push(...opcode, ...u32(target - (bytes.length + opcode.length + 4)));
+        }
+    }
+    return bytes;
+}
+
 /**
  * Builds an executable.
  *

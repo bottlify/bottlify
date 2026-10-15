@@ -21,7 +21,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createApp } from './app.js';
 import { writeBundle } from './bundle-node.js';
-import { buildExe } from '../../../tools/make-pe.mjs';
+import { assemble, buildExe } from '../../../tools/make-pe.mjs';
 
 /** @param {number} value @returns {number[]} */
 const u32 = value=>[
@@ -35,57 +35,7 @@ const cString = text=>[...text].map(c=>c.charCodeAt(0)).concat(0);
 const WORKER_AT = 0x200;
 const CODE_SIZE = 0x400;
 
-/**
- * @typedef {number | { label: string } | { jump: 'jmp' | 'jz' | 'jnz', to: string }} Part
- */
-
-/**
- * Bytes, labels and jumps (always rel32, so one pass sizes them) to bytes.
- *
- * @param {Part[]} parts
- * @returns {number[]}
- */
-function assemble(parts){
-    /** @type {Map<string, number>} */
-    const labels = new Map();
-    let at = 0;
-    for (const part of parts)
-    {
-        if (typeof part === 'number')
-        {
-            at++;
-        }
-        else if ('label' in part)
-        {
-            labels.set(part.label, at);
-        }
-        else
-        {
-            at += part.jump === 'jmp' ? 5 : 6;
-        }
-    }
-    /** @type {number[]} */
-    const bytes = [];
-    for (const part of parts)
-    {
-        if (typeof part === 'number')
-        {
-            bytes.push(part);
-        }
-        else if ('jump' in part)
-        {
-            const opcode = part.jump === 'jmp' ? [0xe9] : part.jump === 'jz' ? [0x0f, 0x84]
-                : [0x0f, 0x85];
-            const target = labels.get(part.to);
-            if (target === undefined)
-            {
-                throw new Error(`no label ${part.to}`);
-            }
-            bytes.push(...opcode, ...u32(target - (bytes.length + opcode.length + 4)));
-        }
-    }
-    return bytes;
-}
+/** @typedef {import('../../../tools/make-pe.mjs').AsmPart} Part */
 
 /**
  * A program of a main routine and a worker routine at `WORKER_AT`.
