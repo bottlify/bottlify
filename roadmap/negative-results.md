@@ -178,6 +178,42 @@ evidence again.
 - **Correctness.** Every checksum the processor's.
 - **Decision.** Left off.
 
+### 2026-10-15 -- the shared layout's bases as other kinds of global
+
+- **Idea.** Under the process's shared layout (`sharedLayout`, every executor's translation the
+  same bytes) the state block and the tables are addressed from two immutable imported globals,
+  `env.stateBase` and `env.tablesBase`. A seven-instruction loop (an LCG step and a
+  read-modify-write, 600 million instructions) ran 1.34 times as long under it as under one
+  executor's own layout; V8's code for the region kept the loop's `eax` in a stack slot, the base
+  read in the prologue staying live through the loop to the exits that write the state back.
+  Three ways to keep that value from living across the loop were tried: the globals imported
+  mutable (read where used, through the instance's table of imported mutable globals); a second
+  pair of immutable globals for every use after the prologue (`split`); and mutable globals the
+  module defines, initialised from the imported pair (`defined`).
+- **Workload.** The cork benchmark (`tools/cork-bench/bench.mjs`, its 22 workloads) on one
+  executor with the shared layout forced on, against the same tree's own layout; 10 reps of each,
+  each workload's figure the mean of its three fastest reps (`best3Us`, µs an iteration); the
+  checksum (`eax`) the same in every arm. Tree: `cork2` at `a53a1ec6` with the change under way.
+  Bundle hash: not applicable. Per-rep values: not recorded (the bench kept the fastest and the
+  three fastest's mean).
+- **Values.** Geometric mean over the 22 against the own layout, three campaigns in the same
+  hour: immutable (as committed) 1.054, 1.069, 1.070; mutable 1.166; split 1.057; defined
+  1.073. Mutable won the loop (161 against 215 ms in a micro test of the region, 1710 against
+  2249 ms in the engine) and lost calls: through a table of 8 targets 1.45-1.68, of 4096 targets
+  1.54, Lua 1.26. Split won the micro test (151 ms) and not the engine (2224 ms). Defined won the
+  loop (1633 ms) and lost calls about as much as it won elsewhere. The noise floor: the own
+  layout's figure for one workload moved by up to a fifth between campaigns (game-pc24 616-750).
+- **Where the time goes.** A small called function's code is a sixth larger under the shared
+  layout (488 bytes of machine code against 572): every access adds a base, and the loads of the
+  flag record from the state block that its own layout's code drops as dead stay, a load from a
+  computed address being one that may fault.
+- **Machine.** Node 22.22.0 (V8 12.4.254.21-node.33), a 4-core x86-64 Linux VM, Intel Xeon @
+  2.80 GHz. No browser. Power plan: not recorded.
+- **Correctness.** Every arm's checksums equal the own layout's.
+- **Decision.** The globals stay immutable imports. The process's own executor translates for its
+  own layout instead (`cork-host.js`): it runs the first thread and any thread alone, and the
+  shared layout is the other executors' alone.
+
 ## Invalidated
 
 None yet.

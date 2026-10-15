@@ -111,6 +111,33 @@ test('two threads computing on two executors keep them, not handing their thread
         `${scheduler?.executorSlices} slices on the other executor`);
 });
 
+test('a thread started while the first still ran, left alone when the first waits for it, comes'
+    + ' to the process\'s own executor', async()=>{
+    // Started while the main thread runs here, the worker goes to the other
+    // executor; once the main thread waits, this one has nothing to run and
+    // takes the worker over: its code is translated here for this executor's
+    // own layout, and its calls into the host cross nothing.
+    const executable = buildProgram(['CreateThread', 'WaitForSingleObject', 'ExitProcess'],
+        { first: [0, 0, 0, 0] }, ({ call, at, start })=>({
+            main: [...start('first'), 0x6a, 0xff, 0xff, 0x35, ...u32(at('first')),
+                ...call('WaitForSingleObject'), 0x6a, 0x07, ...call('ExitProcess')],
+            worker: [
+                0xb9, ...u32(LOOPS * 5), //        mov ecx, 5 * LOOPS
+                0x49, 0x75, 0xfd, //               L: dec ecx; jnz L
+                0x31, 0xc0, 0xc2, 0x04, 0x00, //   xor eax, eax; ret 4
+            ],
+        }));
+    const { code, scheduler } = await run(executable, 2);
+    assert.equal(code, 7);
+    const shared = JSON.parse(scheduler?.sharedTime ?? '{}');
+    const here = shared.hereRetired ?? 0;
+    const total = here + (shared.elsewhereRetired ?? 0);
+    // Three hundred million instructions; a few milliseconds' worth elsewhere,
+    // not a chain of a quarter of a second, before it comes.
+    assert.ok(total >= LOOPS * 10 && here > total * 0.75,
+        `${here} of ${total} instructions on the process's own executor`);
+});
+
 test('a thread sleeping on the process\'s executor wakes at its time while the other executor'
     + ' runs a thread that never calls into the host', async()=>{
     const SLEEPS = 5;

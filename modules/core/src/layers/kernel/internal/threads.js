@@ -90,6 +90,14 @@ const EXECUTORS_WAIT_MS = 4;
  */
 const ENDING_WAIT_MS = 1000;
 
+/**
+ * How long, in host ms, this executor goes with nothing of its own to run
+ * while another keeps a thread it could run before that one lets the thread go
+ * to come here: long enough that a wait of a millisecond or so does not move a
+ * thread over and back.
+ */
+const RECALL_MS = 2;
+
 /** The base of the normal priority class, and the two relative values pinned outside it. */
 const NORMAL_BASE = 8;
 const THREAD_PRIORITY_IDLE = -15;
@@ -845,9 +853,11 @@ export function createScheduler(options){
      * (`betweenMs`). And the others' side of it: from each of their slices'
      * start to its end taken here (`heldMs`, against the time the executor
      * itself reports in its slices), and from that to its next start (`gapMs`).
+     * And the instructions retired on this one (`hereRetired`) and on the
+     * others (`elsewhereRetired`), whichever threads they were.
      */
     const sharedTime = { hereMs: 0, answerMs: 0, waitMs: 0, answers: 0, turns: 0,
-        betweenMs: 0, heldMs: 0, gapMs: 0, gaps: 0,
+        betweenMs: 0, heldMs: 0, gapMs: 0, gaps: 0, hereRetired: 0, elsewhereRetired: 0,
         // Counts by bound in ms: the gaps before another executor's next slice,
         // and this executor's own turns.
         gapsUnder: { '0.05': 0, '0.2': 0, '1': 0, '5': 0, '20': 0, more: 0 },
@@ -890,6 +900,8 @@ export function createScheduler(options){
     };
     /** The bell's count when they were last answered. */
     let answeredAt = -1;
+    /** Since when this executor has had nothing of its own while another ran a thread it could run (`RECALL_MS`). */
+    let idleSince = -1;
 
     /**
      * Whether `thread` may run on executor `index`: the processor of that
@@ -1082,6 +1094,7 @@ export function createScheduler(options){
                     cpu.remoteFault?.(ended.fault);
                 }
                 account(on.thread, ended.instructions, on.began, on.from, at);
+                sharedTime.elsewhereRetired += ended.instructions;
                 ran = on.thread;
                 instructions += ended.instructions;
             }
@@ -1189,6 +1202,8 @@ export function createScheduler(options){
         let here = null;
         /** @type {any[]} */
         const waiting = [];
+        /** Threads going to their own executors this turn, placed once the turn is decided. @type {[any, any][]} */
+        const going = [];
         while (candidates.length > 0 && (here === null || free.length > 0))
         {
             const next = pick(candidates);
@@ -1202,12 +1217,30 @@ export function createScheduler(options){
             else if (remote !== undefined)
             {
                 free.splice(free.indexOf(remote), 1);
-                place(remote, next);
+                going.push([remote, next]);
             }
             else
             {
                 waiting.push(next);
             }
+        }
+        // This executor left with nothing of its own: it runs the first thread
+        // bound for another rather than wait for it -- a program whose one
+        // working thread had a home elsewhere ran it there, its calls into the
+        // host crossing over, while this one waited (a tenth slower on two).
+        if (here === null && waiting.length === 0)
+        {
+            const at = going.findIndex(([, thread])=>allowedOn(thread, 0));
+            if (at >= 0)
+            {
+                here = going[at][1];
+                free.push(going[at][0]);
+                going.splice(at, 1);
+            }
+        }
+        for (const [remote, next] of going)
+        {
+            place(remote, next);
         }
         for (const next of waiting)
         {
@@ -1226,11 +1259,27 @@ export function createScheduler(options){
                 break;
             }
         }
+        // This executor with nothing to run while another keeps a thread it
+        // could run: past RECALL_MS that one lets it go at its slice's end and
+        // it comes here (above) -- a program whose one working thread was
+        // started while its first still ran had it run elsewhere, its code
+        // translated for the layout every other executor shares (a fifth
+        // slower than this one's own) and its calls into the host crossing over.
+        let recall = false;
+        if (here === null && [...placed.values()].some(on=>allowedOn(on.thread, 0)))
+        {
+            idleSince = idleSince < 0 ? wall() : idleSince;
+            recall = wall() - idleSince >= RECALL_MS;
+        }
+        else
+        {
+            idleSince = -1;
+        }
         // A thread left without an executor waits for one to give its thread up.
         // The one taken here is not left: it runs this turn, still ready until it does.
         // So does an executor whose thread is wanted back -- suspended, ended
         // by another -- as it keeps one it is let go on with past its slice.
-        bell.goOn?.(candidates.length === 0
+        bell.goOn?.(!recall && candidates.length === 0
             && waiting.every(thread=>thread === here || thread.state !== ThreadState.READY)
             && [...placed.values()].every(on=>on.thread.state === ThreadState.RUNNING
                 && !(on.thread.suspendCount > 0)));
@@ -1313,6 +1362,7 @@ export function createScheduler(options){
                 const hereFrom = wall();
                 const turn = runHere(here, true);
                 sharedTime.hereMs += wall() - hereFrom;
+                sharedTime.hereRetired += turn.instructions;
                 bucket(sharedTime.hereUnder, wall() - hereFrom);
                 const after = answerExecutors();
                 return { ran: turn.ran, instructions: turn.instructions + instructions

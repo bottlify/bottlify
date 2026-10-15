@@ -373,16 +373,22 @@ There are no page tables: each 4 KiB page has one byte of flags — `INACCESSIBL
   thread slice after slice while no ready thread waits for one and the process wants none back
   (suspended, ended by another): its event loop turns in between, and the process hears of the
   thread at most every 250 ms. The process's thread with nothing of its own to run waits for the
-  others until its soonest deadline, 4 ms at most; its own turns are long while no other executor
-  runs a thread, and a thread made ready that a free executor could take ends such a turn. An executor past the
-  first is a cork host in a worker of its own over the
-  process's memory
+  others until its soonest deadline, 4 ms at most; past 2 ms of that, an executor keeping a thread
+  the process's executor may run lets it go at its slice's end and the thread comes to the
+  process's executor, so a program whose one working thread was started while its first still ran
+  runs it there. Its own turns are long while no other executor runs a thread, and a thread made
+  ready that a free executor could take ends such a turn. An executor past the first is a cork host
+  in a worker of its own over the process's memory
   (`core/src/layers/cpu/internal/executor.worker.js`), with its own state page, entry hash and
-  instances of translations. The translations themselves are the process's: made for its shared
-  layout (`sharedLayout`), which addresses the state block and the tables from two bases each
-  instance is given, their bytes are the same on every executor, and one arena of emitted functions
-  serves all the executors and their translators -- a region one of them emitted, the others take
-  from it. The page flags and the code bounds are the process's: a write on any executor into
+  instances of translations. The translations of the executors past the first are theirs together:
+  made for the process's shared layout (`sharedLayout`), which addresses the state block and the
+  tables from two bases each instance is given, their bytes are the same on each of them, and one
+  arena of emitted functions serves them all and their translators -- a region one of them emitted,
+  the others take from it. The process's own executor translates for a layout of its own, the state
+  and the tables at constant addresses, as with one executor: the shared layout's bases cost a
+  sixth more machine code in a small function and 7 % of the benchmark, and the process's executor
+  runs the first thread and any thread alone. Code run on both sides is translated twice, never
+  once per executor. The page flags and the code bounds are the process's: a write on any executor into
   code any of them translated is found, the finder drops its own translations and puts the range in
   a ring in shared memory, and every other executor drops its own at its next slice
   (`cork/src/runtime/shared-code.js`). A trap or a fault on such an executor waits for the process's

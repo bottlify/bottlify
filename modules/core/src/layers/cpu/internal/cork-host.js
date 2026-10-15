@@ -487,10 +487,19 @@ export function createCorkHost(config){
     const runtime = createEngine({
         memory,
         layout,
-        // One translation for every executor of the process: made for the
-        // shared layout, it is the same on each, so the arena and the store
-        // keep it once whichever executor asked for it first.
-        ...(executors > 1 && typeof engine.sharedLayout === 'function'
+        // One translation for every other executor of the process: made for
+        // the shared layout, it is the same on each, so the arena and the
+        // store keep it once whichever of them asked for it first. The
+        // process's own keeps its own layout, the state and the tables at
+        // constant addresses: under the shared one each access adds a base, a
+        // load from the state block may fault and so is never dropped as dead,
+        // and the base itself stays live across loops -- a called function's
+        // code was a sixth larger, a seven-instruction loop kept eax on the
+        // stack, and the benchmark ran 7 % slower (geometric mean, a call
+        // through a table of 4096 targets 35 %). It runs the process's first
+        // thread and any thread alone; what it runs elsewhere too is
+        // translated twice, never once per executor.
+        ...(executors > 1 && executor !== 0 && typeof engine.sharedLayout === 'function'
             ? { sharedLayout: engine.sharedLayout(own) } : {}),
         config: { ...(trapPort === undefined ? {} : { trapPort }), ...corkConfig,
             ...(sharedAt < 0 ? {} : { sharedCode: { at: sharedAt, index: executor } }) },
