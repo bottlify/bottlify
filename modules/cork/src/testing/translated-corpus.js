@@ -43,12 +43,15 @@ const X87_PRECISION = new Set(['x87-int-binop', 'fscale-wide']);
  * One part of the corpus: the cases whose index is `part` modulo `of`.
  *
  * @param {number} part @param {number} of
- * @param {{ executor?: number }} [where]  the executor of a shared memory the machine is:
- *     its state and tables past the first's, as for every executor of a process but the first
+ * @param {{ executor?: number, shared?: boolean }} [where]  the executor of a shared memory
+ *     the machine is: its state and tables past the first's, as for every executor of a
+ *     process but the first; shared: the code translated for the process's shared layout,
+ *     run with this executor's bases
  */
-export function testTranslatedCorpus(part, of, { executor = 0 } = {}){
+export function testTranslatedCorpus(part, of, { executor = 0, shared = false } = {}){
     test(`translated code leaves what the hardware left, on every case it translates in full`
-        + ` (part ${part + 1} of ${of}${executor > 0 ? `, executor ${executor}` : ''})`,
+        + ` (part ${part + 1} of ${of}${executor > 0 ? `, executor ${executor}` : ''}`
+        + `${shared ? ', the shared layout' : ''})`,
     { skip: skipWithout(CORPUS) },
     async()=>{
         const { cases } = loadCorpus(await readFile(CORPUS));
@@ -66,7 +69,8 @@ export function testTranslatedCorpus(part, of, { executor = 0 } = {}){
         for (const one of selected)
         {
             // Judged against the hardware, so exact where the fast default is not.
-            const m = createTestMachine({ ramSize: 2 << 20, precise: true, executor });
+            const m = createTestMachine({ ramSize: 2 << 20, precise: true, executor, shared,
+                processors: shared ? Math.max(2, executor + 1) : 1 });
             for (const { address, bytes } of one.segments)
             {
                 m.write(address, bytes);

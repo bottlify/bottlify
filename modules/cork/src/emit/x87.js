@@ -65,6 +65,7 @@ import { prepare, writeReg } from './integer.js';
 import { PRECISION, noteStore } from './memory.js';
 import { callsOut, inlineReturns } from '../region.js';
 import { exactWrites } from '../ir-x87.js';
+import { atState } from './bases.js';
 
 /** @typedef {import('./region.js').RegionEmitter} E */
 /** @typedef {import('../decode/decoder.js').Instruction} Instruction */
@@ -1579,10 +1580,10 @@ export function x87Prologue(e){
     const x = e.x87;
     // The top as the machine has it: a block whose stack shape the tracking
     // does not know sets no top of its own, and writes this one back.
-    b.i32const(0).load('i32_8u', { offset: layout.x87Top }).localSet(Local.x87Top);
-    b.i32const(0).load('i32_8u', { offset: layout.x87Empty }).localSet(Local.x87Empty);
-    b.i32const(0).load('i32_16u', { offset: layout.x87Status }).localSet(Local.x87Status);
-    b.i32const(0).load('i32_16u', { offset: layout.x87Control }).localSet(Local.x87Control);
+    atState(e.context, b).load('i32_8u', { offset: layout.x87Top }).localSet(Local.x87Top);
+    atState(e.context, b).load('i32_8u', { offset: layout.x87Empty }).localSet(Local.x87Empty);
+    atState(e.context, b).load('i32_16u', { offset: layout.x87Status }).localSet(Local.x87Status);
+    atState(e.context, b).load('i32_16u', { offset: layout.x87Control }).localSet(Local.x87Control);
     b.i32const(0).localSet(Local.x87Dirty);
     if (x.hasMmx)
     {
@@ -1620,9 +1621,9 @@ export function x87LoadRegisters(e, needed){
         }
         if (layout.x87Format === 'tagged80')
         {
-            b.i32const(0).load('i32_16u', { offset: at + 8 }).i32const(RELAXED_TAG).op(I32.eq);
+            atState(e.context, b).load('i32_16u', { offset: at + 8 }).i32const(RELAXED_TAG).op(I32.eq);
             e.openIf('tagged', EMPTY);
-            b.i32const(0).load('i64', { offset: at }).op(F64.reinterpretI64).localSet(x.base + k);
+            atState(e.context, b).load('i64', { offset: at }).op(F64.reinterpretI64).localSet(x.base + k);
             b.else();
             b.i32const(at).call(/** @type {number} */ (e.context.f80ToF64)).localSet(x.base + k);
             e.close();
@@ -1631,7 +1632,7 @@ export function x87LoadRegisters(e, needed){
                 // The form the register enters in: an MMX write before this
                 // region left the exponent and sign all ones, which the exit
                 // writes back as it found it rather than as a relaxed double.
-                b.i32const(0).load('i32_16u', { offset: at + 8 }).i32const(0xffff).op(I32.eq);
+                atState(e.context, b).load('i32_16u', { offset: at + 8 }).i32const(0xffff).op(I32.eq);
                 e.openIf(`mmxform${k}`, EMPTY);
                 b.localGet(x.form).i32const(1 << k).op(I32.or).localSet(x.form);
                 e.close();
@@ -1639,7 +1640,7 @@ export function x87LoadRegisters(e, needed){
         }
         else
         {
-            b.i32const(0).load('f64', { offset: at }).localSet(x.base + k);
+            atState(e.context, b).load('f64', { offset: at }).localSet(x.base + k);
         }
         if (!x.hasMmx)
         {
@@ -1654,10 +1655,10 @@ export function x87LoadRegisters(e, needed){
             b.i32const(0).localSet(x.dyn);
             return;
         }
-        b.i32const(0).load('i32_8u', { offset: exactAt }).localSet(x.dyn);
+        atState(e.context, b).load('i32_8u', { offset: exactAt }).localSet(x.dyn);
         for (let k = 0; k < 8; k++)
         {
-            b.i32const(0).load('i64', { offset: layout.x87 + k * 16 + 8 }).localSet(x.shadow[k]);
+            atState(e.context, b).load('i64', { offset: layout.x87 + k * 16 + 8 }).localSet(x.shadow[k]);
         }
     }
 }
@@ -1682,12 +1683,12 @@ const exactPlace = layout=>(layout.x87Format === 'f64' ? layout.x87Exact ?? -1 :
 export function x87Epilogue(e){
     const { b, layout } = e;
     const x = e.x87;
-    b.i32const(0).localGet(Local.x87Top).store('i32_8', { offset: layout.x87Top });
-    b.i32const(0).localGet(Local.x87Empty).store('i32_8', { offset: layout.x87Empty });
-    b.i32const(0).localGet(Local.x87Status).store('i32_16', { offset: layout.x87Status });
+    atState(e.context, b).localGet(Local.x87Top).store('i32_8', { offset: layout.x87Top });
+    atState(e.context, b).localGet(Local.x87Empty).store('i32_8', { offset: layout.x87Empty });
+    atState(e.context, b).localGet(Local.x87Status).store('i32_16', { offset: layout.x87Status });
     if (x.controlWritten)
     {
-        b.i32const(0).localGet(Local.x87Control).store('i32_16', { offset: layout.x87Control });
+        atState(e.context, b).localGet(Local.x87Control).store('i32_16', { offset: layout.x87Control });
     }
 }
 
@@ -1712,12 +1713,12 @@ export function x87StoreRegisters(e, written){
         e.openIf(`dirty${k}`, EMPTY);
         if (layout.x87Format === 'tagged80')
         {
-            b.i32const(0).localGet(x.base + k).op(I64.reinterpretF64).store('i64', { offset: at });
-            b.i32const(0).i32const(RELAXED_TAG).store('i32_16', { offset: at + 8 });
+            atState(e.context, b).localGet(x.base + k).op(I64.reinterpretF64).store('i64', { offset: at });
+            atState(e.context, b).i32const(RELAXED_TAG).store('i32_16', { offset: at + 8 });
         }
         else
         {
-            b.i32const(0).localGet(x.base + k).store('f64', { offset: at });
+            atState(e.context, b).localGet(x.base + k).store('f64', { offset: at });
         }
         e.close();
     }
@@ -1725,10 +1726,10 @@ export function x87StoreRegisters(e, written){
     {
         // What the region knows at run time, its own quadwords and the ones
         // it came in with alike.
-        b.i32const(0).localGet(x.dyn).store('i32_8', { offset: exactPlace(layout) });
+        atState(e.context, b).localGet(x.dyn).store('i32_8', { offset: exactPlace(layout) });
         for (let k = 0; k < 8; k++)
         {
-            b.i32const(0).localGet(x.shadow[k]).store('i64', { offset: layout.x87 + k * 16 + 8 });
+            atState(e.context, b).localGet(x.shadow[k]).store('i64', { offset: layout.x87 + k * 16 + 8 });
         }
         return;
     }
@@ -1750,7 +1751,7 @@ export function x87DropExact(e, mask){
     {
         return;
     }
-    b.i32const(0).i32const(0).load('i32_8u', { offset: at });
+    atState(e.context, atState(e.context, b)).load('i32_8u', { offset: at });
     mask();
     b.i32const(-1).op(I32.xor).op(I32.and).store('i32_8', { offset: at });
 }
@@ -2429,7 +2430,7 @@ export function emitX87(e, instruction, flagsLive){
     const noteAsker = ()=>{
         if (nanAt >= 0)
         {
-            b.i32const(0).i32const(instruction.eip)
+            atState(e.context, b).i32const(instruction.eip)
                 .store('i32', { offset: nanAt + NanRecord.ASKER });
         }
     };
@@ -2543,10 +2544,10 @@ export function emitX87(e, instruction, flagsLive){
         // Which region, entered at which top, and the stack as it found it.
         noteFirst(NanRecord.FAULT, ()=>{
             const at = nanAt + NanRecord.FAULT_REGION;
-            b.i32const(0).i32const(e.region.entry).store('i32', { offset: at });
-            b.i32const(0).i32const(e.entryTop).store('i32', { offset: at + 4 });
-            b.i32const(0).localGet(Local.x87Empty).store('i32', { offset: at + 8 });
-            b.i32const(0).localGet(Local.x87Top).store('i32', { offset: at + 12 });
+            atState(e.context, b).i32const(e.region.entry).store('i32', { offset: at });
+            atState(e.context, b).i32const(e.entryTop).store('i32', { offset: at + 4 });
+            atState(e.context, b).localGet(Local.x87Empty).store('i32', { offset: at + 8 });
+            atState(e.context, b).localGet(Local.x87Top).store('i32', { offset: at + 12 });
         });
         if (overflowChecked)
         {
@@ -3874,7 +3875,7 @@ function loadFloat(e, operand, mode = 'checked'){
     b.localTee(value).localGet(value).op(F64.ne);
     b.if(EMPTY);
     noteEvent(e, NanRecord.LOAD, ()=>{
-        b.i32const(0).localGet(Local.addr).store('i32', { offset: at + NanRecord.LOAD + 8 });
+        atState(e.context, b).localGet(Local.addr).store('i32', { offset: at + NanRecord.LOAD + 8 });
     });
     b.end();
     b.localGet(value);
@@ -3991,7 +3992,7 @@ function storeFloat(e, operand, pushValue){
         b.localTee(value).localGet(value).op(F64.ne);
         b.if(EMPTY);
         noteEvent(e, NanRecord.STORE, ()=>{
-            b.i32const(0).localGet(Local.addr).store('i32', { offset: at + NanRecord.STORE + 8 });
+            atState(e.context, b).localGet(Local.addr).store('i32', { offset: at + NanRecord.STORE + 8 });
         });
         b.end();
         pushValue = ()=>b.localGet(value);
@@ -4261,15 +4262,15 @@ export const NanRecord = Object.freeze({
 function noteEvent(e, slot, first){
     const { b } = e;
     const at = /** @type {number} */ (e.layout.nanFirst);
-    b.i32const(0).i32const(0).load('i32', { offset: at + slot + 4 }).i32const(1).op(I32.add)
+    atState(e.context, atState(e.context, b)).load('i32', { offset: at + slot + 4 }).i32const(1).op(I32.add)
         .store('i32', { offset: at + slot + 4 });
-    b.i32const(0).load('i32', { offset: at + slot }).op(I32.eqz);
+    atState(e.context, b).load('i32', { offset: at + slot }).op(I32.eqz);
     b.if(EMPTY);
-    b.i32const(0).i32const(/** @type {import('../decode/decoder.js').Instruction} */ (e.current).eip)
+    atState(e.context, b).i32const(/** @type {import('../decode/decoder.js').Instruction} */ (e.current).eip)
         .store('i32', { offset: at + slot });
-    b.i32const(0).i32const(0).load('i32', { offset: at + NanRecord.ORDER }).i32const(1).op(I32.add)
+    atState(e.context, atState(e.context, b)).load('i32', { offset: at + NanRecord.ORDER }).i32const(1).op(I32.add)
         .store('i32', { offset: at + NanRecord.ORDER });
-    b.i32const(0).i32const(0).load('i32', { offset: at + NanRecord.ORDER })
+    atState(e.context, atState(e.context, b)).load('i32', { offset: at + NanRecord.ORDER })
         .store('i32', { offset: at + NanRecord.orderOf[slot] });
     first?.();
     b.end();

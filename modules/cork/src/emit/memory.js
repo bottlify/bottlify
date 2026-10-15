@@ -25,6 +25,7 @@ import { Tables, codeRangesAt, pageFlagsAt } from '../runtime/layout.js';
 import { PageFlag } from '../runtime/pages.js';
 import { I32 } from './flags.js';
 import { Exit, Local } from './region.js';
+import { atTables } from './bases.js';
 
 /** @typedef {import('./region.js').RegionEmitter} E */
 
@@ -234,11 +235,11 @@ function noteCodeStore(e, size){
     // Unsigned maxima of the complemented lowest byte and of the end, each
     // read twice: no scratch local is free across every store's emission.
     const higher = (/** @type {() => void} */ value, /** @type {number} */ offset)=>{
-        b.i32const(0);
+        atTables(e.context, b);
         value();
-        b.i32const(0).load('i32', { offset });
+        atTables(e.context, b).load('i32', { offset });
         value();
-        b.i32const(0).load('i32', { offset }).op(I32.gtU);
+        atTables(e.context, b).load('i32', { offset }).op(I32.gtU);
         b.select().store('i32', { offset });
     };
     higher(()=>b.localGet(Local.addr).i32const(-1).op(I32.xor), low);
@@ -1719,6 +1720,11 @@ export function emitStaleExit(e, next){
  * @returns {number} the function index
  */
 export function addUndoHelper(m, layout){
+    if (layout.shared === true)
+    {
+        // A differential build's, on one executor: its ring is that one's tables.
+        throw new Error('emit: the undo log is under one executor\'s layout, not the shared one');
+    }
     const type = m.type({ params: [ValType.i32, ValType.i32], results: [] });
     const head = layout.tables + Tables.UNDO_HEAD;
     const ring = layout.tables + Tables.UNDO_RING;

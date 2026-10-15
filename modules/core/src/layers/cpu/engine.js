@@ -77,6 +77,8 @@
  *     -- the process's executors -- where more than one; absent, one.
  * @property {number} [processor]  Cork's own: which of them this layout's executor is, the
  *     initial APIC id `cpuid` gives code running there.
+ * @property {boolean} [shared]  Cork's own: the process's shared layout (`sharedLayout`), whose
+ *     state fields and tables are offsets from bases each instance is given.
  * @property {string} id           A hash of every field above.
  */
 

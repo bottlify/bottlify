@@ -332,6 +332,43 @@ export function executorLayout(layout, base, index = 1){
 }
 
 /**
+ * The process's shared layout over `layout`, its first executor's (`ownLayout`): the
+ * state fields where they are in every executor's state page, the tables at 0 --
+ * both offsets from the bases each instance is given (`emit/bases.js`) -- and the
+ * page flags and code granules where they are, the process's own. A translation
+ * made for it runs on every executor of the process, so it is made, kept and
+ * compiled once; its id is the same on all of them. No processor is named in it:
+ * which executor runs a translation is not known when it is made.
+ *
+ * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
+ * @returns {import('../../../core/src/layers/cpu/engine.js').StateLayout}
+ */
+export function sharedLayout(layout){
+    if (layout.regs !== 0)
+    {
+        throw new Error('layout: the shared layout is made from the first executor\'s');
+    }
+    /** @type {Record<string, any>} */
+    const fields = { ...layout };
+    delete fields.id;
+    delete fields.processor;
+    fields.pageFlags = pageFlagsAt(layout);
+    fields.codeRanges = codeRangesAt(layout);
+    fields.tables = 0;
+    fields.shared = true;
+    return /** @type {any} */ ({ ...fields, id: layoutId(fields) });
+}
+
+/**
+ * Where an executor's state block and tables are, as the shared layout's
+ * instances are given them: `layout` is the executor's own (`executorLayout`).
+ *
+ * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
+ * @returns {{ stateBase: number, tablesBase: number }}
+ */
+export const basesOf = layout=>({ stateBase: layout.regs, tablesBase: layout.tables });
+
+/**
  * The identity of a layout, for cache keys: every field's value, hashed.
  *
  * @param {Record<string, number | string>} fields
