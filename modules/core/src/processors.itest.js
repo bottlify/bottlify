@@ -172,7 +172,8 @@ function buildAskingExe(processors){
  *     registry the system's
  */
 async function ask(executors, concurrency = 1){
-    const app = await createApp({ executable: buildAskingExe(executors), executors, concurrency });
+    const app = await createApp({ executable: buildAskingExe(executors), cpu: { cores: executors },
+        concurrency });
     try
     {
         return await app.run({ timeoutMs: 60_000 });

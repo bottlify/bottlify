@@ -12,7 +12,7 @@ import { captureTrace, describeAddress, formatTrace } from './trace.js';
 import { coalescedSaver, inflateRaw, normaliseSession, resolveStorage } from './storage.js';
 import {
     DEFAULT_ENGINE, DEFAULT_INITIAL_STACK, DEFAULT_MEMORY_SIZE,
-    DEFAULT_THUNK_BASE, DEFAULT_THUNK_CAPACITY, processorsFor,
+    DEFAULT_THUNK_BASE, DEFAULT_THUNK_CAPACITY, MAX_EXECUTORS, processorsFor,
 } from './layers/cpu/module.js';
 import { CORK_TSC_MHZ } from './layers/cpu/internal/cork-host.js';
 import { SETTINGS, processorName } from './settings.js';
@@ -270,10 +270,15 @@ const hashText = (hash, text)=>{
  * @property {number} [soloQuantum]  Guest instructions per turn of a thread no other is
  *           ready beside, in a process with one executor, while no timed wait or timer is
  *           due within 16 ms. Default ten quanta.
- * @property {number} [executors]  Executors of the program's process under cork: past
- *           the process's own thread, each a worker running one of its threads at once
- *           with the others, the locked instructions atomic (roadmap/v2, stage 3).
- *           Default 1, every thread on the process's own.
+ * @property {{ cores?: number }} [cpu]  The machine's processor. `cores`: how many
+ *           processors the program is told it has -- by every road Windows has to say
+ *           it -- and the executors that run its threads at once, each a worker past
+ *           the process's own thread; 1 to 32, default 1. Under cork, on a page that
+ *           can share memory; elsewhere the program runs on one and is told of one.
+ * @property {number} [executors]  `cpu.cores` by its older name: executors of the
+ *           program's process under cork, past the process's own thread each a worker
+ *           running one of its threads at once with the others, the locked
+ *           instructions atomic (roadmap/v2, stage 3). Default 1.
  * @property {boolean} [preemption]  End a slice early when a thread of higher
  *           priority comes due, as Windows preempts (the kernel's option; off).
  * @property {(eip: number, instructions: number) => void} [sample]
@@ -1532,11 +1537,55 @@ async function openTranslationPool(options){
     }
     return createTranslatorPool({
         open: ()=>openProcessWorker(url),
-        perProcess: cork.poolPerProcess
-            ?? Math.max(1, globalThis.navigator?.hardwareConcurrency ?? 4),
+        perProcess: cork.poolPerProcess ?? translatorsBeside(processorsFor({
+            engine: options.engine ?? DEFAULT_ENGINE, executors: options.executors,
+        }), globalThis.navigator?.hardwareConcurrency ?? 4),
         ...(cork.poolWindowMs === undefined ? {} : { windowMs: cork.poolWindowMs }),
         driver: cork.poolDriver ?? {},
     });
+}
+
+/**
+ * How many translators the pool lends a process at most: the host's cores the
+ * program's own leave free -- each of its executors keeps one busy running it,
+ * and the graphics worker and the browser's own threads take about two more --
+ * and never fewer than one. On four cores a second translator made a game load
+ * slower (`negative-results.md`, 2026-10-07): the core it ran on was taken from
+ * the engine thread. The two is an estimate, not a measurement.
+ *
+ * @param {number} cores  the program's (`cpu.cores`)
+ * @param {number} host   the host's (`navigator.hardwareConcurrency`)
+ */
+export const translatorsBeside = (cores, host)=>Math.max(1, Math.floor(host) - cores - 2);
+
+/**
+ * The machine's processor as the caller sets it up (`cpu`): `cores`, the
+ * processors the program is told it has, is the executors that run its threads
+ * at once -- `executors` by its older name, which it sets. Refused before
+ * anything is built when it is not a whole number from 1 to 32, or when
+ * `executors` says otherwise.
+ *
+ * @template {{ cpu?: { cores?: number }, executors?: number }} T
+ * @param {T} options
+ * @returns {T & { executors?: number }}
+ */
+export function withCpuSetup(options){
+    const cores = options.cpu?.cores;
+    if (cores === undefined)
+    {
+        return options;
+    }
+    if (!Number.isInteger(cores) || cores < 1 || cores > MAX_EXECUTORS)
+    {
+        throw new Error(`cpu: ${JSON.stringify(cores)} cores -- a whole number from 1 to`
+            + ` ${MAX_EXECUTORS}, as many as an affinity mask has bits`);
+    }
+    if (options.executors !== undefined && options.executors !== cores)
+    {
+        throw new Error(`cpu: ${cores} cores and ${options.executors} executors -- they are one`
+            + ' number; set cores alone');
+    }
+    return { ...options, executors: cores };
 }
 
 /**
@@ -8180,7 +8229,7 @@ export async function createApp(options){
     // fails later somewhere that says nothing about why.
     windowsVersion(options.windows);
     // Settled once, here, so every process the run makes is built in it.
-    options = withRunMode(options);
+    options = withRunMode(withCpuSetup(options));
     options = { ...options, processId: options.processId ?? runProcessId() };
     graphicsChoice(options.graphicsApi);
     emulatorOf(options);

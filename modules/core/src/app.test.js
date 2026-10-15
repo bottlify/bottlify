@@ -41,6 +41,8 @@ import {
     createApp,
     versionResourceOf,
     runProcessId,
+    withCpuSetup,
+    translatorsBeside,
 } from './app.js';
 import { createEvents } from './events.js';
 import { filesystemModule } from './layers/filesystem/module.js';
@@ -1784,4 +1786,23 @@ test('each run has a first process id of its own, below the others and on the ta
     {
         assert.ok(id >= 0x400 && id < 0x2000 && id % 8 === 0, `0x${id.toString(16)}`);
     }
+});
+
+test('the cpu setup\'s cores are the executors, a whole number from 1 to 32 that executors does'
+    + ' not contradict', ()=>{
+    assert.equal(withCpuSetup({ cpu: { cores: 4 } }).executors, 4);
+    assert.equal(withCpuSetup({ cpu: { cores: 2 }, executors: 2 }).executors, 2);
+    assert.equal(withCpuSetup({ executors: 3 }).executors, 3, 'executors alone, as before');
+    for (const cores of [0, 33, 2.5, -1, NaN])
+    {
+        assert.throws(()=>withCpuSetup({ cpu: { cores } }), /from 1 to 32/);
+    }
+    assert.throws(()=>withCpuSetup({ cpu: { cores: 2 }, executors: 4 }), /one number/);
+});
+
+test('the pool lends a process the host\'s cores its own leave, less two, and never none', ()=>{
+    assert.equal(translatorsBeside(1, 4), 1, 'four cores, one for the program: one translator');
+    assert.equal(translatorsBeside(4, 4), 1, 'the program takes them all: still one');
+    assert.equal(translatorsBeside(1, 8), 5);
+    assert.equal(translatorsBeside(4, 16), 10);
 });
