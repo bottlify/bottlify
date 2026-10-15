@@ -862,3 +862,35 @@ None yet.
   phase, do not show in their sum: they were inside the noise, as each entry said, and none of
   them is evidence for a default by itself. Half of the engine thread in this window is outside
   translated code, and that half did not move.
+
+### 2026-10-15 -- three host-side costs off Far Cry's engine thread, measured in its rate
+
+- **Idea.** The engine thread spends half of Far Cry's run outside translated code, 64 s of 240
+  in host calls, 55 s of them Direct3D 9's. Three costs there were work for nothing: cork judged
+  every host write into a page with no code against a copy of the page (`d9a43818`; 5.6 s of
+  the thread, and a copy kept of every page the host ever wrote); `ringState` was sent to the
+  graphics worker after every host entry (`a94451fc`; 222 thousand sends); and a dynamic
+  buffer's bytes compared at its unlock were compared again by the draws of the same entry
+  (`cdcee939`; 2.9 to 3.1 GB a run compared again).
+- **Workload.** The Far Cry demo bundle (`bundle.btl` sha256 `44530097b2a5a284…`),
+  `tools/cdp_test/game.mjs farcry-demo --worker --coi --no-video --fake-gpu --run-seconds 240
+  --cpu-profile 240`, each tree from a worktree of its own, alternated. First `ddbcdfc4` against
+  `a94451fc`: cold, cold, then warm in the order base, new, new, base, base, new. Then
+  `a94451fc` against `cdcee939`: base warm, new cold, new warm, base warm.
+- **Values.** Guest instructions over the whole run, M/s. `ddbcdfc4`: 230.8 cold; 224.9, 224.0,
+  232.9 warm. `a94451fc`: 215.0 cold (run while the disk was full, its profile writes failing:
+  left out); 226.2, 228.9, 232.2 warm. Warm medians 224.9 against 228.9 (1.018). Second pair:
+  `a94451fc` 236.3 and 225.1 warm; `cdcee939` 234.8 cold, 228.4 warm. The noise floor on this
+  machine about 4% between runs of one tree.
+- **The engine thread** (inclusive, from its profile, a warm run of each): host calls 63.5 s
+  (`ddbcdfc4`), 61.3 s (`a94451fc`), 58.4 s (`cdcee939`); cork's store judge 5.6 s, then none;
+  the ring's take phase 29.3 s, then 26.3, then 23.0; bytes the draws compared 2.87-3.14 GB,
+  then 0, with the bytes the unlocks sent unchanged (1.56-1.71 GB a run in both).
+- **Machine.** A 4-core x86-64 Linux VM, Intel Xeon @ 2.80 GHz, headless Chromium 141.0.7390.37
+  (V8 14.1), Node 22.22.0. Power plan not recorded.
+- **Correctness.** Cork's unit and integration tests, the graphics layer's remote, seam, Direct3D
+  8 and 9 tests and gates (1016) pass; every run ran to the end of its window.
+- **Decision.** Kept: each takes work away that bought nothing, and the profile shows it gone.
+  The rate does not show it past the noise: 5 to 9 s of a 260 s thread is 2-3.5%, inside the
+  4% two runs of one tree differ by. The thread's time freed went to translated code, whose own
+  rate over its time did not rise with it (443-468 M/s before, 434-446 after).
