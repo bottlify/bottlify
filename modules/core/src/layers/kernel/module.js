@@ -404,6 +404,8 @@ export function createKernelModule(){
                  * @returns {number}
                  */
                 processorOf: thread=>(live() ? state.scheduler.processorOf(thread) : 0),
+                /** The processor time the process's threads have taken, in milliseconds. */
+                processCpuMs: ()=>(live() ? state.scheduler.cpuMs() : 0),
 
                 /** @param {number} address @param {number} id */
                 writeThreadId: (address, id)=>memory.writeU32(address, id),

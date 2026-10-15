@@ -656,6 +656,20 @@ test('GetProcessTimes fills the same four FILETIMEs for this process', ()=>{
     assert.deepEqual(host.errors, [6], 'ERROR_INVALID_HANDLE');
 });
 
+test('the user times are the processor time the scheduler gave, the process\'s past the wall'
+    + ' clock when its threads ran at once', ()=>{
+    const host = fakeHost();
+    /** @type {any} */ (host.kernel).processCpuMs = ()=>2500;
+    const fns = createSyncFunctions(host);
+    host.register(0x20, 'thread', host.threads.second);
+    host.threads.second.cpuMs = 1250.5;
+    const read64 = (/** @type {number} */ at)=>new DataView(host.bytes.buffer).getBigInt64(at, true);
+    assert.equal(fns.GetThreadTimes.handler([0x20, 0, 0, 0x310, 0x318]), 1);
+    assert.deepEqual([read64(0x310), read64(0x318)], [0n, 12_505_000n], '100 ns units, user time');
+    assert.equal(fns.GetProcessTimes.handler([0xffffffff, 0, 0, 0x310, 0x318]), 1);
+    assert.equal(read64(0x318), 25_000_000n);
+});
+
 test('SetThreadAffinityMask records the mask and answers the one before', ()=>{
     // One processor: its mask is the only one there is to set, and the one a
     // thread had before (Wine's kernel32 test_thread_processor).

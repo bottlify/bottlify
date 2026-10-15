@@ -1252,6 +1252,40 @@ test('MoveFileExW is the same move in wide names, flags and all', ()=>{
     assert.equal(fns.MoveFileExW.argBytes, 12);
 });
 
+test('MoveFileWithProgressW moves as MoveFileExW does, and a rename calls no progress routine',
+    ()=>{
+        const { files, memory, fns, error } = setup();
+        files.put('C:\\GAME\\NEW.DLL', 'fresh');
+        files.put('C:\\GAME\\OLD.DLL', 'stale');
+        const from = putWide(memory, NAME, 'C:\\GAME\\NEW.DLL');
+        const to = putWide(memory, NAME2, 'C:\\GAME\\OLD.DLL');
+        // A routine the guest never wrote: called, it would run nothing there.
+        const routine = 0x7000;
+        assert.equal(fns.MoveFileWithProgressW.handler([from, to, routine, 0, 0]), 0);
+        assert.equal(error.code, ERROR_ALREADY_EXISTS);
+        assert.equal(fns.MoveFileWithProgressW.handler([from, to, routine, 0, 1]), 1);
+        assert.equal(files.text('C:\\GAME\\OLD.DLL'), 'fresh');
+        assert.equal(fns.MoveFileWithProgressW.argBytes, 20);
+        assert.equal(fns.MoveFileWithProgressA.argBytes, 20);
+    });
+
+test('after SetFileApisToOEM the ANSI spellings read and write names in the OEM page', ()=>{
+    const { files, memory, fns } = setup();
+    assert.equal(fns.AreFileApisANSI.handler(), 1, 'the ANSI page by default');
+    files.put('C:\\GAME\\\u00fc.TXT', 'umlaut');
+    // 0x81 is u-umlaut in page 437 and no character at all in page 1252.
+    memory.writeMemory(NAME, Uint8Array.from([...'C:\\GAME\\'].map(c=>c.charCodeAt(0))
+        .concat([0x81], [...'.TXT'].map(c=>c.charCodeAt(0)), [0])));
+    assert.equal(fns.GetFileAttributesA.handler([NAME]), 0xffffffff, 'not that name in 1252');
+    fns.SetFileApisToOEM.handler();
+    assert.equal(fns.AreFileApisANSI.handler(), 0);
+    assert.notEqual(fns.GetFileAttributesA.handler([NAME]), 0xffffffff, 'found in 437');
+    const length = fns.GetFullPathNameA.handler([NAME, 0x40, NAME2, 0]);
+    assert.equal(memory.bytes[NAME2 + length - 5], 0x81, 'and written back in it');
+    fns.SetFileApisToANSI.handler();
+    assert.equal(fns.AreFileApisANSI.handler(), 1);
+});
+
 test('a wide directory listing writes twice as wide a name, at the same offset', ()=>{
     // WIN32_FIND_DATAW shares every offset up to cFileName with the ANSI form
     // and then does not, which is exactly why the tail is easy to get wrong.

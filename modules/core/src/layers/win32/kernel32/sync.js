@@ -331,14 +331,16 @@ export function createSyncFunctions(host){
     /**
      * The four FILETIMEs GetThreadTimes and GetProcessTimes write, a slot of
      * zero left alone. The clock this build keeps is one wall clock, so the
-     * creation time is now, the exit time now for one that has ended and
-     * zero otherwise, and the processor times zero -- a plausible FILETIME
-     * rather than a pointer left unwritten.
+     * creation time is now and the exit time now for one that has ended and
+     * zero otherwise. The processor time is the slices the scheduler gave,
+     * all of it user time: a benchmark divides it by the time that passed to
+     * say how busy its threads kept the processors.
      *
      * @param {number[]} slots  creation, exit, kernel, user
      * @param {boolean} ended
+     * @param {number} [userMs]
      */
-    const writeTimes = ([creation, exit, kernelTime, userTime], ended)=>{
+    const writeTimes = ([creation, exit, kernelTime, userTime], ended, userMs = 0)=>{
         const now = BigInt(Math.floor(kernel.clock.wallClock() + FILETIME_EPOCH_MS)) * 10000n;
         /** @param {number} address @param {bigint} value */
         const write = (address, value)=>{
@@ -352,7 +354,7 @@ export function createSyncFunctions(host){
         write(creation, now);
         write(exit, ended ? now : 0n);
         write(kernelTime, 0n);
-        write(userTime, 0n);
+        write(userTime, BigInt(Math.round(userMs * 10000)));
         return 1;
     };
 
@@ -902,7 +904,7 @@ export function createSyncFunctions(host){
                     return 0;
                 }
                 return writeTimes([creation, exit, kernelTime, userTime],
-                    (thread.exitCode ?? null) !== null);
+                    (thread.exitCode ?? null) !== null, thread.cpuMs ?? 0);
             },
         },
 
@@ -924,8 +926,10 @@ export function createSyncFunctions(host){
                     host.setLastError?.(ERROR_INVALID_HANDLE);
                     return 0;
                 }
+                // A child's processor time is its own scheduler's, not known here.
                 return writeTimes([creation, exit, kernelTime, userTime], child !== null
-                    && (child.completed || child.exitCode !== kernel.processes?.STILL_ACTIVE));
+                    && (child.completed || child.exitCode !== kernel.processes?.STILL_ACTIVE),
+                child === null ? kernel.processCpuMs?.() ?? 0 : 0);
             },
         },
 

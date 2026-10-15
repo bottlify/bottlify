@@ -732,6 +732,11 @@ export function createScheduler(options){
         lastEnd = Math.max(lastEnd, began + held);
         next.lastRanAt = lastEnd;
         next.instructions += instructions;
+        // The processor time Windows reports (GetThreadTimes, GetProcessTimes):
+        // a slice's own, so the process's adds up past the wall clock when its
+        // threads run on several executors at once.
+        next.cpuMs = (next.cpuMs ?? 0) + held;
+        cpuMs += held;
         next.sincePublished += instructions;
         // Where the heaviest slice of the interval began: one page names
         // the module, and a slice weighs what it retired, so this is the
@@ -810,6 +815,8 @@ export function createScheduler(options){
      * @type {Map<any, { thread: any, began: number, from: number }>}
      */
     const placed = new Map();
+    /** The processor time every slice of the process has taken, in milliseconds. */
+    let cpuMs = 0;
     /** Slices run on the other executors, and the most threads running at once, this one's included. */
     let executorSlices = 0;
     let mostAtOnce = 0;
@@ -1361,6 +1368,9 @@ export function createScheduler(options){
 
         /** @returns {any[]} */
         all: ()=>[...threads],
+
+        /** The processor time the process's threads have taken, in milliseconds. */
+        cpuMs: ()=>cpuMs,
 
         /**
          * The executor `thread` runs on now -- the processor it would read

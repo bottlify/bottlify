@@ -90,6 +90,15 @@ test('the drive strings block ends with an empty entry', ()=>{
     assert.equal(bytes[0x48], 0);
 });
 
+test('the wide drive strings are the same block, counted in characters', ()=>{
+    const { fns, bytes } = setup(['C', 'D']);
+    bytes.fill(0xaa, 0x40, 0x60);
+    assert.equal(fns.GetLogicalDriveStringsW.handler([0x100, 0x40]), 8);
+    const text = String.fromCharCode(...new Uint16Array(bytes.slice(0x40, 0x52).buffer));
+    assert.equal(text, `C:${String.fromCharCode(92)}\0D:${String.fromCharCode(92)}\0\0`);
+    assert.equal(fns.GetLogicalDriveStringsW.handler([4, 0x40]), 9, 'too small: the size');
+});
+
 test('a buffer with no room is told the size instead of being written', ()=>{
     const { fns, bytes } = setup(['C']);
     bytes[0x40] = 0xaa;

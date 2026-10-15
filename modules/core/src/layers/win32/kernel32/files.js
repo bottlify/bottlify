@@ -30,7 +30,7 @@
 
 import { HANDLE_STDIN, HANDLE_STDOUT, HANDLE_STDERR } from './console.js';
 import { fileAttributes, msToFileTime } from './filetime.js';
-import { decodeAnsi, encodeAnsi } from './locale.js';
+import { decodeAnsi, decodeOem, encodeAnsi, encodeOem } from './locale.js';
 import { createCommFunctions } from './comm.js';
 import { createResourceUpdates } from './resource-update.js';
 
@@ -522,6 +522,43 @@ export function createFileFunctions(host){
     };
 
     /**
+     * Whether the ANSI spellings of the functions here read and write names in
+     * the OEM page rather than the ANSI one: SetFileApisToOEM, which a console
+     * program calls so the names it prints are in the page its console shows.
+     */
+    let fileApisOem = false;
+
+    /** A name in the page the ANSI spellings use now. @param {string} text */
+    const encodeName = text=>(fileApisOem ? encodeOem(text) : encodeAnsi(text));
+
+    /**
+     * A NUL-terminated name in the page the ANSI spellings use now, at most
+     * `limit` bytes.
+     *
+     * @param {number} address @param {number} limit
+     */
+    const readName = (address, limit)=>{
+        if (!fileApisOem)
+        {
+            return host.readCString(address, limit);
+        }
+        /** @type {number[]} */
+        const bytes = [];
+        while (bytes.length < limit)
+        {
+            const chunk = host.readMemory(address + bytes.length,
+                Math.min(256, limit - bytes.length));
+            const end = chunk.indexOf(0);
+            bytes.push(...(end < 0 ? chunk : chunk.subarray(0, end)));
+            if (end >= 0)
+            {
+                break;
+            }
+        }
+        return decodeOem(Uint8Array.from(bytes));
+    };
+
+    /**
      * The two-call protocol every path-returning function here shares: called
      * with a buffer too small (or none at all) it reports the size it needs
      * *including* the terminator, and having written it reports the length
@@ -537,7 +574,7 @@ export function createFileFunctions(host){
         {
             return text.length + 1;
         }
-        host.writeMemory(buffer, encodeAnsi(text + '\0'));
+        host.writeMemory(buffer, encodeName(text + '\0'));
         return text.length;
     };
 
@@ -548,7 +585,7 @@ export function createFileFunctions(host){
      * @param {number} pointer
      */
     const pathArgument = pointer=>fullPath(
-        pointer === 0 ? '' : host.readCString(pointer >>> 0, MAX_PATH_LIST));
+        pointer === 0 ? '' : readName(pointer >>> 0, MAX_PATH_LIST));
 
     /**
      * Turns what the guest wrote into the absolute path the filesystem takes.
@@ -777,7 +814,7 @@ export function createFileFunctions(host){
      */
     const writeFindData = (address, entry)=>{
         const data = findDataHead(entry);
-        data.set(encodeAnsi(entry.name.slice(0, MAX_PATH - 1)), WIN32_FIND_DATAA.cFileName);
+        data.set(encodeName(entry.name.slice(0, MAX_PATH - 1)), WIN32_FIND_DATAA.cFileName);
         host.writeMemory(address, data);
     };
 
@@ -903,8 +940,8 @@ export function createFileFunctions(host){
     /** @type {TextForm} */
     const ANSI = {
         path: pathArgument,
-        raw: pointer=>pointer === 0 ? '' : host.readCString(pointer >>> 0, MAX_PATH),
-        list: pointer=>host.readCString(pointer >>> 0, MAX_PATH_LIST),
+        raw: pointer=>pointer === 0 ? '' : readName(pointer >>> 0, MAX_PATH),
+        list: pointer=>readName(pointer >>> 0, MAX_PATH_LIST),
         write: writeStringTo,
         findData: writeFindData,
         unit: 1,
@@ -1060,6 +1097,15 @@ export function createFileFunctions(host){
         return renamePath(text.path(from), text.path(to),
             (flags >>> 0 & MOVEFILE_REPLACE_EXISTING) !== 0);
     });
+
+    /**
+     * MoveFileEx with a routine told of a copy's progress. A move here is a
+     * rename on one volume, which copies nothing, so the routine is never
+     * called -- as on Windows, where it is called only when the move copies
+     * across volumes (MOVEFILE_COPY_ALLOWED).
+     */
+    const moveFileWithProgress = bothForms(20, ([from, to, , , flags], text)=>
+        moveFileEx[text === ANSI ? 'ansi' : 'wide'].handler([from, to, flags]));
 
     /**
      * The volume has no hard links, as a FAT volume has none, and it answers
@@ -2770,6 +2816,37 @@ export function createFileFunctions(host){
          */
         MoveFileExA: moveFileEx.ansi,
         MoveFileExW: moveFileEx.wide,
+        MoveFileWithProgressA: moveFileWithProgress.ansi,
+        MoveFileWithProgressW: moveFileWithProgress.wide,
+
+        /**
+         * void SetFileApisToOEM(void)
+         *
+         * The ANSI spellings of the file functions take and give names in the
+         * OEM page from here on (`fileApisOem`).
+         */
+        SetFileApisToOEM: {
+            argBytes: 0,
+            handler: ()=>{
+                fileApisOem = true;
+                return 0;
+            },
+        },
+
+        /** void SetFileApisToANSI(void): back to the ANSI page, the default. */
+        SetFileApisToANSI: {
+            argBytes: 0,
+            handler: ()=>{
+                fileApisOem = false;
+                return 0;
+            },
+        },
+
+        /** BOOL AreFileApisANSI(void) */
+        AreFileApisANSI: {
+            argBytes: 0,
+            handler: ()=>(fileApisOem ? 0 : 1),
+        },
 
         /** HANDLE FindFirstFile(LPCSTR, LPWIN32_FIND_DATA) -- one body, both spellings. */
         FindFirstFileA: findFirstFile.ansi,

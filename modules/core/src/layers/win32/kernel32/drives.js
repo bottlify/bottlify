@@ -412,6 +412,31 @@ export function createDriveFunctions(host){
         },
     });
 
+    /**
+     * One NUL-terminated root per drive, and a second NUL after the last --
+     * the block is what a caller walks, and it stops on the empty entry. The
+     * length reported is the block without that final terminator when it
+     * fits, and with it when it does not, which is the same two-call
+     * protocol as everything else that fills a buffer here. Counted in the
+     * characters of `encode`'s spelling.
+     *
+     * @param {(text: string) => Uint8Array} encode
+     */
+    const driveStrings = encode=>({
+        argBytes: 8,
+        /** @param {number[]} args */
+        handler: ([size, buffer])=>{
+            const block = letters().map(letter=>`${letter}:\\\0`).join('');
+            const needed = block.length + 1;
+            if (buffer === 0 || needed > (size >>> 0))
+            {
+                return needed;
+            }
+            host.writeMemory(buffer >>> 0, encode(block + '\0'));
+            return block.length;
+        },
+    });
+
     return {
         /** DWORD QueryDosDeviceA(LPCSTR lpDeviceName, LPSTR lpTargetPath, DWORD ucchMax) */
         QueryDosDeviceA: queryDosDevice(address=>host.readCString(address, MAX_PATH), encodeAnsi),
@@ -439,29 +464,15 @@ export function createDriveFunctions(host){
             },
         },
 
+        /** DWORD GetLogicalDriveStringsA(DWORD nBufferLength, LPSTR lpBuffer) */
+        GetLogicalDriveStringsA: driveStrings(encodeAnsi),
+
         /**
-         * DWORD GetLogicalDriveStringsA(DWORD nBufferLength, LPSTR lpBuffer)
+         * DWORD GetLogicalDriveStringsW(DWORD nBufferLength, LPWSTR lpBuffer)
          *
-         * One NUL-terminated root per drive, and a second NUL after the last --
-         * the block is what a caller walks, and it stops on the empty entry. The
-         * length reported is the block without that final terminator when it
-         * fits, and with it when it does not, which is the same two-call
-         * protocol as everything else that fills a buffer here.
+         * The same block in wide characters; the sizes are in characters too.
          */
-        GetLogicalDriveStringsA: {
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([size, buffer])=>{
-                const block = letters().map(letter=>`${letter}:\\\0`).join('');
-                const needed = block.length + 1;
-                if (buffer === 0 || needed > (size >>> 0))
-                {
-                    return needed;
-                }
-                host.writeMemory(buffer >>> 0, encodeAnsi(block + '\0'));
-                return block.length;
-            },
-        },
+        GetLogicalDriveStringsW: driveStrings(encodeWide),
 
         /** UINT GetDriveTypeA(LPCSTR lpRootPathName) */
         GetDriveTypeA: {
