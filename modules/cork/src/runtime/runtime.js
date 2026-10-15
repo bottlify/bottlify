@@ -40,7 +40,7 @@ import { buildHelpersModule } from '../emit/helpers.js';
 import { openTranslationWorker } from './translator.js';
 import { ANY_TOP, createEntries } from './entries.js';
 import { PageFlag, createPageTable } from './pages.js';
-import { createSharedCode } from './shared-code.js';
+import { SharedSwitch, createSharedCode } from './shared-code.js';
 import { Tables, basesOf, tablesSize } from './layout.js';
 import { blockCounts, mechanismCounts, resetBlockCounts, topBlocks, transferTargets }
     from './block-profile.js';
@@ -1451,6 +1451,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         }
         loose = false;
         counts.stackCode++;
+        codeShared?.raise(SharedSwitch.STACKS_TESTED);
         const on = new Set([...regions].filter(record=>record.loose)
             .flatMap(record=>[...record.pages]));
         for (const page of on)
@@ -1474,6 +1475,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         }
         readsChecked = true;
         counts.readSwitches++;
+        codeShared?.raise(SharedSwitch.READS_CHECKED);
         const on = new Set([...regions].filter(record=>record.wrapped)
             .flatMap(record=>[...record.pages]));
         for (const page of on)
@@ -2385,7 +2387,9 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         {
             pages.markCode(block.start, block.end - block.start);
         }
-        if (loose && stackPages.size > 0 && [...region.pages].some(page=>stackPages.has(page)))
+        if (loose && (stackPages.size > 0 || codeShared !== null)
+            && [...region.pages].some(page=>stackPages.has(page)
+                || codeShared?.onStack(page) === true))
         {
             stackCodeSeen();
         }
@@ -4578,6 +4582,16 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
          * each slice.
          */
         takeCodeWrites(){
+            // A switch another executor flipped is this one's too.
+            const raised = codeShared?.switches() ?? 0;
+            if ((raised & SharedSwitch.STACKS_TESTED) !== 0)
+            {
+                stackCodeSeen();
+            }
+            if ((raised & SharedSwitch.READS_CHECKED) !== 0)
+            {
+                readsFaulted();
+            }
             return codeShared?.take((address, size)=>{
                 if (size === 0xffffffff)
                 {
@@ -4605,6 +4619,9 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         noteStack(base, size){
             const first = base >>> 12;
             const last = (base + Math.max(size, 1) - 1) >>> 12;
+            // The other executors are not told: they read it where every
+            // executor's stacks are kept.
+            codeShared?.noteStack(first, last);
             for (let page = first; page <= last; page++)
             {
                 stackPages.add(page);

@@ -254,6 +254,59 @@ test('a store on one executor into code another translated reaches the other\'s 
         }
     });
 
+test('what one executor learns of the process reaches the others: the stacks the process\'s own'
+    + ' was told of, code translated on one of them, a read that faulted', async()=>{
+    const process = createCorkHost({ ...CONFIG, engine, executors: 2 });
+    handle(process);
+    const remote = await createRemoteExecutor({ host: process, index: 1, engineUrl: ENGINE_URL,
+        config: { ...CONFIG, executors: 2 } });
+    // A thread's stack, told to the process's executor alone, as the kernel tells it.
+    const STACK = 0x50000;
+    process.noteStack(STACK, 0x10000);
+    const LOOP = STACK + 0x8000;
+    // L: add ebx, ecx; dec ecx; jnz L; hlt -- code on a stack page, as a program that
+    // builds a thunk on its stack has.
+    const loop = [0x01, 0xcb, 0x49, 0x75, 0xfb, 0xf4];
+    const view = new DataView(remote.block().buffer, remote.block().byteOffset);
+    const layout = process.blockLayout();
+    /** @param {string} name @param {number} value */
+    const setRemote = (name, value)=>(name === 'eip'
+        ? view.setUint32(layout.eip, value, true)
+        : view.setUint32(layout.regs + REGISTERS.indexOf(name) * 4, value >>> 0, true));
+    try
+    {
+        process.writePhysical(LOOP, new Uint8Array(loop));
+        setRemote('ecx', 100_000);
+        setRemote('esp', 0x300000);
+        setRemote('eip', LOOP);
+        let slice = remote.runSlice(5000);
+        for (let turn = 1; turn < 2000 && !slice.halted; turn++)
+        {
+            await settle();
+            slice = remote.runSlice(5000);
+        }
+        await settle();
+        const there = await remote.diagnostics();
+        assert.ok(there?.modules > 0, 'the loop was translated on the other executor');
+        assert.equal(there?.stackCode, 1, 'which knew the page for a stack page');
+        // The process's executor stores through esp tested from its next slice on.
+        process.writeReg32('eip', LOOP + loop.length - 1);
+        process.runSlice(10);
+        assert.equal(process.cork().diagnostics().stackCode, 1, 'and so does the process\'s');
+
+        // A read that faulted on the process's executor: the other tests its reads too.
+        process.cork().readsFaulted();
+        setRemote('eip', LOOP + loop.length - 1);
+        remote.runSlice(10);
+        await settle();
+        assert.equal((await remote.diagnostics())?.readSwitches, 1);
+    }
+    finally
+    {
+        remote.close();
+    }
+});
+
 test('two executors at once: interlocked counters, a spin lock and a compare-and-swap loop '
     + 'lose no update', async()=>{
     const config = { ...CONFIG, executors: 3, cork: { ...CONFIG.cork, atomic: true } };
