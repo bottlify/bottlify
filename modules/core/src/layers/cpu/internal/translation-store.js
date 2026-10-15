@@ -399,6 +399,17 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
     let writerTried = false;
     /** Where the next record goes: the records file's size. */
     let end = 0;
+    /**
+     * By record name, the latest `put` of it: its turn among every put of this
+     * opening, taken as the put is called. A put whose append finishes after a
+     * later put of the same name finished its own names nothing, so the bytes
+     * a name answers are the last put's -- not whichever append the thread
+     * happened to finish last.
+     *
+     * @type {Map<string, number>}
+     */
+    const latestPut = new Map();
+    let putTurns = 0;
     /** @type {Promise<void> | null} */
     let opening = null;
     /** The index is read and the files are this opening's, so `places` answers at once. */
@@ -848,6 +859,9 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
         /** Opens the store ahead of its first lookup: its index read, its files open. */
         prepare: ()=>open(),
         async put(key, bytes){
+            const recordName = fileNameOf(key);
+            const turn = ++putTurns;
+            latestPut.set(recordName, turn);
             await ready();
             if (broken)
             {
@@ -860,7 +874,11 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
                 const { length } = bytes;
                 end += length;
                 await appendRecords([[offset, bytes]]);
-                const recordName = fileNameOf(key);
+                if (latestPut.get(recordName) !== turn)
+                {
+                    return;
+                }
+                latestPut.delete(recordName);
                 /** @type {Map<string, Place>} */ (places)
                     .set(recordName, { offset, length, session });
                 pendingLines.push(`${recordName} ${offset} ${length}\n`);

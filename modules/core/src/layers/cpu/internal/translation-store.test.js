@@ -839,6 +839,72 @@ test('a writer that cannot stand beside the store\'s handle leaves the writes to
         assert.deepEqual([...store.getNow('cork/41/a/x') ?? []], [1, 2, 3]);
     });
 
+/**
+ * A record as its length and an FNV-1a hash of its bytes, or what stood for it.
+ *
+ * @param {Uint8Array | null | undefined} bytes
+ */
+const digest = bytes=>{
+    if (!(bytes instanceof Uint8Array))
+    {
+        return String(bytes);
+    }
+    let hash = 0x811c9dc5;
+    for (const byte of bytes)
+    {
+        hash = Math.imul(hash ^ byte, 0x01000193) >>> 0;
+    }
+    return `${bytes.length}:${hash.toString(16)}`;
+};
+
+test('a key put twice answers its last put\'s bytes though the first one\'s write ends last',
+    async()=>{
+        // A writer that finishes the writes it is given in the order opposite to it.
+        /** @type {(() => void)[]} */
+        const waiting = [];
+        let handle = /** @type {any} */ (null);
+        const root = fakeDirectory({ probes: 0, syncReads: 0 }, true);
+        const store = await createDirectoryTranslationStore(root, 'game', undefined, {
+            writer: ()=>({
+                open: async(/** @type {any} */ file)=>{
+                    handle = await file.createSyncAccessHandle();
+                    return true;
+                },
+                write: writes=>new Promise(resolve=>{
+                    waiting.push(()=>{
+                        for (const [at, bytes] of writes)
+                        {
+                            handle.write(bytes, { at });
+                        }
+                        resolve();
+                    });
+                }),
+                flush: async()=>handle.flush(),
+                close: ()=>handle?.close(),
+            }),
+        });
+        await store.get('cork/41/a/none');
+        const first = Uint8Array.from({ length: 300 }, (_, i)=>i & 0xff);
+        const second = Uint8Array.from({ length: 200 }, (_, i)=>0xff - (i & 0xff));
+        const puts = [store.put('cork/41/a/1/x', first.slice()),
+            store.put('cork/41/a/1/x', second.slice())];
+        while (waiting.length < 2)
+        {
+            await new Promise(resolve=>setTimeout(resolve, 0));
+        }
+        /** @type {() => void} */ (waiting.pop())();
+        await new Promise(resolve=>setTimeout(resolve, 0));
+        /** @type {() => void} */ (waiting.pop())();
+        await Promise.all(puts);
+        await store.flush();
+        assert.equal(digest(store.getNow('cork/41/a/1/x')), digest(second));
+        store.close();
+        const reopened = await createDirectoryTranslationStore(root, 'game', undefined,
+            { writer: ()=>null });
+        assert.equal(digest(await reopened.get('cork/41/a/1/x')), digest(second),
+            'and so does the index the next opening reads');
+    });
+
 // The gate of the writer: a seeded run of puts, through the writer and through the store's
 // own handle, leaves the same records, the same seed and what the next opening finds.
 for (const seed of [5, 6, 7])
@@ -858,6 +924,10 @@ for (const seed of [5, 6, 7])
                 const length = 1 + Math.floor(next() * (next() < 0.1 ? 600_000 : 3000));
                 puts.push([key, Uint8Array.from({ length }, ()=>Math.floor(next() * 256))]);
             }
+            // Keys come again (sixty puts of forty names): each answers its last.
+            /** @type {Map<string, Uint8Array>} */
+            const last = new Map(puts);
+            const lastPuts = puts.map(([key])=>last.get(key));
             /** @param {(() => any) | undefined} writer */
             const fill = async writer=>{
                 const root = fakeDirectory({ probes: 0, syncReads: 0 }, true);
@@ -879,8 +949,12 @@ for (const seed of [5, 6, 7])
             const itself = await fill(undefined);
             const through = await fill(()=>null);
             assert.ok(through.wrote > 0, 'the writer wrote the records');
-            assert.deepEqual(through.found, itself.found);
-            assert.deepEqual(through.exported, itself.exported);
-            assert.deepEqual(through.again, itself.again);
+            // Compared by a digest of each record: a deepEqual of records up to
+            // 600 KB that differ builds a message of gigabytes.
+            assert.deepEqual(through.found.map(digest), itself.found.map(digest));
+            assert.deepEqual(digest(through.exported), digest(itself.exported));
+            assert.deepEqual(through.again.map(digest), itself.again.map(digest));
+            assert.deepEqual(itself.found.map(digest), lastPuts.map(digest),
+                'a key answers the bytes of its last put');
         });
 }
