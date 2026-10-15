@@ -25,7 +25,8 @@
  * Each rep makes a fresh host, times its first iteration (`coldMs`: the
  * interpreter, the translator and the tier-up, what a new stretch of code
  * costs), runs `--warm` iterations and times `--iters` more (`usPerIter`, the
- * best rep: translated code in its steady state). `firstMs` is the first
+ * best rep: translated code in its steady state; `best3Us` the three best reps'
+ * mean). `firstMs` is the first
  * rep's first iteration alone: in a process that has run nothing before --
  * the first workload named, or any under `compare.mjs`, which runs each in a
  * process of its own -- the engine's own JavaScript and wasm are cold too, as
@@ -207,6 +208,9 @@ for (const name of names)
         coldMs: Number(median(colds.length > 3 ? colds.slice(2) : colds).toFixed(2)),
         firstMs: Number(colds[0].toFixed(2)),
         usPerIter: Number(best.toFixed(1)),
+        // The three best reps' mean: steadier than the best alone against one lucky rep.
+        ...(steady.length >= 3 ? { best3Us: Number((steady.toSorted((a, b)=>a - b).slice(0, 3)
+            .reduce((sum, one)=>sum + one, 0) / 3).toFixed(1)) } : {}),
         nsPerInstr: Number((best * 1000 / summary.instructions).toFixed(3)),
         instructions: Math.round(summary.instructions),
         share: Number(summary.share.toFixed(3)),

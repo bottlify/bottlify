@@ -21,7 +21,9 @@
  *       [--quantum n] [--json]
  *
  * K or H of 0 leaves that out. A run's time is `app.run` (the program from its
- * first instruction to its exit, translation included), not the boot.
+ * first instruction to its exit, translation included), not the boot; a point's
+ * is the mean of its three fastest runs (`best3`), and its speedup against the
+ * first executor count's.
  */
 
 import './chromium-v8.mjs';
@@ -156,6 +158,15 @@ async function run(executable, executors){
 
 /** @param {number[]} values */
 const median = values=>[...values].sort((a, b)=>a - b)[values.length >> 1];
+/**
+ * What a point is judged by: the mean of its three fastest runs, steadier than
+ * the median against a machine whose other load comes and goes; the median
+ * with fewer than three.
+ *
+ * @param {number[]} values
+ */
+const best3 = values=>(values.length < 3 ? median(values)
+    : [...values].sort((a, b)=>a - b).slice(0, 3).reduce((sum, one)=>sum + one, 0) / 3);
 
 const rows = [];
 for (const threads of THREADS)
@@ -185,16 +196,16 @@ for (const threads of THREADS)
                     codes.add(code);
                 }
             }
-            const one = median(/** @type {number[]} */ (times.get(EXECUTORS[0])));
+            const one = best3(/** @type {number[]} */ (times.get(EXECUTORS[0])));
             for (const executors of EXECUTORS)
             {
                 const raw = /** @type {number[]} */ (times.get(executors));
                 const retired = retiredBy.get(executors) ?? 0;
                 const row = { threads, sync, host, executors, median: median(raw),
-                    min: Math.min(...raw), max: Math.max(...raw), raw,
-                    speedup: one / median(raw), sameResult: codes.size === 1,
+                    best3: best3(raw), min: Math.min(...raw), max: Math.max(...raw), raw,
+                    speedup: one / best3(raw), sameResult: codes.size === 1,
                     // Millions of guest instructions a second, every thread together.
-                    mips: retired / median(raw) / 1e6 };
+                    mips: retired / best3(raw) / 1e6 };
                 rows.push(row);
                 if (JSON_OUT)
                 {
@@ -203,7 +214,7 @@ for (const threads of THREADS)
                 else
                 {
                     console.log(`T=${threads} K=${sync || '-'} H=${host || '-'} E=${executors}`
-                        + `  median ${row.median.toFixed(2)}s [${raw.map(t=>t.toFixed(2))
+                        + `  best3 ${row.best3.toFixed(2)}s [${raw.map(t=>t.toFixed(2))
                             .join(' ')}]  x${row.speedup.toFixed(2)} vs E=${EXECUTORS[0]}`
                         + `  ${Math.round(row.mips)} MIPS (${(retired / 1e9).toFixed(2)} G)`
                         + `${row.sameResult ? '' : '  RESULTS DIFFER'}`);
