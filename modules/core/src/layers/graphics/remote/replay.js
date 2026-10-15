@@ -49,6 +49,10 @@ const PURE_GETTERS = new Set([
     'GetDesc', 'GetLevelDesc', 'GetLevelCount', 'GetLOD', 'GetPriority', 'GetType',
     'GetAvailableTextureMem', 'GetCreationParameters', 'GetNumberOfSwapChains',
     'GetPresentParameters', 'GetGammaRamp',
+    // Not Direct3D's: what the shadow block's routines check a call against,
+    // read back after every entry of the host's -- 222 thousand sends in four
+    // minutes of one title, each played for nothing.
+    'ringState',
 ]);
 
 /**

@@ -876,6 +876,8 @@ test('a getter of plain state answers on the program\'s side and sends nothing',
     /** @type {{ matrix?: ArrayLike<number> }} */
     const matrix = {};
     assert.equal(device.GetTransform(D3DTS.WORLD, matrix), D3D_OK);
+    // What the shadow block mirrors after every entry of the host's.
+    assert.equal(typeof device.ringState().drawable, 'number');
     assert.equal(sent, before, 'nothing sent for the reads');
     assert.equal(device.SetRenderState(D3DRS.LIGHTING, 1), D3D_OK);
     assert.ok(sent > before, 'a set still is');
