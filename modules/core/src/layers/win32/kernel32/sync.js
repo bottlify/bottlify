@@ -1016,7 +1016,9 @@ export function createSyncFunctions(host){
          *
          * The groups ContextFlags asks for, from the running registers for
          * the calling thread and from the state saved when another was last
-         * switched away. A thread that has ended has no context to read.
+         * switched away -- one running on another executor brought back first,
+         * so a thread SuspendThread stopped is read where it stopped. A thread
+         * that has ended has no context to read.
          */
         GetThreadContext: {
             argBytes: 8,
@@ -1033,8 +1035,12 @@ export function createSyncFunctions(host){
                     host.setLastError?.(ERROR_GEN_FAILURE);
                     return 0;
                 }
-                const registers = thread === host.currentThread()
-                    ? host.registers?.() ?? {} : savedRegisters(thread.context);
+                const own = thread === host.currentThread();
+                if (!own)
+                {
+                    kernel.settleThread?.(thread);
+                }
+                const registers = own ? host.registers?.() ?? {} : savedRegisters(thread.context);
                 writeThreadContext(out >>> 0, registers);
                 return 1;
             },

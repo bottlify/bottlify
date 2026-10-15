@@ -488,6 +488,15 @@ export function createKernelModule(){
                 suspendThread: thread=>live() ? state.scheduler.suspend(thread) : null,
 
                 /**
+                 * Brings a thread running on another of the process's executors
+                 * back to it, its registers saved (`scheduler.settle`).
+                 *
+                 * @param {any} thread
+                 * @returns {boolean} whether it runs nowhere now
+                 */
+                settleThread: thread=>!live() || state.scheduler.settle(thread),
+
+                /**
                  * @param {any} thread
                  * @returns {number} the count before
                  */

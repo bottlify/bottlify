@@ -143,18 +143,26 @@ test('a thread sleeping on the process\'s executor wakes at its time while the o
         `${SLEEPS} sleeps of ${SLEEP_MS} ms took ${code} ms`);
 });
 
+/** CONTEXT_i386 | CONTEXT_CONTROL: eip, esp and the flags. */
+const CONTEXT_CONTROL = 0x10001;
+
 for (const cores of [1, 2])
 {
     test(`a thread suspended while it runs stops, on ${cores} executor${cores > 1 ? 's' : ''}`,
         async()=>{
+            // SuspendThread stops a thread on another processor a little
+            // later, as on Windows; reading its context waits for the stop.
             const executable = buildProgram(['CreateThread', 'SuspendThread', 'ExitProcess',
-                'Sleep'], { runner: [0, 0, 0, 0], count: [0, 0, 0, 0], seen: [0, 0, 0, 0] },
+                'Sleep', 'GetThreadContext'], { runner: [0, 0, 0, 0], count: [0, 0, 0, 0],
+                seen: [0, 0, 0, 0],
+                context: [...u32(CONTEXT_CONTROL), ...new Array(0x2c8).fill(0)] },
             ({ call, at, start })=>({
                 main: [
                     ...start('runner'),
                     0x6a, 0x64, ...call('Sleep'), //                         Sleep(100)
                     0xff, 0x35, ...u32(at('runner')), ...call('SuspendThread'),
-                    0x6a, 0x32, ...call('Sleep'), //                         Sleep(50)
+                    0x68, ...u32(at('context')), 0xff, 0x35, ...u32(at('runner')),
+                    ...call('GetThreadContext'), //       GetThreadContext(runner, &context)
                     0xa1, ...u32(at('count')), 0xa3, ...u32(at('seen')), // seen = count
                     0x6a, 0x3c, ...call('Sleep'), //                         Sleep(60)
                     0xa1, ...u32(at('count')), 0x2b, 0x05, ...u32(at('seen')),

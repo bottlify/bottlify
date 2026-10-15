@@ -1743,7 +1743,50 @@ export function createScheduler(options){
                 return null;
             }
             thread.suspendCount = previous + 1;
+            // Running on another executor, the thread stops at that one's next
+            // slice end rather than at whatever turn of this one comes next.
+            if ([...placed.values()].some(on=>on.thread === thread))
+            {
+                cpu.executorBell?.()?.goOn?.(false);
+            }
             return previous;
+        },
+
+        /**
+         * Brings a thread running on another executor back, its slice ended
+         * there and its registers saved, as a processor stops a thread before
+         * its context is read: GetThreadContext of a thread SuspendThread asked
+         * to stop answers where it stopped, not where it was last placed.
+         * Answered from the process's own executor; inside the answer to
+         * another executor's call the others cannot be waited for, and the
+         * thread is left where it runs.
+         *
+         * @param {any} thread
+         * @returns {boolean} whether the thread runs nowhere now
+         */
+        settle(thread){
+            const runs = ()=>[...placed.values()].some(on=>on.thread === thread);
+            if (!runs())
+            {
+                return true;
+            }
+            if (answering)
+            {
+                return false;
+            }
+            const bell = cpu.executorBell();
+            bell.goOn?.(false);
+            const from = wall();
+            while (runs() && wall() - from < ENDING_WAIT_MS)
+            {
+                const seen = bell.rung();
+                answerExecutors();
+                if (runs())
+                {
+                    bell.wait(seen, EXECUTORS_WAIT_MS);
+                }
+            }
+            return !runs();
         },
 
         /**
