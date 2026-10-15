@@ -46,6 +46,12 @@ const YIELD_MS = 4;
  * counts in a word -- is never older than this.
  */
 const CHAIN_MS = 250;
+/**
+ * The longest a chain goes without asking its translator for what its
+ * interpreters found hot: asked after every slice, a quantum of 40 µs, it took
+ * a twelfth of a lone thread's time on its own executor.
+ */
+const FEED_MS = 1;
 
 /** The executor's host, once started. @type {any} */
 let running = null;
@@ -125,15 +131,27 @@ async function serve({ engineUrl, config, memory, channel: buffer, bell, unbroke
     });
     send({ type: 'ready' });
     const { words } = channel;
-    // A turn of the event loop that waits for no timer: a message to itself.
-    const ping = new MessageChannel();
-    /** @type {(() => void) | null} */
-    let pinged = null;
-    ping.port1.onmessage = ()=>pinged?.();
-    const yieldTurn = ()=>new Promise(resolve=>{
-        pinged = /** @type {() => void} */ (resolve);
-        ping.port2.postMessage(0);
-    });
+    // A turn of the event loop that waits for no timer: node's setImmediate,
+    // or a message to itself. Not the message in node: its first message event
+    // loads its fetch, http2 and TLS modules, 50 ms the first thread placed here
+    // lost in its first chain.
+    /** @type {() => Promise<void>} */
+    let yieldTurn;
+    if (typeof setImmediate === 'function')
+    {
+        yieldTurn = ()=>new Promise(resolve=>setImmediate(resolve));
+    }
+    else
+    {
+        const ping = new MessageChannel();
+        /** @type {(() => void) | null} */
+        let pinged = null;
+        ping.port1.onmessage = ()=>pinged?.();
+        yieldTurn = ()=>new Promise(resolve=>{
+            pinged = /** @type {() => void} */ (resolve);
+            ping.port2.postMessage(0);
+        });
+    }
     let yieldedAt = performance.now();
     spent.startedAt = yieldedAt;
     for (;;)
@@ -186,27 +204,32 @@ async function serve({ engineUrl, config, memory, channel: buffer, bell, unbroke
             // kept: the slice's end would cost a round trip through the process,
             // which takes it only between its own turns -- a quarter of the
             // executor's time where nothing else waited (7-Zip's benchmark).
+            let fedAt = chained;
             for (;;)
             {
                 retired += host.runSlice(budget);
+                const now = performance.now();
                 const end = host.halted() ? 'halted' : host.stopRequested() ? 'stopped'
                     : host.fault() !== null ? 'faulted'
                         : Atomics.load(bellWords, 1) !== 1 ? 'released'
-                            : performance.now() - chained >= CHAIN_MS ? 'chained' : null;
+                            : now - chained >= CHAIN_MS ? 'chained' : null;
                 if (end !== null)
                 {
                     spent.ends[end]++;
                     retired += end === 'released' || end === 'chained' ? runOut() : 0;
                     break;
                 }
-                if (performance.now() - yieldedAt >= yieldMs)
+                if (now - yieldedAt >= yieldMs)
                 {
-                    const yieldFrom = performance.now();
                     await yieldTurn();
                     yieldedAt = performance.now();
-                    spent.inChainYieldMs += yieldedAt - yieldFrom;
+                    spent.inChainYieldMs += yieldedAt - now;
                 }
-                host.cork().translatePending().catch(()=>{});
+                if (now - fedAt >= FEED_MS)
+                {
+                    fedAt = now;
+                    host.cork().translatePending().catch(()=>{});
+                }
             }
         }
         catch (e){
