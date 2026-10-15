@@ -34,7 +34,9 @@ async function openWorker(url){
             post: (/** @type {any} */ message)=>worker.postMessage(message),
             onMessage: (/** @type {(data: any) => void} */ handler)=>worker.addEventListener(
                 'message', (/** @type {any} */ event)=>handler(event.data)),
-            terminate: ()=>worker.terminate(),
+            // The page's worker runs nothing more once terminated: there is no
+            // exit to wait for.
+            terminate: async()=>worker.terminate(),
         };
     }
     const { Worker } = await import('node:worker_threads');
@@ -42,7 +44,9 @@ async function openWorker(url){
     return {
         post: (/** @type {any} */ message)=>worker.postMessage(message),
         onMessage: (/** @type {(data: any) => void} */ handler)=>worker.on('message', handler),
-        terminate: ()=>void worker.terminate(),
+        terminate: async()=>{
+            await worker.terminate();
+        },
     };
 }
 
@@ -310,9 +314,14 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
                 worker.post({ type: 'diagnostics', id });
             });
         },
+        /**
+         * Ends the executor; resolved once its worker can no longer touch the
+         * process's memory, which a later process may then be given.
+         * @returns {Promise<void>}
+         */
         close(){
             channel.say(Turn.CLOSE);
-            worker.terminate();
+            return worker.terminate();
         },
     };
     return executor;

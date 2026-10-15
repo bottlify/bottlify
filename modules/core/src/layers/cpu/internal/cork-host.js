@@ -223,7 +223,7 @@ export function createCorkHost(config){
         throw new Error(`cpu: a memory of ${given.buffer.byteLength} bytes has no room for`
             + ` ${executors} executors`);
     }
-    const taken = given === undefined && reused !== undefined && executors === 1
+    const taken = given === undefined && reused !== undefined
         && reused.memory.buffer.byteLength === pages * 65536
         && (typeof SharedArrayBuffer === 'function'
             && reused.memory.buffer instanceof SharedArrayBuffer) === shared
@@ -234,7 +234,8 @@ export function createCorkHost(config){
     {
         // A new memory is zero; this one is made so where it was used: its
         // state block and the guest's RAM up to where the guest was given
-        // memory, and the engine's tables past the RAM.
+        // memory, and everything past the RAM -- the engine's tables, the
+        // other executors' pages and the record they kept together.
         const bytes = new Uint8Array(memory.buffer);
         const guestEnd = Math.min(Math.max(reused?.guestEnd ?? memorySize, 0), memorySize);
         bytes.fill(0, 0, own.ramBase + guestEnd);

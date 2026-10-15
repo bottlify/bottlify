@@ -7,7 +7,9 @@
 /**
  * A thread that wakes one of higher priority gives it the processor at once,
  * as Windows does: the woken thread runs before the next instruction of the
- * thread that woke it. One of the same priority waits its turn.
+ * thread that woke it. One of the same priority waits its turn. Both are what
+ * one processor does -- with several the woken thread runs on another, beside
+ * the thread that woke it -- so these programs run on one (`ONE_PROCESSOR`).
  *
  * The program starts a worker that waits on an event and, when it wakes,
  * writes a flag. The main thread lets it reach the wait, sets the event, and
@@ -26,6 +28,9 @@ const u32 = value=>[
 ];
 
 const WORKER_OFFSET = 0x80;
+
+/** A machine of one processor, whatever the run's default. */
+const ONE_PROCESSOR = { cpu: { cores: 1 } };
 
 /** @param {number} priority  The worker's, relative, as SetThreadPriority takes it. */
 function buildWakeExe(priority){
@@ -78,7 +83,7 @@ function buildWakeExe(priority){
 
 /** @param {number} priority */
 async function flagAfterSetEvent(priority){
-    const app = await createApp({ executable: buildWakeExe(priority) });
+    const app = await createApp({ executable: buildWakeExe(priority), ...ONE_PROCESSOR });
     try
     {
         return await app.run({ timeoutMs: 8000 });
@@ -243,7 +248,7 @@ function buildSectionExe(){
 }
 
 test('a worker woken inside a critical section takes it the moment it is left', async()=>{
-    const app = await createApp({ executable: buildSectionExe() });
+    const app = await createApp({ executable: buildSectionExe(), ...ONE_PROCESSOR });
     try
     {
         assert.equal(await app.run({ timeoutMs: 8000 }), 8,
@@ -302,7 +307,7 @@ function buildSectionAnyExe(){
 }
 
 test('a worker waiting on any of its events is handed over to the same way', async()=>{
-    const app = await createApp({ executable: buildSectionAnyExe() });
+    const app = await createApp({ executable: buildSectionAnyExe(), ...ONE_PROCESSOR });
     try
     {
         assert.equal(await app.run({ timeoutMs: 8000 }), 8);
@@ -361,7 +366,7 @@ function buildCallbackExe(){
 }
 
 test('a set made inside a procedure a host function called back hands over at once too', async()=>{
-    const app = await createApp({ executable: buildCallbackExe() });
+    const app = await createApp({ executable: buildCallbackExe(), ...ONE_PROCESSOR });
     try
     {
         assert.equal(await app.run({ timeoutMs: 8000 }), 1);

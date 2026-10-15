@@ -42,17 +42,29 @@ export const DEFAULT_ENGINE = 'cork';
 export const MAX_EXECUTORS = 32;
 
 /**
+ * Whether the program's memory can be shared with other threads: a
+ * SharedArrayBuffer exists, the page is cross-origin isolated, and the run did
+ * not ask for an unshared memory (cork's `sharedMemory: false`, as the
+ * compatible mode does). Executors past one need it.
+ *
+ * @param {boolean | undefined} sharedMemory  cork's setting
+ */
+export const memoryShareable = sharedMemory=>sharedMemory !== false
+    && typeof SharedArrayBuffer === 'function'
+    && /** @type {any} */ (globalThis).crossOriginIsolated !== false;
+
+/**
  * The processors a process is told the machine has, under `config`: one for
  * each executor under cork, which alone runs more than one, and one where the
  * host cannot share the program's memory with another (`executorsRefused`).
  * The cpu layer answers this (`processors`), and whoever describes the machine
  * before a process exists -- the run's registry -- asks it here.
  *
- * @param {{ engine?: string, executors?: number } | undefined} config
+ * @param {{ engine?: string, executors?: number, sharedMemory?: boolean } | undefined} config
  * @returns {number}
  */
 export function processorsFor(config){
-    return (config?.engine ?? DEFAULT_ENGINE) === 'cork' && typeof SharedArrayBuffer === 'function'
+    return (config?.engine ?? DEFAULT_ENGINE) === 'cork' && memoryShareable(config?.sharedMemory)
         ? Math.min(MAX_EXECUTORS, Math.max(1, config?.executors ?? 1)) : 1;
 }
 
@@ -373,10 +385,14 @@ export function createCpuModule(){
             // only a SharedArrayBuffer allows, and a page that is not
             // cross-origin isolated has none: the program then runs on one, as
             // by default, and the report says why rather than the launch failing.
-            if (settings.executors > 1 && typeof SharedArrayBuffer !== 'function')
+            if (settings.executors > 1 && !memoryShareable(settings.cork?.sharedMemory))
             {
-                state.executorsRefused = `${settings.executors} asked, 1 run: no`
-                    + ' SharedArrayBuffer, the page is not cross-origin isolated';
+                // The host's lack first: it is why a run falls back to the
+                // compatible mode, which then also asks for unshared memory.
+                state.executorsRefused = `${settings.executors} asked, 1 run: `
+                    + (memoryShareable(undefined)
+                        ? 'the run keeps the memory unshared (sharedMemory: false)'
+                        : 'no SharedArrayBuffer, the page is not cross-origin isolated');
                 settings.executors = 1;
                 log?.warn?.('cpu', `executors: ${state.executorsRefused}`);
             }
@@ -1316,10 +1332,9 @@ export function createCpuModule(){
                 {
                     current.host.stop();
                 }
-                for (const remote of current.remotes)
-                {
-                    remote.close();
-                }
+                // Every executor's worker gone before the machine is: the memory
+                // may be handed to the next process (`CorkHostConfig.reused`).
+                await Promise.all(current.remotes.map((/** @type {any} */ remote)=>remote.close()));
                 current.remotes = [];
                 current.bell = null;
                 current.host = null;

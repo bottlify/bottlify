@@ -374,7 +374,10 @@ function buildSectionHandoffExe(){
                 push('section'), call('InitializeCriticalSection'),
                 push('section'), call('EnterCriticalSection'),
                 spawn(worker, 'handles', 0),
-                [0x6a, 0x14], call('Sleep'),                        // the worker runs, and waits
+                // Until the worker waits: at once on one processor, whenever its
+                // own gets to it on several.
+                'waiting', [0x6a, 0x01], call('Sleep'),
+                compare('section', 1, CS.LOCK_COUNT), { jump: JNE, to: 'waiting' },
                 check(1), compare('tried', 0), { jump: JNE, to: 'fail' },
                 check(2), compare('reached', 1), { jump: JNE, to: 'fail' },
                 check(3), compare('inside', 0), { jump: JNE, to: 'fail' },

@@ -88,7 +88,11 @@ int mainCRTStartup(void)
     check("GetSystemInfo's level is CPUID's family", info.level == family);
     check("and its revision CPUID's model and stepping",
         info.revision == (model << 8 | stepping));
-    check("one processor, in the mask as well", info.count == 1 && info.active_mask == 1);
+    // As many as leaf 1 counts in the package -- one where HTT is clear --
+    // and each in the mask.
+    unsigned logical = edx & 1 << 28 ? ebx >> 16 & 0xff : 1;
+    check("the processors CPUID counts, each in the mask",
+        info.count == logical && info.active_mask == (logical == 32 ? ~0u : (1u << logical) - 1));
 
     check("MMX as CPUID says", IsProcessorFeaturePresent(3) == !!(edx & 1 << 23));
     check("SSE as CPUID says", IsProcessorFeaturePresent(6) == !!(edx & 1 << 25));
