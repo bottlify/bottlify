@@ -17,6 +17,9 @@
  *   --reps n                   runs of each, the fastest kept (default 1)
  *   --iterations n             instead of each workload's own count
  *   --root <dir>               a checkout whose engine to run instead of this one
+ *   --cores n                  the machine's processors (`cpu.cores`, default 1): the workloads
+ *                              are single-threaded, so this measures what a machine of several
+ *                              costs a program that runs one thread
  *   --native                   also time the processor through bin/peload
  *   --update-expected          write expected.json from bin/peload's checksums
  *   --json                     one JSON line per run instead of the table
@@ -64,6 +67,7 @@ const variants = options.variant === 'x87' || options.variant === 'sse'
 const only = typeof options.only === 'string' ? options.only.split(',') : WORKLOADS;
 const reps = Number(options.reps ?? 1);
 const corkConfig = typeof options.cork === 'string' ? JSON.parse(options.cork) : {};
+const cores = Number(options.cores ?? 1);
 const root = typeof options.root === 'string' ? resolve(options.root) : resolve(HERE, '../../..');
 const { createApp } = await import(pathToFileURL(join(root, 'modules/core/src/app.js')).href);
 
@@ -99,6 +103,7 @@ async function engine(executable, workload, iterations){
         exitNotice: false,
         commandLine: `bench.exe ${workload}${iterations ? ` ${iterations}` : ''}`,
         cork: { config: corkConfig },
+        ...(cores > 1 ? { cpu: { cores } } : {}),
     });
     try
     {
