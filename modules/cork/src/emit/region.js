@@ -629,7 +629,8 @@ export function finishModule(context, functions){
         const origin = /** @type {number} */ (layout.origin);
         for (let r = 0; r < CARRIED_REGS; r++)
         {
-            atState(context, b).localGet(Local.reg + r).store('i32', { offset: layout.regs + r * 4 });
+            atState(context, b).localGet(Local.reg + r)
+                .store('i32', { offset: layout.regs + r * 4 });
         }
         if (layout.flagsChanged >= 0)
         {

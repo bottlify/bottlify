@@ -1621,9 +1621,11 @@ export function x87LoadRegisters(e, needed){
         }
         if (layout.x87Format === 'tagged80')
         {
-            atState(e.context, b).load('i32_16u', { offset: at + 8 }).i32const(RELAXED_TAG).op(I32.eq);
+            atState(e.context, b).load('i32_16u', { offset: at + 8 })
+                .i32const(RELAXED_TAG).op(I32.eq);
             e.openIf('tagged', EMPTY);
-            atState(e.context, b).load('i64', { offset: at }).op(F64.reinterpretI64).localSet(x.base + k);
+            atState(e.context, b).load('i64', { offset: at }).op(F64.reinterpretI64)
+                .localSet(x.base + k);
             b.else();
             b.i32const(at).call(/** @type {number} */ (e.context.f80ToF64)).localSet(x.base + k);
             e.close();
@@ -1632,7 +1634,8 @@ export function x87LoadRegisters(e, needed){
                 // The form the register enters in: an MMX write before this
                 // region left the exponent and sign all ones, which the exit
                 // writes back as it found it rather than as a relaxed double.
-                atState(e.context, b).load('i32_16u', { offset: at + 8 }).i32const(0xffff).op(I32.eq);
+                atState(e.context, b).load('i32_16u', { offset: at + 8 }).i32const(0xffff)
+                    .op(I32.eq);
                 e.openIf(`mmxform${k}`, EMPTY);
                 b.localGet(x.form).i32const(1 << k).op(I32.or).localSet(x.form);
                 e.close();
@@ -1658,7 +1661,8 @@ export function x87LoadRegisters(e, needed){
         atState(e.context, b).load('i32_8u', { offset: exactAt }).localSet(x.dyn);
         for (let k = 0; k < 8; k++)
         {
-            atState(e.context, b).load('i64', { offset: layout.x87 + k * 16 + 8 }).localSet(x.shadow[k]);
+            atState(e.context, b).load('i64', { offset: layout.x87 + k * 16 + 8 })
+                .localSet(x.shadow[k]);
         }
     }
 }
@@ -1688,7 +1692,8 @@ export function x87Epilogue(e){
     atState(e.context, b).localGet(Local.x87Status).store('i32_16', { offset: layout.x87Status });
     if (x.controlWritten)
     {
-        atState(e.context, b).localGet(Local.x87Control).store('i32_16', { offset: layout.x87Control });
+        atState(e.context, b).localGet(Local.x87Control)
+            .store('i32_16', { offset: layout.x87Control });
     }
 }
 
@@ -1713,7 +1718,8 @@ export function x87StoreRegisters(e, written){
         e.openIf(`dirty${k}`, EMPTY);
         if (layout.x87Format === 'tagged80')
         {
-            atState(e.context, b).localGet(x.base + k).op(I64.reinterpretF64).store('i64', { offset: at });
+            atState(e.context, b).localGet(x.base + k).op(I64.reinterpretF64)
+                .store('i64', { offset: at });
             atState(e.context, b).i32const(RELAXED_TAG).store('i32_16', { offset: at + 8 });
         }
         else
@@ -1729,7 +1735,8 @@ export function x87StoreRegisters(e, written){
         atState(e.context, b).localGet(x.dyn).store('i32_8', { offset: exactPlace(layout) });
         for (let k = 0; k < 8; k++)
         {
-            atState(e.context, b).localGet(x.shadow[k]).store('i64', { offset: layout.x87 + k * 16 + 8 });
+            atState(e.context, b).localGet(x.shadow[k])
+                .store('i64', { offset: layout.x87 + k * 16 + 8 });
         }
         return;
     }
@@ -3875,7 +3882,8 @@ function loadFloat(e, operand, mode = 'checked'){
     b.localTee(value).localGet(value).op(F64.ne);
     b.if(EMPTY);
     noteEvent(e, NanRecord.LOAD, ()=>{
-        atState(e.context, b).localGet(Local.addr).store('i32', { offset: at + NanRecord.LOAD + 8 });
+        atState(e.context, b).localGet(Local.addr)
+            .store('i32', { offset: at + NanRecord.LOAD + 8 });
     });
     b.end();
     b.localGet(value);
@@ -3992,7 +4000,8 @@ function storeFloat(e, operand, pushValue){
         b.localTee(value).localGet(value).op(F64.ne);
         b.if(EMPTY);
         noteEvent(e, NanRecord.STORE, ()=>{
-            atState(e.context, b).localGet(Local.addr).store('i32', { offset: at + NanRecord.STORE + 8 });
+            atState(e.context, b).localGet(Local.addr)
+                .store('i32', { offset: at + NanRecord.STORE + 8 });
         });
         b.end();
         pushValue = ()=>b.localGet(value);
@@ -4262,13 +4271,15 @@ export const NanRecord = Object.freeze({
 function noteEvent(e, slot, first){
     const { b } = e;
     const at = /** @type {number} */ (e.layout.nanFirst);
-    atState(e.context, atState(e.context, b)).load('i32', { offset: at + slot + 4 }).i32const(1).op(I32.add)
+    atState(e.context, atState(e.context, b)).load('i32', { offset: at + slot + 4 })
+        .i32const(1).op(I32.add)
         .store('i32', { offset: at + slot + 4 });
     atState(e.context, b).load('i32', { offset: at + slot }).op(I32.eqz);
     b.if(EMPTY);
     atState(e.context, b).i32const(/** @type {import('../decode/decoder.js').Instruction} */ (e.current).eip)
         .store('i32', { offset: at + slot });
-    atState(e.context, atState(e.context, b)).load('i32', { offset: at + NanRecord.ORDER }).i32const(1).op(I32.add)
+    atState(e.context, atState(e.context, b)).load('i32', { offset: at + NanRecord.ORDER })
+        .i32const(1).op(I32.add)
         .store('i32', { offset: at + NanRecord.ORDER });
     atState(e.context, atState(e.context, b)).load('i32', { offset: at + NanRecord.ORDER })
         .store('i32', { offset: at + NanRecord.orderOf[slot] });
