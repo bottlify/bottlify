@@ -100,6 +100,12 @@ const UNTIERED_KEPT = 16;
  * run the whole stretch.
  */
 const WASM_AFTER = 8192;
+/**
+ * The longest host write into the RAM made a dword at a time (`copyIn`): the
+ * structures a call fills in, past which a byte copy is faster and has no
+ * thread reading it as it is written.
+ */
+const WORDWISE_BYTES = 256;
 const NEW_TARGET_WORK = 128;
 /** The names an engine module must export for this host. */
 const ENGINE_EXPORTS = Object.freeze([
@@ -250,11 +256,41 @@ export function createCorkHost(config){
     const xmm = new Uint32Array(memory.buffer, layout.xmm, 32);
     const ram = new Uint8Array(memory.buffer, layout.ramBase, layout.ramSize);
     const whole = new DataView(memory.buffer);
+    const wholeWords = new Int32Array(memory.buffer);
 
     /** The flags word, whole: the record a region left is folded into it first. */
     const eflagsWord = ()=>eflagsOf(blockView, own) >>> 0;
     /** @param {number} address  A guest address. */
     const ramOffset = address=>layout.ramBase + address;
+    /**
+     * The host's write into the RAM. A short one at an aligned address goes in
+     * a dword at a time, each one store, as an x86 dword store is: the shared
+     * memory's copy went a byte at a time unless both ends were 8-aligned, and
+     * a pointer, count or flag the host published was read half written by a
+     * thread on another executor (3.4 M of 157 M reads in a probe). A long one
+     * -- a texture, a file read -- has no such reader and keeps the copy.
+     *
+     * @param {number} address @param {Uint8Array} bytes
+     */
+    const copyIn = (address, bytes)=>{
+        const length = bytes.length;
+        if (length > WORDWISE_BYTES || (address & 3) !== 0)
+        {
+            ram.set(bytes, address);
+            return;
+        }
+        const first = ramOffset(address) >>> 2;
+        let at = 0;
+        for (; at + 4 <= length; at += 4)
+        {
+            wholeWords[first + (at >>> 2)] = bytes[at] | bytes[at + 1] << 8 | bytes[at + 2] << 16
+                | bytes[at + 3] << 24;
+        }
+        for (; at < length; at++)
+        {
+            ram[address + at] = bytes[at];
+        }
+    };
 
     // The boot state: the registers the ROM would have left, and nothing run.
     block.fill(0);
@@ -1352,7 +1388,8 @@ export function createCorkHost(config){
         /** @param {number} address @param {number} length @returns {Uint8Array} */
         readPhysical: (address, length)=>ram.subarray(address, address + length),
         /** @param {number} address */
-        readU32: address=>whole.getUint32(ramOffset(address), true),
+        readU32: address=>((address & 3) === 0 ? wholeWords[ramOffset(address) >>> 2] >>> 0
+            : whole.getUint32(ramOffset(address), true)),
         /**
          * Dwords, signed, into an array: a host call's stack words in one call.
          *
@@ -1372,14 +1409,14 @@ export function createCorkHost(config){
         writePhysical: (address, bytes)=>{
             hostWrites++;
             hostWrittenBytes += bytes.length;
-            ram.set(bytes, address);
+            copyIn(address, bytes);
             invalidate(address, bytes.length);
         },
         /** @param {number} address @param {Uint8Array} bytes */
         writeData: (address, bytes)=>{
             hostWrites++;
             hostWrittenBytes += bytes.length;
-            ram.set(bytes, address);
+            copyIn(address, bytes);
             invalidate(address, bytes.length);
         },
         /** @param {number} address @param {number} value @param {number} length */

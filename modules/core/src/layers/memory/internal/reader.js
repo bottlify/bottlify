@@ -44,6 +44,11 @@ export class DwordReader {
         this.machine = machine;
         /** @type {DataView | null} */
         this.data = null;
+        // The same RAM by aligned dword, for the reads another thread may be
+        // writing meanwhile: one load, where a DataView's read went a byte at a
+        // time and was seen half written (21 in 38 M reads in a probe).
+        /** @type {Int32Array} */
+        this.words = new Int32Array(0);
         this.lends = typeof machine.ramView === 'function';
         // The last spans a read validated, as [from, to) pairs, and the
         // table's version they were validated at: a host call reads its
@@ -144,6 +149,9 @@ export class DwordReader {
                 return null;
             }
             this.data = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+            this.words = bytes.byteOffset % 4 === 0
+                ? new Int32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength >>> 2)
+                : new Int32Array(0);
         }
         return this.data;
     }
@@ -160,6 +168,16 @@ export class DwordReader {
         if (data !== null && span >= 0)
         {
             this.manyAt = span;
+            const words = this.words;
+            if ((address & 3) === 0 && (address >>> 2) + count <= words.length)
+            {
+                const first = address >>> 2;
+                for (let word = 0; word < count; word++)
+                {
+                    into[at + word] = words[first + word];
+                }
+                return;
+            }
             try
             {
                 for (let word = 0; word < count; word++)
@@ -220,6 +238,11 @@ export class DwordReader {
         if (data !== null && span >= 0)
         {
             this.oneAt = span;
+            const word = (address & 3) === 0 ? this.words[address >>> 2] : undefined;
+            if (word !== undefined)
+            {
+                return word >>> 0;
+            }
             try
             {
                 return data.getUint32(address, true);
