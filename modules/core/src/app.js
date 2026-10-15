@@ -1539,6 +1539,7 @@ async function openTranslationPool(options){
         open: ()=>openProcessWorker(url),
         perProcess: cork.poolPerProcess ?? translatorsBeside(processorsFor({
             engine: options.engine ?? DEFAULT_ENGINE, executors: options.executors,
+            sharedMemory: options.cork?.config?.sharedMemory,
         }), globalThis.navigator?.hardwareConcurrency ?? 4),
         ...(cork.poolWindowMs === undefined ? {} : { windowMs: cork.poolWindowMs }),
         driver: cork.poolDriver ?? {},
@@ -1570,7 +1571,8 @@ export const translatorsBeside = (cores, host)=>Math.max(1, Math.floor(host) - c
  * @returns {T & { executors?: number }}
  */
 export function withCpuSetup(options){
-    const cores = options.cpu?.cores;
+    const cores = options.cpu?.cores
+        ?? (options.executors === undefined ? coresFromHost() : undefined);
     if (cores === undefined)
     {
         return options;
@@ -1586,6 +1588,17 @@ export function withCpuSetup(options){
             + ' number; set cores alone');
     }
     return { ...options, executors: cores };
+}
+
+/**
+ * The cores a run that names none gets from where it runs: `BOTTLIFY_CORES` in node, so
+ * every suite can be run with its programs on several executors; none (one) elsewhere.
+ *
+ * @returns {number | undefined}
+ */
+function coresFromHost(){
+    const named = /** @type {any} */ (globalThis).process?.env?.BOTTLIFY_CORES;
+    return named === undefined || named === '' ? undefined : Number(named);
 }
 
 /**
@@ -6731,7 +6744,12 @@ async function buildApp(options){
                         kernel.noteHostAnswer?.(tick, !step.ran.awaitingHost);
                     }
 
-                    spun = step.instructions === 0 ? spun + 1 : 0;
+                    // A turn spent waiting on the process's other executors is
+                    // the guest at work there, not a machine with nothing to do:
+                    // counted as a spin, every one went round the event loop and,
+                    // with a thread in GetMessage, slept on a timer while the
+                    // others waited for their traps to be answered.
+                    spun = step.instructions === 0 && !step.elsewhere ? spun + 1 : 0;
 
                     // The guest ran for real, so its clock moves. Nothing else in
                     // the engine does this, and without it the clock only ever
@@ -7781,7 +7799,7 @@ async function buildSystemHost(deps){
         // The keys a process in a worker reads are these: they name as many
         // processors as its cpu layer will say it has.
         processors: processorsFor({ engine: options.engine ?? DEFAULT_ENGINE,
-            executors: options.executors }),
+            executors: options.executors, sharedMemory: options.cork?.config?.sharedMemory }),
     });
     system.windows = createWindowDirectory();
     const { seeded, saver, stopSavingRegistry } = await openSession({ options, events,
