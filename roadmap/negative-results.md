@@ -831,3 +831,34 @@ None yet.
   pays nothing for a profile it cannot use. What the Far Cry counts point at instead: 50 to 103
   times a run (91, 103, 50, 82) the callees a call was predicted to were found too large to form
   in, and those calls still go through the entry hash.
+
+### 2026-10-15 -- the speed work of 2026-10-13 and 14 in Far Cry, all of it at once
+
+- **Idea.** The changes of those two days that were measured in Far Cry (call prediction, quiet
+  calls, the solo turn) were each measured against the tree just before them, one pair of runs a
+  phase, and came out between 1.004 and 1.064. Their sum, measured against the tree before the
+  first change of the work, should show at least the larger ones.
+- **Workload.** The Far Cry demo bundle (`bundle.btl` sha256 `44530097b2a5a284…`),
+  `tools/cdp_test/game.mjs farcry-demo --worker --coi --no-video --fake-gpu --run-seconds 240
+  --cpu-profile 240`. Before: `98303907`, the last tree before the first runtime change of the
+  work (`1e368204`), with the harness's `--fake-gpu` (`ca67027a`) applied on top and nothing else.
+  After: `0ee30d80`. Ten runs, alternated: before cold, after cold, before warm, after warm; then
+  after first: after cold, before cold (fresh profiles), and warm runs on all four profiles. Guest
+  instructions over the whole run (257 to 271 s, the load included).
+- **Values.** Before: 201.1, 222.9, 220.8, 213.4, 226.7 M/s (cold, warm, cold, warm, warm), median
+  220.8. After: 219.3, 218.6, 220.9, 225.4, 222.5, median 220.9. Ratio of the medians 1.000. The
+  lowest, 201.1, is the first browser started after the machine started. The instructions over
+  the engine thread's time in translated code alone: before median 450 M/s (402 to 451), after
+  440 (430 to 448). Translated code holds 49 to 53% of the engine thread in both; calls to the host
+  37 to 42 s a run in both; the Direct3D command ring's replay 31.5 to 35.5 s before, 29.0 to
+  29.8 s after. Scheduler turns 691 to 743 thousand before, 578 to 604 thousand after.
+- **Machine.** A 4-core x86-64 Linux VM, Intel Xeon @ 2.80 GHz, headless Chromium 141.0.7390.37
+  (V8 14.1), Node 22.22.0. Power plan not recorded. Not the VM of the entries above: `0ee30d80`'s
+  tree ran 273 to 279 M/s there and 219 to 225 here, so no number here compares with theirs.
+- **Correctness.** Every run ran to the end of its window; the game's log in each ends on the same
+  line (its CPU speed test). Whether each reached the level was not checked.
+- **Decision.** Nothing to revert: the work was taken for what it was measured on (the benchmark,
+  Gothic 3's x87, the engine thread's holds). But the Far Cry gains each change was credited with, one pair a
+  phase, do not show in their sum: they were inside the noise, as each entry said, and none of
+  them is evidence for a default by itself. Half of the engine thread in this window is outside
+  translated code, and that half did not move.
