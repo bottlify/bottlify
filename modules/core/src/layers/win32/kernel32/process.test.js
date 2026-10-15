@@ -897,63 +897,81 @@ const boundTo = (entry, builder)=>{
     return entry.guest(builder);
 };
 
-test('the clock the guest reads is the one the engine credits', ()=>{
-    const { host, fns, u64 } = setup({ arena: 0x4000 });
-    const out = 0x400;
-    host.clock.uptimeMs = 1500;
+for (const words of [false, true])
+{
+    test(`the clock the guest reads is the one the engine credits${words
+        ? ', written through the words of the RAM itself' : ''}`, ()=>{
+        const { host, fns, u64 } = setup({ arena: 0x4000 });
+        if (words)
+        {
+        // As the memory layer hands them out where the RAM is shared.
+            Object.assign(host, { wordsOver: (/** @type {number} */ address,
+            /** @type {number} */ length)=>new Int32Array(host.bytes.buffer, address,
+                Math.ceil(length / 4)) });
+        }
+        const out = 0x400;
+        host.clock.uptimeMs = 1500;
 
-    // Binding a clock export is what takes the block and hands the engine the
-    // means to keep it current.
-    const trap = 0x7f000010;
-    /** @type {import('./sync.js').GuestBuilder} */
-    const builder = { register: ()=>trap };
-    const counter = boundTo(fns.QueryPerformanceCounter, builder);
-    assert.notEqual(counter, trap, 'the routine was placed');
-    assert.equal(host.refreshes.length, 1, 'and the engine knows how to keep it current');
-    assert.notEqual(boundTo(fns.QueryPerformanceFrequency, builder), trap);
-    const tickCount = boundTo(fns.GetTickCount, builder);
-    assert.equal(host.refreshes.length, 1, 'one block for all of them');
+        // Binding a clock export is what takes the block and hands the engine the
+        // means to keep it current.
+        const trap = 0x7f000010;
+        /** @type {import('./sync.js').GuestBuilder} */
+        const builder = { register: ()=>trap };
+        const counter = boundTo(fns.QueryPerformanceCounter, builder);
+        assert.notEqual(counter, trap, 'the routine was placed');
+        assert.equal(host.refreshes.length, 1, 'and the engine knows how to keep it current');
+        assert.notEqual(boundTo(fns.QueryPerformanceFrequency, builder), trap);
+        const tickCount = boundTo(fns.GetTickCount, builder);
+        assert.equal(host.refreshes.length, 1, 'one block for all of them');
 
-    // One block, and a page of its own: the engine writes it whenever the
-    // clock moves, and a write into a page holding compiled code costs the
-    // emulator everything it compiled there -- including these routines.
-    const block = host.view.getUint32(counter + 19, true) - CLOCK.SEQUENCE;
-    assert.equal(host.view.getUint32(tickCount + 1, true) - CLOCK.TICKS, block,
-        'the tick count reads the same block');
-    assert.equal(block & 0xfff, 0, 'on a page boundary');
-    assert.ok(block >= 0x2000, 'out of the arena, not over the program');
+        // One block, and a page of its own: the engine writes it whenever the
+        // clock moves, and a write into a page holding compiled code costs the
+        // emulator everything it compiled there -- including these routines.
+        const block = host.view.getUint32(counter + 19, true) - CLOCK.SEQUENCE;
+        assert.equal(host.view.getUint32(tickCount + 1, true) - CLOCK.TICKS, block,
+            'the tick count reads the same block');
+        assert.equal(block & 0xfff, 0, 'on a page boundary');
+        assert.ok(block >= 0x2000, 'out of the arena, not over the program');
 
-    // What the guest reads is what the host would have answered, to the word.
-    assert.equal(fns.QueryPerformanceCounter.handler([out]), 1);
-    assert.equal(host.view.getBigUint64(block + CLOCK.COUNTER, true), u64(out));
-    assert.equal(host.view.getUint32(block + CLOCK.TICKS, true), fns.GetTickCount.handler());
+        // What the guest reads is what the host would have answered, to the word.
+        assert.equal(fns.QueryPerformanceCounter.handler([out]), 1);
+        assert.equal(host.view.getBigUint64(block + CLOCK.COUNTER, true), u64(out));
+        assert.equal(host.view.getUint32(block + CLOCK.TICKS, true), fns.GetTickCount.handler());
 
-    // The block moves only when the engine says the clock did, which is what
-    // makes the two answers agree: guest time does not pass while the guest is
-    // the one running.
-    host.clock.uptimeMs = 2500;
-    assert.equal(host.view.getUint32(block + CLOCK.TICKS, true), 1500);
-    host.refreshes[0]();
-    assert.equal(host.view.getUint32(block + CLOCK.TICKS, true), 2500);
-    assert.equal(host.view.getBigUint64(block + CLOCK.COUNTER, true), 2_500_000_000n,
-        'a gigahertz of ticks: a million for every millisecond credited');
-    fns.QueryPerformanceCounter.handler([out]);
-    assert.equal(host.view.getBigUint64(block + CLOCK.COUNTER, true), u64(out),
-        'and still what a trap would have answered');
-
-    // A clock that is asked again before anything credits it answers the same
-    // thing rather than something smaller: a program timing a frame with it
-    // must never see time run backwards.
-    let last = 0n;
-    for (const uptime of [2500, 2500, 2501, 4000, 4000, 9999])
-    {
-        host.clock.uptimeMs = uptime;
+        // The block moves only when the engine says the clock did, which is what
+        // makes the two answers agree: guest time does not pass while the guest is
+        // the one running.
+        host.clock.uptimeMs = 2500;
+        assert.equal(host.view.getUint32(block + CLOCK.TICKS, true), 1500);
         host.refreshes[0]();
-        const now = host.view.getBigUint64(block + CLOCK.COUNTER, true);
-        assert.ok(now >= last, `${uptime} did not take the counter backwards`);
-        last = now;
-    }
-});
+        assert.equal(host.view.getUint32(block + CLOCK.TICKS, true), 2500);
+        assert.equal(host.view.getBigUint64(block + CLOCK.COUNTER, true), 2_500_000_000n,
+            'a gigahertz of ticks: a million for every millisecond credited');
+        fns.QueryPerformanceCounter.handler([out]);
+        assert.equal(host.view.getBigUint64(block + CLOCK.COUNTER, true), u64(out),
+            'and still what a trap would have answered');
+
+        // A clock that is asked again before anything credits it answers the same
+        // thing rather than something smaller: a program timing a frame with it
+        // must never see time run backwards.
+        let last = 0n;
+        for (const uptime of [2500, 2500, 2501, 4000, 4000, 9999])
+        {
+            host.clock.uptimeMs = uptime;
+            host.refreshes[0]();
+            const now = host.view.getBigUint64(block + CLOCK.COUNTER, true);
+            assert.ok(now >= last, `${uptime} did not take the counter backwards`);
+            last = now;
+        }
+        // Even between writes: a reader on another executor takes the words only
+        // between two looks that find the same even sequence.
+        const sequence = host.view.getUint32(block + CLOCK.SEQUENCE, true);
+        assert.equal(sequence % 2, 0, 'the sequence even once the engine has written');
+        host.refreshes[0]();
+        assert.equal(host.view.getUint32(block + CLOCK.SEQUENCE, true), sequence + 2,
+            'moved twice by a write: odd while it wrote');
+    });
+}
 
 test('the counter answers later each time it is asked, whether the clock moved or not', ()=>{
     // The guest's clock is credited between slices, so two reads inside one

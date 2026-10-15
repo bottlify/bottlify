@@ -421,10 +421,14 @@ export function createCpuModule(){
                 }
             };
 
-            const captureCurrentContext = ()=>{
+            /**
+             * @param {any} [into]  the thread's last record, written over where
+             *     the engine can (cork): a record is its thread's alone
+             */
+            const captureCurrentContext = into=>{
                 const host = started();
                 return typeof host.captureContext === 'function'
-                    ? host.captureContext()
+                    ? host.captureContext(into)
                     : captureContext(host.cpu());
             };
 

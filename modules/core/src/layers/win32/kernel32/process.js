@@ -154,6 +154,8 @@ const ERROR_NOACCESS = 998;
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, expected: bigint, value: bigint) => bigint} [compareExchangeU64]
+ * @property {(address: number, length: number) => Int32Array | null} [wordsOver]
+ *     the dwords of a block the engine keeps, over the RAM itself, where it can be had
  *     A quadword swapped only if it holds `expected`, indivisible against the
  *     guest's `lock cmpxchg8b` on the process's other executors; answers what it held.
  * @property {(address: number, maxLength: number) => string} readCString
@@ -697,12 +699,32 @@ export function createProcessFunctions(host){
     };
     /** The block's sequence, the engine's alone to move: even, odd while it writes. */
     let sequence = 0;
+    /**
+     * The block's dwords over the RAM itself, where the memory layer has them:
+     * written at every turn, through the memory's checked path that was the
+     * largest of a turn's costs when threads took turns on one executor.
+     *
+     * @type {Int32Array | null}
+     */
+    let clockWords = null;
     const refreshClock = ()=>{
         if (clockAt === 0)
         {
             return;
         }
         const milliseconds = host.now();
+        if (clockWords !== null)
+        {
+            const counter = ticksOf(milliseconds);
+            // The sequence by Atomics: odd before the words move, even after,
+            // in that order for a reader on another executor.
+            Atomics.store(clockWords, CLOCK.SEQUENCE >> 2, ++sequence);
+            clockWords[CLOCK.TICKS >> 2] = Math.floor(milliseconds);
+            clockWords[CLOCK.COUNTER >> 2] = Number(counter & 0xffffffffn) | 0;
+            clockWords[(CLOCK.COUNTER >> 2) + 1] = Number(counter >> 32n) | 0;
+            Atomics.store(clockWords, CLOCK.SEQUENCE >> 2, ++sequence);
+            return;
+        }
         // The span written runs from the ticks to the counter's end.
         clockView.setUint32(0, Math.floor(milliseconds) >>> 0, true);
         clockView.setBigUint64(CLOCK.COUNTER - CLOCK.TICKS, ticksOf(milliseconds), true);
@@ -728,6 +750,7 @@ export function createProcessFunctions(host){
             return 0;
         }
         clockAt = (span + PAGE - 1) & ~(PAGE - 1);
+        clockWords = host.wordsOver?.(clockAt, CLOCK.SIZE) ?? null;
         refreshClock();
         host.publishClock(refreshClock);
         return clockAt;

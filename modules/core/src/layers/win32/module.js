@@ -1505,6 +1505,7 @@ export function createWin32Module(){
                         writeMemory,
                         compareExchangeU64: (address, expected, value)=>
                             memory.compareExchangeU64(address, expected, value),
+                        wordsOver: (address, length)=>memory.wordsOver?.(address, length) ?? null,
                         readCString,
                         readWideString,
                         currentThread: ()=>kernel.currentThread(),

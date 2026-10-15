@@ -380,6 +380,26 @@ export function createMemoryModule(){
                     }
                 },
                 /**
+                 * The dwords of [address, address + length) as an array over the
+                 * RAM itself, for a block the engine keeps and the program only
+                 * reads -- a clock it moves at every turn: a store through it is
+                 * charged to nothing and reaches no translated code, and costs a
+                 * store. Null where the RAM is not shared (it can move as it
+                 * grows) or the address is not 4-aligned.
+                 *
+                 * @param {number} address @param {number} length  bytes
+                 * @returns {Int32Array | null}
+                 */
+                wordsOver: (address, length)=>{
+                    const shared = live() ? sharedWords() : null;
+                    if (shared === null || (address & 3) !== 0
+                        || (address >>> 0) + length > shared.byteLength)
+                    {
+                        return null;
+                    }
+                    return shared.subarray(address >>> 2, (address >>> 2) + Math.ceil(length / 4));
+                },
+                /**
                  * The dword at `address` replaced by `value` if it is `expected`, as
                  * one indivisible step against the threads running on other
                  * executors where the RAM is shared; answers what it was. How the

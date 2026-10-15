@@ -1648,7 +1648,7 @@ export function createCorkHost(config){
     host.useGuestClock = readMs=>{
         guestClock = readMs;
     };
-    host.captureContext = ()=>captureBlockContext(host);
+    host.captureContext = (/** @type {any} */ into)=>captureBlockContext(host, into);
     host.restoreContext = (/** @type {any} */ context)=>{
         restoreBlockContext(host, context);
         entered = true;

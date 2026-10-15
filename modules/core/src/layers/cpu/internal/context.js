@@ -147,6 +147,26 @@ export function restoreContext(cpu, context){
  */
 
 /**
+ * Views over a host's state block, made once for each block: a typed array or
+ * a view made at every switch was a fifth of a thread switch's cost.
+ *
+ * @type {WeakMap<Uint8Array, { view: DataView, words: Int32Array }>}
+ */
+const blockViews = new WeakMap();
+
+/** @param {Uint8Array} block  a state block, 4-aligned */
+function viewsOf(block){
+    let views = blockViews.get(block);
+    if (views === undefined)
+    {
+        views = { view: new DataView(block.buffer, block.byteOffset, block.byteLength),
+            words: new Int32Array(block.buffer, block.byteOffset, block.byteLength >> 2) };
+        blockViews.set(block, views);
+    }
+    return views;
+}
+
+/**
  * Captures the running cork thread's context.
  *
  * The block is every register, the flags, x87, XMM and the thread's FS base,
@@ -155,25 +175,34 @@ export function restoreContext(cpu, context){
  * where it is, so a switch cannot make the global count go backward or count
  * one instruction range twice.
  *
+ * `into`, the thread's own last record, is written over rather than a new one
+ * made: a record is the thread's alone, and an array buffer of the block's size
+ * cost 3.4 us to make in node 22 -- most of a switch between two threads.
+ *
  * @param {any} host  A cork host.
+ * @param {BlockContext} [into]
  * @returns {BlockContext}
  */
-export function captureBlockContext(host){
+export function captureBlockContext(host, into){
     const layout = host.blockLayout();
-    const block = /** @type {Uint8Array} */ (host.block().slice());
-    const view = new DataView(block.buffer, block.byteOffset, block.byteLength);
-    const registers = new Int32Array(block.buffer, block.byteOffset + layout.regs, 8);
-    return {
-        block,
-        reg32: copy(registers),
-        eip: view.getUint32(layout.eip, true) >>> 0,
-        previousIp: layout.previousIp >= 0
-            ? view.getUint32(layout.previousIp, true) >>> 0
-            : 0,
-        inHlt: host.haltedFlag(),
-        fsBase: layout.fsBase >= 0 ? view.getUint32(layout.fsBase, true) >>> 0 : 0,
-        layout,
-    };
+    const source = /** @type {Uint8Array} */ (host.block());
+    const { view, words } = viewsOf(source);
+    const context = into !== undefined && into.layout === layout
+        && into.block?.length === source.length && Array.isArray(into.reg32)
+        ? into
+        : { block: new Uint8Array(source.length), reg32: new Array(8).fill(0), eip: 0,
+            previousIp: 0, inHlt: 0, fsBase: 0, layout };
+    context.block.set(source);
+    const registers = layout.regs >> 2;
+    for (let index = 0; index < 8; index++)
+    {
+        context.reg32[index] = words[registers + index];
+    }
+    context.eip = view.getUint32(layout.eip, true) >>> 0;
+    context.previousIp = layout.previousIp >= 0 ? view.getUint32(layout.previousIp, true) >>> 0 : 0;
+    context.inHlt = host.haltedFlag();
+    context.fsBase = layout.fsBase >= 0 ? view.getUint32(layout.fsBase, true) >>> 0 : 0;
+    return context;
 }
 
 /**
@@ -185,13 +214,13 @@ export function captureBlockContext(host){
 export function restoreBlockContext(host, context){
     const layout = context.layout;
     const block = /** @type {Uint8Array} */ (host.block());
-    const view = new DataView(block.buffer, block.byteOffset, block.byteLength);
+    const { view, words } = viewsOf(block);
     const counter = layout.counter >= 0 ? view.getUint32(layout.counter, true) >>> 0 : 0;
     block.set(context.block);
-    const registers = new Int32Array(block.buffer, block.byteOffset + layout.regs, 8);
-    for (let index = 0; index < registers.length; index++)
+    const registers = layout.regs >> 2;
+    for (let index = 0; index < 8; index++)
     {
-        registers[index] = context.reg32[index] | 0;
+        words[registers + index] = context.reg32[index] | 0;
     }
     view.setUint32(layout.eip, context.eip >>> 0, true);
     if (layout.previousIp >= 0)

@@ -77,6 +77,9 @@ const SHORT_WAIT_MS = 20;
 /** A short-period thread kept off the processor this long, in host ms, is counted late. */
 const LATE_GAP_MS = 40;
 
+/** Turns kept to say what held the processor through a late thread's gap. */
+const RECENT_TURNS = 256;
+
 /**
  * The longest this executor waits, in host ms, for the others with nothing of its
  * own to run before its turn ends: they keep their threads while nothing waits for
@@ -262,9 +265,13 @@ export function createScheduler(options){
     const lateGaps = [];
     /**
      * The last turns: whose, host ms in the slice, when it ended, ms since the one before.
+     * A ring of records written over in turn, not pushed and shifted: a turn
+     * is a few microseconds when threads take turns on one executor.
      * @type {{ thread: string, ms: number, end: number, outside: number }[]}
      */
-    const recentTurns = [];
+    const recentTurns = Array.from({ length: RECENT_TURNS },
+        ()=>({ thread: '', ms: 0, end: -Infinity, outside: 0 }));
+    let recentAt = 0;
     let lastEnd = 0;
     /**
      * Host ms each thread held the machine, and ms between slices, by second
@@ -735,8 +742,12 @@ export function createScheduler(options){
         const could = Math.min(readyAtSlice.size, 3);
         parallel.ms[could] += held;
         parallel.instructions[could] += instructions;
-        recentTurns.push({ thread: next.name ?? '?', ms: held, end: began + held,
-            outside: lastEnd === 0 ? 0 : Math.max(0, began - lastEnd) });
+        const turn = recentTurns[recentAt];
+        recentAt = (recentAt + 1) % RECENT_TURNS;
+        turn.thread = next.name ?? '?';
+        turn.ms = held;
+        turn.end = began + held;
+        turn.outside = lastEnd === 0 ? 0 : Math.max(0, began - lastEnd);
         const slot = busySlot(began);
         const name = next.name ?? '?';
         let seconds = busyByThread.get(name);
@@ -750,10 +761,6 @@ export function createScheduler(options){
         const windowStart = (Math.floor(began / 1000) - BUSY_SECONDS + 1) * 1000;
         // Slices on several executors overlap: none of that is time between them.
         between[slot] += lastEnd === 0 ? 0 : Math.max(0, began - Math.max(lastEnd, windowStart));
-        if (recentTurns.length > 256)
-        {
-            recentTurns.shift();
-        }
         lastEnd = Math.max(lastEnd, began + held);
         next.lastRanAt = lastEnd;
         next.instructions += instructions;
@@ -1012,7 +1019,7 @@ export function createScheduler(options){
         runsOnce(next);
         if (next === current)
         {
-            current.context = cpu.captureContext();
+            current.context = cpu.captureContext(current.context);
             current = null;
         }
         const resume = resumeOf(next);
@@ -1086,7 +1093,7 @@ export function createScheduler(options){
                 sharedTime.heldMs += wall() - on.began;
                 let at = 0;
                 cpu.onExecutor(remote.index, ()=>{
-                    on.thread.context = cpu.captureContext();
+                    on.thread.context = cpu.captureContext(on.thread.context);
                     at = cpu.eip?.() ?? 0;
                 });
                 if (ended.fault !== null)
