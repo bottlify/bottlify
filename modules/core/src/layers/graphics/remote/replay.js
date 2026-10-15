@@ -49,6 +49,11 @@ const PURE_GETTERS = new Set([
     'GetDesc', 'GetLevelDesc', 'GetLevelCount', 'GetLOD', 'GetPriority', 'GetType',
     'GetAvailableTextureMem', 'GetCreationParameters', 'GetNumberOfSwapChains',
     'GetPresentParameters', 'GetGammaRamp',
+    // Not Direct3D's: what the shadow block's routines check a call against,
+    // read back after every entry of the host's -- 222 thousand sends in four
+    // minutes of one title, each played for nothing -- and a pause the host's
+    // entry runs its calls in.
+    'ringState', 'whileStill',
 ]);
 
 /**
@@ -395,6 +400,7 @@ const sharedNow = ()=>performance.timeOrigin + performance.now();
  *     wrote: (address: number, bytes: Uint8Array) => void,
  *     read: (address: number, bytes: Uint8Array) => void, outward: (value: any) => any,
  *     drawsFrom: (buffer: any, from: number, to: number) => void,
+ *     still: <T>(work: () => T) => T,
  *     adopt: (object: object) => void }}
  *     `allocated` and `freed` are told every allocation the recorded device
  *     makes and gives back, `writing` every write it is about to make into guest
@@ -404,7 +410,9 @@ const sharedNow = ()=>performance.timeOrigin + performance.now();
  *     rather than through its locks -- every read, whose bytes the played
  *     device is sent ahead of the call; `drawsFrom` the bytes of a dynamic
  *     buffer a draw reads, of which what the program wrote since they were
- *     last sent goes ahead of the call; `outward` is a value of the device's
+ *     last sent goes ahead of the call; `still` runs `work` as one pause of the
+ *     program's, in which a range compared by one call is not compared by the next;
+ *     `outward` is a value of the device's
  *     as the caller is given it; `adopt` numbers an object of another model,
  *     unwrapped, as the next the played side binds -- what the call just
  *     recorded answered there
@@ -504,6 +512,13 @@ export function createRecording(options){
      * is compared once in it, however many draws read it.
      */
     const compared = createCompared();
+    /**
+     * How deep in pauses that span several calls (`still`): while in one, the
+     * program does not run between the calls either -- a host entry's buffers
+     * settled, then its command ring played -- and what one call compared
+     * stays compared for the next.
+     */
+    let still = 0;
     /**
      * Where a buffer's bytes in guest memory differ from what was sent of
      * them, made what is sent: four bytes at a time against the copy on this
@@ -1278,8 +1293,22 @@ export function createRecording(options){
                         ? ranges.flatMap(range=>{
                             const from = range.address - sent.base;
                             const to = from + extentOf(range.address, range.length);
-                            return from >= 0 && to <= sent.bytes.length
-                                ? changedSince(sent, from, to, []) : rangeFrom(range);
+                            if (from < 0 || to > sent.bytes.length)
+                            {
+                                return rangeFrom(range);
+                            }
+                            // In a pause (`still`) counted compared, so that the
+                            // draws after the unlock find it done. Outside one, what
+                            // the last call compared is not what the program left.
+                            const open = still > 0 ? compared.take(target, from, to)
+                                : [from, to];
+                            /** @type {{ address: number, bytes: Uint8Array }[]} */
+                            const into = [];
+                            for (let part = 0; part < open.length; part += 2)
+                            {
+                                changedSince(sent, open[part], open[part + 1], into);
+                            }
+                            return into;
                         })
                         : ranges.flatMap(range=>rangeFrom(range));
                     shippedAs('buffers', unlocked);
@@ -1290,7 +1319,7 @@ export function createRecording(options){
             writes = null;
             reads = null;
             drawn = null;
-            if (depth === 0)
+            if (depth === 0 && still === 0)
             {
                 compared.clear();
             }
@@ -1722,7 +1751,29 @@ export function createRecording(options){
                 blocks.ends.splice(found, 1);
             }
         },
-        writing: (address, length)=>claim(address, length),
+        writing: (address, length)=>{
+            // What the device writes is no longer what was compared.
+            if (still > 0)
+            {
+                compared.clear();
+            }
+            claim(address, length);
+        },
+        still(work){
+            if (still === 0)
+            {
+                compared.clear();
+            }
+            still++;
+            try
+            {
+                return work();
+            }
+            finally
+            {
+                still--;
+            }
+        },
         settled(){
             return unanswered.size === 0 ? null
                 : Promise.allSettled([...unanswered]).then(()=>{});

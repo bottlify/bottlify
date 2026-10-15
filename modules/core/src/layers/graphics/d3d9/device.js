@@ -465,6 +465,10 @@ const isDepthFormat = format=>FORMAT_INFO[format] !== undefined && FORMAT_INFO[f
  * @property {boolean} [rectangleBump]  The renderer's (`createRenderer`).
  * @property {boolean} [keepMemory]  Released resources' memory is never given back (debugging).
  * @property {boolean} [rereadBuffers]  The renderer's (`createRenderer`).
+ * @property {boolean} [drawsNothing]  Nothing is drawn on purpose (the graphics
+ *     setting `draw: false`): an occlusion query without a renderer counts every
+ *     pixel of the target rather than none, and a copy between two surfaces whose
+ *     pixels only a GPU would hold moves nothing.
  * @property {boolean} [mips]
  * @property {(watcher: () => void) => () => void} [onDeviceLost]
  *     Calls the watcher once the GPU underneath is gone for good, at once if it
@@ -485,6 +489,9 @@ const isDepthFormat = format=>FORMAT_INFO[format] !== undefined && FORMAT_INFO[f
  *     Told the bytes of each dynamic buffer a draw reads (`drawn.js`), by a
  *     device that records for one drawing elsewhere, which has to be sent
  *     what the program wrote there after the unlock.
+ * @property {(work: () => any) => any} [whileStill]  Runs `work` as one pause of
+ *     the program's (`whileStill`), for a device that records: what it compares of
+ *     guest memory in the pause it compares once.
  */
 
 /**
@@ -508,7 +515,7 @@ export function createDirect3D9(options = {}){
         free: giveBack, divergence, dumpDraws, dumpEvery, liveDump, maxDraws, skipTexture,
         probeTexture, fog, mips, driverRules, onDeviceLost, gamma, frameQueued, renderedElsewhere,
         occlusionCounted,
-        keepMemory, rereadBuffers, drawsFrom, rectangleBump, ...caps
+        keepMemory, rereadBuffers, drawsFrom, whileStill, rectangleBump, drawsNothing, ...caps
     } = options;
     /** @type {DeviceCaps} */
     const resolved = { ...DEFAULT_CAPS, ...caps, fullscreenGamma: gamma?.applies() === true };
@@ -522,7 +529,7 @@ export function createDirect3D9(options = {}){
         liveDump, maxDraws, skipTexture,
         probeTexture, fog, mips, driverRules, onDeviceLost, gamma, frameQueued, renderedElsewhere,
         occlusionCounted,
-        rereadBuffers, drawsFrom, rectangleBump,
+        rereadBuffers, drawsFrom, whileStill, rectangleBump, drawsNothing,
     };
     if (backend && !readMemory)
     {
@@ -2334,6 +2341,20 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
 
         get inScene(){
             return inScene;
+        },
+
+        /**
+         * Runs `work` -- the calls a host entry makes before the program runs
+         * again -- as one pause, so that a recording compares a dynamic
+         * buffer's bytes once in it rather than at its unlock and again at
+         * each draw from it. Not a D3D method.
+         *
+         * @template T
+         * @param {() => T} work
+         * @returns {T}
+         */
+        whileStill(work){
+            return services.whileStill ? services.whileStill(work) : work();
         },
 
         /**
@@ -4312,8 +4333,10 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 // Recording for a device that draws elsewhere, there is no
                 // renderer here to ask: the played one draws the stretch
                 // whenever both sides are its GPU's and not one texture, and
-                // the program is answered as it will be.
-                if (services.renderedElsewhere === true && drawnOnGpu(source)
+                // the program is answered as it will be. Drawing nothing on
+                // purpose, it is answered as a GPU would answer it.
+                if ((services.renderedElsewhere === true || services.drawsNothing === true)
+                    && drawnOnGpu(source)
                     && drawnOnGpu(destination) && !oneTexture(source, destination))
                 {
                     out.moves = [];
@@ -4346,8 +4369,10 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 // between two surfaces that live on the GPU is made there,
                 // and their guest bytes hold no pixels: moving them was a
                 // render target's worth of bytes copied on the program's
-                // thread for nothing.
-                if (services.renderedElsewhere === true && isGpuResident(destination))
+                // thread for nothing. Drawing nothing on purpose, there are
+                // no pixels anywhere to move.
+                if ((services.renderedElsewhere === true || services.drawsNothing === true)
+                    && isGpuResident(destination))
                 {
                     out.moves = [];
                     return D3D_OK;
@@ -4450,10 +4475,12 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
          * Two kinds are offered. An event query asks whether the GPU has
          * caught up, and it has, as far as the program can tell, the moment it
          * asks. An occlusion query asks how many pixels a set of draws
-         * produced, which this device cannot count: it answers with every
-         * pixel of the target, the one number that never culls what should be
-         * drawn, and says so once. Every other kind is the timing family, and
-         * is not offered.
+         * produced: the GPU's count where there is one. A device that draws
+         * nothing counts none, unless it draws nothing on purpose
+         * (`drawsNothing`, the graphics setting `draw: false`): then every
+         * pixel of the target, the one number that culls nothing the program
+         * would draw on a GPU. Every other kind is the timing family, and is
+         * not offered.
          *
          * A null out-pointer is the documented way to ask whether a kind is
          * offered at all.
@@ -4596,7 +4623,8 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         const queryCount = explicitCount();
         const occlusion = type === D3DQUERYTYPE.OCCLUSION;
         // An occlusion query counts what the GPU drew between its BEGIN and
-        // its END; a device that draws nothing counts nothing.
+        // its END; a device without one counts nothing, or, drawing nothing
+        // on purpose, the whole target.
         const counted = occlusion && renderer?.createOcclusionQuery
             ? renderer.createOcclusionQuery()
             : null;
@@ -4688,7 +4716,13 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 }
                 if (!counted)
                 {
-                    return ended ? answer(0) : D3D_OK;
+                    if (!ended)
+                    {
+                        return D3D_OK;
+                    }
+                    const target = services.drawsNothing === true ? model.renderTarget : null;
+                    const desc = target ? describe(target) : null;
+                    return answer(desc ? desc.Width * desc.Height : 0);
                 }
                 const result = renderer.occlusionResult(counted,
                     (flags & D3DGETDATA_FLUSH) !== 0);

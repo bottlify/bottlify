@@ -286,12 +286,14 @@ Where to look in the code: `ui/src/engine/session.js` (what the launcher passes)
 
 ## 5. cork, the execution core
 
-cork is our x86-32 to WebAssembly translator with a runtime of its own, the `cork/` package. It
-runs all of the program's code. The engine does not import cork; the `cpu` layer loads it by URL
-(`/engine/cork/index.js`).
+cork, our x86-32 to WebAssembly translator with a runtime of its own (the `cork/` package), runs all
+of the program's code. What it is, how it translates and runs code, what it supports and how fast it
+is: [`modules/cork/README.md`](../modules/cork/README.md). This section is about how it sits in
+Bottlify.
 
-Only user-mode code runs. Nothing reaches a Windows kernel: where a system call would be, a trap
-into the bridge fires instead (section 6).
+The engine does not import cork; the `cpu` layer loads it by URL (`/engine/cork/index.js`). Only
+user-mode code runs. Nothing reaches a Windows kernel: where a system call would be, a trap into the
+bridge fires instead (section 6).
 
 | Where | What it does |
 | --- | --- |
@@ -310,53 +312,8 @@ executor of a process has, past these, a 64 KiB state page and tables for each f
 There are no page tables: each 4 KiB page has one byte of flags — `INACCESSIBLE`,
 `HAS_CODE`, `VOLATILE`, `CLOSED`, `NO_EXECUTE`.
 
-### The layers of cork
+### Translation in Bottlify
 
-| Layer | Files | Takes → gives | What matters |
-| --- | --- | --- | --- |
-| Decoder | `decode/decoder.js`, `decode/table.js` | bytes at an address → `Instruction` | The opcode tables are written by hand. For each instruction the decoder knows its operands, its length, which flags it reads and writes, and how it can fault. On an unknown opcode it refuses and names it |
-| Region former | `region.js`, `helpers.js` | an entry address → `Region` | Gathers blocks along direct jumps and stops at an indirect jump, `ret`, `call`, a trap, `hlt`, a decoder refusal, or at the limit of 128 blocks / 8192 bytes. Short leaf functions (up to 16 blocks / 512 bytes) are inlined into the region. Compiler helpers such as MSVC's `_ftol2` are recognised by a fingerprint of their bytes |
-| Emitter | `emit/` | `Region` → one wasm function | Builds a `br_table` dispatch loop with structured loops. Integer instructions are `integer.js`, lazy flags `flags.js`, memory and page checks `memory.js`, the FPU `x87.js`, MMX and SSE `simd.js`, shared helpers `helpers.js` |
-| Encoder and batches | `wasm/encoder.js`, `wasm/features.js`, `runtime/emit-built.js`, `runtime/arena.js`, `runtime/translator.worker.js` | a batch of regions → one module | A pure function, so it can run on a translation thread, or on the engine thread until one is ready. `features.js` finds out whether the browser has SIMD and tail calls. `arena.js` keeps the functions already emitted in shared memory, for every translation thread of the process |
-| Runtime | `runtime/runtime.js`, `entries.js`, `pages.js`, `layout.js`, `cache.js` | EIP → translated function | The candidate queue by heat, batches, publishing, the entry hash of 262,144 slots, page flags, dropping translations on a write into code, relinking modules |
-| Interpreters | `interp.js` with `fast.js`, `interp-wasm.c` | run what is not translated yet | The JS interpreter runs first, then a wasm interpreter built from C with clang. It hands MMX and rare instruction forms back to JS |
-| Instruction model | `ir.js`, `ir-x87.js`, `ir-simd.js` | — | A deliberately slow and obvious account of what each x86 instruction does. The JS interpreter runs on it, and the emitter's tests are checked against it |
-| Engine glue | `core/src/layers/cpu/internal/cork-host.js`, `translation-store.js`, `thunks.js` | — | Memory, the quantum loop, switching between interpreters, the translation store in OPFS, the trap stubs |
-
-cork has no intermediate representation: the emitter works directly on decoded instructions.
-
-### Translation: from a hot address to a ready function
-
-```mermaid
-%%{init: {"theme": "base", "flowchart": {"curve": "step", "nodeSpacing": 30, "rankSpacing": 46, "padding": 10}, "themeVariables": {"fontFamily": "Inter, Segoe UI, Helvetica, Arial, sans-serif", "fontSize": "13px", "primaryColor": "#FFFFFF", "primaryBorderColor": "#2F3A40", "primaryTextColor": "#1B2328", "lineColor": "#5C6970", "clusterBkg": "#F3F5F6", "clusterBorder": "#9AA6AC", "edgeLabelBackground": "#FFFFFF"}}}%%
-flowchart TB
-  subgraph E1["Engine thread"]
-    HOT["Interpreter: hot address"]
-    REG["Region former and decoder"]
-    Q{"Translation<br/>in the store?"}
-  end
-  subgraph TW["Translation threads"]
-    EMI["Emitter: region → wasm function"]
-    ENC["Encoder: batch → module,<br/>compilation"]
-  end
-  subgraph E2["Engine thread"]
-    PUT["Write to the store, OPFS"]
-    PUB["Publish: module instance,<br/>functions into the table, entries into the hash"]
-  end
-  HOT --> REG --> Q
-  Q -->|"no"| EMI
-  EMI --> ENC
-  ENC -->|"bytes and WebAssembly.Module"| PUT
-  PUT --> PUB
-  Q -->|"yes"| PUB
-```
-
-- **A hot address.** The interpreters count jumps to each target. A target becomes a candidate on
-  its second jump, then again at every power of two. An address that translated code has left for
-  64 times without finding a translation becomes a candidate too.
-- **Batches.** Regions are translated 32 at a time, up to 256 when the queue is long. Each batch is
-  one wasm module. Functions a region calls directly go into the same batch. Later the modules are
-  relinked into larger ones of 512 regions.
 - **Several translation threads, one arena.** A process can have several translation threads, each
   with a batch of its own out. A relink, a merge, and a region formed again take over running
   regions, so they still go out alone. The functions already emitted, which a relink or merge takes
@@ -379,37 +336,13 @@ flowchart TB
   x87 stack top. A second run takes from the store everything the first one translated. A bundle may
   bring translations along (`CORKSEED`); they are seeded before the first instruction.
 
-### Execution: how a region ends
+### Execution in Bottlify
 
-```mermaid
-%%{init: {"theme": "base", "flowchart": {"curve": "step", "nodeSpacing": 26, "rankSpacing": 50, "padding": 10}, "themeVariables": {"fontFamily": "Inter, Segoe UI, Helvetica, Arial, sans-serif", "fontSize": "13px", "primaryColor": "#FFFFFF", "primaryBorderColor": "#2F3A40", "primaryTextColor": "#1B2328", "lineColor": "#5C6970", "clusterBkg": "#F3F5F6", "clusterBorder": "#9AA6AC", "edgeLabelBackground": "#FFFFFF"}}}%%
-flowchart LR
-  EIP["EIP of a program thread"] --> H{"Entry<br/>in the hash?"}
-  H -->|"yes"| R["Region<br/>registers in wasm locals"]
-  H -->|"no"| I["Interpreter<br/>hot addresses queue for translation"]
-  R -->|"jump, ret, call"| X1["Target in the hash: tail call<br/>to the next region, else the interpreter"]
-  R -->|"out dx, eax"| X2["Bridge call right from the region"]
-  R -->|"quantum used up"| X3["Scheduler: next thread"]
-  R -->|"write into a page with code"| X4["The page's translations dropped"]
-  R -->|"exception"| X5["Exact EIP and registers → the program's SEH"]
-```
-
-- **A jump between regions** is a tail call (`return_call_indirect`) through a shared function
-  table, with no exit to the host, when the browser has wasm tail calls. A `switch` through a jump
-  table stays inside the region: the target is checked against the table as it runs.
 - **Counting instructions.** Each block subtracts its instruction count from a budget on the way
   out, and the budget is checked on backward jumps. The scheduler's quantum is 100,000 instructions,
   but translated code is given its budget 10,000 at a time, so a thread can be preempted promptly.
 - **Two interpreters.** The first 8192 units of a process's work (instructions, plus 128 for each new
   jump target) run on the JS interpreter, the rest on the wasm interpreter.
-- **Lazy flags.** Arithmetic records the operation, its width, the result and the operands, and a
-  flag is computed only where it is read. That is how `cmp` + `jl` becomes a single signed compare in
-  wasm. Flags nobody reads are removed by a separate pass.
-- **x87** is eight f64 locals. A region is compiled for a particular stack top on entry (the hash
-  slot holds it) and checks the stack's shape once, so `fld`, `fmul` and `fstp` work on the locals
-  directly. The FPU's precision control is honoured.
-- **SSE.** XMM registers are `v128` locals (wasm SIMD); MMX registers are `i64` locals over the x87
-  registers.
 - **Memory and self-modifying code.** Outside precise mode reads are not checked: the address simply
   wraps into the program's memory. Every write checks the page's flag byte. When the program writes
   where translated code lies on a page, the region exits. The first such write drops all of that
@@ -431,7 +364,10 @@ flowchart LR
   busy then goes to one left free -- the process's own first -- and has its code translated there
   too, rather than leave a processor idle. A thread is never started while another executor still
   runs it: one that waited there is made ready by its wake before that slice is taken, and the
-  scheduler refuses the second start. The process's own thread runs its threads
+  scheduler refuses the second start. Only the executors in a thread's affinity mask are its to
+  run on: the program is told it has one processor for each executor -- by GetSystemInfo, the
+  process block, `cpuid` and the rest -- and `cpuid` answers each executor's number as its APIC
+  id, so a thread pinned to a processor reads that processor's. The process's own thread runs its threads
   too, and answers the calls the others' threads make -- at each of its own crossings into the host
   and between its turns, each caller the current thread while it is answered. An executor past the
   first is a cork host in a worker of its own over the

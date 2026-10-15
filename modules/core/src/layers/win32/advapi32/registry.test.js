@@ -559,6 +559,48 @@ test('a bottle packed again lays its registry over a session saved under the one
         'what the program wrote beside it stays');
 });
 
+test('each processor has a key of its own, alike, and no key past the last', ()=>{
+    const hive = createHive({ processors: 4, processorMhz: 3000 });
+    const local = /** @type {any} */ (hive.root(HKEY_LOCAL_MACHINE));
+    const processors = hive.open(local, 'HARDWARE\\DESCRIPTION\\System\\CentralProcessor');
+    assert.deepEqual(processors && hive.subkeys(processors), ['0', '1', '2', '3']);
+    const valuesOf = (/** @type {string} */ name)=>{
+        const key = hive.open(local, `HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\${name}`);
+        return key && hive.values(key).map(value=>[value.name, [...value.data]]);
+    };
+    assert.ok(valuesOf('0')?.some(([name])=>name === 'Identifier'));
+    for (const name of ['1', '2', '3'])
+    {
+        assert.deepEqual(valuesOf(name), valuesOf('0'), `processor ${name}`);
+    }
+    const one = createHive();
+    assert.deepEqual(one.subkeys(/** @type {any} */ (one.open(
+        /** @type {any} */ (one.root(HKEY_LOCAL_MACHINE)),
+        'HARDWARE\\DESCRIPTION\\System\\CentralProcessor'))), ['0'], 'one by default');
+});
+
+test('a hive kept or installed on more processors has this machine\'s keys', ()=>{
+    // HARDWARE is the kernel's, written at every boot: a restored session
+    // and an installation's registry both describe the machine they came from.
+    const keysOf = (/** @type {ReturnType<typeof createHive>} */ hive)=>hive.subkeys(
+        /** @type {any} */ (hive.open(/** @type {any} */ (hive.root(HKEY_LOCAL_MACHINE)),
+            'HARDWARE\\DESCRIPTION\\System\\CentralProcessor')));
+    const four = createHive({ processors: 4 }).toJSON();
+    const restored = createHive({ processors: 2 });
+    restored.fromJSON(four);
+    assert.deepEqual(keysOf(restored), ['0', '1']);
+    for (const over of [false, true])
+    {
+        const installed = createHive({ processors: 2, processorMhz: 3000 });
+        installed.fillFromJSON(four, over);
+        assert.deepEqual(keysOf(installed), ['0', '1'], over ? 'laid over' : 'filled');
+        const key = installed.open(/** @type {any} */ (installed.root(HKEY_LOCAL_MACHINE)),
+            'HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0');
+        const mhz = key && installed.getValue(key, '~MHz');
+        assert.equal(mhz && new DataView(mhz.data.buffer).getUint32(0, true), 3000);
+    }
+});
+
 test('the processor key names the processor the engine gives', ()=>{
     const nameOf = (/** @type {any} */ hive)=>{
         const local = /** @type {any} */ (hive.root(HKEY_LOCAL_MACHINE));

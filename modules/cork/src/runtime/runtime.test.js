@@ -56,92 +56,106 @@ function machine(config = {}, ramSize = 4 << 20){
 // mov ecx, 1000; L: dec ecx; jnz L; hlt
 const COUNTDOWN = [0xb9, 0xe8, 0x03, 0, 0, 0x49, 0x75, 0xfd, 0xf4];
 
-test('single precision seen leaves a wide x87 region once, and the address is translated'
-    + ' again with the rounding', async()=>{
-    const m = machine();
+/** fld1; fld1; fadd st0, st1; fstp st0; fstp st0; hlt -- a block whose fadd rounds. */
+const ROUNDING = [0xd9, 0xe8, 0xd9, 0xe8, 0xd8, 0xc1, 0xdd, 0xd8, 0xdd, 0xd8, 0xf4];
+
+/**
+ * The x87 at a block's start, under a control word, and the block run from its
+ * entry, translated first when it has none.
+ *
+ * @param {ReturnType<typeof machine>} m @param {number} at @param {number} control
+ */
+async function runRounding(m, at, control){
     const view = new DataView(m.memory.buffer);
+    view.setUint16(m.layout.x87Control, control, true);
+    view.setUint32(m.layout.eip, at, true);
     view.setUint8(m.layout.x87Empty, 0xff);
-    // fld1; fld1; fadd st0, st1; fstp st0; fstp st0; hlt -- a rounding block, translated
-    // under double precision and run under single.
-    m.write(CODE, [0xd9, 0xe8, 0xd9, 0xe8, 0xd8, 0xc1, 0xdd, 0xd8, 0xdd, 0xd8, 0xf4]);
-    m.runtime.noteHot(CODE, 0);
-    await m.runtime.translatePending();
-    assert.equal(m.runtime.diagnostics().wide, true);
+    view.setUint8(m.layout.x87Top, 0);
+    if (m.runtime.entryOf(at, 0) < 0)
+    {
+        m.runtime.noteHot(at, 0);
+        await m.runtime.translatePending();
+    }
+    return m.runtime.run(m.runtime.entryOf(at, 0), 100);
+}
+
+test('a wide x87 region run under single leaves once, and its address is translated again'
+    + ' with the rounding', async()=>{
+    const m = machine();
+    m.write(CODE, ROUNDING);
+    assert.equal((await runRounding(m, CODE, 0x27f)).kind, 'halt');
+    assert.deepEqual(m.runtime.diagnostics().precision, { wide: 1, narrow: 0, mixed: 0 });
+    const view = new DataView(m.memory.buffer);
     view.setUint16(m.layout.x87Control, 0x07f, true);
+    view.setUint32(m.layout.eip, CODE, true);
+    view.setUint8(m.layout.x87Empty, 0xff);
     const exit = m.runtime.run(m.runtime.entryOf(CODE, 0), 100);
     assert.equal(exit.kind, 'untranslated');
     assert.equal(exit.retired, 2, 'the two fld1 ran, the fadd did not');
     assert.equal(m.eip(), CODE + 4);
     const after = m.runtime.diagnostics();
     assert.equal(after.precisionSwitches, 1);
-    assert.equal(after.wide, false);
+    assert.deepEqual(after.precision, { wide: 0, narrow: 1, mixed: 0 });
     assert.equal(m.runtime.entryOf(CODE, 0), -1, 'the wide region went');
     // Translated again, it runs to the end under single precision.
-    view.setUint32(m.layout.eip, CODE, true);
-    view.setUint8(m.layout.x87Empty, 0xff);
-    view.setUint8(m.layout.x87Top, 0);
-    m.runtime.noteHot(CODE, 0);
-    await m.runtime.translatePending();
-    assert.equal(m.runtime.run(m.runtime.entryOf(CODE, 0), 100).kind, 'halt');
+    assert.equal((await runRounding(m, CODE, 0x07f)).kind, 'halt');
     assert.equal(m.runtime.diagnostics().precisionSwitches, 1, 'once');
-    assert.equal(m.runtime.diagnostics().precision, 'narrow');
 });
 
-test('a batch formed while the machine has single set is compiled for single at once', async()=>{
-    const m = machine();
-    const view = new DataView(m.memory.buffer);
-    view.setUint8(m.layout.x87Empty, 0xff);
-    view.setUint16(m.layout.x87Control, 0x07f, true);
-    m.write(CODE, [0xd9, 0xe8, 0xd9, 0xe8, 0xd8, 0xc1, 0xdd, 0xd8, 0xdd, 0xd8, 0xf4]);
-    m.runtime.noteHot(CODE, 0);
-    await m.runtime.translatePending();
-    const before = m.runtime.diagnostics();
-    assert.equal(before.precision, 'narrow');
-    assert.equal(before.precisionSwitches, 1);
-    assert.equal(m.runtime.run(m.runtime.entryOf(CODE, 0), 100).kind, 'halt');
-    assert.equal(m.runtime.diagnostics().exits.untranslated, 0, 'no wide region to leave');
-});
+test('a region first formed while the machine has single set is compiled for single at once',
+    async()=>{
+        const m = machine();
+        m.write(CODE, ROUNDING);
+        assert.equal((await runRounding(m, CODE, 0x07f)).kind, 'halt');
+        const after = m.runtime.diagnostics();
+        assert.deepEqual(after.precision, { wide: 0, narrow: 1, mixed: 0 });
+        assert.equal(after.precisionSwitches, 0);
+        assert.equal(after.exits.untranslated, 0, 'no wide region to leave');
+    });
 
-test('a region compiled for single leaves once another precision is seen, and the address is'
-    + ' translated again with a test at every rounding instruction', async()=>{
+test('a region that runs under single and then under double is compiled for double, and one'
+    + ' that then runs under single again tests at every rounding instruction', async()=>{
     const m = machine();
-    const view = new DataView(m.memory.buffer);
-    const restart = ()=>{
-        view.setUint32(m.layout.eip, CODE, true);
-        view.setUint8(m.layout.x87Empty, 0xff);
-        view.setUint8(m.layout.x87Top, 0);
-    };
-    view.setUint16(m.layout.x87Control, 0x07f, true);
-    m.write(CODE, [0xd9, 0xe8, 0xd9, 0xe8, 0xd8, 0xc1, 0xdd, 0xd8, 0xdd, 0xd8, 0xf4]);
-    restart();
-    m.runtime.noteHot(CODE, 0);
-    await m.runtime.translatePending();
-    m.runtime.run(m.runtime.entryOf(CODE, 0), 100);
-    restart();
-    m.runtime.noteHot(CODE, 0);
-    await m.runtime.translatePending();
-    assert.equal(m.runtime.run(m.runtime.entryOf(CODE, 0), 100).kind, 'halt');
-    assert.equal(m.runtime.diagnostics().precision, 'narrow');
+    m.write(CODE, ROUNDING);
+    assert.equal((await runRounding(m, CODE, 0x07f)).kind, 'halt');
     // Double precision under the single region: it leaves before the fadd.
-    view.setUint16(m.layout.x87Control, 0x27f, true);
-    restart();
-    const exit = m.runtime.run(m.runtime.entryOf(CODE, 0), 100);
+    let exit = await runRounding(m, CODE, 0x27f);
     assert.equal(exit.kind, 'untranslated');
     assert.equal(m.eip(), CODE + 4);
+    assert.deepEqual(m.runtime.diagnostics().precision, { wide: 1, narrow: 0, mixed: 0 });
+    assert.equal(m.runtime.entryOf(CODE, 0), -1, 'the single region went');
+    assert.equal((await runRounding(m, CODE, 0x27f)).kind, 'halt');
+    // And single again: both seen, the address tests from now on.
+    exit = await runRounding(m, CODE, 0x07f);
+    assert.equal(exit.kind, 'untranslated');
     const after = m.runtime.diagnostics();
     assert.equal(after.precisionSwitches, 2);
-    assert.equal(after.precision, 'mixed');
-    assert.equal(m.runtime.entryOf(CODE, 0), -1, 'the single region went');
-    for (const control of [0x27f, 0x07f])
+    assert.deepEqual(after.precision, { wide: 0, narrow: 0, mixed: 1 });
+    for (const control of [0x27f, 0x07f, 0x37f, 0x07f])
     {
-        view.setUint16(m.layout.x87Control, control, true);
-        restart();
-        m.runtime.noteHot(CODE, 0);
-        await m.runtime.translatePending();
-        assert.equal(m.runtime.run(m.runtime.entryOf(CODE, 0), 100).kind, 'halt');
+        assert.equal((await runRounding(m, CODE, control)).kind, 'halt');
     }
     assert.equal(m.runtime.diagnostics().precisionSwitches, 2, 'and no further');
 });
+
+test('regions run under different precision controls are each compiled for their own',
+    async()=>{
+        // A renderer's code under single, a physics library's under double: one switch for
+        // the whole program left both testing at every rounding instruction.
+        const m = machine();
+        const other = CODE + 0x2000;
+        m.write(CODE, ROUNDING);
+        m.write(other, ROUNDING);
+        for (let turn = 0; turn < 4; turn++)
+        {
+            assert.equal((await runRounding(m, CODE, 0x07f)).kind, 'halt');
+            assert.equal((await runRounding(m, other, 0x27f)).kind, 'halt');
+        }
+        const after = m.runtime.diagnostics();
+        assert.deepEqual(after.precision, { wide: 1, narrow: 1, mixed: 0 });
+        assert.equal(after.precisionSwitches, 0);
+        assert.equal(after.exits.untranslated, 0, 'neither left at a rounding block');
+    });
 
 test('a formed-in leaf two tops reach takes an exchanged stack as it is', async()=>{
     // F is called with two values on the stack and then with one, so its
@@ -574,6 +588,29 @@ test('a store into code drops only the regions whose bytes it changed, and asks 
         m.setReg(1, 0);
         assert.equal(m.runtime.run(m.runtime.entryOf(CODE), 100000).kind, 'halt',
             'the loop as its bytes are now');
+    });
+
+test('a host write into a page with no code keeps no copy of it; one beside code does',
+    async()=>{
+        const m = machine({ precise: true });
+        m.write(CODE, COUNTDOWN);
+        m.runtime.noteHot(CODE);
+        assert.equal(await m.runtime.translatePending(), 1);
+        // Answers into a buffer and a file read, on pages no code is on.
+        for (let i = 0; i < 100; i++)
+        {
+            m.runtime.stored(0x20000 + (i % 4) * 0x1000 + i * 4, 4);
+        }
+        m.runtime.stored(0x40000, 0x10000);
+        let d = m.runtime.diagnostics();
+        assert.equal(d.codePageCopies, 0, 'nothing kept of pages without code');
+        assert.equal(d.regions, 1);
+        assert.equal(d.invalidations, 0);
+        // Beside the loop, on its page: kept, to judge the next store there by.
+        m.runtime.stored(CODE + 0x800, 4);
+        d = m.runtime.diagnostics();
+        assert.equal(d.codePageCopies, 1);
+        assert.equal(m.runtime.entryOf(CODE), -1, 'a page met first goes whole, as before');
     });
 
 test('a volatile page is translated again once its hold is over', async()=>{
@@ -1722,25 +1759,27 @@ test('a candidate that got an entry while it waited is not formed again', async(
     assert.equal(m.runtime.diagnostics().regions, 1, 'the loop head not a region of its own');
 });
 
-test('a batch asked for while the worker is still loading is emitted inline, not held for it',
-    async()=>{
-        const m = machine({ worker: true });
-        m.write(CODE, COUNTDOWN);
-        m.setReg(4, 0x80000);
-        try
-        {
-            // The worker is made, and is loading its modules.
-            await new Promise(resolve=>setImmediate(resolve));
-            await new Promise(resolve=>setImmediate(resolve));
-            m.runtime.noteHot(CODE, 0, 2);
-            await m.runtime.translatePending();
-            assert.ok(m.runtime.entryOf(CODE) >= 0, 'published at once');
-        }
-        finally
-        {
-            await m.runtime.flush();
-        }
-    });
+// Where the work here is bounded (`holdMs`), the batch waits for the worker instead
+// (forming-parts.test.js).
+test('a batch asked for while the worker is still loading is emitted inline, not held for it,'
+    + ' where the work here is unbounded', async()=>{
+    const m = machine({ worker: true, holdMs: 0 });
+    m.write(CODE, COUNTDOWN);
+    m.setReg(4, 0x80000);
+    try
+    {
+        // The worker is made, and is loading its modules.
+        await new Promise(resolve=>setImmediate(resolve));
+        await new Promise(resolve=>setImmediate(resolve));
+        m.runtime.noteHot(CODE, 0, 2);
+        await m.runtime.translatePending();
+        assert.ok(m.runtime.entryOf(CODE) >= 0, 'published at once');
+    }
+    finally
+    {
+        await m.runtime.flush();
+    }
+});
 
 test('a worker that cannot load is dropped and the batches are emitted inline', async()=>{
     // A worker file that throws as it loads: the worker is made, and fails after.
@@ -1891,6 +1930,56 @@ test('a block profile counts each block\'s executions: a loop\'s body its iterat
     assert.equal(topBlocks[0].address, CODE + 5);
     assert.equal(topBlocks[0].entry, CODE, 'in the region entered at the start');
     assert.equal(topBlocks[0].shared, false);
+});
+
+test('a block profile counts how calls and returns went, transfers and rdtscs', async()=>{
+    const m = machine({ blockProfile: true });
+    // mov ecx, 100; L: mov edx, F; call edx; dec ecx; jnz L; hlt -- an indirect
+    // call out of the region, a hundred times.
+    m.write(CODE, [0xb9, 100, 0, 0, 0, 0xba, 0x00, 0x11, 0, 0, 0xff, 0xd2, 0x49, 0x75, 0xf6, 0xf4]);
+    // F: call G; ret -- G, a leaf, formed into F's region. G: rdtsc; inc eax; ret.
+    m.write(0x1100, [0xe8, 0xfb, 0, 0, 0, 0xc3]);
+    m.write(0x1200, [0x0f, 0x31, 0x40, 0xc3]);
+    m.setReg(4, 0x80000);
+    m.runtime.noteHot(CODE);
+    m.runtime.noteHot(0x1100);
+    await m.runtime.translatePending();
+    const exit = m.runtime.run(m.runtime.entryOf(CODE), 1_000_000);
+    assert.equal(exit.kind, 'halt');
+    const { mechanisms, transferTargets } = /** @type {any} */ (m.runtime.diagnostics());
+    assert.equal(mechanisms.CALL_INDIRECT, 100, 'call edx, a wasm call each turn');
+    assert.equal(mechanisms.TRANSFER, 100, 'each through the entry hash');
+    assert.deepEqual(transferTargets, [[0x1100, 100]], 'all of them to F');
+    assert.equal(mechanisms.RET_TO_CALL, 100, 'F\'s ret answered the call waiting for it');
+    assert.equal(mechanisms.CALL_FORMED, 100, 'call G, formed into F\'s region');
+    assert.equal(mechanisms.RET_FORMED, 100, 'G\'s ret, a jump back');
+    assert.equal(mechanisms.RDTSC, 100);
+    assert.equal(mechanisms.APART_UNPREDICTED, 100, 'call edx, apart: no callee predicted');
+    assert.equal(mechanisms.CALL_REL + mechanisms.CALL_LEFT + mechanisms.RET_LEFT
+        + mechanisms.CALL_ELSEWHERE, 0, 'nothing left a region');
+    assert.equal(/** @type {any} */ (machine().runtime.diagnostics()).mechanisms, undefined,
+        'a run without the profile counts nothing');
+});
+
+test('a block profile says what the hot code is made of: each form\'s executions and the wasm'
+    + ' bytes they ran through, emitted without the profile\'s counts', async()=>{
+    const m = machine({ blockProfile: true });
+    m.write(CODE, COUNTDOWN);
+    m.runtime.noteHot(CODE);
+    await m.runtime.translatePending();
+    m.runtime.run(m.runtime.entryOf(CODE), 100_000);
+    const { forms } = /** @type {any} */ (m.runtime.diagnostics());
+    assert.equal(forms.regions, 1);
+    const row = (/** @type {string} */ form)=>forms.forms
+        .find((/** @type {any} */ one)=>one.form === form);
+    assert.equal(row('dec r32').executed, 1000, 'once a turn');
+    assert.equal(row('jne rel').executed, 1000);
+    assert.equal(row('mov r32, imm').executed, 1, 'the entry block, once');
+    assert.equal(row('hlt').executed, 1);
+    assert.equal(forms.executed, 2002, 'mov, a thousand dec and jnz, hlt');
+    assert.ok(row('dec r32').perInstruction > 0);
+    assert.ok(Math.abs(forms.forms.reduce((/** @type {number} */ sum, /** @type {any} */ one)=>
+        sum + one.share, 0) - 1) < 1e-9, 'the shares are of the bytes run through');
 });
 
 test('a block profile with blockProfileFrom counts only what ran after that moment', async()=>{
@@ -2367,14 +2456,263 @@ test('an indirect call sampled going to a few small callees has them formed into
     assert.equal(run(), 300, 'only H leaves, and its return comes back');
 });
 
-test('callTargets and dispatch are off unless a run asks for them', async()=>{
+test('a call its prediction takes is not sampled: the calls that still leave are, and their'
+    + ' callee is formed in next', async()=>{
+    if (!probeFeatures().tailCalls)
+    {
+        return;
+    }
+    const m = machine({ countTransfers: true, callTargets: true, callReturn: false });
+    const { code, table, slots, f, g, h } = dispatchLoop(1600);
+    m.write(CODE, code);
+    m.write(table, slots.flatMap(slot=>[slot & 0xff, slot >>> 8 & 0xff, 0, 0]));
+    for (const at of [f, g, h, CODE])
+    {
+        m.runtime.noteHot(at);
+    }
+    await m.runtime.translatePending();
+    const run = ()=>{
+        m.setReg(1, 1600);
+        m.setReg(2, 0);
+        m.setReg(4, 0x80000);
+        const before = m.runtime.diagnostics().transfers ?? 0;
+        assert.equal(m.runtime.run(m.runtime.entryOf(CODE + 5), 1_000_000).kind, 'halt');
+        assert.equal(m.reg(2), 800 + 700 * 3 + 100 * 100);
+        return (m.runtime.diagnostics().transfers ?? 0) - before;
+    };
+    for (let i = 0; i < 16 && m.runtime.diagnostics().reforms === 0; i++)
+    {
+        run();
+        await m.runtime.translatePending();
+    }
+    assert.equal(run(), 300, 'F and G formed in, H leaves');
+    // H is a sixteenth of the calls, under the share a callee needs among all of
+    // them; among the calls that leave it is every one.
+    for (let i = 0; i < 400 && m.runtime.diagnostics().reforms === 1; i++)
+    {
+        run();
+        await m.runtime.translatePending();
+    }
+    assert.equal(m.runtime.diagnostics().reforms, 2);
+    assert.equal(run(), 0, 'every call formed in');
+});
+
+/**
+ * The loop of `dispatchLoop` over sixty-four callees, one a slot (`and eax, 63`): H_k at
+ * CODE + 0x200 + 4k adds k + 1 to edx -- an indirect call whose targets no callee takes an
+ * eighth of. Sixteen, a period the profile's sampled calls are often apart by (144 calls),
+ * gave one callee a quarter of the samples.
+ * @param {number} n
+ */
+const spreadLoop = n=>{
+    const { code, table } = dispatchLoop(n);
+    const callees = Array.from({ length: 64 }, (_, k)=>CODE + 0x200 + k * 4);
+    return { code: [...code.slice(0, 7), 0x83, 0xe0, 0x3f, ...code.slice(10, 21),
+        ...Array.from({ length: 0x200 - 21 }, ()=>0xcc),
+        ...callees.flatMap((_, k)=>[0x83, 0xc2, k + 1, 0xc3])], table, slots: callees };
+};
+
+/**
+ * A machine running a loop over an indirect call through `table`, its regions translated:
+ * `run` runs it once from the top, and `counted` once with the profile on, answering how
+ * many calls it counted.
+ * @param {object} config @param {{ code: number[], table: number, slots: number[] }} loop
+ * @param {number} sum  what the loop leaves in edx
+ */
+const profiledLoop = async(config, { code, table, slots }, sum)=>{
+    const m = machine({ callTargets: true, ...config });
+    m.write(CODE, code);
+    m.write(table, slots.flatMap(slot=>[slot & 0xff, slot >>> 8 & 0xff, 0, 0]));
+    const starts = [...new Set(slots), CODE];
+    for (const at of starts)
+    {
+        m.runtime.noteHot(at);
+    }
+    // More starts than a batch takes.
+    for (let i = 0; i < 8 && starts.some(at=>m.runtime.entryOf(at) < 0); i++)
+    {
+        await m.runtime.translatePending();
+    }
+    const profile = new DataView(m.memory.buffer);
+    const at = /** @type {number} */ (m.layout.callProfile);
+    const run = ()=>{
+        m.setReg(1, 1600);
+        m.setReg(2, 0);
+        m.setReg(4, 0x80000);
+        assert.equal(m.runtime.run(m.runtime.entryOf(CODE + 5), 1_000_000).kind, 'halt');
+        assert.equal(m.reg(2), sum);
+    };
+    const counted = async()=>{
+        if (profile.getUint32(at, true) === 0)
+        {
+            await m.runtime.translatePending();
+        }
+        assert.equal(profile.getUint32(at, true), 1, 'the profile on');
+        const before = profile.getUint32(at + 4, true);
+        run();
+        return profile.getUint32(at + 4, true) - before;
+    };
+    return { m, run, counted };
+};
+
+test('an indirect call whose callees are spread is sampled until it comes due, then formed'
+    + ' again without the profile', async()=>{
+    if (!probeFeatures().tailCalls)
+    {
+        return;
+    }
+    // Each of the sixty-four a sixty-fourth of the calls, under the eighth a callee needs.
+    const { m, run, counted } = await profiledLoop({}, spreadLoop(1600), 1600 + 25 * 2016);
+    assert.equal(await counted(), 1600, 'every call counted while the profile is on');
+    for (let i = 0; i < 64 && m.runtime.diagnostics().reforms === 0; i++)
+    {
+        run();
+        await m.runtime.translatePending();
+    }
+    const d = m.runtime.diagnostics();
+    assert.equal(d.reforms, 1);
+    assert.equal(d.prediction?.quiet, 1);
+    assert.equal(await counted(), 0, 'formed again, the call is not counted');
+    for (let i = 0; i < 16; i++)
+    {
+        run();
+        await m.runtime.translatePending();
+    }
+    assert.equal(m.runtime.diagnostics().reforms, 1, 'and never formed again for it');
+});
+
+test('an indirect call whose callees cannot be formed in is quiet once it comes due again',
+    async()=>{
+        if (!probeFeatures().tailCalls)
+        {
+            return;
+        }
+        // F and G take most calls, but no callee of more than a byte is formed in.
+        const { m, run, counted } = await profiledLoop({ leafBytes: 1 }, dispatchLoop(1600),
+            800 + 700 * 3 + 100 * 100);
+        for (let i = 0; i < 64 && m.runtime.diagnostics().reforms === 0; i++)
+        {
+            run();
+            await m.runtime.translatePending();
+        }
+        const d = m.runtime.diagnostics();
+        assert.equal(d.reforms, 1);
+        assert.equal(d.prediction?.notFormed, 1, 'first formed again with F and G, not taken');
+        assert.equal(d.prediction?.quiet, 1);
+        assert.equal(await counted(), 0);
+    });
+
+test('a region formed after its call was predicted elsewhere is formed again with the callee'
+    + ' too', async()=>{
+    if (!probeFeatures().tailCalls)
+    {
+        return;
+    }
+    // A: mov ebx, G; mov ecx, 1600; L: call F; dec ecx; jnz L; hlt -- and B the same
+    // at CODE + 0x20; F: call ebx; ret, formed into both; G: add edx, 1; ret. A's
+    // region has the call's callee formed in before B's region exists.
+    const m = machine({ countTransfers: true, callTargets: true, callReturn: false });
+    const [a, b, f, g] = [CODE, CODE + 0x20, CODE + 0x40, CODE + 0x50];
+    /** @param {number} at */
+    const caller = at=>[0xbb, ...[0, 8, 16, 24].map(shift=>g >>> shift & 0xff),
+        0xb9, 0x40, 0x06, 0, 0,
+        0xe8, ...[0, 8, 16, 24].map(shift=>(f - (at + 15)) >>> shift & 0xff),
+        0x49, 0x75, 0xf8, 0xf4];
+    m.write(a, caller(a));
+    m.write(b, caller(b));
+    m.write(f, [0xff, 0xd3, 0xc3]);
+    m.write(g, [0x83, 0xc2, 0x01, 0xc3]);
+    /** @param {number} at */
+    const run = at=>{
+        m.setReg(2, 0);
+        m.setReg(4, 0x80000);
+        const before = m.runtime.diagnostics().transfers ?? 0;
+        assert.equal(m.runtime.run(m.runtime.entryOf(at), 1_000_000).kind, 'halt');
+        assert.equal(m.reg(2), 1600);
+        return (m.runtime.diagnostics().transfers ?? 0) - before;
+    };
+    for (const at of [g, f, a])
+    {
+        m.runtime.noteHot(at);
+    }
+    await m.runtime.translatePending();
+    // A transfer each for the call through ebx, G's return, and F's return then.
+    assert.equal(run(a), 4800, 'every call through ebx a transfer, and both returns');
+    for (let i = 0; i < 64 && run(a) > 0; i++)
+    {
+        await m.runtime.translatePending();
+    }
+    assert.equal(run(a), 0, 'G formed into A\'s region');
+    m.runtime.noteHot(b);
+    await m.runtime.translatePending();
+    assert.equal(run(b), 4800, 'B\'s region formed without G');
+    for (let i = 0; i < 64 && run(b) > 0; i++)
+    {
+        await m.runtime.translatePending();
+    }
+    assert.equal(run(b), 0, 'G formed into B\'s region as well');
+});
+
+test('a hot indirect call is sampled though another one is always the last before a reading',
+    async()=>{
+        if (!probeFeatures().tailCalls)
+        {
+            return;
+        }
+        // mov ecx, 1600; L: mov eax, ecx; and eax, 15; call [TABLE + eax*4]; dec ecx;
+        // jnz L; mov ecx, 16; mov ebx, H; M: call ebx; dec ecx; jnz M; hlt; F, G, H as in
+        // dispatchLoop -- the loop's call the hot one, M's sixteen calls the last
+        // before every reading: the last sixteen calls a reading took were all
+        // M's, and the loop's call never came due.
+        const m = machine({ countTransfers: true, callTargets: true, callReturn: false });
+        const table = CODE + 0x100;
+        const code = [
+            0xb9, 0x40, 0x06, 0, 0,
+            0x89, 0xc8, 0x83, 0xe0, 0x0f,
+            0xff, 0x14, 0x85, table & 0xff, table >>> 8 & 0xff, 0, 0,
+            0x49, 0x75, 0xf1,
+            0xb9, 16, 0, 0, 0,
+            0xbb, (CODE + 44) & 0xff, (CODE + 44) >>> 8 & 0xff, 0, 0,
+            0xff, 0xd3,
+            0x49, 0x75, 0xfb,
+            0xf4,
+            0x83, 0xc2, 0x01, 0xc3,
+            0x83, 0xc2, 0x03, 0xc3,
+            0x83, 0xc2, 0x64, 0xc3,
+        ];
+        const [f, g, h] = [CODE + 36, CODE + 40, CODE + 44];
+        m.write(CODE, code);
+        m.write(table, Array.from({ length: 16 }, (_, k)=>(k % 2 === 1 ? g : f))
+            .flatMap(slot=>[slot & 0xff, slot >>> 8 & 0xff, 0, 0]));
+        for (const at of [f, g, h, CODE])
+        {
+            m.runtime.noteHot(at);
+        }
+        await m.runtime.translatePending();
+        const run = ()=>{
+            m.setReg(2, 0);
+            m.setReg(4, 0x80000);
+            const before = m.runtime.diagnostics().transfers ?? 0;
+            assert.equal(m.runtime.run(m.runtime.entryOf(CODE), 1_000_000).kind, 'halt');
+            assert.equal(m.reg(2), 800 + 800 * 3 + 16 * 100);
+            return (m.runtime.diagnostics().transfers ?? 0) - before;
+        };
+        assert.equal(run(), 2 * (1600 + 16), 'every call and every return a transfer');
+        for (let i = 0; i < 32; i++)
+        {
+            run();
+            await m.runtime.translatePending();
+        }
+        assert.ok(run() < 1600, 'the loop\'s calls to F and G formed in');
+    });
+
+test('callTargets is on and dispatch off unless a run says otherwise', async()=>{
     if (!probeFeatures().tailCalls)
     {
         return; // no hash: no transfers, no placing
     }
-    // Each is worth a lot on the benchmarks and cost games on real hardware
-    // their frame rate while on (see the settings); a default that turns one
-    // back on unnoticed is what this holds.
+    // Each default was chosen by measuring games (see the settings); a default
+    // that flips unnoticed is what this holds.
     const calls = machine({ countTransfers: true });
     const { code, table, slots, f, g, h } = dispatchLoop(1600);
     calls.write(CODE, code);
@@ -2392,8 +2730,8 @@ test('callTargets and dispatch are off unless a run asks for them', async()=>{
         assert.equal(calls.runtime.run(calls.runtime.entryOf(CODE + 5), 1_000_000).kind, 'halt');
         await calls.runtime.translatePending();
     }
-    assert.equal(calls.runtime.diagnostics().reforms, 0,
-        'no indirect call sampled, no region formed again with its callees');
+    assert.ok((calls.runtime.diagnostics().reforms ?? 0) > 0,
+        'the indirect call sampled, its region formed again with its callees');
     // The callee in a module of its own: unplaced, a transfer between the two
     // goes through the table and is no crossing of a placed module's range.
     const modules = machine({ leafCalls: false, mergeAfter: 0 });
@@ -2414,7 +2752,8 @@ test('an indirect call sampled only now and then is not formed again; one sample
         {
             return;
         }
-        const m = machine({ callTargets: true });
+        // A window of 64 readings, against the 140 the call is left cold for.
+        const m = machine({ callTargets: true, callWindow: 64 });
         const { code, table, slots, f, g, h } = dispatchLoop(1600);
         m.write(CODE, code);
         m.write(table, slots.flatMap(slot=>[slot & 0xff, slot >>> 8 & 0xff, 0, 0]));

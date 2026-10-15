@@ -2653,6 +2653,16 @@ export function createDirect3D8Seam(
                     device: held.device,
                     divergence,
                     phases,
+                    // The buffers settled and the ring played as one pause: a
+                    // recording compares a dynamic buffer once in it.
+                    still: work=>{
+                        if (typeof held.device.whileStill === 'function')
+                        {
+                            held.device.whileStill(work);
+                            return;
+                        }
+                        work();
+                    },
                     commands: { take: records=>{
                         const made = held.device.commands(records,
                             D3D8_COMMANDS.commandObjects(records, publisher.objectAt));

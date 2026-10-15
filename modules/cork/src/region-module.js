@@ -24,12 +24,20 @@ import { ownLayout } from './runtime/layout.js';
 
 /**
  * @param {{ code: ArrayLike<number>, at: number, entry?: number, precise?: boolean,
- *     atomic?: boolean, ramSize?: number }} what
+ *     atomic?: boolean, ramSize?: number, hash?: boolean, callReturn?: boolean,
+ *     looseStacks?: boolean, structure?: boolean,
+ *     expansion?: import('./emit/region.js').ExpansionNote | null, wide?: boolean,
+ *     checked?: boolean }} what
  *     the bytes and the guest address they lie at; `entry` where the region starts (`at` by
- *     default); `precise`, `atomic`: as the translator's configuration has them
+ *     default); `precise`, `atomic`, `hash`, `callReturn`, `looseStacks`, `structure`: as the
+ *     translator's configuration has them; `expansion` told each instruction's wasm bytes
+ *     (a diagnostic build); `wide` the x87 compiled for double or extended precision, as a
+ *     run whose control word says so has it; `checked` false the x87 stack's shape at the
+ *     entry tested once rather than at every instruction, as the runtime speculates
  */
 export function regionModule({ code, at, entry = at, precise = false, atomic = false,
-    ramSize = 16 << 20 })
+    ramSize = 16 << 20, hash = false, callReturn = false, looseStacks = false,
+    structure = true, expansion = null, wide = false, checked = true })
 {
     const bytes = Uint8Array.from(code);
     // Bytes past the code read as `hlt`, so a region never runs off into them.
@@ -40,8 +48,9 @@ export function regionModule({ code, at, entry = at, precise = false, atomic = f
     const region = formRegion(read, entry, {});
     const m = new ModuleBuilder();
     const context = prepareModule(m, ownLayout({ ramSize }), features(), {},
-        { precise, atomic });
-    const translation = emitRegion(context, region, { entryTop: 0, checked: true });
+        { precise, atomic, hash, callReturn: hash && callReturn, looseStacks, structure,
+            expansion, wide });
+    const translation = emitRegion(context, region, { entryTop: 0, checked });
     finishModule(context, [translation.functionIndex]);
     m.exportFunction('region', translation.functionIndex);
     const wasm = m.toBytes();

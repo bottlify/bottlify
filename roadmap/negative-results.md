@@ -106,6 +106,78 @@ evidence again.
   wanted them, and every one adds a read-back to the GPU's queue. Not kept.
 - Not recorded: GPU (Parallels display adapter, model not recorded), driver, power plan.
 
+### 2026-10-12 -- callees formed in two and three levels deep (`formDepth`)
+
+- **Idea.** A callee of at most 16 blocks / 512 bytes is formed into its caller with one level of
+  its own calls; its callees' calls leave as wasm calls with the state written back. Far Cry's
+  counts (`mechanisms`, `roadmap/cork/README.md` step 0b) put 22% of its calls out of a region at a
+  call inside a callee already formed in. Forming those as well (`formDepth` 2 or 3) would take
+  them in.
+- **Workload.** cork-bench in the browser (`modules/cork/bench/browser/suite.mjs --scale 10 --reps
+  3`), both builds, all eight workloads, one bundle `head` of `cork2` at `7ea60178` with the
+  setting, three configurations interleaved: `formDepth` 1 (today), 2, 3. Bundle hash: not
+  recorded.
+- **Values.** Best of three reps, MIPS, d1 / d2 / d3: x87 vm 3382/3437/3225, entities 802/806/837,
+  math 1897/1905/1927, path 2356/2366/2217, lz 4420/4419/4433, containers 2166/2180/2174, spread
+  345/356/351, api 773/736/689; sse vm 3351/3173/3281, entities 758/762/779, math 2263/2254/2312,
+  path 2063/2313/2185, lz 4333/4386/4490, containers 2106/2059/2029, spread 350/348/346, api
+  780/719/788. Geomean 1531 / 1530 (1.00x) / 1526 (1.00x). Noise: the three reps of one
+  configuration and workload differed by 13.1% at the median, 24.3% at most (144 runs). Every
+  checksum the processor's. Native beside them: geomean 4683, spread 5.3-5.7x, entities 4.6-4.9x.
+- **Machine.** Headless Chromium 141.0.7390.37 on SwiftShader, a 4-core x86-64 Linux VM
+  (Firecracker). Power plan: not recorded.
+- **Why it did not pay.** Not found. The gate's programs (`src/runtime/forming.itest.js`) show the
+  setting takes calls in (calls out 3074 / 1358 / 668 / 267 for depths 0-3 over 40 seeds), so the
+  calls go; their cost on these workloads is under the noise, or the code formed in again in every
+  caller costs what the call saved.
+- **Correctness.** The gate: 120 seeded programs of functions calling one another (`ret imm`,
+  returns moved past their caller's bytes, stores into another function's code) run interpreted,
+  with nothing formed in, leaves alone and one, two and three levels, every observable the same; a
+  mutation that took every formed `ret` back to its call failed it at seed 5.
+- **Decision.** Left at 1. `formDepth` stays a setting with its gate, for a game measurement on
+  the person's machine before it is tried again.
+
+### 2026-10-12 -- predicted virtual calls (`callTargets`) on cork-bench
+
+- **Idea.** Far Cry's counts put a third of its calls out of a region at indirect calls with no
+  callee predicted; `callTargets` samples them and forms their few callees in. Its README row said
+  benchmarks of virtual calls gained 4-5x and games were slower; the plan's step 1c was to find why
+  games were slower and turn it on.
+- **Workload.** cork-bench in the browser, `--scale 10 --reps 3`, both builds, all workloads, one
+  bundle `head` of `cork2` at `08b89c40`, `callTargets` off against on, interleaved. Bundle hash:
+  not recorded.
+- **Values.** Best of three, MIPS, off / on: x87 vm 3373/3211, entities 772/814, math 1862/1925,
+  path 2331/2348, lz 4274/4258, containers 2102/2172, spread 325/348, api 729/755; sse vm
+  3255/3069, entities 753/748, math 2290/2224, path 2250/2336, lz 4514/4434, containers 2030/2115,
+  spread 341/322, api 744/790. Geomean 1507 / 1521 (1.01x). Noise: reps of one configuration and
+  workload 7.6% apart at the median, 20.5% at most (96 runs).
+- **Machine.** Headless Chromium 141.0.7390.37 on SwiftShader, a 4-core x86-64 Linux VM
+  (Firecracker). Power plan: not recorded.
+- **Why it did not pay.** `entities`, the virtual-call workload, is no faster: a node run with
+  `blockProfile` shows every one of its calls out unpredicted and the call's cost in the call and
+  return code (`call [m]` 379 bytes, `ret imm` 193), which predicting a target does not shorten
+  where the callee is not formed in. The 4-5x the README named was not reproduced here.
+- **Correctness.** Every checksum the processor's.
+- **Decision.** Left off.
+
+### 2026-10-12 -- transfers inside a placed module as direct tail calls (`dispatch`) on cork-bench
+
+- **Idea.** A node profile of `spread` put about a quarter of its wasm time in the module's shared
+  transfer (the entry hash's probe and `return_call_indirect`); `dispatch` places a module in a
+  range of the table and makes a transfer inside it a direct tail call.
+- **Workload.** As above, `dispatch` off against on.
+- **Values.** Best of three, MIPS, off / on: x87 vm 3156/3274, entities 801/814, math 1831/1890,
+  path 2335/2274, lz 4360/4515, containers 2192/2241, spread 354/347, api 770/768; sse vm
+  3200/3311, entities 782/737, math 2278/2205, path 2274/2221, lz 4494/4366, containers 2098/2078,
+  spread 346/322, api 758/751. Geomean 1530 / 1520 (0.99x). Noise: 5.3% at the median, 12.7% at
+  most (96 runs).
+- **Machine.** Headless Chromium 141.0.7390.37 on SwiftShader, a 4-core x86-64 Linux VM
+  (Firecracker). Power plan: not recorded.
+- **Why it did not pay.** Not found; the node profile's share of the transfer did not turn into
+  time Chromium saves.
+- **Correctness.** Every checksum the processor's.
+- **Decision.** Left off.
+
 ## Invalidated
 
 None yet.
@@ -381,3 +453,466 @@ None yet.
   spread between runs; the frame is the guest's code. One screenshot of the idea's run showed
   streaks over the road that the same spot before did not, not followed up.
 - **Decision.** Reverted, then put back the same day at the person's word (optional): what crosses to the graphics worker is what a heavy scene is bound by -- 30-55 MB/s in a fight of a third-person action demo, its worker parsing 200-260 ms of every 500 -- and less of it is the lever there. The streaks are to be checked.
+
+### 2026-10-13 -- every register in wasm parameters across guest calls (calling-convention bench, x64)
+
+- **Idea.** A function tier: a guest call becomes a wasm call that carries all eight registers
+  and the budget in parameters and results, instead of cork's state block, spilled registers
+  and the transfer's hash probe. Measured before building it, with the decision rule in
+  `modules/cork/bench/calls/README.md` committed before the runs (`cef7b45f`).
+- **Workload.** `modules/cork/bench/calls` at `a5022c56` (`calls.mjs` sha256 `0b74a3d39a0fd4d7…`,
+  `profiles.json` `4fd316bc3ee68f9b…`): the call shapes of the Far Cry block profile and of
+  cork-bench spread and entities, from `tools/cork-calls.mjs`; chains of depth 2, 8 and 32; arms
+  `state`, `state-direct`, `params`, `params+flags`, all ending with the same registers. 9 runs
+  of ~200 ms after 5 warming runs; nanoseconds a guest call.
+- **Values (TurboFan, depth 8, median of 9, spread = (max − min) / median).**
+  Node 22.22.0 (V8 12.4.254.21): farcry state 47.9 (17%), state-direct 39.4 (25%), params 42.7
+  (43%) -- params/state 0.892, params/state-direct 1.085; spread state 65.8 (34%), state-direct
+  56.4 (13%), params 45.7 (40%) -- 0.695, 0.809. Chromium 141.0.7390.37 headless: farcry 48.4
+  (21%), 43.2 (24%), 41.5 (25%) -- 0.857, 0.959; spread 65.9 (34%), 58.7 (22%), 50.7 (33%) --
+  0.770, 0.864. Liftoff, the other depths, entities and params+flags are in the runs' JSON and
+  were not decided on (Chromium Liftoff farcry params/state-direct 0.799, spread 0.939). The
+  Node TurboFan run overlapped for about a minute with `inspect.mjs` (one core of four); the
+  Chromium run, alone, gives the same answer. Noise floor: the spread of one arm, 13–43%.
+- **Machine.** A 4-core x86-64 Linux VM (Firecracker), Intel Xeon @ 2.80 GHz; power plan not
+  recorded. `inspect.mjs` on this V8: no argument on the stack up to 5 parameters, then one
+  `push` for each past the fifth.
+- **Why it did not pay.** On x64 V8 passes only five wasm parameters in registers; the rest go
+  through the stack at every call, which is the memory the state block uses anyway. What the
+  arms do show, inside the noise, is the transfer's probe (`state` over `state-direct`,
+  ~10–15% of a call), not the convention.
+- **Decision.** Not built: by the rule, `params` above 0.90 of `state-direct` for farcry on one
+  machine is negative (1.085 Node, 0.959 Chromium). The M4 (arm64) run is recorded when it
+  comes, and does not reopen this; a reason to come back would be a new rule.
+
+### 2026-10-13 -- loading only what is live after a call (plan step 2a/2b), its ceiling
+
+- **Idea.** `roadmap/cork/README.md` step 2: keep cork's call, but after the return load only
+  the registers the continuation reads before it writes them, and write back before a call only
+  the dirty ones. Measured as a ceiling before any translator code: the arm `state-live` of
+  `modules/cork/bench/calls` reloads only esp and the workload's `live after a return`
+  registers and no flags, more than the step can reach. Rule committed before the run
+  (`12194b8a`, `modules/cork/bench/calls/README.md`).
+- **Workload.** The bench at `12194b8a`, depth 8, the Far Cry, spread and entities call shapes;
+  `paired.mjs`: `state` and `state-live` alternated in 15 pairs of ~200 ms runs after 3 warming
+  pairs; TurboFan (`--no-liftoff`).
+- **Values.** Ratio `state-live` / `state` per pair, median [min .. max], pairs it won: farcry
+  0.984 [0.759 .. 1.292], 10 of 15; spread 0.972 [0.780 .. 1.100], 12 of 15; entities 0.950
+  [0.847 .. 1.139], 12 of 15. A smoke run before it (3 pairs, 50 ms, farcry) gave 0.967–0.970.
+  Every pair's times are in the run's JSON (not committed).
+- **Machine.** A 4-core x86-64 Linux VM (Firecracker), Intel Xeon @ 2.80 GHz, Node 22.22.0
+  (V8 12.4.254.21); power plan not recorded. Chromium not run: the rule checks it only after
+  Node passes.
+- **Why it did not pay.** Eleven loads from the state block, hits in the first-level cache, are
+  2–5% of a call whose cost is the transfer's probe, the shadow stack and the call itself. At
+  ~13% of Far Cry's hot bytes in calls that is under 1% of its guest time.
+- **Decision.** Step 2a/2b not built (rule: median at most 0.90 and 13 of 15 pairs, for farcry
+  and spread). Step 2c (the shadow stack's depth and the budget in one comparison) is a smaller
+  part of the same call and is left with it.
+
+### 2026-10-13 -- indirect call prediction (`callTargets`) in Far Cry, and its knobs, while the sampling took the last calls before a reading
+
+- **Idea.** cork's optional `callTargets`: indirect calls sampled, and a callee that takes a share
+  of a site's samples formed into the regions holding the site behind a compare. Measured on a
+  game with the GPU out of the way, then the knobs that decide which sites are formed again
+  (`predictShare`, `predictCallees`, `reforms`) and the leaf limits (`LEAF_BLOCKS`, `LEAF_BYTES`
+  in `modules/cork/src/region.js`) loosened.
+- **Workload.** The Far Cry demo bundle (`bundle.btl` sha256 `44530097b2a5a284…`) under
+  `tools/launch-probe.mjs --no-draw`, started into the level by its command line (`map fort`),
+  one executor and a translation worker, cold (no translation store). The level is in by
+  330–420 s; guest MIPS in rows of the run's series from 420 s to the end of the run.
+- **Values, prediction on and off** (tree `1e368204`, no block profile, rows of 30 s, 15 rows an
+  arm, one run an arm, off first). Off: 169.8 164.5 180.2 175.4 176.8 172.2 177.4 176.0 167.9 166.0
+  166.8 169.9 166.0 158.4 163.9 -- median 169.8, spread (max − min) / median 13%. On: 166.7 160.8
+  161.0 171.8 171.7 165.7 160.1 168.9 169.5 153.9 153.4 168.5 151.4 161.6 164.8 -- median 164.8,
+  spread 12%. On / off 0.971, inside the spread of one run.
+- **Values, the knobs** (tree `80d60f6f`, block profile from 420 s, its counts over the window;
+  share = `CALL_PREDICTED` / (`CALL_PREDICTED` + `APART_UNPREDICTED`)). Defaults: 19.5M
+  predicted, 139.0M unpredicted, share 12.3%, window MIPS 127.0 136.0 136.6 135.2 129.1 129.0.
+  `predictShare` 16, `predictCallees` 8, `reforms` 8: 20.2M, 137.8M, 12.8%; MIPS 119.7 125.6
+  125.9 129.6 131.1 120.3 102.5. Leaf limits 32 blocks and 1024 bytes (a local change, not
+  committed): 18.5M, 129.4M, 12.5%; transfers through the shared function 479.0M against
+  519.9M (−8%); MIPS 128.7 125.7 128.1 122.1 134.1 123.9. One run each; the noise floor between
+  runs of one setting not measured (two runs of the defaults on neighbouring trees gave window
+  medians 137 and 120).
+- **Machine.** A 4-core x86-64 Linux VM (Firecracker), Intel Xeon @ 2.80 GHz, Node 22.22.0
+  (V8 12.4.254.21). No GPU: `draw: false`. Power plan not recorded.
+- **Correctness.** Every run reached the level (the game's own debug output says so) and ran in
+  it to the end of the run; cork's unit tests and the forming gate passed on both committed trees.
+  The leaf-limit change was checked by the run alone.
+- **Why it did not pay.** Found afterwards with a log of the sampled sites (`ac1cc0de`): a
+  reading took the sixteen pairs written last, the calls just before it, so a site called
+  right before every reading took the samples (up to 10^5 times its share of the calls), and
+  64.8% of the window's indirect call executions were at sites that never came due. Knobs that act
+  on the sites that came due could not move a share decided by which sites came due.
+- **Decision.** Knobs and leaf limits left as they were. The sampling picks its calls by a hash
+  of a count across the last thousand (`cb208adb`), measured anew in a later entry.
+
+### 2026-10-13 -- indirect call prediction (`callTargets`) in Far Cry at a 44% share of its calls
+
+- **Idea.** The earlier entry's prediction, with what kept its share at 12–16% fixed: calls
+  sampled past the prediction rather than every call of a predicted site (`0f3712db`), each
+  region holding a call asked by what it has itself (`c9371c7e`), and room past a region's caps
+  for the callees the runtime predicted (`9b222a46`). The question is whether forming more of
+  the indirect calls' callees in runs the game faster.
+- **Workload.** The Far Cry demo bundle (`bundle.btl` sha256 `44530097b2a5a284…`) under
+  `tools/launch-probe.mjs --no-draw` at `9b222a46`, started into the level by its command line
+  (`map fort`), one executor and a translation worker, 900 s, guest MIPS in rows of 30 s. The two
+  arms ran at once on the same machine, so that what drifts drifts for both; cold, each arm into
+  an empty translation store (`--translation-store`), then warm from the store its cold run left
+  (on: 16215 hits, 2935 misses; off: 16164 and 2527).
+- **Share.** A run of its own with the block profile (from 600 s): `CALL_PREDICTED` 63.7M
+  against `APART_UNPREDICTED` 81.5M, 43.9% of the indirect calls predicted (12.3–16% before);
+  transfers through the shared function ~10.2 a thousand guest instructions (~11.0 before).
+- **Values, cold** (rows 541–1051 s, 18 rows, inside the level for both). On: 138.0 137.1 128.6
+  130.1 131.3 130.4 145.7 149.3 142.9 130.9 136.6 144.4 131.3 136.2 131.8 135.9 126.0 139.5 --
+  median 136.1, spread (max − min) / median 17%. Off: 141.5 125.4 135.4 143.2 137.6 127.9 135.1
+  135.7 150.5 142.4 139.6 150.7 147.9 143.0 139.7 151.5 144.3 156.8 -- median 141.9, spread 22%.
+  On / off 0.958; on ahead in 4 rows of 18. The translator did as little in the window in both.
+- **Values, warm** (rows 390–1050 s, 23 rows; the level was in by 360 s warm, by 510 s cold).
+  On: 151.0 150.0 140.5 151.3 148.9 137.4 132.0 125.0 141.4 137.5 135.5 147.6 154.1 144.3 142.2
+  156.8 149.8 147.5 153.1 154.2 146.2 150.3 146.2 -- median 147.5, spread 22%. Off: 154.6 145.9
+  148.4 142.2 141.7 141.8 150.3 136.1 143.2 150.8 155.9 153.6 149.0 150.1 142.7 151.0 154.2 150.0
+  162.2 163.0 154.4 146.6 160.3 -- median 150.1, spread 18%. On / off 0.983, by row a median of
+  0.969; on ahead in 6 rows of 23.
+- **Machine.** A 4-core x86-64 Linux VM (Firecracker), Intel Xeon @ 2.80 GHz, Node 22.22.0
+  (V8 12.4.254.21). No GPU: `draw: false`. Power plan not recorded. One pair a phase: the
+  noise floor between pairs not measured.
+- **Correctness.** Both arms reached the level and ran in it to the end; cork's unit tests
+  (597), the forming gate with its two predicted paths and the code-writes gate passed at the
+  tree measured.
+- **Why it did not pay.** The ceiling is small: the shared transfer function was ~5% of the
+  worker's time in an earlier profile of this game, and unpredicted indirect calls are about a
+  quarter of its transfers, so forming every one of them in is worth 1–2% at most. Against that
+  stand regions grown by the callees formed in, the compares before each predicted call and the
+  sampling of the calls left; which of them costs the 2–4% was not separated.
+- **Decision.** `callTargets` stays off by default, a choice a run makes. The three changes
+  stay: they make the option do what it says (the sampling reached the sites it was missing),
+  each with its test, and the gate runs its paths.
+
+### 2026-10-13 -- a call out's cost in Far Cry: a smaller entry hash, and the callee found from the call's own site
+
+- **Idea.** In a CPU profile of Far Cry in its level the module's transfer -- the entry hash's
+  probe and one indirect tail call for every call out of a module -- was 10% of the program's
+  thread, ~30 ns a transfer at ~3 million a second (a share of the time of the thread that runs
+  the program; the rate from the block profile's count a thousand instructions). Two guesses at
+  why: the hash's 12 MB missing the cache, and one indirect jump for every callee, which the
+  processor cannot predict.
+- **Workload.** The Far Cry demo bundle (`bundle.btl` sha256 `44530097b2a5a284…`) under
+  `tools/launch-probe.mjs --no-draw`, started into the level (`map fort`), one executor and a
+  translation worker, cold, a V8 CPU profile of 240 s from 600 s (`--cpu-profile`), two arms run
+  at once on the same machine; trees `110cde3b` and `eb1f9dbd`.
+- **Values, the hash.** 2^20 slots (12 MB) against 2^18 (3 MB, `hashSlots`; every one of the
+  ~200 000 entries fitted in both): the transfer 9.9% and 10.3% of the thread, regions 58.3% and
+  58.6%; MIPS in the level the same within the rows (300.3–304.3 and 295.9–307.0 at the end).
+- **Values, the site.** A call out to a known address read the slot its address hashes to from
+  its own site and, the key and the x87 top matching, called the slot's function through the
+  table from there (`eb1f9dbd`). Transfer 10.2% → 7.4% of the thread, regions 57.9% → 60.4%,
+  wasm in all 68.9% → 68.7%; guest MIPS 280.8 → 284.9 (median of 8 rows of 30 s, 601–811 s;
+  per row 0.931–1.083, ahead in 5 of 8). A loop of call sites in cork's machine did gain: 1
+  site 19.0/22.3 → 16.1/16.7 ns a call, 16 sites 24.9/24.5 → 16.4/16.7, 64 sites none
+  (36.0/40.3 against 40.0/36.7).
+- **What it showed.** A transfer table of N one-instruction callees through one site costs
+  21 ns a call at N = 1, 29 ns at 64 in order and 46 at random, 67 ns at 1024 in order and 91 at
+  random: past a few callees the cost is the jump into code far from the last, in order as much
+  as at random, and it is paid wherever the call is made from.
+- **Machine.** A 4-core x86-64 Linux VM (Firecracker), Intel Xeon @ 2.80 GHz, Node 22.22.0
+  (V8 12.4.254.21). No GPU: `draw: false`. Power plan not recorded. One pair each.
+- **Correctness.** Cork's unit tests (597), the forming gate (with the site path counted taken)
+  and the x86 corpus passed with the site's lookup.
+- **Decision.** Reverted (`fb81120b`, cache version back to 85); `hashSlots` left at 2^20.
+  Fewer calls out is what is left of this cost, and forming more in already did not pay
+  (`callTargets`, above).
+
+### 2026-10-13 -- larger regions for an interpreter: every region's caps doubled, and room only for the blocks a call returns to
+
+- **Idea.** Lua 5.1's `luaV_execute` (cork-bench `lua`) is cut by the region caps (128 blocks,
+  8192 bytes): the opcode handlers' tails past them, and the blocks its calls to
+  `luaV_gettable`, `luaD_precall` and `luaF_close` return to, are left out, so those calls
+  leave the region and their returns come back through the entry hash. Two ways to keep them:
+  (a) `maxRegionBlocks` 256 and `maxRegionBytes` 16384 for every region; (b) room past the caps
+  (64 blocks, 2048 bytes) for a block a call in the region returns to, nothing else.
+- **Workload.** cork-bench at `12d1ea54` with the `lua` image of `7e19106c` (built from the
+  same sources with a debug dump of the addons' text that the committed image leaves out), run
+  on the cork host as bench.mjs runs it (`run-cork.mjs`, not committed), the translator in the
+  same thread; frames 201-600, the median of the per-frame times; and the whole bench (21
+  workloads then, 3 reps, best rep), each arm twice.
+- **Values, Lua.** Medians of per-frame ms, four processes an arm, alternated: base 9.18, 9.03,
+  9.81, 9.73; (b) 9.14, 9.17, 9.25, 9.07; (a) 8.23, 8.52, 8.07, 8.75. Block profile over 100
+  frames: transfers through the hash 12.60 M base, 11.93 M (b), 10.13 M (a); calls leaving the
+  region 1.14 M base, 0 (b), 0 (a). (b) kept the calls but not the handlers' tails, which (a)
+  kept.
+- **Values, the bench, (a).** Steady time against base, the mean of the two runs' ratios:
+  geomean 1.089; load-x87 3.28, game-x87 1.91, calls512-scatter 1.22, fmath-x87 1.10;
+  str-x87 0.86, crc-x87 0.91. Cold time geomean 1.037. Every eax the same.
+- **Machine.** A 4-core x86-64 Linux VM (Firecracker), Intel Xeon @ 2.80 GHz, Node 22.22.0
+  (V8 12.4.254.21), branch hints read (`tools/chromium-v8.mjs`). Power plan not recorded. Run
+  to run, a whole-run mean moved by up to 15% (base 9.5-11.6 ms in one campaign); the
+  per-frame medians moved by under 9%.
+- **Decision.** Neither built. (a) cost the rest of the bench 8.9% (geomean), four workloads
+  10-228%, for its 11% on Lua; (b) is within the noise. Built instead: room past the caps for
+  the entry's own function
+  alone, callees still stopping at the caps (the commit after this entry).
+
+### 2026-10-13 -- x87: code a wasm call returns to tests its stack shape whatever top its region was entered at
+
+- **Idea.** `planStack` gives a block a call returns to the shape it needs, tested after the
+  call (`x87AfterCall`), only when the block's state is the region's entry state. A region
+  entered mid-loop with registers held -- cork-bench `game-pc24`'s distance loop at 0x4012e0,
+  entered at top 6 -- returns from its indirect call (`think[]`) at top 0, knows nothing of
+  the stack from there on, and so checks every push of the loop it comes back to, and the
+  float path (`floatSingles`, which needs a push known clear) never runs in it. The change
+  gave every return block its needs, tested after the call, whatever the entry.
+- **Workload.** cork-bench `game-pc24` (sha256 e2781f07...), `bench.mjs --root` of the tree
+  at `383b0b04` against the same tree with the change, `node --no-liftoff`, defaults (warm
+  20, iters 40, best of 5 reps), usPerIter; processes alternated.
+- **Values.** Ten processes an arm: base 346.6 350.6 351.4 356.7 365.5 367.5 374.7 441.1
+  465.4 467.6 (median 366.5); with the change 339.9 344.1 353.5 354.3 355.6 359.5 373.6 379.4
+  379.8 413.6 (median 357.6): -2.4%, inside the spread. An earlier five each: base median
+  329.9, change 330.7. fmath-pc24, the x87 and sse workloads: the same within noise; every eax
+  the same. A CPU profile (3 reps, 200 iters) put the 0x4012e0 region at 53.0 ms of self time
+  without and 32.5 ms with it, but the block profile shows the steady state running that loop
+  inside the region entered at 0x4010a5 (top 0), where the return block is the entry's state
+  and was tested already: the region the change speeds runs mostly while warming.
+- **Machine.** A 4-core x86-64 Linux VM (Firecracker), Intel Xeon @ 2.80 GHz, Node 22.22.0.
+  Power plan not recorded. A run's usPerIter moved by up to 35% between processes.
+- **Correctness.** Cork's unit tests (608, with a test of a callee leaving ST(7) held at the
+  same top: four shape misses, then checked, the interpreter's result) and integration tests
+  (22) passed; core's cpu layer (153) too.
+- **Decision.** Not committed: no signal over the noise on the one workload that has the
+  shape. Worth measuring again on a title whose hot loops sit in regions entered with
+  registers held.
+
+### 2026-10-14 -- invalidated: "x87: code a wasm call returns to tests its stack shape whatever top its region was entered at" (2026-10-13)
+
+- **Reason.** That entry compared separate processes' `usPerIter` of 40 iterations each; on
+  this machine one process's figure moves by up to 35%, and ten processes an arm could not
+  resolve a 10% change. Its explanation -- the region the change speeds runs mostly while
+  warming -- came from a block profile, which changes how regions form: without it the region
+  at 0x4012e0 is entered 1.335 times an iteration in the steady state (counted by wrapping the
+  runtime's `run`) and is its hottest (a CPU profile: 182.8 ms of self time of 4 reps x 400
+  iterations, against 107.6 ms with every region compiled for the wide controls).
+- **Measured again.** Paired in one thread (`tools/cork-bench/pair.mjs`, `browser.mjs
+  --paired`): blocks of 10 iterations alternated, 100 warm, the median of the rounds' ratios
+  with its quartiles. game-pc24, with the change against without: node 22.22.0
+  `--no-liftoff` 0.897 [0.858 0.947] (40 rounds; medians 281.4 and 254.2 us); Chrome 141 (V8
+  14.1) headless, three tabs of 40 rounds, 0.897 [0.865 0.943] (medians 260.0 and 233.5 us);
+  the same tree against itself 1.000 [0.942 1.025]. Every eax the same. The other workloads
+  within their quartiles; calls4096-order-x87 read 1.099 once, and 0.959 with the arms swapped
+  -- its control (one tree in both arms) reads 1.056, the second host slower on a workload of
+  4096 functions.
+- **Machine.** A 4-core x86-64 Linux VM (Firecracker), Intel Xeon @ 2.80 GHz. Power plan not
+  recorded.
+- **Decision.** Committed (the commit after this entry).
+
+### 2026-10-14 -- x87 single precision on floats: other encodings of the range test
+
+- **Idea.** Each f32 operation of the float path (`floatSingles`) tests its result before
+  going on: finite for a sum (`(bits & 0x7f800000) != 0x7f800000`), a normal above the
+  smallest for a product or a quotient (`(bits & 0x7fffffff) - 0x00800001 <u 0x7effffff`, a
+  zero from a zero operand aside). Tried in the float domain instead: a sum's as `r - r == 0`
+  (`sub`) and as `|r| <= FLT_MAX` (`abs`), a product's as `|r| > FLT_MIN && |r| <= FLT_MAX`
+  (`fpmul`). Two bounds beside, both wrong arithmetic: no test at all (`none`), and the exit
+  branch kept on a test of a local that never fails (`branch`).
+- **Workload.** cork-bench fmath-pc24 and game-pc24 at `6f1c8ae4`, paired in one thread
+  (`pair.mjs` in node 22.22.0 `--no-liftoff`, 40 rounds of 10; `browser.mjs --paired` in
+  Chrome 141 headless, two tabs of 40 rounds), 100 warm; the median of the rounds' ratios to
+  the committed encoding, with its quartiles. Every eax the same.
+- **Values.** node, fmath-pc24: sub 1.079 [1.005 1.133], abs 1.017 [0.965 1.089], fpmul 1.192
+  [1.099 1.276], none 0.599 [0.555 0.632], branch 0.665 [0.592 0.706]; game-pc24: sub 1.007,
+  abs 0.995, fpmul 1.018, none 0.839 [0.781 0.879], branch 0.842 [0.806 0.912]. Chrome,
+  fmath-pc24: sub 1.061, abs 1.028, fpmul 1.172, none 0.603; game-pc24: sub 1.032, abs 1.009,
+  fpmul 1.053, none 0.860.
+- **Reading.** The branches cost little (branch is within a few per cent of none); the cost is
+  the test's own operations -- the float's bits to an integer register and three or four
+  operations on them, as many again as the operation they guard in a chain of float
+  arithmetic. One test for several operations would save the branches only, and needs the
+  machine state rolled back to the first of them when it fails.
+- **Machine.** A 4-core x86-64 Linux VM (Firecracker), Intel Xeon @ 2.80 GHz. Power plan not
+  recorded. Not measured on arm64, where the transfer of a float's bits costs otherwise.
+- **Decision.** The committed encoding stays: no variant is faster on either engine.
+
+### 2026-10-14 -- invalidated: the "before" of "cork: the store's hits compiled off the engine thread and published a few at a call" (3cc3e7c4)
+
+- **Reason.** The commit message's "before" arm (the store-hit run of lua-x87 in headless
+  Chrome 141, 3 runs: synchronous compiles 6-7 of 10.5-19.6 ms, `instantiateMs` 13-23, the
+  longest `translatePending` calls 6.4-10.3 ms, the longest guest slices 56-60 ms, the three
+  iterations 1641-1784 ms) was measured on an intermediate build of the change, which already
+  compiled a hit off the thread once the translation worker had loaded, not on its parent
+  (`a0ac139c`). Those values are not the parent's and are not cited again; the "after" arm was
+  measured on the commit itself.
+- **Measured again.** Not on lua-x87. The Far Cry demo runs of 2026-10-14 (`--fake-gpu`, the
+  engine in a worker, headless Chrome 141, 240 s windows of the engine worker's CPU profile)
+  compare the tree before the whole series (`92f18dcd`) with the later commits instead.
+- **Machine.** The invalidated runs: not recorded. The Far Cry runs: a 4-core x86-64 Linux VM,
+  Intel Xeon @ 2.10 GHz; power plan not recorded.
+- **Decision.** The change stays.
+
+### 2026-10-14 -- indirect call prediction (`callTargets`) in Far Cry in Chromium, measured again
+
+- **Idea.** The two 2026-10-13 entries above left `callTargets` off: in Node, in the level, it ran
+  0.958 and 0.983 of the rate without it. Measured again in the browser the product runs in,
+  after its regions formed again were bounded by the engine thread's credit (`d96d7c1b`; formed in
+  one call they had held the thread for 33 ms).
+- **Workload.** The Far Cry demo bundle (`bundle.btl` sha256 `44530097b2a5a284…`) under
+  `tools/cdp_test/game.mjs farcry-demo --worker --coi --no-video --fake-gpu --run-seconds 240`, the
+  engine in a worker, the GPU a fake one that draws nothing. Tree `e5128a7c` with
+  `--cork-config '{"callTargets":true}'` against `'{}'`, alternated: cold on, cold off, warm on,
+  warm off, each arm on a browser profile of its own (its translation store). Guest instructions
+  over the whole run (about 259 s, the load included: the translator is quiet after 60 s cold and
+  30 s warm).
+- **Values.** Cold: on 68.27 G instructions in 259 s, 263.5 M/s; off 65.44 G, 253.1 M/s (on / off
+  1.041). Warm: on 68.97 G in 256 s, 269.9 M/s; off 64.67 G in 255 s, 253.7 M/s (1.064). The
+  same tree without it, run an hour before (`a24f5d9a`, same harness): 238.4 M/s cold, 244.8 warm.
+  One pair a phase; two runs off of one tree differ by up to 6%, so the noise floor is about the
+  size of the difference, and every run on was faster than every run off.
+- **The engine thread.** On, the translator's longest hold was 32.8 ms cold and 21.3 ms warm
+  (holds of 16 ms or more: 14 and 2), against 25.0 and 12.4 ms off (3 and 0), the regions formed
+  again in one call; bounded since (`d96d7c1b`), not measured again yet.
+- **Machine.** A 4-core x86-64 Linux VM, Intel Xeon @ 2.10 GHz, headless Chromium 141.0.7390.37
+  (V8 14.1). Power plan not recorded.
+- **Correctness.** Every run ran to the end of its window without the program stopping; whether
+  each reached the level was not checked. Cork's unit tests passed with the bound and with the
+  option on by default.
+- **Decision.** On by default. The earlier entries stand as measured in their conditions (Node, in
+  the level for 900 s, without the bound); the difference between them and this one is not
+  separated yet.
+
+### 2026-10-14 -- indirect call prediction (`callTargets`) on the benchmark, on by default
+
+- **Idea.** Whether `callTargets`, on by default since `b73438e6` for Far Cry's 4-6%, costs the
+  benchmark anything, and which part of it does.
+- **Workload.** `modules/cork/bench` at ten times each workload's own length, tree `b73438e6`.
+  Chromium: `suite.mjs '{"head":{},"off":{"bundle":"head","cork":{"callTargets":false}}}' --scale
+  10 --reps 3`, the two arms alternated run by run. Node: `run.mjs --variant x87 --only spread
+  --iterations 1000`, one run each, three arms started together each round as three processes:
+  on; the same tree with the profile never switched on (`sampleCalls` leaving its flag 0); off.
+  Eight rounds.
+- **Values.** Chromium, best of three, on / off: geometric mean of the sixteen 1358 / 1361 MIPS
+  (1.00). `spread` x87 291 / 321 (runs on 291 283 266, off 321 319 305: every run on below every
+  run off), SSE 300 / 321 (on 290 300 279, off 311 321 281). The other fourteen between 0.92 and
+  1.06 either way, inside the spread of their own three runs. Node, started together, on / off
+  by round: 0.957 0.976 0.927 0.933 1.035 0.972 0.936 0.977 (median 0.965, 7 of 8 below 1); never
+  on / off: 0.973 1.012 0.964 0.979 0.994 0.938 0.988 0.938 (median 0.976). With `reforms: 0` (no
+  region formed again), run one after another, on's rate: 251 and 267 MIPS against on 267 and 246,
+  off 313 and 288.
+- **Noise.** In Node one after another, the rounds' on / off went from 0.87 to 1.15, and the
+  machine's rate drifted by a quarter within the hour (290 MIPS, then 220, the same arm; steal
+  time under 1%). Started together, within about 4%.
+- **What costs.** Not the regions formed again. The profile: about two and a half per cent is its
+  flag's load and branch on every indirect call with it switched off, about one more is the
+  sampling while it is on (one reading in two).
+- **Machine.** A 4-core x86-64 Linux VM, Intel Xeon @ 2.10 GHz; Chromium 141.0.7390.37 headless
+  (V8 14.1); Node 22.22.0. Power plan not recorded.
+- **Decision.** It stays on: Far Cry gained more than `spread` loses, and the benchmark as a whole
+  is unchanged. Sampling less often while no call comes due would cut the part paid while it is
+  on; the flag's load stays while regions carry the profile. Not tried.
+
+### 2026-10-14 -- `callTargets` in Far Cry in Chromium, its regions formed again under the credit
+
+- **Idea.** The entry above measured `callTargets` before the regions it forms again were bounded
+  by the engine thread's credit (`d96d7c1b`), and left the holds with the bound not measured.
+- **Workload.** As in that entry: the Far Cry demo bundle (`bundle.btl` sha256
+  `44530097b2a5a284…`), `tools/cdp_test/game.mjs farcry-demo --worker --coi --no-video --fake-gpu
+  --run-seconds 240 --cpu-profile 240`. Tree `b73438e6`, `--cork-config '{}'` (on, the default)
+  against `'{"callTargets":false}'`, alternated: cold on, cold off, warm on, warm off, each arm on a
+  profile of its own. During the last run (warm off) a few unit tests of a few seconds each ran
+  beside it.
+- **Values.** Guest instructions over the whole run: cold on 68.68 G in 260 s, 264.5 M/s; off
+  67.18 G in 258 s, 259.9 M/s (1.018). Warm on 70.17 G in 254 s, 276.2 M/s; off 68.45 G in 255 s,
+  268.6 M/s (1.028). One pair a phase; the noise floor about 6%, as before.
+- **The engine thread.** The translator's longest hold by its own samples: cold on 23.3 ms, off
+  27.3; warm on 16.8, off 14.2. Holds of 16 ms or more: 4 and 3 cold, 1 and 0 warm; none of 33 ms
+  or more in any run, against 32.8 ms and 14 of 16 ms or more cold with it on before the bound.
+  The slowest slices (0.7 to 1 s, in both arms) are the guest's own while the level loads.
+- **Machine.** A 4-core x86-64 Linux VM, Intel Xeon @ 2.10 GHz, headless Chromium 141.0.7390.37
+  (V8 14.1). Power plan not recorded.
+- **Correctness.** Every run ran to the end of its window; whether each reached the level was not
+  checked.
+- **Decision.** It stays on: the holds it added are gone with the bound, and every run on was
+  faster than the run off beside it.
+
+### 2026-10-14 -- an indirect call with nothing to form in sampled no more (quiet calls)
+
+- **Idea.** A call whose samples came due with no callee to form in (none took an eighth, or the
+  ones that did cannot be formed in) keeps paying the profile's flag load on every call. Formed
+  again without the profile at it (`d207d7e5`), it pays nothing.
+- **Workload.** Far Cry as in the entries above, tree `d207d7e5` (quiet) against `b73438e6`
+  (without), both with `callTargets` on, alternated: cold quiet, cold without, warm quiet, warm
+  without, each arm on a profile of its own. And `spread` in Node, three arms started together as
+  three processes for eight rounds (quiet, without, `callTargets` off).
+- **Values.** Far Cry: cold 269.6 against 268.5 M/s (1.004), warm 276.2 against 270.6 (1.021), the
+  noise floor about 6%. Calls quiet: 19 cold, 20 warm, every one of them for a
+  callee not formed in (calls with no callee taking a share: none); due calls 49 and 45. The
+  translator's holds of 16 ms or more: 2 against 9 cold, 1 and 1 warm. `spread` in Node: quiet /
+  without by round 1.011 1.045 1.006 0.989 0.908 1.031 0.984 1.005 (median 1.005): there the
+  profile is read too seldom for any call to come due (34 samples over 26 calls in a run of 4 s).
+- **Machine.** A 4-core x86-64 Linux VM, Intel Xeon @ 2.10 GHz, headless Chromium 141.0.7390.37
+  (V8 14.1), Node 22.22.0. Power plan not recorded.
+- **Decision.** Kept: inside the noise in Far Cry, nothing measured against it, and a quiet call
+  pays nothing for a profile it cannot use. What the Far Cry counts point at instead: 50 to 103
+  times a run (91, 103, 50, 82) the callees a call was predicted to were found too large to form
+  in, and those calls still go through the entry hash.
+
+### 2026-10-15 -- the speed work of 2026-10-13 and 14 in Far Cry, all of it at once
+
+- **Idea.** The changes of those two days that were measured in Far Cry (call prediction, quiet
+  calls, the solo turn) were each measured against the tree just before them, one pair of runs a
+  phase, and came out between 1.004 and 1.064. Their sum, measured against the tree before the
+  first change of the work, should show at least the larger ones.
+- **Workload.** The Far Cry demo bundle (`bundle.btl` sha256 `44530097b2a5a284…`),
+  `tools/cdp_test/game.mjs farcry-demo --worker --coi --no-video --fake-gpu --run-seconds 240
+  --cpu-profile 240`. Before: `98303907`, the last tree before the first runtime change of the
+  work (`1e368204`), with the harness's `--fake-gpu` (`ca67027a`) applied on top and nothing else.
+  After: `0ee30d80`. Ten runs, alternated: before cold, after cold, before warm, after warm; then
+  after first: after cold, before cold (fresh profiles), and warm runs on all four profiles. Guest
+  instructions over the whole run (257 to 271 s, the load included).
+- **Values.** Before: 201.1, 222.9, 220.8, 213.4, 226.7 M/s (cold, warm, cold, warm, warm), median
+  220.8. After: 219.3, 218.6, 220.9, 225.4, 222.5, median 220.9. Ratio of the medians 1.000. The
+  lowest, 201.1, is the first browser started after the machine started. The instructions over
+  the engine thread's time in translated code alone: before median 450 M/s (402 to 451), after
+  440 (430 to 448). Translated code holds 49 to 53% of the engine thread in both; calls to the host
+  37 to 42 s a run in both; the Direct3D command ring's replay 31.5 to 35.5 s before, 29.0 to
+  29.8 s after. Scheduler turns 691 to 743 thousand before, 578 to 604 thousand after.
+- **Machine.** A 4-core x86-64 Linux VM, Intel Xeon @ 2.80 GHz, headless Chromium 141.0.7390.37
+  (V8 14.1), Node 22.22.0. Power plan not recorded. Not the VM of the entries above: `0ee30d80`'s
+  tree ran 273 to 279 M/s there and 219 to 225 here, so no number here compares with theirs.
+- **Correctness.** Every run ran to the end of its window; the game's log in each ends on the same
+  line (its CPU speed test). Whether each reached the level was not checked.
+- **Decision.** Nothing to revert: the work was taken for what it was measured on (the benchmark,
+  Gothic 3's x87, the engine thread's holds). But the Far Cry gains each change was credited with, one pair a
+  phase, do not show in their sum: they were inside the noise, as each entry said, and none of
+  them is evidence for a default by itself. Half of the engine thread in this window is outside
+  translated code, and that half did not move.
+
+### 2026-10-15 -- three host-side costs off Far Cry's engine thread, measured in its rate
+
+- **Idea.** The engine thread spends half of Far Cry's run outside translated code, 64 s of 240
+  in host calls, 55 s of them Direct3D 9's. Three costs there were work for nothing: cork judged
+  every host write into a page with no code against a copy of the page (`d9a43818`; 5.6 s of
+  the thread, and a copy kept of every page the host ever wrote); `ringState` was sent to the
+  graphics worker after every host entry (`a94451fc`; 222 thousand sends); and a dynamic
+  buffer's bytes compared at its unlock were compared again by the draws of the same entry
+  (`cdcee939`; 2.9 to 3.1 GB a run compared again).
+- **Workload.** The Far Cry demo bundle (`bundle.btl` sha256 `44530097b2a5a284…`),
+  `tools/cdp_test/game.mjs farcry-demo --worker --coi --no-video --fake-gpu --run-seconds 240
+  --cpu-profile 240`, each tree from a worktree of its own, alternated. First `ddbcdfc4` against
+  `a94451fc`: cold, cold, then warm in the order base, new, new, base, base, new. Then
+  `a94451fc` against `cdcee939`: base warm, new cold, new warm, base warm.
+- **Values.** Guest instructions over the whole run, M/s. `ddbcdfc4`: 230.8 cold; 224.9, 224.0,
+  232.9 warm. `a94451fc`: 215.0 cold (run while the disk was full, its profile writes failing:
+  left out); 226.2, 228.9, 232.2 warm. Warm medians 224.9 against 228.9 (1.018). Second pair:
+  `a94451fc` 236.3 and 225.1 warm; `cdcee939` 234.8 cold, 228.4 warm. The noise floor on this
+  machine about 4% between runs of one tree.
+- **The engine thread** (inclusive, from its profile, a warm run of each): host calls 63.5 s
+  (`ddbcdfc4`), 61.3 s (`a94451fc`), 58.4 s (`cdcee939`); cork's store judge 5.6 s, then none;
+  the ring's take phase 29.3 s, then 26.3, then 23.0; bytes the draws compared 2.87-3.14 GB,
+  then 0, with the bytes the unlocks sent unchanged (1.56-1.71 GB a run in both).
+- **Machine.** A 4-core x86-64 Linux VM, Intel Xeon @ 2.80 GHz, headless Chromium 141.0.7390.37
+  (V8 14.1), Node 22.22.0. Power plan not recorded.
+- **Correctness.** Cork's unit and integration tests, the graphics layer's remote, seam, Direct3D
+  8 and 9 tests and gates (1016) pass; every run ran to the end of its window.
+- **Decision.** Kept: each takes work away that bought nothing, and the profile shows it gone.
+  The rate does not show it past the noise: 5 to 9 s of a 260 s thread is 2-3.5%, inside the
+  4% two runs of one tree differ by. The thread's time freed went to translated code, whose own
+  rate over its time did not rise with it (443-468 M/s before, 434-446 after).

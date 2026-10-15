@@ -36,6 +36,8 @@ const REMOVED = 0xffffffff;
  * @property {number} top      the x87 top it was compiled for, or ANY_TOP
  * @property {number} table    the region function's index in the function table, or -1
  * @property {number} slot     the entry's slot in the hash, or -1
+ * @property {number} empty    the block a function that does nothing, as `emptyCode` (region.js)
+ *     answers it, or 0
  */
 
 /**
@@ -60,8 +62,14 @@ export function createEntries({ memory, hashBase = -1, shift = 16, load: share =
     {
         clear();
     }
-    /** @param {number} eip @param {number} table @param {number} label @param {number} top */
-    const insert = (eip, table, label, top)=>{
+    /**
+     * A slot: the address, the function-table index, the label (u16), the top (u8) and
+     * `empty` (u8), which the transfer reads (`finishModule`).
+     *
+     * @param {number} eip @param {number} table @param {number} label @param {number} top
+     * @param {number} empty
+     */
+    const insert = (eip, table, label, top, empty)=>{
         if (!hashed || table < 0 || inHash >= load)
         {
             return -1;
@@ -78,6 +86,7 @@ export function createEntries({ memory, hashBase = -1, shift = 16, load: share =
                 v.setUint32(at + 4, table, true);
                 v.setUint16(at + 8, label, true);
                 v.setUint8(at + 10, top);
+                v.setUint8(at + 11, empty);
                 inHash++;
                 if (key === REMOVED)
                 {
@@ -117,16 +126,17 @@ export function createEntries({ memory, hashBase = -1, shift = 16, load: share =
          *
          * @param {number} eip @param {Entry['fn']} fn @param {number} label
          * @param {number} [top] @param {number} [table]  the region's function-table index
+         * @param {number} [empty]  the block a function that does nothing (`Entry`)
          */
-        add(eip, fn, label, top = ANY_TOP, table = -1){
+        add(eip, fn, label, top = ANY_TOP, table = -1, empty = 0){
             const known = byEip.get(keyOf(eip, top));
             if (known !== undefined)
             {
                 return known;
             }
             const page = eip >>> 12;
-            const slot = insert(eip, table, label, top);
-            const index = slots.push({ eip, fn, label, page, top, table, slot }) - 1;
+            const slot = insert(eip, table, label, top, empty);
+            const index = slots.push({ eip, fn, label, page, top, table, slot, empty }) - 1;
             byEip.set(keyOf(eip, top), index);
             // One for the top alone comes before one for any top.
             lastEip = -1;
@@ -239,7 +249,8 @@ export function createEntries({ memory, hashBase = -1, shift = 16, load: share =
                     {
                         if (kept)
                         {
-                            kept.slot = insert(kept.eip, kept.table, kept.label, kept.top);
+                            kept.slot = insert(kept.eip, kept.table, kept.label, kept.top,
+                                kept.empty);
                         }
                     }
                 }

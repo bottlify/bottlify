@@ -465,6 +465,50 @@ test('the configured Windows is the one every library answers with', async()=>{
     await win32Module.dispose();
 });
 
+test('the kernel\'s processors are the ones every library counts, and one mask is the process\'s',
+    async()=>{
+        // GetSystemInfo, the native query, the environment, the registry and
+        // the processor a thread is on, from the one count the kernel gives;
+        // the process's mask set through kernel32 is the one ntdll reports and
+        // the one a thread's starts from.
+        const machine = hostWithMemory();
+        const self = { id: 1 };
+        const other = { id: 2 };
+        const kernel = { ...machine.host.requireApi('kernel'), processors: ()=>4,
+            processorOf: (/** @type {any} */ thread)=>(thread === self ? 2 : 0),
+            threads: ()=>[self, other], currentThread: ()=>self };
+        const api = await win32Module.create({}, { ...machine.host,
+            requireApi: (/** @type {string} */ name)=>(name === 'kernel'
+                ? kernel : machine.host.requireApi(name)) });
+        const libraries = /** @type {Record<string, any>} */ (api.libraries());
+        const kernel32 = libraries['KERNEL32.dll'];
+        const ntdll = libraries['ntdll.dll'];
+
+        kernel32.GetSystemInfo.handler([0x100]);
+        assert.deepEqual([machine.view.getUint32(0x110, true), machine.view.getUint32(0x114, true)],
+            [0xf, 4]);
+        ntdll.NtQuerySystemInformation.handler([0, 0x200, 0x2c, 0]);
+        assert.equal(machine.bytes[0x228], 4);
+        kernel32.GetEnvironmentVariableA.handler([machine.put(0x300, 'NUMBER_OF_PROCESSORS'),
+            0x400, 16]);
+        assert.equal(machine.text(0x400), '4');
+        const hive = api.registry();
+        const processors = hive.open(/** @type {any} */ (hive.root(0x80000002)),
+            'HARDWARE\\DESCRIPTION\\System\\CentralProcessor');
+        assert.deepEqual(processors && hive.subkeys(processors), ['0', '1', '2', '3']);
+        assert.equal(kernel32.GetCurrentProcessorNumber.handler([]), 2);
+        assert.equal(ntdll.NtGetCurrentProcessorNumber.handler([]), 2);
+
+        assert.equal(kernel32.SetProcessAffinityMask.handler([0xffffffff, 6]), 1);
+        ntdll.NtQueryInformationProcess.handler([0xffffffff, 0, 0x500, 0x18, 0]);
+        assert.equal(machine.view.getUint32(0x508, true), 6, 'ntdll reads what kernel32 set');
+        assert.equal(kernel32.SetThreadAffinityMask.handler([0xfffffffe, 4]), 6,
+            'the thread had the process\'s');
+        assert.deepEqual([self, other].map(thread=>/** @type {any} */ (thread).affinityMask),
+            [4, 6]);
+        await win32Module.dispose();
+    });
+
 test('the C runtime\'s copy of the environment starts as the process\'s', async()=>{
     const machine = hostWithMemory();
     const api = await win32Module.create({ arena: { base: 0x1000, size: 0x1000 } }, machine.host);

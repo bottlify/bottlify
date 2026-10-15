@@ -1,0 +1,21 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>cork-bench</title>
+<script type="module">
+// One job a tab: a worker of its own runs the workload, and its answer goes to the
+// driver's binding.
+window.job = message=>{
+    const worker = new Worker('/sandbox/worker.js', { type: 'module' });
+    worker.onmessage = event=>{
+        worker.terminate();
+        window.report(JSON.stringify(event.data));
+    };
+    worker.onerror = event=>{
+        worker.terminate();
+        window.report(JSON.stringify({ error: `worker error: ${event.message}` }));
+    };
+    worker.postMessage(message);
+    return true;
+};
+window.ready = true;
+</script>

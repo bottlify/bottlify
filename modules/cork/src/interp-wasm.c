@@ -527,9 +527,10 @@ static double roundBy(double v, u32 control)
     if (mode == 2) return __builtin_ceil(v);
     if (mode == 3) return __builtin_trunc(v);
     double low = __builtin_floor(v), diff = v - low;
-    if (diff < 0.5) return low;
-    if (diff > 0.5) return low + 1;
-    return __builtin_floor(low * 0.5) * 2 == low ? low : low + 1;
+    double r = diff < 0.5 ? low
+        : diff > 0.5 || __builtin_floor(low * 0.5) * 2 != low ? low + 1 : low;
+    /* A negative rounded to zero is -0, as the processor's is; -1 + 1 is +0. */
+    return __builtin_copysign(r, v);
 }
 
 /* The ten-byte extended value as a double; a NaN loses its payload and a zero

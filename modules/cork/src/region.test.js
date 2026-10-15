@@ -6,7 +6,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { formRegion, inlineReturns } from './region.js';
+import { readFileSync, readdirSync } from 'node:fs';
+import { emptyCode, formRegion, inlineReturns } from './region.js';
 
 /** A region over bytes placed at `base`. @param {number[]} bytes @param {number} [base] */
 function regionOf(bytes, base = 0x1000, options = {}){
@@ -141,7 +142,8 @@ test('a refused instruction ends the block, named, and is counted by opcode', ()
 test('the caps cut the region and leave the rest as exits to the runtime', ()=>{
     // The diamond of above, with room for two blocks only.
     const bytes = [0x85, 0xc0, 0x74, 0x07, 0xbb, 1, 0, 0, 0, 0xeb, 0x05, 0xbb, 2, 0, 0, 0, 0xc3];
-    const capped = regionOf(bytes, 0x1000, { maxBlocks: 2 });
+    const none = { blocks: 0, bytes: 0 };
+    const capped = regionOf(bytes, 0x1000, { maxBlocks: 2, ownRoom: none });
     assert.equal(capped.blocks.length, 2);
     assert.deepEqual(capped.entries, [0x1000, 0x1004]);
     const second = capped.blocks[1];
@@ -150,11 +152,32 @@ test('the caps cut the region and leave the rest as exits to the runtime', ()=>{
 
     // The byte cap is looked at before each instruction, so the instruction
     // that crosses it is kept and the block is cut after it.
-    const small = regionOf(bytes, 0x1000, { maxBytes: 1 });
+    const small = regionOf(bytes, 0x1000, { maxBytes: 1, ownRoom: none });
     assert.equal(small.blocks[0].exit.kind, 'cut');
     assert.equal(small.blocks[0].exit.next, 0x1002);
     assert.equal(small.blocks[0].instructions.length, 1);
     assert.equal(small.blocks.length, 1);
+
+    // The entry's own function takes the caps again past them unless told otherwise.
+    assert.equal(regionOf(bytes, 0x1000, { maxBlocks: 1 }).blocks.length, 2);
+    assert.equal(regionOf(bytes, 0x1000, { maxBlocks: 2 }).blocks.length, 4);
+});
+
+test('a function past the caps is formed whole in its own room, its callees within the caps', ()=>{
+    // 1000: ten of inc eax; jz +0 (a block each); call F; ret. F = 1100: inc ecx; ret.
+    const code = [...Array.from({ length: 10 }, ()=>[0x40, 0x74, 0x00]).flat(),
+        0xe8, 0xdd, 0x00, 0x00, 0x00, 0xc3];
+    const image = [...code, ...Array.from({ length: 0x100 - code.length }, ()=>0xcc), 0x41, 0xc3];
+    const starts = (/** @type {object} */ options)=>regionOf(image, 0x1000, options).blocks
+        .map(block=>block.start);
+    const own = starts({ maxBlocks: 6 });
+    assert.equal(own.filter(start=>start < 0x1100).length, 12, 'eleven blocks and the return');
+    assert.equal(own.includes(0x1023), true,
+        'the block the call returns to, so the call stays a wasm call');
+    assert.equal(own.includes(0x1100), false, 'the callee finds the caps passed');
+    assert.equal(starts({ maxBlocks: 6, ownRoom: { blocks: 0, bytes: 0 } }).length, 6);
+    // Within the caps the callee is formed in as before.
+    assert.equal(starts({ maxBlocks: 16 }).includes(0x1100), true);
 });
 
 test('a page the runtime refuses is not entered, and the edge to it stays an exit', ()=>{
@@ -256,6 +279,45 @@ test('an indirect call\'s predicted callees are formed in as a direct call\'s ar
         .entries, [0x1000, 0x1002]);
     assert.deepEqual(regionOf(code, 0x1000, { leafCalls: false,
         callTargets: new Map([[0x1000, [0x1003]]]) }).entries, [0x1000, 0x1002]);
+});
+
+test('an indirect call named with no callees is quiet, hashed apart, and a fixed slot still'
+    + ' predicts its callee', ()=>{
+    // 1000: call eax (ff d0)   1002: ret   F = 1003: inc eax; ret
+    const code = [0xff, 0xd0, 0xc3, 0x40, 0xc3];
+    const plain = regionOf(code);
+    const quiet = regionOf(code, 0x1000, { callTargets: new Map([[0x1000, []]]) });
+    assert.deepEqual(quiet.entries, plain.entries, 'the same blocks');
+    assert.equal(quiet.blocks[0].exit.quiet, true);
+    assert.equal(quiet.blocks[0].exit.predicted, undefined);
+    assert.equal(plain.blocks[0].exit.quiet, undefined);
+    assert.notEqual(quiet.hash, plain.hash, 'other code: no profile at the call');
+    // 1000: call [1008] (ff 15 08 10 00 00)   1006: ret   1007: int3   1008: F's address
+    // F = 100c: inc eax; ret -- the slot names F as it reads now, quiet or not.
+    const slot = [0xff, 0x15, 0x08, 0x10, 0, 0, 0xc3, 0xcc, 0x0c, 0x10, 0, 0, 0x40, 0xc3];
+    const read = regionOf(slot, 0x1000, { callTargets: new Map([[0x1000, []]]) });
+    assert.equal(read.blocks[0].exit.predicted, true);
+    assert.deepEqual(read.blocks[0].exit.targets, [0x100c]);
+    assert.equal(read.blocks[0].exit.quiet, true);
+    assert.notEqual(read.hash, regionOf(slot).hash);
+});
+
+test('a predicted callee is formed into a region its own function fills, within the room'
+    + ' past the caps', ()=>{
+    // 1000: call ebx; then ten of inc eax; jz +0 (a block each); ret -- twelve blocks of
+    // its own; G = 1100: add edx, 1; ret.
+    const code = [0xff, 0xd3, ...Array.from({ length: 10 }, ()=>[0x40, 0x74, 0x00]).flat(), 0xc3];
+    const image = [...code, ...Array.from({ length: 0x100 - code.length }, ()=>0xcc),
+        0x83, 0xc2, 0x01, 0xc3];
+    const callTargets = new Map([[0x1000, [0x1100]]]);
+    const has = (/** @type {object} */ options)=>regionOf(image, 0x1000,
+        { maxBlocks: 6, callTargets, ...options }).blocks.some(block=>block.start === 0x1100);
+    assert.equal(has({}), true, 'G in, past the six blocks');
+    assert.equal(has({ predictedRoom: { blocks: 0, bytes: 0 } }), false, 'no room, no G');
+    assert.equal(regionOf(image, 0x1000, { maxBlocks: 6, callTargets }).blocks
+        .filter(block=>block.start < 0x1100).length, 12, 'the function itself in its own room');
+    // The room is the callees' alone: a call the runtime did not predict has none.
+    assert.equal(regionOf(image, 0x1000, { maxBlocks: 6 }).blocks.length, 12);
 });
 
 test('a call through a fixed slot predicts the leaf the slot holds', ()=>{
@@ -379,4 +441,74 @@ test('a switch whose index is loaded after the bound test of the memory it comes
     memory.set(0x1004, 0x04); // lea eax, [ebx + ebx*2]: eax written
     const moved = formRegion(address=>memory.get(address) ?? 0, 0x1000);
     assert.equal(moved.blocks.find(block=>block.start === 0x1008)?.exit.table, undefined);
+});
+
+/**
+ * `emptyCode` of the region formed at the first piece's address, over pieces of code placed
+ * apart. @param {[number, number[]][]} pieces
+ */
+function emptyOf(pieces){
+    const image = new Map(pieces.flatMap(([at, bytes])=>bytes.map((byte, i)=>[at + i, byte])));
+    const region = formRegion(address=>image.get(address) ?? 0xcc, pieces[0][0], {});
+    const blocks = new Map(region.blocks.map(block=>[block.start, block]));
+    return emptyCode(at=>blocks.get(at), pieces[0][0]);
+}
+
+test('a function that does nothing is marked with its jumps and the dwords its ret pops', ()=>{
+    assert.equal(emptyOf([[0x1000, [0xc3]]]), 1, 'ret');
+    assert.equal(emptyOf([[0x1000, [0xf3, 0xc3]]]), 1, 'rep ret is a ret');
+    assert.equal(emptyOf([[0x1000, [0xc2, 0x08, 0x00]]]), 3, 'ret 8: the address and two');
+    assert.equal(emptyOf([[0x1000, [0xc2, 0xf8, 0x00]]]), 63, 'ret 248, the most a slot holds');
+    // An incremental linker's thunk to an empty virtual method (Engine.dll+0x3f9b3 and its
+    // target, 0x30000000 lower: the jump is relative, the bytes the same).
+    assert.equal(emptyOf([[0x3f9b3, [0xe9, 0xd8, 0x7c, 0x43, 0x00]], [0x477690, [0xc3]]]),
+        1 << 6 | 1);
+    // Three jumps, near and short.
+    assert.equal(emptyOf([[0x1000, [0xe9, 0xfb, 0x00, 0x00, 0x00]], [0x1100, [0xeb, 0x7e]],
+        [0x1180, [0xe9, 0x7b, 0x00, 0x00, 0x00]], [0x1200, [0xc2, 0x04, 0x00]]]), 3 << 6 | 2);
+});
+
+test('anything else is not marked', ()=>{
+    const none = {
+        'four jumps': [[0x1000, [0xeb, 0x0e]], [0x1010, [0xeb, 0x0e]], [0x1020, [0xeb, 0x0e]],
+            [0x1030, [0xeb, 0x0e]], [0x1040, [0xc3]]],
+        'a jump to itself': [[0x1000, [0xeb, 0xfe]]],
+        'ret 6, not dwords': [[0x1000, [0xc2, 0x06, 0x00]]],
+        'ret 252, past the slot': [[0x1000, [0xc2, 0xfc, 0x00]]],
+        'a word ret': [[0x1000, [0x66, 0xc3]]],
+        'a word ret 4': [[0x1000, [0x66, 0xc2, 0x04, 0x00]]],
+        'a word jump': [[0x1000, [0x66, 0xe9, 0xfc, 0x00]], [0x1100, [0xc3]]],
+        'nop; ret': [[0x1000, [0x90, 0xc3]]],
+        'a jump to work': [[0x1000, [0xeb, 0x0e]], [0x1010, [0x40, 0xc3]]],
+        'a jump through memory': [[0x1000, [0xff, 0x20]]],
+        'a jump to a call': [[0x1000, [0xeb, 0x0e]], [0x1010, [0xe8, 0xeb, 0x0f, 0x00, 0x00]]],
+    };
+    for (const [name, pieces] of Object.entries(none))
+    {
+        assert.equal(emptyOf(/** @type {[number, number[]][]} */ (pieces)), 0, name);
+    }
+});
+
+test('a region\'s sources copied a span at once are the bytes read one at a time', ()=>{
+    // Every cork-bench image, a region at its start and at each block start of that one,
+    // formed with a copy of each span at once (`bytesOf`) and without: the same in every
+    // field, the sources among them.
+    const images = new URL('../../../tools/cork-bench/images/', import.meta.url);
+    let regions = 0;
+    for (const name of readdirSync(images).filter(file=>file.endsWith('.bin')))
+    {
+        const image = readFileSync(new URL(name, images));
+        const read = (/** @type {number} */ address)=>image[address - 0x401000] ?? 0;
+        /** @param {number} from @param {number} to */
+        const bytesOf = (from, to)=>Uint8Array.from({ length: to - from }, (_, at)=>
+            read(from + at));
+        const first = formRegion(read, 0x401000);
+        for (const entry of [0x401000, ...first.blocks.map(block=>block.start)])
+        {
+            assert.deepEqual(formRegion(read, entry, { bytesOf }), formRegion(read, entry),
+                `${name} at ${entry.toString(16)}`);
+            regions++;
+        }
+    }
+    assert.equal(regions, 160);
 });

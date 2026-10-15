@@ -143,11 +143,15 @@ test('a seeded store gives a run\'s first iteration every region it formed, and 
         const image = imageOf('load-x87');
         const cold = await firstIteration(image, null);
         assert.ok(cold.cork.emitMs > 0 && cold.cork.cacheMisses > 0, 'cold, the regions are made');
-        const seed = await capture(image);
-        const seeded = await firstIteration(image, seed);
+        // Slices bounded by the clock end where the machine's load puts them,
+        // and where they end decides what is formed: on a loaded machine the
+        // seeded run formed up to a dozen regions of 1500 the capture never
+        // had. Bounded by their instruction count alone, both runs form the
+        // same regions.
+        const counted = { cork: { sliceMs: Infinity } };
+        const seed = await capture(image, counted);
+        const seeded = await firstIteration(image, seed, counted);
         assert.equal(seeded.eax, cold.eax, 'the program\'s own checksum');
-        // Which starts turn hot depends on where slices end, so the two runs
-        // need not form the same regions; every one this run formed was there.
         assert.ok(seeded.cork.cacheHits > 1000, `hits: ${seeded.cork.cacheHits}`);
         assert.equal(seeded.cork.cacheMisses, 0, 'every region formed was in the seed');
         assert.equal(seeded.cork.emitMs, 0, 'nothing emitted');

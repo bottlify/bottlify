@@ -178,11 +178,42 @@ test('a terminated thread stops being scheduled', ()=>{
 
 test('the quantum bounds a turn', ()=>{
     // A cpu that would happily run forever; the scheduler must ask for no more
-    // than the quantum, since that is the only thing making turns fair.
+    // than the quantum while another thread is ready, since that is the only
+    // thing making turns fair.
     const { sched } = scheduler(1_000_000);
     sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000 });
+    sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000 });
 
     assert.equal(sched.runOnce().instructions, 5000, 'the slice is capped by the quantum');
+});
+
+test('a thread no other is ready beside gets a longer turn, until a deadline comes near', ()=>{
+    let clock = 0;
+    const cpu = fakeCpu(1_000_000);
+    const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 5000,
+        soloQuantum: 40_000, now: ()=>clock });
+    const a = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'a' });
+    const b = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'b' });
+    sched.block(b, 'an event nobody sets');
+
+    assert.equal(sched.runOnce().instructions, 40_000, 'alone: the solo quantum');
+    assert.equal(sched.runOnce().instructions, 40_000);
+    sched.wake(b);
+    assert.equal(sched.runOnce().instructions, 5000, 'b ready beside it: the quantum');
+    assert.equal(sched.runOnce().instructions, 5000);
+
+    // b waits with a deadline 10 ms off: a turn of a's keeps the quantum, so
+    // the wait ends when it would have; 100 ms off, a's turn is a solo one.
+    sched.block(b, 'a timed wait', { deadline: 10 });
+    assert.equal(sched.runOnce().ran, a);
+    assert.equal(sched.runOnce().instructions, 5000, 'a deadline near: the quantum');
+    clock = 20;
+    sched.runOnce();
+    assert.equal(b.state, ThreadState.READY, 'the wait ended at its deadline');
+    sched.block(b, 'a long timed wait', { deadline: 120 });
+    sched.runOnce();
+    assert.equal(sched.runOnce().instructions, 40_000, 'a deadline far off: the solo quantum');
+    assert.equal(sched.diagnostics().overruns, 0, 'a solo turn is not an overrun');
 });
 
 test('a thread parked on a host call is not a candidate for a turn', ()=>{
@@ -232,7 +263,10 @@ test('a slice the emulator ran past is counted, not assumed away', ()=>{
         },
         eip: ()=>eip,
     };
-    const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 1000 });
+    // Alone, the thread is given a solo turn: here the same bound, the overrun
+    // counted against what was asked.
+    const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 1000,
+        soloQuantum: 1000 });
     sched.create({ entry: 0x1000, stackTop: 0x2000, tebAddress: 0, name: 'main' });
 
     sched.runOnce();
@@ -846,9 +880,11 @@ test('a thread woken at the same priority or lower waits for the slice to end', 
         other.priority = priority;
         sched.block(other, 'an event');
 
+        // main was alone when the slice began: a solo turn, which the thread
+        // woken during it waits out as it would a quantum.
         const first = sched.runOnce();
         assert.equal(first.ran, main);
-        assert.equal(first.instructions, 5000, `priority ${priority}: the whole quantum`);
+        assert.equal(first.instructions, 50_000, `priority ${priority}: the whole turn`);
         assert.equal(cpu.stops, 0);
     }
 });

@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Calling conventions</title>
+<style>
+    :root { --bg: #fff; --fg: #1a1a1a; --muted: #666; --line: #ddd; --accent: #2457c5; }
+    @media (prefers-color-scheme: dark) {
+        :root { --bg: #161616; --fg: #e8e8e8; --muted: #999; --line: #333; --accent: #7aa2ff; }
+    }
+    body { background: var(--bg); color: var(--fg); font: 14px/1.45 system-ui, sans-serif;
+        margin: 0; padding: 16px; max-width: 1100px; }
+    h1 { font-size: 20px; margin: 0 0 8px; }
+    p, li { color: var(--muted); }
+    table { border-collapse: collapse; margin: 12px 0; font-variant-numeric: tabular-nums; }
+    td, th { border-bottom: 1px solid var(--line); padding: 4px 10px; text-align: right; }
+    td:first-child, th:first-child { text-align: left; }
+    button { font: inherit; padding: 6px 14px; margin-right: 8px; }
+    textarea { width: 100%; height: 220px; font: 12px ui-monospace, monospace;
+        background: var(--bg); color: var(--fg); border: 1px solid var(--line); }
+    #status { color: var(--accent); }
+    .wrap { overflow-x: auto; }
+</style>
+</head>
+<body>
+<h1>Calling conventions for translated code</h1>
+<p>The guest call chains of real block profiles (Far Cry, cork-bench spread and entities) under
+cork's convention today (<code>state</code>), the same with direct calls
+(<code>state-direct</code>), and the registers in parameters (<code>params</code>,
+<code>params+flags</code>); then a sweep of the parameter count. Nanoseconds a guest call, the
+median of the runs and their spread. Start Chrome with the flags of one tier, open this file, name
+the tier in the address (<code>?tier=turbofan</code> or <code>?tier=liftoff</code>), press Run and
+leave the tab in front until it is done.</p>
+<p><button id="run">Run</button><button id="copy" disabled>Copy the result</button>
+<span id="status"></span></p>
+<div class="wrap"><table id="table"><thead><tr><th>workload</th><th>depth</th>
+<th>state</th><th>state-direct</th><th>params</th><th>params+flags</th>
+<th>params / state</th><th>params / state-direct</th></tr></thead><tbody></tbody></table></div>
+<div class="wrap"><table id="sweep"><thead><tr><th>parameters</th><th>ns a call</th>
+<th>spread</th></tr></thead><tbody></tbody></table></div>
+<textarea id="out" readonly placeholder="the result as JSON, every run's values"></textarea>
+<script type="module">
+/* PROFILES */
+/* BENCHMARK */
+
+const query = new URLSearchParams(location.search);
+const runs = Number(query.get('runs') ?? 9);
+const ms = Number(query.get('ms') ?? 200);
+const depths = (query.get('depths') ?? '2,8,32').split(',').map(Number);
+const status = document.getElementById('status');
+const out = document.getElementById('out');
+const pause = ()=>new Promise(resolve=>setTimeout(resolve, 0));
+/** @param {number} v */
+const ns = v=>v.toFixed(2);
+
+async function environment(){
+    const hints = navigator.userAgentData?.getHighEntropyValues
+        ? await navigator.userAgentData.getHighEntropyValues(['architecture', 'bitness',
+            'platformVersion', 'fullVersionList', 'model']).catch(()=>null)
+        : null;
+    return { userAgent: navigator.userAgent, hints, cores: navigator.hardwareConcurrency,
+        crossOriginIsolated: globalThis.crossOriginIsolated === true,
+        tier: query.get('tier') ?? 'not given', power: 'not recorded' };
+}
+
+document.getElementById('run').onclick = async()=>{
+    document.getElementById('run').disabled = true;
+    const result = { environment: await environment(), options: { runs, ms, depths },
+        rows: [], sweep: [], started: new Date().toISOString() };
+    const body = document.querySelector('#table tbody');
+    for (const w of PROFILES.workloads)
+    {
+        for (const depth of depths)
+        {
+            const by = {};
+            let registers = null;
+            for (const arm of ARMS)
+            {
+                status.textContent = `${w.name}, depth ${depth}, ${arm}`;
+                await pause();
+                const run = await measure({ ...w, depth }, arm, { runs, ms });
+                if (registers !== null && run.registers.join() !== registers.join())
+                {
+                    status.textContent = `${w.name} depth ${depth}: ${arm} ended with other registers`;
+                    throw new Error(status.textContent);
+                }
+                registers = run.registers;
+                by[arm] = summary(run.nsPerCall);
+                result.rows.push({ workload: w.name, depth, arm, nsPerCall: run.nsPerCall,
+                    moduleBytes: run.moduleBytes, turns: run.turns, ...by[arm] });
+            }
+            const row = document.createElement('tr');
+            row.innerHTML = `<td>${w.name}</td><td>${depth}</td>`
+                + ARMS.map(arm=>`<td>${ns(by[arm].median)} ±${(100 * by[arm].spread).toFixed(0)}%</td>`)
+                    .join('')
+                + `<td>${(by.params.median / by.state.median).toFixed(3)}</td>`
+                + `<td>${(by.params.median / by['state-direct'].median).toFixed(3)}</td>`;
+            body.append(row);
+        }
+    }
+    const sweepBody = document.querySelector('#sweep tbody');
+    for (const k of [2, 4, 5, 6, 7, 8, 10, 12, 16, 20])
+    {
+        status.textContent = `sweep, ${k} parameters`;
+        await pause();
+        const run = await measureSweep(k, { runs, ms: Math.min(ms, 150) });
+        const s = summary(run.nsPerCall);
+        result.sweep.push({ k, nsPerCall: run.nsPerCall, ...s });
+        const row = document.createElement('tr');
+        row.innerHTML = `<td>${k}</td><td>${ns(s.median)}</td><td>${(100 * s.spread).toFixed(0)}%</td>`;
+        sweepBody.append(row);
+    }
+    result.finished = new Date().toISOString();
+    out.value = JSON.stringify(result, null, 1);
+    globalThis.result = result;
+    status.textContent = 'done';
+    document.getElementById('copy').disabled = false;
+};
+if (query.get('auto') === '1')
+{
+    document.getElementById('run').click();
+}
+document.getElementById('copy').onclick = ()=>{
+    out.select();
+    navigator.clipboard?.writeText(out.value);
+};
+</script>
+</body>
+</html>

@@ -852,6 +852,82 @@ test('a buffer locked a few bytes at a time sends those bytes at each unlock, no
             `${sent - before} bytes sent for 50 locks of 256`);
     });
 
+test('a dynamic buffer unlocked and drawn from in one pause is compared once; apart, at both',
+    ()=>{
+        // A host entry settles the buffers the guest let go of and then plays
+        // the ring's draws, the program stopped between them: the draws found
+        // again what the unlock had just compared.
+        const ram = new Uint8Array(4 << 20);
+        let next = RAM_BASE + (1 << 20);
+        const services = {
+            readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
+                ram.slice(at - RAM_BASE, at - RAM_BASE + length),
+            allocate: (/** @type {number} */ bytes)=>{
+                const at = next;
+                next += bytes + 0x100;
+                return at;
+            },
+        };
+        const played = playedDirect3D(createDirect3D9, { ...services, readMemory: true });
+        const sender = createSender({
+            post: message=>{
+                played.read(message.buffer, call=>{
+                    played.play(call);
+                });
+            },
+            later: flush=>flush(),
+        });
+        const d3d = recordedDirect3D(createDirect3D9, services, sender);
+        /** @param {number} value */
+        const ok = value=>assert.equal(value, D3D_OK);
+        /** @type {{ device?: any }} */
+        const out = {};
+        ok(d3d.CreateDevice({ swapEffect: D3DSWAPEFFECT.DISCARD, backBufferCount: 1,
+            backBufferWidth: 8, backBufferHeight: 8, backBufferFormat: D3DFMT.X8R8G8B8 }, out));
+        const device = out.device;
+        const stride = 16;
+        /** @type {{ buffer?: any }} */
+        const made = {};
+        ok(device.CreateVertexBuffer(64 * stride, 0x200, FVF.XYZ | FVF.DIFFUSE, D3DPOOL.DEFAULT,
+            made));
+        ok(device.SetStreamSource(0, made.buffer, 0, stride));
+        ok(device.SetFVF(FVF.XYZ | FVF.DIFFUSE));
+        ok(device.BeginScene());
+        /** @param {number} value */
+        const write = value=>{
+            /** @type {{ pBits?: number }} */
+            const locked = {};
+            ok(made.buffer.Lock(0, 0, locked, 0));
+            const at = /** @type {number} */ (locked.pBits) - RAM_BASE;
+            ram.fill(value, at, at + 3 * stride);
+            ok(made.buffer.Unlock());
+        };
+        const draw = ()=>ok(device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1));
+        // The first draw sends the buffer whole; from then on what differs.
+        write(1);
+        draw();
+        const compared = ()=>sender.shippedBytes().compared;
+        const unlocked = ()=>sender.shippedBytes().buffers;
+        let before = compared();
+        const sentBefore = unlocked();
+        write(2);
+        // The last call's draw compared these bytes before the program wrote them.
+        assert.equal(unlocked() - sentBefore, 3 * stride, 'apart: the unlock sends what it wrote');
+        draw();
+        assert.equal(compared() - before, 3 * stride, 'apart: the draw compares again');
+        before = compared();
+        device.whileStill(()=>{
+            write(3);
+            draw();
+        });
+        assert.equal(compared() - before, 0, 'in a pause: once, at the unlock');
+        // What the draw reads arrived all the same.
+        before = compared();
+        write(4);
+        draw();
+        assert.equal(compared() - before, 3 * stride, 'and apart again after it');
+    });
+
 test('an event query answers on the program\'s side; an occlusion query asks the renderer', ()=>{
     // An event is signalled once its end is issued, as the device without a
     // renderer signals it: a round trip only made the program wait for the
@@ -924,6 +1000,8 @@ test('a getter of plain state answers on the program\'s side and sends nothing',
     /** @type {{ matrix?: ArrayLike<number> }} */
     const matrix = {};
     assert.equal(device.GetTransform(D3DTS.WORLD, matrix), D3D_OK);
+    // What the shadow block mirrors after every entry of the host's.
+    assert.equal(typeof device.ringState().drawable, 'number');
     assert.equal(sent, before, 'nothing sent for the reads');
     assert.equal(device.SetRenderState(D3DRS.LIGHTING, 1), D3D_OK);
     assert.ok(sent > before, 'a set still is');
@@ -1018,6 +1096,50 @@ test('an occlusion count is asked of the renderer without waiting, and taken whe
         assert.equal(count.value, 0);
         assert.equal(made.query.Issue(D3DISSUE_END), D3D_OK);
         assert.equal(made.query.GetData(count, 4, 0), S_FALSE, 'a new measurement is asked anew');
+    });
+
+test('the counts the renderer holds come beside one query\'s answer, each for its own measurement',
+    async t=>{
+        // A program that waits on its queries one after another crossed to the
+        // played side and back for each, where the GPU had counted them all
+        // in one read: two hundred round trips a frame.
+        const d3d = acrossAPort({ writeMemory: ()=>{} });
+        t.after(()=>d3d.close());
+        /** @type {{ device?: any }} */
+        const out = {};
+        assert.equal(d3d.CreateDevice({ swapEffect: D3DSWAPEFFECT.DISCARD, backBufferCount: 1,
+            backBufferWidth: 8, backBufferHeight: 8, backBufferFormat: D3DFMT.X8R8G8B8 }, out),
+        D3D_OK);
+        const D3DISSUE_END = 1;
+        const D3DISSUE_BEGIN = 2;
+        const S_FALSE = 1;
+        const queries = [0, 1, 2].map(()=>{
+            /** @type {{ query?: any }} */
+            const made = {};
+            assert.equal(out.device.CreateQuery(D3DQUERYTYPE.OCCLUSION, made), D3D_OK);
+            assert.equal(made.query.Issue(D3DISSUE_BEGIN), D3D_OK);
+            assert.equal(made.query.Issue(D3DISSUE_END), D3D_OK);
+            return made.query;
+        });
+        /** @type {{ value?: number }} */
+        const count = {};
+        assert.equal(queries[0].GetData(count, 4, 0), S_FALSE, 'asked');
+        // The third's measurement closed again after the ask: the count the
+        // answer brings for it is of the one before.
+        assert.equal(queries[2].Issue(D3DISSUE_END), D3D_OK);
+        let answer = S_FALSE;
+        for (let tries = 0; tries < 50 && answer === S_FALSE; tries++)
+        {
+            await new Promise(resolve=>setTimeout(resolve, 5));
+            answer = queries[0].GetData(count, 4, 0);
+        }
+        assert.equal(answer, D3D_OK);
+        /** @type {{ value?: number }} */
+        const beside = {};
+        assert.equal(queries[1].GetData(beside, 4, 0), D3D_OK, 'came beside the first');
+        assert.equal(beside.value, 0);
+        assert.equal(queries[2].GetData(beside, 4, 0), S_FALSE,
+            'a count of a measurement closed since is not this one\'s');
     });
 
 test('the counts the renderer holds come beside one query\'s answer, each for its own measurement',

@@ -20,7 +20,8 @@ import { blockState, interpret } from '../interp.js';
 import { createCorkRuntime } from '../runtime/runtime.js';
 import { ownLayout, pagesFor, tablesSize } from '../runtime/layout.js';
 import { Exit } from './region.js';
-import { SHAPE } from './x87.js';
+import { SHAPE, analyseX87 } from './x87.js';
+import { formRegion } from '../region.js';
 
 const CODE = 0x1000;
 const DATA = 0x2000;
@@ -178,4 +179,122 @@ test('a region whose entry keeps finding another shape is translated again check
     assert.equal(view.getUint16(layout.x87Status, true) & (IE | SF), IE | SF,
         'the checks inside raise the fault');
     assert.equal(runtime.diagnostics().shapeMisses, 4, 'and it enters with no test');
+});
+
+/**
+ * Runs from CODE with ST(6) and ST(7) held, top 6: translated where a region can be made
+ * (calls made as wasm calls), or on the interpreter alone.
+ *
+ * @param {number[]} code @param {number[]} callee  at 0x1100 @param {boolean} translated
+ */
+async function heldAtSix(code, callee, translated){
+    const layout = ownLayout({ ramSize: 1 << 20, hashSlots: 1 << 16 });
+    const memory = new WebAssembly.Memory({ initial: pagesFor(layout, tablesSize(layout)) });
+    const view = new DataView(memory.buffer);
+    const bytes = new Uint8Array(memory.buffer);
+    view.setUint8(layout.x87Top, 6);
+    view.setUint8(layout.x87Empty, 0x3f);
+    view.setFloat64(layout.x87 + 6 * 16, 2, true);
+    view.setFloat64(layout.x87 + 7 * 16, 5, true);
+    view.setUint16(layout.x87Control, 0x37f, true);
+    view.setFloat32(layout.ramBase + DATA, 1.5, true);
+    view.setFloat32(layout.ramBase + DATA + 4, 3, true);
+    view.setUint32(layout.ramBase + DATA + 16, 0x1100, true);
+    bytes.set(code, layout.ramBase + CODE);
+    bytes.set(callee, layout.ramBase + 0x1100);
+    view.setUint32(layout.regs + 4, 2, true); // ecx
+    view.setUint32(layout.regs + 8, 3, true); // edx
+    view.setUint32(layout.regs + 16, 0x80000, true);
+    view.setUint32(layout.eip, CODE, true);
+    let shapeMisses = 0;
+    if (translated)
+    {
+        const runtime = createCorkRuntime({
+            memory, layout, config: { callReturn: true, leafCalls: false },
+            read: address=>bytes[layout.ramBase + address],
+            imports: { trap: ()=>0, getEflags: ()=>view.getUint32(layout.eflags, true),
+                x87Read: ()=>0, rdtsc: ()=>0n },
+        });
+        for (let turn = 0; turn < 1000; turn++)
+        {
+            const eip = view.getUint32(layout.eip, true);
+            const top = view.getUint8(layout.x87Top);
+            if (runtime.entryOf(eip, top) < 0)
+            {
+                runtime.noteHot(eip, top);
+                await runtime.translatePending();
+            }
+            const entry = runtime.entryOf(eip, top);
+            if (entry >= 0)
+            {
+                if (runtime.run(entry, 10_000).kind === 'halt')
+                {
+                    break;
+                }
+                continue;
+            }
+            const state = blockState({ memory, layout });
+            state.syncIn();
+            interpret(state, 1, { force: true });
+            state.syncOut();
+            if (state.halted)
+            {
+                break;
+            }
+        }
+        shapeMisses = runtime.diagnostics().shapeMisses ?? 0;
+    }
+    else
+    {
+        const state = blockState({ memory, layout });
+        state.syncIn();
+        interpret(state, 10_000);
+        state.syncOut();
+        assert.ok(state.halted);
+    }
+    return {
+        shapeMisses,
+        seen: {
+            eip: view.getUint32(layout.eip, true),
+            top: view.getUint8(layout.x87Top), empty: view.getUint8(layout.x87Empty),
+            // C0 C2 C3 and the top: C1 and the flags are kept only when `precise`.
+            status: view.getUint16(layout.x87Status, true) & 0x7d00,
+            registers: Array.from({ length: 8 }, (_, k)=>view.getFloat64(layout.x87 + k * 16,
+                true)),
+            stored: [8, 12].map(offset=>view.getFloat32(layout.ramBase + DATA + offset, true)),
+        },
+    };
+}
+
+test('code a call returns to tests the stack it needs, whatever top its region was entered at,'
+    + ' and what follows runs with no stack-fault check', async()=>{
+    // Entered at L with two registers held (top 6), as a loop over a pair is:
+    // L: fld dword [DATA]; fstp dword [DATA+8]; dec ecx; jnz L; fstp st0; fstp st0;
+    //    call [DATA+16]; fld dword [DATA]; fld dword [DATA+4]; fstp dword [DATA+12];
+    //    fld dword [DATA+4]; mov ecx, 2; dec edx; jnz L; fstp st0; fstp st0; hlt
+    // The code after the call is at top 0, another state than the entry's: it pushes into
+    // ST(7) and ST(6) and the loop into ST(5), which the call's return now tests empty.
+    const code = [0xd9, 0x05, ...at(DATA), 0xd9, 0x1d, ...at(DATA + 8), 0x49, 0x75, 0xf1,
+        0xdd, 0xd8, 0xdd, 0xd8, 0xff, 0x15, ...at(DATA + 16),
+        0xd9, 0x05, ...at(DATA), 0xd9, 0x05, ...at(DATA + 4), 0xd9, 0x1d, ...at(DATA + 12),
+        0xd9, 0x05, ...at(DATA + 4), 0xb9, 2, 0, 0, 0, 0x4a, 0x75, 0xc7,
+        0xdd, 0xd8, 0xdd, 0xd8, 0xf4];
+    const region = formRegion(address=>code[address - CODE] ?? 0xf4, CODE, {});
+    const analysis = /** @type {NonNullable<ReturnType<typeof analyseX87>>} */ (
+        analyseX87(region, new Set(), 6, false, true));
+    const index = (/** @type {number} */ address)=>region.blocks.findIndex(block=>
+        block.start === address);
+    assert.deepEqual(analysis.needs[index(CODE + 0x19)], { held: 0, empty: 0xe0, c1: false },
+        'the return tests ST(5) to ST(7) empty');
+    assert.equal(analysis.shapes[0].empty & 0x20, 0x20,
+        'the loop knows its push\'s register empty');
+    // ret, and a callee that leaves ST(7) held at the same top: fld1; fincstp; ret.
+    for (const [callee, misses] of /** @type {[number[], number][]} */ ([[[0xc3], 0],
+        [[0xd9, 0xe8, 0xd9, 0xf7, 0xc3], 1]]))
+    {
+        const expected = await heldAtSix(code, callee, false);
+        const got = await heldAtSix(code, callee, true);
+        assert.deepEqual(got.seen, expected.seen);
+        assert.equal(got.shapeMisses > 0, misses > 0, `${callee.length}: left at the return`);
+    }
 });

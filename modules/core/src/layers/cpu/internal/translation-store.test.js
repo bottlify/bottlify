@@ -19,7 +19,8 @@ import {
  * worker gets from the origin's file system.
  *
  * @param {{ probes: number, syncReads: number, writes?: number, writeMs?: number,
- *     writables?: number }} [counter]
+ *     writables?: number, largest?: number }} [counter]  `largest`: the most bytes one
+ *     write through the synchronous handle took
  * @param {boolean} [sync]
  */
 function fakeDirectory(counter = { probes: 0, syncReads: 0 }, sync = false){
@@ -110,6 +111,7 @@ function fakeDirectory(counter = { probes: 0, syncReads: 0 }, sync = false){
                                 /** @param {Uint8Array} from @param {{ at: number }} where */
                                 write(from, { at }){
                                     counter.writes = (counter.writes ?? 0) + 1;
+                                    counter.largest = Math.max(counter.largest ?? 0, from.length);
                                     // A disk that takes its time, where a test asks.
                                     const until = performance.now() + (counter.writeMs ?? 0);
                                     while (performance.now() < until)
@@ -666,6 +668,29 @@ test('a large seed is written a few milliseconds at a time, the thread let go be
     assert.deepEqual([...await store.get('cork/41/a/401010/x') ?? []], new Array(40).fill(1));
 });
 
+test('a record of megabytes is written in pieces, the thread let go between, and reads whole',
+    async()=>{
+        // A relinked module is a record of megabytes: written whole it held
+        // the engine's thread for a dozen milliseconds in one write.
+        const counter = { probes: 0, syncReads: 0, writes: 0, writeMs: 1, largest: 0 };
+        const store = await createDirectoryTranslationStore(fakeDirectory(counter, true), 'game');
+        await store.get('cork/41/a/none');
+        const bytes = Uint8Array.from({ length: 5 << 20 }, (_, at)=>(at * 7) >>> 3);
+        let turned = false;
+        setTimeout(()=>{
+            turned = true;
+        }, 0);
+        const put = store.put('cork/41/a/module/m', bytes);
+        await new Promise(resolve=>setTimeout(resolve, 0));
+        assert.equal(await store.get('cork/41/a/module/m'), null, 'not a record until written');
+        await put;
+        assert.ok(turned);
+        assert.ok(counter.largest < bytes.length, `the largest write ${counter.largest} bytes`);
+        await store.flush();
+        assert.deepEqual(await store.get('cork/41/a/module/m'), bytes);
+        store.close();
+    });
+
 test('a store whose files fail it answers and keeps nothing rather than throwing', async()=>{
     // Another user of the directory compacting it removed the generation this
     // one read, and the engine did not start: a cache that cannot be read is
@@ -692,6 +717,248 @@ test('a store whose files fail it answers and keeps nothing rather than throwing
     assert.equal(await store.get('0123456789abcdef'), null, 'nothing kept');
     assert.equal(store.getNow?.('0123456789abcdef'), null);
 });
+
+/**
+ * A records writer as the store's worker is, but in this thread: its own handle on the
+ * file, its writes made when the test lets them go (`release`) -- the disk taking its
+ * time while the store's thread goes on.
+ */
+function heldWriter(){
+    /** @type {(() => void)[]} */
+    const held = [];
+    let holding = true;
+    /** @type {any} */
+    let handle = null;
+    const state = { writes: 0 };
+    /** @param {() => void} run @returns {Promise<void>} */
+    const later = run=>new Promise((resolve, reject)=>{
+        const go = ()=>{
+            try
+            {
+                run();
+                resolve();
+            }
+            catch (e){
+                reject(e);
+            }
+        };
+        if (holding)
+        {
+            held.push(go);
+        }
+        else
+        {
+            queueMicrotask(go);
+        }
+    });
+    return {
+        state,
+        release(){
+            holding = false;
+            for (const go of held.splice(0))
+            {
+                go();
+            }
+        },
+        /** @returns {import('./translation-store.js').RecordsWriter} */
+        factory: ()=>({
+            open: async(/** @type {any} */ file)=>{
+                handle = await file.createSyncAccessHandle();
+                return true;
+            },
+            write: writes=>{
+                // As to the worker, the records' buffers go across.
+                /** @type {[number, Uint8Array][]} */
+                const taken = structuredClone(writes,
+                    { transfer: [...new Set(writes.map(([, bytes])=>bytes.buffer))] });
+                return later(()=>{
+                    for (const [at, bytes] of taken)
+                    {
+                        handle.write(bytes, { at });
+                        state.writes++;
+                    }
+                });
+            },
+            flush: ()=>later(()=>handle.flush()),
+            close: ()=>handle?.close(),
+        }),
+    };
+}
+
+test('with a records writer the store\'s own thread writes no record, found once written',
+    async()=>{
+        const counter = { probes: 0, syncReads: 0, writes: 0 };
+        const root = fakeDirectory(counter, true);
+        const writer = heldWriter();
+        const store = await createDirectoryTranslationStore(root, 'game', undefined,
+            { writer: writer.factory });
+        await store.get('cork/41/a/none');
+        const bytes = Uint8Array.from({ length: 1 << 20 }, (_, at)=>(at * 13) >>> 2);
+        const before = counter.writes;
+        const put = store.put('cork/41/a/module/m', bytes.slice());
+        await new Promise(resolve=>setTimeout(resolve, 0));
+        assert.equal(counter.writes, before, 'nothing written on the store\'s thread');
+        assert.equal(store.getNow('cork/41/a/module/m'), null, 'not a record until written');
+        writer.release();
+        await put;
+        assert.ok(writer.state.writes > 0, 'the writer wrote it');
+        assert.deepEqual(store.getNow('cork/41/a/module/m'), bytes);
+        await store.flush();
+        store.close();
+        const next = await createDirectoryTranslationStore(root, 'game');
+        assert.deepEqual(await next.get('cork/41/a/module/m'), bytes, 'and the next run finds it');
+    });
+
+test('a record is handed to the writer, one inside a larger buffer copied out', async()=>{
+    const root = fakeDirectory({ probes: 0, syncReads: 0, writes: 0 }, true);
+    const writer = heldWriter();
+    writer.release();
+    const store = await createDirectoryTranslationStore(root, 'game', undefined,
+        { writer: writer.factory });
+    await store.get('cork/41/a/none');
+    const whole = Uint8Array.from({ length: 5000 }, (_, at)=>at * 7);
+    const expected = whole.slice();
+    const larger = Uint8Array.from({ length: 300 }, (_, at)=>at * 3);
+    const inside = larger.subarray(100, 200);
+    await store.put('cork/41/a/whole', whole);
+    await store.put('cork/41/a/inside', inside);
+    assert.equal(whole.byteLength, 0, 'the record that was all of its buffer went across');
+    assert.equal(larger.byteLength, 300, 'the larger buffer stays with its owner');
+    assert.deepEqual(store.getNow('cork/41/a/whole'), expected);
+    assert.deepEqual(store.getNow('cork/41/a/inside'), larger.slice(100, 200));
+});
+
+test('a writer that cannot stand beside the store\'s handle leaves the writes to the store',
+    async()=>{
+        const counter = { probes: 0, syncReads: 0, writes: 0 };
+        const store = await createDirectoryTranslationStore(fakeDirectory(counter, true), 'game',
+            undefined, { writer: ()=>({ open: async()=>false, write: async()=>{
+                throw new Error('not this writer');
+            }, flush: async()=>{}, close: ()=>{} }) });
+        await store.get('cork/41/a/none');
+        await store.put('cork/41/a/x', new Uint8Array([1, 2, 3]));
+        assert.deepEqual([...store.getNow('cork/41/a/x') ?? []], [1, 2, 3]);
+    });
+
+/**
+ * A record as its length and an FNV-1a hash of its bytes, or what stood for it.
+ *
+ * @param {Uint8Array | null | undefined} bytes
+ */
+const digest = bytes=>{
+    if (!(bytes instanceof Uint8Array))
+    {
+        return String(bytes);
+    }
+    let hash = 0x811c9dc5;
+    for (const byte of bytes)
+    {
+        hash = Math.imul(hash ^ byte, 0x01000193) >>> 0;
+    }
+    return `${bytes.length}:${hash.toString(16)}`;
+};
+
+test('a key put twice answers its last put\'s bytes though the first one\'s write ends last',
+    async()=>{
+        // A writer that finishes the writes it is given in the order opposite to it.
+        /** @type {(() => void)[]} */
+        const waiting = [];
+        let handle = /** @type {any} */ (null);
+        const root = fakeDirectory({ probes: 0, syncReads: 0 }, true);
+        const store = await createDirectoryTranslationStore(root, 'game', undefined, {
+            writer: ()=>({
+                open: async(/** @type {any} */ file)=>{
+                    handle = await file.createSyncAccessHandle();
+                    return true;
+                },
+                write: writes=>new Promise(resolve=>{
+                    waiting.push(()=>{
+                        for (const [at, bytes] of writes)
+                        {
+                            handle.write(bytes, { at });
+                        }
+                        resolve();
+                    });
+                }),
+                flush: async()=>handle.flush(),
+                close: ()=>handle?.close(),
+            }),
+        });
+        await store.get('cork/41/a/none');
+        const first = Uint8Array.from({ length: 300 }, (_, i)=>i & 0xff);
+        const second = Uint8Array.from({ length: 200 }, (_, i)=>0xff - (i & 0xff));
+        const puts = [store.put('cork/41/a/1/x', first.slice()),
+            store.put('cork/41/a/1/x', second.slice())];
+        while (waiting.length < 2)
+        {
+            await new Promise(resolve=>setTimeout(resolve, 0));
+        }
+        /** @type {() => void} */ (waiting.pop())();
+        await new Promise(resolve=>setTimeout(resolve, 0));
+        /** @type {() => void} */ (waiting.pop())();
+        await Promise.all(puts);
+        await store.flush();
+        assert.equal(digest(store.getNow('cork/41/a/1/x')), digest(second));
+        store.close();
+        const reopened = await createDirectoryTranslationStore(root, 'game', undefined,
+            { writer: ()=>null });
+        assert.equal(digest(await reopened.get('cork/41/a/1/x')), digest(second),
+            'and so does the index the next opening reads');
+    });
+
+// The gate of the writer: a seeded run of puts, through the writer and through the store's
+// own handle, leaves the same records, the same seed and what the next opening finds.
+for (const seed of [5, 6, 7])
+{
+    test(`a store written through its writer holds what one writing itself holds (seed ${seed})`,
+        async()=>{
+            let state = seed >>> 0;
+            const next = ()=>{
+                state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+                return state / 4294967296;
+            };
+            /** @type {[string, Uint8Array][]} */
+            const puts = [];
+            for (let i = 0; i < 60; i++)
+            {
+                const key = `cork/41/a/${Math.floor(next() * 40).toString(16)}/x`;
+                const length = 1 + Math.floor(next() * (next() < 0.1 ? 600_000 : 3000));
+                puts.push([key, Uint8Array.from({ length }, ()=>Math.floor(next() * 256))]);
+            }
+            // Keys come again (sixty puts of forty names): each answers its last.
+            /** @type {Map<string, Uint8Array>} */
+            const last = new Map(puts);
+            const lastPuts = puts.map(([key])=>last.get(key));
+            /** @param {(() => any) | undefined} writer */
+            const fill = async writer=>{
+                const root = fakeDirectory({ probes: 0, syncReads: 0 }, true);
+                const held = writer === undefined ? null : heldWriter();
+                held?.release();
+                const store = await createDirectoryTranslationStore(root, 'game', undefined,
+                    held === null ? { writer: ()=>null } : { writer: held.factory });
+                await store.get('cork/41/a/none');
+                await Promise.all(puts.map(([key, bytes])=>store.put(key, bytes.slice())));
+                await store.flush();
+                const found = puts.map(([key])=>store.getNow(key));
+                const exported = await store.exportSeed();
+                store.close();
+                const reopened = await createDirectoryTranslationStore(root, 'game',
+                    undefined, { writer: ()=>null });
+                const again = await Promise.all(puts.map(([key])=>reopened.get(key)));
+                return { found, exported, again, wrote: held?.state.writes ?? 0 };
+            };
+            const itself = await fill(undefined);
+            const through = await fill(()=>null);
+            assert.ok(through.wrote > 0, 'the writer wrote the records');
+            // Compared by a digest of each record: a deepEqual of records up to
+            // 600 KB that differ builds a message of gigabytes.
+            assert.deepEqual(through.found.map(digest), itself.found.map(digest));
+            assert.deepEqual(digest(through.exported), digest(itself.exported));
+            assert.deepEqual(through.again.map(digest), itself.again.map(digest));
+            assert.deepEqual(itself.found.map(digest), lastPuts.map(digest),
+                'a key answers the bytes of its last put');
+        });
+}
 
 test('clearing a bundle\'s translations removes every version of them and no other bundle\'s',
     async()=>{

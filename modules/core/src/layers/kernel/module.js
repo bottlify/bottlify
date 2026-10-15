@@ -162,6 +162,7 @@ export function createKernelModule(){
                 // Below a page the emulator cannot honour a smaller quantum anyway,
                 // so asking for one would only be a lie in the configuration.
                 quantum: config?.quantum ?? 100_000,
+                soloQuantum: config?.soloQuantum,
                 ids: config?.ids,
                 ...published(cpu, log),
             });
@@ -389,6 +390,22 @@ export function createKernelModule(){
                     state.refreshClock = refresh;
                 },
                 threads: ()=>live() ? state.scheduler.all() : [],
+                /**
+                 * The processors the machine has: the process's executors,
+                 * each a processor its threads may be pinned to.
+                 *
+                 * @returns {number}
+                 */
+                processors: ()=>cpu.processors?.() ?? 1,
+                /**
+                 * The processor `thread` runs on now: the executor holding it.
+                 *
+                 * @param {any} thread
+                 * @returns {number}
+                 */
+                processorOf: thread=>(live() ? state.scheduler.processorOf(thread) : 0),
+                /** The processor time the process's threads have taken, in milliseconds. */
+                processCpuMs: ()=>(live() ? state.scheduler.cpuMs() : 0),
 
                 /** @param {number} address @param {number} id */
                 writeThreadId: (address, id)=>memory.writeU32(address, id),

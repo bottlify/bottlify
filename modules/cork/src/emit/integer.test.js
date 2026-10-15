@@ -545,6 +545,28 @@ test('cpuid reads its subleaf from ecx where a leaf has them, as the emulator do
     assert.deepEqual(ask(5, 9), [0x40, 0x40, 3, 0x00142120], 'a plain leaf ignores ecx');
 });
 
+test('cpuid describes the executors as processors: their count, the asking one\'s APIC id,'
+    + ' a core each', ()=>{
+    /** @param {number} processors @param {number} executor @param {number} leaf @param {number} subleaf */
+    const ask = (processors, executor, leaf, subleaf = 0)=>{
+        const m = createTestMachine({ processors, executor });
+        // mov eax, leaf; mov ecx, subleaf; cpuid; hlt
+        m.write(CODE, [0xb8, leaf, 0, 0, 0, 0xb9, subleaf, 0, 0, 0, 0x0f, 0xa2, 0xf4]);
+        assert.equal(m.runProgram(CODE).kind, 3);
+        return ['eax', 'ebx', 'ecx', 'edx'].map(name=>m.reg(name) >>> 0);
+    };
+    assert.deepEqual(ask(1, 0, 1), [0x673, 0x00010800, 0xc0800001, 0x0780a979],
+        'one processor: as the pinned emulator answers');
+    assert.deepEqual(ask(4, 0, 1), [0x673, 0x00040800, 0xc0800001, 0x1780a979],
+        'four: the count in EBX[23:16], HTT in EDX');
+    assert.deepEqual(ask(4, 3, 1), [0x673, 0x03040800, 0xc0800001, 0x1780a979],
+        'the fourth executor: APIC id 3 in EBX[31:24]');
+    assert.deepEqual(ask(4, 2, 4, 0), [0x0c000121, 0x01c0003f, 0x3f, 1],
+        'leaf 4: three more cores in the package, no cache shared');
+    assert.deepEqual(ask(4, 2, 4, 2), [0x0c000143, 0x05c0003f, 0xfff, 1]);
+    assert.deepEqual(ask(4, 1, 0), ask(1, 0, 0), 'the vendor leaf does not move');
+});
+
 test('int3 and int n are left to the other executor, before the instruction', ()=>{
     const m = createTestMachine();
     m.write(CODE, [0x90, 0xcd, 0x21]);

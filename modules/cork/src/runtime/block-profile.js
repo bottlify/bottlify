@@ -11,7 +11,8 @@
  * bundle carries none of it.
  */
 
-import { Tables, blockProfileAt } from './layout.js';
+import { MECHANISM_NAMES, Tables, blockProfileAt, mechanismAt, transferTargetAt }
+    from './layout.js';
 
 /**
  * @typedef {{ entry: number, spans: [number, number][] }} ProfiledRegion
@@ -65,6 +66,30 @@ export function resetBlockCounts(data, layout){
     {
         data.setUint32(base + slot * Tables.BLOCK_SLOT + 4, 0, true);
     }
+    for (let mechanism = 0; mechanism < Tables.MECHANISMS; mechanism++)
+    {
+        data.setBigUint64(layout.tables + mechanismAt(layout, mechanism), 0n, true);
+    }
+    for (let slot = 0; slot < Tables.BLOCK_SLOTS; slot++)
+    {
+        data.setUint32(layout.tables + transferTargetAt(layout, slot) + 4, 0, true);
+    }
+}
+
+/**
+ * The run's count of each `Mechanism`, by name.
+ *
+ * @param {DataView} data  over the memory the tables are in
+ * @param {{ tables: number, hashShift?: number }} layout
+ * @returns {Record<string, number>}
+ */
+export function mechanismCounts(data, layout){
+    /** @type {Record<string, number>} */
+    const out = {};
+    MECHANISM_NAMES.forEach((name, mechanism)=>{
+        out[name] = Number(data.getBigUint64(layout.tables + mechanismAt(layout, mechanism), true));
+    });
+    return out;
 }
 
 /**
@@ -89,4 +114,29 @@ export function topBlocks(blocks, regions){
         }
         return { address, count, shared: shared !== 0, entry, bytes: size };
     });
+}
+
+/**
+ * Where the shared transfer went by its hash probe, the most often first, as
+ * [address, times]: the jumps between regions no direct link took. A slot two
+ * targets shared holds the last one's address and both's count.
+ *
+ * @param {DataView} data  over the memory the tables are in
+ * @param {{ tables: number, hashShift?: number }} layout
+ * @param {number} [top]
+ * @returns {[number, number][]}
+ */
+export function transferTargets(data, layout, top = 200){
+    /** @type {[number, number][]} */
+    const out = [];
+    for (let slot = 0; slot < Tables.BLOCK_SLOTS; slot++)
+    {
+        const at = layout.tables + transferTargetAt(layout, slot);
+        const count = data.getUint32(at + 4, true);
+        if (count > 0)
+        {
+            out.push([data.getUint32(at, true), count]);
+        }
+    }
+    return out.sort((one, two)=>two[1] - one[1]).slice(0, top);
 }

@@ -73,6 +73,10 @@
  * @property {number} codePages    Wasm address of the other executor's byte-per-page
  *                                 "has compiled code" table (hybrid), or -1: a store into
  *                                 such a page leaves `stale` so its cache can be dirtied.
+ * @property {number} [processors] Cork's own: how many processors `cpuid` says the machine has
+ *     -- the process's executors -- where more than one; absent, one.
+ * @property {number} [processor]  Cork's own: which of them this layout's executor is, the
+ *     initial APIC id `cpuid` gives code running there.
  * @property {string} id           A hash of every field above.
  */
 
@@ -84,6 +88,9 @@
  * @property {StateLayout} layout
  * @property {EngineConfig} config
  * @property {(address: number) => number} read   One byte of guest memory.
+ * @property {(start: number, end: number) => Uint8Array} [readBytes]  The bytes `read`
+ *     answers for `[start, end)`, copied at once: what the engine keeps of a region's code
+ *     to find it rewritten, taken a byte at a time through `read` where this is absent.
  * @property {EngineImports} imports
  */
 
@@ -226,12 +233,14 @@
  * @property {boolean} [leafCalls]  A small leaf callee formed into its caller. Default true.
  * @property {number} [leafBlocks]  Its blocks at most. Default 16.
  * @property {number} [leafBytes]  Its bytes at most. Default 512.
+ * @property {number} [formDepth]  How many levels of callees formed in may keep direct calls
+ *     of their own, those callees formed in as well when small; 0 forms leaves alone. Default 1.
  * @property {number} [switchEntries]  Entries of a switch's jump table followed when forming.
  *     Default 1024.
  * @property {boolean} [runtimeHelpers]  A call to a compiler's runtime helper (MSVC's `_ftol2`)
  *     formed as what it amounts to. Default true.
  * @property {boolean} [callTargets]  Indirect calls sampled and their few small callees formed
- *     in. Default false.
+ *     in. Default true.
  * @property {number} [predictAfter]  Samples of one call before its callees are looked at.
  *     Default 48.
  * @property {number} [predictShare]  A callee formed in takes one in this many of the call's
@@ -241,8 +250,19 @@
  * @property {number} [callWindow]  The window a call's samples are counted in. Default 64.
  * @property {boolean} [callReturn]  A call out of a region a wasm call, the region going on after
  *     the `ret`. Default true.
- * @property {boolean} [wideFirst]  x87 regions compiled for the precision control the program
- *     runs under, tested once a block. Default true.
+ * @property {boolean} [emptyCalls]  A call to a function that does nothing -- a `ret` or
+ *     `ret imm16`, after at most three direct jumps -- returns without entering a region.
+ *     Default true.
+ * @property {boolean} [emptySites]  With `emptyCalls`, a call out of a region reads its target's
+ *     slot first and returns from such a function in place, without calling the transfer.
+ *     Default false.
+ * @property {boolean} [wideFirst]  Each x87 region compiled for the precision control it runs
+ *     under, tested once a block; one seen under both tests at every rounding operation.
+ *     Default true.
+ * @property {boolean} [floatSingles]  An x87 region compiled for single precision computes its
+ *     arithmetic on floats in f32 where the operands are floats; a result past a float's range
+ *     leaves for the host, and an entry that keeps leaving is compiled again rounding doubles.
+ *     Default true.
  * @property {boolean} [x87Shapes]  x87 regions compiled for the stack's shape at their entries,
  *     tested once at an entry. Default true.
  * @property {number} [checkedAfter]  Failed shape tests before a region is formed again with no
@@ -257,9 +277,17 @@
  * @property {number} [arenaBytes]  Bytes of the shared translation arena (0: none). Default
  *     48 MiB.
  * @property {number} [loadingBatch]  While the translation worker loads, the largest batch
- *     emitted on the engine thread. Default 16.
+ *     emitted on the engine thread -- none where `holdMs` bounds the work there: a batch waits
+ *     for the worker. Default 16.
  * @property {number} [loadingShare]  And the share of the time since the worker was made
  *     emitting there may take. Default 0.25.
+ * @property {number} [holdMs]  Where a translation worker is wanted, the engine thread's
+ *     time the translator's work may take at a stretch: a batch is formed over several calls,
+ *     the store's hits compiled off the thread, their compiles started and they and a worker's
+ *     answers published a few at a call (0: a batch formed and published whole in one call).
+ *     Default 4.
+ * @property {number} [holdShare]  And the share of the engine thread's time that work may
+ *     take over a while. Default 0.5.
  * @property {number} [exitTargets]  Targets of untranslated exits kept. Default 4096.
  * @property {number} [missesKept]  (Address, top) miss counts kept. Default 4096.
  * @property {number} [callSitesKept]  Indirect call sites tried with predicted callees kept.
@@ -313,7 +341,9 @@
  *
  * @typedef {Object} TranslationStore
  * @property {(key: string) => Promise<Uint8Array | null>} get
- * @property {(key: string, bytes: Uint8Array) => Promise<void>} put
+ * @property {(key: string, bytes: Uint8Array) => Promise<void>} put  The bytes are the store's
+ *     from the call on: a directory store hands a record that is the whole of its buffer to the
+ *     worker that writes it, and the caller's view of it is then empty.
  * @property {(key: string) => Uint8Array | null | undefined} [getNow]  The record at once,
  *     without a turn of the event loop, where the store can answer so; undefined where it
  *     cannot yet, and the translator asks `get`. Optional.
@@ -376,7 +406,14 @@
  *     emitted here meanwhile), or taking the batches.
  * @property {number} [reforms]        Regions formed again with the callees their indirect
  *     calls were sampled going to (`callTargets`).
- * @property {number} [copied]         Regions formed again with copies of the blocks inside
+ * @property {{ due: number, noShare: number, reformsOut: number, notFormed: number,
+ *     noRegion: number, held: number, quiet: number, reforms: number,
+ *     sites: object[] }} [prediction]  With `callTargets`: the indirect calls whose samples came
+ *     due, and why each was left as it was -- no callee took a share of them, its regions formed
+ *     again as often as they may be, its callees not formed in, no region holding it, or every
+ *     region having its callees -- the calls a region was formed again without sampling
+ *     (`quiet`), and the most sampled calls.
+ * @property {number} [copied]        Regions formed again with copies of the blocks inside
  *     their loops, which the machine kept coming back into there (`structure`).
  * @property {number} [crossings]      Transfers out of a running module into another,
  *     through the function table: the rest are direct tail calls.
@@ -387,22 +424,27 @@
  * @property {number} retired          Instructions retired in the engine, for a frame's share.
  * @property {number} cacheHits        Regions taken from the store.
  * @property {number} cacheMisses
- * @property {number} [lookedUpNow]    Batches the store answered in the call that formed them.
+ * @property {number} [lookedUpNow]    Batches the store answered without a turn of the event loop.
  * @property {number} [lookedUpLater]  Batches it answered a turn of the event loop later.
+ * @property {number} [lookedUpInPart]  Calls that left a batch's answers half read (`holdMs`).
  * @property {number} [readSwitches]  1 once translated reads test their pages after a fault.
- * @property {number} [precisionSwitches]  Times x87 regions went to another precision control:
- *     from the wide ones to single, and from single to a test at every rounding operation.
+ * @property {number} [precisionSwitches]  Times an x87 entry went to another precision control,
+ *     or from one to a test at every rounding operation.
  * @property {number} [interpretedRelaxedReads]  x87 status words the interpreter tier in wasm
  *     stored (`fnstsw`) while not `precise`: reads that may see a bit only `precise` keeps.
  * @property {boolean} [looseStacks]  Whether stores through esp alone go untested: until code
  *     is translated on a thread's stack (`noteStack`).
  * @property {number} [stackCode]  Times code on a stack switched that off (once at most).
- * @property {boolean} [wide]  Whether x87 regions are still compiled for wide precision.
- * @property {'wide' | 'narrow' | 'mixed'} [precision]  The precision control new x87 regions are
- *     compiled for: the wide ones, single, or either (a test at every rounding operation).
+ * @property {{ wide: number, narrow: number, mixed: number }} [precision]  The x87 entries by
+ *     the precision control they are compiled for: the wide ones, single, or either (a test
+ *     at every rounding operation).
  * @property {number} [shapeMisses]  Entries that found the x87 stack in another shape than
  *     their block was compiled for, and left for the host.
  * @property {number} [shapeChecked]  x87 regions translated again checked for it.
+ * @property {number} [floatMisses]  Single-precision operations on floats (`floatSingles`) that
+ *     left for the host, their float result not the processor's.
+ * @property {number} [floatsRounded]  Entries translated again rounding doubles after they kept
+ *     leaving so.
  * @property {number} [x87RelaxedReads]  Translated x87 status-word reads (`fnstsw` into memory or
  *     into AX not read as C0 C2 C3 alone, `fnstenv`, `fnsave`) that may see the exception flags
  *     or C1, which only a `precise` run keeps: a strange result there is worth one.
@@ -424,11 +466,22 @@
  *     or -1], most executed first.
  * @property {{ address: number, count: number, shared: boolean, entry: number,
  *     bytes: number }[]} [topBlocks]  The forty most executed, with the region each is in.
+ * @property {Record<string, number>} [mechanisms]  With `blockProfile`: how calls and returns
+ *     went -- formed into a region, wasm calls, or ways out -- transfers through the entry hash
+ *     and `rdtsc`s, each counted by the code that took it (cork's `Mechanism`).
+ * @property {{ regions: number, held: number, executed: number, bytes: number,
+ *     perInstruction: number, forms: { form: string, executed: number, bytes: number,
+ *     perInstruction: number, share: number }[] }} [forms]  With `blockProfile`: what the hot
+ *     code is made of -- each instruction form's executions and the wasm bytes cork emits for
+ *     it in the regions the run formed (emitted again without the profile's counts), the regions
+ *     holding `held` of the counted executions.
  * @property {number} invalidations    Regions discarded by a write.
  * @property {number} volatilePages    Times a page written so often was left to the interpreter.
  * @property {number} [volatileNow]     The pages left to the interpreter now.
  * @property {number} [storesKept]      Stores into code that changed no byte a region on the page
  *     was formed from, and dropped none.
+ * @property {number} [codePageCopies]  Pages whose bytes are kept to judge a later store into
+ *     none of their regions by: pages code was on when a store came.
  * @property {number} [dropped]        Regions dropped at publication because a page moved.
  * @property {number} [queued]         Candidates noted and not yet formed.
  * @property {number} [barren]         Candidate keys a region formed nothing at.

@@ -656,27 +656,105 @@ test('GetProcessTimes fills the same four FILETIMEs for this process', ()=>{
     assert.deepEqual(host.errors, [6], 'ERROR_INVALID_HANDLE');
 });
 
+test('the user times are the processor time the scheduler gave, the process\'s past the wall'
+    + ' clock when its threads ran at once', ()=>{
+    const host = fakeHost();
+    /** @type {any} */ (host.kernel).processCpuMs = ()=>2500;
+    const fns = createSyncFunctions(host);
+    host.register(0x20, 'thread', host.threads.second);
+    host.threads.second.cpuMs = 1250.5;
+    const read64 = (/** @type {number} */ at)=>new DataView(host.bytes.buffer).getBigInt64(at, true);
+    assert.equal(fns.GetThreadTimes.handler([0x20, 0, 0, 0x310, 0x318]), 1);
+    assert.deepEqual([read64(0x310), read64(0x318)], [0n, 12_505_000n], '100 ns units, user time');
+    assert.equal(fns.GetProcessTimes.handler([0xffffffff, 0, 0, 0x310, 0x318]), 1);
+    assert.equal(read64(0x318), 25_000_000n);
+});
+
 test('SetThreadAffinityMask records the mask and answers the one before', ()=>{
+    // One processor: its mask is the only one there is to set, and the one a
+    // thread had before (Wine's kernel32 test_thread_processor).
     const host = fakeHost();
     const fns = createSyncFunctions(host);
     host.register(0x20, 'thread', host.threads.second);
 
-    assert.equal(fns.SetThreadAffinityMask.handler([0x20, 2]), 1, 'the one processor');
-    assert.equal(fns.SetThreadAffinityMask.handler([0x20, 4]), 2, 'what was set before');
-    assert.equal(host.threads.second.affinityMask, 4);
+    assert.equal(fns.SetThreadAffinityMask.handler([0x20, 1]), 1, 'the process\'s, before');
+    assert.equal(host.threads.second.affinityMask, 1);
+    assert.equal(fns.SetThreadAffinityMask.handler([0x20, 0xffffffff]), 1, 'every processor');
 
+    assert.equal(fns.SetThreadAffinityMask.handler([0x20, 2]), 0, 'a processor there is not');
+    assert.equal(fns.SetThreadAffinityMask.handler([0x20, 0]), 0, 'no processor');
     assert.equal(fns.SetThreadAffinityMask.handler([0x1234, 1]), 0, 'not a thread');
-    assert.deepEqual(host.errors, [6], 'ERROR_INVALID_HANDLE');
+    assert.deepEqual(host.errors, [87, 87, 6], 'ERROR_INVALID_PARAMETER, then _HANDLE');
+    assert.equal(host.threads.second.affinityMask, 1, 'nothing changed by a refusal');
 });
+
+test('on four processors a thread is kept to the ones its mask names, within its process\'s',
+    ()=>{
+        const host = fakeHost();
+        /** @type {any} */ (host.kernel).processors = ()=>4;
+        const fns = createSyncFunctions(host);
+        host.register(0x20, 'thread', host.threads.second);
+
+        assert.equal(fns.SetThreadAffinityMask.handler([0x20, 4]), 0xf, 'every processor before');
+        assert.equal(fns.SetThreadAffinityMask.handler([0x20, 0x13]), 4,
+            'the bits past the fourth go');
+        assert.equal(host.threads.second.affinityMask, 3);
+        assert.equal(fns.SetThreadAffinityMask.handler([0x20, 0x10]), 0, 'none of the four');
+        assert.deepEqual(host.errors, [87]);
+    });
+
+test('a thread that moves itself off its processor gives up its turn and answers the old mask',
+    ()=>{
+        // A program pins itself to each processor in turn and reads the APIC id
+        // there: the call returns on one the new mask names.
+        const host = fakeHost();
+        /** @type {any} */
+        const kernel = host.kernel;
+        kernel.processors = ()=>4;
+        kernel.processorOf = (/** @type {any} */ thread)=>(thread === host.threads.first ? 2 : 0);
+        /** @type {any[]} */
+        const blocked = [];
+        kernel.block = (/** @type {any} */ thread, /** @type {string} */ reason,
+            /** @type {any} */ timed)=>blocked.push({ thread, reason, timed });
+        host.kernel.state.now = 50;
+        const fns = createSyncFunctions(host);
+
+        assert.equal(fns.SetThreadAffinityMask.handler([0xfffffffe, 0xc]), 0xf, 'still on 2');
+        assert.deepEqual(blocked, []);
+        assert.equal(fns.SetThreadAffinityMask.handler([0xfffffffe, 1]), PARKED, 'off 2');
+        assert.deepEqual(blocked, [{ thread: host.threads.first, reason: 'SetThreadAffinityMask',
+            timed: { deadline: 50, result: 0xc } }], 'woken at once, with the mask before');
+        assert.equal(host.threads.first.affinityMask, 1);
+
+        host.register(0x20, 'thread', host.threads.second);
+        assert.equal(fns.SetThreadAffinityMask.handler([0x20, 2]), 0xf, 'another thread: no wait');
+        assert.equal(blocked.length, 1);
+    });
 
 test('SetThreadIdealProcessor records the ideal and answers the one before', ()=>{
     const host = fakeHost();
+    /** @type {any} */ (host.kernel).processors = ()=>4;
     const fns = createSyncFunctions(host);
     host.register(0x20, 'thread', host.threads.second);
 
     assert.equal(fns.SetThreadIdealProcessor.handler([0x20, 1]), 0, 'processor 0 before');
     assert.equal(fns.SetThreadIdealProcessor.handler([0x20, 3]), 1);
     assert.equal(host.threads.second.idealProcessor, 3);
+    assert.equal(fns.SetThreadIdealProcessor.handler([0x20, 32]), 3, 'MAXIMUM_PROCESSORS reads');
+    assert.equal(host.threads.second.idealProcessor, 3);
+});
+
+test('SetThreadIdealProcessor refuses a processor the machine does not have', ()=>{
+    // Wine's kernel32 test_thread_processor: MAXIMUM_PROCESSORS + 1 is (DWORD)-1
+    // and ERROR_INVALID_PARAMETER, MAXIMUM_PROCESSORS itself an answer.
+    const host = fakeHost();
+    const fns = createSyncFunctions(host);
+    assert.equal(fns.SetThreadIdealProcessor.handler([0xfffffffe, 0]), 0);
+    assert.equal(fns.SetThreadIdealProcessor.handler([0xfffffffe, 1]), 0xffffffff, 'one: 0 only');
+    assert.equal(fns.SetThreadIdealProcessor.handler([0xfffffffe, 33]), 0xffffffff);
+    assert.equal(fns.SetThreadIdealProcessor.handler([0xfffffffe, 32]), 0);
+    assert.equal(fns.SetThreadIdealProcessor.handler([0x1234, 0]), 0xffffffff, 'not a thread');
+    assert.deepEqual(host.errors, [87, 87, 6]);
 });
 
 test('a thread resumed while queued behind a released section takes it', ()=>{

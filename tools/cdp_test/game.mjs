@@ -21,8 +21,8 @@
  *                                  [--keep-images N,M] [--watch-import LIB.dll[#ord+ord]]
  *                                  [--click x,y[,after]] [--key Code[,after]] [--coi]
  *                                  [--mode NAME] [--executors N] [--cork-config JSON]
- *                                  [--graphics-worker] [--journal-calls]
- *                                  [--command-line STRING] [--windows NAME]
+ *                                  [--graphics-worker] [--fake-gpu] [--journal-calls]
+ *                                  [--command-line STRING] [--args STRING] [--windows NAME]
  *                                  [--file HOST=GUEST] [--save-files]
  *                                  [--user-data-dir DIR] [--port N] [--store local] [--prefetch]
  *                                  [--cpu-profile SECONDS] [--heap-profile [old]]
@@ -262,6 +262,9 @@ function parse(argv){
         commandLine: argv.includes('--command-line')
             ? argv[argv.indexOf('--command-line') + 1]
             : null,
+        // The arguments alone, as the launcher takes them: the quoted image
+        // path goes in front, as it does for the manifest's.
+        args: argv.includes('--args') ? argv[argv.indexOf('--args') + 1] : null,
         // The Windows the title runs under, over the one its manifest names.
         windows: argv.includes('--windows') ? argv[argv.indexOf('--windows') + 1] : null,
         // Files put on the volume before the program starts, as `HOST=GUEST`:
@@ -601,6 +604,10 @@ function parse(argv){
         // Direct3D and OpenGL drawn in a graphics worker, the program's thread
         // keeping only their state, as the player runs them.
         graphicsWorker: argv.includes('--graphics-worker'),
+        // A GPU that takes every call and draws nothing, the devices played in
+        // a graphics worker over it: what measures the engine alone, with no
+        // software rasteriser taking the machine's cores and holding it for frames.
+        fakeGpu: argv.includes('--fake-gpu'),
         // The call areas a person's report is taken with, traced from the
         // first instruction: what tracing costs a run is part of what it measures.
         journalCalls: argv.includes('--journal-calls'),
@@ -811,6 +818,14 @@ function describeCork(cork, say){
             + ` relinks and ${cork.merges ?? 0} merges` : ''));
     say(`    x87 precision: ${cork.wide ? 'wide' : 'rounding'}`
         + `, switched ${cork.precisionSwitches ?? 0} times`);
+    if (cork.prediction)
+    {
+        // `callTargets`: the indirect calls whose samples came due, and what became of them.
+        const p = cork.prediction;
+        say(`    predicted calls: ${p.due} due, ${p.reforms} regions formed again, ${p.quiet ?? 0}`
+            + ` calls quiet; left as they were: no share ${p.noShare}, held ${p.held}, reforms`
+            + ` out ${p.reformsOut}, not formed ${p.notFormed}, no region ${p.noRegion}`);
+    }
     say(`    volatile pages: ${cork.volatilePages ?? 0}`
         + `  invalidations: ${cork.invalidations ?? 0}`
         + `  dropped: ${cork.dropped ?? 0}`
@@ -847,6 +862,32 @@ function describeCork(cork, say){
         // The block profile's most executed blocks (--cork-config blockProfile).
         say(`    hottest blocks: ${cork.topBlocks.slice(0, 20).map((/** @type {any} */ b)=>
             `${b.address.toString(16)}x${b.count}${b.shared ? '*' : ''}`).join(' ')}`);
+    }
+    if (cork.mechanisms)
+    {
+        // How the profiled window's calls and returns went (cork's `Mechanism`).
+        say(`    mechanisms: ${Object.entries(cork.mechanisms).filter(([, n])=>n > 0)
+            .map(([name, n])=>`${name}=${n}`).join(' ')}`);
+    }
+    if (cork.transferTargets?.length)
+    {
+        // Where the shared transfer's hash probe went, the most often first:
+        // the jumps between regions that no direct link took.
+        say(`    transfer targets: ${cork.transferTargets.slice(0, 40).map((/** @type {number[]} */ [
+            address, count])=>`${address.toString(16)}x${count}`).join(' ')}`);
+    }
+    if (cork.forms)
+    {
+        // What the hot code is made of: each form's executions and wasm bytes.
+        const { forms } = cork;
+        say(`    forms: ${forms.regions} regions holding ${(100 * forms.held).toFixed(0)}% of the`
+            + ` executions, ${forms.perInstruction.toFixed(1)} wasm bytes an instruction`);
+        for (const row of forms.forms.slice(0, 25))
+        {
+            const part = `${(100 * row.share).toFixed(1)}%`;
+            say(`      ${row.form.padEnd(28)} ${String(row.executed).padStart(12)}`
+                + ` ${row.perInstruction.toFixed(0).padStart(5)} B ${part}`);
+        }
     }
     if (cork.stalls?.length)
     {
@@ -1594,7 +1635,8 @@ export async function game(options){
             // image path the same way createApp's own default is built,
             // unless `--command-line` overrides them.
             commandLine: options.commandLine
-                ?? (manifest.commandLine ? `"${imagePath}" ${manifest.commandLine}` : undefined),
+                ?? ((options.args ?? manifest.commandLine)
+                    ? `"${imagePath}" ${options.args ?? manifest.commandLine}` : undefined),
             windows,
             sidecarHooks,
             hooks: options.watches,
@@ -1617,6 +1659,7 @@ export async function game(options){
             quantum: options.quantum,
             executors: options.executors,
             graphicsWorker: options.graphicsWorker,
+            fakeGpu: options.fakeGpu,
             ...options.journalCalls ? { logCapacity: 100000, logCategories: {
                 'call.cpu': 'trace', 'call.gpu': 'trace', 'call.net': 'trace' } } : {},
             log: Boolean(options.log),

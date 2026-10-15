@@ -12,6 +12,7 @@ import { isStandardHandle, untagged } from './handle-tags.js';
 import { createChangeNotifications } from './changes.js';
 import { SELECTORS } from './seh.js';
 import { childWaitMark } from './threading.js';
+import { MAXIMUM_PROCESSORS, createProcessors } from './processor.js';
 
 /**
  * What the export binding hands an entry that is guest code rather than a
@@ -132,6 +133,9 @@ const FILETIME_EPOCH_MS = 11644473600000;
  * @property {import('./changes.js').WatchedVolume} [volume]
  *           The volume, for the directories a change notification watches;
  *           without it FindFirstChangeNotification is refused.
+ * @property {import('./processor.js').Processors} [processors]  The process's
+ *           processors and its affinity, which every other interface that
+ *           counts or sets them shares. Absent, the kernel's alone.
  */
 
 /**
@@ -145,6 +149,7 @@ const FILETIME_EPOCH_MS = 11644473600000;
  */
 export function createSyncFunctions(host){
     const { kernel } = host;
+    const processors = host.processors ?? createProcessors(kernel);
 
     /** @param {number} address @param {number} value */
     const writeI32 = (address, value)=>{
@@ -326,14 +331,16 @@ export function createSyncFunctions(host){
     /**
      * The four FILETIMEs GetThreadTimes and GetProcessTimes write, a slot of
      * zero left alone. The clock this build keeps is one wall clock, so the
-     * creation time is now, the exit time now for one that has ended and
-     * zero otherwise, and the processor times zero -- a plausible FILETIME
-     * rather than a pointer left unwritten.
+     * creation time is now and the exit time now for one that has ended and
+     * zero otherwise. The processor time is the slices the scheduler gave,
+     * all of it user time: a benchmark divides it by the time that passed to
+     * say how busy its threads kept the processors.
      *
      * @param {number[]} slots  creation, exit, kernel, user
      * @param {boolean} ended
+     * @param {number} [userMs]
      */
-    const writeTimes = ([creation, exit, kernelTime, userTime], ended)=>{
+    const writeTimes = ([creation, exit, kernelTime, userTime], ended, userMs = 0)=>{
         const now = BigInt(Math.floor(kernel.clock.wallClock() + FILETIME_EPOCH_MS)) * 10000n;
         /** @param {number} address @param {bigint} value */
         const write = (address, value)=>{
@@ -347,7 +354,7 @@ export function createSyncFunctions(host){
         write(creation, now);
         write(exit, ended ? now : 0n);
         write(kernelTime, 0n);
-        write(userTime, 0n);
+        write(userTime, BigInt(Math.round(userMs * 10000)));
         return 1;
     };
 
@@ -897,7 +904,7 @@ export function createSyncFunctions(host){
                     return 0;
                 }
                 return writeTimes([creation, exit, kernelTime, userTime],
-                    (thread.exitCode ?? null) !== null);
+                    (thread.exitCode ?? null) !== null, thread.cpuMs ?? 0);
             },
         },
 
@@ -919,18 +926,23 @@ export function createSyncFunctions(host){
                     host.setLastError?.(ERROR_INVALID_HANDLE);
                     return 0;
                 }
+                // A child's processor time is its own scheduler's, not known here.
                 return writeTimes([creation, exit, kernelTime, userTime], child !== null
-                    && (child.completed || child.exitCode !== kernel.processes?.STILL_ACTIVE));
+                    && (child.completed || child.exitCode !== kernel.processes?.STILL_ACTIVE),
+                child === null ? kernel.processCpuMs?.() ?? 0 : 0);
             },
         },
 
         /**
          * DWORD_PTR SetThreadAffinityMask(HANDLE hThread, DWORD_PTR dwThreadAffinityMask)
          *
-         * The processor a thread is allowed on. This build has one processor,
-         * so the mask is recorded and the previous one handed back -- a caller
-         * that sets and restores it gets the value it saved. A handle that is
-         * not a thread fails with ERROR_INVALID_HANDLE.
+         * The processors a thread may run on, which the scheduler keeps it to,
+         * and the mask it had before -- its process's, until one is set. A
+         * mask naming none of the process's processors, or one it does not
+         * have, is ERROR_INVALID_PARAMETER and 0 (`threadMaskFor`). A thread
+         * that moves itself off the processor it is on gives up its turn, so
+         * it is on one of the new ones before the call returns: a program that
+         * pins itself to each processor in turn reads each one's APIC id next.
          */
         SetThreadAffinityMask: {
             argBytes: 8,
@@ -942,8 +954,25 @@ export function createSyncFunctions(host){
                     host.setLastError?.(ERROR_INVALID_HANDLE);
                     return 0;
                 }
-                const previous = thread.affinityMask ?? 1;
-                thread.affinityMask = mask >>> 0;
+                const wanted = processors.threadMaskFor(mask);
+                if (wanted === 0)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                const previous = processors.threadMask(thread);
+                thread.affinityMask = wanted;
+                const self = host.currentThread();
+                if (thread === self && (wanted >>> processors.processorOf(self) & 1) === 0)
+                {
+                    // Woken at once with the answer: the scheduler gives the
+                    // thread an allowed processor when it next chooses.
+                    kernel.block(self, 'SetThreadAffinityMask', {
+                        deadline: kernel.clock.virtualTime(),
+                        result: previous,
+                    });
+                    return host.park();
+                }
                 return previous;
             },
         },
@@ -951,9 +980,10 @@ export function createSyncFunctions(host){
         /**
          * DWORD SetThreadIdealProcessor(HANDLE hThread, DWORD dwIdealProcessor)
          *
-         * The processor a thread would prefer to run on. There is one, so the
-         * choice is recorded and the previous one handed back, as
-         * SetThreadAffinityMask does.
+         * The processor a thread would prefer to run on: recorded, and the
+         * previous one handed back. MAXIMUM_PROCESSORS only reads it; a
+         * processor the machine does not have is (DWORD)-1 with
+         * ERROR_INVALID_PARAMETER (Wine's kernel32 test_thread_processor).
          */
         SetThreadIdealProcessor: {
             argBytes: 8,
@@ -963,10 +993,20 @@ export function createSyncFunctions(host){
                 if (!thread)
                 {
                     host.setLastError?.(ERROR_INVALID_HANDLE);
-                    return 0;
+                    return 0xffffffff;
                 }
                 const previous = thread.idealProcessor ?? 0;
-                thread.idealProcessor = ideal >>> 0;
+                const asked = ideal >>> 0;
+                if (asked === MAXIMUM_PROCESSORS)
+                {
+                    return previous;
+                }
+                if (asked >= processors.count())
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0xffffffff;
+                }
+                thread.idealProcessor = asked;
                 return previous;
             },
         },

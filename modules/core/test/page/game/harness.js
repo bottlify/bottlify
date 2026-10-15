@@ -26,6 +26,7 @@
 import { createApp } from '../../../src/app.js';
 import { placeHooks, watchFrom } from '../../../src/host/serve.js';
 import { openGraphicsWorker } from '../../../src/host/graphics-worker.js';
+import { createFakeDevice } from '../../../src/layers/graphics/webgpu/internal/fake-device.js';
 import { createInputRoute } from '../../../src/layers/input/route.js';
 import {
     SLOTS, GLOBAL_HEADER_INT32, SLOT_HEADER_INT32, SLOT_BYTES, ARENA_OFFSET, ARENA_BYTES,
@@ -290,6 +291,27 @@ async function openDevice(errors){
             fallback: adapter.isFallbackAdapter === true,
         },
     };
+}
+
+/**
+ * A device that takes every call and draws nothing (`fakeGpu`), for a run that
+ * measures the engine alone: a software rasteriser shares the machine's cores
+ * with it and holds it waiting for frames, which a person's GPU does not.
+ *
+ * @returns {GpuHandle}
+ */
+function fakeDevice(){
+    const gpu = createFakeDevice();
+    // The fake keeps every call it was given for a test to look at; a run
+    // minutes long would hold gigabytes of it. Nothing reads the log here.
+    setInterval(()=>{
+        gpu.calls.length = 0;
+    }, 1000);
+    Object.assign(gpu.device, { queue: gpu.queue, features: new Set(),
+        createSampler: (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor }) });
+    return { available: true, device: gpu.device,
+        adapter: { vendor: 'fake', architecture: '', description: 'draws nothing',
+            fallback: false } };
 }
 
 /**
@@ -1414,13 +1436,13 @@ export function createHarness(canvas, how = {}){
      *           files?: { path: string, base64: string }[],
      *           wholeFiles?: boolean,
      *           sampling?: boolean,
-     *           store?: string, prefetch?: boolean, bundleId?: string,
+     *           store?: string, prefetch?: boolean, bundleId?: string, fakeGpu?: boolean,
      *           watch?: { libraries: Record<string, number[] | null>,
      *               strings: number[] }, record?: number, memorySize?: number }} request
      * @returns {Promise<any>}
      */
     async function run(request){
-        const handle = await opened;
+        const handle = request.fakeGpu ? fakeDevice() : await opened;
         if (!handle.available)
         {
             return { ok: false, gpu: false, reason: handle.reason };
@@ -1428,8 +1450,12 @@ export function createHarness(canvas, how = {}){
         // The player draws in a graphics worker of its own and keeps only the
         // devices' state on the program's thread; a run asked to measure what
         // a player's machine does takes the same split.
-        const graphicsWorker = request.graphicsWorker
-            ? await openGraphicsWorker({ frames: 'pixels' }) : null;
+        // With the fake device the devices are played in a worker of their own
+        // over another fake, as the player's split has them.
+        const graphicsWorker = request.fakeGpu
+            ? await openGraphicsWorker({ frames: 'none',
+                url: new URL('./fake-graphics.worker.js', import.meta.url) })
+            : request.graphicsWorker ? await openGraphicsWorker({ frames: 'pixels' }) : null;
         if (graphicsWorker && !graphicsWorker.worker)
         {
             const why = 'reason' in graphicsWorker ? graphicsWorker.reason : '';

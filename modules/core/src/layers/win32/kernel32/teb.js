@@ -27,8 +27,6 @@
  * ones where they belong.
  */
 
-import { PROCESSOR } from './processor.js';
-
 /** Field offsets in the thread block, and the size a whole one occupies. */
 export const TEB = Object.freeze({
     EXCEPTION_LIST: 0x00,
@@ -177,6 +175,9 @@ export const TLS_SLOTS = 64;
  * @param {string} [options.commandLine]
  * @param {string} [options.currentDirectory]
  * @param {{ input: number, output: number, error: number }} [options.standardHandles]
+ * @param {number} [options.processors]  How many processors the machine has --
+ *        the process's executors, which the kernel knows once the processor
+ *        layer is made; absent, one.
  * @param {LoadedModule[]} [options.modules]
  *        Every module mapped before the process's first instruction runs --
  *        the loader's own module table, snapshotted here once. `addModule`
@@ -218,7 +219,7 @@ export function createProcessBlocks(options){
         | ((version.servicePackMinor ?? 0) & 0xff) << 16) >>> 0);
     write(peb + PEB.OS_PLATFORM_ID, 2); // VER_PLATFORM_WIN32_NT
     // Read directly by a runtime sizing its thread pool, without a call.
-    write(peb + PEB.NUMBER_OF_PROCESSORS, PROCESSOR.count);
+    write(peb + PEB.NUMBER_OF_PROCESSORS, options.processors ?? 1);
 
     // Strings are laid out after the parameter block, in the same allocation.
     let strings = params + PARAMS.SIZE;

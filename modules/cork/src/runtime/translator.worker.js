@@ -21,6 +21,7 @@
  * which differ only in how the scope receives and sends messages.
  */
 
+import { moduleDigest, packRegion } from './cache.js';
 import { arenaEmitCache, createEmitCache, emitBatch, relinkBatch } from './emit-built.js';
 
 /**
@@ -66,11 +67,12 @@ function connection(send){
     };
     /**
      * A batch of formed regions (`jobs`), or a relink of running ones (`relink`:
-     * formed here again from a copy of their pages).
+     * formed here again from a copy of their pages); with `storeVersion`, the
+     * module is to be stored, and is answered digested and packed for it.
      *
      * @param {{ id: number, jobs?: { region: any, entryTop: number }[], relink?: any,
      *     layout: any, features: any, options: any, ready?: boolean, doorbell?: any,
-     *     arena?: SharedArrayBuffer | null }} data
+     *     arena?: SharedArrayBuffer | null, storeVersion?: number }} data
      */
     return data=>{
         if (data?.ready === true)
@@ -91,7 +93,7 @@ function connection(send){
             ring();
             return;
         }
-        const { id, jobs, relink, layout, features, options } = data;
+        const { id, jobs, relink, layout, features, options, storeVersion } = data;
         // The whole of what the batch held this worker for, forming a relink and
         // compiling included: how busy the worker is, which its parts do not say.
         const started = performance.now();
@@ -117,6 +119,15 @@ function connection(send){
             catch {
                 compiled = null;
             }
+            // What the engine stores the module under, and as: hashing and
+            // copying its megabytes there held the thread a few milliseconds
+            // an answer.
+            if (typeof storeVersion === 'number')
+            {
+                batch.digest = moduleDigest(batch.module);
+                batch.packed = packRegion({ module: batch.module, labels: [], cut: [],
+                    entryTop: 0, instructions: 0 }, storeVersion);
+            }
             const busyMs = performance.now() - started;
             if (busyCell !== null)
             {
@@ -124,7 +135,8 @@ function connection(send){
                 Atomics.add(busyCell.cells, busyCell.at + 1, batch.results.length);
                 Atomics.store(busyCell.cells, busyCell.at + 2, 0);
             }
-            send({ id, batch, compiled, busyMs }, [batch.module.buffer]);
+            send({ id, batch, compiled, busyMs }, [batch.module.buffer,
+                ...batch.packed === undefined ? [] : [batch.packed.buffer]]);
         }
         catch (e){
             if (busyCell !== null)

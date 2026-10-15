@@ -56,8 +56,14 @@ import {
     planLoop, planRegion, readsWrapped,
 } from './memory.js';
 import { importHelpers } from './helpers.js';
-import { Tables, blockProfileAt, blockSlot, hashSlotsOf } from '../runtime/layout.js';
+import { Mechanism, Tables, blockProfileAt, blockSlot, hashSlotsOf, mechanismAt,
+    pageFlagsAt, transferTargetAt }
+    from '../runtime/layout.js';
+import { PageFlag } from '../runtime/pages.js';
 import { ANY_TOP } from '../runtime/entries.js';
+
+/** `i64.add`, the one 64-bit operation a profiling run's counts take. */
+const I64_ADD = 0x7c;
 import { callsOut, inlineReturns } from '../region.js';
 import {
     analyseX87, floatCondition, isX87, prepareX87, sameState, x87BlockEnd, x87BlockStart,
@@ -197,6 +203,19 @@ const LOCAL_TYPES = [
 ];
 
 /**
+ * What a diagnostic run is told of each instruction emitted: the instruction,
+ * the bytes of wasm it and the checks its memory plan placed before it took in
+ * the region's body (its exits' code, written at the region's end, apart), and
+ * whether it had a lowering.
+ *
+ * @callback ExpansionNote
+ * @param {import('../decode/decoder.js').Instruction} instruction
+ * @param {number} bytes
+ * @param {boolean} lowered
+ * @returns {void}
+ */
+
+/**
  * What a module carries that every region function in it uses.
  *
  * @typedef {Object} ModuleContext
@@ -208,10 +227,15 @@ const LOCAL_TYPES = [
  * @property {number} [undo]           the undo helper's function index, in a differential build
  * @property {boolean} [callReturn] a call out of a region is a wasm call the matching `ret`
  *     returns from (`CallStack`), where the region goes on after it
+ * @property {boolean} [emptySites] with `callReturn`, such a call looks its target up in the
+ *     entry hash first and does the `ret` of a function that does nothing in place
+ *     (`callAndReturn`)
  * @property {boolean} [countTransfers] each transfer through the hash adds one to the
  *     tables' transfer count (a diagnostic run)
  * @property {boolean} [blockProfile] each block counts its executions in the block
  *     profile past the tables (a diagnostic run, in a memory sized for it)
+ * @property {ExpansionNote} [expansion] told each instruction's wasm bytes as it is
+ *     emitted, the checks of its memory plan with it (a diagnostic run)
  * @property {boolean} [profileCalls] an indirect call notes its address and target in the
  *     layout's call profile while the host has it on
  * @property {boolean} [flat]  every backward jump through the dispatch rather than the loops
@@ -273,11 +297,13 @@ const LOCAL_TYPES = [
  * @param {{ undoLog?: boolean, hash?: boolean, trapPort?: number, leaveOut?: Set<string>,
  *     countTransfers?: boolean, wide?: boolean, narrow?: boolean, blockProfile?: boolean,
  *     structure?: boolean, precise?: boolean, place?: number, profileCalls?: boolean,
- *     resume?: boolean, callReturn?: boolean, looseStacks?: boolean,
- *     atomic?: boolean, checkReads?: boolean }}
- *     [options]  checkReads: an instruction that only reads tests its pages too, so a page
- *     the program cannot read faults (a reservation not committed, PAGE_NOACCESS) rather
- *     than reading RAM; atomic: locked instructions as wasm atomics (`locked.js`), for a process
+ *     resume?: boolean, callReturn?: boolean, emptySites?: boolean, looseStacks?: boolean,
+ *     atomic?: boolean, checkReads?: boolean, expansion?: ExpansionNote | null }}
+ *     [options]  expansion: told every instruction's wasm bytes as it is emitted
+ *     (`tools/cork-expansion.mjs`), in a diagnostic build only; checkReads: an
+ *     instruction that only reads tests its pages too, so a page the program cannot read
+ *     faults (a reservation not committed, PAGE_NOACCESS) rather than reading RAM;
+ *     atomic: locked instructions as wasm atomics (`locked.js`), for a process
  *     whose threads run on more than one executor; looseStacks: a store through esp alone
  *     tests no page (`emitGroupChecks`), which holds while no translated code lies on a
  *     thread's stack (the runtime's
@@ -297,8 +323,8 @@ const LOCAL_TYPES = [
 export function prepareModule(m, layout, features, memory = {},
     { undoLog = false, hash = false, trapPort, leaveOut = new Set(), countTransfers = false,
         wide = false, narrow = false, blockProfile = false, structure = true, precise = false,
-        place = 0, profileCalls = false, resume = false, callReturn = false,
-        looseStacks = false, atomic = false, checkReads = false } = {})
+        place = 0, profileCalls = false, resume = false, callReturn = false, emptySites = false,
+        looseStacks = false, atomic = false, checkReads = false, expansion = null } = {})
 {
     m.importMemory('env', 'memory', {
         min: 1, ...(memory.maxPages === undefined ? {} : { max: memory.maxPages }),
@@ -369,6 +395,10 @@ export function prepareModule(m, layout, features, memory = {},
     if (callReturn && hashed && !undoLog && (layout.flagRecord ?? -1) >= 0)
     {
         context.callReturn = true;
+        if (emptySites)
+        {
+            context.emptySites = true;
+        }
     }
     if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && countTransfers)
     {
@@ -409,6 +439,10 @@ export function prepareModule(m, layout, features, memory = {},
     if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && blockProfile)
     {
         context.blockProfile = true;
+    }
+    if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && expansion !== null)
+    {
+        context.expansion = expansion;
     }
     if (hashed)
     {
@@ -518,11 +552,30 @@ export function finishModule(context, functions){
     b.br(0);
     b.end(); // loop
     b.end(); // found
+    if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && context.blockProfile)
+    {
+        const at = layout.tables + mechanismAt(layout, Mechanism.TRANSFER);
+        b.i32const(0).i32const(0).load('i64', { offset: at }).i64const(1n).op(I64_ADD)
+            .store('i64', { offset: at });
+        // And where to, by the target's slot (`blockSlot`, computed here): the
+        // address, which a collision overwrites, and the count.
+        b.localGet(eip).i32const(0x9e3779b1 | 0).op(I32.mul).i32const(12).op(I32.shrU)
+            .i32const(Tables.TRANSFER_SLOT).op(I32.mul).localTee(key);
+        b.localGet(eip).store('i32', { offset: layout.tables + transferTargetAt(layout, 0) });
+        b.localGet(key).localGet(key)
+            .load('i32', { offset: layout.tables + transferTargetAt(layout, 0) + 4 })
+            .i32const(1).op(I32.add)
+            .store('i32', { offset: layout.tables + transferTargetAt(layout, 0) + 4 });
+    }
     if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && context.countTransfers)
     {
         const at = layout.tables + Tables.TRANSFERS;
         b.i32const(0).i32const(0).load('i32', { offset: at }).i32const(1).op(I32.add)
             .store('i32', { offset: at });
+    }
+    if (carried && context.callReturn === true)
+    {
+        emptyReturn(context, b, slotAt, key);
     }
     b.localGet(slotAt).load('i32_16u', { offset: 8 }).localSet(eip);
     if (placed !== undefined)
@@ -596,9 +649,69 @@ export function finishModule(context, functions){
         b.i32const(Exit.UNTRANSLATED);
     }
     m.functions[transfer - m.importedFunctions] = {
-        typeIndex: regionType, locals: [ValType.i32, ValType.i32, ValType.i32], body: b.toBytes(),
-        hints: b.hints,
+        typeIndex: regionType,
+        locals: [ValType.i32, ValType.i32, ValType.i32, ValType.i32, ValType.i32],
+        body: b.toBytes(), hints: b.hints,
     };
+}
+
+/**
+ * In the transfer, at a slot whose entry is a function that does nothing (`emptyCode`, the
+ * slot's byte 11): that function's `ret`, done here when it returns to the wasm call waiting
+ * at the top of the call stack (`callAndReturn`) -- the return address the call pushed read
+ * back from the guest's stack, on pages the program can read, and found to be the one the
+ * call waits at. Then as `returnToCall` and `returnToCaller` leave it: the call taken off the
+ * stack, `esp` past the address and the bytes the `ret` pops, the registers the parameters
+ * carry in the state block beside the rest the caller left there, and the budget less the
+ * instructions run (the jumps and the `ret`) where the caller reads it. The flags, the x87
+ * and the memory are as the call left them, as the function would leave them. A `ret` to
+ * anywhere else -- a jump into the function, a return address rewritten -- enters the region
+ * as before.
+ *
+ * @param {ModuleContext} context @param {Body} b @param {number} slotAt @param {number} code
+ */
+function emptyReturn(context, b, slotAt, code){
+    const { layout } = context;
+    const esp = STATE_PARAMS + 3;
+    const depth = STATE_PARAMS + 4;
+    const flags = pageFlagsAt(layout);
+    b.localGet(slotAt).load('i32_8u', { offset: 11 }).localTee(code);
+    b.if(EMPTY);
+    b.i32const(0).load('i32', { offset: layout.tables + CallStack.DEPTH }).localTee(depth);
+    b.if(EMPTY);
+    b.i32const(0).load('i32', { offset: layout.regs + 16 }).localTee(esp);
+    b.i32const(12).op(I32.shrU).load('i32_8u', { offset: flags });
+    b.localGet(esp).i32const(3).op(I32.add).i32const(12).op(I32.shrU)
+        .load('i32_8u', { offset: flags });
+    b.op(I32.or).i32const(PageFlag.INACCESSIBLE).op(I32.and).op(I32.eqz);
+    b.if(EMPTY);
+    b.localGet(depth).i32const(2).op(I32.shl)
+        .load('i32', { offset: layout.tables + CallStack.STACK - 4 })
+        .localGet(esp).load('i32', { offset: layout.ramBase }).op(I32.eq);
+    b.if(EMPTY);
+    if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && context.blockProfile)
+    {
+        const at = layout.tables + mechanismAt(layout, Mechanism.EMPTY_RETURN);
+        b.i32const(0).i32const(0).load('i64', { offset: at }).i64const(1n).op(I64_ADD)
+            .store('i64', { offset: at });
+    }
+    b.i32const(0).localGet(depth).i32const(1).op(I32.sub)
+        .store('i32', { offset: layout.tables + CallStack.DEPTH });
+    // The low six bits are the dwords popped plus one: the return address's and the rest.
+    b.i32const(0).localGet(esp).localGet(code).i32const(63).op(I32.and).i32const(2)
+        .op(I32.shl).op(I32.add).store('i32', { offset: layout.regs + 16 });
+    for (let r = 0; r < CARRIED_REGS; r++)
+    {
+        b.i32const(0).localGet(Local.reg + r).store('i32', { offset: layout.regs + r * 4 });
+    }
+    b.i32const(0).localGet(Local.budget).localGet(code).i32const(6).op(I32.shrU)
+        .i32const(1).op(I32.add).op(I32.sub)
+        .store('i32', { offset: layout.tables + CallStack.BUDGET });
+    b.i32const(Exit.RETURNED).return();
+    b.end();
+    b.end();
+    b.end();
+    b.end();
 }
 
 /**
@@ -695,10 +808,14 @@ function addResume(m, layout, materialise, transfer){
  *
  * @param {ModuleContext} context
  * @param {import('../region.js').Region} region
- * @param {{ entryTop?: number, checked?: boolean, copies?: boolean }} [options]  the x87 top
- *     the entry is compiled for; checked: the entries test nothing of the x87 stack's shape
- *     (`planStack`); copies: a structured region's blocks inside its loops are entered through
- *     copies of them (`emitCopies`) -- false, they have no entry (`closed`)
+ * @param {{ entryTop?: number, checked?: boolean, copies?: boolean,
+ *     precision?: X87Precision, floats?: boolean }} [options]  the x87 top the entry is
+ *     compiled for; checked: the entries test nothing of the x87 stack's shape (`planStack`);
+ *     copies: a structured region's blocks inside its loops are entered through copies of
+ *     them (`emitCopies`) -- false, they have no entry (`closed`); precision: the precision
+ *     control its x87 is compiled for, the module's (`prepareModule`'s wide and narrow) by
+ *     default; floats: compiled for single, its arithmetic on floats in f32 (`Singles` in
+ *     x87.js)
  * @returns {Translation}
  */
 export function emitRegion(context, region, options = {}){
@@ -722,25 +839,41 @@ export function emitRegion(context, region, options = {}){
  * @property {import('./memory.js').RegionPlan | null} memoryPlan  the access groups
  */
 
+/**
+ * The precision control a region's x87 arithmetic is compiled for: `wide` (double or
+ * extended, nothing rounded; a block leaves at its first rounding instruction when single is
+ * set), `narrow` (single, every result rounded; leaves when another is set) or `mixed` (a
+ * test at every rounding instruction).
+ *
+ * @typedef {'wide' | 'narrow' | 'mixed'} X87Precision
+ */
+
 /** The state the emitter keeps while writing one function. */
 export class RegionEmitter {
     /**
      * @param {ModuleContext} context
      * @param {import('../region.js').Region} region
      * @param {{ entryTop?: number, checked?: boolean, copies?: boolean,
-     *     copyFunction?: boolean, planned?: RegionPlanning | null }} [options]  copies: as
-     *     `emitRegion` takes it; copyFunction: this is the function of a structured region's
+     *     precision?: X87Precision, floats?: boolean, copyFunction?: boolean,
+     *     planned?: RegionPlanning | null }} [options]  copies, precision and floats: as
+     *     `emitRegion` takes them; copyFunction: this is the function of a structured region's
      *     copies (`emitCopies`); planned: what the region's own function planned of it, which
      *     the function of its copies takes rather than plan it again
      */
     constructor(context, region,
         { entryTop = 0, checked = false, copies = true, copyFunction = false,
-            planned = null } = {})
+            planned = null, precision = context.wide === true ? 'wide'
+                : context.narrow === true ? 'narrow' : 'mixed', floats = false } = {})
     {
         this.context = context;
         /** The region as formed, and the options, for the function of its copies. */
         this.formed = region;
-        this.options = { entryTop, checked };
+        this.options = { entryTop, checked, precision, floats };
+        /** Its x87 compiled for the wide precision controls, or for single (`X87Precision`). */
+        this.wide = precision === 'wide';
+        this.narrow = precision === 'narrow';
+        /** Compiled for single with its arithmetic on floats in f32 (`Singles` in x87.js). */
+        this.floats = this.narrow && floats;
         this.copyFunction = copyFunction;
         this.layout = context.layout;
         /** Where the layout keeps the flag record between regions, or -1. */
@@ -2416,6 +2549,22 @@ export class RegionEmitter {
     }
 
     /**
+     * One more of `mechanism` in a profiling run's counts (`blockProfile`);
+     * nothing in any other.
+     *
+     * @param {number} mechanism  a `Mechanism`
+     */
+    countMechanism(mechanism){
+        if (import.meta.BOTTLIFY_DIAGNOSTICS === false || !this.context.blockProfile)
+        {
+            return;
+        }
+        const at = this.layout.tables + mechanismAt(this.layout, mechanism);
+        this.b.i32const(0).i32const(0).load('i64', { offset: at }).i64const(1n).op(I64_ADD)
+            .store('i64', { offset: at });
+    }
+
+    /**
      * The block's instructions, each under its access plan. Answers false
      * when the block ended early -- an instruction with no lowering, or one
      * that leaves unconditionally -- and nothing after it is reached.
@@ -2441,11 +2590,16 @@ export class RegionEmitter {
             this.blockRetired++;
             this.instructions++;
             this.memPlan = plan.get(i) ?? null;
+            const bodyAt = this.b.length;
             if (this.memPlan !== null && this.memPlan.checks.length > 0)
             {
                 emitGroupChecks(this, this.memPlan.checks);
             }
             const done = emitInstruction(this, instruction, flagsLive);
+            if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && this.context.expansion)
+            {
+                this.context.expansion(instruction, this.b.length - bodyAt, done);
+            }
             if (done && this.memPlan !== null && this.memPlan.access !== null
                 && !this.memPlan.used)
             {

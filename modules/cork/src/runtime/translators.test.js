@@ -12,11 +12,15 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { CACHE_VERSION, moduleDigest, packRegion, unpackRegion } from './cache.js';
 import { machine, observe, piece, translateUntil, untilTranslatorsLoaded }
     from '../testing/seeded-pieces.js';
 
 test('three translators take a batch each, all out at once, and each is published', async()=>{
-    const m = machine({ worker: true, translators: 3, batchRegions: 1, maxBatchRegions: 1 });
+    // With forming unbounded: a first region formed on a cold start takes the
+    // share (`holdMs`), and the asks after it wait for it to come back.
+    const m = machine({ worker: true, translators: 3, batchRegions: 1, maxBatchRegions: 1,
+        holdMs: 0 });
     try
     {
         await untilTranslatorsLoaded(m, 3);
@@ -78,3 +82,40 @@ for (const seed of [11, 12, 13, 14])
             assert.deepEqual(three, inline, 'three translators');
         });
 }
+
+test('a module a translator answers is stored under what its bytes hash to, packed as here',
+    async()=>{
+        /** @type {Map<string, Uint8Array>} */
+        const records = new Map();
+        const store = {
+            get: async(/** @type {string} */ key)=>records.get(key) ?? null,
+            put: async(/** @type {string} */ key, /** @type {Uint8Array} */ bytes)=>{
+                records.set(key, bytes);
+            },
+        };
+        const m = machine({ worker: true, translators: 1, store, bundleId: 'test' });
+        try
+        {
+            await untilTranslatorsLoaded(m, 1);
+            const starts = [0x2000, 0x3000];
+            starts.forEach((at, i)=>m.write(at, piece(i, 100, 3).code));
+            for (const at of starts)
+            {
+                m.runtime.noteHot(at, 0, 2);
+            }
+            await translateUntil(m, ()=>starts.every(at=>m.runtime.entryOf(at) >= 0));
+            const modules = [...records].filter(([key])=>key.includes('/module/'));
+            assert.ok(modules.length > 0, 'a module stored');
+            for (const [key, bytes] of modules)
+            {
+                const { module } = /** @type {any} */ (unpackRegion(bytes, CACHE_VERSION));
+                assert.ok(key.endsWith(`/module/${moduleDigest(module)}`), key);
+                assert.deepEqual(bytes, packRegion({ module, labels: [], cut: [], entryTop: 0,
+                    instructions: 0 }, CACHE_VERSION));
+            }
+        }
+        finally
+        {
+            await m.runtime.flush();
+        }
+    });

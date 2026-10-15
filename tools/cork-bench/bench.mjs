@@ -10,7 +10,9 @@
  * decoder, x87 and SSE float math, a game's entity update, a message pump,
  * a loading phase's fifteen hundred functions each run a few times, a
  * loop calling a routine that patches its own code, which crosses from
- * translated code into the interpreter and back on every call, calls through a
+ * translated code into the interpreter and back on every call, Lua 5.1 itself
+ * running one frame of a raid's interface of 27 addons a call (`lua`, its events
+ * pushed through Lua's C API, its addons in src/lua/addons.lua), calls through a
  * table of 8, 512 or 4096 small functions, in order or scattered, where only
  * the number of distinct targets changes (`calls*`), and the x87 float ones
  * again under single precision control, as Direct3D leaves it (`pc24`) --
@@ -45,6 +47,7 @@
  * to `DIR/<name>.seed`.
  */
 
+import '../chromium-v8.mjs';
 import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';

@@ -16,7 +16,7 @@ import { readFault, describeFault, hostFault } from './internal/faults.js';
 import {
     captureContext, freshThreadFpu, restoreContext, setContextEflags, setThreadBase,
 } from './internal/context.js';
-import { createSampleTable, creditSample, topSamples } from './internal/samples.js';
+import { createSampleTable, creditSample, takeDue, topSamples } from './internal/samples.js';
 import { fileNameOf } from './internal/translation-store.js';
 
 /**
@@ -37,6 +37,24 @@ export const ENGINES = Object.freeze(['emulator', 'cork']);
 
 /** The engine a launch that names none runs: the translator. */
 export const DEFAULT_ENGINE = 'cork';
+
+/** The most executors a process has: an x86 affinity mask has 32 bits, a processor each. */
+export const MAX_EXECUTORS = 32;
+
+/**
+ * The processors a process is told the machine has, under `config`: one for
+ * each executor under cork, which alone runs more than one, and one where the
+ * host cannot share the program's memory with another (`executorsRefused`).
+ * The cpu layer answers this (`processors`), and whoever describes the machine
+ * before a process exists -- the run's registry -- asks it here.
+ *
+ * @param {{ engine?: string, executors?: number } | undefined} config
+ * @returns {number}
+ */
+export function processorsFor(config){
+    return (config?.engine ?? DEFAULT_ENGINE) === 'cork' && typeof SharedArrayBuffer === 'function'
+        ? Math.min(MAX_EXECUTORS, Math.max(1, config?.executors ?? 1)) : 1;
+}
 
 /**
  * Where the first thread's stack pointer starts and where the stub table sits
@@ -213,20 +231,15 @@ export function createCpuModule(){
                 {
                     return;
                 }
-                const hotThreshold = settings.cork.hotThreshold ?? 2000;
-                for (const bucket of state.samples.buckets.values())
+                // A hot bucket is handed over at the address its last slice
+                // ended on, every time that address is a new one: a bucket
+                // ends its slices at more than one place (a loop's head, the
+                // stub it calls), and the first of them said nothing about
+                // the others. The runtime keeps what it has an entry for,
+                // has queued, or found empty.
+                for (const eip of takeDue(state.samples))
                 {
-                    // A hot bucket is handed over at the address its last slice
-                    // ended on, every time that address is a new one: a bucket
-                    // ends its slices at more than one place (a loop's head, the
-                    // stub it calls), and the first of them said nothing about
-                    // the others. The runtime keeps what it has an entry for,
-                    // has queued, or found empty.
-                    if (bucket.instructions >= hotThreshold && bucket.noted !== bucket.eip)
-                    {
-                        bucket.noted = bucket.eip;
-                        cork.noteHot(bucket.eip, state.host.x87Top());
-                    }
+                    cork.noteHot(eip, state.host.x87Top());
                 }
                 // Always: the translator queues candidates of its own (the
                 // addresses it keeps leaving for) between feeds.
@@ -352,8 +365,9 @@ export function createCpuModule(){
                 // past the first a worker running its threads at once with the
                 // others (`internal/executor.js`); under cork, and with the atomic
                 // variant, which more than one needs. The kernel gives them the
-                // threads (`executors`).
-                executors: Math.max(1, config?.executors ?? 1),
+                // threads (`executors`). The program is told it has a processor
+                // for each (`processorsFor`).
+                executors: Math.min(MAX_EXECUTORS, Math.max(1, config?.executors ?? 1)),
             };
             // Executors past one share the program's memory with workers, which
             // only a SharedArrayBuffer allows, and a page that is not
@@ -857,6 +871,13 @@ export function createCpuModule(){
                  * @returns {any[]}
                  */
                 executors: ()=>state.remotes,
+                /**
+                 * The processors the program is told the machine has: one for
+                 * each of its executors, the process's own among them -- known
+                 * from the start, before the others are made. Only cork runs
+                 * more than one.
+                 */
+                processors: ()=>processorsFor({ engine, executors: settings.executors }),
                 /** The word their turns ring: one wait for all of them. */
                 executorBell: ()=>state.bell,
                 /**
@@ -976,7 +997,8 @@ export function createCpuModule(){
                     // retired charged a frame's hot loop to the call ending it.
                     if (samplingEnabled && instructions >= maxInstructions)
                     {
-                        creditSample(state.samples, machine.eip(), instructions);
+                        creditSample(state.samples, machine.eip(), instructions,
+                            settings.cork.hotThreshold ?? 2000);
                     }
                     if (samplingEnabled && instructions > 0 && settings.cork.feed === 'slice')
                     {

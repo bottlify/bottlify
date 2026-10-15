@@ -102,6 +102,10 @@ const KERNEL32_ALIASES = Object.freeze({
     RtlInterlockedPushEntrySList: 'InterlockedPushEntrySList',
     RtlInterlockedPopEntrySList: 'InterlockedPopEntrySList',
     RtlInterlockedFlushSList: 'InterlockedFlushSList',
+    // kernel32's is forwarded to the Rtl one; the Nt one is the system call
+    // under it, with the same answer.
+    RtlGetCurrentProcessorNumber: 'GetCurrentProcessorNumber',
+    NtGetCurrentProcessorNumber: 'GetCurrentProcessorNumber',
 });
 
 /**
@@ -134,6 +138,8 @@ const KERNEL32_ALIASES = Object.freeze({
  * @property {Record<string | symbol, any>} [advapi32]
  *           The assembled ADVAPI32.dll table, whose registry NtUnloadKey
  *           unloads a hive from. Absent, NtUnloadKey stays unexported.
+ * @property {import('../kernel32/processor.js').Processors} [processors]
+ *           The process's processors, kernel32's own. Absent, one.
  */
 
 /**
@@ -319,6 +325,7 @@ export function createNtdllFunctions(host){
             handleType: host.handleType,
             divergence: host.divergence,
             processes: host.processes,
+            processors: host.processors,
         }),
 
         ...(host.setRegisters

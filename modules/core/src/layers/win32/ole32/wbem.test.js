@@ -304,6 +304,18 @@ test('every property kept is one its class has in Windows', ()=>{
     }
 });
 
+test('Win32_Processor counts a core and a logical processor for each processor', ()=>{
+    // One package, a thread a core, as CPUID's leaf 4 and
+    // GetLogicalProcessorInformation describe it.
+    const countsOf = (/** @type {number | undefined} */ processors)=>{
+        const [processor] = machineClasses({ processors, windows: WINDOWS_VERSIONS.winxp })
+            .win32_processor;
+        return [processor.numberofcores, processor.numberoflogicalprocessors];
+    };
+    assert.deepEqual(countsOf(4), [[19, 4], [19, 4]], 'CIM_UINT32');
+    assert.deepEqual(countsOf(undefined), [[19, 1], [19, 1]], 'one, by default');
+});
+
 test('the processor\'s clock speed is the rate its time-stamp counter runs at', ()=>{
     // A program turns rdtsc deltas into seconds with it: told 1000 MHz of a
     // counter running at 3000, everything it timed so ran three times as fast.

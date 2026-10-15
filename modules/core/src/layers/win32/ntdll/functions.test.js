@@ -141,6 +141,17 @@ test('VerSetConditionMask is the entry kernel32 exports', ()=>{
     assert.equal(createNtdllFunctions(host).VerSetConditionMask, host.kernel32.VerSetConditionMask);
 });
 
+test('the processor a thread is on is kernel32\'s answer under both native names', ()=>{
+    // kernel32's GetCurrentProcessorNumber is forwarded to the Rtl one, and
+    // the Nt one is the system call beneath it.
+    const host = fakeHost();
+    const current = { argBytes: 0, handler: ()=>3 };
+    const fns = createNtdllFunctions({ ...host,
+        kernel32: { ...host.kernel32, GetCurrentProcessorNumber: current } });
+    assert.equal(fns.NtGetCurrentProcessorNumber, current);
+    assert.equal(fns.RtlGetCurrentProcessorNumber, current);
+});
+
 test('LdrUnloadDll is FreeLibrary as a status', ()=>{
     // A program linked with the Microsoft Layer for Unicode tells NT from
     // Windows 9x by whether ntdll has this name; without it, it loads

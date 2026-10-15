@@ -72,8 +72,71 @@ export const Tables = Object.freeze({
     // and whether another block shared the slot.
     BLOCK_SLOTS: 1 << 20,
     BLOCK_SLOT: 12,
-    BLOCK_PROFILE_SIZE: (1 << 20) * 12,
+    // Past the slots, the same run's count of each `Mechanism`, a 64-bit word
+    // each: a run of minutes makes billions of calls.
+    MECHANISMS: 32,
+    // Past the counts, the addresses the shared transfer went to by its hash
+    // probe, a slot per hashed address (`blockSlot`): the address and how
+    // many times -- the jumps between regions that no direct link took.
+    TRANSFER_SLOT: 8,
+    BLOCK_PROFILE_SIZE: (1 << 20) * 12 + 32 * 8 + (1 << 20) * 8,
 });
+
+/**
+ * What a profiling run (`blockProfile`) counts beside its blocks, by the word
+ * each takes past the slots (`mechanismAt`): how calls and returns went --
+ * formed into the region, a wasm call, or a way out -- and the other
+ * crossings whose cost a profile of the regions' functions cannot tell apart
+ * from the guest's own work.
+ */
+export const Mechanism = Object.freeze({
+    /** A transfer through the entry hash: a call out, or a jump to another region. */
+    TRANSFER: 0,
+    /** A direct call to a callee formed into the region: a jump. */
+    CALL_FORMED: 1,
+    /** A direct call out of the region as a wasm call (`callReturn`). */
+    CALL_REL: 2,
+    /** An indirect call out of the region as a wasm call. */
+    CALL_INDIRECT: 3,
+    /** A call that leaves the region to the host's dispatch. */
+    CALL_LEFT: 4,
+    /** An indirect call whose target was one of the callees formed in (`callTargets`). */
+    CALL_PREDICTED: 5,
+    /** A wasm call that came back other than by its `ret`: an exit gone up through it. */
+    CALL_ELSEWHERE: 6,
+    /** A `ret` back to a call whose callee is formed in: a jump. */
+    RET_FORMED: 7,
+    /** A `ret` that answered the wasm call waiting for it. */
+    RET_TO_CALL: 8,
+    /** A `ret` that left the region to the host's dispatch. */
+    RET_LEFT: 9,
+    /** An `rdtsc`, each a call into the host's clock. */
+    RDTSC: 10,
+    // A call out of its region -- a wasm call or a way out -- by why its
+    // callee was not formed in (`Apart`), so the calls forming could take in
+    // are told from the ones it cannot:
+    /** more blocks than a callee formed in may have; */
+    APART_BLOCKS: 11,
+    /** more bytes; */
+    APART_BYTES: 12,
+    /** a way out other than `ret` and direct branches (an API call among them); */
+    APART_SHAPE: 13,
+    /** a call inside a callee already formed in; */
+    APART_NESTED: 14,
+    /** an indirect call with no callee predicted; */
+    APART_UNPREDICTED: 15,
+    /** a callee that would have been formed in, but the region was full; */
+    APART_FULL: 16,
+    /** an indirect call to none of the callees predicted and formed in. */
+    APART_MISSED: 17,
+    /** A call to a function that does nothing, returned from in the transfer (`emptyCalls`). */
+    EMPTY_RETURN: 18,
+    /** A call to a function that does nothing, returned from at the call (`emptySites`). */
+    EMPTY_SITE: 19,
+});
+
+/** The names of `Mechanism`'s counts, by index. */
+export const MECHANISM_NAMES = Object.freeze(Object.keys(Mechanism));
 
 /**
  * The entry hash's slots under a layout: its slot shift says how many.
@@ -97,6 +160,32 @@ export const tablesSize = layout=>Tables.HASH + hashSlotsOf(layout) * Tables.HAS
 export const blockProfileAt = layout=>tablesSize(layout);
 
 /**
+ * Where a profiling run's count of a `Mechanism` is, from the tables' start:
+ * past the block profile's slots.
+ *
+ * @param {{ hashShift?: number }} layout @param {number} mechanism
+ */
+export const mechanismAt = (layout, mechanism)=>blockProfileAt(layout)
+    + Tables.BLOCK_SLOTS * Tables.BLOCK_SLOT + mechanism * 8;
+
+/**
+ * Where a profiling run's slot of a transfer target is, from the tables'
+ * start: past the counts of the mechanisms.
+ *
+ * @param {{ hashShift?: number }} layout @param {number} slot  a `blockSlot`
+ */
+export const transferTargetAt = (layout, slot)=>mechanismAt(layout, Tables.MECHANISMS)
+    + slot * Tables.TRANSFER_SLOT;
+
+/**
+ * About one indirect call in this many is kept in the call profile's sixteen
+ * pairs, picked by a hash of the count (`profileCall` in emit/integer.js): the
+ * pairs then hold calls spread over the last thousand rather than the last
+ * sixteen before a reading.
+ */
+export const CALL_STRIDE = 64;
+
+/**
  * The block profile's slot for a block start: the top twenty bits of the
  * address times the golden ratio.
  *
@@ -107,11 +196,14 @@ export const blockSlot = address=>Math.imul(address, 0x9e3779b1) >>> 12;
 /**
  * Cork's own layout for a memory holding `ramSize` bytes of guest RAM.
  *
- * @param {{ ramSize: number, hashSlots?: number }} options  `hashSlots`: the entry
- *     hash's, a power of two (`Tables.HASH_SLOTS` unless given)
+ * @param {{ ramSize: number, hashSlots?: number, processors?: number }} options
+ *     `hashSlots`: the entry hash's, a power of two (`Tables.HASH_SLOTS` unless given);
+ *     `processors`: the process's executors, which `cpuid` says the machine has --
+ *     a field only past one, so one processor's layout, and its translations, are
+ *     what they were
  * @returns {import('../../../core/src/layers/cpu/engine.js').StateLayout}
  */
-export function ownLayout({ ramSize, hashSlots = Tables.HASH_SLOTS }){
+export function ownLayout({ ramSize, hashSlots = Tables.HASH_SLOTS, processors = 1 }){
     if (!(hashSlots >= 1 << 10 && hashSlots <= 1 << 26 && (hashSlots & (hashSlots - 1)) === 0))
     {
         throw new Error(`cork: ${hashSlots} entry hash slots is not a power of two`
@@ -157,6 +249,7 @@ export function ownLayout({ ramSize, hashSlots = Tables.HASH_SLOTS }){
         // The entry hash's slot is the top bits of eip times the golden ratio,
         // as many as the hash has slots for.
         hashShift: 32 - Math.log2(hashSlots),
+        ...processors > 1 ? { processors, processor: 0 } : {},
     };
     return { ...fields, id: layoutId(fields) };
 }
@@ -199,14 +292,17 @@ export const executorBytes = layout=>PAGE + Math.ceil(tablesSize(layout) / PAGE)
  * constants, so a translation is the executor's own and the layout's id tells.
  * The page flags and the code granules stay the first executor's: whether a
  * page may be read, and whether a store into it reaches code some executor
- * runs, is the process's, and a store on any executor has to find it.
+ * runs, is the process's, and a store on any executor has to find it. The
+ * executor is processor `index` of the layout's (`processors`), the one `cpuid`
+ * names to code translated for it.
  *
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout  the first
  *     executor's (`ownLayout`)
  * @param {number} base
+ * @param {number} [index]  which executor: 1 for the first past the process's own
  * @returns {import('../../../core/src/layers/cpu/engine.js').StateLayout}
  */
-export function executorLayout(layout, base){
+export function executorLayout(layout, base, index = 1){
     if (base % PAGE !== 0 || base < layout.tables + tablesSize(layout))
     {
         throw new Error(`layout: an executor's page at ${base} is not one past the first's`);
@@ -222,6 +318,14 @@ export function executorLayout(layout, base){
         }
     }
     fields.tables = base + PAGE;
+    if (layout.processors !== undefined)
+    {
+        if (!(index >= 1 && index < layout.processors))
+        {
+            throw new Error(`layout: executor ${index} of ${layout.processors}`);
+        }
+        fields.processor = index;
+    }
     fields.pageFlags = pageFlagsAt(layout);
     fields.codeRanges = codeRangesAt(layout);
     return /** @type {any} */ ({ ...fields, id: layoutId(fields) });

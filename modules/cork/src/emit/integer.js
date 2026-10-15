@@ -23,12 +23,12 @@
  */
 
 import { AF, CF, DF, OF, PF, SF, ZF } from '../decode/table.js';
-import { CPUID_LEAVES } from '../cpuid.js';
+import { cpuidLeaves, topologyOf } from '../cpuid.js';
 import { EMPTY } from '../wasm/encoder.js';
 import { I32, Kind, MASKS, SIGN_BITS, widthCode } from './flags.js';
 import { CallStack, Exit, Local, STATE_PARAMS } from './region.js';
 import { checkAccess, emitStaleExit, looseStackStore, noteStore, stackAccess } from './memory.js';
-import { pageFlagsAt } from '../runtime/layout.js';
+import { CALL_STRIDE, Mechanism, Tables, pageFlagsAt } from '../runtime/layout.js';
 import { PageFlag } from '../runtime/pages.js';
 import { emitSimd } from './simd.js';
 import { emitLocked, isLocked } from './locked.js';
@@ -103,15 +103,22 @@ export function classOf(instruction){
 
 /**
  * An indirect call's address and target into the layout's call profile while
- * the runtime has it on (`callProfile`: a flag, a count, and the last sixteen
- * calls as pairs), which is how the runtime learns the callees to form into
- * the caller (`callTargets`). Off, one load and a branch; the call's target is
- * in `count`.
+ * the runtime has it on (`callProfile`: a flag, a count, and sixteen calls as
+ * pairs), which is how the runtime learns the callees to form into the caller
+ * (`callTargets`). About one call in `CALL_STRIDE` is kept, so the sixteen are
+ * spread over the last thousand calls rather than the last sixteen: those are
+ * the calls just before the slice left for the host, the same few sites every
+ * time, and a site deep in the frame was sampled a hundred thousand times
+ * less often than one beside a `Present`. Which calls is the count's golden
+ * ratio hash, not every n-th: a loop over sixteen objects sampled every
+ * sixty-fourth call would see one object only. Off, one load and a branch,
+ * at every call: a `quiet` call, sampled enough to know there is nothing to
+ * form in, has none. The call's target is in `count`.
  *
  * @param {E} e @param {number} site
  */
 function profileCall(e, site){
-    if (e.context.profileCalls !== true)
+    if (e.context.profileCalls !== true || e.region.blocks[e.blockIndex].exit.quiet === true)
     {
         return;
     }
@@ -121,10 +128,34 @@ function profileCall(e, site){
     e.openIf('profile');
     b.i32const(0).i32const(0).load('i32', { offset: at + 4 }).localTee(Local.t1)
         .i32const(1).op(I32.add).store('i32', { offset: at + 4 });
-    b.localGet(Local.t1).i32const(15).op(I32.and).i32const(3).op(I32.shl).localTee(Local.t1)
+    b.localGet(Local.t1).i32const(0x9e3779b1 | 0).op(I32.mul)
+        .i32const(32 - Math.log2(CALL_STRIDE)).op(I32.shrU).op(I32.eqz);
+    e.openIf('sampled');
+    b.localGet(Local.t1).i32const(Math.log2(CALL_STRIDE)).op(I32.shrU).i32const(15).op(I32.and)
+        .i32const(3).op(I32.shl).localTee(Local.t1)
         .i32const(site | 0).store('i32', { offset: at + 8 });
     b.localGet(Local.t1).localGet(Local.count).store('i32', { offset: at + 12 });
     e.close();
+    e.close();
+}
+
+/** The `Mechanism` a call out of its region counts by why its callee stayed apart. */
+const APART = Object.freeze({
+    blocks: Mechanism.APART_BLOCKS, bytes: Mechanism.APART_BYTES, shape: Mechanism.APART_SHAPE,
+    nested: Mechanism.APART_NESTED, unpredicted: Mechanism.APART_UNPREDICTED,
+});
+
+/**
+ * A call out of the block's region, counted by why its callee was not formed
+ * in: a predicted call's target none of the callees formed in, or else a
+ * callee that would have been, the region full.
+ *
+ * @param {E} e
+ */
+function countApart(e){
+    const { apart, predicted } = e.region.blocks[e.blockIndex].exit;
+    e.countMechanism(apart !== undefined ? APART[apart]
+        : predicted === true ? Mechanism.APART_MISSED : Mechanism.APART_FULL);
 }
 
 /**
@@ -139,13 +170,23 @@ function profileCall(e, site){
  * came, this call's entry taken off the stack. Past the stack's limit, or with
  * the budget spent, the call leaves as any call does.
  *
+ * With `emptySites`, outside x87 code, the target's first slot in the entry hash
+ * is read first: a function that does nothing there (`emptyCode`, the slot's
+ * byte 11) is returned from in place -- the address just pushed popped, with
+ * the bytes its `ret` pops, and its instructions charged -- with nothing
+ * written back and no transfer called. A target held further along the probe
+ * goes through the transfer, which returns from it as well (`finishModule`).
+ *
  * @param {import('./region.js').RegionEmitter} e
  * @param {number} next  the return address, a block of the region
  * @param {() => void} pushTarget  pushes the callee's address
+ * @param {number} mechanism  what a profiling run counts it as (`Mechanism`)
  */
-function callAndReturn(e, next, pushTarget){
+function callAndReturn(e, next, pushTarget, mechanism){
     const { b, layout } = e;
     const depth = layout.tables + CallStack.DEPTH;
+    e.countMechanism(mechanism);
+    countApart(e);
     e.charge();
     pushTarget();
     b.localSet(Local.eip);
@@ -158,6 +199,25 @@ function callAndReturn(e, next, pushTarget){
         e.openGuard('stale');
         e.exitDynamic(Exit.STALE);
         e.close();
+    }
+    const site = e.context.emptySites === true && !e.x87.active;
+    if (site)
+    {
+        const hash = layout.tables + Tables.HASH;
+        b.localGet(Local.eip).i32const(0x9e3779b1 | 0).op(I32.mul)
+            .i32const(layout.hashShift ?? 16).op(I32.shrU).i32const(Tables.HASH_SLOT).op(I32.mul)
+            .localTee(Local.t1).load('i32_8u', { offset: hash + 11 });
+        b.i32const(0);
+        b.localGet(Local.t1).load('i32', { offset: hash }).localGet(Local.eip).op(I32.eq);
+        b.select().localTee(Local.t1);
+        e.openIf('empty');
+        e.countMechanism(Mechanism.EMPTY_SITE);
+        // The low six bits are the dwords popped plus one, the top two the jumps before the `ret`.
+        b.localGet(Local.reg + 4).localGet(Local.t1).i32const(63).op(I32.and).i32const(2)
+            .op(I32.shl).op(I32.add).localSet(Local.reg + 4);
+        b.localGet(Local.budget).localGet(Local.t1).i32const(6).op(I32.shrU).i32const(1)
+            .op(I32.add).op(I32.sub).localSet(Local.budget);
+        b.else();
     }
     b.i32const(0).load('i32', { offset: depth }).localTee(Local.t1)
         .i32const(CallStack.LIMIT).op(I32.geU)
@@ -187,6 +247,7 @@ function callAndReturn(e, next, pushTarget){
     b.call(/** @type {number} */ (e.context.transfer)).localTee(Local.t0)
         .i32const(Exit.RETURNED).op(I32.ne);
     e.openGuard('elsewhere');
+    e.countMechanism(Mechanism.CALL_ELSEWHERE);
     // Left for the host somewhere inside: the state block holds it all.
     b.i32const(0).localGet(Local.t1).store('i32', { offset: depth });
     b.localGet(Local.t0).return();
@@ -197,6 +258,10 @@ function callAndReturn(e, next, pushTarget){
     if (e.x87.active)
     {
         x87AfterCall(e, next, top);
+    }
+    if (site)
+    {
+        e.close();
     }
     b.i32const(next).localSet(Local.eip);
     e.returned = true;
@@ -219,6 +284,7 @@ function returnToCall(e){
         .load('i32', { offset: layout.tables + CallStack.STACK - 4 })
         .localGet(Local.eip).op(I32.eq);
     e.openIf('returns');
+    e.countMechanism(Mechanism.RET_TO_CALL);
     b.i32const(0).localGet(Local.t1).i32const(1).op(I32.sub).store('i32', { offset: depth });
     e.returnToCaller();
     e.close();
@@ -255,6 +321,7 @@ function predictCall(e){
     {
         b.localGet(Local.count).i32const(callee | 0).op(I32.eq);
         e.openIf('predicted');
+        e.countMechanism(Mechanism.CALL_PREDICTED);
         e.jumpTo(callee);
         e.close();
     }
@@ -328,17 +395,18 @@ export function emitInstruction(e, instruction, flagsLive){
         }
         case 'cpuid':
         {
-            // The leaves the pinned emulator answers, as constants; a leaf
-            // with no entry answers four zeros. The leaf in eax and the
-            // subleaf in ecx are saved before the four registers are cleared
-            // and the known ones set.
+            // The leaves the pinned emulator answers, as constants -- with the
+            // processors of the executor the code is translated for, whose
+            // layout it is -- and a leaf with no entry answers four zeros. The
+            // leaf in eax and the subleaf in ecx are saved before the four
+            // registers are cleared and the known ones set.
             b.localGet(Local.reg).localSet(Local.t1);
             b.localGet(Local.reg + 1).localSet(Local.t2);
             for (let index = 0; index < 4; index++)
             {
                 b.i32const(0).localSet(Local.reg + index);
             }
-            for (const [leaf, entry] of Object.entries(CPUID_LEAVES))
+            for (const [leaf, entry] of Object.entries(cpuidLeaves(topologyOf(e.layout))))
             {
                 /** @type {[string | null, import('../cpuid.js').CpuidAnswer][]} */
                 const answers = 'eax' in entry
@@ -365,6 +433,7 @@ export function emitInstruction(e, instruction, flagsLive){
             // The time-stamp counter, read through the host's import (the
             // emulator's own under hybrid, cork's clock under cork): the low
             // word to eax, the high word to edx.
+            e.countMechanism(Mechanism.RDTSC);
             b.call(e.context.rdtsc).localSet(Local.t64);
             b.localGet(Local.t64).op(I64.wrap).localSet(Local.reg);
             b.localGet(Local.t64).i64const(32n).op(I64.shrU).op(I64.wrap)
@@ -698,6 +767,7 @@ export function emitInstruction(e, instruction, flagsLive){
             {
                 // The callee is a block of this region: the block's exit jumps
                 // there. A push into code leaves first, at the callee.
+                e.countMechanism(Mechanism.CALL_FORMED);
                 if (e.staleCheck)
                 {
                     e.staleCheck = false;
@@ -715,17 +785,24 @@ export function emitInstruction(e, instruction, flagsLive){
                 }
                 callAndReturn(e, next, dst.kind === 'rel'
                     ? ()=>b.i32const(/** @type {number} */ (dst.target))
-                    : ()=>b.localGet(Local.count));
+                    : ()=>b.localGet(Local.count),
+                dst.kind === 'rel' ? Mechanism.CALL_REL : Mechanism.CALL_INDIRECT);
                 return true;
             }
             if (dst.kind === 'rel')
             {
+                e.countMechanism(Mechanism.CALL_LEFT);
+                countApart(e);
                 e.exitAt(/** @type {number} */ (dst.target), Exit.UNTRANSLATED);
             }
             else
             {
-                profileCall(e, instruction.eip);
+                // Sampled past the prediction: a call it takes costs nothing more,
+                // and the samples are the calls that still leave.
                 predictCall(e);
+                profileCall(e, instruction.eip);
+                e.countMechanism(Mechanism.CALL_LEFT);
+                countApart(e);
                 b.localGet(Local.count).localSet(Local.eip);
                 e.exitDynamic(Exit.UNTRANSLATED);
             }
@@ -746,6 +823,7 @@ export function emitInstruction(e, instruction, flagsLive){
             {
                 b.localGet(Local.eip).i32const(at).op(I32.eq);
                 e.openIf('return');
+                e.countMechanism(Mechanism.RET_FORMED);
                 e.jumpTo(at);
                 e.close();
             }
@@ -753,6 +831,7 @@ export function emitInstruction(e, instruction, flagsLive){
             {
                 returnToCall(e);
             }
+            e.countMechanism(Mechanism.RET_LEFT);
             e.exitDynamic(Exit.UNTRANSLATED);
             e.dead = true;
             return true;

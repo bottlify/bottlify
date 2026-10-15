@@ -220,15 +220,9 @@ function roundBy(value, control){
     }
     const floor = Math.floor(value);
     const diff = value - floor;
-    if (diff < 0.5)
-    {
-        return floor;
-    }
-    if (diff > 0.5)
-    {
-        return floor + 1;
-    }
-    return floor % 2 === 0 ? floor : floor + 1;
+    const rounded = diff < 0.5 ? floor : diff > 0.5 || floor % 2 !== 0 ? floor + 1 : floor;
+    // A negative rounded to zero is -0, as the processor's is; -1 + 1 is +0.
+    return value < 0 && rounded === 0 ? -0 : rounded;
 }
 
 /**

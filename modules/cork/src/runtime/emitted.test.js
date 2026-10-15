@@ -70,6 +70,12 @@ const EMITTED = {
     81: '501cc728d19eb39b',
     82: 'c151fd95bf630b39',
     83: '0c64d49d49b14315',
+    84: '42f0f2f5d3d51fbe',
+    85: 'bbc86e076a900b9f',
+    86: 'eb6cfc99e139de77',
+    87: '920c8f09ff12fb1b',
+    88: '9fbd07aebb029be4',
+    89: '92cab94d459b71f1',
 };
 
 /** Features fixed rather than probed, so every host emits the same bytes. */
@@ -100,6 +106,47 @@ function digest(){
             hash.update(`${name}:${entry.toString(16)}:${looseStacks ? 's:' : ''}`)
                 .update(m.toBytes());
         }
+    }
+    // An indirect call predicted to two callees and sampled past them (`callTargets`,
+    // `profileCalls`), which no region of the images is: mov ecx, 16; L: mov eax, ecx;
+    // and eax, 15; call [0x1100 + eax*4]; dec ecx; jnz L; hlt; F: add edx, 1; ret;
+    // G: add edx, 3; ret.
+    const code = [0xb9, 16, 0, 0, 0, 0x89, 0xc8, 0x83, 0xe0, 0x0f, 0xff, 0x14, 0x85, 0, 0x11, 0, 0,
+        0x49, 0x75, 0xf1, 0xf4, 0x83, 0xc2, 0x01, 0xc3, 0x83, 0xc2, 0x03, 0xc3];
+    const region = formRegion(address=>code[address - 0x1000] ?? 0, 0x1000,
+        { callTargets: new Map([[0x100a, [0x1015, 0x1019]]]) });
+    const m = new ModuleBuilder();
+    const context = prepareModule(m, layout, FEATURES, {}, { hash: true, trapPort: 0xb077,
+        resume: true, callReturn: true, profileCalls: true });
+    const translation = emitRegion(context, region, { entryTop: 0, checked: false });
+    finishModule(context, [translation.functionIndex]);
+    m.exportFunction('region', translation.functionIndex);
+    hash.update('predicted:').update(m.toBytes());
+    // The same unpredicted, its call looking for an empty callee in place (`emptySites`).
+    const plain = formRegion(address=>code[address - 0x1000] ?? 0, 0x1000, {});
+    const sites = new ModuleBuilder();
+    const sitesContext = prepareModule(sites, layout, FEATURES, {}, { hash: true,
+        trapPort: 0xb077, resume: true, callReturn: true, emptySites: true });
+    const atSites = emitRegion(sitesContext, plain, { entryTop: 0, checked: false });
+    finishModule(sitesContext, [atSites.functionIndex]);
+    sites.exportFunction('region', atSites.functionIndex);
+    hash.update('empty sites:').update(sites.toBytes());
+    // Single precision computed on floats (`floatSingles`): fmath's loop of sums of products,
+    // and game's loop of distances entered with two floats held, whose code after an
+    // indirect call tests the stack it needs.
+    for (const [name, entry, entryTop] of /** @type {const} */ ([['fmath-pc24.bin', 0x401050, 0],
+        ['game-pc24.bin', 0x4012e0, 6]]))
+    {
+        const image = readFileSync(new URL(name, IMAGES));
+        const loop = formRegion(address=>image[address - BASE] ?? 0, entry, {});
+        const floats = new ModuleBuilder();
+        const floatsContext = prepareModule(floats, layout, FEATURES, {}, { hash: true,
+            trapPort: 0xb077, resume: true, callReturn: true });
+        const onFloats = emitRegion(floatsContext, loop, { entryTop, checked: false,
+            precision: 'narrow', floats: true });
+        finishModule(floatsContext, [onFloats.functionIndex]);
+        floats.exportFunction('region', onFloats.functionIndex);
+        hash.update(`floats:${name}:`).update(floats.toBytes());
     }
     return hash.digest('hex').slice(0, 16);
 }

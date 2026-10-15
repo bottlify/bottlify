@@ -7,9 +7,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { MULDIV_CODE, createSystemFunctions, mulDiv } from './system.js';
+import { createProcessors } from './processor.js';
 import { KEPT, random, runCode } from '../../../../scripts/guest-code/equivalence.mjs';
 
 const ERROR_INVALID_HANDLE = 6;
+const ERROR_INVALID_PARAMETER = 87;
+const ERROR_INSUFFICIENT_BUFFER = 122;
 
 const FILE_TYPE_UNKNOWN = 0x0000;
 const FILE_TYPE_DISK = 0x0001;
@@ -92,6 +95,107 @@ test('the machine reported is one a program of the era knows what to do with', (
     assert.equal(host.view.getUint32(0x21c, true), 0x10000, 'allocation granularity');
     assert.equal(host.view.getUint16(0x220, true), 6, 'the level is CPUID\'s family');
     assert.equal(host.view.getUint16(0x222, true), 0x0703, 'the revision its model and stepping');
+});
+
+test('GetSystemInfo counts a processor for each the kernel has, and masks all of them', ()=>{
+    // dwActiveProcessorMask is the machine's, not the process's: a process
+    // narrowed to one processor still learns there are four.
+    for (const [count, mask] of [[4, 0xf], [32, 0xffffffff]])
+    {
+        const host = fakeHost();
+        const processors = createProcessors({ processors: ()=>count });
+        processors.setProcessMask(1);
+        const fns = createSystemFunctions({ ...host, processors });
+        fns.GetSystemInfo.handler([0x200]);
+        assert.deepEqual([host.view.getUint32(0x210, true), host.view.getUint32(0x214, true)],
+            [mask, count], `${count} processors`);
+    }
+});
+
+/**
+ * SYSTEM_LOGICAL_PROCESSOR_INFORMATION entries read back: the mask, the
+ * relationship, and the union's bytes as each relationship reads them.
+ *
+ * @param {DataView} view @param {number} at @param {number} length
+ */
+const logicalEntries = (view, at, length)=>Array.from({ length: length / 24 }, (_, index)=>{
+    const entry = at + index * 24;
+    return {
+        mask: view.getUint32(entry, true),
+        relationship: view.getUint32(entry + 4, true),
+        word: view.getUint32(entry + 8, true),
+        cache: [view.getUint8(entry + 8), view.getUint8(entry + 9),
+            view.getUint16(entry + 10, true), view.getUint32(entry + 12, true),
+            view.getUint32(entry + 16, true)],
+    };
+});
+
+test('GetLogicalProcessorInformation lists a core and its caches for each processor, '
+    + 'then the package and the node', ()=>{
+    const LENGTH = 0x1fc;
+    const BUFFER = 0x200;
+    for (const count of [1, 4])
+    {
+        const host = fakeHost();
+        const fns = createSystemFunctions({ ...host,
+            processors: createProcessors({ processors: ()=>count }) });
+        const needed = (count * 4 + 2) * 24;
+        host.view.setUint32(LENGTH, 0x400, true);
+        assert.equal(fns.GetLogicalProcessorInformation.handler([BUFFER, LENGTH]), 1);
+        assert.equal(host.view.getUint32(LENGTH, true), needed, 'what was written');
+        const entries = logicalEntries(host.view, BUFFER, needed);
+        const all = 2 ** count - 1;
+        for (let index = 0; index < count; index++)
+        {
+            const mask = 1 << index;
+            assert.deepEqual(entries.slice(index * 4, index * 4 + 4).map(entry=>
+                [entry.mask, entry.relationship, entry.relationship === 2 ? entry.cache
+                    : entry.word]), [
+                [mask, 0, 0],
+                // Level, associativity, line, size, type: data 2, instruction 1, unified 0.
+                [mask, 2, [1, 8, 64, 32 << 10, 2]],
+                [mask, 2, [1, 8, 64, 32 << 10, 1]],
+                [mask, 2, [2, 24, 64, 6 << 20, 0]],
+            ], `processor ${index} of ${count}`);
+        }
+        assert.deepEqual(entries.slice(count * 4).map(entry=>
+            [entry.mask, entry.relationship, entry.word]), [[all, 3, 0], [all, 1, 0]],
+        'one package and node 0, holding all of them');
+    }
+});
+
+test('GetLogicalProcessorInformation says what it needs of a buffer too small, '
+    + 'and needs a length', ()=>{
+    // Wine's kernelbase, and the two calls every caller makes: ask with
+    // nothing, allocate, ask again.
+    const LENGTH = 0x1fc;
+    const host = fakeHost();
+    const fns = createSystemFunctions({ ...host,
+        processors: createProcessors({ processors: ()=>4 }) });
+    host.view.setUint32(LENGTH, 0, true);
+    assert.equal(fns.GetLogicalProcessorInformation.handler([0, LENGTH]), 0);
+    assert.equal(host.view.getUint32(LENGTH, true), 18 * 24);
+    host.view.setUint32(LENGTH, 17 * 24, true);
+    host.bytes.fill(0xcc, 0x200, 0x400);
+    assert.equal(fns.GetLogicalProcessorInformation.handler([0x200, LENGTH]), 0);
+    assert.equal(host.view.getUint32(LENGTH, true), 18 * 24);
+    assert.ok(host.bytes.subarray(0x200, 0x400).every(byte=>byte === 0xcc), 'nothing written');
+    assert.equal(fns.GetLogicalProcessorInformation.handler([0x200, 0]), 0);
+    assert.deepEqual(host.errors, [ERROR_INSUFFICIENT_BUFFER, ERROR_INSUFFICIENT_BUFFER,
+        ERROR_INVALID_PARAMETER]);
+    assert.equal(fns.GetLogicalProcessorInformation.argBytes, 8);
+});
+
+test('GetCurrentProcessorNumber is the processor the kernel has the caller on', ()=>{
+    const host = fakeHost();
+    const fns = createSystemFunctions({ ...host, processors: createProcessors({
+        processors: ()=>4,
+        processorOf: (/** @type {any} */ thread)=>(thread === host.self ? 3 : 0),
+    }) });
+    assert.equal(fns.GetCurrentProcessorNumber.handler(), 3);
+    assert.equal(fns.GetCurrentProcessorNumber.argBytes, 0);
+    assert.equal(createSystemFunctions(fakeHost()).GetCurrentProcessorNumber.handler(), 0,
+        'one processor, the first');
 });
 
 test('kernel32 exports none of the Windows 95 calls NT lacks', ()=>{

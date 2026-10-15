@@ -83,7 +83,12 @@ const I64 = Object.freeze({
     mul: 0x7e, divU: 0x80, and: 0x83, or: 0x84, shl: 0x86, shrU: 0x88, clz: 0x79, wrap: 0xa7,
     extendS: 0xac, extendU: 0xad, reinterpretF64: 0xbd,
 });
-const F32 = Object.freeze({ demoteF64: 0xb6 });
+const F32 = Object.freeze({
+    eq: 0x5b, gt: 0x5e, le: 0x5f, abs: 0x8b, neg: 0x8c, sqrt: 0x91,
+    add: 0x92, sub: 0x93, mul: 0x94, div: 0x95, demoteF64: 0xb6,
+    /** i32.reinterpret_f32 */
+    bits: 0xbc,
+});
 /** i32.trunc_sat_f64_s / i64.trunc_sat_f64_s */
 const TRUNC_SAT_I32 = [0xfc, 0x02];
 const TRUNC_SAT_I64 = [0xfc, 0x06];
@@ -110,6 +115,17 @@ const CONTROL_WRITERS = new Set(['fldcw', 'fninit', 'fnsave', 'fldenv', 'frstor'
  * it against the region.
  */
 export const SHAPE = 3;
+
+/**
+ * The vector of an untranslated exit a region compiled for single precision
+ * with its arithmetic in floats (`floats`) takes before an operation whose
+ * float result is not the 24-bit one the processor makes: past a float's
+ * range, where the processor keeps its wider exponent, below its smallest
+ * normal from a product or a quotient, or a NaN. The host's interpreter runs
+ * it; the runtime counts it against the region, and one that keeps leaving is
+ * translated again rounding every result from a double.
+ */
+export const RANGE = 4;
 
 /** @param {Instruction} instruction */
 export function isX87(instruction){
@@ -139,6 +155,69 @@ const MASK_SAFE = new Set([
     'fcomi', 'fcomip', 'fucomi', 'fucomip',
     'fchs', 'fabs', 'fsqrt', 'frndint', 'fxam', 'fnstsw', 'fnstcw', 'fldcw', 'fwait', 'fnop',
 ]);
+
+/** Forms that read no register's value: the float path's floats stay as they are (`Singles`). */
+const FLOAT_NEUTRAL = new Set(['fxch', 'fwait', 'fnop', 'fnstsw', 'fnstcw', 'fldcw']);
+
+/** The arithmetic the float path computes in f32. */
+const FLOAT_ARITHMETIC = new Set(['fadd', 'fsub', 'fsubr', 'fmul', 'fdiv', 'fdivr', 'faddp',
+    'fsubp', 'fsubrp', 'fmulp', 'fdivp', 'fdivrp']);
+
+/**
+ * Whether the float path (`Singles`) takes a form with these operands: a float
+ * load or a constant 0 or 1 pushed, a copy of a float, a float stored (one
+ * known not to be a NaN, to memory), a sign or a magnitude, a square root, and
+ * the four operations on two floats, a register's or a float in memory.
+ *
+ * @param {string} op @param {Operand | undefined} dst @param {Operand | undefined} src
+ * @param {(i: number) => boolean} isSingle @param {(i: number) => boolean} isNumeric
+ */
+function floatForm(op, dst, src, isSingle, isNumeric){
+    switch (op)
+    {
+        case 'fld':
+            return src?.kind === 'mem' ? src.size === 4
+                : src?.kind === 'x87' && isSingle(Number(src.reg));
+        case 'fld1': case 'fldz':
+            return true;
+        case 'fst': case 'fstp':
+            return dst?.kind === 'x87' ? isSingle(0)
+                : dst?.kind === 'mem' && dst.size === 4 && isSingle(0) && isNumeric(0);
+        case 'fchs': case 'fabs': case 'fsqrt':
+            return isSingle(0);
+        default:
+        {
+            if (!FLOAT_ARITHMETIC.has(op) || src === undefined)
+            {
+                return false;
+            }
+            const target = dst?.kind === 'x87' ? Number(dst.reg) : 0;
+            return isSingle(target) && (src.kind === 'x87' ? isSingle(Number(src.reg))
+                : src.kind === 'mem' && src.size === 4);
+        }
+    }
+}
+
+/**
+ * The floats (`Singles`) a form leaves behind it, as a mask of locals: one the
+ * float path took (`taken`) wrote its own and forgets the registers it pops; any
+ * other ran on the f64 locals and forgets the ones it writes besides, and one
+ * `exactWrites` does not know (an exchange of all of them, a transcendental),
+ * every one. A popped register's float would otherwise outlive it into a test
+ * at an entry (`x87EntryCheck`) of whatever its double was left as.
+ *
+ * @param {Instruction} instruction
+ * @param {StackState} state  before it
+ * @param {boolean} taken
+ */
+function floatsGone(instruction, state, taken){
+    const writes = exactWrites(instruction, state.top, state.slot);
+    if (writes === null)
+    {
+        return taken ? 0 : 0xff;
+    }
+    return (taken ? 0 : writes.written) | writes.popped;
+}
 
 /**
  * @typedef {Object} StackState
@@ -849,10 +928,12 @@ export function planStack(region, states, cut, speculate, callReturn = false){
         }
         blocks.forEach((_, i)=>{
             // A register one path needs held and another empty is not in
-            // one shape here: its checks stay.
+            // one shape here: its checks stay. A block a wasm call returns to
+            // tests the same after the call (`x87AfterCall`), whatever top the
+            // region was entered at: the callee may have left any shape.
             const { held, empty } = ahead[i];
             const both = held & empty;
-            if (entries[i] && (held | empty) !== both)
+            if ((entries[i] || returnedFrom[i].length > 0) && (held | empty) !== both)
             {
                 needs[i] = { held: held & ~both, empty: empty & ~both, c1: false };
             }
@@ -892,7 +973,7 @@ export function planStack(region, states, cut, speculate, callReturn = false){
             }
             if (returnedFrom[i].some(p=>runs[p] && own[p].end !== null))
             {
-                shape = meet(shape, entries[i] ? needs[i] ?? NOTHING : NOTHING);
+                shape = meet(shape, needs[i] ?? NOTHING);
             }
             if (!sameShape(shape, known[i]))
             {
@@ -958,6 +1039,11 @@ export function planStack(region, states, cut, speculate, callReturn = false){
  *     a quadword `fild`'s integer at run time, whichever block or executor loaded it: taken
  *     from the state block where the region is entered (`layout.x87Exact`), kept by every
  *     instruction as `exact` is, and left there at every exit; -1 elsewhere
+ * @property {Singles} singles  what the current block holds in f32 locals (`floats`)
+ * @property {number[]} single  the f32 local beside each x87 local, -1 until one is needed
+ * @property {number[]} floatTemps  f32 scratch locals of the float path, made as needed
+ * @property {{ held: number, numeric: number }[] | null} floatsIn  what each block starts
+ *     with in floats (`planFloats`), or null where the float path is not taken
  */
 
 /**
@@ -989,6 +1075,84 @@ export function planStack(region, states, cut, speculate, callReturn = false){
 const unknown = ()=>({
     block: -1, held: 0, empty: 0, stale: 0, dirty: 0, pending: 0, top: 0, topStale: false,
 });
+
+/**
+ * Which x87 locals hold their value as a float too, in a region compiled for
+ * single precision with its arithmetic in floats (`floats`): a float loaded, a
+ * constant, or the result of an operation on two such that the range test
+ * passed -- the processor's 24-bit result exactly, since an operation on
+ * floats rounded once to 24 bits is the float operation wherever the result
+ * is a normal float. A chain of such operations then runs in f32 with no
+ * conversion between them; the f64 local is written from the float where
+ * something else reads it: every exit and edge (in its branch), the block's
+ * end, a call, and any form the float path does not take, which forgets only
+ * the floats it writes or pops. An exchange moves nothing, the bits being the
+ * locals'; a block starts with the floats every edge into it hands on
+ * (`planFloats`).
+ *
+ * @typedef {Object} Singles
+ * @property {number} block   the block they are of, or -1
+ * @property {number} held    the x87 locals (by index 0-7) whose value their f32 local holds
+ * @property {number} stale   of them, those whose f64 local does not hold it yet
+ * @property {number} numeric of them, those known not to be a NaN, which a float store writes
+ *     as it is (a NaN loaded goes out quieted, through the double, as the processor's does)
+ */
+
+/** @returns {Singles} */
+const noSingles = ()=>({ block: -1, held: 0, stale: 0, numeric: 0 });
+
+/**
+ * The f32 local beside x87 local k, made the first time one is needed.
+ *
+ * @param {E} e @param {number} k
+ */
+function singleOf(e, k){
+    const x = e.x87;
+    if (x.single[k] < 0)
+    {
+        x.single[k] = e.localTypes.length + STATE_PARAMS;
+        e.localTypes.push(ValType.f32);
+    }
+    return x.single[k];
+}
+
+/**
+ * The float path's scratch f32 local n, made the first time.
+ *
+ * @param {E} e @param {number} n
+ */
+function floatTempOf(e, n){
+    const x = e.x87;
+    while (x.floatTemps.length <= n)
+    {
+        x.floatTemps.push(e.localTypes.length + STATE_PARAMS);
+        e.localTypes.push(ValType.f32);
+    }
+    return x.floatTemps[n];
+}
+
+/**
+ * Writes the f64 locals the float path left stale from their floats (`Singles`):
+ * inside an exit's or an edge's branch (`commit` false), the straight path going
+ * on as it was; on the straight path before something reads the f64 locals, after
+ * which the floats are forgotten.
+ *
+ * @param {E} e @param {boolean} commit
+ */
+export function x87WriteSingles(e, commit){
+    const x = e.x87;
+    for (let k = 0; k < 8; k++)
+    {
+        if ((x.singles.stale & 1 << k) !== 0)
+        {
+            e.b.localGet(x.single[k]).op(F64.promoteF32).localSet(x.base + k);
+        }
+    }
+    if (commit)
+    {
+        x.singles = noSingles();
+    }
+}
 
 /**
  * Whether a region translates an MMX instruction: one with an mm operand that
@@ -1045,6 +1209,203 @@ export function analyseX87(region, leaveOut, entryTop, checked, callReturn = fal
 }
 
 /**
+ * Which x87 locals hold their value as a float at each block's start
+ * (`Singles`), for a region whose single-precision arithmetic runs on floats:
+ * what every edge into the block from inside the region leaves there, the
+ * block's own forms followed as `emitX87` takes them -- a form the float path
+ * takes with its operands as floats and its stack known clear, any other
+ * forgetting the registers it writes or pops (`floatsGone`). Only a register
+ * the stack's plan knows held at the block's start is one. An edge that moves
+ * the registers between locals moves the floats with them (`x87MoveTo`); one
+ * after a call (the callee may have written the stack), out of an indirect
+ * jump or call, or onto another top hands on nothing; a block cut, entered at
+ * a guessed top, or with no edge into it from the region starts with nothing.
+ * An entry from outside the region fills the floats from the doubles it
+ * loaded and tests them (`x87EntryCheck`). Settled from all floats down, a
+ * pass at a time.
+ *
+ * @param {import('../region.js').Region} region  in its emitting order
+ * @param {NonNullable<X87Analysis>} analysis
+ * @param {Map<number, number[]>} returns  by `ret` block, the return addresses it jumps to
+ * @returns {{ held: number, numeric: number }[]}
+ */
+export function planFloats(region, analysis, returns){
+    const { states, shapes, cut, guarded } = analysis;
+    const { blocks } = region;
+    const indexOf = new Map(blocks.map((block, index)=>[block.start, index]));
+    /** @param {number} index @param {{ held: number, numeric: number }} start */
+    const across = (index, start)=>{
+        const begin = states[index];
+        if (begin === null || cut.has(index))
+        {
+            return null;
+        }
+        let { held, numeric } = start;
+        let state = cloneState(begin);
+        let stack = shapes[index] ?? NOTHING;
+        for (const instruction of blocks[index].instructions)
+        {
+            if (!isX87(instruction))
+            {
+                continue;
+            }
+            const next = step(instruction, state);
+            if (next === null)
+            {
+                return null;
+            }
+            const use = stackUse(instruction, state);
+            const at = (/** @type {number} */ i)=>state.slot[(state.top + i) & 7];
+            const isSingle = (/** @type {number} */ i)=>(held & 1 << at(i)) !== 0;
+            const isNumeric = (/** @type {number} */ i)=>(numeric & 1 << at(i)) !== 0;
+            const { op, operands: [dst, src] } = instruction;
+            // As `guard` decides it: every source known held, a push's register known empty.
+            let read = 0;
+            for (const i of use.sources)
+            {
+                read |= 1 << ((state.top + i) & 7);
+            }
+            const clear = (read & ~stack.held) === 0
+                && !(use.pushes && (stack.empty & 1 << ((state.top - 1) & 7)) === 0);
+            const taken = floatForm(op, dst, src, isSingle, isNumeric) && clear;
+            if (taken)
+            {
+                const bit = (/** @type {number} */ k)=>1 << k;
+                if (op === 'fld' || op === 'fld1' || op === 'fldz')
+                {
+                    const into = at(-1);
+                    held |= bit(into);
+                    const kept = op === 'fld' ? src.kind === 'x87' && isNumeric(Number(src.reg))
+                        : true;
+                    numeric = kept ? numeric | bit(into) : numeric & ~bit(into);
+                }
+                else if ((op === 'fst' || op === 'fstp') && dst.kind === 'x87')
+                {
+                    const into = at(Number(dst.reg));
+                    held |= bit(into);
+                    numeric = isNumeric(0) ? numeric | bit(into) : numeric & ~bit(into);
+                }
+                else if (op === 'fsqrt')
+                {
+                    numeric |= bit(at(0));
+                }
+                else if (FLOAT_ARITHMETIC.has(op))
+                {
+                    const into = at(dst?.kind === 'x87' ? Number(dst.reg) : 0);
+                    held |= bit(into);
+                    numeric |= bit(into);
+                }
+            }
+            const gone = floatsGone(instruction, state, taken);
+            held &= ~gone;
+            numeric &= ~gone;
+            stack = advance(stack, use, state);
+            state = next;
+        }
+        return { held, numeric, end: state };
+    };
+    /**
+     * The block's edges into the region: each target, and whether the floats go along.
+     * @param {import('../region.js').Block} block @returns {[number, boolean][]}
+     */
+    const edgesOf = block=>{
+        const { exit } = block;
+        const last = block.instructions[block.instructions.length - 1];
+        switch (exit.kind)
+        {
+            case 'fallthrough': case 'jump': case 'jcc': case 'loop':
+                return exit.targets.map(target=>[target, true]);
+            case 'ret':
+                return (returns.get(block.start) ?? []).map(target=>[target, true]);
+            case 'call':
+                // A callee formed in is jumped to; any other call is made and returned from.
+                if (!exit.predicted && last?.op === 'call' && last.operands[0]?.kind === 'rel'
+                    && indexOf.has(exit.targets[0]))
+                {
+                    return [[exit.targets[0], true]];
+                }
+                return [...exit.targets, exit.next].map(target=>[target, false]);
+            default:
+                return [...exit.targets, exit.next].map((/** @type {number} */ target)=>
+                    [target, false]);
+        }
+    };
+    /** @type {{ from: number, carries: boolean }[][]} */
+    const into = blocks.map(()=>[]);
+    blocks.forEach((block, from)=>{
+        for (const [target, carries] of edgesOf(block))
+        {
+            const to = indexOf.get(target);
+            if (to !== undefined)
+            {
+                into[to].push({ from, carries });
+            }
+        }
+    });
+    // Only a register the plan knows held at the block's start (`planStack`) is a float
+    // there: an empty one's double is whatever was last in it.
+    const holds = blocks.map((_, index)=>{
+        const state = states[index];
+        const shape = shapes[index] ?? NOTHING;
+        let locals = 0;
+        for (let physical = 0; physical < 8; physical++)
+        {
+            if (state !== null && (shape.held & 1 << physical) !== 0)
+            {
+                locals |= 1 << state.slot[physical];
+            }
+        }
+        return locals;
+    });
+    const none = { held: 0, numeric: 0 };
+    /** @type {{ held: number, numeric: number }[]} */
+    const start = blocks.map((_, index)=>(into[index].length === 0 || guarded.has(index)
+        || cut.has(index) || states[index] === null ? none
+        : { held: holds[index], numeric: holds[index] }));
+    for (let changed = true, passes = 0; changed && passes < blocks.length * 16 + 16; passes++)
+    {
+        changed = false;
+        const ends = blocks.map((_, index)=>across(index, start[index]));
+        start.forEach((was, index)=>{
+            if (was.held === 0)
+            {
+                return;
+            }
+            let [held, numeric] = [holds[index], holds[index]];
+            for (const { from, carries } of into[index])
+            {
+                const end = ends[from];
+                const to = states[index];
+                // An edge whose permutation differs moves the floats with the doubles
+                // (`x87MoveTo`); one onto another top leaves.
+                const goes = carries && end !== null && to !== null && end.end.top === to.top;
+                /** Locals at the edge's end -> the target's. @param {number} mask */
+                const moved = mask=>{
+                    let there = 0;
+                    for (let k = 0; k < 8; k++)
+                    {
+                        if (end !== null && to !== null && (mask & 1 << end.end.slot[k]) !== 0)
+                        {
+                            there |= 1 << to.slot[k];
+                        }
+                    }
+                    return there;
+                };
+                held &= goes ? moved(end.held) : 0;
+                numeric &= goes ? moved(end.numeric) : 0;
+            }
+            numeric &= held;
+            if (held !== was.held || numeric !== was.numeric)
+            {
+                start[index] = { held, numeric };
+                changed = true;
+            }
+        });
+    }
+    return start;
+}
+
+/**
  * Sets up the region's x87 emission: decides whether the region uses x87,
  * runs the tracker and allocates the locals. A region with MMX in it keeps
  * x87 too -- the two are the mantissa and the value of one set of eight
@@ -1071,7 +1432,7 @@ export function prepareX87(e, entryTop, checked = false,
             controlWritten: false, checkedPrecision: -1, known: unknown(), shapes: [], needs: [],
             stack: NOTHING,
             guards: 0, relaxedReads: 0, tracksExact: false, exact: 0, exactNaN: 0, shadow: [],
-            dyn: -1,
+            dyn: -1, singles: noSingles(), single: [], floatTemps: [], floatsIn: null,
         };
     }
     const { hasMmx, tracksExact, states, ends, cut, guarded, shapes, needs } = analysis;
@@ -1114,6 +1475,9 @@ export function prepareX87(e, entryTop, checked = false,
         checkedPrecision: -1,
         known: unknown(), shapes, needs, stack: NOTHING, guards: 0, relaxedReads: 0,
         tracksExact, exact: 0, exactNaN: 0, shadow, dyn,
+        singles: noSingles(), single: new Array(8).fill(-1), floatTemps: [],
+        floatsIn: e.floats === true && !hasMmx && e.context.precise !== true
+            ? planFloats(e.region, analysis, e.returns) : null,
     };
 }
 
@@ -1127,14 +1491,18 @@ export function prepareX87(e, entryTop, checked = false,
  */
 export function x87EntryCheck(e){
     const x = e.x87;
-    /** @type {{ label: number, need: Shape }[]} */
+    /** @type {{ label: number, need: Shape | null, floats: number }[]} */
     const tests = [];
-    x.needs.forEach((need, label)=>{
-        if (need !== null)
+    const count = e.region.blocks.length;
+    for (let label = 0; label < count; label++)
+    {
+        const need = x.needs[label] ?? null;
+        const floats = x.floatsIn?.[label]?.held ?? 0;
+        if (need !== null || floats !== 0)
         {
-            tests.push({ label, need });
+            tests.push({ label, need, floats });
         }
-    });
+    }
     if (tests.length === 0)
     {
         return;
@@ -1150,19 +1518,47 @@ export function x87EntryCheck(e){
         return e.depthOf(k < 0 ? 'shaped' : `shape${k}`);
     });
     b.localGet(Local.label).brTable(depths, e.depthOf('shaped'));
-    tests.forEach(({ label, need }, k)=>{
+    tests.forEach(({ label, need, floats }, k)=>{
         e.close();
-        // A held register's bit is 0 and an empty one's 1: whatever is not
-        // as needed survives the xor.
-        b.localGet(Local.x87Empty);
-        if (need.empty !== 0)
+        if (need !== null)
         {
-            b.i32const(need.empty).op(I32.xor);
+            // A held register's bit is 0 and an empty one's 1: whatever is not
+            // as needed survives the xor.
+            b.localGet(Local.x87Empty);
+            if (need.empty !== 0)
+            {
+                b.i32const(need.empty).op(I32.xor);
+            }
+            b.i32const(need.held | need.empty).op(I32.and);
+            e.openGuard('unshaped', EMPTY);
+            e.exitAt(e.region.blocks[label].start, Exit.UNTRANSLATED, SHAPE);
+            e.close();
         }
-        b.i32const(need.held | need.empty).op(I32.and);
-        e.openGuard('unshaped', EMPTY);
-        e.exitAt(e.region.blocks[label].start, Exit.UNTRANSLATED, SHAPE);
-        e.close();
+        if (floats !== 0)
+        {
+            // The block takes these registers as floats (`planFloats`): each filled
+            // from the double the entry loaded, which must be that float exactly --
+            // a NaN, a double of more bits or past a float's range leaves for the host.
+            let tested = false;
+            for (let local = 0; local < 8; local++)
+            {
+                if ((floats & 1 << local) === 0)
+                {
+                    continue;
+                }
+                b.localGet(x.base + local).op(F32.demoteF64).localTee(singleOf(e, local))
+                    .op(F64.promoteF32).localGet(x.base + local).op(F64.eq);
+                if (tested)
+                {
+                    b.op(I32.and);
+                }
+                tested = true;
+            }
+            b.op(I32.eqz);
+            e.openGuard('unfloat', EMPTY);
+            e.exitAt(e.region.blocks[label].start, Exit.UNTRANSLATED, RANGE);
+            e.close();
+        }
         if (k < tests.length - 1)
         {
             b.br(e.depthOf('shaped'));
@@ -1373,6 +1769,12 @@ export function x87BlockStart(e, index){
     // emitted before it, and that one -- a block that ended in a `ret` or a
     // `hlt`, whose own exits wrote its stale words -- left them uncommitted.
     x.known = unknown();
+    // What every edge into it from the region left in floats, or an entry filled
+    // and tested (`planFloats`); the f64 locals hold the same, written at the
+    // block before's end.
+    const floatsIn = x.floatsIn?.[index];
+    x.singles = floatsIn === undefined || floatsIn.held === 0 ? noSingles()
+        : { block: index, held: floatsIn.held, stale: 0, numeric: floatsIn.numeric };
     x.exact = 0;
     x.exactNaN = 0;
     if (x.cut.has(index))
@@ -1445,7 +1847,7 @@ export function x87Edge(e, targetIndex){
         return false;
     }
     x.landed = x.current === null ? null : to;
-    x87MoveTo(e, to);
+    x87MoveTo(e, to, (x.floatsIn?.[targetIndex]?.held ?? 0) !== 0);
     return true;
 }
 
@@ -1479,6 +1881,11 @@ export function x87Normalise(e, from = e.x87.current){
 function x87Flush(e, commit){
     const { b } = e;
     const known = e.x87.known;
+    if (!commit)
+    {
+        // An exit's or an edge's: the f64 locals are what it stores or hands on.
+        x87WriteSingles(e, false);
+    }
     if (known.stale !== 0)
     {
         b.localGet(Local.x87Empty).i32const(~known.stale).op(I32.and);
@@ -1513,6 +1920,7 @@ function x87Flush(e, commit){
  * @param {E} e
  */
 export function x87BlockEnd(e){
+    x87WriteSingles(e, true);
     x87Flush(e, true);
 }
 
@@ -1529,6 +1937,7 @@ export function x87Reloaded(e){
     const x = e.x87;
     x.current = null;
     x.known = unknown();
+    x.singles = noSingles();
     x.stack = NOTHING;
     x.exact = 0;
     x.exactNaN = 0;
@@ -1579,6 +1988,7 @@ export function x87AfterCall(e, next, top){
  * @param {E} e
  */
 export function x87Forget(e){
+    x87WriteSingles(e, true);
     x87Flush(e, true);
     e.x87.known.block = -1;
     e.x87.stack = NOTHING;
@@ -1587,11 +1997,13 @@ export function x87Forget(e){
 }
 
 /**
- * Moves the registers from the current state's locals to the target's.
+ * Moves the registers from the current state's locals to the target's: with
+ * `floats`, for a block that takes floats in (`planFloats`), their f32 locals
+ * along with the f64 ones.
  *
- * @param {E} e @param {StackState} to
+ * @param {E} e @param {StackState} to @param {boolean} [floats]
  */
-function x87MoveTo(e, to){
+function x87MoveTo(e, to, floats = false){
     const x = e.x87;
     const from = x.current;
     if (!from || sameState(from, to))
@@ -1610,28 +2022,37 @@ function x87MoveTo(e, to){
             moves.set(to.slot[k], from.slot[k]);
         }
     }
-    const done = new Set();
-    for (const start of moves.keys())
-    {
-        if (done.has(start))
+    /** @param {(k: number) => number} local @param {number} temp */
+    const walk = (local, temp)=>{
+        const done = new Set();
+        for (const start of moves.keys())
         {
-            continue;
-        }
-        // Walk the cycle: save start, then dest <- source along it.
-        b.localGet(x.base + start).localSet(x.temp);
-        let dest = start;
-        for (;;)
-        {
-            const source = /** @type {number} */ (moves.get(dest));
-            done.add(dest);
-            if (source === start)
+            if (done.has(start))
             {
-                b.localGet(x.temp).localSet(x.base + dest);
-                break;
+                continue;
             }
-            b.localGet(x.base + source).localSet(x.base + dest);
-            dest = source;
+            // Walk the cycle: save start, then dest <- source along it.
+            b.localGet(local(start)).localSet(temp);
+            let dest = start;
+            for (;;)
+            {
+                const source = /** @type {number} */ (moves.get(dest));
+                done.add(dest);
+                if (source === start)
+                {
+                    b.localGet(temp).localSet(local(dest));
+                    break;
+                }
+                b.localGet(local(source)).localSet(local(dest));
+                dest = source;
+            }
         }
+    };
+    walk(k=>x.base + k, x.temp);
+    if (floats)
+    {
+        // Every float of the permutation, the ones the target holds among them.
+        walk(k=>singleOf(e, k), floatTempOf(e, 0));
     }
 }
 
@@ -1712,15 +2133,15 @@ export function emitX87(e, instruction, flagsLive){
     // one an operation. Precision control changes in a block only by its own
     // fldcw/fldenv/frstor/finit, which clear the check; an x87 region's host
     // calls leave the region.
-    if ((e.context.wide || e.context.narrow) && ROUNDS.has(op)
+    if ((e.wide || e.narrow) && ROUNDS.has(op)
         && x.checkedPrecision !== e.blockIndex)
     {
         b.localGet(Local.x87Control).i32const(0x300).op(I32.and);
-        if (e.context.wide)
+        if (e.wide)
         {
             b.op(I32.eqz);
         }
-        e.openGuard(e.context.wide ? 'single' : 'notSingle', EMPTY);
+        e.openGuard(e.wide ? 'single' : 'notSingle', EMPTY);
         // Not `exitBefore`: the exit is conditional, and the block stays an entry.
         e.blockRetired--;
         e.exitAt(instruction.eip, Exit.UNTRANSLATED, PRECISION);
@@ -1740,6 +2161,30 @@ export function emitX87(e, instruction, flagsLive){
     const known = x.known;
     /** The local holding ST(i). @param {number} i */
     const st = i=>x.base + state.slot[(state.top + i) & 7];
+    // The float path (`Singles`): the forms it takes when their operands are floats; any
+    // other reads the f64 locals, so the stale ones are written first, and the floats it
+    // writes or pops are forgotten after it (`floatsGone`). An exchange and the words'
+    // own forms read no register.
+    const floats = e.floats === true && !precise && !x.hasMmx;
+    if (x.singles.block !== e.blockIndex)
+    {
+        x.singles = { ...noSingles(), block: e.blockIndex };
+    }
+    const singles = x.singles;
+    /** Whether ST(i) is a float (`Singles`). @param {number} i */
+    const isSingle = i=>(singles.held & 1 << state.slot[(state.top + i) & 7]) !== 0;
+    /** Whether ST(i) is a float known not to be a NaN. @param {number} i */
+    const isNumeric = i=>(singles.numeric & 1 << state.slot[(state.top + i) & 7]) !== 0;
+    const viaFloats = floats && floatForm(op, operands[0], operands[1], isSingle, isNumeric);
+    /** The stale f64 locals written on the straight path, the floats kept beside them. */
+    const writeFloats = ()=>{
+        x87WriteSingles(e, false);
+        singles.stale = 0;
+    };
+    if (!viaFloats && !FLOAT_NEUTRAL.has(op))
+    {
+        writeFloats();
+    }
     /**
      * Keeps the MMX view of a physical register equal to the x87 view just
      * written into `stLocal`: the mantissa is the double's bits and the form is
@@ -1847,6 +2292,47 @@ export function emitX87(e, instruction, flagsLive){
     };
     /** The index of the local ST(i) is held in. @param {number} i */
     const localOf = i=>state.slot[(state.top + i) & 7];
+    /**
+     * The float path's write of x87 local k: its float holds the value, its f64 local
+     * is stale until written (`Singles`).
+     *
+     * @param {number} k @param {boolean} numeric  known not to be a NaN
+     */
+    const setFloat = (k, numeric)=>{
+        x.singles.held |= 1 << k;
+        x.singles.stale |= 1 << k;
+        x.singles.numeric = numeric ? x.singles.numeric | 1 << k : x.singles.numeric & ~(1 << k);
+    };
+    /** A push of a value already in the new top's float. @param {boolean} numeric */
+    const pushFloat = numeric=>{
+        const top = (state.top - 1) & 7;
+        mark(top, true);
+        markDirty(top);
+        setTop(top);
+        setFloat(state.slot[top], numeric);
+    };
+    /** Whether x87 local k's float is known not to be a NaN. @param {number} k */
+    const numericAt = k=>(x.singles.numeric & 1 << k) !== 0;
+    /** @param {number} n */
+    const floatTemp = n=>floatTempOf(e, n);
+    /** Whether the f32 on the stack is finite, by its exponent's bits: not an infinity or NaN. */
+    const finite = ()=>{
+        b.op(F32.bits).i32const(0x7f800000).op(I32.and).i32const(0x7f800000).op(I32.ne);
+    };
+    /**
+     * Leaves before the instruction, for the host to run it, unless the i32 on the
+     * stack says its float result is the processor's (`RANGE`): nothing of it is
+     * written yet, and the exit writes the stale f64 locals.
+     */
+    const unlessFloat = ()=>{
+        b.op(I32.eqz);
+        e.openGuard('range', EMPTY);
+        // Not `exitBefore`: the exit is conditional, and the block stays an entry.
+        e.blockRetired--;
+        e.exitAt(instruction.eip, Exit.UNTRANSLATED, RANGE);
+        e.blockRetired++;
+        e.close();
+    };
     // The exact quadwords this instruction makes, from a load or a copy.
     let madeExact = 0;
     let madeNaN = 0;
@@ -1888,6 +2374,12 @@ export function emitX87(e, instruction, flagsLive){
     };
     const finish = ()=>{
         x.current = next;
+        if (singles.held !== 0)
+        {
+            const gone = floatsGone(instruction, state, viaFloats && clear);
+            singles.held &= ~gone;
+            singles.numeric &= ~gone;
+        }
         if (!safe)
         {
             // Nothing is known after it: the next form starts afresh.
@@ -2072,12 +2564,12 @@ export function emitX87(e, instruction, flagsLive){
      * and the square root are subject to it, as on the processor.
      */
     const byPrecision = ()=>{
-        if (e.context.wide)
+        if (e.wide)
         {
             // Checked at the block's first rounding instruction (`emitX87`).
             return;
         }
-        if (e.context.narrow)
+        if (e.narrow)
         {
             // Likewise, the other way round.
             roundSingle(e);
@@ -2264,15 +2756,39 @@ export function emitX87(e, instruction, flagsLive){
             x.checkedPrecision = -1;
             return finish();
         case 'fld':
+            guard();
+            if (viaFloats && clear)
+            {
+                const into = localOf(-1);
+                if (src.kind === 'x87')
+                {
+                    const from = localOf(Number(src.reg));
+                    b.localGet(x.single[from]).localSet(singleOf(e, into));
+                    copyExact(from, into);
+                    pushFloat(numericAt(from));
+                }
+                else
+                {
+                    // The float the double would be promoted from; a NaN keeps its bits
+                    // here and is quieted where it leaves through the double.
+                    prepare(e, src);
+                    b.localGet(Local.addr).load('f32', { offset: e.layout.ramBase })
+                        .localSet(singleOf(e, into));
+                    pushFloat(false);
+                }
+                return finish();
+            }
+            if (viaFloats)
+            {
+                writeFloats();
+            }
             if (src.kind === 'x87')
             {
-                guard();
                 b.localGet(st(/** @type {number} */ (src.reg)));
                 copyExact(localOf(Number(src.reg)), localOf(-1));
             }
             else
             {
-                guard();
                 loadFloat(e, src, 'quick');
             }
             orIndefinite();
@@ -2300,6 +2816,16 @@ export function emitX87(e, instruction, flagsLive){
         case 'fld1': case 'fldz': case 'fldpi': case 'fldl2e': case 'fldln2': case 'fldlg2':
         case 'fldl2t':
             guard();
+            if (viaFloats && clear)
+            {
+                b.f32const(op === 'fld1' ? 1 : 0).localSet(singleOf(e, localOf(-1)));
+                pushFloat(true);
+                return finish();
+            }
+            if (viaFloats)
+            {
+                writeFloats();
+            }
             b.f64const({
                 fld1: 1, fldz: 0, fldpi: Math.PI, fldl2e: Math.LOG2E, fldln2: Math.LN2,
                 fldlg2: Math.log10(2), fldl2t: Math.log2(10),
@@ -2309,6 +2835,36 @@ export function emitX87(e, instruction, flagsLive){
             return finish();
         case 'fst': case 'fstp':
             guard();
+            if (viaFloats && clear)
+            {
+                const from = localOf(0);
+                if (dst.kind === 'x87')
+                {
+                    const i = /** @type {number} */ (dst.reg);
+                    const to = localOf(i);
+                    b.localGet(x.single[from]).localSet(singleOf(e, to));
+                    dirty(i);
+                    mark((state.top + i) & 7, true);
+                    copyExact(from, to);
+                    setFloat(to, numericAt(from));
+                }
+                else
+                {
+                    prepare(e, dst);
+                    noteStore(e, 4);
+                    b.localGet(Local.addr).localGet(x.single[from])
+                        .store('f32', { offset: e.layout.ramBase });
+                }
+                if (op === 'fstp')
+                {
+                    popN(1);
+                }
+                return finish();
+            }
+            if (viaFloats)
+            {
+                writeFloats();
+            }
             if (dst.kind === 'x87')
             {
                 const i = /** @type {number} */ (dst.reg);
@@ -2479,22 +3035,53 @@ export function emitX87(e, instruction, flagsLive){
         case 'fincstp': case 'fdecstp':
             b.i32const(next.top).localSet(Local.x87Top);
             return finish();
-        case 'fchs':
+        case 'fchs': case 'fabs':
             guard();
+            if (viaFloats && clear)
+            {
+                const k = localOf(0);
+                b.localGet(x.single[k]).op(op === 'fchs' ? F32.neg : F32.abs)
+                    .localSet(x.single[k]);
+                setFloat(k, numericAt(k));
+                dirty(0);
+                return finish();
+            }
+            if (viaFloats)
+            {
+                writeFloats();
+            }
+            if (op === 'fabs')
+            {
+                b.localGet(st(0)).op(F64.abs);
+                orIndefinite();
+                b.localSet(st(0));
+                dirty(0);
+                return finish();
+            }
             b.localGet(st(0)).op(F64.neg);
-            orIndefinite();
-            b.localSet(st(0));
-            dirty(0);
-            return finish();
-        case 'fabs':
-            guard();
-            b.localGet(st(0)).op(F64.abs);
             orIndefinite();
             b.localSet(st(0));
             dirty(0);
             return finish();
         case 'fsqrt':
             guard();
+            if (viaFloats && clear)
+            {
+                // A float's square root is the 24-bit one; a negative's is a NaN, left.
+                const k = localOf(0);
+                const result = floatTemp(0);
+                b.localGet(x.single[k]).op(F32.sqrt).localTee(result);
+                finite();
+                unlessFloat();
+                b.localGet(result).localSet(x.single[k]);
+                setFloat(k, true);
+                dirty(0);
+                return finish();
+            }
+            if (viaFloats)
+            {
+                writeFloats();
+            }
             if (precise)
             {
                 // A negative other than -0 is invalid: IE, and the result is a NaN.
@@ -2759,6 +3346,65 @@ export function emitX87(e, instruction, flagsLive){
             const kind = reversed ? base.slice(0, -1) : base;
             const target = dst.kind === 'x87' ? /** @type {number} */ (dst.reg) : 0;
             guard();
+            if (viaFloats && clear)
+            {
+                // Two floats: the f32 operation is the processor's 24-bit result
+                // wherever that is a normal float, and an exact sum's below it. A
+                // result past a float's range, a product's or a quotient's below its
+                // smallest normal (a zero one included, unless an operand is zero),
+                // and a NaN leave for the host instead.
+                const into = localOf(target);
+                const [mine, theirs, result] = [floatTemp(0), floatTemp(1), floatTemp(2)];
+                b.localGet(x.single[into]).localSet(mine);
+                if (src.kind === 'x87')
+                {
+                    b.localGet(x.single[localOf(Number(src.reg))]);
+                }
+                else
+                {
+                    prepare(e, src);
+                    b.localGet(Local.addr).load('f32', { offset: e.layout.ramBase });
+                }
+                b.localSet(theirs);
+                const [a, c] = reversed ? [theirs, mine] : [mine, theirs];
+                b.localGet(a).localGet(c).op(/** @type {number} */ ({
+                    fadd: F32.add, fsub: F32.sub, fmul: F32.mul, fdiv: F32.div,
+                }[kind])).localTee(result);
+                if (kind === 'fmul' || kind === 'fdiv')
+                {
+                    // Above the smallest normal and at most the largest, by the magnitude's
+                    // bits: one unsigned compare on the way that goes on. The smallest
+                    // normal itself is out, as a value the processor rounds to just below
+                    // it, in its wider exponent, comes out of f32 as it. A zero from a
+                    // zero operand is the processor's too.
+                    b.op(F32.bits).i32const(0x7fffffff).op(I32.and)
+                        .i32const(0x00800001).op(I32.sub).i32const(0x7effffff).op(I32.ltU);
+                    b.op(I32.eqz);
+                    e.openGuard('subnormal', EMPTY);
+                    b.localGet(result).f32const(0).op(F32.eq);
+                    b.localGet(a).f32const(0).op(F32.eq);
+                    b.localGet(c).f32const(0).op(F32.eq).op(I32.or).op(I32.and);
+                    unlessFloat();
+                    e.close();
+                }
+                else
+                {
+                    finite();
+                    unlessFloat();
+                }
+                b.localGet(result).localSet(x.single[into]);
+                setFloat(into, true);
+                dirty(target);
+                if (op.endsWith('p'))
+                {
+                    popN(1);
+                }
+                return finish();
+            }
+            if (viaFloats)
+            {
+                writeFloats();
+            }
             // Operands: the destination register, and the source (a register,
             // a float in memory, or an integer in memory).
             b.localGet(st(target)).localSet(x.temp);

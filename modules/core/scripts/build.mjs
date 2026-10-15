@@ -160,10 +160,11 @@ if (keepDiagnostics)
 {
     console.log('diagnostics: kept in the bundle');
 }
-// Six entries, one build: the module a page imports and the workers it
+// Seven entries, one build: the module a page imports and the workers it
 // starts -- the engine and the log keeper -- and the ones the engine starts:
-// the one Direct3D draws in, a child process's own, and a process's further
-// executors (`layers/cpu/internal/executor.worker.js`). Bundled apart because
+// the one Direct3D draws in, a child process's own, a process's further
+// executors (`layers/cpu/internal/executor.worker.js`), and the one that writes
+// the translation store's records (`translation-store.writer.js`). Bundled apart because
 // a worker is loaded by URL, not imported, and each carries what it needs. All
 // sit in dist/, so the vendor directory below is the same for each.
 await build({
@@ -174,6 +175,7 @@ await build({
         join(SRC, 'host', 'graphics.worker.js'),
         join(SRC, 'host', 'process.worker.js'),
         join(SRC, 'layers', 'cpu', 'internal', 'executor.worker.js'),
+        join(SRC, 'layers', 'cpu', 'internal', 'translation-store.writer.js'),
     ],
     bundle: true,
     format: 'esm',
@@ -235,5 +237,5 @@ for (const name of LEGAL)
 }
 await writeChecksums();
 console.log('dist: core.js + engine.worker.js + log.worker.js + graphics.worker.js'
-    + ' + process.worker.js + executor.worker.js + cork/ + '
+    + ' + process.worker.js + executor.worker.js + translation-store.writer.js + cork/ + '
     + `${vendored} vendor artifacts + checksums.json`);

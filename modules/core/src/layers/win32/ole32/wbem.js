@@ -123,11 +123,13 @@ export const WBEM_SCHEMAS = Object.fromEntries(Object.entries({
         'VideoMode', 'VideoModeDescription', 'VideoProcessor'],
     Win32_SoundDevice: [...DEVICE, 'DMABufferSize', 'Manufacturer', 'MPU401Address',
         'ProductName'],
+    // The two counts came with XP's third service pack.
     Win32_Processor: [...DEVICE, 'AddressWidth', 'Architecture', 'CpuStatus', 'CurrentClockSpeed',
         'CurrentVoltage', 'DataWidth', 'ExtClock', 'Family', 'L2CacheSize', 'L2CacheSpeed',
-        'Level', 'LoadPercentage', 'Manufacturer', 'MaxClockSpeed', 'OtherFamilyDescription',
-        'ProcessorId', 'ProcessorType', 'Revision', 'Role', 'SocketDesignation', 'Stepping',
-        'UniqueId', 'UpgradeMethod', 'Version', 'VoltageCaps'],
+        'Level', 'LoadPercentage', 'Manufacturer', 'MaxClockSpeed', 'NumberOfCores',
+        'NumberOfLogicalProcessors', 'OtherFamilyDescription', 'ProcessorId', 'ProcessorType',
+        'Revision', 'Role', 'SocketDesignation', 'Stepping', 'UniqueId', 'UpgradeMethod',
+        'Version', 'VoltageCaps'],
     Win32_BIOS: [...ELEMENT, 'BiosCharacteristics', 'BIOSVersion', 'BuildNumber', 'CodeSet',
         'CurrentLanguage', 'IdentificationCode', 'InstallableLanguages', 'LanguageEdition',
         'ListOfLanguages', 'Manufacturer', 'OtherTargetOS', 'PrimaryBIOS', 'ReleaseDate',
@@ -160,13 +162,18 @@ export const WBEM_SCHEMAS = Object.fromEntries(Object.entries({
  * Each kept class's instances, each instance its properties keyed in lower
  * case, as WMI matches names without regard to it.
  *
- * @param {{ physicalMemory?: number, processorMhz?: number,
+ * @param {{ physicalMemory?: number, processors?: number, processorMhz?: number,
  *     windows?: import('../kernel32/versions.js').WindowsVersion }} machine
- *     `processorMhz` the rate the time-stamp counter runs at, as the registry's
- *     `~MHz` says it: a program turns rdtsc deltas into seconds with either
+ *     `processors`: how many the machine has, all of them cores of the one
+ *     package Win32_Processor describes; absent, one. `processorMhz` the rate
+ *     the time-stamp counter runs at, as the registry's `~MHz` says it: a
+ *     program turns rdtsc deltas into seconds with either
  * @returns {Record<string, Record<string, WbemProperty>[]>}
  */
-export function machineClasses({ physicalMemory = 0, processorMhz = PROCESSOR.mhz, windows }){
+export function machineClasses(
+    { physicalMemory = 0, processors = 1, processorMhz = PROCESSOR.mhz, windows },
+)
+{
     const hex = (/** @type {number} */ value)=>(value >>> 0).toString(16).toUpperCase()
         .padStart(8, '0');
     // A reference names its instance by the computer, the namespace, the
@@ -235,6 +242,9 @@ export function machineClasses({ physicalMemory = 0, processorMhz = PROCESSOR.mh
             processorid: [CIM_STRING, hex(CPUID.edx) + hex(CPUID.signature)],
             maxclockspeed: [CIM_UINT32, processorMhz],
             currentclockspeed: [CIM_UINT32, processorMhz],
+            // A thread a core, as CPUID's leaf 4 tells it.
+            numberofcores: [CIM_UINT32, processors],
+            numberoflogicalprocessors: [CIM_UINT32, processors],
             extclock: [CIM_UINT32, 100],
             processortype: [CIM_UINT16, 3], // a central processor
             upgrademethod: [CIM_UINT16, 2], // unknown
@@ -377,6 +387,7 @@ const SLOTS = {
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readWideString
  * @property {number} [physicalMemory]  What GlobalMemoryStatus reports as physical memory.
+ * @property {number} [processors]  How many processors GetSystemInfo reports.
  * @property {number} [processorMhz]  The time-stamp counter's rate, as the registry's `~MHz`.
  * @property {import('../kernel32/versions.js').WindowsVersion} [windows]
  *           The Windows the process is told it runs on.
@@ -390,7 +401,7 @@ const SLOTS = {
  */
 export function registerWbemClasses(host){
     const CLASSES = machineClasses({ physicalMemory: host.physicalMemory,
-        processorMhz: host.processorMhz, windows: host.windows });
+        processors: host.processors, processorMhz: host.processorMhz, windows: host.windows });
     const diverge = (/** @type {string} */ api, /** @type {string} */ detail)=>
         host.divergence?.(api, detail);
     const writeU32 = (/** @type {number} */ address, /** @type {number} */ value)=>{

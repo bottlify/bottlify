@@ -315,8 +315,14 @@ export function createGraphicsModule(){
              * Injected rather than discovered, for the same reason the filesystem's
              * stores are: this layer should be testable without a browser, and what
              * device to draw on is the assembling caller's decision, not ours.
+             *
+             * `draw: false` sets it aside: every API keeps the state a program
+             * sets and answers what it asks, as in a build without one, and
+             * nothing reaches a GPU or the processor's raster -- a run that
+             * measures the program and the layers, not the drawing.
              */
-            const device = config?.device ?? null;
+            const drawing = config?.draw !== false;
+            const device = drawing ? config?.device ?? null : null;
 
             // Data, not code: whether a title's kept-block-compressed art travels as
             // BC blocks is a configuration decision, not something the adapter's
@@ -394,7 +400,7 @@ export function createGraphicsModule(){
              * (`config.worker`), and the frames its devices present go to the
              * thread that shows the run's.
              */
-            const workerEnd = device?.worker ?? config?.worker ?? null;
+            const workerEnd = drawing ? device?.worker ?? config?.worker ?? null : null;
             const remote = workerEnd
                 ? connectGraphicsWorker({
                     worker: workerEnd,
@@ -566,6 +572,10 @@ export function createGraphicsModule(){
                     compressedTextures: gatedCompressedTextures(caps),
                     videoMemory,
                     backend: device && !remote ? api.backend() : undefined,
+                    // Nothing drawn on purpose: an occlusion query answers that
+                    // everything was seen, so the program culls nothing it would
+                    // draw on a GPU and runs the work it would run there.
+                    drawsNothing: !drawing,
                     readMemory: services.readMemory,
                     // What a draw from a dynamic buffer compares, in place: as a
                     // copy, it was most of a frame in a game that skins into one.
@@ -647,7 +657,7 @@ export function createGraphicsModule(){
                     currentTeb: ()=>bridge.callerThread?.()?.tebAddress ?? 0,
                     // On the configuration rather than the device handle: it
                     // concerns the build that has no device.
-                    raster: config?.raster,
+                    raster: drawing ? config?.raster : false,
                     // With a graphics worker, contexts keep their state here and
                     // draw there, as Direct3D 8 and 9 devices do.
                     remote: remote

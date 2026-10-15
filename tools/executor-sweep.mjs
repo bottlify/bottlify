@@ -24,6 +24,7 @@
  * first instruction to its exit, translation included), not the boot.
  */
 
+import './chromium-v8.mjs';
 import { createApp } from '../modules/core/src/app.js';
 import { buildExe } from './make-pe.mjs';
 

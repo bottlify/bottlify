@@ -25,12 +25,21 @@ const BUCKET_SHIFT = 6;
 /** Distinct buckets kept before a new one is refused and counted instead. */
 export const BUCKET_CAP = 16384;
 
+/**
+ * @typedef {{ instructions: number, samples: number, eip: number, noted: number,
+ *     due: boolean }} Bucket
+ */
+
 /** A fresh, empty sample table. */
 export function createSampleTable(){
     return {
-        /** @type {Map<number, { instructions: number, samples: number, eip: number,
-         *     noted: number }>} */
+        /** @type {Map<number, Bucket>} */
         buckets: new Map(),
+        /** The buckets past the hot threshold whose last address is not yet the one
+         * handed over (`noted`), each once: what a feed looks at, rather than every
+         * bucket -- a pass over all of them after every slice was most of a run's
+         * thread time with the translator fed by slice. @type {Bucket[]} */
+        due: [],
         slices: 0,
         overflow: 0,
     };
@@ -45,26 +54,57 @@ export function createSampleTable(){
  * @param {ReturnType<typeof createSampleTable>} table
  * @param {number} eip
  * @param {number} instructions
+ * @param {number} [hot]  the instructions past which a bucket is due (`due`)
  */
-export function creditSample(table, eip, instructions){
+export function creditSample(table, eip, instructions, hot = Infinity){
     table.slices++;
     const key = (eip >>> 0) >>> BUCKET_SHIFT;
-    const bucket = table.buckets.get(key);
+    let bucket = table.buckets.get(key);
     if (bucket)
     {
         bucket.instructions += instructions;
         bucket.samples++;
         bucket.eip = eip >>> 0;
-        return;
     }
-    if (table.buckets.size >= BUCKET_CAP)
+    else if (table.buckets.size >= BUCKET_CAP)
     {
         table.overflow++;
         return;
     }
-    // The exact address as well as the bucket: a translator's region starts
-    // at an instruction, and the slice ended on one.
-    table.buckets.set(key, { instructions, samples: 1, eip: eip >>> 0, noted: -1 });
+    else
+    {
+        // The exact address as well as the bucket: a translator's region starts
+        // at an instruction, and the slice ended on one.
+        bucket = { instructions, samples: 1, eip: eip >>> 0, noted: -1, due: false };
+        table.buckets.set(key, bucket);
+    }
+    if (!bucket.due && bucket.instructions >= hot && bucket.noted !== bucket.eip)
+    {
+        bucket.due = true;
+        table.due.push(bucket);
+    }
+}
+
+/**
+ * The buckets due since the last call, each at the address its last slice ended
+ * on, marked as handed over there; a bucket ending somewhere new is due again.
+ *
+ * @param {ReturnType<typeof createSampleTable>} table
+ * @returns {number[]}
+ */
+export function takeDue(table){
+    const addresses = [];
+    for (const bucket of table.due)
+    {
+        bucket.due = false;
+        if (bucket.noted !== bucket.eip)
+        {
+            bucket.noted = bucket.eip;
+            addresses.push(bucket.eip);
+        }
+    }
+    table.due.length = 0;
+    return addresses;
 }
 
 /**

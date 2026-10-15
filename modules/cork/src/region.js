@@ -45,11 +45,22 @@ import { decode } from './decode/decoder.js';
  * @property {import('./decode/decoder.js').Instruction[]} instructions
  * @property {{ kind: ExitKind, targets: number[], next: number, backEdge: boolean,
  *              refusal?: import('./decode/decoder.js').Refusal,
- *              table?: SwitchTable, predicted?: boolean }} exit
+ *              table?: SwitchTable, predicted?: boolean, apart?: Apart,
+ *              quiet?: boolean }} exit
  *   an `indirect` exit through a switch's table of addresses carries the table,
  *   and its distinct targets as `targets`; an indirect call the runtime has
  *   seen go to a few callees (`callTargets`) is `predicted`, those callees its
- *   `targets`
+ *   `targets`, and one it has seen enough of to know it has none to form in is
+ *   `quiet`; a call whose callee forming did not take in says why (`apart`)
+ */
+
+/**
+ * @typedef {'blocks' | 'bytes' | 'shape' | 'nested' | 'unpredicted'} Apart
+ *   why a call's callee was not formed into its caller, for a profiling run's
+ *   counts: more blocks or bytes than a callee formed in may have; a way out of
+ *   it other than a `ret` and direct branches (an indirect jump or call, a
+ *   trap, a refusal, a page not to translate); a call of its own inside a
+ *   callee already formed in; an indirect call with no callee predicted
  */
 
 /**
@@ -92,6 +103,9 @@ const LEAF_BLOCKS = 16;
 const LEAF_BYTES = 512;
 /** How large a callee formed into its caller may be, unless forming says otherwise. */
 const LEAF_LIMITS = Object.freeze({ blocks: LEAF_BLOCKS, bytes: LEAF_BYTES });
+/** Past the caps, for the callees the runtime predicted: four of the largest leaves. */
+const PREDICTED_ROOM = Object.freeze({ blocks: 4 * LEAF_BLOCKS, bytes: 4 * LEAF_BYTES });
+const NO_ROOM = Object.freeze({ blocks: 0, bytes: 0 });
 
 /**
  * Whether the function at `target` is small enough to form into its caller:
@@ -100,13 +114,15 @@ const LEAF_LIMITS = Object.freeze({ blocks: LEAF_BLOCKS, bytes: LEAF_BYTES });
  * return address at run time -- so anything else (an indirect jump, a trap,
  * a refusal, a page not to translate) answers no; so does a direct call in
  * it unless `calls`, when the callee's own callees leave through the hash as
- * any call does and come back to the block after their call.
+ * any call does and come back to the block after their call. Answers null
+ * for yes, and for no why not (`Apart`).
  *
  * @param {(address: number) => import('./decode/decoder.js').Instruction
  *     | import('./decode/decoder.js').Refusal} decodeAt
  * @param {number} target
  * @param {(eip: number) => boolean} translatable @param {boolean} [calls]
  * @param {{ blocks: number, bytes: number }} [limits]  its blocks and bytes at most
+ * @returns {Apart | null}
  */
 function isLeaf(decodeAt, target, translatable, calls = false, limits = LEAF_LIMITS){
     const seen = new Set();
@@ -119,9 +135,13 @@ function isLeaf(decodeAt, target, translatable, calls = false, limits = LEAF_LIM
         {
             continue;
         }
-        if (seen.size >= limits.blocks || !translatable(start))
+        if (seen.size >= limits.blocks)
         {
-            return false;
+            return 'blocks';
+        }
+        if (!translatable(start))
+        {
+            return 'shape';
         }
         seen.add(start);
         for (let eip = start; ;)
@@ -129,12 +149,12 @@ function isLeaf(decodeAt, target, translatable, calls = false, limits = LEAF_LIM
             const decoded = decodeAt(eip);
             if ('refused' in decoded)
             {
-                return false;
+                return 'shape';
             }
             bytes += decoded.length;
             if (bytes > limits.bytes)
             {
-                return false;
+                return 'bytes';
             }
             eip = (eip + decoded.length) >>> 0;
             const exit = exitOf(decoded, eip);
@@ -147,20 +167,30 @@ function isLeaf(decodeAt, target, translatable, calls = false, limits = LEAF_LIM
                 work.push(...exit.targets);
                 break;
             }
-            if (exit.kind === 'ret')
+            // A jump through a register or memory leaves through the entry hash
+            // from wherever it stands -- a thunk forwarding to a virtual
+            // function, a switch's table -- and what it reaches returns past
+            // the call as the callee would have: the path ends there, as at a `ret`.
+            if (exit.kind === 'ret' || (exit.kind === 'indirect' && decoded.op === 'jmp'))
             {
                 break;
             }
-            if (calls && exit.kind === 'call' && seen.size < limits.blocks)
+            // A call through a register or memory -- a virtual call, the most
+            // of what a C++ setter or accessor calls -- is a call out as any
+            // indirect call in a region is, and the callee around it forms in
+            // as one with a direct call does.
+            const call = exit.kind === 'call'
+                || (exit.kind === 'indirect' && decoded.op === 'call');
+            if (calls && call && seen.size < limits.blocks)
             {
                 // The return lands after the call: a block of its own.
                 seen.add(eip);
                 continue;
             }
-            return false;
+            return call && seen.size < limits.blocks ? 'nested' : call ? 'blocks' : 'shape';
         }
     }
-    return true;
+    return null;
 }
 
 /**
@@ -172,7 +202,7 @@ function isLeaf(decodeAt, target, translatable, calls = false, limits = LEAF_LIM
  *
  * @param {(address: number) => number} read
  * @param {import('./decode/decoder.js').Instruction} call
- * @param {(target: number, calls: boolean) => boolean} leafAt
+ * @param {(target: number, calls: boolean) => Apart | null} leafAt
  * @returns {number[] | undefined}
  */
 function slotCallee(read, call, leafAt){
@@ -186,7 +216,7 @@ function slotCallee(read, call, leafAt){
     const slot = (operand.disp ?? 0) >>> 0;
     const target = (read(slot) | read(slot + 1) << 8 | read(slot + 2) << 16
         | read(slot + 3) << 24) >>> 0;
-    return target !== 0 && leafAt(target, false) ? [target] : undefined;
+    return target !== 0 && leafAt(target, false) === null ? [target] : undefined;
 }
 
 /**
@@ -197,6 +227,51 @@ function slotCallee(read, call, leafAt){
  */
 const calleesOf = exit=>(exit.kind === 'call' || exit.kind === 'indirect' && exit.predicted
     ? exit.targets : []);
+
+/**
+ * Whether the block at `start` is a function that does nothing: a `ret` or a `ret imm16`
+ * alone, or reached from `start` through at most three blocks that are each a direct `jmp`
+ * alone -- an incremental linker's thunk to an empty method is one. A call to it returns
+ * where it was made, `esp` past the return address and the bytes the `ret` pops, and nothing
+ * else changes; the transfer through the entry hash does that without entering the region
+ * (`finishModule`). Answered as the byte a hash slot keeps for it: the jumps in the top two
+ * bits, the bytes popped in dwords plus one in the low six; 0 for anything else, among them a
+ * `ret imm16` not a multiple of four or past 248, and a `ret` or `jmp` of a word's operand
+ * size, which pops a word or jumps within the first 64 KB. A `rep ret` is a `ret`.
+ * The blocks are a region's (`blockAt`), so a store into their bytes drops the entry with it.
+ *
+ * @param {(start: number) => Block | undefined} blockAt  the region's block at an address
+ * @param {number} start
+ */
+export function emptyCode(blockAt, start){
+    let at = start;
+    for (let jumps = 0; jumps < 4; jumps++)
+    {
+        const block = blockAt(at);
+        if (block === undefined || block.instructions.length !== 1)
+        {
+            return 0;
+        }
+        const [instruction] = block.instructions;
+        if (instruction.prefixes.operand)
+        {
+            return 0;
+        }
+        if (instruction.op === 'ret')
+        {
+            const popped = instruction.operands[0]?.kind === 'imm'
+                ? /** @type {number} */ (instruction.operands[0].value) : 0;
+            return popped % 4 === 0 && popped <= 248 ? jumps << 6 | (popped / 4 + 1) : 0;
+        }
+        const [operand] = instruction.operands;
+        if (instruction.op !== 'jmp' || operand?.kind !== 'rel')
+        {
+            return 0;
+        }
+        at = /** @type {number} */ (operand.target);
+    }
+    return 0;
+}
 
 /**
  * Whether a block ends in a call that leaves its region: a direct call whose
@@ -424,7 +499,7 @@ function switchTable(read, block, blocks, most = SWITCH_ENTRIES){
  * functions, and each region decoded every callee again to test it.
  *
  * @typedef {{ decoded: Map<number, import('./decode/decoder.js').Instruction
- *     | import('./decode/decoder.js').Refusal>, leaves: Map<number, boolean> }} FormShared
+ *     | import('./decode/decoder.js').Refusal>, leaves: Map<number, Apart | null> }} FormShared
  */
 
 /** @returns {FormShared} */
@@ -436,26 +511,43 @@ export function formShared(){
  * @param {(address: number) => number} read
  * @param {number} entry
  * @param {{ maxBlocks?: number, maxBytes?: number, leafBlocks?: number, leafBytes?: number,
- *     switchEntries?: number,
+ *     formDepth?: number, predictedRoom?: { blocks: number, bytes: number },
+ *     ownRoom?: { blocks: number, bytes: number }, switchEntries?: number,
  *     translatable?: (eip: number) => boolean, leafCalls?: boolean,
  *     callTargets?: Map<number, number[]>, shared?: FormShared,
- *     helpers?: boolean | readonly import('./helpers.js').RuntimeHelper[] }} [options]
+ *     helpers?: boolean | readonly import('./helpers.js').RuntimeHelper[],
+ *     bytesOf?: (start: number, end: number) => Uint8Array }} [options]
  *     leafCalls: a small leaf callee is formed into its caller (see `isLeaf`), of
- *     `leafBlocks` blocks and `leafBytes` bytes at most; switchEntries: the most entries a
- *     switch's jump table is followed through; helpers: a
+ *     `leafBlocks` blocks and `leafBytes` bytes at most; formDepth: how many levels of
+ *     callees formed in may have direct calls of their own, formed in in turn when small
+ *     (1: a callee's callees leave; 0: only leaves are formed in); switchEntries: the most
+ *     entries a switch's jump table is followed through; helpers: a
  *     call to a compiler's runtime helper is formed as what it amounts to (helpers.js), those
  *     of RUNTIME_HELPERS or of the list given;
  *     callTargets:
  *     by the address of an indirect call, the callees it has been seen to go to, formed in
- *     as a direct call's small callee is -- the call compares its target with each;
+ *     as a direct call's small callee is -- the call compares its target with each; a call
+ *     named with none is `quiet`, its calls no longer sampled;
+ *     predictedRoom: the blocks and bytes past `maxBlocks` and `maxBytes` those callees may
+ *     take, all of them together: a region full of its own function is where a hot call
+ *     was left out, and the runtime asks for its callees having seen it go there;
+ *     ownRoom: the blocks and bytes past them the entry's own function may take (the caps
+ *     again unless given), the callees formed in stopping at the caps: a function the caps
+ *     cut leaves through the entry hash at every block they left out and comes back the
+ *     same way -- an interpreter's opcode handlers, the blocks its calls return to, which
+ *     a call needs in the region to be a wasm call rather than two ways out;
  *     shared: what forming found, for other regions formed over the same bytes with the
- *     same `translatable` (`formShared`)
+ *     same `translatable` (`formShared`);
+ *     bytesOf: `[start, end)` of what `read` answers, copied at once -- the region's
+ *     `sources` are read so where given, a byte at a time through `read` otherwise
  * @returns {Region}
  */
 export function formRegion(read, entry,
     { maxBlocks = 128, maxBytes = 8192, translatable = ()=>true, leafCalls = true,
         callTargets, shared, helpers = true, leafBlocks = LEAF_BLOCKS, leafBytes = LEAF_BYTES,
-        switchEntries = SWITCH_ENTRIES } = {})
+        formDepth = 1, predictedRoom = PREDICTED_ROOM,
+        ownRoom = { blocks: maxBlocks, bytes: maxBytes },
+        switchEntries = SWITCH_ENTRIES, bytesOf } = {})
 {
     // Every page forming reads decides what it forms -- an import slot a call is predicted
     // through, a callee looked at for a leaf or a runtime helper -- so a worker forms the
@@ -536,8 +628,17 @@ export function formRegion(read, entry,
     const pendingAt = [[entry], [], []];
     /** @type {Map<number, number>} */
     const depthOf = new Map([[entry, 0]]);
+    /** The starts reached through a callee `callTargets` named, which may take
+     * `predictedRoom` past the caps. @type {Set<number>} */
+    const predictedStarts = new Set();
+    /** Whether the block being decoded was reached through such a callee. */
+    let inPredicted = false;
     /** @param {number} at @param {number} depth */
     const follow = (at, depth)=>{
+        if (inPredicted)
+        {
+            predictedStarts.add(at);
+        }
         pendingAt[Math.min(depth, 2)].push(at);
         if (!((depthOf.get(at) ?? Infinity) <= depth))
         {
@@ -551,9 +652,9 @@ export function formRegion(read, entry,
     const tables = [];
     /** `isLeaf` by callee and form, once a region (or once for every region
      * sharing it): a function called from many places is decoded once.
-     * @type {Map<number, boolean>} */
+     * @type {Map<number, Apart | null>} */
     const leaves = shared?.leaves ?? new Map();
-    /** @param {number} target @param {boolean} calls */
+    /** @param {number} target @param {boolean} calls @returns {Apart | null} */
     const leafAt = (target, calls)=>{
         const key = target * 2 + (calls ? 1 : 0);
         let leaf = leaves.get(key);
@@ -659,7 +760,11 @@ export function formRegion(read, entry,
         {
             overlapping = true;
         }
-        if (blocks.size >= maxBlocks || !translatable(start))
+        inPredicted = predictedStarts.has(start);
+        // The entry's own function is decoded first (`pendingAt`): it may take its room
+        // past the caps, and the callees after it stop at them.
+        const room = inPredicted ? predictedRoom : depth === 0 ? ownRoom : NO_ROOM;
+        if (blocks.size >= maxBlocks + room.blocks || !translatable(start))
         {
             // Not followed: whoever jumps here exits to the runtime.
             continue;
@@ -681,7 +786,7 @@ export function formRegion(read, entry,
                 follow(eip, depth);
                 break;
             }
-            if (bytes >= maxBytes)
+            if (bytes >= maxBytes + room.bytes)
             {
                 block.exit = { kind: 'cut', targets: [], next: eip, backEdge: false };
                 break;
@@ -785,8 +890,16 @@ export function formRegion(read, entry,
                 // byte made a block of every byte of the padding, until the
                 // region had none left for the callees it forms in.
                 follow(exit.next, depth);
+                const listed = exit.kind !== 'indirect' ? undefined : callTargets?.get(decoded.eip);
+                // Named with no callees, the call's samples showed none worth forming
+                // in: it is sampled no more (`quiet`), a fixed slot still read.
                 const predicted = exit.kind !== 'indirect' ? undefined
-                    : callTargets?.get(decoded.eip) ?? slotCallee(read, decoded, leafAt);
+                    : listed !== undefined && listed.length > 0 ? listed
+                        : slotCallee(read, decoded, leafAt);
+                if (listed !== undefined && listed.length === 0)
+                {
+                    exit.quiet = true;
+                }
                 if (leafCalls && predicted !== undefined && predicted.length > 0)
                 {
                     exit.predicted = true;
@@ -797,10 +910,23 @@ export function formRegion(read, entry,
                     // A small callee is formed into its caller: the call
                     // becomes a jump inside the region, and its return, when
                     // it comes back to this call's return address, one too.
-                    if (leafAt(callee, depth === 0))
+                    const apart = leafAt(callee, depth < formDepth);
+                    if (apart === null)
                     {
+                        if (exit.predicted === true && callTargets?.has(decoded.eip))
+                        {
+                            predictedStarts.add(callee);
+                        }
                         follow(callee, depth + 1);
                     }
+                    else
+                    {
+                        exit.apart ??= apart;
+                    }
+                }
+                if (exit.kind === 'indirect' && !exit.predicted)
+                {
+                    exit.apart = 'unpredicted';
                 }
             }
             break;
@@ -863,18 +989,21 @@ export function formRegion(read, entry,
         formable: granted,
         tables,
         hash: hashRegion(read, { blocks: ordered, tables }),
-        sources: copiesOf(source, spans),
+        sources: copiesOf(source, spans, bytesOf),
         refused,
     };
 }
 
 /**
- * The bytes of `spans`, merged where they meet, as `read` answers now.
+ * The bytes of `spans`, merged where they meet, as `read` answers now: copied
+ * at once by `bytesOf` where the host has it -- a byte at a time, a call each,
+ * was a third of forming a region.
  *
  * @param {(address: number) => number} read @param {[number, number][]} spans
+ * @param {((start: number, end: number) => Uint8Array) | undefined} bytesOf
  * @returns {{ start: number, bytes: Uint8Array }[]}
  */
-function copiesOf(read, spans){
+function copiesOf(read, spans, bytesOf){
     const sorted = [...spans].sort((a, b)=>a[0] - b[0]);
     /** @type {[number, number][]} */
     const merged = [];
@@ -890,8 +1019,8 @@ function copiesOf(read, spans){
             merged.push([start, end]);
         }
     }
-    return merged.map(([start, end])=>({ start,
-        bytes: Uint8Array.from({ length: end - start }, (_, at)=>read(start + at)) }));
+    return merged.map(([start, end])=>({ start, bytes: bytesOf?.(start, end)
+        ?? Uint8Array.from({ length: end - start }, (_, at)=>read(start + at)) }));
 }
 
 /**
@@ -918,13 +1047,14 @@ function helpersOf(blocks){
 
 /**
  * A region's hash, over what decides its code: its blocks' bytes in address
- * order, the callees its predictions name and its switch tables' entries. Two
- * FNV lanes, 64 bits: the hash is what a stored translation is found by, and a
- * store -- a bundle's seed above all, made on another machine from a build of
- * the program that may differ -- must not answer for other bytes at the same
- * entry. Thirty-two bits met that at one pair in four billion, and a birthday
- * search finds such a pair in a second. Read again later, it tells a region
- * whose code was written since it was formed from one that still fits.
+ * order, the callees its predictions name, its quiet calls and its switch
+ * tables' entries. Two FNV lanes, 64 bits: the hash is what a stored
+ * translation is found by, and a store -- a bundle's seed above all, made on
+ * another machine from a build of the program that may differ -- must not
+ * answer for other bytes at the same entry. Thirty-two bits met that at one
+ * pair in four billion, and a birthday search finds such a pair in a second.
+ * Read again later, it tells a region whose code was written since it was
+ * formed from one that still fits.
  *
  * @param {(address: number) => number} read
  * @param {{ blocks: Block[], tables?: SwitchTable[] }} region  its blocks in address order
@@ -947,9 +1077,12 @@ export function hashRegion(read, { blocks, tables = [] }){
         }
     }
     // A prediction decides blocks as a table does: its callees are hashed too.
+    // A quiet call decides code, the profile left out: hashed as a callee at 0,
+    // which no call is predicted to.
     for (const block of blocks)
     {
-        for (const target of block.exit.predicted ? block.exit.targets : [])
+        for (const target of [...block.exit.predicted ? block.exit.targets : [],
+            ...block.exit.quiet ? [0] : []])
         {
             for (let shift = 0; shift < 32; shift += 8)
             {

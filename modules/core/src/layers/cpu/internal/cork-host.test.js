@@ -665,6 +665,25 @@ test('the RAM lent to the memory layer is the machine\'s own, byte 0 at address 
     assert.equal(h.ramView(), ram, 'one view for the life of the machine');
 });
 
+test('a span the engine copies at once is the bytes it reads one by one, zeros past RAM\'s end',
+    ()=>{
+        /** @type {any} */
+        let env = null;
+        const h = host({ engine: { ...engine, createEngine(/** @type {any} */ given){
+            env = given;
+            return engine.createEngine(given);
+        } } });
+        h.writePhysical(MEMORY - 4, new Uint8Array([1, 2, 3, 4]));
+        h.writePhysical(0x2000, new Uint8Array([0xde, 0xad, 0xbe, 0xef]));
+        for (const [start, end] of [[0x1ffe, 0x2006], [MEMORY - 6, MEMORY + 3], [MEMORY + 8,
+            MEMORY + 12]])
+        {
+            assert.deepEqual(env.readBytes(start, end),
+                Uint8Array.from({ length: end - start }, (_, at)=>env.read(start + at)));
+        }
+        assert.deepEqual([...env.readBytes(MEMORY - 2, MEMORY + 2)], [3, 4, 0, 0]);
+    });
+
 test('addresses below closedBelow fault on a fetch and a store; none are closed by default',
     ()=>{
         // call [0x20100], whose word is zero: a call through a null pointer.

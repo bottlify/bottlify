@@ -107,6 +107,15 @@ test('the process block holds the process heap, for GetProcessHeap compiled inli
     assert.equal(memory.view.getUint32(peb + PEB.PROCESS_HEAP, true), 0x50004);
 });
 
+test('the process block counts the processors the machine has, one when it is not told', ()=>{
+    // Read with no call by a runtime sizing its thread pool, and the same
+    // count GetSystemInfo gives.
+    const memory = guest();
+    assert.equal(memory.view.getUint32(build(memory).peb + PEB.NUMBER_OF_PROCESSORS, true), 1);
+    const { peb } = build(memory, { processors: 4 });
+    assert.equal(memory.view.getUint32(peb + PEB.NUMBER_OF_PROCESSORS, true), 4);
+});
+
 test('the process block holds the version and its service pack where a program reads them', ()=>{
     // A program that reads the block directly finds what GetVersionEx says:
     // the build is a WORD, and the WORD after it is the service pack, major

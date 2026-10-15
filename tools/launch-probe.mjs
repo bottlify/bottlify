@@ -22,11 +22,15 @@
  *     node tools/launch-probe.mjs <bundle-id> [--turns 200000] [--mode NAME]
  */
 
+import { ENGINE } from './chromium-v8.mjs';
 import { createWriteStream, mkdirSync, writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { openBundle } from './btl.mjs';
+import { diskDirectory } from './disk-directory.mjs';
 import { createApp } from '../modules/core/src/app.js';
+import { createDirectoryTranslationStore }
+    from '../modules/core/src/layers/cpu/internal/translation-store.js';
 import { peekBytes } from '../modules/core/src/trace.js';
 import { placementOf } from '../modules/installer/src/prefix.js';
 import { modeOf } from './play/modes.js';
@@ -110,6 +114,13 @@ function parse(argv){
         // which past a title's load is most of the thread: off, a run measures
         // the program and the layers instead (the graphics layer's `raster`).
         raster: !argv.includes('--no-raster'),
+        // Nothing drawn on purpose (the graphics setting `draw: false`): an
+        // occlusion query answers that everything was seen, so the program
+        // runs the work it would run on a GPU rather than culling all of it.
+        draw: !argv.includes('--no-draw'),
+        // Where a profiling run writes cork's block counts and sampled call
+        // sites as JSON (`--cork-out FILE`).
+        corkOut: argv.includes('--cork-out') ? argv[argv.indexOf('--cork-out') + 1] : null,
         // The program's command line, in place of the manifest's: a game
         // started straight into a level (`+map ...`) loads it and plays.
         commandLine: argv.includes('--command-line')
@@ -121,6 +132,16 @@ function parse(argv){
         // Guest RAM in megabytes, as the launcher's setting gives it.
         memory: argv.includes('--memory')
             ? Number(argv[argv.indexOf('--memory') + 1]) : undefined,
+        // A folder to keep the translator's regions in between runs, as a
+        // player's origin keeps them: the first run into it is cold, every
+        // later one warm. None: every run translates from nothing.
+        translationStore: argv.includes('--translation-store')
+            ? argv[argv.indexOf('--translation-store') + 1] : null,
+        // A V8 CPU profile of the thread the program runs on, as FILE[:FROM[:FOR]]
+        // seconds of the run: translated code's own time, region by region
+        // (`r<entry>`), which counting its instructions cannot give.
+        cpuProfile: argv.includes('--cpu-profile')
+            ? argv[argv.indexOf('--cpu-profile') + 1] : null,
     };
 }
 
@@ -450,10 +471,58 @@ function seriesRow(app, last, began){
     return point;
 }
 
+/**
+ * A CPU profile of this thread from `from` seconds on for `for` seconds (to the
+ * run's end when not given), written to the file when it stops.
+ *
+ * @param {string} spec  FILE[:FROM[:FOR]]
+ */
+async function cpuProfiler(spec){
+    const [file, from = '0', length = ''] = spec.split(':');
+    const { Session } = await import('node:inspector');
+    const session = new Session();
+    session.connect();
+    /** @param {string} method @param {object} [params] @returns {Promise<any>} */
+    const post = (method, params = {})=>new Promise((resolve, reject)=>
+        session.post(method, params, (error, result)=>(error ? reject(error) : resolve(result))));
+    await post('Profiler.enable');
+    await post('Profiler.setSamplingInterval', { interval: 1000 });
+    let state = 'waiting';
+    const stop = async()=>{
+        if (state !== 'running')
+        {
+            state = 'done';
+            return;
+        }
+        state = 'done';
+        const { profile } = await post('Profiler.stop');
+        writeFileSync(file, JSON.stringify(profile));
+        console.log(`  cpu profile written to ${file}`);
+        session.disconnect();
+    };
+    setTimeout(()=>{
+        if (state !== 'waiting')
+        {
+            return;
+        }
+        state = 'running';
+        post('Profiler.start').then(()=>{
+            console.log(`  cpu profile started at ${from} s`);
+            if (length !== '')
+            {
+                setTimeout(()=>{
+                    stop();
+                }, Number(length) * 1000).unref();
+            }
+        });
+    }, Number(from) * 1000).unref();
+    return { stop };
+}
+
 async function main(){
     const { id, turns, map, grep, calls, heap, profile, log, watch, peek, dump, which,
-        corkConfig, series, raster, concurrency, seconds, commandLine, executors, memory, mode }
-        = parse(process.argv.slice(2));
+        corkConfig, series, raster, draw, corkOut, concurrency, seconds, commandLine, executors,
+        memory, mode, translationStore, cpuProfile } = parse(process.argv.slice(2));
     if (!id)
     {
         console.error('usage: node tools/launch-probe.mjs <bundle-id> [--turns N] '
@@ -461,7 +530,8 @@ async function main(){
         process.exit(2);
     }
 
-    console.log(`mode: ${mode}, ${executors ?? 1} executor(s), cork ${JSON.stringify(corkConfig)}`);
+    console.log(`mode: ${mode}, ${executors ?? 1} executor(s), cork ${JSON.stringify(corkConfig)};`
+        + ` ${ENGINE}`);
     const directory = new URL(`${id}/`, BUNDLES);
     const manifest = JSON.parse(
         await readFile(new URL('manifest.json', directory), 'utf8'));
@@ -499,6 +569,12 @@ async function main(){
     const sink = log ? createWriteStream(log) : null;
 
     const placement = placementOf(manifest);
+    const store = translationStore === null ? null
+        : await createDirectoryTranslationStore(diskDirectory(translationStore), id);
+    if (store !== null)
+    {
+        console.log(`  translation store: ${translationStore}`);
+    }
     let dumped = false;
     const app = await createApp({
         executable: new Uint8Array(executable),
@@ -513,12 +589,14 @@ async function main(){
             // engine thread would carry the whole emission a browser moves off it.
             worker: true, workerUrl: new URL('../modules/cork/src/runtime/translator.worker.js',
                 import.meta.url).href,
+            ...store === null ? {} : { store },
             ...corkConfig } },
         heapSize: heap,
         ...executors ? { executors } : {},
         ...memory ? { memorySize: memory * 1024 * 1024 } : {},
         ...concurrency ? { concurrency } : {},
-        ...(raster ? {} : { graphics: { raster: false } }),
+        ...(raster && draw ? {} : { graphics: { ...raster ? {} : { raster: false },
+            ...draw ? {} : { draw: false } } }),
         quantum: profile > 0 ? profile : undefined,
         sample: profile > 0 ? (/** @type {number} */ eip)=>samples.push(eip) : undefined,
         // A probe is read afterwards, which is exactly when a stack string is gone.
@@ -651,6 +729,7 @@ async function main(){
         app.stop();
     });
 
+    const profiling = cpuProfile === null ? null : await cpuProfiler(cpuProfile);
     let stopped;
     const began = performance.now();
     /** @type {SeriesPoint | null} */
@@ -694,6 +773,59 @@ async function main(){
     {
         printProfile(app, samples);
     }
+    // A profiling run's account of its calls and transfers (`blockProfile`).
+    const cork = app.diagnostics().find((/** @type {any} */ layer)=>layer.name === 'cpu')
+        ?.metrics?.cork;
+    if (cork)
+    {
+        // How full the entry hash ran: what sizes it (`hashSlots`) for a title.
+        console.log(`  cork entries: ${cork.entriesAll} (${cork.entries} in the hash),`
+            + ` ${cork.regions} regions, function table ${cork.tableSize}`);
+        // The precision control x87 entries are compiled for -- single rounds every
+        // arithmetic result, mixed tests at each -- how often an entry found the stack
+        // in another shape, and how often single precision on floats left for the host
+        // and the entries that went back to rounding doubles for it (`floatSingles`).
+        const precision = cork.precision ?? {};
+        console.log(`  x87: entries wide ${precision.wide}, single ${precision.narrow},`
+            + ` mixed ${precision.mixed} (${cork.precisionSwitches} switches),`
+            + ` shape misses ${cork.shapeMisses}, checked ${cork.shapeChecked},`
+            + ` float misses ${cork.floatMisses}, rounded ${cork.floatsRounded},`
+            + ` relaxed status reads ${cork.x87RelaxedReads}`);
+    }
+    if (cork?.mechanisms)
+    {
+        console.log(`  mechanisms: ${Object.entries(cork.mechanisms).filter(([, n])=>n > 0)
+            .map(([name, n])=>`${name}=${n}`).join(' ')}`);
+    }
+    if (cork?.prediction?.due > 0)
+    {
+        // Indirect call prediction (`callTargets`): the sites that came due and why
+        // each was left unpredicted.
+        console.log(`  prediction: ${Object.entries(cork.prediction)
+            .filter(([, n])=>typeof n === 'number').map(([name, n])=>`${name}=${n}`).join(' ')}`);
+    }
+    if (cork?.transferTargets?.length)
+    {
+        console.log(`  transfer targets: ${cork.transferTargets.slice(0, 40)
+            .map((/** @type {number[]} */ [address, count])=>`${address.toString(16)}x${count}`)
+            .join(' ')}`);
+    }
+    if (store !== null && cork)
+    {
+        // Whether the run was warm: the regions found in the store against those
+        // translated anew.
+        console.log(`  translation store: ${cork.cacheHits} hits, ${cork.cacheMisses} misses`);
+    }
+    if (corkOut !== null && cork)
+    {
+        // The profile for reading afterwards: every counted block, the call
+        // sites the prediction sampled, the mechanisms, and what the hottest
+        // regions' instruction forms emit, weighted by how often each ran.
+        writeFileSync(corkOut, JSON.stringify({ blockCounts: cork.blockCounts ?? [],
+            sites: cork.prediction?.sites ?? [], mechanisms: cork.mechanisms ?? {},
+            forms: cork.forms ?? null }));
+        console.log(`  cork profile written to ${corkOut}`);
+    }
     await report(app, { grep, calls });
     for (const failure of failures.slice(0, 3))
     {
@@ -714,8 +846,12 @@ async function main(){
 ${text}` : `  ${JSON.stringify(failure).slice(0, 200)}`);
     }
 
+    await profiling?.stop();
     sink?.end();
     await app.dispose();
+    // A store handed in is the caller's to close, and its index is written then.
+    await store?.flush();
+    store?.close();
     await handle.close();
 }
 
