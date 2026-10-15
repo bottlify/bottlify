@@ -894,3 +894,28 @@ None yet.
   The rate does not show it past the noise: 5 to 9 s of a 260 s thread is 2-3.5%, inside the
   4% two runs of one tree differ by. The thread's time freed went to translated code, whose own
   rate over its time did not rise with it (443-468 M/s before, 434-446 after).
+
+### 2026-10-15 -- the process's executor looking for the others' words between its regions
+
+- **Idea.** With other executors running threads, the process's own executor answers their calls
+  into the host and takes their slices' ends only at its own crossings and between its turns, so
+  its turns stay one quantum (100 000 instructions) long; 7-Zip's benchmark with one thread on two
+  executors ran a fifth slower than on one in such turns. Turns as long as a lone thread's, ended
+  between regions as soon as the executors' bell rang -- the kernel's `yieldCheck`, which runs
+  translated code in budgets of `yieldChunk` (10 000) and asks between them -- would answer them
+  as soon and lose nothing to the turn.
+- **Workload.** 7-Zip 26.04 x86 `7zr.exe b -md22` (sha256 `256feca8e274e5da…`) through
+  `createApp` with `cpu: { cores: 1 }`, the kernel's `preemption` on (the same chunked budget and
+  a check between regions) against off; `cork2` at `a6925e9b` with `89ab808d`'s scheduler changes
+  under way (the check is the kernel's own, which they do not touch).
+- **Values.** One run each, MIPS (compressing / decompressing / total): off 809 / 1413 / 1111,
+  on 525 / 667 / 596.
+- **Machine.** Node 22.22.0, a 4-core x86-64 Linux VM (KVM, Intel Xeon @ 2.80 GHz). No browser.
+  Power plan: not recorded.
+- **Why it did not pay.** A budget of 10 000 instructions brings the slice back to the host
+  every 10 microseconds or so, and the round trip and the check cost as much as the code: half the
+  rate gone before any bell is looked at.
+- **Correctness.** Not judged: measured once for speed.
+- **Decision.** Not used for the executors' bell. The process's executor takes a lone thread's
+  long turn only while no other executor runs a thread (nobody's calls to answer), and a thread
+  made ready during it that a free executor could take ends it (`noteReady` in `threads.js`).

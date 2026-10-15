@@ -350,6 +350,23 @@ faster with two executors in all (`negative-results.md`). One thread lost nothin
 mark in 17 s against 18 s (medians of six runs), the rate after it 14.56 against 14.78 M/s
 (three 70 s runs each, spread about 7 %): not distinguishable.
 
+**Measured** (2026-10-15, 7-Zip 26.04 x86 `7zr.exe b -md22`, sha256 `256feca8e274e5da…`, through
+`createApp` with `cpu: { cores }`; node 22.22.0, a 4-core x86-64 KVM VM, Intel Xeon @ 2.80 GHz, no
+browser, power plan not recorded; three runs a point, base and new alternated, total rating in
+MIPS, medians with the raw values): base `a6925e9b` -- 1 core 1119 (1053 1177 1119), 2 cores 1218
+(1167 1222 1218), 4 cores 1563 (1563 1535 1635); new `89ab808d` -- 1 core 1154 (1154 1162 1084),
+2 cores 1678 (1678 1740 1636), 4 cores 3164 (3317 2901 3164). Against one core: x1.09 and x1.40
+before, x1.45 and x2.74 after; decompressing, whose threads are independent, x3.28 on four
+(4547 against 1385). The same benchmark built for the host (`7zz` 23.01 x64) on the same machine:
+x2.19 and x4.25. What the executors' time went to, before: the second of two ran its thread one
+quantum at a time and waited on the process for the next, idle 57% of its life (153 731 slices
+in 45 s; the scheduler let it go on only when no thread it had given the process's own executor
+was still ready, which that one always was). Left after: phases where the program has fewer ready
+threads than executors (gaps past 5 ms were 7 of an executor's 33 s on two), its calls answered
+only at the process's crossings and between its turns (0.5 ms each on average), the process's
+own turns kept a quantum long while others run (a single-threaded run on two executors 10-15%
+below one), and the atomic variant (4% of the total on one executor, 8% of decompressing).
+
 **What it costs, and when it pays.** The atomic variant makes every executor slower by the tax *t*
 measured before stage 1. Two executors win when their speedup *S* satisfies *S* × (1 − *t*) > 1.
 At *t* = 20 % that is *S* > 1.25, which by Amdahl's law needs more than 40 % of the work to run in
