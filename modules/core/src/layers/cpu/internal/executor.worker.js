@@ -20,6 +20,7 @@
 
 import { createCorkHost } from './cork-host.js';
 import { SPIN_MS, Said, Turn, channelOf, waitWhile } from './executor-channel.js';
+import { UNBROKEN_STEP, UNBROKEN_STEPS, unbrokenTable } from './unbroken.js';
 
 /**
  * What the process sends once: where the engine is, the host's configuration,
@@ -31,6 +32,7 @@ import { SPIN_MS, Said, Turn, channelOf, waitWhile } from './executor-channel.js
  * @property {WebAssembly.Memory} memory
  * @property {SharedArrayBuffer} channel
  * @property {SharedArrayBuffer} bell  the process's word for all its executors' turns
+ * @property {SharedArrayBuffer | ArrayBuffer} [unbroken]  the routines no slice ends inside
  */
 
 /** How long the executor waits in place for the next slice before its event loop does. */
@@ -64,11 +66,33 @@ const spent = { startedAt: 0, slicesMs: 0, answerWaitMs: 0, idleMs: 0, slices: 0
  * @param {ExecutorStart} start
  * @param {(message: any) => void} send
  */
-async function serve({ engineUrl, config, memory, channel: buffer, bell }, send){
+async function serve({ engineUrl, config, memory, channel: buffer, bell, unbroken }, send){
     const engine = await import(engineUrl);
     const host = createCorkHost({ ...config, engine, memory });
     running = host;
     const bellWords = new Int32Array(bell);
+    const routines = unbroken === undefined ? null : unbrokenTable(unbroken);
+    /**
+     * A run that ended inside a routine no slice ends inside runs on to its
+     * end, as on the process's own executor: the thread goes back to the
+     * process next, and taken off in the middle of a record it would hold back
+     * every record after it until it ran again.
+     *
+     * @returns {number} the instructions it ran
+     */
+    const runOut = ()=>{
+        if (routines === null || routines.size() === 0)
+        {
+            return 0;
+        }
+        let retired = 0;
+        for (let step = 0; step < UNBROKEN_STEPS && !host.halted() && !host.stopRequested()
+            && host.fault() === null && routines.inside(host.eip()); step++)
+        {
+            retired += host.runSlice(UNBROKEN_STEP);
+        }
+        return retired;
+    };
     // The pacing the config names (`EngineConfig`), these defaults otherwise.
     const spinMs = config.cork?.spinMs ?? SPIN_MS;
     const idleMs = config.cork?.executorIdleMs ?? IDLE_MS;
@@ -172,6 +196,7 @@ async function serve({ engineUrl, config, memory, channel: buffer, bell }, send)
                 if (end !== null)
                 {
                     spent.ends[end]++;
+                    retired += end === 'released' || end === 'chained' ? runOut() : 0;
                     break;
                 }
                 if (performance.now() - yieldedAt >= yieldMs)

@@ -98,12 +98,15 @@ export function createBell(){
  *
  * @param {{ host: any, index: number, engineUrl: string,
  *     config: Omit<import('./cork-host.js').CorkHostConfig, 'engine' | 'memory' | 'executor'>,
- *     workerUrl?: URL, bell?: ReturnType<typeof createBell> }} options
+ *     workerUrl?: URL, bell?: ReturnType<typeof createBell>,
+ *     unbroken?: SharedArrayBuffer | ArrayBuffer }} options
  *     host: the process's cork host, made for `config.executors`; config: the configuration
- *     it was made with; bell: the one its executors share, when it waits on several
+ *     it was made with; bell: the one its executors share, when it waits on several;
+ *     unbroken: the routines no slice ends inside (`unbroken.js`), the process's table
  */
 export async function createRemoteExecutor({ host, index, engineUrl, config,
-    workerUrl = new URL('./executor.worker.js', import.meta.url), bell = createBell() })
+    workerUrl = new URL('./executor.worker.js', import.meta.url), bell = createBell(),
+    unbroken = undefined })
 {
     const memory = host.wasmMemory();
     if (typeof SharedArrayBuffer !== 'function' || !(memory.buffer instanceof SharedArrayBuffer))
@@ -136,7 +139,7 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
             }
         });
         worker.post({ type: 'start', engineUrl, memory, channel: buffer, bell: bell.buffer,
-            config: { ...config, executor: index } });
+            unbroken, config: { ...config, executor: index } });
     });
     const own = /** @type {Uint8Array} */ (host.block());
     const theirs = new Uint8Array(memory.buffer, host.executorBase(index), own.length);

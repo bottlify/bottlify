@@ -94,7 +94,7 @@ test('a slice that runs out inside an unbroken routine runs on to its end, on th
     assert.equal(asked.length, 4, 'the quantum, then three steps until EIP left the routine');
     assert.equal(asked[0], 5000);
     assert.ok(asked.slice(1).every(max=>max < 5000), 'each step a short one');
-    assert.equal(a.instructions, 1000 + 3 * 512, 'and every step charged to the thread');
+    assert.equal(a.instructions, 1000 + 3, 'and every step charged to the thread');
     assert.equal(sched.runOnce().ran?.name, 'b', 'then the next thread has its turn');
     assert.equal(asked.length, 5, 'whose slice ended outside any routine');
 });

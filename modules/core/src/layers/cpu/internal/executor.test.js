@@ -17,6 +17,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createCorkHost } from './cork-host.js';
 import { createBell, createRemoteExecutor } from './executor.js';
+import { unbrokenTable } from './unbroken.js';
 import * as engine from '../../../../../cork/src/index.js';
 
 const ENGINE_URL = new URL('../../../../../cork/src/index.js', import.meta.url).href;
@@ -398,3 +399,59 @@ test('two executors at once: interlocked counters, a spin lock and a compare-and
         remotes.forEach(remote=>remote.close());
     }
 });
+
+for (const told of [true, false])
+{
+    test(`another executor ends a thread's run outside a routine no slice ends inside`
+        + `${told ? '' : ' -- and inside one when not told of it'}`, async()=>{
+        // A thread calls a routine over and over that spends most of its time
+        // inside: told of the routine, the executor runs every slice that ends
+        // in it on to its end, as the process's own does.
+        const process = createCorkHost({ ...CONFIG, engine, executors: 2 });
+        handle(process);
+        const ROUTINE = 0x42000;
+        // mov eax, 300; R: dec eax; jnz R; ret
+        const routine = [0xb8, ...u32(300), 0x48, 0x75, 0xfd, 0xc3];
+        // L: call ROUTINE; jmp L
+        const caller = [0xe8, ...u32(ROUTINE - (CODE + 5)), 0xeb, 0xf9];
+        const table = unbrokenTable();
+        if (told)
+        {
+            table.add(ROUTINE, routine.length);
+        }
+        const remote = await createRemoteExecutor({ host: process, index: 1, engineUrl: ENGINE_URL,
+            config: { ...CONFIG, executors: 2 }, unbroken: table.buffer });
+        try
+        {
+            process.writePhysical(CODE, new Uint8Array(caller));
+            process.writePhysical(ROUTINE, new Uint8Array(routine));
+            process.writeReg32('esp', 0x300000);
+            process.writeReg32('eip', CODE);
+            remote.block().set(process.block());
+            const view = new DataView(remote.block().buffer, remote.block().byteOffset);
+            const layout = process.blockLayout();
+            const next = random(0x5eed);
+            let inside = 0;
+            for (let slice = 0; slice < 200; slice++)
+            {
+                const ended = remote.runSlice(1 + next(400));
+                assert.equal(ended.fault, null);
+                const eip = view.getUint32(layout.eip, true);
+                inside += eip >= ROUTINE && eip < ROUTINE + routine.length ? 1 : 0;
+                await settle();
+            }
+            if (told)
+            {
+                assert.equal(inside, 0, 'slices that ended inside the routine');
+            }
+            else
+            {
+                assert.ok(inside > 0, 'the routine is where most slices end, untold');
+            }
+        }
+        finally
+        {
+            remote.close();
+        }
+    });
+}

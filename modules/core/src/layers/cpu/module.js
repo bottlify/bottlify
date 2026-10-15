@@ -7,6 +7,7 @@
 import { createV86Host } from './internal/v86-host.js';
 import { createCorkHost } from './internal/cork-host.js';
 import { createBell, createRemoteExecutor } from './internal/executor.js';
+import { unbrokenTable } from './internal/unbroken.js';
 import { createFpu } from './internal/fpu.js';
 import { createThunkTable, FORWARD_SAVE } from './internal/thunks.js';
 import {
@@ -205,6 +206,7 @@ export function createCpuModule(){
              *          yieldCheck: (() => boolean) | null, stacks: [number, number][],
              *          lent: import('./engine.js').TranslatorPort[], remotes: any[],
              *          bell: ReturnType<typeof createBell> | null,
+             *          unbroken: ReturnType<typeof unbrokenTable>,
              *          beforeTrap: (() => void) | null,
              *          remoteFigures: Map<number, any>, executorsRefused: string | null }}
              */
@@ -215,6 +217,8 @@ export function createCpuModule(){
                 cork: null,
                 remotes: [],
                 bell: null,
+                // The routines no slice ends inside, as every executor reads them.
+                unbroken: unbrokenTable(),
                 beforeTrap: null,
                 // The other executors' translator figures, as each last answered.
                 remoteFigures: new Map(),
@@ -544,6 +548,7 @@ export function createCpuModule(){
                                 { length: settings.executors - 1 },
                                 (_, i)=>createRemoteExecutor({ host: state.host, index: i + 1,
                                     engineUrl: settings.engineUrl, bell,
+                                    unbroken: state.unbroken.buffer,
                                     config: { ...hostConfig, cork } })));
                         }
                         state.cork = state.host.cork();
@@ -904,6 +909,21 @@ export function createCpuModule(){
                 processors: ()=>processorsFor({ engine, executors: settings.executors }),
                 /** The word their turns ring: one wait for all of them. */
                 executorBell: ()=>state.bell,
+                /**
+                 * A routine of the host's no slice is to end inside (the
+                 * kernel's `atomicCode`), told to every executor: one that
+                 * ends a thread's run inside it runs the thread on to its end.
+                 *
+                 * @param {number} address @param {number} length
+                 */
+                noteUnbroken(address, length){
+                    if (!state.unbroken.add(address, length))
+                    {
+                        log?.warn?.('cpu', `unbroken routines past ${state.unbroken.size()}:`
+                            + ` 0x${(address >>> 0).toString(16)} is the process's`
+                            + ' executor\'s alone');
+                    }
+                },
                 /**
                  * Who is told of every crossing into the host before it is
                  * answered: the scheduler, which answers the other executors'

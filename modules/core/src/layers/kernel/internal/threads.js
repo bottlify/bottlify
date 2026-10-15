@@ -117,12 +117,16 @@ export function absolutePriority(relative){
 }
 
 /**
- * How far a slice that ended inside an unbroken routine runs on: steps of a
- * few hundred instructions, a handful of them -- more than the longest such
- * routine with the most it copies, and a bound should one ever wait.
+ * How a slice that ended inside an unbroken routine runs on: a step at a time,
+ * each ending at the first place translated code looks at its budget -- a back
+ * edge, a region's exit -- so it stops at the routine's `ret` rather than run
+ * past it into the next call to one, a program's setters coming one after
+ * another; as many steps as the longest such routine's loop takes, a bound
+ * should one ever wait. The process's other executors step the same way (the
+ * cpu's `unbroken.js`).
  */
-const ATOMIC_STEP = 512;
-const ATOMIC_STEPS = 16;
+const ATOMIC_STEP = 1;
+const ATOMIC_STEPS = 4096;
 
 /**
  * What a blocked thread is queued on that it could take now. Nothing, for a
@@ -1465,6 +1469,9 @@ export function createScheduler(options){
             }
             atomic.starts.splice(at, 0, start);
             atomic.ends.splice(at, 0, start + (length >>> 0));
+            // And the process's other executors, which end their threads' runs
+            // where they will, are told too.
+            cpu.noteUnbroken?.(start, length >>> 0);
         },
 
         /**
