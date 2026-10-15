@@ -177,6 +177,22 @@ export function createMemoryModule(){
                 }
                 return ramWords;
             };
+            /** The same RAM by quadword, for the 64-bit swap. @type {BigInt64Array | null | undefined} */
+            let ramQuads;
+            const sharedQuads = ()=>{
+                if (ramQuads === undefined)
+                {
+                    const words = sharedWords();
+                    if (words === null)
+                    {
+                        return null;
+                    }
+                    ramQuads = words.byteOffset % 8 === 0
+                        ? new BigInt64Array(words.buffer, words.byteOffset, words.length >>> 1)
+                        : null;
+                }
+                return ramQuads;
+            };
 
             current = state;
             return {
@@ -393,6 +409,42 @@ export function createMemoryModule(){
                     if (was === expected >>> 0)
                     {
                         state.accessors.writeU32(address, value);
+                    }
+                    return was;
+                },
+                /**
+                 * The same for a quadword, as `lock cmpxchg8b` takes one: a
+                 * 64-bit word the guest's threads move that way -- a counter's
+                 * last answer, an SList's header -- moved by the host too.
+                 * Indivisible where the RAM is shared and the address
+                 * 8-aligned; a read then a write elsewhere.
+                 *
+                 * @param {number} address @param {bigint} expected @param {bigint} value
+                 * @returns {bigint}  what the quadword held, unsigned
+                 */
+                compareExchangeU64: (address, expected, value)=>{
+                    if (!live())
+                    {
+                        return 0n;
+                    }
+                    const shared = sharedQuads();
+                    if (shared !== null && (address & 7) === 0)
+                    {
+                        const was = BigInt.asUintN(64, Atomics.compareExchange(shared,
+                            address >>> 3, BigInt.asIntN(64, expected), BigInt.asIntN(64, value)));
+                        if (was === BigInt.asUintN(64, expected))
+                        {
+                            state.accessors.adopt(address, 8);
+                        }
+                        return was;
+                    }
+                    const was = BigInt(state.accessors.readU32(address))
+                        | BigInt(state.accessors.readU32(address + 4)) << 32n;
+                    if (was === BigInt.asUintN(64, expected))
+                    {
+                        const bytes = new Uint8Array(8);
+                        new DataView(bytes.buffer).setBigUint64(0, BigInt.asUintN(64, value), true);
+                        state.accessors.writeBytes(address, bytes);
                     }
                     return was;
                 },

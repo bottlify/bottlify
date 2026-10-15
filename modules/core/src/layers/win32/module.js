@@ -1503,6 +1503,8 @@ export function createWin32Module(){
                         readMemory,
                         processId,
                         writeMemory,
+                        compareExchangeU64: (address, expected, value)=>
+                            memory.compareExchangeU64(address, expected, value),
                         readCString,
                         readWideString,
                         currentThread: ()=>kernel.currentThread(),

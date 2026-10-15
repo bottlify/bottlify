@@ -829,36 +829,42 @@ test('the clock routines read one block, and what they read is what a trap would
     const trap = 0x7f000010;
     const block = 0x31000;
 
-    // The counter is two words of the block, copied into the caller's
-    // LARGE_INTEGER; the pointer is the only case left to the host.
+    // The counter is two words of the block read between two looks at its
+    // sequence, copied into the caller's LARGE_INTEGER and kept as the last
+    // answer by lock cmpxchg8b; the pointer is the only case left to the host.
     const counter = queryPerformanceCounterCode(at, trap, block);
     const view = new DataView(counter.buffer);
     assert.deepEqual([...counter.slice(0, 6)], [0x8b, 0x4c, 0x24, 0x04, 0x85, 0xc9],
         'the out-pointer, tested');
-    assert.equal(counter[6], 0x74, 'jz to the slow path');
-    const slow = 8 + counter[7];
-    assert.equal(counter[8], 0xa1, 'mov eax, [block]');
-    assert.equal(view.getUint32(9, true), block + CLOCK.COUNTER);
-    assert.deepEqual([...counter.slice(13, 15)], [0x8b, 0x15]);
-    assert.equal(view.getUint32(15, true), block + CLOCK.COUNTER + 4);
-    // Compared with the last answer, high word first, and kept as it.
-    assert.deepEqual([...counter.slice(19, 21)], [0x3b, 0x15], 'cmp edx, [last+4]');
-    assert.equal(view.getUint32(21, true), block + CLOCK.LAST + 4);
-    assert.deepEqual([...counter.slice(29, 31)], [0x3b, 0x05], 'cmp eax, [last]');
-    assert.equal(view.getUint32(31, true), block + CLOCK.LAST);
-    assert.equal(27 + counter[26], 54, 'ja to the store');
-    assert.equal(29 + counter[28], 37, 'jb to the bump');
-    assert.equal(37 + counter[36], 54, 'ja to the store');
-    assert.deepEqual([...counter.slice(48, 54)], [0x83, 0xc0, 0x01, 0x83, 0xd2, 0x00],
+    assert.deepEqual([...counter.slice(6, 8)], [0x0f, 0x84], 'jz to the slow path');
+    const slow = 12 + view.getInt32(8, true);
+    assert.deepEqual([...counter.slice(12, 16)], [0x53, 0x56, 0x57, 0x55], 'four saved');
+    const read = 18;
+    assert.equal(counter[read], 0xa1, 'mov eax, [sequence]');
+    assert.equal(view.getUint32(read + 1, true), block + CLOCK.SEQUENCE);
+    assert.deepEqual([...counter.slice(23, 25)], [0xa8, 0x01], 'test al, 1: being written');
+    const spin = 27 + counter[26];
+    assert.deepEqual([...counter.slice(spin, spin + 2)], [0xf3, 0x90], 'pause');
+    assert.equal(spin + 4 + (counter[spin + 3] << 24 >> 24), read, 'and look again');
+    assert.equal(view.getUint32(29, true), block + CLOCK.COUNTER, 'mov edi, [counter]');
+    assert.equal(view.getUint32(35, true), block + CLOCK.COUNTER + 4, 'mov esi, [counter+4]');
+    assert.equal(view.getUint32(41, true), block + CLOCK.SEQUENCE, 'cmp eax, [sequence]');
+    assert.equal(47 + (counter[46] << 24 >> 24), read, 'read again when it moved');
+    assert.equal(view.getUint32(48, true), block + CLOCK.LAST);
+    assert.equal(view.getUint32(54, true), block + CLOCK.LAST + 4);
+    assert.deepEqual([...counter.slice(76, 82)], [0x83, 0xc3, 0x01, 0x83, 0xd1, 0x00],
         'one tick more than the last answer');
-    assert.equal(counter[54], 0xa3);
-    assert.equal(view.getUint32(55, true), block + CLOCK.LAST, 'kept as the last answer');
-    assert.deepEqual([...counter.slice(slow - 3, slow)], [0xc2, 0x04, 0x00],
+    assert.deepEqual([...counter.slice(82, 86)], [0xf0, 0x0f, 0xc7, 0x0d],
+        'lock cmpxchg8b [last]');
+    assert.equal(view.getUint32(86, true), block + CLOCK.LAST, 'kept as the last answer');
+    assert.equal(92 + (counter[91] << 24 >> 24), 58, 'and another\'s taken meanwhile: again');
+    assert.deepEqual([...counter.slice(spin - 3, spin)], [0xc2, 0x04, 0x00],
         'the fast path pops its one argument');
     assert.equal(counter[slow], 0xe9);
     assert.equal((at + slow + 5 + view.getInt32(slow + 1, true)) >>> 0, trap,
         'and the slow path lands on the trap');
     assert.equal(counter.length, slow + 5);
+    assert.equal((block + CLOCK.LAST) % 8, 0, 'the last answer 8-aligned, as cmpxchg8b takes it');
 
     // The frequency is a constant of this machine, so it is an immediate.
     const frequency = queryPerformanceFrequencyCode(at, trap);
@@ -911,7 +917,7 @@ test('the clock the guest reads is the one the engine credits', ()=>{
     // One block, and a page of its own: the engine writes it whenever the
     // clock moves, and a write into a page holding compiled code costs the
     // emulator everything it compiled there -- including these routines.
-    const block = host.view.getUint32(counter + 9, true) - CLOCK.COUNTER;
+    const block = host.view.getUint32(counter + 19, true) - CLOCK.SEQUENCE;
     assert.equal(host.view.getUint32(tickCount + 1, true) - CLOCK.TICKS, block,
         'the tick count reads the same block');
     assert.equal(block & 0xfff, 0, 'on a page boundary');
@@ -973,7 +979,7 @@ test('the trap and the guest routine keep one last answer, in the block', ()=>{
     const out = 0x400;
     host.clock.uptimeMs = 1500;
     const counter = boundTo(fns.QueryPerformanceCounter, { register: ()=>0x7f000010 });
-    const block = host.view.getUint32(counter + 9, true) - CLOCK.COUNTER;
+    const block = host.view.getUint32(counter + 19, true) - CLOCK.SEQUENCE;
     fns.QueryPerformanceCounter.handler([out]);
     fns.QueryPerformanceCounter.handler([out]);
     assert.equal(host.view.getBigUint64(block + CLOCK.LAST, true), u64(out),
