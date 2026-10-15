@@ -16,6 +16,7 @@ differently raises a `divergence` event naming the API.
 
 ## Processes
 
+- A program is told it has one processor for each of its executors (`executors`, one by default). A thread's affinity mask keeps it to those executors. Not done: a child process does not inherit its parent's narrowed process mask, a process handle other than the caller's own reads and sets the caller's mask, `NtSetInformationProcess(ProcessAffinityMask)` is accepted and ignored, and `NtQueryInformationThread`/`NtSetInformationThread` know no affinity; GetActiveProcessorCount, GetLogicalProcessorInformationEx and the processor-group calls are not exported.
 - A child started with `CreateProcess` runs while its parent waits; the parent resumes when the
   child ends. With `concurrency` 2 or 4 every process runs in a worker of its own, the program the
   page started too, and a child starts at `CreateProcess` and runs beside its parent; one past

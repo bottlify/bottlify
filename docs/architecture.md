@@ -364,7 +364,10 @@ There are no page tables: each 4 KiB page has one byte of flags — `INACCESSIBL
   busy then goes to one left free -- the process's own first -- and has its code translated there
   too, rather than leave a processor idle. A thread is never started while another executor still
   runs it: one that waited there is made ready by its wake before that slice is taken, and the
-  scheduler refuses the second start. The process's own thread runs its threads
+  scheduler refuses the second start. Only the executors in a thread's affinity mask are its to
+  run on: the program is told it has one processor for each executor -- by GetSystemInfo, the
+  process block, `cpuid` and the rest -- and `cpuid` answers each executor's number as its APIC
+  id, so a thread pinned to a processor reads that processor's. The process's own thread runs its threads
   too, and answers the calls the others' threads make -- at each of its own crossings into the host
   and between its turns, each caller the current thread while it is answered. An executor past the
   first is a cork host in a worker of its own over the

@@ -12,7 +12,7 @@ import { captureTrace, describeAddress, formatTrace } from './trace.js';
 import { coalescedSaver, inflateRaw, normaliseSession, resolveStorage } from './storage.js';
 import {
     DEFAULT_ENGINE, DEFAULT_INITIAL_STACK, DEFAULT_MEMORY_SIZE,
-    DEFAULT_THUNK_BASE, DEFAULT_THUNK_CAPACITY,
+    DEFAULT_THUNK_BASE, DEFAULT_THUNK_CAPACITY, processorsFor,
 } from './layers/cpu/module.js';
 import { CORK_TSC_MHZ } from './layers/cpu/internal/cork-host.js';
 import { SETTINGS, processorName } from './settings.js';
@@ -5939,6 +5939,8 @@ async function buildApp(options){
         writeMemory: (address, bytes)=>memory.writeBytes(address, bytes),
         processId: options.processId ?? FIRST_PROCESS_ID,
         version: windowsVersion(options.windows),
+        // One for each executor, as every other road to the count says.
+        processors: kernel.processors?.() ?? 1,
         imageBase: image.base,
         processHeap: allLibraries['KERNEL32.dll']?.GetProcessHeap?.handler([]) ?? 0,
         imagePath: options.imagePath ?? 'C:\\app.exe',
@@ -7724,6 +7726,10 @@ async function buildSystemHost(deps){
             ? GRAPHICS_CHOICES[options.graphicsApi].directx ?? undefined : undefined,
         processorMhz: CORK_TSC_MHZ,
         processorName: processorName(SETTINGS),
+        // The keys a process in a worker reads are these: they name as many
+        // processors as its cpu layer will say it has.
+        processors: processorsFor({ engine: options.engine ?? DEFAULT_ENGINE,
+            executors: options.executors }),
     });
     system.windows = createWindowDirectory();
     const { seeded, saver, stopSavingRegistry } = await openSession({ options, events,

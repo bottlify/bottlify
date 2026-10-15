@@ -24,7 +24,9 @@
  * code that only ever reads the classes root.
  */
 
-import { PROCESSOR, PROCESSOR_IDENTIFIER, PROCESSOR_NAME } from '../kernel32/processor.js';
+import {
+    PROCESSOR, PROCESSOR_IDENTIFIER, PROCESSOR_NAME, processorCount,
+} from '../kernel32/processor.js';
 import { windowsVersion } from '../kernel32/versions.js';
 
 /** The predefined roots. A guest names these by constant; it never opens them. */
@@ -205,6 +207,10 @@ function keyFromJSON(stored){
  *     written from `values` whenever the machine's keys are put in place, and
  *     removed when `values` has none, so a hive kept from a run under another
  *     Windows describes this one.
+ * @property {readonly string[]} [subkeys]
+ *     The keys under it, and no others: one past them is removed whenever the
+ *     machine's keys are put in place, so a hive kept from a run on more
+ *     processors describes this one.
  */
 
 /** @typedef {import('../kernel32/versions.js').WindowsVersion} WindowsVersion */
@@ -384,8 +390,8 @@ export function installedVersionOf(version){
  */
 const pick = (table, names)=>Object.fromEntries(names.map(name=>[name, table[name]]));
 
-/** Where the kernel describes the processor. */
-const PROCESSOR_KEY = 'HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0';
+/** Where the kernel describes the processors, a key for each. */
+const PROCESSORS_KEY = 'HARDWARE\\DESCRIPTION\\System\\CentralProcessor';
 
 /** The in-process COM classes the system libraries serve, by CLSID. */
 const IN_PROCESS_CLASSES = Object.freeze([
@@ -417,10 +423,13 @@ const SCRIPT_ENGINES = Object.freeze([
  * actually holds, so what a program reads here it can then open.
  *
  * @param {WindowsVersion} windows
- * @param {DirectXRelease} [directx]  A bottle's own; absent, 9.0c.
+ * @param {DirectXRelease | undefined} directx  A bottle's own; undefined, 9.0c.
+ * @param {{ count: number, mhz: number, name: string }} processors  How many
+ *     processors the machine has, their speed and their name.
  * @returns {readonly MachineKey[]}
  */
-const machineKeys = (windows, directx)=>{
+const machineKeys = (windows, directx, processors)=>{
+    const numbers = Array.from({ length: processors.count }, (_, index)=>String(index));
     const folders = shellFolders(windows);
     const userFolders = pick(folders, ['Desktop', 'Programs', 'Start Menu', 'Startup',
         'Personal', 'AppData', 'Local AppData', 'Fonts']);
@@ -486,19 +495,21 @@ const machineKeys = (windows, directx)=>{
             },
             owned: VERSION_VALUES },
         { root: HKEY_LOCAL_MACHINE, path: 'SYSTEM\\CurrentControlSet\\Control\\Session Manager' },
-        // What the kernel wrote about the processor it found: the identifier is
-        // the emulated CPUID's family, model and stepping, and the speed the
-        // emulated counter's rate (`createHive`'s `processorMhz`), and the name
-        // the engine gives itself (`processorName`). A program reads
-        // the speed from here before it measures anything, and one that finds no
-        // key reports a 0 MHz machine.
-        { root: HKEY_LOCAL_MACHINE, path: PROCESSOR_KEY,
+        // What the kernel wrote about each processor it found, alike: the
+        // identifier is the emulated CPUID's family, model and stepping, the
+        // speed the emulated counter's rate (`createHive`'s `processorMhz`),
+        // and the name the engine gives itself (`processorName`). A program
+        // reads the speed from here before it measures anything, and one that
+        // finds no key reports a 0 MHz machine; one counts the keys.
+        { root: HKEY_LOCAL_MACHINE, path: PROCESSORS_KEY, subkeys: numbers },
+        ...numbers.map(number=>({ root: HKEY_LOCAL_MACHINE,
+            path: `${PROCESSORS_KEY}\\${number}`,
             values: {
                 Identifier: PROCESSOR_IDENTIFIER,
                 VendorIdentifier: PROCESSOR.vendor,
-                ProcessorNameString: PROCESSOR_NAME,
-                '~MHz': PROCESSOR.mhz,
-            } },
+                ProcessorNameString: processors.name,
+                '~MHz': processors.mhz,
+            } })),
         // The DirectX this machine has, in the two forms its own setup library
         // reads back: the version string, and the binary pair an older setup
         // library consults first. 9.0c, the newest of the interfaces the drawing
@@ -601,19 +612,24 @@ const classesKey = path=>({
  * index-based enumeration answer the same thing twice. Overwriting a value
  * leaves it where it was; only deleting and re-adding moves it to the end.
  *
- * @param {{ processorMhz?: number, processorName?: string, windows?: WindowsVersion,
- *     directx?: DirectXRelease }} [options]
- *        `processorMhz` is the speed the processor key reports: the rate the
- *        engine's rdtsc advances at, which is the engine's to say. `windows` is
- *        the Windows the machine's keys describe, `directx` the DirectX; absent,
- *        the defaults.
+ * @param {{ processorMhz?: number, processorName?: string, processors?: number,
+ *     windows?: WindowsVersion, directx?: DirectXRelease }} [options]
+ *        `processorMhz` is the speed the processor keys report: the rate the
+ *        engine's rdtsc advances at, which is the engine's to say.
+ *        `processors` is how many there are: the run's executors, a key for
+ *        each. `windows` is the Windows the machine's keys describe, `directx`
+ *        the DirectX; absent, the defaults.
  */
 export function createHive(
-    { processorMhz = PROCESSOR.mhz, processorName = PROCESSOR_NAME, windows = windowsVersion(),
-        directx } = {},
+    { processorMhz = PROCESSOR.mhz, processorName = PROCESSOR_NAME, processors = 1,
+        windows = windowsVersion(), directx } = {},
 )
 {
-    const furnishings = machineKeys(windows, directx);
+    const furnishings = machineKeys(windows, directx, {
+        count: processorCount(processors),
+        mhz: processorMhz,
+        name: processorName,
+    });
     /** @type {Map<number, RegistryNode>} */
     const roots = new Map();
 
@@ -654,16 +670,16 @@ export function createHive(
      * value a program wrote, and a key the program deleted comes back, as
      * it would on a machine whose registry was repaired. The values that
      * describe the machine itself are the exception, and are written over.
+     *
+     * @param {readonly MachineKey[]} [entries]  Which of the machine's keys.
      */
-    const furnish = ()=>{
-        for (const entry of furnishings)
+    const furnish = (entries = furnishings)=>{
+        for (const entry of entries)
         {
             // HARDWARE is written by the kernel at every boot, not kept: a hive
             // restored from a run on another engine reports this one's speed.
             const volatile = entry.path.startsWith('HARDWARE\\');
-            const values = entry.path === PROCESSOR_KEY
-                ? { ...entry.values, '~MHz': processorMhz, ProcessorNameString: processorName }
-                : entry.values ?? {};
+            const values = entry.values ?? {};
             let node = /** @type {RegistryNode} */ (roots.get(entry.root));
             for (const part of segments(entry.path))
             {
@@ -680,6 +696,17 @@ export function createHive(
                 if (!Object.hasOwn(values, name))
                 {
                     node.values.delete(fold(name));
+                }
+            }
+            if (entry.subkeys)
+            {
+                const kept = new Set(entry.subkeys.map(fold));
+                for (const name of [...node.keys.keys()])
+                {
+                    if (!kept.has(name))
+                    {
+                        node.keys.delete(name);
+                    }
                 }
             }
             for (const [name, value] of Object.entries(values))
@@ -1163,6 +1190,9 @@ export function createHive(
                     }
                 }
             }
+            // An installation's HARDWARE is the machine it was installed on:
+            // this one's processors are the ones there are.
+            furnish(furnishings.filter(entry=>entry.path.startsWith('HARDWARE\\')));
         },
     };
     return hive;

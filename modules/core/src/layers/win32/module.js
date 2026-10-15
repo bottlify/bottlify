@@ -25,6 +25,7 @@ import { createEnvironmentFunctions, defaultEnvironment } from './kernel32/envir
 import { createThreadPool } from './kernel32/pool.js';
 import { reportedVersion, windowsVersion } from './kernel32/versions.js';
 import { createSystemFunctions } from './kernel32/system.js';
+import { createProcessors } from './kernel32/processor.js';
 import { createSpawner, createSpawnFunctions, writeThroughProtection } from './kernel32/spawn.js';
 import { createAtomFunctions } from './kernel32/atoms.js';
 import { createSeh } from './kernel32/seh.js';
@@ -218,12 +219,14 @@ function directxOf(choice){
  * any of them.
  *
  * @param {{ windows?: string, directx?: unknown, processorMhz?: number,
- *     processorName?: string }} [config]
+ *     processorName?: string, processors?: number }} [config]
+ *     `processors`: how many the machine has -- the executors a process of
+ *     the run is given, a CentralProcessor key for each; absent, one.
  */
 export function createRunRegistry(config){
     return createRegistryService(createHive({ processorMhz: config?.processorMhz,
-        processorName: config?.processorName, windows: windowsVersion(config?.windows),
-        directx: directxOf(config?.directx) }));
+        processorName: config?.processorName, processors: config?.processors,
+        windows: windowsVersion(config?.windows), directx: directxOf(config?.directx) }));
 }
 
 /** The win32 layer's module for one graph; see `defaultModules`. */
@@ -282,6 +285,24 @@ export function createWin32Module(){
             const bridge = host.requireApi('bridge');
             const filesystem = host.requireApi('filesystem');
             const journal = host.requireApi('log');
+            // The processors this process is told of -- one for each executor
+            // the kernel runs its threads on -- and its affinity: one record,
+            // which every interface that counts or sets them asks at the call.
+            const processors = createProcessors(kernel);
+            /**
+             * A thread made here starts on its process's processors, and with a
+             * block of its own, made by whoever owns the process's, which win32
+             * is only handed.
+             *
+             * @param {any} thread
+             */
+            const threadMade = thread=>{
+                processors.adopt(thread);
+                config?.threadBlock?.(thread);
+            };
+            /** The variables the process starts with: its parent's, or the machine's. */
+            const startingEnvironment = ()=>config?.environment
+                ?? defaultEnvironment(windows, folders, processors.count());
 
             // What the run's processes share, as one Windows does: handed in
             // from outside when there is a process beside or after this one
@@ -465,7 +486,8 @@ export function createWin32Module(){
             // names keys by number (`registry-service.js`): what a process in
             // a worker of its own will be able to call across a ring.
             const inheritedHive = system?.registry ?? null;
-            const hive = inheritedHive ?? createRunRegistry(config);
+            const hive = inheritedHive
+                ?? createRunRegistry({ ...config, processors: processors.count() });
             if (system)
             {
                 system.registry = hive;
@@ -820,7 +842,7 @@ export function createWin32Module(){
                 /** @param {{ entry: number, name: string }} options */
                 createThread: options=>{
                     const thread = kernel.createThread(options);
-                    config?.threadBlock?.(thread);
+                    threadMade(thread);
                     return thread;
                 },
                 currentThread: ()=>kernel.currentThread(),
@@ -846,7 +868,7 @@ export function createWin32Module(){
                 /** @param {{ entry: number, name: string }} options */
                 createThread: options=>{
                     const thread = kernel.createThread(options);
-                    config?.threadBlock?.(thread);
+                    threadMade(thread);
                     return thread;
                 },
                 currentThread: ()=>kernel.currentThread(),
@@ -868,7 +890,7 @@ export function createWin32Module(){
                 /** @param {{ entry: number, name: string }} options */
                 createThread: options=>{
                     const thread = kernel.createThread(options);
-                    config?.threadBlock?.(thread);
+                    threadMade(thread);
                     return thread;
                 },
                 currentThread: ()=>kernel.currentThread(),
@@ -1177,7 +1199,8 @@ export function createWin32Module(){
             // machine.
             registerWbemClasses({
                 registry: com, vtables: comVtables, heap, readMemory, writeMemory, readWideString,
-                physicalMemory: arena.size, windows: reported, divergence: config?.divergence,
+                physicalMemory: arena.size, processors: processors.count(), windows: reported,
+                divergence: config?.divergence,
             });
 
             // DxDiag's provider, which an installer asks which DirectX this is
@@ -1425,9 +1448,7 @@ export function createWin32Module(){
                         imagePath: ()=>modules.imagePath(),
                         modules: ()=>modules.list?.() ?? [],
                         divergence: config?.divergence,
-                        // Every thread gets a block of its own, made by whoever
-                        // owns the process's, which win32 is only handed.
-                        threadBlock: config?.threadBlock,
+                        threadBlock: threadMade,
                         /** @param {number} handle */
                         handleType: handle=>kernel.handles.typeOf(handle),
                         /** @param {any} node */
@@ -1445,7 +1466,7 @@ export function createWin32Module(){
                         /** @param {number} address */
                         free: address=>heap.free(address),
                         writeMemory,
-                        threadBlock: config?.threadBlock,
+                        threadBlock: threadMade,
                         park: (/** @type {any} */ thread)=>bridge.park(thread),
                         setLastError: setError,
                     }).table,
@@ -1475,6 +1496,7 @@ export function createWin32Module(){
                         }),
                     }),
                     ...createProcessFunctions({
+                        processors,
                         performanceFrequency: config?.performanceFrequency,
                         readMemory,
                         processId,
@@ -1529,6 +1551,7 @@ export function createWin32Module(){
                     }),
                     ...createSyncFunctions({
                         kernel,
+                        processors,
                         // A change notification watches a directory on the
                         // same volume every file call writes through.
                         volume,
@@ -1663,10 +1686,10 @@ export function createWin32Module(){
                         // What a program believes it was started with. Kept stable
                         // because the pointer is handed out once and callers keep it.
                         commandLine: ()=>config?.commandLine ?? `"${modules.imagePath()}"`,
-                        environment: ()=>config?.environment
-                            ?? defaultEnvironment(windows, folders),
+                        environment: startingEnvironment,
                     }),
                     ...createSystemFunctions({
+                        processors,
                         // TerminateProcess wakes whoever waits on the child it ends.
                         wake: (/** @type {any} */ thread, /** @type {number} */ result)=>
                             kernel.wake(thread, result),
@@ -1869,8 +1892,7 @@ export function createWin32Module(){
                         addressOf: name=>modules.find('msvcrt.dll')?.addressOf?.(name) ?? 0,
                         // The runtime's copy of the environment starts as the
                         // variables kernel32 starts the process with.
-                        environment: ()=>config?.environment
-                            ?? defaultEnvironment(windows, folders),
+                        environment: startingEnvironment,
                         // The same set GetLogicalDrives reports, from the same
                         // place: a program populates its drive list from whichever
                         // of the two it happens to call.
@@ -2373,8 +2395,7 @@ export function createWin32Module(){
                         memoryMegabytes: Math.floor(arena.size / (1024 * 1024)),
                         tempFolder: 'C:\\WINDOWS\\TEMP\\',
                         environment: (/** @type {string} */ name)=>{
-                            const variables = config?.environment
-                                ?? defaultEnvironment(windows, folders);
+                            const variables = startingEnvironment();
                             const key = Object.keys(variables)
                                 .find(candidate=>candidate.toLowerCase() === name.toLowerCase());
                             return key === undefined ? null : variables[key];
@@ -2833,7 +2854,7 @@ export function createWin32Module(){
                     hive,
                     // A server's path written REG_EXPAND_SZ names %SystemRoot% and
                     // the like, expanded against the process's variables.
-                    environment: ()=>config?.environment ?? defaultEnvironment(windows, folders),
+                    environment: startingEnvironment,
                     // A docfile is a file on the volume, and an object a program
                     // saves into one answers GetClassID and Save on its own side.
                     files: volume,
@@ -3126,6 +3147,7 @@ export function createWin32Module(){
                 ],
                 divergence: config?.divergence,
                 advapi32: libraries['ADVAPI32.dll'],
+                processors,
             });
 
             /** Every function, whichever library exports it. */

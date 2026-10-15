@@ -7,6 +7,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createEnvironmentFunctions, defaultEnvironment } from './environment.js';
+import {
+    PROCESSOR, PROCESSOR_IDENTIFIER, PROCESSOR_LEVEL, PROCESSOR_REVISION,
+} from './processor.js';
 import { WINDOWS_VERSIONS } from './versions.js';
 import { shellFolders } from '../advapi32/registry.js';
 import { decodeAnsi } from './locale.js';
@@ -308,6 +311,15 @@ test('the system Windows directory is the Windows directory: this is no terminal
         fns.GetSystemWindowsDirectoryW.argBytes], [8, 8]);
 });
 
+/** The processor as one machine of one processor defines it in every Windows. */
+const PROCESSOR_VARIABLES = Object.freeze({
+    NUMBER_OF_PROCESSORS: '1',
+    PROCESSOR_ARCHITECTURE: 'x86',
+    PROCESSOR_IDENTIFIER: 'x86 Family 6 Model 7 Stepping 3, GenuineIntel',
+    PROCESSOR_LEVEL: '6',
+    PROCESSOR_REVISION: '0703',
+});
+
 test('a process starts with the profile variables of the machine\'s layout', ()=>{
     // The same folders the registry and the shell name: a program that joins
     // %APPDATA% and one that asks SHGetFolderPath arrive at one directory.
@@ -315,6 +327,7 @@ test('a process starts with the profile variables of the machine\'s layout', ()=
     assert.deepEqual(defaultEnvironment(xp, shellFolders(xp)), {
         ALLUSERSPROFILE: 'C:\\Documents and Settings\\All Users',
         APPDATA: 'C:\\Documents and Settings\\User\\Application Data',
+        ...PROCESSOR_VARIABLES,
         SystemRoot: 'C:\\WINDOWS',
         TEMP: 'C:\\WINDOWS\\TEMP',
         TMP: 'C:\\WINDOWS\\TEMP',
@@ -330,6 +343,7 @@ test('a process starts with the profile variables of the machine\'s layout', ()=
         ALLUSERSPROFILE: 'C:\\ProgramData',
         APPDATA: 'C:\\Users\\User\\AppData\\Roaming',
         LOCALAPPDATA: 'C:\\Users\\User\\AppData\\Local',
+        ...PROCESSOR_VARIABLES,
         ProgramData: 'C:\\ProgramData',
         PUBLIC: 'C:\\Users\\Public',
         SystemRoot: 'C:\\WINDOWS',
@@ -342,9 +356,24 @@ test('a process starts with the profile variables of the machine\'s layout', ()=
     assert.deepEqual(defaultEnvironment(ten, shellFolders(ten)),
         defaultEnvironment(seven, shellFolders(seven)));
 
-    const names = Object.keys(defaultEnvironment(seven, shellFolders(seven)));
-    assert.deepEqual(names, [...names].sort((a, b)=>a.toUpperCase().localeCompare(b.toUpperCase())),
-        'in the order Windows keeps the block, whatever the case');
+    for (const windows of [xp, seven])
+    {
+        const names = Object.keys(defaultEnvironment(windows, shellFolders(windows)));
+        assert.deepEqual(names, [...names].sort((a, b)=>(a.toUpperCase() < b.toUpperCase() ? -1
+            : 1)), 'in the order Windows keeps the block, whatever the case');
+    }
+});
+
+test('NUMBER_OF_PROCESSORS is the machine\'s count, and the processor the registry names', ()=>{
+    // The identifier is the registry's with the vendor after it, the level the
+    // family and the revision model and stepping in four hex digits, as
+    // GetSystemInfo gives them.
+    const xp = WINDOWS_VERSIONS.winxp;
+    const variables = defaultEnvironment(xp, shellFolders(xp), 4);
+    assert.equal(variables.NUMBER_OF_PROCESSORS, '4');
+    assert.equal(variables.PROCESSOR_IDENTIFIER, `${PROCESSOR_IDENTIFIER}, ${PROCESSOR.vendor}`);
+    assert.equal(Number(variables.PROCESSOR_LEVEL), PROCESSOR_LEVEL);
+    assert.equal(parseInt(variables.PROCESSOR_REVISION, 16), PROCESSOR_REVISION);
 });
 
 test('text in the upper half of the ANSI page goes back as the bytes it was read from', ()=>{

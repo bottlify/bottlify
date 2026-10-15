@@ -10,6 +10,7 @@ import { createQueryFunctions, systemProcessInformation } from './query.js';
 import { STATUS } from './status.js';
 import { PEB, TEB, createProcessBlocks } from '../kernel32/teb.js';
 import { VER, WINDOWS_VERSIONS, setCondition } from '../kernel32/versions.js';
+import { createProcessors } from '../kernel32/processor.js';
 
 const TEB_AT = 0x1000;
 const PEB_AT = 0x2000;
@@ -201,6 +202,28 @@ test('the memory reported is the memory the process actually has', ()=>{
     assert.equal(host.view.getUint32(BUFFER + 0x18, true), 0x10000, 'granularity');
     assert.equal(host.bytes[BUFFER + 0x28], 1, 'one processor');
 });
+
+test('the machine\'s processors are counted and masked, whatever the process is narrowed to',
+    ()=>{
+        // SystemBasicInformation is what GetProcessAffinityMask's system mask
+        // and GetSystemInfo are made of; ProcessBasicInformation's mask is the
+        // process's (Wine's ntdll test_affinity).
+        const processors = createProcessors({ processors: ()=>4 });
+        const host = { ...fakeHost(), processors };
+        const fns = createQueryFunctions(host);
+        processors.setProcessMask(6);
+
+        assert.equal(fns.NtQuerySystemInformation.handler([0, BUFFER, 0x2c, 0]), STATUS.SUCCESS);
+        assert.equal(host.view.getUint32(BUFFER + 0x24, true), 0xf, 'ActiveProcessorsAffinityMask');
+        assert.equal(host.bytes[BUFFER + 0x28], 4, 'NumberOfProcessors');
+        assert.equal(fns.NtQueryInformationProcess.handler([-1, 0, BUFFER, 0x18, 0]),
+            STATUS.SUCCESS);
+        assert.equal(host.view.getUint32(BUFFER + 0x08, true), 6, 'AffinityMask');
+
+        const alone = fakeHost();
+        createQueryFunctions(alone).NtQueryInformationProcess.handler([-1, 0, BUFFER, 0x18, 0]);
+        assert.equal(alone.view.getUint32(BUFFER + 0x08, true), 1, 'one processor, by default');
+    });
 
 test('the process reports the block a program would have found itself', ()=>{
     // The address of the process block is the only thing most callers of this

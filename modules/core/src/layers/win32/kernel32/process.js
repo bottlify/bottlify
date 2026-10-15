@@ -6,6 +6,7 @@
 
 
 import { TEB } from './teb.js';
+import { createProcessors } from './processor.js';
 import { setCondition, verifyVersion, windowsVersion } from './versions.js';
 
 /**
@@ -176,6 +177,9 @@ const ERROR_NOACCESS = 998;
  * @property {(values: Record<string, number>) => void} [setRegisters]
  *           Where an answer wider than EAX puts its high half. Absent, the
  *           functions that answer 64 bits are not exported.
+ * @property {import('./processor.js').Processors} [processors]  The process's
+ *           processors and its affinity, which every other interface that
+ *           counts or sets them shares. Absent, one processor.
  */
 
 /**
@@ -484,6 +488,7 @@ export function createProcessFunctions(host){
         writeU32: (address, value)=>host.writeMemory(address, new Uint8Array(dword(value))),
     };
     const { stateOf, setError, lastErrorOf } = createThreadState(host.currentThread, memory);
+    const processors = host.processors ?? createProcessors();
 
     /** The process's place in the shutdown order, which it may move. */
     const shutdown = { level: SHUTDOWN_DEFAULT_LEVEL, flags: 0 };
@@ -1130,16 +1135,12 @@ export function createProcessFunctions(host){
         },
 
         /**
-         * The process priority and processor affinity a program reads and sets
-         * to tune itself. There is one processor and one priority here; the
-         * settings are accepted and have nothing to act on, and the queries
-         * report the single-processor machine honestly.
+         * The process priority a program reads and sets to tune itself. There
+         * is one priority here; the setting is accepted and has nothing to act
+         * on.
          *
          * DWORD GetPriorityClass(HANDLE hProcess)
          * BOOL SetPriorityClass(HANDLE hProcess, DWORD dwPriorityClass)
-         * BOOL GetProcessAffinityMask(HANDLE, PDWORD_PTR lpProcessAffinityMask,
-         *                             PDWORD_PTR lpSystemAffinityMask)
-         * BOOL SetProcessAffinityMask(HANDLE, DWORD_PTR dwProcessAffinityMask)
          */
         GetPriorityClass: {
             argBytes: 4,
@@ -1151,25 +1152,48 @@ export function createProcessFunctions(host){
             handler: ()=>1,
         },
 
+        /**
+         * BOOL GetProcessAffinityMask(HANDLE hProcess, PDWORD_PTR lpProcessAffinityMask,
+         *                             PDWORD_PTR lpSystemAffinityMask)
+         *
+         * The processors the process may run on, and the machine's. The
+         * handle is not looked at, as NtQueryInformationProcess does not look
+         * at it: this process's masks are the ones kept here.
+         */
         GetProcessAffinityMask: {
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([, processMask, systemMask])=>{
                 if ((processMask >>> 0) !== 0)
                 {
-                    memory.writeU32(processMask >>> 0, 1);
+                    memory.writeU32(processMask >>> 0, processors.processMask());
                 }
                 if ((systemMask >>> 0) !== 0)
                 {
-                    memory.writeU32(systemMask >>> 0, 1);
+                    memory.writeU32(systemMask >>> 0, processors.systemMask());
                 }
                 return 1;
             },
         },
 
+        /**
+         * BOOL SetProcessAffinityMask(HANDLE hProcess, DWORD_PTR dwProcessAffinityMask)
+         *
+         * Puts the process, and every thread of it, on the processors the mask
+         * names. A mask naming none, or a processor the machine does not have,
+         * is ERROR_INVALID_PARAMETER and changes nothing.
+         */
         SetProcessAffinityMask: {
             argBytes: 8,
-            handler: ()=>1,
+            /** @param {number[]} args */
+            handler: ([, mask])=>{
+                if (!processors.setProcessMask(mask))
+                {
+                    setError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                return 1;
+            },
         },
 
         /**

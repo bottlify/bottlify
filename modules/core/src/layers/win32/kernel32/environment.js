@@ -22,6 +22,9 @@
  */
 
 import { encodeAnsi } from './locale.js';
+import {
+    PROCESSOR, PROCESSOR_IDENTIFIER, PROCESSOR_LEVEL, PROCESSOR_REVISION,
+} from './processor.js';
 
 /** Error codes this file can produce. */
 const ERROR_ENVVAR_NOT_FOUND = 203;
@@ -52,20 +55,30 @@ const SYSTEM_DIRECTORY = 'C:\\WINDOWS\\system32';
  * layout -- ALLUSERSPROFILE, APPDATA and USERPROFILE everywhere, and from
  * Vista's layout on LOCALAPPDATA, ProgramData and PUBLIC too. The folders are
  * the ones the registry and the shell name, so a program that joins %APPDATA%
- * and one that asks SHGetFolderPath arrive at the same directory. In the order
- * Windows keeps the block, sorted without regard to case.
+ * and one that asks SHGetFolderPath arrive at the same directory. And the
+ * processor, as every Windows defines it: how many, the architecture, and the
+ * identifier, level and revision the registry and GetSystemInfo give, in the
+ * forms Windows writes them -- the identifier with the vendor after it, the
+ * revision four hex digits. In the order Windows keeps the block, sorted
+ * without regard to case.
  *
  * @param {import('./versions.js').WindowsVersion} windows
  * @param {Readonly<Record<string, string>>} folders  That Windows's shell folders.
+ * @param {number} [processors]  How many the machine has; absent, one.
  * @returns {Record<string, string>}
  */
-export function defaultEnvironment(windows, folders){
+export function defaultEnvironment(windows, folders, processors = 1){
     const { allUsers, public: shared } = windows.profiles;
     return {
         ALLUSERSPROFILE: allUsers,
         APPDATA: folders.AppData,
+        ...shared === null ? {} : { LOCALAPPDATA: folders['Local AppData'] },
+        NUMBER_OF_PROCESSORS: String(processors),
+        PROCESSOR_ARCHITECTURE: 'x86',
+        PROCESSOR_IDENTIFIER: `${PROCESSOR_IDENTIFIER}, ${PROCESSOR.vendor}`,
+        PROCESSOR_LEVEL: String(PROCESSOR_LEVEL),
+        PROCESSOR_REVISION: PROCESSOR_REVISION.toString(16).padStart(4, '0'),
         ...shared === null ? {} : {
-            LOCALAPPDATA: folders['Local AppData'],
             ProgramData: folders['Common AppData'],
             PUBLIC: shared,
         },

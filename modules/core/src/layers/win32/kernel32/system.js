@@ -14,22 +14,24 @@
  * and all of them are answered from the same three things -- the clock, the
  * handle table, and a decision about what machine to claim to be.
  *
- * The claim is deliberate: one processor, a 4 KiB page, a 64 KiB allocation
- * granularity, and a Pentium-class x86. A program branches on all four -- a
- * thread pool sizes itself from the processor count, an allocator rounds to the
- * granularity -- so the answer has to be one a program of this era knows what
- * to do with rather than one that flatters the host.
+ * The claim is deliberate: a 4 KiB page, a 64 KiB allocation granularity, a
+ * Pentium-class x86, and a processor for each executor the process runs its
+ * threads on. A program branches on all four -- a thread pool sizes itself
+ * from the processor count, an allocator rounds to the granularity -- so the
+ * answer has to be one a program of this era knows what to do with rather
+ * than one that flatters the host.
  */
 
 import { lstrcpyCode, lstrlenCode } from './lstr.js';
 import { assemble } from '../msvcrt/guest-code.js';
 import { createWin9xFunctions } from './win9x.js';
 import {
-    PROCESSOR, PROCESSOR_FEATURES, PROCESSOR_LEVEL, PROCESSOR_REVISION,
+    PROCESSOR_CACHES, PROCESSOR_FEATURES, PROCESSOR_LEVEL, PROCESSOR_REVISION, createProcessors,
 } from './processor.js';
 
 /** Error codes this file can produce. */
 const ERROR_CALL_NOT_IMPLEMENTED = 120;
+const ERROR_INSUFFICIENT_BUFFER = 122;
 const ERROR_INVALID_HANDLE = 6;
 /** TerminateProcess on a process that has already ended. */
 const ERROR_ACCESS_DENIED = 5;
@@ -37,6 +39,29 @@ const ERROR_ACCESS_DENIED = 5;
 /** sizeof(SYSTEM_INFO) and sizeof(SYSTEMTIME). */
 const SYSTEM_INFO_SIZE = 36;
 const SYSTEMTIME_SIZE = 16;
+
+/**
+ * SYSTEM_LOGICAL_PROCESSOR_INFORMATION on x86: the processor mask, the
+ * relationship, and a 16-byte union -- a core's flags, a node's number, or a
+ * CACHE_DESCRIPTOR of level, associativity, line size, size and type.
+ */
+const LOGICAL_PROCESSOR = Object.freeze({
+    PROCESSOR_MASK: 0,
+    RELATIONSHIP: 4,
+    LEVEL: 8,
+    ASSOCIATIVITY: 9,
+    LINE_SIZE: 10,
+    SIZE: 12,
+    TYPE: 16,
+    BYTES: 24,
+});
+/** LOGICAL_PROCESSOR_RELATIONSHIP. */
+const RELATION_PROCESSOR_CORE = 0;
+const RELATION_NUMA_NODE = 1;
+const RELATION_CACHE = 2;
+const RELATION_PROCESSOR_PACKAGE = 3;
+/** PROCESSOR_CACHE_TYPE, by the kind leaf 4 names. */
+const CACHE_TYPES = Object.freeze({ unified: 0, instruction: 1, data: 2 });
 
 /** The machine claimed. See the note above. */
 const PROCESSOR_ARCHITECTURE_INTEL = 0;
@@ -240,6 +265,9 @@ const compare = (left, right)=>(left < right ? -1 : (left > right ? 1 : 0));
  * @property {(child: any, code: number) => boolean} [terminateChild]
  *           Ends a child that is running beside this process, with the code:
  *           false where the run cannot reach it.
+ * @property {import('./processor.js').Processors} [processors]  The process's
+ *           processors, which every other interface that counts them shares.
+ *           Absent, one.
  */
 
 /**
@@ -254,6 +282,8 @@ const pick = (table, names)=>/** @type {Partial<T>} */ (
  * @param {SystemHost} host
  */
 export function createSystemFunctions(host){
+    const processors = host.processors ?? createProcessors();
+
     /**
      * What SetErrorMode last recorded. Nothing reads it but the next call, and
      * that is enough: the save-and-restore pattern a caller uses depends only on
@@ -784,8 +814,10 @@ export function createSystemFunctions(host){
             view.setUint32(4, PAGE_SIZE, true);
             view.setUint32(8, MINIMUM_APPLICATION_ADDRESS, true);
             view.setUint32(12, MAXIMUM_APPLICATION_ADDRESS, true);
-            view.setUint32(16, (1 << PROCESSOR.count) - 1, true); // the mask
-            view.setUint32(20, PROCESSOR.count, true);
+            // The processors the machine has, whatever the process is
+            // narrowed to: dwActiveProcessorMask, then dwNumberOfProcessors.
+            view.setUint32(16, processors.systemMask(), true);
+            view.setUint32(20, processors.count(), true);
             view.setUint32(24, PROCESSOR_INTEL_PENTIUM, true);
             view.setUint32(28, ALLOCATION_GRANULARITY, true);
             // The family and the model and stepping, as CPUID gives them.
@@ -794,6 +826,48 @@ export function createSystemFunctions(host){
             host.writeMemory(info >>> 0, bytes);
             return 0;
         },
+    };
+
+    /**
+     * The machine's processors as GetLogicalProcessorInformation lists them:
+     * each a core of its own with its caches -- every processor has caches of
+     * its own, as CPUID's leaf 4 says -- then the one package and the one
+     * NUMA node that hold them all.
+     */
+    const logicalProcessors = ()=>{
+        const count = processors.count();
+        const all = processors.systemMask();
+        const caches = PROCESSOR_CACHES.length;
+        const bytes = new Uint8Array((count * (1 + caches) + 2) * LOGICAL_PROCESSOR.BYTES);
+        const view = new DataView(bytes.buffer);
+        let at = 0;
+        /** @param {number} mask @param {number} relationship */
+        const entry = (mask, relationship)=>{
+            view.setUint32(at + LOGICAL_PROCESSOR.PROCESSOR_MASK, mask, true);
+            view.setUint32(at + LOGICAL_PROCESSOR.RELATIONSHIP, relationship, true);
+            const start = at;
+            at += LOGICAL_PROCESSOR.BYTES;
+            return start;
+        };
+        for (let index = 0; index < count; index++)
+        {
+            const mask = (1 << index) >>> 0;
+            // A core's flags are 0: one logical processor to the core.
+            entry(mask, RELATION_PROCESSOR_CORE);
+            for (const cache of PROCESSOR_CACHES)
+            {
+                const start = entry(mask, RELATION_CACHE);
+                view.setUint8(start + LOGICAL_PROCESSOR.LEVEL, cache.level);
+                view.setUint8(start + LOGICAL_PROCESSOR.ASSOCIATIVITY, cache.ways);
+                view.setUint16(start + LOGICAL_PROCESSOR.LINE_SIZE, cache.lineSize, true);
+                view.setUint32(start + LOGICAL_PROCESSOR.SIZE, cache.size, true);
+                view.setUint32(start + LOGICAL_PROCESSOR.TYPE, CACHE_TYPES[cache.type], true);
+            }
+        }
+        entry(all, RELATION_PROCESSOR_PACKAGE);
+        // Node 0, the number the union's first DWORD already holds.
+        entry(all, RELATION_NUMA_NODE);
+        return bytes;
     };
 
     /** GetSystemWow64Directory in either form: the buffer is never written. */
@@ -835,6 +909,54 @@ export function createSystemFunctions(host){
          * system, the same machine GetSystemInfo reports.
          */
         GetNativeSystemInfo: systemInfo,
+
+        /**
+         * BOOL GetLogicalProcessorInformation(
+         *     PSYSTEM_LOGICAL_PROCESSOR_INFORMATION Buffer, PDWORD ReturnedLength)
+         *
+         * The length is the buffer's on the way in and what was written, or
+         * what is needed, on the way out: a buffer too small -- none at all is
+         * the first of the two calls every caller makes -- fails with
+         * ERROR_INSUFFICIENT_BUFFER and the length it needs, and no length to
+         * read fails as a parameter (Wine's kernelbase, as its tests of the
+         * extended form expect).
+         */
+        GetLogicalProcessorInformation: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([buffer, returned])=>{
+                if ((returned >>> 0) === 0)
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                const bytes = logicalProcessors();
+                const room = new DataView(host.readMemory(returned >>> 0, 4).slice().buffer)
+                    .getUint32(0, true);
+                const length = new Uint8Array(4);
+                new DataView(length.buffer).setUint32(0, bytes.length, true);
+                host.writeMemory(returned >>> 0, length);
+                if (room < bytes.length || (buffer >>> 0) === 0)
+                {
+                    host.setLastError(ERROR_INSUFFICIENT_BUFFER);
+                    return 0;
+                }
+                host.writeMemory(buffer >>> 0, bytes);
+                return 1;
+            },
+        },
+
+        /**
+         * DWORD GetCurrentProcessorNumber(void)
+         *
+         * The processor the calling thread is running on: the executor that
+         * holds it. A program that pins a thread to each processor in turn
+         * reads each one's number here, as it reads its APIC id from CPUID.
+         */
+        GetCurrentProcessorNumber: {
+            argBytes: 0,
+            handler: ()=>processors.processorOf(host.currentThread()) >>> 0,
+        },
 
         /**
          * BOOL IsWow64Process(HANDLE hProcess, PBOOL Wow64Process)

@@ -38,6 +38,24 @@ export const ENGINES = Object.freeze(['emulator', 'cork']);
 /** The engine a launch that names none runs: the translator. */
 export const DEFAULT_ENGINE = 'cork';
 
+/** The most executors a process has: an x86 affinity mask has 32 bits, a processor each. */
+export const MAX_EXECUTORS = 32;
+
+/**
+ * The processors a process is told the machine has, under `config`: one for
+ * each executor under cork, which alone runs more than one, and one where the
+ * host cannot share the program's memory with another (`executorsRefused`).
+ * The cpu layer answers this (`processors`), and whoever describes the machine
+ * before a process exists -- the run's registry -- asks it here.
+ *
+ * @param {{ engine?: string, executors?: number } | undefined} config
+ * @returns {number}
+ */
+export function processorsFor(config){
+    return (config?.engine ?? DEFAULT_ENGINE) === 'cork' && typeof SharedArrayBuffer === 'function'
+        ? Math.min(MAX_EXECUTORS, Math.max(1, config?.executors ?? 1)) : 1;
+}
+
 /**
  * Where the first thread's stack pointer starts and where the stub table sits
  * below it, unless the configuration says otherwise. The span between the end
@@ -347,9 +365,9 @@ export function createCpuModule(){
                 // past the first a worker running its threads at once with the
                 // others (`internal/executor.js`); under cork, and with the atomic
                 // variant, which more than one needs. The kernel gives them the
-                // threads (`executors`). As many as an x86 affinity mask has bits:
-                // the program is told it has a processor for each.
-                executors: Math.min(32, Math.max(1, config?.executors ?? 1)),
+                // threads (`executors`). The program is told it has a processor
+                // for each (`processorsFor`).
+                executors: Math.min(MAX_EXECUTORS, Math.max(1, config?.executors ?? 1)),
             };
             // Executors past one share the program's memory with workers, which
             // only a SharedArrayBuffer allows, and a page that is not
@@ -859,7 +877,7 @@ export function createCpuModule(){
                  * from the start, before the others are made. Only cork runs
                  * more than one.
                  */
-                processors: ()=>(engine === 'cork' ? settings.executors : 1),
+                processors: ()=>processorsFor({ engine, executors: settings.executors }),
                 /** The word their turns ring: one wait for all of them. */
                 executorBell: ()=>state.bell,
                 /**

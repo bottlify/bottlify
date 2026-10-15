@@ -23,7 +23,7 @@
 
 import { PEB, TEB } from '../kernel32/teb.js';
 import { STATUS } from './status.js';
-import { PROCESSOR } from '../kernel32/processor.js';
+import { createProcessors } from '../kernel32/processor.js';
 import { verifyVersion, windowsVersion } from '../kernel32/versions.js';
 
 /** RTL_OSVERSIONINFOW, and the extended form that also carries the service pack. */
@@ -208,10 +208,6 @@ const MAXIMUM_USER_ADDRESS = 0x7ffeffff;
  */
 const TIMER_RESOLUTION = 156250;
 
-/** How many processors, and the mask that says which. */
-const PROCESSOR_COUNT = PROCESSOR.count;
-const ACTIVE_PROCESSORS = (1 << PROCESSOR.count) - 1;
-
 /** The priority a process started from the shell runs at. */
 const NORMAL_BASE_PRIORITY = 8;
 
@@ -233,6 +229,8 @@ const NORMAL_BASE_PRIORITY = 8;
  * @property {() => SystemProcess[]} [processes]  The processes a Toolhelp
  *           snapshot lists, this one first. Without it SystemProcessInformation
  *           is an unknown class.
+ * @property {import('../kernel32/processor.js').Processors} [processors]  The
+ *           process's processors and its affinity, kernel32's own. Absent, one.
  */
 
 /**
@@ -302,6 +300,7 @@ export function systemProcessInformation(processes, base){
  */
 export function createQueryFunctions(host){
     const machine = host.version ?? windowsVersion();
+    const processors = host.processors ?? createProcessors();
 
     /** @param {number} at */
     const readU32 = at=>{
@@ -500,8 +499,9 @@ export function createQueryFunctions(host){
                     MINIMUM_USER_ADDRESS, true);
                 view.setUint32(SYSTEM_BASIC.MAXIMUM_USER_ADDRESS,
                     MAXIMUM_USER_ADDRESS, true);
-                view.setUint32(SYSTEM_BASIC.ACTIVE_PROCESSORS, ACTIVE_PROCESSORS, true);
-                view.setUint8(SYSTEM_BASIC.PROCESSOR_COUNT, PROCESSOR_COUNT);
+                // The machine's processors, whatever the process is narrowed to.
+                view.setUint32(SYSTEM_BASIC.ACTIVE_PROCESSORS, processors.systemMask(), true);
+                view.setUint8(SYSTEM_BASIC.PROCESSOR_COUNT, processors.count());
                 host.writeMemory(buffer >>> 0, struct);
                 return STATUS.SUCCESS;
             },
@@ -564,7 +564,7 @@ export function createQueryFunctions(host){
                     // STILL_ACTIVE, the native side STATUS_PENDING.
                     view.setUint32(PROCESS_BASIC.EXIT_STATUS, STATUS.PENDING, true);
                     view.setUint32(PROCESS_BASIC.PEB_BASE_ADDRESS, peb(), true);
-                    view.setUint32(PROCESS_BASIC.AFFINITY_MASK, ACTIVE_PROCESSORS, true);
+                    view.setUint32(PROCESS_BASIC.AFFINITY_MASK, processors.processMask(), true);
                     view.setUint32(PROCESS_BASIC.BASE_PRIORITY, NORMAL_BASE_PRIORITY, true);
                     view.setUint32(PROCESS_BASIC.PROCESS_ID,
                         teb === 0 ? 0 : readU32(teb + TEB.PROCESS_ID), true);

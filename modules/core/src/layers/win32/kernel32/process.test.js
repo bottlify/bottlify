@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { TEB } from './teb.js';
+import { createProcessors } from './processor.js';
 import {
     CLOCK, TLS_SLOTS, createProcessFunctions, getCurrentThreadIdCode, getLastErrorCode,
     queryPerformanceCounterCode, queryPerformanceFrequencyCode, setLastErrorCode, tickCountCode,
@@ -132,7 +133,8 @@ const PARKED = Symbol('parked');
 /**
  * @param {{ arena?: number,
  *           version?: import('./versions.js').WindowsVersion,
- *           performanceFrequency?: number }} [options]
+ *           performanceFrequency?: number,
+ *           processors?: import('./processor.js').Processors }} [options]
  */
 function setup(options = {}){
     const host = fakeHost(options);
@@ -142,6 +144,7 @@ function setup(options = {}){
     // host after the table is built, and the table has to see it.
     Object.assign(host, {
         ...options.version ? { version: options.version } : {},
+        ...options.processors ? { processors: options.processors } : {},
         ...'performanceFrequency' in options
             ? { performanceFrequency: options.performanceFrequency } : {},
         /** @param {Record<string, number>} values */
@@ -733,7 +736,7 @@ test('the priority and affinity calls pop their own stdcall bytes', ()=>{
     const { fns, host } = setup();
     assert.equal(fns.GetPriorityClass.handler([0xffffffff]), 0x20);
     assert.equal(fns.SetPriorityClass.handler([0xffffffff, 0x80]), 1);
-    assert.equal(fns.SetProcessAffinityMask.handler([0xffffffff, 3]), 1);
+    assert.equal(fns.SetProcessAffinityMask.handler([0xffffffff, 1]), 1);
     assert.equal(fns.GetProcessAffinityMask.handler([0xffffffff, 0x200, 0x204]), 1);
     assert.equal(host.view.getUint32(0x200, true), 1, 'one processor in the process mask');
     assert.equal(host.view.getUint32(0x204, true), 1, 'and in the system mask');
@@ -742,6 +745,25 @@ test('the priority and affinity calls pop their own stdcall bytes', ()=>{
     assert.equal(fns.SetPriorityClass.argBytes, 8);
     assert.equal(fns.GetProcessAffinityMask.argBytes, 12);
     assert.equal(fns.SetProcessAffinityMask.argBytes, 8);
+});
+
+test('a process is put on the processors its mask names, and on none the machine lacks', ()=>{
+    // Wine's ntdll test_affinity: a mask past the processors, or of none, is
+    // refused; one that is taken becomes every thread's.
+    const threads = [{}, { affinityMask: 8 }];
+    const processors = createProcessors({ processors: ()=>4, threads: ()=>threads });
+    const { fns, host } = setup({ processors });
+    assert.equal(fns.GetProcessAffinityMask.handler([0xffffffff, 0x200, 0x204]), 1);
+    assert.deepEqual([host.view.getUint32(0x200, true), host.view.getUint32(0x204, true)],
+        [0xf, 0xf], 'every processor, of four');
+
+    assert.equal(fns.SetProcessAffinityMask.handler([0xffffffff, 0x10]), 0);
+    assert.equal(fns.GetLastError.handler([]), 87, 'ERROR_INVALID_PARAMETER');
+    assert.equal(fns.SetProcessAffinityMask.handler([0xffffffff, 0]), 0);
+    assert.equal(fns.SetProcessAffinityMask.handler([0xffffffff, 6]), 1);
+    assert.deepEqual(threads.map(thread=>thread.affinityMask), [6, 6]);
+    fns.GetProcessAffinityMask.handler([0xffffffff, 0x200, 0]);
+    assert.equal(host.view.getUint32(0x200, true), 6, 'the process\'s, and no system mask asked');
 });
 
 test('a process starts at shutdown level 0x280 and reads back the place it moved to', ()=>{
