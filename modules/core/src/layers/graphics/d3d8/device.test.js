@@ -1097,7 +1097,7 @@ test('deleting the bound shader unbinds it and deleting another does not', ()=>{
 });
 
 test('the two shader stages are independent questions', ()=>{
-    const device = createDevice();
+    const device = createDevice({ caps: { driverRules: 'current' } });
     /** @type {{ handle?: number }} */
     const pixel = {};
     /** @type {{ handle?: number }} */
@@ -1381,7 +1381,7 @@ test('a pixel shader is made from a ps_1_x, hands its function back and has eigh
     });
 
 test('a pixel shader over a vertex format is a program over the format\'s elements', ()=>{
-    const device = createDevice();
+    const device = createDevice({ caps: { driverRules: 'current' } });
     /** @type {{ handle?: number }} */
     const made = {};
     assert.equal(device.CreatePixelShader(PIXEL_SHADER, made), D3D_OK);
@@ -1397,6 +1397,27 @@ test('a pixel shader over a vertex format is a program over the format\'s elemen
         'a format is never odd, so it is never a handle');
     assert.equal(device.SetPixelShader(0), D3D_OK);
     assert.equal(device.stageProcessing.program, null, 'no shader, no program');
+    assert.equal(device.DeletePixelShader(made.handle ?? 0), D3D_OK);
+    assertFullyReleased(device);
+});
+
+test('under the legacy driver rules a vertex format draws through the fixed pixel stage', ()=>{
+    // A46: a program that leaves its car's ps_1_1 bound and draws its menu
+    // through a vertex format had the menu drawn by the texture stages on the
+    // drivers it was written for. GetPixelShader still answers the binding.
+    const device = createDevice();
+    /** @type {{ handle?: number }} */
+    const made = {};
+    assert.equal(device.CreatePixelShader(PIXEL_SHADER, made), D3D_OK);
+    assert.equal(device.SetVertexShader(FVF_XYZ_DIFFUSE), D3D_OK);
+    assert.equal(device.SetPixelShader(made.handle ?? 0), D3D_OK);
+    assert.equal(device.stageProcessing.program, null);
+    assert.equal(device.stageProcessing.pixelShader, 0);
+    /** @type {{ handle?: number }} */
+    const out = {};
+    assert.equal(device.GetPixelShader(out), D3D_OK);
+    assert.equal(out.handle, made.handle);
+    assert.equal(device.SetPixelShader(0), D3D_OK);
     assert.equal(device.DeletePixelShader(made.handle ?? 0), D3D_OK);
     assertFullyReleased(device);
 });

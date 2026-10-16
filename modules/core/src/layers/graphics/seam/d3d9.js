@@ -67,8 +67,8 @@ import { capabilityWords } from '../d3d9/caps.js';
 import { D3DCREATE, D3DDEVTYPE, PALETTE_BYTES } from '../d3d9/device.js';
 import { MAX_DECLARATION_LENGTH } from '../d3d9/declaration.js';
 import { END_TOKEN } from '../d3d9/shader.js';
-import { REFRESH_HZ, displayModes } from '../../win32/user32/display.js';
-import { createRaster, rasterStatus } from './raster.js';
+import { REFRESH_HZ, REFRESH_RATES, displayModes } from '../../win32/user32/display.js';
+import { createRaster, presentWait, rasterStatus } from './raster.js';
 import { queryAs, readGuid } from './guid.js';
 import { D3D_PRIVATE_DATA, createPrivateData } from './privatedata.js';
 import {
@@ -176,6 +176,11 @@ const MAX_SHADER_DWORDS = 1 << 16;
  * @param {import('../d3d9/resources.js').SurfaceGdi} [deps.gdi]
  *     Device contexts over a surface's pixels, for GetDC; absent, none is handed out.
  * @param {() => number} [deps.now]  The clock the display's raster runs on, in milliseconds.
+ * @param {() => number} [deps.refresh]  The display's rate, in hertz: its raster's and its
+ *     current mode's. REFRESH_HZ when none is given.
+ * @param {(deadline: number, result: number) => any} [deps.waitUntil]  Stops the calling
+ *     thread until that time of `now`'s clock, where its call answers `result`: how a
+ *     Present waits for the blank its interval names. Absent, a Present answers at once.
  * @param {Set<string>} [deps.traps]  Guest routines kept as traps, by name or group
  *     (`guestsBut`).
  * @param {(bytes: number) => number} [deps.allocate]  Guest memory, for a device's
@@ -186,7 +191,8 @@ const MAX_SHADER_DWORDS = 1 << 16;
  */
 export function createDirect3D9Seam(
     { publisher, memory, screen, divergence, cursor, resolution, identity,
-        windowClientSize, gdi, now = ()=>performance.now(), allocate, allocateCode,
+        windowClientSize, gdi, now = ()=>performance.now(), waitUntil, refresh = ()=>REFRESH_HZ,
+        allocate, allocateCode,
         traps = new Set(), phases },
 )
 {
@@ -209,9 +215,38 @@ export function createDirect3D9Seam(
     const deviceGroup = name=>(GUEST_GETTERS.has(name) ? 'getters' : 'ring');
     const fields = createFields(memory);
     const privateData = createPrivateData({ memory, publisher, rules: D3D_PRIVATE_DATA });
+    /**
+     * The rate of the mode the device runs in: the one a full-screen device
+     * asked for, when the display lists it, else the display's own. A program
+     * that steps its world once a frame is paced by this rate, not by how
+     * often the page shows a frame.
+     */
+    const modeRefresh = ()=>{
+        const asked = lastParameters && !lastParameters.windowed
+            ? lastParameters.fullScreenRefreshRateInHz >>> 0 : 0;
+        return REFRESH_RATES.includes(asked) ? asked : refresh();
+    };
     const raster = createRaster({
-        now, refresh: ()=>REFRESH_HZ, height: ()=>screen().height,
+        now, refresh: modeRefresh, height: ()=>screen().height,
     });
+    /**
+     * A Present's answer, once the blank its presentation interval names has
+     * come: Direct3D beat-syncs presentation to the retrace for every interval
+     * but IMMEDIATE, and a program that steps its world once a frame keeps
+     * the display's time only under that wait. An answer still to come -- the
+     * device holding the call while the GPU catches up -- already waited.
+     *
+     * @param {number | Promise<number>} hr
+     * @returns {any}
+     */
+    const pacedPresent = hr=>{
+        if (!waitUntil || typeof hr !== 'number' || hr !== D3D_OK)
+        {
+            return hr;
+        }
+        const wait = presentWait(raster, lastParameters?.presentationInterval ?? 0, modeRefresh());
+        return wait > 0 ? waitUntil(now() + wait, hr) : hr;
+    };
 
     /**
      * The device each resource was made by, for GetDevice. Weak, so this map
@@ -1173,7 +1208,7 @@ export function createDirect3D9Seam(
         fields.writeStruct(address, D3DDISPLAYMODE, {
             Width: display.width,
             Height: display.height,
-            RefreshRate: REFRESH_HZ,
+            RefreshRate: modeRefresh(),
             Format: D3DFMT.X8R8G8B8,
         });
     };
@@ -1190,7 +1225,7 @@ export function createDirect3D9Seam(
         /** @param {any} chain @param {number[]} args */
         Present: (chain, [, , window])=>{
             showScreen(chainOwners.get(chain));
-            return chain.Present(shownIn(chain, window));
+            return pacedPresent(chain.Present(shownIn(chain, window)));
         },
         // The caller waits while the picture comes back from the GPU.
         /** @param {any} chain @param {number[]} args */
@@ -1269,7 +1304,7 @@ export function createDirect3D9Seam(
         fields.writeStruct(address >>> 0, D3DDISPLAYMODEEX, {
             Width: display.width,
             Height: display.height,
-            RefreshRate: REFRESH_HZ,
+            RefreshRate: modeRefresh(),
             Format: D3DFMT.X8R8G8B8,
             ScanLineOrdering: D3DSCANLINEORDERING_PROGRESSIVE,
         });
@@ -1583,7 +1618,7 @@ export function createDirect3D9Seam(
                         window: deviceWindow, fullscreen: true, announce: true,
                     });
             }
-            return device.Present();
+            return pacedPresent(device.Present());
         },
 
         /** @param {any} device @param {number[]} args */

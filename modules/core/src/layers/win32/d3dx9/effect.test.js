@@ -1771,6 +1771,41 @@ for (const managed of [false, true])
         + ' commits', ()=>commitGate(managed, COMMIT_SOURCE, COMMIT_NAMES, commitSet));
 }
 
+for (const managed of [false, true])
+{
+    test(`CommitChanges in the guest makes the ${managed ? 'state manager' : 'device'} calls the`
+        + ' host\'s does for a structure array\'s constants and constant states set from'
+        + ' parameters', ()=>commitGate(managed, `struct Light { float4 pos; float4 color; };
+            Light Lights[2]; float4 boost; float2 half; int count; bool on;
+            float4 VS(float4 p : POSITION) : POSITION { return p + Lights[0].pos
+                + Lights[1].color + Lights[1].pos; }
+            float4 PS() : COLOR { return float4(1, 1, 1, 1); }
+            technique T { pass P { VertexShader = compile vs_2_0 VS();
+                PixelShader = compile ps_2_0 PS(); PixelShaderConstantF[3] = <boost>;
+                VertexShaderConstantF[40] = <half>; VertexShaderConstantI[1] = <count>;
+                PixelShaderConstantB[2] = <on>; } }`, ['Lights', 'boost', 'half', 'count', 'on'],
+    (rand, values)=>{
+        const pick = rand() % 5;
+        return pick === 0 ? ['SetValue', 'Lights', [values, 64]]
+            : pick === 1 ? ['SetVector', 'boost', [values + 16]]
+                : pick === 2 ? ['SetFloatArray', 'half', [values + 32, 2]]
+                    : pick === 3 ? ['SetInt', 'count', [rand() % 9 - 4]]
+                        : ['SetBool', 'on', [rand() % 3]];
+    }));
+}
+
+test('CommitChanges and BeginPass in the guest make the device calls the host\'s do for states'
+    + ' expressions work out from a parameter (neg, frc): the host works them out again once an'
+    + ' input is written', ()=>commitGate(false,
+    String.fromCharCode(...copyingEffect([0x10100001, 0x10400001])), ['f', 'i', 'b'], rand=>{
+        // Half the sets are none, so cells stay worked out and commits stay in the guest.
+        const pick = rand() % 6;
+        return pick === 0 ? ['SetFloat', 'f', [new Uint32Array(Float32Array.of([0, 0.75, -2.5, 3.99,
+            1e6, -7][rand() % 6]).buffer)[0]]]
+            : pick === 1 ? ['SetInt', 'i', [rand() % 9 - 4]]
+                : pick === 2 ? ['SetBool', 'b', [rand() % 3]] : null;
+    }, { commits: 60, begins: 5 }));
+
 test('CommitChanges in the guest makes the device calls the host\'s does for states compiled'
     + ' expressions copy from a float, an int or a bool', ()=>commitGate(false,
     String.fromCharCode(...copyingEffect()), ['f', 'i', 'b'], rand=>{
@@ -1785,11 +1820,13 @@ test('CommitChanges in the guest makes the device calls the host\'s does for sta
  * pass sets six states, each an expression (FXLC) that moves one of them --
  * as fxc compiles a state given a parameter in parentheses -- typed as fxc
  * types the expression: a float into a dword, an int, a bool, a float through
- * an int, an int through a float and an int into a colour.
+ * an int, an int through a float and an int into a colour. `ops` gives each
+ * state's instruction in turn instead of a move: an expression that is no copy.
  *
+ * @param {number[]} [ops]
  * @returns {Uint8Array}
  */
-function copyingEffect(){
+function copyingEffect(ops = [0x10000001]){
     /** @type {number[]} */
     // Offsets count from the body's own first word, before the one the header gives.
     const words = [0];
@@ -1840,8 +1877,8 @@ function copyingEffect(){
             64, 2 | Number(register) << 16, 1, 48, 0,
             PC.VECTOR | PT.FLOAT << 16, 1 | 4 << 16, 1, 0,
             String(param).charCodeAt(0)];
-        // mov oc0.x, c[register].x
-        const fxlc = [1, 0x10000001, 1, 0, 2, Number(register) * 4, 0, 4, 0];
+        // mov oc0.x, c[register].x -- or the state's own instruction of one input.
+        const fxlc = [1, ops[s % ops.length], 1, 0, 2, Number(register) * 4, 0, 4, 0];
         const body = [0x46580201, (table.length + 1) << 16 | 0xfffe, 0x42415443, ...table,
             (fxlc.length + 1) << 16 | 0xfffe, 0x434c5846, ...fxlc];
         put(0, 0, 0xffffffff, s, 0, body.length * 4, ...body);
@@ -1893,9 +1930,11 @@ const commitSet = (rand, values)=>{
  * is the one for it.
  *
  * @param {boolean} managed @param {string} source @param {string[]} names  its parameters
- * @param {(rand: () => number, values: number) => [string, string, number[]]} setOf
+ * @param {(rand: () => number, values: number) => [string, string, number[]] | null} setOf
+ *     a set, or null for none
+ * @param {{ commits: number, begins: number }} [least]  how many must have stayed in the guest
  */
-async function commitGate(managed, source, names, setOf){
+async function commitGate(managed, source, names, setOf, least = { commits: 400, begins: 40 }){
     const g = guest();
     const fxA = await g.effect(source);
     const fxB = await g.effect(source);
@@ -1992,7 +2031,12 @@ async function commitGate(managed, source, names, setOf){
         const sets = 1 + rand() % 4;
         for (let k = 0; k < sets; k++)
         {
-            const [method, name, args] = setOf(rand, values);
+            const set = setOf(rand, values);
+            if (!set)
+            {
+                continue;
+            }
+            const [method, name, args] = set;
             const a = await g.call(fxA, method, hA[name], ...args);
             const b = await g.call(fxB, method, hB[name], ...args);
             assert.equal(b, a);
@@ -2019,7 +2063,7 @@ async function commitGate(managed, source, names, setOf){
             guestCommits += await both('CommitChanges') ? 1 : 0;
         }
     }
-    assert.ok(guestCommits > 400, `${guestCommits} commits in the guest`);
-    assert.ok(guestBegins > 40, `${guestBegins} passes begun in the guest`);
+    assert.ok(guestCommits > least.commits, `${guestCommits} commits in the guest`);
+    assert.ok(guestBegins > least.begins, `${guestBegins} passes begun in the guest`);
     assert.ok(guestTechniques > 80, `${guestTechniques} Begins and Ends in the guest`);
 }

@@ -732,6 +732,34 @@ test('a held lock is found through the lock routine\'s ring, and past its capaci
     assert.deepEqual(vb.calls.slice(2), ['lock 0+32 0x0', 'unlock']);
 });
 
+test('a buffer released while it may be held locked is never locked by the host again', ()=>{
+    // A dynamic buffer counts as held from its first lock. A program that
+    // releases it at a change of its settings, then locks past the lock
+    // routine's ring, had the host lock the released buffer at the look at
+    // every held one: the played device had dropped it, and stopped.
+    const m = machine({ commands: true });
+    const vb = Object.assign(fakeBuffer(0x8000, 0x100), { usage: 0x200 });
+    const block = m.shadow.attachBuffer(vb);
+    const at = m.shadow.address();
+    const ring = m.u32(at + SHADOW.COMMANDS);
+    m.put32(block + BUFFER.LOCKED, 1);
+    m.put32(block + BUFFER.FROM, 0);
+    m.put32(block + BUFFER.TO, 16);
+    vb.refCount = 0;
+    const locks = SHADOW.LOCK_RING_CAPACITY + 3;
+    for (let n = 0; n < SHADOW.LOCK_RING_CAPACITY; n++)
+    {
+        m.put32(at + SHADOW.LOCK_RING + n * 4, 0x7770000 + n * 64);
+    }
+    m.put32(at + SHADOW.LOCK_CALLS, locks);
+    m.put32(at + SHADOW.UNLOCK_CALLS, locks - 1);
+    record(7, [1, 2]).forEach((word, i)=>m.put32(ring + i * 4, word));
+    m.put32(at + SHADOW.COMMAND_HEAD, 16);
+    m.shadow.sync();
+    assert.deepEqual(vb.calls, []);
+    assert.equal(m.taken.length, 1, 'the ring is taken all the same');
+});
+
 test('the ring starts over once the host has read up to a head near its end', ()=>{
     const m = machine({ commands: true });
     const at = m.shadow.address();

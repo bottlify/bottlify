@@ -414,6 +414,20 @@ camera was drawn as spikes across the screen (the person's run, 2026-10-13, brow
 worker, Parallels GPU). `driverRules: 'current'` clips behind the eye in every pre-transformed
 draw, as Wine does. *2026-10-13.*
 
+**A46 -- Under Direct3D 8 a vertex format draws through the fixed function's pixel stage, whatever
+1.0 to 1.3 pixel shader is bound.** A draw whose vertex shader is a vertex format (no vertex shader
+handle) is drawn by the texture stage states, a bound `ps_1_1` to `ps_1_3` left aside (a
+`ps_1_4`, the generation Wine's `cnd_test` runs over a vertex format, is run); the binding itself stays, and
+GetPixelShader answers it. Wine runs the bound shader over the fixed vertex stage. Need for Speed:
+Hot Pursuit 2 keeps the pixel shader its car's last pass set -- its own state cache is cleared
+each frame without SetPixelShader(0), and its menus are drawn through vertex formats -- and that
+shader adds the specular colour and takes its alpha from the diffuse: run over the menus, the
+screen came out white, then, with the specular default corrected, its text as solid boxes; with
+the pixel stage the texture stages set, the menus, the car select and the race HUD are what the
+game draws (the person's run, 2026-10-16, browser, graphics worker, Parallels GPU). The same
+game is listed with severe graphics issues under Wine. `driverRules: 'current'` runs the bound
+shader, as Wine does. *2026-10-16.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this

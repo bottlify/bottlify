@@ -408,20 +408,18 @@ export function captureRecord(record, view){
  * @param {StateView} view
  */
 export function applyRecord(record, view){
-    for (const [state, value] of record.renderStates)
-    {
+    // By forEach: an entry array per state, made by `for (const [k, v] of map)`,
+    // was most of what a block applied between draws allocated.
+    record.renderStates.forEach((value, state)=>{
         view.renderStates.set(state, value);
-    }
-    for (const [key, value] of record.stageStates)
-    {
+    });
+    record.stageStates.forEach((value, key)=>{
         view.stageStates(key >>> 8).set(key & 0xff, value);
-    }
-    for (const [key, value] of record.samplerStates)
-    {
+    });
+    record.samplerStates.forEach((value, key)=>{
         view.stageStates(key >>> 8).set(SAMPLER_STATE_KEY[key & 0xff], value);
-    }
-    for (const [stage, texture] of record.textures)
-    {
+    });
+    record.textures.forEach((texture, stage)=>{
         if (texture)
         {
             view.textures.set(stage, texture);
@@ -430,7 +428,7 @@ export function applyRecord(record, view){
         {
             view.textures.delete(stage);
         }
-    }
+    });
     for (const [type, matrix] of record.transforms)
     {
         view.transforms.set(type, Float32Array.from(matrix));

@@ -90,7 +90,7 @@ const FVF_TEXTURED_QUAD = FVF.XYZRHW | FVF.DIFFUSE | (1 << FVF.TEXCOUNT_SHIFT);
  *           probeTexture?: string,
  *           divergence?: (api: string, detail: string)=>void,
  *           skipTexture?: string, compressedTextures?: boolean,
- *           writable?: boolean }} [options]
+ *           driverRules?: 'legacy' | 'current', writable?: boolean }} [options]
  */
 function harness(options = {}){
     const gpu = createFakeDevice();
@@ -134,6 +134,7 @@ function harness(options = {}){
         probeTexture: options.probeTexture,
         fog: options.fog,
         mips: options.mips,
+        driverRules: options.driverRules,
         compressedTextures: options.compressedTextures,
     });
     /** @type {{ device?: any }} */
@@ -2141,7 +2142,7 @@ test('recorded: a fan drawn from user memory is expanded, and unbinds stream zer
 
 test('recorded: a bound pixel shader is drawn through its translation, not as fixed function',
     async()=>{
-        const h = harness();
+        const h = harness({ driverRules: 'current' });
         const { device, gpu } = h;
         /** @type {{ handle?: number }} */
         const pixel = {};

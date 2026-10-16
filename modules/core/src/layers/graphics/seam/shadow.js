@@ -1980,8 +1980,18 @@ export function createShadow(deps){
     /** Whether the ring is being taken: a mirror written from inside does not take it again. */
     let taking = false;
 
+    /**
+     * A dword's bytes, in one array reused by every write: whoever is handed
+     * it copies it at once, and an array made per state written was most of
+     * what bringing the block back after a state block allocated.
+     */
+    const dwordScratch = new Uint8Array(4);
+    const dwordScratchWords = new Uint32Array(dwordScratch.buffer);
     /** @param {number} value */
-    const dwordBytes = value=>new Uint8Array(dword(value));
+    const dwordBytes = value=>{
+        dwordScratchWords[0] = value;
+        return dwordScratch;
+    };
     /** @param {number[]} values */
     const dwordsBytes = values=>new Uint8Array(values.flatMap(dword));
     /**
@@ -2380,7 +2390,7 @@ export function createShadow(deps){
         heldSince = locks;
         for (const block of heldLocks)
         {
-            if (!blocks.has(block) || !lockedInGuest.has(block))
+            if (!live(block) || !lockedInGuest.has(block))
             {
                 lockedInGuest.delete(block);
                 heldLocks.delete(block);
@@ -2391,6 +2401,25 @@ export function createShadow(deps){
                 heldLocks.delete(block);
             }
         }
+    };
+    /**
+     * A block's entry while its buffer is the program's; one released --
+     * which a dynamic buffer may be while it still counts as held -- is
+     * forgotten here, so the host never locks it again: the played device has
+     * let it go.
+     *
+     * @param {number} block
+     */
+    const live = block=>{
+        const entry = blocks.get(block);
+        if (entry && entry.buffer.refCount <= 0)
+        {
+            blocks.delete(block);
+            lockedInGuest.delete(block);
+            heldLocks.delete(block);
+            return undefined;
+        }
+        return entry;
     };
     /** The blocks that may be held locked in the guest, as `settleHeld` last found them. */
     const heldLocks = new Set();
@@ -2409,7 +2438,7 @@ export function createShadow(deps){
      * @returns {boolean}  whether the guest holds it locked
      */
     const flushHeld = block=>{
-        const entry = blocks.get(block);
+        const entry = live(block);
         if (!entry || readWord(block + BUFFER.LOCKED) === 0)
         {
             return false;

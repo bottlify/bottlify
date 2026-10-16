@@ -27,7 +27,7 @@ import { D3DERR_INVALIDCALL } from './constants.js';
  */
 const constants = (name, kind, width, most)=>({
     args: 3, pointer: 1, count: { arg: 2, shift: width === 1 ? 2 : 4, most }, span: 0,
-    make: (d, c)=>d[name](c.arg(0), c[kind].slice(0, c.arg(2) * width), c.arg(2)),
+    make: (d, c)=>d[name](c.arg(0), c.first(kind, c.arg(2) * width), c.arg(2)),
 });
 
 /**

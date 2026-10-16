@@ -9,6 +9,7 @@
  * their JavaScript, input by input, on cork's test machine
  * (`scripts/guest-code/equivalence.mjs`): random commit tables of every kind
  * of entry, with triggers and versions on both sides of the pass's date,
+ * stale pairs of an expression's input and its cell's date either way round,
  * constants of every conversion and setters of every arity, the device's
  * setters stand-ins that fold what they are given into a checksum in memory.
  * What the JavaScript does against the host's is `effect.test.js`'s gate. It
@@ -139,7 +140,8 @@ function layout(next){
     put(PASSES, passes);
     for (let i = 0; i < passes; i++)
     {
-        put(PASSES + 4 + 8 * i, next() % 4 === 0 ? 0 : next() | 1);
+        // BeginPass reads a table's stale pairs: the one table, or none.
+        put(PASSES + 4 + 8 * i, next() % 4 === 0 ? 0 : TABLE);
         put(PASSES + 8 + 8 * i, 1 + next() % 5);
     }
     put(CLOCK, 1000 + next() % 100);
@@ -169,19 +171,27 @@ function layout(next){
         }
     }
     const triggers = next() % 3;
+    // Stale pairs: an input's version and a cell's date, either side of each other.
+    const stale = next() % 4;
     const entries = next() % 8;
     put(TABLE, DEVICE);
     put(TABLE + 4, APPLIED);
     put(TABLE + 8, entries);
     put(TABLE + 12, SCRATCH);
     put(TABLE + 16, triggers);
+    put(TABLE + 20, stale);
     for (let t = 0; t < triggers; t++)
     {
-        put(TABLE + 20 + 4 * t, VERSIONS + 4 * (next() % 16));
+        put(TABLE + 24 + 4 * t, VERSIONS + 4 * (next() % 16));
+    }
+    for (let k = 0; k < stale; k++)
+    {
+        put(TABLE + 24 + 4 * triggers + 8 * k, VERSIONS + 4 * (next() % 16));
+        put(TABLE + 28 + 4 * triggers + 8 * k, VERSIONS + 4 * (next() % 16));
     }
     for (let e = 0; e < entries; e++)
     {
-        const at = TABLE + 20 + 4 * triggers + 32 * e;
+        const at = TABLE + 24 + 4 * triggers + 8 * stale + 32 * e;
         const kind = 1 + next() % 9;
         const constants = kind <= 6;
         const arity = constants ? 0 : 1 + next() % 3;

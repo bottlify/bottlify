@@ -70,6 +70,13 @@ const S_FALSE = 1;
 const E_FAIL = 0x80004005;
 const E_NOTIMPL = 0x80004001;
 const E_OUTOFMEMORY = 0x8007000e;
+
+/**
+ * The guest heap had no room for part of an effect: the one failure a maker
+ * answers E_OUTOFMEMORY for. Any other error is a defect of this layer and
+ * goes up whole, so it is never read as a full heap.
+ */
+class HeapFull extends RangeError {}
 const D3DERR_INVALIDCALL = 0x8876086c;
 
 /** D3DXFX_* flags. */
@@ -115,13 +122,22 @@ export const TECHNIQUE = Object.freeze({ PASSES: 0, SAVED: 4, SIZE: 20 });
  * A pass's commit table, which CommitChanges in the guest walks
  * (`effect-commit.js`): the device (or the state manager the program set),
  * where the pass's date is, how many
- * entries, a scratch block for constants, how many triggers, the triggers --
- * versions whose change sends the commit to the host -- then the entries, each
+ * entries, a scratch block for constants, how many triggers, how many stale
+ * pairs, the triggers -- versions whose change sends the commit to the host --
+ * the stale pairs -- an expression's input version and its cell's date
+ * (`CELL`), the input newer than the cell sending BeginPass and the commit to
+ * the host, which works the expression out again -- then the entries, each
  * a kind (`COMMIT_KIND`), the version that says it changed, the device
  * setter's slot, two arguments, the data, a mode and the setter's arity.
  */
 export const COMMIT = Object.freeze({ DEVICE: 0, APPLIED: 4, ENTRIES: 8, SCRATCH: 12,
-    TRIGGERS: 16, HEADER: 20, ENTRY: 32 });
+    TRIGGERS: 16, STALE: 20, HEADER: 24, ENTRY: 32 });
+/**
+ * A state expression's cell in guest memory: the word the host last set the
+ * state to from it, and the clock's reading before that evaluation -- every
+ * input written since is dated later.
+ */
+export const CELL = Object.freeze({ VALUE: 0, DATE: 4, SIZE: 8 });
 /**
  * The kinds of a commit entry: constants as the parameter's words, as bools
  * of an int's or of a float's, as floats of an int's or of a bool's, as ints
@@ -345,6 +361,8 @@ const COLOR_SCALE = 255;
  * @property {Set<string>} skip   Constants Ex was told not to set.
  * @property {number} block   Its block in guest memory (`EFFECT_BLOCK`), or 0.
  * @property {number} [commitScratch]   The block its commits in the guest gather constants in.
+ * @property {Map<StateModel, number>} [cells]  Each state expression's cell (`CELL`) a table
+ *     sets the state from.
  * @property {number} version   Which ID3DXEffect layout it was handed out as.
  */
 
@@ -457,7 +475,7 @@ export function createEffects(host, helpers, options = {}){
         const base = heap().allocate(Math.max(size, 4));
         if (base === 0)
         {
-            throw new RangeError('out of memory');
+            throw new HeapFull(`no room for ${size} bytes of names`);
         }
         owner.push(base);
         let at = base;
@@ -525,13 +543,13 @@ export function createEffects(host, helpers, options = {}){
      * A store in guest memory, zeroed, dated now.
      *
      * @param {number} bytes @returns {Store}
-     * @throws {RangeError} when the heap has no room, which a maker answers E_OUTOFMEMORY
+     * @throws {HeapFull} when the heap has no room, which a maker answers E_OUTOFMEMORY
      */
     const newStore = bytes=>{
         const at = heap().allocate(4 + Math.max(bytes, 4));
         if (at === 0)
         {
-            throw new RangeError('no room for a parameter');
+            throw new HeapFull(`no room for a parameter of ${bytes} bytes`);
         }
         host.writeMemory(at, new Uint8Array(4 + Math.max(bytes, 4)));
         putU32(at, tick());
@@ -555,13 +573,13 @@ export function createEffects(host, helpers, options = {}){
      * A word for a pass's date, never set: owned by the effect.
      *
      * @param {EffectState} effect
-     * @throws {RangeError} when the heap has no room
+     * @throws {HeapFull} when the heap has no room
      */
     const appliedWord = effect=>{
         const at = heap().allocate(4);
         if (at === 0)
         {
-            throw new RangeError('no room for a pass');
+            throw new HeapFull('no room for a pass');
         }
         effect.owned.push(at);
         putU32(at, 0);
@@ -1726,7 +1744,13 @@ export function createEffects(host, helpers, options = {}){
                     ? (x !== 0 ? 1 : 0) : Math.trunc(x) | 0;
             });
             const held = numbers.map(x=>(source.type === PT.FLOAT ? floatBits(x) : x >>> 0));
-            return shaped(state, source.type, held, numbers, null, dirty);
+            const value = shaped(state, source.type, held, numbers, null, dirty);
+            const cell = effect.cells?.get(state);
+            if (cell !== undefined)
+            {
+                putU32s(cell, [value.words[0] ?? 0, clockAt === 0 ? 0 : (u32(clockAt) - 1) >>> 0]);
+            }
+            return value;
         }
         const p = effect.byName.get(source.path);
         if (!p)
@@ -2293,8 +2317,98 @@ export function createEffects(host, helpers, options = {}){
         };
         /** @type {number[]} */
         const triggers = [];
+        /** Each expression input's version and its cell's date. @type {number[]} */
+        const stale = [];
         /** @param {string} name */
         const slotOf = name=>SETTERS[name][effect.manager ? 1 : 0];
+        /**
+         * An entry that sets `count` registers from `first` with units of a
+         * parameter's words (`map`, -1 for a zero), dated by the store at
+         * `version`; '' when made, else why not.
+         *
+         * @param {number} kind @param {number} dated @param {string} setter
+         * @param {number} first @param {number} count @param {number} data
+         * @param {Int32Array} map
+         * @returns {string}
+         */
+        const constantEntry = (kind, dated, setter, first, count, data, map)=>{
+            if (map.length * 4 > SCRATCH_BYTES)
+            {
+                return `${setter}: ${map.length} units, more than a commit's scratch`;
+            }
+            const layout = heap().allocate(8 + 4 * map.length);
+            if (layout === 0)
+            {
+                return 'no room';
+            }
+            effect.owned.push(layout);
+            host.writeMemory(layout, u32Bytes([map.length, data, ...map]));
+            entries.push([kind, dated, slotOf(setter), first, count, layout, 0, 0]);
+            return '';
+        };
+        /**
+         * A shader constant's entries from its parameter, as `storeConstant`
+         * sets it: a structure member by member, each element's registers
+         * after the last's, every one dated by the store at `dated`; ''
+         * when made, else why not.
+         *
+         * @param {Constant} constant @param {Param} param @param {number} dated
+         * @param {boolean} pixel
+         * @returns {string}
+         */
+        const constantEntries = (constant, param, dated, pixel)=>{
+            if (constant.cls === PC.STRUCT || constant.members.length > 0)
+            {
+                const elements = Math.max(1, constant.elements);
+                const span = constant.members.reduce((sum, m)=>sum + m.count, 0);
+                for (let e = 0; e < elements; e++)
+                {
+                    const holder = param.model.elements ? param.members[e] : param;
+                    if (!holder)
+                    {
+                        break;
+                    }
+                    for (const member of constant.members)
+                    {
+                        const p = holder.members.find(m=>m.model.name === member.name);
+                        const no = p ? constantEntries({ ...member, index: member.index
+                            + e * span }, p, dated, pixel) : '';
+                        if (no)
+                        {
+                            return no;
+                        }
+                    }
+                }
+                return '';
+            }
+            if (!numeric(param))
+            {
+                return '';
+            }
+            const { count, map } = layoutOf(constant, param.model);
+            if (count === 0)
+            {
+                return '';
+            }
+            const type = param.model.type;
+            // How the host converts each unit into the register's type.
+            const kind = (constant.set === 2 && type === PT.FLOAT)
+                || (constant.set === 1 && type === PT.INT) ? COMMIT_KIND.WORDS
+                : constant.set !== 2 && (type === PT.INT || type === PT.BOOL)
+                    ? COMMIT_KIND.BOOLS
+                    : constant.set === 0 && type === PT.FLOAT ? COMMIT_KIND.FLOAT_BOOLS
+                        : constant.set === 2 && type === PT.INT ? COMMIT_KIND.INT_FLOATS
+                            : constant.set === 2 && type === PT.BOOL
+                                ? COMMIT_KIND.BOOL_FLOATS
+                                : constant.set === 1 && type === PT.FLOAT
+                                    ? COMMIT_KIND.FLOAT_INTS : 0;
+            if (kind === 0)
+            {
+                return `${constant.name}: register set ${constant.set} of type ${type}`;
+            }
+            return constantEntry(kind, dated, CONSTANT_SETTERS[constant.set][pixel ? 1 : 0],
+                constant.index, count, dataAt(param), map);
+        };
         /**
          * A state's entry, set on `unit` for a sampler's; false where the table cannot say it.
          *
@@ -2313,6 +2427,35 @@ export function createEffects(host, helpers, options = {}){
                             : state.kind === 'fvf' ? [slotOf('SetFVF'), 0, 0, 1]
                                 : state.kind === 'npatch' ? [slotOf('SetNPatchMode'), 0, 0, 1]
                                     : null;
+            const constantState = CONSTANT_STATES[state.kind];
+            if (constantState && source.kind === 'param')
+            {
+                // A shader constant set from a parameter, as `applyState`
+                // sets it: the parameter's words in registers, zeros after.
+                const p = effect.byName.get(source.path);
+                if (!p)
+                {
+                    return true;
+                }
+                if (!numeric(p))
+                {
+                    why = `${state.name} from ${source.path}, not a number`;
+                    return false;
+                }
+                const [setter, perRegister] = constantState;
+                const held = p.model.bytes < 4 ? 0 : p.model.bytes >>> 2;
+                const count = Math.max(1, Math.ceil(held / perRegister));
+                const type = p.model.type;
+                const kind = state.value === 'vector'
+                    ? (type === PT.FLOAT ? COMMIT_KIND.WORDS : type === PT.BOOL
+                        ? COMMIT_KIND.BOOL_FLOATS : COMMIT_KIND.INT_FLOATS)
+                    : type === PT.FLOAT ? COMMIT_KIND.FLOAT_INTS : type === PT.BOOL
+                        ? COMMIT_KIND.BOOLS : COMMIT_KIND.WORDS;
+                const no = constantEntry(kind, p.store.at, setter, index, count, dataAt(p),
+                    Int32Array.from({ length: count * perRegister }, (_, i)=>(i < held ? i : -1)));
+                why = no ? `${state.name}: ${no}` : '';
+                return !no;
+            }
             if (source.kind === 'const')
             {
                 // Never changed, so never a commit's: BeginPass sets it as it is.
@@ -2350,7 +2493,8 @@ export function createEffects(host, helpers, options = {}){
                     0, call[3]]);
                 return true;
             }
-            if (source.kind !== 'expression' || !word || state.kind === 'texture')
+            if (source.kind !== 'expression' || (!word && state.value !== 'float')
+                || state.kind === 'texture')
             {
                 why = `${state.name} from a ${source.kind}`;
                 return false;
@@ -2358,8 +2502,9 @@ export function createEffects(host, helpers, options = {}){
             const copies = source.program.copies;
             const input = source.program.inputs.length === 1 ? source.program.inputs[0] : null;
             const p = input ? effect.byName.get(input.name) : undefined;
-            if (!copies || !input || !p || input.set !== 2 || copies.offset !== input.index * 4
-                || source.count !== 1 || (source.type !== PT.INT && source.type !== PT.BOOL
+            if (!word || !copies || !input || !p || input.set !== 2
+                || copies.offset !== input.index * 4 || source.count !== 1
+                || (source.type !== PT.INT && source.type !== PT.BOOL
                     // A float result is truncated into a dword as an int is; into a
                     // colour the host keeps its bits.
                     && (source.type !== PT.FLOAT || state.value !== 'dword'))
@@ -2367,8 +2512,34 @@ export function createEffects(host, helpers, options = {}){
                 || (p.model.type !== PT.INT && p.model.type !== PT.BOOL
                     && p.model.type !== PT.FLOAT))
             {
-                why = `${state.name} from an expression that is no copy of a scalar`;
-                return false;
+                // Any other expression: the host works it out into a cell the
+                // entry sets the state from, and an input written since sends
+                // the pass to the host, which works it out again.
+                effect.cells ??= new Map();
+                let cell = effect.cells.get(state);
+                if (cell === undefined)
+                {
+                    cell = heap().allocate(CELL.SIZE);
+                    if (cell === 0)
+                    {
+                        why = 'no room';
+                        return false;
+                    }
+                    effect.owned.push(cell);
+                    effect.cells.set(state, cell);
+                    valueOf(effect, null, state);
+                }
+                for (const constant of source.program.inputs)
+                {
+                    const named = effect.byName.get(constant.name);
+                    if (named)
+                    {
+                        stale.push(named.store.at, cell + CELL.DATE);
+                    }
+                }
+                entries.push([COMMIT_KIND.STATE, cell + CELL.DATE, call[0], call[1], call[2],
+                    cell + CELL.VALUE, 0, call[3]]);
+                return true;
             }
             entries.push([p.model.type === PT.FLOAT ? COMMIT_KIND.COPIED_FLOAT
                 : COMMIT_KIND.COPIED, p.store.at, call[0], call[1], call[2], dataAt(p),
@@ -2415,45 +2586,11 @@ export function createEffects(host, helpers, options = {}){
                         }
                         continue;
                     }
-                    if (constant.cls === PC.STRUCT || constant.members.length > 0)
+                    const no = constantEntries(constant, param, param.store.at, shader.pixel);
+                    if (no)
                     {
-                        return `${constant.name}: a structure's constants`;
+                        return no;
                     }
-                    if (!numeric(param))
-                    {
-                        continue;
-                    }
-                    const { count, units, map } = layoutOf(constant, param.model);
-                    if (count === 0)
-                    {
-                        continue;
-                    }
-                    const type = param.model.type;
-                    // How the host converts each unit into the register's type.
-                    const kind = (constant.set === 2 && type === PT.FLOAT)
-                        || (constant.set === 1 && type === PT.INT) ? COMMIT_KIND.WORDS
-                        : constant.set !== 2 && (type === PT.INT || type === PT.BOOL)
-                            ? COMMIT_KIND.BOOLS
-                            : constant.set === 0 && type === PT.FLOAT ? COMMIT_KIND.FLOAT_BOOLS
-                                : constant.set === 2 && type === PT.INT ? COMMIT_KIND.INT_FLOATS
-                                    : constant.set === 2 && type === PT.BOOL
-                                        ? COMMIT_KIND.BOOL_FLOATS
-                                        : constant.set === 1 && type === PT.FLOAT
-                                            ? COMMIT_KIND.FLOAT_INTS : 0;
-                    if (kind === 0)
-                    {
-                        return `${constant.name}: register set ${constant.set} of type ${type}`;
-                    }
-                    const layout = heap().allocate(8 + 4 * units);
-                    if (layout === 0)
-                    {
-                        return 'no room';
-                    }
-                    effect.owned.push(layout);
-                    host.writeMemory(layout, u32Bytes([units, dataAt(param), ...map]));
-                    entries.push([kind, param.store.at,
-                        slotOf(CONSTANT_SETTERS[constant.set][shader.pixel ? 1 : 0]),
-                        constant.index, count, layout, 0, 0]);
                 }
                 continue;
             }
@@ -2478,7 +2615,8 @@ export function createEffects(host, helpers, options = {}){
             }
         }
         effect.commitScratch ||= heap().allocate(SCRATCH_BYTES);
-        const tail = COMMIT.HEADER + 4 * triggers.length + COMMIT.ENTRY * entries.length;
+        const tail = COMMIT.HEADER + 4 * triggers.length + 4 * stale.length
+            + COMMIT.ENTRY * entries.length;
         const table = heap().allocate(tail + 4 + 4 * fixed.length);
         if (table === 0 || effect.commitScratch === 0)
         {
@@ -2493,7 +2631,8 @@ export function createEffects(host, helpers, options = {}){
         }
         host.writeMemory(table, u32Bytes([effect.manager || effect.device, pass.appliedAt,
             entries.length,
-            effect.commitScratch, triggers.length, ...triggers, ...entries.flat(), 0, ...fixed]));
+            effect.commitScratch, triggers.length, stale.length / 2, ...triggers, ...stale,
+            ...entries.flat(), 0, ...fixed]));
         return table;
     };
 
@@ -3257,7 +3396,7 @@ export function createEffects(host, helpers, options = {}){
                         t.record = heap().allocate(TECHNIQUE.SIZE);
                         if (t.record === 0)
                         {
-                            throw new RangeError('no room for a technique');
+                            throw new HeapFull('no room for a technique');
                         }
                         effect.owned.push(t.record);
                         putU32s(t.record, [0, 0, 0, 0, 0]);
@@ -3697,8 +3836,9 @@ export function createEffects(host, helpers, options = {}){
                 thread });
         }
         catch (e){
-            if (e instanceof RangeError)
+            if (e instanceof HeapFull)
             {
+                host.divergence?.(api, `answered E_OUTOFMEMORY: ${e.message}`);
                 return E_OUTOFMEMORY;
             }
             throw e;

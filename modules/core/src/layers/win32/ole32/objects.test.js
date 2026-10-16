@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { IID_IUNKNOWN, IUNKNOWN_METHODS, createComRegistry } from './objects.js';
+import { IID_IUNKNOWN, IUNKNOWN_METHODS, createComObject, createComRegistry } from './objects.js';
 
 const CLSID_TEST = '{11111111-2222-3333-4444-555555555555}';
 const IID_FIRST = '{AAAAAAAA-0001-0000-C000-000000000046}';
@@ -177,4 +177,22 @@ test('a vtable begins with IUnknown and continues in declaration order', ()=>{
         ['queryInterface', 'addRef', 'release']);
     assert.equal(record.object, object);
     assert.deepEqual(object.state, { pixels: 1 });
+});
+
+test('objects of one interface description hand the bridge one method list', ()=>{
+    // The bridge builds a table -- a stub per method, and guest code for a
+    // method that has some -- once per list it is given. A list per object
+    // built it again for every object: the effects a program recreated on
+    // each change of its settings ran the stub table out.
+    const descriptor = { id: '{11111111-2222-3333-4444-555555555555}',
+        methods: [{ name: 'Draw', argBytes: 8 }] };
+    const clsid = '{11111111-2222-3333-4444-666666666666}';
+    const one = createComObject(clsid, { interfaces: [descriptor] });
+    const two = createComObject(clsid, { interfaces: [descriptor] });
+    const first = one.interfaceFor(descriptor.id);
+    const second = two.interfaceFor(descriptor.id);
+    assert.notEqual(first, second, 'each object has its own interface record');
+    assert.equal(first?.methods, second?.methods);
+    assert.deepEqual(first?.methods.map((/** @type {any} */ method)=>method.name),
+        ['QueryInterface', 'AddRef', 'Release', 'Draw']);
 });

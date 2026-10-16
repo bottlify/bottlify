@@ -3622,7 +3622,15 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             const handle = isShaderHandle(boundVertexShader);
             const shader = handle ? vertexShaders.get(boundVertexShader) ?? null : null;
             const programmed = shader?.parsed ? shader : null;
-            const pixel = pixelShaders.get(boundPixelShader) ?? null;
+            // A vertex format draws through the fixed function's pixel stage
+            // too, whatever 1.0 to 1.3 pixel shader is bound, as the drivers
+            // of the shader-model-1 generation did (decisions.md A46); Wine and
+            // later drivers run the bound shader over the fixed vertex stage.
+            const bound = pixelShaders.get(boundPixelShader) ?? null;
+            const fvfAlone = services.driverRules !== 'current' && !handle && bound !== null
+                && (bound.parsed?.version?.major ?? 0) === 1
+                && (bound.parsed?.version?.minor ?? 0) <= 3;
+            const pixel = fvfAlone ? null : bound;
             // Asked for by every draw: the answer is kept while the bindings
             // and the shader objects they name are the ones it was made from.
             const held = heldProcessing;
@@ -3634,7 +3642,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             }
             // A handle naming no live shader -- a block applied after a
             // delete -- is a stage nothing can draw, so it has no program.
-            const drawable = (!handle || shader) && (boundPixelShader === 0 || pixel);
+            const drawable = (!handle || shader) && (boundPixelShader === 0 || pixel || fvfAlone);
             held.vertexShader = boundVertexShader;
             held.pixelShader = boundPixelShader;
             held.shader = shader;
@@ -3644,7 +3652,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 fvf: handle ? 0 : boundVertexShader,
                 fixedFunctionLayout: shader && !programmed ? shader.layout : null,
                 fixedFunctionVertex: !programmed,
-                pixelShader: boundPixelShader,
+                pixelShader: fvfAlone ? 0 : boundPixelShader,
                 program: drawable && (programmed || pixel)
                     ? {
                         vertex: programmed?.parsed ?? null,

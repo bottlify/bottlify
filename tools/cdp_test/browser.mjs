@@ -43,6 +43,10 @@ function closeLeftBehind(profileRoot){
     }
 }
 
+/** The browser's backgrounding of a hidden page, off: a page measured runs as one in front. */
+export const BACKGROUND_OFF = Object.freeze(['--disable-renderer-backgrounding',
+    '--disable-backgrounding-occluded-windows', '--disable-background-timer-throttling']);
+
 const CANDIDATES = [
     process.env.CDP_TEST_CHROME,
     process.env.CHROME_BIN,
@@ -179,6 +183,11 @@ function start(browser, flags, headed = false, profileDir){
             '--no-proxy-server',
             '--proxy-bypass-list=*',
             '--window-size=1280,720',
+            // A window nobody sees -- covered, or on a screen that is off -- is
+            // a background tab to the browser, whose renderer Windows then runs
+            // at idle priority: the engine waited for a core a quarter of the
+            // time, and the frame times measured were the scheduler's.
+            ...BACKGROUND_OFF,
             ...flags,
             `--user-data-dir=${profileRoot}`,
             '--remote-debugging-port=0',
