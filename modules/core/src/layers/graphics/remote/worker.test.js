@@ -80,6 +80,61 @@ test('the worker sends one frame at a time, the newest, and counts those replace
         }
     });
 
+test('counting, the worker says every frame presented, without its picture', async()=>{
+    // A run on a device that draws nothing measures the engine alone; its
+    // frame rate is the program's presents, which a kept picture would hide.
+    const gpu = createFakeDevice();
+    Object.assign(gpu.device, { queue: gpu.queue });
+    /** @type {any[]} */
+    const posted = [];
+    /** @type {any} */
+    const scope = { postMessage: (/** @type {any} */ message)=>posted.push(message),
+        onmessage: null };
+    serveGraphics(scope, {
+        gpu: { requestAdapter: async()=>({ features: new Set(), info: {},
+            requestDevice: async()=>gpu.device }) },
+        canvas: ()=>{
+            throw new Error('a counted frame needs no canvas');
+        },
+    });
+    scope.onmessage({ data: { type: 'open', frames: 'count' } });
+    await settle();
+    const { port1, port2 } = new MessageChannel();
+    scope.onmessage({ data: { type: 'root', api: 'd3d9', options: {}, port: port2, source: 7 } });
+    const sender = createSender({ post: (message, transfer)=>port1.postMessage(message,
+        transfer), framesAhead: 100 });
+    port1.onmessage = event=>sender.receive(event.data);
+    const d3d = recordedDirect3D(createDirect3D9, {}, sender);
+    /** @type {{ device?: any }} */
+    const out = {};
+    assert.equal(d3d.CreateDevice({ swapEffect: D3DSWAPEFFECT.DISCARD, backBufferCount: 1,
+        backBufferWidth: 8, backBufferHeight: 8, backBufferFormat: D3DFMT.X8R8G8B8 }, out),
+    D3D_OK);
+    try
+    {
+        for (let frame = 0; frame < 3; frame++)
+        {
+            out.device.BeginScene();
+            out.device.Clear(0, null, D3DCLEAR.TARGET, 0xff000000 + frame, 1, 0);
+            out.device.EndScene();
+            await out.device.Present();
+            await out.device.idle();
+            await settle();
+        }
+        const frames = posted.filter(message=>message.type === 'frame');
+        assert.equal(frames.length, 3, 'every frame, none waiting to be shown');
+        assert.deepEqual(frames.map(message=>Object.keys(message).sort()),
+            Array(3).fill(['frameIndex', 'source', 'type']), 'and no picture with any');
+        assert.equal(frames[2].frameIndex > frames[0].frameIndex, true);
+        assert.equal(frames[0].source, 7, 'whose it is');
+    }
+    finally
+    {
+        port1.close();
+        port2.close();
+    }
+});
+
 test('told to, the worker sends its frames as bytes from then on', async()=>{
     const gpu = createFakeDevice();
     Object.assign(gpu.device, { queue: gpu.queue });

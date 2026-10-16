@@ -1453,7 +1453,7 @@ export function createHarness(canvas, how = {}){
         // With the fake device the devices are played in a worker of their own
         // over another fake, as the player's split has them.
         const graphicsWorker = request.fakeGpu
-            ? await openGraphicsWorker({ frames: 'none',
+            ? await openGraphicsWorker({ frames: 'count',
                 url: new URL('./fake-graphics.worker.js', import.meta.url) })
             : request.graphicsWorker ? await openGraphicsWorker({ frames: 'pixels' }) : null;
         if (graphicsWorker && !graphicsWorker.worker)
@@ -1848,7 +1848,8 @@ export function createHarness(canvas, how = {}){
             result.snaps.push({ frame: frameAfter, width: image.width, height: image.height,
                 rgba: toBase64(image.pixels) });
         }
-        if (presentState.presented)
+        // A frame counted without its picture (the fake GPU's) has none to read back.
+        if (presentState.presented?.surface)
         {
             const image = await readBack(handle.device, presentState.presented.surface);
             // A live canvas is WebGPU's already and has the frame; a 2D context cannot be had.
@@ -2098,7 +2099,7 @@ export function createHarness(canvas, how = {}){
         // compared at the same one. The pixels are the surface's own bytes,
         // in its format, as base64.
         frameShot: async()=>{
-            if (!running || !presentState.presented)
+            if (!running || !presentState.presented?.surface)
             {
                 return null;
             }

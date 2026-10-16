@@ -77,6 +77,21 @@ test('a frame the worker sends back is presented as one drawn here, its texture 
     assert.ok(device.calls.includes('destroy'));
 });
 
+test('a frame the worker counted is presented with no picture, and nothing is drawn', ()=>{
+    const worker = fakeWorker();
+    const device = fakeDevice();
+    /** @type {any[]} */
+    const shown = [];
+    const end = connectGraphicsWorker({ worker, device, presentTo: frame=>shown.push(frame),
+        source: 3 });
+    worker.answer({ type: 'frame', frameIndex: 9, source: 3 });
+    assert.deepEqual(shown, [{ surface: null, frameIndex: 9, source: 3 }]);
+    assert.deepEqual(device.calls, [], 'no texture made or written');
+    assert.deepEqual(worker.posted.filter(message=>message.type === 'shown').length, 1,
+        'and the worker told it was taken');
+    end.dispose();
+});
+
 test('a picture this thread\'s device refuses has the worker send bytes from the next frame on',
     ()=>{
         const worker = fakeWorker();

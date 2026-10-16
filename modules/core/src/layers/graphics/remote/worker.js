@@ -20,7 +20,8 @@
  *                                    last; the next goes when it has
  *   { type: 'open', frames }         `frames` 'bitmap' sends each presented
  *                                    frame back as a picture, 'pixels' as its
- *                                    bytes read back; anything else keeps them.
+ *                                    bytes read back, 'count' says only that
+ *                                    one was presented; anything else keeps them.
  *                                    Answered every time it is asked.
  *   { type: 'root', api, options, port, memory, lending, source }
  *                                    `api` 'd3d7', 'd3d8', 'd3d9' or 'opengl', `options` the
@@ -40,6 +41,7 @@
  *   { type: 'opened', adapter } | { type: 'failed', message }
  *   { type: 'frame', bitmap, frameIndex, format, dropped, source }
  *   { type: 'frame', pixels, bytesPerRow, width, height, frameIndex, format, dropped, source }
+ *   { type: 'frame', frameIndex, source }  under 'count', every frame presented
  *                                    one at a time, the newest presented of a process,
  *                                    the processes in turn; `dropped` counts those a
  *                                    newer one replaced unsent
@@ -207,6 +209,13 @@ export function serveGraphics(scope, deps){
      *     frameIndex: number }} frame
      */
     const present = (device, frame)=>{
+        // A run measuring the engine on a device that draws nothing still
+        // counts the program's frames: every one, without its picture.
+        if (frames === 'count')
+        {
+            scope.postMessage({ type: 'frame', frameIndex: frame.frameIndex, source: playing });
+            return;
+        }
         if (frames !== 'pixels' && frames !== 'bitmap')
         {
             return;
