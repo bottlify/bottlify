@@ -955,3 +955,43 @@ None yet.
 - **Decision.** Not used for the executors' bell. The process's executor takes a lone thread's
   long turn only while no other executor runs a thread (nobody's calls to answer), and a thread
   made ready during it that a free executor could take ends it (`noteReady` in `threads.js`).
+
+### 2026-10-16 -- the program's cores chosen from the host's by default (roadmap/v2 C1)
+
+- **Idea.** A run that names no cores, in a browser whose page shares memory, gets one fewer
+  than the host's processors (at most eight): the program sizes its threads to them, the
+  executors open only as its threads want them (B2), the process's turns stay long while they
+  run (B1), and an executor keeps its thread a turn while others wait (B5).
+- **Workload.** Far Cry demo (bundle sha256 `ec81f9c260efb780…`) settled 40 s and watched 40 s,
+  Gothic 3 (`bundles/g3`) settled 120 s and watched 40 s, in `tools/cdp_test/frames.mjs` with
+  the page cross-origin isolated and the engine in a worker of the page in both arms
+  (`--coi --worker`); `--cores 1` against `--cores 3` and against `--cores 2`; `cork2` at
+  `f72be67b`. Three runs an arm, alternated.
+- **Values.** Frames a second. Far Cry, 1 core 13.2 13.0 12.9 against 3 cores 10.8 12.7 12.8;
+  1 core 13.0 13.1 12.6 against 2 cores 10.1 11.3 8.5. Gothic 3, 1 core 4.6 4.6 4.8 against
+  3 cores 3.4 4.1 4.3; 1 core 4.6 4.5 4.6 against 2 cores 3.4 4.2 4.1.
+- **Machine.** Headless Chromium 141 (`chromium-1194`), SwiftShader, a 4-core x86-64 KVM VM
+  (Intel Xeon @ 2.80 GHz). Power plan: not recorded.
+- **What was found.** Not the program's own path for several processors: Far Cry told of two
+  and kept on the process's executor drew 11.6 and 12.7 frames a second, as on one. Not the host
+  out of cores: the VM was 77% busy on one core and 71% on two. What changes is a thread running
+  on the other executor: the game's sound thread (priority 15, a 10 ms sleep between runs that
+  spin on the sound cursor) took it -- 2.39 G instructions in 38 s there, 1126 slices, 0.39 ms a
+  call waiting for the answer -- and the renderer on the process's executor retired as many
+  instructions as on one core (18.81 G against 18.88 G) and drew a fifth fewer frames, the
+  process's executor idle 10.5 s of the 38 waiting for the other. With a fake GPU (no
+  SwiftShader) the renderer's rate was the same on one core and three.
+- **Tried, without a positive signal.** (1) The process's executor to the thread calling into
+  the host more often a millisecond (twice as often and at least once): 9.5, 7.6 frames a second
+  on two cores. (2) A thread calling into the host more than once in 30 000 instructions kept on
+  the process's executor and called back from another: 9.0, 7.1, 9.2, 8.5, 10.0 -- the sound
+  thread spins between its calls and is placed between them as one that computes. (3) An idle
+  wait of the process's run loop ended by the other executors' bell: 8.8, 8.0.
+- **Correctness.** Every run drew its frames to the end of its window; none of the three was
+  judged on the suites.
+- **Decision.** One core stays the default; `cpu.cores` and the player's modes give more. None of
+  the three placements is kept; the scheduler keeps each thread's calls into the host and their
+  rate an instruction (`x` in `byThread`) and the last placements (`recentPlacements`), and
+  `frames.mjs` runs the page isolated with the engine in a worker for `--cores` past one -- before
+  it, every browser measurement of frames ran the `compatible` mode on the page's own thread,
+  where a run asking for cores ran on one (`executorsRefused`).

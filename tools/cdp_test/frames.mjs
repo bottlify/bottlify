@@ -19,7 +19,8 @@
  *
  *     node tools/cdp_test/frames.mjs <bundle-id> [--seconds 60] [--settle 20]
  *                                    [--video] [--no-trace] [--command-line STRING]
- *                                    [--windows NAME] [--quantum N] [--cores N]
+ *                                    [--windows NAME] [--quantum N] [--cores N] [--coi]
+ *                                    [--worker] [--threads]
  */
 
 import { existsSync } from 'node:fs';
@@ -76,6 +77,14 @@ function parse(argv){
         // The processors the program is told it has and the executors that run
         // its threads (`cpu.cores`); 0 leaves the engine's default.
         cores: number('--cores', 0),
+        // The page cross-origin isolated, so its memory is shared (the `isolated`
+        // mode) -- which more than one core needs, and the product's page is.
+        coi: argv.includes('--coi') || number('--cores', 0) > 1,
+        // The engine in a worker of the page's, as the product runs it: a page's
+        // own thread may not wait on shared memory, which other executors need.
+        worker: argv.includes('--worker') || number('--cores', 0) > 1,
+        // Each thread's last placements and the executors' time, with the report.
+        threads: argv.includes('--threads'),
         // Without the per-call string peeks the report's trace would otherwise
         // carry: they read guest memory on every host call, which is a cost
         // the engine outside this harness does not pay.
@@ -153,6 +162,45 @@ function describe(before, after, windowMs){
         say(`the slice: ${slices.quantum} instructions asked for`
             + `, ${past} of ${turns} turns ran past it`
             + `${slices.worst > 0 ? `, worst ${slices.worst}` : ''}`);
+        say('');
+    }
+
+    // The program's threads on the other executors (`cpu.cores`), over the whole run:
+    // the kernel's account is not kept per window.
+    const kernel = after.layers?.kernel ?? null;
+    const opened = after.layers?.cpu?.executors?.length;
+    if (kernel && opened !== undefined)
+    {
+        const shared = JSON.parse(kernel.sharedTime ?? '{}');
+        const here = shared.hereRetired ?? 0;
+        const elsewhere = shared.elsewhereRetired ?? 0;
+        say(`other executors: ${opened} opened, at most ${kernel.mostAtOnce ?? 1} threads at once,`
+            + ` ${kernel.executorSlices ?? 0} slices there`
+            + (here + elsewhere > 0
+                ? `, ${(elsewhere / (here + elsewhere) * 100).toFixed(1)}% of the instructions`
+                + ' retired while they ran a thread'
+                : '')
+            + (after.layers.cpu.executorsRefused ? `; refused: ${after.layers.cpu.executorsRefused}`
+                : '')
+            + `; memory ${after.layers.cpu.sharedMemory ? 'shared' : 'not shared'}`);
+        if (options.threads)
+        {
+            // Where each thread ran last and what held the executors: whose
+            // turns crossed, and whose waited.
+            for (const line of kernel.recentByThread ?? [])
+            {
+                say(`  ${line}`);
+            }
+            say(`  busy: ${kernel.busyByThread ?? ''}`);
+            say(`  threads: ${kernel.byThread ?? ''}`);
+            say(`  placed: ${(kernel.recentPlacements ?? []).join(' ')}`);
+            say(`  time: ${JSON.stringify(kernel.time ?? null)}`);
+            for (const executor of after.layers.cpu.executors ?? [])
+            {
+                say(`  executor ${executor.index}: ${JSON.stringify(executor.spent ?? executor)}`);
+            }
+            say(`  shared: ${kernel.sharedTime ?? ''}`);
+        }
         say('');
     }
 
@@ -351,6 +399,7 @@ const server = await serveStatic({
         // The translator package beside core, where app.js resolves the default engine.
         { prefix: '/cork/', root: join(PACKAGE_DIR, '..', 'cork') },
     ],
+    coi: options.coi,
 });
 const browser = await launchWithGpu();
 /** @type {CdpEndpoint | null} */
@@ -360,7 +409,8 @@ try
     cdp = new CdpEndpoint(browser.browserWs);
     await cdp.open();
     const { targetId } = await cdp.send('Target.createTarget', {
-        url: `http://127.0.0.1:${server.port}/sandbox/test/page/game/index.html`,
+        url: `http://127.0.0.1:${server.port}/sandbox/test/page/game/index.html`
+            + (options.worker ? '?worker=1' : ''),
     });
     const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
     await cdp.send('Runtime.enable', {}, sessionId);

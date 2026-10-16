@@ -646,7 +646,9 @@ test('the report says what priority each thread runs at and how often it was boo
     const feeder = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'feeder' });
     feeder.priority = 2;
 
-    assert.match(sched.diagnostics().byThread, /main 0 ready p8 b0 \| feeder 0 ready p10 b0/);
+    assert.match(sched.diagnostics().byThread,
+        /main 0 ready p8 b0 x0\.0 \| feeder 0 ready p10 b0 x0\.0/,
+        'and its calls into the host a hundred thousand instructions');
     clock = 10;
     sched.runOnce();
     assert.match(sched.diagnostics().byThread, /main 1000 ready p8 b1/,

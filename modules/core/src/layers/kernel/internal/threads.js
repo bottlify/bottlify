@@ -752,6 +752,14 @@ export function createScheduler(options){
      */
     const account = (next, instructions, began, from, at, asked = quantum)=>{
         const held = wall() - began;
+        const crossed = next.crossings - next.crossingsAt;
+        if (instructions > 0 || crossed > 0)
+        {
+            const rate = crossed / Math.max(1, instructions);
+            next.crossRate = next.crossSeen ? next.crossRate * 0.75 + rate * 0.25 : rate;
+            next.crossSeen = true;
+        }
+        next.crossingsAt = next.crossings;
         const could = Math.min(readyAtSlice.size, 3);
         parallel.ms[could] += held;
         parallel.instructions[could] += instructions;
@@ -895,6 +903,13 @@ export function createScheduler(options){
     /** When the last shared turn returned, for the time the caller kept between turns. */
     let sharedTurnEnd = -1;
 
+    /**
+     * The last threads placed on another executor, each with its calls into the
+     * host a hundred thousand instructions when it went (`?`: not yet measured).
+     *
+     * @type {string[]}
+     */
+    const recentPlacements = [];
     /** Set while they are answered: an answer's own trap does not answer again. */
     let answering = false;
     /** Set while this executor's thread runs a long turn with the others free (`runHere`). */
@@ -1115,6 +1130,12 @@ export function createScheduler(options){
             bucket(sharedTime.gapsUnder, began - taken);
         }
         placed.set(remote, { thread: next, began, from });
+        recentPlacements.push(`${next.name}>${remote.index} x${(next.crossRate * 100_000)
+            .toFixed(1)}${next.crossSeen ? '' : '?'}`);
+        if (recentPlacements.length > 16)
+        {
+            recentPlacements.shift();
+        }
         remote.start(quantum);
         executorSlices++;
         mostAtOnce = Math.max(mostAtOnce, placed.size + (inSlice ? 1 : 0));
@@ -1147,6 +1168,7 @@ export function createScheduler(options){
             {
                 const ended = remote.step((/** @type {() => void} */ reply)=>{
                     sharedTime.crossings++;
+                    on.thread.crossings++;
                     const was = current;
                     const wasInSlice = inSlice;
                     current = on.thread;
@@ -1587,6 +1609,10 @@ export function createScheduler(options){
 
     /** The other executors' traps, answered at a crossing of this executor's thread. */
     cpu.beforeTrap?.(()=>{
+        if (current !== null)
+        {
+            current.crossings++;
+        }
         if (placed.size === 0)
         {
             return;
@@ -1640,6 +1666,16 @@ export function createScheduler(options){
                 // turns for 31 while the thread spinning beside it waiting for
                 // it ran 520 M instructions for 1.9 M.
                 home: threads.length === 0 ? 0 : undefined,
+                /**
+                 * Its calls into the host, wherever it ran, and how many an
+                 * instruction it made over its last slices (`crossRate`,
+                 * `account`): what running it on another executor costs in
+                 * crossings, for the report.
+                 */
+                crossings: 0,
+                crossingsAt: 0,
+                crossRate: 0,
+                crossSeen: false,
                 instructions: 0,
                 /**
                  * The same since the figures were last published. Kept on the
@@ -2214,6 +2250,7 @@ export function createScheduler(options){
                 // Slices given to the process's other executors, and the most
                 // that ran at once: zero and zero where it has one.
                 executorSlices,
+                recentPlacements: [...recentPlacements],
                 mostAtOnce,
                 sharedTime: JSON.stringify(sharedTime),
                 recentWakes: recentWakes.slice(),
@@ -2243,12 +2280,14 @@ export function createScheduler(options){
                 // Instructions retired, because that is what a quantum is
                 // measured in here and so it is the only currency the scheduler
                 // and the thread agree on. Then the absolute priority it runs
-                // at and how often it had to be boosted to run at all.
+                // at and how often it had to be boosted to run at all, and its
+                // calls into the host a hundred thousand instructions (`crossRate`).
                 byThread: threads
                     .map(thread=>`${thread.name} ${thread.instructions} ${thread.state} p${
                         absolutePriority(thread.priority)} b${thread.boosts}${
                         thread.boosted ? '+' : ''}${thread.worstGap === undefined ? ''
-                        : ` g${Math.round(thread.worstGap)}/${thread.lateGaps ?? 0}`}`)
+                        : ` g${Math.round(thread.worstGap)}/${thread.lateGaps ?? 0}`}`
+                        + ` x${(thread.crossRate * 100_000).toFixed(1)}`)
                     .join(' | '),
                 current: current ? current.name : null,
                 // A thread that has been waiting on the same thing for a long
