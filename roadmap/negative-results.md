@@ -937,3 +937,62 @@ None yet.
 - **Correctness.** The bridge's tests of steps answered in place; the gate holding the host's
   command records to the guest routine's byte for byte (`seam/commands-host.itest.js`).
 - **Decision.** Removed: steps are answered in place only by appending the command.
+
+### 2026-10-16 -- an effect's constants handed to the setter where the parameter lies
+
+- **Idea.** The guest `Walk` (`d3dx9/effect-commit.js`) copies each constant word by word into a
+  scratch block before calling the device's setter. For a constant whose registers are the
+  parameter's words in order (a float parameter into float registers, an identity layout), the
+  setter could read the parameter in place and the copy loop go. The performance overlay's
+  "guest code, last second" put `Walk` at 26-37% of the guest's code.
+- **Workload.** The Need for Speed Carbon demo bundle (`bundle.btl` sha256 `f5aec769a16ce7d8…`)
+  at the start of its first race, 640x480, the renderer set to normal priority by hand.
+- **Values.** The overlay's share of the buckets holding `Walk`: 28% before, 30% after (21 + 9).
+  The engine worker's CPU profile (V8, 8 s) put `Walk`'s translated region at 2.0% of the
+  worker's time -- about 4% of the guest's. One run of each; the race scenes differed (520 and
+  770-1700 draws a frame), so no frame rate is compared.
+- **Machine.** Chrome in a Parallels Windows 11 VM (4 vCPUs, Apple Silicon host) on its virtual
+  GPU; versions and power plan not recorded.
+- **Why it did not pay.** D3DX lays a matrix into registers transposed unless it is declared
+  row-major, so few of the title's constants have an identity layout; and the overlay's share was
+  not `Walk`'s time. The guest sampler (`cpu/internal/samples.js`) credits a whole slice to the
+  64-byte bucket where it ended, and slices end where translated code exits -- around calls and
+  short loops such as `Walk`'s -- so a routine full of calls is overstated there by several times.
+- **Correctness.** The equivalence test of `Walk` with an in-place entry, and the effect's
+  guest-against-host commit gates, which caught a wrong pointer on the in-place path.
+- **Decision.** Removed. A routine's cost is read from the worker's CPU profile, not the overlay.
+
+### 2026-10-16 -- less garbage on the Direct3D path, against a frame rate that floats
+
+- **Idea.** Frames of the measured title floated (p90 twice the median, p99 four times), and a CPU
+  profile of the engine worker put the garbage collector at 7.3% of it. The Direct3D path made a
+  new array or closure for most commands: a copy of every constant and matrix out of the ring, a
+  closure per SetConstant, arrays per draw for the streams read, entries per state-block apply.
+  Reusing views and buffers there would cut what the collector has to sweep.
+- **Workload.** The Need for Speed Carbon demo bundle (`bundle.btl` sha256 `f5aec769a16ce7d8…`)
+  in its first race, 640x480.
+- **Values.** The engine worker's allocation (`tools/cdp_test/live/worker-allocations.mjs`, 8 s,
+  one run each): 152-182 MiB/s before, 88 MiB/s after (1.7 MiB a frame); the scenes differed, the
+  sources removed made about a third of the first figure. The collector's share stayed 7.3%.
+  Then the page was found hidden and its renderer at Windows' Idle priority class; with the tab
+  visible and the renderer at normal priority (one 10 s trace of V8's GC categories): the busier
+  dedicated worker spent 88.7 ms in 55 scavenges (largest 4.2 ms), 26.7 ms in 3 mark-compacts
+  (largest 11.9 ms) and 34 ms in incremental marking -- 1.5% of its time; the worker's CPU profile
+  (10 s, 14 087 samples) put the collector at 0.5%. Frames meanwhile: p10 17.3, p50 21.5, p90
+  34.0, max 104.6 ms (239 frames).
+- **Where the spread is.** Not the work: a frame's instructions stay at 15-16 million across its
+  quantiles. A steady loop in an unrelated process, sampled beside the frames, ran at 67-68% of
+  its median speed in the slowest tenth of frames and 106-113% in the fastest quarter (r = -0.53
+  to -0.59 against ms per million instructions, two runs of 12 s). The VM was not saturated: 68%
+  of its 4 processors busy, the renderer 1.4 of them. The vCPUs slow down together, from outside
+  the guest.
+- **Machine.** Chrome in a Parallels Windows 11 VM (4 vCPUs, Apple Silicon host) on its virtual
+  GPU; versions and power plan not recorded.
+- **Why it did not pay.** The 7.3% was the Idle priority's: the collector's background marking
+  and sweeping run on threads of the same process, and starved, they leave the work to the
+  worker's own thread. At normal priority the collector was a small share before the change could
+  matter.
+- **Correctness.** The Direct3D 8 and 9 tests and the device gates (3508 passing).
+- **Decision.** Kept, as less garbage at no cost; no frame rate is claimed for it. A frame spread
+  on this machine is measured with the tab visible, and set against an unrelated loop before it
+  is read as the engine's.

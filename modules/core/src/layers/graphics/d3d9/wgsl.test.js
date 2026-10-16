@@ -1079,6 +1079,21 @@ test('flat shading makes the two colour varyings flat on both sides, and nothing
         .wgsl.includes('interpolate'), 'Gouraud declares nothing');
 });
 
+test('a pixel shader under a fixed vertex reads a missing diffuse as white and a missing'
+    + ' specular as black of alpha one', ()=>{
+    // A vertex format with no colours still feeds v0 and v1 what the fixed
+    // function hands on: a ps_1_1 left bound over such quads, adding v1 and
+    // scaling by v1.a, draws them as their texture and diffuse -- neither
+    // washed white nor scaled to nothing.
+    const diffuse = varyingLocation(D3DDECLUSAGE.COLOR, 0);
+    const specular = varyingLocation(D3DDECLUSAGE.COLOR, 1);
+    const hybrid = fixedVertexStage([
+        { usage: D3DDECLUSAGE.POSITION, usageIndex: 0, register: 0 },
+    ], new Map([[0, { components: 3, scalar: 'f32', bgra: false }]]), [diffuse, specular]);
+    assertLine(hybrid.wgsl, `out.o${diffuse} = vec4f(1.0);`);
+    assertLine(hybrid.wgsl, `out.o${specular} = vec4f(0.0, 0.0, 0.0, 1.0);`);
+});
+
 test('a vertex shader carries fog to the pixel stage: its oFog, or all fog without one', ()=>{
     // Direct3D fogs a shader-drawn surface below model 3 after the pixel
     // shader, by the amount the vertex shader wrote to oFog -- and fogs it

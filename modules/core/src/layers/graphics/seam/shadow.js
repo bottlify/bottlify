@@ -1865,8 +1865,18 @@ export function createShadow(deps){
     /** The command ring's bytes in guest memory, 0 for none, and how far the host has read it. */
     let commands = 0;
 
+    /**
+     * A dword's bytes, in one array reused by every write: whoever is handed
+     * it copies it at once, and an array made per state written was most of
+     * what bringing the block back after a state block allocated.
+     */
+    const dwordScratch = new Uint8Array(4);
+    const dwordScratchWords = new Uint32Array(dwordScratch.buffer);
     /** @param {number} value */
-    const dwordBytes = value=>new Uint8Array(dword(value));
+    const dwordBytes = value=>{
+        dwordScratchWords[0] = value;
+        return dwordScratch;
+    };
     /** @param {number[]} values */
     const dwordsBytes = values=>new Uint8Array(values.flatMap(dword));
     /**

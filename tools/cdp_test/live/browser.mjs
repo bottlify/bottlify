@@ -16,7 +16,7 @@
  */
 import { spawn } from 'node:child_process';
 import { resolve } from 'node:path';
-import { findBrowser } from '../browser.mjs';
+import { BACKGROUND_OFF, findBrowser } from '../browser.mjs';
 import { PORT } from './connect.mjs';
 
 const url = process.argv[2] ?? 'https://192.168.100.22:5180/library';
@@ -30,6 +30,8 @@ const browser = spawn(findBrowser(), [
     '--no-proxy-server', '--proxy-bypass-list=*',
     '--enable-unsafe-webgpu', '--enable-unsafe-swiftshader',
     '--autoplay-policy=no-user-gesture-required',
+    // Covered or on a screen that is off, the page would run at idle priority.
+    ...BACKGROUND_OFF,
     `--user-data-dir=${profile}`, `--remote-debugging-port=${PORT}`,
     url,
 ], { stdio: ['ignore', 'ignore', 'inherit'] });

@@ -281,6 +281,8 @@ const S3TC_OF_FOURCC = Object.freeze({
  *        And on every surface: the texture interfaces of the Direct3D before
  *        the seventh, which a surface answers a QueryInterface for.
  * @param {() => number} [deps.now]  The clock the raster runs on, in milliseconds.
+ * @param {() => number} [deps.refresh]  The display's rate, in hertz. REFRESH_HZ when none
+ *     is given.
  * @param {(ms: number, run: () => void) => void} [deps.schedule]
  *        How a wait for the vertical blank is woken.
  * @param {() => import('./adapter.js').AdapterIdentity | null} [deps.identity]
@@ -304,7 +306,7 @@ const S3TC_OF_FOURCC = Object.freeze({
 export function createDirectDrawSeam(
     { publisher, memory, screen, gdi, present, flipQueued, callGuest, currentThread, scratch,
         extraInterfaces = [], extraSurfaceInterfaces = [], now = ()=>performance.now(),
-        schedule = (ms, run)=>{
+        refresh = ()=>REFRESH_HZ, schedule = (ms, run)=>{
             setTimeout(run, ms);
         }, identity, videoMemory, gamma, deactivated, deactivations, resolution, divergence },
 )
@@ -329,7 +331,7 @@ export function createDirectDrawSeam(
 
     /** The raster of a DirectDraw object's display mode. @param {any} root */
     const rasterOf = root=>createRaster({
-        now, refresh: ()=>REFRESH_HZ, height: ()=>root.displayMode.height,
+        now, refresh, height: ()=>root.displayMode.height,
     });
 
     /** @type {number} the descriptor block, taken on the first enumeration */
@@ -1637,7 +1639,7 @@ export function createDirectDrawSeam(
             {
                 return DDERR_INVALIDPARAMS;
             }
-            fields.writeU32(out >>> 0, REFRESH_HZ);
+            fields.writeU32(out >>> 0, refresh());
             return DD_OK;
         },
 
@@ -1691,9 +1693,9 @@ export function createDirectDrawSeam(
         // The first generation takes width, height and depth; every later one
         // adds a refresh rate and flags after them.
         /** @param {any} root @param {number[]} args */
-        SetDisplayMode: (root, [width, height, depth, refresh])=>{
+        SetDisplayMode: (root, [width, height, depth, rate])=>{
             const hr = root.setDisplayMode(
-                width >>> 0, height >>> 0, depth >>> 0, version === 1 ? 0 : (refresh >>> 0));
+                width >>> 0, height >>> 0, depth >>> 0, version === 1 ? 0 : (rate >>> 0));
             if (hr === DD_OK)
             {
                 coverScreen(root);

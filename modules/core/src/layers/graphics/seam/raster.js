@@ -99,3 +99,28 @@ export function rasterStatus(raster){
     const { line, inBlank } = raster.position();
     return { InVBlank: inBlank ? 1 : 0, ScanLine: inBlank ? 0 : line };
 }
+
+/** D3DPRESENT_INTERVAL_IMMEDIATE: present at once, never at a blank. */
+const PRESENT_INTERVAL_IMMEDIATE = 0x80000000;
+
+/**
+ * How long a Present waits for the blank its presentation interval names:
+ * DEFAULT (0) and ONE the next blank, TWO, THREE and FOUR (2, 4, 8) that many
+ * blanks on, IMMEDIATE none. A program that steps its world once a frame was
+ * written against this wait and runs as many times too fast as the frames
+ * outrun the display without it.
+ *
+ * @param {{ untilBlank: (edge: 'begin' | 'end') => number }} raster
+ * @param {number} interval  The device's D3DPRESENT_INTERVAL_ value.
+ * @param {number} refresh  The display's rate, in hertz.
+ * @returns {number} milliseconds; zero for no wait
+ */
+export function presentWait(raster, interval, refresh){
+    const value = interval >>> 0;
+    if (value === PRESENT_INTERVAL_IMMEDIATE)
+    {
+        return 0;
+    }
+    const blanks = value === 0 ? 1 : value === 2 ? 2 : value === 4 ? 3 : value === 8 ? 4 : 1;
+    return raster.untilBlank('begin') + (blanks - 1) * 1000 / Math.max(1, refresh);
+}

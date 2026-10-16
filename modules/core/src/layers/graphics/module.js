@@ -1028,6 +1028,10 @@ export function createGraphicsModule(){
                 // that owns it, because a program that spins on the blank times
                 // the spin with its own timers. The host's without one.
                 now: config?.guestNow,
+                // How a Present waits for the blank its interval names: the
+                // calling thread stopped until then, by the assembling caller
+                // that owns the threads. Without it a Present answers at once.
+                waitUntil: config?.waitUntil,
                 // Told the resolution a device is created at, so the reported
                 // screen becomes that resolution.
                 resolution: config?.resolution,

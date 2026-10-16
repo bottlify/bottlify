@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createRaster } from './raster.js';
+import { createRaster, presentWait } from './raster.js';
 
 /** A raster at 60 Hz over 480 lines, on a clock the test sets. */
 function clocked(){
@@ -53,3 +53,18 @@ test('a wait for the blank lands inside it, and a wait for its end on the next f
         assert.deepEqual(c.raster.position(), { line: 0, inBlank: false });
         assert.ok(Math.abs(c.now() % period) < 0.01);
     });
+
+test('a Present waits for the blank its interval names, and IMMEDIATE for none', ()=>{
+    // D3DPRESENT_INTERVAL_DEFAULT and ONE beat-sync presentation to the
+    // display's retrace; a frame loop stepping its world once a frame keeps
+    // the display's time only under that wait.
+    const c = clocked();
+    c.at(1);
+    const toBlank = c.raster.untilBlank('begin');
+    assert.ok(toBlank > 0 && toBlank <= 1000 / 60);
+    assert.equal(presentWait(c.raster, 0, 60), toBlank, 'DEFAULT');
+    assert.equal(presentWait(c.raster, 1, 60), toBlank, 'ONE');
+    assert.equal(presentWait(c.raster, 2, 60), toBlank + 1000 / 60, 'TWO');
+    assert.equal(presentWait(c.raster, 8, 60), toBlank + 3000 / 60, 'FOUR');
+    assert.equal(presentWait(c.raster, 0x80000000, 60), 0, 'IMMEDIATE');
+});

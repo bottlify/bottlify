@@ -39,8 +39,8 @@ export function reportDynamicReads(drawsFrom, streams, first, count, indices, st
     indexCount = 0, indexed = undefined)
 {
     // The streams may come as an iterator, which the range's scan would leave
-    // empty for the loop after it.
-    const all = [...streams];
+    // empty for the loop after it; an array is read as it is.
+    const all = Array.isArray(streams) ? streams : [...streams];
     const named = indexed && indices ? namedRange(all, count, indices, startIndex, indexCount,
         indexed) : null;
     if (named)

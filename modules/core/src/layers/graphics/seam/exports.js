@@ -32,6 +32,7 @@ import { createDirect3D9Seam } from './d3d9.js';
 import { createDirect3D10Seam } from './d3d10.js';
 import { createVulkanSeam } from './vulkan.js';
 import { createDirectDrawSeam, readGuid } from './ddraw.js';
+import { REFRESH_HZ } from '../../win32/user32/display.js';
 import { createDirect3D7Seam } from './d3d7.js';
 import { createLegacyDirect3DSeam } from './d3dlegacy.js';
 import { IID_IDirectDraw7, IID_IDirectDrawClipper } from './iids.js';
@@ -141,6 +142,14 @@ const E_OUTOFMEMORY = 0x8007000e | 0;
  * @param {() => number} [deps.now]
  *        The clock the display's raster runs on, in milliseconds; the host's
  *        when none is given.
+ * @param {() => number} [deps.refresh]
+ *        The display's rate, in hertz: what its raster and a beat-synced
+ *        Present run at and its current mode reports. REFRESH_HZ when none
+ *        is given.
+ * @param {(deadline: number, result: number) => any} [deps.waitUntil]
+ *        Stops the calling thread until that time of `now`'s clock, where its
+ *        call answers `result`: how a Direct3D 8 or 9 Present waits for the
+ *        blank. Absent, a Present answers at once.
  * @param {(ms: number, run: () => void) => void} [deps.schedule]
  *        How a wait for the vertical blank is woken; a host timer when none is
  *        given.
@@ -172,7 +181,8 @@ export function createGraphicsLibraries(
         free, exportAddress, processHeapAllocate,
         currentThread,
         scratch, render, allocate, allocateCode, divergence, cursor, resolution, windowClientSize,
-        gamma, deactivated, deactivations, now = ()=>performance.now(), guestCode = true, phases,
+        gamma, deactivated, deactivations, now = ()=>performance.now(), waitUntil,
+        refresh = ()=>REFRESH_HZ, guestCode = true, phases,
         guestTraps = [],
         schedule = (ms, run)=>{
             setTimeout(run, ms);
@@ -315,12 +325,12 @@ export function createGraphicsLibraries(
     const d3d8 = built('D3D8.dll', ()=>createDirect3D8Seam({
         publisher, memory, screen, allocate: guestAllocate, allocateCode: guestAllocateCode,
         traps: new Set(guestTraps), divergence, cursor, resolution,
-        windowClientSize, now, phases,
+        windowClientSize, now, waitUntil, refresh, phases,
         identity: ()=>graphics.adapter?.() ?? null,
     }));
     const d3d9 = built('D3D9.dll', ()=>createDirect3D9Seam({
         publisher, memory, screen, divergence, cursor, resolution, windowClientSize, gdi, now,
-        phases, allocate: guestAllocate, allocateCode: guestAllocateCode,
+        waitUntil, refresh, phases, allocate: guestAllocate, allocateCode: guestAllocateCode,
         traps: new Set(guestTraps),
         identity: ()=>graphics.adapter?.() ?? null,
     }));
@@ -346,7 +356,7 @@ export function createGraphicsLibraries(
     }));
     const ddraw = built('DDRAW.dll', ()=>createDirectDrawSeam({
         publisher, memory, screen, gdi, present, flipQueued, callGuest, currentThread, scratch,
-        now, schedule,
+        now, schedule, refresh,
         extraInterfaces: [d3d7.interface, ...d3dLegacy.interfaces],
         extraSurfaceInterfaces: d3dLegacy.surfaceInterfaces,
         identity: ()=>graphics.adapter?.() ?? null,

@@ -4063,6 +4063,16 @@ async function buildApp(options){
             // runs on the guest's clock, which only this assembly can reach:
             // a program times its spin on the blank with its own timers.
             guestNow: ()=>core.api('kernel').clock.virtualTime(),
+            // A device call that waits on the display -- a Present beat-synced
+            // to the retrace -- stops the calling thread until that moment of
+            // the guest's clock and returns what its call answers then.
+            /** @param {number} deadline @param {number} result */
+            waitUntil: (deadline, result)=>{
+                const kernel = core.api('kernel');
+                const thread = kernel.currentThread();
+                kernel.block(thread, 'the vertical blank', { deadline, result });
+                return core.api('bridge').park(thread);
+            },
             // Where a COM interface goes when a program asks for one. Without
             // it the drawing entry points refuse rather than publishing into
             // nowhere, which is what a build with no bridge should do.

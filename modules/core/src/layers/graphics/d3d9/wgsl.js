@@ -2133,7 +2133,8 @@ const TCI_CAMERASPACEREFLECTIONVECTOR = 0x30000;
  *        Varying locations the pixel shader reads that the declaration does
  *        not supply. A fragment input with no vertex output fails the
  *        pipeline, so each is written as the fixed-function pipeline leaves
- *        it: a colour as white, a coordinate set as zero.
+ *        it: the diffuse colour as opaque white, the specular colour as black
+ *        with an alpha of one, a coordinate set as zero.
  * @param {readonly number[]} [generated]
  *        Per coordinate set, the D3DTSS_TCI_ mode the stage of that number
  *        generates it under, or zero for a set the vertex carries: the
@@ -2348,9 +2349,14 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
             outputFields.push(`    @location(${location})`
                 + `${colourInterpolation(location, flatColours)} o${location}: vec4f,`);
             outputs.push(location);
-            const colour = location === varyingLocation(D3DDECLUSAGE.COLOR, 0)
-                || location === varyingLocation(D3DDECLUSAGE.COLOR, 1);
-            body.push(`    out.o${location} = vec4f(${colour ? '1.0' : '0.0'});`);
+            // What the fixed function hands on without one: an opaque white
+            // diffuse, and a specular of no highlight whose alpha -- the fog
+            // factor's place -- is one. A ps_1_x left bound over such a vertex
+            // adds v1 as nothing and scales by v1.a as nothing.
+            const diffuse = location === varyingLocation(D3DDECLUSAGE.COLOR, 0);
+            const specular = location === varyingLocation(D3DDECLUSAGE.COLOR, 1);
+            body.push(`    out.o${location} = ${diffuse ? 'vec4f(1.0)'
+                : specular ? 'vec4f(0.0, 0.0, 0.0, 1.0)' : 'vec4f(0.0)'};`);
         }
     }
     if (options.points)

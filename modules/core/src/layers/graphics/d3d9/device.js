@@ -104,6 +104,8 @@ const USAGE_QUERY_SRGBWRITE = 0x00040000;
  */
 const USAGE_QUERY_FILTER = 0x00020000;
 const USAGE_QUERY_POSTPIXELSHADER_BLENDING = 0x00080000;
+/** What a draw through a vertex format reads: stream zero alone. */
+const STREAM_ZERO = Object.freeze([0]);
 
 /** The three states a device is ever in, as far as a program can tell. */
 export const DEVICE_STATE = Object.freeze({
@@ -1743,6 +1745,23 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
     };
 
     /**
+     * The streams each declaration's elements read, found once: a set and two
+     * arrays made per draw were a fair share of what the engine allocated.
+     *
+     * @type {WeakMap<object, number[]>}
+     */
+    const streamsRead = new WeakMap();
+    /**
+     * What `drawnStreams` answers, filled again on each draw: the reader
+     * (`reportDynamicReads`) is done with it before the draw returns.
+     *
+     * @type {{ buffer: any, offset: number, stride: number, whole: boolean }[]}
+     */
+    const drawn = [];
+    /** @type {{ buffer: any, offset: number, stride: number, whole: boolean }[]} */
+    const drawnSlots = [];
+
+    /**
      * The streams a draw reads, for `drawsFrom`: those its declaration names,
      * or stream zero's for a vertex format.
      *
@@ -1750,20 +1769,35 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
      */
     const drawnStreams = ()=>{
         const elements = vertexDeclaration.declaration?.elements;
-        const read = elements && vertexDeclaration.fvf === 0
-            ? new Set(elements.map((/** @type {any} */ e)=>e.Stream)) : [0];
-        const drawn = [];
+        /** @type {readonly number[]} */
+        let read = STREAM_ZERO;
+        if (elements && vertexDeclaration.fvf === 0)
+        {
+            read = streamsRead.get(elements) ?? [];
+            if (read.length === 0)
+            {
+                const found = [...new Set(elements.map((/** @type {any} */ e)=>e.Stream))];
+                streamsRead.set(elements, found);
+                read = found;
+            }
+        }
+        let filled = 0;
         for (const index of read)
         {
             const bound = streams.get(index);
             if (bound?.buffer)
             {
+                const entry = drawnSlots[filled]
+                    ??= { buffer: null, offset: 0, stride: 0, whole: false };
+                entry.buffer = bound.buffer;
+                entry.offset = bound.offset;
+                entry.stride = bound.stride;
                 // D3DSTREAMSOURCE_INSTANCEDATA: read once per instance.
-                const whole = ((streamFrequencies.get(index) ?? 1) & 0x80000000) !== 0;
-                drawn.push({ buffer: bound.buffer, offset: bound.offset, stride: bound.stride,
-                    whole });
+                entry.whole = ((streamFrequencies.get(index) ?? 1) & 0x80000000) !== 0;
+                drawn[filled++] = entry;
             }
         }
+        drawn.length = filled;
         return drawn;
     };
 
@@ -3157,32 +3191,32 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
 
         /** @param {number} start @param {ArrayLike<number>} values @param {number} n */
         SetVertexShaderConstantF: (start, values, n)=>setConstants(
-            vertexConstants, 'floats', start, values, n, record=>record.vertexConstantsF),
+            vertexConstants, 'floats', start, values, n, 'vertexConstantsF'),
         /** @param {number} start @param {number} n @param {{ values?: Float32Array }} out */
         GetVertexShaderConstantF: (start, n, out)=>vertexConstants.getF(start, n, out),
         /** @param {number} start @param {ArrayLike<number>} values @param {number} n */
         SetVertexShaderConstantI: (start, values, n)=>setConstants(
-            vertexConstants, 'ints', start, values, n, record=>record.vertexConstantsI),
+            vertexConstants, 'ints', start, values, n, 'vertexConstantsI'),
         /** @param {number} start @param {number} n @param {{ values?: Int32Array }} out */
         GetVertexShaderConstantI: (start, n, out)=>vertexConstants.getI(start, n, out),
         /** @param {number} start @param {ArrayLike<number>} values @param {number} n */
         SetVertexShaderConstantB: (start, values, n)=>setConstants(
-            vertexConstants, 'bools', start, values, n, record=>record.vertexConstantsB),
+            vertexConstants, 'bools', start, values, n, 'vertexConstantsB'),
         /** @param {number} start @param {number} n @param {{ values?: Uint32Array }} out */
         GetVertexShaderConstantB: (start, n, out)=>vertexConstants.getB(start, n, out),
         /** @param {number} start @param {ArrayLike<number>} values @param {number} n */
         SetPixelShaderConstantF: (start, values, n)=>setConstants(
-            pixelConstants, 'floats', start, values, n, record=>record.pixelConstantsF),
+            pixelConstants, 'floats', start, values, n, 'pixelConstantsF'),
         /** @param {number} start @param {number} n @param {{ values?: Float32Array }} out */
         GetPixelShaderConstantF: (start, n, out)=>pixelConstants.getF(start, n, out),
         /** @param {number} start @param {ArrayLike<number>} values @param {number} n */
         SetPixelShaderConstantI: (start, values, n)=>setConstants(
-            pixelConstants, 'ints', start, values, n, record=>record.pixelConstantsI),
+            pixelConstants, 'ints', start, values, n, 'pixelConstantsI'),
         /** @param {number} start @param {number} n @param {{ values?: Int32Array }} out */
         GetPixelShaderConstantI: (start, n, out)=>pixelConstants.getI(start, n, out),
         /** @param {number} start @param {ArrayLike<number>} values @param {number} n */
         SetPixelShaderConstantB: (start, values, n)=>setConstants(
-            pixelConstants, 'bools', start, values, n, record=>record.pixelConstantsB),
+            pixelConstants, 'bools', start, values, n, 'pixelConstantsB'),
         /** @param {number} start @param {number} n @param {{ values?: Uint32Array }} out */
         GetPixelShaderConstantB: (start, n, out)=>pixelConstants.getB(start, n, out),
 
@@ -4560,9 +4594,11 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
      * @param {import('./shader.js').ConstantFile} file
      * @param {'floats' | 'ints' | 'bools'} which
      * @param {number} start @param {ArrayLike<number>} values @param {number} n
-     * @param {(record: import('./stateblock.js').StateBlockRecord) => Map<number, any>} pick
+     * @param {'vertexConstantsF' | 'vertexConstantsI' | 'vertexConstantsB' | 'pixelConstantsF'
+     *     | 'pixelConstantsI' | 'pixelConstantsB'} recorded  the recording's map, by name: a
+     *     function picking it, made per call, was an allocation on every set
      */
-    const setConstants = (file, which, start, values, n, pick)=>{
+    const setConstants = (file, which, start, values, n, recorded)=>{
         const width = which === 'bools' ? 1 : 4;
         const limit = file[which].length / width;
         if (!values || start < 0 || n < 0 || start + n > limit)
@@ -4575,7 +4611,8 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 ? file.setF(start, values, n)
                 : which === 'ints' ? file.setI(start, values, n) : file.setB(start, values, n);
         }
-        const map = pick(recording);
+        /** @type {Map<number, any>} */
+        const map = recording[recorded];
         for (let register = 0; register < n; register++)
         {
             const at = register * width;

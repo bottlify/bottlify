@@ -41,6 +41,30 @@ const scratch = new ArrayBuffer(4 * 4 * 256);
 const words = new Uint32Array(scratch);
 const floats = new Float32Array(scratch);
 const ints = new Int32Array(scratch);
+const kinds = { words, floats, ints };
+
+/**
+ * The scratch's first `length` elements of a kind, a view made once for each
+ * length and kept: a matrix or a run of shader constants handed over by a
+ * slice per record was most of what the engine allocated while a game ran.
+ * Every device copies what it keeps of such an array before it returns.
+ *
+ * @type {Record<'words' | 'floats' | 'ints', (Uint32Array | Float32Array | Int32Array)[]>}
+ */
+const firsts = { words: [], floats: [], ints: [] };
+/**
+ * @template {'words' | 'floats' | 'ints'} K
+ * @param {K} kind @param {number} length
+ * @returns {(typeof kinds)[K]}
+ */
+const first = (kind, length)=>{
+    const all = kinds[kind];
+    if (length > all.length)
+    {
+        return /** @type {any} */ (all.subarray(0, length));
+    }
+    return /** @type {any} */ (firsts[kind][length] ??= all.subarray(0, length));
+};
 
 /**
  * What a method's call is made of: `arg(i)` its arguments as dwords, `object()`
@@ -52,6 +76,9 @@ const ints = new Int32Array(scratch);
  * @property {Uint32Array} words
  * @property {Float32Array} floats
  * @property {Int32Array} ints
+ * @property {<K extends 'words' | 'floats' | 'ints'>(kind: K, length: number)
+ *     => (typeof kinds)[K]} first  the first `length` of the copy as that kind, in a view
+ *     reused by the next record
  * @property {(bytes: number) => Uint8Array} copy  the first `bytes` of the copy, as a copy
  *     of its own, for a method that keeps them or reads more than the scratch holds
  * @property {(bytes: number) => Uint8Array} view  the same bytes in place, for a method
@@ -189,6 +216,7 @@ export function commandSet(slots, table){
             words,
             floats,
             ints,
+            first,
             view: bytes=>{
                 const from = records.byteOffset
                     + (at + ARGS + (bySlot[all[at]]?.args ?? 0)) * 4;
@@ -306,7 +334,7 @@ const drawChecks = (type, count)=>({
 export const SHARED_COMMANDS = {
     SetRenderState: { args: 2, make: (d, c)=>d.SetRenderState(c.arg(0), c.arg(1)) },
     SetTransform: { args: 2, pointer: 1, bytes: 64,
-        make: (d, c)=>d.SetTransform(c.arg(0), c.floats.slice(0, 16)) },
+        make: (d, c)=>d.SetTransform(c.arg(0), c.first('floats', 16)) },
     SetTextureStageState: { args: 3,
         make: (d, c)=>d.SetTextureStageState(c.arg(0), c.arg(1), c.arg(2)) },
     SetMaterial: { args: 1, pointer: 0, bytes: 68,
@@ -320,7 +348,7 @@ export const SHARED_COMMANDS = {
     LightEnable: { args: 2, make: (d, c)=>d.LightEnable(c.arg(0), c.arg(1) !== 0) },
     SetClipPlane: { args: 2, pointer: 1, bytes: 16,
         below: { arg: 0, word: SHADOW.CLIP_PLANES },
-        make: (d, c)=>d.SetClipPlane(c.arg(0), c.floats.slice(0, 4)) },
+        make: (d, c)=>d.SetClipPlane(c.arg(0), c.first('floats', 4)) },
     DrawPrimitive: { args: 3, draws: true, ...drawChecks(0, 2),
         make: (d, c)=>d.DrawPrimitive(c.arg(0), c.arg(1), c.arg(2)) },
     BeginScene: { args: 0, refuses: DRAW.SCENE, make: d=>d.BeginScene() },
@@ -359,10 +387,10 @@ export const D3D8_COMMANDS = commandSet(IDIRECT3DDEVICE8_SLOTS, {
         make: (d, c)=>d.SetPixelShader(c.arg(0)) },
     SetVertexShaderConstant: { args: 3, pointer: 1, count: { arg: 2, shift: 4, most: 256 },
         span: 0, make: (d, c)=>d.SetVertexShaderConstant(c.arg(0),
-            c.floats.slice(0, c.arg(2) * 4), c.arg(2)) },
+            c.first('floats', c.arg(2) * 4), c.arg(2)) },
     SetPixelShaderConstant: { args: 3, pointer: 1, count: { arg: 2, shift: 4, most: 8 },
         span: 0, make: (d, c)=>d.SetPixelShaderConstant(c.arg(0),
-            c.floats.slice(0, c.arg(2) * 4), c.arg(2)) },
+            c.first('floats', c.arg(2) * 4), c.arg(2)) },
     // Without a stream or indices this version draws nothing and says D3D_OK.
     DrawIndexedPrimitive: { args: 5, draws: true, ...drawChecks(0, 4),
         needs: DRAW.SCENE | DRAW.DECLARED,

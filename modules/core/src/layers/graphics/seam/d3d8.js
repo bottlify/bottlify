@@ -46,7 +46,7 @@ import { D3DPRESENT_PARAMETERS8, D3DDISPLAYMODE, D3DVIEWPORT8, D3DCAPS8,
     D3DBOX, D3DLOCKED_BOX, D3DVOLUME_DESC8, createLightReader, dwordsOf, floatsOf, putLight,
     putMaterial } from './structs.js';
 import { D3DDEVTYPE, D3DFMT_INDEX, D3DRTYPE, PRIMARY_MONITOR } from '../d3d8/constants.js';
-import { REFRESH_HZ, displayModes } from '../../win32/user32/display.js';
+import { REFRESH_HZ, REFRESH_RATES, displayModes } from '../../win32/user32/display.js';
 import { ADAPTER_STRING_LENGTH, D3DADAPTER_IDENTIFIER8, D3DCLIPSTATUS8,
     D3DDEVICE_CREATION_PARAMETERS, D3DGAMMARAMP, D3DRASTER_STATUS,
     GAMMA_RAMP_ENTRIES } from '../d3d8/structs.js';
@@ -55,7 +55,7 @@ import { PALETTE_BYTES } from '../d3d9/device.js';
 import { createCursorTeller } from './cursor.js';
 import { fpuSetupCode } from './fpu.js';
 import { ADAPTER_GUID, describeAdapter } from './adapter.js';
-import { createRaster, rasterStatus } from './raster.js';
+import { createRaster, presentWait, rasterStatus } from './raster.js';
 import { TEXTURE_OP_CAPS } from '../d3d8/validity.js';
 import { D3D_PRIVATE_DATA, createPrivateData } from './privatedata.js';
 import { declarationLength } from '../d3d8/declaration.js';
@@ -139,6 +139,8 @@ const D3DCAPS2_FULLSCREENGAMMA = 0x00020000;
 
 const D3DPRESENT_INTERVAL_ONE = 0x00000001;
 const D3DPRESENT_INTERVAL_IMMEDIATE = 0x80000000;
+/** A windowed chain that waits for the retrace before its copy. */
+const D3DSWAPEFFECT_COPY_VSYNC = 4;
 
 const D3DDEVCAPS_EXECUTESYSTEMMEMORY = 0x00000010;
 const D3DDEVCAPS_TEXTUREVIDEOMEMORY = 0x00000200;
@@ -292,13 +294,19 @@ const S_FALSE = 1;
  *        for as zero by zero takes. Without it the configured display is the
  *        nearest size this layer knows.
  * @param {() => number} [deps.now]  The clock the display's raster runs on, in milliseconds.
+ * @param {() => number} [deps.refresh]  The display's rate, in hertz: its raster's and its
+ *     current mode's. REFRESH_HZ when none is given.
+ * @param {(deadline: number, result: number) => any} [deps.waitUntil]  Stops the calling
+ *     thread until that time of `now`'s clock, where its call answers `result`: how a
+ *     Present waits for the blank. Absent, a Present answers at once.
  * @param {Set<string>} [deps.traps]  Guest routines kept as traps, by name or group
  *     (`guestsBut`).
  * @param {import('./shadow.js').ShadowPhases} [deps.phases]  Where a device's entry work is timed.
  */
 export function createDirect3D8Seam(
     { publisher, memory, screen, allocate, allocateCode, divergence, cursor, resolution, identity,
-        windowClientSize, now = ()=>performance.now(), traps = new Set(), phases },
+        windowClientSize, now = ()=>performance.now(), waitUntil, refresh = ()=>REFRESH_HZ,
+        traps = new Set(), phases },
 )
 {
     /** The getters a device answers in the guest, as against the calls its ring carries. */
@@ -319,9 +327,48 @@ export function createDirect3D8Seam(
     /** @param {string} name */
     const deviceGroup = name=>(GUEST_GETTERS.has(name) ? 'getters' : 'ring');
     const fields = createFields(memory);
+    /**
+     * The rate of the mode the device runs in: the one a full-screen device
+     * asked for, when the display lists it, else the display's own. A program
+     * that steps its world once a frame is paced by this rate, not by how
+     * often the page shows a frame.
+     */
+    const modeRefresh = ()=>(pacing !== null && !pacing.windowed
+        && REFRESH_RATES.includes(pacing.rate) ? pacing.rate : refresh());
     const raster = createRaster({
-        now, refresh: ()=>REFRESH_HZ, height: ()=>screen().height,
+        now, refresh: modeRefresh, height: ()=>screen().height,
     });
+    /**
+     * How the device presents, as its creation or last reset asked.
+     *
+     * @type {{ windowed: boolean, swapEffect: number, interval: number, rate: number } | null}
+     */
+    let pacing = null;
+    /** @param {any} parameters */
+    const pacingOf = parameters=>({ windowed: parameters.windowed === true,
+        swapEffect: parameters.swapEffect >>> 0,
+        interval: parameters.fullScreenPresentationInterval >>> 0,
+        rate: parameters.fullScreenRefreshRateInHz >>> 0 });
+    /**
+     * A Present's answer, once the blank it waits for has come. Full screen
+     * Direct3D 8 beat-syncs presentation to the retrace for every interval but
+     * IMMEDIATE; windowed, only D3DSWAPEFFECT_COPY_VSYNC does, the others
+     * copying at once. An answer still to come already waited.
+     *
+     * @param {number | Promise<number>} hr
+     * @returns {any}
+     */
+    const pacedPresent = hr=>{
+        if (!waitUntil || typeof hr !== 'number' || hr !== D3D_OK || pacing === null)
+        {
+            return hr;
+        }
+        const interval = pacing.windowed
+            ? (pacing.swapEffect === D3DSWAPEFFECT_COPY_VSYNC ? 1 : D3DPRESENT_INTERVAL_IMMEDIATE)
+            : pacing.interval;
+        const wait = presentWait(raster, interval, modeRefresh());
+        return wait > 0 ? waitUntil(now() + wait, hr) : hr;
+    };
     const privateData = createPrivateData({ memory, publisher, rules: D3D_PRIVATE_DATA });
 
     /**
@@ -524,8 +571,8 @@ export function createDirect3D8Seam(
     const swapChainInterfaces = [describeResource(IID_IDirect3DSwapChain8,
         IDIRECT3DSWAPCHAIN8_SLOTS, {
         /** @param {any} chain @param {number[]} args */
-            Present: (chain, [, , override])=>chain.Present(
-                ((override >>> 0) || chainWindows.get(chain) || deviceWindow) === deviceWindow),
+            Present: (chain, [, , override])=>pacedPresent(chain.Present(
+                ((override >>> 0) || chainWindows.get(chain) || deviceWindow) === deviceWindow)),
             /** @param {any} chain @param {number[]} args */
             GetBackBuffer: (chain, [index, type, out])=>{
                 if ((out >>> 0) === 0)
@@ -1192,7 +1239,7 @@ export function createDirect3D8Seam(
         /** @param {any} device */
         Present: (/** @type {any} */ device)=>{
             showScreen(device);
-            return device.Present();
+            return pacedPresent(device.Present());
         },
 
         /** @param {any} device @param {number[]} args */
@@ -1212,6 +1259,7 @@ export function createDirect3D8Seam(
                 // fills.
                 deviceWindow = (next.hDeviceWindow >>> 0) || deviceWindow;
                 takeScreen(device, next, deviceWindow);
+                pacing = pacingOf(next);
             }
             // The block is brought to what the device now holds, not to what
             // it held before: a reset is the host changing state on its own.
@@ -2400,7 +2448,7 @@ export function createDirect3D8Seam(
         fields.writeStruct(address, D3DDISPLAYMODE, {
             Width: display.width,
             Height: display.height,
-            RefreshRate: REFRESH_HZ,
+            RefreshRate: modeRefresh(),
             // D3DFMT_X8R8G8B8, which is what a 32-bit display reports.
             Format: 22,
         });
@@ -2655,6 +2703,7 @@ export function createDirect3D8Seam(
                 // parameters need not repeat it.
                 deviceWindow = (wanted.hDeviceWindow >>> 0) || (focus >>> 0);
                 takeScreen(held.device, wanted, deviceWindow);
+                pacing = pacingOf(wanted);
             }
             if (hr !== D3D_OK || !held.device)
             {
