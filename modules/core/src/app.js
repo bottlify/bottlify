@@ -1306,6 +1306,16 @@ export function answeredByEngine(knownDlls, runtimes){
 }
 
 /**
+ * The API sets Windows 10 resolves by its schema rather than by file, and the
+ * library each is: a program imports `api-ms-win-crt-stdio-l1-1-0.dll` and is
+ * bound to ucrtbase.dll, which GetModuleHandle names it too -- one module, not
+ * a copy for each set, and a copy of one a program carries is never loaded.
+ *
+ * @type {[RegExp, string][]}
+ */
+const API_SETS = [[/^api-ms-win-crt-[a-z0-9-]+$/, 'ucrtbase']];
+
+/**
  * The key a module is known by: its file name, without directory, case or
  * the extension a program is free to leave off.
  *
@@ -1318,7 +1328,8 @@ export function answeredByEngine(knownDlls, runtimes){
  */
 export function moduleKeyOf(name){
     const file = name.slice(Math.max(name.lastIndexOf('\\'), name.lastIndexOf('/')) + 1);
-    return file.toLowerCase().replace(/\.dll$/, '');
+    const key = file.toLowerCase().replace(/\.dll$/, '');
+    return API_SETS.find(([set])=>set.test(key))?.[1] ?? key;
 }
 
 // `relocatablePrefix` and `jumpBytes` live in `layers/loader/internal/hooks.js`
