@@ -122,13 +122,22 @@ export const TECHNIQUE = Object.freeze({ PASSES: 0, SAVED: 4, SIZE: 20 });
  * A pass's commit table, which CommitChanges in the guest walks
  * (`effect-commit.js`): the device (or the state manager the program set),
  * where the pass's date is, how many
- * entries, a scratch block for constants, how many triggers, the triggers --
- * versions whose change sends the commit to the host -- then the entries, each
+ * entries, a scratch block for constants, how many triggers, how many stale
+ * pairs, the triggers -- versions whose change sends the commit to the host --
+ * the stale pairs -- an expression's input version and its cell's date
+ * (`CELL`), the input newer than the cell sending BeginPass and the commit to
+ * the host, which works the expression out again -- then the entries, each
  * a kind (`COMMIT_KIND`), the version that says it changed, the device
  * setter's slot, two arguments, the data, a mode and the setter's arity.
  */
 export const COMMIT = Object.freeze({ DEVICE: 0, APPLIED: 4, ENTRIES: 8, SCRATCH: 12,
-    TRIGGERS: 16, HEADER: 20, ENTRY: 32 });
+    TRIGGERS: 16, STALE: 20, HEADER: 24, ENTRY: 32 });
+/**
+ * A state expression's cell in guest memory: the word the host last set the
+ * state to from it, and the clock's reading before that evaluation -- every
+ * input written since is dated later.
+ */
+export const CELL = Object.freeze({ VALUE: 0, DATE: 4, SIZE: 8 });
 /**
  * The kinds of a commit entry: constants as the parameter's words, as bools
  * of an int's or of a float's, as floats of an int's or of a bool's, as ints
@@ -352,6 +361,8 @@ const COLOR_SCALE = 255;
  * @property {Set<string>} skip   Constants Ex was told not to set.
  * @property {number} block   Its block in guest memory (`EFFECT_BLOCK`), or 0.
  * @property {number} [commitScratch]   The block its commits in the guest gather constants in.
+ * @property {Map<StateModel, number>} [cells]  Each state expression's cell (`CELL`) a table
+ *     sets the state from.
  * @property {number} version   Which ID3DXEffect layout it was handed out as.
  */
 
@@ -1733,7 +1744,13 @@ export function createEffects(host, helpers, options = {}){
                     ? (x !== 0 ? 1 : 0) : Math.trunc(x) | 0;
             });
             const held = numbers.map(x=>(source.type === PT.FLOAT ? floatBits(x) : x >>> 0));
-            return shaped(state, source.type, held, numbers, null, dirty);
+            const value = shaped(state, source.type, held, numbers, null, dirty);
+            const cell = effect.cells?.get(state);
+            if (cell !== undefined)
+            {
+                putU32s(cell, [value.words[0] ?? 0, clockAt === 0 ? 0 : (u32(clockAt) - 1) >>> 0]);
+            }
+            return value;
         }
         const p = effect.byName.get(source.path);
         if (!p)
@@ -2300,6 +2317,8 @@ export function createEffects(host, helpers, options = {}){
         };
         /** @type {number[]} */
         const triggers = [];
+        /** Each expression input's version and its cell's date. @type {number[]} */
+        const stale = [];
         /** @param {string} name */
         const slotOf = name=>SETTERS[name][effect.manager ? 1 : 0];
         /**
@@ -2474,7 +2493,8 @@ export function createEffects(host, helpers, options = {}){
                     0, call[3]]);
                 return true;
             }
-            if (source.kind !== 'expression' || !word || state.kind === 'texture')
+            if (source.kind !== 'expression' || (!word && state.value !== 'float')
+                || state.kind === 'texture')
             {
                 why = `${state.name} from a ${source.kind}`;
                 return false;
@@ -2482,8 +2502,9 @@ export function createEffects(host, helpers, options = {}){
             const copies = source.program.copies;
             const input = source.program.inputs.length === 1 ? source.program.inputs[0] : null;
             const p = input ? effect.byName.get(input.name) : undefined;
-            if (!copies || !input || !p || input.set !== 2 || copies.offset !== input.index * 4
-                || source.count !== 1 || (source.type !== PT.INT && source.type !== PT.BOOL
+            if (!word || !copies || !input || !p || input.set !== 2
+                || copies.offset !== input.index * 4 || source.count !== 1
+                || (source.type !== PT.INT && source.type !== PT.BOOL
                     // A float result is truncated into a dword as an int is; into a
                     // colour the host keeps its bits.
                     && (source.type !== PT.FLOAT || state.value !== 'dword'))
@@ -2491,8 +2512,34 @@ export function createEffects(host, helpers, options = {}){
                 || (p.model.type !== PT.INT && p.model.type !== PT.BOOL
                     && p.model.type !== PT.FLOAT))
             {
-                why = `${state.name} from an expression that is no copy of a scalar`;
-                return false;
+                // Any other expression: the host works it out into a cell the
+                // entry sets the state from, and an input written since sends
+                // the pass to the host, which works it out again.
+                effect.cells ??= new Map();
+                let cell = effect.cells.get(state);
+                if (cell === undefined)
+                {
+                    cell = heap().allocate(CELL.SIZE);
+                    if (cell === 0)
+                    {
+                        why = 'no room';
+                        return false;
+                    }
+                    effect.owned.push(cell);
+                    effect.cells.set(state, cell);
+                    valueOf(effect, null, state);
+                }
+                for (const constant of source.program.inputs)
+                {
+                    const named = effect.byName.get(constant.name);
+                    if (named)
+                    {
+                        stale.push(named.store.at, cell + CELL.DATE);
+                    }
+                }
+                entries.push([COMMIT_KIND.STATE, cell + CELL.DATE, call[0], call[1], call[2],
+                    cell + CELL.VALUE, 0, call[3]]);
+                return true;
             }
             entries.push([p.model.type === PT.FLOAT ? COMMIT_KIND.COPIED_FLOAT
                 : COMMIT_KIND.COPIED, p.store.at, call[0], call[1], call[2], dataAt(p),
@@ -2568,7 +2615,8 @@ export function createEffects(host, helpers, options = {}){
             }
         }
         effect.commitScratch ||= heap().allocate(SCRATCH_BYTES);
-        const tail = COMMIT.HEADER + 4 * triggers.length + COMMIT.ENTRY * entries.length;
+        const tail = COMMIT.HEADER + 4 * triggers.length + 4 * stale.length
+            + COMMIT.ENTRY * entries.length;
         const table = heap().allocate(tail + 4 + 4 * fixed.length);
         if (table === 0 || effect.commitScratch === 0)
         {
@@ -2583,7 +2631,8 @@ export function createEffects(host, helpers, options = {}){
         }
         host.writeMemory(table, u32Bytes([effect.manager || effect.device, pass.appliedAt,
             entries.length,
-            effect.commitScratch, triggers.length, ...triggers, ...entries.flat(), 0, ...fixed]));
+            effect.commitScratch, triggers.length, stale.length / 2, ...triggers, ...stale,
+            ...entries.flat(), 0, ...fixed]));
         return table;
     };
 

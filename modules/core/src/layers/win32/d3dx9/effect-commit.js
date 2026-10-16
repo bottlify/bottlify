@@ -52,8 +52,9 @@ const KEEPS = 6;
 /** IDirect3DStateBlock9's Capture and Apply. */
 const CAPTURE = 4;
 const APPLY = 5;
-/** A table's header: device, where the pass's date is, entries, scratch, triggers. */
-const HEADER = 20;
+/** A table's header: device, where the pass's date is, entries, scratch, triggers, stale pairs. */
+const STALE = 20;
+const HEADER = 24;
 /** An entry: kind, version, setter's slot, two arguments, data, mode, arity. */
 const ENTRY = 32;
 
@@ -84,6 +85,17 @@ export function CommitChanges({ u32, callStd, host }, self){
             return host();
         }
     }
+    // An expression's input written after its cell was worked out: the host's.
+    let pair = (table + HEADER + u32(table + 16) * 4) >>> 0;
+    const pairsEnd = (pair + u32(table + STALE) * 8) >>> 0;
+    while (pair < pairsEnd)
+    {
+        if (u32(u32(pair)) > u32(u32(pair + 4)))
+        {
+            return host();
+        }
+        pair = (pair + 8) >>> 0;
+    }
     return callStd(u32(block + BLOCK_WALK), block, table, 0) >>> 0;
 }
 
@@ -113,6 +125,17 @@ export function BeginPass({ u32, setU32, callStd, host }, self, index){
     if (table === 0)
     {
         return host();
+    }
+    // An expression's input written after its cell was worked out: the host's.
+    let pair = (table + HEADER + u32(table + 16) * 4) >>> 0;
+    const pairsEnd = (pair + u32(table + STALE) * 8) >>> 0;
+    while (pair < pairsEnd)
+    {
+        if (u32(u32(pair)) > u32(u32(pair + 4)))
+        {
+            return host();
+        }
+        pair = (pair + 8) >>> 0;
     }
     setU32(block + BLOCK_ACTIVE, u32(passes + 8 + index * 8));
     setU32(block + BLOCK_COMMIT, table);
@@ -301,7 +324,7 @@ export function Walk({ u32, setU32, f32, setF32, callStd }, block, table, all){
     const now = u32(clock);
     setU32(clock, (now + 1) | 0);
     let answer = 0;
-    let at = (table + HEADER + triggers * 4) >>> 0;
+    let at = (table + HEADER + triggers * 4 + u32(table + STALE) * 8) >>> 0;
     const end = (at + u32(table + 8) * ENTRY) >>> 0;
     while (at < end)
     {
