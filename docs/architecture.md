@@ -371,16 +371,20 @@ There are no page tables: each 4 KiB page has one byte of flags — `INACCESSIBL
   run on: the program is told it has one processor for each executor -- by GetSystemInfo, the
   process block, `cpuid` and the rest -- and `cpuid` answers each executor's number as its APIC
   id, so a thread pinned to a processor reads that processor's. The process's own thread runs its threads
-  too, and answers the calls the others' threads make -- at each of its own crossings into the host
-  and between its turns, each caller the current thread while it is answered. An executor keeps its
+  too, and answers the calls the others' threads make -- at each of its own crossings into the host,
+  between its turns, and inside them: an executor that needs its answer (a call, a fault, a slice's
+  end) stores a word the process's translated code reads at every back edge as the floor of its
+  budget, so its slice leaves there, the calls are answered and the slice goes on -- each caller the
+  current thread while it is answered. An executor keeps its
   thread slice after slice while no ready thread waits for one and the process wants none back
   (suspended, ended by another): its event loop turns in between, and the process hears of the
   thread at most every 250 ms. The process's thread with nothing of its own to run waits for the
   others until its soonest deadline, 4 ms at most; past 2 ms of that, an executor keeping a thread
   the process's executor may run lets it go at its slice's end and the thread comes to the
   process's executor, so a program whose one working thread was started while its first still ran
-  runs it there. Its own turns are long while no other executor runs a thread, and a thread made
-  ready that a free executor could take ends such a turn. An executor past the first is a cork host
+  runs it there. Its own turns are as long while other executors run threads as while none does,
+  and a thread made ready that a free executor could take ends such a turn, whether its own thread
+  or an answer to another's made it ready, as does another executor's slice ending. An executor past the first is a cork host
   in a worker of its own over the process's memory, opened when a ready thread wants one (a thread
   more than the open executors run, or one whose affinity mask names it): a program of one thread
   opens none

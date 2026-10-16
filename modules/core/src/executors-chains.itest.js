@@ -255,6 +255,53 @@ test('the process\'s first thread keeps the process\'s own executor when the exe
     }
 });
 
+test('a thread on another executor calling into the host is answered at the process\'s next back'
+    + ' edge while the process\'s own thread only computes', async()=>{
+    // The worker calls into the host CALLS times; the main thread spins on a
+    // word the worker sets after, never calling. Each call is answered inside
+    // the main thread's turn, which the other executor's ask interrupts
+    // (`interruptProcess`): its turns stay long, not one a call -- where the
+    // asks waited for the turn's end, a turn was a quantum, and each call
+    // waited 0.57 ms for it.
+    const CALLS = 20_000;
+    const executable = buildProgram(
+        ['CreateThread', 'WaitForSingleObject', 'GetCurrentProcessId', 'ExitProcess'],
+        { first: [0, 0, 0, 0], done: [0, 0, 0, 0] }, ({ call, at, start })=>({
+            main: [
+                ...start('first'),
+                0x83, 0x3d, ...u32(at('done')), 0x00, // S: cmp dword [done], 0
+                0x74, 0xf7, //                     je S
+                0x6a, 0xff, 0xff, 0x35, ...u32(at('first')), ...call('WaitForSingleObject'),
+                0x6a, 0x07, ...call('ExitProcess'),
+            ],
+            worker: [
+                0xbe, ...u32(CALLS), //            mov esi, CALLS
+                ...call('GetCurrentProcessId'), // L: call [GetCurrentProcessId]
+                0x4e, 0x75, 0xf7, //               dec esi; jnz L
+                0xc7, 0x05, ...u32(at('done')), ...u32(1), // mov dword [done], 1
+                0x31, 0xc0, 0xc2, 0x04, 0x00, //   xor eax, eax; ret 4
+            ],
+        }));
+    const app = await createApp({ executable, cpu: { cores: 2, eager: true } });
+    try
+    {
+        assert.equal((await app.run({ timeoutMs: 60_000 })) >>> 0, 7);
+        const tables = await app.diagnostics();
+        const byName = Object.fromEntries((Array.isArray(tables) ? tables : [])
+            .map(table=>[table.name, table]));
+        const scheduler = byName.kernel?.metrics?.scheduler ?? byName.kernel?.metrics;
+        const shared = JSON.parse(scheduler?.sharedTime ?? '{}');
+        assert.ok(shared.crossings >= CALLS, `${shared.crossings} calls crossed from the worker`);
+        assert.ok(byName.cpu?.metrics?.interrupts > 0, 'the process\'s slices were interrupted');
+        assert.ok(scheduler.turns * 20 < shared.crossings,
+            `${scheduler.turns} turns of the process's own for ${shared.crossings} crossings`);
+    }
+    finally
+    {
+        await app.dispose();
+    }
+});
+
 test('a thread sleeping on the process\'s executor wakes at its time while the other executor'
     + ' runs a thread that never calls into the host', async()=>{
     const SLEEPS = 5;

@@ -107,6 +107,9 @@ async function serve({ engineUrl, config, memory, channel: buffer, bell, unbroke
     host.onTrap((/** @type {number} */ value)=>{
         const asked = performance.now();
         channel.say(Turn.TRAP, value);
+        // The process's slice ends at its next back edge to answer, not at its
+        // next crossing or its end.
+        host.interruptProcess();
         channel.await(Turn.TRAP);
         spent.answerWaitMs += performance.now() - asked;
         spent.traps++;
@@ -124,6 +127,7 @@ async function serve({ engineUrl, config, memory, channel: buffer, bell, unbroke
         const asked = performance.now();
         channel.write(fault);
         channel.say(Turn.FAULT);
+        host.interruptProcess();
         channel.await(Turn.FAULT);
         spent.answerWaitMs += performance.now() - asked;
         spent.faults++;
@@ -245,6 +249,8 @@ async function serve({ engineUrl, config, memory, channel: buffer, bell, unbroke
         }
         channel.say(Turn.DONE, retired, (host.halted() ? Said.HALTED : 0)
             | (fault !== null ? Said.FAULTED : 0));
+        // Taken now, so this executor is given its next thread now.
+        host.interruptProcess();
         // The executor's own feed, as the process's is once a frame: what its
         // interpreters found hot is formed while it waits for the next slice.
         const feedFrom = performance.now();

@@ -662,6 +662,9 @@ export function createCpuModule(){
                         // refuses a slot rather than laying one outside it.
                         capacity: settings.thunkCapacity,
                     });
+                    // Another executor's ask, at a back edge of this one's
+                    // slice (`interruptProcess`): answered as at a crossing.
+                    state.host.onInterrupt?.(()=>state.beforeTrap?.());
                     state.host.onTrap((/** @type {number} */ id)=>{
                         state.beforeTrap?.();
                         // A processor exception arrives as a trap like any other,
@@ -989,6 +992,13 @@ export function createCpuModule(){
                 processors: ()=>processorsFor({ engine, executors: settings.executors }),
                 /** The word their turns ring: one wait for all of them. */
                 executorBell: ()=>state.bell,
+                /**
+                 * Whether the other executors' asks end this one's slice at
+                 * its next back edge (`interruptProcess`) rather than waiting
+                 * for its next crossing or its slice's end: a slice here may
+                 * then be long while they run.
+                 */
+                interruptible: ()=>state.host?.interruptible === true,
                 /**
                  * A routine of the host's no slice is to end inside (the
                  * kernel's `atomicCode`), told to every executor: one that
@@ -1355,6 +1365,9 @@ export function createCpuModule(){
                     // program stuck in a trap is visible as a count that grows
                     // with the turns.
                     trapCrossings: instance.host.trapCrossings(),
+                    // The other executors' asks that ended a run of this one's
+                    // translated code at a back edge.
+                    interrupts: instance.host.interrupts?.() ?? null,
                     ports: instance.host.ports ? instance.host.ports() : null,
                     // Under cork, the last slices: where each began and ended and what
                     // it retired, so a run that makes no progress says where it sits.

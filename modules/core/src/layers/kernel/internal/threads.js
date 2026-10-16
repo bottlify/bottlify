@@ -901,6 +901,8 @@ export function createScheduler(options){
     let soloShared = false;
     /** Set while a turn among ready threads runs past a quantum (`turnMs`). */
     let longTurn = false;
+    /** Set when another executor's call, answered inside this one's slice, made a thread ready. */
+    let readiedInAnswer = false;
 
     /**
      * A thread made ready during a long turn here that one of the other
@@ -916,7 +918,14 @@ export function createScheduler(options){
      * @param {any} thread
      */
     const noteReady = thread=>{
-        if (!inSlice || answering || thread === current
+        if (inSlice && answering)
+        {
+            // Made ready by another executor's call answered inside this one's
+            // slice: weighed once the answers are given (`answerExecutors`).
+            readiedInAnswer = true;
+            return;
+        }
+        if (!inSlice || thread === current
             || thread.state !== ThreadState.READY || thread.suspendCount > 0)
         {
             return;
@@ -1127,6 +1136,8 @@ export function createScheduler(options){
             return { ran: null, instructions: 0 };
         }
         answering = true;
+        const inTurn = inSlice;
+        readiedInAnswer = false;
         let ran = null;
         let instructions = 0;
         const from = wall();
@@ -1177,6 +1188,20 @@ export function createScheduler(options){
             answering = false;
             sharedTime.answerMs += wall() - from;
             sharedTime.answers++;
+        }
+        // Inside this executor's turn (a crossing of its thread, or the others'
+        // word at a back edge): a thread an answer made ready, or one whose
+        // slice there was taken, is weighed as a wake during the turn -- a
+        // long one ends, so the next choice places it (`noteReady`).
+        if (inTurn && (readiedInAnswer || ran !== null))
+        {
+            for (const thread of runnable())
+            {
+                if (thread !== current)
+                {
+                    noteReady(thread);
+                }
+            }
         }
         return { ran, instructions };
     };
@@ -1262,13 +1287,16 @@ export function createScheduler(options){
         // turning where a lone thread lost nothing; code that runs slower
         // keeps the quantum, and no ready thread waits longer than it did for
         // a quantum of it. Not with a deadline within a few such turns, nor
-        // with other executors' threads running: their calls are answered
-        // between turns.
+        // with other executors' threads running where their calls are
+        // answered only between turns and at this one's crossings: where they
+        // interrupt this one's slice (`interruptible`), at its next back edge,
+        // its turns are as long with them running as without.
         const clear = noDeadlineBefore === null ? Infinity : noDeadlineBefore - now();
-        const solo = (!shared || placed.size === 0) && readyAtSlice.size === 0
+        const others = placed.size === 0 || cpu.interruptible?.() === true;
+        const solo = (!shared || others) && readyAtSlice.size === 0
             && clear > SOLO_CLEAR_MS;
         const asked = solo ? soloQuantum
-            : turnMs > 0 && placed.size === 0 && clear > turnMs * TURN_CLEAR
+            : turnMs > 0 && others && clear > turnMs * TURN_CLEAR
                 ? Math.min(soloQuantum, Math.max(quantum, Math.floor(perMs * turnMs)))
                 : quantum;
         soloShared = shared && solo;

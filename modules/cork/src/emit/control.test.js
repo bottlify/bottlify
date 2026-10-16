@@ -19,6 +19,7 @@ import { features } from '../wasm/features.js';
 import { Body, ModuleBuilder, ValType } from '../wasm/encoder.js';
 import { I32 } from './flags.js';
 import { Exit, TIER_ENTRY } from './region.js';
+import { ownLayout, sharedLayout } from '../runtime/layout.js';
 import { WasmExit } from '../interp-wasm.js';
 
 const CODE = 0x1000;
@@ -604,4 +605,48 @@ test('under resume a tier that answers 0 is none: the miss leaves untranslated a
 
 test('the tier\'s code the transfer goes on at is the tier\'s own', ()=>{
     assert.equal(TIER_ENTRY, WasmExit.ENTRY);
+});
+
+test('where other executors run beside it, a back edge leaves on the interrupt word with budget'
+    + ' left, and goes round while the word is clear', ()=>{
+    const loops = {
+        // A block that is its own loop.
+        self: [
+            0xb9, ...u32(1000),         //     mov ecx, 1000
+            0x49,                       // L:  dec ecx
+            0x75, 0xfd,                 //     jnz L
+            0xf4,                       //     hlt
+        ],
+        // A loop of two blocks, closed by a jump back to its head.
+        jump: [
+            0xb9, ...u32(1000),         //     mov ecx, 1000
+            0x49,                       // L:  dec ecx
+            0x74, 0x03,                 //     jz out
+            0x90,                       //     nop
+            0xeb, 0xfa,                 //     jmp L
+            0xf4,                       // out: hlt
+        ],
+    };
+    for (const [shape, code] of Object.entries(loops))
+    {
+        const m = createTestMachine({ processors: 2 });
+        m.write(CODE, code);
+        m.setReg('esp', STACK);
+        const at = /** @type {number} */ (m.layout.interrupt);
+        assert.ok(at >= 0, 'a layout with another executor has the word');
+        const word = new DataView(m.memory.buffer);
+        word.setInt32(at, 0x7fffffff, true);
+        const asked = m.runProgram(CODE, { budget: 1_000_000 });
+        assert.equal(asked.kind, Exit.BUDGET, `${shape}: left at a back edge`);
+        assert.ok(asked.retired < 10 && m.reg('ecx') >= 998,
+            `${shape}: after ${asked.retired} instructions, ecx ${m.reg('ecx')}`);
+        word.setInt32(at, 0, true);
+        const clear = m.runProgram(CODE, { budget: 1_000_000 });
+        assert.equal(clear.kind, Exit.HALT, `${shape}: round to the end`);
+        assert.equal(m.reg('ecx'), 0, shape);
+    }
+    assert.equal(createTestMachine().layout.interrupt, undefined,
+        'one executor\'s layout has no word: its back edges look at the budget alone');
+    assert.equal(sharedLayout(ownLayout({ ramSize: 1 << 20, processors: 2 })).interrupt, undefined,
+        'nor the layout the other executors share');
 });

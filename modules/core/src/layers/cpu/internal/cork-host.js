@@ -257,6 +257,20 @@ export function createCorkHost(config){
     const ram = new Uint8Array(memory.buffer, layout.ramBase, layout.ramSize);
     const whole = new DataView(memory.buffer);
     const wholeWords = new Int32Array(memory.buffer);
+    // The process's own executor's interrupt word (`layout.interrupt`), where
+    // the process has others: they store it when they need its answer, and its
+    // translated code leaves at the next back edge; it reads and clears it.
+    const interruptWord = own.interrupt === undefined ? -1 : own.interrupt >>> 2;
+    const interruptible = executor === 0 && interruptWord >= 0;
+    /**
+     * Answers what the other executors stored the word for (`onInterrupt`).
+     *
+     * @type {(() => void) | null}
+     */
+    let interruptHandler = null;
+    let interrupts = 0;
+    /** Whether another executor stored the word since this one last took it. */
+    const interrupted = ()=>interruptible && Atomics.load(wholeWords, interruptWord) !== 0;
 
     /** The flags word, whole: the record a region left is folded into it first. */
     const eflagsWord = ()=>eflagsOf(blockView, own) >>> 0;
@@ -1116,6 +1130,15 @@ export function createCorkHost(config){
         let jumpedIn = false;
         while (remaining > 0 && !isHalted() && !isStopped() && !isFeedDue())
         {
+            if (interrupted())
+            {
+                // Cleared before it is answered: a store after the answer
+                // looked is the next one's.
+                Atomics.store(wholeWords, interruptWord, 0);
+                interrupts++;
+                interruptHandler?.();
+                continue;
+            }
             if (yieldCheck !== null && ran > 0 && yieldCheck())
             {
                 break;
@@ -1203,6 +1226,12 @@ export function createCorkHost(config){
                 }
                 if (exit.kind === 'budget')
                 {
+                    if (remaining > 0 && interrupted())
+                    {
+                        // Left at a back edge for the word, not the budget:
+                        // answered above, and the slice goes on.
+                        continue;
+                    }
                     break;
                 }
                 if (exit.retired === 0 && eip() === at)
@@ -1343,6 +1372,13 @@ export function createCorkHost(config){
         },
         stop(){
             stopped = true;
+            // Where the others interrupt this one, the stop takes the same
+            // road: the slice ends at its next back edge, not at its next
+            // region's end.
+            if (interruptible)
+            {
+                Atomics.store(wholeWords, interruptWord, 0x7fffffff);
+            }
         },
         /** Whether something asked the turn to end since the slice began (`stop`). */
         stopRequested: ()=>stopped,
@@ -1356,6 +1392,32 @@ export function createCorkHost(config){
         setYieldCheck(check){
             yieldCheck = check;
         },
+        /**
+         * Whether this executor's translated code leaves at a back edge when
+         * another stores its interrupt word: the process's own, with others.
+         */
+        interruptible,
+        /**
+         * What this executor runs, inside a slice, when another stored the word
+         * (`interruptProcess`); the slice goes on after.
+         *
+         * @param {(() => void) | null} handler
+         */
+        onInterrupt(handler){
+            interruptHandler = handler;
+        },
+        /**
+         * Asks the process's own executor for its answer before its slice ends:
+         * stored after the ask is said, so the answer finds it.
+         */
+        interruptProcess(){
+            if (interruptWord >= 0)
+            {
+                Atomics.store(wholeWords, interruptWord, 0x7fffffff);
+            }
+        },
+        /** The slices the word interrupted. */
+        interrupts: ()=>interrupts,
         runSlice,
 
         /** One byte of guest memory, for the runtime's decoder. @param {number} address */

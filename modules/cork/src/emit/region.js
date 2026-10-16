@@ -2500,7 +2500,7 @@ export class RegionEmitter {
             this.charge();
             this.pushBranchCondition(last);
             this.openIf('taken');
-            b.localGet(Local.budget).i32const(0).op(I32.leS);
+            this.spentTest();
             this.openGuard('spent');
             this.exitAt(block.start, Exit.BUDGET);
             this.close();
@@ -2699,6 +2699,28 @@ export class RegionEmitter {
     }
 
     /**
+     * Whether a back edge leaves for the host: the budget spent -- at or under
+     * zero, or, where other executors run beside this one, under the word they
+     * store when they need its answer (`layout.interrupt`), all ones but the
+     * sign then. An atomic load, not a plain one: a loop that stores nothing
+     * would have its plain load of the word taken out of the loop, and the
+     * other executor's store never seen. On x86 it is the plain load.
+     */
+    spentTest(){
+        const { b } = this;
+        b.localGet(Local.budget);
+        if (this.layout.interrupt === undefined)
+        {
+            b.i32const(0);
+        }
+        else
+        {
+            atState(this.context, b).atomic('load_i32', { offset: this.layout.interrupt });
+        }
+        b.op(I32.leS);
+    }
+
+    /**
      * Charges the block's instructions so far to the budget, which is the
      * count too (`origin`). On a conditional path (inside an `if` the block
      * opened) the count stays owed: the path that falls through charges it at
@@ -2754,7 +2776,7 @@ export class RegionEmitter {
                     // repeat the body past a fall-through it never took.
                     this.pushBranchCondition(last);
                     this.openIf('taken');
-                    this.b.localGet(Local.budget).i32const(0).op(I32.leS);
+                    this.spentTest();
                     this.openGuard('spent');
                     this.exitAt(block.start, Exit.BUDGET);
                     this.close();
@@ -2933,7 +2955,7 @@ export class RegionEmitter {
         // to a block the dispatch does not hold, out through the entry hash:
         // a copy's (`emitCopies`), or, from a copy, the region's own.
         const around = !this.copying && this.ranges.some(range=>range.loop && range.lo === label);
-        b.localGet(Local.budget).i32const(0).op(I32.leS);
+        this.spentTest();
         this.openGuard('spent');
         this.exitAfterEdge(target, Exit.BUDGET);
         this.close();

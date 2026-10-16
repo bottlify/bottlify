@@ -376,6 +376,23 @@ it opens none; two threads on two 0.670 s against 0.830 on one, four on four 0.5
 threads wait. A run of four cores is made in about 150 ms against 330 to 410 (runs not recorded),
 and the core suite's process-spawning file on four cores took 47.7 s against 59 to 60.
 
+**Measured** (2026-10-16, the process's executor interrupted by the others: a word they store when
+they need its answer, which its translated code reads at every back edge as the floor of its
+budget; node 22.22.0, the same VM): a worker thread on a second executor calling into the host
+20 000 times while the main thread spins on the process's own without a call took 10.8 to 11.6 s
+before -- each call waited 0.57 ms for the end of a turn kept a quantum long, 17 to 18 thousand
+turns -- and 0.14 to 0.22 s after, 4 to 7 us a call in 15 to 19 turns (three runs each). The word
+costs a load at each back edge where a process has more than one core: the cork benchmark on a
+layout of four, its program on the first executor alone, against the same without the word -- two
+rounds of ten reps a workload, the mean of the three fastest, in both orders: geometric means
+x1.004 and x0.987, the same tree against itself x1.001 and x0.984; per workload within the ten
+per cent a steady-state figure moves between processes. Not distinguishable. The executor sweep
+(1 to 4 threads on 1, 2 and 4 executors, a host call every 4096 turns or none, five runs a point,
+the mean of the fastest three, against the same without the word): on one executor, where nothing
+changed, x0.96 to x1.06 -- the noise; with others x0.88 to x1.05, two threads on two 0.566 s against
+0.644, four on four 0.441 against 0.485, four on two with host calls 0.849 against 0.933, more
+threads than executors no slower.
+
 **What it costs, and when it pays.** The atomic variant makes every executor slower by the tax *t*
 measured before stage 1. Two executors win when their speedup *S* satisfies *S* × (1 − *t*) > 1.
 At *t* = 20 % that is *S* > 1.25, which by Amdahl's law needs more than 40 % of the work to run in
