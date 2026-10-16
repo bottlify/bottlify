@@ -22,7 +22,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createCorkHost } from '../../cpu/internal/cork-host.js';
 import * as cork from '../../../../../cork/src/index.js';
-import { SHADOW, commandCode } from './shadow.js';
+import { SHADOW, SURFACE, commandCode } from './shadow.js';
 import { COMMAND_MIRRORS as MIRRORS_9 } from './d3d9.js';
 import { COMMAND_MIRRORS as MIRRORS_8 } from './d3d8.js';
 import * as D3D9 from '../d3d9/commands.js';
@@ -39,6 +39,8 @@ const RING = 0xd000;
 const RING_BYTES = 0x4000;
 const DATA = 0x14000;
 const OBJECTS = 0x18000;
+/** Each surface's block (`SURFACE`), the word after its interface pointing there. */
+const SURFACES = 0x19000;
 const STACK = 0x300000;
 /** The device's interface: its block one word on. */
 const DEVICE = OBJECTS + 0x800;
@@ -218,8 +220,22 @@ function gate(api, table){
             const names = Object.keys(made);
             names.forEach((key, i)=>{
                 const at = OBJECTS + i * 16;
-                // An object's interface points at its block one word on.
-                host.writePhysical(at + 4, new Uint8Array(u32(BLOCK)));
+                // An object's interface points at its block one word on; a
+                // surface's at a block of its own with its description, as the
+                // seam publishes one.
+                /** @type {{ desc?: any }} */
+                const held = {};
+                const surface = typeof made[key].LockRect === 'function'
+                    && typeof made[key].GetDesc === 'function'
+                    && made[key].GetDesc(held) === D3D_OK && held.desc;
+                const block = surface ? SURFACES + i * SURFACE.SIZE : BLOCK;
+                if (surface)
+                {
+                    const { Format, Type, Usage, Pool, Width, Height } = held.desc;
+                    host.writePhysical(block, new Uint8Array(new Uint32Array([0, Format, Type,
+                        Usage, Pool, 0, 0, Width, Height]).buffer));
+                }
+                host.writePhysical(at + 4, new Uint8Array(u32(block)));
                 pointers.set(at, made[key]);
             });
             /** @param {number | string} arg */
@@ -467,6 +483,25 @@ test('Direct3D 9: every call the command ring answers for in the guest is one th
         };
         gate({ ...D3D9, mirrors: MIRRORS_9, device: device9 }, {
             ...shared(drawable9),
+            SetRenderTarget: [
+                { label: 'a target', args: [0, 'target'], setup: offscreen },
+                { label: 'the second target', args: [1, 'target'], setup: offscreen },
+                { label: 'none', args: [0, 0] },
+                { label: 'a depth surface for a target', args: [0, 'depth'], setup: offscreen },
+                { label: 'a texture level that is no target', args: [0, 'level'],
+                    setup: (device, made)=>{
+                        texture(device, made);
+                        /** @type {{ surface?: any }} */
+                        const out = {};
+                        assert.equal(made.texture.GetSurfaceLevel(0, out), D3D_OK);
+                        made.level = out.surface;
+                    } },
+            ],
+            SetDepthStencilSurface: [
+                { label: 'a depth surface', args: ['depth'], setup: offscreen },
+                { label: 'none', args: [0] },
+                { label: 'a target for a depth surface', args: ['target'], setup: offscreen },
+            ],
             SetTexture: [
                 { label: 'a texture', args: [0, 'texture'], setup: texture },
                 { label: 'none', args: [0, 0] },

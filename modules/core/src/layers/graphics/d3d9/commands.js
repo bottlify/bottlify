@@ -17,6 +17,10 @@ import { SHARED_COMMANDS, commandSet } from '../d3d8/commands.js';
 import { DRAW } from '../seam/shadow.js';
 import { D3DERR_INVALIDCALL } from './constants.js';
 
+/** D3DUSAGE_RENDERTARGET and D3DUSAGE_DEPTHSTENCIL. */
+const D3DUSAGE_RENDERTARGET = 0x1;
+const D3DUSAGE_DEPTHSTENCIL = 0x2;
+
 /**
  * A constant setter: `count` registers of four floats or integers, or of one
  * boolean, from the copy.
@@ -51,6 +55,15 @@ const set = commandSet([...IDIRECT3DDEVICE9_SLOTS, ...STATE_BLOCK_SLOTS], {
     SetStreamSource: { args: 4, objects: [1], within: [{ arg: 0, ranges: [[0, 15]] }],
         make: (d, c)=>d.SetStreamSource(c.arg(0), c.object(), c.arg(2), c.arg(3)) },
     SetIndices: { args: 1, objects: [0], make: (d, c)=>d.SetIndices(c.object()) },
+    // The one target, of a surface made to be one; it resets the viewport, which the
+    // block mirrors from the surface's (`RENDER_TARGET_MIRROR`), and the scissor.
+    SetRenderTarget: { args: 2, objects: [1], within: [{ arg: 0, ranges: [[0, 0]] }],
+        surfaceUsage: { arg: 1, mask: D3DUSAGE_RENDERTARGET },
+        make: (d, c)=>d.SetRenderTarget(c.arg(0), c.object()) },
+    // A depth surface, or none.
+    SetDepthStencilSurface: { args: 1, objects: [0],
+        surfaceUsage: { arg: 0, mask: D3DUSAGE_DEPTHSTENCIL, nullable: true },
+        make: (d, c)=>d.SetDepthStencilSurface(c.object()) },
     SetVertexDeclaration: { args: 1, objects: [0],
         make: (d, c)=>d.SetVertexDeclaration(c.object()) },
     SetVertexShader: { args: 1, objects: [0], make: (d, c)=>d.SetVertexShader(c.object()) },

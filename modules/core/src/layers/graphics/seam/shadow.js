@@ -1163,6 +1163,21 @@ function commandChecks(shape, at){
             [0x3b, 0x81, ...dword(shape.below.word)],            // cmp eax, [ecx+word]
             { jcc: 0x73, to: 'out', near: true });               // jae out
     }
+    if (shape.surfaceUsage)
+    {
+        const { arg, mask, nullable = false } = shape.surfaceUsage;
+        parts.push(
+            [0x8b, 0x44, 0x24, at(arg)],                         // mov eax, [esp+arg]
+            [0x85, 0xc0],                                        // test eax, eax
+            { jcc: 0x74, to: nullable ? 'usable' : 'out', near: true }, // jz usable / out
+            [0x8b, 0x40, 0x04],                                  // mov eax, [eax+4]: its block
+            [0x85, 0xc0],                                        // test eax, eax
+            { jcc: 0x74, to: 'out', near: true },                // jz out
+            // test dword [eax + DESC + Usage], mask
+            [0xf7, 0x80, ...dword(SURFACE.DESC + 8), ...dword(mask)],
+            { jcc: 0x74, to: 'out', near: true },                // jz out
+            { label: 'usable' });
+    }
     if (shape.validated)
     {
         parts.push(
@@ -1224,6 +1239,10 @@ function commandChecks(shape, at){
  *     the device takes or not by its value alone: one with a bit of `when` is
  *     taken here only if the host has seen the device take it, in that table
  *     of `SHADOW.VALIDATED`
+ * @property {{ arg: number, mask: number, nullable?: boolean }} [surfaceUsage]  an
+ *     argument the device takes only as a surface whose usage has a bit of `mask`, read
+ *     from the surface's block (`SURFACE`, the word after its interface): a surface
+ *     with no block is the host's, and so is a null one unless `nullable`
  * @property {number} [needs]  the `DRAW` bits the device must have for the call
  * @property {number} [refuses]  and those it must not
  * @property {boolean} [fresh]  the call reads what a state block applied in the
@@ -1545,6 +1564,26 @@ export const VIEWPORT_MIRROR = Object.freeze([
     [0xf3, 0xa5],                                                // rep movsd
     [0x89, 0xd1],                                                // mov ecx, edx
     [0x5f, 0x5e],                                                // pop edi; pop esi
+]);
+
+/**
+ * The same for Direct3D 9's SetRenderTarget, after its checks have found the
+ * surface a target with a block: the viewport a new target brings -- all of it,
+ * depths 0 and 1 -- and the target's size, from the surface's description.
+ */
+export const RENDER_TARGET_MIRROR = Object.freeze([
+    [0x8b, 0x44, 0x24, 0x0c],                                    // mov eax, [esp+12]: the surface
+    [0x8b, 0x40, 0x04],                                          // mov eax, [eax+4]: its block
+    [0x8b, 0x90, ...dword(SURFACE.DESC + 24)],                   // mov edx, [eax+Width]
+    [0x89, 0x91, ...dword(SHADOW.VIEWPORT + 8)],                 // mov [ecx+viewport W], edx
+    [0x89, 0x91, ...dword(SHADOW.TARGET_WIDTH)],                 // mov [ecx+target W], edx
+    [0x8b, 0x90, ...dword(SURFACE.DESC + 28)],                   // mov edx, [eax+Height]
+    [0x89, 0x91, ...dword(SHADOW.VIEWPORT + 12)],                // mov [ecx+viewport H], edx
+    [0x89, 0x91, ...dword(SHADOW.TARGET_HEIGHT)],                // mov [ecx+target H], edx
+    [0xc7, 0x81, ...dword(SHADOW.VIEWPORT), ...dword(0)],        // X 0
+    [0xc7, 0x81, ...dword(SHADOW.VIEWPORT + 4), ...dword(0)],    // Y 0
+    [0xc7, 0x81, ...dword(SHADOW.VIEWPORT + 16), ...dword(0)],   // MinZ 0
+    [0xc7, 0x81, ...dword(SHADOW.VIEWPORT + 20), ...dword(0x3f800000)], // MaxZ 1
 ]);
 
 /**
@@ -2871,6 +2910,21 @@ export const HOST_MIRRORS = Object.freeze({
         return true;
     },
     /** @type {HostMirror} */
+    renderTarget: (m, block, [, surface])=>{
+        const desc = m.u32(surface + 4) + SURFACE.DESC;
+        const width = m.u32(desc + 24);
+        const height = m.u32(desc + 28);
+        m.setU32(block + SHADOW.VIEWPORT + 8, width);
+        m.setU32(block + SHADOW.TARGET_WIDTH, width);
+        m.setU32(block + SHADOW.VIEWPORT + 12, height);
+        m.setU32(block + SHADOW.TARGET_HEIGHT, height);
+        m.setU32(block + SHADOW.VIEWPORT, 0);
+        m.setU32(block + SHADOW.VIEWPORT + 4, 0);
+        m.setU32(block + SHADOW.VIEWPORT + 16, 0);
+        m.setU32(block + SHADOW.VIEWPORT + 20, 0x3f800000);
+        return true;
+    },
+    /** @type {HostMirror} */
     samplerState: (m, block, [sampler, type, value])=>{
         if (sampler >= SHADOW.SAMPLER_COUNT || type >= SHADOW.SAMPLER_STATE_STRIDE)
         {
@@ -3008,6 +3062,17 @@ export function appendCommand(m, shape, mirror, call){
             seen = m.u32(table + 4 * index) === a[validated.arg];
         }
         if (!seen)
+        {
+            return undefined;
+        }
+    }
+    const usage = shape.surfaceUsage;
+    if (usage)
+    {
+        const surface = a[usage.arg];
+        const owner = surface === 0 ? 0 : m.u32(surface + 4);
+        if (surface === 0 ? !usage.nullable
+            : owner === 0 || (m.u32(owner + SURFACE.DESC + 8) & usage.mask) === 0)
         {
             return undefined;
         }

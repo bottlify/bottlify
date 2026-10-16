@@ -80,7 +80,10 @@ const slot = (slots, name)=>{
 function machine(){
     const low = new Uint8Array(1 << 20);
     const high = new Uint8Array(8 << 20);
-    let next = 0x100;
+    // Above every address a test writes its own arguments and answers at, so
+    // that what the seam allocates -- its routines, blocks and rings -- never
+    // lies under one, however many routines it places.
+    let next = 0x10000;
 
     /** @param {number} address */
     const block = address=>(address >= DEVICE_STORAGE
@@ -1959,32 +1962,34 @@ test('a state block applied through the ring is made in order, and its states ar
     assert.deepEqual(h.divergences, []);
 });
 
-test('a render target is set on the host, and its viewport and size are the block\'s at once',
-    ()=>{
-        // Whether the device takes a target is the surface's to say, which
-        // the guest cannot see; the viewport a new target brings, and the
-        // size a later viewport is checked against, are written as it is set.
-        const h = seamed({ shadow: true });
-        const root = h.create();
-        const { device } = h.createDevice(root);
-        assert.ok(!h.box.isGuest(device, slot(IDIRECT3DDEVICE9_SLOTS, 'SetRenderTarget')));
-        assert.ok(!h.box.isGuest(device, slot(IDIRECT3DDEVICE9_SLOTS, 'SetDepthStencilSurface')));
-        const owner = h.box.memory.readU32(device + 4);
-        const out = 0x3200;
-        assert.equal(h.device(device, 'CreateRenderTarget',
-            [32, 16, D3DFMT.A8R8G8B8, 0, 0, 0, out, 0]), D3D_OK);
-        const target = h.box.memory.readU32(out);
-        assert.equal(h.device(device, 'SetRenderTarget', [0, target]), D3D_OK);
-        assert.deepEqual(Array.from({ length: 4 },
-            (unused, i)=>h.box.memory.readU32(owner + SHADOW.VIEWPORT + i * 4)), [0, 0, 32, 16],
-        'the target\'s whole');
-        assert.deepEqual([h.box.memory.readU32(owner + SHADOW.TARGET_WIDTH),
-            h.box.memory.readU32(owner + SHADOW.TARGET_HEIGHT)], [32, 16]);
-        // The program lets go of the target while the device holds it: the
-        // device keeps it.
-        assert.equal(h.release(target), 0);
-        assert.deepEqual(h.divergences, []);
-    });
+test('a render target is set in the guest, and on the host it falls back to its viewport and'
+    + ' size are the block\'s at once', ()=>{
+    // The guest reads the surface's block for whether it is a target and
+    // how large (`surfaceUsage`, `RENDER_TARGET_MIRROR`; the ring's gates
+    // run it); the host's path, which a surface the guest leaves takes,
+    // writes the viewport a new target brings and the size a later
+    // viewport is checked against as it is set.
+    const h = seamed({ shadow: true });
+    const root = h.create();
+    const { device } = h.createDevice(root);
+    assert.ok(h.box.isGuest(device, slot(IDIRECT3DDEVICE9_SLOTS, 'SetRenderTarget')));
+    assert.ok(h.box.isGuest(device, slot(IDIRECT3DDEVICE9_SLOTS, 'SetDepthStencilSurface')));
+    const owner = h.box.memory.readU32(device + 4);
+    const out = 0x3200;
+    assert.equal(h.device(device, 'CreateRenderTarget',
+        [32, 16, D3DFMT.A8R8G8B8, 0, 0, 0, out, 0]), D3D_OK);
+    const target = h.box.memory.readU32(out);
+    assert.equal(h.device(device, 'SetRenderTarget', [0, target]), D3D_OK);
+    assert.deepEqual(Array.from({ length: 4 },
+        (unused, i)=>h.box.memory.readU32(owner + SHADOW.VIEWPORT + i * 4)), [0, 0, 32, 16],
+    'the target\'s whole');
+    assert.deepEqual([h.box.memory.readU32(owner + SHADOW.TARGET_WIDTH),
+        h.box.memory.readU32(owner + SHADOW.TARGET_HEIGHT)], [32, 16]);
+    // The program lets go of the target while the device holds it: the
+    // device keeps it.
+    assert.equal(h.release(target), 0);
+    assert.deepEqual(h.divergences, []);
+});
 
 test('a surface\'s description is in its block, which the guest\'s GetDesc answers from', ()=>{
     const h = seamed({ shadow: true });

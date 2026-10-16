@@ -19,7 +19,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createCorkHost } from '../../cpu/internal/cork-host.js';
 import * as cork from '../../../../../cork/src/index.js';
-import { SHADOW, appendCommand, commandCode } from './shadow.js';
+import { SHADOW, SURFACE, appendCommand, commandCode } from './shadow.js';
 import { COMMANDS, commandSlot } from '../d3d9/commands.js';
 import { D3D8_COMMANDS } from '../d3d8/commands.js';
 import { COMMAND_MIRRORS as MIRRORS_9, HOST_COMMAND_MIRRORS as HOST_9 } from './d3d9.js';
@@ -34,6 +34,9 @@ const RING = 0xc000;
 const RING_BYTES = 0x1000;
 const DATA = 0xd000;
 const HIGH = 0xe000;
+/** A surface's interface and its block, in the data. */
+const SURFACE_OBJECT = DATA + 0xf00;
+const SURFACE_BLOCK = DATA + 0xf10;
 const ROUTINES = 0x20000;
 const STACK = 0x300000;
 
@@ -129,6 +132,19 @@ function gate(version, list){
         for (let at = DATA; at < HIGH; at += 4)
         {
             put(at, next());
+        }
+        const usage = entry.shape.surfaceUsage;
+        if (usage)
+        {
+            // A surface: its interface in the data, the word after it its block
+            // (`SURFACE`) of a usage and a size at random -- or a surface with no
+            // block, or none.
+            const pick = next() % 6;
+            put(SURFACE_OBJECT + 4, pick === 0 ? 0 : SURFACE_BLOCK);
+            put(SURFACE_BLOCK + SURFACE.DESC + 8, [0, 1, 2, 3, 0x200][next() % 5]);
+            put(SURFACE_BLOCK + SURFACE.DESC + 24, 1 + next() % 2048);
+            put(SURFACE_BLOCK + SURFACE.DESC + 28, 1 + next() % 2048);
+            args[usage.arg] = pick === 1 ? 0 : SURFACE_OBJECT;
         }
 
         const headBefore = view.getUint32(BLOCK + SHADOW.COMMAND_HEAD - LOW, true);

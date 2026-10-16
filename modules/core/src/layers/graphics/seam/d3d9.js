@@ -73,7 +73,8 @@ import { queryAs, readGuid } from './guid.js';
 import { D3D_PRIVATE_DATA, createPrivateData } from './privatedata.js';
 import {
     DRAWABLE_MIRRORS, RENDER_STATE_MIRROR, SAMPLER_STATE_MIRROR, TRANSFORM_MIRROR,
-    VIEWPORT_GUARD_9, VIEWPORT_MIRROR, commandCode, createShadow, getRenderStateCode,
+    RENDER_TARGET_MIRROR, VIEWPORT_GUARD_9, VIEWPORT_MIRROR, commandCode, createShadow,
+    getRenderStateCode,
     getSamplerStateCode, getSurfaceDescCode, getSurfaceLevelCode, getTextureStageStateCode,
     getTransformCode, getViewportCode, lockCode, settledAfter, stageStateMirror,
     unlockCode, HOST_MIRRORS, appendCommand, guestWords,
@@ -107,6 +108,7 @@ export const COMMAND_MIRRORS = {
     SetStreamSource: [...DRAWABLE_MIRRORS.SetStreamSource9],
     SetIndices: [...DRAWABLE_MIRRORS.SetIndices],
     DrawPrimitiveUP: [...DRAWABLE_MIRRORS.DrawPrimitiveUP],
+    SetRenderTarget: [...RENDER_TARGET_MIRROR],
 };
 
 /**
@@ -126,6 +128,7 @@ export const HOST_COMMAND_MIRRORS = {
     SetVertexDeclaration: HOST_MIRRORS.declaration,
     SetStreamSource: HOST_MIRRORS.streamSource9,
     SetIndices: HOST_MIRRORS.indices,
+    SetRenderTarget: HOST_MIRRORS.renderTarget,
 };
 
 const D3D_OK = 0;
