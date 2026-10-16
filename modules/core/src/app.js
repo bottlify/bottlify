@@ -270,11 +270,14 @@ const hashText = (hash, text)=>{
  * @property {number} [soloQuantum]  Guest instructions per turn of a thread no other is
  *           ready beside, in a process with one executor, while no timed wait or timer is
  *           due within 16 ms. Default ten quanta.
- * @property {{ cores?: number }} [cpu]  The machine's processor. `cores`: how many
+ * @property {{ cores?: number, eager?: boolean }} [cpu]  The machine's processor. `cores`: how many
  *           processors the program is told it has -- by every road Windows has to say
  *           it -- and the executors that run its threads at once, each a worker past
  *           the process's own thread; 1 to 32, default 1. Under cork, on a page that
  *           can share memory; elsewhere the program runs on one and is told of one.
+ *           Each is opened when a thread wants it, some tens of milliseconds before it
+ *           runs one; `eager`, all of them before the program starts -- for a gate or
+ *           a measurement that wants threads at once from the first instruction.
  * @property {number} [executors]  `cpu.cores` by its older name: executors of the
  *           program's process under cork, past the process's own thread each a worker
  *           running one of its threads at once with the others, the locked
@@ -1566,7 +1569,7 @@ export const translatorsBeside = (cores, host)=>Math.max(1, Math.floor(host) - c
  * anything is built when it is not a whole number from 1 to 32, or when
  * `executors` says otherwise.
  *
- * @template {{ cpu?: { cores?: number }, executors?: number }} T
+ * @template {{ cpu?: { cores?: number, eager?: boolean }, executors?: number }} T
  * @param {T} options
  * @returns {T & { executors?: number }}
  */
@@ -3729,6 +3732,7 @@ async function buildApp(options){
             noExecuteBelow: 0x10000,
             engine: options.engine ?? DEFAULT_ENGINE,
             executors: options.executors ?? 1,
+            eagerExecutors: options.cpu?.eager === true,
             engineUrl: (options.engine ?? DEFAULT_ENGINE) !== 'emulator'
                 ? corkArtifacts(options.cork).moduleUrl : null,
             cork: {

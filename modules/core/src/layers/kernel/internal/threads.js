@@ -874,9 +874,11 @@ export function createScheduler(options){
      * start to its end taken here (`heldMs`, against the time the executor
      * itself reports in its slices), and from that to its next start (`gapMs`).
      * And the instructions retired on this one (`hereRetired`) and on the
-     * others (`elsewhereRetired`), whichever threads they were.
+     * others (`elsewhereRetired`), whichever threads they were, and the calls
+     * into the host the others' threads made (`crossings`), each answered here
+     * (`answers` counts the passes that answered them).
      */
-    const sharedTime = { hereMs: 0, answerMs: 0, waitMs: 0, answers: 0, turns: 0,
+    const sharedTime = { hereMs: 0, answerMs: 0, waitMs: 0, answers: 0, crossings: 0, turns: 0,
         betweenMs: 0, heldMs: 0, gapMs: 0, gaps: 0, hereRetired: 0, elsewhereRetired: 0,
         // Counts by bound in ms: the gaps before another executor's next slice,
         // and this executor's own turns.
@@ -936,6 +938,12 @@ export function createScheduler(options){
     let answeredAt = -1;
     /** Since when this executor has had nothing of its own while another ran a thread it could run (`RECALL_MS`). */
     let idleSince = -1;
+    /**
+     * Whether a ready thread was left this turn for the executor its mask
+     * names to open (`waitsForExecutor`): a turn that ran nothing then is the
+     * machine waiting for it, not a machine with nothing to do.
+     */
+    let awaitingExecutor = false;
 
     /**
      * Whether `thread` may run on executor `index`: the processor of that
@@ -945,6 +953,30 @@ export function createScheduler(options){
      */
     const allowedOn = (thread, index)=>thread.affinityMask === undefined
         || (thread.affinityMask >>> index & 1) === 1;
+
+    /**
+     * Whether `thread` waits for an executor its mask names to open: it names
+     * neither this one nor any open (`remotes`), and the first it names that
+     * the cpu layer can open is opening (`wantExecutor`). A mask naming only
+     * executors that cannot open leaves the thread where every thread may run.
+     *
+     * @param {any} thread @param {any[]} remotes
+     */
+    const waitsForExecutor = (thread, remotes)=>{
+        if (thread.affinityMask === undefined || allowedOn(thread, 0)
+            || remotes.some(remote=>allowedOn(thread, remote.index)))
+        {
+            return false;
+        }
+        for (let index = 1; index < 32; index++)
+        {
+            if (allowedOn(thread, index) && cpu.wantExecutor?.(index))
+            {
+                return true;
+            }
+        }
+        return false;
+    };
 
     /**
      * The executor a thread runs on: where its translations are, made there
@@ -959,9 +991,15 @@ export function createScheduler(options){
      * @returns {number} the executor's index, 0 for this one
      */
     const homeOf = (thread, remotes)=>{
-        if (thread.home !== undefined && allowedOn(thread, thread.home))
+        if (thread.home !== undefined && allowedOn(thread, thread.home)
+            && (thread.home === 0 || remotes.some(remote=>remote.index === thread.home)))
         {
             return thread.home;
+        }
+        if (waitsForExecutor(thread, remotes))
+        {
+            awaitingExecutor = true;
+            return -1;
         }
         // This one counts a thread more than it holds: it answers the others' crossings.
         /** @type {Map<number, number>} */
@@ -1097,6 +1135,7 @@ export function createScheduler(options){
             for (const [remote, on] of placed)
             {
                 const ended = remote.step((/** @type {() => void} */ reply)=>{
+                    sharedTime.crossings++;
                     const was = current;
                     const wasInSlice = inSlice;
                     current = on.thread;
@@ -1140,6 +1179,27 @@ export function createScheduler(options){
             sharedTime.answers++;
         }
         return { ran, instructions };
+    };
+
+    /**
+     * The ready threads this executor may run while it is the only one open,
+     * the others' executors asked for: one for every ready thread past the
+     * one that runs (`wantExecutors`), and a thread whose mask names another
+     * waiting for it to open.
+     */
+    const hereNow = ()=>{
+        const candidates = ready();
+        if (cpu.wantExecutors === undefined)
+        {
+            return candidates;
+        }
+        const here = candidates.filter(thread=>!waitsForExecutor(thread, []));
+        awaitingExecutor = here.length < candidates.length;
+        if (here.length > 1)
+        {
+            cpu.wantExecutors(here.length - 1);
+        }
+        return here;
     };
 
     /**
@@ -1251,6 +1311,7 @@ export function createScheduler(options){
      * @returns {any | null}
      */
     const choose = (remotes, bell)=>{
+        awaitingExecutor = false;
         let candidates = runnable();
         const free = remotes.filter(remote=>!remote.busy());
         let here = null;
@@ -1312,6 +1373,15 @@ export function createScheduler(options){
             {
                 break;
             }
+        }
+        // Ready threads left without an executor: as many more opened, as the
+        // process has (`wantExecutors`); until they open they take turns.
+        const unplaced = candidates.length + waiting.filter(thread=>thread !== here
+            && thread.state === ThreadState.READY
+            && ![...placed.values()].some(on=>on.thread === thread)).length;
+        if (unplaced > 0)
+        {
+            cpu.wantExecutors?.(remotes.length + unplaced);
         }
         // This executor with nothing to run while another keeps a thread it
         // could run: past RECALL_MS that one lets it go at its slice's end and
@@ -1422,6 +1492,10 @@ export function createScheduler(options){
                 return { ran: turn.ran, instructions: turn.instructions + instructions
                     + after.instructions, switched: turn.switched };
             }
+            if (placed.size === 0 && awaitingExecutor)
+            {
+                return { ran, instructions, switched: false, elsewhere: true };
+            }
             if (placed.size === 0)
             {
                 // Nothing runs anywhere: the clock to the soonest deadline, as with
@@ -1516,6 +1590,14 @@ export function createScheduler(options){
                 stackLimit,
                 entry,
                 context: cpu.newContext({ entry, stackTop }),
+                // The process's first thread is this executor's from the start
+                // (`homeOf`): with the others opened as threads want them, the
+                // first thread asked about once one opened could be a later
+                // one, and the first went to the other executor, each of its
+                // host calls crossing back -- an effect's renderer took 5223
+                // turns for 31 while the thread spinning beside it waiting for
+                // it ran 520 M instructions for 1.9 M.
+                home: threads.length === 0 ? 0 : undefined,
                 instructions: 0,
                 /**
                  * The same since the figures were last published. Kept on the
@@ -1688,7 +1770,11 @@ export function createScheduler(options){
                 return runShared(remotes);
             }
             expire();
-            let candidates = ready();
+            let candidates = hereNow();
+            if (candidates.length === 0 && awaitingExecutor)
+            {
+                return { ran: null, instructions: 0, switched: false, elsewhere: true };
+            }
             if (candidates.length === 0)
             {
                 // Nothing can run, but something is waiting for a time rather
@@ -1710,7 +1796,7 @@ export function createScheduler(options){
                     return { ran: null, instructions: 0, switched: false };
                 }
                 expire();
-                candidates = ready();
+                candidates = hereNow();
                 if (candidates.length === 0)
                 {
                     return { ran: null, instructions: 0, switched: false };

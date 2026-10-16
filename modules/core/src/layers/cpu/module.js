@@ -205,6 +205,8 @@ export function createCpuModule(){
              *          guestClock: (() => number) | null,
              *          yieldCheck: (() => boolean) | null, stacks: [number, number][],
              *          lent: import('./engine.js').TranslatorPort[], remotes: any[],
+             *          openExecutor: ((index: number) => Promise<any>) | null,
+             *          opening: Map<number, Promise<void>>, unopened: Set<number>,
              *          bell: ReturnType<typeof createBell> | null,
              *          unbroken: ReturnType<typeof unbrokenTable>,
              *          beforeTrap: (() => void) | null,
@@ -216,6 +218,12 @@ export function createCpuModule(){
                 lastFault: null, disposed: false, samples: createSampleTable(), engine,
                 cork: null,
                 remotes: [],
+                // How an executor past the process's own is opened, those being
+                // opened, and those that failed to open: opened when a thread
+                // wants one (`wantExecutor`), not all at the start.
+                openExecutor: null,
+                opening: new Map(),
+                unopened: new Set(),
                 bell: null,
                 // The routines no slice ends inside, as every executor reads them.
                 unbroken: unbrokenTable(),
@@ -422,6 +430,68 @@ export function createCpuModule(){
             };
 
             /**
+             * Opens executor `index` in a worker of its own: a few hundred
+             * milliseconds later it is among `executors`. A process opens them as
+             * its threads want them -- a program of one thread none, every child
+             * of a launcher none it does not use -- where each cost a worker, its
+             * engine and its translator at the start.
+             *
+             * @param {number} index
+             * @returns {boolean} whether it is open or opening: false past the
+             *     process's executors, or where it failed to open
+             */
+            const wantExecutor = (/** @type {number} */ index)=>{
+                const open = state.openExecutor;
+                if (open === null || state.disposed || !(index >= 1 && index < settings.executors)
+                    || state.unopened.has(index))
+                {
+                    return false;
+                }
+                if (state.opening.has(index)
+                    || state.remotes.some((/** @type {any} */ one)=>one.index === index))
+                {
+                    return true;
+                }
+                state.opening.set(index, open(index).then(remote=>{
+                    state.opening.delete(index);
+                    if (state.openExecutor !== open)
+                    {
+                        // The process went while it opened.
+                        return remote.close();
+                    }
+                    state.remotes = [...state.remotes, remote]
+                        .sort((a, b)=>a.index - b.index);
+                    return undefined;
+                }, (/** @type {any} */ error)=>{
+                    state.opening.delete(index);
+                    state.unopened.add(index);
+                    log?.warn?.('cpu', `executor ${index} did not open:`
+                        + ` ${error?.message ?? error}`);
+                }));
+                return true;
+            };
+            /**
+             * At least `count` executors past the process's own open or opening,
+             * the lowest first (`wantExecutor`), as many as there are.
+             *
+             * @param {number} count
+             * @returns {number} how many are open or opening
+             */
+            const wantExecutors = (/** @type {number} */ count)=>{
+                let have = state.remotes.length + state.opening.size;
+                for (let index = 1; index < settings.executors && have < count; index++)
+                {
+                    if (!state.opening.has(index) && !state.unopened.has(index)
+                        && !state.remotes.some((/** @type {any} */ one)=>one.index === index)
+                        && wantExecutor(index))
+                    {
+                        have++;
+                    }
+                }
+                return have;
+            };
+
+            /**
              * @param {any} [into]  the thread's last record, written over where
              *     the engine can (cork): a record is its thread's alone
              */
@@ -548,12 +618,16 @@ export function createCpuModule(){
                             }
                             const bell = createBell();
                             state.bell = bell;
-                            state.remotes = await Promise.all(Array.from(
-                                { length: settings.executors - 1 },
-                                (_, i)=>createRemoteExecutor({ host: state.host, index: i + 1,
-                                    engineUrl: settings.engineUrl, bell,
-                                    unbroken: state.unbroken.buffer,
-                                    config: { ...hostConfig, cork } })));
+                            const host = state.host;
+                            state.openExecutor = index=>createRemoteExecutor({ host, index,
+                                engineUrl: settings.engineUrl, bell,
+                                unbroken: state.unbroken.buffer,
+                                config: { ...hostConfig, cork } });
+                            if (config?.eagerExecutors === true)
+                            {
+                                wantExecutors(settings.executors - 1);
+                                await Promise.all(state.opening.values());
+                            }
                         }
                         state.cork = state.host.cork();
                         for (const adapter of state.lent.splice(0))
@@ -904,6 +978,8 @@ export function createCpuModule(){
                  * @returns {any[]}
                  */
                 executors: ()=>state.remotes,
+                wantExecutor: (/** @type {number} */ index)=>wantExecutor(index),
+                wantExecutors: (/** @type {number} */ count)=>wantExecutors(count),
                 /**
                  * The processors the program is told the machine has: one for
                  * each of its executors, the process's own among them -- known
@@ -1358,6 +1434,9 @@ export function createCpuModule(){
                 }
                 // Every executor's worker gone before the machine is: the memory
                 // may be handed to the next process (`CorkHostConfig.reused`).
+                // One still opening closes itself once open.
+                current.openExecutor = null;
+                await Promise.allSettled([...current.opening.values()]);
                 await Promise.all(current.remotes.map((/** @type {any} */ remote)=>remote.close()));
                 current.remotes = [];
                 current.bell = null;

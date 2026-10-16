@@ -33,7 +33,7 @@ test('a lone thread that sleeps wakes and runs on three executors', { timeout: 6
         });
         for (const executors of [1, 3])
         {
-            const app = await createApp({ executable, executors });
+            const app = await createApp({ executable, cpu: { cores: executors, eager: true } });
             try
             {
                 assert.equal(await app.run({ timeoutMs: 30_000 }), 7, `${executors} executor(s)`);

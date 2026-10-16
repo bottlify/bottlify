@@ -65,7 +65,7 @@ function buildProgram(imports, data, parts){
  * @param {Uint8Array} executable @param {number} cores
  */
 async function run(executable, cores){
-    const app = await createApp({ executable, cpu: { cores } });
+    const app = await createApp({ executable, cpu: { cores, eager: true } });
     try
     {
         const code = await app.run({ timeoutMs: 60_000 });
@@ -136,6 +136,123 @@ test('a thread started while the first still ran, left alone when the first wait
     // not a chain of a quarter of a second, before it comes.
     assert.ok(total >= LOOPS * 10 && here > total * 0.75,
         `${here} of ${total} instructions on the process's own executor`);
+});
+
+test('a program of one thread on a machine of four opens no executor past the process\'s own',
+    async()=>{
+        const executable = buildProgram(['ExitProcess'], {}, ({ call })=>({
+            main: [
+                0xb9, ...u32(LOOPS), //            mov ecx, LOOPS
+                0x49, 0x75, 0xfd, //               L: dec ecx; jnz L
+                0x6a, 0x07, ...call('ExitProcess'),
+            ],
+            worker: [],
+        }));
+        const app = await createApp({ executable, cpu: { cores: 4 } });
+        try
+        {
+            assert.equal((await app.run({ timeoutMs: 60_000 })) >>> 0, 7);
+            const tables = await app.diagnostics();
+            const cpu = (Array.isArray(tables) ? tables : []).find(table=>table.name === 'cpu');
+            assert.deepEqual(cpu?.metrics?.executors, [], 'no worker opened for a thread alone');
+        }
+        finally
+        {
+            await app.dispose();
+        }
+    });
+
+test('two threads computing open the executor they want, and run at once on it', async()=>{
+    const executable = buildProgram(['CreateThread', 'WaitForSingleObject', 'ExitProcess'],
+        { first: [0, 0, 0, 0], second: [0, 0, 0, 0] }, ({ call, at, start })=>{
+            /** WaitForSingleObject([slot], INFINITE) @param {string} slot */
+            const wait = slot=>[0x6a, 0xff, 0xff, 0x35, ...u32(at(slot)),
+                ...call('WaitForSingleObject')];
+            return {
+                main: [...start('first'), ...start('second'), ...wait('first'), ...wait('second'),
+                    0x6a, 0x07, ...call('ExitProcess')],
+                worker: [
+                    0xb9, ...u32(LOOPS * 10), //       mov ecx, 10 * LOOPS
+                    0x49, 0x75, 0xfd, //               L: dec ecx; jnz L
+                    0x31, 0xc0, 0xc2, 0x04, 0x00, //   xor eax, eax; ret 4
+                ],
+            };
+        });
+    const app = await createApp({ executable, cpu: { cores: 4 } });
+    try
+    {
+        assert.equal((await app.run({ timeoutMs: 60_000 })) >>> 0, 7);
+        const tables = await app.diagnostics();
+        const byName = Object.fromEntries((Array.isArray(tables) ? tables : [])
+            .map(table=>[table.name, table]));
+        const scheduler = byName.kernel?.metrics?.scheduler ?? byName.kernel?.metrics;
+        // Opened as the ready threads wanted them: the main thread may still
+        // have been ready beside the two as they started, never more.
+        const opened = byName.cpu?.metrics?.executors?.length ?? 0;
+        assert.ok(opened >= 1 && opened <= 2, `${opened} executors opened of the 3 there are`);
+        assert.ok(scheduler?.mostAtOnce >= 2, 'the two ran at once once it opened');
+    }
+    finally
+    {
+        await app.dispose();
+    }
+});
+
+test('the process\'s first thread keeps the process\'s own executor when the executor a thread'
+    + ' it started wants opens', async()=>{
+    // The main thread calls into the host CALLS times while its worker spins
+    // on a word it sets after; the worker's executor opens while both are
+    // ready, and the worker, if asked about first, is still not the one given
+    // this executor: the main thread's calls are answered where it runs, not
+    // crossing from the other executor between this one's turns.
+    const CALLS = 20_000;
+    // Instructions between two calls: the main thread's run, a few hundred
+    // milliseconds, is longer than an executor takes to open.
+    const BETWEEN = 5_000;
+    const executable = buildProgram(
+        ['CreateThread', 'WaitForSingleObject', 'GetCurrentProcessId', 'ExitProcess'],
+        { first: [0, 0, 0, 0], stop: [0, 0, 0, 0] }, ({ call, at, start })=>({
+            main: [
+                ...start('first'),
+                0xbe, ...u32(CALLS), //            mov esi, CALLS
+                ...call('GetCurrentProcessId'), // L: call [GetCurrentProcessId]
+                0xb9, ...u32(BETWEEN), //          mov ecx, BETWEEN
+                0x49, 0x75, 0xfd, //               M: dec ecx; jnz M
+                0x4e, 0x75, 0xef, //               dec esi; jnz L
+                0xc7, 0x05, ...u32(at('stop')), ...u32(1), // mov dword [stop], 1
+                0x6a, 0xff, 0xff, 0x35, ...u32(at('first')), ...call('WaitForSingleObject'),
+                0x6a, 0x07, ...call('ExitProcess'),
+            ],
+            worker: [
+                0x83, 0x3d, ...u32(at('stop')), 0x00, // W: cmp dword [stop], 0
+                0x74, 0xf7, //                     je W
+                0x31, 0xc0, 0xc2, 0x04, 0x00, //   xor eax, eax; ret 4
+            ],
+        }));
+    // Which thread is asked about first once the executor opens is the run
+    // loop's turn order at that moment: without the first thread's home, one
+    // run in three put it on the other executor (13592 crossings), so three.
+    for (let attempt = 0; attempt < 3; attempt++)
+    {
+        const app = await createApp({ executable, cpu: { cores: 4 } });
+        try
+        {
+            assert.equal((await app.run({ timeoutMs: 60_000 })) >>> 0, 7);
+            const tables = await app.diagnostics();
+            const kernel = (Array.isArray(tables) ? tables : [])
+                .find(table=>table.name === 'kernel');
+            const shared = JSON.parse((kernel?.metrics?.scheduler ?? kernel?.metrics)
+                ?.sharedTime ?? '{}');
+            assert.ok(shared.crossings !== undefined,
+                'the scheduler counts the others\' crossings');
+            assert.ok(shared.crossings < CALLS / 10, `run ${attempt}: ${shared.crossings} of the`
+                + ` main thread's ${CALLS} calls crossed from another executor`);
+        }
+        finally
+        {
+            await app.dispose();
+        }
+    }
 });
 
 test('a thread sleeping on the process\'s executor wakes at its time while the other executor'

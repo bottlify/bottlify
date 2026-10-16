@@ -18,10 +18,12 @@
  *
  *   node tools/executor-sweep.mjs [--threads 1,2,3] [--executors 1,2,3,4]
  *       [--host 0,65536,4096,256] [--sync 0,256] [--work 400000000] [--reps 3]
- *       [--quantum n] [--json]
+ *       [--quantum n] [--eager] [--json]
  *
- * K or H of 0 leaves that out. A run's time is `app.run` (the program from its
- * first instruction to its exit, translation included), not the boot; a point's
+ * K or H of 0 leaves that out. Executors open as the threads want them, a run's
+ * time holding their opening; `--eager` opens them all first. A run's time is
+ * `app.run` (the program from its first instruction to its exit, translation
+ * included), not the boot; a point's
  * is the mean of its three fastest runs (`best3`), and its speedup against the
  * first executor count's.
  */
@@ -47,6 +49,8 @@ const REPS = Number(option('reps', '3'));
 /** The kernel's quantum, guest instructions a slice; the app's default where not given. */
 const QUANTUM = option('quantum', '');
 const JSON_OUT = args.includes('--json');
+/** Every executor opened before the program starts: the steady state, not the opening. */
+const EAGER = args.includes('--eager');
 
 /** @param {number} value @returns {number[]} */
 const u32 = value=>[
@@ -136,6 +140,7 @@ function program({ threads, work, sync, host }){
  */
 async function run(executable, executors){
     const app = await createApp({ executable, executors,
+        ...(EAGER ? { cpu: { eager: true } } : {}),
         ...(QUANTUM === '' ? {} : { quantum: Number(QUANTUM) }) });
     try
     {

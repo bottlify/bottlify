@@ -367,6 +367,15 @@ only at the process's crossings and between its turns (0.5 ms each on average), 
 own turns kept a quantum long while others run (a single-threaded run on two executors 10-15%
 below one), and the atomic variant (4% of the total on one executor, 8% of decompressing).
 
+**Measured** (2026-10-16, an executor's worker opened when a ready thread wants it rather than all
+at the start -- `cpu.eager` keeps the old way for gates; node 22.22.0, the same VM, power plan not
+recorded; `tools/executor-sweep.mjs`, five runs a point, the mean of the fastest three): one thread
+x1.02 on two executors and x0.99 on four against one (x0.93 and x0.96 with every worker open), as
+it opens none; two threads on two 0.670 s against 0.830 on one, four on four 0.526 s, each 50 to
+90 ms behind every worker open from the start (0.618, 0.434) -- the opening is paid while the
+threads wait. A run of four cores is made in about 150 ms against 330 to 410 (runs not recorded),
+and the core suite's process-spawning file on four cores took 47.7 s against 59 to 60.
+
 **What it costs, and when it pays.** The atomic variant makes every executor slower by the tax *t*
 measured before stage 1. Two executors win when their speedup *S* satisfies *S* × (1 − *t*) > 1.
 At *t* = 20 % that is *S* > 1.25, which by Amdahl's law needs more than 40 % of the work to run in

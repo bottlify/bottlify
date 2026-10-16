@@ -155,6 +155,8 @@ async function run(executable, libraries, executors){
         executable,
         imagePath: 'C:\\App\\libs.exe',
         executors,
+        // Open from the start: the gate is threads at once from the first instruction.
+        cpu: { eager: true },
         bundle: {
             prefix: 'App',
             fetch: async(/** @type {number} */ offset, /** @type {number} */ length)=>{

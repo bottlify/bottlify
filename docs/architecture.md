@@ -381,7 +381,9 @@ There are no page tables: each 4 KiB page has one byte of flags — `INACCESSIBL
   process's executor, so a program whose one working thread was started while its first still ran
   runs it there. Its own turns are long while no other executor runs a thread, and a thread made
   ready that a free executor could take ends such a turn. An executor past the first is a cork host
-  in a worker of its own over the process's memory
+  in a worker of its own over the process's memory, opened when a ready thread wants one (a thread
+  more than the open executors run, or one whose affinity mask names it): a program of one thread
+  opens none
   (`core/src/layers/cpu/internal/executor.worker.js`), with its own state page, entry hash and
   instances of translations. The translations of the executors past the first are theirs together:
   made for the process's shared layout (`sharedLayout`), which addresses the state block and the
