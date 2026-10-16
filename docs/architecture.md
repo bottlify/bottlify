@@ -365,7 +365,14 @@ There are no page tables: each 4 KiB page has one byte of flags — `INACCESSIBL
   the process's own, each later one on the other executor fewest live threads call theirs. A turn
   gives every free executor the next ready thread whose executor it is; a thread whose executor is
   busy then goes to one left free -- the process's own first -- and has its code translated there
-  too, rather than leave a processor idle. A thread is never started while another executor still
+  too, rather than leave a processor idle. Two kinds of thread run on the process's own executor
+  only, where they may: one calling into the host more often than once in 30 000 instructions over
+  its last slices, every such call a round trip back to it from another executor, and one whose
+  runs on another executor have mostly ended with the process's executor left nothing to run and
+  calling it back -- a thread that takes turns with the process's threads rather than running beside
+  them (the share halves every second, so it tries again). A thread of either kind waiting for the
+  process's executor takes it from one that computes, which goes to the other executor in its place.
+  A thread is never started while another executor still
   runs it: one that waited there is made ready by its wake before that slice is taken, and the
   scheduler refuses the second start. Only the executors in a thread's affinity mask are its to
   run on: the program is told it has one processor for each executor -- by GetSystemInfo, the
@@ -381,10 +388,12 @@ There are no page tables: each 4 KiB page has one byte of flags — `INACCESSIBL
   thread at most every 250 ms. While ready threads wait for an executor, it keeps its thread for a
   turn, 1 ms (`executorHoldMs`), and gives it up at the first slice's end past that, as a processor
   keeps a thread to its quantum's end. The process's thread with nothing of its own to run waits for the
-  others until its soonest deadline, 4 ms at most; past 2 ms of that, an executor keeping a thread
-  the process's executor may run lets it go at its slice's end and the thread comes to the
-  process's executor, so a program whose one working thread was started while its first still ran
-  runs it there. Its own turns are as long while other executors run threads as while none does,
+  others until its soonest deadline, 4 ms at most, and an executor keeping a thread the process's
+  executor may run lets it go at its slice's end and the thread comes to the process's executor, so
+  a program whose one working thread was started while its first still ran runs it there. While a
+  call into the host is still to answer through the event loop -- a graphics worker's answer, a
+  fetched block -- the turn does not wait: the run loop waits for that answer and the others' bell
+  together. Its own turns are as long while other executors run threads as while none does,
   and a thread made ready that a free executor could take ends such a turn, whether its own thread
   or an answer to another's made it ready, as does another executor's slice ending. An executor past the first is a cork host
   in a worker of its own over the process's memory, opened when a ready thread wants one (a thread

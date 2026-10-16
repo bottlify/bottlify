@@ -114,7 +114,8 @@ export function createKernelModule(){
              *
              * @type {{ scheduler: any, sync: any, handles: any, clock: any, switcher: any,
              *          processes: any, stacks: any, disposed: boolean, resumeLog: string[],
-             *          refreshClock: (() => void) | undefined }}
+             *          refreshClock: (() => void) | undefined,
+             *          hostAnswering: (() => boolean) | undefined }}
              */
             const state = {
                 stacks,
@@ -126,6 +127,7 @@ export function createKernelModule(){
                 processes: null,
                 disposed: false,
                 refreshClock: undefined,
+                hostAnswering: undefined,
                 // The last parks, holds and scheduled resumes, newest last: what a
                 // thread that sits in the park loop is read by.
                 resumeLog: [],
@@ -169,6 +171,7 @@ export function createKernelModule(){
                 turnMs: config?.quantum === undefined ? TURN_MS : undefined,
                 soloQuantum: config?.soloQuantum,
                 ids: config?.ids,
+                hostAnswering: ()=>state.hostAnswering?.() === true,
                 ...published(cpu, log),
             });
             if (typeof log.metrics?.onFrame === 'function')
@@ -393,6 +396,17 @@ export function createKernelModule(){
                  */
                 refreshClockWith(refresh){
                     state.refreshClock = refresh;
+                },
+                /**
+                 * How the scheduler tells a host call still to answer through
+                 * the event loop -- not a caller parked on the guest's own
+                 * message queue -- from none: a turn with nothing to run then
+                 * leaves rather than wait for the other executors.
+                 *
+                 * @param {() => boolean} answering
+                 */
+                hostAnsweringWith(answering){
+                    state.hostAnswering = answering;
                 },
                 threads: ()=>live() ? state.scheduler.all() : [],
                 /**

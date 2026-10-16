@@ -1019,3 +1019,149 @@ test('a thread whose slice ended on a host call goes on once it is answered', ()
     clock += 10_000;
     assert.equal(sched.runOnce().ran.name, 'audio', 'starved, it is not passed over again');
 });
+
+/**
+ * The cpu of a process on two executors: the other's slices never end on their
+ * own, and the bell records the waits a turn takes for it.
+ */
+function twoExecutors(){
+    const cpu = fakeCpu();
+    const remote = {
+        index: 1,
+        started: 0,
+        busy: ()=>remote.started > 0,
+        start: ()=>{
+            remote.started++;
+        },
+        /** @type {() => ({ instructions: number, fault: any } | null)} */
+        step: ()=>null,
+        ending: ()=>false,
+    };
+    /** @type {number[]} */
+    const waits = [];
+    /** What the turns last told the other executor of keeping its thread. */
+    const told = { goOn: /** @type {boolean | null} */ (null) };
+    const bell = {
+        rung: ()=>0,
+        /** @param {number} seen @param {number} ms */
+        wait: (seen, ms)=>waits.push(ms),
+        /** @param {boolean} on */
+        goOn(on){
+            told.goOn = on;
+        },
+        hold(){},
+    };
+    return {
+        cpu: { ...cpu, executors: ()=>[remote], executorBell: ()=>bell, eip: ()=>0,
+            /** @param {number} index @param {() => void} work */
+            onExecutor: (index, work)=>work() },
+        waits,
+        told,
+    };
+}
+
+test('a turn with nothing to run here leaves at once while a host call is still to answer', ()=>{
+    // The answer comes through the event loop, which a wait for the other
+    // executor holds back: with a game's sound thread on the other one, its
+    // renderer waited for the graphics worker's answers a wait at a time.
+    const { cpu, waits } = twoExecutors();
+    let answering = false;
+    const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 5000,
+        hostAnswering: ()=>answering });
+    const main = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
+    const worker = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'worker' });
+    assert.equal(sched.runOnce().ran, main);
+    assert.equal(sched.processorOf(worker), 1, 'the worker runs on the other executor');
+
+    main.awaitingHost = true;
+    const queued = sched.runOnce();
+    assert.equal(queued.elsewhere, true);
+    assert.deepEqual(waits, [4],
+        'a caller parked on the guest\'s own queue: the turn waits for the other executor');
+
+    answering = true;
+    const left = sched.runOnce();
+    assert.deepEqual({ elsewhere: left.elsewhere, rung: left.rung }, { elsewhere: true, rung: 0 },
+        'it says where the bell stood, for its caller to wait for both');
+    assert.deepEqual(waits, [4], 'and took no wait of its own');
+});
+
+test('a thread calling into the host often runs on the process\'s executor and no other', ()=>{
+    // A game's sound thread, woken at priority 15, took the turn, and its
+    // renderer -- a call into the host every hundred instructions -- went to
+    // the other executor, every call a round trip back.
+    const two = ()=>{
+        const { cpu, told } = twoExecutors();
+        const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 5000 });
+        const main = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
+        const sound = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'sound' });
+        Object.assign(sound, { home: 0, priority: 15 });
+        Object.assign(main, { crossSeen: true, crossRate: 1 / 100 });
+        return { sched, main, sound, told };
+    };
+
+    // The sound thread computes: it takes the other executor, the renderer this one.
+    const computing = two();
+    Object.assign(computing.sound, { crossSeen: true, crossRate: 1 / 100_000 });
+    assert.equal(computing.sched.runOnce().ran, computing.main);
+    assert.equal(computing.sched.processorOf(computing.sound), 1);
+
+    // Both call into the host: they take turns here, as on one processor, the
+    // one of higher priority first, and the other executor is not asked for.
+    const calling = two();
+    Object.assign(calling.sound, { crossSeen: true, crossRate: 1 / 150 });
+    assert.equal(calling.sched.runOnce().ran, calling.sound);
+    assert.equal(calling.sched.processorOf(calling.main), 0,
+        'the renderer waits for its turn here');
+
+    // One placed there while it computed, calling into the host since: it is
+    // let go at its slice's end, to come back here.
+    computing.sound.crossRate = 1 / 150;
+    computing.sched.runOnce();
+    assert.equal(computing.told.goOn, false, 'the other executor gives it up');
+});
+
+test('a thread this executor keeps calling back from the other one stays here a while', ()=>{
+    // A game's sound thread, placed on the other executor whenever it was ready
+    // beside the renderer, was called back 1 312 times of 1 319 as the renderer
+    // waited on it: the two took turns, each run there a round trip.
+    const { cpu, told } = twoExecutors();
+    const [remote] = cpu.executors();
+    // The other executor's slice ends when it is told to give its thread up.
+    remote.step = ()=>{
+        if (remote.started === 0 || told.goOn !== false)
+        {
+            return null;
+        }
+        remote.started = 0;
+        told.goOn = null;
+        return { instructions: 1000, fault: null };
+    };
+    let clock = 0;
+    const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 5000,
+        wall: ()=>clock });
+    const main = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
+    const sound = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'sound' });
+    // The renderer calls into the host and stays here; the sound thread computes.
+    Object.assign(main, { crossSeen: true, crossRate: 1 / 100 });
+    /** Both ready: where the sound thread goes, then the renderer waits on it. */
+    const round = ()=>{
+        assert.equal(sched.runOnce().ran, main);
+        const where = sched.processorOf(sound);
+        if (where === 1)
+        {
+            sched.block(main, 'the sound');
+            assert.equal(sched.runOnce().ran, sound,
+                'left nothing to run here, it calls the sound back and runs it');
+            sched.wake(main);
+        }
+        return where;
+    };
+
+    assert.deepEqual([round(), round(), round()], [1, 1, 1],
+        'called back once and twice, it still goes there');
+    assert.equal(round(), 0, 'called back three times running, it takes its turns here');
+    assert.equal(remote.started, 0, 'and the other executor is not started for it');
+    clock += 3000;
+    assert.equal(round(), 1, 'three seconds on, it tries the other executor again');
+});

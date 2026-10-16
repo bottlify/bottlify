@@ -1038,3 +1038,53 @@ None yet.
 - **Correctness.** The bridge's tests of steps answered in place; the gate holding the host's
   command records to the guest routine's byte for byte (`seam/commands-host.itest.js`).
 - **Decision.** Removed: steps are answered in place only by appending the command.
+
+### 2026-10-16 -- a host answer let in at once, and the renderer kept by its rate of calls, each alone (roadmap/v2 C1)
+
+- **Idea.** Two cores drew fewer of Far Cry's frames than one (the entry of the same date above).
+  Two steps were measured alone before the change that was kept: (a) the process's turn with
+  nothing of its own to run leaves at once while a call into the host is still to be answered
+  through the event loop -- a graphics worker's answer -- rather than waiting up to 4 ms on the
+  other executors' bell, a wait in which that answer cannot come in; (b) with (a), of two threads
+  the process's executor may run, the one calling into the host twice as often an instruction
+  keeps it and the other goes to the other executor.
+- **Workload.** Far Cry demo (bundle sha256 `ec81f9c260efb780…`) settled 40 s and watched 40 s in
+  `tools/cdp_test/frames.mjs --coi --worker --cores N --threads`; `cork2` at `20eb483b` with the
+  step. Three runs an arm for (a), one for (b).
+- **Values.** Frames a second. (a) 1 core 13.4 13.8 13.6, 2 cores 5.7 11.1 10.5 (2822 to 3026
+  slices on the other executor, 5.5 to 6.0% of the instructions retired while it ran). (b) 2
+  cores 10.4 (3040 slices there). Before either (the entry above, at `f72be67b`), 2 cores 10.1 11.3 8.5.
+- **Machine.** Headless Chromium 141 (`chromium-1194`), SwiftShader, a 4-core x86-64 KVM VM
+  (Intel Xeon @ 2.80 GHz). Power plan: not recorded.
+- **What was found.** Both left threads that call into the host often running on the other
+  executor, where each call is a round trip to the process's: of the last 16 placements there, in
+  (a) 13 to 15 a run were a priority-15 thread that sleeps 10 ms between runs, at 0.4 to 1.6 calls
+  a hundred instructions, and 1 to 3 the renderer (the main thread); in (b) 15 and 1. (b) decides
+  only between two threads that want the process's executor at the same moment; a thread placed
+  elsewhere because that executor was busy was placed by the old rule.
+- **Correctness.** Every run drew its frames to the end of its window.
+- **Decision.** Neither kept alone: (a) is part of the change that was kept, with a thread kept on
+  the process's executor by its rate of calls into the host or by how its runs elsewhere end
+  (roadmap/v2/README, 2026-10-16); (b) was replaced by it.
+
+### 2026-10-16 -- invalidated: the host calls of `tools/executor-sweep.mjs` (2026-10-08 to 2026-10-16)
+
+- **What was wrong.** The sweep's host call, every H-th turn of each thread, was GetTickCount,
+  which kernel32 answers as guest code -- a read of the clock word in the process block -- since
+  before the tool was written: the call never left its executor, and no point with H measured a
+  call into the host. Its figures stand for what ran: a guest routine every H-th turn and a test
+  and branch on every turn, beside the locks and the computing.
+- **Cited as host calls in.** "2026-10-08 -- more threads than other executors, or one other
+  executor" above (its host-call combinations), and roadmap/v2/README's measurements of
+  2026-10-08 ("the more locks and host calls, the larger the gain"), of the interrupt word ("four
+  on two with host calls") and of more ready threads than executors (the sweep's host-call points).
+- **Measured again with a call the host answers** (GetACP; node 22.22.0, a 4-core x86-64 KVM VM,
+  Intel Xeon @ 2.80 GHz, power plan not recorded; `cork2` at `9791153d`; 200 M turns over T
+  threads, five runs a point, the mean of the fastest three, two rounds): against one executor, a
+  call every 256 turns (about one in 2 300 instructions) x0.58 to x0.74 on two and four executors
+  for two and four threads; every 1024 turns x0.91 to x1.18; every 4096 turns x1.04 to x1.28 --
+  where the computing alone gave x1.24 to x1.45 on two (400 M turns, the same day). The other executors retired 10 to 63% of the
+  instructions.
+- **Since.** The sweep calls GetACP, says how many calls the other executors made and what share
+  of the instructions they retired, and stops with an error at a point whose workers' calls never
+  reached the host.

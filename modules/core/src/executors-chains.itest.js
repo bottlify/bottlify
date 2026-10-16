@@ -306,13 +306,18 @@ test('a thread on another executor calling into the host is answered at the proc
     // the main thread's turn, which the other executor's ask interrupts
     // (`interruptProcess`): its turns stay long, not one a call -- where the
     // asks waited for the turn's end, a turn was a quantum, and each call
-    // waited 0.57 ms for it.
+    // waited 0.57 ms for it. A thread calling into the host this often runs on
+    // the process's executor when it may (`keptHere`): the worker is pinned to
+    // the other one, as a program that pins it.
     const CALLS = 20_000;
     const executable = buildProgram(
-        ['CreateThread', 'WaitForSingleObject', 'GetCurrentProcessId', 'ExitProcess'],
+        ['CreateThread', 'SetThreadAffinityMask', 'WaitForSingleObject', 'GetCurrentProcessId',
+            'ExitProcess'],
         { first: [0, 0, 0, 0], done: [0, 0, 0, 0] }, ({ call, at, start })=>({
             main: [
                 ...start('first'),
+                0x6a, 0x02, 0xff, 0x35, ...u32(at('first')), // SetThreadAffinityMask(first, 2)
+                ...call('SetThreadAffinityMask'),
                 0x83, 0x3d, ...u32(at('done')), 0x00, // S: cmp dword [done], 0
                 0x74, 0xf7, //                     je S
                 0x6a, 0xff, 0xff, 0x35, ...u32(at('first')), ...call('WaitForSingleObject'),

@@ -77,6 +77,30 @@ const SHORT_WAIT_MS = 20;
 /** A short-period thread kept off the processor this long, in host ms, is counted late. */
 const LATE_GAP_MS = 40;
 
+/**
+ * Calls into the host an instruction past which a thread runs on the process's
+ * own executor (`keptHere`): one every 30 000 instructions, 10 to 100 us of
+ * translated code, against 5 us a call from another executor took to be
+ * answered at best and half a millisecond on average in a browser, where this
+ * executor is also the one waiting on the graphics worker and the event loop.
+ * Threads that compute and call the host once in 2 300 instructions ran 0.58 to
+ * 0.74 times as fast on two and four executors as on one, once in 9 200 0.91 to
+ * 1.18 times, once in 37 000 1.04 to 1.28 times (`tools/executor-sweep.mjs`).
+ */
+const HOST_BOUND = 1 / 30_000;
+
+/**
+ * The share of a thread's last runs on another executor that ended with this
+ * one called it back, nothing of its own to run, past which it runs here
+ * (`coupled`): it and this executor's threads take turns rather than run at
+ * once -- a game's sound thread, placed there whenever it was ready beside the
+ * renderer, was called back 1 312 times of 1 319 and ran 3% of the
+ * instructions there. The share halves every `COUPLED_HALF_MS` it is not
+ * renewed, so such a thread tries the other executor again now and then.
+ */
+const COUPLED = 0.5;
+const COUPLED_HALF_MS = 1000;
+
 /** How many turns of `turnMs` a deadline must be beyond for a turn to take one. */
 const TURN_CLEAR = 4;
 
@@ -99,10 +123,12 @@ const ENDING_WAIT_MS = 1000;
 /**
  * How long, in host ms, this executor goes with nothing of its own to run
  * while another keeps a thread it could run before that one lets the thread go
- * to come here: long enough that a wait of a millisecond or so does not move a
- * thread over and back.
+ * to come here: at once. Waited for 2 ms, a game's renderer waited on its
+ * sound thread elsewhere 3.9 s of 80 in such waits (12.2 against 11.1 to 11.8
+ * frames a second at once); a thread moved over and back so is one that takes
+ * turns with this executor's, and stays here (`COUPLED`).
  */
-const RECALL_MS = 2;
+const RECALL_MS = 0;
 
 /** The base of the normal priority class, and the two relative values pinned outside it. */
 const NORMAL_BASE = 8;
@@ -185,6 +211,9 @@ const readyNow = thread=>{
  * @param {(thread: any, reason: string | null, value: number) => void} [options.onResume]
  *        Told what a parked thread is resumed with, and from which wait.
  * @param {() => number} [options.wall]  The host's clock, for how long a slice held the machine.
+ * @param {() => boolean} [options.hostAnswering]  Whether a host call is still to answer
+ *        through the event loop: then a turn with nothing to run here leaves at once rather
+ *        than wait for the other executors, its caller waiting for both.
  * @param {Float64Array} [options.pages]
  *        Retired instructions by 64 KiB page, one entry per page of guest
  *        memory and a last one for anywhere else. Credited in place.
@@ -201,6 +230,7 @@ export function createScheduler(options){
     const { cpu, switcher, quantum = 100_000, now = ()=>0, skipTo = ()=>0 } = options;
     const soloQuantum = options.soloQuantum ?? quantum * 10;
     const turnMs = options.turnMs ?? 0;
+    const hostAnswering = options.hostAnswering ?? (()=>false);
     /**
      * Instructions this executor retires a host ms, from its turns that ran
      * their whole budget -- host calls inside them included, so code that
@@ -862,10 +892,11 @@ export function createScheduler(options){
     };
 
     /**
-     * The thread each of the process's other executors is running, and when and
-     * where its slice began.
+     * The thread each of the process's other executors is running, when and
+     * where its slice began, and whether this executor, left nothing to run,
+     * has called it back (`recalled`).
      *
-     * @type {Map<any, { thread: any, began: number, from: number }>}
+     * @type {Map<any, { thread: any, began: number, from: number, recalled?: boolean }>}
      */
     const placed = new Map();
     /** The processor time every slice of the process has taken, in milliseconds. */
@@ -1206,6 +1237,8 @@ export function createScheduler(options){
                     cpu.remoteFault?.(ended.fault);
                 }
                 account(on.thread, ended.instructions, on.began, on.from, at);
+                on.thread.coupled = coupledNow(on.thread) * 0.75 + (on.recalled ? 0.25 : 0);
+                on.thread.coupledAt = wall();
                 sharedTime.elsewhereRetired += ended.instructions;
                 ran = on.thread;
                 instructions += ended.instructions;
@@ -1355,6 +1388,26 @@ export function createScheduler(options){
         return { ran: next, instructions, switched };
     };
 
+    /** A thread's `coupled` share as it stands now. @param {any} thread */
+    const coupledNow = thread=>(thread.coupled === 0 ? 0
+        : thread.coupled * 0.5 ** ((wall() - thread.coupledAt) / COUPLED_HALF_MS));
+
+    /**
+     * Whether `thread` runs on this executor and no other, where it may run
+     * here: it calls into the host more often than `HOST_BOUND` over its last
+     * slices (`crossRate`) -- elsewhere every such call is a round trip back
+     * here, and the thread waits on its calls longer than it computes: a
+     * game's renderer, a call every hundred instructions, was put on the other
+     * executor when its sound thread took this one's turn, and drew a fifth
+     * fewer frames -- or its runs elsewhere have ended with this executor
+     * calling it back (`COUPLED`), the two taking turns rather than running
+     * at once. Such threads take turns here, as on one processor.
+     *
+     * @param {any} thread
+     */
+    const keptHere = thread=>allowedOn(thread, 0) && (coupledNow(thread) > COUPLED
+        || thread.crossSeen === true && thread.crossRate > HOST_BOUND);
+
     /**
      * The ready threads in the usual order, each to its own executor while
      * that one is free. A thread whose own is taken then goes to an executor
@@ -1370,6 +1423,7 @@ export function createScheduler(options){
         awaitingExecutor = false;
         let candidates = runnable();
         const free = remotes.filter(remote=>!remote.busy());
+        /** @type {any} */
         let here = null;
         /** @type {any[]} */
         const waiting = [];
@@ -1379,7 +1433,7 @@ export function createScheduler(options){
         {
             const next = pick(candidates);
             candidates = candidates.filter(thread=>thread !== next);
-            const home = homeOf(next, remotes);
+            const home = keptHere(next) ? 0 : homeOf(next, remotes);
             const remote = free.find(one=>one.index === home);
             if (home === 0 && here === null)
             {
@@ -1420,6 +1474,19 @@ export function createScheduler(options){
                 here = next;
                 continue;
             }
+            // One bound to the host takes this executor's turn from one that
+            // computes, which goes where it would have, or waits for its turn here.
+            if (keptHere(next))
+            {
+                const at = here === null || keptHere(here) ? -1
+                    : free.findIndex(one=>allowedOn(here, one.index));
+                if (at >= 0)
+                {
+                    place(free.splice(at, 1)[0], here);
+                    here = next;
+                }
+                continue;
+            }
             const at = free.findIndex(one=>allowedOn(next, one.index));
             if (at >= 0)
             {
@@ -1431,10 +1498,12 @@ export function createScheduler(options){
             }
         }
         // Ready threads left without an executor: as many more opened, as the
-        // process has (`wantExecutors`); until they open they take turns.
-        const unplaced = candidates.length + waiting.filter(thread=>thread !== here
-            && thread.state === ThreadState.READY
-            && ![...placed.values()].some(on=>on.thread === thread)).length;
+        // process has (`wantExecutors`); until they open they take turns. One
+        // bound to the host waits for this executor and wants no other.
+        const unplaced = candidates.filter(thread=>!keptHere(thread)).length
+            + waiting.filter(thread=>thread !== here && !keptHere(thread)
+                && thread.state === ThreadState.READY
+                && ![...placed.values()].some(on=>on.thread === thread)).length;
         if (unplaced > 0)
         {
             cpu.wantExecutors?.(remotes.length + unplaced);
@@ -1450,21 +1519,31 @@ export function createScheduler(options){
         {
             idleSince = idleSince < 0 ? wall() : idleSince;
             recall = wall() - idleSince >= RECALL_MS;
+            if (recall)
+            {
+                for (const on of placed.values())
+                {
+                    on.recalled = true;
+                }
+            }
         }
         else
         {
             idleSince = -1;
         }
         // An executor whose thread is wanted back -- suspended, ended by
-        // another, called back here -- gives it up at its slice's end, as it
-        // keeps one it is let go on with past its slice. One left without an
-        // executor waits for one to give its thread up at its turn's end
-        // (`hold`): the one taken here is not left, it runs this turn, still
-        // ready until it does.
+        // another, called back here, bound to the host since it was placed --
+        // gives it up at its slice's end, as it keeps one it is let go on with
+        // past its slice. One left without an executor waits for one to give
+        // its thread up at its turn's end (`hold`): the one taken here is not
+        // left, it runs this turn, still ready until it does; one bound to the
+        // host waits for this executor, not for them.
         const wanted = recall || [...placed.values()].some(on=>
-            on.thread.state !== ThreadState.RUNNING || on.thread.suspendCount > 0);
-        const left = candidates.length > 0
-            || waiting.some(thread=>thread !== here && thread.state === ThreadState.READY);
+            on.thread.state !== ThreadState.RUNNING || on.thread.suspendCount > 0
+            || keptHere(on.thread));
+        const left = candidates.some(thread=>!keptHere(thread))
+            || waiting.some(thread=>thread !== here && !keptHere(thread)
+                && thread.state === ThreadState.READY);
         if (wanted || left && bell.hold === undefined)
         {
             bell.goOn?.(false);
@@ -1489,7 +1568,9 @@ export function createScheduler(options){
      *
      * @param {any[]} remotes
      * @returns {{ ran: any | null, instructions: number, switched: boolean,
-     *     elsewhere?: boolean }}  elsewhere: nothing ran here, the others still run
+     *     elsewhere?: boolean, rung?: number }}  elsewhere: nothing ran here, the others
+     *     still run; rung: the others' bell as the turn last looked, when the turn left
+     *     without waiting for it
      */
     const runShared = remotes=>{
         const turnFrom = wall();
@@ -1519,7 +1600,7 @@ export function createScheduler(options){
      * had its entry point's frame dropped and the thread returned to 0.
      *
      * @param {{ ran: any | null, instructions: number, switched: boolean,
-     *     elsewhere?: boolean }} turn
+     *     elsewhere?: boolean, rung?: number }} turn
      */
     const takeEnding = turn=>{
         const bell = cpu.executorBell();
@@ -1542,7 +1623,8 @@ export function createScheduler(options){
 
     /**
      * @param {any[]} remotes
-     * @returns {{ ran: any | null, instructions: number, switched: boolean, elsewhere?: boolean }}
+     * @returns {{ ran: any | null, instructions: number, switched: boolean,
+     *     elsewhere?: boolean, rung?: number }}
      */
     const runSharedTurn = remotes=>{
         expire();
@@ -1595,6 +1677,15 @@ export function createScheduler(options){
             // A thread made ready runs here next round: this executor is free.
             if (runnable().length === 0)
             {
+                // A host call still to answer through the event loop, which a
+                // wait here holds back: its caller waits for the answer and the
+                // others' bell together (`rung`). A caller parked on the guest's
+                // own message queue is not one -- its look is the next turn's.
+                if (hostAnswering())
+                {
+                    return { ran: null, instructions, switched: false, elsewhere: true,
+                        rung: seen };
+                }
                 // Until the soonest deadline at most: an executor keeps its thread
                 // while nothing waits for one, so no word may come before a timed
                 // wait here runs out. A wait that saw none ends the turn as one
@@ -1682,6 +1773,12 @@ export function createScheduler(options){
                 crossingsAt: 0,
                 crossRate: 0,
                 crossSeen: false,
+                /**
+                 * How often its runs on another executor ended with this one
+                 * left nothing to run and calling it back (`coupled`).
+                 */
+                coupled: 0,
+                coupledAt: 0,
                 instructions: 0,
                 /**
                  * The same since the figures were last published. Kept on the
@@ -1823,16 +1920,6 @@ export function createScheduler(options){
         },
 
         /**
-         * Gives the CPU to the next ready thread and lets it run a quantum.
-         *
-         * Returns what happened, so a caller driving the machine can tell the
-         * difference between progress, an idle system and a finished one --
-         * three states that look identical if all you get back is a number.
-         *
-         * @returns {{ ran: any | null, instructions: number, switched: boolean,
-         *     elsewhere?: boolean }}  elsewhere: nothing ran here, the others still run
-         */
-        /**
          * How a turn's wait for its thread's host answer went (the run loop's):
          * the microtasks it took, or that none came in the ones allowed.
          *
@@ -1847,6 +1934,18 @@ export function createScheduler(options){
             }
         },
 
+        /**
+         * Gives the CPU to the next ready thread and lets it run a quantum.
+         *
+         * Returns what happened, so a caller driving the machine can tell the
+         * difference between progress, an idle system and a finished one --
+         * three states that look identical if all you get back is a number.
+         *
+         * @returns {{ ran: any | null, instructions: number, switched: boolean,
+         *     elsewhere?: boolean, rung?: number }}  elsewhere: nothing ran here, the
+         *     others still run; rung: the others' bell as the turn last looked, when it
+         *     left without waiting for them
+         */
         runOnce(){
             const remotes = cpu.executors?.() ?? [];
             if (remotes.length > 0)

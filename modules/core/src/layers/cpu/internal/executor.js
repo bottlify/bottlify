@@ -80,6 +80,17 @@ export function createBell(){
             waitWhile(word, 0, seen, ms);
         },
         /**
+         * The same wait without blocking: for a caller whose other wake comes
+         * through the event loop, which a blocking wait holds back.
+         *
+         * @param {number} seen @param {number} ms
+         * @returns {Promise<void>}
+         */
+        waitAsync(seen, ms){
+            const waiting = /** @type {any} */ (Atomics).waitAsync(word, 0, seen, ms);
+            return waiting.async ? waiting.value.then(()=>{}) : Promise.resolve();
+        },
+        /**
          * Whether no ready thread waits for an executor: then one whose slice
          * ends with its thread still running goes on with it, a slice after
          * another, without a word to the process -- which a round trip a

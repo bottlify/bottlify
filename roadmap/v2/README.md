@@ -339,16 +339,17 @@ measurement before stage 1 says that pays.
 | --- | --- | --- | --- | --- |
 | Executors of a process | 1 | `hardwareConcurrency`, at most the process's thread count | two or more of its threads are ready most of the time | rarely, after a long quiet spell: it is a mode switch |
 
-**Measured** (2026-10-08, `tools/executor-sweep.mjs`, node 22.22.0, a 4-core VM, no browser;
-three runs a point, medians): a synthetic program of T threads, each on its own data, with a
-`lock add` every 256 iterations or none and a host call every 4 096 or 65 536 or none, ran
-x1.53 to x1.91 faster with two threads on three or four executors than on one, and x1.88 to
-x2.58 with three threads on four; the more locks and host calls, the larger the gain. It ran
-slower -- x0.64 to x0.86 -- with more threads than executors past the process's own, and never
+**Measured** (2026-10-08, `tools/executor-sweep.mjs`, node 22.22.0, a 4-core VM, no browser; three
+runs a point, medians): a synthetic program of T threads, each on its own data, with a `lock add`
+every 256 iterations or none and a "host call" every 4 096 or 65 536 or none (GetTickCount, which
+runs as guest code: no call reached the host -- invalidated as host calls, `negative-results.md`,
+2026-10-16), ran x1.53 to x1.91 faster with two threads on three or four executors than on one, and
+x1.88 to x2.58 with three threads on four; the more locks and host calls, the larger the gain. It
+ran slower -- x0.64 to x0.86 -- with more threads than executors past the process's own, and never
 faster with two executors in all (`negative-results.md`). One thread lost nothing on any count
 (x0.94 to x1.10). Doom 3, one executor, against `728d9672` before this stage: loading to the same
-mark in 17 s against 18 s (medians of six runs), the rate after it 14.56 against 14.78 M/s
-(three 70 s runs each, spread about 7 %): not distinguishable.
+mark in 17 s against 18 s (medians of six runs), the rate after it 14.56 against 14.78 M/s (three 70
+s runs each, spread about 7 %): not distinguishable.
 
 **Measured** (2026-10-15, 7-Zip 26.04 x86 `7zr.exe b -md22`, sha256 `256feca8e274e5da…`, through
 `createApp` with `cpu: { cores }`; node 22.22.0, a 4-core x86-64 KVM VM, Intel Xeon @ 2.80 GHz, no
@@ -377,36 +378,63 @@ threads wait. A run of four cores is made in about 150 ms against 330 to 410 (ru
 and the core suite's process-spawning file on four cores took 47.7 s against 59 to 60.
 
 **Measured** (2026-10-16, the process's executor interrupted by the others: a word they store when
-they need its answer, which its translated code reads at every back edge as the floor of its
-budget; node 22.22.0, the same VM): a worker thread on a second executor calling into the host
-20 000 times while the main thread spins on the process's own without a call took 10.8 to 11.6 s
-before -- each call waited 0.57 ms for the end of a turn kept a quantum long, 17 to 18 thousand
-turns -- and 0.14 to 0.22 s after, 4 to 7 us a call in 15 to 19 turns (three runs each). The word
-costs a load at each back edge where a process has more than one core: the cork benchmark on a
-layout of four, its program on the first executor alone, against the same without the word -- two
-rounds of ten reps a workload, the mean of the three fastest, in both orders: geometric means
-x1.004 and x0.987, the same tree against itself x1.001 and x0.984; per workload within the ten
-per cent a steady-state figure moves between processes. Not distinguishable. The executor sweep
-(1 to 4 threads on 1, 2 and 4 executors, a host call every 4096 turns or none, five runs a point,
-the mean of the fastest three, against the same without the word): on one executor, where nothing
-changed, x0.96 to x1.06 -- the noise; with others x0.88 to x1.05, two threads on two 0.566 s against
-0.644, four on four 0.441 against 0.485, four on two with host calls 0.849 against 0.933, more
-threads than executors no slower.
+they need its answer, which its translated code reads at every back edge as the floor of its budget;
+node 22.22.0, the same VM): a worker thread on a second executor calling into the host 20 000 times
+while the main thread spins on the process's own without a call took 10.8 to 11.6 s before -- each
+call waited 0.57 ms for the end of a turn kept a quantum long, 17 to 18 thousand turns -- and 0.14
+to 0.22 s after, 4 to 7 us a call in 15 to 19 turns (three runs each). The word costs a load at each
+back edge where a process has more than one core: the cork benchmark on a layout of four, its
+program on the first executor alone, against the same without the word -- two rounds of ten reps a
+workload, the mean of the three fastest, in both orders: geometric means x1.004 and x0.987, the same
+tree against itself x1.001 and x0.984; per workload within the ten per cent a steady-state figure
+moves between processes. Not distinguishable. The executor sweep (1 to 4 threads on 1, 2 and 4
+executors, a "host call" every 4096 turns or none (GetTickCount, which runs as guest code: no call
+reached the host -- invalidated as host calls, `negative-results.md`, 2026-10-16), five runs a
+point, the mean of the fastest three, against the same without the word): on one executor, where
+nothing changed, x0.96 to x1.06 -- the noise; with others x0.88 to x1.05, two threads on two 0.566 s
+against 0.644, four on four 0.441 against 0.485, four on two with host calls 0.849 against 0.933,
+more threads than executors no slower.
 
 **Measured** (2026-10-16, more ready threads than executors; node 22.22.0, the same VM): another
 executor gave its thread back at every slice's end while a thread waited -- four threads on two
-executors, 14 405 slices of 48 us in 1.4 s, each a round trip through the process, the executor
-idle 44% of its life, x1.00 to x1.09 against one executor. Kept a turn of 1 ms (`executorHoldMs`)
-before it gives the thread up -- as a processor keeps a thread to its quantum's end; a thread
-wanted back at once (suspended, recalled) is still given up at the slice's end -- the same program
-took 747 to 845 ms against 1242 to 1338 (three runs each; 0.25 ms 817 to 976, 2 ms 752 to 837).
-The sweep (1 to 4 threads on 1, 2 and 4 executors, a host call every 4096 turns or none, a lock
-every 256 or none, five runs a point, the mean of the fastest three): every point with more
-threads than executors faster, x0.74 to x0.91 -- four on two x1.32 to x1.57 against one executor,
-from x1.00 to x1.09 -- the others within the x0.87 to x1.09 the points on one executor, where
-nothing changed, moved. 7-Zip 26.04 `7zr.exe b -md22` (three runs a point, the arms alternated,
-total rating in MIPS): two cores 2217 (2316 2190 2217) against 2097 (2310 2097 2090), four 4024
-(3850 4024 4112) against 3914 (3835 3914 3924).
+executors, 14 405 slices of 48 us in 1.4 s, each a round trip through the process, the executor idle
+44% of its life, x1.00 to x1.09 against one executor. Kept a turn of 1 ms (`executorHoldMs`) before
+it gives the thread up -- as a processor keeps a thread to its quantum's end; a thread wanted back
+at once (suspended, recalled) is still given up at the slice's end -- the same program took 747 to
+845 ms against 1242 to 1338 (three runs each; 0.25 ms 817 to 976, 2 ms 752 to 837). The sweep (1 to
+4 threads on 1, 2 and 4 executors, a "host call" every 4096 turns or none (GetTickCount, which runs
+as guest code: no call reached the host -- invalidated as host calls, `negative-results.md`,
+2026-10-16), a lock every 256 or none, five runs a point, the mean of the fastest three): every
+point with more threads than executors faster, x0.74 to x0.91 -- four on two x1.32 to x1.57 against
+one executor, from x1.00 to x1.09 -- the others within the x0.87 to x1.09 the points on one
+executor, where nothing changed, moved. 7-Zip 26.04 `7zr.exe b -md22` (three runs a point, the arms
+alternated, total rating in MIPS): two cores 2217 (2316 2190 2217) against 2097 (2310 2097 2090),
+four 4024 (3850 4024 4112) against 3914 (3835 3914 3924).
+
+**Measured** (2026-10-16, a thread that calls into the host kept on the process's executor): Far
+Cry's loading screen (the demo, bundle sha256 `ec81f9c260efb780…`, settled 40 s and watched 40 s in
+`tools/cdp_test/frames.mjs --coi --worker --cores N --threads`; headless Chromium 141, SwiftShader,
+the same VM, power plan not recorded; three runs an arm) drew 10.1, 11.3 and 8.5 frames a second on
+two cores against 13.0 to 13.6 on one (`negative-results.md`): the renderer, a call into the host
+every hundred instructions, ran on the other executor whenever a sound thread had the process's,
+each call a round trip. Three changes, each measured on top of the last: a thread calling into the
+host more than once in 30 000 instructions over its last slices runs on the process's executor only,
+and a turn there with nothing to run leaves at once while a host answer is due through the event
+loop -- 11.2, 11.8, 11.1 (one core 13.5, 13.6, 13.5); a thread another executor keeps comes to the
+process's as soon as that one has nothing to run, not after 2 ms -- 12.2, 12.2, 12.4; a thread whose
+runs elsewhere mostly end with the process's executor calling it back stays there too, the share
+halving every second -- 13.6, 12.3, 12.7, the other executor running 179 to 202 slices and 0.7 to
+1.0% of the instructions. Gothic 3 (`bundles/g3`, settled 120 s, watched 40 s): two cores 4.4, 4.7,
+4.4 against one 4.4, 4.5, 4.5, from 3.4, 4.2, 4.1 against 4.6, 4.5, 4.6. Threads that compute keep
+their gain (node 22.22.0, the same VM; `tools/executor-sweep.mjs`, five runs a point, the mean of
+the fastest three, two rounds, `9791153d` against the change): without calls into the host x1.31 to
+x1.51 on two executors for two and four threads against x1.24 to x1.45; with a call the host answers
+(GetACP) every 4096 turns, about one in 37 000 instructions, x1.03 to x1.30 on two and four against
+x1.04 to x1.28; every 1024, x0.93 to x1.15 against x0.91 to x1.18, and every 256 x0.91 to x1.10
+against x0.58 to x0.74 -- those threads now all on the process's executor. 7-Zip 26.04 `7zr.exe b
+-md22`: (three runs a point, the arms alternated, total rating in MIPS, medians with the raw
+values): one core 1253 (1173 1314 1253) against 1239 (1239 1205 1262), two 2073 (2109 2073 2023)
+against 2047 (2047 2050 1985), four 3757 (3809 3757 3630) against 3634 (3442 3742 3634).
 
 **What it costs, and when it pays.** The atomic variant makes every executor slower by the tax *t*
 measured before stage 1. Two executors win when their speedup *S* satisfies *S* × (1 − *t*) > 1.

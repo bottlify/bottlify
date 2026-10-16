@@ -1260,9 +1260,11 @@ const SOUND_PUMP_MS = 1;
  * @param {number} state.suspended  Host calls suspended on the host, the
  *     callers parked on the guest's own queue left out.
  * @param {number} state.spun       Turns in a row that retired no instruction.
+ * @param {boolean} [state.others]  The process's other executors still run its
+ *     threads, the last turn having left without waiting for them.
  * @returns {{ phase: string, timer: boolean } | null} null to go straight on.
  */
-export function idleWait({ fetching, idlers, suspended, spun }){
+export function idleWait({ fetching, idlers, suspended, spun, others = false }){
     if (idlers === 0 && suspended === 0)
     {
         return null;
@@ -1275,7 +1277,10 @@ export function idleWait({ fetching, idlers, suspended, spun }){
         return null;
     }
     const on = fetching > 0 ? 'fetch' : idlers > 0 ? 'message' : 'host';
-    const timer = spun >= IDLE_SPINS_BEFORE_TIMER;
+    // A turn the others ran retired nothing here and still resets the count:
+    // with a call waiting on the host, the loop would come straight back for
+    // as long as they run. Their bell ends the wait as the answer does.
+    const timer = spun >= IDLE_SPINS_BEFORE_TIMER || others && suspended > 0;
     return { phase: `idle-${on}${timer ? '-wait' : ''}`, timer };
 }
 
@@ -6351,6 +6356,9 @@ async function buildApp(options){
     const CLOCK_CREDIT_CAP_MS = 250;
     const creditClock = clockCredit(clockSource, clock, CLOCK_CREDIT_CAP_MS);
     kernel.refreshClockWith?.(()=>creditClock());
+    // Callers parked on the guest's own queue are suspended calls too, answered
+    // at the look each turn gives them.
+    kernel.hostAnsweringWith?.(()=>bridge.suspended() > idlers.length);
 
     const breathe = createMacrotask();
     const jsSampler = options.sampleJs ? createJsSampler() : null;
@@ -6512,6 +6520,13 @@ async function buildApp(options){
             // the host, which are the same shape from here and want opposite
             // waits.
             let spun = 0;
+            /**
+             * The process's other executors' bell as the last turn left it
+             * without waiting for them, a call waiting on the host: the idle
+             * wait ends on its ring too. Null otherwise.
+             * @type {number | null}
+             */
+            let othersRung = null;
             /** When the sound was last pumped (`SOUND_PUMP_MS`). */
             let pumpedAt = -Infinity;
             while (worked < maxTurns && !expired())
@@ -6654,7 +6669,8 @@ async function buildApp(options){
                     // together. The timer is kept for the case it is right for,
                     // which is a machine that really can do nothing until the
                     // host answers.
-                    const wait = idleWait({ fetching, idlers: queued, suspended: onHost, spun });
+                    const wait = idleWait({ fetching, idlers: queued, suspended: onHost, spun,
+                        others: othersRung !== null });
                     if (wait)
                     {
                         journal.begin(wait.phase, journal.PhaseKind.HOST);
@@ -6698,6 +6714,10 @@ async function buildApp(options){
                         if (wait.timer && bridge.suspended() > 0)
                         {
                             wakes.push(bridge.answered());
+                        }
+                        if (wait.timer && othersRung !== null)
+                        {
+                            wakes.push(cpu.executorBell().waitAsync(othersRung, IDLE_LOOK_MS));
                         }
                         await pacing.wait({
                             timer: wait.timer, sleep: wait.timer,
@@ -6850,6 +6870,7 @@ async function buildApp(options){
                     // with a thread in GetMessage, slept on a timer while the
                     // others waited for their traps to be answered.
                     spun = step.instructions === 0 && !step.elsewhere ? spun + 1 : 0;
+                    othersRung = step.elsewhere && step.rung !== undefined ? step.rung : null;
 
                     // The guest ran for real, so its clock moves. Nothing else in
                     // the engine does this, and without it the clock only ever

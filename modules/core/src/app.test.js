@@ -1049,6 +1049,19 @@ test('the wait is named for what is being waited on', ()=>{
         'and the name says which of the two waits it took');
 });
 
+test('a call on the host while the other executors run waits for its answer or for them', ()=>{
+    // The turn the others ran retired nothing here and resets the count, so a
+    // machine whose one thread here waits on the host came straight back for
+    // as long as they ran -- or, before, the turn itself waited for them and
+    // held the answer back, the event loop being where it comes.
+    assert.equal(waitOn({ suspended: 1, others: true }).timer, true);
+    assert.equal(waitOn({ suspended: 1, others: true }).phase, 'idle-host-wait');
+    assert.equal(idleWait(busy({ others: true })), null,
+        'with nothing on the host the next turn is the others\' work');
+    assert.equal(idleWait(busy({ idlers: 1, others: true })), null,
+        'nor a caller on the guest\'s own queue: its look is the next turn');
+});
+
 test("a caller parked on the guest's own queue is no wait while the guest still runs", ()=>{
     // An installer's window thread sits in GetMessage while another thread
     // copies; the window thread looks at its queue every turn without the
