@@ -296,6 +296,9 @@ export const D3DFMT = Object.freeze({
     DXT3: 0x33545844,
     DXT4: 0x34545844,
     DXT5: 0x35545844,
+    // The vendor formats of two channels, ATI's 3Dc: one or two BC4 blocks.
+    ATI1: 0x31495441,
+    ATI2: 0x32495441,
     // Packed 4:2:2 video, two pixels to four bytes.
     YUY2: 0x32595559,
     UYVY: 0x59565955,
@@ -410,6 +413,12 @@ export const FORMAT_INFO = Object.freeze({
         bytesPerPixel: 0, depth: false, alpha: true, blockBytes: 16, blockSize: 4 }),
     [D3DFMT.DXT5]: Object.freeze({
         bytesPerPixel: 0, depth: false, alpha: true, blockBytes: 16, blockSize: 4 }),
+    // One channel, sampled into all four; and two -- a normal map's x and y --
+    // sampled as (y, x, 1, 1), as wined3d's fixups for these formats sample them.
+    [D3DFMT.ATI1]: Object.freeze({
+        bytesPerPixel: 0, depth: false, alpha: true, blockBytes: 8, blockSize: 4 }),
+    [D3DFMT.ATI2]: Object.freeze({
+        bytesPerPixel: 0, depth: false, alpha: false, blockBytes: 16, blockSize: 4 }),
 });
 
 /**

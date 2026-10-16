@@ -57,6 +57,7 @@ import { D3DTSS9, D3DVERTEXTEXTURESAMPLER0 } from '../d3d9/samplerstates.js';
 import { D3DDECLUSAGE, MAX_STREAMS } from '../d3d9/declaration.js';
 import { OPCODE, REGISTER, SHADER_KIND } from '../d3d9/shader.js';
 import { decodeS3tc } from '../webgpu/internal/s3tc.js';
+import { convertTexels } from '../d3d10/blocks.js';
 import { fromHalf, storedToHalves } from '../d3d9/half.js';
 import { passedSamples, reachableArea } from '../webgpu/internal/occlusion.js';
 import { changedSpans, createCompared } from '../webgpu/internal/changed.js';
@@ -882,13 +883,18 @@ const DECODE_ROOM_LIMIT = 1024 * 1024 * 4;
  * the same block-rounded count `decodeS3tc` requires.
  *
  * @param {Uint8Array} bytes
- * @param {import('../webgpu/internal/s3tc.js').S3tcKind} kind
+ * @param {number} format  D3DFMT, a DXTn or an ATI one
  * @param {number} width @param {number} height
  * @param {Uint8Array} [into]  bytes to decode into, when they are enough
  * @returns {Uint8Array}
  */
-const decodeCompressed = (bytes, kind, width, height, into)=>{
-    const decoded = /** @type {Uint8Array} */ (decodeS3tc(bytes, kind, width, height, into));
+const decodeCompressed = (bytes, format, width, height, into)=>{
+    if (format === D3DFMT.ATI1 || format === D3DFMT.ATI2)
+    {
+        return decodeAti(bytes, format, width, height);
+    }
+    const decoded = /** @type {Uint8Array} */ (decodeS3tc(bytes, S3TC_OF[format], width, height,
+        into));
     for (let at = 0; at < decoded.length; at += 4)
     {
         const red = decoded[at];
@@ -896,6 +902,39 @@ const decodeCompressed = (bytes, kind, width, height, into)=>{
         decoded[at + 2] = red;
     }
     return decoded;
+};
+
+/**
+ * An ATI1 or ATI2 level in `bgra8unorm` texels: its BC4 blocks decoded, one
+ * channel into all four, or two -- x the first block, y the second -- as red y
+ * and green x, blue and alpha one, which is how a Direct3D 9 driver samples
+ * them (wined3d's fixups for ATI1N and ATI2N). Decoded rather than kept: a
+ * WebGPU BC5 texture samples x as red, and a view cannot exchange them.
+ *
+ * @param {Uint8Array} bytes @param {number} format @param {number} width @param {number} height
+ * @returns {Uint8Array}
+ */
+const decodeAti = (bytes, format, width, height)=>{
+    const two = format === D3DFMT.ATI2;
+    const channels = convertTexels(two ? 'bc5u' : 'bc4u', bytes, width, height)
+        ?? new Uint8Array(width * height * (two ? 2 : 1));
+    const out = new Uint8Array(width * height * 4);
+    for (let texel = 0; texel < width * height; texel++)
+    {
+        const at = texel * 4;
+        if (two)
+        {
+            out[at] = 255;
+            out[at + 1] = channels[texel * 2];
+            out[at + 2] = channels[texel * 2 + 1];
+            out[at + 3] = 255;
+        }
+        else
+        {
+            out.fill(channels[texel], at, at + 4);
+        }
+    }
+    return out;
 };
 
 /**
@@ -4925,7 +4964,7 @@ export function createRenderer(options){
             const desc = describe(surface);
             const bytes = readMemory(surface.base,
                 surfaceBytes(desc.Format, desc.Width, desc.Height));
-            const keepsBlocks = isCompressed(desc.Format) && compressedTextures
+            const keepsBlocks = COMPRESSED_FORMAT[desc.Format] !== undefined && compressedTextures
                 && blockAligned(desc.Width, desc.Height);
             uploadTexels(made, {
                 format: made.format,
@@ -4935,7 +4974,7 @@ export function createRenderer(options){
                 texels: keepsBlocks
                     ? bytes
                     : isCompressed(desc.Format)
-                        ? decodeCompressed(bytes, S3TC_OF[desc.Format], desc.Width, desc.Height)
+                        ? decodeCompressed(bytes, desc.Format, desc.Width, desc.Height)
                         : expandTexels(desc.Format, bytes, desc.Width * desc.Height, float32),
             }, true);
         }
@@ -5354,8 +5393,8 @@ export function createRenderer(options){
             // texture's path: WebGPU already refused (and gpuFormatOf already
             // fell back) on the base alone, so every level -- mips round down
             // further still -- follows the same choice.
-            const keepsBlocks = isCompressed(record.format) && compressedTextures
-                && blockAligned(record.width, record.height);
+            const keepsBlocks = COMPRESSED_FORMAT[record.format] !== undefined
+                && compressedTextures && blockAligned(record.width, record.height);
             for (const subresource of [...record.dirtyLevels].sort((left, right)=>left - right))
             {
                 const level = subresource % record.levels;
@@ -5395,7 +5434,7 @@ export function createRenderer(options){
                 const texels = keepsBlocks
                     ? bytes
                     : decodes
-                        ? decodeCompressed(bytes, S3TC_OF[record.format], width, height, room)
+                        ? decodeCompressed(bytes, record.format, width, height, room)
                         : expandTexels(record.format, bytes, width * height, float32);
                 uploadTexels(record.gpu,
                     { format: gpuFormat, mipLevel: level, width, height, texels, layer: face },
