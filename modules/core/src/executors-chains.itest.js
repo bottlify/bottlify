@@ -111,6 +111,50 @@ test('two threads computing on two executors keep them, not handing their thread
         `${scheduler?.executorSlices} slices on the other executor`);
 });
 
+test('three threads computing on two executors take turns there a turn long, not a slice',
+    async()=>{
+        // One more thread than the executors: the other executor's is wanted by
+        // a waiting thread at every slice's end. It gives it up when it has held
+        // it a turn (`executorHoldMs`), not after each quantum, which took a
+        // round trip through the process every 50 us and left it idle for
+        // almost half its time.
+        const executable = buildProgram(['CreateThread', 'WaitForSingleObject', 'ExitProcess'],
+            { first: [0, 0, 0, 0], second: [0, 0, 0, 0], third: [0, 0, 0, 0] },
+            ({ call, at, start })=>{
+                /** WaitForSingleObject([slot], INFINITE) @param {string} slot */
+                const wait = slot=>[0x6a, 0xff, 0xff, 0x35, ...u32(at(slot)),
+                    ...call('WaitForSingleObject')];
+                return {
+                    main: [...start('first'), ...start('second'), ...start('third'),
+                        ...wait('first'), ...wait('second'), ...wait('third'),
+                        0x6a, 0x07, ...call('ExitProcess')],
+                    worker: [
+                        0xb9, ...u32(LOOPS * 2), //        mov ecx, 2 * LOOPS
+                        0x49, 0x75, 0xfd, //               L: dec ecx; jnz L
+                        0x31, 0xc0, 0xc2, 0x04, 0x00, //   xor eax, eax; ret 4
+                    ],
+                };
+            });
+        const app = await createApp({ executable, cpu: { cores: 2, eager: true } });
+        try
+        {
+            const began = performance.now();
+            assert.equal((await app.run({ timeoutMs: 60_000 })) >>> 0, 7);
+            const ms = performance.now() - began;
+            const tables = await app.diagnostics();
+            const kernel = (Array.isArray(tables) ? tables : [])
+                .find(table=>table.name === 'kernel');
+            const scheduler = kernel?.metrics?.scheduler ?? kernel?.metrics;
+            // A turn a millisecond is about one a millisecond; a quantum each, ten.
+            assert.ok(scheduler?.executorSlices > 0 && scheduler.executorSlices < ms * 3,
+                `${scheduler?.executorSlices} slices elsewhere in ${Math.round(ms)} ms`);
+        }
+        finally
+        {
+            await app.dispose();
+        }
+    });
+
 test('a thread started while the first still ran, left alone when the first waits for it, comes'
     + ' to the process\'s own executor', async()=>{
     // Started while the main thread runs here, the worker goes to the other

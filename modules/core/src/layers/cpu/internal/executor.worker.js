@@ -47,6 +47,11 @@ const YIELD_MS = 4;
  */
 const CHAIN_MS = 250;
 /**
+ * How long it keeps a thread past its slice while other ready threads wait
+ * for an executor (`hold`), unless the process asks for it at once: its turn.
+ */
+const HOLD_MS = 1;
+/**
  * The longest a chain goes without asking its translator for what its
  * interpreters found hot: asked after every slice, a quantum of 40 µs, it took
  * a twelfth of a lone thread's time on its own executor.
@@ -66,7 +71,7 @@ let running = null;
  */
 const spent = { startedAt: 0, slicesMs: 0, answerWaitMs: 0, idleMs: 0, slices: 0, traps: 0,
     faults: 0, yieldMs: 0, feedMs: 0, asyncWaits: 0, inChainYieldMs: 0,
-    ends: { halted: 0, stopped: 0, faulted: 0, released: 0, chained: 0 } };
+    ends: { halted: 0, stopped: 0, faulted: 0, released: 0, turned: 0, chained: 0 } };
 
 /**
  * @param {ExecutorStart} start
@@ -103,6 +108,7 @@ async function serve({ engineUrl, config, memory, channel: buffer, bell, unbroke
     const spinMs = config.cork?.spinMs ?? SPIN_MS;
     const idleMs = config.cork?.executorIdleMs ?? IDLE_MS;
     const yieldMs = config.cork?.executorYieldMs ?? YIELD_MS;
+    const holdMs = config.cork?.executorHoldMs ?? HOLD_MS;
     const channel = channelOf(buffer, bellWords, spinMs);
     host.onTrap((/** @type {number} */ value)=>{
         const asked = performance.now();
@@ -213,14 +219,17 @@ async function serve({ engineUrl, config, memory, channel: buffer, bell, unbroke
             {
                 retired += host.runSlice(budget);
                 const now = performance.now();
+                const go = Atomics.load(bellWords, 1);
                 const end = host.halted() ? 'halted' : host.stopRequested() ? 'stopped'
                     : host.fault() !== null ? 'faulted'
-                        : Atomics.load(bellWords, 1) !== 1 ? 'released'
-                            : now - chained >= CHAIN_MS ? 'chained' : null;
+                        : go === 0 ? 'released'
+                            : go === 2 && now - chained >= holdMs ? 'turned'
+                                : now - chained >= CHAIN_MS ? 'chained' : null;
                 if (end !== null)
                 {
                     spent.ends[end]++;
-                    retired += end === 'released' || end === 'chained' ? runOut() : 0;
+                    retired += end === 'released' || end === 'turned' || end === 'chained'
+                        ? runOut() : 0;
                     break;
                 }
                 if (now - yieldedAt >= yieldMs)

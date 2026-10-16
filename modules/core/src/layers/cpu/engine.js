@@ -313,6 +313,8 @@
  *     before its event loop does. Default 2.
  * @property {number} [executorYieldMs]  The longest an executor goes without a turn of its
  *     event loop. Default 4.
+ * @property {number} [executorHoldMs]  How long an executor keeps a thread past its slice while
+ *     other ready threads wait for one: its turn. Default 1.
  */
 
 /**

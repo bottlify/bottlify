@@ -65,7 +65,7 @@ async function openWorker(url){
  */
 export function createBell(){
     // The count of turns rung, then whether an executor may go on with its
-    // thread past a slice (`goOn`).
+    // thread past a slice: 1 on, 0 not, 2 for a turn's length (`goOn`, `hold`).
     const buffer = new SharedArrayBuffer(8);
     const word = new Int32Array(buffer);
     return {
@@ -89,6 +89,17 @@ export function createBell(){
          */
         goOn(on){
             Atomics.store(word, 1, on ? 1 : 0);
+        },
+        /**
+         * Ready threads wait for an executor, none of them at once: one whose
+         * slice ends with its thread still running goes on with it until it has
+         * held it a turn (`executorHoldMs`), as a processor keeps a thread to
+         * its quantum's end -- given back after every slice, a thread past the
+         * executors cost a round trip through the process each quantum, and
+         * four threads on two executors ran barely faster than on one.
+         */
+        hold(){
+            Atomics.store(word, 1, 2);
         },
     };
 }

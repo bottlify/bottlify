@@ -91,6 +91,7 @@ something only with a measurement beside it.
 | `interpretChunk`, `sliceMs` | 8192, 8 | Instructions interpreted at a time (`createMachine`: 65536), and how long an interpreting slice may take. | Larger interprets in longer stretches: fewer checks, longer holds. |
 | `tscDriftMs` | 16 | How far `rdtsc` may run ahead of the guest's clock. | Programs timing with `rdtsc`. |
 | `spinMs`, `executorIdleMs`, `executorYieldMs` | 0.05, 2, 4 | With several executors: how long a side looks at their channel before sleeping, how long an executor waits in place, the longest it goes without a turn of its event loop. | Longer spins lower latency and burn a core. |
+| `executorHoldMs` | 1 | With several executors and more ready threads than they run: how long an executor keeps its thread before it gives it up for one that waits -- its turn. | Shorter is fairer and costs a round trip through the process each turn: four threads on two executors 817-976 ms at 0.25, 747-845 at 1, 752-837 at 2, 1242-1338 giving the thread up every slice. |
 
 The core also takes `cork.pool`, `cork.poolPerProcess`, `cork.poolWindowMs` and `cork.poolDriver`
 (the translation pool's thresholds) beside `config`, and `quantum` and `executors` on `createApp`.

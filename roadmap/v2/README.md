@@ -393,6 +393,21 @@ changed, x0.96 to x1.06 -- the noise; with others x0.88 to x1.05, two threads on
 0.644, four on four 0.441 against 0.485, four on two with host calls 0.849 against 0.933, more
 threads than executors no slower.
 
+**Measured** (2026-10-16, more ready threads than executors; node 22.22.0, the same VM): another
+executor gave its thread back at every slice's end while a thread waited -- four threads on two
+executors, 14 405 slices of 48 us in 1.4 s, each a round trip through the process, the executor
+idle 44% of its life, x1.00 to x1.09 against one executor. Kept a turn of 1 ms (`executorHoldMs`)
+before it gives the thread up -- as a processor keeps a thread to its quantum's end; a thread
+wanted back at once (suspended, recalled) is still given up at the slice's end -- the same program
+took 747 to 845 ms against 1242 to 1338 (three runs each; 0.25 ms 817 to 976, 2 ms 752 to 837).
+The sweep (1 to 4 threads on 1, 2 and 4 executors, a host call every 4096 turns or none, a lock
+every 256 or none, five runs a point, the mean of the fastest three): every point with more
+threads than executors faster, x0.74 to x0.91 -- four on two x1.32 to x1.57 against one executor,
+from x1.00 to x1.09 -- the others within the x0.87 to x1.09 the points on one executor, where
+nothing changed, moved. 7-Zip 26.04 `7zr.exe b -md22` (three runs a point, the arms alternated,
+total rating in MIPS): two cores 2217 (2316 2190 2217) against 2097 (2310 2097 2090), four 4024
+(3850 4024 4112) against 3914 (3835 3914 3924).
+
 **What it costs, and when it pays.** The atomic variant makes every executor slower by the tax *t*
 measured before stage 1. Two executors win when their speedup *S* satisfies *S* × (1 − *t*) > 1.
 At *t* = 20 % that is *S* > 1.25, which by Amdahl's law needs more than 40 % of the work to run in

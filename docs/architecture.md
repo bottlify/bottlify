@@ -378,7 +378,9 @@ There are no page tables: each 4 KiB page has one byte of flags — `INACCESSIBL
   current thread while it is answered. An executor keeps its
   thread slice after slice while no ready thread waits for one and the process wants none back
   (suspended, ended by another): its event loop turns in between, and the process hears of the
-  thread at most every 250 ms. The process's thread with nothing of its own to run waits for the
+  thread at most every 250 ms. While ready threads wait for an executor, it keeps its thread for a
+  turn, 1 ms (`executorHoldMs`), and gives it up at the first slice's end past that, as a processor
+  keeps a thread to its quantum's end. The process's thread with nothing of its own to run waits for the
   others until its soonest deadline, 4 ms at most; past 2 ms of that, an executor keeping a thread
   the process's executor may run lets it go at its slice's end and the thread comes to the
   process's executor, so a program whose one working thread was started while its first still ran

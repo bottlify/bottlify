@@ -19,7 +19,7 @@
  *
  *     node tools/cdp_test/frames.mjs <bundle-id> [--seconds 60] [--settle 20]
  *                                    [--video] [--no-trace] [--command-line STRING]
- *                                    [--windows NAME]
+ *                                    [--windows NAME] [--quantum N] [--cores N]
  */
 
 import { existsSync } from 'node:fs';
@@ -73,6 +73,9 @@ function parse(argv){
         // Guest instructions per scheduler turn. Worth varying: it is the one
         // number that decides how long a thread may hold the machine.
         quantum: number('--quantum', 0),
+        // The processors the program is told it has and the executors that run
+        // its threads (`cpu.cores`); 0 leaves the engine's default.
+        cores: number('--cores', 0),
         // Without the per-call string peeks the report's trace would otherwise
         // carry: they read guest memory on every host call, which is a cost
         // the engine outside this harness does not pay.
@@ -407,6 +410,7 @@ try
         maxTurns: Number.MAX_SAFE_INTEGER,
         video: options.video,
         quantum: options.quantum || undefined,
+        executors: options.cores || undefined,
         profile: options.profile || undefined,
         trace: options.trace,
     })}); null`);

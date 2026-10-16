@@ -1427,14 +1427,28 @@ export function createScheduler(options){
         {
             idleSince = -1;
         }
-        // A thread left without an executor waits for one to give its thread up.
-        // The one taken here is not left: it runs this turn, still ready until it does.
-        // So does an executor whose thread is wanted back -- suspended, ended
-        // by another -- as it keeps one it is let go on with past its slice.
-        bell.goOn?.(!recall && candidates.length === 0
-            && waiting.every(thread=>thread === here || thread.state !== ThreadState.READY)
-            && [...placed.values()].every(on=>on.thread.state === ThreadState.RUNNING
-                && !(on.thread.suspendCount > 0)));
+        // An executor whose thread is wanted back -- suspended, ended by
+        // another, called back here -- gives it up at its slice's end, as it
+        // keeps one it is let go on with past its slice. One left without an
+        // executor waits for one to give its thread up at its turn's end
+        // (`hold`): the one taken here is not left, it runs this turn, still
+        // ready until it does.
+        const wanted = recall || [...placed.values()].some(on=>
+            on.thread.state !== ThreadState.RUNNING || on.thread.suspendCount > 0);
+        const left = candidates.length > 0
+            || waiting.some(thread=>thread !== here && thread.state === ThreadState.READY);
+        if (wanted || left && bell.hold === undefined)
+        {
+            bell.goOn?.(false);
+        }
+        else if (left)
+        {
+            bell.hold();
+        }
+        else
+        {
+            bell.goOn?.(true);
+        }
         return here;
     };
 
