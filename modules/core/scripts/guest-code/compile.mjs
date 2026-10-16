@@ -57,6 +57,15 @@
  * runtime's own business with the floating-point environment, whose
  * JavaScript reads and writes the words the host's FPU seam keeps.
  *
+ * A call to another `@guestCode` function of the module is a call: its code
+ * goes into the caller's after it, reached by `call rel32`, and its arguments
+ * are pushed as its convention takes them. The first argument is the helpers
+ * it takes, as the caller's own names -- `print({ u8, setU8 }, at, count)` --
+ * which in JavaScript is the call; the rest are integers, and it answers an
+ * integer or nothing. A callee that hands calls to the host has no host of its
+ * own inside another function, and a function that calls itself has no end
+ * of copies: both are refused.
+ *
  * `return host()` hands the call to the host's handler of the same function
  * with the arguments it came with, for a case the function leaves to it --
  * errno to set, a base it does not take: the frame is taken down and the code
@@ -358,6 +367,9 @@ const tableType = table=>(table.signed ? 'i32' : table.size === 4 ? 'u32' : 'nat
  *     Each arithmetic node and what it was compiled as: 'rounds' for a double's
  *     `+ - * /` and square root, which precision control rounds, 'integer' for
  *     an integer's -- what the tests' model of the x87 is made from.
+ * @property {Map<string, { node: any, doc: string }>} guests  The `@guestCode` functions.
+ * @property {(name: string, node: any) => CompiledFunction} compiledOf
+ *     A `@guestCode` function compiled, once, for a call to it.
  */
 
 /**
@@ -388,6 +400,7 @@ export function compileModule(text, { file, values = {}, arithmetic }){
     const scope = {
         file, text, constants: new Map(), tables: new Map(), inline: new Map(),
         declared: new Map(), comments: ast.comments, x87: null, arithmetic: arithmetic ?? null,
+        guests: new Map(), compiledOf: ()=>fail(scope, null, 'no function compiled yet'),
     };
     /** @type {{ node: any, doc: string }[]} */
     const marked = [];
@@ -459,7 +472,26 @@ export function compileModule(text, { file, values = {}, arithmetic }){
             scope.tables.set(name, { name, bytes, size, signed });
         }
     }
-    return marked.map(({ node, doc })=>{
+    for (const { node, doc } of marked)
+    {
+        scope.guests.set(node.id.name, { node, doc });
+    }
+    /** @type {Map<string, CompiledFunction>} */
+    const compiled = new Map();
+    /** @type {Set<string>} */
+    const compiling = new Set();
+    scope.compiledOf = (name, at)=>{
+        const done = compiled.get(name);
+        if (done)
+        {
+            return done;
+        }
+        if (compiling.has(name))
+        {
+            fail(scope, at, `${name} calls itself, through the functions it calls`);
+        }
+        compiling.add(name);
+        const { node, doc } = /** @type {{ node: any, doc: string }} */ (scope.guests.get(name));
         // Once to count the uses, once with the registers they earn to find
         // the frame that leaves, and once to address it.
         const first = new FunctionCompiler(scope, node, doc, null);
@@ -467,9 +499,13 @@ export function compileModule(text, { file, values = {}, arithmetic }){
         const plan = first.plan();
         const second = new FunctionCompiler(scope, node, doc, plan);
         second.compile();
-        return new FunctionCompiler(scope, node, doc, { ...plan, frame: second.frame() })
+        const made = new FunctionCompiler(scope, node, doc, { ...plan, frame: second.frame() })
             .compile();
-    });
+        compiling.delete(name);
+        compiled.set(name, made);
+        return made;
+    };
+    return marked.map(({ node })=>scope.compiledOf(node.id.name, node));
 }
 
 /** A function whose body is a single `return` of an expression, or an expression arrow. @param {any} node */
@@ -553,6 +589,8 @@ class FunctionCompiler {
         /** The bytes expression code has pushed where the next instruction goes. */
         this.pushed = 0;
         this.calls = false;
+        /** @type {Set<string>} The module's `@guestCode` functions this one calls. */
+        this.callees = new Set();
         this.bulkUsed = false;
         /** @type {Set<any>} The variables in scope, and those among them a call was made in. */
         this.live = new Set();
@@ -857,6 +895,12 @@ class FunctionCompiler {
         if (thunk)
         {
             out.label('pc').emit(0x8b, 0x1c, 0x24, 0xc3);        // mov ebx, [esp]; ret
+        }
+        // Each function called, whole -- its own tables after it, reached from
+        // its own code -- where its calls reach it.
+        for (const callee of this.callees)
+        {
+            out.label(`fn:${callee}`).emit(...this.scope.compiledOf(callee, node).code);
         }
         const tables = [...this.tables.values()].map(table=>({
             name: table.name,
@@ -1665,6 +1709,11 @@ class FunctionCompiler {
                 if (name === 'host' && this.helpers.has(name))
                 {
                     this.fail(node, 'host() is only returned: return host()');
+                }
+                if (this.scope.guests.has(name) && this.lookupLocal(name) === undefined)
+                {
+                    this.moduleCall(node, name);
+                    return;
                 }
                 return this.fail(node, 'a call made for what it does is a store, a copy, a '
                     + 'fill or call()');
@@ -2654,7 +2703,8 @@ class FunctionCompiler {
         if (node.type === 'CallExpression' && node.callee.type === 'Identifier')
         {
             const name = node.callee.name;
-            if ((name === 'call' || name === 'callStd') && this.helpers.has(name))
+            if ((name === 'call' || name === 'callStd') && this.helpers.has(name)
+                || this.scope.guests.has(name))
             {
                 return true;
             }
@@ -3019,12 +3069,90 @@ class FunctionCompiler {
         {
             this.fail(node, `${name} is taken from the guest in the first parameter: { ${name} }`);
         }
+        if (this.scope.guests.has(name) && this.lookupLocal(name) === undefined)
+        {
+            return this.moduleCall(node, name);
+        }
         const inline = this.scope.inline.get(name);
         if (inline && this.lookupLocal(name) === undefined)
         {
             return this.inline(node, inline);
         }
         this.fail(node, `${name} is not a helper, nor a module-level function of one return`);
+    }
+
+    /**
+     * A call to another `@guestCode` function of the module: the helpers it
+     * takes named first, then its integers pushed as its convention takes them,
+     * and `call rel32` to its code, which goes after this function's.
+     *
+     * @param {any} node @param {string} name @returns {Value}
+     */
+    moduleCall(node, name){
+        const a = this.a;
+        if (name === this.node.id.name)
+        {
+            this.fail(node, `${name} calls itself`);
+        }
+        const callee = this.scope.compiledOf(name, node);
+        if (callee.host !== undefined)
+        {
+            this.fail(node, `${name} hands calls to the host, which it has none of here`);
+        }
+        if (callee.convention === 'thiscall' || callee.params.some(type=>type !== 'i32'
+            && type !== 'u32') || (callee.returns !== 'i32' && callee.returns !== 'u32'
+            && callee.returns !== 'void'))
+        {
+            this.fail(node, `${name} takes and answers integers, cdecl or stdcall`);
+        }
+        const [helpers, ...args] = node.arguments;
+        const named = new Set(helpers?.type === 'ObjectExpression'
+            ? helpers.properties.map((/** @type {any} */ property)=>(property.type === 'Property'
+                && property.shorthand && this.helpers.has(property.key.name)
+                ? property.key.name : '')) : []);
+        if (callee.uses.length > 0 && (helpers?.type !== 'ObjectExpression'
+            || named.has('') || callee.uses.some(use=>!named.has(use))))
+        {
+            this.fail(helpers ?? node, `${name} is given the helpers it takes, by this `
+                + `function's names: { ${callee.uses.join(', ')} }`);
+        }
+        const given = callee.uses.length > 0 || helpers?.type === 'ObjectExpression'
+            ? args : node.arguments;
+        if (given.length !== callee.params.length)
+        {
+            this.fail(node, `${name} takes ${callee.params.length} arguments after its helpers`);
+        }
+        if (this.fpu !== 0)
+        {
+            this.fail(node, 'a call is made with the x87 stack empty, as cdecl has it');
+        }
+        this.calls = true;
+        this.x87Clean = false;
+        for (const key of this.live)
+        {
+            this.acrossCalls.add(key);
+        }
+        const bytes = given.length * 4;
+        if (bytes > 0)
+        {
+            a.emit(...fitsByte(bytes) ? [0x83, 0xec, bytes] : [0x81, 0xec, ...le32(bytes)]);
+        }
+        this.grew(bytes);
+        given.forEach((/** @type {any} */ argument, /** @type {number} */ i)=>{
+            const value = this.expr(argument);
+            this.integer(value, argument, 'typed');
+            this.toEax(value, argument);
+            a.emit(0x89, ...memory(EAX, { base: ESP, disp: i * 4 }));       // mov [esp+4i], eax
+        });
+        a.call(`fn:${name}`);
+        // A stdcall callee has popped its arguments itself.
+        if (bytes > 0 && callee.convention === 'cdecl')
+        {
+            a.emit(...fitsByte(bytes) ? [0x83, 0xc4, bytes] : [0x81, 0xc4, ...le32(bytes)]);
+        }
+        this.grew(-bytes);
+        this.callees.add(name);
+        return { where: 'eax', type: callee.returns === 'u32' ? 'u32' : 'i32' };
     }
 
     /** @param {any} node @param {number} count */

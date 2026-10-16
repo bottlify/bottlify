@@ -1139,6 +1139,106 @@ function refused(text, message){
         });
 }
 
+const CALLS = `
+/**
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} at @param {u32} most
+ * @returns {u32}
+ */
+export function measure({ u8 }, at, most){
+    let n = 0;
+    while (n < (most | 0) && u8(at + n) !== 0)
+    {
+        n++;
+    }
+    return n >>> 0;
+}
+
+/**
+ * @guestCode stdcall
+ * @param {Guest} guest @param {u32} at @param {u32} count @param {u32} byte
+ * @returns {void}
+ */
+export function paint({ setU8 }, at, count, byte){
+    for (let i = 0; i < (count | 0); i++)
+    {
+        setU8(at + i, byte);
+    }
+}
+
+/**
+ * @guestCode stdcall
+ * @param {Guest} guest @param {u32} at @param {u32} to
+ * @returns {i32}
+ */
+export function both({ u8, setU8 }, at, to){
+    const left = measure({ u8 }, at, 40);
+    paint({ setU8 }, to, left, 0x2a);
+    const right = measure({ u8, setU8 }, (at + left + 1) >>> 0, 40);
+    return (Math.imul(left, 100) + right) | 0;
+}`;
+
+test('a call to another @guestCode function: its code after the caller\'s, cdecl and stdcall,'
+    + ' the registers it may change saved round it', async()=>{
+    const { same, compiled } = await load(CALLS);
+    const next = random(31);
+    for (let i = 0; i < 60; i++)
+    {
+        const bytes = Array.from({ length: 96 }, ()=>(next() % 9 === 0 ? 0 : 0x41 + next() % 20));
+        same('both', { stack: [DATA, DATA + 0x80], memory: [[DATA, bytes]] });
+    }
+    // Each callee's code whole after the caller's, once each.
+    assert.ok(compiled.both.code.length > compiled.measure.code.length
+        + compiled.paint.code.length, 'both carries measure and paint');
+    refused(`${CALLS}
+/**
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} at
+ * @returns {u32}
+ */
+export function handing({ u8, host }, at){
+    if (u8(at) === 0)
+    {
+        return host();
+    }
+    return 1;
+}
+/**
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} at
+ * @returns {u32}
+ */
+export function caller({ u8 }, at){
+    return handing({ u8 }, at);
+}`, /handing hands calls to the host/);
+    refused(`${CALLS}
+/**
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} at
+ * @returns {u32}
+ */
+export function narrow({ setU8 }, at){
+    return measure({ setU8 }, at, 4);
+}`, /measure is given the helpers it takes/);
+    refused(`
+/**
+ * @guestCode cdecl
+ * @param {u32} n
+ * @returns {u32}
+ */
+export function ping(n){
+    return pong(n);
+}
+/**
+ * @guestCode cdecl
+ * @param {u32} n
+ * @returns {u32}
+ */
+export function pong(n){
+    return ping(n);
+}`, /calls itself/);
+});
+
 test('a hand-over jumps to its trap directly from integer code, through EAX from x87 code',
     async()=>{
         const { compiled } = await load(SAMPLE);
