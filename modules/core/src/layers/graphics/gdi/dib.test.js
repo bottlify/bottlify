@@ -15,7 +15,8 @@ import {
     setDIBitsToDevice,
     stretchDIBits,
 } from './dib.js';
-import { COLORONCOLOR } from './blit.js';
+import { COLORONCOLOR, bitBlt } from './blit.js';
+import { SRCCOPY } from './rop.js';
 import { clearSurface, createSurface, dibPitch } from './surface.js';
 
 const BACKGROUND = 0x00202020;
@@ -322,5 +323,62 @@ test('a round trip through a DIB changes no pixel', ()=>{
     for (let index = 0; index < colours.length; index++)
     {
         assert.equal(back.read(index % 3, Math.floor(index / 3)), colours[index]);
+    }
+});
+
+test('SetDIBitsToDevice of part of a DIB draws what decoding all of it and copying the part '
+    + 'drew', ()=>{
+    // Only the part a copy reads is decoded now: a program copying a button's
+    // worth of a screen-sized DIB had all of it decoded for every button.
+    let seed = 7;
+    const random = (/** @type {number} */ below)=>{
+        seed = (seed * 1103515245 + 12345) >>> 0;
+        return (seed >>> 8) % below;
+    };
+    for (let round = 0; round < 300; round++)
+    {
+        const width = 1 + random(13);
+        const height = 1 + random(11);
+        const bitCount = [8, 24][random(2)];
+        const topDown = random(2) === 0;
+        const pitch = dibPitch(width, bitCount);
+        const first = random(height);
+        const scans = 1 + random(height - first);
+        const bits = new Uint8Array(pitch * scans).map(()=>random(256));
+        const colors = Array.from({ length: 256 }, ()=>random(0x1000000));
+        const image = { header: header(width, topDown ? -height : height, bitCount), bits,
+            colors };
+        const call = { xDest: random(6) - 2, yDest: random(6) - 2, width: random(16),
+            height: random(14), xSrc: random(18) - 3, ySrc: random(14) - 3, firstScan: first,
+            scans };
+        const dest = createSurface({ width: 16, height: 16 });
+        clearSurface(dest, BACKGROUND);
+        const answer = setDIBitsToDevice({ ...call, dest, image });
+
+        // The old way: the whole DIB decoded, then the part copied out of it.
+        const expected = createSurface({ width: 16, height: 16 });
+        clearSurface(expected, BACKGROUND);
+        const whole = decodeDib({ ...image, startScan: topDown ? height - first - scans : first,
+            scanLines: scans });
+        assert.ok(whole);
+        const rectangleTop = height - call.ySrc - call.height;
+        const top = Math.max(height - first - scans, rectangleTop);
+        const bottom = Math.min(height - first, height - call.ySrc);
+        if (bottom > top && call.width > 0)
+        {
+            bitBlt({ dest: expected, x: call.xDest, y: call.yDest + (top - rectangleTop),
+                width: call.width, height: bottom - top, src: whole, srcX: call.xSrc, srcY: top,
+                rop: SRCCOPY });
+        }
+        for (let y = 0; y < 16; y++)
+        {
+            for (let x = 0; x < 16; x++)
+            {
+                assert.equal(dest.read(x, y), expected.read(x, y),
+                    `round ${round} (${x}, ${y}) of ${JSON.stringify({ dibWidth: width,
+                        dibHeight: height, bitCount, topDown, ...call })}`);
+            }
+        }
+        assert.ok(Number.isInteger(answer));
     }
 });

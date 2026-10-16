@@ -820,6 +820,31 @@ test('tracing peeks through the region map and never through a read that throws'
     assert.deepEqual(dispatcher.detailed(1)[0].strings, [null, text, null]);
 });
 
+test('a string longer than a peek is shown cut short, not as nothing', ()=>{
+    // An installer's paths run past the peek; an empty slot in a trace read
+    // as a call made with no path at all.
+    const text = `C:\\${'Deep\\'.repeat(40)}file.dll`;
+    const bytes = new Uint8Array(0x1000);
+    bytes.set([...text].map(c=>c.charCodeAt(0)));
+    const m = machine({ args: [0x7000] });
+    /** @type {any} */
+    const memory = {
+        ...m.memory,
+        find: (/** @type {number} */ address)=>(address >= 0x7000 && address < 0x8000
+            ? { name: 'data', base: 0x7000, size: 0x1000, access: 'rw' } : undefined),
+        window: (/** @type {number} */ address, /** @type {number} */ length)=>(address < 0x7000
+            ? m.memory.window(address, length)
+            : bytes.subarray(address - 0x7000, address - 0x7000 + length)),
+    };
+    const dispatcher = createDispatcher({ cpu: m.cpu, memory, parking: m.parking,
+        traceStrings: true });
+    dispatcher.register(3, { name: 'X.dll!F', convention: 'stdcall', argBytes: 4,
+        handler: ()=>1 });
+    dispatcher.dispatch(3);
+    const [shown] = dispatcher.detailed(1)[0].strings;
+    assert.ok(shown?.endsWith('…') && text.startsWith(shown.slice(0, -1)), String(shown));
+});
+
 test('a waiting call is reported to the sink twice: once as asked, once as answered', async()=>{
     const m = machine({ args: [1, 2] });
     /** @type {any[]} */
@@ -1801,4 +1826,27 @@ test('a function called too often a second is named, in the report and once in t
     clock = 3000;
     dispatcher.diagnostics();
     assert.equal(written.length, 1, 'written to the journal once, however long it goes on');
+});
+
+test('a function kept out of the ring of recent calls is counted but not kept there', ()=>{
+    // app.debug.callRingSkip: an idle loop's few calls kept out, so that the
+    // calls around one moment are still there to read.
+    const { dispatcher } = machine({ args: [1, 2] });
+    const add = { convention: Convention.STDCALL, argBytes: 8, handler: ()=>0 };
+    dispatcher.register(1, { ...add, name: 'USER32.dll!ShowWindow' });
+    dispatcher.register(2, { ...add, name: 'USER32.dll!PeekMessageA' });
+    dispatcher.register(3, { ...add, name: 'USER32.dll!DestroyWindow' });
+    assert.deepEqual(dispatcher.skipInRing(['ShowWindow', 'PeekMessage']),
+        ['USER32.dll!ShowWindow', 'USER32.dll!PeekMessageA'], 'a width left off matches both');
+    for (const id of [1, 2, 3, 1, 2])
+    {
+        dispatcher.dispatch(id);
+    }
+    assert.deepEqual(dispatcher.detailed().map((/** @type {any} */ call)=>call.name),
+        ['USER32.dll!DestroyWindow']);
+    assert.equal(dispatcher.diagnostics().calls, 5, 'every call still counted');
+    dispatcher.skipInRing([]);
+    dispatcher.dispatch(1);
+    assert.equal(dispatcher.detailed().at(-1).name, 'USER32.dll!ShowWindow',
+        'and none, once cleared');
 });

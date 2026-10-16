@@ -46,6 +46,15 @@ outward-facing action) or for a wait a rule imposes, and say what waits on what.
 - **Vanilla ES modules + JSDoc**, checked by `tsc --checkJs --noEmit`; a `.d.ts` only where JSDoc
   cannot say it. WASM only where it is already required (cork's output, the prebuilt FFmpeg and
   zstd decoders) or where a profile proves a hot path needs it.
+- **A hot call stays in the guest.** Every crossing into the host costs microseconds; a function
+  or COM method a program calls thousands of times a frame runs as guest code. Write it once in
+  JS marked `@guestCode` (`modules/core/scripts/guest-code/`, its README: the subset of JS that
+  32-bit integer and x87 code reproduce exactly, guest memory through `{ u32, setU32, ... }`,
+  `return host()` handing a rare case to the same function's host handler). `npm run build`
+  writes the i386 beside it (`*.x86.js`), a test fails when the two differ, and the JS stays
+  the handler and the reference. A COM method takes it through its `guest`
+  slot (`bridge/internal/vtable.js`). Measure crossings first (`trap`, `drive` in the phase
+  profile), and gate the guest path against the host one.
 - **Zero runtime dependencies** in `@bottlify/core`; nothing in the product fetches its own code.
 - **Modules are standalone libraries.** Each `src/layers/<name>/module.js` declares `name`,
   `requires`, `create(config, host)`, `diagnostics()`, `dispose()`; a module reaches another only

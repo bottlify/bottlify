@@ -462,3 +462,48 @@ export function createEnvironmentFunctions(host){
         },
     };
 }
+
+/**
+ * userenv's environment blocks: the variables a process started for the user
+ * gets, which on this machine of one user are the process's own.
+ * ponytail: bInherit FALSE still answers the process's own variables; read
+ * the user's from the registry if a program tells the two apart.
+ *
+ * @param {{ block: () => number, free: (block: number) => number,
+ *     writeMemory: (address: number, bytes: Uint8Array) => void,
+ *     setLastError: (code: number) => void }} host
+ *     `block` is GetEnvironmentStringsW, `free` FreeEnvironmentStringsW.
+ */
+export function createUserenvFunctions(host){
+    return {
+        /**
+         * BOOL CreateEnvironmentBlock(LPVOID *lpEnvironment, HANDLE hToken, BOOL bInherit)
+         *
+         * A Unicode block, each variable NAME=value and terminated, the whole
+         * ending in an empty one, for DestroyEnvironmentBlock to free.
+         */
+        CreateEnvironmentBlock: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    host.setLastError(87);
+                    return 0;
+                }
+                const block = host.block() >>> 0;
+                const bytes = new Uint8Array(4);
+                new DataView(bytes.buffer).setUint32(0, block, true);
+                host.writeMemory(out >>> 0, bytes);
+                return block === 0 ? 0 : 1;
+            },
+        },
+
+        /** BOOL DestroyEnvironmentBlock(LPVOID lpEnvironment) */
+        DestroyEnvironmentBlock: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([block])=>host.free(block),
+        },
+    };
+}

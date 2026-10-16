@@ -174,9 +174,9 @@ function buildNode(key, value, children = []){
 
 /**
  * The version block of a library the engine answers for: the system's version
- * for a system library, and for a DirectX component the DirectX the registry
- * says is installed -- so a program that reads the version from the file gets
- * the answer it would have got from the registry.
+ * for a system library, the release's own for a file it describes -- XP's
+ * DirectX among them -- and for any other DirectX component the DirectX the
+ * registry says is installed, as on a system the redistributable installed it.
  *
  * @param {string} name  The file name, extension included.
  * @param {import('../kernel32/versions.js').WindowsVersion} [windows]  The system.
@@ -190,7 +190,10 @@ export function systemVersionResource(
     const directX = DIRECTX_LIBRARY.test(name);
     const component = windows.components?.files[name.toLowerCase()] ?? null;
     const system = [windows.major, windows.minor, windows.build, 0];
-    const own = directX ? directx : component;
+    // A file the release describes carries its version there -- on XP, the
+    // DirectX that is part of the system -- and any other DirectX library the
+    // DirectX the bottle reports, as Windows 2000's redistributable left it.
+    const own = component ?? (directX ? directx : null);
     const quad = own !== null ? own.split('.').map(part=>Number(part)) : system;
     const spelled = own ?? system.join('.');
     const fixed = new Uint8Array(FIXED_FILE_INFO_SIZE);
@@ -341,6 +344,34 @@ export function fileVersionOf(block){
     }
     return view.getUint32(root.value + FIXED_FILE_VERSION_MS, true) * 0x1_0000_0000
         + view.getUint32(root.value + FIXED_FILE_VERSION_LS, true);
+}
+
+/**
+ * A text the block's first string table holds under a key -- `CompanyName`,
+ * `OriginalFilename` -- whatever language that table is in; null when there
+ * is none.
+ *
+ * @param {Uint8Array} block @param {string} key
+ */
+export function versionStringOf(block, key){
+    const tables = find(block, ['StringFileInfo']);
+    const table = tables && tables.children < tables.end ? readNode(block, tables.children) : null;
+    const entry = table && find(block, ['StringFileInfo', table.key, key]);
+    if (!entry || entry.type !== 1)
+    {
+        return null;
+    }
+    let text = '';
+    for (let at = entry.value; at + 1 < entry.end; at += 2)
+    {
+        const unit = u16(block, at);
+        if (unit === 0)
+        {
+            break;
+        }
+        text += String.fromCharCode(unit);
+    }
+    return text;
 }
 
 /**

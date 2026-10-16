@@ -399,6 +399,21 @@ w, as by the default here, it is water (the person's run, 2026-10-13, browser, g
 Parallels GPU). `driverRules: 'current'` divides by the count, as later drivers and Wine do.
 *2026-10-13.*
 
+**A45 -- A pre-transformed vertex with a negative RHW is clipped behind the eye only where the
+runtime clipped it.** A Direct3D 7 or 6 vertex buffer that ProcessVertices transformed with
+D3DVOP_CLIP, made without D3DVBCAPS_DONOTCLIP, keeps its vertices' clip codes, and a draw from it
+without D3DDP_DONOTCLIP, under D3DRENDERSTATE_CLIPPING, is clipped by the runtime against the
+view volume. Such a draw here takes each RHW back as its clip w, a negative one included, so
+the rasteriser clips the triangle at the eye -- the same volume, in homogeneous space. Every
+other pre-transformed draw takes an RHW of zero or less as w one: the rasterisers of that
+generation took the screen position as given, and only the runtime's clipping kept a vertex
+behind the eye off the screen. Wine divides the position by every non-zero RHW, so clips such
+a vertex in every draw. Half-Life's Direct3D renderer (through IDirect3DDevice3) processes its
+world with D3DVOP_CLIP and draws the buffer indexed: taken at w one, every wall behind the
+camera was drawn as spikes across the screen (the person's run, 2026-10-13, browser, graphics
+worker, Parallels GPU). `driverRules: 'current'` clips behind the eye in every pre-transformed
+draw, as Wine does. *2026-10-13.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this
@@ -746,3 +761,74 @@ failed. Model 2 is the card most games of DirectX 9's years know; a title that w
 gets it from the bottle's "Shader profile" (`gpuProfile` sm1-sm4, or `host` for the browser's
 vendor and model 3, the engine's own default). Which card real Windows reports is the card's;
 none was measured against hardware. *2026-10-12.*
+
+**On XP the DirectX libraries carry the system's build, not the DirectX version.** DirectX 9.0c is
+part of Windows XP, and its files there are at the system's build: Service Pack 3's 5.3.2600.5512
+for `ddraw`, `dsound`, `dinput`, `dinput8`, `d3d8`, `d3d9`, `dplayx`, `dpnet`, `dpnhpast`,
+`dpnhupnp`, `dmusic` and `dmime` (`kernel32/versions.js`, `components.files`, beside A39's).
+GetFileVersionInfo answered them with the registry's DirectX, 4.9.0.904 -- what the files are where
+a redistributable put DirectX 9.0c on Windows 2000 or 98 -- and a DirectX 9 setup comparing its own
+5.3.1.904 found the system's older, failed to back it up and asked for a restart. The registry still
+says 4.09.00.0904; a library XP does not ship (the D3DX DLLs, XInput) and every DirectX library under
+Windows 2000 still name the bottle's DirectX. The numbers are Service Pack 3's as published and were
+not read off a machine. *2026-10-15.*
+
+**A41 revisited: a library standing in the system folder gives way to a setup that writes it.** A
+DirectX setup opened `system32\d3dx9_26.dll` for writing to see whether it was in use, was refused,
+and put its copy off to a restart. Opened to be written, a stand-in now becomes a file on the volume
+that the program writes; read, it is still nothing but the engine's. What a setup puts in the
+system folder is never in its way, and a program that loads the name still gets the engine's own
+library (the loader's `ours` rule). A setup that only opens one to look leaves an empty file there,
+which is no library the loader takes. *2026-10-15.*
+
+**DirectX's setup is the engine's: a title's `dsetup.dll` and `DXSETUP.exe` answer that DirectX is
+in place.** DirectX 9.0c is part of XP, and on XP SP3 its redistributable finds every file of it in
+the system folder at a newer build and installs only the D3DX helpers. Here the system folder holds
+only the libraries the engine implements, so a redistributable copied XP's DirectX over it -- 305
+files into system32, `DLLCache`, `drivers`, `inf` -- and, as it does for any file it copies on XP
+outside `RegisteredPackages`, answered "succeeded, restart needed"; a game's installer then stopped
+at a restart nothing here makes. Now `DSETUP.dll` is answered from the engine's table whoever's copy
+a program loads (a runtime, as the sound layer's MPEG provider is): `DirectXSetup` installs nothing
+and succeeds without a restart, `DirectXSetupGetVersion` names the bottle's DirectX, and
+`DirectXSetupGetEULA` reads the licence the program's own redistributable carries (`dsetup32.dll`,
+`DATA/SETUP_AGREEMENT_<language>`, beside the copy it asked for). A `DXSETUP.exe` a title brings --
+known by its version block, Microsoft's `dxsetup.exe`, not by its file name -- is run as a program
+of the engine's that exits with 0 and shows nothing. The D3DX helpers are not put in the system
+folder; the engine answers them whether or not a file is there. Revisit if a title is found that
+reads a D3DX helper's bytes from system32 rather than loading it. *2026-10-15.*
+
+**The screen is composed as Windows 7's desktop window manager composes it, not drawn into as XP's
+is.** On XP every window draws straight onto one screen, clipped by the windows over it, and a
+window that goes, moves or is raised leaves the windows and the desktop beneath to repaint what it
+uncovered; a program that does not -- a wizard busy copying files, a skin that paints in a
+different window than the one uncovered -- leaves a dead dialog's pixels on the screen. Here each
+top-level window has a surface of its own, its whole rectangle; its contexts draw on it unclipped by
+other top-level windows; and the screen is the desktop's background with the shown windows copied
+over it, bottom to top, where their regions keep them (`graphics/gdi/screen.js`). A top-level window
+moved, raised, hidden or destroyed paints nothing and asks nothing of anyone: the screen is composed
+again. Inside one top-level window the XP rules stay (siblings, WS_CLIPCHILDREN, a child moved
+copies its bits and its parent paints the strip). A screen context (`GetDC(NULL)`) draws over the
+screen as shown, which stays until the screen is composed again, as with the window manager. The
+cost is a surface per top-level window, a few megabytes each. *2026-10-15.*
+
+**The Visual C++ C runtimes are the engine's; the C++ libraries are the program's own copy when it
+brings one.** MSVCR80 is answered by the engine even beside a copy the program carries: it is
+msvcrt's functions with the names Visual C++ 2005 added, the calls a program makes per character
+or per pointer run as guest code, and one runtime serves every module instead of a second for the
+translator to carry. MSVCP71/80 are not: their exports are counted in thousands, the iostreams and
+locales among them are objects whose layout and virtual tables a program's own inlined header code
+reads, and a partial table in front of a program's copy left F.E.A.R.'s imports unbound. The
+engine's `std::string` (MSVCP80/71) answers only a program that brought no copy -- PhysX in
+Mafia II -- and grows by what the bundles import. MSVCR71 likewise, until its exports are
+checked against the real list. *2026-10-15.*
+
+**The machine has a page file, as large as its memory.** `GlobalMemoryStatus(Ex)` answers a
+commit limit of memory and a system-managed page file the size of memory, as Windows 7 is set up
+by default; a program refuses a machine whose limit is no more than its memory (paging turned
+off). Physical memory stays the arena, as WMI reports it. *2026-10-15.*
+
+**A full-screen Direct3D 9 device is one of the display's modes.** `CreateDevice` and `Reset` with
+`Windowed = FALSE` and a back buffer of no display mode's size -- 0x0 among them -- answer
+`D3DERR_INVALIDCALL`, as Wine's test_reset sees Windows do; only a windowed device measures its
+window for a size of zero. Making such a device at the display's size instead left a program
+laying out a screen of 0x0. *2026-10-15.*

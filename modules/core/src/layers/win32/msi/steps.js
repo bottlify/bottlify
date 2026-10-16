@@ -62,12 +62,28 @@ export async function message(engine, type, fields){
  */
 export async function actionStart(engine, action){
     const row = engine.session.db.table('ActionText')?.rows.find(entry=>entry[0] === action);
+    // The log's own "Action time: name." line is the message's, written there
+    // as the interface is told.
+    return message(engine, INSTALLMESSAGE.ACTIONSTART,
+        [null, action, row?.[1] ?? null, row?.[2] ?? null]);
+}
+
+/**
+ * The action's end in the log, as Windows writes it: the return value 1 for
+ * success, 2 for a user's exit, 3 for a failure, 4 for a suspension, 0 for an
+ * action not called. A failed installation's log names the action that failed
+ * by this line and no other.
+ *
+ * @param {Engine} engine @param {string} action @param {number} code
+ */
+export function actionEnded(engine, action, code){
     const now = new Date();
     const two = (/** @type {number} */ value)=>String(value).padStart(2, '0');
     const time = `${two(now.getHours())}:${two(now.getMinutes())}:${two(now.getSeconds())}`;
-    log(engine, `Action ${time}: ${action}.`);
-    return message(engine, INSTALLMESSAGE.ACTIONSTART,
-        [null, action, row?.[1] ?? null, row?.[2] ?? null]);
+    const value = { [ERROR_SUCCESS]: 1, [ERROR_NO_MORE_ITEMS]: 1, [ERROR_INSTALL_USEREXIT]: 2,
+        [ERROR_INSTALL_FAILURE]: 3, [ERROR_INSTALL_SUSPEND]: 4,
+        [ERROR_FUNCTION_NOT_CALLED]: 0 }[code] ?? 3;
+    log(engine, `Action ended ${time}: ${action}. Return value ${value}.`);
 }
 
 /**

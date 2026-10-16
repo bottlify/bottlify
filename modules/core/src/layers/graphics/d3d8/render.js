@@ -57,7 +57,7 @@ import { D3DTSS9, D3DVERTEXTEXTURESAMPLER0 } from '../d3d9/samplerstates.js';
 import { D3DDECLUSAGE, MAX_STREAMS } from '../d3d9/declaration.js';
 import { OPCODE, REGISTER, SHADER_KIND } from '../d3d9/shader.js';
 import { decodeS3tc } from '../webgpu/internal/s3tc.js';
-import { storedToHalves } from '../d3d9/half.js';
+import { fromHalf, storedToHalves } from '../d3d9/half.js';
 import { passedSamples, reachableArea } from '../webgpu/internal/occlusion.js';
 import { changedSpans, createCompared } from '../webgpu/internal/changed.js';
 import {
@@ -1591,6 +1591,10 @@ function inverseRotation(view){
  *     that bindings do not reach is built once per such change rather than
  *     once per draw. Whoever keys a preparation by a binding names it apart.
  * @property {Material} material
+ * @property {boolean} [clipsTransformed]
+ *     The draw's pre-transformed vertices came from a vertex buffer the
+ *     runtime clips: Direct3D 7's and 6's, transformed by ProcessVertices with
+ *     D3DVOP_CLIP (decisions.md A45). Absent, false.
  * @property {any} backBuffer                                What Present shows.
  * @property {{ vertexShader: number, fvf: number, pixelShader: number,
  *              program?: ProgramState | null,
@@ -2423,6 +2427,8 @@ function depthBiasOf(model, depthFormat, topology){
  * @param {boolean} [shape.clipping]  Whether the vertices are clipped by the
  *     user planes at all: not a pre-transformed vertex.
  * @param {boolean} [shape.clipDistances]  Whether the device clips by distances.
+ * @param {boolean} [shape.clipsBehindEye]  Whether a pre-transformed vertex
+ *     with a negative RHW is clipped behind the eye (decisions.md A45).
  * @returns {import('../webgpu/internal/pipeline.js').PipelineState}
  */
 export function pipelineStateOf(model, shape){
@@ -2497,6 +2503,7 @@ export function pipelineStateOf(model, shape){
         } : {}),
         ...(shape.topology === POINT_QUADS ? { points: pointsOf(model) } : {}),
         ...clippingOf(model, shape),
+        ...(shape.clipsBehindEye ? { clipsBehindEye: true } : {}),
         ...(shape.depthFormat !== undefined && hasStencil(shape.depthFormat)
             && (model.renderStates.get(STENCIL_RS.ENABLE) ?? 0) !== 0
             ? { stencil: stencilOf(model) } : {}),
@@ -2856,7 +2863,7 @@ const CLEAR_STRIDE = 20;
  *     lock or not -- a debugging aid, for a program that writes a buffer
  *     outside its locks.
  * @property {{ dumpFrames: number, bufferLocks?: string, skipTexture?: string,
- *     skipShader?: string, occlusion?: string, stageLimit?: number,
+ *     skipShader?: string, occlusion?: string, stageLimit?: number, textureStats?: string,
  *     maxDraws?: number, written?: (lines: string[], frame: number) => void,
  *     replayLast?: (cut?: number) => boolean,
  *     shownDraws?: () => { lines: string[], sceneDraws: number },
@@ -2888,8 +2895,9 @@ const CLEAR_STRIDE = 20;
  *     profile shows took it (`GpuProfile.rectangleBump`).
  * @property {'legacy' | 'current'} [driverRules]  Which generation of
  *     drivers a behaviour Direct3D left to them follows where they changed
- *     it (decisions.md A43): 'legacy', the default, the shader-model-1 era's;
- *     'current', what later drivers and Wine's conformance tests do.
+ *     it (decisions.md A43, A44, A45): 'legacy', the default, the
+ *     shader-model-1 era's; 'current', what later drivers and Wine's
+ *     conformance tests do.
  * @property {boolean} [nanProbe]  Every pixel a shader made NaN or infinite is
  *     drawn magenta: where a picture goes black on one GPU and not another.
  * @property {boolean} [mips]
@@ -2931,6 +2939,11 @@ export function createRenderer(options){
     // drivers of that generation did (decisions.md A44); later drivers and
     // Wine divide by the count's last component.
     const projectByCount = options.driverRules === 'current';
+    // A pre-transformed vertex with a negative RHW is clipped behind the eye
+    // in every draw, as Wine takes the RHW back as w; the drivers of the
+    // fixed-function era drew it, and only the runtime's clipping of a
+    // processed vertex buffer kept such a vertex off the screen (A45).
+    const behindEyeAlways = options.driverRules === 'current';
     const rectangleBump = options.rectangleBump === true;
     const dumpEvery = Math.max(0, Math.floor(options.dumpEvery ?? 0));
     // Asked for on a running program: the next frames with draws are written
@@ -6408,10 +6421,11 @@ export function createRenderer(options){
                 `${program.declarationId}|${shapes}|w${missing.join(',')}${hybridKey}`
                     + `|f${fog.source}/${fog.mode}${flat ? '|flat' : ''}`
                     + `${normalizeNormals ? '|normalize' : ''}${rangeFog ? '|range' : ''}`
-                    + pointKey + clipKey,
+                    + pointKey + clipKey + (behindEyeAlways ? '|eye' : ''),
                 wanted, layout.shapes, missing, generated, fog,
                 { flatColours: flat, normalizeNormals, rangeFog, ...(points ? { points } : {}),
-                    ...(planes ? { clip: planes } : {}), carried });
+                    ...(planes ? { clip: planes } : {}), carried,
+                    ...(behindEyeAlways ? { clipsBehindEye: true } : {}) });
         if (vertex.error)
         {
             skip('program');
@@ -6748,7 +6762,8 @@ export function createRenderer(options){
      * @param {{ flatColours: boolean, normalizeNormals: boolean, rangeFog: boolean,
      *     points?: import('../webgpu/internal/pipeline.js').PointState,
      *     clip?: import('../webgpu/internal/fixedfunction.js').ClipState,
-     *     carried?: ({ set: number, transformed: boolean } | null)[] }} shading
+     *     carried?: ({ set: number, transformed: boolean } | null)[],
+     *     clipsBehindEye?: boolean }} shading
      *     See `fixedVertexStage`.
      */
     const hybridStageFor = (key, wanted, shapes, alsoWrite, generated, fog, shading)=>{
@@ -7575,6 +7590,55 @@ export function createRenderer(options){
      * @type {PreparedDraw | null}
      */
     let preparedState = null;
+    /**
+     * What a texture's top level holds, as the guest left it in memory: the
+     * least, the most and the mean of its values -- half floats read as
+     * numbers, any other format as its bytes -- and the share that are zero.
+     * A texture the program fills on the processor and every draw samples is
+     * read here, on a running program, to tell "never written" from "written
+     * and read wrongly" (`app.debug.textureStats`).
+     *
+     * @param {string} id  as a dump names it, `t642`
+     * @returns {string}
+     */
+    const texelStats = id=>{
+        const entry = [...roster].find((/** @type {any} */ one)=>one.id === id);
+        if (!entry)
+        {
+            return `texture ${id}: not known`;
+        }
+        /** @type {{ surface?: any }} */
+        const held = {};
+        if (entry.texture.GetSurfaceLevel?.(0, held) !== D3D_OK || !held.surface)
+        {
+            return `texture ${id}: no top level to read`;
+        }
+        held.surface.release();
+        const bytes = readMemory(held.surface.base,
+            surfaceBytes(entry.format, entry.width, entry.height));
+        const wide = FORMAT_INFO[entry.format]?.wide;
+        /** @type {ArrayLike<number>} */
+        const values = wide && wide.stored === 'half'
+            ? Array.from(new Uint16Array(bytes.slice().buffer), fromHalf)
+            : bytes;
+        let least = Infinity;
+        let most = -Infinity;
+        let sum = 0;
+        let zeros = 0;
+        for (let at = 0; at < values.length; at++)
+        {
+            const value = values[at];
+            least = Math.min(least, value);
+            most = Math.max(most, value);
+            sum += value;
+            zeros += value === 0 ? 1 : 0;
+        }
+        return `texture ${id}: format ${entry.format} ${entry.width}x${entry.height}`
+            + ` at 0x${(held.surface.base >>> 0).toString(16)}, ${values.length}`
+            + ` ${wide?.stored === 'half' ? 'halves' : 'bytes'}: least ${least} most ${most}`
+            + ` mean ${(sum / Math.max(1, values.length)).toFixed(4)}`
+            + ` zero ${(100 * zeros / Math.max(1, values.length)).toFixed(1)}%`;
+    };
     /** The cascade cut the prepared states were made under. */
     let preparedLimit = -1;
     /**
@@ -8400,6 +8464,8 @@ export function createRenderer(options){
             fog: fogApplied,
             clipping: !layout.preTransformed,
             clipDistances,
+            clipsBehindEye: layout.preTransformed
+                && (behindEyeAlways || model.clipsTransformed === true),
         });
         // `layout` and `textures` are the frame dump's, and are handed back
         // rather than worked out again there: both are already in hand and
@@ -9811,7 +9877,9 @@ export function createRenderer(options){
                 // report later may be another device's by then.
                 const lines = handOver;
                 // Numbered as the frame history numbers it.
-                chain = chain.then(()=>liveDump?.written?.(joinDump(lines), replayed - 1));
+                const statsOf = liveDump?.textureStats ?? '';
+                chain = chain.then(()=>liveDump?.written?.([...joinDump(lines),
+                    ...statsOf.split(',').filter(Boolean).map(texelStats)], replayed - 1));
             }
             if (releasedBuffers.size > 0)
             {
@@ -9937,6 +10005,13 @@ export function createRenderer(options){
                 prepared: { ...counters.prepared },
                 statesNamed: counters.statesNamed,
                 programs: programs.stats(),
+                // The fixed-function pipelines the backend built, and the GPU's
+                // own time per pass where the device stamps passes: what a
+                // draw that is slow on the GPU, or rebuilt every frame, shows as.
+                ...(()=>{
+                    const own = backend.diagnostics?.();
+                    return own ? { fixedPipelines: own.pipelines, gpuPasses: own.gpuPasses } : {};
+                })(),
                 skipped: { ...counters.skipped },
                 cascade: {
                     ...counters.cascade,

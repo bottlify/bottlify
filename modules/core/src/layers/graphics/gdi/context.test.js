@@ -203,6 +203,23 @@ test('the selected pen and brush come from the shared object table', ()=>{
     assert.equal(surface.read(4, 4), BLUE_PIXEL, 'the interior is the brush');
 });
 
+test('a rectangle without a pen is filled from its corner, one pixel short each way', ()=>{
+    // A setup paints its gradient as bands twelve rows apart, each thirteen
+    // tall, with the null pen: filling only inside where an outline would be
+    // left the first row of every band unpainted.
+    const { objects, drawing, surface, context } = fixture();
+    context.state.pen = objects.create('pen', { style: PS_NULL, width: 1, color: 0 });
+    context.state.brush = objects.create('brush', {
+        style: BS_SOLID, color: BLUE_COLOR, hatch: 0,
+    });
+
+    drawing.rectangle(HDC, 2, 2, 8, 6);
+    assert.equal(surface.read(2, 2), BLUE_PIXEL, 'the corner is filled');
+    assert.equal(surface.read(6, 4), BLUE_PIXEL);
+    assert.equal(surface.read(7, 4), BACKGROUND, 'the right edge is one short');
+    assert.equal(surface.read(6, 5), BACKGROUND, 'the bottom edge is one short');
+});
+
 test('a hatched brush honours the background mode and the brush origin', ()=>{
     const { objects, drawing, surface, context } = fixture();
     context.state.brush = objects.create('brush', {

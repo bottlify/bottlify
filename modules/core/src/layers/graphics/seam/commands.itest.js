@@ -19,7 +19,8 @@ import assert from 'node:assert/strict';
 import { createCorkHost } from '../../cpu/internal/cork-host.js';
 import * as cork from '../../../../../cork/src/index.js';
 import {
-    BUFFER, COMMAND, FLAG_SLOW_PATH, FLAG_STALE, RENDER_STATE_MIRROR, SAMPLER_STATE_MIRROR, SHADOW,
+    BUFFER, COMMAND, FLAG_DRAW_STALE, FLAG_SLOW_PATH, FLAG_STALE, RENDER_STATE_MIRROR,
+    SAMPLER_STATE_MIRROR, SHADOW,
     SURFACE, TRANSFORM_MIRROR, VIEWPORT_MIRROR, commandCode, getRenderStateCode,
     getSamplerStateCode, getSurfaceDescCode, getViewportCode, lockCode,
 } from './shadow.js';
@@ -399,8 +400,12 @@ test('a state block\'s Apply in the ring names the block and sends the getters t
     });
     const APPLY = VIEWPORT;
     const CAPTURE = VIEWPORT + BESIDE;
+    const APPLY_DRAWN = ENABLE;
     const GET = CONSTANTS;
     host.writePhysical(APPLY, commandCode(APPLY, TRAP, shape('StateBlock.Apply')));
+    host.writePhysical(APPLY_DRAWN, commandCode(APPLY_DRAWN, TRAP, shape('StateBlock.Apply',
+        { staleDraws: true })));
+    host.writePhysical(DRAW, commandCode(DRAW, TRAP, shape('DrawIndexedPrimitive')));
     host.writePhysical(CAPTURE, commandCode(CAPTURE, TRAP, shape('StateBlock.Capture')));
     host.writePhysical(GET, getRenderStateCode(GET, TRAP));
     host.writePhysical(TRAP, new Uint8Array([0xf4]));
@@ -409,6 +414,7 @@ test('a state block\'s Apply in the ring names the block and sends the getters t
     host.writePhysical(BLOCK, new Uint8Array(SHADOW.SIZE));
     host.writePhysical(BLOCK + SHADOW.COMMANDS, new Uint8Array([...u32(RING), ...u32(RING_BYTES)]));
     host.writePhysical(BLOCK + SHADOW.RENDER_STATE_VALID, new Uint8Array([0xff]));
+    host.writePhysical(BLOCK + SHADOW.DRAWABLE, new Uint8Array(u32(0xf)));
     host.writePhysical(0x7000, new Uint8Array(u32(PROGRAM)));
 
     /** @param {number} at */
@@ -428,9 +434,9 @@ test('a state block\'s Apply in the ring names the block and sends the getters t
             return 'trap';
         }
         assert.equal(host.readReg32('eip'), PROGRAM + code.length);
-        assert.equal(host.readReg32('esp'), STACK, 'the routine popped `this` alone');
         return 'ok';
     };
+    const DIP = [4, 0, 0, 4, 0, 2];
 
     assert.equal(run(GET, [3, OUT]), 'ok', 'a getter reads the block');
     assert.equal(run(CAPTURE, []), 'ok');
@@ -443,6 +449,11 @@ test('a state block\'s Apply in the ring names the block and sends the getters t
     assert.equal(read(BLOCK + SHADOW.FLAGS), FLAG_STALE, 'an apply may');
     assert.equal(run(GET, [3, OUT]), 'trap', 'so the getter goes to the host');
     assert.equal(run(APPLY, []), 'ok', 'while setters and applies go on in the ring');
+    assert.equal(run(DRAW, DIP), 'ok', 'and draws: this block holds nothing a draw checks');
+    assert.equal(run(APPLY_DRAWN, []), 'ok');
+    assert.equal(read(BLOCK + SHADOW.FLAGS), FLAG_STALE | FLAG_DRAW_STALE,
+        'a block holding a stream, the indices or a format');
+    assert.equal(run(DRAW, DIP), 'trap', 'sends the draws after it to the host');
     host.writePhysical(BLOCK, new Uint8Array(u32(FLAG_SLOW_PATH)));
     assert.equal(run(APPLY, []), 'trap', 'the host\'s flag');
 });

@@ -54,6 +54,8 @@ function richEdit(source, step = 7){
     const released = [];
     /** @type {any[]} */
     const toEdit = [];
+    /** @type {number[][]} */
+    const sent = [];
     /** @type {WeakMap<object, any>} */
     const states = new WeakMap();
     const view = new DataView(memory.buffer);
@@ -79,6 +81,11 @@ function richEdit(source, step = 7){
             return Promise.resolve(0);
         },
         invalidate: ()=>{},
+        /** @param {number[]} args */
+        send: (...args)=>{
+            sent.push(args.slice(0, 4));
+            return 0;
+        },
         sysColor: (/** @type {number} */ index)=>(index === 5 ? 0xffffff : 0),
     });
     const toolkit = {
@@ -111,7 +118,7 @@ function richEdit(source, step = 7){
     /** @param {number} message @param {number} wParam @param {number} lParam */
     const send = (message, wParam, lParam)=>definitions[0].procedure(record,
         { hwnd: record.hwnd, message, wParam, lParam });
-    return { definitions, record, send, memory, view, STREAM, released, toEdit, toolkit };
+    return { definitions, record, send, memory, view, STREAM, released, toEdit, toolkit, sent };
 }
 
 test('EM_STREAMIN reads the program\'s stream through its callback, RTF as its text', async()=>{
@@ -154,4 +161,39 @@ test('a rich edit paints in its own background, which EM_SETBKGNDCOLOR sets', ()
     assert.equal(toolkit.stateOf(record).richBackground, 0x00336699);
     assert.equal(send(EM_SETBKGNDCOLOR, 1, 0), 0x00336699);
     assert.equal(toolkit.stateOf(record).richBackground, 0xffffff, 'and the system\'s again');
+});
+
+test('with ENM_UPDATE the parent hears EN_UPDATE before each paint, and not without', ()=>{
+    // An installer's licence page asks for ENM_UPDATE and reads the box's
+    // scroll bar on EN_UPDATE; never told, it kept "I accept" disabled.
+    const { record, send, toEdit, sent: told } = richEdit(new Uint8Array(0));
+    Object.assign(record, { parent: 0x20, id: 0x5dc });
+    send(0x000f, 0, 0);
+    assert.equal(told.length, 0, 'no mask, nothing said');
+    assert.equal(send(0x0400 + 69, 0, 2), 0, 'EM_SETEVENTMASK answers the old mask');
+    send(0x000f, 0, 0);
+    assert.deepEqual(told, [[0x20, 0x0111, (0x0400 << 16 | 0x5dc) >>> 0, 0x40]]);
+    assert.equal(toEdit.at(-1).message, 0x000f, 'and then painted');
+});
+
+test('EM_SETTEXTEX puts a licence in, UTF-16 or ANSI, RTF read as its text', ()=>{
+    // An installer hands its licence over this way; unanswered, the box
+    // stayed empty and its "I accept" page had nothing to accept.
+    const { record, send, memory, view } = richEdit(new Uint8Array(0));
+    const SET = 0x200;
+    const TEXT = 0x300;
+    const rtf = '{\\rtf1\\ansi TOMB RAIDER\\par LICENCE}';
+    Array.from(rtf).forEach((ch, at)=>view.setUint16(TEXT + at * 2, ch.charCodeAt(0), true));
+    view.setUint16(TEXT + rtf.length * 2, 0, true);
+    view.setUint32(SET, 0, true);
+    view.setUint32(SET + 4, 1200, true);
+    assert.equal(send(0x0400 + 97, SET, TEXT), 1);
+    assert.equal(record.title, 'TOMB RAIDER\r\nLICENCE');
+
+    memory.set([0x21, 0], TEXT);
+    view.setUint32(SET, 2, true);
+    view.setUint32(SET + 4, 0, true);
+    send(0x00b1, 0, 0);
+    assert.equal(send(0x0400 + 97, SET, TEXT), 1);
+    assert.equal(record.title, '!TOMB RAIDER\r\nLICENCE', 'ST_SELECTION: at the caret');
 });

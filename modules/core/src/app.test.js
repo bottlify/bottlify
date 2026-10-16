@@ -603,31 +603,37 @@ test('a file beside the program still wins over system32', async()=>{
     assert.deepEqual([.../** @type {Uint8Array} */ (await read('d3dx9_26.dll'))], [9]);
 });
 
-test('an import the engine has a table for is planned from the system file', async()=>{
-    const d3dx = new Uint8Array(buildExe({
-        imports: { 'KERNEL32.dll': ['Anything'] },
-        code: ()=>[0xc3],
-    }));
-    const entry = new Uint8Array(buildExe({
-        imports: { 'd3dx9_26.dll': ['D3DXCreateEffect'], 'KERNEL32.dll': ['Anything'] },
-        code: ()=>[0xc3],
-    }));
-    const filesystem = await filesystemModule.create({
-        drives: { C: { source: createMemoryStore({ 'WINDOWS\\system32\\d3dx9_26.dll': d3dx }) } },
-    });
+test('an import the engine answers is its own over a file in system32, not over one beside',
+    async()=>{
+        // A bottle carries everything its installation wrote, the runtime its
+        // DirectX setup put in system32 too; the engine covers that copy, as
+        // LoadLibrary at run time already did. A copy the program keeps beside
+        // itself is still the program's.
+        const d3dx = new Uint8Array(buildExe({
+            imports: { 'KERNEL32.dll': ['Anything'] },
+            code: ()=>[0xc3],
+        }));
+        const entry = new Uint8Array(buildExe({
+            imports: { 'd3dx9_26.dll': ['D3DXCreateEffect'], 'KERNEL32.dll': ['Anything'] },
+            code: ()=>[0xc3],
+        }));
+        const ours = (/** @type {string} */ name)=>name.toLowerCase() === 'd3dx9_26.dll';
+        const plan = async(/** @type {Record<string, Uint8Array>} */ files)=>planDependencies({
+            entry,
+            isSystem: ours,
+            isKnownDll: (/** @type {string} */ name)=>name.toLowerCase() === 'kernel32.dll',
+            readLibrary: shippedLibraryReader(await filesystemModule.create({
+                drives: { C: { source: createMemoryStore(files) } } }), null, IMAGE, ours),
+        });
 
-    const { order, missing } = await planDependencies({
-        entry,
-        // The engine does have a d3dx9_26 table; the file is still the answer.
-        isSystem: (/** @type {string} */ name)=>name.toLowerCase() === 'd3dx9_26.dll',
-        isKnownDll: (/** @type {string} */ name)=>name.toLowerCase() === 'kernel32.dll',
-        readLibrary: shippedLibraryReader(filesystem, null, IMAGE),
-    });
+        const covered = await plan({ 'WINDOWS\\system32\\d3dx9_26.dll': d3dx });
+        assert.deepEqual(covered.order, [], 'the table answers; the file is not mapped');
+        assert.deepEqual(covered.missing, []);
 
-    assert.deepEqual(order.map(/** @type {any} */ one=>one.name), ['d3dx9_26.dll']);
-    assert.deepEqual([...order[0].file], [...d3dx], 'the file was planned, not the table');
-    assert.deepEqual(missing, []);
-});
+        const beside = await plan({ 'App\\d3dx9_26.dll': d3dx });
+        assert.deepEqual(beside.order.map(/** @type {any} */ one=>one.name), ['d3dx9_26.dll'],
+            'the program\'s own copy is mapped');
+    });
 
 /**
  * A fixture image given a relocation directory -- one empty block -- so that

@@ -490,7 +490,8 @@ export function createSeh(host){
      * Walks the chain, calling every handler in order until one takes the
      * exception or the chain runs out.
      *
-     * @param {{ code: number, flags?: number, address: number, parameters?: number[] }} what
+     * @param {{ code: number, flags?: number, address: number, parameters?: number[],
+     *     raisedFrom?: number }} what  `raisedFrom` the return address of RaiseException's caller
      * @param {Record<string, number>} [given]  The registers at the exception,
      *        when they are not the processor's right now -- a fault is
      *        reported from a stub that has already moved the stack and spent
@@ -534,8 +535,11 @@ export function createSeh(host){
         const { frames, damaged } = chain(asked);
         // A jump into the first page is a call through a null pointer, whose
         // return address -- the call's own place -- is the only lead.
-        const caller = (what.address >>> 0) < 0x10000 && host.isMapped(registers.esp >>> 0)
-            ? `, called from ${hex(readU32(registers.esp >>> 0))}` : '';
+        // A raised one's address is inside RaiseException; who raised it is
+        // the call's return address.
+        const caller = what.raisedFrom !== undefined ? `, raised from ${hex(what.raisedFrom)}`
+            : (what.address >>> 0) < 0x10000 && host.isMapped(registers.esp >>> 0)
+                ? `, called from ${hex(readU32(registers.esp >>> 0))}` : '';
         // An instruction the processor refused is named by its bytes: a
         // deliberate trap and an opcode the translator lacks look alike
         // otherwise.
@@ -730,7 +734,8 @@ export function createSeh(host){
      * Raises an exception on the running thread and answers with what the
      * raising call should do next. Nothing handled means the process ends.
      *
-     * @param {{ code: number, flags?: number, address: number, parameters?: number[] }} what
+     * @param {{ code: number, flags?: number, address: number, parameters?: number[],
+     *     raisedFrom?: number }} what  `raisedFrom` the return address of RaiseException's caller
      */
     const raise = async what=>{
         const result = await dispatch(what);
@@ -856,6 +861,7 @@ export function createSeh(host){
                         flags: flags >>> 0 & EXCEPTION_NONCONTINUABLE,
                         address: host.registers().eip,
                         parameters,
+                        raisedFrom: readU32(host.registers().esp >>> 0),
                     }).then(result=>(result.registers ? host.answerWith(0, result.registers) : 0));
                 },
             },

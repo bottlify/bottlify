@@ -1099,13 +1099,18 @@ export function createLegacyDirect3DSeam(
             readArray(indices, (indexCount >>> 0) * 2), indexCount >>> 0, flags >>> 0),
 
         /** @param {any} device @param {number[]} args */
-        DrawPrimitiveVB: (device, [type, buffer, start, count, flags])=>device.drawPrimitiveVB(
-            type >>> 0, publisher.objectAt(buffer), start >>> 0, count >>> 0, flags >>> 0),
+        DrawPrimitiveVB: (device, [type, buffer, start, count, flags])=>{
+            const vertices = publisher.objectAt(buffer);
+            return device.drawPrimitiveVB(type >>> 0, vertices, start >>> 0, count >>> 0,
+                flags >>> 0, d3d7.clippedDraw(vertices, flags));
+        },
 
         /** @param {any} device @param {number[]} args */
-        DrawIndexedPrimitiveVB: (device, [type, buffer, indices, indexCount, flags])=>
-            device.drawIndexedPrimitiveVB(type >>> 0, publisher.objectAt(buffer), indices >>> 0,
-                indexCount >>> 0, flags >>> 0),
+        DrawIndexedPrimitiveVB: (device, [type, buffer, indices, indexCount, flags])=>{
+            const vertices = publisher.objectAt(buffer);
+            return device.drawIndexedPrimitiveVB(type >>> 0, vertices, indices >>> 0,
+                indexCount >>> 0, flags >>> 0, d3d7.clippedDraw(vertices, flags));
+        },
 
         ComputeSphereVisibility: onInner('ComputeSphereVisibility'),
 

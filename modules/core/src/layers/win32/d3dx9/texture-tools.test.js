@@ -193,3 +193,51 @@ test('D3DXFilterTexture filters every face of a cube texture and refuses what it
         assert.equal(await r.call(tools.D3DXFilterTexture, [floats, 0, 0, 5]), 0x80004001);
         assert.match(r.diverged.flat().join(' '), /format 116 is not one a filter reads/);
     });
+
+test('D3DXCreateCubeTexture makes a square of the size asked, a power of two where cubes need it',
+    async()=>{
+        const r = deviceRig({ caps: { textureCaps: 0x20000 } });
+        const tools = /** @type {any} */ (createTextureTools(r.host));
+        const out = r.heap.allocate(4);
+        assert.equal(await r.call(tools.D3DXCreateCubeTexture,
+            [r.device, 100, 0, 0, FMT.A8R8G8B8, 1, out]), 0);
+        assert.deepEqual(r.calls.find(c=>c[0] === 'CreateCubeTexture')?.slice(1, 8),
+            [128, 8, 0, FMT.A8R8G8B8, 1, out, 0]);
+        assert.equal(r.call(tools.D3DXCreateCubeTexture, [r.device, 1, 1, 0, 21, 1, 0]),
+            D3DERR_INVALIDCALL);
+    });
+
+test('D3DXCreateVolumeTexture corrects its three sides by the volume caps', async()=>{
+    const r = deviceRig({ caps: { textureCaps: 0x40000, maxVolume: 64 } });
+    const tools = /** @type {any} */ (createTextureTools(r.host));
+    const out = r.heap.allocate(4);
+    assert.equal(await r.call(tools.D3DXCreateVolumeTexture,
+        [r.device, 30, 100, 0, D3DX_DEFAULT, 0, FMT.A8R8G8B8, 1, out]), 0);
+    assert.deepEqual(r.calls.find(c=>c[0] === 'CreateVolumeTexture')?.slice(1, 10),
+        [32, 64, 1, 7, 0, FMT.A8R8G8B8, 1, out, 0],
+        'powers of two, the height cut to the largest extent, a depth of one, the full chain');
+});
+
+test('D3DXFillVolumeTexture asks the function for each texel of each slice', async()=>{
+    const r = deviceRig();
+    const tools = /** @type {any} */ (createTextureTools(r.host));
+    /** @type {number[][]} */
+    const asked = [];
+    const fill = r.guestFunction(([out, coord, size])=>{
+        const [u, v, w] = r.floats(coord, 3);
+        asked.push([u, v, w, ...r.floats(size, 3)]);
+        r.putFloats(out, [u, v, w, 1]);
+        return 0;
+    });
+    const out = r.heap.allocate(4);
+    await r.call(tools.D3DXCreateVolumeTexture, [r.device, 2, 2, 2, 1, 0, FMT.A8R8G8B8, 1, out]);
+    const volume = r.view.getUint32(out, true);
+    assert.equal(await r.call(tools.D3DXFillVolumeTexture, [volume, fill, 0]), 0);
+    assert.equal(asked.length, 8);
+    assert.deepEqual(asked[7], [0.75, 0.75, 0.75, 0.5, 0.5, 0.5]);
+    const level = r.objects.get(volume).levels[0];
+    // B, G, R, A of the last texel: (1, 1, 1), u v w 0.75.
+    assert.deepEqual([...r.memory.subarray(level.data + level.slicePitch + 12,
+        level.data + level.slicePitch + 16)], [191, 191, 191, 255]);
+    assert.equal(level.locked, false, 'unlocked again');
+});

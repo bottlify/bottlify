@@ -27,6 +27,10 @@
  * has no XInputEnable, keystrokes or battery, and 1.4 dropped
  * XInputGetDSoundAudioDeviceGuids (both per Wine's .spec files, which its
  * tests hold to on Windows).
+ *
+ * xinput1_3.dll is the DirectX redistributable's, put in system32 by the
+ * DirectX setup a game runs; this engine answers that setup itself, so the
+ * library it would have installed is answered here as well.
  */
 
 /**
@@ -47,6 +51,18 @@ const XINPUT1_4_ORDINALS = Object.freeze({
     10: 'XInputGetAudioDeviceIds',
     100: 'XInputGetStateEx',
     108: 'XInputGetCapabilitiesEx',
+});
+
+/** The numbers xinput1_3.dll exports by, per Wine's xinput1_3.spec. */
+const XINPUT1_3_ORDINALS = Object.freeze({
+    2: 'XInputGetState',
+    3: 'XInputSetState',
+    4: 'XInputGetCapabilities',
+    5: 'XInputEnable',
+    6: 'XInputGetDSoundAudioDeviceGuids',
+    7: 'XInputGetBatteryInformation',
+    8: 'XInputGetKeystroke',
+    100: 'XInputGetStateEx',
 });
 
 const ERROR_BAD_ARGUMENTS = 160;
@@ -114,51 +130,68 @@ export function createXInput(){
             ((flags >>> 0) & ~XINPUT_FLAG_GAMEPAD) === 0 && given(capabilities)),
     };
 
+    /** DWORD XInputGetDSoundAudioDeviceGuids(DWORD, GUID* render, GUID* capture) */
+    const XInputGetDSoundAudioDeviceGuids = {
+        argBytes: 12,
+        /** @param {number[]} args */
+        handler: ([index, render, capture])=>slot(index,
+            given(render) && given(capture)),
+    };
+    /** void XInputEnable(BOOL) */
+    const XInputEnable = {
+        argBytes: 4,
+        /** @param {number[]} args */
+        handler: ([enable])=>{
+            enabled = enable !== 0;
+            return 0;
+        },
+    };
+    /** DWORD XInputGetBatteryInformation(DWORD, BYTE, XINPUT_BATTERY_INFORMATION*) */
+    const XInputGetBatteryInformation = {
+        argBytes: 12,
+        /** @param {number[]} args */
+        handler: ([index, , information])=>slot(index, given(information)),
+    };
+    /**
+     * DWORD XInputGetKeystroke(DWORD, DWORD reserved, XINPUT_KEYSTROKE*)
+     *
+     * The one call that may ask about every slot at once, and
+     * with none of them holding a pad the answer is the same.
+     */
+    const XInputGetKeystroke = {
+        argBytes: 12,
+        /** @param {number[]} args */
+        handler: ([index, , keystroke])=>slot(
+            (index >>> 0) === XUSER_INDEX_ANY ? 0 : index, given(keystroke)),
+    };
+
     return {
         libraries: {
             'XINPUT9_1_0.dll': {
                 XInputGetState,
                 XInputSetState,
                 XInputGetCapabilities,
-                /** DWORD XInputGetDSoundAudioDeviceGuids(DWORD, GUID* render, GUID* capture) */
-                XInputGetDSoundAudioDeviceGuids: {
-                    argBytes: 12,
-                    /** @param {number[]} args */
-                    handler: ([index, render, capture])=>slot(index,
-                        given(render) && given(capture)),
-                },
+                XInputGetDSoundAudioDeviceGuids,
+            },
+            // The DirectX redistributable's, which its setup puts in system32;
+            // that setup is answered here, so its library is too.
+            'XINPUT1_3.dll': {
+                XInputGetState,
+                XInputSetState,
+                XInputGetCapabilities,
+                XInputEnable,
+                XInputGetDSoundAudioDeviceGuids,
+                XInputGetBatteryInformation,
+                XInputGetKeystroke,
+                XInputGetStateEx: XInputGetState,
             },
             'XINPUT1_4.dll': {
                 XInputGetState,
                 XInputSetState,
                 XInputGetCapabilities,
-                /** void XInputEnable(BOOL) */
-                XInputEnable: {
-                    argBytes: 4,
-                    /** @param {number[]} args */
-                    handler: ([enable])=>{
-                        enabled = enable !== 0;
-                        return 0;
-                    },
-                },
-                /** DWORD XInputGetBatteryInformation(DWORD, BYTE, XINPUT_BATTERY_INFORMATION*) */
-                XInputGetBatteryInformation: {
-                    argBytes: 12,
-                    /** @param {number[]} args */
-                    handler: ([index, , information])=>slot(index, given(information)),
-                },
-                /**
-                 * DWORD XInputGetKeystroke(DWORD, DWORD reserved, XINPUT_KEYSTROKE*)
-                 *
-                 * The one call that may ask about every slot at once, and
-                 * with none of them holding a pad the answer is the same.
-                 */
-                XInputGetKeystroke: {
-                    argBytes: 12,
-                    /** @param {number[]} args */
-                    handler: ([index, , keystroke])=>slot(
-                        (index >>> 0) === XUSER_INDEX_ANY ? 0 : index, given(keystroke)),
-                },
+                XInputEnable,
+                XInputGetBatteryInformation,
+                XInputGetKeystroke,
                 /** DWORD XInputGetStateEx(DWORD, XINPUT_STATE*): GetState with the guide button. */
                 XInputGetStateEx: XInputGetState,
                 /** DWORD XInputGetCapabilitiesEx(DWORD, DWORD, DWORD, XINPUT_CAPABILITIES_EX*) */
@@ -181,7 +214,7 @@ export function createXInput(){
                 },
             },
         },
-        ordinals: { 'XINPUT1_4.dll': XINPUT1_4_ORDINALS },
+        ordinals: { 'XINPUT1_3.dll': XINPUT1_3_ORDINALS, 'XINPUT1_4.dll': XINPUT1_4_ORDINALS },
         diagnostics: ()=>({ asked, enabled }),
     };
 }

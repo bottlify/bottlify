@@ -234,10 +234,17 @@ function indexAt(bits, row, x, bitCount){
  * `scanLines` -- are left at zero, so a partial `SetDIBitsToDevice` cannot pick
  * up whatever the rest of the DIB would have been.
  *
+ * With `area` only that part of the picture is decoded, into a surface of its
+ * size whose (0, 0) is the area's corner: a program that keeps its whole
+ * screen as one DIB and copies a button's worth of it at a time had every
+ * pixel of the screen decoded for every button.
+ *
  * @param {DibImage} image
+ * @param {{ left: number, top: number, right: number, bottom: number }} [area]
+ *        Top-down picture coordinates, within the picture.
  * @returns {import("./contract.js").Surface | null}
  */
-export function decodeDib(image){
+export function decodeDib(image, area){
     if (!isConvertibleDib(image))
     {
         return null;
@@ -256,8 +263,19 @@ export function decodeDib(image){
     const colors = image.colors ?? [];
     const startScan = image.startScan ?? 0;
     const scanLines = Math.min(image.scanLines ?? height, height - startScan);
-    const out = createSurface({ width, height });
+    const left = area?.left ?? 0;
+    const top = area?.top ?? 0;
+    const right = area?.right ?? width;
+    const bottom = area?.bottom ?? height;
+    const out = createSurface({ width: Math.max(0, right - left),
+        height: Math.max(0, bottom - top) });
     const channels = header.bitCount === 16 || header.bitCount === 32 ? channelsFor(image) : [];
+    // A new surface is 32 bits deep, top-down and packed, so its pixels are
+    // written as words: through `write` a pixel cost a tenth of a microsecond,
+    // most of a menu's frame for a program that redraws its buttons from a DIB.
+    const stride = out.width;
+    const words = new Uint32Array(out.bytes.buffer, out.bytes.byteOffset, stride * out.height);
+    const bitCount = header.bitCount;
 
     for (let index = 0; index < scanLines; index++)
     {
@@ -270,31 +288,47 @@ export function decodeDib(image){
         // The one place the sign of biHeight is consulted: a bottom-up DIB's
         // row zero is the picture's last row.
         const y = topDown ? dibRow : height - 1 - dibRow;
-        const row = base + (index * pitch);
-        for (let x = 0; x < width; x++)
+        if (y < top || y >= bottom)
         {
-            let pixel;
-            if (header.bitCount === 32)
+            continue;
+        }
+        const row = base + (index * pitch);
+        const line = ((y - top) * stride) - left;
+        if (bitCount === 24)
+        {
+            for (let x = left, at = row + (left * 3); x < right; x++, at += 3)
             {
-                const at = row + (x * 4);
-                pixel = unpackPixel(bits[at] | (bits[at + 1] << 8) | (bits[at + 2] << 16)
-                    | (bits[at + 3] << 24), channels);
+                words[line + x] = ((bits[at + 2] << 16) | (bits[at + 1] << 8) | bits[at]) >>> 0;
             }
-            else if (header.bitCount === 24)
+        }
+        else if (bitCount === 32)
+        {
+            for (let x = left, at = row + (left * 4); x < right; x++, at += 4)
             {
-                const at = row + (x * 3);
-                pixel = ((bits[at + 2] << 16) | (bits[at + 1] << 8) | bits[at]) >>> 0;
+                words[line + x] = unpackPixel(bits[at] | (bits[at + 1] << 8)
+                    | (bits[at + 2] << 16) | (bits[at + 3] << 24), channels) >>> 0;
             }
-            else if (header.bitCount === 16)
+        }
+        else if (bitCount === 16)
+        {
+            for (let x = left, at = row + (left * 2); x < right; x++, at += 2)
             {
-                const at = row + (x * 2);
-                pixel = unpackPixel(bits[at] | (bits[at + 1] << 8), channels);
+                words[line + x] = unpackPixel(bits[at] | (bits[at + 1] << 8), channels) >>> 0;
             }
-            else
+        }
+        else if (bitCount === 8)
+        {
+            for (let x = left; x < right; x++)
             {
-                pixel = colors[indexAt(bits, row, x, header.bitCount)] ?? 0;
+                words[line + x] = (colors[bits[row + x]] ?? 0) >>> 0;
             }
-            out.write(x, y, pixel);
+        }
+        else
+        {
+            for (let x = left; x < right; x++)
+            {
+                words[line + x] = (colors[indexAt(bits, row, x, bitCount)] ?? 0) >>> 0;
+            }
         }
     }
     return out;
@@ -488,20 +522,28 @@ export function setDIBitsToDevice(options){
         });
         return height;
     }
-    const source = decodeDib({
-        ...options.image,
-        startScan: topDown ? height - first - scans : first,
-        scanLines: scans,
-    });
-    if (!source)
-    {
-        return 0;
-    }
     // Both in picture rows, top-down: what was supplied, and what was asked for.
     const rectangleTop = height - ySrc - rows;
     const top = Math.max(height - first - scans, rectangleTop);
     const bottom = Math.min(height - first, height - ySrc);
-    if (bottom > top && (options.width | 0) > 0)
+    // Only what the copy reads is decoded: those rows, and the source
+    // rectangle's columns that lie in the picture.
+    const xSrc = options.xSrc | 0;
+    const left = Math.max(0, xSrc);
+    const right = Math.min(header.width, xSrc + (options.width | 0));
+    const area = { left, top: Math.max(0, top), right: Math.max(left, right),
+        bottom: Math.max(Math.max(0, top), Math.min(height, bottom)) };
+    if (!isConvertibleDib(options.image))
+    {
+        return 0;
+    }
+    const reads = area.right > area.left && area.bottom > area.top;
+    const source = reads ? decodeDib({
+        ...options.image,
+        startScan: topDown ? height - first - scans : first,
+        scanLines: scans,
+    }, area) : null;
+    if (source && bottom > top && (options.width | 0) > 0)
     {
         bitBlt({
             dest: options.dest,
@@ -511,8 +553,8 @@ export function setDIBitsToDevice(options){
             width: options.width | 0,
             height: bottom - top,
             src: source,
-            srcX: options.xSrc | 0,
-            srcY: top,
+            srcX: xSrc - area.left,
+            srcY: top - area.top,
             rop: SRCCOPY,
         });
     }

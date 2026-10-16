@@ -7,8 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    MEDIA_DIRECTORY, REGISTRY_PATH, SYSTEM_PATH, chooseRoot, collect, guessEntry,
-    installLocations, prefixOptions,
+    DRIVE_ROOT, MEDIA_DIRECTORY, REGISTRY_PATH, collect, guessEntry, prefixOptions,
 } from './prefix.js';
 
 /** @param {string} text */
@@ -58,17 +57,66 @@ test('the rest of the media is seeded beside the entry, none of it counted as pr
         files: tree([...options.seeded, 'C:\\Games\\Title\\title.exe']),
         seeded: options.seeded,
     });
-    assert.deepEqual(prefix.files.map(file=>file.path), ['title.exe']);
+    assert.deepEqual(prefix.files.map(file=>file.path), ['Games\\Title\\title.exe']);
 });
 
-test('the empty directories under the root are carried, relative to it', ()=>{
+test('a bottle is everything the install wrote on C:, by its path from the root', ()=>{
+    // No directory is guessed to be the installation: a game installed to a
+    // Bin directory left its Data beside it, a setup put its runtime in Common
+    // Files, and a guess at one root left the rest behind.
     const prefix = collect({
-        files: tree(['C:\\Games\\Title\\title.exe']),
+        files: tree(['C:\\Program Files\\Maker\\Title\\Bin\\title.exe',
+            'C:\\Program Files\\Maker\\Title\\Data\\level.pak',
+            'C:\\Program Files\\Common Files\\Runtime\\run.dll',
+            'C:\\WINDOWS\\Fonts\\title.ttf']),
+    });
+    assert.equal(prefix.root, DRIVE_ROOT);
+    assert.deepEqual(prefix.files.map(file=>file.path), [
+        'Program Files\\Maker\\Title\\Bin\\title.exe',
+        'Program Files\\Maker\\Title\\Data\\level.pak',
+        'Program Files\\Common Files\\Runtime\\run.dll',
+        'WINDOWS\\Fonts\\title.ttf',
+    ]);
+    assert.equal(prefix.entry, 'Program Files\\Maker\\Title\\Bin\\title.exe');
+    assert.deepEqual(prefix.outside, []);
+});
+
+test('the run\'s scratch and other drives stay out', ()=>{
+    const prefix = collect({
+        files: tree(['C:\\Games\\Title\\title.exe',
+            'C:\\WINDOWS\\TEMP\\_ISTMP1.DIR\\setup.dll',
+            'C:\\Temp\\unpacked.cab',
+            'C:\\Documents and Settings\\User\\Local Settings\\Temp\\x.tmp',
+            'C:\\Documents and Settings\\User\\Application Data\\Title\\config.ini',
+            'D:\\Saves\\one.sav']),
         directories: ['C:\\Games\\Title\\Settings\\Profiles', 'C:\\Temp\\scratch'],
     });
+    assert.deepEqual(prefix.files.map(file=>file.path), ['Games\\Title\\title.exe',
+        'Documents and Settings\\User\\Application Data\\Title\\config.ini']);
+    assert.deepEqual(prefix.outside, ['C:\\WINDOWS\\TEMP\\_ISTMP1.DIR\\setup.dll',
+        'C:\\Temp\\unpacked.cab', 'C:\\Documents and Settings\\User\\Local Settings\\Temp\\x.tmp',
+        'D:\\Saves\\one.sav']);
+    assert.deepEqual(prefix.directories, ['Games\\Title\\Settings\\Profiles'],
+        'empty directories too, scratch left out');
+});
 
-    assert.equal(prefix.root, 'C:\\Games\\Title');
-    assert.deepEqual(prefix.directories, ['Settings\\Profiles']);
+test('what a setup keeps of itself for repair or removal stays out, and so do shortcuts', ()=>{
+    // InstallShield's copy of a demo's whole package was 88 MB of a 228 MB
+    // bottle; only Add or Remove Programs reads any of it.
+    const kept = [
+        'C:\\WINDOWS\\Downloaded Installations\\{C0D3}\\Demo.msi',
+        'C:\\WINDOWS\\Installer\\fee4f149.msi',
+        'C:\\WINDOWS\\Installer\\{69EA}\\DemoShortCut.exe',
+        'C:\\Program Files\\InstallShield Installation Information\\{69EA}\\setup.inx',
+        'C:\\Program Files\\Common Files\\InstallShield\\Driver\\8\\Intel 32\\IDriver.exe',
+        'C:\\WINDOWS\\system32\\dllcache\\quartz.dll',
+        'C:\\WINDOWS\\RegisteredPackages\\{44BBA855}\\dxnt.cab',
+        'C:\\Documents and Settings\\All Users\\Desktop\\Demo.lnk',
+        'C:\\Documents and Settings\\All Users\\Start Menu\\Programs\\Demo\\Demo.lnk',
+    ];
+    const prefix = collect({ files: tree(['C:\\Games\\Title\\title.exe', ...kept]) });
+    assert.deepEqual(prefix.files.map(file=>file.path), ['Games\\Title\\title.exe']);
+    assert.deepEqual(prefix.outside, kept);
 });
 
 test('what was seeded is not part of what the installer produced', ()=>{
@@ -78,153 +126,43 @@ test('what was seeded is not part of what the installer produced', ()=>{
         seeded: media.seeded,
     });
 
-    assert.deepEqual(prefix.files.map(file=>file.path), ['title.exe']);
-    assert.equal(prefix.root, 'C:\\Games\\Title');
-});
-
-test('the root is the shallowest directory holding an executable', ()=>{
-    assert.equal(chooseRoot(tree([
-        'C:\\Program Files\\Title\\title.exe',
-        'C:\\Program Files\\Title\\tools\\editor.exe',
-        'C:\\Program Files\\Title\\data\\art.mpq',
-    ])), 'C:\\Program Files\\Title');
-});
-
-test('the system\'s own tree is never mistaken for the installation', ()=>{
-    // An installer that drops a runtime in the system directory has still
-    // installed the game somewhere else, and the shallowest rule alone would
-    // pick the system directory every time.
-    assert.equal(chooseRoot(tree([
-        'C:\\Windows\\System32\\helper.exe',
-        'C:\\Games\\Title\\title.exe',
-    ])), 'C:\\Games\\Title');
-});
-
-test('the setup InstallShield keeps for maintenance is not the installation', ()=>{
-    // As deep as the program, one executable each, and sorted ahead of it.
-    assert.equal(chooseRoot(tree([
-        'C:\\Program Files\\InstallShield Installation Information\\{91B323B5}\\Setup.exe',
-        'C:\\Program Files\\Publisher\\Title\\title.exe',
-    ])), 'C:\\Program Files\\Publisher\\Title');
+    assert.deepEqual(prefix.files.map(file=>file.path), ['Games\\Title\\title.exe']);
 });
 
 test('what an installer unpacks beside itself is the distribution, not the installation', ()=>{
-    // A self-extractor unpacks its setup next to itself, a level shallower
-    // than any Program Files directory the setup then installs into.
-    assert.equal(chooseRoot(tree([
+    // A self-extractor unpacks its setup next to itself before the setup
+    // installs the game elsewhere; that unpacked setup is scratch.
+    const unpacked = collect({ files: tree([
         `${MEDIA_DIRECTORY}\\Title_Install\\setup.exe`,
-        `${MEDIA_DIRECTORY}\\Title_Install\\autorun.exe`,
+        `${MEDIA_DIRECTORY}\\Title_Install\\data1.cab`,
         'C:\\Program Files\\Publisher\\Title\\title.exe',
-    ])), 'C:\\Program Files\\Publisher\\Title');
+    ]) });
+    assert.deepEqual(unpacked.files.map(file=>file.path),
+        ['Program Files\\Publisher\\Title\\title.exe']);
+    assert.equal(unpacked.outside.length, 2);
     // An archive that unpacks the game itself put it nowhere else.
-    assert.equal(chooseRoot(tree([`${MEDIA_DIRECTORY}\\Title\\title.exe`])),
-        `${MEDIA_DIRECTORY}\\Title`);
+    const itself = collect({ files: tree([`${MEDIA_DIRECTORY}\\Title\\title.exe`]) });
+    assert.deepEqual(itself.files.map(file=>file.path), ['Install\\Title\\title.exe']);
 });
 
-/**
- * A hive as `toJSON` gives it, with one Uninstall entry per location, each
- * InstallLocation a REG_SZ in the ANSI page as the registry keeps it.
- *
- * @param {string[]} locations @param {number} [root]  HKEY_LOCAL_MACHINE by default.
- */
-const uninstallHive = (locations, root = 0x80000002)=>{
-    /** @param {string} name @param {any[]} keys @param {any[]} [values] */
-    const key = (name, keys, values = [])=>({ name, values, keys });
-    const entries = locations.map((location, index)=>key(`{entry-${index}}`, [], [
-        { name: 'DisplayName', type: 1, data: [...bytes(`Title ${index}\0`)] },
-        { name: 'InstallLocation', type: 1, data: [...bytes(`${location}\0`)] },
-    ]));
-    return { roots: [{ id: root, key: key('ROOT', [key('SOFTWARE', [key('Microsoft', [
-        key('Windows', [key('CurrentVersion', [key('Uninstall', entries)])])])])]) }] };
-};
-
-test('the root is where the install told Windows it put the application', ()=>{
-    // An installer's maintenance copy of itself sits shallower than the game,
-    // and the shallowest-executable rule alone would bottle the setup.
-    const files = tree([
-        'C:\\Program Files\\Setup Information\\{1234}\\setup.exe',
-        'C:\\Program Files\\Publisher\\Demo\\Title\\title.exe',
-        'C:\\Program Files\\Publisher\\Demo\\Title\\Video\\intro.bik',
-    ]);
-    const prefix = collect({ files,
-        registry: uninstallHive(['c:\\program files\\publisher\\demo\\title\\']) });
-    assert.equal(prefix.root, 'C:\\Program Files\\Publisher\\Demo\\Title',
-        'spelt as the volume spells it, without the trailing separator');
-    assert.deepEqual(prefix.files.filter(file=>file.path !== REGISTRY_PATH)
-        .map(file=>file.path), ['title.exe', 'Video\\intro.bik']);
-    const perUser = uninstallHive(['C:\\Program Files\\Publisher\\Demo\\Title'], 0x80000001);
-    assert.equal(collect({ files, registry: perUser }).root,
-        'C:\\Program Files\\Publisher\\Demo\\Title', 'a per-user entry too');
-});
-
-test('a recorded location holding nothing the install wrote leaves the layout to decide', ()=>{
-    // Another program's entry, or a location the program was moved from.
-    const files = tree(['C:\\Games\\Title\\title.exe']);
-    assert.equal(collect({ files, registry: uninstallHive(['C:\\Elsewhere']) }).root,
-        'C:\\Games\\Title');
-    assert.deepEqual(installLocations(uninstallHive(['C:\\Elsewhere', 'not a path'])),
-        ['C:\\Elsewhere']);
-    assert.deepEqual(installLocations(undefined), []);
-});
-
-test('among equally shallow candidates the one with more executables wins', ()=>{
-    assert.equal(chooseRoot(tree([
-        'C:\\Games\\Shortcut\\link.exe',
-        'C:\\Games\\Title\\title.exe',
-        'C:\\Games\\Title\\patch.exe',
-    ])), 'C:\\Games\\Title');
-});
-
-test('files the root does not cover are reported rather than dropped silently', ()=>{
-    const prefix = collect({
-        files: tree(['C:\\Games\\Title\\title.exe', 'C:\\Windows\\Fonts\\title.ttf']),
-    });
-
-    assert.deepEqual(prefix.files.map(file=>file.path), ['title.exe']);
-    assert.deepEqual(prefix.outside, ['C:\\Windows\\Fonts\\title.ttf']);
-});
-
-test('what the install added to system32 travels beside the registry', ()=>{
-    // A setup installs the runtime its program links against there -- the D3DX
-    // libraries a DirectX setup puts in -- and the program looks nowhere else.
-    const prefix = collect({
-        files: tree([
-            'C:\\Games\\Title\\title.exe',
-            'C:\\WINDOWS\\system32\\d3dx9_30.dll',
-            'C:\\Windows\\System32\\xinput1_3.dll',
-            'C:\\WINDOWS\\system32\\drivers\\title.sys',
-        ]),
-    });
-
-    assert.deepEqual(prefix.files.map(file=>file.path), [
-        'title.exe',
-        `${SYSTEM_PATH}\\d3dx9_30.dll`,
-        `${SYSTEM_PATH}\\xinput1_3.dll`,
-        `${SYSTEM_PATH}\\drivers\\title.sys`,
-    ]);
-    assert.equal(new TextDecoder().decode(prefix.files[1].bytes),
-        'C:\\WINDOWS\\system32\\d3dx9_30.dll', 'the bytes the install wrote');
-    assert.deepEqual(prefix.outside, []);
-    assert.equal(prefix.entry, 'title.exe', 'a file in system32 is never the program to start');
-});
-
-test('a library the engine synthesises is not carried out of system32', ()=>{
-    // Mounted back, a copy of one of Windows' own libraries would be mapped in
-    // place of the engine's; the redistributables are not in the list.
+test('what the install put in system32 travels, Windows\' own libraries included', ()=>{
+    // The engine answers its own libraries there whatever a bottle carries
+    // (core's loader), so a DirectX setup's copies are carried as they are.
     const prefix = collect({
         files: tree([
             'C:\\Games\\Title\\title.exe',
             'C:\\WINDOWS\\system32\\d3d9.dll',
-            'C:\\WINDOWS\\system32\\DSOUND.DLL',
             'C:\\WINDOWS\\system32\\d3dx9_30.dll',
+            'C:\\WINDOWS\\system32\\drivers\\title.sys',
         ]),
-        synthesised: ['D3D9.dll', 'DSOUND.dll', 'KERNEL32.dll'],
     });
-
-    assert.deepEqual(prefix.files.map(file=>file.path),
-        ['title.exe', `${SYSTEM_PATH}\\d3dx9_30.dll`]);
-    assert.deepEqual(prefix.answered,
-        ['C:\\WINDOWS\\system32\\d3d9.dll', 'C:\\WINDOWS\\system32\\DSOUND.DLL']);
+    assert.deepEqual(prefix.files.map(file=>file.path), [
+        'Games\\Title\\title.exe',
+        'WINDOWS\\system32\\d3d9.dll',
+        'WINDOWS\\system32\\d3dx9_30.dll',
+        'WINDOWS\\system32\\drivers\\title.sys',
+    ]);
+    assert.equal(prefix.entry, 'Games\\Title\\title.exe');
 });
 
 test('the registry travels as a file inside the tree', ()=>{
@@ -240,12 +178,10 @@ test('the registry travels as a file inside the tree', ()=>{
 
 test('the guessed entry is the largest executable that is not a setup program', ()=>{
     assert.equal(guessEntry([
-        { path: 'unins000.exe', bytes: new Uint8Array(9000) },
-        { path: 'title.exe', bytes: new Uint8Array(400) },
-        { path: 'config.exe', bytes: new Uint8Array(100) },
-    ]), 'title.exe');
-});
-
-test('a tree with no executable keeps the volume root rather than inventing one', ()=>{
-    assert.equal(chooseRoot(tree(['C:\\Data\\readme.txt'])), 'C:\\');
+        { path: 'Games\\Title\\unins000.exe', bytes: new Uint8Array(9000) },
+        { path: 'WINDOWS\\IsUninst.exe', bytes: new Uint8Array(9000) },
+        { path: 'WINDOWS\\system32\\helper.exe', bytes: new Uint8Array(8000) },
+        { path: 'Games\\Title\\title.exe', bytes: new Uint8Array(400) },
+        { path: 'Games\\Title\\config.exe', bytes: new Uint8Array(100) },
+    ]), 'Games\\Title\\title.exe', 'never one of the Windows directory\'s');
 });

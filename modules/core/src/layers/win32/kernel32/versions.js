@@ -122,7 +122,10 @@ export const WINDOWS_VERSIONS = Object.freeze({
         profiles: DOCUMENTS_AND_SETTINGS,
         release: null,
         // Service Pack 3's own: Internet Explorer 6 SP3 and Media Player 9.
-        // Not measured against a machine; see decision A39.
+        // Not measured against a machine; see decision A39. DirectX 9.0c is
+        // part of the system from XP on, its files at the system's build --
+        // newer than any DirectX 9 redistributable's, which a setup's DXSETUP
+        // then leaves alone rather than replacing at the next restart.
         components: Object.freeze({
             internetExplorer: '6.0.2900.5512',
             mediaPlayer: '9.0.0.4503',
@@ -131,6 +134,12 @@ export const WINDOWS_VERSIONS = Object.freeze({
                 'urlmon.dll': '6.0.2900.5512', 'wininet.dll': '6.0.2900.5512',
                 'shlwapi.dll': '6.0.2900.5512', 'msdxm.ocx': '6.4.9.1133',
                 'wmp.dll': '9.0.0.4503',
+                'ddraw.dll': '5.3.2600.5512', 'dsound.dll': '5.3.2600.5512',
+                'dinput.dll': '5.3.2600.5512', 'dinput8.dll': '5.3.2600.5512',
+                'd3d8.dll': '5.3.2600.5512', 'd3d9.dll': '5.3.2600.5512',
+                'dplayx.dll': '5.3.2600.5512', 'dpnet.dll': '5.3.2600.5512',
+                'dpnhpast.dll': '5.3.2600.5512', 'dpnhupnp.dll': '5.3.2600.5512',
+                'dmusic.dll': '5.3.2600.5512', 'dmime.dll': '5.3.2600.5512',
             }),
         }),
     }),

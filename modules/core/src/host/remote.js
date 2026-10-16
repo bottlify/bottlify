@@ -34,6 +34,39 @@ import { createRingMemory } from '../system/ring.js';
 import { INBOUND_BYTES, createInboundWriter } from './inbound.js';
 
 /**
+ * A file of the exit as the worker sent it, in the volume's pieces, with the
+ * `bytes` a reader of the whole file asks for made only then -- a program's
+ * entry, a few megabytes. A bottle is packed from the pieces, a block at a
+ * time, and a gigabyte archive file is never one buffer on either side.
+ *
+ * @param {{ path: string, size: number, pieces: (Uint8Array | null)[] }} file
+ * @returns {{ path: string, size: number, pieces: (Uint8Array | null)[], bytes: Uint8Array }}
+ */
+export function wholeOnDemand(file){
+    /** @type {Uint8Array | null} */
+    let whole = null;
+    const unit = file.pieces.find(piece=>piece)?.length || file.size || 1;
+    return /** @type {any} */ (Object.defineProperty({ ...file }, 'bytes', {
+        enumerable: false,
+        get: ()=>{
+            if (!whole)
+            {
+                whole = new Uint8Array(file.size);
+                file.pieces.forEach((piece, index)=>{
+                    if (piece)
+                    {
+                        const at = index * unit;
+                        whole?.set(piece.subarray(0, Math.max(0,
+                            Math.min(piece.length, file.size - at))), at);
+                    }
+                });
+            }
+            return whole;
+        },
+    }));
+}
+
+/**
  * The keeper, in a worker of its own. A test can hand in its own port instead
  * of a real worker; without `Worker` -- a thread-hosted run, a headless one --
  * the same keeper is served over a `MessageChannel` on this thread, which is
@@ -681,7 +714,7 @@ export async function createRemoteApp(wiring){
                 {
                     throw new Error('the program has not exited yet');
                 }
-                return left.files;
+                return left.files.map(wholeOnDemand);
             },
         },
         registry: ()=>({

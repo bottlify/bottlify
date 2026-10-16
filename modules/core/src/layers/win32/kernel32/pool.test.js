@@ -391,3 +391,80 @@ test('deleting a queue silences every timer in it and waits for all their callba
     const empty = m.fns.CreateTimerQueue.handler();
     assert.equal(m.fns.DeleteTimerQueue.handler([empty]), 1, 'an empty queue at once');
 });
+
+test('a registered wait hands its callback to the pool on each answer, until unregistered', ()=>{
+    const memory = new Uint8Array(0x10000);
+    let free = 0x1000;
+    /** @type {any} */
+    let current = { name: 'main' };
+    /** @type {Record<string, { argBytes: number, handler: Function }>} */
+    const traps = {};
+    /** @type {any[]} */
+    const created = [];
+    /** @type {number[]} */
+    const errors = [];
+    /** @type {[number, number][]} */
+    const waited = [];
+    let answer = 0x102;
+    const OBJECT = 0x44;
+    const CALLBACK = 0x401000;
+    const CONTEXT = 0x1234;
+    const pool = createThreadPool({
+        kernel: {
+            currentThread: ()=>current,
+            createThread: (/** @type {any} */ options)=>{
+                created.push(options);
+                return { name: options.name, parameter: options.parameter };
+            },
+            block: ()=>{},
+            wake: ()=>true,
+        },
+        register: (name, fn)=>{
+            traps[name] = fn;
+            return 0x900 + Object.keys(traps).length * 0x10;
+        },
+        allocate: bytes=>{
+            const at = free;
+            free += Math.max(bytes, 16);
+            return at;
+        },
+        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        park: ()=>PARKED,
+        setLastError: code=>errors.push(code),
+        waitFor: (handle, milliseconds)=>{
+            waited.push([handle, milliseconds]);
+            return answer;
+        },
+    });
+    const fns = pool.table;
+    const handle = fns.RegisterWaitForSingleObjectEx.handler([OBJECT, CALLBACK, CONTEXT, 250, 0]);
+    assert.notEqual(handle, 0);
+    const waiter = created.find(options=>options.name === 'registered wait');
+    assert.equal(waiter.parameter, handle, 'the wait\'s thread is handed the wait');
+
+    assert.equal(traps['<registered-wait>'].handler([handle]), 0x102);
+    assert.deepEqual(waited, [[OBJECT, 250]], 'it waits on the object for the time asked');
+    assert.equal(traps['<registered-wait-done>'].handler([handle, 0x102]), 1, 'and again after');
+    const worker = created.find(options=>options.name === 'thread pool');
+    assert.ok(worker, 'the callback goes to a pool thread');
+    current = { name: 'worker' };
+    assert.equal(traps['<thread-pool>'].handler([0x8000, RAN]), RUN);
+    const get32 = (/** @type {number} */ at)=>new DataView(memory.buffer).getUint32(at, true);
+    assert.deepEqual([get32(0x8000), get32(0x8004), get32(0x8008)], [CALLBACK, CONTEXT, 1],
+        'its context, and TRUE: the time ran out');
+
+    current = { name: 'main' };
+    assert.equal(fns.UnregisterWait.handler([handle]), 0, 'a callback still running');
+    assert.deepEqual(errors, [ERROR_IO_PENDING]);
+    assert.equal(traps['<registered-wait>'].handler([handle]), 0x80, 'no wait once unregistered');
+    assert.equal(traps['<registered-wait-done>'].handler([handle, 0x80]), 0,
+        'and the thread stops');
+
+    answer = 0;
+    const once = fns.RegisterWaitForSingleObjectEx.handler([OBJECT, CALLBACK, CONTEXT,
+        0xffffffff, 0x8]);
+    assert.equal(traps['<registered-wait-done>'].handler([once, 0]), 0,
+        'WT_EXECUTEONLYONCE waits no more after its callback');
+    assert.equal(fns.RegisterWaitForSingleObjectEx.handler([OBJECT, 0, CONTEXT, 0, 0]), 0,
+        'no callback is refused');
+});

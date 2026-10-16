@@ -424,3 +424,64 @@ test('a mutex the parent named is ERROR_ALREADY_EXISTS when the child names it t
     assert.equal(output.join('').charCodeAt(0), ERROR_ALREADY_EXISTS,
         'the child found the name the parent registered, never closed across the handover');
 });
+
+for (const concurrency of /** @type {(1 | 2)[]} */ ([1, 2]))
+{
+    test(`a process's windows go when it exits, and the one started in its place finds none of`
+        + ` them (concurrency ${concurrency})`, { timeout: 60000 }, async t=>{
+        // InstallShield's setup shows a window, starts a copy of itself and
+        // exits; the copy shows its wizard. On Windows the first process's
+        // windows are destroyed with it. Carried into the copy, its window
+        // stayed on the screen under the wizard for the whole install, its
+        // destruction refused as another thread's.
+        const ascii = (/** @type {string} */ text)=>[...text].map(c=>c.charCodeAt(0)).concat(0);
+        const parent = buildExe({
+            imports: { 'USER32.dll': ['CreateWindowExA'],
+                'KERNEL32.dll': ['CreateProcessA', 'ExitProcess'] },
+            codeSize: 0x100,
+            data: {
+                kind: ascii('STATIC'),
+                title: ascii('left by the parent'),
+                child: ascii('C:\\App\\Child.exe'),
+                startup: [68, ...new Array(67).fill(0)],
+                information: new Array(16).fill(0),
+            },
+            code: ({ iat, at })=>[
+                // CreateWindowExA(0, "STATIC", title, WS_POPUP | WS_VISIBLE, 0, 0, 100, 50, ...)
+                0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0,
+                0x6a, 50, 0x6a, 100, 0x6a, 0, 0x6a, 0,
+                0x68, ...u32(0x90000000),
+                0x68, ...u32(at('title')), 0x68, ...u32(at('kind')), 0x6a, 0,
+                0xff, 0x15, ...u32(iat('CreateWindowExA')),
+                0x68, ...u32(at('information')), 0x68, ...u32(at('startup')),
+                0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0, 0x6a, 0,
+                0x68, ...u32(at('child')),
+                0xff, 0x15, ...u32(iat('CreateProcessA')),
+                0x6a, 0, 0xff, 0x15, ...u32(iat('ExitProcess')),
+            ],
+        });
+        // Exits with FindWindowA(NULL, title): zero when the parent's window is gone.
+        const child = buildExe({
+            imports: { 'USER32.dll': ['FindWindowA'], 'KERNEL32.dll': ['ExitProcess'] },
+            codeSize: 0x40,
+            data: { title: ascii('left by the parent') },
+            code: ({ iat, at })=>[
+                0x68, ...u32(at('title')), 0x6a, 0,
+                0xff, 0x15, ...u32(iat('FindWindowA')),
+                0x50, 0xff, 0x15, ...u32(iat('ExitProcess')),
+            ],
+        });
+        const app = await createApp({
+            executable: parent,
+            imagePath: 'C:\\App\\Parent.exe',
+            engine: 'cork',
+            concurrency,
+            storage: { load: async()=>({ files: [{ path: 'C:\\App\\Child.exe', bytes: child }] }) },
+        });
+        t.after(()=>app.dispose());
+        assert.equal(await app.run({ timeoutMs: 30000 }), 0,
+            'the child found no window of the parent');
+        assert.deepEqual((await app.debug.windows()).filter((/** @type {any} */ each)=>
+            each.title === 'left by the parent'), [], 'and none is listed');
+    });
+}

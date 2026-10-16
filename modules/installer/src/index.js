@@ -38,16 +38,18 @@
 import { REGISTRY_PATH, collect, prefixOptions } from './prefix.js';
 import { isDiscMedia } from './disc.js';
 import { packBundle } from './pack.js';
-import { finish, partSink } from './upload.js';
+import { bundleManifest, finish, partSink } from './upload.js';
+import { HEADER_SIZE } from '@bottlify/core/bundle';
 import { graphicsChoice, windowsChoice } from './windows.js';
 
 export {
-    MEDIA_DIRECTORY, REGISTRY_PATH, SYSTEM_PATH, chooseRoot, collect, guessEntry, placementOf,
+    DRIVE_ROOT, MEDIA_DIRECTORY, REGISTRY_PATH, collect, guessEntry, placementOf,
     prefixOptions,
 } from './prefix.js';
 export { archiveDisc, isZipArchive, readZip } from './archive.js';
 export { isRarArchive, readRar } from './rar.js';
 export { DEFAULT_BLOCK_SIZE, packBundle, packBlock, sha256 } from './pack.js';
+export { chunkedFile, sizeOf } from './chunks.js';
 export {
     DISC_LETTER, autorunText, discEntry, discOptions, isDiscImage, isDiscMedia, readAutorun,
     splitCommand,
@@ -55,7 +57,7 @@ export {
 export {
     DESTINATION, detectFamily, dialogCalled, responseFile, responseFileV5, silentOptions,
 } from './silent.js';
-export { PART_BYTES, finish, partSink } from './upload.js';
+export { PART_BYTES, bundleManifest, finish, partSink } from './upload.js';
 export {
     GRAPHICS_CHOICES, WINDOWS_CHOICES, graphicsChoice, windowsChoice,
 } from './windows.js';
@@ -69,8 +71,6 @@ export {
  *             directories?: () => string[] }} session  `directories`: the empty ones
  *           it made, which a list of files cannot carry.
  * @property {() => { toJSON: () => unknown }} registry
- * @property {() => string[]} [systemLibraries]  The libraries the engine synthesises
- *           as Windows' own, which a bottle does not carry out of system32.
  */
 
 /**
@@ -108,18 +108,15 @@ export async function storageHeadroom(){
  *
  * @param {InstalledApp} app
  * @param {import('./prefix.js').InstallMedia | import('./disc.js').DiscMedia} media
- * @param {string} [root]  Overrides the chosen installation root.
  * @returns {import('./prefix.js').Prefix}
  */
-export function collectFrom(app, media, root){
+export function collectFrom(app, media){
     return collect({
         files: app.session.export(),
         directories: app.session.directories?.() ?? [],
         registry: app.registry().toJSON(),
         // A disc is a drive of its own and was never in the prefix.
         seeded: isDiscMedia(media) ? [] : prefixOptions(media).seeded,
-        root,
-        synthesised: app.systemLibraries?.() ?? [],
     });
 }
 
@@ -179,4 +176,87 @@ export async function publish({ prefix, endpoint, id, manifest = {}, report }){
 
     report?.({ stage: 'done', bytes: packed.bytes });
     return { packed, answer };
+}
+
+/**
+ * Turns a finished prefix into a bottle kept in this browser: a directory of
+ * the origin's file system (`directory`, OPFS) that holds the bottle as a
+ * server would -- `<id>/bundle.btl`, its `manifest.json` -- and the
+ * program it starts, `<id>/entry`, which a server reads out of the bundle
+ * and a browser keeps beside it, so starting the bottle reads nothing back.
+ *
+ * Packed as it is written, as `publish` sends it: the blocks go to the file
+ * behind the room left for the header, the index after them, and the header,
+ * known last, into that room.
+ *
+ * @param {Object} options
+ * @param {import('./prefix.js').Prefix} options.prefix
+ * @param {FileSystemDirectoryHandle} options.directory  Where bottles are kept.
+ * @param {string} options.id                Names the bottle, and its directory.
+ * @param {Record<string, unknown>} [options.manifest]  As `publish` takes it.
+ * @param {(report: PublishReport) => void} [options.report]
+ * @returns {Promise<{ packed: import('./pack.js').PackedSummary,
+ *                      manifest: Record<string, unknown> }>}
+ */
+export async function saveBottle({ prefix, directory, id, manifest = {}, report }){
+    windowsChoice(manifest.windows);
+    graphicsChoice(manifest.graphics);
+    if (!prefix.files.some(file=>file.path !== REGISTRY_PATH))
+    {
+        throw new Error('the installer produced no files, so there is no bottle to make');
+    }
+    const entry = String(manifest.entry ?? prefix.entry ?? '');
+    const program = prefix.files.find(file=>file.path.toLowerCase() === entry.toLowerCase());
+    if (!program)
+    {
+        throw new Error(`the program to start, ${entry || 'none'}, `
+            + 'is not among the installed files');
+    }
+
+    const folder = await directory.getDirectoryHandle(id, { create: true });
+    const stream = await (await folder.getFileHandle('bundle.btl', { create: true }))
+        .createWritable();
+    /** @type {import('./pack.js').PackedSummary} */
+    let packed;
+    try
+    {
+        await stream.write({ type: 'seek', position: HEADER_SIZE });
+        report?.({ stage: 'packing', detail: `${prefix.files.length} files under ${prefix.root}` });
+        packed = await packBundle({
+            files: prefix.files,
+            directories: prefix.directories ?? [],
+            write: bytes=>stream.write(/** @type {Uint8Array<ArrayBuffer>} */ (bytes)),
+            onProgress: progress=>report?.({
+                stage: 'packing',
+                detail: progress.path,
+                bytes: progress.packedTotal,
+            }),
+        });
+        report?.({ stage: 'finishing' });
+        await stream.write(/** @type {Uint8Array<ArrayBuffer>} */ (packed.index));
+        await stream.write({ type: 'write', position: 0,
+            data: /** @type {Uint8Array<ArrayBuffer>} */ (packed.header) });
+        await stream.close();
+    }
+    catch (e){
+        await stream.abort?.();
+        throw e;
+    }
+
+    const described = bundleManifest(packed, {
+        title: id,
+        root: prefix.root,
+        ...manifest,
+        entry: program.path,
+    });
+    /** @param {string} name @param {Uint8Array} bytes */
+    const put = async(name, bytes)=>{
+        const writing = await (await folder.getFileHandle(name, { create: true })).createWritable();
+        await writing.write(/** @type {Uint8Array<ArrayBuffer>} */ (bytes));
+        await writing.close();
+    };
+    await put('entry', program.bytes);
+    await put('manifest.json', new TextEncoder().encode(JSON.stringify(described, null, 4)));
+    report?.({ stage: 'done', bytes: packed.bytes });
+    return { packed, manifest: described };
 }

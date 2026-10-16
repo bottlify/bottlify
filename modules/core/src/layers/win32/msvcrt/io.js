@@ -107,6 +107,20 @@ const STATI64 = Object.freeze({
     ATIME: 32, MTIME: 36, CTIME: 40, BYTES: 48,
 });
 
+/** `struct _stat64`: 64-bit size and times, each on its 8-byte alignment. */
+const STAT64 = Object.freeze({
+    DEV: 0, INO: 4, MODE: 6, NLINK: 8, UID: 10, GID: 12, RDEV: 16, SIZE: 24, WIDE_SIZE: true,
+    ATIME: 32, MTIME: 40, CTIME: 48, WIDE_TIME: true, BYTES: 56,
+});
+
+/** `struct _stat64i32`: 64-bit times, a 32-bit size. */
+const STAT64I32 = Object.freeze({
+    DEV: 0, INO: 4, MODE: 6, NLINK: 8, UID: 10, GID: 12, RDEV: 16, SIZE: 20, WIDE_SIZE: false,
+    ATIME: 24, MTIME: 32, CTIME: 40, WIDE_TIME: true, BYTES: 48,
+});
+
+/** @typedef {typeof STAT | typeof STATI64 | typeof STAT64 | typeof STAT64I32} StatLayout */
+
 /** `st_mode` bits, as sys/stat.h numbers them. */
 const S_IFDIR = 0x4000;
 const S_IFCHR = 0x2000;
@@ -920,7 +934,7 @@ export function createIoFunctions(host, descriptors){
      *
      * @param {number} address
      * @param {{ device: number, mode: number, size: number, modified: number }} entry
-     * @param {typeof STAT | typeof STATI64} [layout]
+     * @param {StatLayout} [layout]
      */
     const writeStat = (address, entry, layout = STAT)=>{
         const bytes = new Uint8Array(layout.BYTES);
@@ -938,9 +952,17 @@ export function createIoFunctions(host, descriptors){
             view.setUint32(layout.SIZE, entry.size >>> 0, true);
         }
         const time = seconds(entry.modified);
-        view.setUint32(layout.ATIME, time, true);
-        view.setUint32(layout.MTIME, time, true);
-        view.setUint32(layout.CTIME, time, true);
+        for (const at of [layout.ATIME, layout.MTIME, layout.CTIME])
+        {
+            if ('WIDE_TIME' in layout)
+            {
+                view.setBigUint64(at, BigInt(time), true);
+            }
+            else
+            {
+                view.setUint32(at, time, true);
+            }
+        }
         host.writeMemory(address >>> 0, bytes);
     };
 
@@ -987,7 +1009,7 @@ export function createIoFunctions(host, descriptors){
      * character device whose device is its number.
      *
      * @param {number} fd @param {number} buffer
-     * @param {typeof STAT | typeof STATI64} layout
+     * @param {StatLayout} layout
      */
     const statDescriptor = (fd, buffer, layout)=>{
         const descriptor = descriptors.get(fd | 0);
@@ -1022,7 +1044,7 @@ export function createIoFunctions(host, descriptors){
      * program are executable.
      *
      * @param {number} path @param {number} buffer
-     * @param {typeof STAT | typeof STATI64} layout
+     * @param {StatLayout} layout
      */
     const statPath = (path, buffer, layout)=>{
         if ((path >>> 0) === 0 || (buffer >>> 0) === 0)
@@ -1420,6 +1442,15 @@ export function createIoFunctions(host, descriptors){
          * `_stat` with a size that goes past 4 GiB, and the same answers.
          */
         _stati64: cdecl(8, ([path, buffer])=>statPath(path, buffer, STATI64)),
+
+        /** int _stat64(const char *path, struct _stat64 *buffer) */
+        _stat64: cdecl(8, ([path, buffer])=>statPath(path, buffer, STAT64)),
+        /** int _stat64i32(const char *path, struct _stat64i32 *buffer) */
+        _stat64i32: cdecl(8, ([path, buffer])=>statPath(path, buffer, STAT64I32)),
+        /** int _fstat64(int fd, struct _stat64 *buffer) */
+        _fstat64: cdecl(8, ([fd, buffer])=>statDescriptor(fd, buffer, STAT64)),
+        /** int _fstat64i32(int fd, struct _stat64i32 *buffer) */
+        _fstat64i32: cdecl(8, ([fd, buffer])=>statDescriptor(fd, buffer, STAT64I32)),
 
         // An __int64 answer is EDX:EAX, and only a seam onto the registers
         // reaches EDX: without one these would answer a high half that is

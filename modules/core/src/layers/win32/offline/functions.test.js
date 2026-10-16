@@ -6,7 +6,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createNetbiosFunctions, createSensFunctions, createTelephonyFunctions }
+import { createNetbiosFunctions, createSensFunctions, createSessionNotificationFunctions,
+    createTelephonyFunctions }
     from './functions.js';
 
 const NCB = 0x100;
@@ -72,4 +73,11 @@ test('the network is not alive, and that is not an error', ()=>{
     const { IsNetworkAlive } = createSensFunctions(host);
     assert.equal(IsNetworkAlive.handler(), 0);
     assert.deepEqual(errors, [0]);
+});
+
+test('a window registered for session changes is kept, and none ever comes', ()=>{
+    const fns = createSessionNotificationFunctions();
+    assert.equal(fns.WTSRegisterSessionNotification.argBytes, 8);
+    assert.equal(fns.WTSRegisterSessionNotification.handler(), 1);
+    assert.equal(fns.WTSUnRegisterSessionNotification.handler(), 1);
 });

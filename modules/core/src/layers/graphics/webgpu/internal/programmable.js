@@ -25,7 +25,7 @@
  *   its blocks into the same groups.
  */
 
-import { pipelineDescriptor, pipelineKey, vertexBuffersOf } from './pipeline.js';
+import { createBuildLog, pipelineDescriptor, pipelineKey, vertexBuffersOf } from './pipeline.js';
 import { VERTEX_SAMPLER_BINDING } from '../../d3d9/wgsl.js';
 
 /**
@@ -220,7 +220,8 @@ const FRAGMENT_STAGE = 2;
  * @param {Object} options
  * @param {any} options.backend
  * @returns {{ get: (state: import('./pipeline.js').PipelineState, program: ProgramSource)
- *             => Promise<any>, stats: () => { built: number, reused: number, latest: string[] } }}
+ *             => Promise<any>, stats: () => { built: number, reused: number,
+ *             buildMs: number, latest: string[], churn: any[] } }}
  */
 export function createProgramCache({ backend }){
     /** @type {Map<string, Promise<any>>} */
@@ -232,8 +233,7 @@ export function createProgramCache({ backend }){
      */
     const layouts = new Map();
     let built = 0;
-    /** The last keys built, newest last: a key made anew every frame shows here. @type {string[]} */
-    const latest = [];
+    const log = createBuildLog();
     let reused = 0;
 
     /**
@@ -306,11 +306,6 @@ export function createProgramCache({ backend }){
                 return existing;
             }
             built++;
-            latest.push(key);
-            if (latest.length > 4)
-            {
-                latest.shift();
-            }
             const building = (async()=>{
                 const [vertexModule, pixelModule] = await Promise.all([
                     backend.createShaderModule(
@@ -346,10 +341,11 @@ export function createProgramCache({ backend }){
                     }),
                 };
             })();
+            log.built(key, building);
             pipelines.set(key, building);
             return building;
         },
-        stats: ()=>({ built, reused, latest: latest.slice() }),
+        stats: ()=>({ built, reused, ...log.stats() }),
     };
 }
 

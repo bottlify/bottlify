@@ -113,9 +113,6 @@ const IID_ILOCKBYTES = '{0000000A-0000-0000-C000-000000000046}';
  * Save, GetSizeMax. IStream's Read and Write, likewise, for a stream a
  * program implemented itself.
  */
-const SLOT_QUERYINTERFACE = 0;
-const SLOT_ADDREF = 1;
-const SLOT_RELEASE = 2;
 const SLOT_GETCLASSID = 3;
 const SLOT_SAVE = 6;
 const SLOT_STREAM_READ = 3;
@@ -1854,81 +1851,6 @@ export function createStorageFunctions(host){
                 }
                 writeU32(out, 0);
                 return publishMemoryStream(hGlobal >>> 0, (fDeleteOnRelease >>> 0) !== 0, out);
-            },
-        },
-
-        /**
-         * HRESULT CoMarshalInterThreadInterfaceInStream(REFIID riid, LPUNKNOWN pUnk,
-         *                                               LPSTREAM *ppStm)
-         * HRESULT CoGetInterfaceAndReleaseStream(LPSTREAM pStm, REFIID iid, LPVOID *ppv)
-         *
-         * An interface handed from one thread to another through a stream.
-         * Every thread here shares one address space and no apartment rule
-         * is enforced, so the packet is the pointer itself, with the
-         * reference marshaling holds: an AddRef going in, and on the way out
-         * the QueryInterface the caller keeps and the Release of the one
-         * marshaling took. Both calls into the object cross the bridge,
-         * because the object is usually the program's.
-         */
-        CoMarshalInterThreadInterfaceInStream: {
-            argBytes: 12,
-            /** @param {number[]} args */
-            handler: ([, pUnk, ppStm])=>{
-                const out = ppStm >>> 0;
-                const object = pUnk >>> 0;
-                if (out === 0)
-                {
-                    return E_INVALIDARG;
-                }
-                writeU32(out, 0);
-                if (object === 0 || !host.call)
-                {
-                    return E_INVALIDARG;
-                }
-                const hr = publishMemoryStream(0, true, out);
-                if (hr !== S_OK)
-                {
-                    return hr;
-                }
-                /** @type {StreamState} */
-                const state = stateAt(readU32(out), CLSID_STREAM);
-                const packet = new Uint8Array(WORD);
-                new DataView(packet.buffer).setUint32(0, object, true);
-                state.backing.write(0, packet);
-                return host.call(methodAt(object, SLOT_ADDREF), [object], host.callerThread?.())
-                    .then(()=>S_OK);
-            },
-        },
-        CoGetInterfaceAndReleaseStream: {
-            argBytes: 12,
-            /** @param {number[]} args */
-            handler: ([pStm, iid, ppv])=>{
-                const out = ppv >>> 0;
-                if (out === 0)
-                {
-                    return E_INVALIDARG;
-                }
-                writeU32(out, 0);
-                /** @type {StreamState | null} */
-                const state = stateAt(pStm >>> 0, CLSID_STREAM);
-                if (!state || (iid >>> 0) === 0 || !host.call)
-                {
-                    return E_INVALIDARG;
-                }
-                const object = new DataView(state.backing.read(0, WORD).slice().buffer)
-                    .getUint32(0, true);
-                // The stream is released whatever happens next, which is what
-                // the name promises.
-                byPointer.get(pStm >>> 0)?.release();
-                if (object === 0)
-                {
-                    return E_INVALIDARG;
-                }
-                const call = /** @type {NonNullable<typeof host.call>} */ (host.call);
-                const thread = host.callerThread?.();
-                return call(methodAt(object, SLOT_QUERYINTERFACE), [object, iid >>> 0, out], thread)
-                    .then(hr=>call(methodAt(object, SLOT_RELEASE), [object], thread)
-                        .then(()=>hr | 0));
             },
         },
 

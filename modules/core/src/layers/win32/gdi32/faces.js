@@ -96,17 +96,47 @@ export function faceNamed(name){
  * @property {number} internalLeading
  * @property {number} aveCharWidth
  * @property {{ width: number, height: number }} cell
+ * @property {Uint8Array} advances  Each character's advance, 0x20 to 0xFF of
+ *           the ANSI code page: where a string wraps, is clipped or is
+ *           shortened -- a static that held its line on Windows, a path an
+ *           installer cut with an ellipsis -- is decided by these.
  */
 
-/** @type {WindowsMetrics} */
-const DIALOG_8PT = Object.freeze({ height: 13, ascent: 11, descent: 2, internalLeading: 2,
-    aveCharWidth: 5, cell: Object.freeze({ width: 6, height: 13 }) });
+/**
+ * The advances, one hexadecimal digit a character from 0x20 to 0xFF, read off
+ * the fonts Windows draws these faces with at 96 DPI: MS Sans Serif's and
+ * System's bitmaps, and Microsoft Sans Serif's and Tahoma's hinted widths at
+ * 11 pixels (their `hdmx` tables). A face's own glyphs for 0x80-0x9F where it
+ * has them; MS Sans Serif answers those with its default character.
+ *
+ * @param {string} digits
+ */
+const advancesOf = digits=>Uint8Array.from(digits, digit=>parseInt(digit, 16));
+const MS_SANS_SERIF = advancesOf('33576862334633356666666666336666b7778768835769887887787b777353'
+    + '66366666366226286666353668555424736333333333333333333333333333333333666626394663864633366333'
+    + '468886777777a7777733338888888688888776666666a6666624446666666666666565');
+const MICROSOFT_SANS_SERIF = advancesOf('33576862334633356666666666336666b7778768835769887887787b77'
+    + '735366366666366226286666353668555424736336565554b76b373333446565956a35733666626394663864'
+    + '633366333468886777777a7777733338888888688888776666666a6666624446666666666666565');
+const TAHOMA = advancesOf('34486b72446844446666666666448885a7677667745658786876676a666444866665'
+    + '664662352866664546686655458b6b2649666f64bb6bb224456a6a54ab56346666466a5684a6585566646556b'
+    + 'bb5777777a7666644448788888887777666666666a5666622226666666866666666');
+const SYSTEM = advancesOf('44688b94446844448888888888448888e8a9a98aa4798caa9aa98a8e9a944458588'
+    + '7884884474c888858488a8885455444444444444444444444444444444444948888485a5784a8584458745457'
+    + 'bbb8888888d999994444aaaaaaa8aaaaaa98888888c7888844448888888688888888');
+
+/** @param {Uint8Array} advances */
+const dialog8pt = advances=>Object.freeze({ height: 13, ascent: 11, descent: 2,
+    internalLeading: 2, aveCharWidth: 5, cell: Object.freeze({ width: 6, height: 13 }), advances });
+/** The 8-point dialog faces, substitutes resolved. @type {ReadonlyMap<string, WindowsMetrics>} */
+const DIALOG_8PT = new Map([
+    ['ms sans serif', dialog8pt(MS_SANS_SERIF)],
+    ['microsoft sans serif', dialog8pt(MICROSOFT_SANS_SERIF)],
+    ['tahoma', dialog8pt(TAHOMA)],
+]);
 /** @type {WindowsMetrics} */
 const SYSTEM_CELL = Object.freeze({ height: 16, ascent: 13, descent: 3, internalLeading: 3,
-    aveCharWidth: 7, cell: Object.freeze({ width: 8, height: 16 }) });
-
-/** The faces of DIALOG_8PT, substitutes resolved. */
-const DIALOG_FACES = new Set(['ms sans serif', 'microsoft sans serif', 'tahoma']);
+    aveCharWidth: 7, cell: Object.freeze({ width: 8, height: 16 }), advances: SYSTEM });
 
 /**
  * Windows' measurements of a font, for the requests whose Windows answer is
@@ -120,9 +150,12 @@ export function windowsMetrics(font){
     const resolved = (named?.substitute ?? named?.name ?? '').toLowerCase();
     const height = font.height | 0;
     const weight = font.weight || 400;
-    if (DIALOG_FACES.has(resolved) && weight < 600 && (height === -11 || height === 13))
+    // ponytail: the bold 8-point faces are measured, not Windows'; a bitmap
+    // face's bold is its regular advances plus one, Tahoma's is a face of its own.
+    const dialog = DIALOG_8PT.get(resolved);
+    if (dialog && weight < 600 && (height === -11 || height === 13))
     {
-        return DIALOG_8PT;
+        return dialog;
     }
     if (resolved === 'system' && (height === 16 || height === -13))
     {

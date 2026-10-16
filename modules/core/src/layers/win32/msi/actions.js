@@ -42,7 +42,8 @@ import { valueText } from './registration.js';
 import {
     ERROR_SUCCESS, ERROR_FUNCTION_NOT_CALLED, ERROR_INSTALL_USEREXIT, ERROR_INSTALL_FAILURE,
     ERROR_INSTALL_SUSPEND, ERROR_NO_MORE_ITEMS, INSTALLMESSAGE, log, message, actionStart,
-    errorMessage, REGISTRY_TICKS, COMPONENT_TICKS, PROGRESS_RESET, progressed, actionData,
+    actionEnded, errorMessage, REGISTRY_TICKS, COMPONENT_TICKS, PROGRESS_RESET, progressed,
+    actionData,
     schedule, makeDirectories, create, readFile, writeFile, componentOf, installing,
     registryRoot, registryValue,
 } from './steps.js';
@@ -136,17 +137,21 @@ export async function doAction(engine, action){
     if (standard)
     {
         await actionStart(engine, action);
-        return standard(engine);
+        const code = await standard(engine);
+        actionEnded(engine, action, code);
+        return code;
     }
     const custom = engine.session.db.table('CustomAction')?.rows.find(row=>row[0] === action);
     if (custom)
     {
         await actionStart(engine, action);
-        return runCustomAction(engine, {
+        const code = await runCustomAction(engine, {
             action, type: Number(custom[1] ?? 0),
             source: custom[2] === null ? null : String(custom[2]),
             target: custom[3] === null ? null : String(custom[3]),
         });
+        actionEnded(engine, action, code);
+        return code;
     }
     if (engine.session.db.table('Dialog')?.rows.some(row=>row[0] === action))
     {

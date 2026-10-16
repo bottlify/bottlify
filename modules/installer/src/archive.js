@@ -261,9 +261,12 @@ function copiedDiscFolder(entries){
  *
  * @param {string} name  The archive's file name.
  * @param {ArchiveEntry[]} entries
- * @returns {{ name: string, disc: Uint8Array }}
+ * @param {string} [program]  A program of the archive to start, by its path
+ *        there; answered by its path on the disc, the folder taken off with
+ *        the rest -- named by the archive's path it was a file the disc lacked.
+ * @returns {{ name: string, disc: Uint8Array, entry?: string }}
  */
-export function archiveDisc(name, entries){
+export function archiveDisc(name, entries, program){
     const folder = copiedDiscFolder(entries);
     /** @type {Record<string, Uint8Array | null>} */
     const files = {};
@@ -280,5 +283,13 @@ export function archiveDisc(name, entries){
     }
     const label = name.replace(/\.[^.]+$/, '').toUpperCase().replace(/[^A-Z0-9_]/g, '_')
         .slice(0, 32) || 'ARCHIVE';
-    return { name, disc: buildIso({ files, label }) };
+    const disc = buildIso({ files, label });
+    if (program === undefined)
+    {
+        return { name, disc };
+    }
+    const prefix = folder === null ? '' : `${folder.toLowerCase()}\\`;
+    return { name, disc,
+        entry: prefix && program.toLowerCase().startsWith(prefix)
+            ? program.slice(prefix.length) : program };
 }

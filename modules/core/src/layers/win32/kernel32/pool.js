@@ -43,6 +43,11 @@ const INVALID_HANDLE_VALUE = 0xffffffff;
 /** Flags of CreateTimerQueueTimer: a timer that fires once whatever its period. */
 const WT_EXECUTEONLYONCE = 0x00000008;
 
+/** What a wait answers: the object signalled, abandoned, or the time out. */
+const WAIT_OBJECT_0 = 0;
+const WAIT_ABANDONED = 0x80;
+const WAIT_TIMEOUT = 0x102;
+
 /** Codes this surface reports. */
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_NOT_ENOUGH_MEMORY = 8;
@@ -105,6 +110,40 @@ export function poolLoopCode(fetch, at){
 }
 
 /**
+ * The loop of a registered wait's thread, as x86: the wait handle is the
+ * thread's parameter, kept in EBX across the two traps.
+ *
+ *            mov ebx, [esp+4]
+ *     loop:  push ebx
+ *            call wait              ; stdcall: the wait on the object, its answer in EAX
+ *            push eax
+ *            push ebx
+ *            call after             ; stdcall: the callback handed to the pool; 0 to stop
+ *            test eax, eax
+ *            jnz loop
+ *            ret 4
+ *
+ * @param {number} wait @param {number} after @param {number} at
+ * @returns {Uint8Array}
+ */
+export function waitLoopCode(wait, after, at){
+    /** @param {number} value */
+    const dword = value=>
+        [value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff];
+    return new Uint8Array([
+        0x8b, 0x5c, 0x24, 0x04,
+        0x53,
+        0xe8, ...dword((wait - (at + 10)) | 0),
+        0x50,
+        0x53,
+        0xe8, ...dword((after - (at + 17)) | 0),
+        0x85, 0xc0,
+        0x75, 0xef,
+        0xc2, 0x04, 0x00,
+    ]);
+}
+
+/**
  * @typedef {Object} ThreadPoolHost
  * @property {any} kernel  `createThread`, `block`, `wake`, `currentThread`, the
  *           timers (`createTimer`, `armTimer`, `cancelTimer`), `setEvent`,
@@ -122,6 +161,10 @@ export function poolLoopCode(fetch, at){
  *           Gives a pool thread its environment block, as CreateThread's are.
  * @property {(thread: any) => any} park  Stops a thread inside a trap.
  * @property {(code: number) => void} setLastError
+ * @property {(handle: number, milliseconds: number) => any} [waitFor]
+ *           WaitForSingleObject, from inside a trap: its answer, or the park
+ *           that answers it later. Absent, no wait can be registered.
+ * @property {() => number} [threadReturn]  Where a thread that returns ends.
  */
 
 /**
@@ -158,6 +201,11 @@ export function poolLoopCode(fetch, at){
 
 /**
  * @typedef {Owner & { handle: number, timers: Set<Timer>, deleting: boolean }} Queue
+ */
+
+/**
+ * @typedef {Owner & { handle: number, object: number, callback: number, context: number,
+ *     timeout: number, once: boolean, cancelled: boolean }} Wait
  */
 
 /**
@@ -547,6 +595,120 @@ export function createThreadPool(host){
         return answer;
     };
 
+    /** @type {Map<number, Wait>} */
+    const waits = new Map();
+    let waitLoop = 0;
+
+    /** @param {Wait} wait */
+    const forget = wait=>{
+        if (wait.outstanding === 0 && waits.get(wait.handle) === wait)
+        {
+            waits.delete(wait.handle);
+            host.free?.(wait.handle);
+        }
+    };
+
+    /** The wait's thread asks: the wait on its object, or abandoned once unregistered. */
+    const waitStep = (/** @type {number[]} */ [handle])=>{
+        const wait = waits.get(handle >>> 0);
+        return wait && !wait.cancelled
+            ? /** @type {NonNullable<ThreadPoolHost['waitFor']>} */ (host.waitFor)(
+                wait.object, wait.timeout)
+            : WAIT_ABANDONED;
+    };
+
+    /**
+     * The wait answered: the callback handed to the pool -- the object
+     * signalled or abandoned FALSE, the time out TRUE, as its TimerOrWaitFired
+     * says -- and whether to wait again.
+     */
+    const waitDone = (/** @type {number[]} */ [handle, answer])=>{
+        const wait = waits.get(handle >>> 0);
+        const result = answer >>> 0;
+        if (!wait || wait.cancelled || result !== WAIT_OBJECT_0 && result !== WAIT_ABANDONED
+            && result !== WAIT_TIMEOUT)
+        {
+            return 0;
+        }
+        dispatch({ entry: wait.callback,
+            args: [wait.context, result === WAIT_TIMEOUT ? 1 : 0], owner: wait });
+        return wait.once ? 0 : 1;
+    };
+
+    /**
+     * A wait with a thread of its own, its callback run on the pool's.
+     *
+     * @param {number} object @param {number} callback @param {number} context
+     * @param {number} timeout @param {number} flags
+     * @returns {Wait | number}  the wait, or the error that refused it
+     */
+    const registerWait = (object, callback, context, timeout, flags)=>{
+        if (!host.waitFor || (callback >>> 0) === 0)
+        {
+            return ERROR_INVALID_PARAMETER;
+        }
+        if (waitLoop === 0)
+        {
+            const step = host.register('<registered-wait>', { argBytes: 4, handler: waitStep });
+            const done = host.register('<registered-wait-done>',
+                { argBytes: 8, handler: waitDone });
+            const size = waitLoopCode(0, 0, 0).length;
+            const at = (host.allocateCode ?? host.allocate)(size);
+            if (at === 0)
+            {
+                return ERROR_NOT_ENOUGH_MEMORY;
+            }
+            host.writeMemory(at, waitLoopCode(step, done, at));
+            waitLoop = at;
+        }
+        const handle = host.allocate(4);
+        if (handle === 0)
+        {
+            return ERROR_NOT_ENOUGH_MEMORY;
+        }
+        /** @type {Wait} */
+        const wait = { handle, object: object >>> 0, callback: callback >>> 0,
+            context: context >>> 0, timeout: timeout >>> 0,
+            once: (flags & WT_EXECUTEONLYONCE) !== 0, cancelled: false, outstanding: 0,
+            waiters: [] };
+        wait.settled = ()=>{
+            if (wait.cancelled)
+            {
+                forget(wait);
+            }
+        };
+        const thread = kernel.createThread({ entry: waitLoop, parameter: handle,
+            name: 'registered wait', returnTo: host.threadReturn?.() });
+        if (!thread)
+        {
+            host.free?.(handle);
+            return ERROR_NOT_ENOUGH_MEMORY;
+        }
+        host.threadBlock?.(thread);
+        waits.set(handle, wait);
+        return wait;
+    };
+
+    /**
+     * No more callbacks: the wait's thread stops at its next answer.
+     * ponytail: one blocked on an object never signalled stays blocked; wake
+     * it once the kernel can withdraw a thread from a wait.
+     *
+     * @param {number} waitHandle @param {number} event
+     */
+    const unregisterWait = (waitHandle, event)=>{
+        const wait = waits.get(waitHandle >>> 0);
+        if (!wait || wait.cancelled)
+        {
+            return fail(ERROR_INVALID_HANDLE);
+        }
+        wait.cancelled = true;
+        const own = running()?.owner === wait ? 1 : 0;
+        const answer = complete(wait, event, own);
+        forget(wait);
+        return answer;
+    };
+
     return {
         diagnostics: ()=>({
             threads: workers.size,
@@ -555,6 +717,7 @@ export function createThreadPool(host){
             ran,
             queues: queues.size,
             timers: timers.size,
+            waits: waits.size,
             fired,
         }),
 
@@ -681,6 +844,69 @@ export function createThreadPool(host){
                 argBytes: 4,
                 /** @param {number[]} args */
                 handler: ([queue])=>deleteQueue(queue, 0),
+            },
+
+            /**
+             * BOOL RegisterWaitForSingleObject(PHANDLE phNewWaitObject, HANDLE hObject,
+             *     WAITORTIMERCALLBACK Callback, PVOID Context, ULONG dwMilliseconds,
+             *     ULONG dwFlags)
+             *
+             * The callback is handed its context and whether the time ran out,
+             * on a pool thread, each time the object is signalled or the time
+             * runs out -- once only with WT_EXECUTEONLYONCE. The flags that
+             * choose a kind of thread choose nothing here.
+             */
+            RegisterWaitForSingleObject: {
+                argBytes: 24,
+                /** @param {number[]} args */
+                handler: ([out, object, callback, context, timeout, flags])=>{
+                    if ((out >>> 0) === 0)
+                    {
+                        return fail(ERROR_INVALID_PARAMETER);
+                    }
+                    const made = registerWait(object, callback, context, timeout, flags);
+                    if (typeof made === 'number')
+                    {
+                        return fail(made);
+                    }
+                    host.writeMemory(out >>> 0, dword(made.handle));
+                    return 1;
+                },
+            },
+
+            /**
+             * HANDLE RegisterWaitForSingleObjectEx(HANDLE hObject, WAITORTIMERCALLBACK
+             *     Callback, PVOID Context, ULONG dwMilliseconds, ULONG dwFlags)
+             *
+             * The same, answering the wait's handle, NULL when refused.
+             */
+            RegisterWaitForSingleObjectEx: {
+                argBytes: 20,
+                /** @param {number[]} args */
+                handler: ([object, callback, context, timeout, flags])=>{
+                    const made = registerWait(object, callback, context, timeout, flags);
+                    return typeof made === 'number' ? fail(made) : made.handle;
+                },
+            },
+
+            /**
+             * BOOL UnregisterWaitEx(HANDLE WaitHandle, HANDLE CompletionEvent)
+             *
+             * No callback is handed over after it; one already handed over
+             * still runs, and the event says how the caller learns it has
+             * returned (`complete`).
+             */
+            UnregisterWaitEx: {
+                argBytes: 8,
+                /** @param {number[]} args */
+                handler: ([waitHandle, event])=>unregisterWait(waitHandle, event),
+            },
+
+            /** BOOL UnregisterWait(HANDLE WaitHandle): ERROR_IO_PENDING while a callback runs. */
+            UnregisterWait: {
+                argBytes: 4,
+                /** @param {number[]} args */
+                handler: ([waitHandle])=>unregisterWait(waitHandle, 0),
             },
 
             /**

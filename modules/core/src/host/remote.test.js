@@ -619,7 +619,8 @@ test('run answers with the exit code and what the exit left behind', async()=>{
     const { remote } = await connect({ collectOnExit: true });
     assert.throws(()=>remote.session.export(), /not exited/);
     assert.equal(await remote.run({ maxTurns: 5 }), 7);
-    assert.deepEqual(remote.session.export(), [{ path: 'C:\\a.txt', bytes: Uint8Array.of(1, 2) }]);
+    assert.deepEqual(remote.session.export().map((/** @type {any} */ file)=>
+        [file.path, file.size, [...file.bytes]]), [['C:\\a.txt', 2, [1, 2]]]);
     assert.deepEqual(remote.registry().toJSON(), { HKLM: {} });
     assert.deepEqual(remote.systemLibraries(), ['KERNEL32.dll', 'D3D9.dll'],
         'and what an installer\'s output is sorted against');
@@ -640,6 +641,30 @@ test('an exit\'s volume is moved to the page rather than copied', async()=>{
         [[1, 2], [3]]);
     assert.equal(one.buffer.byteLength, 0, 'the worker holds none of it');
     await assert.rejects(remote.files.read('C:\\a.txt'), /went to the page with the exit/);
+    await remote.dispose();
+});
+
+test('a file the volume keeps in pieces crosses in them, never made whole on the way', async()=>{
+    // A game's 1.5 GB archive file was glued into one buffer to cross: one
+    // allocation more than the worker could make, and the bottle was lost.
+    const { remote, app } = await connect({ collectOnExit: true });
+    const first = Uint8Array.of(1, 2, 3, 4);
+    const last = Uint8Array.of(9, 9, 9, 9);
+    const entry = { path: 'C:\\Game\\big.dat' };
+    Object.defineProperty(entry, 'bytes', { enumerable: true, get: ()=>{
+        throw new Error('made whole in the worker');
+    } });
+    Object.defineProperty(entry, 'contents', { value: { size: 10, flat: null,
+        pieces: [first, undefined, last] } });
+    const exported = /** @type {any} */ (entry);
+    app.session.export = ()=>[exported];
+    assert.equal(await remote.run(), 7);
+    const [file] = remote.session.export();
+    assert.equal(file.size, 10);
+    assert.equal(file.pieces.length, 3, 'its pieces, a missing one as none');
+    assert.equal(file.pieces[1], null);
+    assert.equal(first.buffer.byteLength, 0, 'moved, not copied');
+    assert.deepEqual([...file.bytes], [1, 2, 3, 4, 0, 0, 0, 0, 9, 9], 'whole only when read');
     await remote.dispose();
 });
 

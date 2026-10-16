@@ -259,6 +259,9 @@ function lookUp(table, value, what){
  *     Whether those planes are clipped by the device (`clip-distances`) rather
  *     than by a discard in the fragment stage.
  * @property {StencilState} [stencil]
+ * @property {boolean} [clipsBehindEye]
+ *     A pre-transformed vertex with a negative RHW is behind the eye and its
+ *     triangle is clipped there, rather than drawn at w one (decisions.md A45).
  * @property {number} [blendConstant]  D3DRS_BLENDFACTOR, a D3DCOLOR; set on the pass, not keyed.
  *     D3DRS_STENCILENABLE on a target with a stencil: absent, no stencil test.
  */
@@ -366,6 +369,7 @@ export function pipelineKey(state){
         ...(state.points
             ? [`points${state.points.sprite ? 's' : ''}${state.points.scale ? 'd' : ''}`] : []),
         ...(state.clipPlanes ? [`clip${state.clipPlanes}${state.clipDistances ? 'd' : 'v'}`] : []),
+        ...(state.clipsBehindEye ? ['eye'] : []),
         ...(state.stencil ? [`stencil${[state.stencil.func, state.stencil.fail,
             state.stencil.zfail, state.stencil.pass, state.stencil.ccwFunc, state.stencil.ccwFail,
             state.stencil.ccwZfail, state.stencil.ccwPass, state.stencil.readMask & 0xff,
@@ -534,6 +538,87 @@ export function pipelineDescriptor(state, layout){
 }
 
 /**
+ * What a pipeline cache built, kept so a key made anew draw after draw shows:
+ * how many builds, how long they took to come back, the last keys, and for
+ * each build the parts of its key that differ from the most alike key built
+ * before -- the part a program changes every frame is the one counted most.
+ * A shader that writes a value of the state into its source builds a pipeline
+ * for every value; this names that value's place in the key.
+ *
+ * @returns {{ built: (key: string, building: Promise<any>) => void,
+ *     stats: () => { buildMs: number, latest: string[],
+ *         churn: { part: number, count: number, from: string, to: string }[] } }}
+ */
+export function createBuildLog(){
+    /** @type {string[][]} */
+    const recentParts = [];
+    /** @type {string[]} */
+    const latest = [];
+    /** @type {Map<number, { count: number, from: string, to: string }>} */
+    const changed = new Map();
+    let buildMs = 0;
+    const clock = ()=>(typeof performance === 'undefined' ? Date.now() : performance.now());
+    return {
+        built(key, building){
+            latest.push(key);
+            if (latest.length > 4)
+            {
+                latest.shift();
+            }
+            const parts = key.split(/[|;,[\]]/);
+            let closest = null;
+            let same = -1;
+            for (const earlier of recentParts)
+            {
+                if (earlier.length !== parts.length)
+                {
+                    continue;
+                }
+                const equal = earlier.reduce(
+                    (sum, part, at)=>sum + (part === parts[at] ? 1 : 0), 0);
+                // The latest of equally alike keys: what the value moved from last.
+                if (equal >= same)
+                {
+                    same = equal;
+                    closest = earlier;
+                }
+            }
+            // A key differing in one or two parts from one built before is a
+            // value moving; one that differs everywhere is a new kind of draw.
+            if (closest && parts.length - same <= 2)
+            {
+                for (let at = 0; at < parts.length; at++)
+                {
+                    if (parts[at] !== closest[at])
+                    {
+                        const entry = changed.get(at) ?? { count: 0, from: '', to: '' };
+                        entry.count++;
+                        entry.from = closest[at];
+                        entry.to = parts[at];
+                        changed.set(at, entry);
+                    }
+                }
+            }
+            recentParts.push(parts);
+            if (recentParts.length > 32)
+            {
+                recentParts.shift();
+            }
+            const began = clock();
+            building.then(()=>{
+                buildMs += clock() - began;
+            }, ()=>{});
+        },
+        stats: ()=>({
+            buildMs: Math.round(buildMs),
+            latest: latest.slice(),
+            churn: [...changed].map(([part, entry])=>({ part, ...entry }))
+                .sort((a, b)=>b.count - a.count).slice(0, 5),
+        }),
+    };
+}
+
+/**
  * A cache of pipelines, keyed by the state they were built from.
  *
  * Building is asynchronous because compiling a shader is, and two draws with
@@ -548,8 +633,7 @@ export function createPipelineCache(options){
     const pipelines = new Map();
     let built = 0;
     let reused = 0;
-    /** The last keys built, newest last: a key made anew every frame shows here. @type {string[]} */
-    const latest = [];
+    const log = createBuildLog();
 
     return {
         /** @param {PipelineState} state @returns {Promise<any>} */
@@ -562,17 +646,13 @@ export function createPipelineCache(options){
                 return existing;
             }
             built++;
-            latest.push(key);
-            if (latest.length > 4)
-            {
-                latest.shift();
-            }
             const building = options.build(state, key);
+            log.built(key, building);
             pipelines.set(key, building);
             return building;
         },
 
-        stats: ()=>({ built, reused, resident: pipelines.size, latest: latest.slice() }),
+        stats: ()=>({ built, reused, resident: pipelines.size, ...log.stats() }),
 
         clear(){
             pipelines.clear();

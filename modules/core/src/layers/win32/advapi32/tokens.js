@@ -1589,6 +1589,22 @@ export function createTokenFunctions(host){
         },
 
         /**
+         * void MapGenericMask(PDWORD AccessMask, PGENERIC_MAPPING GenericMapping)
+         *
+         * Each generic right in the mask replaced by the specific rights the
+         * mapping gives it, as AccessCheck maps the access it is asked for.
+         */
+        MapGenericMask: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([mask, mapping])=>{
+                const map = [0, 4, 8, 12].map(offset=>readDword((mapping >>> 0) + offset));
+                writeDword(mask >>> 0, mapGeneric(readDword(mask >>> 0), map));
+                return 0;
+            },
+        },
+
+        /**
          * BOOL AccessCheck(PSECURITY_DESCRIPTOR, HANDLE ClientToken, DWORD DesiredAccess,
          *   PGENERIC_MAPPING, PPRIVILEGE_SET, LPDWORD PrivilegeSetLength,
          *   LPDWORD GrantedAccess, LPBOOL AccessStatus)

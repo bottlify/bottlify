@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createMessageQueue } from './messages.js';
 import { MSG, RECT, WNDCLASSA, WNDCLASSEXA } from './structs.js';
-import { createWindowFunctions, watchDispatch } from './windows.js';
+import { createWindowFunctions, endEllipsis, watchDispatch } from './windows.js';
 import { createWindowDirectory } from './directory.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 import { intersectAreas } from './paint.js';
@@ -206,7 +206,7 @@ const PARKED = Object.freeze({ parked: true });
 function paintedHost(fills, presents, clips, scrolls = []){
     return {
         screen: { width: 640, height: 480, bitsPerPixel: 32 },
-        dc: ()=>({ get: ()=>1, release: ()=>{} }),
+        dc: ()=>({ get: ()=>1, background: ()=>1, release: ()=>{} }),
         draw: {
             snapshot: (/** @type {any} */ hdc, /** @type {any} */ rect)=>{
                 scrolls.push({ snapshot: rect });
@@ -526,6 +526,23 @@ test('GetClassInfoExA fills the extended structure behind the caller\'s cbSize',
     assert.equal(fns.GetClassInfoExA.handler([HINSTANCE, CLASS_NAME, 0]), 0);
 });
 
+test('a class Windows\' own libraries register is there though no control draws it', ()=>{
+    // An engine's window framework registers its subclass of every common
+    // control at start-up, asking GetClassInfoEx(NULL, ...) for each; one
+    // missing -- the list view, the tooltip -- stopped it there.
+    const { memory, fns } = setup();
+    for (const name of ['SysListView32', 'tooltips_class32', 'SysHeader32'])
+    {
+        memory.putString(CLASS_NAME, name);
+        memory.fill(TEXT_BUFFER, WNDCLASSEXA.SIZE / 4);
+        assert.equal(fns.GetClassInfoExA.handler([0, CLASS_NAME, TEXT_BUFFER]), 1, name);
+        assert.notEqual(memory.u32(TEXT_BUFFER + WNDCLASSEXA.lpfnWndProc), 0,
+            `${name}: a procedure to subclass`);
+        assert.notEqual(createWindow(fns, memory, { className: CLASS_NAME }), 0,
+            `${name}: a window of it is made`);
+    }
+});
+
 test('GetClassInfoA on a class nobody registered writes nothing', ()=>{
     const { memory, fns } = setup();
     memory.putString(CLASS_NAME, 'Absent');
@@ -589,6 +606,24 @@ test('CW_USEDEFAULT is replaced by a real position and size', ()=>{
     const width = memory.u32(RECT_BUFFER + RECT.right) - memory.u32(RECT_BUFFER + RECT.left);
     const height = memory.u32(RECT_BUFFER + RECT.bottom) - memory.u32(RECT_BUFFER + RECT.top);
     assert.ok(width > 0 && height > 0, 'a window the system placed still has an extent');
+});
+
+test('CW_USEDEFAULT for x ignores y, and for the width ignores the height', ()=>{
+    // CreateWindow(..., CW_USEDEFAULT, 0, CW_USEDEFAULT, 0, ...): the tutorial
+    // skeleton. Taken at its word the window was zero pixels tall, and a
+    // setup centring its dialog over it put the dialog above the screen.
+    const { fns, memory } = withWindow({});
+    const hwnd = createWindow(fns, memory, { x: CW_USEDEFAULT, y: 0, width: CW_USEDEFAULT,
+        height: 0 });
+    fns.GetWindowRect.handler([hwnd, RECT_BUFFER]);
+    const width = memory.u32(RECT_BUFFER + RECT.right) - memory.u32(RECT_BUFFER + RECT.left);
+    const height = memory.u32(RECT_BUFFER + RECT.bottom) - memory.u32(RECT_BUFFER + RECT.top);
+    assert.ok(width > 0 && height > 0, `${width}x${height}`);
+
+    const placed = createWindow(fns, memory, { x: 10, y: 20, width: 100, height: 0 });
+    fns.GetWindowRect.handler([placed, RECT_BUFFER]);
+    assert.equal(memory.u32(RECT_BUFFER + RECT.bottom) - memory.u32(RECT_BUFFER + RECT.top), 0,
+        'a size given is the size made, zero included');
 });
 
 test('the two rectangles differ in origin, not in extent', ()=>{
@@ -748,6 +783,130 @@ test('CloseWindow minimises rather than closing, and a restore restores', ()=>{
     assert.equal(fns.ShowWindow.handler([hwnd, SW_RESTORE]), 1);
     assert.equal(fns.IsIconic.handler([hwnd]), 0, 'and a restore restores it');
     assert.equal(fns.CloseWindow.handler([0x9999]), 0, 'no window, nothing to minimise');
+});
+
+test('SW_SHOWMAXIMIZED covers the screen with the frame beyond it, as WM_GETMINMAXINFO '
+    + 'proposes, and a restore puts the window back', ()=>{
+    const WM_GETMINMAXINFO = 0x0024;
+    const SIZE_MAXIMIZED = 2;
+    const SW_SHOWMAXIMIZED = 3;
+    const SW_RESTORE = 9;
+    const PLACEMENT = 0x11200;
+    /** @type {any} */
+    let table = null;
+    /** @type {number[][]} */
+    const proposals = [];
+    /** @type {number[]} */
+    const sizes = [];
+    /** What the procedure answers WM_GETMINMAXINFO with, if anything. @type {number[] | null} */
+    let answer = null;
+    const context = setup({ heap: true, reply: message=>{
+        if (message.message === WM_GETMINMAXINFO)
+        {
+            proposals.push([2, 3, 4, 5].map(at=>context.memory.u32(message.lParam + at * 4) | 0));
+            if (answer)
+            {
+                context.memory.putU32s(message.lParam + 8, answer);
+            }
+            return 0;
+        }
+        if (message.message === WM_SIZE)
+        {
+            sizes.push(message.wParam);
+        }
+        return table.DefWindowProcA.handler([message.hwnd, message.message, message.wParam,
+            message.lParam]);
+    } });
+    const { fns, memory } = context;
+    table = fns;
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    // A popup with a sizing frame, three pixels a side, on the 640x480 screen.
+    const hwnd = createWindow(fns, memory, { style: 0x80040000 });
+    /** @param {'GetWindowRect' | 'GetClientRect'} which */
+    const rectOf = which=>{
+        fns[which].handler([hwnd, RECT_BUFFER]);
+        return [0, 4, 8, 12].map(at=>memory.u32(RECT_BUFFER + at) | 0);
+    };
+
+    assert.equal(fns.ShowWindow.handler([hwnd, SW_SHOWMAXIMIZED]), 0);
+    assert.deepEqual(proposals, [[646, 486, -3, -3]],
+        'the procedure is offered the screen and the sizing edges beyond it');
+    assert.deepEqual(rectOf('GetWindowRect'), [-3, -3, 643, 483]);
+    assert.deepEqual(rectOf('GetClientRect'), [0, 0, 640, 480], 'the client area is the screen');
+    assert.equal(fns.IsZoomed.handler([hwnd]), 1);
+    assert.ok(sizes.includes(SIZE_MAXIMIZED), 'WM_SIZE says it was maximised');
+    fns.GetWindowPlacement.handler([hwnd, PLACEMENT]);
+    assert.equal(memory.u32(PLACEMENT + 8), SW_SHOWMAXIMIZED);
+    assert.deepEqual([7, 8, 9, 10].map(at=>memory.u32(PLACEMENT + at * 4) | 0),
+        [10, 20, 310, 220], 'the normal place is where it was');
+
+    assert.equal(fns.ShowWindow.handler([hwnd, SW_SHOWMAXIMIZED]), 1);
+    assert.equal(proposals.length, 1, 'maximised already, nothing is asked');
+
+    fns.ShowWindow.handler([hwnd, SW_RESTORE]);
+    assert.deepEqual(rectOf('GetWindowRect'), [10, 20, 310, 220], 'restored to where it was');
+    assert.equal(fns.IsZoomed.handler([hwnd]), 0);
+
+    answer = [400, 300, 5, 6];
+    fns.ShowWindow.handler([hwnd, SW_SHOWMAXIMIZED]);
+    assert.deepEqual(rectOf('GetWindowRect'), [5, 6, 405, 306],
+        'where the procedure said instead');
+});
+
+test('a scroll bar\'s thumb held and moved has what each SB_THUMBTRACK scrolled painted before '
+    + 'it is let go', async()=>{
+    // A licence's text scrolled only once the thumb was let go: the window
+    // was told each position, and its paints waited for the loop the thumb
+    // was holding.
+    const WM_VSCROLL = 0x0115;
+    const WM_MOUSEMOVE = 0x0200;
+    const WM_LBUTTONUP = 0x0202;
+    const WS_POPUP = 0x80000000;
+    const WS_VSCROLL = 0x00200000;
+    const SB_THUMBTRACK = 5;
+    /** @type {any} */
+    let table = null;
+    const context = setup({ heap: true, reply: message=>{
+        if (message.message === WM_VSCROLL && (message.wParam & 0xffff) === SB_THUMBTRACK)
+        {
+            // The program scrolls its picture: all of it is to paint.
+            table.InvalidateRect.handler([message.hwnd, 0, 0]);
+            return 0;
+        }
+        return table.DefWindowProcA.handler([message.hwnd, message.message, message.wParam,
+            message.lParam]);
+    } });
+    const { fns, memory, queue, dispatched } = context;
+    table = fns;
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    // At 10,20, 300 by 200, its bar the right sixteen columns; the thumb is
+    // sixteen rows under the arrow at the top.
+    const hwnd = createWindow(fns, memory, { style: WS_POPUP | WS_VISIBLE | WS_VSCROLL });
+    fns.SetScrollRange.handler([hwnd, 1, 0, 100, 0]);
+    const drain = async()=>{
+        while (fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]) !== 0)
+        {
+            await fns.DispatchMessageA.handler([MSG_BUFFER]);
+        }
+    };
+    await drain();
+    dispatched.length = 0;
+    queue.post({ hwnd: 0, message: WM_LBUTTONDOWN, wParam: 1, lParam: 0, time: 0,
+        x: 10 + 300 - 8, y: 20 + 20 });
+    // What the pointer does while the window holds the mouse, in its client
+    // coordinates, as the input layer hands it on.
+    for (const message of [WM_MOUSEMOVE, WM_LBUTTONUP])
+    {
+        queue.post({ hwnd, message, wParam: 0, lParam: (60 << 16 | 100) >>> 0, time: 0 });
+    }
+    await drain();
+    const seen = dispatched.filter(one=>one.hwnd === hwnd
+        && (one.message === WM_VSCROLL || one.message === WM_PAINT))
+        .map(one=>(one.message === WM_PAINT ? 'paint' : one.wParam & 0xffff));
+    assert.deepEqual(seen, [SB_THUMBTRACK, 'paint', 4, 8],
+        'SB_THUMBTRACK, its paint, then SB_THUMBPOSITION and SB_ENDSCROLL');
 });
 
 test('ShowWindow answers with the visibility it found, not the one it set', ()=>{
@@ -1793,57 +1952,56 @@ test('uncovering the desktop presents it, because a window no longer covers it',
     assert.ok(presents.length >= 1, 'the desktop under the closed window is shown');
 });
 
-test('a window that goes shows the desktop only where no other window is', ()=>{
+test('a window that goes paints nothing: the desktop and the windows under it keep their pixels',
+    ()=>{
     // A wizard destroys the page inside its frame and makes the next one: the
     // frame, which paints no background of its own, keeps the old page's
-    // pixels until the new page paints over them. Painting the desktop colour
-    // there instead showed a hole onto the desktop between every two pages.
-    let clock = 0;
-    const { fns, memory, fills } = setup({ paint: true, queueNow: ()=>clock });
-    putClass(memory);
-    fns.RegisterClassA.handler([CLASS_STRUCT]);
-    const hwnd = createWindow(fns, memory);
-    const drain = ()=>{
-        while (fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]) !== 0)
-        {
-            fns.ValidateRect.handler([memory.u32(MSG_BUFFER + MSG.hwnd), 0]);
-        }
-    };
-    fns.ShowWindow.handler([hwnd, SW_SHOW]);
-    drain();
-    const page = createWindow(fns, memory, { style: WS_CHILD | WS_VISIBLE, parent: hwnd,
-        x: 0, y: 0, width: 100, height: 50 });
-    drain();
-    const DESKTOP = 0x808080;
-    const desktop = ()=>fills.filter(fill=>fill.color === DESKTOP && !fill.quiet)
-        .map(fill=>fill.rect);
-    fills.length = 0;
-    fns.DestroyWindow.handler([page]);
-    clock += 1000;
-    drain();
-    assert.deepEqual(desktop(), [], 'the page was inside its frame');
+    // pixels until the new page paints over them. A top-level window that
+    // goes uncovers the desktop and the windows under it, each on a surface
+    // of its own: nothing is painted, the screen is composed without it.
+        let clock = 0;
+        const { fns, memory, fills } = setup({ paint: true, queueNow: ()=>clock });
+        putClass(memory);
+        fns.RegisterClassA.handler([CLASS_STRUCT]);
+        const hwnd = createWindow(fns, memory);
+        const drain = ()=>{
+            while (fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]) !== 0)
+            {
+                fns.ValidateRect.handler([memory.u32(MSG_BUFFER + MSG.hwnd), 0]);
+            }
+        };
+        fns.ShowWindow.handler([hwnd, SW_SHOW]);
+        drain();
+        const page = createWindow(fns, memory, { style: WS_CHILD | WS_VISIBLE, parent: hwnd,
+            x: 0, y: 0, width: 100, height: 50 });
+        drain();
+        const DESKTOP = 0x808080;
+        const desktop = ()=>fills.filter(fill=>fill.color === DESKTOP && !fill.quiet)
+            .map(fill=>fill.rect);
+        fills.length = 0;
+        fns.DestroyWindow.handler([page]);
+        clock += 1000;
+        drain();
+        assert.deepEqual(desktop(), [], 'the page was inside its frame');
 
-    // Over the first window, from (200, 100) to (500, 300); the first spans
-    // (10, 20) to (310, 220).
-    const over = createWindow(fns, memory, { x: 200, y: 100, width: 300, height: 200 });
-    fns.ShowWindow.handler([over, SW_SHOW]);
-    drain();
-    fills.length = 0;
-    fns.ShowWindow.handler([over, SW_HIDE]);
-    clock += 1000;
-    drain();
-    assert.deepEqual(desktop(), [
-        { left: 310, top: 100, right: 500, bottom: 220 },
-        { left: 200, top: 220, right: 500, bottom: 300 },
-    ], 'beside and below the window it covered');
+        // Over the first window, from (200, 100) to (500, 300); the first spans
+        // (10, 20) to (310, 220).
+        const over = createWindow(fns, memory, { x: 200, y: 100, width: 300, height: 200 });
+        fns.ShowWindow.handler([over, SW_SHOW]);
+        drain();
+        fills.length = 0;
+        fns.ShowWindow.handler([over, SW_HIDE]);
+        clock += 1000;
+        drain();
+        assert.deepEqual(desktop(), [], 'nothing beside and below the window it covered');
+        assert.equal(fns.GetUpdateRect.handler([hwnd, 0, 0]), 0, 'nor the window it covered');
 
-    fills.length = 0;
-    fns.ShowWindow.handler([hwnd, SW_HIDE]);
-    clock += 1000;
-    drain();
-    assert.deepEqual(desktop(), [{ left: 10, top: 20, right: 310, bottom: 220 }],
-        'and all of the last one');
-});
+        fills.length = 0;
+        fns.ShowWindow.handler([hwnd, SW_HIDE]);
+        clock += 1000;
+        drain();
+        assert.deepEqual(desktop(), [], 'nor where the last one was');
+    });
 
 /**
  * Takes every paint the queue hands out, validating each, and answers the
@@ -1866,6 +2024,35 @@ function paintsInOrder(fns, memory){
     }
     throw new Error('the paints never ran out');
 }
+
+test('a window being destroyed, and its children, are given no paint', ()=>{
+    // DestroyWindow hides the window before WM_DESTROY, and a hidden window
+    // owes no WM_PAINT. A framework that pumps its queue from WM_DESTROY was
+    // handed one for a child already past WM_NCDESTROY; BeginPaint there
+    // fails, and MFC's CPaintDC threw on it, ending the thread.
+    /** @type {{ parent: number, child: number }} */
+    const handles = { parent: 0, child: 0 };
+    /** @type {number[][]} */
+    const seen = [];
+    const { fns, memory } = setup({ reply: message=>{
+        if (message.message === WM_DESTROY && message.hwnd === handles.parent)
+        {
+            seen.push(paintsInOrder(fns, memory));
+        }
+        return 0;
+    } });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    handles.parent = createWindow(fns, memory, { style: WS_VISIBLE });
+    handles.child = createWindow(fns, memory, { style: WS_CHILD | WS_VISIBLE,
+        parent: handles.parent, x: 10, y: 10, width: 20, height: 10 });
+    paintsInOrder(fns, memory);
+    fns.InvalidateRect.handler([handles.child, 0, 1]);
+    fns.InvalidateRect.handler([handles.parent, 0, 1]);
+
+    fns.DestroyWindow.handler([handles.parent]);
+    assert.deepEqual(seen, [[]], 'nothing to paint from inside WM_DESTROY');
+});
 
 test('an area a child is to erase is the child\'s alone: its parent is not invalidated', ()=>{
     // user32's msg.c test_paint_messages: RedrawWindow(hchild, ...,
@@ -1980,9 +2167,9 @@ test('a window shaped to an empty region takes none of the screen, and the deskt
     ()=>{
         // SetWindowRgn: "the system does not display any portion of a window
         // that lies outside of the window region". A visible full-screen
-        // window shaped to nothing covered the whole screen here: a page that
-        // left the screen over it was its to paint over, it painted nothing,
-        // and the page stayed on the screen for good.
+        // window shaped to nothing covered the whole screen here, and took
+        // its clicks. The screen is composed of each window's shape, so
+        // nothing is painted for the desktop to show there.
         let clock = 0;
         const EMPTY = 0x5000;
         const nothing = { left: 0, top: 0, right: 0, bottom: 0 };
@@ -2007,8 +2194,7 @@ test('a window shaped to an empty region takes none of the screen, and the deskt
         assert.equal(fns.SetWindowRgn.handler([back, EMPTY, 1]), 1);
         clock += 1000;
         drain();
-        assert.deepEqual(desktop(), [{ left: 0, top: 0, right: 640, bottom: 480 }],
-            'redrawn, what it took is the desktop\'s again');
+        assert.deepEqual(desktop(), [], 'nothing painted: the screen is composed of its shape');
 
         const page = createWindow(fns, memory, { style: WS_POPUP | WS_VISIBLE,
             x: 200, y: 100, width: 300, height: 200 });
@@ -2017,8 +2203,7 @@ test('a window shaped to an empty region takes none of the screen, and the deskt
         fns.ShowWindow.handler([page, SW_HIDE]);
         clock += 1000;
         drain();
-        assert.deepEqual(desktop(), [{ left: 200, top: 100, right: 500, bottom: 300 }],
-            'a page that goes over it uncovers the desktop');
+        assert.deepEqual(desktop(), [], 'nor for a page that goes over it');
 
         assert.equal(fns.WindowFromPoint.handler([300, 200]), 0, 'a point over it is not on it');
         fns.GetWindowRect.handler([back, RECT_BUFFER]);
@@ -2032,7 +2217,7 @@ test('a window shaped to an empty region takes none of the screen, and the deskt
         fns.SetWindowRgn.handler([other, EMPTY, 0]);
         clock += 1000;
         drain();
-        assert.deepEqual(desktop(), [], 'not redrawn, the screen is left until something paints');
+        assert.deepEqual(desktop(), [], 'nor when it is not redrawn');
     });
 
 test('a window shaped by a region of many rectangles shows, covers and is hit only there',
@@ -2067,78 +2252,65 @@ test('a window shaped by a region of many rectangles shows, covers and is hit on
         assert.equal(fns.SetWindowRgn.handler([launcher, SHAPE, 1]), 1);
         clock += 1000;
         drain();
-        assert.deepEqual(desktop(), [{ left: 100, top: 50, right: 200, bottom: 100 }],
-            'the corner its region leaves out is the desktop\'s');
-        assert.equal(fns.WindowFromPoint.handler([150, 75]), 0, 'and is not on it');
+        assert.deepEqual(desktop(), [], 'nothing painted: the screen is composed of its shape');
+        assert.equal(fns.WindowFromPoint.handler([150, 75]), 0,
+            'the corner its region leaves out is not on it');
         assert.equal(fns.WindowFromPoint.handler([50, 75]), launcher, 'its shape is');
         assert.equal(fns.WindowFromPoint.handler([150, 25]), launcher);
     });
 
-test('the desktop paints what a window left on the system\'s clock, with no queue looked at',
-    ()=>{
-        // The desktop is no thread of the program's: on Windows its own thread
-        // paints what a window left a moment later, whatever the program does.
-        // Waiting for the program to look at its queue left a closed window on
-        // the screen for as long as it worked without looking.
-        /** @type {{ delay: number, fire: () => void }[]} */
-        const timers = [];
-        const { fns, memory, fills } = setup({ paint: true, later: (delay, fire)=>{
-            timers.push({ delay, fire });
-            return true;
-        } });
-        putClass(memory);
-        fns.RegisterClassA.handler([CLASS_STRUCT]);
-        const hwnd = createWindow(fns, memory, { style: WS_VISIBLE });
-        const desktop = ()=>fills.filter(fill=>fill.color === 0x808080 && !fill.quiet)
-            .map(fill=>fill.rect);
-        fills.length = 0;
-        fns.ShowWindow.handler([hwnd, SW_HIDE]);
-        assert.deepEqual(timers.map(timer=>timer.delay), [100], 'a moment later');
-        assert.deepEqual(desktop(), [], 'not at once');
-        timers[0].fire();
-        assert.deepEqual(desktop(), [{ left: 10, top: 20, right: 310, bottom: 220 }],
-            'then, with no message looked at');
-    });
-
-test('a window hidden or destroyed has the caller\'s windows under it erased before it returns',
-    ()=>{
-        // XP's synchronous paint: the windows a hide or a destroy uncovers are
-        // framed and erased at once when they are the caller's, their client
-        // left to WM_PAINT. A setup that closes a page and copies files
-        // without looking at its queue shows its window's background where
-        // the page was, not the page.
-        const WM_ERASEBKGND = 0x0014;
-        const WS_POPUP = 0x80000000;
-        const { fns, memory, dispatched } = setup({ paint: true });
-        putClass(memory);
-        fns.RegisterClassA.handler([CLASS_STRUCT]);
-        const drain = ()=>{
-            while (fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]) !== 0)
-            {
-                fns.ValidateRect.handler([memory.u32(MSG_BUFFER + MSG.hwnd), 0]);
-            }
-        };
-        const under = createWindow(fns, memory, { style: WS_POPUP | WS_VISIBLE,
-            x: 0, y: 0, width: 300, height: 200 });
-        const page = createWindow(fns, memory, { style: WS_POPUP | WS_VISIBLE,
-            x: 50, y: 50, width: 100, height: 50 });
-        const other = createWindow(fns, memory, { style: WS_POPUP | WS_VISIBLE,
-            x: 50, y: 120, width: 100, height: 50 });
-        drain();
-        /** @param {number} hwnd */
-        const erased = hwnd=>dispatched.filter(message=>message.hwnd === hwnd
+test('a page hidden or destroyed inside a window has it erased before it returns; one over it,'
+    + ' nothing', ()=>{
+    // XP's synchronous paint: the windows a hide or a destroy uncovers are
+    // framed and erased at once when they are the caller's, their client
+    // left to WM_PAINT. A setup that closes a page and copies files
+    // without looking at its queue shows its window's background where
+    // the page was, not the page. A top-level window over another
+    // uncovers nothing: the one under it kept its own pixels.
+    const WM_ERASEBKGND = 0x0014;
+    const WS_POPUP = 0x80000000;
+    const { fns, memory, dispatched } = setup({ paint: true });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const drain = ()=>{
+        while (fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]) !== 0)
+        {
+            fns.ValidateRect.handler([memory.u32(MSG_BUFFER + MSG.hwnd), 0]);
+        }
+    };
+    const under = createWindow(fns, memory, { style: WS_POPUP | WS_VISIBLE,
+        x: 0, y: 0, width: 300, height: 200 });
+    const page = createWindow(fns, memory, { style: WS_POPUP | WS_VISIBLE,
+        x: 50, y: 50, width: 100, height: 50 });
+    const other = createWindow(fns, memory, { style: WS_POPUP | WS_VISIBLE,
+        x: 50, y: 120, width: 100, height: 50 });
+    drain();
+    /** @param {number} hwnd */
+    const erased = hwnd=>dispatched.filter(message=>message.hwnd === hwnd
             && message.message === WM_ERASEBKGND).length;
 
-        dispatched.length = 0;
-        fns.ShowWindow.handler([page, SW_HIDE]);
-        assert.equal(erased(under), 1, 'the window under it was erased before the call returned');
-        assert.equal(fns.GetUpdateRect.handler([under, 0, 0]), 1, 'its client is still to paint');
-        drain();
+    dispatched.length = 0;
+    fns.ShowWindow.handler([page, SW_HIDE]);
+    assert.equal(erased(under), 0, 'a window over it: nothing under it erased');
+    assert.equal(fns.GetUpdateRect.handler([under, 0, 0]), 0, 'nor left to paint');
+    drain();
 
-        dispatched.length = 0;
-        fns.DestroyWindow.handler([other]);
-        assert.equal(erased(under), 1, 'and the same for a window destroyed');
-    });
+    const inside = createWindow(fns, memory, { style: WS_CHILD | WS_VISIBLE, parent: under,
+        x: 50, y: 50, width: 100, height: 50 });
+    const second = createWindow(fns, memory, { style: WS_CHILD | WS_VISIBLE, parent: under,
+        x: 50, y: 120, width: 100, height: 50 });
+    drain();
+    dispatched.length = 0;
+    fns.ShowWindow.handler([inside, SW_HIDE]);
+    assert.equal(erased(under), 1, 'a page inside it: erased before the call returned');
+    assert.equal(fns.GetUpdateRect.handler([under, 0, 0]), 1, 'its client is still to paint');
+    drain();
+
+    dispatched.length = 0;
+    fns.DestroyWindow.handler([second]);
+    assert.equal(erased(under), 1, 'and the same for a page destroyed');
+    fns.DestroyWindow.handler([other]);
+});
 
 test('a child invalidating itself marks no sibling, beneath it or over it', ()=>{
     // An update region is one window's (msg.c test_paint_messages,
@@ -2234,7 +2406,9 @@ const WS_POPUP_STYLE = 0x80000000;
 
 test('a window invalidated marks no window over it, and is erased only when asked', ()=>{
     // An update region is the window's own (msg.c test_paint_messages); a
-    // popup over it is clipped out of its context, not repainted after it.
+    // popup over it is neither repainted after it nor cut out of it: each
+    // top-level window has a surface of its own, as with the desktop window
+    // manager, and the screen is composed of them.
     const context = paintWorld();
     const { fns, dispatched } = context;
     const below = createWindow(fns, context.memory, { style: WS_POPUP_STYLE | WS_VISIBLE,
@@ -2247,11 +2421,8 @@ test('a window invalidated marks no window over it, and is erased only when aske
     assert.equal(updateRect(context, above), null, 'nothing for the window over it');
     dispatched.length = 0;
     assert.ok(sameArea(updateRegion(context, below), [
-        { left: 0, top: 0, right: 300, bottom: 50 },
-        { left: 0, top: 50, right: 100, bottom: 200 },
-        { left: 200, top: 50, right: 300, bottom: 200 },
-        { left: 100, top: 150, right: 200, bottom: 200 },
-    ]), 'it paints where it is seen');
+        { left: 0, top: 0, right: 300, bottom: 200 },
+    ]), 'it paints all of itself, under the popup too');
     assert.equal(dispatched.filter(message=>message.message === 0x0014).length, 0,
         'bErase FALSE: no WM_ERASEBKGND');
 
@@ -2373,11 +2544,12 @@ test('GetUpdateRgn fills in the update region, piece by piece', ()=>{
         { left: 30, top: 30, right: 40, bottom: 40 }]);
 });
 
-test('a window moved over another exposes only the strip it left, and nothing over it', ()=>{
-    // msg.c test_swp_paint_regions: what is beneath is invalidated where the
-    // window was and no longer is; the moved window, its pixels copied,
-    // owes nothing; a window over it is not touched. Hidden, it exposes all
-    // of what it showed, which is not what the window over it covers.
+test('a top-level window moved or hidden over another exposes nothing, and owes nothing', ()=>{
+    // Each top-level window has a surface of its own, as with the desktop
+    // window manager: the one beneath kept its pixels where the moved one
+    // was, the moved one took its own along, and the screen is composed
+    // again. (msg.c test_swp_paint_regions has a child's parent invalidated
+    // where the child was: inside one window, that still holds.)
     const SWP_NOSIZE = 0x1;
     const SWP_NOZORDER = 0x4;
     const SWP_NOACTIVATE = 0x10;
@@ -2389,7 +2561,7 @@ test('a window moved over another exposes only the strip it left, and nothing ov
         x: 50, y: 50, width: 100, height: 100 });
     drainPaints(context);
     fns.SetWindowPos.handler([moving, 0, 60, 50, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE]);
-    assert.deepEqual(updateRect(context, below), [50, 50, 60, 150], 'the 10-pixel strip');
+    assert.equal(updateRect(context, below), null, 'nothing beneath');
     assert.equal(updateRect(context, moving), null, 'its pixels came with it');
     drainPaints(context);
 
@@ -2398,10 +2570,7 @@ test('a window moved over another exposes only the strip it left, and nothing ov
     drainPaints(context);
     fns.ShowWindow.handler([moving, SW_HIDE]);
     assert.equal(updateRect(context, over), null, 'the window over it');
-    assert.ok(sameArea(updateRegion(context, below), [
-        { left: 60, top: 50, right: 160, bottom: 140 },
-        { left: 60, top: 140, right: 140, bottom: 150 },
-    ]), 'what it showed, less what the window over it covers');
+    assert.equal(updateRect(context, below), null, 'nor the one beneath');
 });
 
 test('SWP_NOREDRAW marks nothing: the program redraws what it asks for', ()=>{
@@ -2495,7 +2664,7 @@ test('a child shown, or moved, marks its parent as msg.c test_swp_paint_regions 
     assert.equal(updateRect(context, child), null);
 });
 
-test('a window brought to the top paints only what the windows over it hid', ()=>{
+test('a window brought to the top paints nothing: what the windows over it hid is its own', ()=>{
     const SWP_NOSIZE = 0x1;
     const SWP_NOMOVE = 0x2;
     const SWP_NOACTIVATE = 0x10;
@@ -2507,7 +2676,7 @@ test('a window brought to the top paints only what the windows over it hid', ()=
         x: 100, y: 100, width: 200, height: 200 });
     drainPaints(context);
     fns.SetWindowPos.handler([first, 0, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE]);
-    assert.deepEqual(updateRect(context, first), [100, 100, 200, 200]);
+    assert.equal(updateRect(context, first), null, 'its surface held it all along');
     assert.equal(updateRect(context, second), null, 'the one now beneath keeps its pixels');
 });
 
@@ -2540,7 +2709,10 @@ test('a transparent sibling over a window that repaints paints again over it', (
 test('a window that moves takes its pixels with it, and only what it left is painted', ()=>{
     // As SetWindowPos copies a window's bits. A launcher that moves itself on
     // every mouse move of a drag had itself and every control repainted, by
-    // its own code, at every step.
+    // its own code, at every step. A top-level window's surface goes with it
+    // and nothing is copied or painted, covered or not; a window inside one
+    // has its pixels copied inside that window's surface, and its parent
+    // paints the strip it left.
     const SWP_NOSIZE = 0x0001;
     const SWP_NOZORDER = 0x0004;
     const SWP_NOACTIVATE = 0x0010;
@@ -2564,29 +2736,41 @@ test('a window that moves takes its pixels with it, and only what it left is pai
     drain();
     fills.length = 0;
     dispatched.length = 0;
+    const painting = ()=>dispatched.filter(message=>[WM_NCPAINT, WM_ERASEBKGND, WM_PAINT]
+        .includes(message.message));
 
     fns.SetWindowPos.handler([hwnd, 0, 50, 20, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE]);
-    assert.deepEqual(scrolls, [{ rect: { left: 10, top: 20, right: 310, bottom: 220 }, dx: 40,
-        dy: 0, clip: { left: 50, top: 20, right: 350, bottom: 220 } }], 'its pixels moved');
+    assert.deepEqual(scrolls, [], 'nothing copied: its surface went with it');
     assert.equal(fns.GetUpdateRect.handler([hwnd, 0, 0]), 0, 'nothing of it is left to paint');
-    assert.deepEqual(dispatched.filter(message=>[WM_NCPAINT, WM_ERASEBKGND, WM_PAINT]
-        .includes(message.message)), [], 'nothing was asked of its procedure');
-    assert.deepEqual(desktop(), [{ left: 10, top: 20, right: 50, bottom: 220 }],
-        'the strip it left is the desktop\'s, at once');
+    assert.deepEqual(painting(), [], 'nothing was asked of its procedure');
+    assert.deepEqual(desktop(), [], 'nor of the desktop');
 
-    // Partly under another window, its pixels are not all its own.
+    // Partly under another window, its pixels are still all its own.
     createWindow(fns, memory, { style: WS_POPUP | WS_VISIBLE, x: 300, y: 100,
         width: 100, height: 50 });
     drain();
-    scrolls.length = 0;
     fns.SetWindowPos.handler([hwnd, 0, 60, 20, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE]);
-    assert.deepEqual(scrolls, [], 'a window partly covered is painted instead');
-    assert.equal(fns.GetUpdateRect.handler([hwnd, 0, 0]), 1);
-});
+    assert.deepEqual(scrolls, []);
+    assert.equal(fns.GetUpdateRect.handler([hwnd, 0, 0]), 0);
 
-test('a window dragged -- moved while it holds the mouse -- is held as it is until let go', ()=>{
-    // Only its picture moves; it paints nothing and is handed nothing to
-    // paint until the mouse is let go, and then it paints where it is.
+    // A control moved inside it: copied in the window's surface, whose
+    // corner is the context's origin.
+    const control = createWindow(fns, memory, { style: WS_CHILD | WS_VISIBLE, parent: hwnd,
+        x: 5, y: 5, width: 50, height: 40 });
+    drain();
+    dispatched.length = 0;
+    fns.SetWindowPos.handler([control, 0, 15, 5, 0, 0,
+        SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE]);
+    assert.deepEqual(scrolls, [{ rect: { left: 5, top: 5, right: 55, bottom: 45 }, dx: 10,
+        dy: 0, clip: { left: 15, top: 5, right: 65, bottom: 45 } }], 'its pixels moved');
+    assert.equal(fns.GetUpdateRect.handler([control, 0, 0]), 0, 'the control owes nothing');
+    assert.equal(fns.GetUpdateRect.handler([hwnd, 0, 0]), 1, 'its parent paints the strip');
+});
+test('a window dragged -- moved while it holds the mouse -- paints nothing, its surface going'
+    + ' along', ()=>{
+    // A top-level window's surface moves with it: nothing is taken, drawn or
+    // asked of its procedure at any step, and nothing is left to paint once
+    // the mouse is let go.
     const SWP_NOSIZE = 0x0001;
     const SWP_NOZORDER = 0x0004;
     const SWP_NOACTIVATE = 0x0010;
@@ -2594,7 +2778,7 @@ test('a window dragged -- moved while it holds the mouse -- is held as it is unt
     const WS_POPUP = 0x80000000;
     /** @type {any[]} */
     const scrolls = [];
-    const { fns, memory, fills, dispatched, clips, service } = setup({ paint: true, scrolls });
+    const { fns, memory, fills, dispatched } = setup({ paint: true, scrolls });
     putClass(memory);
     fns.RegisterClassA.handler([CLASS_STRUCT]);
     const drain = ()=>{
@@ -2614,54 +2798,26 @@ test('a window dragged -- moved while it holds the mouse -- is held as it is unt
     fns.SetCapture.handler([hwnd]);
     move(50);
     move(90);
-    assert.deepEqual(scrolls, [{ snapshot: { left: 10, top: 20, right: 310, bottom: 220 } },
-        { paste: [50, 20] }, { paste: [90, 20] }], 'taken once, drawn at every step');
-    fns.InvalidateRect.handler([hwnd, 0, 1]);
-    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, WM_PAINT, WM_PAINT, PM_REMOVE]), 0,
-        'asked to repaint while dragged, it is handed nothing to paint');
-    assert.equal(service.painting(), false, 'nor does it hold the screen back');
-    fns.ReleaseDC.handler([hwnd, fns.GetDC.handler([hwnd])]);
-    assert.deepEqual(clips.at(-1), [], 'what it draws meanwhile reaches nothing');
+    assert.deepEqual(scrolls, [], 'nothing taken or drawn');
     assert.deepEqual(dispatched.filter(message=>[WM_NCPAINT, WM_ERASEBKGND, WM_PAINT]
         .includes(message.message)), [], 'nothing was asked of its procedure');
-
     fns.ReleaseCapture.handler();
-    assert.deepEqual(scrolls.at(-1), { drop: { left: 10, top: 20, right: 310, bottom: 220 } });
-    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, WM_PAINT, WM_PAINT, PM_REMOVE]), 1,
-        'let go, it paints where it is');
-    assert.equal(memory.u32(MSG_BUFFER + MSG.hwnd), hwnd);
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, WM_PAINT, WM_PAINT, PM_REMOVE]), 0,
+        'let go, it has nothing to paint');
+
+    // A control dragged inside it is held, its picture taken in the window's
+    // surface and drawn there at every step.
+    const control = createWindow(fns, memory, { style: WS_CHILD | WS_VISIBLE, parent: hwnd,
+        x: 5, y: 5, width: 50, height: 40 });
+    drain();
+    fns.SetCapture.handler([control]);
+    fns.SetWindowPos.handler([control, 0, 15, 5, 0, 0,
+        SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE]);
+    assert.deepEqual(scrolls, [{ snapshot: { left: 5, top: 5, right: 55, bottom: 45 } },
+        { paste: [15, 5] }], 'taken once, drawn where it now is');
+    fns.ReleaseCapture.handler();
+    assert.deepEqual(scrolls.at(-1), { drop: { left: 5, top: 5, right: 55, bottom: 45 } });
 });
-
-test('the desktop paints where a window went a moment later, under whatever came there', ()=>{
-    // A wizard that replaces its window between pages destroys one, pumps
-    // its messages and shows the next in the same place: the desktop shown
-    // in that gap was the whole window gone for a frame at every page.
-    let clock = 0;
-    const { fns, memory, fills, presents } = setup({ paint: true, queueNow: ()=>clock });
-    putClass(memory);
-    fns.RegisterClassA.handler([CLASS_STRUCT]);
-    const desktop = ()=>fills.filter(fill=>fill.color === 0x808080 && !fill.quiet);
-    const first = createWindow(fns, memory);
-    fns.ShowWindow.handler([first, SW_SHOW]);
-    pump(fns, first);
-    fills.length = 0;
-    presents.length = 0;
-
-    fns.DestroyWindow.handler([first]);
-    clock += 10;
-    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 0);
-    assert.deepEqual(desktop(), [], 'not in the gap');
-    const next = createWindow(fns, memory, { width: 200 });
-    fns.ShowWindow.handler([next, SW_SHOW]);
-    pump(fns, next);
-    clock += 1000;
-    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 0);
-    assert.deepEqual(desktop().map(fill=>fill.rect),
-        [{ left: 210, top: 20, right: 310, bottom: 220 }],
-        'then only beside the window that took the place');
-    assert.ok(presents.length > 0, 'and shown');
-});
-
 test('the screen is half drawn while a shown window has an area to paint, and not for ever', ()=>{
     // A draw in the middle of a pass -- a frame painted before the page inside
     // it -- would show the window with nothing inside if the desktop were
@@ -4225,6 +4381,35 @@ test('AttachThreadInput joins two threads with queues, and refuses one without',
     assert.equal(fns.AttachThreadInput.handler([2, 7, 1]), 0, 'nor to nobody');
 });
 
+test('the active window and the focus are the thread\'s: another thread reads NULL until '
+    + 'AttachThreadInput joins them', async()=>{
+    // input.c's test_attach_input. A setup's main thread made its wizard
+    // while a please-wait dialog of its worker thread was active: asked for
+    // the active window to own it, it was handed the worker's dialog, and the
+    // wizard went when the dialog closed.
+    const main = { id: 1, name: 'main', state: 'running' };
+    const worker = { id: 2, name: 'thread-2', state: 'running' };
+    const caller = { current: /** @type {unknown} */ (worker) };
+    const { fns, memory } = setup({ caller, threadExists: id=>id === 1 || id === 2 });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const dialog = createWindow(fns, memory, { style: WS_VISIBLE });
+    await fns.SetActiveWindow.handler([dialog]);
+    await fns.SetFocus.handler([dialog]);
+    assert.equal(fns.GetActiveWindow.handler(), dialog, 'its own thread reads it');
+    assert.equal(fns.GetFocus.handler(), dialog);
+
+    caller.current = main;
+    fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]);
+    assert.equal(fns.GetActiveWindow.handler(), 0, 'another thread\'s active window is not');
+    assert.equal(fns.GetFocus.handler(), 0);
+    assert.equal(fns.AttachThreadInput.handler([1, 2, 1]), 1);
+    assert.equal(fns.GetActiveWindow.handler(), dialog, 'joined, it is');
+    assert.equal(fns.GetFocus.handler(), dialog);
+    assert.equal(fns.AttachThreadInput.handler([1, 2, 0]), 1);
+    assert.equal(fns.GetActiveWindow.handler(), 0, 'parted, it is not again');
+});
+
 test('PostThreadMessageA refuses a thread that does not exist, and says why', ()=>{
     const { fns, queue, errors } = setup({ threadExists: id=>id === 0x88 });
     assert.equal(fns.PostThreadMessageA.handler([0x99, WM_USER, 0, 0]), 0);
@@ -5402,11 +5587,12 @@ test('an MDI child brought to the top is told WM_CHILDACTIVATE and becomes the a
     assert.deepEqual(told, [], 'SWP_NOACTIVATE: nothing said');
 });
 
-test('a window draws around the windows over it: a top-level window above its own, a sibling '
-    + 'over a child that clips its siblings, and its children under WS_CLIPCHILDREN', ()=>{
-    // A dialog in front of a program's main window while the main window's
-    // controls repaint: on Windows their visible region leaves the dialog
-    // out, and nothing they draw lands on it.
+test('a window draws around a sibling over a child that clips its siblings, and its children'
+    + ' under WS_CLIPCHILDREN, and under a top-level window over it', ()=>{
+    // Inside one top-level window a visible region leaves out what is over
+    // it there. A dialog in front of the program's main window is a surface
+    // of its own: the main window's controls draw all of themselves under
+    // it, and the screen is composed with the dialog on top.
     const WS_POPUP = 0x80000000;
     const WS_CLIPSIBLINGS = 0x04000000;
     const WS_CLIPCHILDREN = 0x02000000;
@@ -5425,10 +5611,8 @@ test('a window draws around the windows over it: a top-level window above its ow
     const dialog = { left: 50, top: 25, right: 150, bottom: 125 };
     createWindow(fns, memory, { style: WS_POPUP | WS_VISIBLE, parent: hwnd,
         x: dialog.left, y: dialog.top, width: 100, height: 100 });
-    assert.deepEqual(clipOf(child), [
-        { left: 0, top: 0, right: 100, bottom: 25 },
-        { left: 0, top: 25, right: 50, bottom: 50 },
-    ], 'the owned dialog over its corner is left out');
+    assert.deepEqual(clipOf(child), [{ left: 0, top: 0, right: 100, bottom: 50 }],
+        'the owned dialog over its corner takes nothing of it');
 
     // Created after it, so beneath it: one that clips its siblings is cut
     // where the first child lies over it, one that does not is not.
@@ -5443,15 +5627,15 @@ test('a window draws around the windows over it: a top-level window above its ow
     const overlaps = (a, b)=>a.left < b.right && b.left < a.right && a.top < b.bottom
         && b.top < a.bottom;
     const main = clipOf(hwnd);
-    const covered = [dialog, { left: 0, top: 0, right: 100, bottom: 50 },
+    const covered = [{ left: 0, top: 0, right: 100, bottom: 50 },
         { left: 80, top: 0, right: 120, bottom: 20 }];
     assert.ok(main.length > 0, 'the main window still draws somewhere');
     assert.ok(main.every((/** @type {any} */ piece)=>covered.every(cover=>!overlaps(piece, cover))),
-        'but not over its children, nor the dialog');
+        'but not over its children');
     const area = main.reduce((/** @type {number} */ sum, /** @type {any} */ piece)=>
         sum + (piece.right - piece.left) * (piece.bottom - piece.top), 0);
-    assert.equal(area, 200 * 100 - 100 * 50 - 20 * 20 - 100 * 75 + 50 * 25,
-        'and everywhere else in its client area');
+    assert.equal(area, 200 * 100 - 100 * 50 - 20 * 20,
+        'and everywhere else in its client area, under the dialog too');
 });
 
 test('SetWindowPos asks the window first, applies what it answers, and tells it what changed',
@@ -5979,12 +6163,13 @@ test('only the thread that made a window may destroy it', ()=>{
     assert.equal(fns.DestroyWindow.handler([hwnd]), 1, 'its own thread may');
 });
 
-test('a window uncovered by its dialog going paints, then every control the dialog lay over',
+test('a window uncovered by its dialog going paints nothing: it and its controls kept their pixels',
     ()=>{
         // Half-Life's menu: a popup that does not clip its children, its
         // buttons drawn by their own WM_PAINT. A dialog shown over all of it
         // and closed -- hidden, then destroyed -- left the menu's background
         // painted and the buttons blank until the pointer passed over them.
+        // The dialog is a surface of its own: nothing under it is repainted.
         const WS_POPUP = 0x80000000;
         const RDW_VALIDATE = 0x8;
         const RDW_NOCHILDREN = 0x40;
@@ -6023,54 +6208,81 @@ test('a window uncovered by its dialog going paints, then every control the dial
         fns.EnableWindow.handler([menu, 1]);
         fns.ShowWindow.handler([dialog, SW_HIDE]);
         fns.DestroyWindow.handler([dialog]);
-        assert.deepEqual(drain(), [menu, ...buttons], 'the menu, then its buttons');
+        assert.deepEqual(drain(), [], 'nothing to paint');
+        assert.equal(buttons.length, 2);
     });
 
-test('a dialog hidden over a window that does not clip its children erases the window, and '
-    + 'its children wait for its paint', ()=>{
+test('a dialog hidden over a window that does not clip its children erases nothing under it',
+    ()=>{
     // Half-Life's menu: its buttons paint from WM_ERASEBKGND. A dialog
     // ended over it had every button erased -- painted -- inside EndDialog's
     // hide, then the menu's own WM_PAINT, later, painted its background over
-    // them all (server window.c get_window_update_flags: children of windows
-    // that do not clip them "need to wait for WM_PAINT to be done in the
-    // parent first").
-    const WS_POPUP = 0x80000000;
+    // them all. The dialog is a surface of its own: the menu and its buttons
+    // kept their pixels under it, and nothing is erased or painted.
+        const WS_POPUP = 0x80000000;
+        const WM_ERASEBKGND = 0x0014;
+        const RDW_VALIDATE = 0x8;
+        const RDW_NOCHILDREN = 0x40;
+        const { fns, memory, dispatched } = setup({ paint: true });
+        putClass(memory);
+        fns.RegisterClassA.handler([CLASS_STRUCT]);
+        const menu = createWindow(fns, memory, { style: WS_POPUP | WS_VISIBLE,
+            x: 0, y: 0, width: 640, height: 480 });
+        memory.putString(TITLE, 'button');
+        const button = fns.CreateWindowExA.handler([0, CLASS_NAME, TITLE, WS_CHILD | WS_VISIBLE,
+            70, 180, 156, 26, menu, 0, HINSTANCE, 0]);
+        /** @returns {number[]} */
+        const drain = ()=>{
+            const painted = [];
+            while (fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]) === 1)
+            {
+                if (memory.u32(MSG_BUFFER + MSG.message) === WM_PAINT)
+                {
+                    const target = memory.u32(MSG_BUFFER + MSG.hwnd);
+                    painted.push(target);
+                    fns.RedrawWindow.handler([target, 0, 0, RDW_VALIDATE | RDW_NOCHILDREN]);
+                }
+            }
+            return painted;
+        };
+        drain();
+        memory.putString(TITLE, 'dialog');
+        const dialog = fns.CreateWindowExA.handler([0, CLASS_NAME, TITLE,
+            WS_POPUP | WS_VISIBLE, 0, 0, 640, 480, menu, 0, HINSTANCE, 0]);
+        drain();
+        dispatched.length = 0;
+        fns.ShowWindow.handler([dialog, SW_HIDE]);
+        /** @param {number} hwnd */
+        const erased = hwnd=>dispatched.filter(message=>message.hwnd === hwnd
+        && message.message === WM_ERASEBKGND).length;
+        assert.equal(erased(menu), 0, 'the menu not erased');
+        assert.equal(erased(button), 0, 'nor its button');
+        assert.deepEqual(drain(), [], 'nor painted');
+    });
+
+test('a caption that does not fit ends in an ellipsis, as Windows draws it', ()=>{
+    // An installer's progress box titled wider than itself showed its title
+    // cut mid-letter at the close box; Windows shows the start and "...".
+    const width = (/** @type {string} */ text)=>text.length * 6;
+    assert.equal(endEllipsis('Short', 60, width), 'Short');
+    assert.equal(endEllipsis('InstallShield Wizard', 100, width), 'InstallShield...');
+    assert.equal(endEllipsis('InstallShield Wizard', 12, width), '..');
+    assert.equal(endEllipsis('InstallShield Wizard', 0, width), '');
+});
+
+test('a window painted while hidden is erased when it is shown, before ShowWindow returns', ()=>{
+    // An InstallShield wizard page: made hidden, its skin painted through
+    // InvalidateRect and UpdateWindow while it is still hidden -- which
+    // reaches nothing -- then shown before a long copy that never pumps.
+    // ShowWindow's WM_ERASEBKGND is all the page gets until the copy is over.
     const WM_ERASEBKGND = 0x0014;
     const RDW_VALIDATE = 0x8;
-    const RDW_NOCHILDREN = 0x40;
-    const { fns, memory, dispatched } = setup({ paint: true });
-    putClass(memory);
-    fns.RegisterClassA.handler([CLASS_STRUCT]);
-    const menu = createWindow(fns, memory, { style: WS_POPUP | WS_VISIBLE,
-        x: 0, y: 0, width: 640, height: 480 });
-    memory.putString(TITLE, 'button');
-    const button = fns.CreateWindowExA.handler([0, CLASS_NAME, TITLE, WS_CHILD | WS_VISIBLE,
-        70, 180, 156, 26, menu, 0, HINSTANCE, 0]);
-    /** @returns {number[]} */
-    const drain = ()=>{
-        const painted = [];
-        while (fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]) === 1)
-        {
-            if (memory.u32(MSG_BUFFER + MSG.message) === WM_PAINT)
-            {
-                const target = memory.u32(MSG_BUFFER + MSG.hwnd);
-                painted.push(target);
-                fns.RedrawWindow.handler([target, 0, 0, RDW_VALIDATE | RDW_NOCHILDREN]);
-            }
-        }
-        return painted;
-    };
-    drain();
-    memory.putString(TITLE, 'dialog');
-    const dialog = fns.CreateWindowExA.handler([0, CLASS_NAME, TITLE,
-        WS_POPUP | WS_VISIBLE, 0, 0, 640, 480, menu, 0, HINSTANCE, 0]);
-    drain();
+    const { fns, hwnd, dispatched } = withWindow({ paint: true, reply: ()=>1 });
+    fns.InvalidateRect.handler([hwnd, 0, 0]);
+    fns.UpdateWindow.handler([hwnd]);
+    fns.RedrawWindow.handler([hwnd, 0, 0, RDW_VALIDATE]);
     dispatched.length = 0;
-    fns.ShowWindow.handler([dialog, SW_HIDE]);
-    /** @param {number} hwnd */
-    const erased = hwnd=>dispatched.filter(message=>message.hwnd === hwnd
-        && message.message === WM_ERASEBKGND).length;
-    assert.equal(erased(menu), 1, 'the menu erased before the hide returned');
-    assert.equal(erased(button), 0, 'its button not: it waits for the menu\'s paint');
-    assert.deepEqual(drain(), [menu, button], 'then the menu paints, and the button after it');
+    fns.ShowWindow.handler([hwnd, SW_SHOW]);
+    assert.deepEqual(dispatched.filter(entry=>[WM_NCPAINT, WM_ERASEBKGND].includes(entry.message))
+        .map(entry=>entry.message), [WM_NCPAINT, WM_ERASEBKGND]);
 });

@@ -831,9 +831,12 @@ export function createWire(side){
         }
         if (vt & VT_BYREF)
         {
+            // No referent at all is apart from one that holds nothing -- a
+            // BSTR* at a NULL string: the callee is handed a cell either way
+            // but the first, as COM hands it.
             const at = u32(bytes, 8);
-            return { vt, value: at === 0 ? null
-                : await decode(type, side.readMemory(at, sizeOf(type)), context) };
+            return at === 0 ? { vt, value: null, absent: true }
+                : { vt, value: await decode(type, side.readMemory(at, sizeOf(type)), context) };
         }
         return { vt, value: await decode(type, bytes.subarray(8, 8 + sizeOf(type)), context) };
     };
@@ -998,7 +1001,7 @@ export function createWire(side){
         }
         if (wire.vt & VT_BYREF)
         {
-            if (wire.value === null)
+            if (wire.absent)
             {
                 return out;
             }
@@ -1400,7 +1403,7 @@ export async function unmarshalReply(side, method, args, request, reply){
                     VARIANT_BYTES);
                 const target = typeOfVartype(u16(variant, 0) & VT_TYPEMASK);
                 const cell = u32(variant, 8);
-                if (!target || cell === 0 || update.value.value === null)
+                if (!target || cell === 0 || update.value.absent)
                 {
                     continue;
                 }

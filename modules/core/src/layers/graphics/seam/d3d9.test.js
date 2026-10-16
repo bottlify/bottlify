@@ -23,6 +23,7 @@ import { createVtables } from '../../bridge/internal/vtable.js';
 import { createPublisher } from './com.js';
 import { createDirect3D9Seam } from './d3d9.js';
 import { BUFFER, FLAG_STALE, SHADOW, SURFACE, transformSlot } from './shadow.js';
+import { FPU_SETUP } from './fpu.js';
 import { commandSlot } from '../d3d9/commands.js';
 import { ADAPTER_GUID, describeAdapter } from './adapter.js';
 import { IDIRECT3D9_SLOTS } from './vtables.js';
@@ -135,6 +136,15 @@ function machine(){
         heap: { allocate },
     });
 
+    /**
+     * A slot's trap: itself, or where the guest routine CreateDevice's slot holds
+     * (`fpu.js`) goes on to.
+     *
+     * @param {number} at
+     */
+    const trapOf = at=>(registered.has(at) || memory.readU32(at) !== FPU_SETUP.HEAD ? at
+        : (at + FPU_SETUP.LENGTH + (memory.readU32(at + FPU_SETUP.JUMP) | 0)) >>> 0);
+
     return {
         memory,
         services: { readMemory: readBytes, writeMemory: writeBytes },
@@ -144,7 +154,7 @@ function machine(){
         /** @param {number} pointer @param {number} index @param {number[]} args */
         call(pointer, index, args = []){
             const table = memory.readU32(pointer);
-            const entry = registered.get(memory.readU32(table + index * 4));
+            const entry = registered.get(trapOf(memory.readU32(table + index * 4)));
             assert.ok(entry, `slot ${index} has an implementation`);
             return entry.fn.handler([pointer, ...args]) >>> 0;
         },
@@ -158,7 +168,7 @@ function machine(){
          */
         callRaw(pointer, index, args = []){
             const table = memory.readU32(pointer);
-            const entry = registered.get(memory.readU32(table + index * 4));
+            const entry = registered.get(trapOf(memory.readU32(table + index * 4)));
             assert.ok(entry, `slot ${index} has an implementation`);
             return entry.fn.handler([pointer, ...args]);
         },
@@ -166,7 +176,7 @@ function machine(){
         /** @param {number} pointer @param {number} index */
         argBytesOf(pointer, index){
             const table = memory.readU32(pointer);
-            return registered.get(memory.readU32(table + index * 4)).fn.argBytes;
+            return registered.get(trapOf(memory.readU32(table + index * 4))).fn.argBytes;
         },
 
         /**
@@ -443,9 +453,10 @@ test('a fullscreen device names the window it takes with it', ()=>{
     // named so whoever answers can do the same, and fullscreen is the signal.
     const h = seamed();
     const root = h.create();
-    const { device } = h.createDevice(root, { Windowed: 0, hDeviceWindow: 0x777 });
+    const { device } = h.createDevice(root, { BackBufferWidth: 640, BackBufferHeight: 480,
+        Windowed: 0, hDeviceWindow: 0x777 });
     assert.notEqual(device, 0);
-    assert.deepEqual(h.resolutions.at(-1), [64, 64, 0x777, true]);
+    assert.deepEqual(h.resolutions.at(-1), [640, 480, 0x777, true]);
 });
 
 test('a fullscreen device tells its window the mode at its first frame, once', ()=>{
@@ -454,10 +465,11 @@ test('a fullscreen device tells its window the mode at its first frame, once', (
     // nothing from the placement at creation, so the first frame says it.
     const h = seamed();
     const root = h.create();
-    const { device } = h.createDevice(root, { Windowed: 0, hDeviceWindow: 0x777 });
+    const { device } = h.createDevice(root, { BackBufferWidth: 640, BackBufferHeight: 480,
+        Windowed: 0, hDeviceWindow: 0x777 });
     assert.equal(h.resolutions.length, 1, 'creation placed the window');
     assert.equal(h.device(device, 'Present', [0, 0, 0, 0]), D3D_OK);
-    assert.deepEqual(h.resolutions.at(-1), [64, 64, 0x777, true, 'announced']);
+    assert.deepEqual(h.resolutions.at(-1), [640, 480, 0x777, true, 'announced']);
     assert.equal(h.device(device, 'Present', [0, 0, 0, 0]), D3D_OK);
     assert.equal(h.resolutions.length, 2, 'the second frame says nothing');
 
@@ -499,13 +511,13 @@ test('a reset that changes the mode names the window it presents into', ()=>{
         });
     };
 
-    write({ BackBufferWidth: 320, BackBufferHeight: 240, Windowed: 0 });
+    write({ BackBufferWidth: 640, BackBufferHeight: 480, Windowed: 0 });
     assert.equal(h.device(device, 'Reset', [at]), D3D_OK);
-    assert.deepEqual(h.resolutions.at(-1), [320, 240, HWND, true], 'fullscreen names the window');
+    assert.deepEqual(h.resolutions.at(-1), [640, 480, HWND, true], 'fullscreen names the window');
 
     write({});
     assert.equal(h.device(device, 'Reset', [at]), D3D_OK);
-    assert.deepEqual(h.resolutions.at(-1), [320, 240, HWND, true],
+    assert.deepEqual(h.resolutions.at(-1), [640, 480, HWND, true],
         'back to windowed, the screen waits for a frame');
     assert.equal(h.device(device, 'Present', [0, 0, 0, 0]), D3D_OK);
     assert.deepEqual(h.resolutions.at(-1), [64, 64, HWND, false],
@@ -573,22 +585,31 @@ test('a zero back buffer size with no window to measure falls back to the displa
     h.release(root);
 });
 
-test('a fullscreen device asked for zero by zero is not made at zero', ()=>{
-    // A fullscreen device's back buffer is the mode, and Direct3D refuses the
-    // creation outright rather than carrying a zero. The display stands for the
-    // mode here: a device made at zero leaves the program computing every
-    // layout against a screen that is not there.
+test('a fullscreen device is a display mode, and any other size is refused', ()=>{
+    // Wine's test_reset: full screen at 0x0, 32x32 or 801x600 is
+    // D3DERR_INVALIDCALL. Only a window stands for a size of zero; a program
+    // that asks for one full screen takes another way on the refusal, and a
+    // device made at the display instead leaves it laying out a screen of
+    // zero by zero.
     const h = seamed();
     const root = h.create();
-    const { hr, device, parameters } = h.createDevice(root, {
-        BackBufferWidth: 0, BackBufferHeight: 0, Windowed: 0, hDeviceWindow: 0x777,
-    });
-    assert.equal(hr, D3D_OK);
-    assert.equal(h.fields.readU32(parameters + D3DPRESENT_PARAMETERS9.BackBufferWidth),
-        SCREEN.width);
-    assert.equal(h.fields.readU32(parameters + D3DPRESENT_PARAMETERS9.BackBufferHeight),
-        SCREEN.height);
-    assert.deepEqual(h.resolutions.at(-1), [SCREEN.width, SCREEN.height, 0x777, true]);
+    for (const [width, height] of [[0, 0], [32, 32], [801, 600]])
+    {
+        const { hr, device } = h.createDevice(root, {
+            BackBufferWidth: width, BackBufferHeight: height, Windowed: 0, hDeviceWindow: 0x777,
+        });
+        assert.equal(hr, D3DERR_INVALIDCALL, `${width}x${height}`);
+        assert.equal(device, 0, 'the pointer is cleared');
+    }
+    const { hr, device } = h.createDevice(root, { BackBufferWidth: SCREEN.width,
+        BackBufferHeight: SCREEN.height, Windowed: 0, hDeviceWindow: 0x777 });
+    assert.equal(hr, D3D_OK, 'the mode in effect');
+    const at = 0x2200;
+    h.box.services.writeMemory(at, new Uint8Array(D3DPRESENT_PARAMETERS9.SIZE));
+    h.fields.writeStruct(at, D3DPRESENT_PARAMETERS9, { BackBufferWidth: 801,
+        BackBufferHeight: 600, BackBufferFormat: D3DFMT.X8R8G8B8, BackBufferCount: 1,
+        SwapEffect: 1, hDeviceWindow: 0x777, Windowed: 0 });
+    assert.equal(h.device(device, 'Reset', [at]), D3DERR_INVALIDCALL, 'nor reset to one');
     h.release(device);
     h.release(root);
 });

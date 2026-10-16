@@ -28,12 +28,16 @@
  */
 
 import { isIsoImage, openIso, rangeReader } from '@bottlify/core/iso';
+import { SYSTEM_DIRECTORY, systemProgramImage } from '@bottlify/core/programs';
 import { launcherPlan } from './is5stub.js';
 import { silentOptions } from './silent.js';
 import { windowsChoice } from './windows.js';
 
 /** The drive a disc is mounted as: the first letter after the machine's own disk. */
 export const DISC_LETTER = 'D';
+
+/** Where msiexec writes the log of a package a person chose on a disc. */
+export const MSI_LOG = 'C:\\WINDOWS\\TEMP\\msiexec.log';
 
 /** What a disc starts when `autorun.inf` names nothing on it. */
 const FALLBACK_ENTRY = 'setup.exe';
@@ -260,10 +264,19 @@ export async function discOptions(media, under = {}){
             && item.path.slice(0, item.path.length - item.name.length).toLowerCase()
                 === programFolder.toLowerCase())
         .map(async item=>({ name: item.name, bytes: await bytesOf(item) }))));
-    const executable = launcher?.executable ?? programBytes;
-    const imagePath = launcher?.imagePath ?? programPath;
-    const commandLine = launcher || entry.arguments === ''
-        ? `"${imagePath}"` : `"${imagePath}" ${entry.arguments}`;
+    // A Windows Installer package is not a program: Explorer opens one with
+    // msiexec, the system's own, and so does this.
+    const msi = !launcher && /\.msi$/i.test(program.name);
+    const msiexec = `${SYSTEM_DIRECTORY}\\msiexec.exe`;
+    const executable = launcher?.executable
+        ?? (msi ? /** @type {Uint8Array} */ (systemProgramImage(msiexec)) : programBytes);
+    const imagePath = launcher?.imagePath ?? (msi ? msiexec : programPath);
+    // With a verbose log in the temporary directory, which no bottle carries:
+    // a package that fails says why only there.
+    const commandLine = msi
+        ? `"${msiexec}" /i "${programPath}" /l*v "${MSI_LOG}"`
+        : launcher || entry.arguments === ''
+            ? `"${imagePath}"` : `"${imagePath}" ${entry.arguments}`;
     // Windows starts a disc's autorun program in the disc's root, wherever on
     // the disc the program lives, and launchers lean on it: a menu in a
     // subfolder looks for the setup beside autorun.inf by a relative name. A

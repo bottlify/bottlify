@@ -750,6 +750,8 @@ export function createGdiFunctions(host){
              * @type {{ left: number, top: number, right: number, bottom: number } | null}
              */
             bounds: null,
+            /** Whether it draws the desktop's background, under every window. */
+            background: false,
             /** The bitmap a surface's DC brought with it, and takes away again. */
             defaultBitmap: 0,
             pen: stockObject(BLACK_PEN),
@@ -1799,14 +1801,25 @@ export function createGdiFunctions(host){
 
     /**
      * How wide a string is in a context's font: what the engine draws, or
-     * the estimate's fixed pitch without one.
+     * without one Windows' advances where they are known and the estimate's
+     * fixed pitch where they are not.
      *
      * @param {any} dc @param {string} text
      * @returns {number}
      */
     const widthOf = (dc, text)=>{
         const font = currentFont(dc);
-        return host.graphics?.textWidth?.(font, text) ?? text.length * metricsOf(font).aveCharWidth;
+        const engine = host.graphics?.textWidth?.(font, text);
+        if (engine !== undefined && engine !== null)
+        {
+            return engine;
+        }
+        const pitch = metricsOf(font).aveCharWidth;
+        const windows = windowsMetrics(font)?.advances;
+        return windows ? Array.from(text, character=>{
+            const code = character.charCodeAt(0);
+            return code >= 0x20 && code <= 0xff ? windows[code - 0x20] : pitch;
+        }).reduce((sum, advance)=>sum + advance, 0) : text.length * pitch;
     };
 
     /**
@@ -3898,19 +3911,6 @@ export function createGdiFunctions(host){
         },
 
         /**
-         * HMETAFILE SetMetaFileBitsEx(UINT cbBuffer, const BYTE *lpData)
-         *
-         * A Windows metafile is a picture kept as recorded GDI calls. One made
-         * from bits would hold records EnumMetaFile and PlayMetaFileRecord
-         * here do not hand out, so the bits are refused: the caller draws
-         * without the picture rather than with a handle that means nothing.
-         */
-        SetMetaFileBitsEx: {
-            argBytes: 8,
-            handler: ()=>0,
-        },
-
-        /**
          * HMETAFILE CopyMetaFileA(HMETAFILE hmfSrc, LPCSTR lpszFile)
          * HMETAFILE CopyMetaFileW(HMETAFILE hmfSrc, LPCWSTR lpszFile)
          */
@@ -5017,11 +5017,15 @@ export function createGdiFunctions(host){
          *
          * @param {number} hwnd
          * @param {{ left: number, top: number, right: number, bottom: number } | null} bounds
+         * @param {boolean} [background]  The desktop's background rather than the screen.
          * @returns {number} A device context handle.
          */
-        windowContext(hwnd, bounds){
+        windowContext(hwnd, bounds, background = false){
             const dc = createContext(hwnd >>> 0, 'window');
             dc.bounds = bounds;
+            // The desktop's background, which every window is composed over;
+            // a screen context draws on what the screen shows.
+            dc.background = background;
             return dc.hdc;
         },
 

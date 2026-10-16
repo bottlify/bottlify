@@ -468,6 +468,28 @@ None yet.
 - **Decision.** Both reverted. What paid was the interpreter's own speed on MMX: the wasm tier
   runs the MMX forms (the every-call case 38.6 s to 3.1 s).
 
+### 2026-10-14 -- An indexed draw's dynamic vertices compared over the range its indices name (optional)
+
+- **Idea.** A recording that sends a dynamic buffer's changed bytes with each draw
+  (`drawsFrom`) compares the draw's declared vertex range against what was sent. A Direct3D 9
+  program that declares most of a buffer as each draw's range had it compared draw after draw.
+  The idea: read the draw's indices from guest memory and compare only from the lowest vertex
+  they name to the highest, when reading them costs less than comparing the declared range.
+- **Workload.** A first-person shooter demo through the graphics worker, the first seconds of
+  its first level, the player standing. Two arms, each on its own fresh start to that spot:
+  before (`585e5774` plus the session's uncommitted tree) and the idea. Two 10 s windows each.
+  Diagnostics build.
+- **Values.** Bytes compared per frame: before 34.5 and 36.4 MB, idea 19.9 and 18.8 MB. The
+  ring replay's host time (`ring-take`): before 8.1 ms a frame, idea 6.6 ms. Frames per
+  second: before 12.6 and 18.9, idea 13.2, 13.3 and 15.9. The frame was about 53-63 ms, of
+  which the guest's code was 32-37 ms. Noise floor: the arms' own spread, 12.6-18.9 fps.
+- **Machine.** Parallels VM on Apple silicon, Windows 11, Chrome, Parallels GPU. Power plan:
+  not recorded.
+- **Why it did not pay.** The comparing it saved was about 1.5 ms of a 55 ms frame, below the
+  spread between runs; the frame is the guest's code. One screenshot of the idea's run showed
+  streaks over the road that the same spot before did not, not followed up.
+- **Decision.** Reverted, then put back the same day at the person's word (optional): what crosses to the graphics worker is what a heavy scene is bound by -- 30-55 MB/s in a fight of a third-person action demo, its worker parsing 200-260 ms of every 500 -- and less of it is the lever there. The streaks are to be checked.
+
 ### 2026-10-13 -- every register in wasm parameters across guest calls (calling-convention bench, x64)
 
 - **Idea.** A function tier: a guest call becomes a wasm call that carries all eight registers
@@ -995,3 +1017,24 @@ None yet.
   `frames.mjs` runs the page isolated with the engine in a worker for `--cores` past one -- before
   it, every browser measurement of frames ran the `compatible` mode on the page's own thread,
   where a run asking for cores ran on one (`executorsRefused`).
+
+### 2026-10-16 -- a host call's device steps run as the device's methods in the host
+
+- **Idea.** `ID3DXEffect::CommitChanges` on the host drives the device's setters as guest calls,
+  each a turn into the guest and back. The guess was that answering those steps where they stand
+  (`InterfaceMethod.inPlace`), by running the setter's own host method, would make a commit
+  cheaper than entering the guest for each.
+- **Workload.** The Need for Speed Carbon demo bundle (`bundle.btl` sha256 `f5aec769a16ce7d8…`),
+  started from the launcher and driven into its first race, 640x480; host calls counted by
+  function over 10 s on the running page. The scenes of two runs are not the same.
+- **Values.** Host time per `CommitChanges` call: before, not recorded; with the steps run as the
+  device's methods, about 48 us; with the steps answered by writing the setter's command into the
+  ring as the guest routine would (`appendCommand`, the change that was kept), 34 then 18-24 us.
+  One run of each; spread and noise floor not recorded.
+- **Machine.** Chrome in a Parallels Windows 11 VM on its virtual GPU; version, driver and power
+  plan not recorded.
+- **Why it did not pay.** A setter's host method does the device's whole work at once (its state
+  checks, its shadow, its seam), where the guest routine only appends a command record.
+- **Correctness.** The bridge's tests of steps answered in place; the gate holding the host's
+  command records to the guest routine's byte for byte (`seam/commands-host.itest.js`).
+- **Decision.** Removed: steps are answered in place only by appending the command.

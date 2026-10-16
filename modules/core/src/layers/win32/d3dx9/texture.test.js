@@ -543,6 +543,38 @@ test('D3DXGetImageInfoFromFileInMemory describes a volume DDS; a 2D loader refus
         D3DXERR_INVALIDDATA);
 });
 
+test('a volume DDS becomes a volume texture slice by slice; asked another size, the file\'s is'
+    + ' kept and said', async()=>{
+    const slices = [1, 2, 3].flatMap(n=>new Array(16).fill(n));
+    const file = dds([slices]);
+    const view = new DataView(file.buffer);
+    view.setUint32(8, view.getUint32(8, true) | 0x800000, true);
+    view.setUint32(24, 3, true);
+    view.setUint32(112, 0x200000, true);
+    const { r, call } = exported({});
+    const data = r.heap.allocate(file.length);
+    r.memory.set(file, data);
+    const out = r.heap.allocate(4);
+    assert.equal(await call('D3DXCreateVolumeTextureFromFileInMemory', [r.device, data,
+        file.length, out]), 0);
+    const volume = r.objects.get(r.view.getUint32(out, true));
+    assert.equal(volume.kind, 'volume');
+    assert.equal(volume.format, FMT.A8R8G8B8);
+    assert.deepEqual([volume.levels.length, volume.levels[0].depth], [1, 3]);
+    const level = volume.levels[0];
+    assert.deepEqual([...r.memory.subarray(level.data, level.data + 48)], slices);
+    assert.equal(level.locked, false);
+
+    assert.equal(await call('D3DXCreateVolumeTextureFromFileInMemoryEx', [r.device, data,
+        file.length, 4, 4, 4, 1, 0, FMT.UNKNOWN, 1, 0, 0, 0, 0, 0, out]), 0);
+    assert.match(r.diverged.join('\n'), /asked 4x4x4: the file's 2x2x3 is kept/);
+    const flat = dds([face(7)]);
+    const flatAt = r.heap.allocate(flat.length);
+    r.memory.set(flat, flatAt);
+    assert.equal(await call('D3DXCreateVolumeTextureFromFileInMemory', [r.device, flatAt,
+        flat.length, out]), D3DXERR_INVALIDDATA, 'a 2D file is not a volume');
+});
+
 test('a palette-indexed DDS becomes A8R8G8B8, keeping the alpha its palette holds', async()=>{
     // P8's palette entries carry an alpha in peFlags; the nearest format with room for
     // it is A8R8G8B8, and D3DXIMAGE_INFO still names the file's own P8.

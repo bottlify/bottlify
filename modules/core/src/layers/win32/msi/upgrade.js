@@ -18,6 +18,9 @@ import { ERROR_INSTALL_FAILURE, ERROR_SUCCESS, schedule } from './steps.js';
 
 /** @typedef {import('./engine.js').Engine} Engine */
 
+/** A product code, as an Upgrade row's property lists them. */
+const PRODUCT_CODE = /^\{[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\}$/;
+
 /** The Upgrade table's Attributes. */
 const UPGRADE = Object.freeze({
     MIGRATE_FEATURES: 0x1, ONLY_DETECT: 0x2, IGNORE_REMOVE_FAILURE: 0x4,
@@ -128,8 +131,11 @@ function upgrading(engine){
     const { session } = engine;
     return (session.db.table('Upgrade')?.rows ?? [])
         .filter(row=>row[6] !== null && (Number(row[4] ?? 0) & UPGRADE.ONLY_DETECT) === 0)
+        // The property is a list of product codes; anything else a custom
+        // action left in it -- a package that blanks it with a space -- names
+        // no product to remove.
         .map(row=>({ row, products: session.getProperty(String(row[6])).split(';')
-            .filter(Boolean) }))
+            .map(code=>code.trim()).filter(code=>PRODUCT_CODE.test(code)) }))
         .filter(entry=>entry.products.length > 0);
 }
 

@@ -66,6 +66,22 @@ export const SCOPE_ENTRY = Object.freeze({
 export const NO_TRY_LEVEL = 0xffffffff;
 
 /**
+ * Visual C++ 2005's frames, _except_handler4's: the same registration, but
+ * the scope table's address is XORed with the image's security cookie, the
+ * table opens with four words of the GS and EH cookies' offsets before its
+ * entries, and no block entered is -2.
+ */
+export const EH4_TABLE_HEADER = 0x10;
+export const EH4_NO_TRY_LEVEL = 0xfffffffe;
+
+/**
+ * How a frame's scope table is found and read: where its entries start, and
+ * the level that means none is entered.
+ *
+ * @typedef {{ table: (frame: number) => number, none: number }} ScopeScheme
+ */
+
+/**
  * The runtime's jmp_buf, as far as this pair reads and writes it: the
  * registers, then where the handler chain stood, so a jump out of guarded
  * code leaves the chain as the function it lands in last saw it.
@@ -160,6 +176,20 @@ export function createCrtSeh(host){
         };
     };
 
+    /** _except_handler3's table: at the frame's word, entries from its start. */
+    /** @type {ScopeScheme} */
+    const EH3 = { table: frame=>readU32(frame + SCOPE_FRAME.TABLE), none: NO_TRY_LEVEL };
+
+    /**
+     * _except_handler4's, under the cookie the image's handler names.
+     *
+     * @param {number} cookie @returns {ScopeScheme}
+     */
+    const eh4 = cookie=>({
+        table: frame=>((readU32(frame + SCOPE_FRAME.TABLE) ^ cookie) + EH4_TABLE_HEADER) >>> 0,
+        none: EH4_NO_TRY_LEVEL,
+    });
+
     /**
      * Runs the `__finally` blocks of a frame from the level entered out to,
      * but not including, `stop`.
@@ -172,9 +202,10 @@ export function createCrtSeh(host){
      * @param {number} frame
      * @param {number} stop
      * @param {{ thread?: any, stackAtRest?: number }} how
+     * @param {ScopeScheme} [scheme]
      */
-    const localUnwind = async(frame, stop, how)=>{
-        const table = readU32(frame + SCOPE_FRAME.TABLE);
+    const localUnwind = async(frame, stop, how, scheme = EH3)=>{
+        const table = scheme.table(frame);
         if (!host.isMapped(table))
         {
             return;
@@ -182,7 +213,7 @@ export function createCrtSeh(host){
         let level = readU32(frame + SCOPE_FRAME.TRY_LEVEL);
         // A table is finite, and a level that encloses itself is a table the
         // program damaged; walking it would not end.
-        for (let guard = 0; level !== NO_TRY_LEVEL && level !== stop && guard < 4096; guard++)
+        for (let guard = 0; level !== scheme.none && level !== stop && guard < 4096; guard++)
         {
             const scope = entryAt(table, level);
             writeU32(frame + SCOPE_FRAME.TRY_LEVEL, scope.enclosing);
@@ -229,9 +260,10 @@ export function createCrtSeh(host){
      * thread goes on in the `__except` block and never returns here.
      *
      * @param {number[]} args  record, frame, context, dispatcher
+     * @param {ScopeScheme} [scheme]
      * @returns {Promise<any>}
      */
-    const exceptHandler3 = async([record, frame, context])=>{
+    const exceptHandler3 = async([record, frame, context], scheme = EH3)=>{
         // Whose exception this is and where its stack stands, read before
         // anything is awaited. A __finally block and a filter are both guest
         // code, the walk runs several of them, and the loop turns in between
@@ -240,7 +272,7 @@ export function createCrtSeh(host){
         const asked = host.currentThread?.();
         const at = frame >>> 0;
         const flags = readU32((record >>> 0) + 4);
-        const table = readU32(at + SCOPE_FRAME.TABLE);
+        const table = scheme.table(at);
         let level = readU32(at + SCOPE_FRAME.TRY_LEVEL);
         // The exception pointers a filter reads through its frame, kept below
         // everything the handler was called with, and every block this handler
@@ -259,7 +291,7 @@ export function createCrtSeh(host){
 
         if ((flags & EH_UNWINDING) !== 0)
         {
-            await localUnwind(at, NO_TRY_LEVEL, how);
+            await localUnwind(at, scheme.none, how, scheme);
             return Disposition.CONTINUE_SEARCH;
         }
 
@@ -267,7 +299,7 @@ export function createCrtSeh(host){
         writeU32(pointers + 4, context >>> 0);
         writeU32(at + SCOPE_FRAME.POINTERS, pointers);
 
-        for (let guard = 0; level !== NO_TRY_LEVEL && guard < 4096; guard++)
+        for (let guard = 0; level !== scheme.none && guard < 4096; guard++)
         {
             const scope = entryAt(table, level);
             if (scope.filter !== 0 && host.isMapped(scope.filter))
@@ -292,7 +324,7 @@ export function createCrtSeh(host){
                         thread: asked,
                     });
                     clearUnwinding(record >>> 0);
-                    await localUnwind(at, level, how);
+                    await localUnwind(at, level, how, scheme);
                     writeU32(at + SCOPE_FRAME.TRY_LEVEL, scope.enclosing);
                     const esp = readU32(at + SCOPE_FRAME.SAVED_ESP);
                     return host.continueAt({
@@ -395,7 +427,27 @@ export function createCrtSeh(host){
 
         table: {
             /** EXCEPTION_DISPOSITION _except_handler3(record, frame, context, dispatcher) */
-            _except_handler3: { argBytes: 16, handler: exceptHandler3 },
+            _except_handler3: { argBytes: 16,
+                handler: (/** @type {number[]} */ args)=>exceptHandler3(args) },
+
+            /**
+             * EXCEPTION_DISPOSITION _except_handler4_common(PUINT cookie,
+             *     PCOOKIE_CHECK check, record, frame, context, dispatcher)
+             *
+             * Visual C++ 2005's: the image's own _except_handler4 calls it with
+             * its security cookie, and the frame is _except_handler3's but for
+             * the encoded table (`eh4`). The check routine verifies the
+             * cookies the table's header names; a frame whose cookie was
+             * overwritten is a stack the program wrecked, which the walk below
+             * does not need to be told of to stay inside the table.
+             */
+            _except_handler4_common: {
+                convention: 'cdecl',
+                argBytes: 24,
+                /** @param {number[]} args */
+                handler: ([cookie, , record, frame, context, dispatcher])=>exceptHandler3(
+                    [record, frame, context, dispatcher], eh4(readU32(cookie >>> 0))),
+            },
 
             /**
              * void _local_unwind2(PEXCEPTION_REGISTRATION frame, int stop)

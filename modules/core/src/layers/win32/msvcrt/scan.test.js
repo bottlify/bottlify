@@ -237,3 +237,17 @@ test('swscanf stores wide text for %s and %c, and answers no input with zero', (
         memory.putWide('aሴ%ሴ%c'), out]), 1);
     assert.equal(memory.bytes[out], 0x62);
 });
+
+test('sscanf_s takes each string buffer\'s size, and text too long for it ends the scan', ()=>{
+    const fixture = build();
+    const { memory, table } = fixture;
+    const word = memory.allocate(32);
+    const number = memory.allocate(8);
+    assert.equal(table.sscanf_s.handler([memory.put('one 7'), memory.put('%s %d'),
+        word, 4, number]), 2, 'the size is an argument of its own, not the next pointer');
+    assert.equal(memory.text(word), 'one');
+    assert.equal(memory.i32(number), 7);
+    assert.equal(table.sscanf_s.handler([memory.put('four 7'), memory.put('%s %d'),
+        word, 4, number]), 0, 'four characters and a terminator do not fit in four');
+    assert.equal(memory.text(word), '', 'the buffer is emptied');
+});

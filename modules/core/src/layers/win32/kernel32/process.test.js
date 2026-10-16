@@ -112,6 +112,8 @@ function fakeHost({ arena = 0 } = {}){
         /** @param {number} milliseconds */
         sleep: milliseconds=>sleeps.push(milliseconds),
         park: ()=>PARKED,
+        /** Sleep(0)'s: none other ready, unless a test says. @type {() => boolean} */
+        yieldTurn: ()=>false,
         ...arena === 0 ? {} : {
             /** @param {number} size */
             allocate: size=>{
@@ -458,11 +460,30 @@ test('Sleep stops the thread, and a zero sleep yields instead', ()=>{
     // guest's clock has moved far enough.
     assert.equal(fns.Sleep.handler([250]), PARKED);
 
-    // Zero is a program offering its turn, not asking for time. Parking on it
-    // would be the same thing at the cost of a context switch.
+    // Zero is a program offering its turn, not asking for time: with no other
+    // thread ready it returns at once.
     assert.equal(fns.Sleep.handler([0]), 0);
 
     assert.deepEqual(host.sleeps, [250], 'and only the real wait reached the scheduler');
+});
+
+test('a zero sleep gives the turn to another thread ready to run, and parks only then', ()=>{
+    // A thread polling for another's work -- WaitForSingleObject(h, 0), then
+    // Sleep(0) -- must let that thread run, or it spins its whole turn while
+    // the work it waits for stands in the queue.
+    const { host, fns } = setup();
+    let others = true;
+    /** @type {number[]} */
+    const yielded = [];
+    host.yieldTurn = ()=>{
+        yielded.push(1);
+        return others;
+    };
+    assert.equal(fns.Sleep.handler([0]), PARKED, 'behind the other thread');
+    others = false;
+    assert.equal(fns.Sleep.handler([0]), 0, 'none ready: at once');
+    assert.equal(yielded.length, 2);
+    assert.deepEqual(host.sleeps, [], 'no wait of any length');
 });
 
 test('the identity queries answer for the thread that is running', ()=>{

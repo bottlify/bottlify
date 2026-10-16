@@ -148,6 +148,20 @@ export function createTelephonyFunctions(host){
     };
 }
 
+/**
+ * wtsapi32's session notifications: a window asks to be told of a session
+ * being connected, locked or switched. The one session here never changes,
+ * so the registration is kept and no WM_WTSSESSION_CHANGE ever comes.
+ */
+export function createSessionNotificationFunctions(){
+    return {
+        /** BOOL WTSRegisterSessionNotification(HWND hWnd, DWORD dwFlags) */
+        WTSRegisterSessionNotification: { argBytes: 8, handler: ()=>1 },
+        /** BOOL WTSUnRegisterSessionNotification(HWND hWnd) */
+        WTSUnRegisterSessionNotification: { argBytes: 4, handler: ()=>1 },
+    };
+}
+
 /** @param {OfflineHost} host */
 export function createSensFunctions(host){
     return {

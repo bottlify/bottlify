@@ -378,8 +378,12 @@ ONE_BYTE[0xff] = G([
  */
 export const TWO_BYTE = new Array(256).fill(null);
 
-TWO_BYTE[0x00] = SYS;
-TWO_BYTE[0x01] = SYS;
+// The descriptor-table and machine-status stores read nothing privileged
+// back but the system's own tables' places, and run in user mode (Windows
+// answers them itself where the processor refuses them, UMIP).
+TWO_BYTE[0x00] = G([I('sldt', 'Ew'), I('str', 'Ew'), SYS, SYS, SYS, SYS, SYS, SYS]);
+TWO_BYTE[0x01] = G([I('sgdt', 'Mq'), I('sidt', 'Mq'), SYS, SYS, I('smsw', 'Ew'), SYS, SYS,
+    SYS]);
 TWO_BYTE[0x02] = SYS; // lar
 TWO_BYTE[0x03] = SYS; // lsl
 TWO_BYTE[0x05] = SYS; // syscall

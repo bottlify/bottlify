@@ -18,7 +18,7 @@ import zlib from 'node:zlib';
 // a packed bottle has to be.
 import { openBundle } from '../../core/src/layers/filesystem/internal/bundle/format.js';
 import { Codec, crc32 } from '@bottlify/core/bundle';
-import { packBundle, packBlock } from './pack.js';
+import { packBundle, packBlock, sha256 } from './pack.js';
 
 /** @param {number} codec @param {Uint8Array} stored */
 const decode = (codec, stored)=>codec === Codec.DEFLATE_RAW
@@ -148,4 +148,17 @@ test('nothing is handed to the sink but block bytes', async()=>{
     // upload cannot be seeked back to and neither is known until the end.
     assert.equal(lengths.reduce((total, at)=>total + at, 0), summary.blockBytes);
     assert.equal(lengths.length, summary.totalBlocks);
+});
+
+test('a file is hashed where it lies, a view of a larger buffer as its own bytes', async()=>{
+    // Copied to be hashed, a game's 1.5 GB archive file was an allocation the
+    // tab could not make, and the bottle was never saved.
+    const whole = Uint8Array.from({ length: 64 }, (_, at)=>at);
+    const view = whole.subarray(16, 48);
+    assert.equal(await sha256(view), await sha256(whole.slice(16, 48)));
+    assert.equal(await sha256(new Uint8Array(0)),
+        'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855');
+    const shared = new Uint8Array(new SharedArrayBuffer(32));
+    shared.set(whole.subarray(16, 48));
+    assert.equal(await sha256(shared), await sha256(view), 'shared memory, copied to be read');
 });

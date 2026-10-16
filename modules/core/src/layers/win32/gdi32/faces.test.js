@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { fontFamilies } from './faces.js';
+import { fontFamilies, windowsMetrics } from './faces.js';
 
 /**
  * The smallest font a name can be read from: an sfnt directory with one
@@ -51,3 +51,28 @@ test('a font file names its family from its name table, Windows English first', 
     const cut = fontWithNames([[3, 0x409, 'Cut']]).subarray(0, 30);
     assert.deepEqual(fontFamilies(cut), [], 'a directory past the end');
 });
+
+test('the dialog faces advance as Windows draws them, so a line breaks where Windows broke it',
+    ()=>{
+        // An installer's statics are sized to their text in MS Sans Serif 8:
+        // "Please Enter Date of Birth" is 122 pixels on Windows in a static 125
+        // wide, and a stand-in face's wider advances wrapped it and clipped the
+        // second line.
+        /** @param {string} faceName @param {number} height @param {string} text */
+        const width = (faceName, height, text)=>{
+            const known = windowsMetrics({ faceName, height, weight: 400 });
+            assert.ok(known, faceName);
+            return Array.from(text, character=>known.advances[character.charCodeAt(0) - 0x20])
+                .reduce((sum, advance)=>sum + advance, 0);
+        };
+        assert.equal(width('MS Sans Serif', 13, 'Please Enter Date of Birth'), 122);
+        assert.equal(width('MS Sans Serif', 13, 'Information will not be stored.'), 137);
+        assert.equal(width('MS Shell Dlg', -11, 'Please Enter Date of Birth'), 122,
+            'Microsoft Sans Serif, whose hinted widths are the bitmap face\'s');
+        // System, which a DC answers in before a font is selected: the path an
+        // installer measures that way is 350 pixels, wider than its 333-pixel
+        // static, and is shortened there on Windows too.
+        assert.equal(width('System', 16,
+            'C:\\Program Files\\Rockstar Games\\Max Payne 2 Demo'), 350);
+        assert.equal(windowsMetrics({ faceName: 'Arial', height: 13, weight: 400 }), null);
+    });

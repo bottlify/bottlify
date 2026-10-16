@@ -225,7 +225,10 @@ test('the block fits its two pages and its regions follow one another', ()=>{
     assert.equal(SHADOW.TARGET_HEIGHT + 4, SHADOW.CLIP_PLANES);
     assert.equal(SHADOW.CLIP_PLANES + 4, SHADOW.VALIDATED);
     assert.equal(SHADOW.VALIDATED + SHADOW.VALIDATED_TABLES * SHADOW.VALIDATED_SLOTS * 4,
-        SHADOW.HELD);
+        SHADOW.LOCK_RING);
+    // The lock routine's own, which the host only reads.
+    assert.equal(SHADOW.LOCK_RING_CAPACITY & (SHADOW.LOCK_RING_CAPACITY - 1), 0);
+    assert.equal(SHADOW.LOCK_RING + SHADOW.LOCK_RING_CAPACITY * 4, SHADOW.HELD);
     // The device's lock, a word the routines take with xchg: aligned.
     assert.equal(SHADOW.HELD % 4, 0);
     assert.equal(SHADOW.HELD + 4, SHADOW.SIZE);
@@ -668,10 +671,12 @@ test('a buffer the guest holds locked is sent only when the ring has calls that 
     const vb = Object.assign(fakeBuffer(0x8000, 0x100), { usage: 0x200 });
     const block = m.shadow.attachBuffer(vb);
     const at = m.shadow.address();
-    // As the lock routine leaves it: the range, the flag, and its count.
+    // As the lock routine leaves it: the range, the flag, the block in its
+    // ring and its count.
     m.put32(block + BUFFER.LOCKED, 1);
     m.put32(block + BUFFER.FROM, 0);
     m.put32(block + BUFFER.TO, 16);
+    m.put32(at + SHADOW.LOCK_RING, block);
     m.put32(at + SHADOW.LOCK_CALLS, 1);
     m.shadow.sync();
     m.shadow.sync();
@@ -685,10 +690,46 @@ test('a buffer the guest holds locked is sent only when the ring has calls that 
     assert.deepEqual(vb.calls, [], 'no lock held: none looked at');
     record(7, [1, 2]).forEach((word, i)=>m.put32(ring + 16 + i * 4, word));
     m.put32(at + SHADOW.COMMAND_HEAD, 32);
+    m.put32(at + SHADOW.LOCK_RING + 4, block);
     m.put32(at + SHADOW.LOCK_CALLS, 2);
     m.shadow.sync();
     assert.deepEqual(vb.calls, ['lock 0+16 0x0', 'unlock'], 'sent before the calls in the ring');
     assert.equal(m.taken.length, 2);
+});
+
+test('a held lock is found through the lock routine\'s ring, and past its capacity by a look at'
+    + ' every buffer', ()=>{
+    const m = machine({ commands: true });
+    const vb = Object.assign(fakeBuffer(0x8000, 0x100), { usage: 0x200 });
+    const block = m.shadow.attachBuffer(vb);
+    const at = m.shadow.address();
+    const ring = m.u32(at + SHADOW.COMMANDS);
+    let head = 0;
+    const draw = ()=>{
+        record(7, [1, 2]).forEach((word, i)=>m.put32(ring + head + i * 4, word));
+        head += 16;
+        m.put32(at + SHADOW.COMMAND_HEAD, head);
+    };
+    m.put32(block + BUFFER.LOCKED, 1);
+    m.put32(block + BUFFER.FROM, 0);
+    m.put32(block + BUFFER.TO, 16);
+    // More locks than the ring holds since the host last looked: its slots
+    // name other blocks now, and only a look at every buffer finds this one.
+    const locks = SHADOW.LOCK_RING_CAPACITY + 3;
+    for (let n = 0; n < SHADOW.LOCK_RING_CAPACITY; n++)
+    {
+        m.put32(at + SHADOW.LOCK_RING + n * 4, 0x7770000 + n * 64);
+    }
+    m.put32(at + SHADOW.LOCK_CALLS, locks);
+    m.put32(at + SHADOW.UNLOCK_CALLS, locks - 1);
+    draw();
+    m.shadow.sync();
+    assert.deepEqual(vb.calls, ['lock 0+16 0x0', 'unlock']);
+    // No lock since: still held, still sent before the ring's calls.
+    m.put32(block + BUFFER.TO, 32);
+    draw();
+    m.shadow.sync();
+    assert.deepEqual(vb.calls.slice(2), ['lock 0+32 0x0', 'unlock']);
 });
 
 test('the ring starts over once the host has read up to a head near its end', ()=>{
@@ -763,6 +804,8 @@ function entryWithEverything(phases){
     m.put32(second + BUFFER.FROM, 0);
     m.put32(second + BUFFER.TO, 16);
     // Two locks taken by the routines, one let go of: one is held.
+    m.put32(at + SHADOW.LOCK_RING, first);
+    m.put32(at + SHADOW.LOCK_RING + 4, second);
     m.put32(at + SHADOW.LOCK_CALLS, 2);
     m.put32(at + SHADOW.UNLOCK_CALLS, 1);
     record(3, [0, 2]).forEach((word, i)=>m.put32(ring + i * 4, word));

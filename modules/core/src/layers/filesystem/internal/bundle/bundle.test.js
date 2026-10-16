@@ -382,6 +382,19 @@ test('a relocated directory appears where it is mapped, outside the prefix', asy
     assert.ok(!paths.some(path=>/data/i.test(path)), 'nothing is left at the old place');
 });
 
+test('a directory relocated to the root lands there, with no leading separator', async()=>{
+    // What an installation wrote elsewhere on C: comes back where it was.
+    const bundle = await open();
+    const source = createBundleSource({
+        bundle, readBlock: blockReader().readBlock, decode: decodeBlock, prefix: 'App',
+        relocate: { 'game': '' },
+    });
+    const notes = CONTENT['Game\\Data\\Notes.txt'];
+    same(source.read('Data\\Notes.txt', 0, notes.length), notes);
+    assert.ok(source.list().every(entry=>!entry.path.startsWith('\\') && entry.path !== ''),
+        'every path relative to the root');
+});
+
 test('a bundle packed again under the same name has another fingerprint', async()=>{
     // A block cache named by the bundle alone answered a repacked bundle's
     // reads with the old one's blocks, and the guest read garbage.

@@ -232,16 +232,21 @@ export function rectangle(painter, rect, pen, pattern){
     {
         return;
     }
+    if (!penPaints(pen))
+    {
+        // Without a pen the brush alone covers one less each way, from the
+        // same corner: bands a pen-less gradient draws a pixel apart meet edge
+        // to edge, where filling only inside the outline left each band's
+        // first row unpainted.
+        fillRect(painter, { ...rect, right: rect.right - 1, bottom: rect.bottom - 1 }, pattern);
+        return;
+    }
     fillRect(painter, {
         left: rect.left + 1,
         top: rect.top + 1,
         right: rect.right - 1,
         bottom: rect.bottom - 1,
     }, pattern);
-    if (!penPaints(pen))
-    {
-        return;
-    }
     const pixel = colorToPixel(pen.color);
     frameRect(painter, rect, ()=>pixel);
 }

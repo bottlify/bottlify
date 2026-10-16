@@ -694,10 +694,21 @@ export function createDialogFunctions(options){
         const origin = owner && (described.style & WS_CHILD) === 0
             ? host.geometry.clientOrigin(owner) : { x: 0, y: 0 };
         const centred = (described.style & DS_CENTER) !== 0;
-        const x = centred
-            ? Math.floor((screen.width - width) / 2) : origin.x + acrossFor(described.x, cell);
-        const y = centred
-            ? Math.floor((screen.height - height) / 2) : origin.y + downFor(described.y, cell);
+        const asked = {
+            x: centred
+                ? Math.floor((screen.width - width) / 2) : origin.x + acrossFor(described.x, cell),
+            y: centred
+                ? Math.floor((screen.height - height) / 2) : origin.y + downFor(described.y, cell),
+        };
+        // A dialog of its own on the desktop is moved wholly onto the screen,
+        // as the dialog manager does whatever the template and the owner said:
+        // a setup whose owner window was zero pixels tall at the top of the
+        // screen had its box placed above it, caption and all.
+        /** @param {number} at @param {number} size @param {number} room */
+        const onScreen = (at, size, room)=>Math.max(0, Math.min(at, room - size));
+        const topLevel = (described.style & WS_CHILD) === 0;
+        const x = topLevel ? onScreen(asked.x, width, screen.width) : asked.x;
+        const y = topLevel ? onScreen(asked.y, height, screen.height) : asked.y;
         // The dialog class is a system class: its procedure hands every
         // message to the dialog procedure kept in the extra bytes, which is
         // where GetWindowLong(DWLP_DLGPROC) reads it from.

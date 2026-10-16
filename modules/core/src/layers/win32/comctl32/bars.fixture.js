@@ -127,15 +127,40 @@ function fakeHandles(){
 
 /**
  * @param {Record<string, any>} gdiEngine  The graphics layer's createGdiDrawing,
- *     createSurface, surfaceForDdb, surfaceForDibSection and viewOf.
+ *     createScreen, surfaceForDdb and surfaceForDibSection.
  */
 export function setupBars(gdiEngine){
-    const { createGdiDrawing, createSurface, surfaceForDdb, surfaceForDibSection,
-        viewOf } = gdiEngine;
+    const { createGdiDrawing, createScreen, surfaceForDdb, surfaceForDibSection } = gdiEngine;
     const memory = fakeMemory();
     const handles = fakeHandles();
     const queue = createMessageQueue();
-    const desktop = createSurface({ width: SCREEN.width, height: SCREEN.height });
+    /** The window manager, once it has said: what the screen is composed of. @type {any} */
+    let windowService = null;
+    // The screen as the engine composes it, its surfaces in memory of their
+    // own: a window's pixels are larger than the fake guest memory.
+    /** @type {Map<number, Uint8Array>} */
+    const pixels = new Map();
+    let pixelsNext = 0x10000000;
+    const screen = createScreen({
+        allocate: (/** @type {number} */ bytes)=>{
+            const at = pixelsNext;
+            pixelsNext += (bytes + 15) & ~15;
+            pixels.set(at, new Uint8Array(bytes));
+            return at;
+        },
+        bytesAt: (/** @type {number} */ at, /** @type {number} */ length)=>
+            (pixels.get(at) ?? new Uint8Array(0)).subarray(0, length),
+        size: ()=>SCREEN,
+        surfaceOf: (/** @type {number} */ hwnd)=>windowService?.surfaceOf(hwnd) ?? null,
+        windows: ()=>windowService?.surfaces() ?? [],
+    });
+    /** The screen as it shows now, a pixel at a time. */
+    const desktop = {
+        /** @param {number} x @param {number} y */
+        read: (x, y)=>screen.compose()?.surface.read(x, y) ?? 0,
+        /** @param {number} x @param {number} y @param {number} pixel */
+        write: (x, y, pixel)=>screen.compose()?.surface.write(x, y, pixel),
+    };
     /** Every message the parent's procedure was sent. @type {any[]} */
     const sent = [];
     /** @type {string[]} */
@@ -164,11 +189,11 @@ export function setupBars(gdiEngine){
         screen: SCREEN,
         graphics: {
             createDrawing: (/** @type {any} */ options)=>createGdiDrawing(options),
+            presentDesktop: (/** @type {any} */ dc)=>screen.drawnOn(dc),
             surfaceFor: (/** @type {any} */ dc, /** @type {any} */ bitmap)=>{
                 if (dc.kind !== 'memory')
                 {
-                    return viewOf(desktop, dc.bounds
-                        ?? { left: 0, top: 0, right: SCREEN.width, bottom: SCREEN.height });
+                    return screen.surfaceFor(dc);
                 }
                 if (bitmap.pixels)
                 {
@@ -205,6 +230,7 @@ export function setupBars(gdiEngine){
         dc: ()=>({
             /** @param {number} hwnd @param {any} bounds */
             get: (hwnd, bounds = null)=>gdi.windowContext(hwnd, bounds),
+            background: ()=>gdi.windowContext(0, null, true),
             /** @param {number} hdc @param {any} bounds */
             rebind: (hdc, bounds)=>gdi.rebindWindowContext(hdc, bounds),
             /** @param {number} hwnd @param {number} hdc */
@@ -212,6 +238,7 @@ export function setupBars(gdiEngine){
         }),
         windowService: service=>{
             refreshContext = service.refreshContext;
+            windowService = service;
         },
         draw: gdi.draw,
         /** @param {number} region @param {any} rect */
@@ -220,7 +247,7 @@ export function setupBars(gdiEngine){
         regionBox: region=>gdi.regionBox(region),
         /** @param {number} region */
         deleteRegion: region=>void gdi.table.DeleteObject.handler([region]),
-        present: ()=>{},
+        present: ()=>screen.invalidate(),
         allocate,
         release: ()=>{},
         divergence: (api, detail)=>divergences.push(`${api}: ${detail}`),

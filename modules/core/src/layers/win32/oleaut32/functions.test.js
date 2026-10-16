@@ -136,6 +136,55 @@ test('error information is held once, handed over once, and absent by default', 
     assert.equal(call('SetErrorInfo', [0xdeadbeef, 0]) >>> 0, 0x80070057);
 });
 
+test('the error slot holds a reference of its own, and Get hands it over', async()=>{
+    // InstallShield's kernel sets its error object and releases both of its
+    // own pointers at once; a slot that took no reference held an object
+    // already gone, and the next GetErrorInfo reader called through a freed
+    // vtable at address 0 (Wine's errorinfo tests count the same).
+    setUp();
+    const FIRST = 0x3340;
+    const SECOND = 0x3380;
+    const VTABLE = 0x3400;
+    host.putU32(FIRST, VTABLE);
+    host.putU32(SECOND, VTABLE);
+    host.putU32(VTABLE + 4, 0xadd);
+    host.putU32(VTABLE + 8, 0x4e1);
+    /** @type {string[]} */
+    const counted = [];
+    /** @param {number} entry @param {number[]} args */
+    const count = async(entry, args)=>{
+        counted.push(`${entry === 0xadd ? 'AddRef' : 'Release'} ${args[0].toString(16)}`);
+        return 0;
+    };
+    /** @type {any} */ (host).call = count;
+    assert.equal(await fx.SetErrorInfo.handler([0, FIRST]), 0);
+    assert.deepEqual(counted, ['AddRef 3340'], 'the slot takes its own');
+    assert.equal(await fx.SetErrorInfo.handler([0, SECOND]), 0);
+    assert.deepEqual(counted.slice(1), ['AddRef 3380', 'Release 3340'],
+        'and gives back the one it held');
+    assert.equal(await fx.GetErrorInfo.handler([0, SLOT]), 0);
+    assert.equal(host.u32(SLOT), SECOND);
+    assert.equal(counted.length, 3, 'the reader is handed the slot\'s, not another');
+    assert.equal(await fx.SetErrorInfo.handler([0, FIRST]), 0);
+    assert.equal(await fx.SetErrorInfo.handler([0, 0]), 0);
+    assert.deepEqual(counted.slice(3), ['AddRef 3340', 'Release 3340'], 'cleared, released');
+    assert.equal(await fx.GetErrorInfo.handler([0, SLOT]), 1, 'S_FALSE: nothing held');
+});
+
+test('each thread has its own error information', ()=>{
+    // An installer's script engine reads the slot after each call it makes on
+    // its thread; another thread's error found there failed the call.
+    setUp();
+    let thread = 'worker';
+    /** @type {any} */ (host).callerThread = ()=>thread;
+    assert.equal(call('SetErrorInfo', [0, 0x12340]), 0);
+    thread = 'script';
+    assert.equal(call('GetErrorInfo', [0, SLOT]), 1, 'S_FALSE: not this thread\'s');
+    thread = 'worker';
+    assert.equal(call('GetErrorInfo', [0, SLOT]), 0);
+    assert.equal(host.u32(SLOT), 0x12340);
+});
+
 test('GetActiveObject finds no running object and clears the out pointer', ()=>{
     setUp();
     host.putU32(SLOT, 0xdeadbeef);
@@ -585,6 +634,23 @@ test('an element put into a copied array is not seen through the array it was co
     assert.equal(stringAt(original, 0), 'alpha');
 });
 
+test('a NULL put into an array of strings is the empty string; into one of variants, refused', ()=>{
+    // Wine's SafeArrayPutElement: the BSTR is copied by SysStringByteLen,
+    // which reads NULL as empty. InstallShield 11 puts NULL strings there.
+    setUp();
+    const strings = stringArray();
+    host.putU32(0x3040, 0);
+    assert.equal(call('SafeArrayPutElement', [strings, 0x3040, 0]), S_OK);
+    assert.equal(stringAt(strings, 0), '');
+    assert.equal(stringAt(strings, 1), 'beta');
+
+    host.putU32(0x3000, 1);
+    host.putU32(0x3004, 0);
+    const variants = call('SafeArrayCreate', [12, 1, 0x3000]);
+    host.putU32(0x3040, 0);
+    assert.equal(call('SafeArrayPutElement', [variants, 0x3040, 0]), E_INVALIDARG);
+});
+
 test('VariantCopy of an array reference is a reference, and clearing it destroys nothing', ()=>{
     setUp();
     const original = stringArray();
@@ -822,6 +888,10 @@ test('a SAFEARRAY holds a reference to every interface in it, as its elements or
         assert.equal(await settled('SafeArrayPutElement', [interfaces, INDEX, OBJECT_A]), S_OK);
         assert.equal(await settled('SafeArrayPutElement', [interfaces, INDEX, OBJECT_B]), S_OK);
         assert.deepEqual(calls, ['AddRef a', 'AddRef b', 'Release a'], 'put over another');
+        host.putU32(INDEX, 1);
+        assert.equal(await settled('SafeArrayPutElement', [interfaces, INDEX, 0]), S_OK,
+            'NULL empties a slot');
+        host.putU32(INDEX, 0);
         calls.length = 0;
         assert.equal(await settled('SafeArrayGetElement', [interfaces, INDEX, SLOT]), S_OK);
         assert.equal(host.u32(SLOT), OBJECT_B);

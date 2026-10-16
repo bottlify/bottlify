@@ -60,6 +60,12 @@ const WORD = 4;
  * @property {(builder: GuestSlotBuilder) => number} [guest]
  *           Guest code for the slot instead of a trap: given the method's own
  *           trap to fall back to, answers the address the slot should hold.
+ * @property {(call: number[]) => number | undefined} [inPlace]
+ *           What a call the host makes to the slot from driven steps is
+ *           answered with in place, with no entry into the guest
+ *           (`answerInPlace`): the slot's own work done by the host -- a
+ *           device's setter's record written into its command ring -- or
+ *           undefined, for a call the slot's code is to make itself.
  * @property {string} [builtin]           IUnknown's three, which we implement here.
  */
 
@@ -169,6 +175,13 @@ export function createVtables({ memory, register, heap }){
      * @type {Map<any, Set<string>>}
      */
     const heldAtZero = new Map();
+    /**
+     * The slots whose calls can be answered in place (`inPlace`), by the
+     * slot's address: its code's, or its trap's.
+     *
+     * @type {Map<number, (call: number[]) => number | undefined>}
+     */
+    const inPlace = new Map();
     let interfaces = 0;
     let methods = 0;
     let refused = 0;
@@ -225,7 +238,7 @@ export function createVtables({ memory, register, heap }){
                 // when the next call comes, so that call gets a new one.
                 /** @type {number[]} */
                 let rest = new Array((method.argBytes >>> 2) - 1);
-                const trap = register(`${interfaceId}::${method.name}`, {
+                const fn = {
                     convention: Convention.STDCALL,
                     argBytes: method.argBytes,
                     // An HRESULT is the whole answer; nothing here sets the
@@ -258,12 +271,22 @@ export function createVtables({ memory, register, heap }){
                         }
                         return answer;
                     },
-                });
+                };
+                const trap = register(`${interfaceId}::${method.name}`, fn);
                 // A method that runs in the guest keeps its trap: that is
                 // what its code falls back to for the cases it does not take.
                 if (method.guest)
                 {
-                    return method.guest({ trap, register });
+                    const at = method.guest({ trap, register });
+                    if (method.inPlace)
+                    {
+                        inPlace.set(at, method.inPlace);
+                    }
+                    return at;
+                }
+                if (method.inPlace)
+                {
+                    inPlace.set(trap, method.inPlace);
                 }
                 return method.builtin === 'addRef' || method.builtin === 'release'
                     ? countRoutine(method.builtin, trap)
@@ -577,6 +600,18 @@ export function createVtables({ memory, register, heap }){
     }
 
     return {
+        /**
+         * A call to a slot answered in place (`inPlace`): its number, or
+         * undefined for a call that is not answered so -- which then goes
+         * into the guest as it is.
+         *
+         * @param {number} entry  the slot's address @param {number[]} args  `this` first
+         * @returns {number | undefined}
+         */
+        answerInPlace(entry, args){
+            return inPlace.get(entry >>> 0)?.(args);
+        },
+
         /**
          * @param {any} object
          * @param {string} interfaceId

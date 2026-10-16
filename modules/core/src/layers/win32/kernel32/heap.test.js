@@ -947,6 +947,9 @@ test('GlobalMemoryStatusEx reports the arena in 64-bit fields and insists on its
     assert.equal(view.getBigUint64(at + 8, true), BigInt(ARENA.size), 'total physical');
     const free = view.getBigUint64(at + 16, true);
     assert.ok(free > 0n && free <= BigInt(ARENA.size), 'available physical is what the arena has');
+    assert.equal(view.getBigUint64(at + 24, true), 2n * BigInt(ARENA.size),
+        'the commit limit: memory and a page file as large');
+    assert.equal(view.getBigUint64(at + 32, true), free + BigInt(ARENA.size));
     assert.equal(view.getBigUint64(at + 40, true), BigInt(ARENA.size), 'total virtual');
     assert.equal(view.getBigUint64(at + 56, true), 0n, 'no extended virtual');
 });
@@ -1548,4 +1551,31 @@ test('the address index answers what one sorted array answers, across splits and
                 `step ${step} above ${probe}`);
         }
     }
+});
+
+test('MEM_RESERVE with MEM_COMMIT at an address commits from the base it answers', ()=>{
+    const { fns, host } = recording();
+    const wanted = 3 * GRANULARITY + 0x8000;
+    assert.equal(fns.VirtualAlloc.handler([wanted, 0x400, MEM_RESERVE | MEM_COMMIT, 0x40]),
+        3 * GRANULARITY, 'the granule the address is in');
+    const buffer = fns.VirtualAlloc.handler([0, PAGE_SIZE, MEM_RESERVE | MEM_COMMIT, 0x04]);
+    assert.notEqual(buffer, 0);
+    assert.equal(fns.VirtualQuery.handler([3 * GRANULARITY, buffer, MBI.SIZE]), MBI.SIZE);
+    const view = new DataView(host.bytes.buffer);
+    assert.equal(view.getUint32(buffer + MBI.State, true), MEM_COMMIT,
+        'the base itself is committed, where the program writes first');
+    assert.equal(view.getUint32(buffer + MBI.RegionSize, true), 0x9000,
+        'through the page the last byte asked for');
+});
+
+test('GlobalMemoryStatus answers a commit limit past memory, as a machine that pages does', ()=>{
+    // A program refuses one whose limit is no more than its memory: paging off.
+    const { host, fns } = setup();
+    const view = new DataView(host.bytes.buffer);
+    const at = 0x100;
+    fns.GlobalMemoryStatus.handler([at]);
+    assert.ok(view.getUint32(at + 16, true) > view.getUint32(at + 8, true),
+        'dwTotalPageFile past dwTotalPhys');
+    assert.ok(view.getUint32(at + 20, true) > view.getUint32(at + 12, true),
+        'and what is free of it past free memory');
 });

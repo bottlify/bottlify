@@ -28,6 +28,7 @@
  */
 
 import { IDIRECT3D9_SLOTS, describe } from './vtables.js';
+import { fpuSetupCode } from './fpu.js';
 import {
     D3DBOX, D3DDISPLAYMODE, D3DLIGHT7, D3DLOCKED_BOX, lockRectInto, D3DPRESENT_PARAMETERS9,
     POINT, RECT, createFields, createLightReader, dwordsOf, floatsOf, intsOf, putLight, putMaterial,
@@ -75,7 +76,7 @@ import {
     VIEWPORT_GUARD_9, VIEWPORT_MIRROR, commandCode, createShadow, getRenderStateCode,
     getSamplerStateCode, getSurfaceDescCode, getSurfaceLevelCode, getTextureStageStateCode,
     getTransformCode, getViewportCode, lockCode, settledAfter, stageStateMirror,
-    unlockCode,
+    unlockCode, HOST_MIRRORS, appendCommand, guestWords,
 } from './shadow.js';
 import { D3DTSS9 } from '../d3d9/samplerstates.js';
 import { COMMANDS, commandObjects, commandSlot } from '../d3d9/commands.js';
@@ -106,6 +107,25 @@ export const COMMAND_MIRRORS = {
     SetStreamSource: [...DRAWABLE_MIRRORS.SetStreamSource9],
     SetIndices: [...DRAWABLE_MIRRORS.SetIndices],
     DrawPrimitiveUP: [...DRAWABLE_MIRRORS.DrawPrimitiveUP],
+};
+
+/**
+ * The same mirrors as the host keeps them (`HOST_MIRRORS`), for the setters
+ * whose records it writes itself (`appendCommand`); a method with a mirror
+ * not here goes into the guest.
+ */
+export const HOST_COMMAND_MIRRORS = {
+    SetRenderState: HOST_MIRRORS.renderState,
+    SetTransform: HOST_MIRRORS.transform,
+    SetTextureStageState: HOST_MIRRORS.stageState(STAGE_STATE_TYPES_9),
+    SetViewport: HOST_MIRRORS.viewport9,
+    SetSamplerState: HOST_MIRRORS.samplerState,
+    BeginScene: HOST_MIRRORS.beginScene,
+    EndScene: HOST_MIRRORS.endScene,
+    SetFVF: HOST_MIRRORS.fvf,
+    SetVertexDeclaration: HOST_MIRRORS.declaration,
+    SetStreamSource: HOST_MIRRORS.streamSource9,
+    SetIndices: HOST_MIRRORS.indices,
 };
 
 const D3D_OK = 0;
@@ -1062,11 +1082,20 @@ export function createDirect3D9Seam(
     });
     /** The state blocks this seam handed out, which a run of records may name. */
     const stateBlocks = new WeakSet();
-    /** @param {string} name */
-    const stateBlockGuest = name=>(/** @type {{ trap: number }} */ { trap })=>placeCode(at=>
-        commandCode(at, trap, { ...COMMANDS[`StateBlock.${name}`],
-            slot: commandSlot(`StateBlock.${name}`) }));
-    const stateBlockInterfaces = [
+    /**
+     * Whether a block holds what a draw's checks read (`FLAG_DRAW_STALE`):
+     * which states a block holds is fixed when it is made.
+     *
+     * @param {any} record
+     */
+    const touchesDraws = record=>record.vertexDeclaration !== undefined
+        || record.indices !== undefined || record.streams.size > 0;
+    /** @param {string} name @param {boolean} [staleDraws] */
+    const stateBlockGuest = (name, staleDraws = false)=>(/** @type {{ trap: number }} */ { trap })=>
+        placeCode(at=>commandCode(at, trap, { ...COMMANDS[`StateBlock.${name}`],
+            slot: commandSlot(`StateBlock.${name}`), staleDraws }));
+    /** @param {boolean} staleDraws */
+    const stateBlockDescriptors = staleDraws=>[
         describeResource(IID_IDirect3DStateBlock9, IDIRECT3DSTATEBLOCK9_SLOTS, {
             GetDevice: getDevice,
             // A block reads and writes the device's state, which the guest
@@ -1087,9 +1116,13 @@ export function createDirect3D9Seam(
                 return hr;
             },
         }, allocate
-            ? { Capture: stateBlockGuest('Capture'), Apply: stateBlockGuest('Apply') }
+            ? { Capture: stateBlockGuest('Capture'), Apply: stateBlockGuest('Apply', staleDraws) }
             : {}),
     ];
+    // Two tables, one for each kind of block: the Apply each runs in the guest
+    // differs in whether the draws after it wait for the host.
+    const stateBlockInterfaces = stateBlockDescriptors(false);
+    const drawingStateBlockInterfaces = stateBlockDescriptors(true);
 
     /**
      * A state block, handed out as its interface: its methods in the guest
@@ -1100,8 +1133,8 @@ export function createDirect3D9Seam(
     const handBackStateBlock = (block, device, out)=>{
         stateBlocks.add(block);
         block.guestState = ()=>shadowOf(device)?.address() ?? 0;
-        return handBack(block, stateBlockInterfaces, IID_IDirect3DStateBlock9, out,
-            E_OUTOFMEMORY, device);
+        return handBack(block, touchesDraws(block.record) ? drawingStateBlockInterfaces
+            : stateBlockInterfaces, IID_IDirect3DStateBlock9, out, E_OUTOFMEMORY, device);
     };
 
     const queryInterfaces = [describeResource(IID_IDirect3DQuery9, IDIRECT3DQUERY9_SLOTS, {
@@ -1504,6 +1537,10 @@ export function createDirect3D9Seam(
         /** @param {any} device @param {number[]} args */
         Reset: (device, [parameters])=>{
             if ((parameters >>> 0) === 0)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            if (fullScreenUnlikeAnyMode(parameters >>> 0))
             {
                 return D3DERR_INVALIDCALL;
             }
@@ -2596,8 +2633,24 @@ export function createDirect3D9Seam(
                     { ...shape, slot: commandSlot(name), mirror: COMMAND_MIRRORS[name] }))])),
         }
         : {});
+    /**
+     * The device's setters its command ring carries: what the guest's call
+     * would only have written into the ring, a host's call from driven steps
+     * makes in place (`answerInPlace`). Not the draws, which may wait.
+     */
+    const words = guestWords(memory);
+    /** @type {Record<string, (call: number[]) => number | undefined>} */
+    const IN_PLACE = Object.fromEntries(Object.entries(COMMANDS).filter(([name, shape])=>
+        !shape.draws && !shape.self && (!(name in COMMAND_MIRRORS) || name in HOST_COMMAND_MIRRORS))
+        .map(([name, shape])=>{
+            const placed = { ...shape, slot: commandSlot(name) };
+            const mirror = /** @type {Record<string, any>} */ (HOST_COMMAND_MIRRORS)[name];
+            return [name, (/** @type {number[]} */ call)=>appendCommand(words, placed, mirror,
+                call)];
+        }));
     const deviceInterfaces = [
-        describe(IID_IDirect3DDevice9, IDIRECT3DDEVICE9_SLOTS, synced(deviceMethods), deviceGuests),
+        describe(IID_IDirect3DDevice9, IDIRECT3DDEVICE9_SLOTS, synced(deviceMethods), deviceGuests,
+            undefined, IN_PLACE),
     ];
 
     /**
@@ -2711,7 +2764,7 @@ export function createDirect3D9Seam(
      */
     const exDeviceInterfaces = [
         describe(IID_IDirect3DDevice9Ex, [...IDIRECT3DDEVICE9_SLOTS, ...IDIRECT3DDEVICE9EX_SLOTS],
-            synced({ ...deviceMethods, ...exDeviceMethods }), deviceGuests),
+            synced({ ...deviceMethods, ...exDeviceMethods }), deviceGuests, undefined, IN_PLACE),
         ...deviceInterfaces,
     ];
 
@@ -2787,6 +2840,26 @@ export function createDirect3D9Seam(
             fullScreenRefreshRateInHz: raw.FullScreen_RefreshRateInHz,
             presentationInterval: raw.PresentationInterval,
         };
+    };
+
+    /**
+     * Whether a full-screen back buffer is a size the display can be set to.
+     * Windows refuses one that is not -- zero by zero among them, which only a
+     * window can stand for -- and a program that asks for one goes another
+     * way on the refusal (Wine's test_reset: 0x0, 32x32 and 801x600 are
+     * D3DERR_INVALIDCALL). A windowed one is any size.
+     *
+     * @param {number} address
+     */
+    const fullScreenUnlikeAnyMode = address=>{
+        const raw = fields.readStruct(address, D3DPRESENT_PARAMETERS9);
+        if (raw.Windowed !== 0)
+        {
+            return false;
+        }
+        const width = raw.BackBufferWidth >>> 0;
+        const height = raw.BackBufferHeight >>> 0;
+        return !displayModes(screen()).some(mode=>mode.width === width && mode.height === height);
     };
 
     /**
@@ -3008,6 +3081,11 @@ export function createDirect3D9Seam(
             fields.writeU32(out >>> 0, 0);
             return D3DERR_INVALIDCALL;
         }
+        if (fullScreenUnlikeAnyMode(parameters >>> 0))
+        {
+            fields.writeU32(out >>> 0, 0);
+            return D3DERR_INVALIDCALL;
+        }
         const wanted = readPresentParameters(parameters >>> 0, focus >>> 0);
         /** @type {{ device?: any }} */
         const held = {};
@@ -3177,7 +3255,13 @@ export function createDirect3D9Seam(
     /** Tells the taker the cursor the device holds, when it changed. */
     const tellCursor = cursor ? createCursorTeller(cursor, memory.readMemory) : ()=>{};
 
-    const rootInterfaces = [describe(IID_IDirect3D9, IDIRECT3D9_SLOTS, rootMethods)];
+    // A device made without FPU_PRESERVE sets the calling thread's x87 as
+    // Direct3D does, in the guest, before the method's trap (`fpu.js`).
+    /** @type {Record<string, (builder: { trap: number }) => number>} */
+    const fpuGuests = allocate ? Object.fromEntries(['CreateDevice', 'CreateDeviceEx'].map(name=>
+        [name, (/** @type {{ trap: number }} */ { trap })=>placeCode(at=>fpuSetupCode(at, trap))]))
+        : {};
+    const rootInterfaces = [describe(IID_IDirect3D9, IDIRECT3D9_SLOTS, rootMethods, fpuGuests)];
 
     /**
      * The object Direct3DCreate9Ex hands back, which answers IDirect3D9 as
@@ -3187,7 +3271,7 @@ export function createDirect3D9Seam(
      */
     const rootExInterfaces = [
         describe(IID_IDirect3D9Ex, [...IDIRECT3D9_SLOTS, ...IDIRECT3D9EX_SLOTS],
-            { ...rootMethods, ...rootExMethods }),
+            { ...rootMethods, ...rootExMethods }, fpuGuests),
         ...rootInterfaces,
     ];
 

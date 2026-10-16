@@ -150,19 +150,31 @@ export async function finish(endpoint, id, packed, manifest){
             header: toBase64(packed.header),
             index: toBase64(packed.index),
             blockBytes: packed.blockBytes,
-            manifest: {
-                ...manifest,
-                bundle: {
-                    file: 'bundle.btl',
-                    blockSize: packed.blockSize,
-                    files: packed.files,
-                    directories: packed.directories,
-                    uncompressedBytes: packed.uncompressedBytes,
-                    bytes: packed.bytes,
-                    indexSha256: packed.indexSha256,
-                },
-            },
+            manifest: bundleManifest(packed, manifest),
         }),
     });
     return response.json();
+}
+
+/**
+ * A bottle's manifest: what is said about the title, and what its packing
+ * says about the bytes -- the same wherever the bottle is kept.
+ *
+ * @param {import('./pack.js').PackedSummary} packed
+ * @param {Record<string, unknown>} manifest
+ * @returns {Record<string, unknown>}
+ */
+export function bundleManifest(packed, manifest){
+    return {
+        ...manifest,
+        bundle: {
+            file: 'bundle.btl',
+            blockSize: packed.blockSize,
+            files: packed.files,
+            directories: packed.directories,
+            uncompressedBytes: packed.uncompressedBytes,
+            bytes: packed.bytes,
+            indexSha256: packed.indexSha256,
+        },
+    };
 }

@@ -41,7 +41,8 @@ import {
     DDSCL_NORMAL, DDSD_CAPS, DDSD_HEIGHT, DDSD_PIXELFORMAT, DDSD_WIDTH, DD_OK,
 } from '../ddraw/constants.js';
 import {
-    D3DDEVCAPS_HWRASTERIZATION, D3DDEVCAPS_HWTRANSFORMANDLIGHT, D3DERR_INVALIDVERTEXFORMAT,
+    D3DDEVCAPS_HWRASTERIZATION, D3DDEVCAPS_HWTRANSFORMANDLIGHT, D3DDP_DONOTCLIP,
+    D3DERR_INVALIDVERTEXFORMAT, D3DVBCAPS_DONOTCLIP,
     D3DERR_SCENE_NOT_IN_SCENE, D3DERR_VERTEXBUFFERLOCKED, D3D_OK, DDERR_INVALIDCAPS,
     DDERR_INVALIDPARAMS, DDERR_NOTFOUND, DEVICE_IDS, floatToDword,
 } from '../d3d7/constants.js';
@@ -778,6 +779,148 @@ test('ProcessVertices and ProcessVerticesStrided write transformed vertices into
     h.release(ddraw);
     h.assertAllReleased();
 });
+test('a buffer ProcessVertices clipped tells its draws so, until it is processed without', ()=>{
+    // The runtime keeps a clipping ProcessVertices's clip codes in the buffer
+    // and clips the triangles of a draw from it (decisions.md A45): the draw
+    // is told, unless it says D3DDP_DONOTCLIP or the buffer was made with
+    // D3DVBCAPS_DONOTCLIP, which keeps no codes.
+    const h = seamed();
+    const ddraw = h.create7();
+    const d3d = h.direct3D(ddraw);
+    const target = h.surface(ddraw);
+    const device = h.createDevice(d3d, target).device;
+    /** @param {number} fvf @param {number} caps */
+    const vertexBuffer = (fvf, caps)=>{
+        const desc = 0x6400;
+        h.box.memory.writeU32(desc + D3DVERTEXBUFFERDESC.dwSize, D3DVERTEXBUFFERDESC.SIZE);
+        h.box.memory.writeU32(desc + D3DVERTEXBUFFERDESC.dwCaps, caps);
+        h.box.memory.writeU32(desc + D3DVERTEXBUFFERDESC.dwFVF, fvf);
+        h.box.memory.writeU32(desc + D3DVERTEXBUFFERDESC.dwNumVertices, 3);
+        assert.equal(h.box.call(d3d, slot(IDIRECT3D7_SLOTS, 'CreateVertexBuffer'),
+            [desc, 0x6500, 0]), D3D_OK);
+        return h.box.memory.readU32(0x6500);
+    };
+    const src = vertexBuffer(FVF.XYZ, 0);
+    const dest = vertexBuffer(FVF.XYZRHW, 0);
+    const uncoded = vertexBuffer(FVF.XYZRHW, D3DVBCAPS_DONOTCLIP);
+    const drawn = h.publisher.objectAt(device);
+    /** @type {number[]} */
+    const told = [];
+    const draw = drawn.DrawPrimitiveVB;
+    drawn.DrawPrimitiveVB = (/** @type {any[]} */ ...args)=>{
+        told.push(args[4]);
+        return draw(...args);
+    };
+    const drawIndexed = drawn.DrawIndexedPrimitiveVB;
+    drawn.DrawIndexedPrimitiveVB = (/** @type {any[]} */ ...args)=>{
+        told.push(args[6]);
+        return drawIndexed(...args);
+    };
+    const TRANSFORM = 1;
+    const CLIP = 4;
+    const list = 4;
+    /** @param {number} buffer @param {number} op */
+    const process = (buffer, op)=>assert.equal(h.buffer(buffer, 'ProcessVertices',
+        [op, 0, 3, src, 0, device, 0]), D3D_OK);
+    /** @param {number} buffer @param {number} flags */
+    const drawOf = (buffer, flags)=>{
+        h.device(device, 'DrawPrimitiveVB', [list, buffer, 0, 3, flags]);
+        h.device(device, 'DrawIndexedPrimitiveVB', [list, buffer, 0, 3, 0x6600, 3, flags]);
+    };
+
+    process(dest, TRANSFORM | CLIP);
+    drawOf(dest, 0);
+    drawOf(dest, D3DDP_DONOTCLIP);
+    process(dest, TRANSFORM);
+    drawOf(dest, 0);
+    process(uncoded, TRANSFORM | CLIP);
+    drawOf(uncoded, 0);
+    assert.deepEqual(told, [1, 1, 0, 0, 0, 0, 0, 0]);
+
+    h.release(src);
+    h.release(dest);
+    h.release(uncoded);
+    assert.equal(h.release(device), 0);
+    h.release(d3d);
+    h.release(target);
+    h.release(ddraw);
+    h.assertAllReleased();
+});
+test('a buffer no draw has read is locked in place, read whole at its first draw, and '
+    + 'ProcessVertices locks only what it writes', ()=>{
+    // A program that fills four vertices of a megabyte buffer and transforms
+    // them, a quad at a time, had the megabyte compared or sent at every
+    // unlock. Until a draw reads a buffer nothing but ProcessVertices does,
+    // here; then all of it goes once, and after that each lock is the
+    // renderer's -- ProcessVertices's of only the vertices it writes.
+    const h = seamed();
+    const ddraw = h.create7();
+    const d3d = h.direct3D(ddraw);
+    const target = h.surface(ddraw);
+    const device = h.createDevice(d3d, target).device;
+    /** @param {number} fvf */
+    const vertexBuffer = fvf=>{
+        const desc = 0x6400;
+        h.box.memory.writeU32(desc + D3DVERTEXBUFFERDESC.dwSize, D3DVERTEXBUFFERDESC.SIZE);
+        h.box.memory.writeU32(desc + D3DVERTEXBUFFERDESC.dwCaps, 0);
+        h.box.memory.writeU32(desc + D3DVERTEXBUFFERDESC.dwFVF, fvf);
+        h.box.memory.writeU32(desc + D3DVERTEXBUFFERDESC.dwNumVertices, 64);
+        assert.equal(h.box.call(d3d, slot(IDIRECT3D7_SLOTS, 'CreateVertexBuffer'),
+            [desc, 0x6500, 0]), D3D_OK);
+        return h.box.memory.readU32(0x6500);
+    };
+    const src = vertexBuffer(FVF.XYZ);
+    const dest = vertexBuffer(FVF.XYZRHW);
+    /** @type {string[]} */
+    const calls = [];
+    for (const [name, buffer] of /** @type {const} */ ([['src', src], ['dest', dest]]))
+    {
+        const model = h.publisher.objectAt(buffer);
+        for (const method of ['Lock', 'LockRange', 'LockInPlace', 'Unlock', 'UnlockInPlace'])
+        {
+            const own = model[method];
+            model[method] = (/** @type {any[]} */ ...args)=>{
+                calls.push(`${name}.${method}${method === 'LockRange'
+                    ? `(${args[0]},${args[1]})` : ''}`);
+                return own(...args);
+            };
+        }
+    }
+    const lockUnlock = (/** @type {number} */ buffer)=>{
+        assert.equal(h.buffer(buffer, 'Lock', [0, 0x6600, 0]), D3D_OK);
+        assert.equal(h.buffer(buffer, 'Lock', [0, 0x6600, 0]), D3DERR_VERTEXBUFFERLOCKED >>> 0,
+            'locked in place is locked');
+        assert.equal(h.buffer(buffer, 'Unlock'), D3D_OK);
+    };
+    const process = (/** @type {number} */ at)=>assert.equal(h.buffer(dest, 'ProcessVertices',
+        [1, at, 4, src, 0, device, 0]), D3D_OK);
+    const draw = ()=>assert.equal(h.device(device, 'DrawPrimitiveVB', [4, dest, 0, 3, 0]),
+        D3DERR_SCENE_NOT_IN_SCENE >>> 0, 'outside a scene, the buffer still readied');
+
+    lockUnlock(src);
+    process(0);
+    assert.deepEqual(calls.splice(0), ['src.LockInPlace', 'src.LockInPlace',
+        'src.UnlockInPlace', 'dest.LockInPlace', 'dest.UnlockInPlace']);
+    draw();
+    assert.deepEqual(calls.splice(0), ['dest.Lock', 'dest.Unlock'], 'read whole, once');
+    draw();
+    process(8);
+    lockUnlock(src);
+    assert.deepEqual(calls.splice(0), [`dest.LockRange(${8 * 16},${5 * 16})`, 'dest.Unlock',
+        'src.LockInPlace', 'src.LockInPlace', 'src.UnlockInPlace']);
+    lockUnlock(dest);
+    assert.deepEqual(calls.splice(0), ['dest.Lock', 'dest.Lock', 'dest.Unlock'],
+        'a drawn buffer\'s own lock');
+
+    h.release(src);
+    h.release(dest);
+    assert.equal(h.release(device), 0);
+    h.release(d3d);
+    h.release(target);
+    h.release(ddraw);
+    h.assertAllReleased();
+});
+
 
 /**
  * The enumerations, driven through the descriptor directly: each answers with

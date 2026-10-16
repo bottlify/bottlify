@@ -16,10 +16,13 @@
  *  - clip-distances: the user clip planes are the rasteriser's; without it a
  *    clipped draw's fragment stage discards instead;
  *  - float32-filterable and float32-blendable: with both, a 32-bit float
- *    surface keeps its 32 bits; without them it is kept at half precision.
+ *    surface keeps its 32 bits; without them it is kept at half precision;
+ *  - timestamp-query, in a diagnostics build only: the GPU's time for each
+ *    pass (`internal/gputime.js`).
  */
 export const OPTIONAL_GPU_FEATURES = Object.freeze(['texture-compression-bc',
-    'depth-clip-control', 'clip-distances', 'float32-filterable', 'float32-blendable']);
+    'depth-clip-control', 'clip-distances', 'float32-filterable', 'float32-blendable',
+    ...(import.meta.BOTTLIFY_DIAGNOSTICS !== false ? ['timestamp-query'] : [])]);
 
 /**
  * The optional features an adapter has.

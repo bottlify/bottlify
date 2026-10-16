@@ -1297,7 +1297,7 @@ test('a wide directory listing writes twice as wide a name, at the same offset',
     memory.bytes.fill(0xee, 0x600 + 320, 0x600 + 600);
 
     const search = fns.FindFirstFileW.handler(
-        [putWide(memory, NAME, 'C:\\GAME\\*'), 0x600]);
+        [putWide(memory, NAME, 'C:\\GAME\\*.DAT'), 0x600]);
     assert.notEqual(search, INVALID_HANDLE_VALUE);
 
     // cFileName is at 44 in both forms; here it is UTF-16.
@@ -1694,7 +1694,7 @@ test('a name in the upper half of the ANSI page goes back as the bytes it was re
         [...path, 0]);
 
     files.put('C:\\GAME\\\u20ac\u2122\u2014\u00e9', 'x');
-    memory.bytes.set([...bytesOf('C:\\GAME\\*'), 0], NAME);
+    memory.bytes.set([...bytesOf('C:\\GAME\\*'), 0xe9, 0], NAME);
     assert.notEqual(fns.FindFirstFileA.handler([NAME, FIND_DATA]), INVALID_HANDLE_VALUE);
     const found = FIND_DATA + WIN32_FIND_DATAA.cFileName;
     assert.deepEqual([...memory.bytes.subarray(found, found + name.length + 1)], [...name, 0]);
@@ -2210,6 +2210,21 @@ test('a library this build implements stands in the system folder as a file', ()
     'a file on the volume is the file');
 });
 
+test('a library standing in the system folder is replaced by a setup that writes it', ()=>{
+    // A game's DXSETUP opened d3dx9_26.dll there to see whether it was in
+    // use, was refused, and put its copy off to a restart. Written, the name
+    // becomes the setup's file; read, it is still the engine's.
+    const { files, fns, at } = setup({ systemLibraries: ()=>['d3dx9_26.dll'] });
+    const path = 'C:\\WINDOWS\\system32\\d3dx9_26.dll';
+    assert.equal(fns.CreateFileA.handler([at(NAME, path), GENERIC_READ, 1, 0, OPEN_EXISTING,
+        0, 0]), INVALID_HANDLE_VALUE, 'nothing to read');
+    const handle = fns.CreateFileA.handler([at(NAME, path), GENERIC_WRITE, 3, 0, OPEN_EXISTING,
+        0, 0]);
+    assert.notEqual(handle, INVALID_HANDLE_VALUE, 'open to be written');
+    assert.equal(fns.CloseHandle.handler([handle]), 1);
+    assert.ok(files.stat(path)?.exists, 'and a file on the volume now');
+});
+
 test('a read through an OVERLAPPED moves a synchronous handle\'s pointer, not an overlapped one\'s',
     ()=>{
         const { memory, files, fns, open } = setup({ ports: {
@@ -2232,3 +2247,34 @@ test('a read through an OVERLAPPED moves a synchronous handle\'s pointer, not an
         assert.equal(fns.SetFilePointer.handler([overlapped, 0, 0, FILE_CURRENT]), 3,
             'a read with no OVERLAPPED still moves it');
     });
+
+test('a folder lists itself and its parent first, and a drive\'s root does not', ()=>{
+    // A program that skips the first two entries unseen -- Titan Quest
+    // listing its characters -- loses the first real one without them.
+    const { memory, files, fns } = setup();
+    files.mkdir('C:\\GAME\\SAVE');
+    files.mkdir('C:\\GAME\\SAVE\\_ONE');
+    files.put('C:\\TOP.TXT', 'x');
+    const name = FIND_DATA + WIN32_FIND_DATAA.cFileName;
+    /** @param {string} pattern */
+    const listing = pattern=>{
+        memory.bytes.set([...Array.from(pattern, c=>c.charCodeAt(0)), 0], NAME);
+        const search = fns.FindFirstFileA.handler([NAME, FIND_DATA]);
+        if (search === INVALID_HANDLE_VALUE)
+        {
+            return [];
+        }
+        const names = [];
+        for (let more = true; more; more = fns.FindNextFileA.handler([search, FIND_DATA]) !== 0)
+        {
+            names.push(String.fromCharCode(...memory.bytes.subarray(name,
+                memory.bytes.indexOf(0, name))));
+        }
+        fns.FindClose.handler([search]);
+        return names;
+    };
+    assert.deepEqual(listing('C:\\GAME\\SAVE\\*'), ['.', '..', '_ONE']);
+    assert.deepEqual(listing('C:\\GAME\\SAVE\\?*'), ['.', '..', '_ONE']);
+    assert.deepEqual(listing('C:\\GAME\\SAVE\\_*'), ['_ONE'], 'a pattern with a name in it');
+    assert.ok(!listing('C:\\*').includes('.'), 'the root has neither');
+});

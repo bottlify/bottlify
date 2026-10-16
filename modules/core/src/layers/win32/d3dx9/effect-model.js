@@ -60,11 +60,14 @@ export const isShader = type=>type === PT.PIXELSHADER || type === PT.VERTEXSHADE
 /**
  * Where a state's value comes from: a constant known when the effect is read, a
  * parameter read each time the state is applied, a shader the effect compiled (or
- * none), or something this layer does not evaluate.
+ * none), or an expression of parameters a compiled effect carries (FXLC),
+ * evaluated each time into `count` numbers of `type` (D3DXPARAMETER_TYPE).
  *
  * @typedef {{ kind: 'const', words: number[] }
  *   | { kind: 'param', path: string }
- *   | { kind: 'shader', shader: number | null }} ValueSource
+ *   | { kind: 'shader', shader: number | null }
+ *   | { kind: 'expression', program: import('./preshader.js').Preshader, type: number,
+ *       count: number }} ValueSource
  */
 
 /**

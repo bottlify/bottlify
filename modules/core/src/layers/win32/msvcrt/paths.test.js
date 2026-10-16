@@ -604,3 +604,14 @@ test('_chmod takes a path that exists and is ENOENT for one that does not', ()=>
     assert.equal(table._chmod.handler([memory.put('C:\\game\\data.mpq'), 0x80]), 0);
     assert.equal(table._chmod.handler([memory.put('C:\\game\\none.mpq'), 0x80]), -1);
 });
+
+test('_findfirst lists "." and ".." first in a folder, as the FindFirstFile it wraps does', ()=>{
+    const { memory, table, data, found } = finder();
+    const handle = table._findfirst.handler([memory.put('C:\\game\\*'), data]);
+    assert.equal(found().name, '.');
+    assert.equal(found().attrib & 0x10, 0x10, 'a directory');
+    assert.equal(table._findnext.handler([handle, data]), 0);
+    assert.equal(found().name, '..');
+    assert.equal(table._findnext.handler([handle, data]), 0);
+    assert.notEqual(found().name, '..', 'then what the folder holds');
+});

@@ -106,6 +106,10 @@ const NTE_BAD_VER = 0x80090007;
 const NTE_BAD_ALGID = 0x80090008;
 const NTE_BAD_FLAGS = 0x80090009;
 const NTE_BAD_TYPE = 0x8009000a;
+const NTE_NO_KEY = 0x8009000d;
+/** The two key pairs a container holds: for exchanging keys and for signing. */
+const AT_KEYEXCHANGE = 1;
+const AT_SIGNATURE = 2;
 const NTE_BAD_HASH_STATE = 0x8009000c;
 const NTE_FAIL = 0x80090020;
 const NTE_BAD_KEYSET = 0x80090016;
@@ -858,6 +862,33 @@ export function createCryptoFunctions(host){
                 key.prov = provHandle >>> 0;
                 writeDword(out, handle);
                 return 1;
+            },
+        },
+
+        /**
+         * BOOL CryptGetUserKey(HCRYPTPROV hProv, DWORD dwKeySpec, HCRYPTKEY *phUserKey)
+         *
+         * The container's key pair of that kind. No container here holds one
+         * -- no pair is ever generated (CryptGenKey) -- so it is NTE_NO_KEY,
+         * as a fresh container answers on Windows.
+         */
+        CryptGetUserKey: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([provHandle, spec, out])=>{
+                if (!asProvider(provHandle))
+                {
+                    return fail(NTE_BAD_UID);
+                }
+                if ((out >>> 0) === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                if ((spec >>> 0) !== AT_KEYEXCHANGE && (spec >>> 0) !== AT_SIGNATURE)
+                {
+                    return fail(NTE_BAD_KEY);
+                }
+                return fail(NTE_NO_KEY);
             },
         },
 

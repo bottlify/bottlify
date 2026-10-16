@@ -4,6 +4,7 @@
  * See LICENSE for details
  */
 
+import { visibleCursor } from './cursor.js';
 import { createJsSampler } from './host/js-samples.js';
 import { fitFrame, isShown, placementOf, stretchFrame } from './letterbox.js';
 import { assembleModules } from './core.js';
@@ -55,7 +56,7 @@ import { storeHandlers } from './layers/cpu/internal/store-link.js';
 import { eventFrom } from './system/events-across.js';
 import { defaultModules } from './layers/index.js';
 import { createRunRegistry } from './layers/win32/module.js';
-import { systemProgramImage } from './layers/win32/programs/table.js';
+import { programInPlaceOf, systemProgramImage } from './layers/win32/programs/table.js';
 import { createWindowDirectory } from './layers/win32/user32/directory.js';
 import { createMixer } from './layers/audio/output/mixer.js';
 import { objectHandlers } from './system-objects.js';
@@ -147,9 +148,9 @@ const hashText = (hash, text)=>{
  *     default button as Enter would, and each answer is reported as a divergence.
  * @property {boolean} [driveGuestCalls]  Host calls written as steps (`bridge.drive`) call the
  *     guest in the slice they came in, rather than parking the thread for each guest call
- *     and resuming it a turn later. Off by default: in a game's frame its committed effect
- *     parameters cost several times what they cost through promises, for a reason not yet
- *     found (bridge `driveMs` is what to read).
+ *     and resuming it a turn later. On by default: through promises each guest call of an
+ *     effect pass was a turn of its own, thousands a frame (bridge `driveMs` is what to read).
+ *     False runs the steps through promises.
  * @property {boolean} [profileCalls]  Time every host call as a phase of its own, for a
  *                                     report's cost per API; two clock readings a call.
  * @property {'sm1' | 'sm2' | 'sm3' | 'sm4' | 'host'} [gpuProfile]  The profile the
@@ -1761,17 +1762,22 @@ export function libraryCandidates(name, imagePath, currentDirectory, how = {}){
  *
  * The order matters because the bytes decide whether a real PE is mapped or a
  * synthesised table stands in for one, and the two answer different exports.
- * A title that shipped its own `d3dx9_26.dll` gets that file; one whose
- * installer put the runtime in `C:\WINDOWS\system32\` gets that one.
+ * A title that shipped its own `d3dx9_26.dll` gets that file; a library an
+ * installer put in `C:\WINDOWS\system32\` gets that one only when the engine
+ * answers no library of the name -- the system's copy of one it does answer
+ * is the engine's, as LoadLibrary at run time finds it (`libraryCandidates`'
+ * `ours`), so what a bottle carried there is covered rather than mapped.
  *
  * @param {any} filesystem
  * @param {any} blocks       The bundle fetcher, or null when there is no bundle.
  * @param {string} imagePath The running program, whose directory is searched first.
+ * @param {(name: string) => boolean} [ours]  Whether the engine answers the name.
  * @returns {(name: string) => Promise<Uint8Array | null>}
  */
-export function shippedLibraryReader(filesystem, blocks, imagePath){
+export function shippedLibraryReader(filesystem, blocks, imagePath, ours = ()=>false){
     return async name=>{
-        for (const candidate of libraryCandidates(name, imagePath))
+        for (const candidate of libraryCandidates(name, imagePath, undefined,
+            { ours: ours(name) }))
         {
             const file = await readWholeFile(filesystem, blocks, candidate);
             if (file)
@@ -2025,6 +2031,14 @@ export const BOTTLE_REGISTRY_PATH = '.bottlify\\registry.json';
 export const BOTTLE_SYSTEM_PATH = '.bottlify\\system32';
 
 /**
+ * Where in a bottle what its installation wrote elsewhere on C: is kept, by its
+ * path from the drive's root -- a shared runtime in Common Files, a settings
+ * file beside Windows -- and mounted back there (`@bottlify/installer`'s
+ * `DRIVE_PATH`, the same path).
+ */
+export const BOTTLE_DRIVE_PATH = '.bottlify\\drive_c';
+
+/**
  * The version resource of a file on the volume, or null: for a file that is
  * not there, is not an image or carries none. A file of a bundle whose bytes
  * have not arrived answers with a promise: the blocks the read missed are
@@ -2150,9 +2164,10 @@ export function compatibilityOf(executable){
 
 /**
  * A child's image: its file on the volume, or -- for a program of the system
- * folder the volume has no file for -- the image the engine makes for it
+ * folder the volume has no file for, or one a title brought that the engine
+ * runs in its place -- the image the engine makes for it
  * (`win32/programs/table.js`). Every way a child is started reads it here, so
- * a system program is a process in each of them.
+ * such a program is a process in each of them.
  *
  * @param {any} filesystem
  * @param {any} blocks
@@ -2160,7 +2175,52 @@ export function compatibilityOf(executable){
  * @returns {Promise<Uint8Array | null>}
  */
 async function readProgramImage(filesystem, blocks, path){
-    return await readWholeFile(filesystem, blocks, path) ?? systemProgramImage(path);
+    const file = await readWholeFile(filesystem, blocks, path);
+    return file ? programInPlaceOf(file) ?? file : systemProgramImage(path);
+}
+
+/**
+ * A child's image as it stands when CreateProcess is called, read at once, or
+ * null when any of it is not here yet (it is then read when the child starts,
+ * from a volume nothing of the run changes it on). Windows maps the image then:
+ * a setup that copies itself to a temporary file opened delete-on-close,
+ * starts the copy and exits has the file gone by the time a later read looks.
+ *
+ * @param {any} filesystem @param {string} path
+ * @returns {Uint8Array | null}
+ */
+function readImageNow(filesystem, path){
+    let handle;
+    try
+    {
+        handle = filesystem.open(path, { create: false });
+    }
+    catch {
+        return null;
+    }
+    try
+    {
+        const size = filesystem.size(handle);
+        const bytes = new Uint8Array(size);
+        for (let at = 0; at < size;)
+        {
+            const chunk = filesystem.read(handle, size - at);
+            if (chunk.length === 0)
+            {
+                return bytes.subarray(0, at);
+            }
+            bytes.set(chunk, at);
+            at += chunk.length;
+        }
+        return programInPlaceOf(bytes) ?? bytes;
+    }
+    catch {
+        return null;
+    }
+    finally
+    {
+        filesystem.close(handle);
+    }
 }
 
 /**
@@ -2303,7 +2363,8 @@ export async function mapShippedLibraries(options){
      * @param {string} name
      * @returns {string}
      */
-    const placeOf = name=>libraryCandidates(name, imagePath).find(candidate=>{
+    const placeOf = name=>libraryCandidates(name, imagePath, undefined,
+        { ours: isSystem(name) }).find(candidate=>{
         try
         {
             const entry = filesystem.stat(candidate);
@@ -2324,7 +2385,7 @@ export async function mapShippedLibraries(options){
         // bring is looked for in the system directories the engine fills, which
         // is where the runtime a title links against actually lives. Only when
         // neither has it does the engine's own table answer.
-        readLibrary: shippedLibraryReader(filesystem, blocks, imagePath),
+        readLibrary: shippedLibraryReader(filesystem, blocks, imagePath, isSystem),
     });
 
     if (missing.length > 0)
@@ -2593,7 +2654,8 @@ async function mountBundle({ options, cpu, events, translationStore }){
         prefix: options.bundle.prefix ?? BUNDLE_DIRECTORY,
         // What the installation left in system32 is found there again, read
         // from the bundle a block at a time like any of its files.
-        relocate: { [BOTTLE_SYSTEM_PATH]: SYSTEM_DIRECTORY },
+        // So is what it wrote anywhere else on C:, at the drive's root.
+        relocate: { [BOTTLE_SYSTEM_PATH]: SYSTEM_DIRECTORY, [BOTTLE_DRIVE_PATH]: '' },
     });
 
 
@@ -3575,14 +3637,14 @@ async function buildApp(options){
     // journal a later process's threads carry its image name as well.
     const callerImage = String(options.imagePath ?? '').split(/[\\/]/).pop() ?? '';
     const callerTag = options.log?.journal ? `${callerImage}:` : '';
-    // The cursor the page shows: what the program last said of it -- user32's
-    // count and SetCursor, or a device cursor; the last report wins -- hidden
-    // while it holds the mouse exclusively through DirectInput, as Windows does.
+    // The cursor the page shows: the system's or a device's (`visibleCursor`).
     /** @type {any} */
-    let programCursor = { shown: true };
+    let systemCursor = { shown: true };
+    /** @type {any} */
+    let deviceCursor = null;
     let mouseHeld = false;
     const showCursor = ()=>{
-        const cursor = mouseHeld ? { ...programCursor, shown: false } : programCursor;
+        const cursor = visibleCursor(systemCursor, deviceCursor, mouseHeld);
         core.api('input')?.cursorShown?.(cursor.shown !== false);
         events.emit('cursor', cursor);
     };
@@ -3754,7 +3816,7 @@ async function buildApp(options){
             // Costly and off unless asked for; see the dispatcher.
             traceStrings: options.traceStrings ?? false,
             callPhases: options.profileCalls ?? false,
-            driveGuestCalls: options.driveGuestCalls ?? false,
+            driveGuestCalls: options.driveGuestCalls ?? true,
             record: options.record ?? 0,
             onCall: (/** @type {any} */ call)=>{
                 journalCall(call);
@@ -4171,7 +4233,7 @@ async function buildApp(options){
             // bitmap and the hot spot, and shows it the way its screen can.
             /** @param {any} cursor */
             cursor: cursor=>{
-                programCursor = cursor;
+                deviceCursor = cursor;
                 showCursor();
             },
         },
@@ -4212,13 +4274,11 @@ async function buildApp(options){
             // that answer for one as well as to the layer that draws on it.
             screen: display,
             desktop: options.desktop,
-            // The cursor the program asks the page to show, from user32's own
-            // state -- ShowCursor's count and a null SetCursor -- the same event
-            // the Direct3D device methods emit above. Two producers, one
-            // consumer, and the last report wins.
+            // The system cursor, from user32's own state -- ShowCursor's count
+            // and a null SetCursor; a device's shown cursor goes over it.
             /** @param {any} cursor */
             reportCursor: cursor=>{
-                programCursor = cursor;
+                systemCursor = cursor;
                 showCursor();
             },
             // Sound leaves through the audio layer's mixer, and win32 sits
@@ -4281,7 +4341,8 @@ async function buildApp(options){
                 // The desktop every window context draws into, shown after
                 // a paint pass. The window manager decides when a pass is
                 // over; the graphics layer owns the surface and the screen.
-                presentDesktop: ()=>core.api('graphics').gdiDrawing().presentDesktop(),
+                presentDesktop: (/** @type {any} */ dc)=>core.api('graphics').gdiDrawing()
+                    .presentDesktop(dc),
                 // The display's gamma ramp, which the presenter shows every
                 // frame through, whichever API set it last.
                 /** @param {any} ramp */
@@ -4440,12 +4501,30 @@ async function buildApp(options){
                  */
                 versionInfo: path=>versionResourceOf(filesystem, path, blocks),
                 /**
+                 * Where the program found the copy of a library the table
+                 * answers in its place (`broughtCopies`), or null.
+                 *
+                 * @param {string} name
+                 */
+                broughtLibrary: name=>broughtCopies.get(moduleKeyOf(name)) ?? null,
+                /**
+                 * A whole file off the volume, waited for.
+                 *
+                 * @param {string} path
+                 */
+                readFile: path=>readWholeFile(filesystem, blocks, path),
+                /**
                  * Whether a library is one this build synthesises, which has
                  * a version though no file.
                  *
                  * @param {string} name
                  */
                 systemLibrary: name=>systemLibraries.has(moduleKeyOf(name)),
+                /**
+                 * Every library this build synthesises, whichever layer
+                 * answers for it: what a setup finds in the system folder.
+                 */
+                systemLibraries: ()=>Object.keys(allLibraries),
             },
             commandLine: options.commandLine,
             // Every child a program asks for, while the stack that asked is
@@ -4453,6 +4532,9 @@ async function buildApp(options){
             // one of these tears the machine down and takes the logs with it.
             /** @param {any} request */
             spawned: request=>{
+                // The image as it is now (`readImageNow`), for every way the
+                // child is started to take before it reads the volume again.
+                request.image ??= readImageNow(filesystem, request.imagePath);
                 events.emit('process-create', {
                     image: request.imagePath,
                     commandLine: request.commandLine,
@@ -4728,6 +4810,7 @@ async function buildApp(options){
     const isKnownDll = answeredByEngine(
         /** @type {() => string[]} */ (win32.knownDlls)?.() ?? [],
         [
+            ...(/** @type {() => string[]} */ (win32.runtimes)?.() ?? []),
             ...(/** @type {() => string[]} */ (audio.runtimes)?.() ?? []),
             ...(/** @type {() => string[]} */ (core.api('media').runtimes)?.() ?? []),
         ]);
@@ -5110,6 +5193,15 @@ async function buildApp(options){
     const systemLibraries = new Set(Object.keys(allLibraries).map(moduleKeyOf));
 
     /**
+     * The path a program named for a library answered from the table in place
+     * of its copy, by module key: a table that reads what the copy's package
+     * carries beside it -- DSETUP the licence in dsetup32.dll -- looks there.
+     *
+     * @type {Map<string, string>}
+     */
+    const broughtCopies = new Map();
+
+    /**
      * Those of them that are Windows' own, by file name: a copy an installation
      * left in system32 would be mapped in place of the engine's, so a bottle
      * carries none (`@bottlify/installer`'s `collect`). The redistributables a
@@ -5203,6 +5295,10 @@ async function buildApp(options){
         const asked = thread ?? kernel.currentThread();
         const unresolved = (flags & DONT_RESOLVE_DLL_REFERENCES) !== 0;
         const key = name.toLowerCase().replace(/\.dll$/, '');
+        if (isKnownDll(name) && /[\\/]/.test(name))
+        {
+            broughtCopies.set(moduleKeyOf(name), name);
+        }
         if (absentLibraries.has(key))
         {
             return 0;
@@ -7102,6 +7198,24 @@ async function buildApp(options){
             /** @param {number} address @param {number} length */
             read: (address, length)=>memory.readBytes(address >>> 0, length),
             /**
+             * The calls the guest made through Direct3D's command rings, which
+             * no call log shows: kept from now on for the last `count` of them,
+             * 0 to stop; answers what was kept.
+             *
+             * @param {number} [count]
+             */
+            ringTrace: count=>core.api('graphics').ringTrace?.(count) ?? [],
+            /**
+             * Keeps the functions named -- `'ShowWindow,PeekMessage'`, '' none --
+             * out of the bridge's ring of recent calls from now on, so that what
+             * a program did around one moment is still there to read when an
+             * idle loop of a few calls would have pushed it out. Answers the
+             * functions it matched.
+             *
+             * @param {string} [names]
+             */
+            callRingSkip: (names = '')=>bridge.skipInRing?.(String(names).split(',')) ?? [],
+            /**
              * Whether a system library this build makes exports a name, or a
              * number when there is no name: what an import table is checked
              * against without running the program (tools/import-audit.mjs).
@@ -7953,6 +8067,8 @@ async function buildSystemHost(deps){
         debug: {
             /** @param {number} address @param {number} length */
             read: (address, length)=>ask('debug.read', [address, length]),
+            /** @param {number} [count] */
+            ringTrace: count=>ask('debug.ringTrace', count === undefined ? [] : [count]),
             modules: ()=>ask('debug.modules'),
             /** @param {number} address */
             moduleAt: address=>ask('debug.moduleAt', [address]),
@@ -7960,6 +8076,25 @@ async function buildSystemHost(deps){
             desktop: ()=>ask('debug.desktop'),
             /** @param {number} address @param {any} how */
             hook: (address, how)=>ask('debug.hook', [address, how]),
+            /** @param {string} [names] */
+            callRingSkip: names=>ask('debug.callRingSkip', [names ?? '']),
+            /**
+             * Every process of the run standing, oldest first: the run's own
+             * program is the first, and `diagnostics` answers for it alone --
+             * an installer's real work is in the child its launcher started.
+             */
+            processes: ()=>across().map(each=>({ id: each.id, image: each.image })),
+            /**
+             * One standing process's tables, as `diagnostics` gives the first's.
+             *
+             * @param {number} id
+             */
+            diagnosticsOf: id=>{
+                const process = across().find(each=>each.id === id);
+                return process
+                    ? process.link.call('report', 'diagnostics', [])
+                    : Promise.reject(new Error(`no process ${id} stands`));
+            },
             ...liveDumpOf(options.device?.worker, {
                 pause: ()=>{
                     pausedByCaller = true;
@@ -8154,6 +8289,21 @@ function liveDumpOf(worker, control){
          *
          * @param {number} [count]
          */
+        /**
+         * Adds to every frame dump from now on a line for each of these
+         * textures -- `t642` as a dump names it, '' none -- with what its top
+         * level holds in guest memory: least, most, mean and the share zero.
+         *
+         * @param {string} [ids]
+         */
+        textureStats: (ids = '')=>{
+            if (!worker)
+            {
+                throw new Error('textureStats: this run draws without a graphics worker');
+            }
+            worker.postMessage({ type: 'debug', textureStats: ids });
+            return ids;
+        },
         stageLimit: (count = -1)=>{
             if (!worker)
             {
@@ -8894,7 +9044,7 @@ export async function createApp(options){
      * @param {any} parent @param {any} request @param {any} runOptions
      */
     const runBeside = async(line, parent, request, runOptions)=>{
-        const image = await parent.readImage(request.imagePath);
+        const image = request.image ?? await parent.readImage(request.imagePath);
         if (!image)
         {
             throw new Error(`cannot start ${request.imagePath}: it is not on the volume`);
@@ -9137,7 +9287,24 @@ export async function createApp(options){
         {
             facade.debug = { ...speaking.debug,
                 windows: ()=>runWindows() ?? speaking.debug.windows(),
-                desktop: ()=>runDesktop(()=>speaking.debug.desktop()) };
+                desktop: ()=>runDesktop(()=>speaking.debug.desktop()),
+                // `diagnostics` answers for this process alone, and an
+                // installer's work is often in a child its launcher started:
+                // the run's processes, and any one's tables by its id.
+                processes: ()=>[
+                    { id: options.processId ?? FIRST_PROCESS_ID, image: options.imagePath ?? '' },
+                    ...[...standingAcross].map(each=>({ id: each.id, image: each.image })),
+                ],
+                /** @param {number} id */
+                diagnosticsOf: id=>{
+                    if (id === (options.processId ?? FIRST_PROCESS_ID))
+                    {
+                        return facade.diagnostics();
+                    }
+                    const child = [...standingAcross].find(each=>each.id === id);
+                    return child ? child.diagnostics()
+                        : Promise.reject(new Error(`no process ${id} stands`));
+                } };
         }
     };
 
@@ -9159,7 +9326,8 @@ export async function createApp(options){
      *     libraries it knew
      */
     const runAcross = async(from, request, reach)=>{
-        const image = await from.readImage(request.imagePath).catch(()=>null);
+        const image = request.image
+            ?? await from.readImage(request.imagePath).catch(()=>null);
         if (!image)
         {
             events.emit('divergence', { api: 'process',
@@ -9607,7 +9775,7 @@ export async function createApp(options){
             const sound = ownSound();
             try
             {
-                const image = await parent.readImage(request.imagePath);
+                const image = request.image ?? await parent.readImage(request.imagePath);
                 if (!image)
                 {
                     events.emit('divergence', { api: 'process',
@@ -9771,7 +9939,7 @@ export async function createApp(options){
             // run's drives when it goes: an extractor that unpacked its
             // payload and then started it leaves the payload where the child
             // finds it.
-            const child = await line.current.readImage(request.imagePath);
+            const child = request.image ?? await line.current.readImage(request.imagePath);
             // The sequence the journal reached, read while the machine that
             // wrote it still stands. The child's journal continues from
             // here, so the cursor a reader is holding points into it rather

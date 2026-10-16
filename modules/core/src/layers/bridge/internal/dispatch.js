@@ -301,6 +301,10 @@ const NO_ERROR = ()=>0;
  *        Where a host call's time is accounted. Optional: this layer is
  *        testable without one, and a phase nobody reads is work nobody asked
  *        for.
+ * @param {(call: { entry: number, args?: number[] }) => number | undefined} [deps.inPlace]
+ *        What a driven step's guest call is answered with in place, with no
+ *        entry into the guest (`answerInPlace` of the vtables), or undefined
+ *        for one that goes in.
  * @param {(record: any) => void} [deps.onCall]
  *        Read the text an argument points at while the call is being made
  *        rather than when the trace is read. Off by default: it costs a scan
@@ -354,6 +358,8 @@ class Dispatcher {
         this.parking = parking;
         /** @type {((answer: Promise<number> | import('./drive.js').Driven, frame: any) => void) | null} */
         this.suspend = deps.suspend ?? null;
+        /** @type {Parameters<typeof createDispatcher>[0]['inPlace'] | null} */
+        this.inPlace = deps.inPlace ?? null;
 
         /**
          * The cpu's general registers as a view, when it lends one
@@ -506,26 +512,28 @@ class Dispatcher {
          * grow at all, failing inside the dispatcher with a message about
          * array length that says nothing about the guest.
          *
-         * A slot a call, `callCount` its index, in typed arrays a field
+         * A slot a call, `ringCount` its index, in typed arrays a field
          * each, and a record made of a slot only when somebody reads it: a
          * record object per slot was written field by field on every
          * crossing, each name and array a store the collector has to be told
          * about, and that bookkeeping was as much of a crossing as all the
          * rest of it.
          */
-        this.ids = new Int32Array(CALL_RING);
-        this.froms = new Int32Array(CALL_RING);
-        this.argWords = new Int32Array(CALL_RING * KEPT_ARGS);
-        this.argCounts = new Uint8Array(CALL_RING);
-        this.kinds = new Uint8Array(CALL_RING);
-        this.answers = new Float64Array(CALL_RING);
-        this.errors = new Float64Array(CALL_RING);
+        // One slot past the ring: where a call kept out of it (`skipInRing`)
+        // is written, so the rest of a crossing need not ask.
+        this.ids = new Int32Array(CALL_RING + 1);
+        this.froms = new Int32Array(CALL_RING + 1);
+        this.argWords = new Int32Array((CALL_RING + 1) * KEPT_ARGS);
+        this.argCounts = new Uint8Array(CALL_RING + 1);
+        this.kinds = new Uint8Array(CALL_RING + 1);
+        this.answers = new Float64Array(CALL_RING + 1);
+        this.errors = new Float64Array(CALL_RING + 1);
         /**
          * The text each argument pointed at, by slot, read only when tracing
          * asked for it.
          * @type {((string | null)[] | null)[]}
          */
-        this.strings = new Array(CALL_RING).fill(null);
+        this.strings = new Array(CALL_RING + 1).fill(null);
         /** What a sink is handed, written over for each call it is handed. */
         this.sinkRecord = makeRecord();
         /**
@@ -539,6 +547,16 @@ class Dispatcher {
         /** @type {Map<number, string>} */
         this.byAddress = new Map();
         this.callCount = 0;
+        /** The calls written into the ring, which the ring is read by. */
+        this.ringCount = 0;
+        /**
+         * The functions kept out of the ring, by id: a program's idle loop
+         * calling a few of them a hundred thousand times a second pushed out
+         * of it, in milliseconds, the calls a reader was after.
+         *
+         * @type {Set<number>}
+         */
+        this.ringSkip = new Set();
         /** A hook's name to its trap id, for `reportMismatch`. */
         /** @type {Map<string, number>} */
         this.hooksByName = new Map();
@@ -717,7 +735,9 @@ class Dispatcher {
             }
             text += String.fromCharCode(byte);
         }
-        return null;
+        // Text that runs to the end of the read is a long path or message
+        // cut short, and is shown as that rather than as nothing.
+        return text.length >= 2 && span === PEEK_LIMIT ? `${text}…` : null;
     }
 
     /**
@@ -727,12 +747,12 @@ class Dispatcher {
      * @returns {string[]}
      */
     history(count){
-        const kept = Math.min(count, this.callCount, CALL_RING);
+        const kept = Math.min(count, this.ringCount, CALL_RING);
         /** @type {string[]} */
         const out = [];
         for (let back = kept; back > 0; back--)
         {
-            out.push(this.nameAt((this.callCount - back) & CALL_RING - 1));
+            out.push(this.nameAt((this.ringCount - back) & CALL_RING - 1));
         }
         return out;
     }
@@ -1062,7 +1082,8 @@ class Dispatcher {
             ? this.readSite(entry, pushed, esp)
             : this.readCall(entry, regs, pushed, esp);
 
-        const at = this.callCount++ & CALL_RING - 1;
+        this.callCount++;
+        const at = this.ringSkip.has(id) ? CALL_RING : this.ringCount++ & CALL_RING - 1;
         this.ids[at] = id;
         entry.calls++;
         if ((this.callCount & RATE_CHECK_CALLS - 1) === 0)
@@ -1209,9 +1230,18 @@ class Dispatcher {
             {
                 // Steps: the first runs here, while the call still holds the
                 // processor. Steps that call the guest for nothing answer now,
-                // as a plain handler does; the rest the bridge runs on in this
-                // slice.
-                const first = result.steps.next();
+                // as a plain handler does -- those whose every call is answered
+                // in place too; the rest the bridge runs on in this slice.
+                let first = result.steps.next();
+                const inPlace = this.inPlace;
+                if (inPlace)
+                {
+                    for (let answered; !first.done
+                        && (answered = inPlace(first.value)) !== undefined;)
+                    {
+                        first = result.steps.next(answered | 0);
+                    }
+                }
                 if (first.done)
                 {
                     result = first.value;
@@ -1580,8 +1610,8 @@ class Dispatcher {
         return {
             implemented: this.implemented,
             calls: this.callCount,
-            lastCall: this.callCount === 0 ? null
-                : this.nameAt((this.callCount - 1) & CALL_RING - 1),
+            lastCall: this.ringCount === 0 ? null
+                : this.nameAt((this.ringCount - 1) & CALL_RING - 1),
             // What the guest has been doing, rather than the one thing it did
             // last. A program stuck in a loop says so here in a line; a stack
             // trace only shows where the loop was when it was interrupted.
@@ -1609,6 +1639,32 @@ class Dispatcher {
     }
 
     /**
+     * Keeps the functions named out of the ring of recent calls, or none with
+     * an empty list: a debugging aid for reading what a program did around
+     * one moment when a loop of a few calls drowns it. Matched by the name
+     * after the library's, `ShowWindow` for `USER32.dll!ShowWindow`; every
+     * function of that name, either width's too when its suffix is left off.
+     *
+     * @param {string[]} names
+     * @returns {string[]} the functions kept out
+     */
+    skipInRing(names){
+        const wanted = new Set(names.map(name=>name.trim()).filter(Boolean));
+        this.ringSkip.clear();
+        /** @type {string[]} */
+        const skipped = [];
+        this.functions.forEach((entry, id)=>{
+            const bare = entry?.name.slice(entry.name.indexOf('!') + 1) ?? '';
+            if (entry && (wanted.has(bare) || wanted.has(bare.replace(/[AW]$/, ''))))
+            {
+                this.ringSkip.add(id);
+                skipped.push(entry.name);
+            }
+        });
+        return skipped;
+    }
+
+    /**
      * The last few calls with what was asked and what was answered, oldest
      * first. Read backwards from a failure, this is where an answer that
      * was wrong rather than missing shows itself.
@@ -1616,12 +1672,12 @@ class Dispatcher {
      * @param {number} [count]
      */
     detailed(count = CALL_RING){
-        const kept = Math.min(count, this.callCount, CALL_RING);
+        const kept = Math.min(count, this.ringCount, CALL_RING);
         /** @type {any[]} */
         const out = [];
         for (let back = kept; back > 0; back--)
         {
-            const copy = this.recordAt((this.callCount - back) & CALL_RING - 1);
+            const copy = this.recordAt((this.ringCount - back) & CALL_RING - 1);
             copy.strings ??= copy.args.map(value=>this.peekString(value));
             out.push(copy);
         }
@@ -1689,7 +1745,7 @@ class Dispatcher {
      * still holds, which is every one of them until it wraps.
      */
     calls(){
-        return this.history(this.callCount);
+        return this.history(this.ringCount);
     }
 
     /** @param {number} count @returns {string[]} the last few, oldest first */

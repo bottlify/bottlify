@@ -37,7 +37,7 @@
 import {
     D3DERR_INBEGINSTATEBLOCK, D3DERR_INVALIDPRIMITIVETYPE, D3DERR_INVALIDSTATEBLOCK,
     D3DERR_INVALIDVERTEXFORMAT, D3DERR_NOTINBEGINSTATEBLOCK, D3DERR_SCENE_IN_SCENE,
-    D3DERR_SCENE_NOT_IN_SCENE, D3DERR_VERTEXBUFFERLOCKED, D3DFMT, D3DLIGHTTYPE,
+    D3DERR_SCENE_NOT_IN_SCENE, D3DERR_VERTEXBUFFERLOCKED, D3DFMT, D3DLIGHTTYPE, D3DRENDERSTATE,
     D3DRENDERSTATE_D3D7_ONLY, D3DRENDERSTATE_MAX, D3DSBT, D3DTRANSFORMSTATE, D3DTSS_MAX,
     D3DVBCAPS_OPTIMIZED, D3D_OK, DDERR_INVALIDPARAMS, DDERR_NOTFOUND, DDLOCK_DISCARDCONTENTS,
     DDLOCK_NOOVERWRITE, DDLOCK_READONLY, DEVICE_IDS, transformStateOf,
@@ -107,6 +107,7 @@ const FILTER_NUMBERING = Object.freeze({
  * @property {string | null} [probeTexture]
  * @property {{ dumpFrames: number }} [liveDump]  frames to write down from now on, on
  *     asking (app.debug.dumpFrames), as Direct3D 8 and 9 devices take it
+ * @property {'legacy' | 'current'} [driverRules]  The renderer's (`createRenderer`).
  * @property {(ddraw: any, services: RenderServices) => any} [remote]
  *     Makes the Direct3D 7 object in this one's place, whose devices draw
  *     elsewhere (`remote/d3d7.js`).
@@ -251,6 +252,7 @@ export function createDirect3D7(ddraw, services = {}){
             skipTexture: services.skipTexture ?? null,
             probeTexture: services.probeTexture ?? null,
             liveDump: services.liveDump,
+            driverRules: services.driverRules,
         })
         : null;
 
@@ -323,6 +325,8 @@ export function createDirect3D7(ddraw, services = {}){
         const length = layout.stride * desc.numVertices;
         const base = allocate(length);
         let locked = false;
+        // Whether the lock held is one the renderer was not told of.
+        let inPlace = false;
         let count = 1;
         // A buffer takes a reference on the DirectDraw object, as a surface
         // made through the seventh generation does.
@@ -381,15 +385,75 @@ export function createDirect3D7(ddraw, services = {}){
                     return D3D_OK;
                 }
                 locked = false;
-                if (renderer)
+                if (renderer && !inPlace)
                 {
                     renderer.unlockBuffer(buffer);
                 }
+                inPlace = false;
+                return D3D_OK;
+            },
+
+            /**
+             * Part of the buffer, for the runtime's own writes into it --
+             * ProcessVertices's -- whose extent it knows: only that part is
+             * read back from guest memory at the unlock, where a lock of the
+             * whole compared or sent all of it for a few vertices.
+             *
+             * @param {number} offset @param {number} size  in bytes
+             * @param {number} flags DDLOCK
+             * @param {{ data?: number, size?: number, pBits?: number }} out
+             */
+            LockRange(offset, size, flags, out){
+                if (locked)
+                {
+                    return D3DERR_VERTEXBUFFERLOCKED;
+                }
+                const from = Math.min(offset >>> 0, length);
+                const extent = Math.min(size >>> 0, length - from);
+                locked = true;
+                out.data = base + from;
+                out.pBits = base + from;
+                out.size = extent;
+                if (renderer)
+                {
+                    renderer.lockBuffer(buffer, from, extent, bufferLockFlags(flags >>> 0));
+                }
+                return D3D_OK;
+            },
+
+            /**
+             * A lock the renderer is not told of, so its unlock reads nothing:
+             * for a buffer no draw has read yet, which the seam has read whole
+             * before the first draw that does (`seam/d3d7.js`). A buffer that
+             * only ever feeds ProcessVertices is then never read here at all.
+             *
+             * @param {{ data?: number, size?: number }} out
+             */
+            LockInPlace(out){
+                if (locked)
+                {
+                    return D3DERR_VERTEXBUFFERLOCKED;
+                }
+                locked = true;
+                inPlace = true;
+                out.data = base;
+                out.size = length;
+                return D3D_OK;
+            },
+
+            /** Ends a lock `LockInPlace` took. */
+            UnlockInPlace(){
+                locked = false;
+                inPlace = false;
                 return D3D_OK;
             },
 
             get locked(){
                 return locked;
+            },
+
+            get lockedInPlace(){
+                return locked && inPlace;
             },
 
             GetVertexBufferDesc(/** @type {{ desc?: any }} */ out){
@@ -633,6 +697,9 @@ export function createDirect3D7(ddraw, services = {}){
         };
         let baseVertexIndex = 0;
         let drawFvf = 0;
+        // Whether the buffer being drawn was transformed with D3DVOP_CLIP,
+        // which the runtime clips when it draws it (decisions.md A45).
+        let clipsTransformed = false;
         /** @type {number} the address a present shows; the render target's until a flip */
         let presenting = 0;
 
@@ -676,6 +743,9 @@ export function createDirect3D7(ddraw, services = {}){
             },
             get stageProcessing(){
                 return { vertexShader: 0, fvf: drawFvf, pixelShader: 0 };
+            },
+            get clipsTransformed(){
+                return clipsTransformed;
             },
         };
 
@@ -1486,8 +1556,10 @@ export function createDirect3D7(ddraw, services = {}){
              * @param {any} buffer   A vertex buffer this object made.
              * @param {number} startVertex
              * @param {number} vertexCount
+             * @param {number} [clipped]  Non-zero for a buffer transformed with
+             *     D3DVOP_CLIP and drawn without D3DDP_DONOTCLIP, as the seam knows it.
              */
-            DrawPrimitiveVB(type, buffer, startVertex, vertexCount){
+            DrawPrimitiveVB(type, buffer, startVertex, vertexCount, clipped = 0){
                 const primitiveCount = primitiveCountOf(type, vertexCount);
                 const hr = buffer
                     ? drawPreconditions(type, buffer.fvf, primitiveCount, vertexCount)
@@ -1503,7 +1575,10 @@ export function createDirect3D7(ddraw, services = {}){
                 drawFvf = buffer.fvf;
                 stream.buffer = buffer;
                 stream.stride = buffer.stride;
+                clipsTransformed = clipped !== 0
+                    && (renderStates.get(D3DRENDERSTATE.CLIPPING) ?? 1) !== 0;
                 renderer?.drawPrimitive(model, type, startVertex, primitiveCount);
+                clipsTransformed = false;
                 return D3D_OK;
             },
 
@@ -1518,9 +1593,10 @@ export function createDirect3D7(ddraw, services = {}){
              * @param {number} vertexCount
              * @param {number} indexAddress  Guest address of the 16-bit indices.
              * @param {number} indexCount
+             * @param {number} [clipped]  As DrawPrimitiveVB takes it.
              */
             DrawIndexedPrimitiveVB(
-                type, buffer, startVertex, vertexCount, indexAddress, indexCount,
+                type, buffer, startVertex, vertexCount, indexAddress, indexCount, clipped = 0,
             )
             {
                 const primitiveCount = primitiveCountOf(type, indexCount);
@@ -1549,7 +1625,10 @@ export function createDirect3D7(ddraw, services = {}){
                     indexScratch.base = indexAddress >>> 0;
                     renderer.lockBuffer(indexScratch, 0, indexCount * 2, D3DLOCK.DISCARD);
                     renderer.unlockBuffer(indexScratch);
+                    clipsTransformed = clipped !== 0
+                        && (renderStates.get(D3DRENDERSTATE.CLIPPING) ?? 1) !== 0;
                     renderer.drawIndexedPrimitive(model, type, 0, primitiveCount);
+                    clipsTransformed = false;
                 }
                 return D3D_OK;
             },

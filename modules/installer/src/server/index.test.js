@@ -106,12 +106,12 @@ test('a prefix becomes a bundle the engine can open, and a manifest beside it', 
         });
 
         // What was seeded before the run is not part of what came out of it.
-        assert.equal(prefix.root, 'C:\\Games\\Title');
+        assert.equal(prefix.root, 'C:\\');
         assert.deepEqual(prefix.files.map(file=>file.path).sort(),
-            ['.bottlify\\registry.json', 'data\\art.mpq', 'title.exe']);
+            ['.bottlify\\registry.json', 'Games\\Title\\data\\art.mpq', 'Games\\Title\\title.exe']);
 
         const { bundle, close } = await readBundle(join(host.root, 'a-title', 'bundle.btl'));
-        const program = bundle.find('title.exe');
+        const program = bundle.find('Games\\Title\\title.exe');
         assert.ok(program, 'the program the installer wrote is not in the bundle');
         assert.equal(program.size, 10);
         assert.ok(bundle.find('.bottlify\\registry.json'), 'the registry travels with the files');
@@ -121,7 +121,7 @@ test('a prefix becomes a bundle the engine can open, and a manifest beside it', 
             await readFile(join(host.root, 'a-title', 'manifest.json'), 'utf8'));
         assert.equal(manifest.id, 'a-title');
         assert.equal(manifest.title, 'A Title');
-        assert.equal(manifest.entry, 'title.exe');
+        assert.equal(manifest.entry, 'Games\\Title\\title.exe');
         assert.equal(manifest.commandLine, '+set s_realTimeDecoding 0');
         assert.equal(manifest.bundle.format, 'btl/2');
         // Computed on this side, because a browser cannot hash incrementally.

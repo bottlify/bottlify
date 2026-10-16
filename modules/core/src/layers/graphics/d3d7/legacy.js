@@ -1398,10 +1398,11 @@ function createLegacyDevice(inner, version, legacy){
         /**
          * @param {number} type @param {any} buffer @param {number} start
          * @param {number} vertexCount @param {number} flags
+         * @param {number} [clipped]  As the Direct3D 7 device's draw takes it.
          */
-        drawPrimitiveVB: (type, buffer, start, vertexCount, flags)=>draw(type,
+        drawPrimitiveVB: (type, buffer, start, vertexCount, flags, clipped = 0)=>draw(type,
             buffer ? buffer.fvf : 0, flags, vertexCount, vertexCount,
-            ()=>inner.DrawPrimitiveVB(type, buffer, start, vertexCount)),
+            ()=>inner.DrawPrimitiveVB(type, buffer, start, vertexCount, clipped)),
 
         /**
          * The whole buffer is the vertices an indexed draw may reach, in this
@@ -1409,11 +1410,13 @@ function createLegacyDevice(inner, version, legacy){
          *
          * @param {number} type @param {any} buffer @param {number} indexAddress
          * @param {number} indexCount @param {number} flags
+         * @param {number} [clipped]  As the Direct3D 7 device's draw takes it.
          */
-        drawIndexedPrimitiveVB: (type, buffer, indexAddress, indexCount, flags)=>draw(type,
-            buffer ? buffer.fvf : 0, flags, indexCount, buffer ? buffer.numVertices : 0,
-            ()=>inner.DrawIndexedPrimitiveVB(type, buffer, 0, buffer ? buffer.numVertices : 0,
-                indexAddress, indexCount)),
+        drawIndexedPrimitiveVB: (type, buffer, indexAddress, indexCount, flags, clipped = 0)=>
+            draw(type, buffer ? buffer.fvf : 0, flags, indexCount,
+                buffer ? buffer.numVertices : 0,
+                ()=>inner.DrawIndexedPrimitiveVB(type, buffer, 0,
+                    buffer ? buffer.numVertices : 0, indexAddress, indexCount, clipped)),
 
         /**
          * Immediate mode: a primitive given a vertex at a time.

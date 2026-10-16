@@ -51,6 +51,12 @@ import {
 } from '../oleaut32/marshal.js';
 
 const S_OK = 0;
+/**
+ * How often a thread waiting on a call looks at its own windows when nothing
+ * woke it: about a frame, so a window it paints is drawn at the rate one is
+ * shown, and a wait costs nothing a frame does not.
+ */
+const MODAL_LOOK_MS = 16;
 const E_NOTIMPL = 0x80004001 | 0;
 const E_NOINTERFACE = 0x80004002 | 0;
 const E_POINTER = 0x80004003 | 0;
@@ -430,12 +436,21 @@ export function createClassTable(hooks = {}){
  *     post: (window: number, message: number) => unknown }} [apartmentWindow]
  *     A hidden window on the calling thread, whose procedure is `handler`,
  *     and a way to post to it.
+ * @property {(thread: unknown) => number | Promise<number>} [modalPump]
+ *     What a thread waiting on a call it made runs meanwhile, besides the
+ *     calls into its apartment: the messages other threads sent it and its
+ *     windows' paints, as COM's modal loop dispatches them.
+ * @property {(thread: unknown) => unknown} [apartmentOf]
+ *     The apartment a thread is in: two threads of one apartment call an
+ *     object directly, any other through a proxy. Absent, every thread is in
+ *     the same one.
  * @property {import('../oleaut32/marshal.js').CatalogHost} catalog
  * @property {{ factory: (iid: string, thread: unknown) => Promise<number> }} [proxyStub]
  *     The IPSFactoryBuffer of the proxy/stub DLL the registry names for an
  *     interface, loaded into this process as COM loads it; 0 when none is.
  * @property {(api: string, detail: string) => void} [divergence]
- * @property {{ take: () => number, set: (pointer: number) => unknown,
+ * @property {{ take: (thread: unknown) => number,
+ *     set: (pointer: number, thread: unknown) => unknown,
  *     create: (out: number) => number }} [errors]
  *     The thread's error-information slot -- taken off it, which clears it,
  *     and set, the slot keeping the reference handed it -- and
@@ -642,7 +657,7 @@ export function createRemoting(host){
      *     helpFile: string | null, helpContext: number } | null>}
      */
     const takeErrorInfo = async thread=>{
-        const pointer = host.errors?.take() ?? 0;
+        const pointer = host.errors?.take(thread) ?? 0;
         if (pointer === 0)
         {
             return null;
@@ -723,7 +738,7 @@ export function createRemoting(host){
         // The thread's slot holds the reference the query took.
         if (asked.pointer !== 0)
         {
-            host.errors.set(asked.pointer);
+            host.errors.set(asked.pointer, thread);
         }
     };
 
@@ -747,10 +762,22 @@ export function createRemoting(host){
                     await drain(thread);
                     continue;
                 }
+                // The thread's windows go on painting while it waits, and what
+                // other threads sent it is answered, as COM's modal loop does:
+                // a dialog whose program calls into another apartment for a
+                // whole file copy is drawn meanwhile.
+                if (host.modalPump)
+                {
+                    await host.modalPump(thread);
+                }
                 const woken = new Promise(resolve=>{
                     home.waiting = ()=>resolve(null);
                 });
-                const settled = await Promise.race([answer, woken]);
+                const settled = await Promise.race(host.modalPump
+                    ? [answer, woken, new Promise(resolve=>{
+                        setTimeout(()=>resolve(null), MODAL_LOOK_MS);
+                    })]
+                    : [answer, woken]);
                 home.waiting = null;
                 if (settled)
                 {
@@ -927,6 +954,7 @@ export function createRemoting(host){
      * @property {number} local     References the program holds.
      * @property {number} remote    Counts held on the exporter.
      * @property {Map<string, any>} records
+     * @property {string} [key]  Where the proxy table keeps it.
      * @property {Map<string, { pointer: number, buffer: number }>} midl
      *           The interfaces a proxy/stub DLL's proxy stands for: its
      *           interface pointer, and the IRpcProxyBuffer that owns it.
@@ -935,6 +963,16 @@ export function createRemoting(host){
 
     /** @type {Map<string, Proxy>} */
     const proxies = new Map();
+    /** A number for each apartment a proxy of this process's own objects is in. */
+    const apartmentKeys = new Map();
+    /** @param {unknown} apartmentOfThread */
+    const apartmentKey = apartmentOfThread=>{
+        if (!apartmentKeys.has(apartmentOfThread))
+        {
+            apartmentKeys.set(apartmentOfThread, apartmentKeys.size + 1);
+        }
+        return apartmentKeys.get(apartmentOfThread);
+    };
     /** @type {Map<number, Proxy>} */
     const proxyAt = new Map();
 
@@ -1305,7 +1343,7 @@ export function createRemoting(host){
      * @param {number} endpoint @param {number} object
      * @returns {Proxy}
      */
-    const makeProxy = (endpoint, object)=>{
+    const makeProxy = (endpoint, object, key = `${endpoint}:${object}`)=>{
         /** @type {Proxy & { interfaceFor: (id: string) => any }} */
         const proxy = {
             endpoint,
@@ -1318,7 +1356,8 @@ export function createRemoting(host){
             interfaceFor: id=>proxy.records.get(formatGuid(
                 /** @type {Uint8Array} */ (parseGuid(id) ?? new Uint8Array(16)))) ?? null,
         };
-        proxies.set(`${endpoint}:${object}`, proxy);
+        proxy.key = key;
+        proxies.set(key, proxy);
         return proxy;
     };
 
@@ -1330,13 +1369,22 @@ export function createRemoting(host){
      * @returns {Promise<number>}
      */
     const importInterface = async(reference, iid, thread)=>{
-        if (reference.endpoint === endpointId)
+        const own = reference.endpoint === endpointId;
+        const entry = own ? exported.get(reference.object) : null;
+        if (own && !entry)
         {
-            const entry = exported.get(reference.object);
-            if (!entry)
-            {
-                return 0;
-            }
+            return 0;
+        }
+        // An object of this process is itself in its own apartment; from
+        // another single-threaded one, it is reached through a proxy and its
+        // calls run in its own, on its thread. One of the multithreaded
+        // apartment is called directly: COM runs such a call on a thread of
+        // its RPC pool, which this process does not have, and the caller's
+        // thread is the nearest to it.
+        const here = host.apartmentOf?.(thread) ?? null;
+        const home = entry ? host.apartmentOf?.(entry.thread) ?? null : null;
+        if (entry && (home === here || /** @type {any} */ (home)?.multithreaded))
+        {
             let pointer = entry.interfaces.get(iid) ?? 0;
             if (pointer === 0)
             {
@@ -1349,8 +1397,9 @@ export function createRemoting(host){
             await dropExported(entry, 1, thread);
             return pointer;
         }
-        const key = `${reference.endpoint}:${reference.object}`;
-        const proxy = proxies.get(key) ?? makeProxy(reference.endpoint, reference.object);
+        const key = own ? `${reference.endpoint}:${reference.object}:${apartmentKey(here)}`
+            : `${reference.endpoint}:${reference.object}`;
+        const proxy = proxies.get(key) ?? makeProxy(reference.endpoint, reference.object, key);
         proxy.remote++;
         if (!await describeFor(proxy, IID_IUNKNOWN, thread)
             || !await describeFor(proxy, iid, thread))
@@ -1437,7 +1486,7 @@ export function createRemoting(host){
             return;
         }
         proxy.destroyed = true;
-        proxies.delete(`${proxy.endpoint}:${proxy.object}`);
+        proxies.delete(proxy.key ?? `${proxy.endpoint}:${proxy.object}`);
         for (const [pointer, owner] of proxyAt)
         {
             if (owner === proxy)
@@ -1462,7 +1511,11 @@ export function createRemoting(host){
         {
             const count = proxy.remote;
             proxy.remote = 0;
-            await send(proxy.endpoint, { kind: 'release', object: proxy.object, count });
+            // A call like any other: the object's release may call back into
+            // this apartment -- a destructor telling its caller it is gone --
+            // and is answered only if the thread goes on serving meanwhile.
+            const released = send(proxy.endpoint, { kind: 'release', object: proxy.object, count });
+            await (thread === null ? released : awaitServing(thread, released));
         }
     };
 
@@ -1882,8 +1935,8 @@ export function createRemoting(host){
         async releaseReference(reference, thread = host.callerThread()){
             if (reference.endpoint !== endpointId)
             {
-                await send(reference.endpoint,
-                    { kind: 'release', object: reference.object, count: 1 });
+                await awaitServing(thread, send(reference.endpoint,
+                    { kind: 'release', object: reference.object, count: 1 }));
                 return S_OK;
             }
             const entry = exported.get(reference.object);

@@ -1632,11 +1632,9 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
      */
     const drawPreconditions = (type, primitiveCount)=>{
         // Each refusal says which: the draw is simply missing from the picture otherwise.
-        if (!inScene)
-        {
-            report('draw-scene', 'a draw outside BeginScene and EndScene was refused');
-            return D3DERR_INVALIDCALL;
-        }
+        // A draw outside BeginScene and EndScene is not one: the runtime
+        // draws it (Wine's d3d9 draws check no scene), and a loading screen
+        // drawn between two Presents without a scene is on screen on Windows.
         if (vertexCountOf(type, primitiveCount) === 0)
         {
             report('draw-count', `a draw of no vertices (type ${type}, ${primitiveCount}`
@@ -3333,8 +3331,10 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             baseVertexIndex = base + bias;
             if (services.drawsFrom)
             {
+                const read = services.windowMemory ?? services.readMemory;
                 reportDynamicReads(services.drawsFrom, drawnStreams(), base + minIndex, numVertices,
-                    indices, startIndex, vertexCountOf(type, primitiveCount));
+                    indices, startIndex, vertexCountOf(type, primitiveCount),
+                    read ? { read, base } : undefined);
             }
             renderer?.drawIndexedPrimitive(model, type, startIndex, primitiveCount, minIndex,
                 numVertices);
@@ -3617,6 +3617,10 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             // Direct3D 8 refuses the same rectangle; this version takes it.
             if (!value || !(value.Width > 0) || !(value.Height > 0) || value.X < 0 || value.Y < 0)
             {
+                // Which rectangle: a program that keeps asking draws nowhere.
+                report(`viewport:${value?.X},${value?.Y},${value?.Width},${value?.Height}`,
+                    `SetViewport refused X=${value?.X} Y=${value?.Y} Width=${value?.Width} Height=${
+                        value?.Height}`);
                 return D3DERR_INVALIDCALL;
             }
             // The same rectangle again keeps the object a renderer names the

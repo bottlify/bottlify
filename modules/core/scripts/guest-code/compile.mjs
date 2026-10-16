@@ -22,8 +22,12 @@
  *    *\/
  *   export function strncmp({ u8 }, left, right, count){ ... }
  *
- * The tag names the calling convention (`cdecl` or `stdcall`); `@param` and
- * `@returns` give each value's machine type:
+ * The tag names the calling convention (`cdecl`, `stdcall` or `thiscall`);
+ * `@param` and `@returns` give each value's machine type. A thiscall
+ * function's first parameter is `this`, which the caller passes in ECX: the
+ * code begins `pop eax; push ecx; push eax`, putting it on the stack before
+ * the others, and is a stdcall function from there, whose `ret` takes the
+ * slot it pushed with the caller's arguments. The types:
  *
  *   i32, u32  a 32-bit stack slot, signed or unsigned; EAX as a result
  *   f64       a double: two stack slots; ST0 as a result
@@ -40,7 +44,9 @@
  * The loads are u8, i8, u16, i16, u32, i32, f32 and f64 (address); the
  * stores setU8, setU16, setU32, setF32 and setF64 (address, value), a
  * float stored rounded to nearest as `fstp dword` stores it; `call(fn, ...)`
- * calls a cdecl function pointer and answers its EAX as an i32; `copyUp`,
+ * calls a cdecl function pointer and answers its EAX as an i32, and
+ * `callStd(fn, ...)` a stdcall one, which pops its own arguments -- a COM
+ * method, `this` the first; `copyUp`,
  * `copyDown` (dst, src, count) copy bytes ascending or descending, and
  * `fill` (dst, byte, count) sets them -- `rep movsd` and `rep stosd` for the
  * whole dwords, leaving the bytes as the byte forms do.
@@ -155,7 +161,7 @@ import {
 /**
  * @typedef {Object} CompiledFunction
  * @property {string} name
- * @property {'cdecl' | 'stdcall'} convention
+ * @property {'cdecl' | 'stdcall' | 'thiscall'} convention
  * @property {ParamType[]} params   Excluding the guest's helpers.
  * @property {ReturnType} returns
  * @property {string[]} uses        The helpers the first parameter takes, in order.
@@ -251,7 +257,7 @@ const FLOAT_STORES = new Set(['setF32', 'setF64']);
 const X87_WORDS = new Set(['controlWord', 'statusWord', 'setControlWord', 'clearExceptions']);
 
 const HELPERS = new Set([...Object.keys(LOADS), ...Object.keys(STORES),
-    'call', 'copyUp', 'copyDown', 'fill', 'host', ...X87_WORDS]);
+    'call', 'callStd', 'copyUp', 'copyDown', 'fill', 'host', ...X87_WORDS]);
 
 const TABLE_KINDS = /** @type {const} */ ([
     ['Uint8Array', 1, false], ['Int8Array', 1, true], ['Uint16Array', 2, false],
@@ -560,7 +566,8 @@ class FunctionCompiler {
          * The load just emitted into EAX, while it is the last instruction:
          * what a store into a register variable can aim at the register.
          *
-         * @type {{ item: { bytes: number[] }, modrm: number, length: number, count: number }
+         * @type {{ item: { bytes: number[] }, at: number, modrm: number, length: number,
+         *     count: number }
          *     | null}
          */
         this.loaded = null;
@@ -598,10 +605,11 @@ class FunctionCompiler {
     compile(){
         const { node, doc } = this;
         const name = node.id.name;
-        const convention = /@guestCode\s+(cdecl|stdcall)\b/.exec(doc)?.[1];
-        if (convention !== 'cdecl' && convention !== 'stdcall')
+        const convention = /@guestCode\s+(cdecl|stdcall|thiscall)\b/.exec(doc)?.[1];
+        if (convention !== 'cdecl' && convention !== 'stdcall' && convention !== 'thiscall')
         {
-            this.fail(node, `${name}: @guestCode names its convention, cdecl or stdcall`);
+            this.fail(node, `${name}: @guestCode names its convention, cdecl, stdcall or `
+                + 'thiscall');
         }
         if (node.async || node.generator)
         {
@@ -743,6 +751,10 @@ class FunctionCompiler {
         {
             throw new Error(`guest code: ${name}'s frame is not the one it was addressed as`);
         }
+        if (convention === 'thiscall')
+        {
+            out.emit(0x58, 0x51, 0x50);   // pop eax; push ecx; push eax: `this` the first argument
+        }
         // The saved registers, then the variables below them: the frame from
         // ESP up, the parameters above the return address.
         for (const reg of saved)
@@ -811,7 +823,7 @@ class FunctionCompiler {
         out.label(this.epilogue);
         takeDown();
         const argBytes = stack - 8;
-        if (convention === 'stdcall' && argBytes > 0)
+        if (convention !== 'cdecl' && argBytes > 0)
         {
             out.emit(0xc2, argBytes & 0xff, argBytes >>> 8);  // ret argBytes
         }
@@ -1479,7 +1491,7 @@ class FunctionCompiler {
         const at = items.length - 1 - (items[items.length - 1].kind === 'ref' ? 1 : 0);
         const item = /** @type {{ kind: 'bytes', bytes: number[] }} */ (items[at]);
         this.loaded = {
-            item, modrm: item.bytes.length - 1 - tail, length: item.bytes.length,
+            item, at, modrm: item.bytes.length - 1 - tail, length: item.bytes.length,
             count: items.length,
         };
     }
@@ -1493,7 +1505,11 @@ class FunctionCompiler {
     retarget(reg){
         const loaded = this.loaded;
         this.loaded = null;
+        // The load noted must be the last thing emitted, in the assembler in
+        // hand: a count and a length that only match a stale note -- of another
+        // pass, of another expression -- would retarget an instruction long gone.
         if (!loaded || this.a.items.length !== loaded.count
+            || this.a.items[loaded.at] !== loaded.item
             || loaded.item.bytes.length !== loaded.length)
         {
             return false;
@@ -1624,9 +1640,9 @@ class FunctionCompiler {
                     this.bulk(node, name);
                     return;
                 }
-                if (name === 'call' && this.helpers.has(name))
+                if ((name === 'call' || name === 'callStd') && this.helpers.has(name))
                 {
-                    this.guestCall(node);
+                    this.guestCall(node, name === 'callStd');
                     return;
                 }
                 if (name === 'setControlWord' && this.helpers.has(name))
@@ -2638,7 +2654,7 @@ class FunctionCompiler {
         if (node.type === 'CallExpression' && node.callee.type === 'Identifier')
         {
             const name = node.callee.name;
-            if (name === 'call' && this.helpers.has('call'))
+            if ((name === 'call' || name === 'callStd') && this.helpers.has(name))
             {
                 return true;
             }
@@ -2970,9 +2986,9 @@ class FunctionCompiler {
                 this.noteLoad(modrm.length - 1);
                 return { where: 'eax', type: load.type };
             }
-            if (name === 'call')
+            if (name === 'call' || name === 'callStd')
             {
-                this.guestCall(node);
+                this.guestCall(node, name === 'callStd');
                 return { where: 'eax', type: 'i32' };
             }
             if (name === 'controlWord' || name === 'statusWord')
@@ -3458,7 +3474,7 @@ class FunctionCompiler {
      *
      * @param {any} node
      */
-    guestCall(node){
+    guestCall(node, stdcall = false){
         const a = this.a;
         const [target, ...args] = node.arguments;
         if (!target)
@@ -3505,7 +3521,8 @@ class FunctionCompiler {
                 this.toEax(fn, target);
                 a.emit(0xff, 0xd0);                                        // call eax
             }
-            if (bytes > 0)
+            // A stdcall callee has popped its arguments itself.
+            if (bytes > 0 && !stdcall)
             {
                 a.emit(0x83, 0xc4, bytes);                                 // add esp, 4n
             }
@@ -3528,7 +3545,7 @@ class FunctionCompiler {
             a.emit(0x89, ...memory(EAX, { base: ESP, disp: i * 4 }));       // mov [esp+4i], eax
         });
         a.emit(0xff, ...memory(2, { base: ESP, disp: bytes }));            // call [esp+4n]
-        a.emit(0x83, 0xc4, bytes + 4);                                     // add esp, 4n+4
+        a.emit(0x83, 0xc4, stdcall ? 4 : bytes + 4);                       // add esp, (4n+)4
         this.grew(-(bytes + 4));
     }
 }

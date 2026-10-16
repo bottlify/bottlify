@@ -29,6 +29,10 @@ test('a UUID is made random and read back from its braceless spelling', ()=>{
     assert.equal(fns.UuidCreate.handler([0]), 0, 'RPC_S_OK');
     assert.equal(memory[7] >> 4, 4, 'version 4');
     assert.equal(memory[8] >> 6, 2, 'variant 1');
+    assert.equal(fns.UuidCreateSequential.handler([0]), 0, 'RPC_S_OK');
+    assert.equal(memory[7] >> 4, 1, 'version 1');
+    assert.equal(memory[8] >> 6, 2, 'variant 1');
+    assert.equal(memory[10] & 1, 1, 'a node that is not an address');
     assert.equal(fns.UuidFromStringA.handler([64, 16]), 0);
     assert.deepEqual([...memory.subarray(16, 32)], [0x40, 0xfc, 0x29, 0x6b, 0x47, 0xca, 0x67, 0x10,
         0xb3, 0x1d, 0x00, 0xdd, 0x01, 0x06, 0x62, 0xda]);
@@ -36,6 +40,35 @@ test('a UUID is made random and read back from its braceless spelling', ()=>{
     assert.equal(fns.UuidFromStringA.handler([64, 16]), 1705, 'RPC_S_INVALID_STRING_UUID');
     assert.equal(fns.UuidFromStringA.handler([0, 32]), 0, 'NULL is the nil UUID');
     assert.deepEqual([...memory.subarray(32, 48)], new Array(16).fill(0));
+});
+
+test('a UUID spelled with COM\'s braces is no UUID string, refused rather than read on', ()=>{
+    // InstallShield 11 hands UuidFromStringA "{79896C28-...}"; the reader
+    // stopped at a UUID's length, found no terminator and failed the run.
+    const memory = new Uint8Array(128);
+    const text = '{6B29FC40-CA47-1067-B31D-00DD010662DA}';
+    for (let at = 0; at < text.length; at++)
+    {
+        memory[64 + at] = text.charCodeAt(at);
+    }
+    memory.fill(0xcc, 16, 32);
+    const fns = createRpcFunctions({
+        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        readCString: (address, max)=>{
+            let read = '';
+            for (let at = address; memory[at] !== 0; at++)
+            {
+                if (read.length >= max)
+                {
+                    throw new Error(`No NUL within ${max} bytes of 0x${address.toString(16)}`);
+                }
+                read += String.fromCharCode(memory[at]);
+            }
+            return read;
+        },
+    });
+    assert.equal(fns.UuidFromStringA.handler([64, 16]), 1705, 'RPC_S_INVALID_STRING_UUID');
+    assert.deepEqual([...memory.subarray(16, 32)], new Array(16).fill(0xcc), 'nothing written');
 });
 
 test('a UUID is spelled into a string the caller frees with RpcStringFree', ()=>{

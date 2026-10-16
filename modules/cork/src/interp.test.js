@@ -177,9 +177,10 @@ test('an encoding that is no instruction raises #UD at it, for the program to an
 });
 
 test('an instruction with no model throws Unsupported', ()=>{
-    // A form no user program runs and the evaluator has no case for: sldt.
+    // A form no user program runs and the evaluator has no case for: cli,
+    // which the translator traps to the host instead.
     const m = machine();
-    m.ram.set([0x0f, 0x00, 0x00], 0x1000); // sldt [eax]
+    m.ram.set([0xfa], 0x1000); // cli
     // `evaluate` counts and advances before it decides it has no case; the
     // host answers the throw for the instruction, not for the count.
     assert.throws(()=>interpret(m.state, 1), /no model for/);

@@ -12,7 +12,8 @@ import { createWindowFunctions } from './windows.js';
 import { MSG } from './structs.js';
 import { createGdiFunctions } from '../gdi32/functions.js';
 import { createGdiDrawing } from '../../graphics/gdi/context.js';
-import { createSurface, surfaceForDibSection, viewOf } from '../../graphics/gdi/surface.js';
+import { surfaceForDibSection } from '../../graphics/gdi/surface.js';
+import { createScreen } from '../../graphics/gdi/screen.js';
 import { createCommonControls } from '../comctl32/controls.js';
 import { createRichEditControls } from '../riched/richedit.js';
 import { imagePlace } from './controls.js';
@@ -282,7 +283,33 @@ function setup({ reply = ()=>0, engine = false, desktopPicture = null } = {}){
     /** The queue's clock, which a test moves on to have what is due later happen. */
     const clock = { now: 0 };
     const queue = createMessageQueue({ now: ()=>clock.now });
-    const desktop = createSurface({ width: SCREEN.width, height: SCREEN.height });
+    /** The window manager, once it has said: what the screen is composed of. @type {any} */
+    let windowService = null;
+    // The screen as the engine composes it, its surfaces in memory of their own.
+    /** @type {Map<number, Uint8Array>} */
+    const pixels = new Map();
+    let pixelsNext = 0x10000000;
+    const screen = createScreen({
+        allocate: bytes=>{
+            const at = pixelsNext;
+            pixelsNext += (bytes + 15) & ~15;
+            pixels.set(at, new Uint8Array(bytes));
+            return at;
+        },
+        bytesAt: (at, length)=>(pixels.get(at) ?? new Uint8Array(0)).subarray(0, length),
+        size: ()=>SCREEN,
+        surfaceOf: hwnd=>windowService?.surfaceOf(hwnd) ?? null,
+        windows: ()=>windowService?.surfaces() ?? [],
+    });
+    /** The screen as it shows now, a pixel at a time. */
+    const desktop = {
+        width: SCREEN.width,
+        height: SCREEN.height,
+        /** @param {number} x @param {number} y */
+        read: (x, y)=>screen.compose()?.surface.read(x, y) ?? 0,
+        /** @param {number} x @param {number} y @param {number} pixel */
+        write: (x, y, pixel)=>screen.compose()?.surface.write(x, y, pixel),
+    };
     /** @type {{ wndProc: number, hwnd: number, message: number, wParam: number,
      *     lParam: number }[]} */
     const dispatched = [];
@@ -316,11 +343,11 @@ function setup({ reply = ()=>0, engine = false, desktopPicture = null } = {}){
         screen: SCREEN,
         graphics: {
             createDrawing: options=>createGdiDrawing(options),
+            presentDesktop: dc=>screen.drawnOn(dc),
             surfaceFor: (dc, bitmap)=>{
                 if (dc.kind !== 'memory')
                 {
-                    return viewOf(desktop, dc.bounds
-                        ?? { left: 0, top: 0, right: SCREEN.width, bottom: SCREEN.height });
+                    return screen.surfaceFor(dc);
                 }
                 return bitmap.bits ? surfaceForDibSection(bitmap, memory.bytes, 0) : null;
             },
@@ -350,11 +377,16 @@ function setup({ reply = ()=>0, engine = false, desktopPicture = null } = {}){
         dc: ()=>({
             /** @param {number} hwnd @param {any} bounds */
             get: (hwnd, bounds = null)=>gdi.windowContext(hwnd, bounds),
+            background: ()=>gdi.windowContext(0, null, true),
             /** @param {number} hwnd @param {number} hdc */
             release: (hwnd, hdc)=>gdi.table.ReleaseDC.handler([hwnd, hdc]),
         }),
         draw: gdi.draw,
+        windowService: service=>{
+            windowService = service;
+        },
         present: ()=>{
+            screen.invalidate();
             presents++;
         },
         keyState: key=>(keysDown.has(key) ? 0x8000 : 0),
@@ -578,6 +610,61 @@ test('a shown static given new text paints it at once, with no message pumped', 
     context.memory.putString(TEXT, 'Copying');
     context.fns.SetWindowTextA.handler([label, TEXT]);
     assert.equal(context.fns.GetUpdateRect.handler([label, 0, 0]), 0, 'nothing left to paint');
+});
+
+test('a BS_TOP check box draws its box at the top, beside its label', async()=>{
+    // An installer's finish page set BS_TOP on tall check boxes: the label sat
+    // at the top and the box a line below it, in the middle.
+    const context = setup();
+    const dialog = await openDialog(context);
+    context.memory.putString(TEXT, 'Button');
+    /** @param {number} style */
+    const boxTop = async style=>{
+        const button = context.fns.CreateWindowExA.handler([0, TEXT, 0,
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | style, 8, 60, 160, 36, dialog, 600,
+            HINSTANCE, 0]);
+        await context.pump(dialog);
+        context.fns.GetWindowRect.handler([button, OUT]);
+        const [left, top, , bottom] = [0, 4, 8, 12].map(at=>context.memory.u32(OUT + at));
+        const shadow = 0x808080;
+        let found = -1;
+        for (let y = bottom - 1; y >= top; y--)
+        {
+            if ((context.desktop.read(left + 1, y) & 0xffffff) === shadow)
+            {
+                found = y - top;
+            }
+        }
+        context.fns.DestroyWindow.handler([button]);
+        await context.pump(dialog);
+        return found;
+    };
+    assert.equal(await boxTop(0x0400), 0, 'BS_TOP: at the top');
+    assert.equal(await boxTop(0), Math.floor((36 - 13) / 2), 'by default, in the middle');
+    assert.equal(await boxTop(0x0800), 36 - 13, 'BS_BOTTOM: at the bottom');
+});
+
+test('a static repainted in part lays its text out in all of itself, as when whole', async()=>{
+    // A dropped list closing over half a static left that half to repaint;
+    // laid out in rcPaint, the text began again at the uncovered part's edge.
+    const context = setup();
+    const dialog = await openDialog(context);
+    const label = context.fns.GetDlgItem.handler([dialog, 100]);
+    context.memory.putString(TEXT, 'Birth date is for verification');
+    context.fns.SetWindowTextA.handler([label, TEXT]);
+    await context.pump(dialog);
+    context.fns.GetWindowRect.handler([label, OUT]);
+    const [left, top, right, bottom] = [0, 4, 8, 12].map(at=>context.memory.u32(OUT + at));
+    const pixels = ()=>Array.from({ length: (right - left) * (bottom - top) },
+        (_, at)=>context.desktop.read(left + at % (right - left),
+            top + Math.floor(at / (right - left))));
+    const whole = pixels();
+    const half = Math.floor((right - left) / 2);
+    context.memory.writeMemory(OUT, Uint8Array.from([half, 0, 0, 0, 0, 0, 0, 0,
+        right - left, 0, 0, 0, bottom - top, 0, 0, 0]));
+    context.fns.InvalidateRect.handler([label, OUT, 1]);
+    await context.pump(dialog);
+    assert.deepEqual(pixels(), whole, 'the right half painted as it was');
 });
 
 test('a static passes the pointer through to the dialog unless it has SS_NOTIFY', async()=>{
@@ -1563,6 +1650,33 @@ test('a dropdown list drops a list of its own under the field, and a click there
             CBN_DROPDOWN, CBN_SELENDCANCEL, CBN_CLOSEUP]);
     });
 
+test('an editable combo box in focus shows its text with a caret, not a field of blue', async()=>{
+    // A self-extractor's destination box, typed into, was one block of the
+    // selection colour from edge to edge; Windows shows an edit there.
+    const context = setup();
+    const dialog = await openDialog(context);
+    context.memory.putString(TEXT, 'ComboBox');
+    const combo = context.fns.CreateWindowExA.handler([0, TEXT, 0,
+        WS_CHILD | WS_VISIBLE | 0x0002, 8, 60, 160, 60, dialog, 500, HINSTANCE, 0]);
+    context.memory.putString(TEXT, 'C:\\Game');
+    context.fns.SetWindowTextA.handler([combo, TEXT]);
+    await context.fns.SetFocus.handler([combo]);
+    context.fns.SendMessageA.handler([combo, CB_SETEDITSEL, 0, (7 << 16) >>> 0]);
+    context.fns.InvalidateRect.handler([combo, 0, 1]);
+    await context.pump(dialog);
+    context.fns.GetWindowRect.handler([combo, OUT]);
+    const [left, top, , bottom] = [0, 4, 8, 12].map(at=>context.memory.u32(OUT + at));
+    const y = Math.floor((top + bottom) / 2);
+    // A COLORREF is blue-green-red; the desktop keeps red-green-blue.
+    const colorref = context.fns.GetSysColor.handler([13]);
+    const highlight = (colorref & 0xff) << 16 | colorref & 0xff00 | colorref >>> 16 & 0xff;
+    const row = Array.from({ length: 120 },
+        (_, x)=>context.desktop.read(left + 4 + x, y) & 0xffffff);
+    const blue = row.filter(pixel=>pixel === highlight).length;
+    assert.ok(blue > 0, 'the selected text is in the selection colour');
+    assert.ok(blue < 60, 'and not the field past it');
+});
+
 test('an editable combo box field takes typing and answers the edit selection', async()=>{
     const context = setup();
     const dialog = await openDialog(context);
@@ -1676,6 +1790,164 @@ test('a scroll bar keeps its range and position, and a click on an arrow asks it
         const scrolled = context.dispatched.find(one=>one.message === WM_VSCROLL);
         assert.deepEqual([scrolled?.hwnd, scrolled?.wParam, scrolled?.lParam],
             [dialog, SB_LINEDOWN, bar], 'WM_VSCROLL(SB_LINEDOWN) with the bar as lParam');
+    });
+
+test('a scroll bar\'s thumb is dragged: SB_THUMBTRACK as it moves, then SB_THUMBPOSITION and '
+    + 'SB_ENDSCROLL where it is let go', async()=>{
+    const WM_MOUSEMOVE = 0x0200;
+    const [SB_THUMBPOSITION, SB_THUMBTRACK, SB_ENDSCROLL] = [4, 5, 8];
+    const context = setup();
+    const dialog = await openDialog(context);
+    context.memory.putString(TEXT, 'ScrollBar');
+    const bar = context.fns.CreateWindowExA.handler([0, TEXT, 0,
+        WS_CHILD | WS_VISIBLE | SBS_VERT, 180, 4, 16, 70, dialog, 600, HINSTANCE, 0]);
+    context.fns.SendMessageA.handler([bar, SBM_SETRANGE, 0, 100]);
+    await context.pump(dialog);
+    context.fns.GetWindowRect.handler([bar, OUT]);
+    const [left, top, , bottom] = [0, 4, 8, 12].map(at=>context.memory.u32(OUT + at));
+    // Seventy rows: two arrows of sixteen, a thumb of sixteen at the top of
+    // the track, and twenty-two to travel; taken four rows into it.
+    context.mouse(WM_LBUTTONDOWN, left + 8, top + 20);
+    await context.pump(dialog);
+    // A move waits for the program to take it, or the next one replaces it.
+    context.mouse(WM_MOUSEMOVE, left + 8, top + 31);
+    await context.pump(dialog);
+    context.mouse(WM_MOUSEMOVE, left + 8, bottom + 40);
+    context.mouse(WM_LBUTTONUP, left + 8, bottom + 40);
+    await context.pump(dialog);
+    const told = context.dispatched.filter(one=>one.message === WM_VSCROLL && one.hwnd === dialog)
+        .map(one=>[one.wParam & 0xffff, one.wParam >>> 16, one.lParam]);
+    assert.deepEqual(told, [[SB_THUMBTRACK, 50, bar], [SB_THUMBTRACK, 100, bar],
+        [SB_THUMBPOSITION, 100, bar], [SB_ENDSCROLL, 0, bar]]);
+});
+
+test('the thumb of a window\'s own scroll bar is dragged, and the window scrolls with it',
+    async()=>{
+        // The licence text of a setup could be scrolled by the arrows and
+        // the track, and its thumb did not move however it was dragged.
+        const WM_MOUSEMOVE = 0x0200;
+        const context = setup();
+        const dialog = await openDialog(context);
+        context.memory.putString(TEXT, 'Edit');
+        const edit = context.fns.CreateWindowExA.handler([WS_EX_CLIENTEDGE, TEXT, 0,
+            WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY,
+            8, 30, 200, 80, dialog, 301, HINSTANCE, 0]);
+        context.memory.putString(TEXT, Array.from({ length: 40 }, (_, index)=>`Clause ${index}`)
+            .join('\r\n'));
+        context.fns.SetWindowTextA.handler([edit, TEXT]);
+        await context.pump(dialog);
+        context.fns.GetWindowRect.handler([edit, OUT]);
+        const [top, right] = [4, 8].map(at=>context.memory.u32(OUT + at));
+        // The press on the thumb, at the top of the track inside the edge;
+        // then what the pointer does while the edit holds the mouse, in its
+        // client coordinates, as the input layer hands it on.
+        context.mouse(WM_LBUTTONDOWN, right - 10, top + 2 + 16 + 2);
+        for (const [message, y] of [[WM_MOUSEMOVE, 400], [WM_LBUTTONUP, 400]])
+        {
+            context.queue.post({ hwnd: edit, message, wParam: 0, lParam: (y << 16 | 100) >>> 0,
+                time: 0 });
+        }
+        await context.pump(dialog);
+        const first = context.fns.SendMessageA.handler([edit, EM_GETFIRSTVISIBLELINE, 0, 0]);
+        const lines = context.fns.SendMessageA.handler([edit, EM_GETLINECOUNT, 0, 0]);
+        assert.ok(first > 0, `scrolled: ${first}`);
+        context.fns.SendMessageA.handler([edit, WM_VSCROLL, 7, 0]);
+        assert.equal(context.fns.SendMessageA.handler([edit, EM_GETFIRSTVISIBLELINE, 0, 0]), first,
+            `dragged to the end, as SB_BOTTOM puts it (${lines} lines)`);
+    });
+
+test('the wheel scrolls the list under the pointer, and a child that does not use it hands '
+    + 'it to its parent', async()=>{
+    const WM_MOUSEWHEEL = 0x020a;
+    const LB_GETTOPINDEX = 0x018e;
+    const GWL_STYLE = -16;
+    const context = setup();
+    const dialog = await openDialog(context);
+    context.memory.putString(TEXT, 'ListBox');
+    // Under the check box and left of the Next button, which were made
+    // before it and are stacked above it.
+    const list = context.fns.CreateWindowExA.handler([0, TEXT, 0,
+        WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY, 8, 58, 70, 36, dialog, 400,
+        HINSTANCE, 0]);
+    /** @param {number} count */
+    const fill = count=>{
+        for (let index = 0; index < count; index++)
+        {
+            context.memory.putString(TEXT, `Item ${index}`);
+            context.fns.SendMessageA.handler([list, LB_ADDSTRING, 0, TEXT]);
+        }
+    };
+    fill(1);
+    assert.equal(context.fns.GetWindowLongA.handler([list, GWL_STYLE]) & WS_VSCROLL, 0,
+        'one item fits: no bar to scroll it with');
+    fill(19);
+    assert.notEqual(context.fns.GetWindowLongA.handler([list, GWL_STYLE]) & WS_VSCROLL, 0,
+        'twenty do not');
+    await context.pump(dialog);
+
+    // The focus is on the dialog's button, the pointer over the list.
+    const at = context.centre(list);
+    context.queue.post({ hwnd: 0, message: WM_MOUSEWHEEL, wParam: (-120 << 16) >>> 0,
+        lParam: (at.y << 16 | at.x) >>> 0, time: 0, x: at.x, y: at.y });
+    await context.pump(dialog);
+    assert.equal(context.fns.SendMessageA.handler([list, LB_GETTOPINDEX, 0, 0]), 3,
+        'three rows a notch');
+    context.fns.SendMessageA.handler([list, WM_VSCROLL, 7, 0]);
+    const bottom = context.fns.SendMessageA.handler([list, LB_GETTOPINDEX, 0, 0]);
+    assert.ok(bottom > 3 && bottom < 20, `SB_BOTTOM shows the last item: ${bottom}`);
+
+    const button = context.fns.GetDlgItem.handler([dialog, 3]);
+    const over = context.centre(button);
+    context.queue.post({ hwnd: 0, message: WM_MOUSEWHEEL, wParam: (120 << 16) >>> 0,
+        lParam: (over.y << 16 | over.x) >>> 0, time: 0, x: over.x, y: over.y });
+    await context.pump(dialog);
+    assert.ok(context.dispatched.some(one=>one.wndProc === DIALOGPROC
+        && one.message === WM_MOUSEWHEEL), 'the button handed the wheel to the dialog');
+});
+
+test('a simple combo box shows its list under the field, and a click there chooses',
+    async()=>{
+        // A setup's page for the Start menu folder: the field with the
+        // folder's name and the folders there are below it. It was drawn as a
+        // dropdown stretched over the whole height, and nothing could be chosen.
+        const WM_MOUSEWHEEL = 0x020a;
+        const CBS_SIMPLE = 0x0001;
+        const context = setup();
+        const dialog = await openDialog(context);
+        context.memory.putString(TEXT, 'ComboBox');
+        const combo = context.fns.CreateWindowExA.handler([0, TEXT, 0,
+            WS_CHILD | WS_VISIBLE | WS_VSCROLL | CBS_SIMPLE, 8, 4, 120, 70, dialog, 500,
+            HINSTANCE, 0]);
+        for (let index = 0; index < 12; index++)
+        {
+            context.memory.putString(TEXT, `Folder ${index}`);
+            context.fns.SendMessageA.handler([combo, CB_ADDSTRING, 0, TEXT]);
+        }
+        await context.pump(dialog);
+        context.fns.GetWindowRect.handler([combo, OUT]);
+        const [left, top] = [0, 4].map(at=>context.memory.u32(OUT + at));
+        const row = context.gdi.draw.measure(context.gdi.windowContext(combo, null), 'M').height;
+        const field = row + 8;
+        // The third row of the list: under the field and the list's edge.
+        context.click(left + 20, top + field + 2 + 2 * row + Math.floor(row / 2));
+        await context.pump(dialog);
+        assert.equal(context.fns.SendMessageA.handler([combo, CB_GETCURSEL, 0, 0]), 2);
+        assert.equal(context.fns.GetWindowTextA.handler([combo, OUT, 32]), 8);
+        assert.equal(context.memory.readCString(OUT, 32), 'Folder 2', 'the field shows it');
+        const CBN_SETFOCUS = 3;
+        assert.deepEqual(context.commands().filter(([id])=>id === 500).map(([, code])=>code),
+            [CBN_SETFOCUS, CBN_SELCHANGE], 'it takes the focus, and the item is chosen');
+
+        // A notch of the wheel over the list scrolls it three rows.
+        const x = left + 20;
+        const y = top + field + 2 + Math.floor(row / 2);
+        context.queue.post({ hwnd: 0, message: WM_MOUSEWHEEL, wParam: (-120 << 16) >>> 0,
+            lParam: (y << 16 | x) >>> 0, time: 0, x, y });
+        await context.pump(dialog);
+        context.click(x, y);
+        await context.pump(dialog);
+        assert.equal(context.fns.SendMessageA.handler([combo, CB_GETCURSEL, 0, 0]), 3,
+            'the top row is now the fourth item');
     });
 
 test('a system class has a procedure address a program can subclass and call through',
@@ -1861,8 +2133,8 @@ test('ChildWindowFromPoint finds the child at a point in the parent\'s client ar
 });
 
 test('an unread message for a hidden window paints nothing and the desktop stays', async()=>{
-    // GetClientRect is the window less its frame; MoveWindow repaints what
-    // it uncovers and what it now covers.
+    // GetClientRect is the window less its frame. MoveWindow takes its
+    // surface along: nothing is painted, the screen is composed again.
     const context = setup();
     const dialog = await openDialog(context);
     context.fns.GetClientRect.handler([dialog, OUT]);
@@ -1874,14 +2146,13 @@ test('an unread message for a hidden window paints nothing and the desktop stays
     'plus the three-pixel dialog frame each side and the caption');
     const presentedBefore = context.presents();
     context.fns.MoveWindow.handler([dialog, 30, 10, 206, 145, 1]);
-    // Its pixels go with it, and where it was the desktop paints at once: a
-    // window that moved left no gap to wait out.
+    // Its pixels go with it, and where it was the desktop shows at once.
     assert.equal(context.desktop.read(8, 8), 0x00808080, 'the desktop where it was, at once');
     assert.equal(context.desktop.read(181, 130), 0x00c0c0c0, 'the dialog face where it is now');
     assert.equal(context.fns.GetUpdateRect.handler([dialog, 0, 0]), 0, 'none of it to paint');
     context.clock.now += 1000;
     await context.pump(dialog);
-    assert.ok(context.presents() > presentedBefore, 'moving repainted and showed the desktop');
+    assert.ok(context.presents() > presentedBefore, 'moving showed the screen again');
     assert.equal(context.desktop.read(8, 8), 0x00808080, 'the desktop shows where it was');
     assert.equal(context.desktop.read(181, 130), 0x00c0c0c0, 'the dialog face where it is now');
     assert.deepEqual(context.fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 0);

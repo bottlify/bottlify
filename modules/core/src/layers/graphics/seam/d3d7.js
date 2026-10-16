@@ -34,11 +34,13 @@ import {
 import { readGuid } from './ddraw.js';
 import { writePixelFormat } from '../ddraw/structs.js';
 import { depthFormatForDepth } from '../ddraw/objects.js';
-import { DDERR_INVALIDPARAMS, D3D_OK } from '../d3d7/constants.js';
+import {
+    D3DDP_DONOTCLIP, D3DVBCAPS_DONOTCLIP, DDERR_INVALIDPARAMS, D3D_OK,
+} from '../d3d7/constants.js';
 import { DDPF_ALPHAPIXELS, DDPF_RGB } from '../ddraw/constants.js';
 import { createDirect3D7 } from '../d3d7/device.js';
 import { loadTexture } from '../d3d7/load.js';
-import { processVertices } from '../d3d7/process.js';
+import { D3DVOP, processVertices } from '../d3d7/process.js';
 import { decodeFvf } from '../webgpu/internal/vertexformat.js';
 
 /** What an enumeration callback answers to stop. */
@@ -434,19 +436,92 @@ export function createDirect3D7Seam(
         {
             return DDERR_INVALIDPARAMS;
         }
-        const locking = !buffer.locked;
-        if (locking)
+        if ((op & D3DVOP.CLIP) !== 0 && (buffer.caps & D3DVBCAPS_DONOTCLIP) === 0)
         {
-            buffer.Lock(0, {});
+            clipCoded.add(buffer);
+        }
+        else
+        {
+            clipCoded.delete(buffer);
+        }
+        // Only the vertices written are locked, and the one after them, whose
+        // first four bytes take the last RHW (`processVertices`); a buffer no
+        // draw has read yet is written in place and read whole at its first.
+        const locking = !buffer.locked;
+        if (locking && drawn.has(buffer))
+        {
+            buffer.LockRange((destIndex >>> 0) * buffer.stride,
+                ((count >>> 0) + 1) * buffer.stride, 0, {});
+        }
+        else if (locking)
+        {
+            buffer.LockInPlace({});
+            unseen.add(buffer);
         }
         const hr = processVertices({ memory, vertexOp: op >>> 0, dest: buffer,
             destIndex: destIndex >>> 0, count: count >>> 0, source,
             state: owner.processingState(), flags: flags >>> 0 });
         if (locking)
         {
-            buffer.Unlock();
+            unlock(buffer);
         }
         return hr;
+    };
+
+    /**
+     * The vertex buffers a draw has read. Until one has, the program's locks
+     * of a buffer are taken in place: nothing reads it but ProcessVertices,
+     * here, from guest memory, and a lock the renderer was told of had all of
+     * it compared or sent at every unlock -- a program that fills a megabyte
+     * buffer's first four vertices a quad sent the megabyte a quad.
+     *
+     * @type {WeakSet<object>}
+     */
+    const drawn = new WeakSet();
+    /** The buffers written in place since a draw last read them whole. @type {WeakSet<object>} */
+    const unseen = new WeakSet();
+    /** @param {any} buffer */
+    const unlock = buffer=>(buffer.lockedInPlace ? buffer.UnlockInPlace() : buffer.Unlock());
+    /**
+     * A buffer as a draw is about to read it: what was written in place goes
+     * to the renderer first, by a lock of all of it.
+     *
+     * @param {any} buffer
+     */
+    const drawingFrom = buffer=>{
+        if (!buffer || buffer.locked)
+        {
+            return;
+        }
+        drawn.add(buffer);
+        if (unseen.has(buffer))
+        {
+            unseen.delete(buffer);
+            buffer.Lock(0, {});
+            buffer.Unlock();
+        }
+    };
+
+    /**
+     * The vertex buffers whose last ProcessVertices was asked to clip, into a
+     * buffer made without D3DVBCAPS_DONOTCLIP: the runtime keeps each vertex's
+     * clip codes and clips the triangles when such a buffer is drawn, unless
+     * the draw says D3DDP_DONOTCLIP (decisions.md A45). Kept here, beside the
+     * call that knows it, so a device drawn elsewhere is told it with the draw.
+     *
+     * @type {WeakSet<object>}
+     */
+    const clipCoded = new WeakSet();
+    /**
+     * Readies a buffer for a draw from it (`drawingFrom`), and answers what
+     * the draw is told of its clipping.
+     *
+     * @param {any} buffer @param {number} flags D3DDP @returns {number}
+     */
+    const clippedDraw = (buffer, flags)=>{
+        drawingFrom(buffer);
+        return buffer && clipCoded.has(buffer) && ((flags >>> 0) & D3DDP_DONOTCLIP) === 0
+            ? 1 : 0;
     };
 
     const bufferMethods = {
@@ -458,7 +533,19 @@ export function createDirect3D7Seam(
             }
             /** @type {{ data?: number, size?: number }} */
             const locked = {};
-            const hr = buffer.Lock(flags >>> 0, locked);
+            let hr;
+            if (drawn.has(buffer))
+            {
+                hr = buffer.Lock(flags >>> 0, locked);
+            }
+            else
+            {
+                hr = buffer.LockInPlace(locked);
+                if (hr === D3D_OK)
+                {
+                    unseen.add(buffer);
+                }
+            }
             if (hr === D3D_OK)
             {
                 fields.writeU32(out >>> 0, locked.data ?? 0);
@@ -470,7 +557,7 @@ export function createDirect3D7Seam(
             return hr;
         },
         /** @param {any} buffer */
-        Unlock: (/** @type {any} */ buffer)=>buffer.Unlock(),
+        Unlock: (/** @type {any} */ buffer)=>unlock(buffer),
         /** @param {any} buffer @param {number[]} args */
         GetVertexBufferDesc: (buffer, [out])=>{
             if ((out >>> 0) === 0)
@@ -830,13 +917,19 @@ export function createDirect3D7Seam(
                 readArray(indices, (indexCount >>> 0) * 2), indexCount >>> 0),
 
         /** @param {any} device @param {number[]} args */
-        DrawPrimitiveVB: (device, [type, buffer, start, count])=>device.DrawPrimitiveVB(
-            type >>> 0, publisher.objectAt(buffer), start >>> 0, count >>> 0),
+        DrawPrimitiveVB: (device, [type, buffer, start, count, flags])=>{
+            const vertices = publisher.objectAt(buffer);
+            return device.DrawPrimitiveVB(type >>> 0, vertices, start >>> 0, count >>> 0,
+                clippedDraw(vertices, flags));
+        },
 
         /** @param {any} device @param {number[]} args */
-        DrawIndexedPrimitiveVB: (device, [type, buffer, start, count, indices, indexCount])=>
-            device.DrawIndexedPrimitiveVB(type >>> 0, publisher.objectAt(buffer), start >>> 0,
-                count >>> 0, indices >>> 0, indexCount >>> 0),
+        DrawIndexedPrimitiveVB: (device, args)=>{
+            const [type, buffer, start, count, indices, indexCount, flags] = args;
+            const vertices = publisher.objectAt(buffer);
+            return device.DrawIndexedPrimitiveVB(type >>> 0, vertices, start >>> 0,
+                count >>> 0, indices >>> 0, indexCount >>> 0, clippedDraw(vertices, flags));
+        },
 
         /** @param {any} device @param {number[]} args */
         GetTexture: (device, [stage, out])=>{
@@ -1147,7 +1240,7 @@ export function createDirect3D7Seam(
          */
         shared: {
             d3dFor, deviceMethods, bufferMethods, d3dMethods, gatherStrided, readArray, readFloats,
-            strideOf, writeString, textureFormats: TEXTURE_FORMATS,
+            strideOf, writeString, textureFormats: TEXTURE_FORMATS, clippedDraw,
         },
     };
 }

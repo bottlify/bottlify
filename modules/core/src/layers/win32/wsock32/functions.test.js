@@ -552,8 +552,9 @@ test('every ordinal offered names a function this library has', ()=>{
     {
         for (const [ordinal, name] of Object.entries(table))
         {
-            assert.ok(name in fx.winsock.sockets,
-                `${library} ordinal ${ordinal} names ${name}, which is not implemented`);
+            assert.ok(name in fx.winsock.sockets
+                || library === 'wsock32' && name in fx.winsock.extensions,
+            `${library} ordinal ${ordinal} names ${name}, which is not implemented`);
         }
     }
 });
@@ -568,8 +569,11 @@ test('an ordinal whose function does not exist is not offered at all', ()=>{
     {
         const offered = /** @type {Record<string, string>} */ (
             /** @type {any} */ (fx.winsock.ordinals)[library]);
+        // wsock32 forwards three of mswsock's extensions by number too.
+        const exported = library === 'wsock32'
+            ? { ...fx.winsock.sockets, ...fx.winsock.extensions } : fx.winsock.sockets;
         assert.deepEqual(Object.keys(offered), Object.keys(reference)
-            .filter(ordinal=>reference[ordinal] in fx.winsock.sockets),
+            .filter(ordinal=>reference[ordinal] in exported),
         `${library} offers exactly the reference entries that exist`);
     }
     assert.equal(fx.winsock.ordinals.wsock32[52], 'gethostbyname',
@@ -578,13 +582,17 @@ test('an ordinal whose function does not exist is not offered at all', ()=>{
     // middleware of the era, so its two ordinals are offered.
     assert.equal(fx.winsock.ordinals.wsock32[103], 'WSAAsyncGetHostByName');
     assert.equal(fx.winsock.ordinals.wsock32[108], 'WSACancelAsyncRequest');
+    assert.equal(fx.winsock.ordinals.wsock32[1141], 'AcceptEx',
+        'the extensions of mswsock, which wsock32 forwards by number');
+    assert.equal(fx.winsock.ordinals.wsock32[1142], 'GetAcceptExSockaddrs');
 });
 
 test('the two libraries disagree about three ordinals, and only those three', ()=>{
     const wsock32 = /** @type {Record<string, string>} */ (WSOCK32_ORDINALS);
     const ws2_32 = /** @type {Record<string, string>} */ (WS2_32_ORDINALS);
+    // Of the numbers both have: wsock32's forwards past 1100 are its own.
     const differing = Object.keys(wsock32).filter(
-        ordinal=>wsock32[ordinal] !== ws2_32[ordinal]);
+        ordinal=>ordinal in ws2_32 && wsock32[ordinal] !== ws2_32[ordinal]);
     assert.deepEqual(differing.sort(), ['10', '11', '12']);
     assert.equal(ws2_32[10], 'ioctlsocket');
     assert.equal(wsock32[10], 'inet_addr');

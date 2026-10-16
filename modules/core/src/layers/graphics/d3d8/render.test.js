@@ -4632,3 +4632,29 @@ test('a bump matrix moved draw by draw draws through one pipeline, each matrix i
             assert.ok(index >= 0, `the block of the draw with matrix ${scale} carries it`);
         }
     });
+
+test('a dump asked for a texture\'s stats reads its top level as the guest left it', async()=>{
+    /** @type {string[][]} */
+    const handed = [];
+    const liveDump = { dumpFrames: 0, textureStats: '',
+        written: (/** @type {string[]} */ lines)=>handed.push(lines) };
+    const h = harness({ liveDump });
+    const { device } = h;
+    const texture = textureFrom(h, 2, 1, D3DFMT.A8R8G8B8,
+        Uint8Array.from([0, 0, 0, 0, 2, 4, 6, 8]));
+    assert.equal(device.SetTexture(0, texture), D3D_OK);
+    selectTexture(device);
+    assert.equal(device.SetVertexShader(FVF_QUAD), D3D_OK);
+    liveDump.dumpFrames = 1;
+    liveDump.textureStats = 't0,t999';
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 2,
+        quad([0, 0, 8, 8], argb(255, 255, 0, 0), true), 28), D3D_OK);
+    assert.equal(device.EndScene(), D3D_OK);
+    await h.present();
+    const dumped = handed[0] ?? [];
+    const line = dumped.find((/** @type {string} */ one)=>one.startsWith('texture t0'));
+    assert.ok(line, dumped.join(' | '));
+    assert.match(line, /least 0 most 8 mean 2\.5000 zero 50\.0%/);
+    assert.ok(dumped.includes('texture t999: not known'));
+});

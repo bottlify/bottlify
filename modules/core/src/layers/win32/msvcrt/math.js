@@ -131,6 +131,78 @@ const CODE_OF = /** @type {Record<string, string>} */ ({ hypot: '_hypot', _CIhyp
     _scalb: 'ldexp', _cabs: '_hypot' });
 
 /**
+ * J_n(x), the Bessel function of the first kind: the power series where it
+ * converges without losing more than a few digits to cancellation, Hankel's
+ * asymptotic expansion past that for the first two orders, and the upward
+ * recurrence from those two -- stable while the order is below the argument
+ * -- for the rest.
+ *
+ * @param {number} order @param {number} x
+ * @returns {number}
+ */
+export function besselJ(order, x){
+    if (!Number.isFinite(x))
+    {
+        return Number.isNaN(x) ? x : 0;
+    }
+    const n = Math.abs(order);
+    const sign = (order < 0 && n % 2 === 1 ? -1 : 1) * (x < 0 && n % 2 === 1 ? -1 : 1);
+    const a = Math.abs(x);
+    if (a <= 12 || n > a)
+    {
+        const half = a / 2;
+        let term = 1;
+        for (let k = 1; k <= n; k++)
+        {
+            term *= half / k;
+        }
+        let sum = term;
+        for (let k = 1; k < 200 && Math.abs(term) > Math.abs(sum) * 1e-17; k++)
+        {
+            term *= -(half * half) / (k * (k + n));
+            sum += term;
+        }
+        return sign * sum;
+    }
+    if (n > 1)
+    {
+        /** @type {number} */
+        let before = besselJ(0, a);
+        /** @type {number} */
+        let now = besselJ(1, a);
+        for (let k = 1; k < n; k++)
+        {
+            [before, now] = [now, 2 * k / a * now - before];
+        }
+        return sign * now;
+    }
+    const mu = 4 * n * n;
+    const z = 8 * a;
+    let p = 1;
+    let q = 0;
+    let term = 1;
+    for (let k = 1; k < 40; k++)
+    {
+        const next = term * (mu - (2 * k - 1) ** 2) / (k * z);
+        if (Math.abs(next) > Math.abs(term))
+        {
+            break;
+        }
+        term = next;
+        if (k % 2 === 1)
+        {
+            q += (k % 4 === 1 ? 1 : -1) * term;
+        }
+        else
+        {
+            p += (k % 4 === 2 ? -1 : 1) * term;
+        }
+    }
+    const chi = a - (n / 2 + 0.25) * Math.PI;
+    return sign * Math.sqrt(2 / (Math.PI * a)) * (p * Math.cos(chi) - q * Math.sin(chi));
+}
+
+/**
  * @param {MathHost} host
  */
 export function createMathFunctions(host){
@@ -242,6 +314,12 @@ export function createMathFunctions(host){
         const y = readDouble(args, 2);
         return answer([x, y], nextAfter(x, y));
     });
+
+    /** double _j0(double x), double _j1(double x) */
+    handlers._j0 = returningDouble(fpu, 8, args=>besselJ(0, readDouble(args, 0)));
+    handlers._j1 = returningDouble(fpu, 8, args=>besselJ(1, readDouble(args, 0)));
+    /** double _jn(int n, double x) */
+    handlers._jn = returningDouble(fpu, 12, args=>besselJ(args[0] | 0, readDouble(args, 1)));
 
     const guest = {
         readMemory: host.readMemory,

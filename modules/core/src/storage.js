@@ -334,8 +334,17 @@ export function opfsSession(key, directory){
             throw new Error('storage: "opfs" needs the origin private file system, '
                 + 'which does not exist here -- pass a provider of your own instead');
         }
+        // Asked once: storage the browser keeps "best effort" is cleared
+        // whole when the disk runs low -- the saved games with the caches
+        // beside them, every title's at once. Persisted, it is the person's
+        // to clear. A browser may say no; the session is kept all the same.
+        persisting ??= Promise.resolve(storage.persist?.()).then(granted=>granted === true,
+            ()=>false);
         return storage.getDirectory();
     });
+    /** Whether the browser agreed to keep the origin's storage; null before it was asked. */
+    /** @type {Promise<boolean> | null} */
+    let persisting = null;
     /** @type {Promise<void>} */
     let writing = Promise.resolve();
     /** Whether the folder holds this run's whole session, so a change is all a save needs. */
@@ -411,6 +420,13 @@ export function opfsSession(key, directory){
     };
 
     const store = {
+        /**
+         * Whether the browser keeps this storage rather than clearing it when
+         * the disk runs low: null until the store was first opened.
+         *
+         * @returns {Promise<boolean | null>}
+         */
+        persisted: ()=>persisting ?? Promise.resolve(null),
         /**
          * The files kept, by path and size, their bytes left unread: what an
          * editor lists while no machine holds the session.
@@ -584,6 +600,26 @@ export function opfsSession(key, directory){
                         await drop(folder, await entryName(path));
                     }
                 }
+            });
+            return writing;
+        },
+        /**
+         * The whole session taken away, in whichever form it was kept: every
+         * file the program wrote -- its saved games among them -- and its
+         * registry. What removing a program from this machine asks.
+         */
+        clear(){
+            writing = writing.then(async()=>{
+                const dir = await open();
+                try
+                {
+                    await dir.removeEntry(folderName, { recursive: true });
+                }
+                catch {
+                    // Never saved in this form: nothing to take away.
+                }
+                await drop(dir, legacy);
+                whole = false;
             });
             return writing;
         },

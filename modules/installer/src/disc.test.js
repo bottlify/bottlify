@@ -137,6 +137,19 @@ test('an autorun program starts in the disc root, a chosen one where it lives', 
     await assert.rejects(discOptions(disc({ 'readme.txt': 'x' })), /names no program to start/);
 });
 
+test('a Windows Installer package chosen on a disc is opened by msiexec', async()=>{
+    // A game's folder ships its physics runtime as an .msi beside it.
+    const media = disc({ '3rd/Runtime.msi': 'package', 'game.exe': PROGRAM });
+    const options = await discOptions(media, { entry: '3rd\\Runtime.msi' });
+    assert.equal(options.imagePath, 'C:\\WINDOWS\\system32\\msiexec.exe');
+    assert.equal(options.commandLine,
+        '"C:\\WINDOWS\\system32\\msiexec.exe" /i "D:\\3rd\\Runtime.msi"'
+        + ' /l*v "C:\\WINDOWS\\TEMP\\msiexec.log"', 'logged where no bottle carries it');
+    assert.equal(String.fromCharCode(...options.executable.subarray(0, 2)), 'MZ',
+        'the system program\'s own image');
+    assert.equal(options.startDirectory, 'D:\\3rd');
+});
+
 test('silent mode is read off the program the disc starts and the files beside it', async()=>{
     // An InstallShield player on a disc: its cabinets and settings beside it.
     const player = new Uint8Array(0x400);
@@ -171,6 +184,6 @@ test('what a disc install produced is collected whole: nothing of the disc was s
         registry: ()=>({ toJSON: ()=>({}) }),
     };
     const prefix = collectFrom(app, disc({ 'Setup.exe': SETUP }));
-    assert.equal(prefix.root, 'C:\\Program Files\\Demo');
-    assert.equal(prefix.entry, 'game.exe');
+    assert.equal(prefix.root, 'C:\\');
+    assert.equal(prefix.entry, 'Program Files\\Demo\\game.exe');
 });

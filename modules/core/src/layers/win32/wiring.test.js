@@ -171,6 +171,17 @@ test('VERSION knows which libraries the engine answers for', async()=>{
     await win32Module.dispose();
 });
 
+test('a library another layer answers for stands in the system folder too', async()=>{
+    // A setup that looks for DDRAW.DLL in the system folder before reading
+    // its version found nothing -- only this layer's own libraries stood
+    // there -- and said no DirectX was installed.
+    const { bytes, libraries } = await build({ modules: {
+        systemLibraries: ()=>['KERNEL32.dll', 'DDRAW.dll'] } });
+    bytes.set([...'C:\\WINDOWS\\system32\\ddraw.dll\0'].map(ch=>ch.charCodeAt(0)), 0x4000);
+    assert.notEqual(libraries['KERNEL32.dll'].GetFileAttributesA.handler([0x4000]), 0xffffffff);
+    await win32Module.dispose();
+});
+
 test('an mmio buffer comes from the program\'s heap', async()=>{
     // mmioGetInfo hands the buffer's pointers to the program, so the buffer
     // mmio allocates has to be guest memory.

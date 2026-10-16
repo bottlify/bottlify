@@ -6,7 +6,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createEnvironmentFunctions, defaultEnvironment } from './environment.js';
+import { createEnvironmentFunctions, createUserenvFunctions, defaultEnvironment }
+    from './environment.js';
 import {
     PROCESSOR, PROCESSOR_IDENTIFIER, PROCESSOR_LEVEL, PROCESSOR_REVISION,
 } from './processor.js';
@@ -432,4 +433,24 @@ test('the wide forms answer the windows directory and expand as the A forms do',
     assert.equal(host.bytes[0x300], 0xaa, 'a buffer too small gets nothing');
     assert.equal(fns.ExpandEnvironmentStringsW.handler([0x100, 0x300, 64]), expanded.length + 1);
     assert.equal(host.readWideString(0x300, 64), expanded);
+});
+
+test('CreateEnvironmentBlock hands out the process\'s block, and Destroy frees it', ()=>{
+    const memory = new Uint8Array(16);
+    /** @type {number[]} */
+    const freed = [];
+    /** @type {number[]} */
+    const errors = [];
+    const fns = createUserenvFunctions({
+        block: ()=>0x5000,
+        free: block=>freed.push(block) && 1,
+        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        setLastError: code=>errors.push(code),
+    });
+    assert.equal(fns.CreateEnvironmentBlock.handler([4, 0, 1]), 1);
+    assert.equal(new DataView(memory.buffer).getUint32(4, true), 0x5000);
+    assert.equal(fns.DestroyEnvironmentBlock.handler([0x5000]), 1);
+    assert.deepEqual(freed, [0x5000]);
+    assert.equal(fns.CreateEnvironmentBlock.handler([0, 0, 1]), 0);
+    assert.deepEqual(errors, [87], 'no pointer is ERROR_INVALID_PARAMETER');
 });

@@ -1687,3 +1687,29 @@ export function _mbsupr({ u8, setU8, host }, text){
         }
     }
 }
+
+/**
+ * void *_encode_pointer(void *pointer), and `_decode_pointer` with it
+ *
+ * Visual C++ 2005's runtime scrambles the function pointers it keeps against
+ * overwriting, and only it decodes what it encoded: the pair is whole with
+ * the pointer as it is, and run on every registration and call of a kept
+ * pointer, so it costs no crossing.
+ *
+ * @guestCode cdecl
+ * @param {u32} pointer
+ * @returns {u32}
+ */
+export function encodePointer(pointer){
+    return pointer;
+}
+
+/**
+ * void *_encoded_null(void) -- NULL as `_encode_pointer` encodes it.
+ *
+ * @guestCode cdecl
+ * @returns {u32}
+ */
+export function encodedNull(){
+    return 0;
+}

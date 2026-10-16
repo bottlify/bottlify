@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createGdiDrawing } from '../../graphics/gdi/context.js';
 import * as surfaces from '../../graphics/gdi/surface.js';
+import { createScreen } from '../../graphics/gdi/screen.js';
 import { setupBars as setupWith, OUT, TEXT } from './bars.fixture.js';
 import {
     STATUSBAR_CLASS, CCS_NORESIZE, CCS_TOP, SBT_POPOUT, SBT_NOBORDERS, SB_SIMPLEID,
@@ -16,7 +17,7 @@ import {
 } from './statusbar.js';
 
 /** The fixture over the graphics layer's drawing engine. */
-const setupBars = ()=>setupWith({ createGdiDrawing, ...surfaces });
+const setupBars = ()=>setupWith({ createGdiDrawing, createScreen, ...surfaces });
 
 /**
  * The expectations are the status bar's documented contract and what MFC's

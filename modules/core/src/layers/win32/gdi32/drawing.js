@@ -323,7 +323,7 @@ function readGammaRamp(bytes){
  *           The pixels a device context draws into, given the context and
  *           what it reports as its surface -- the selected bitmap's own
  *           attributes for a memory context -- or null when it has none.
- * @property {() => void} [presentDesktop]
+ * @property {(dc?: any) => void} [presentDesktop]  Shows the screen; the DC drawn on, if one was.
  *           Shows the desktop the window contexts draw into. Absent in a
  *           build with nothing to show it on.
  * @property {(font: import('./structs.js').LogFontFields) => FontMeasure | null} [fontMetrics]
@@ -768,7 +768,7 @@ export function createDrawingFunctions(
         // a real frame does not already pay for.
         if (present && dc.kind !== 'memory')
         {
-            services.presentDesktop?.();
+            services.presentDesktop?.(dc);
         }
         const other = (source >>> 0) === 0 ? null : dcOf(source);
         return mapped && (mapsAway(dc) || (other ? mapsAway(other) : false))

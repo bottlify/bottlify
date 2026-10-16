@@ -1564,11 +1564,15 @@ export function createHeapFunctions(host){
                     decommitted.delete(start);
                     committed.set(start, []);
                     unreadable.delete(start);
+                    // Committed with it, the whole of what was reserved: from
+                    // the granule's start, which is the address answered, not
+                    // from the page asked for -- a program writes from the
+                    // base it was handed (Wine's virtual_alloc maps the one
+                    // range both ways).
                     if ((kind & MEM_COMMIT) !== 0)
                     {
-                        const first = (requested & ~(PAGE_SIZE - 1)) >>> 0;
-                        markCommitted(start, first, start + span, true);
-                        noteProtection(start, first, start + span, protection);
+                        markCommitted(start, start, start + span, true);
+                        noteProtection(start, start, start + span, protection);
                     }
                     if ((kind & MEM_WRITE_WATCH) !== 0)
                     {
@@ -2372,10 +2376,15 @@ export function createHeapFunctions(host){
                     total === 0 ? 0 : Math.round((total - free) / total * 100), true);
                 view.setUint32(MEMORYSTATUS.dwTotalPhys, total, true);
                 view.setUint32(MEMORYSTATUS.dwAvailPhys, free, true);
-                // No page file, so the virtual figures are the physical ones --
-                // which is what a machine with paging turned off reports.
-                view.setUint32(MEMORYSTATUS.dwTotalPageFile, total, true);
-                view.setUint32(MEMORYSTATUS.dwAvailPageFile, free, true);
+                // The commit limit: memory and the page file Windows manages
+                // itself, as large as memory by default. A program refuses a
+                // machine whose limit is no more than its memory -- paging
+                // turned off -- and the 32-bit form stops at 4 GB, as Windows
+                // clips it.
+                view.setUint32(MEMORYSTATUS.dwTotalPageFile, Math.min(2 * total, 0xffffffff),
+                    true);
+                view.setUint32(MEMORYSTATUS.dwAvailPageFile, Math.min(free + total, 0xffffffff),
+                    true);
                 view.setUint32(MEMORYSTATUS.dwTotalVirtual, total, true);
                 view.setUint32(MEMORYSTATUS.dwAvailVirtual, free, true);
                 host.writeMemory(buffer >>> 0, data);
@@ -2502,8 +2511,9 @@ export function createHeapFunctions(host){
                     total === 0 ? 0 : Math.round((total - free) / total * 100), true);
                 view.setBigUint64(MEMORYSTATUSEX.ullTotalPhys, BigInt(total), true);
                 view.setBigUint64(MEMORYSTATUSEX.ullAvailPhys, BigInt(free), true);
-                view.setBigUint64(MEMORYSTATUSEX.ullTotalPageFile, BigInt(total), true);
-                view.setBigUint64(MEMORYSTATUSEX.ullAvailPageFile, BigInt(free), true);
+                // Memory and a system-managed page file as large (GlobalMemoryStatus).
+                view.setBigUint64(MEMORYSTATUSEX.ullTotalPageFile, BigInt(2 * total), true);
+                view.setBigUint64(MEMORYSTATUSEX.ullAvailPageFile, BigInt(free + total), true);
                 view.setBigUint64(MEMORYSTATUSEX.ullTotalVirtual, BigInt(total), true);
                 view.setBigUint64(MEMORYSTATUSEX.ullAvailVirtual, BigInt(free), true);
                 host.writeMemory(buffer >>> 0, data);

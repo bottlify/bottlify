@@ -452,7 +452,8 @@ test('a ps_1_1 over a 2D texture and over a cube map draws through a pipeline fo
         await h.device.idle();
         assert.deepEqual(h.reports, []);
 
-        const { latest, ...programs } = h.device.diagnostics().programs;
+        const { latest, buildMs, churn, ...programs } = h.device.diagnostics().programs;
+        assert.ok(buildMs >= 0 && Array.isArray(churn));
         assert.deepEqual(programs, { built: 2, reused: 2 },
             'one pipeline for each dimension, each served again in the next frame');
         assert.equal(latest.length, 2, 'both keys listed as built');

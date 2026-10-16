@@ -242,7 +242,7 @@ export const HOSTENT = Object.freeze({
  * Three of these disagree with ws2_32, which is why the two libraries cannot
  * share one table: 10, 11 and 12 are rotated there.
  */
-export const WSOCK32_ORDINALS = Object.freeze({
+const SHARED_ORDINALS = Object.freeze({
     1: 'accept',
     2: 'bind',
     3: 'closesocket',
@@ -276,11 +276,27 @@ export const WSOCK32_ORDINALS = Object.freeze({
     101: 'WSAAsyncSelect',
     103: 'WSAAsyncGetHostByName',
     108: 'WSACancelAsyncRequest',
+    109: 'WSASetBlockingHook',
+    110: 'WSAUnhookBlockingHook',
     111: 'WSAGetLastError',
     112: 'WSASetLastError',
+    113: 'WSACancelBlockingCall',
+    114: 'WSAIsBlocking',
     115: 'WSAStartup',
     116: 'WSACleanup',
     151: '__WSAFDIsSet',
+});
+
+/**
+ * wsock32.dll's: the shared table and the three Microsoft extensions it
+ * forwards to mswsock by number (Wine's wsock32.spec), which a program
+ * linked against wsock32.lib imports from it.
+ */
+export const WSOCK32_ORDINALS = Object.freeze({
+    ...SHARED_ORDINALS,
+    1140: 'TransmitFile',
+    1141: 'AcceptEx',
+    1142: 'GetAcceptExSockaddrs',
 });
 
 /**
@@ -293,7 +309,7 @@ export const WSOCK32_ORDINALS = Object.freeze({
  * because nothing in front of us imports ws2_32 by number.
  */
 export const WS2_32_ORDINALS = Object.freeze({
-    ...WSOCK32_ORDINALS,
+    ...SHARED_ORDINALS,
     10: 'ioctlsocket',
     11: 'inet_addr',
     12: 'inet_ntoa',

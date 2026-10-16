@@ -139,3 +139,20 @@ test('MakeSureDirectoryPathExists makes every missing directory up to the last b
     assert.equal(lastError, 183);
     assert.equal(make.handler([0]), 0);
 });
+
+test('StackWalk64 walks the same chain in STACKFRAME64\'s wider layout', ()=>{
+    const { fns, put, get } = machine();
+    put(0x2000, 0);
+    put(0x2004, 0x401111);
+    put(0x2008, 7);
+    const frame = 0x1100;
+    put(frame + 0, 0x400500);
+    put(frame + 32, 0x2000);
+    put(frame + 48, 0x1ff0);
+    assert.equal(fns.StackWalk64.handler([0x14c, -1, -2, frame, 0x1300, 0, 0, 0, 0]), 1);
+    assert.deepEqual([get(frame), get(frame + 16), get(frame + 32), get(frame + 48)],
+        [0x400500, 0x401111, 0x2000, 0x1ff0]);
+    assert.equal(get(frame + 12), 3, 'AddrModeFlat, after the DWORD64 offset and the segment');
+    assert.equal(get(frame + 88), 7, 'the first parameter, a DWORD64');
+    assert.equal(fns.SymGetModuleBase64.handler([-1, 0x400123, 0]), 0x400000);
+});

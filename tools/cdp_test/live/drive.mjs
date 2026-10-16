@@ -117,24 +117,39 @@ const canvas = async()=>evaluate(`(()=>{
 
 /** @type {Record<string, number>} */
 const VIRTUAL_KEYS = { Enter: 13, Escape: 27, Space: 32, Tab: 9, Backspace: 8,
-    ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40 };
+    ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40, Delete: 46, End: 35, Home: 36,
+    Semicolon: 0xba, Equal: 0xbb, Comma: 0xbc, Minus: 0xbd, Period: 0xbe, Slash: 0xbf,
+    BracketLeft: 0xdb, Backslash: 0xdc, BracketRight: 0xdd, Quote: 0xde };
 /** @param {string} code */
 const keyOf = code=>(code.startsWith('Key') ? code.slice(3).toLowerCase()
     : code.startsWith('Digit') ? code.slice(5) : code === 'Space' ? ' ' : code);
 /** @param {string} code */
 const virtualKeyOf = code=>VIRTUAL_KEYS[code] ?? keyOf(code).toUpperCase().charCodeAt(0);
+/** The US key a punctuation character is on, and whether Shift is held for it. */
+const PUNCTUATION = {
+    ':': ['Semicolon', true], ';': ['Semicolon', false], '\\': ['Backslash', false],
+    '|': ['Backslash', true], '/': ['Slash', false], '?': ['Slash', true],
+    '.': ['Period', false], '>': ['Period', true], ',': ['Comma', false], '<': ['Comma', true],
+    '-': ['Minus', false], '_': ['Minus', true], '=': ['Equal', false], '+': ['Equal', true],
+    '\'': ['Quote', false], '"': ['Quote', true], '[': ['BracketLeft', false],
+    ']': ['BracketRight', false], '(': ['Digit9', true], ')': ['Digit0', true],
+    '!': ['Digit1', true], '@': ['Digit2', true], '#': ['Digit3', true], '$': ['Digit4', true],
+    '%': ['Digit5', true], '&': ['Digit7', true], '*': ['Digit8', true],
+};
 /** @param {string} ch */
 const codeOfChar = ch=>(/[0-9]/.test(ch) ? `Digit${ch}` : /[a-z]/i.test(ch)
-    ? `Key${ch.toUpperCase()}` : ch === ' ' ? 'Space' : ch);
+    ? `Key${ch.toUpperCase()}` : ch === ' ' ? 'Space' : PUNCTUATION[ch]?.[0] ?? ch);
+/** Shift for an upper-case letter or a shifted punctuation character. @param {string} ch */
+const shiftedChar = ch=>/[A-Z]/.test(ch) || PUNCTUATION[ch]?.[1] === true;
 
-/** @param {string} code @param {string} [text] */
-const press = async(code, text)=>{
+/** @param {string} code @param {string} [text] @param {boolean} [shift] */
+const press = async(code, text, shift = false, hold = 80)=>{
     const key = text ?? keyOf(code);
     const base = { code, key, windowsVirtualKeyCode: virtualKeyOf(code),
-        nativeVirtualKeyCode: virtualKeyOf(code) };
+        nativeVirtualKeyCode: virtualKeyOf(code), ...shift ? { modifiers: 8 } : {} };
     await send('Input.dispatchKeyEvent',
         { type: 'keyDown', ...base, ...key.length === 1 ? { text: key } : {} });
-    await sleep(80);
+    await sleep(hold);
     await send('Input.dispatchKeyEvent', { type: 'keyUp', ...base });
 };
 
@@ -199,13 +214,15 @@ createServer(async(request, answer)=>{
         }
         else if (url.pathname === '/key')
         {
-            await press(arg('code'));
+            // Held `ms` (80 by default): a program that polls its keyboard once a
+            // frame misses a press shorter than its frame.
+            await press(arg('code'), undefined, false, Number(arg('ms')) || 80);
         }
         else if (url.pathname === '/type')
         {
             for (const ch of arg('text'))
             {
-                await press(codeOfChar(ch), ch);
+                await press(codeOfChar(ch), ch, shiftedChar(ch));
                 await sleep(120);
             }
         }

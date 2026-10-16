@@ -21,6 +21,26 @@
 const NO_ERROR = 0;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_BUFFER_OVERFLOW = 111;
+const ERROR_INVALID_DATA = 13;
+const ERROR_INSUFFICIENT_BUFFER = 122;
+
+/** MIB_IFROW: a wide name, then DWORDs, the hardware address and the description. */
+export const IFROW = Object.freeze({
+    SIZE: 860, INDEX: 512, TYPE: 516, MTU: 520, SPEED: 524, PHYS_ADDR_LEN: 528,
+    PHYS_ADDR: 532, ADMIN_STATUS: 540, OPER_STATUS: 544, DESCR_LEN: 600, DESCR: 604,
+});
+/** IP_INTERFACE_INFO: a count, then IP_ADAPTER_INDEX_MAPs of an index and 128 wide characters. */
+const INTERFACE_INFO = Object.freeze({ COUNT: 0, INDEX: 4, NAME: 8, SIZE: 264 });
+
+const MIB_IF_TYPE_LOOPBACK = 24;
+const MIB_IF_ADMIN_STATUS_UP = 1;
+const MIB_IF_OPER_STATUS_DISCONNECTED = 2;
+const MIB_IF_OPER_STATUS_OPERATIONAL = 5;
+/** The loopback interface's index, beside the adapter's. */
+const LOOPBACK_INDEX = 2;
+const MTU = 1500;
+const ADAPTER_SPEED = 1000000000;
+const LOOPBACK_SPEED = 10000000;
 
 /**
  * IP_ADAPTER_INFO as 32-bit Windows writes it, its two time_t fields 32 bits
@@ -89,10 +109,10 @@ export function createIphlpapiFunctions(host){
         view.setUint32(ADAPTER_INFO.DHCP_ENABLED, 1, true);
         view.setUint32(ADAPTER_INFO.CURRENT_IP_ADDRESS, at + ADAPTER_INFO.IP_ADDRESS_LIST, true);
         const own = (host.localAddress?.() ?? 0) >>> 0;
-        const connected = own !== 0 && own >>> 24 !== LOOPBACK_NET;
+        const online = own !== 0 && own >>> 24 !== LOOPBACK_NET;
         const list = ADAPTER_INFO.IP_ADDRESS_LIST;
-        record.set(ascii(connected ? dotted(own) : '0.0.0.0'), list + IP_ADDRESS);
-        record.set(ascii(connected ? '255.255.255.0' : '0.0.0.0'), list + IP_MASK);
+        record.set(ascii(online ? dotted(own) : '0.0.0.0'), list + IP_ADDRESS);
+        record.set(ascii(online ? '255.255.255.0' : '0.0.0.0'), list + IP_MASK);
         for (const empty of [ADAPTER_INFO.GATEWAY_LIST, ADAPTER_INFO.DHCP_SERVER,
             ADAPTER_INFO.PRIMARY_WINS_SERVER, ADAPTER_INFO.SECONDARY_WINS_SERVER])
         {
@@ -102,7 +122,105 @@ export function createIphlpapiFunctions(host){
         return record;
     };
 
+    /** Whether the adapter has a network to be on. */
+    const connected = ()=>{
+        const own = (host.localAddress?.() ?? 0) >>> 0;
+        return own !== 0 && own >>> 24 !== LOOPBACK_NET;
+    };
+
+    /** An interface's MIB_IFROW, or null for an index there is none at. @param {number} index */
+    const interfaceRow = index=>{
+        const loopback = index === LOOPBACK_INDEX;
+        if (index !== INDEX && !loopback)
+        {
+            return null;
+        }
+        const row = new Uint8Array(IFROW.SIZE);
+        const view = new DataView(row.buffer);
+        const description = loopback ? 'Software Loopback Interface 1' : DESCRIPTION;
+        const guid = loopback ? '{00000000-0000-0000-0000-000000000000}' : NAME;
+        const name = `\\DEVICE\\TCPIP_${guid}`;
+        for (let at = 0; at < name.length; at++)
+        {
+            view.setUint16(at * 2, name.charCodeAt(at), true);
+        }
+        view.setUint32(IFROW.INDEX, index, true);
+        view.setUint32(IFROW.TYPE, loopback ? MIB_IF_TYPE_LOOPBACK : MIB_IF_TYPE_ETHERNET, true);
+        view.setUint32(IFROW.MTU, MTU, true);
+        view.setUint32(IFROW.SPEED, loopback ? LOOPBACK_SPEED : ADAPTER_SPEED, true);
+        if (!loopback)
+        {
+            view.setUint32(IFROW.PHYS_ADDR_LEN, HARDWARE_ADDRESS.length, true);
+            row.set(HARDWARE_ADDRESS, IFROW.PHYS_ADDR);
+        }
+        view.setUint32(IFROW.ADMIN_STATUS, MIB_IF_ADMIN_STATUS_UP, true);
+        view.setUint32(IFROW.OPER_STATUS, loopback || connected()
+            ? MIB_IF_OPER_STATUS_OPERATIONAL : MIB_IF_OPER_STATUS_DISCONNECTED, true);
+        view.setUint32(IFROW.DESCR_LEN, description.length + 1, true);
+        row.set(ascii(description), IFROW.DESCR);
+        return row;
+    };
+
     return {
+        /**
+         * DWORD GetIfEntry(PMIB_IFROW pIfRow)
+         *
+         * The row of the interface whose index the caller put in dwIndex:
+         * the adapter or the loopback. The traffic counters are zero -- no
+         * count of them is kept.
+         */
+        GetIfEntry: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([row])=>{
+                if ((row >>> 0) === 0)
+                {
+                    return ERROR_INVALID_PARAMETER;
+                }
+                const filled = interfaceRow(readU32((row >>> 0) + IFROW.INDEX));
+                if (!filled)
+                {
+                    return ERROR_INVALID_DATA;
+                }
+                host.writeMemory(row >>> 0, filled);
+                return NO_ERROR;
+            },
+        },
+
+        /**
+         * DWORD GetInterfaceInfo(PIP_INTERFACE_INFO pIfTable, PULONG dwOutBufLen)
+         *
+         * The adapters, the loopback not among them: the one, by its index and
+         * its device name. The size, with ERROR_INSUFFICIENT_BUFFER, while the
+         * buffer is short of it or absent.
+         */
+        GetInterfaceInfo: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([table, size])=>{
+                if ((size >>> 0) === 0)
+                {
+                    return ERROR_INVALID_PARAMETER;
+                }
+                if ((table >>> 0) === 0 || readU32(size >>> 0) < INTERFACE_INFO.SIZE)
+                {
+                    writeU32(size >>> 0, INTERFACE_INFO.SIZE);
+                    return ERROR_INSUFFICIENT_BUFFER;
+                }
+                const record = new Uint8Array(INTERFACE_INFO.SIZE);
+                const view = new DataView(record.buffer);
+                view.setUint32(INTERFACE_INFO.COUNT, 1, true);
+                view.setUint32(INTERFACE_INFO.INDEX, INDEX, true);
+                const name = `\\DEVICE\\TCPIP_${NAME}`;
+                for (let at = 0; at < name.length; at++)
+                {
+                    view.setUint16(INTERFACE_INFO.NAME + at * 2, name.charCodeAt(at), true);
+                }
+                host.writeMemory(table >>> 0, record);
+                return NO_ERROR;
+            },
+        },
+
         /**
          * DWORD GetAdaptersInfo(PIP_ADAPTER_INFO pAdapterInfo, PULONG pOutBufLen)
          *

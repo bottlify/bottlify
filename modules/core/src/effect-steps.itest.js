@@ -86,6 +86,7 @@ test('an effect\'s passes set through the program\'s state manager as steps leav
     let stepsTurns = 0;
     let promiseTurns = 0;
     let executorSlices = 0;
+    let guestCalls = 0;
     for (let seed = 1; seed <= SEEDS; seed++)
     {
         const steps = await run(executable, seed, true);
@@ -101,11 +102,16 @@ test('an effect\'s passes set through the program\'s state manager as steps leav
         executorSlices += shared.executorSlices;
         stepsTurns += steps.turns;
         promiseTurns += promises.turns;
+        guestCalls += promises.callbacks;
     }
-    console.log(`effect steps: ${SEEDS} seeds, ${stepsTurns} turns as steps,`
-        + ` ${promiseTurns} through promises, ${executorSlices} slices on another executor`);
-    // The steps' path ran: its guest calls took no turns of their own.
-    assert.ok(stepsTurns * 10 < promiseTurns,
-        `${stepsTurns} turns as steps against ${promiseTurns} through promises`);
+    console.log(`effect steps: ${SEEDS} seeds, ${guestCalls} guest calls, ${stepsTurns} turns as`
+        + ` steps, ${promiseTurns} through promises, ${executorSlices} slices on another executor`);
+    // The steps' path ran: its guest calls took no turns of their own, where
+    // through promises each takes one. (The effect's methods are the guest's
+    // own code, so the calls left are the few its host methods still make.)
+    assert.ok(guestCalls > 0, 'the host made guest calls');
+    assert.ok(promiseTurns - stepsTurns >= guestCalls / 2,
+        `${stepsTurns} turns as steps against ${promiseTurns} through promises,`
+        + ` ${guestCalls} calls`);
     assert.ok(executorSlices > 0, 'no slice ran on another executor');
 });

@@ -11,12 +11,16 @@ import { IID_ID3DXEFFECT, IID_ID3DXEFFECTCOMPILER, IID_ID3DXEFFECTPOOL, IID_ID3D
     IID_ID3DXEFFECT_26, createEffects } from './effect.js';
 import { PC, PT, buildEffect, techniqueCompiles } from './effect-model.js';
 import { assembleShader } from './shader-asm.js';
+import { EFFECT_BLOCK, HANDLE } from './effect.js';
+import { FX_2_0 } from './effect-binary.js';
+import * as sources from './effect-setters.js';
+import * as commitSource from './effect-commit.js';
 import { execute } from './d3d9-machine.fixture.js';
 
 const D3D_OK = 0;
 const S_FALSE = 1;
 const E_FAIL = 0x80004005;
-const E_NOTIMPL = 0x80004001;
+const D3DXERR_INVALIDDATA = 0x88760b59;
 const D3DERR_INVALIDCALL = 0x8876086c;
 
 /** The guest's code addresses: a COM object's slot n is ENTRY + n; an include's are its own. */
@@ -368,6 +372,8 @@ function guest(options = {}){
     };
     return { memory, view, heap, freed, objects, object, device, manager, include, calls, opened,
         diverged, fns, fn, call, put, putFloats, putInts, out, u32, floats, ints, text, effect,
+        /** A call into the guest made at once, outside any handler. @param {number} entry @param {number[]} args */
+        callGuestNow: (entry, args)=>callGuest({ entry, args }),
         bufferText, bufferBytes, handle, desc, published };
 }
 
@@ -469,14 +475,27 @@ test('D3DXCreateEffect checks its arguments as D3DX does', async()=>{
     assert.equal(await g.call(fx, 'GetDesc', 0), D3DERR_INVALIDCALL);
 });
 
-test('a compiled fx_2_0 effect is refused, and said so; source is compiled', async()=>{
+test('a compiled fx_2_0 effect is read, a broken one refused; source is compiled', async()=>{
     const g = guest();
-    const binary = g.putInts([0xfeff0901, 0, 0, 0]);
+    // The body: an empty name, the name 'T', an int's type, the value 1; then one
+    // technique 'T' of one unnamed pass setting ZEnable to it.
+    const body = [0, 2, 0x54, 2, 0, 0, 0, 0, 1, 1, 1, 0, 1, 0, 0, 4, 0, 1, 0, 0, 1, 0, 0, 12, 40,
+        0, 0];
     const effectOut = g.out();
-    assert.equal(await g.fn('D3DXCreateEffect', g.device, binary, 16, 0, 0, 0, 0, effectOut, 0),
-        E_NOTIMPL);
+    assert.equal(await g.fn('D3DXCreateEffect', g.device, g.putInts([0xfeff0901, 44, ...body]),
+        8 + body.length * 4, 0, 0, 0, 0, effectOut, 0), D3D_OK);
+    const fx = g.u32(effectOut);
+    const desc = g.out(16);
+    assert.equal(await g.call(fx, 'GetDesc', desc), D3D_OK);
+    assert.deepEqual([g.u32(desc + 4), g.u32(desc + 8)], [0, 1], 'parameters, techniques');
+    const technique = await g.call(fx, 'GetTechniqueByName', g.put('T\0'));
+    assert.notEqual(technique, 0);
+
+    const broken = g.putInts([0xfeff0901, 0, 0, 0]);
+    assert.equal(await g.fn('D3DXCreateEffect', g.device, broken, 16, 0, 0, 0, 0, effectOut, 0),
+        D3DXERR_INVALIDDATA);
     assert.equal(g.u32(effectOut), 0);
-    assert.match(g.diverged.join('\n'), /fx_2_0/);
+    assert.match(g.diverged.join('\n'), /refused: error: /);
     const errorsOut = g.out();
     const bad = 'float4 f( : COLOR { return 0; }';
     assert.equal(await g.fn('D3DXCreateEffect', g.device, g.put(bad), bad.length, 0, 0, 0, 0,
@@ -1607,3 +1626,400 @@ test('an asm block is assembly, not HLSL: its comments are the assembler\'s', as
     const open = await buildEffect('technique t { pass p { VertexShader = asm { vs.1.1 ; } }');
     assert.match(open.messages, /X3000: syntax error: unterminated asm block/);
 });
+
+// ---- the setters in the guest ----------------------------------------------------------
+
+test('the setters in the guest answer, write and date what the host\'s do: random calls on'
+    + ' every shape, names for handles, a parameter block recording', async()=>{
+    // Two effects alike: every call goes to one through the host's setter, and
+    // to the other through the setter's JavaScript -- the reference its x86 is
+    // held to (`effect-setters.test.js`) -- which hands what it does not take
+    // to the same host's setter.
+    const g = guest();
+    const SOURCE = `float f; int i; bool b; float4 v; float3 v3; int ic; float2x3 m23; float4x4 m;
+        column_major float3x4 cm; float4 va[5]; float2 va2[3]; float fa[3]; int4 iv; bool4 bv;
+        texture t; texture2D t2; textureCUBE tc; sampler s = sampler_state { Texture = <t>; };
+        struct S { float a; float2 b; } st; string str = "x"; float4x4 ma[2];
+        technique T { pass P { } }`;
+    const fxA = await g.effect(SOURCE);
+    const fxB = await g.effect(SOURCE);
+    const effectB = /** @type {any} */ (g.published.get(fxB)).object;
+    // The interface pointer the guest's code is handed: its state word the effect's block.
+    const self = g.heap.allocate(8);
+    g.view.setUint32(self + 4, effectB.guestState(), true);
+    const names = ['f', 'i', 'b', 'v', 'v3', 'ic', 'm23', 'm', 'cm', 'va', 'va2', 'fa', 'iv', 'bv',
+        't', 't2', 'tc', 's', 'st', 'str', 'ma', 'st.b', 'va[2]', 'ma[1]'];
+    /** @param {number} fx @param {string} name */
+    const handleIn = async(fx, name)=>{
+        const element = /^(\w+)\[(\d+)\]$/.exec(name);
+        if (element)
+        {
+            return g.call(fx, 'GetParameterElement', await g.handle(fx, element[1]),
+                Number(element[2]));
+        }
+        const member = /^(\w+)\.(\w+)$/.exec(name);
+        return member ? g.call(fx, 'GetParameterByName', await g.handle(fx, member[1]),
+            g.put(member[2])) : g.handle(fx, name);
+    };
+    const handlesA = await Promise.all(names.map(name=>handleIn(fxA, name)));
+    const handlesB = await Promise.all(names.map(name=>handleIn(fxB, name)));
+    /** The data and version of every parameter, through its record. @param {number[]} hs */
+    const state = hs=>hs.map(h=>{
+        const data = g.u32(h + HANDLE.DATA);
+        // A string's word points at a copy of its own: its text is what is the same.
+        const held = g.u32(h + HANDLE.TYPE) === PT.STRING ? [g.text(g.u32(data))]
+            : [...g.memory.slice(data, data + g.u32(h + HANDLE.BYTES))];
+        return { data: held, version: g.u32(g.u32(h + HANDLE.VERSION)) };
+    });
+    const HOST = Symbol('host');
+    const helpers = { u32: g.u32, setU32: (/** @type {number} */ at, /** @type {number} */ v)=>
+        g.view.setUint32(at, v >>> 0, true), host: ()=>HOST };
+    const SETTERS = ['SetMatrix', 'SetMatrixTranspose', 'SetVector', 'SetVectorArray', 'SetFloat',
+        'SetInt', 'SetBool', 'SetTexture', 'SetValue'];
+    let next = 0x2545f491;
+    const rand = ()=>(next = (Math.imul(next, 1103515245) + 12345) >>> 0);
+    const input = g.heap.allocate(256);
+    let recording = false;
+    let handedOver = 0;
+    for (let round = 0; round < 3000; round++)
+    {
+        for (let at = input; at < input + 256; at += 4)
+        {
+            g.view.setUint32(at, rand() % 4 === 0 ? 0 : rand(), true);
+        }
+        if (rand() % 60 === 0)
+        {
+            // A parameter block begun on both, or ended on both.
+            const name = recording ? 'EndParameterBlock' : 'BeginParameterBlock';
+            await g.call(fxA, name);
+            await g.call(fxB, name);
+            recording = !recording;
+        }
+        const which = rand() % names.length;
+        const byName = rand() % 10 === 0;
+        const hA = byName ? g.put(names[which]) : handlesA[which];
+        const hB = byName ? g.put(names[which]) : handlesB[which];
+        const setter = SETTERS[rand() % SETTERS.length];
+        const pointer = rand() % 10 === 0 ? 0 : input;
+        const args = setter === 'SetVectorArray' ? [pointer, rand() % 7]
+            : setter === 'SetValue' ? [pointer, 4 * (rand() % 40)]
+                : /^Set(Matrix|Vector)/.test(setter) ? [pointer] : [rand()];
+        const before = state(handlesB);
+        const beforeA = state(handlesA);
+        const answerA = await g.call(fxA, setter, hA, ...args);
+        let answerB = /** @type {any} */ (sources)[setter](helpers, self, hB, ...args);
+        if (answerB === HOST)
+        {
+            handedOver++;
+            answerB = await g.call(fxB, setter, hB, ...args);
+        }
+        /** @type {string} */
+        const label = `round ${round}: ${setter}(${names[which]}${byName ? ' by name' : ''},`
+            + ` ${args.join(', ')})${recording ? ' recording' : ''}`;
+        assert.equal(answerB >>> 0, answerA, `${label}: the answer`);
+        const afterA = state(handlesA);
+        const afterB = state(handlesB);
+        afterA.forEach((a, k)=>{
+            assert.deepEqual(afterB[k].data, a.data, `${label}: ${names[k]}'s data`);
+            assert.equal(afterB[k].version !== before[k].version, a.version
+                !== beforeA[k].version, `${label}: whether ${names[k]} was dated`);
+        });
+    }
+    assert.ok(handedOver > 300 && handedOver < 2700, `${handedOver} calls handed to the host`);
+});
+
+test('SetTechnique and GetTechnique in the guest answer as the host\'s, and Begin and BeginPass'
+    + ' follow the technique they set', async()=>{
+    const g = guest();
+    const fx = await g.effect(`int cull = 1; int ref = 3;
+        technique A { pass P { CullMode = <cull>; } }
+        technique B { pass P { AlphaRef = <ref>; } pass Q { CullMode = <cull>; } }`);
+    const effect = /** @type {any} */ (g.published.get(fx)).object;
+    const self = g.heap.allocate(8);
+    g.view.setUint32(self + 4, effect.guestState(), true);
+    const HOST = Symbol('host');
+    const helpers = { u32: g.u32, setU32: (/** @type {number} */ at, /** @type {number} */ v)=>
+        g.view.setUint32(at, v >>> 0, true), host: ()=>HOST };
+    const guestCode = /** @type {any} */ (commitSource);
+    for (const index of [0, 1, 2, 0xffffffff])
+    {
+        assert.equal(guestCode.GetTechnique(helpers, self, index),
+            await g.call(fx, 'GetTechnique', index), `GetTechnique(${index})`);
+    }
+    const [a, b] = [await g.call(fx, 'GetTechnique', 0), await g.call(fx, 'GetTechnique', 1)];
+    assert.equal(guestCode.SetTechnique(helpers, self, b), 0);
+    assert.equal(await g.call(fx, 'GetCurrentTechnique'), b, 'the host sees the guest\'s choice');
+    const passes = g.out();
+    assert.equal(await g.call(fx, 'Begin', passes, 1), D3D_OK);
+    assert.equal(g.u32(passes), 2, 'Begin counts B\'s passes');
+    assert.equal(await g.call(fx, 'BeginPass', 1), D3D_OK, 'B has a second pass');
+    assert.equal(await g.call(fx, 'EndPass'), D3D_OK);
+    // Begun, a technique set in the guest is the one BeginPass walks.
+    assert.equal(guestCode.SetTechnique(helpers, self, a), 0);
+    assert.equal(await g.call(fx, 'BeginPass', 1), D3DERR_INVALIDCALL, 'A has one pass');
+    assert.equal(await g.call(fx, 'End'), D3D_OK);
+    for (const wrong of [0, a + 1, 0x1234])
+    {
+        assert.equal(guestCode.SetTechnique(helpers, self, wrong), HOST, 'the host refuses it');
+    }
+});
+
+for (const managed of [false, true])
+{
+    test(`CommitChanges in the guest makes the ${managed ? 'state manager' : 'device'} calls the`
+        + ' host\'s does: random sets of matrices, vectors, ints, bools and textures between'
+        + ' commits', ()=>commitGate(managed, COMMIT_SOURCE, COMMIT_NAMES, commitSet));
+}
+
+test('CommitChanges in the guest makes the device calls the host\'s does for states compiled'
+    + ' expressions copy from a float, an int or a bool', ()=>commitGate(false,
+    String.fromCharCode(...copyingEffect()), ['f', 'i', 'b'], rand=>{
+        const pick = rand() % 3;
+        return pick === 0 ? ['SetFloat', 'f', [new Uint32Array(Float32Array.of([0, 0.75, -2.5, 3.99,
+            1e6, -7][rand() % 6]).buffer)[0]]]
+            : pick === 1 ? ['SetInt', 'i', [rand() % 9 - 4]] : ['SetBool', 'b', [rand() % 3]];
+    }));
+
+/**
+ * A compiled effect of three scalars, float f, int i and bool b, whose one
+ * pass sets six states, each an expression (FXLC) that moves one of them --
+ * as fxc compiles a state given a parameter in parentheses -- typed as fxc
+ * types the expression: a float into a dword, an int, a bool, a float through
+ * an int, an int through a float and an int into a colour.
+ *
+ * @returns {Uint8Array}
+ */
+function copyingEffect(){
+    /** @type {number[]} */
+    // Offsets count from the body's own first word, before the one the header gives.
+    const words = [0];
+    const put = (/** @type {number[]} */ ...values)=>{
+        const at = words.length * 4;
+        words.push(...values.map(v=>v >>> 0));
+        return at;
+    };
+    /** @param {string} text */
+    const name = text=>{
+        const bytes = [...text, '\0'].map(c=>c.charCodeAt(0));
+        while (bytes.length % 4)
+        {
+            bytes.push(0);
+        }
+        return put(text.length + 1, ...new Uint32Array(Uint8Array.from(bytes).buffer));
+    };
+    const none = name('');
+    const scalar = (/** @type {number} */ type, /** @type {number} */ named)=>put(type,
+        PC.SCALAR, named, none, 0, 1, 1);
+    const params = [[PT.FLOAT, 'f'], [PT.INT, 'i'], [PT.BOOL, 'b']].map(([type, n])=>
+        [scalar(Number(type), name(String(n))), put(0)]);
+    const fType = scalar(PT.FLOAT, none);
+    const iType = scalar(PT.INT, none);
+    const bType = scalar(PT.BOOL, none);
+    // State, its type, the parameter it moves, the register the parameter is in.
+    const states = [[14, fType, 'f', 0], [8, iType, 'i', 1], [13, bType, 'b', 2],
+        [10, iType, 'f', 3], [27, fType, 'i', 0], [16, iType, 'i', 5]];
+    const zero = put(0);
+    const technique = name('T');
+    const pass = name('P');
+    const start = words.length * 4;
+    put(params.length, 1, 0, 1);
+    for (const [type, value] of params)
+    {
+        put(type, value, 0, 0);
+    }
+    put(technique, 0, 1, pass, 0, states.length);
+    for (const [op, type] of states)
+    {
+        put(Number(op), 0, Number(type), zero);
+    }
+    put(0, states.length);
+    states.forEach(([, , param, register], s)=>{
+        // The constant table: its header, the one constant (named at 64, in the
+        // float registers from its own, its type at 48), a float4's type, the name.
+        const table = [28, 0, 0, 1, 28, 0, 0,
+            64, 2 | Number(register) << 16, 1, 48, 0,
+            PC.VECTOR | PT.FLOAT << 16, 1 | 4 << 16, 1, 0,
+            String(param).charCodeAt(0)];
+        // mov oc0.x, c[register].x
+        const fxlc = [1, 0x10000001, 1, 0, 2, Number(register) * 4, 0, 4, 0];
+        const body = [0x46580201, (table.length + 1) << 16 | 0xfffe, 0x42415443, ...table,
+            (fxlc.length + 1) << 16 | 0xfffe, 0x434c5846, ...fxlc];
+        put(0, 0, 0xffffffff, s, 0, body.length * 4, ...body);
+    });
+    return new Uint8Array(new Uint32Array([FX_2_0, start, ...words]).buffer);
+}
+
+/** The commit gate's effect: shaders' constants of every shape, samplers and states. */
+const COMMIT_SOURCE = `float4x4 wvp; float4 tint; float3 dir; float4 colors[3]; bool flag;
+        texture tex0; texture tex1; int filt = 2; int cull = 1; int ref = 7; bool blend;
+        sampler s0 = sampler_state { Texture = <tex0>; MinFilter = <filt>; AddressU = Clamp; };
+        sampler s1 = sampler_state { Texture = <tex1>; };
+        float4 VS(float4 p : POSITION) : POSITION { return mul(p, wvp) + tint + float4(dir, 0)
+            + colors[1]; }
+        float4 PS(float2 uv : TEXCOORD0) : COLOR { float4 c = tex2D(s0, uv) * tex2D(s1, uv);
+            if (flag) { c = c * 2; } return c * tint; }
+        technique T { pass P { VertexShader = compile vs_2_0 VS();
+            PixelShader = compile ps_2_0 PS(); CullMode = <cull>; AlphaRef = <ref>;
+            AlphaBlendEnable = <blend>; } }`;
+const COMMIT_NAMES = ['wvp', 'tint', 'dir', 'colors', 'flag', 'tex0', 'tex1', 'filt', 'cull',
+    'ref', 'blend'];
+
+/**
+ * One set between the gate's commits on COMMIT_SOURCE.
+ *
+ * @param {() => number} rand @param {number} values  64 floats at random
+ * @returns {[string, string, number[]]}
+ */
+const commitSet = (rand, values)=>{
+    const pick = rand() % 9;
+    return pick === 0 ? ['SetMatrix', 'wvp', [values]]
+        : pick === 1 ? ['SetVector', 'tint', [values + 16]]
+            : pick === 2 ? ['SetVectorArray', 'colors', [values + 32, 1 + rand() % 3]]
+                : pick === 3 ? ['SetInt', ['filt', 'cull', 'ref'][rand() % 3], [rand() % 9]]
+                    : pick === 4 ? ['SetBool', ['flag', 'blend'][rand() % 2], [rand() % 2]]
+                        : pick === 5 ? ['SetTexture', ['tex0', 'tex1'][rand() % 2],
+                            [0x4000 + 16 * (rand() % 5)]]
+                            : pick === 6 ? ['SetVector', 'dir', [values + 48]]
+                                : pick === 7 ? ['SetFloat', 'tint', [0]]
+                                    : ['SetMatrixTranspose', 'wvp', [values + 64]];
+};
+
+/**
+ * Two effects alike on one device: each commit goes to one through the host's
+ * CommitChanges, and to the other through the guest's JavaScript -- the
+ * reference its x86 is held to -- whose device calls are made at once; the
+ * calls each makes, and their values, must be the same. Managed, the program's
+ * state manager is set after the pass is begun, so the table the commits walk
+ * is the one for it.
+ *
+ * @param {boolean} managed @param {string} source @param {string[]} names  its parameters
+ * @param {(rand: () => number, values: number) => [string, string, number[]]} setOf
+ */
+async function commitGate(managed, source, names, setOf){
+    const g = guest();
+    const fxA = await g.effect(source);
+    const fxB = await g.effect(source);
+    const effectB = /** @type {any} */ (g.published.get(fxB)).object;
+    const self = g.heap.allocate(8);
+    g.view.setUint32(self + 4, effectB.guestState(), true);
+    const passes = g.out();
+    for (const fx of [fxA, fxB])
+    {
+        assert.equal(await g.call(fx, 'Begin', passes, 0), D3D_OK);
+        assert.equal(await g.call(fx, 'BeginPass', 0), D3D_OK);
+        if (managed)
+        {
+            assert.equal(await g.call(fx, 'SetStateManager', g.manager), D3D_OK);
+        }
+    }
+    assert.notEqual(g.u32(effectB.guestState() + EFFECT_BLOCK.COMMIT), 0,
+        'the pass has a table: its commits are the guest\'s');
+    const HOST = Symbol('host');
+    /** The guest's device calls, made at once as the device's routines would take them. */
+    const helpers = {
+        u32: g.u32,
+        setU32: (/** @type {number} */ at, /** @type {number} */ v)=>g.view.setUint32(at, v >>> 0,
+            true),
+        f32: (/** @type {number} */ at)=>g.view.getFloat32(at, true),
+        setF32: (/** @type {number} */ at, /** @type {number} */ v)=>g.view.setFloat32(at, v,
+            true),
+        // Walk, where the block names it, as its JavaScript; any other a device's routine.
+        callStd: (/** @type {number} */ fn, /** @type {number[]} */ ...args)=>(fn
+            === g.u32(effectB.guestState() + EFFECT_BLOCK.WALK)
+            ? /** @type {any} */ (commitSource).Walk(helpers, ...args) : callNow(fn, args)),
+        host: ()=>HOST,
+    };
+    /**
+     * A method on both effects -- on B through its guest code where it has
+     * some, the host's where that hands over -- and what each answered and called.
+     *
+     * @param {string} name @param {number[]} args
+     */
+    const both = async(name, ...args)=>{
+        const before = g.calls.length;
+        const answerA = await g.call(fxA, name, ...args);
+        const callsA = g.calls.slice(before).map(shapeOfA);
+        const middle = g.calls.length;
+        const inGuest = /** @type {any} */ (commitSource)[name];
+        let answerB = inGuest ? inGuest(helpers, self, ...args) : HOST;
+        const guestAnswered = answerB !== HOST;
+        if (!guestAnswered)
+        {
+            answerB = await g.call(fxB, name, ...args);
+        }
+        const callsB = g.calls.slice(middle).map(shapeOfB);
+        assert.equal(answerB >>> 0, answerA, `${name}: the answer`);
+        assert.deepEqual(callsB, callsA, `${name}: the device calls`);
+        assert.ok(!managed || callsA.every(c=>!/\.Set/.test(c) || c.startsWith('manager.')),
+            'the manager\'s calls');
+        return guestAnswered;
+    };
+    /** @param {number} fn @param {number[]} args */
+    const callNow = (fn, args)=>{
+        // The harness's device answers in its body, before any await. What the
+        // guest pushes is a word, whatever sign the JavaScript gave it.
+        void g.callGuestNow(fn, args.map(a=>a >>> 0));
+        return 0;
+    };
+    const handles = async(/** @type {number} */ fx)=>Object.fromEntries(await Promise.all(
+        names.map(async name=>[name, await g.handle(fx, name)])));
+    const hA = await handles(fxA);
+    const hB = await handles(fxB);
+    let seed = 0x9e3779b9;
+    const rand = ()=>(seed = (Math.imul(seed, 1103515245) + 12345) >>> 0);
+    const values = g.heap.allocate(64 * 3);
+    /**
+     * What a device call was, its pointers aside: the values it carried; a
+     * shader, each effect's own, as the how-manieth that effect's calls set.
+     *
+     * @param {Map<number, number>} shaders @returns {(c: any) => string}
+     */
+    const shapeIn = shaders=>c=>(/^Set(Vertex|Pixel)Shader$/.test(c.name)
+        ? `${c.on}.${c.name}(#${shaders.get(c.args[0])
+            ?? shaders.set(c.args[0], shaders.size).size - 1})`
+        : `${c.on}.${c.name}(${JSON.stringify(c.values ?? c.args)})`);
+    const shapeOfA = shapeIn(new Map([[0, -1]]));
+    const shapeOfB = shapeIn(new Map([[0, -1]]));
+    let guestCommits = 0;
+    let guestBegins = 0;
+    let guestTechniques = 0;
+    for (let round = 0; round < 600; round++)
+    {
+        for (let at = values; at < values + 64 * 3; at += 4)
+        {
+            g.view.setFloat32(at, (rand() % 2000 - 1000) / 37, true);
+        }
+        const sets = 1 + rand() % 4;
+        for (let k = 0; k < sets; k++)
+        {
+            const [method, name, args] = setOf(rand, values);
+            const a = await g.call(fxA, method, hA[name], ...args);
+            const b = await g.call(fxB, method, hB[name], ...args);
+            assert.equal(b, a);
+        }
+        // The high bits: the generator's low ones repeat with a short period.
+        const pick = (rand() >>> 16) % 8;
+        if (pick === 0)
+        {
+            // The pass ended and begun again: every state set.
+            await both('EndPass');
+            guestBegins += await both('BeginPass', 0) ? 1 : 0;
+        }
+        else if (pick === 1)
+        {
+            // The technique ended and begun again, or a pass begun twice.
+            await both('EndPass');
+            guestTechniques += await both('End') ? 1 : 0;
+            guestTechniques += await both('Begin', passes, 0) ? 1 : 0;
+            await both('BeginPass', 0);
+            await both('BeginPass', (rand() >>> 16) % 3);
+        }
+        else
+        {
+            guestCommits += await both('CommitChanges') ? 1 : 0;
+        }
+    }
+    assert.ok(guestCommits > 400, `${guestCommits} commits in the guest`);
+    assert.ok(guestBegins > 40, `${guestBegins} passes begun in the guest`);
+    assert.ok(guestTechniques > 80, `${guestTechniques} Begins and Ends in the guest`);
+}

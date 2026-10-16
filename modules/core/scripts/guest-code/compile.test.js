@@ -444,6 +444,25 @@ export function bulk({ copyUp, copyDown, fill, call, u8 }, d, s, n, fn){
     call(fn, s, 1);
     return (call(fn, d, n) + call(fn, s, 3) + u8(d)) | 0;
 }
+
+/**
+ * Calls of a stdcall function, which pops its own arguments: in a loop, with
+ * arguments to evaluate and with plain ones, the frame where it was after each.
+ *
+ * @guestCode stdcall
+ * @param {any} guest @param {u32} p @param {u32} n @param {u32} fn
+ * @returns {i32}
+ */
+export function stdcalls({ callStd, u8 }, p, n, fn){
+    let sum = 0;
+    for (let i = 0; i < (n | 0); i++)
+    {
+        sum = (sum + callStd(fn, (p + i) >>> 0, i)) | 0;
+    }
+    const k = (u8(p) + n) | 0;
+    return (sum + callStd(fn, p, k) + u8(p + 1)) | 0;
+}
+
 `;
 
 /** Doubles and floats, with X87 from where the samples cannot name it relatively. */
@@ -640,6 +659,9 @@ const CALLBACK_X86 = [
     0xc3,
 ];
 
+/** The same callback, stdcall: it pops its two arguments. */
+const CALLBACK_STD_X86 = [...CALLBACK_X86.slice(0, -1), 0xc2, 0x08, 0x00];
+
 /** @type {(memory: Uint8Array, fn: number, args: number[]) => number} */
 const callbackJs = (memory, fn, [p, k])=>{
     assert.equal(fn, CALLBACK);
@@ -752,6 +774,17 @@ test('copies up and down, over themselves, a fill, and calls through a pointer',
         const d = i % 2 === 0 ? s + next() % 9 - 4 : DATA + next() % 64;
         same('bulk', { stack: [d, s, next() % 40, CALLBACK], memory: [[DATA, bytes]] },
             { callback: CALLBACK_X86, call: callbackJs });
+    }
+});
+
+test('calls of a stdcall function leave the frame where the callee popped it', async()=>{
+    const { same } = await load(SAMPLE);
+    const next = random(16);
+    for (let i = 0; i < 200; i++)
+    {
+        const bytes = Array.from({ length: 96 }, ()=>next() & 0xff);
+        same('stdcalls', { stack: [DATA + next() % 32, next() % 9, CALLBACK],
+            memory: [[DATA, bytes]] }, { callback: CALLBACK_STD_X86, call: callbackJs });
     }
 });
 

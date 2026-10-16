@@ -56,6 +56,10 @@
  * @property {(left: number, top: number, right: number, bottom: number, pixel: number) => void
  *     } [fill]  Every pixel of the half-open rectangle written as `write` writes one, in
  *     runs rather than a call a pixel.
+ * @property {Uint32Array | null} [words]
+ *           Its pixels as words, a row `pitch / 4` words apart from the first
+ *           stored one, when each word is the pixel itself; null or absent
+ *           when it is not.
  * @property {(pixel: number) => number} [nearest]
  *           What a write of `pixel` reads back as: the entry an indexed
  *           surface would store, the colour sixteen bits keep. A 32-bit

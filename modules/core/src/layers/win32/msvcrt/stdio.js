@@ -102,6 +102,8 @@ export const standardRecords = iob=>(iob === 0 ? []
  * @property {() => number} [fmode]  The runtime's `_fmode`, for that table.
  * @property {(list: number) => number[]} [varargs]
  *           The argument slots a `va_list` points at, for vprintf.
+ * @property {(values: Record<string, number>) => void} [setRegisters]
+ *           EDX, for an __int64 answer; without it `_ftelli64` is not exported.
  */
 
 /**
@@ -734,6 +736,29 @@ export function createStdioFunctions(host){
         return stream && putUnits(stream, [c & 0xffff]) === 1 ? c & 0xffff : WEOF;
     });
 
+    /**
+     * fseek's body, its offset whole: zero on success.
+     *
+     * @param {number} pointer @param {number} offset @param {number} origin
+     */
+    const seek = (pointer, offset, origin)=>{
+        const stream = argument(pointer);
+        const descriptor = stream ? descriptorOf(stream) : null;
+        if (!stream || !descriptor || descriptor.node === null)
+        {
+            return -1;
+        }
+        const base = origin === SEEK_SET ? 0
+            : origin === SEEK_CUR ? tellOf(stream)
+                : origin === SEEK_END ? descriptors.size(descriptor) : -1;
+        if (base < 0)
+        {
+            fail(EINVAL);
+            return -1;
+        }
+        return reposition(stream, base + offset) ? 0 : -1;
+    };
+
     return {
         /**
          * FILE _iob[20]
@@ -983,23 +1008,23 @@ export function createStdioFunctions(host){
         }),
 
         /** int fseek(FILE *stream, long offset, int origin) -- zero on success. */
-        fseek: cdecl(12, ([pointer, offset, origin])=>{
-            const stream = argument(pointer);
-            const descriptor = stream ? descriptorOf(stream) : null;
-            if (!stream || !descriptor || descriptor.node === null)
-            {
-                return -1;
+        fseek: cdecl(12, ([pointer, offset, origin])=>seek(pointer, offset | 0, origin)),
+
+        /** int _fseeki64(FILE *stream, __int64 offset, int origin) -- fseek past 4 GiB. */
+        _fseeki64: cdecl(16, ([pointer, low, high, origin])=>
+            seek(pointer, (high | 0) * 0x100000000 + (low >>> 0), origin)),
+
+        ...(host.setRegisters
+            ? {
+                /** __int64 _ftelli64(FILE *stream) -- -1 for a stream that is not one. */
+                _ftelli64: cdecl(4, ([pointer])=>{
+                    const stream = argument(pointer);
+                    const bits = BigInt.asUintN(64, BigInt(stream ? tellOf(stream) : -1));
+                    host.setRegisters?.({ edx: Number(bits >> 32n) });
+                    return Number(bits & 0xffffffffn);
+                }),
             }
-            const base = origin === SEEK_SET ? 0
-                : origin === SEEK_CUR ? tellOf(stream)
-                    : origin === SEEK_END ? descriptors.size(descriptor) : -1;
-            if (base < 0)
-            {
-                fail(EINVAL);
-                return -1;
-            }
-            return reposition(stream, base + (offset | 0)) ? 0 : -1;
-        }),
+            : {}),
 
         /** long ftell(FILE *stream) -- -1 for a stream that is not one. */
         ftell: cdecl(4, ([pointer])=>{

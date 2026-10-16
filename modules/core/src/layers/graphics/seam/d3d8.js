@@ -53,6 +53,7 @@ import { ADAPTER_STRING_LENGTH, D3DADAPTER_IDENTIFIER8, D3DCLIPSTATUS8,
 import { vertexCountOf } from '../d3d8/render.js';
 import { PALETTE_BYTES } from '../d3d9/device.js';
 import { createCursorTeller } from './cursor.js';
+import { fpuSetupCode } from './fpu.js';
 import { ADAPTER_GUID, describeAdapter } from './adapter.js';
 import { createRaster, rasterStatus } from './raster.js';
 import { TEXTURE_OP_CAPS } from '../d3d8/validity.js';
@@ -63,7 +64,8 @@ import {
     DRAWABLE_MIRRORS, RENDER_STATE_MIRROR, TRANSFORM_MIRROR, VIEWPORT_GUARD_8, VIEWPORT_MIRROR,
     commandCode, createShadow, settledAfter,
     getRenderStateCode, getSurfaceLevelCode, getTextureStageStateCode, getTransformCode,
-    getViewportCode, lockCode, stageStateMirror, unlockCode,
+    getViewportCode, lockCode, stageStateMirror, unlockCode, HOST_MIRRORS, appendCommand,
+    guestWords,
 } from './shadow.js';
 import { D3D8_COMMANDS, materialOf } from '../d3d8/commands.js';
 import { D3DTSS } from '../d3d8/constants.js';
@@ -91,6 +93,22 @@ export const COMMAND_MIRRORS = {
     SetStreamSource: [...DRAWABLE_MIRRORS.SetStreamSource8],
     SetIndices: [...DRAWABLE_MIRRORS.SetIndices],
     DrawPrimitiveUP: [...DRAWABLE_MIRRORS.DrawPrimitiveUP],
+};
+
+/**
+ * The same mirrors as the host keeps them (`HOST_MIRRORS`), for the setters
+ * whose records it writes itself (`appendCommand`); a method with a mirror
+ * not here -- a viewport checked against the target, a vertex shader's
+ * handle -- goes into the guest.
+ */
+export const HOST_COMMAND_MIRRORS = {
+    SetRenderState: HOST_MIRRORS.renderState,
+    SetTransform: HOST_MIRRORS.transform,
+    SetTextureStageState: HOST_MIRRORS.stageState(STAGE_STATE_TYPES_8),
+    BeginScene: HOST_MIRRORS.beginScene,
+    EndScene: HOST_MIRRORS.endScene,
+    SetStreamSource: HOST_MIRRORS.streamSource8,
+    SetIndices: HOST_MIRRORS.indices,
 };
 
 /**
@@ -2247,8 +2265,19 @@ export function createDirect3D8Seam(
                         mirror: COMMAND_MIRRORS[name] }))])),
         }
         : {});
+    // The setters its ring carries, made in place for a host's driven steps (as Direct3D 9's).
+    const words = guestWords(memory);
+    /** @type {Record<string, (call: number[]) => number | undefined>} */
+    const IN_PLACE = Object.fromEntries(Object.entries(D3D8_COMMANDS.COMMANDS).filter(([name,
+        shape])=>!shape.draws && !shape.self && (!(name in COMMAND_MIRRORS)
+        || name in HOST_COMMAND_MIRRORS)).map(([name, shape])=>{
+        const placed = { ...shape, slot: D3D8_COMMANDS.commandSlot(name) };
+        const mirror = /** @type {Record<string, any>} */ (HOST_COMMAND_MIRRORS)[name];
+        return [name, (/** @type {number[]} */ call)=>appendCommand(words, placed, mirror, call)];
+    }));
     const deviceInterfaces = [
-        describe(IID_IDirect3DDevice8, IDIRECT3DDEVICE8_SLOTS, syncedMethods, deviceGuests),
+        describe(IID_IDirect3DDevice8, IDIRECT3DDEVICE8_SLOTS, syncedMethods, deviceGuests,
+            undefined, IN_PLACE),
     ];
 
     /**
@@ -2703,7 +2732,11 @@ export function createDirect3D8Seam(
     /** Tells the taker the cursor the device holds, when it changed. */
     const tellCursor = cursor ? createCursorTeller(cursor, memory.readMemory) : ()=>{};
 
-    const rootInterfaces = [describe(IID_IDirect3D8, IDIRECT3D8_SLOTS, rootMethods)];
+    // A device made without FPU_PRESERVE sets the calling thread's x87 as
+    // Direct3D does, in the guest, before the method's trap (`fpu.js`).
+    const rootInterfaces = [describe(IID_IDirect3D8, IDIRECT3D8_SLOTS, rootMethods,
+        allocate ? { CreateDevice: (/** @type {{ trap: number }} */ { trap })=>placeCode(at=>
+            fpuSetupCode(at, trap)) } : {})];
 
     /** @type {any} */
     let lastDevice = null;
