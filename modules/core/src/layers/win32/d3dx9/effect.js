@@ -2303,6 +2303,94 @@ export function createEffects(host, helpers, options = {}){
         /** @param {string} name */
         const slotOf = name=>SETTERS[name][effect.manager ? 1 : 0];
         /**
+         * An entry that sets `count` registers from `first` with units of a
+         * parameter's words (`map`, -1 for a zero), dated by the store at
+         * `version`; '' when made, else why not.
+         *
+         * @param {number} kind @param {number} dated @param {string} setter
+         * @param {number} first @param {number} count @param {number} data
+         * @param {Int32Array} map
+         * @returns {string}
+         */
+        const constantEntry = (kind, dated, setter, first, count, data, map)=>{
+            if (map.length * 4 > SCRATCH_BYTES)
+            {
+                return `${setter}: ${map.length} units, more than a commit's scratch`;
+            }
+            const layout = heap().allocate(8 + 4 * map.length);
+            if (layout === 0)
+            {
+                return 'no room';
+            }
+            effect.owned.push(layout);
+            host.writeMemory(layout, u32Bytes([map.length, data, ...map]));
+            entries.push([kind, dated, slotOf(setter), first, count, layout, 0, 0]);
+            return '';
+        };
+        /**
+         * A shader constant's entries from its parameter, as `storeConstant`
+         * sets it: a structure member by member, each element's registers
+         * after the last's, every one dated by the store at `dated`; ''
+         * when made, else why not.
+         *
+         * @param {Constant} constant @param {Param} param @param {number} dated
+         * @param {boolean} pixel
+         * @returns {string}
+         */
+        const constantEntries = (constant, param, dated, pixel)=>{
+            if (constant.cls === PC.STRUCT || constant.members.length > 0)
+            {
+                const elements = Math.max(1, constant.elements);
+                const span = constant.members.reduce((sum, m)=>sum + m.count, 0);
+                for (let e = 0; e < elements; e++)
+                {
+                    const holder = param.model.elements ? param.members[e] : param;
+                    if (!holder)
+                    {
+                        break;
+                    }
+                    for (const member of constant.members)
+                    {
+                        const p = holder.members.find(m=>m.model.name === member.name);
+                        const no = p ? constantEntries({ ...member, index: member.index
+                            + e * span }, p, dated, pixel) : '';
+                        if (no)
+                        {
+                            return no;
+                        }
+                    }
+                }
+                return '';
+            }
+            if (!numeric(param))
+            {
+                return '';
+            }
+            const { count, map } = layoutOf(constant, param.model);
+            if (count === 0)
+            {
+                return '';
+            }
+            const type = param.model.type;
+            // How the host converts each unit into the register's type.
+            const kind = (constant.set === 2 && type === PT.FLOAT)
+                || (constant.set === 1 && type === PT.INT) ? COMMIT_KIND.WORDS
+                : constant.set !== 2 && (type === PT.INT || type === PT.BOOL)
+                    ? COMMIT_KIND.BOOLS
+                    : constant.set === 0 && type === PT.FLOAT ? COMMIT_KIND.FLOAT_BOOLS
+                        : constant.set === 2 && type === PT.INT ? COMMIT_KIND.INT_FLOATS
+                            : constant.set === 2 && type === PT.BOOL
+                                ? COMMIT_KIND.BOOL_FLOATS
+                                : constant.set === 1 && type === PT.FLOAT
+                                    ? COMMIT_KIND.FLOAT_INTS : 0;
+            if (kind === 0)
+            {
+                return `${constant.name}: register set ${constant.set} of type ${type}`;
+            }
+            return constantEntry(kind, dated, CONSTANT_SETTERS[constant.set][pixel ? 1 : 0],
+                constant.index, count, dataAt(param), map);
+        };
+        /**
          * A state's entry, set on `unit` for a sampler's; false where the table cannot say it.
          *
          * @param {StateModel} state @param {number} unit
@@ -2320,6 +2408,35 @@ export function createEffects(host, helpers, options = {}){
                             : state.kind === 'fvf' ? [slotOf('SetFVF'), 0, 0, 1]
                                 : state.kind === 'npatch' ? [slotOf('SetNPatchMode'), 0, 0, 1]
                                     : null;
+            const constantState = CONSTANT_STATES[state.kind];
+            if (constantState && source.kind === 'param')
+            {
+                // A shader constant set from a parameter, as `applyState`
+                // sets it: the parameter's words in registers, zeros after.
+                const p = effect.byName.get(source.path);
+                if (!p)
+                {
+                    return true;
+                }
+                if (!numeric(p))
+                {
+                    why = `${state.name} from ${source.path}, not a number`;
+                    return false;
+                }
+                const [setter, perRegister] = constantState;
+                const held = p.model.bytes < 4 ? 0 : p.model.bytes >>> 2;
+                const count = Math.max(1, Math.ceil(held / perRegister));
+                const type = p.model.type;
+                const kind = state.value === 'vector'
+                    ? (type === PT.FLOAT ? COMMIT_KIND.WORDS : type === PT.BOOL
+                        ? COMMIT_KIND.BOOL_FLOATS : COMMIT_KIND.INT_FLOATS)
+                    : type === PT.FLOAT ? COMMIT_KIND.FLOAT_INTS : type === PT.BOOL
+                        ? COMMIT_KIND.BOOLS : COMMIT_KIND.WORDS;
+                const no = constantEntry(kind, p.store.at, setter, index, count, dataAt(p),
+                    Int32Array.from({ length: count * perRegister }, (_, i)=>(i < held ? i : -1)));
+                why = no ? `${state.name}: ${no}` : '';
+                return !no;
+            }
             if (source.kind === 'const')
             {
                 // Never changed, so never a commit's: BeginPass sets it as it is.
@@ -2422,45 +2539,11 @@ export function createEffects(host, helpers, options = {}){
                         }
                         continue;
                     }
-                    if (constant.cls === PC.STRUCT || constant.members.length > 0)
+                    const no = constantEntries(constant, param, param.store.at, shader.pixel);
+                    if (no)
                     {
-                        return `${constant.name}: a structure's constants`;
+                        return no;
                     }
-                    if (!numeric(param))
-                    {
-                        continue;
-                    }
-                    const { count, units, map } = layoutOf(constant, param.model);
-                    if (count === 0)
-                    {
-                        continue;
-                    }
-                    const type = param.model.type;
-                    // How the host converts each unit into the register's type.
-                    const kind = (constant.set === 2 && type === PT.FLOAT)
-                        || (constant.set === 1 && type === PT.INT) ? COMMIT_KIND.WORDS
-                        : constant.set !== 2 && (type === PT.INT || type === PT.BOOL)
-                            ? COMMIT_KIND.BOOLS
-                            : constant.set === 0 && type === PT.FLOAT ? COMMIT_KIND.FLOAT_BOOLS
-                                : constant.set === 2 && type === PT.INT ? COMMIT_KIND.INT_FLOATS
-                                    : constant.set === 2 && type === PT.BOOL
-                                        ? COMMIT_KIND.BOOL_FLOATS
-                                        : constant.set === 1 && type === PT.FLOAT
-                                            ? COMMIT_KIND.FLOAT_INTS : 0;
-                    if (kind === 0)
-                    {
-                        return `${constant.name}: register set ${constant.set} of type ${type}`;
-                    }
-                    const layout = heap().allocate(8 + 4 * units);
-                    if (layout === 0)
-                    {
-                        return 'no room';
-                    }
-                    effect.owned.push(layout);
-                    host.writeMemory(layout, u32Bytes([units, dataAt(param), ...map]));
-                    entries.push([kind, param.store.at,
-                        slotOf(CONSTANT_SETTERS[constant.set][shader.pixel ? 1 : 0]),
-                        constant.index, count, layout, 0, 0]);
                 }
                 continue;
             }

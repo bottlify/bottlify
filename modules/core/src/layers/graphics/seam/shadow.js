@@ -2228,7 +2228,7 @@ export function createShadow(deps){
         heldSince = locks;
         for (const block of heldLocks)
         {
-            if (!blocks.has(block) || !lockedInGuest.has(block))
+            if (!live(block) || !lockedInGuest.has(block))
             {
                 lockedInGuest.delete(block);
                 heldLocks.delete(block);
@@ -2239,6 +2239,25 @@ export function createShadow(deps){
                 heldLocks.delete(block);
             }
         }
+    };
+    /**
+     * A block's entry while its buffer is the program's; one released --
+     * which a dynamic buffer may be while it still counts as held -- is
+     * forgotten here, so the host never locks it again: the played device has
+     * let it go.
+     *
+     * @param {number} block
+     */
+    const live = block=>{
+        const entry = blocks.get(block);
+        if (entry && entry.buffer.refCount <= 0)
+        {
+            blocks.delete(block);
+            lockedInGuest.delete(block);
+            heldLocks.delete(block);
+            return undefined;
+        }
+        return entry;
     };
     /** The blocks that may be held locked in the guest, as `settleHeld` last found them. */
     const heldLocks = new Set();
@@ -2257,7 +2276,7 @@ export function createShadow(deps){
      * @returns {boolean}  whether the guest holds it locked
      */
     const flushHeld = block=>{
-        const entry = blocks.get(block);
+        const entry = live(block);
         if (!entry || readWord(block + BUFFER.LOCKED) === 0)
         {
             return false;

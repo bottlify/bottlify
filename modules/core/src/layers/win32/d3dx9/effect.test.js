@@ -1771,6 +1771,29 @@ for (const managed of [false, true])
         + ' commits', ()=>commitGate(managed, COMMIT_SOURCE, COMMIT_NAMES, commitSet));
 }
 
+for (const managed of [false, true])
+{
+    test(`CommitChanges in the guest makes the ${managed ? 'state manager' : 'device'} calls the`
+        + ' host\'s does for a structure array\'s constants and constant states set from'
+        + ' parameters', ()=>commitGate(managed, `struct Light { float4 pos; float4 color; };
+            Light Lights[2]; float4 boost; float2 half; int count; bool on;
+            float4 VS(float4 p : POSITION) : POSITION { return p + Lights[0].pos
+                + Lights[1].color + Lights[1].pos; }
+            float4 PS() : COLOR { return float4(1, 1, 1, 1); }
+            technique T { pass P { VertexShader = compile vs_2_0 VS();
+                PixelShader = compile ps_2_0 PS(); PixelShaderConstantF[3] = <boost>;
+                VertexShaderConstantF[40] = <half>; VertexShaderConstantI[1] = <count>;
+                PixelShaderConstantB[2] = <on>; } }`, ['Lights', 'boost', 'half', 'count', 'on'],
+    (rand, values)=>{
+        const pick = rand() % 5;
+        return pick === 0 ? ['SetValue', 'Lights', [values, 64]]
+            : pick === 1 ? ['SetVector', 'boost', [values + 16]]
+                : pick === 2 ? ['SetFloatArray', 'half', [values + 32, 2]]
+                    : pick === 3 ? ['SetInt', 'count', [rand() % 9 - 4]]
+                        : ['SetBool', 'on', [rand() % 3]];
+    }));
+}
+
 test('CommitChanges in the guest makes the device calls the host\'s does for states compiled'
     + ' expressions copy from a float, an int or a bool', ()=>commitGate(false,
     String.fromCharCode(...copyingEffect()), ['f', 'i', 'b'], rand=>{
