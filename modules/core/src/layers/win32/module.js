@@ -1033,6 +1033,8 @@ export function createWin32Module(){
             // chain's head lives in the thread block at FS:[0], and a processor
             // fault is reported with its vector rather than stopping the machine.
             const registerNames = ['eax', 'ebx', 'ecx', 'edx', 'esi', 'edi', 'ebp', 'esp', 'eip'];
+            /** The handler of the dispatch's own frame: ExceptionContinueSearch. */
+            let dispatcherFrameTrap = 0;
             const seh = createSeh({
                 readMemory,
                 writeMemory,
@@ -1046,6 +1048,8 @@ export function createWin32Module(){
                 answerWith: (value, registers)=>bridge.answerWith(value, registers),
                 /** @param {any} call */
                 callGuest: call=>bridge.callGuest(call),
+                dispatcherHandler: ()=>(dispatcherFrameTrap ||= bridge.register(
+                    '<exception dispatcher frame>', { argBytes: 0, handler: ()=>1 })),
                 currentThread: ()=>kernel.currentThread(),
                 /** @param {string} text */
                 trace: text=>trace(text),

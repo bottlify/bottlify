@@ -211,6 +211,10 @@ const hex = value=>`0x${(value >>> 0).toString(16)}`;
  *           sit on this same stack, and a frame built anywhere above them is
  *           a handler writing over what it is reading. `registers.eflags`,
  *           when given, is the flags word it starts with.
+ * @property {() => number} [dispatcherHandler]  The handler of the frame the
+ *           dispatch registers while it calls a frame's handler: guest code
+ *           that answers ExceptionContinueSearch. Without it the frame names
+ *           no handler and every walk passes over it.
  * @property {() => any} [currentThread]
  * @property {(text: string) => void} [trace]
  * @property {(what: { code: number, address: number }) => void} [terminate]
@@ -555,21 +559,39 @@ export function createSeh(host){
             + `${caller}, `
             + `${frames.length} frame(s)${damaged ? ', chain damaged' : ''}`);
 
+        // Windows calls each handler with a frame of its own at the head of
+        // the chain, and the C runtime's catch counts on it: the frame
+        // handler that finds its catch saves the head, unwinds to its own
+        // frame, links the saved frame back on above it, and once the catch
+        // block has run takes the head off as "the system's" before jumping
+        // to the continuation. With no such frame, a catch in the frame at
+        // the head linked that frame to itself and then took it off: the
+        // head was left on a frame whose function had returned, and the next
+        // exception was offered to it alone.
+        const teb = tebOf(asked);
+        const own = (at.top - 16) >>> 0;
+        const ownHandler = host.dispatcherHandler?.() ?? 0;
         for (const { frame, handler } of frames)
         {
             if (!host.isMapped(handler))
             {
                 continue;
             }
+            writeU32(own, readU32(teb));
+            writeU32(own + 4, ownHandler);
+            writeU32(teb, own);
             // Handlers run below the record they were handed, each with the
             // flags the system gives one.
             const answer = await host.callGuest({
                 entry: handler,
                 args: [at.record, frame, at.context, 0],
                 thread: asked,
-                stackAtRest: at.top,
+                stackAtRest: own,
                 ...entryFlags(flags),
             }) >>> 0;
+            // The head is whatever the frame links to now: the handler may
+            // have relinked it.
+            writeU32(teb, readU32(own));
 
             if (answer === Disposition.CONTINUE_EXECUTION)
             {
@@ -671,7 +693,8 @@ export function createSeh(host){
                 reached = true;
                 break;
             }
-            if (host.isMapped(handler))
+            // The dispatch's own frame answers nothing worth a call.
+            if (host.isMapped(handler) && handler !== host.dispatcherHandler?.())
             {
                 await host.callGuest({
                     entry: handler,
