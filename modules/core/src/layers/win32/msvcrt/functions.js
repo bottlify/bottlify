@@ -37,6 +37,8 @@ import * as inGuest from './inguest.js';
 import { COMPILED } from './inguest.x86.js';
 import * as inGuestFloat from './inguest-float.js';
 import { COMPILED as FLOAT_CODE } from './inguest-float.x86.js';
+import * as inGuestPrint from './inguest-print.js';
+import { COMPILED as PRINT_CODE } from './inguest-print.x86.js';
 import { createMathFunctions } from './math.js';
 import { createStartupFunctions } from './startup.js';
 import { createStdioFunctions, standardRecords } from './stdio.js';
@@ -598,9 +600,12 @@ export function createMsvcrtFunctions(host){
             handler: args=>countedPrint(args[0], args[1], render(args, 3)),
         },
 
-        /** int vsprintf(char *buffer, const char *format, va_list args) */
-        vsprintf: {
-            convention: 'cdecl',
+        /**
+         * int vsprintf(char *buffer, const char *format, va_list args) -- in the
+         * guest (`inguest-print.js`), a format with a double, a 64-bit integer or
+         * a wide or counted string the handler's
+         */
+        vsprintf: guestEntry(inGuestPrint.vsprintf, PRINT_CODE.vsprintf, host, {
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([buffer, format, list])=>{
@@ -608,7 +613,7 @@ export function createMsvcrtFunctions(host){
                 writeString(buffer, text);
                 return text.length;
             },
-        },
+        }),
 
         /**
          * int _vsnprintf(char *buffer, size_t count, const char *format, va_list args)
@@ -616,13 +621,12 @@ export function createMsvcrtFunctions(host){
          * _snprintf with its arguments in memory: the same negative answer
          * and unterminated buffer when the text does not fit.
          */
-        _vsnprintf: {
-            convention: 'cdecl',
+        _vsnprintf: guestEntry(inGuestPrint._vsnprintf, PRINT_CODE._vsnprintf, host, {
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([buffer, count, format, list])=>
                 countedPrint(buffer, count, narrowText(format, varargsAt(list))),
-        },
+        }),
 
         /**
          * int _vscprintf(const char *format, va_list args)
@@ -630,12 +634,11 @@ export function createMsvcrtFunctions(host){
          * How many characters the text would take, its terminator left out:
          * what a program sizes a buffer by before it formats into one.
          */
-        _vscprintf: {
-            convention: 'cdecl',
+        _vscprintf: guestEntry(inGuestPrint._vscprintf, PRINT_CODE._vscprintf, host, {
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([format, list])=>narrowText(format, varargsAt(list)).length,
-        },
+        }),
 
         /**
          * int _vsnwprintf(wchar_t *buffer, size_t count, const wchar_t *format,

@@ -19,6 +19,8 @@
 import { guestEntry } from './guest-code.js';
 import * as inGuest from './inguest.js';
 import { COMPILED } from './inguest.x86.js';
+import * as inGuestPrint from './inguest-print.js';
+import { COMPILED as PRINT_CODE } from './inguest-print.x86.js';
 
 const EINVAL = 22;
 const ERANGE = 34;
@@ -135,8 +137,7 @@ export function createMsvcr80Functions(crt, host){
          * count the buffer could not hold, with the buffer emptied and
          * ERANGE, as the invalid-parameter handler that returns leaves it.
          */
-        _vsnprintf_s: {
-            convention: 'cdecl',
+        _vsnprintf_s: guestEntry(inGuestPrint._vsnprintf_s, PRINT_CODE._vsnprintf_s, host, {
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([buffer, size, count, format, list])=>{
@@ -162,7 +163,7 @@ export function createMsvcr80Functions(crt, host){
                 fail(ERANGE);
                 return -1;
             },
-        },
+        }),
 
         /**
          * errno_t fopen_s(FILE **file, const char *name, const char *mode)

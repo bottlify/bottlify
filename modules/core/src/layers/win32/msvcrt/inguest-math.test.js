@@ -151,14 +151,21 @@ test('exp, log, log10, sinh, cosh and tanh, across their ranges', ()=>{
     }
 });
 
-test('pow: the exact powers in the guest, the rest handed over', ()=>{
+test('pow: the exact powers, and any finite power of a finite base, in the guest; the edges'
+    + ' handed over', ()=>{
     const next = random(12);
-    const bases = inputs(6, 6, [4, 10, 0.25, 1e154, -1e154, 1e-160]);
-    const exponents = [0, 1, -1, 2, 0.5, 3, -2, 1.5, NaN, Infinity, -0];
-    // Every base to the exact powers, and to one other.
-    const handed = both('pow', bases.flatMap(x=>[0, 1, -1, 2, 0.5, exponents[next() % 11]]
-        .map(y=>[x, y])));
+    const bases = inputs(6, 6, [4, 10, 0.25, 1e154, -1e154, 1e-160, -3, -0.5, 1.0001, 2 ** 52]);
+    const exponents = [0, 1, -1, 2, 0.5, 3, -2, 1.5, NaN, Infinity, -0, 2.2, -7, 1 / 3, 1e10,
+        -1e10, 2 ** 53, 2 ** 53 + 2, 0.75, 21, -0.25];
+    // Every base to the exact powers, and to three others.
+    const cases = bases.flatMap(x=>[0, 1, -1, 2, 0.5, exponents[next() % exponents.length],
+        exponents[next() % exponents.length], exponents[next() % exponents.length]]
+        .map(y=>[x, y]));
+    const handed = both('pow', cases);
     assert.ok(handed > 0, 'pow: some calls handed over');
+    // Each case under every control word, and every other one as _CIpow besides.
+    const runs = CONTROLS.length * (cases.length + Math.ceil(cases.length / 2));
+    assert.ok(handed < runs / 2, `pow: ${handed} of ${runs} handed over, the general powers kept`);
 });
 
 test('atan2, fmod and _hypot of pairs', ()=>{
