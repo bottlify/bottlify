@@ -70,6 +70,13 @@ const S_FALSE = 1;
 const E_FAIL = 0x80004005;
 const E_NOTIMPL = 0x80004001;
 const E_OUTOFMEMORY = 0x8007000e;
+
+/**
+ * The guest heap had no room for part of an effect: the one failure a maker
+ * answers E_OUTOFMEMORY for. Any other error is a defect of this layer and
+ * goes up whole, so it is never read as a full heap.
+ */
+class HeapFull extends RangeError {}
 const D3DERR_INVALIDCALL = 0x8876086c;
 
 /** D3DXFX_* flags. */
@@ -457,7 +464,7 @@ export function createEffects(host, helpers, options = {}){
         const base = heap().allocate(Math.max(size, 4));
         if (base === 0)
         {
-            throw new RangeError('out of memory');
+            throw new HeapFull(`no room for ${size} bytes of names`);
         }
         owner.push(base);
         let at = base;
@@ -525,13 +532,13 @@ export function createEffects(host, helpers, options = {}){
      * A store in guest memory, zeroed, dated now.
      *
      * @param {number} bytes @returns {Store}
-     * @throws {RangeError} when the heap has no room, which a maker answers E_OUTOFMEMORY
+     * @throws {HeapFull} when the heap has no room, which a maker answers E_OUTOFMEMORY
      */
     const newStore = bytes=>{
         const at = heap().allocate(4 + Math.max(bytes, 4));
         if (at === 0)
         {
-            throw new RangeError('no room for a parameter');
+            throw new HeapFull(`no room for a parameter of ${bytes} bytes`);
         }
         host.writeMemory(at, new Uint8Array(4 + Math.max(bytes, 4)));
         putU32(at, tick());
@@ -555,13 +562,13 @@ export function createEffects(host, helpers, options = {}){
      * A word for a pass's date, never set: owned by the effect.
      *
      * @param {EffectState} effect
-     * @throws {RangeError} when the heap has no room
+     * @throws {HeapFull} when the heap has no room
      */
     const appliedWord = effect=>{
         const at = heap().allocate(4);
         if (at === 0)
         {
-            throw new RangeError('no room for a pass');
+            throw new HeapFull('no room for a pass');
         }
         effect.owned.push(at);
         putU32(at, 0);
@@ -3257,7 +3264,7 @@ export function createEffects(host, helpers, options = {}){
                         t.record = heap().allocate(TECHNIQUE.SIZE);
                         if (t.record === 0)
                         {
-                            throw new RangeError('no room for a technique');
+                            throw new HeapFull('no room for a technique');
                         }
                         effect.owned.push(t.record);
                         putU32s(t.record, [0, 0, 0, 0, 0]);
@@ -3697,8 +3704,9 @@ export function createEffects(host, helpers, options = {}){
                 thread });
         }
         catch (e){
-            if (e instanceof RangeError)
+            if (e instanceof HeapFull)
             {
+                host.divergence?.(api, `answered E_OUTOFMEMORY: ${e.message}`);
                 return E_OUTOFMEMORY;
             }
             throw e;

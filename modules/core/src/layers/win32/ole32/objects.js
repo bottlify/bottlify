@@ -140,6 +140,29 @@ function checkDescriptor(descriptor){
 }
 
 /**
+ * Each interface description's methods behind IUnknown's, made once: every
+ * object of one description hands the same list to the bridge, which builds a
+ * table -- stubs, and guest code for methods that have it -- once per list. A
+ * list made per object built all of that again for every object, and a
+ * program that made a few thousand objects of an interface with guest code
+ * ran the stub table out.
+ *
+ * @type {WeakMap<object, readonly any[]>}
+ */
+const fullMethods = new WeakMap();
+
+/** @param {ComInterfaceDescriptor} descriptor @returns {readonly any[]} */
+function methodsOf(descriptor){
+    let methods = fullMethods.get(descriptor);
+    if (!methods)
+    {
+        methods = Object.freeze([...IUNKNOWN_METHODS, ...descriptor.methods]);
+        fullMethods.set(descriptor, methods);
+    }
+    return methods;
+}
+
+/**
  * @param {string} clsid
  * @param {ComClassDefinition} definition
  * @returns {ComObject}
@@ -191,7 +214,7 @@ export function createComObject(clsid, definition){
             const record = Object.freeze({
                 object,
                 id: key,
-                methods: Object.freeze([...IUNKNOWN_METHODS, ...descriptor.methods]),
+                methods: methodsOf(descriptor),
             });
             // Memoised, so the record -- and therefore the pointer published for
             // it -- is the same one every time this object is asked for this
