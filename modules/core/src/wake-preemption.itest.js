@@ -81,9 +81,17 @@ function buildWakeExe(priority){
     });
 }
 
-/** @param {number} priority */
+/**
+ * Slices are not ended by the clock (`sliceMs`): the main thread's slice is the
+ * scheduler's to end, and one ended by the clock between SetEvent and the read
+ * of the flag -- an interpreting slice's 8 ms, on a loaded machine -- let a
+ * worker of the same priority in there, the turn's end and not the wake.
+ *
+ * @param {number} priority
+ */
 async function flagAfterSetEvent(priority){
-    const app = await createApp({ executable: buildWakeExe(priority), ...ONE_PROCESSOR });
+    const app = await createApp({ executable: buildWakeExe(priority), ...ONE_PROCESSOR,
+        cork: { config: { sliceMs: Infinity } } });
     try
     {
         return await app.run({ timeoutMs: 8000 });

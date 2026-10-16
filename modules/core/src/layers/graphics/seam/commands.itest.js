@@ -17,6 +17,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createCorkHost } from '../../cpu/internal/cork-host.js';
+import { runToHalt } from '../../cpu/internal/halt.fixture.js';
 import * as cork from '../../../../../cork/src/index.js';
 import {
     BUFFER, COMMAND, FLAG_DRAW_STALE, FLAG_SLOW_PATH, FLAG_STALE, RENDER_STATE_MIRROR,
@@ -130,7 +131,7 @@ test('a command routine writes the call into the ring and leaves the rest to the
         host.writePhysical(PROGRAM, new Uint8Array(code));
         host.writeReg32('eip', PROGRAM);
         host.writeReg32('esp', STACK);
-        host.runSlice(1000);
+        runToHalt(host, 1000);
         if (host.readReg32('eip') === TRAP + 1)
         {
             assert.equal(host.readReg32('esp'), STACK - 4 * (args.length + 2),
@@ -257,7 +258,7 @@ test('a draw from the program\'s memory copies the vertices its primitives span'
         host.writePhysical(PROGRAM, new Uint8Array(code));
         host.writeReg32('eip', PROGRAM);
         host.writeReg32('esp', STACK);
-        host.runSlice(1000);
+        runToHalt(host, 1000);
         if (host.readReg32('eip') === TRAP + 1)
         {
             assert.equal(host.readReg32('esp'), STACK - 4 * (args.length + 2));
@@ -357,7 +358,7 @@ test('the viewport and the sampler states a program sets in the guest are what i
             host.writePhysical(PROGRAM, new Uint8Array(code));
             host.writeReg32('eip', PROGRAM);
             host.writeReg32('esp', STACK);
-            host.runSlice(1000);
+            runToHalt(host, 1000);
             if (host.readReg32('eip') === TRAP + 1)
             {
                 assert.equal(host.readReg32('esp'), STACK - 4 * (args.length + 2));
@@ -428,7 +429,7 @@ test('a state block\'s Apply in the ring names the block and sends the getters t
         host.writePhysical(PROGRAM, new Uint8Array(code));
         host.writeReg32('eip', PROGRAM);
         host.writeReg32('esp', STACK);
-        host.runSlice(1000);
+        runToHalt(host, 1000);
         if (host.readReg32('eip') === TRAP + 1)
         {
             return 'trap';
@@ -485,7 +486,7 @@ test('a clear copies its rectangles, or none for the whole target', ()=>{
         host.writePhysical(PROGRAM, new Uint8Array(code));
         host.writeReg32('eip', PROGRAM);
         host.writeReg32('esp', STACK);
-        host.runSlice(1000);
+        runToHalt(host, 1000);
         if (host.readReg32('eip') === TRAP + 1)
         {
             assert.equal(host.readReg32('esp'), STACK - 4 * (args.length + 2));
@@ -543,7 +544,7 @@ test('a surface\'s GetDesc copies the description out of its block', ()=>{
         host.writePhysical(PROGRAM, new Uint8Array(code));
         host.writeReg32('eip', PROGRAM);
         host.writeReg32('esp', STACK);
-        host.runSlice(1000);
+        runToHalt(host, 1000);
         return host.readReg32('eip') === TRAP + 1 ? 'trap'
             : host.readReg32('esp') === STACK && host.readReg32('eax') === 0 ? 'ok' : 'wrong';
     };

@@ -54,6 +54,9 @@
  *     | 'capture', hwnd: number, state: WindowState | null, revision: number }} WindowEvent
  */
 
+/** How many of the last top-level windows made the manager keeps for its report. */
+const MADE_KEPT = 32;
+
 /** The fields whose change is a change of the window, in the order they are compared. */
 const FIELDS = /** @type {const} */ (['processId', 'threadId', 'parent', 'owner', 'className',
     'title', 'style', 'exStyle', 'rect', 'client', 'visible', 'enabled', 'minimized', 'maximized',
@@ -121,6 +124,13 @@ export function createWindowManager({ cells = windowCells() } = {}){
     let revision = 0;
     /** @type {Set<(event: WindowEvent) => void>} */
     const listeners = new Set();
+    /**
+     * The last top-level windows made, oldest first (`MADE_KEPT`): which
+     * process made which, for a report that comes after they are gone.
+     *
+     * @type {{ hwnd: number, process: number, className: string }[]}
+     */
+    const made = [];
 
     /**
      * @param {WindowEvent['kind']} kind @param {number} hwnd
@@ -248,6 +258,15 @@ export function createWindowManager({ cells = windowCells() } = {}){
             if (state.parent === 0 && !listed)
             {
                 order.push(state.hwnd);
+            }
+            if (!had && state.parent === 0)
+            {
+                made.push({ hwnd: state.hwnd, process: state.processId,
+                    className: state.className });
+                if (made.length > MADE_KEPT)
+                {
+                    made.shift();
+                }
             }
             else if (state.parent !== 0 && listed)
             {
@@ -456,6 +475,8 @@ export function createWindowManager({ cells = windowCells() } = {}){
                 topmost: state.topmost,
                 rect: [state.rect.left, state.rect.top, state.rect.right, state.rect.bottom],
             })),
+            made: made.map(({ hwnd, process, className })=>({ hwnd: `0x${hwnd.toString(16)}`,
+                process, className })),
         }),
     };
     return manager;

@@ -884,9 +884,11 @@ export function createScheduler(options){
      * And the instructions retired on this one (`hereRetired`) and on the
      * others (`elsewhereRetired`), whichever threads they were, and the calls
      * into the host the others' threads made (`crossings`), each answered here
-     * (`answers` counts the passes that answered them).
+     * (`answers` counts the passes that answered them), those of them answered
+     * inside a slice of this one's (`crossingsInTurn`).
      */
-    const sharedTime = { hereMs: 0, answerMs: 0, waitMs: 0, answers: 0, crossings: 0, turns: 0,
+    const sharedTime = { hereMs: 0, answerMs: 0, waitMs: 0, answers: 0, crossings: 0,
+        crossingsInTurn: 0, turns: 0,
         betweenMs: 0, heldMs: 0, gapMs: 0, gaps: 0, hereRetired: 0, elsewhereRetired: 0,
         // Counts by bound in ms: the gaps before another executor's next slice,
         // and this executor's own turns.
@@ -1171,6 +1173,10 @@ export function createScheduler(options){
                     on.thread.crossings++;
                     const was = current;
                     const wasInSlice = inSlice;
+                    if (wasInSlice)
+                    {
+                        sharedTime.crossingsInTurn++;
+                    }
                     current = on.thread;
                     inSlice = true;
                     try

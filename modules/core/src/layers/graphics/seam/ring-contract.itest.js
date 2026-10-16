@@ -21,6 +21,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createCorkHost } from '../../cpu/internal/cork-host.js';
+import { runToHalt } from '../../cpu/internal/halt.fixture.js';
 import * as cork from '../../../../../cork/src/index.js';
 import { SHADOW, commandCode } from './shadow.js';
 import { COMMAND_MIRRORS as MIRRORS_9 } from './d3d9.js';
@@ -141,7 +142,7 @@ const machine = ()=>{
         host.writePhysical(PROGRAM, new Uint8Array(code));
         host.writeReg32('eip', PROGRAM);
         host.writeReg32('esp', STACK);
-        host.runSlice(10000);
+        runToHalt(host, 10000);
         if (host.readReg32('eip') === TRAP + 1)
         {
             assert.equal(read(BLOCK + SHADOW.COMMAND_HEAD), before, 'a call left to the trap'

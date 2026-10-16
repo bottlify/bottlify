@@ -337,8 +337,11 @@ test('a thread on another executor calling into the host is answered at the proc
         const shared = JSON.parse(scheduler?.sharedTime ?? '{}');
         assert.ok(shared.crossings >= CALLS, `${shared.crossings} calls crossed from the worker`);
         assert.ok(byName.cpu?.metrics?.interrupts > 0, 'the process\'s slices were interrupted');
-        assert.ok(scheduler.turns * 20 < shared.crossings,
-            `${scheduler.turns} turns of the process's own for ${shared.crossings} crossings`);
+        // Counted, not timed: the turns a run takes go with how fast the worker
+        // makes its calls, and on a loaded machine 20 000 calls took 4 000.
+        assert.ok(shared.crossingsInTurn * 10 >= shared.crossings * 9,
+            `${shared.crossingsInTurn} of ${shared.crossings} crossings answered inside the`
+            + ' process\'s own turns');
     }
     finally
     {

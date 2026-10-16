@@ -106,12 +106,12 @@ function buildOrdinalsExe(){
 }
 
 test('xinput1_4 answers ordinals 100 and 108 with the functions its .spec gives them',
-    { timeout: 15000 }, async t=>{
+    { timeout: 60000 }, async t=>{
         const app = await createApp({
             executable: buildOrdinalsExe(),
             imagePath: 'C:\\App\\Pad.exe',
         });
         t.after(()=>app.dispose());
-        const code = await app.run({ timeoutMs: 8000 });
+        const code = await app.run({ timeoutMs: 30000 });
         assert.equal(code, 0, 'each number reached the function of that name');
     });

@@ -42,6 +42,8 @@ for (const concurrency of /** @type {const} */ ([1, 2, 4]))
         const lines = output.join('');
         assert.doesNotMatch(lines, /FAIL/);
         // Every line the program checks, parent and child.
-        assert.equal(lines.match(/^ok {3}/gm)?.length, 8, lines);
+        // Two processes at once interleave their writes, a verdict and its name
+        // apart, and two checks can share a line: the verdicts are counted.
+        assert.equal(lines.match(/ok {3}/g)?.length, 8, lines);
     });
 }

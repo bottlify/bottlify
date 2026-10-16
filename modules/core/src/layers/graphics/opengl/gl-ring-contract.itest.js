@@ -30,6 +30,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { isDeepStrictEqual } from 'node:util';
 import { createCorkHost } from '../../cpu/internal/cork-host.js';
+import { runToHalt } from '../../cpu/internal/halt.fixture.js';
 import * as cork from '../../../../../cork/src/index.js';
 import { TEB_GL_CONTEXT, commandCode } from '../seam/shadow.js';
 import { GL_COMMANDS } from './commands.js';
@@ -150,7 +151,7 @@ const machine = ()=>{
         }
         host.writeReg32('eip', PROGRAM);
         host.writeReg32('esp', STACK);
-        host.runSlice(1000000);
+        runToHalt(host);
         for (const [register, value] of KEPT)
         {
             assert.equal(host.readReg32(register) >>> 0, value, `${name} keeps ${register}`);

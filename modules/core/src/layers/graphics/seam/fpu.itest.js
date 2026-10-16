@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createCorkHost } from '../../cpu/internal/cork-host.js';
+import { runToHalt } from '../../cpu/internal/halt.fixture.js';
 import * as cork from '../../../../../cork/src/index.js';
 import { fpuSetupCode } from './fpu.js';
 
@@ -49,7 +50,7 @@ test('CreateDevice\'s slot sets the thread\'s x87 as Direct3D does, unless FPU_P
         host.writePhysical(PROGRAM, Uint8Array.from(code));
         host.writeReg32('eip', PROGRAM);
         host.writeReg32('esp', STACK);
-        host.runSlice(1000);
+        runToHalt(host, 1000);
         const word = host.readPhysical(WORD, 2);
         const esp = host.readReg32('esp');
         const at = host.readPhysical(esp + 20, 4);

@@ -87,7 +87,9 @@ for (const concurrency of /** @type {const} */ ([1, 2, 4]))
         const lines = output.join('');
         assert.doesNotMatch(lines, /FAIL/);
         // Every line the program checks, client and server.
-        assert.equal(lines.match(/^ok {3}/gm)?.length, 18, lines);
+        // Two processes at once interleave their writes, a verdict and its name
+        // apart, and two checks can share a line: the verdicts are counted.
+        assert.equal(lines.match(/ok {3}/g)?.length, 18, lines);
     });
 }
 
@@ -154,6 +156,8 @@ for (const concurrency of /** @type {const} */ ([1, 2, 4]))
         const lines = output.join('');
         assert.doesNotMatch(lines, /FAIL/);
         // Every line the program checks, client and server.
-        assert.equal(lines.match(/^ok {3}/gm)?.length, 13, lines);
+        // Two processes at once interleave their writes, a verdict and its name
+        // apart, and two checks can share a line: the verdicts are counted.
+        assert.equal(lines.match(/ok {3}/g)?.length, 13, lines);
     });
 }

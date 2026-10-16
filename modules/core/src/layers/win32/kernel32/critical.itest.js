@@ -16,6 +16,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createCorkHost } from '../../cpu/internal/cork-host.js';
+import { runToHalt } from '../../cpu/internal/halt.fixture.js';
 import * as cork from '../../../../../cork/src/index.js';
 import { COUNTERS, CS, enterCode, leaveCode, tryEnterCode } from './critical.js';
 
@@ -88,7 +89,7 @@ test('enter, leave and try run on the processor and keep the structure Windows k
     const code = program();
     host.writePhysical(PROGRAM, code);
     host.writePhysical(0x7000, new Uint8Array(u32(PROGRAM)));
-    host.runSlice(1000);
+    runToHalt(host, 1000);
 
     /** @param {number} at */
     const read = at=>{
@@ -98,7 +99,7 @@ test('enter, leave and try run on the processor and keep the structure Windows k
     /** Runs one phase: from the halt that ended the last one to the next halt. */
     const run = ()=>{
         host.wake();
-        return host.runSlice(1000);
+        return runToHalt(host, 1000);
     };
 
     // The first slice ran the first phase, up to its halt.
