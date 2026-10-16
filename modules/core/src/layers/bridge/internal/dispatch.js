@@ -301,6 +301,10 @@ const NO_ERROR = ()=>0;
  *        Where a host call's time is accounted. Optional: this layer is
  *        testable without one, and a phase nobody reads is work nobody asked
  *        for.
+ * @param {(call: { entry: number, args?: number[] }) => number | undefined} [deps.inPlace]
+ *        What a driven step's guest call is answered with in place, with no
+ *        entry into the guest (`answerInPlace` of the vtables), or undefined
+ *        for one that goes in.
  * @param {(record: any) => void} [deps.onCall]
  *        Read the text an argument points at while the call is being made
  *        rather than when the trace is read. Off by default: it costs a scan
@@ -354,6 +358,8 @@ class Dispatcher {
         this.parking = parking;
         /** @type {((answer: Promise<number> | import('./drive.js').Driven, frame: any) => void) | null} */
         this.suspend = deps.suspend ?? null;
+        /** @type {Parameters<typeof createDispatcher>[0]['inPlace'] | null} */
+        this.inPlace = deps.inPlace ?? null;
 
         /**
          * The cpu's general registers as a view, when it lends one
@@ -1224,9 +1230,18 @@ class Dispatcher {
             {
                 // Steps: the first runs here, while the call still holds the
                 // processor. Steps that call the guest for nothing answer now,
-                // as a plain handler does; the rest the bridge runs on in this
-                // slice.
-                const first = result.steps.next();
+                // as a plain handler does -- those whose every call is answered
+                // in place too; the rest the bridge runs on in this slice.
+                let first = result.steps.next();
+                const inPlace = this.inPlace;
+                if (inPlace)
+                {
+                    for (let answered; !first.done
+                        && (answered = inPlace(first.value)) !== undefined;)
+                    {
+                        first = result.steps.next(answered | 0);
+                    }
+                }
                 if (first.done)
                 {
                     result = first.value;

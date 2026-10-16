@@ -4,6 +4,7 @@
  * See LICENSE for details
  */
 
+import { visibleCursor } from './cursor.js';
 import { createJsSampler } from './host/js-samples.js';
 import { fitFrame, isShown, placementOf, stretchFrame } from './letterbox.js';
 import { assembleModules } from './core.js';
@@ -3620,14 +3621,14 @@ async function buildApp(options){
     // journal a later process's threads carry its image name as well.
     const callerImage = String(options.imagePath ?? '').split(/[\\/]/).pop() ?? '';
     const callerTag = options.log?.journal ? `${callerImage}:` : '';
-    // The cursor the page shows: what the program last said of it -- user32's
-    // count and SetCursor, or a device cursor; the last report wins -- hidden
-    // while it holds the mouse exclusively through DirectInput, as Windows does.
+    // The cursor the page shows: the system's or a device's (`visibleCursor`).
     /** @type {any} */
-    let programCursor = { shown: true };
+    let systemCursor = { shown: true };
+    /** @type {any} */
+    let deviceCursor = null;
     let mouseHeld = false;
     const showCursor = ()=>{
-        const cursor = mouseHeld ? { ...programCursor, shown: false } : programCursor;
+        const cursor = visibleCursor(systemCursor, deviceCursor, mouseHeld);
         core.api('input')?.cursorShown?.(cursor.shown !== false);
         events.emit('cursor', cursor);
     };
@@ -4215,7 +4216,7 @@ async function buildApp(options){
             // bitmap and the hot spot, and shows it the way its screen can.
             /** @param {any} cursor */
             cursor: cursor=>{
-                programCursor = cursor;
+                deviceCursor = cursor;
                 showCursor();
             },
         },
@@ -4256,13 +4257,11 @@ async function buildApp(options){
             // that answer for one as well as to the layer that draws on it.
             screen: display,
             desktop: options.desktop,
-            // The cursor the program asks the page to show, from user32's own
-            // state -- ShowCursor's count and a null SetCursor -- the same event
-            // the Direct3D device methods emit above. Two producers, one
-            // consumer, and the last report wins.
+            // The system cursor, from user32's own state -- ShowCursor's count
+            // and a null SetCursor; a device's shown cursor goes over it.
             /** @param {any} cursor */
             reportCursor: cursor=>{
-                programCursor = cursor;
+                systemCursor = cursor;
                 showCursor();
             },
             // Sound leaves through the audio layer's mixer, and win32 sits
@@ -7174,6 +7173,14 @@ async function buildApp(options){
             /** @param {number} address @param {number} length */
             read: (address, length)=>memory.readBytes(address >>> 0, length),
             /**
+             * The calls the guest made through Direct3D's command rings, which
+             * no call log shows: kept from now on for the last `count` of them,
+             * 0 to stop; answers what was kept.
+             *
+             * @param {number} [count]
+             */
+            ringTrace: count=>core.api('graphics').ringTrace?.(count) ?? [],
+            /**
              * Keeps the functions named -- `'ShowWindow,PeekMessage'`, '' none --
              * out of the bridge's ring of recent calls from now on, so that what
              * a program did around one moment is still there to read when an
@@ -8035,6 +8042,8 @@ async function buildSystemHost(deps){
         debug: {
             /** @param {number} address @param {number} length */
             read: (address, length)=>ask('debug.read', [address, length]),
+            /** @param {number} [count] */
+            ringTrace: count=>ask('debug.ringTrace', count === undefined ? [] : [count]),
             modules: ()=>ask('debug.modules'),
             /** @param {number} address */
             moduleAt: address=>ask('debug.moduleAt', [address]),

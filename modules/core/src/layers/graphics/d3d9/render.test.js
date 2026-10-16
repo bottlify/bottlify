@@ -859,7 +859,7 @@ test('a device with no backend answers every drawing call and records nothing', 
     await device.idle();
 });
 
-test('a draw needs a scene, a position in its format, and a bound stream', ()=>{
+test('a draw needs a position in its format and a bound stream, and no scene', ()=>{
     const h = harness();
     const { device } = h;
     /** @type {{ buffer?: any }} */
@@ -869,8 +869,10 @@ test('a draw needs a scene, a position in its format, and a bound stream', ()=>{
 
     assert.equal(device.SetFVF(FVF_TRIANGLE), D3D_OK);
     assert.equal(device.SetStreamSource(0, created.buffer, 0, TRIANGLE_STRIDE), D3D_OK);
-    assert.notEqual(device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK,
-        'outside a scene');
+    // Wine's d3d9 draws check no scene, and Titan Quest draws its loading
+    // screen between two Presents with none.
+    assert.equal(device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK,
+        'outside a scene, drawn');
 
     assert.equal(device.BeginScene(), D3D_OK);
     assert.equal(device.SetFVF(FVF.DIFFUSE), D3D_OK);

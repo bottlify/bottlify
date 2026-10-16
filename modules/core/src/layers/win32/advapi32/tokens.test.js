@@ -958,3 +958,12 @@ test('a descriptor is read back through its getters, absolute or self-relative',
     assert.equal(fns.GetSecurityDescriptorOwner.handler([0, OUTS, OUTS + 4]), 0);
     assert.equal(errors.at(-1), 1338, 'ERROR_INVALID_SECURITY_DESCR');
 });
+
+test('MapGenericMask replaces each generic right with the mapping\'s specific ones', ()=>{
+    const { bytes, fns, dword } = setup();
+    const view = new DataView(bytes.buffer);
+    [0x1, 0x2, 0x4, 0x1f].forEach((rights, at)=>view.setUint32(0x110 + at * 4, rights, true));
+    view.setUint32(0x100, 0xa0000100, true);   // GENERIC_READ | GENERIC_EXECUTE | a specific right
+    assert.equal(fns.MapGenericMask.handler([0x100, 0x110]), 0);
+    assert.equal(dword(0x100), 0x105, 'the generic bits gone, read and execute mapped in');
+});

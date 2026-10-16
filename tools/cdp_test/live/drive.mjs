@@ -143,13 +143,13 @@ const codeOfChar = ch=>(/[0-9]/.test(ch) ? `Digit${ch}` : /[a-z]/i.test(ch)
 const shiftedChar = ch=>/[A-Z]/.test(ch) || PUNCTUATION[ch]?.[1] === true;
 
 /** @param {string} code @param {string} [text] @param {boolean} [shift] */
-const press = async(code, text, shift = false)=>{
+const press = async(code, text, shift = false, hold = 80)=>{
     const key = text ?? keyOf(code);
     const base = { code, key, windowsVirtualKeyCode: virtualKeyOf(code),
         nativeVirtualKeyCode: virtualKeyOf(code), ...shift ? { modifiers: 8 } : {} };
     await send('Input.dispatchKeyEvent',
         { type: 'keyDown', ...base, ...key.length === 1 ? { text: key } : {} });
-    await sleep(80);
+    await sleep(hold);
     await send('Input.dispatchKeyEvent', { type: 'keyUp', ...base });
 };
 
@@ -214,7 +214,9 @@ createServer(async(request, answer)=>{
         }
         else if (url.pathname === '/key')
         {
-            await press(arg('code'));
+            // Held `ms` (80 by default): a program that polls its keyboard once a
+            // frame misses a press shorter than its frame.
+            await press(arg('code'), undefined, false, Number(arg('ms')) || 80);
         }
         else if (url.pathname === '/type')
         {

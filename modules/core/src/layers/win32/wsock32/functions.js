@@ -1136,6 +1136,19 @@ export function createWinsockFunctions(host){
 
         WSAGetLastError: { argBytes: 0, handler: ()=>lastError() >>> 0 },
 
+        // Winsock 1.1's blocking hooks. No call here blocks the way they
+        // describe -- a blocking call parks its thread, which other threads
+        // and the message loop run beside -- so there is no hook to run and
+        // nothing to cancel, and each answers as Wine's tests see Windows do.
+        /** FARPROC WSASetBlockingHook(FARPROC lpBlockFunc): the hook before it, none. */
+        WSASetBlockingHook: { argBytes: 4, handler: ()=>0 },
+        /** int WSAUnhookBlockingHook(void) */
+        WSAUnhookBlockingHook: { argBytes: 0, handler: ()=>0 },
+        /** int WSACancelBlockingCall(void) */
+        WSACancelBlockingCall: { argBytes: 0, handler: ()=>0 },
+        /** BOOL WSAIsBlocking(void) */
+        WSAIsBlocking: { argBytes: 0, handler: ()=>0 },
+
         WSASetLastError: {
             argBytes: 4,
             /** @param {number[]} args */
@@ -2625,10 +2638,10 @@ export function createWinsockFunctions(host){
      * a call that binds and then jumps into nowhere, with no name anywhere in
      * the import table to say what it was.
      *
-     * @param {Record<number, string>} all
+     * @param {Record<number, string>} all @param {Record<string, unknown>} [exported]
      */
-    const resolvable = all=>Object.freeze(Object.fromEntries(
-        Object.entries(all).filter(([, name])=>name in table)));
+    const resolvable = (all, exported = table)=>Object.freeze(Object.fromEntries(
+        Object.entries(all).filter(([, name])=>name in exported)));
 
     return {
         /** wsock32 and ws2_32 both export these, over one registry. */
@@ -2637,7 +2650,7 @@ export function createWinsockFunctions(host){
         extensions,
         /** Which ordinal is which name, for whoever synthesises the module. */
         ordinals: {
-            wsock32: resolvable(WSOCK32_ORDINALS),
+            wsock32: resolvable(WSOCK32_ORDINALS, { ...table, ...extensions }),
             ws2_32: resolvable(WS2_32_ORDINALS),
         },
         diagnostics: ()=>({ started, ...registry.diagnostics() }),

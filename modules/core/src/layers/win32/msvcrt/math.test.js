@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createMathFunctions } from './math.js';
+import { besselJ, createMathFunctions } from './math.js';
 import { COMPILED } from './inguest.x86.js';
 import { COMPILED as MATH_CODE } from './inguest-math.x86.js';
 import { EDOM, ERANGE } from './globals.js';
@@ -211,4 +211,15 @@ test('ldexp reaches what a double holds from a power of two a double does not', 
     assert.equal(fpu.result, 1e300 * 2 ** -1000 * 2 ** -100, 'not 1e300 times 2^-1100, zero');
     table.ldexp.handler([...doubleSlots(2 ** -1070), 2000]);
     assert.equal(fpu.result, 2 ** 930);
+});
+
+test('the Bessel functions of the first kind agree with their tables on both sides of 12', ()=>{
+    // Abramowitz and Stegun's tables, to the digits a double holds.
+    for (const [order, x, expected] of [[0, 1, 0.7651976865579666], [1, 1, 0.44005058574493355],
+        [1, 10, 0.04347274616886144], [1, 20, 0.06683312417584993],
+        [0, 30, -0.08636798358104], [2, 5, 0.04656511627775222],
+        [5, 20, 0.15116976798239498], [1, -3, -0.3390589585259365]])
+    {
+        assert.ok(Math.abs(besselJ(order, x) - expected) < 1e-12, `J${order}(${x})`);
+    }
 });

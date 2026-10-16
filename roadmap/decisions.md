@@ -810,3 +810,25 @@ again. Inside one top-level window the XP rules stay (siblings, WS_CLIPCHILDREN,
 copies its bits and its parent paints the strip). A screen context (`GetDC(NULL)`) draws over the
 screen as shown, which stays until the screen is composed again, as with the window manager. The
 cost is a surface per top-level window, a few megabytes each. *2026-10-15.*
+
+**The Visual C++ C runtimes are the engine's; the C++ libraries are the program's own copy when it
+brings one.** MSVCR80 is answered by the engine even beside a copy the program carries: it is
+msvcrt's functions with the names Visual C++ 2005 added, the calls a program makes per character
+or per pointer run as guest code, and one runtime serves every module instead of a second for the
+translator to carry. MSVCP71/80 are not: their exports are counted in thousands, the iostreams and
+locales among them are objects whose layout and virtual tables a program's own inlined header code
+reads, and a partial table in front of a program's copy left F.E.A.R.'s imports unbound. The
+engine's `std::string` (MSVCP80/71) answers only a program that brought no copy -- PhysX in
+Mafia II -- and grows by what the bundles import. MSVCR71 likewise, until its exports are
+checked against the real list. *2026-10-15.*
+
+**The machine has a page file, as large as its memory.** `GlobalMemoryStatus(Ex)` answers a
+commit limit of memory and a system-managed page file the size of memory, as Windows 7 is set up
+by default; a program refuses a machine whose limit is no more than its memory (paging turned
+off). Physical memory stays the arena, as WMI reports it. *2026-10-15.*
+
+**A full-screen Direct3D 9 device is one of the display's modes.** `CreateDevice` and `Reset` with
+`Windowed = FALSE` and a back buffer of no display mode's size -- 0x0 among them -- answer
+`D3DERR_INVALIDCALL`, as Wine's test_reset sees Windows do; only a windowed device measures its
+window for a size of zero. Making such a device at the display's size instead left a program
+laying out a screen of 0x0. *2026-10-15.*

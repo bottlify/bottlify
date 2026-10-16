@@ -91,6 +91,31 @@ const ints = new Int32Array(scratch);
  */
 
 /**
+ * The calls command rings carried, kept while asked for: a debugging switch
+ * on a running program, since the guest makes these calls without crossing
+ * to the host one by one, and no call log shows them otherwise.
+ */
+/** @type {{ limit: number, lines: string[] }} */
+const traced = { limit: 0, lines: [] };
+
+/**
+ * Starts keeping the last `count` ring calls (a fresh list), or with 0 stops;
+ * answers what was kept either way, oldest first.
+ *
+ * @param {number} [count]  absent, only answers
+ * @returns {string[]}
+ */
+export function ringTrace(count){
+    const kept = traced.lines;
+    if (count !== undefined)
+    {
+        traced.limit = Math.max(0, count | 0);
+        traced.lines = [];
+    }
+    return kept;
+}
+
+/**
  * A device's command set: its table, and what the seam and the device do
  * with a run of records.
  *
@@ -194,6 +219,20 @@ export function commandSet(slots, table){
             }
             const hr = entry.make(device, call);
             made++;
+            if (traced.limit > 0)
+            {
+                // The arguments, then the first words of what the record
+                // carries besides them: a viewport's rectangle, a matrix.
+                const hex = (/** @type {number} */ from, /** @type {number} */ to)=>
+                    Array.from(all.subarray(from, to), word=>word.toString(16)).join(',');
+                traced.lines.push(`${names.get(entry)}(${hex(at + ARGS, data)})${
+                    copied > 0 ? ` [${hex(data, data + Math.min(copied, 8))}]` : ''} = ${
+                    ((hr ?? 0) >>> 0).toString(16)}`);
+                if (traced.lines.length > traced.limit)
+                {
+                    traced.lines.splice(0, traced.lines.length - traced.limit);
+                }
+            }
             if ((hr ?? 0) !== 0)
             {
                 refused(/** @type {string} */ (names.get(entry)), hr >>> 0);

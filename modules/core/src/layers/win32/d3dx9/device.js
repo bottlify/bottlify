@@ -18,7 +18,8 @@
 
 /** IDirect3DDevice9's slots, after IUnknown's three, in d3d9.h's order. */
 export const DEVICE = Object.freeze({
-    GetDeviceCaps: 7, CreateTexture: 23, CreateCubeTexture: 25, CreateVertexBuffer: 26,
+    GetDeviceCaps: 7, CreateTexture: 23, CreateVolumeTexture: 24, CreateCubeTexture: 25,
+    CreateVertexBuffer: 26,
     CreateIndexBuffer: 27, CreateRenderTarget: 28,
     CreateDepthStencilSurface: 29, UpdateTexture: 31, SetRenderTarget: 37, GetRenderTarget: 38,
     SetDepthStencilSurface: 39, GetDepthStencilSurface: 40, BeginScene: 41, EndScene: 42,
@@ -38,6 +39,10 @@ export const STATEBLOCK_APPLY = 5;
 export const TEXTURE = Object.freeze({ GetType: 10, GetLevelCount: 13, GetLevelDesc: 17,
     GetSurfaceLevel: 18, LockRect: 19, UnlockRect: 20 });
 
+/** IDirect3DVolumeTexture9's slots where they differ in name: a box where a texture has a rect. */
+export const VOLUME_TEXTURE = Object.freeze({ GetLevelCount: 13, GetLevelDesc: 17, LockBox: 19,
+    UnlockBox: 20 });
+
 /** IDirect3DIndexBuffer9's slots, which IDirect3DVertexBuffer9's are too. */
 export const INDEX_BUFFER = Object.freeze({ Lock: 11, Unlock: 12 });
 export const VERTEX_BUFFER = INDEX_BUFFER;
@@ -49,6 +54,8 @@ export const SURFACE = Object.freeze({ GetDesc: 12, LockRect: 13, UnlockRect: 14
  * @typedef {Object} DeviceHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {(address: number) => number} [readU32]  A word read in place.
+ * @property {(address: number, value: number) => void} [writeU32]  A word written in place.
  * @property {{ allocate: (bytes: number) => number, free: (address: number) => any }} [heap]
  * @property {(call: { entry: number, args: number[], thread?: any }) => Promise<number>}
  *     [callGuest]
@@ -65,12 +72,18 @@ export function createDeviceCalls(host){
      *
      * @param {number} at
      */
-    const u32 = at=>{
+    const u32 = host.readU32 ? (/** @type {number} */ at)=>/** @type {NonNullable<DeviceHost['readU32']>} */ (
+        host.readU32)(at >>> 0) >>> 0 : (/** @type {number} */ at)=>{
         const bytes = host.readMemory(at >>> 0, 4);
         return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
     };
     /** @param {number} at @param {number[]} values */
     const putU32s = (at, values)=>{
+        if (values.length === 1 && host.writeU32)
+        {
+            host.writeU32(at >>> 0, values[0] >>> 0);
+            return;
+        }
         const bytes = new Uint8Array(values.length * 4);
         const view = new DataView(bytes.buffer);
         values.forEach((v, i)=>view.setUint32(i * 4, v >>> 0, true));

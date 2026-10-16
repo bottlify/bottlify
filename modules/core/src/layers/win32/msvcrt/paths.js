@@ -54,8 +54,23 @@ const WFINDDATAI64 = Object.freeze({
 });
 
 /**
+ * `struct __finddata64_t`: 64-bit times and size, each on its 8-byte
+ * alignment, so the attributes are followed by four bytes of padding.
+ */
+const FINDDATA64 = Object.freeze({
+    ATTRIB: 0, TIME_CREATE: 8, TIME_ACCESS: 16, TIME_WRITE: 24, WIDE_TIME: true,
+    SIZE: 32, WIDE_SIZE: true, NAME: 40, WIDE_NAME: false, BYTES: 304,
+});
+
+/** `struct _finddata64i32_t`: `__finddata64_t` with a 32-bit size. */
+const FINDDATA64I32 = Object.freeze({
+    ATTRIB: 0, TIME_CREATE: 8, TIME_ACCESS: 16, TIME_WRITE: 24, WIDE_TIME: true,
+    SIZE: 32, WIDE_SIZE: false, NAME: 36, WIDE_NAME: false, BYTES: 296,
+});
+
+/**
  * @typedef {typeof FINDDATA | typeof FINDDATAI64 | typeof WFINDDATA
- *           | typeof WFINDDATAI64} FindLayout
+ *           | typeof WFINDDATAI64 | typeof FINDDATA64 | typeof FINDDATA64I32} FindLayout
  */
 const MAX_NAME = 259;
 
@@ -430,10 +445,18 @@ export function createPathFunctions(host){
         const bytes = new Uint8Array(layout.BYTES);
         const view = new DataView(bytes.buffer);
         view.setUint32(layout.ATTRIB, entry.isDirectory ? A_SUBDIR : A_ARCH, true);
-        const time = Math.floor((entry.modified ?? 0) / 1000) >>> 0;
-        view.setUint32(layout.TIME_CREATE, time, true);
-        view.setUint32(layout.TIME_ACCESS, time, true);
-        view.setUint32(layout.TIME_WRITE, time, true);
+        const time = Math.floor((entry.modified ?? 0) / 1000);
+        for (const at of [layout.TIME_CREATE, layout.TIME_ACCESS, layout.TIME_WRITE])
+        {
+            if ('WIDE_TIME' in layout)
+            {
+                view.setBigInt64(at, BigInt(time), true);
+            }
+            else
+            {
+                view.setUint32(at, time >>> 0, true);
+            }
+        }
         if (layout.WIDE_SIZE)
         {
             view.setBigUint64(layout.SIZE, BigInt(entry.size ?? 0), true);
@@ -479,8 +502,13 @@ export function createPathFunctions(host){
             const { directory, pattern } = splitSearch(
                 layout.WIDE_NAME ? readWide(spec) : readString(spec));
             const holder = host.files.stat(directory);
+            // "." and ".." first in every folder but a drive's root, as the
+            // FindFirstFile this wraps on Windows lists them (kernel32/files.js).
+            const dots = pattern === '' || !holder?.isDirectory
+                || /^[A-Za-z]:\\?$/.test(directory) || !/^[*?.]+$/.test(pattern) ? []
+                : ['.', '..'].map(dot=>({ ...holder, name: dot, isDirectory: true, size: 0 }));
             const entries = pattern !== '' && holder?.isDirectory
-                ? host.files.list(directory, pattern) ?? []
+                ? [...dots, ...host.files.list(directory, pattern) ?? []]
                 : [];
             if (entries.length === 0)
             {
@@ -958,6 +986,15 @@ export function createPathFunctions(host){
 
         /** int _findnexti64(intptr_t handle, struct _finddatai64_t *fileinfo) */
         _findnexti64: findNext(FINDDATAI64),
+
+        /** intptr_t _findfirst64(const char *filespec, struct __finddata64_t *fileinfo) */
+        _findfirst64: findFirst(FINDDATA64),
+        /** int _findnext64(intptr_t handle, struct __finddata64_t *fileinfo) */
+        _findnext64: findNext(FINDDATA64),
+        /** intptr_t _findfirst64i32(const char *filespec, struct _finddata64i32_t *fileinfo) */
+        _findfirst64i32: findFirst(FINDDATA64I32),
+        /** int _findnext64i32(intptr_t handle, struct _finddata64i32_t *fileinfo) */
+        _findnext64i32: findNext(FINDDATA64I32),
 
         // A wide pattern is read from memory as it lies, which needs the
         // bytes themselves rather than the narrow string reader.

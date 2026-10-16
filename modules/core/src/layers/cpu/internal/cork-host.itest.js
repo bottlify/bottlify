@@ -55,8 +55,8 @@ test('the interpreter tier runs what the translator has no entry for', ()=>{
 
 test('an instruction with no model is an invalid-opcode fault the program can take', ()=>{
     const h = host();
-    // sldt [eax], which no user program runs and the model has no case for.
-    load(h, 0x1000, [0x0f, 0x00, 0x00]);
+    // lar eax, [eax], which no user program runs and the model has no case for.
+    load(h, 0x1000, [0x0f, 0x02, 0x00]);
     h.runSlice(1);
     assert.equal(h.fault()?.vector, 6, '#UD');
 });
@@ -64,12 +64,12 @@ test('an instruction with no model is an invalid-opcode fault the program can ta
 test('the fault and the diagnostics name the instruction met, not the range it started at',
     ()=>{
         const h = host();
-        // Three nops then sldt [eax]: the run starts at 0x1000, the instruction
+        // Three nops then lar eax, [eax]: the run starts at 0x1000, the instruction
         // with no model is at 0x1003.
-        load(h, 0x1000, [0x90, 0x90, 0x90, 0x0f, 0x00, 0x00, 0xf4]);
+        load(h, 0x1000, [0x90, 0x90, 0x90, 0x0f, 0x02, 0x00, 0xf4]);
         h.runSlice(100);
         assert.equal(h.fault()?.eip, 0x1003);
-        assert.deepEqual(h.corkDiagnostics().untiered, ['0x0f (0f 00) at 0x00001003']);
+        assert.deepEqual(h.corkDiagnostics().untiered, ['0x0f (0f 02) at 0x00001003']);
     });
 
 test('an interpreted trap reaches the call channel', ()=>{

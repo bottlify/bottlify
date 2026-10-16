@@ -36,6 +36,12 @@ test('each library exports what its .spec does, and nothing it does not', ()=>{
         'XInputGetCapabilities', 'XInputGetDSoundAudioDeviceGuids',
         'XInputGetState', 'XInputSetState',
     ]);
+    // xinput1_3.spec: 9.1.0's four, Enable, battery, keystrokes and GetStateEx.
+    assert.deepEqual(Object.keys(libraries['XINPUT1_3.dll']).sort(), [
+        'XInputEnable', 'XInputGetBatteryInformation', 'XInputGetCapabilities',
+        'XInputGetDSoundAudioDeviceGuids', 'XInputGetKeystroke', 'XInputGetState',
+        'XInputGetStateEx', 'XInputSetState',
+    ]);
     assert.deepEqual(Object.keys(libraries['XINPUT1_4.dll']).sort(), [
         'XInputEnable', 'XInputGetAudioDeviceIds', 'XInputGetBatteryInformation',
         'XInputGetCapabilities', 'XInputGetCapabilitiesEx', 'XInputGetKeystroke',
@@ -58,12 +64,17 @@ test('xinput1_4 keeps the ordinals its .spec gives, the two taken by number amon
         100: 'XInputGetStateEx',
         108: 'XInputGetCapabilitiesEx',
     });
+    assert.deepEqual(ordinals['XINPUT1_3.dll'], {
+        2: 'XInputGetState', 3: 'XInputSetState', 4: 'XInputGetCapabilities', 5: 'XInputEnable',
+        6: 'XInputGetDSoundAudioDeviceGuids', 7: 'XInputGetBatteryInformation',
+        8: 'XInputGetKeystroke', 100: 'XInputGetStateEx',
+    }, 'xinput1_3.spec numbers its exports too');
     assert.equal(ordinals['XINPUT9_1_0.dll'], undefined,
         'xinput9_1_0.spec pins no number, so none is claimed');
 });
 
 test('every slot answers that no pad is connected there', ()=>{
-    for (const dll of ['XINPUT9_1_0.dll', 'XINPUT1_4.dll'])
+    for (const dll of ['XINPUT9_1_0.dll', 'XINPUT1_3.dll', 'XINPUT1_4.dll'])
     {
         for (let index = 0; index < XUSER_MAX_COUNT; index++)
         {
@@ -91,7 +102,7 @@ test('every slot answers that no pad is connected there', ()=>{
 });
 
 test('arguments are checked before the slot is, as Wine\'s xinput.c shows', ()=>{
-    for (const dll of ['XINPUT9_1_0.dll', 'XINPUT1_4.dll'])
+    for (const dll of ['XINPUT9_1_0.dll', 'XINPUT1_3.dll', 'XINPUT1_4.dll'])
     {
         assert.equal(call(dll, 'XInputGetState', [0, 0]), ERROR_BAD_ARGUMENTS);
         assert.equal(call(dll, 'XInputGetState', [XUSER_MAX_COUNT, OUT]), ERROR_BAD_ARGUMENTS);

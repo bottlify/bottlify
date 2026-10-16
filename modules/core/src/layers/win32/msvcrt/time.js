@@ -939,6 +939,54 @@ export function createTimeFunctions(host){
         }
         : null;
 
+    /** double _difftime64(__time64_t later, __time64_t earlier) -- only with the FPU seam */
+    const difftime64 = host.fpu
+        ? {
+            convention: 'cdecl',
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [laterLow, laterHigh, earlierLow, earlierHigh])=>{
+                host.fpu?.setResult(((laterHigh | 0) - (earlierHigh | 0)) * 0x100000000
+                    + (laterLow >>> 0) - (earlierLow >>> 0));
+                return 0;
+            },
+        }
+        : null;
+
+    /**
+     * `_ftime` for a 32- or 64-bit time_t.
+     *
+     * @param {boolean} wide
+     */
+    function timeb(wide){
+        return {
+            convention: 'cdecl',
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: (/** @type {number[]} */ [result])=>{
+                const milliseconds = host.systemTimeMs();
+                const now = Math.floor(milliseconds / 1000);
+                const local = toLocal(now);
+                const at = wide ? 8 : 4;
+                const bytes = new Uint8Array(wide ? 16 : 12);
+                const view = new DataView(bytes.buffer);
+                if (wide)
+                {
+                    view.setBigInt64(0, BigInt(now), true);
+                }
+                else
+                {
+                    view.setUint32(0, now, true);
+                }
+                view.setUint16(at, Math.floor(milliseconds) % 1000, true);
+                view.setInt16(at + 2, Math.trunc(zone().timezone / 60), true);
+                view.setInt16(at + 4, local.isdst, true);
+                host.writeMemory(result, bytes);
+                return 0;
+            },
+        };
+    }
+
     const sixtyFour = host.setRegisters
         ? {
             /** __time64_t _time64(__time64_t *destination) */
@@ -977,6 +1025,7 @@ export function createTimeFunctions(host){
 
     return {
         ...(difftime ? { difftime } : {}),
+        ...(difftime64 ? { _difftime64: difftime64, _difftime32: difftime } : {}),
         ...sixtyFour,
 
         time: time32,
@@ -1244,24 +1293,15 @@ export function createTimeFunctions(host){
          * shorts, and the compiler pads the tail to twelve bytes. The zone's
          * minutes west and whether it is in daylight time now.
          */
-        _ftime: {
-            convention: 'cdecl',
-            argBytes: 4,
-            /** @param {number[]} args */
-            handler: ([result])=>{
-                const milliseconds = host.systemTimeMs();
-                const now = Math.floor(milliseconds / 1000);
-                const local = toLocal(now);
-                const bytes = new Uint8Array(12);
-                const view = new DataView(bytes.buffer);
-                view.setUint32(0, now, true);
-                view.setUint16(4, Math.floor(milliseconds) % 1000, true);
-                view.setInt16(6, Math.trunc(zone().timezone / 60), true);
-                view.setInt16(8, local.isdst, true);
-                host.writeMemory(result, bytes);
-                return 0;
-            },
-        },
+        _ftime: timeb(false),
+
+        /**
+         * void _ftime64(struct __timeb64 *result)
+         *
+         * `_ftime` with the seconds an __int64: the shorts follow at 8, and
+         * the whole is padded to sixteen bytes.
+         */
+        _ftime64: timeb(true),
 
         /** void _tzset(void): the zone from TZ, or the machine's. */
         _tzset: {

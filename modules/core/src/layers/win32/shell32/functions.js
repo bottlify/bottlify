@@ -150,6 +150,8 @@ const E_FAIL = 0x80004005 | 0;
 
 /** The computer: a folder with no path, whose children are the drives. */
 const CSIDL_DRIVES = 0x11;
+/** The user's documents, "My Documents". */
+const CSIDL_PERSONAL = 0x05;
 
 /** Where a bare file name is looked for after the current directory. */
 const CSIDL_SYSTEM = 0x25;
@@ -331,6 +333,7 @@ export function createShellFunctions(host){
     const namespace = memory && host.volume && host.publish && host.allocate
         ? createShellNamespace({
             publish: host.publish, allocate: host.allocate, memory, volume: host.volume,
+            documents: ()=>folderOf(CSIDL_PERSONAL),
         }) : null;
 
     /**

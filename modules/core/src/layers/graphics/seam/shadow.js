@@ -130,7 +130,14 @@ export const SHADOW = {
     VALIDATED: 5224,
     VALIDATED_TABLES: 2,
     VALIDATED_SLOTS: 8,
-    SIZE: 5224 + 2 * 8 * 4,
+    /**
+     * The buffers the lock routine locked last, as their block addresses,
+     * each at its count of locks modulo the capacity (a power of two): what
+     * the host has to look at for a lock held across its entry.
+     */
+    LOCK_RING: 5224 + 2 * 8 * 4,
+    LOCK_RING_CAPACITY: 16,
+    SIZE: 5288 + 16 * 4,
 };
 
 /** The bits of `SHADOW.DRAWABLE`. */
@@ -220,6 +227,14 @@ export const FLAG_SLOW_PATH = 1;
  * The setters and draws go on through the ring.
  */
 export const FLAG_STALE = 2;
+/**
+ * Bit 2, set beside it by the Apply of a block holding what a draw's checks
+ * read (`SHADOW.DRAWABLE`): a vertex format or declaration, a stream, the
+ * indices. The draws wait for the host then; after any other block's they
+ * go on through the ring, which the effects' blocks of render states,
+ * textures, shaders and constants are.
+ */
+export const FLAG_DRAW_STALE = 4;
 
 /**
  * The command ring's size, and how near its end the host starts it over:
@@ -613,6 +628,9 @@ export function getRenderStateCode(at, trap){
  *     mov [ebx], eax
  *     mov dword [ecx+LOCKED], 1
  *     mov ebx, [ecx+DEVICE]
+ *     mov eax, [ebx+LOCK_CALLS]
+ *     and eax, LOCK_RING_CAPACITY - 1
+ *     mov [ebx + eax*4 + LOCK_RING], ecx
  *     inc dword [ebx+LOCK_CALLS]
  *     pop ebx
  *     xor eax, eax
@@ -681,6 +699,9 @@ export function lockCode(at, trap){
         [0x89, 0x03],                                            // mov [ebx], eax
         [0xc7, 0x41, BUFFER.LOCKED, ...dword(1)],                // mov dword [ecx+12], 1
         [0x8b, 0x59, BUFFER.DEVICE],                             // mov ebx, [ecx+28]
+        [0x8b, 0x83, ...dword(SHADOW.LOCK_CALLS)],               // mov eax, [ebx+disp]
+        [0x83, 0xe0, SHADOW.LOCK_RING_CAPACITY - 1],             // and eax, 15
+        [0x89, 0x8c, 0x83, ...dword(SHADOW.LOCK_RING)],          // mov [ebx+eax*4+disp], ecx
         [0xff, 0x83, ...dword(SHADOW.LOCK_CALLS)],               // inc dword [ebx+disp]
         [0x5b],                                                  // pop ebx
         [0x31, 0xc0],                                            // xor eax, eax
@@ -1182,6 +1203,8 @@ function commandChecks(shape, at){
  *     pointer -- a method of an object of the device's that is not the device
  * @property {boolean} [stale]  the call may change what the block mirrors
  *     (`FLAG_STALE`)
+ * @property {boolean} [staleDraws]  and what a draw's checks read too
+ *     (`FLAG_DRAW_STALE`)
  * @property {'empty' | 'any'} [nullable]  the pointer may be null, and is
  *     then recorded as null with nothing copied: with a count of zero alone
  *     ('empty'), or whatever the count ('any')
@@ -1204,7 +1227,7 @@ function commandChecks(shape, at){
  * @property {number} [needs]  the `DRAW` bits the device must have for the call
  * @property {number} [refuses]  and those it must not
  * @property {boolean} [fresh]  the call reads what a state block applied in the
- *     ring may have changed (`FLAG_STALE`), and waits for the host when it may have
+ *     ring may have changed (`FLAG_DRAW_STALE`), and waits for the host when it may have
  * @property {boolean} [draws]  a draw: a lock in the guest that may overwrite
  *     what it reads waits for the host to make it
  * @property {boolean} [thread]  a function rather than a method: no `this`, and
@@ -1255,8 +1278,8 @@ function commandChecks(shape, at){
  */
 export function commandCode(at, trap, shape){
     const { slot, args, pointer = -1, bytes = 0, count, choose, vertices, mirror = [],
-        draws = false, thread = false, self = false, stale = false, nullable = false,
-        fresh = false } = shape;
+        draws = false, thread = false, self = false, stale = false, staleDraws = false,
+        nullable = false, fresh = false } = shape;
     if (nullable && !count)
     {
         throw new Error('shadow: a pointer that may be null is counted by an argument');
@@ -1287,7 +1310,7 @@ export function commandCode(at, trap, shape){
     /** @type {(number[] | { label: string } | { jcc: number, to: string, near?: boolean })[]} */
     const parts = [
         ...(thread ? threadPrologue('early')
-            : prologue('early', fresh ? FLAG_SLOW_PATH | FLAG_STALE : FLAG_SLOW_PATH)),
+            : prologue('early', fresh ? FLAG_SLOW_PATH | FLAG_DRAW_STALE : FLAG_SLOW_PATH)),
         [0x83, 0xb9, ...dword(SHADOW.COMMANDS), 0x00],           // cmp dword [ecx+disp], 0
         { jcc: 0x74, to: 'early' },                              // je early
         { jcc: 0xeb, to: 'body' },                               // jmp body
@@ -1449,7 +1472,8 @@ export function commandCode(at, trap, shape){
     }
     if (stale)
     {
-        parts.push([0xf0, 0x83, 0x0b, FLAG_STALE]);              // lock or dword [ebx], 2
+        parts.push([0xf0, 0x83, 0x0b,                            // lock or dword [ebx], 2|4
+            staleDraws ? FLAG_STALE | FLAG_DRAW_STALE : FLAG_STALE]);
     }
     parts.push(
         [0x5f, 0x5e, 0x5b],                                      // pop edi; pop esi; pop ebx
@@ -2033,7 +2057,7 @@ export function createShadow(deps){
         {
             return;
         }
-        const words = new Uint32Array((SHADOW.SIZE - SHADOW.DRAWABLE) / 4);
+        const words = new Uint32Array((SHADOW.LOCK_RING - SHADOW.DRAWABLE) / 4);
         words[0] = state.drawable;
         words[1] = state.targetWidth;
         words[2] = state.targetHeight;
@@ -2165,21 +2189,51 @@ export function createShadow(deps){
         // routines that made it, or by `noteLocked` for the host's -- so the
         // difference is what is held. None, and the usual entry costs two
         // words instead of a look at every buffer the guest ever let go of.
-        if (readWord(address + SHADOW.LOCK_CALLS) + hostTaken
-            === readWord(address + SHADOW.UNLOCK_CALLS) + hostReleased)
+        const locks = readWord(address + SHADOW.LOCK_CALLS);
+        if (locks + hostTaken === readWord(address + SHADOW.UNLOCK_CALLS) + hostReleased)
         {
+            heldLocks.clear();
+            heldSince = locks;
             return;
         }
-        for (const block of lockedInGuest)
+        // What may be held: what was at the last look, and what the routine
+        // has locked since, which its ring names -- unless it has gone round.
+        const taken = (locks - heldSince) >>> 0;
+        if (taken > SHADOW.LOCK_RING_CAPACITY)
         {
-            if (!blocks.has(block))
+            heldLocks.clear();
+            for (const block of lockedInGuest)
+            {
+                heldLocks.add(block);
+            }
+        }
+        else if (taken > 0)
+        {
+            const ring = readWords(address + SHADOW.LOCK_RING, SHADOW.LOCK_RING_CAPACITY);
+            for (let n = heldSince; n !== locks; n = (n + 1) >>> 0)
+            {
+                heldLocks.add(ring[n & (SHADOW.LOCK_RING_CAPACITY - 1)]);
+            }
+        }
+        heldSince = locks;
+        for (const block of heldLocks)
+        {
+            if (!blocks.has(block) || !lockedInGuest.has(block))
             {
                 lockedInGuest.delete(block);
+                heldLocks.delete(block);
                 continue;
             }
-            flushHeld(block);
+            if (!flushHeld(block))
+            {
+                heldLocks.delete(block);
+            }
         }
     };
+    /** The blocks that may be held locked in the guest, as `settleHeld` last found them. */
+    const heldLocks = new Set();
+    /** The lock routine's count at that look. */
+    let heldSince = 0;
 
     /**
      * What the guest has written so far into a buffer it holds locked, sent
@@ -2190,15 +2244,17 @@ export function createShadow(deps){
      * the draw, and a draw from the ring is made after the program wrote on.
      *
      * @param {number} block
+     * @returns {boolean}  whether the guest holds it locked
      */
     const flushHeld = block=>{
         const entry = blocks.get(block);
-        // One word first: of the buffers ever let go of, which this is asked
-        // about at every entry while any lock is held, nearly all are not
-        // locked, and reading each whole block was most of what it cost.
-        if (!entry || entry.hostLocked || readWord(block + BUFFER.LOCKED) === 0)
+        if (!entry || readWord(block + BUFFER.LOCKED) === 0)
         {
-            return;
+            return false;
+        }
+        if (entry.hostLocked)
+        {
+            return true;
         }
         const words = readWords(block, BUFFER.SIZE / 4);
         const from = words[BUFFER.FROM / 4];
@@ -2206,7 +2262,7 @@ export function createShadow(deps){
         const flags = words[BUFFER.LOCK_FLAGS / 4];
         if (words[BUFFER.LOCKED / 4] === 0 || to <= from)
         {
-            return;
+            return true;
         }
         if (entry.buffer.Lock(from, to - from, {}, flags) === 0)
         {
@@ -2218,6 +2274,7 @@ export function createShadow(deps){
             flagWord[0] = flags & ~D3DLOCK_DISCARD;
             deps.writeMemory(block + BUFFER.LOCK_FLAGS, flagBytes);
         }
+        return true;
     };
     /** The flags word written back, without a buffer made for each. */
     const flagWord = new Uint32Array(1);
@@ -2383,7 +2440,8 @@ export function createShadow(deps){
             if (address !== 0)
             {
                 deps.writeMemory(address + SHADOW.FLAGS,
-                    dwordBytes(readWord(address + SHADOW.FLAGS) & ~FLAG_STALE));
+                    dwordBytes(readWord(address + SHADOW.FLAGS) & ~(FLAG_STALE
+                        | FLAG_DRAW_STALE)));
             }
         },
 
@@ -2668,4 +2726,346 @@ export function createShadow(deps){
             commandCalls: commandReader?.taken() ?? 0,
         }),
     };
+}
+
+/**
+ * Guest memory as `appendCommand` reads and writes it, over a reader and a
+ * writer of bytes.
+ *
+ * @param {{ readMemory: (at: number, length: number) => Uint8Array,
+ *     writeMemory: (at: number, bytes: Uint8Array) => void,
+ *     readU32?: (at: number) => number, writeU32?: (at: number, value: number) => void }} memory
+ *     a word read and written in place where the memory layer offers it: a
+ *     command's every word through a four-byte copy was most of its cost
+ * @returns {GuestWords}
+ */
+export function guestWords(memory){
+    const word = new Uint8Array(4);
+    const view = new DataView(word.buffer);
+    const { readU32, writeU32 } = memory;
+    return {
+        u32: readU32 ? at=>readU32(at >>> 0) >>> 0 : at=>{
+            const bytes = memory.readMemory(at >>> 0, 4);
+            return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
+        },
+        setU32: writeU32 ? (at, value)=>writeU32(at >>> 0, value >>> 0) : (at, value)=>{
+            view.setUint32(0, value >>> 0, true);
+            memory.writeMemory(at >>> 0, word);
+        },
+        read: (at, length)=>memory.readMemory(at >>> 0, length),
+        write: (at, bytes)=>memory.writeMemory(at >>> 0, bytes),
+    };
+}
+
+/**
+ * Guest memory as `appendCommand` reads and writes it.
+ *
+ * @typedef {Object} GuestWords
+ * @property {(at: number) => number} u32
+ * @property {(at: number, value: number) => void} setU32
+ * @property {(at: number, length: number) => Uint8Array} read
+ * @property {(at: number, bytes: Uint8Array) => void} write
+ */
+
+/**
+ * A mirror as the host keeps it (`HOST_MIRRORS`): the x86 one's work on the
+ * block, from the call's arguments (`this` not among them); false where the
+ * x86 one goes to the host.
+ *
+ * @typedef {(memory: GuestWords, block: number, args: number[]) => boolean} HostMirror
+ */
+
+/**
+ * Whether bit `index` of the bit string at `at` is set, as `bt` reads one.
+ *
+ * @param {GuestWords} m @param {number} at @param {number} index
+ */
+const bitAt = (m, at, index)=>((m.u32(at + 4 * (index >>> 5)) >>> (index & 31)) & 1) === 1;
+
+/**
+ * The DRAWABLE word changed: `clear` bits off, then `set` on.
+ *
+ * @param {GuestWords} m @param {number} block @param {number} clear @param {number} set
+ */
+const drawable = (m, block, clear, set)=>m.setU32(block + SHADOW.DRAWABLE,
+    ((m.u32(block + SHADOW.DRAWABLE) & ~clear) | set) >>> 0);
+
+/**
+ * The mirrors of `RENDER_STATE_MIRROR` and its kin, in JavaScript: what the
+ * host does in place of a command routine (`appendCommand`) keeps the block
+ * as the routine would, which the gate holds them to, input by input.
+ */
+export const HOST_MIRRORS = Object.freeze({
+    /** @type {HostMirror} */
+    renderState: (m, block, [state, value])=>{
+        if (state >= SHADOW.RENDER_STATE_COUNT
+            || !bitAt(m, block + SHADOW.RENDER_STATE_VALID, state))
+        {
+            return false;
+        }
+        m.setU32(block + SHADOW.RENDER_STATES + 4 * state, value);
+        return true;
+    },
+    /** @type {HostMirror} */
+    transform: (m, block, [type, matrix])=>{
+        let slot = type;
+        if (type < WORLD_SLOT)
+        {
+            if (((ANSWERED_TRANSFORMS >>> type) & 1) === 0)
+            {
+                return false;
+            }
+        }
+        else
+        {
+            slot = (type - (WORLD_TYPE - WORLD_SLOT)) >>> 0;
+            if (slot < WORLD_SLOT || slot >= SHADOW.TRANSFORM_SLOTS)
+            {
+                return false;
+            }
+        }
+        if (matrix === 0)
+        {
+            return false;
+        }
+        m.write(block + SHADOW.TRANSFORMS + slot * 64, m.read(matrix, 64).slice());
+        return true;
+    },
+    /** @type {HostMirror} */
+    viewport9: (m, block, [viewport])=>{
+        if (viewport === 0 || (m.u32(viewport) | 0) < 0 || (m.u32(viewport + 4) | 0) < 0
+            || m.u32(viewport + 8) === 0 || m.u32(viewport + 12) === 0)
+        {
+            return false;
+        }
+        m.write(block + SHADOW.VIEWPORT, m.read(viewport, 24).slice());
+        return true;
+    },
+    /** @type {HostMirror} */
+    samplerState: (m, block, [sampler, type, value])=>{
+        if (sampler >= SHADOW.SAMPLER_COUNT || type >= SHADOW.SAMPLER_STATE_STRIDE)
+        {
+            return false;
+        }
+        m.setU32(block + SHADOW.SAMPLER_STATES + 4 * ((sampler << 4) + type), value);
+        return true;
+    },
+    /** @param {number} types @returns {HostMirror} */
+    stageState: types=>(m, block, [stage, type, value])=>{
+        if (type >= SHADOW.STAGE_STATE_STRIDE || ((types >>> type) & 1) === 0
+            || stage >= SHADOW.STAGE_COUNT)
+        {
+            return false;
+        }
+        m.setU32(block + SHADOW.STAGE_STATES + 4 * ((stage << 5) + type), value);
+        return true;
+    },
+    /** @type {HostMirror} */
+    beginScene: (m, block)=>{
+        drawable(m, block, 0, DRAW.SCENE);
+        return true;
+    },
+    /** @type {HostMirror} */
+    endScene: (m, block)=>{
+        drawable(m, block, DRAW.SCENE, 0);
+        return true;
+    },
+    /** @type {HostMirror} */
+    fvf: (m, block, [fvf])=>{
+        if (fvf !== 0)
+        {
+            drawable(m, block, DRAW.DECLARED, (fvf & 0x0e) !== 0 ? DRAW.DECLARED : 0);
+        }
+        return true;
+    },
+    /** @type {HostMirror} */
+    declaration: (m, block, [declaration])=>{
+        drawable(m, block, DRAW.DECLARED, declaration !== 0 ? DRAW.DECLARED : 0);
+        return true;
+    },
+    /** @type {HostMirror} */
+    streamSource9: (m, block, [stream, buffer, offset, stride])=>{
+        if (stream === 0)
+        {
+            drawable(m, block, DRAW.STREAM, buffer !== 0 && stride !== 0
+                && ((offset % stride) & 3) === 0 ? DRAW.STREAM : 0);
+        }
+        return true;
+    },
+    /** @type {HostMirror} */
+    streamSource8: (m, block, [stream, buffer])=>{
+        if (stream === 0)
+        {
+            drawable(m, block, DRAW.STREAM, buffer !== 0 ? DRAW.STREAM : 0);
+        }
+        return true;
+    },
+    /** @type {HostMirror} */
+    indices: (m, block, [indices])=>{
+        drawable(m, block, DRAW.INDEXED, indices !== 0 ? DRAW.INDEXED : 0);
+        return true;
+    },
+});
+
+/**
+ * A command routine's work done by the host (`commandCode`): for a call the
+ * host makes to a device's method from driven steps, the record the routine
+ * would write is written into the ring, the block's mirrors kept as the
+ * routine keeps them, and the call answered D3D_OK -- with no entry into the
+ * guest, and nothing made before the ring is played, as the routine's call
+ * is made. Undefined where the routine would go to the host: the slow path,
+ * a check that fails, a full ring; the call then goes into the guest as it
+ * came. A function or a state block's method (`thread`, `self`) is not one
+ * this takes.
+ *
+ * @param {GuestWords} m @param {CommandShape} shape
+ * @param {HostMirror | undefined} mirror  the routine's mirror, as the host keeps it
+ * @param {number[]} call  the interface pointer, then the arguments
+ * @returns {number | undefined}
+ */
+export function appendCommand(m, shape, mirror, call){
+    const { slot, args, pointer = -1, bytes = 0, count, draws = false, stale = false,
+        staleDraws = false, fresh = false } = shape;
+    if (shape.thread || shape.self)
+    {
+        return undefined;
+    }
+    // The arguments as unsigned words, `this` before them: read in place, not copied.
+    /** @type {number[]} */
+    const a = ARGUMENTS;
+    for (let i = 1; i < call.length; i++)
+    {
+        a[i - 1] = call[i] >>> 0;
+    }
+    const block = m.u32(call[0] + 4);
+    if (block === 0 || (m.u32(block) & (fresh ? FLAG_SLOW_PATH | FLAG_DRAW_STALE
+        : FLAG_SLOW_PATH)) !== 0 || m.u32(block + SHADOW.COMMANDS) === 0)
+    {
+        return undefined;
+    }
+    const able = m.u32(block + SHADOW.DRAWABLE);
+    if ((shape.needs && (able & shape.needs) !== shape.needs)
+        || (shape.refuses && (able & shape.refuses) !== 0))
+    {
+        return undefined;
+    }
+    for (const { arg, ranges } of shape.within ?? [])
+    {
+        if (!ranges.some(([low, high])=>((a[arg] - low) >>> 0) <= ((high - low) >>> 0)))
+        {
+            return undefined;
+        }
+    }
+    if (shape.span !== undefined && count)
+    {
+        const end = a[shape.span] + a[count.arg];
+        if (end > 0xffffffff || end > count.most)
+        {
+            return undefined;
+        }
+    }
+    if (shape.below && a[shape.below.arg] >= m.u32(block + shape.below.word))
+    {
+        return undefined;
+    }
+    const validated = shape.validated;
+    if (validated && (a[validated.arg] & validated.when) !== 0)
+    {
+        const table = block + SHADOW.VALIDATED
+            + (validated.table ?? 0) * SHADOW.VALIDATED_SLOTS * 4;
+        let seen = false;
+        for (let index = 0; index < SHADOW.VALIDATED_SLOTS && !seen; index++)
+        {
+            seen = m.u32(table + 4 * index) === a[validated.arg];
+        }
+        if (!seen)
+        {
+            return undefined;
+        }
+    }
+    const size = copiedBytes(shape, a, pointer, bytes);
+    if (size === null || (mirror && !mirror(m, block, a)))
+    {
+        return undefined;
+    }
+    const header = COMMAND.ARGS + 4 * args;
+    const length = count !== undefined && count.shift < 2 ? (size + header + 3) & ~3
+        : size + header;
+    const head = m.u32(block + SHADOW.COMMAND_HEAD);
+    if (head + length > m.u32(block + SHADOW.COMMAND_BYTES))
+    {
+        return undefined;
+    }
+    m.setU32(block + SHADOW.COMMAND_HEAD, head + length);
+    const record = (m.u32(block + SHADOW.COMMANDS) + head) >>> 0;
+    m.setU32(record + COMMAND.SLOT, slot);
+    for (let arg = 0; arg < args; arg++)
+    {
+        m.setU32(record + COMMAND.ARGS + 4 * arg, arg === pointer
+            ? (a[arg] === 0 ? 0 : record + header) : a[arg]);
+    }
+    if (pointer >= 0 && size > 0)
+    {
+        m.write(record + header, m.read(a[pointer], size).slice());
+    }
+    m.setU32(record + COMMAND.BYTES, length);
+    if (draws)
+    {
+        m.setU32(block + SHADOW.DRAWS_PENDING, 1);
+    }
+    if (stale)
+    {
+        m.setU32(block, m.u32(block) | (staleDraws ? FLAG_STALE | FLAG_DRAW_STALE : FLAG_STALE));
+    }
+    return 0;
+}
+
+/** The arguments of the call `appendCommand` is writing, one array for every call. */
+const ARGUMENTS = /** @type {number[]} */ (new Array(16).fill(0));
+
+/**
+ * How many bytes a command routine copies of what the call points at, as it
+ * works it out; null where it goes to the host.
+ *
+ * @param {CommandShape} shape @param {number[]} a @param {number} pointer @param {number} bytes
+ * @returns {number | null}
+ */
+function copiedBytes(shape, a, pointer, bytes){
+    const { count, choose, vertices, nullable = false } = shape;
+    if (pointer >= 0 && a[pointer] === 0)
+    {
+        if (!nullable)
+        {
+            return null;
+        }
+        return nullable === 'empty' && count && a[count.arg] !== 0 ? null : 0;
+    }
+    if (choose)
+    {
+        return choose.cases.find(([value])=>value === a[choose.arg])?.[1] ?? choose.otherwise;
+    }
+    if (vertices)
+    {
+        const n = a[vertices.count];
+        if (n === 0 || n > vertices.most)
+        {
+            return null;
+        }
+        /** @type {Record<number, number>} */
+        const spans = { 1: n, 2: n + n, 3: n + 1, 4: 3 * n, 5: n + 2, 6: n + 2 };
+        const spanned = spans[a[vertices.type]];
+        const stride = a[vertices.stride];
+        if (spanned === undefined || (stride & 3) !== 0 || stride > vertices.most)
+        {
+            return null;
+        }
+        const total = Math.imul(spanned, stride) >>> 0;
+        return total === 0 || total > vertices.most ? null : total;
+    }
+    if (count)
+    {
+        const n = a[count.arg];
+        return n === 0 || n > count.most ? null : (n << count.shift) >>> 0;
+    }
+    return pointer >= 0 ? bytes : 0;
 }

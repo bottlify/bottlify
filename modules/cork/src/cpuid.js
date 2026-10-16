@@ -130,6 +130,21 @@ export function cpuidLeaves({ processors, processor }){
 }
 
 /**
+ * What the system-table stores answer, as 32-bit Windows has them: the
+ * interrupt and global descriptor tables where its kernel keeps them, no
+ * local table, the task register's selector, and CR0 with paging, write
+ * protection and the FPU's bits set. A program that compares the tables'
+ * bases with a virtual machine's finds a machine of its own.
+ */
+export const SYSTEM_TABLES = Object.freeze({
+    idt: Object.freeze({ limit: 0x7ff, base: 0x8003f400 }),
+    gdt: Object.freeze({ limit: 0x3ff, base: 0x8003f000 }),
+    ldt: 0,
+    tr: 0x28,
+    cr0: 0x8001003b,
+});
+
+/**
  * The answer to one leaf and subleaf; four zeros where the table has none.
  *
  * @param {number} leaf  EAX

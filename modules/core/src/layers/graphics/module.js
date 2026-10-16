@@ -7,6 +7,7 @@
 import { createBackend } from './webgpu/backend.js';
 import { createDirectDraw } from './ddraw/objects.js';
 import { createDirect3D8 } from './d3d8/device.js';
+import { ringTrace } from './d3d8/commands.js';
 import { createDirect3D9 } from './d3d9/device.js';
 import { profileBehaviour, profileCaps } from './seam/adapter.js';
 import { connectGraphicsWorker } from './remote/connect.js';
@@ -1297,6 +1298,14 @@ export function createGraphicsModule(){
                  * the loader; nothing here needs a special case.
                  */
                 libraries: guarded('libraries', ()=>state.seam.libraries),
+
+                /**
+                 * The calls the command rings carried, kept from now on while
+                 * `count` is not 0 (`ringTrace`): a debugging switch.
+                 *
+                 * @param {number} [count]
+                 */
+                ringTrace: (/** @type {number | undefined} */ count)=>ringTrace(count),
 
                 /**
                  * The pixel-format negotiation and frame presentation whose entry

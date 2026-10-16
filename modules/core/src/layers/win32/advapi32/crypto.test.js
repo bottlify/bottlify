@@ -504,3 +504,14 @@ test('signing without a private key fails, and a bad blob is refused', ()=>{
     assert.equal(fns.CryptImportKey.handler([prov, BLOB, 12, 0, 0, OUT]), 0);
     assert.equal(state.lastError, NTE_BAD_DATA);
 });
+
+test('CryptGetUserKey finds no key pair in a container that never made one', ()=>{
+    const { fns, state, acquire } = setup();
+    const prov = acquire();
+    assert.equal(fns.CryptGetUserKey.handler([prov, 1, 0x40]), 0);
+    assert.equal(state.lastError, 0x8009000d, 'NTE_NO_KEY');
+    assert.equal(fns.CryptGetUserKey.handler([prov, 7, 0x40]), 0);
+    assert.equal(state.lastError, 0x80090003, 'NTE_BAD_KEY for a kind there is not');
+    assert.equal(fns.CryptGetUserKey.handler([0x1234, 1, 0x40]), 0);
+    assert.equal(state.lastError, 0x80090001, 'NTE_BAD_UID for no provider');
+});

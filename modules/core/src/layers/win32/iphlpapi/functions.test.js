@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ADAPTER_INFO, HARDWARE_ADDRESS, createIphlpapiFunctions } from './functions.js';
+import { ADAPTER_INFO, HARDWARE_ADDRESS, IFROW, createIphlpapiFunctions } from './functions.js';
 
 /** @param {number} [localAddress] */
 function machine(localAddress){
@@ -69,4 +69,29 @@ test('the interface count holds the adapter and the loopback interface', ()=>{
     assert.equal(fns.GetNumberOfInterfaces.handler([0x100]), 0);
     assert.equal(view.getUint32(0x100, true), 2);
     assert.equal(fns.GetNumberOfInterfaces.handler([0]), 87, 'no place for the answer');
+});
+
+test('GetIfEntry fills the row of the adapter or the loopback by the index asked', ()=>{
+    const { view, memory, fns } = machine(0x0a000005);
+    assert.equal(fns.GetIfEntry.handler([0]), 87, 'no row');
+    view.setUint32(INFO + IFROW.INDEX, 1, true);
+    assert.equal(fns.GetIfEntry.handler([INFO]), 0);
+    assert.equal(view.getUint32(INFO + IFROW.TYPE, true), 6, 'Ethernet');
+    assert.equal(view.getUint32(INFO + IFROW.OPER_STATUS, true), 5, 'operational: on a network');
+    assert.deepEqual([...memory.slice(INFO + IFROW.PHYS_ADDR, INFO + IFROW.PHYS_ADDR + 6)],
+        [...HARDWARE_ADDRESS]);
+    view.setUint32(INFO + IFROW.INDEX, 2, true);
+    assert.equal(fns.GetIfEntry.handler([INFO]), 0);
+    assert.equal(view.getUint32(INFO + IFROW.TYPE, true), 24, 'the loopback');
+    view.setUint32(INFO + IFROW.INDEX, 9, true);
+    assert.equal(fns.GetIfEntry.handler([INFO]), 13, 'ERROR_INVALID_DATA for no such interface');
+});
+
+test('GetInterfaceInfo asks for its size, then lists the one adapter', ()=>{
+    const { view, fns } = machine();
+    assert.equal(fns.GetInterfaceInfo.handler([0, SIZE]), 122, 'ERROR_INSUFFICIENT_BUFFER');
+    assert.equal(view.getUint32(SIZE, true), 264);
+    assert.equal(fns.GetInterfaceInfo.handler([INFO, SIZE]), 0);
+    assert.deepEqual([view.getUint32(INFO, true), view.getUint32(INFO + 4, true)], [1, 1]);
+    assert.equal(view.getUint16(INFO + 8, true), 0x5c, 'the device name, from its backslash');
 });

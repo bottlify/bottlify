@@ -29,9 +29,11 @@
  * them is seen by all.
  *
  * What differs from D3DX, and is said where it happens:
- * - A compiled effect (fx_2_0 bytecode) is not read. The effect compiler's
- *   CompileEffect hands back this layer's own container -- the source, its macros
- *   and the files it included -- which D3DXCreateEffect takes back.
+ * - A compiled effect (fx_2_0 bytecode) is read by `effect-binary.js`, less the
+ *   expressions fxc left to evaluate (a state's FXLC, a shader's preshader). The
+ *   effect compiler reads only source, and its CompileEffect hands back this
+ *   layer's own container -- the source, its macros and the files it included --
+ *   which D3DXCreateEffect takes back.
  * - The effect holds no reference on its device, on the textures set into its
  *   parameters or on the shaders and state blocks it made: a COM release from the
  *   last Release would be a call into the guest from inside one. GetDevice,
@@ -44,6 +46,9 @@ import { DEVICE, UNKNOWN_RELEASE, createDeviceCalls } from './device.js';
 import { parseConstantTable, registerValues } from './constants.js';
 import { compileShader } from './hlsl-compile.js';
 import { PARAMETER, PC, PT, buildEffect, isSampler, isShader, isTexture } from './effect-model.js';
+import { FX_2_0, readCompiledEffect } from './effect-binary.js';
+import { COMPILED as SETTERS_IN_GUEST } from './effect-setters.x86.js';
+import { COMPILED as COMMIT_IN_GUEST } from './effect-commit.x86.js';
 
 /** @typedef {import('./effect-model.js').EffectModel} EffectModel */
 /** @typedef {import('./effect-model.js').ParamModel} ParamModel */
@@ -71,8 +76,62 @@ const D3DERR_INVALIDCALL = 0x8876086c;
 export const FX = Object.freeze({ DONOTSAVESTATE: 1, DONOTSAVESHADERSTATE: 2,
     DONOTSAVESAMPLERSTATE: 4, NOT_CLONEABLE: 1 << 11, LARGEADDRESSAWARE: 1 << 17 });
 
-/** The tag of a compiled effect, which this layer does not read. */
-const FX_2_0 = 0xfeff0901;
+/**
+ * A parameter's handle is a record in guest memory, which the setters that
+ * run in the guest (`effect-setters.js`) read: its type, class, rows,
+ * columns, elements and bytes, where its data is, and where its store's
+ * version is. The records are in one arena, whose bounds the effect's block
+ * names, so the guest tells a handle of ours from a name a program passes
+ * without reading the name. A record let go of is marked `RETIRED`, a type
+ * no setter takes.
+ */
+export const HANDLE = Object.freeze({ TYPE: 0, CLASS: 4, ROWS: 8, COLUMNS: 12, ELEMENTS: 16,
+    BYTES: 20, DATA: 24, VERSION: 28, SIZE: 32 });
+const RETIRED = 0xffffffff;
+/** How many records the arena holds; a parameter past them has a handle the host alone reads. */
+const ARENA_HANDLES = 8192;
+/**
+ * The effect's block, its interface's state word: whether a parameter block
+ * is being recorded (when the setters are the host's), the arena's bounds,
+ * the clock's address, the table of the pass begun, that pass's number (0
+ * for none), the passes of the technique begun (a count, then each pass's
+ * table or 0 and its number; 0 when none is begun), where `Walk` is
+ * (`effect-commit.js`), whether a technique is begun and the flags it was
+ * begun with, the current technique's record (`TECHNIQUE`) and the
+ * techniques (a count, then each one's handle and record).
+ */
+export const EFFECT_BLOCK = Object.freeze({ RECORDING: 0, ARENA: 4, ARENA_BYTES: 8, CLOCK: 12,
+    COMMIT: 16, ACTIVE: 20, PASSES: 24, WALK: 28, STARTED: 32, FLAGS: 36, TECHNIQUE: 40,
+    TECHNIQUES: 44, SIZE: 48 });
+/**
+ * A technique's record in guest memory: its passes as the block's PASSES
+ * lists them for the state manager set, and its state blocks by the two
+ * Begin flags that choose one (D3DXFX_DONOTSAVESHADERSTATE and
+ * D3DXFX_DONOTSAVESAMPLERSTATE, as a number of words).
+ */
+export const TECHNIQUE = Object.freeze({ PASSES: 0, SAVED: 4, SIZE: 20 });
+
+/**
+ * A pass's commit table, which CommitChanges in the guest walks
+ * (`effect-commit.js`): the device (or the state manager the program set),
+ * where the pass's date is, how many
+ * entries, a scratch block for constants, how many triggers, the triggers --
+ * versions whose change sends the commit to the host -- then the entries, each
+ * a kind (`COMMIT_KIND`), the version that says it changed, the device
+ * setter's slot, two arguments, the data, a mode and the setter's arity.
+ */
+export const COMMIT = Object.freeze({ DEVICE: 0, APPLIED: 4, ENTRIES: 8, SCRATCH: 12,
+    TRIGGERS: 16, HEADER: 20, ENTRY: 32 });
+/**
+ * The kinds of a commit entry: constants as the parameter's words, as bools
+ * of an int's or of a float's, as floats of an int's or of a bool's, as ints
+ * of a float's; a state the parameter's word; a state an expression copies
+ * from an int or bool parameter, or from a float one (mode bit 0 the state a
+ * bool, bit 1 the parameter a bool).
+ */
+export const COMMIT_KIND = Object.freeze({ WORDS: 1, BOOLS: 2, FLOAT_BOOLS: 3, INT_FLOATS: 4,
+    BOOL_FLOATS: 5, FLOAT_INTS: 6, STATE: 7, COPIED: 8, COPIED_FLOAT: 9 });
+
 /** The tag of this layer's own compiled effect: 'BTFX'. */
 const CONTAINER = 0x58465442;
 
@@ -136,6 +195,9 @@ const CONSTANT_STATES = {
 
 const D3DXERR_INVALIDDATA = 0x88760b59;
 
+/** The bytes of a pooled scratch block: 256 registers of four floats, a pass's most. */
+const SCRATCH_BYTES = 4096;
+
 /** INT_FLOAT_MULTI: how D3DX packs a colour into an int and back. */
 const COLOR_SCALE = 255;
 
@@ -143,9 +205,12 @@ const COLOR_SCALE = 255;
  * @typedef {Object} EffectHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {(address: number) => number} [readU32]  A word read in place.
+ * @property {(address: number, value: number) => void} [writeU32]  A word written in place.
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {{ publish: (object: any, interfaceId: string) => number }} [vtables]
- * @property {{ allocate: (bytes: number) => number, free: (address: number) => any }} [heap]
+ * @property {{ allocate: (bytes: number) => number, free: (address: number) => any,
+ *     allocateCode?: (bytes: number) => number }} [heap]
  * @property {(call: { entry: number, args: number[], thread?: any }) => Promise<number>}
  *     [callGuest]
  * @property {(steps: Steps) => any} [drive]
@@ -185,11 +250,12 @@ const COLOR_SCALE = 255;
 
 /**
  * A store of parameter data: the DWORDs of one top-level parameter, and when they
- * were last written. A shared parameter's store is its pool's.
+ * were last written, in guest memory -- a word of the version, then the data --
+ * where the setters that run in the guest write them. A shared parameter's
+ * store is its pool's.
  *
  * @typedef {Object} Store
- * @property {DataView} view
- * @property {number} version
+ * @property {number} at   The version word; the data follows it.
  * @property {Map<number, number>} strings   Heap copies of strings, by the offset that holds them.
  */
 
@@ -225,7 +291,14 @@ const COLOR_SCALE = 255;
  * @property {number} handle
  * @property {number} nameAt
  * @property {Param[]} annotations
- * @property {number} applied   The version of the last time its states were set.
+ * @property {number} appliedAt   Where the version of the last time its states were set
+ *     is, in guest memory, which CommitChanges in the guest reads and dates.
+ * @property {number} id   Its number in its effect, from 1: what the block's ACTIVE holds.
+ * @property {Map<number, number>} [commits]   Its tables in guest memory, by the state
+ *     manager they call (0 the device), 0 for a pass whose commit is the host's alone;
+ *     absent until it is first begun.
+ * @property {Map<number, number>} [begins]   The same tables where BeginPass may walk
+ *     them too, 0 where a state of the pass is set only by the host's.
  */
 
 /**
@@ -236,6 +309,9 @@ const COLOR_SCALE = 255;
  * @property {Param[]} annotations
  * @property {Pass[]} passes
  * @property {Map<number, number>} saved   State blocks by the Begin flags they keep.
+ * @property {Map<number, number>} [passList]   Its passes as the block's PASSES lists
+ *     them, by the state manager their tables call.
+ * @property {number} [record]   Its record (`TECHNIQUE`), where the effect has a block.
  */
 
 /**
@@ -256,7 +332,8 @@ const COLOR_SCALE = 255;
  * @property {{ handle: number, nameAt: number, name: string }[]} functions
  * @property {boolean} started
  * @property {number} beginFlags
- * @property {Pass | null} active
+ * @property {Pass | null} active   The pass begun, where the effect has no block (`activeOf`).
+ * @property {Pass[]} passById   Every pass of every technique, by its `id` less one.
  * @property {number} manager
  * @property {Uint8Array[]} lights
  * @property {number} lightsUpdated
@@ -266,6 +343,8 @@ const COLOR_SCALE = 255;
  * @property {Map<number, { param: Param, bytes: Uint8Array }[]>} blocks
  * @property {number[]} owned   Heap blocks that go with the effect.
  * @property {Set<string>} skip   Constants Ex was told not to set.
+ * @property {number} block   Its block in guest memory (`EFFECT_BLOCK`), or 0.
+ * @property {number} [commitScratch]   The block its commits in the guest gather constants in.
  * @property {number} version   Which ID3DXEffect layout it was handed out as.
  */
 
@@ -279,12 +358,60 @@ export function createEffects(host, helpers, options = {}){
     const version = options.version ?? 43;
     /** Every handle any effect of this process handed out, to what it names. @type {Map<number, any>} */
     const handles = new Map();
-    /** The clock that dates parameter writes and pass applications. */
-    let clock = 1;
     const { u32, putU32s, method, string } = createDeviceCalls(host);
     const heap = ()=>/** @type {NonNullable<EffectHost['heap']>} */ (host.heap);
     /** @param {number} at @param {number} value */
     const putU32 = (at, value)=>putU32s(at, [value]);
+    /**
+     * The clock that dates parameter writes and pass applications: a word of
+     * guest memory, which the setters in the guest advance too.
+     */
+    let clockAt = 0;
+    /** The arena of handle records, and the records let go of. */
+    let arenaAt = 0;
+    let arenaUsed = 0;
+    /** @type {number[]} */
+    const retired = [];
+    /** A record for a handle, or 0 when the arena has none left. */
+    const handleRecord = ()=>{
+        if (arenaAt === 0)
+        {
+            arenaAt = heap().allocate(ARENA_HANDLES * HANDLE.SIZE);
+            if (arenaAt === 0)
+            {
+                return 0;
+            }
+        }
+        if (retired.length > 0)
+        {
+            return /** @type {number} */ (retired.pop());
+        }
+        return arenaUsed < ARENA_HANDLES ? arenaAt + HANDLE.SIZE * arenaUsed++ : 0;
+    };
+    /** @param {number} handle */
+    const inArena = handle=>arenaAt !== 0 && handle >= arenaAt
+        && handle < arenaAt + ARENA_HANDLES * HANDLE.SIZE;
+    /** A handle's record written from its parameter, as it is now. @param {Param} p */
+    const recordHandle = p=>{
+        if (inArena(p.handle))
+        {
+            const m = p.model;
+            putU32s(p.handle, [m.type, m.cls, m.rows, m.columns, m.elements, m.bytes, dataAt(p),
+                p.store.at]);
+        }
+    };
+
+    /** The clock's reading, advanced past it. */
+    const tick = ()=>{
+        if (clockAt === 0)
+        {
+            clockAt = heap().allocate(4);
+            putU32(clockAt, 1);
+        }
+        const now = u32(clockAt);
+        putU32(clockAt, now + 1);
+        return now;
+    };
     // One word seen both ways, so a conversion allocates nothing.
     const bitsWord = new Uint32Array(1);
     const floatWord = new Float32Array(bitsWord.buffer);
@@ -355,8 +482,9 @@ export function createEffects(host, helpers, options = {}){
      * @returns {Param}
      */
     const makeParam = (effect, model, fullName, top, store, offset)=>{
-        const [handle, nameAt, semanticAt] = strings(effect.owned,
+        const [named, nameAt, semanticAt] = strings(effect.owned,
             [fullName ?? model.name, model.name, model.semantic]);
+        const handle = handleRecord() || named;
         /** @type {Param} */
         const param = { model, fullName, handle, nameAt, semanticAt, members: [], annotations: [],
             top, store, offset, flags: model.flags, effect };
@@ -375,6 +503,7 @@ export function createEffects(host, helpers, options = {}){
         });
         param.annotations = model.annotations.map(annotation=>annotationOf(effect, annotation,
             fullName === null ? null : `${fullName}@${annotation.name}`));
+        recordHandle(param);
         return param;
     };
 
@@ -392,9 +521,55 @@ export function createEffects(host, helpers, options = {}){
         return param;
     };
 
-    /** @param {number} bytes @returns {Store} */
-    const newStore = bytes=>({ view: new DataView(new ArrayBuffer(Math.max(bytes, 4))),
-        version: clock++, strings: new Map() });
+    /**
+     * A store in guest memory, zeroed, dated now.
+     *
+     * @param {number} bytes @returns {Store}
+     * @throws {RangeError} when the heap has no room, which a maker answers E_OUTOFMEMORY
+     */
+    const newStore = bytes=>{
+        const at = heap().allocate(4 + Math.max(bytes, 4));
+        if (at === 0)
+        {
+            throw new RangeError('no room for a parameter');
+        }
+        host.writeMemory(at, new Uint8Array(4 + Math.max(bytes, 4)));
+        putU32(at, tick());
+        return { at, strings: new Map() };
+    };
+
+    /** Lets go of a store: its strings and its block. @param {Store} store */
+    const freeStore = store=>{
+        store.strings.forEach(at=>heap().free(at));
+        store.strings.clear();
+        heap().free(store.at);
+    };
+
+    /** When a store was last written. @param {Store} store */
+    const versionOf = store=>u32(store.at);
+
+    /** When a pass's states were last set. @param {Pass} pass */
+    const appliedOf = pass=>u32(pass.appliedAt);
+
+    /**
+     * A word for a pass's date, never set: owned by the effect.
+     *
+     * @param {EffectState} effect
+     * @throws {RangeError} when the heap has no room
+     */
+    const appliedWord = effect=>{
+        const at = heap().allocate(4);
+        if (at === 0)
+        {
+            throw new RangeError('no room for a pass');
+        }
+        effect.owned.push(at);
+        putU32(at, 0);
+        return at;
+    };
+
+    /** Where a parameter's data is in guest memory. @param {Param} p */
+    const dataAt = p=>p.store.at + 4 + p.offset;
 
     /**
      * A parameter's data set to its default: numbers as declared, strings copied
@@ -407,7 +582,7 @@ export function createEffects(host, helpers, options = {}){
             const at = param.offset + i * 4;
             if ('word' in slot)
             {
-                param.store.view.setUint32(at, slot.word >>> 0, true);
+                putU32(param.store.at + 4 + at, slot.word >>> 0);
             }
             else if ('string' in slot)
             {
@@ -416,7 +591,7 @@ export function createEffects(host, helpers, options = {}){
             else
             {
                 const shader = slot.shader === null ? null : param.effect.shaders[slot.shader];
-                param.store.view.setUint32(at, shader?.pointer ?? 0, true);
+                putU32(param.store.at + 4 + at, shader?.pointer ?? 0);
             }
         });
     };
@@ -430,7 +605,7 @@ export function createEffects(host, helpers, options = {}){
             host.writeMemory(copy, encode(text));
         }
         store.strings.set(at, copy);
-        store.view.setUint32(at, copy, true);
+        putU32(store.at + 4 + at, copy);
         if (old)
         {
             heap().free(old);
@@ -438,8 +613,7 @@ export function createEffects(host, helpers, options = {}){
     };
 
     /** The words of a parameter's data. @param {Param} p */
-    const wordsOf = p=>Array.from({ length: p.model.bytes >>> 2 }, (_, i)=>
-        p.store.view.getUint32(p.offset + i * 4, true));
+    const wordsOf = p=>(p.model.bytes < 4 ? [] : words(dataAt(p), p.model.bytes >>> 2));
 
     /**
      * Writes words into a parameter's data from its start, dating the write and
@@ -448,23 +622,22 @@ export function createEffects(host, helpers, options = {}){
      * @param {Param} p @param {number[]} words @param {number} [from]  The first word.
      */
     const writeWords = (p, words, from = 0)=>{
-        words.forEach((word, i)=>{
-            if ((from + i) * 4 < p.model.bytes)
-            {
-                p.store.view.setUint32(p.offset + (from + i) * 4, word >>> 0, true);
-            }
-        });
+        const count = Math.max(0, Math.min(words.length, (p.model.bytes >>> 2) - from));
+        if (count > 0)
+        {
+            host.writeMemory(dataAt(p) + from * 4, new Uint8Array(Uint32Array.from(
+                words.slice(0, count), word=>word >>> 0).buffer));
+        }
         touched(p);
     };
 
     /** @param {Param} p */
     const touched = p=>{
-        p.store.version = clock++;
+        putU32(p.store.at, tick());
         const recording = p.effect.recording;
         if (recording)
         {
-            recording.push({ param: p, bytes: new Uint8Array(p.store.view.buffer.slice(p.offset,
-                p.offset + p.model.bytes)) });
+            recording.push({ param: p, bytes: host.readMemory(dataAt(p), p.model.bytes).slice() });
         }
     };
 
@@ -1428,7 +1601,9 @@ export function createEffects(host, helpers, options = {}){
      * @returns {Steps}
      */
     const withBytesStep = function*(bytes, use){
-        const at = heap().allocate(Math.max(bytes.length, 4));
+        const pooled = bytes.length <= SCRATCH_BYTES;
+        const at = pooled ? scratch.pop() ?? heap().allocate(SCRATCH_BYTES)
+            : heap().allocate(Math.max(bytes.length, 4));
         if (at === 0)
         {
             return E_OUTOFMEMORY;
@@ -1440,9 +1615,25 @@ export function createEffects(host, helpers, options = {}){
         }
         finally
         {
-            heap().free(at);
+            if (pooled)
+            {
+                scratch.push(at);
+            }
+            else
+            {
+                heap().free(at);
+            }
         }
     };
+    /**
+     * Blocks of SCRATCH_BYTES a step's bytes go in and come back to: a pass's
+     * constants are set a call each, and a block taken from the heap and
+     * given back for each was most of what CommitChanges spent on the heap.
+     * A pool, not a stack: steps that enter the guest may interleave threads.
+     *
+     * @type {number[]}
+     */
+    const scratch = [];
 
     /**
      * Bytes in the heap for the length of one call, freed after it.
@@ -1498,8 +1689,12 @@ export function createEffects(host, helpers, options = {}){
      * @param {EffectState} effect @param {Pass | null} pass @param {StateModel} state
      * @returns {{ words: number[], param: Param | null, dirty: boolean } | null}
      */
-    const valueOf = (effect, pass, state)=>{
+    const valueOf = (effect, pass, state, all = true)=>{
         const source = state.source;
+        // What applyState sets regardless of a change; for any other state a
+        // value nothing changed is not read -- most of a CommitChanges's states.
+        const always = all || state.kind === 'vs' || state.kind === 'ps'
+            || state.kind === 'setsampler';
         if (source.kind === 'const')
         {
             return { words: source.words, param: null, dirty: false };
@@ -1509,19 +1704,72 @@ export function createEffects(host, helpers, options = {}){
             const shader = source.shader === null ? null : effect.shaders[source.shader];
             return { words: [shader?.pointer ?? 0], param: null, dirty: false };
         }
+        if (source.kind === 'expression')
+        {
+            // D3DX evaluates in floats and stores the result as the state's own
+            // type: an int truncated, a bool any number but zero.
+            const dirty = !pass || source.program.inputs.some(constant=>{
+                const p = effect.byName.get(constant.name);
+                return !!p && versionOf(p.store) > appliedOf(pass);
+            });
+            if (!dirty && !always)
+            {
+                return UNCHANGED;
+            }
+            const out = source.program.run(constant=>{
+                const p = effect.byName.get(constant.name);
+                return p ? numbersOf(p) : null;
+            });
+            const numbers = Array.from({ length: source.count }, (_, i)=>{
+                const x = out[i] ?? 0;
+                return source.type === PT.FLOAT ? Math.fround(x) : source.type === PT.BOOL
+                    ? (x !== 0 ? 1 : 0) : Math.trunc(x) | 0;
+            });
+            const held = numbers.map(x=>(source.type === PT.FLOAT ? floatBits(x) : x >>> 0));
+            return shaped(state, source.type, held, numbers, null, dirty);
+        }
         const p = effect.byName.get(source.path);
         if (!p)
         {
             return null;
         }
-        const dirty = pass ? p.store.version > pass.applied : true;
+        const dirty = pass ? versionOf(p.store) > appliedOf(pass) : true;
+        if (!dirty && !always)
+        {
+            return UNCHANGED;
+        }
         const held = wordsOf(p);
         if (p.model.cls === PC.OBJECT)
         {
             return { words: held, param: p, dirty };
         }
-        const numbers = held.map(word=>(p.model.type === PT.FLOAT ? asFloat(word)
-            : p.model.type === PT.BOOL ? (word !== 0 ? 1 : 0) : word | 0));
+        return shaped(state, p.model.type, held, numbersIn(p, held), p, dirty);
+    };
+
+    /** A state's value nothing changed, which applyState does not set. */
+    const UNCHANGED = Object.freeze({ words: /** @type {number[]} */ ([]), param: null,
+        dirty: false });
+
+    /**
+     * A parameter's words as numbers in its own type.
+     *
+     * @param {Param} p @param {number[]} held @returns {number[]}
+     */
+    const numbersIn = (p, held)=>held.map(word=>(p.model.type === PT.FLOAT ? asFloat(word)
+        : p.model.type === PT.BOOL ? (word !== 0 ? 1 : 0) : word | 0));
+
+    /** A parameter's numbers in its own type. @param {Param} p @returns {number[]} */
+    const numbersOf = p=>numbersIn(p, wordsOf(p));
+
+    /**
+     * A value of the given type as the state takes it.
+     *
+     * @param {StateModel} state @param {number} type
+     * @param {number[]} held  Its words. @param {number[]} numbers  Its numbers.
+     * @param {Param | null} p @param {boolean} dirty
+     * @returns {{ words: number[], param: Param | null, dirty: boolean }}
+     */
+    const shaped = (state, type, held, numbers, p, dirty)=>{
         switch (state.value)
         {
             case 'float':
@@ -1532,7 +1780,7 @@ export function createEffects(host, helpers, options = {}){
             case 'ints':
                 return { words: numbers.map(x=>Math.trunc(x) >>> 0), param: p, dirty };
             case 'color':
-                if (p.model.type === PT.FLOAT && numbers.length >= 3)
+                if (type === PT.FLOAT && numbers.length >= 3)
                 {
                     const [r, g, b, a = 1] = numbers;
                     const byte = (/** @type {number} */ x)=>Math.max(0, Math.min(255,
@@ -1542,7 +1790,7 @@ export function createEffects(host, helpers, options = {}){
                 }
                 return { words: [held[0] ?? 0], param: p, dirty };
             default:
-                return { words: [p.model.type === PT.FLOAT ? Math.trunc(numbers[0] ?? 0) >>> 0
+                return { words: [type === PT.FLOAT ? Math.trunc(numbers[0] ?? 0) >>> 0
                     : (held[0] ?? 0) >>> 0], param: p, dirty };
         }
     };
@@ -1558,7 +1806,7 @@ export function createEffects(host, helpers, options = {}){
      * @returns {Steps}
      */
     const applyState = function*(effect, pass, state, unit, all, thread, keep){
-        const value = valueOf(effect, pass, state);
+        const value = valueOf(effect, pass, state, all);
         if (!value)
         {
             return D3D_OK;
@@ -1685,7 +1933,7 @@ export function createEffects(host, helpers, options = {}){
             {
                 continue;
             }
-            const dirty = !pass || param.store.version > pass.applied;
+            const dirty = !pass || versionOf(param.store) > appliedOf(pass);
             if (constant.set === 3)
             {
                 if (keep & FX.DONOTSAVESAMPLERSTATE)
@@ -1753,32 +2001,72 @@ export function createEffects(host, helpers, options = {}){
         {
             return D3D_OK;
         }
-        const values = wordsOf(param).map(word=>(param.model.type === PT.FLOAT ? asFloat(word)
-            : param.model.type === PT.BOOL ? (word !== 0 ? 1 : 0) : word | 0));
-        const { registers, count } = registerValues(constant, values);
+        const { count, units, map } = layoutOf(constant, param.model);
         if (count === 0)
         {
             return D3D_OK;
         }
-        const bytes = new DataView(new ArrayBuffer(count * 16));
-        const units = constant.set === 0 ? count : count * 4;
+        // The parameter's words, read once; each unit of the registers one of
+        // them (`map`) or zero, converted as D3DX converts: a float into a float
+        // register as its bits, which D3DX copies.
+        const raw = host.readMemory(dataAt(param), param.model.bytes & ~3);
+        const data = (raw.byteOffset & 3) === 0
+            ? new Uint32Array(raw.buffer, raw.byteOffset, raw.length >>> 2)
+            : new Uint32Array(raw.slice().buffer);
+        const type = param.model.type;
+        const out = CONSTANT_UNITS;
         for (let i = 0; i < units; i++)
         {
-            const value = registers[constant.set === 0 ? i * 4 : i];
-            if (constant.set === 2)
-            {
-                bytes.setFloat32(i * 4, value, true);
-            }
-            else
-            {
-                bytes.setInt32(i * 4, constant.set === 0 ? (value !== 0 ? 1 : 0)
-                    : Math.trunc(value), true);
-            }
+            const from = map[i];
+            const word = from < 0 ? 0 : data[from];
+            out[i] = from < 0 ? 0 : constant.set === 2
+                ? (type === PT.FLOAT ? word : floatBits(type === PT.BOOL ? (word !== 0 ? 1 : 0)
+                    : word | 0))
+                : constant.set === 1
+                    ? (type === PT.FLOAT ? Math.trunc(asFloat(word)) | 0 : type === PT.BOOL
+                        ? (word !== 0 ? 1 : 0) : word | 0)
+                    : ((type === PT.FLOAT ? asFloat(word) : word) !== 0 ? 1 : 0);
         }
         const setter = CONSTANT_SETTERS[constant.set][shader.pixel ? 1 : 0];
-        return yield* withBytesStep(new Uint8Array(bytes.buffer, 0, units * 4), at=>set(effect,
+        return yield* withBytesStep(new Uint8Array(out.buffer, 0, units * 4), at=>set(effect,
             thread, setter, [constant.index, at, count]));
     };
+
+    /**
+     * Where each unit of a constant's registers comes from in a parameter of
+     * this shape: the index of the word, or -1 for a unit left zero -- what
+     * `registerValues` lays out, worked out once for the constant and the
+     * shape rather than from the values at every commit.
+     *
+     * @param {Constant} constant @param {ParamModel} model
+     * @returns {{ count: number, units: number, map: Int32Array }}
+     */
+    const layoutOf = (constant, model)=>{
+        let byModel = LAYOUTS.get(constant);
+        if (!byModel)
+        {
+            byModel = new Map();
+            LAYOUTS.set(constant, byModel);
+        }
+        const known = byModel.get(model);
+        if (known)
+        {
+            return known;
+        }
+        // Laid out over the words' indices, one past each, so a zero is a unit no word fills.
+        const { registers, count } = registerValues(constant, Array.from(
+            { length: model.bytes >>> 2 }, (_, i)=>i + 1));
+        const units = constant.set === 0 ? count : count * 4;
+        const map = Int32Array.from({ length: units }, (_, i)=>
+            registers[constant.set === 0 ? i * 4 : i] - 1);
+        const layout = { count, units, map };
+        byModel.set(model, layout);
+        return layout;
+    };
+    /** @type {WeakMap<Constant, Map<ParamModel, { count: number, units: number, map: Int32Array }>>} */
+    const LAYOUTS = new WeakMap();
+    /** The units a constant is set from, one buffer for every commit: 256 registers' most. */
+    const CONSTANT_UNITS = new Uint32Array(1024);
 
     /**
      * Every state of a pass set, then the lights and the material its states built.
@@ -1787,7 +2075,7 @@ export function createEffects(host, helpers, options = {}){
      * @param {number} [keep]
      */
     const applyPass = function*(effect, pass, all, thread, keep = 0){
-        const now = clock++;
+        const now = tick();
         let answer = D3D_OK;
         for (const state of pass.model.states)
         {
@@ -1811,8 +2099,402 @@ export function createEffects(host, helpers, options = {}){
             answer = result !== D3D_OK ? result : answer;
         }
         effect.materialUpdated = false;
-        pass.applied = now;
+        putU32(pass.appliedAt, now);
         return answer;
+    };
+
+    /**
+     * The pass begun, which BeginPass in the guest names in the block.
+     *
+     * @param {EffectState} effect @returns {Pass | null}
+     */
+    const activeOf = effect=>{
+        if (effect.block === 0)
+        {
+            return effect.active;
+        }
+        const id = u32(effect.block + EFFECT_BLOCK.ACTIVE);
+        return id === 0 ? null : effect.passById[id - 1] ?? null;
+    };
+    /** @param {EffectState} effect @param {Pass | null} pass */
+    const setActive = (effect, pass)=>{
+        effect.active = pass;
+        if (effect.block !== 0)
+        {
+            putU32(effect.block + EFFECT_BLOCK.ACTIVE, pass?.id ?? 0);
+        }
+    };
+
+    /** The technique current, which SetTechnique in the guest names in the block. @param {EffectState} effect */
+    const currentOf = effect=>{
+        if (effect.block === 0)
+        {
+            return effect.current;
+        }
+        const record = u32(effect.block + EFFECT_BLOCK.TECHNIQUE);
+        return effect.techniques.find(t=>t.record === record) ?? null;
+    };
+    /** @param {EffectState} effect @param {Technique | null} t */
+    const setCurrent = (effect, t)=>{
+        effect.current = t;
+        if (effect.block !== 0)
+        {
+            putU32(effect.block + EFFECT_BLOCK.TECHNIQUE, t?.record ?? 0);
+        }
+    };
+    /** Whether a technique is begun, which Begin and End in the guest say. @param {EffectState} effect */
+    const startedOf = effect=>(effect.block === 0 ? effect.started
+        : u32(effect.block + EFFECT_BLOCK.STARTED) !== 0);
+    /** The flags the technique begun was begun with. @param {EffectState} effect */
+    const beginFlagsOf = effect=>(effect.block === 0 ? effect.beginFlags
+        : u32(effect.block + EFFECT_BLOCK.FLAGS));
+    /** @param {EffectState} effect @param {boolean} started @param {number} flags */
+    const setStarted = (effect, started, flags)=>{
+        effect.started = started;
+        effect.beginFlags = flags >>> 0;
+        if (effect.block !== 0)
+        {
+            putU32s(effect.block + EFFECT_BLOCK.STARTED, [started ? 1 : 0, flags]);
+        }
+    };
+
+    /**
+     * A technique's passes as the block's PASSES lists them for the state
+     * manager set -- each pass's table where BeginPass in the guest may walk
+     * it, so far as the host has begun the pass once and built it -- in its
+     * record; and the block's PASSES, that list while the technique current
+     * is begun, else 0.
+     *
+     * @param {EffectState} effect @param {Technique | null} t
+     */
+    const passesIn = (effect, t)=>{
+        if (effect.block === 0)
+        {
+            return;
+        }
+        if (t && t.record)
+        {
+            t.passList ??= new Map();
+            let list = t.passList.get(effect.manager) ?? 0;
+            if (list === 0)
+            {
+                list = heap().allocate(4 + 8 * t.passes.length);
+                if (list !== 0)
+                {
+                    effect.owned.push(list);
+                    t.passList.set(effect.manager, list);
+                }
+            }
+            if (list !== 0)
+            {
+                putU32s(list, [t.passes.length, ...t.passes.flatMap(pass=>
+                    [pass.begins?.get(effect.manager) ?? 0, pass.id])]);
+            }
+            putU32(t.record + TECHNIQUE.PASSES, list);
+        }
+        const current = currentOf(effect);
+        putU32(effect.block + EFFECT_BLOCK.PASSES, current && current.record && startedOf(effect)
+            ? u32(current.record + TECHNIQUE.PASSES) : 0);
+    };
+
+    /** Where `Walk` is in guest memory, placed at the first effect's block; 0 for none. */
+    let walkAt = -1;
+    const placeWalk = ()=>{
+        if (walkAt < 0)
+        {
+            const code = /** @type {Uint8Array} */ (/** @type {any} */ (COMMIT_IN_GUEST).Walk.code);
+            walkAt = host.heap ? (heap().allocateCode ?? heap().allocate)(code.length) : 0;
+            if (walkAt !== 0)
+            {
+                host.writeMemory(walkAt, code);
+            }
+        }
+        return walkAt;
+    };
+
+    /**
+     * The table an effect's block names for CommitChanges in the guest: a
+     * pass's, or 0 for the host's.
+     *
+     * @param {EffectState} effect @param {number} table
+     */
+    const commitIn = (effect, table)=>{
+        if (effect.block !== 0)
+        {
+            putU32(effect.block + EFFECT_BLOCK.COMMIT, table);
+        }
+    };
+
+    /**
+     * A pass's commit table (`COMMIT`), built at its first BeginPass: what the
+     * host's commit (`applyPass` with nothing to set but what changed) would
+     * set, entry by entry in its order, for the entries the guest's walk can
+     * say -- constants copied or made bools, states from an int's or a bool's
+     * word, states an expression copies from a scalar -- or 0 for a pass with
+     * any other: a shader a parameter names, a structure's constants, a
+     * conversion through a float, a light or a material, an expression of more.
+     *
+     * @param {EffectState} effect @param {Pass} pass
+     * @returns {number}
+     */
+    const compileCommit = (effect, pass)=>{
+        pass.commits ??= new Map();
+        pass.begins ??= new Map();
+        const known = pass.commits.get(effect.manager);
+        if (known !== undefined)
+        {
+            return known;
+        }
+        const built = { begins: true };
+        const answer = buildCommit(effect, pass, built);
+        if (typeof answer === 'string')
+        {
+            if (pass.commits.size === 0)
+            {
+                // Said once a pass: why its commits cross into the host.
+                host.divergence?.('ID3DXEffect::CommitChanges', `pass '${pass.model.name ?? ''}' `
+                    + `commits on the host: ${answer}`);
+            }
+            pass.commits.set(effect.manager, 0);
+            pass.begins.set(effect.manager, 0);
+            return 0;
+        }
+        pass.commits.set(effect.manager, answer);
+        pass.begins.set(effect.manager, built.begins ? answer : 0);
+        return answer;
+    };
+
+    /**
+     * `compileCommit`'s work: the table, or why there is none.
+     *
+     * Entries BeginPass alone makes -- a constant state, a shader -- carry a
+     * version that never changes, a word of the table's own, and their value
+     * in words after the entries; a state the table cannot say that only
+     * BeginPass sets leaves the table to commits (`built.begins` false).
+     *
+     * @param {EffectState} effect @param {Pass} pass @param {{ begins: boolean }} built
+     * @returns {number | string}
+     */
+    const buildCommit = (effect, pass, built)=>{
+        let why = '';
+        /** @type {number[][]} */
+        const entries = [];
+        /** The words BeginPass's own entries set, after the entries; their data is an index. */
+        /** @type {number[]} */
+        const fixed = [];
+        /** The entries whose version and data are in `fixed`. @type {Set<number[]>} */
+        const fixedEntries = new Set();
+        /** @param {number[]} entry @param {number} value */
+        const fixedEntry = (entry, value)=>{
+            entry[5] = fixed.length;
+            fixed.push(value >>> 0);
+            entries.push(entry);
+            fixedEntries.add(entry);
+        };
+        /** @type {number[]} */
+        const triggers = [];
+        /** @param {string} name */
+        const slotOf = name=>SETTERS[name][effect.manager ? 1 : 0];
+        /**
+         * A state's entry, set on `unit` for a sampler's; false where the table cannot say it.
+         *
+         * @param {StateModel} state @param {number} unit
+         */
+        const stateEntry = (state, unit)=>{
+            const source = state.source;
+            const index = state.index < 0 ? 0 : state.index;
+            /** @type {[number, number, number, number] | null} slot, first, second, arity */
+            const call = state.kind === 'render' ? [slotOf('SetRenderState'), state.op, 0, 2]
+                : state.kind === 'stage' ? [slotOf('SetTextureStageState'), index, state.op, 3]
+                    : state.kind === 'sampler' ? [slotOf('SetSamplerState'), unit < 0 ? index
+                        : unit, state.op, 3]
+                        : state.kind === 'texture' ? [slotOf('SetTexture'), unit < 0 ? index
+                            : unit, 0, 2]
+                            : state.kind === 'fvf' ? [slotOf('SetFVF'), 0, 0, 1]
+                                : state.kind === 'npatch' ? [slotOf('SetNPatchMode'), 0, 0, 1]
+                                    : null;
+            if (source.kind === 'const')
+            {
+                // Never changed, so never a commit's: BeginPass sets it as it is.
+                if (!call)
+                {
+                    built.begins = false;
+                    return true;
+                }
+                fixedEntry([COMMIT_KIND.STATE, 0, call[0], call[1], call[2], 0, 0, call[3]],
+                    source.words[0] ?? 0);
+                return true;
+            }
+            if (!call)
+            {
+                why = `${state.name}, a ${state.kind} state from a parameter`;
+                return false;
+            }
+            const word = state.value === 'dword' || state.value === 'color';
+            if (source.kind === 'param')
+            {
+                const p = effect.byName.get(source.path);
+                if (!p)
+                {
+                    return true;
+                }
+                const plain = state.kind === 'texture' ? p.model.cls === PC.OBJECT
+                    : word && p.model.cls !== PC.OBJECT && p.model.bytes >= 4
+                        && (p.model.type === PT.INT || p.model.type === PT.BOOL);
+                if (!plain)
+                {
+                    why = `${state.name} from ${source.path}, not a word it takes as it is`;
+                    return false;
+                }
+                entries.push([COMMIT_KIND.STATE, p.store.at, call[0], call[1], call[2], dataAt(p),
+                    0, call[3]]);
+                return true;
+            }
+            if (source.kind !== 'expression' || !word || state.kind === 'texture')
+            {
+                why = `${state.name} from a ${source.kind}`;
+                return false;
+            }
+            const copies = source.program.copies;
+            const input = source.program.inputs.length === 1 ? source.program.inputs[0] : null;
+            const p = input ? effect.byName.get(input.name) : undefined;
+            if (!copies || !input || !p || input.set !== 2 || copies.offset !== input.index * 4
+                || source.count !== 1 || (source.type !== PT.INT && source.type !== PT.BOOL
+                    // A float result is truncated into a dword as an int is; into a
+                    // colour the host keeps its bits.
+                    && (source.type !== PT.FLOAT || state.value !== 'dword'))
+                || p.model.cls !== PC.SCALAR || p.model.elements !== 0 || p.model.bytes !== 4
+                || (p.model.type !== PT.INT && p.model.type !== PT.BOOL
+                    && p.model.type !== PT.FLOAT))
+            {
+                why = `${state.name} from an expression that is no copy of a scalar`;
+                return false;
+            }
+            entries.push([p.model.type === PT.FLOAT ? COMMIT_KIND.COPIED_FLOAT
+                : COMMIT_KIND.COPIED, p.store.at, call[0], call[1], call[2], dataAt(p),
+            (source.type === PT.BOOL ? 1 : 0) | (p.model.type === PT.BOOL ? 2 : 0), call[3]]);
+            return true;
+        };
+        /** @param {Param} p @param {number} unit */
+        const samplerEntries = (p, unit)=>(p.model.samplers[0] ?? []).every(state=>
+            stateEntry(state, unit));
+
+        for (const state of pass.model.states)
+        {
+            if (state.kind === 'vs' || state.kind === 'ps')
+            {
+                if (state.source.kind !== 'shader')
+                {
+                    return `${state.name}: a shader a parameter names`;
+                }
+                const shader = shaderFor(effect, state);
+                fixedEntry([COMMIT_KIND.STATE, 0, slotOf(state.kind === 'vs' ? 'SetVertexShader'
+                    : 'SetPixelShader'), 0, 0, 0, 0, 1], shader?.pointer ?? 0);
+                if (!shader?.pointer)
+                {
+                    continue;
+                }
+                for (const { constant, param } of shader.bindings)
+                {
+                    if (effect.skip.has(param.model.name))
+                    {
+                        continue;
+                    }
+                    if (constant.set === 3)
+                    {
+                        // The sampler set whole sets all its states: the host's.
+                        triggers.push(param.store.at);
+                        for (let k = 0; k < Math.max(1, constant.count); k++)
+                        {
+                            const element = param.model.elements ? param.members[k] : param;
+                            if (element && !samplerEntries(element, constant.index + k
+                                + (shader.pixel ? 0 : VERTEX_SAMPLER_BASE)))
+                            {
+                                return why;
+                            }
+                        }
+                        continue;
+                    }
+                    if (constant.cls === PC.STRUCT || constant.members.length > 0)
+                    {
+                        return `${constant.name}: a structure's constants`;
+                    }
+                    if (!numeric(param))
+                    {
+                        continue;
+                    }
+                    const { count, units, map } = layoutOf(constant, param.model);
+                    if (count === 0)
+                    {
+                        continue;
+                    }
+                    const type = param.model.type;
+                    // How the host converts each unit into the register's type.
+                    const kind = (constant.set === 2 && type === PT.FLOAT)
+                        || (constant.set === 1 && type === PT.INT) ? COMMIT_KIND.WORDS
+                        : constant.set !== 2 && (type === PT.INT || type === PT.BOOL)
+                            ? COMMIT_KIND.BOOLS
+                            : constant.set === 0 && type === PT.FLOAT ? COMMIT_KIND.FLOAT_BOOLS
+                                : constant.set === 2 && type === PT.INT ? COMMIT_KIND.INT_FLOATS
+                                    : constant.set === 2 && type === PT.BOOL
+                                        ? COMMIT_KIND.BOOL_FLOATS
+                                        : constant.set === 1 && type === PT.FLOAT
+                                            ? COMMIT_KIND.FLOAT_INTS : 0;
+                    if (kind === 0)
+                    {
+                        return `${constant.name}: register set ${constant.set} of type ${type}`;
+                    }
+                    const layout = heap().allocate(8 + 4 * units);
+                    if (layout === 0)
+                    {
+                        return 'no room';
+                    }
+                    effect.owned.push(layout);
+                    host.writeMemory(layout, u32Bytes([units, dataAt(param), ...map]));
+                    entries.push([kind, param.store.at,
+                        slotOf(CONSTANT_SETTERS[constant.set][shader.pixel ? 1 : 0]),
+                        constant.index, count, layout, 0, 0]);
+                }
+                continue;
+            }
+            if (state.kind === 'setsampler')
+            {
+                const p = state.source.kind === 'param' ? effect.byName.get(state.source.path)
+                    : undefined;
+                if (state.source.kind !== 'param')
+                {
+                    return `${state.name}: a sampler not a parameter`;
+                }
+                if (p && isSampler(p.model.type)
+                    && !samplerEntries(p, state.index < 0 ? 0 : state.index))
+                {
+                    return why;
+                }
+                continue;
+            }
+            if (!stateEntry(state, -1))
+            {
+                return why;
+            }
+        }
+        effect.commitScratch ||= heap().allocate(SCRATCH_BYTES);
+        const tail = COMMIT.HEADER + 4 * triggers.length + COMMIT.ENTRY * entries.length;
+        const table = heap().allocate(tail + 4 + 4 * fixed.length);
+        if (table === 0 || effect.commitScratch === 0)
+        {
+            return 'no room';
+        }
+        effect.owned.push(table);
+        // The never-changing version is the word at `tail`, zero; the values follow it.
+        for (const entry of fixedEntries)
+        {
+            entry[1] = table + tail;
+            entry[5] = table + tail + 4 + 4 * entry[5];
+        }
+        host.writeMemory(table, u32Bytes([effect.manager || effect.device, pass.appliedAt,
+            entries.length,
+            effect.commitScratch, triggers.length, ...triggers, ...entries.flat(), 0, ...fixed]));
+        return table;
     };
 
     /** @param {EffectState} effect @param {Technique} t */
@@ -1839,6 +2521,13 @@ export function createEffects(host, helpers, options = {}){
         const root = param.top ?? param;
         /** @param {StateModel[]} states @returns {boolean} */
         const inStates = states=>states.some(state=>{
+            if (state.source.kind === 'expression' && state.source.program.inputs.some(c=>{
+                const named = effect.byName.get(c.name);
+                return named && (named.top ?? named) === root;
+            }))
+            {
+                return true;
+            }
             if (state.source.kind === 'param')
             {
                 const named = effect.byName.get(state.source.path);
@@ -1886,12 +2575,13 @@ export function createEffects(host, helpers, options = {}){
             {
                 return D3DERR_INVALIDCALL;
             }
-            effect.current = t;
+            setCurrent(effect, t);
+            passesIn(effect, t);
             return D3D_OK;
         } },
         /** D3DXHANDLE GetCurrentTechnique() */
         { name: 'GetCurrentTechnique', argBytes: 4, invoke: object=>
-            stateOf(object).current?.handle ?? 0 },
+            currentOf(stateOf(object))?.handle ?? 0 },
         /** HRESULT ValidateTechnique(D3DXHANDLE) */
         { name: 'ValidateTechnique', argBytes: 8, invoke: (object, [h])=>{
             const effect = stateOf(object);
@@ -1932,7 +2622,7 @@ export function createEffects(host, helpers, options = {}){
         /** HRESULT Begin(UINT *pPasses, DWORD Flags) */
         { name: 'Begin', argBytes: 12, invoke: (object, [passesOut, flags])=>{
             const effect = stateOf(object);
-            const t = effect.current;
+            const t = currentOf(effect);
             if (!t)
             {
                 return D3DERR_INVALIDCALL;
@@ -1941,8 +2631,8 @@ export function createEffects(host, helpers, options = {}){
             {
                 putU32(passesOut, t.passes.length);
             }
-            effect.started = true;
-            effect.beginFlags = flags >>> 0;
+            setStarted(effect, true, flags);
+            passesIn(effect, t);
             if (flags & FX.DONOTSAVESTATE)
             {
                 return D3D_OK;
@@ -1953,8 +2643,8 @@ export function createEffects(host, helpers, options = {}){
         /** HRESULT BeginPass(UINT Pass) */
         { name: 'BeginPass', argBytes: 8, invoke: (object, [index])=>{
             const effect = stateOf(object);
-            const t = effect.current;
-            if (!effect.started || !t || (index >>> 0) >= t.passes.length || effect.active)
+            const t = currentOf(effect);
+            if (!startedOf(effect) || !t || (index >>> 0) >= t.passes.length || activeOf(effect))
             {
                 return D3DERR_INVALIDCALL;
             }
@@ -1963,21 +2653,25 @@ export function createEffects(host, helpers, options = {}){
             effect.lightsUpdated = 0;
             effect.material = new Uint8Array(68);
             effect.materialUpdated = false;
-            effect.active = pass;
+            setActive(effect, pass);
             const thread = host.currentThread?.();
             return answerWith(function*(){
                 const answer = yield* applyPass(effect, pass, true, thread);
-                if (answer !== D3D_OK && effect.active === pass)
+                if (answer !== D3D_OK && activeOf(effect) === pass)
                 {
-                    effect.active = null;
+                    setActive(effect, null);
                 }
+                // The commits to come walk its table in the guest, and the
+                // pass's next BeginPass too.
+                commitIn(effect, activeOf(effect) === pass ? compileCommit(effect, pass) : 0);
+                passesIn(effect, t);
                 return answer;
             }());
         } },
         /** HRESULT CommitChanges() */
         { name: 'CommitChanges', argBytes: 4, invoke: object=>{
             const effect = stateOf(object);
-            const pass = effect.active;
+            const pass = activeOf(effect);
             if (!pass)
             {
                 return D3D_OK;
@@ -1988,25 +2682,29 @@ export function createEffects(host, helpers, options = {}){
         /** HRESULT EndPass() */
         { name: 'EndPass', argBytes: 4, invoke: object=>{
             const effect = stateOf(object);
-            if (!effect.active)
+            if (!activeOf(effect))
             {
                 return D3DERR_INVALIDCALL;
             }
-            effect.active = null;
+            setActive(effect, null);
+            commitIn(effect, 0);
             return D3D_OK;
         } },
         /** HRESULT End() */
         { name: 'End', argBytes: 4, invoke: object=>{
             const effect = stateOf(object);
-            if (!effect.started)
+            if (!startedOf(effect))
             {
                 return D3D_OK;
             }
-            effect.started = false;
-            const t = effect.current;
-            const block = t?.saved.get(effect.beginFlags & (FX.DONOTSAVESHADERSTATE
+            const flags = beginFlagsOf(effect);
+            setStarted(effect, false, flags);
+            commitIn(effect, 0);
+            passesIn(effect, null);
+            const t = currentOf(effect);
+            const block = t?.saved.get(flags & (FX.DONOTSAVESHADERSTATE
                 | FX.DONOTSAVESAMPLERSTATE));
-            if ((effect.beginFlags & FX.DONOTSAVESTATE) || !block)
+            if ((flags & FX.DONOTSAVESTATE) || !block)
             {
                 return D3D_OK;
             }
@@ -2045,6 +2743,13 @@ export function createEffects(host, helpers, options = {}){
             const effect = stateOf(object);
             const old = effect.manager;
             effect.manager = manager >>> 0;
+            // A pass begun calls the new manager's methods from its next commit.
+            const active = activeOf(effect);
+            commitIn(effect, active ? compileCommit(effect, active) : 0);
+            for (const t of effect.techniques)
+            {
+                passesIn(effect, t);
+            }
             const thread = host.currentThread?.();
             return Promise.resolve()
                 .then(()=>(manager ? method(thread, manager >>> 0, 1, []) : 0))
@@ -2069,6 +2774,10 @@ export function createEffects(host, helpers, options = {}){
                 return D3DERR_INVALIDCALL;
             }
             effect.recording = [];
+            if (effect.block !== 0)
+            {
+                putU32(effect.block + EFFECT_BLOCK.RECORDING, 1);
+            }
             return D3D_OK;
         } },
         /** D3DXHANDLE EndParameterBlock() */
@@ -2080,6 +2789,10 @@ export function createEffects(host, helpers, options = {}){
                 return 0;
             }
             effect.recording = null;
+            if (effect.block !== 0)
+            {
+                putU32(effect.block + EFFECT_BLOCK.RECORDING, 0);
+            }
             const handle = heap().allocate(4);
             if (handle === 0)
             {
@@ -2176,6 +2889,10 @@ export function createEffects(host, helpers, options = {}){
             if (block)
             {
                 t.saved.set(keep, block);
+                if (t.record)
+                {
+                    putU32(t.record + TECHNIQUE.SAVED + keep * 2, block);
+                }
             }
         }
         if (block)
@@ -2248,6 +2965,10 @@ export function createEffects(host, helpers, options = {}){
                 await method(thread, block, UNKNOWN_RELEASE, []);
             }
             t.saved.clear();
+            if (t.record)
+            {
+                putU32s(t.record + TECHNIQUE.SAVED, [0, 0, 0, 0]);
+            }
         }
         return D3D_OK;
     };
@@ -2256,8 +2977,51 @@ export function createEffects(host, helpers, options = {}){
     const effectInterface = {
         id: version <= 25 ? IID_ID3DXEFFECT_25 : version === 26 ? IID_ID3DXEFFECT_26
             : IID_ID3DXEFFECT,
-        methods: [...baseMethods(), ...effectMethods],
+        methods: inGuest([...baseMethods(), ...effectMethods]),
     };
+
+    /**
+     * The setters with code in the guest given it: each slot holds the
+     * compiled setter, whose cases it does not take jump to the method's own
+     * trap, the host's setter. Placed once per slot.
+     *
+     * @param {ComMethod[]} methods @returns {ComMethod[]}
+     */
+    function inGuest(methods){
+        return methods.map(m=>{
+            const compiled = /** @type {Record<string, any>} */ ({ ...SETTERS_IN_GUEST,
+                ...COMMIT_IN_GUEST })[m.name];
+            if (!compiled || !host.heap)
+            {
+                return m;
+            }
+            /** @type {Map<number, number>} */
+            const placed = new Map();
+            return /** @type {ComMethod} */ (/** @type {unknown} */ ({ ...m,
+                guest: (/** @type {{ trap: number }} */ { trap })=>{
+                    const known = placed.get(trap);
+                    if (known !== undefined)
+                    {
+                        return known;
+                    }
+                    const code = /** @type {Uint8Array} */ (compiled.code);
+                    const at = (heap().allocateCode ?? heap().allocate)(code.length);
+                    if (at === 0)
+                    {
+                        return trap;
+                    }
+                    const bytes = code.slice();
+                    const view = new DataView(bytes.buffer);
+                    // `return host()` jumps to the trap: an address after `mov eax`,
+                    // else a displacement from the end of the jump.
+                    view.setUint32(compiled.host, bytes[compiled.host - 1] === 0xb8 ? trap >>> 0
+                        : (trap - (at + compiled.host + 4)) >>> 0, true);
+                    host.writeMemory(at, bytes);
+                    placed.set(trap, at);
+                    return at;
+                } }));
+        });
+    }
 
     // ---- the effect compiler ----------------------------------------------------------
 
@@ -2423,9 +3187,9 @@ export function createEffects(host, helpers, options = {}){
         const effect = { kind: how.kind, model, origin, device: how.device, pool: how.pool,
             poolPointer: how.poolPointer, flags: how.flags, params: [], byName: new Map(),
             techniques: [], current: null, shaders: [], shaderByPointer: new Map(), functions: [],
-            started: false, beginFlags: 0, active: null, manager: 0, lights: [],
+            started: false, beginFlags: 0, active: null, passById: [], manager: 0, lights: [],
             lightsUpdated: 0, material: new Uint8Array(68), materialUpdated: false,
-            recording: null, blocks: new Map(), owned: [], skip: how.skip, version };
+            recording: null, blocks: new Map(), owned: [], skip: how.skip, version, block: 0 };
         if (!creatorAt)
         {
             [creatorAt] = strings([], [CREATOR]);
@@ -2452,6 +3216,14 @@ export function createEffects(host, helpers, options = {}){
             {
                 bindShader(effect, shader);
             }
+            effect.block = heap().allocate(EFFECT_BLOCK.SIZE);
+            if (effect.block !== 0)
+            {
+                effect.owned.push(effect.block);
+                tick();
+                putU32s(effect.block, [0, arenaAt, arenaAt === 0 ? 0 : ARENA_HANDLES * HANDLE.SIZE,
+                    clockAt, 0, 0, 0, placeWalk(), 0, 0, 0, 0]);
+            }
             effect.techniques = model.techniques.map(t=>{
                 const [handle] = strings(effect.owned, [t.name ?? '']);
                 /** @type {Technique} */
@@ -2460,16 +3232,43 @@ export function createEffects(host, helpers, options = {}){
                     passes: t.passes.map(pass=>{
                         const [passHandle] = strings(effect.owned, [pass.name ?? '']);
                         handles.set(passHandle, { kind: 'pass' });
-                        return { model: pass, handle: passHandle,
+                        /** @type {Pass} */
+                        const made = { model: pass, handle: passHandle,
                             nameAt: pass.name === null ? 0 : passHandle,
                             annotations: pass.annotations.map(a=>annotationOf(effect, a, null)),
-                            applied: 0 };
+                            appliedAt: appliedWord(effect), id: effect.passById.length + 1 };
+                        effect.passById.push(made);
+                        return made;
                     }),
                     saved: new Map() };
                 handles.set(handle, { kind: 'technique' });
                 return technique;
             });
-            effect.current = effect.techniques[0] ?? null;
+            if (effect.block !== 0)
+            {
+                // Each technique's record, and the list SetTechnique and
+                // GetTechnique in the guest look a handle up in.
+                const list = heap().allocate(4 + 8 * effect.techniques.length);
+                if (list !== 0)
+                {
+                    effect.owned.push(list);
+                    for (const t of effect.techniques)
+                    {
+                        t.record = heap().allocate(TECHNIQUE.SIZE);
+                        if (t.record === 0)
+                        {
+                            throw new RangeError('no room for a technique');
+                        }
+                        effect.owned.push(t.record);
+                        putU32s(t.record, [0, 0, 0, 0, 0]);
+                        passesIn(effect, t);
+                    }
+                    putU32s(list, [effect.techniques.length,
+                        ...effect.techniques.flatMap(t=>[t.handle, t.record ?? 0])]);
+                    putU32(effect.block + EFFECT_BLOCK.TECHNIQUES, list);
+                }
+            }
+            setCurrent(effect, effect.techniques[0] ?? null);
             effect.functions = how.kind === 'compiler' ? model.functions.map(name=>{
                 const [handle] = strings(effect.owned, [name]);
                 handles.set(handle, { kind: 'function' });
@@ -2512,7 +3311,7 @@ export function createEffects(host, helpers, options = {}){
             if (entry)
             {
                 entry.count++;
-                top.store.strings.forEach(at=>heap().free(at));
+                freeStore(top.store);
                 retarget(top, entry.store);
             }
             else
@@ -2525,6 +3324,7 @@ export function createEffects(host, helpers, options = {}){
     /** @param {Param} p @param {Store} store */
     const retarget = (p, store)=>{
         p.store = store;
+        recordHandle(p);
         p.members.forEach(m=>retarget(m, store));
     };
 
@@ -2612,13 +3412,18 @@ export function createEffects(host, helpers, options = {}){
         /** @param {Param} p */
         const forget = p=>{
             handles.delete(p.handle);
+            if (inArena(p.handle))
+            {
+                putU32(p.handle + HANDLE.TYPE, RETIRED);
+                retired.push(p.handle);
+            }
             p.members.forEach(forget);
             forgetAnnotations(p.annotations);
         };
         /** Annotations have stores of their own. @param {Param[]} list */
         const forgetAnnotations = list=>list.forEach(annotation=>{
             forget(annotation);
-            annotation.store.strings.forEach(at=>heap().free(at));
+            freeStore(annotation.store);
         });
         effect.params.forEach(forget);
         for (const t of effect.techniques)
@@ -2647,7 +3452,7 @@ export function createEffects(host, helpers, options = {}){
                 }
                 shared.splice(shared.indexOf(entry), 1);
             }
-            top.store.strings.forEach(at=>heap().free(at));
+            freeStore(top.store);
         }
         effect.pool?.release();
         effect.pool = null;
@@ -2664,6 +3469,8 @@ export function createEffects(host, helpers, options = {}){
         const vtables = /** @type {NonNullable<EffectHost['vtables']>} */ (host.vtables);
         const object = createComObject(effectInterface.id, { interfaces: [effectInterface],
             state: effect, destroy: ()=>destroy(effect) });
+        // The interface's state word, where the setters in the guest find the effect.
+        /** @type {any} */ (object).guestState = ()=>effect.block;
         const pointer = vtables.publish(object, effectInterface.id) >>> 0;
         if (pointer === 0)
         {
@@ -2690,8 +3497,7 @@ export function createEffects(host, helpers, options = {}){
             {
                 return;
             }
-            new Uint8Array(target.store.view.buffer, target.offset, p.model.bytes).set(
-                new Uint8Array(p.store.view.buffer, p.offset, p.model.bytes));
+            host.writeMemory(dataAt(target), host.readMemory(dataAt(p), p.model.bytes).slice());
             for (const [at, copyAt] of p.store.strings)
             {
                 if (at >= p.offset && at < p.offset + p.model.bytes)
@@ -2700,8 +3506,8 @@ export function createEffects(host, helpers, options = {}){
                 }
             }
         });
-        copy.current = copy.techniques[effect.techniques.indexOf(
-            /** @type {Technique} */ (effect.current))] ?? copy.techniques[0] ?? null;
+        setCurrent(copy, copy.techniques[effect.techniques.indexOf(
+            /** @type {Technique} */ (currentOf(effect)))] ?? copy.techniques[0] ?? null);
         return publishEffect(copy, out);
     };
 
@@ -2813,18 +3619,7 @@ export function createEffects(host, helpers, options = {}){
         {
             return D3D_OK;
         }
-        const given = sourceOf(a.bytes);
-        if (!given)
-        {
-            host.divergence?.(api, 'answered E_NOTIMPL: a compiled fx_2_0 effect is not read, '
-                + 'only HLSL source');
-            return E_NOTIMPL;
-        }
         const thread = host.currentThread?.();
-        const defines = given.defines ?? helpers.macrosAt(a.defines);
-        const include = given.files ? replay(given.files) : (a.include >>> 0) === 0 ? undefined
-            : helpers.includer(a.include >>> 0);
-        const flags = (given.flags ?? 0) | (a.flags >>> 0);
         const pool = (a.pool >>> 0) === 0 ? null : pools.get(a.pool >>> 0) ?? null;
         if ((a.pool >>> 0) !== 0 && !pool)
         {
@@ -2832,6 +3627,31 @@ export function createEffects(host, helpers, options = {}){
         }
         const skip = new Set((a.skip >>> 0) === 0 ? [] : cString(a.skip).split(/[;\s]+/)
             .filter(name=>name !== ''));
+        const given = sourceOf(a.bytes);
+        if (!given)
+        {
+            const { model, messages } = readCompiledEffect(a.bytes);
+            if ((a.errors >>> 0) !== 0 && messages !== '')
+            {
+                helpers.giveBuffer(a.errors, encode(messages));
+            }
+            if (!model)
+            {
+                host.divergence?.(api, `refused: ${messages}`);
+                return D3DXERR_INVALIDDATA;
+            }
+            if (messages !== '')
+            {
+                host.divergence?.(api, `left out of a compiled effect: ${[...new Set(messages
+                    .split('\n').map(line=>line.replace(/^warning: \S* /, '')))].join('; ')}`);
+            }
+            return makeEffect(api, a, model, { source: '', defines: [], files: [],
+                flags: a.flags & 0xffff }, pool, skip, thread);
+        }
+        const defines = given.defines ?? helpers.macrosAt(a.defines);
+        const include = given.files ? replay(given.files) : (a.include >>> 0) === 0 ? undefined
+            : helpers.includer(a.include >>> 0);
+        const flags = (given.flags ?? 0) | (a.flags >>> 0);
         return buildOnce(given.source, defines, include, flags & 0xffff, true)
             .then(async result=>{
                 host.shaderCompiled?.({ api, profile: 'fx', entry: 'effect', defines, flags,
@@ -2854,32 +3674,44 @@ export function createEffects(host, helpers, options = {}){
                     host.divergence?.(api, `states left out: ${result.messages.split('\n')
                         .filter(line=>/ X470[89]/.test(line)).join('; ')}`);
                 }
-                pool?.addRef();
-                let effect;
-                try
-                {
-                    effect = await instantiate(result.model, { source: given.source, defines,
-                        files: result.files, flags: flags & 0xffff }, { kind: 'effect',
-                        device: a.device >>> 0, pool, poolPointer: a.pool >>> 0,
-                        flags: flags >>> 0, skip, thread });
-                }
-                catch (e){
-                    if (e instanceof RangeError)
-                    {
-                        return E_OUTOFMEMORY;
-                    }
-                    throw e;
-                }
-                for (const t of effect.techniques)
-                {
-                    if (!valid(effect, t))
-                    {
-                        host.divergence?.(api, `technique '${t.model.name}' is not valid here: `
-                            + 'a shader of it did not compile or was refused');
-                    }
-                }
-                return publishEffect(effect, a.out);
+                return makeEffect(api, a, result.model, { source: given.source, defines,
+                    files: result.files, flags: flags & 0xffff }, pool, skip, thread);
             });
+    };
+
+    /**
+     * The objects of an effect over its model, handed to the program.
+     *
+     * @param {string} api @param {{ device: number, pool: number, flags: number, out: number }} a
+     * @param {EffectModel} model @param {EffectState['origin']} origin
+     * @param {any} pool @param {Set<string>} skip @param {any} thread
+     * @returns {Promise<number>}
+     */
+    const makeEffect = async(api, a, model, origin, pool, skip, thread)=>{
+        pool?.addRef();
+        let effect;
+        try
+        {
+            effect = await instantiate(model, origin, { kind: 'effect', device: a.device >>> 0,
+                pool, poolPointer: a.pool >>> 0, flags: (origin.flags | a.flags) >>> 0, skip,
+                thread });
+        }
+        catch (e){
+            if (e instanceof RangeError)
+            {
+                return E_OUTOFMEMORY;
+            }
+            throw e;
+        }
+        for (const t of effect.techniques)
+        {
+            if (!valid(effect, t))
+            {
+                host.divergence?.(api, `technique '${t.model.name}' is not valid here: `
+                    + 'a shader of it did not compile or was refused');
+            }
+        }
+        return publishEffect(effect, a.out);
     };
 
     /**

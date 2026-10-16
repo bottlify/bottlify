@@ -21,7 +21,7 @@
 import { formatToString, guestAccess, varargsSlots } from './format.js';
 import { createStringFunctions } from './strings.js';
 import { createSecureFunctions } from './secure.js';
-import { createErrorFunctions } from './errors.js';
+import { createErrorFunctions, messageOf } from './errors.js';
 import { createConversionFunctions } from './convert.js';
 import { createScanFunctions, VARIADIC_SLOTS } from './scan.js';
 import { createHeapFunctions } from './heap.js';
@@ -131,6 +131,7 @@ const RAND_MAX = 0x7fff;
  *           runtime's own copy of it follows. Absent, the default one.
  * @property {() => string} [commandLine]
  *           What the process was started with, as GetCommandLineA reports it.
+ * @property {number} [processId]  What `_getpid` answers: GetCurrentProcessId's number.
  * @property {(code: number) => any} [exitProcess]
  * @property {(code: number) => void} [exit]
  *           Records an exit for a call that has already left the bridge and
@@ -515,6 +516,9 @@ export function createMsvcrtFunctions(host){
             { ...host.fpu ? { fpu: host.fpu } : {} }),
         _controlfp: guestEntry(inGuestFloat._controlfp, FLOAT_CODE._controlfp,
             { ...host.fpu ? { fpu: host.fpu } : {} }),
+        _controlfp_s: guestEntry(inGuestFloat._controlfp_s, FLOAT_CODE._controlfp_s,
+            { readMemory: host.readMemory, writeMemory: host.writeMemory,
+                ...host.fpu ? { fpu: host.fpu } : {} }),
         _statusfp: guestEntry(inGuestFloat._statusfp, FLOAT_CODE._statusfp,
             { ...host.fpu ? { fpu: host.fpu } : {} }),
         _clearfp: guestEntry(inGuestFloat._clearfp, FLOAT_CODE._clearfp,
@@ -618,6 +622,19 @@ export function createMsvcrtFunctions(host){
             /** @param {number[]} args */
             handler: ([buffer, count, format, list])=>
                 countedPrint(buffer, count, narrowText(format, varargsAt(list))),
+        },
+
+        /**
+         * int _vscprintf(const char *format, va_list args)
+         *
+         * How many characters the text would take, its terminator left out:
+         * what a program sizes a buffer by before it formats into one.
+         */
+        _vscprintf: {
+            convention: 'cdecl',
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([format, list])=>narrowText(format, varargsAt(list)).length,
         },
 
         /**
@@ -788,6 +805,7 @@ export function createMsvcrtFunctions(host){
             errno,
             descriptors: descriptors ?? undefined,
             varargs: varargsAt,
+            setRegisters: host.setRegisters,
         })
         : null;
 
@@ -997,6 +1015,70 @@ export function createMsvcrtFunctions(host){
             }, descriptors)
             : {}),
         ...(stdio ?? {}),
+
+        /**
+         * void perror(const char *message)
+         *
+         * The message, a colon and a space when there is one, then what
+         * errno says, to stderr.
+         */
+        perror: {
+            convention: 'cdecl',
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([message])=>{
+                const lead = (message >>> 0) === 0 ? '' : host.readCString(message >>> 0, 4096);
+                const line = `${lead ? `${lead}: ` : ''}${messageOf(globals.get(errnoName()))}\n`;
+                const stderr = descriptors?.get(2);
+                if (stderr)
+                {
+                    descriptors?.put(stderr, encodeAnsi(line));
+                }
+                return 0;
+            },
+        },
+
+        /**
+         * int _getch(void)
+         *
+         * A key from the console, unechoed. A windowed process has no console
+         * to read one from, and the runtime answers EOF.
+         */
+        _getch: { convention: 'cdecl', argBytes: 0, handler: ()=>-1 },
+
+        /** int _getpid(void): the process's identifier, as GetCurrentProcessId answers it. */
+        _getpid: { convention: 'cdecl', argBytes: 0, handler: ()=>host.processId ?? 0 },
+
+        ...(host.setRegisters
+            ? {
+                /**
+                 * __int64 _atoi64(const char *text)
+                 *
+                 * Whitespace, a sign and decimal digits; a value past 64 bits
+                 * is clamped as `_strtoi64` clamps it.
+                 */
+                _atoi64: {
+                    convention: 'cdecl',
+                    argBytes: 4,
+                    /** @param {number[]} args */
+                    handler: ([text])=>{
+                        const match = /^[ \t\n\v\f\r]*([+-]?)(\d*)/
+                            .exec(host.readCString(text >>> 0, 4096));
+                        const digits = match?.[2] ?? '';
+                        let value = digits ? BigInt(digits) : 0n;
+                        if (match?.[1] === '-')
+                        {
+                            value = -value;
+                        }
+                        const clamped = value > 2n ** 63n - 1n ? 2n ** 63n - 1n
+                            : value < -(2n ** 63n) ? -(2n ** 63n) : value;
+                        const bits = BigInt.asUintN(64, clamped);
+                        host.setRegisters?.({ edx: Number(bits >> 32n) });
+                        return Number(bits & 0xffffffffn);
+                    },
+                },
+            }
+            : {}),
         ...(host.threads ? createThreadFunctions(host.threads) : {}),
         ...(host.fpu
             ? createMathFunctions({

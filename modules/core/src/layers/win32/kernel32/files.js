@@ -1490,7 +1490,14 @@ export function createFileFunctions(host){
         {
             return fail(ERROR_PATH_NOT_FOUND, INVALID_HANDLE_VALUE);
         }
-        const entries = files.list(directory, pattern) ?? [];
+        // Every folder but a drive's root lists itself and its parent first,
+        // as "." and "..", for any pattern of wildcards and dots alone; a
+        // program that skips the first two entries unseen relies on it.
+        // ponytail: wildcards-and-dots stands in for the volume's own match,
+        // which "." and ".." pass exactly then.
+        const dots = /^[A-Za-z]:\\?$/.test(directory) || !/^[*?.]+$/.test(pattern) ? []
+            : ['.', '..'].map(dot=>({ ...holder, name: dot, isDirectory: true, size: 0 }));
+        const entries = [...dots, ...files.list(directory, pattern) ?? []];
         if (entries.length === 0)
         {
             return fail(ERROR_FILE_NOT_FOUND, INVALID_HANDLE_VALUE);

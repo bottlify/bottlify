@@ -4,7 +4,7 @@
  * See LICENSE for details
  */
 
-import { DEVICE, TEXTURE, createDeviceCalls } from './device.js';
+import { DEVICE, TEXTURE, VOLUME_TEXTURE, createDeviceCalls } from './device.js';
 import { D3DX_DEFAULT } from './texture.js';
 import { FMT, decodeTexels, encodeTexels, halve, isCompressed, isSupported, layoutOf, resample }
     from './pixels.js';
@@ -46,6 +46,10 @@ const E_OUTOFMEMORY = 0x8007000e;
 const D3DPTEXTURECAPS_POW2 = 0x2;
 const D3DPTEXTURECAPS_SQUAREONLY = 0x20;
 const D3DPTEXTURECAPS_NONPOW2CONDITIONAL = 0x100;
+const D3DPTEXTURECAPS_CUBEMAP_POW2 = 0x20000;
+const D3DPTEXTURECAPS_VOLUMEMAP_POW2 = 0x40000;
+/** D3DVOLUME_DESC's size, and its Width, Height and Depth. */
+const D3DVOLUME_DESC_BYTES = 28;
 const D3DUSAGE_AUTOGENMIPMAP = 0x400;
 const D3DSURFACE_DESC_BYTES = 32;
 const E_NOTIMPL = 0x80004001;
@@ -123,6 +127,7 @@ const CAPS_BYTES = 304;
 const CAPS_TEXTURE = 60;
 const CAPS_MAX_WIDTH = 88;
 const CAPS_MAX_HEIGHT = 92;
+const CAPS_MAX_VOLUME_EXTENT = 96;
 
 /**
  * @typedef {Object} TextureToolsHost
@@ -206,7 +211,8 @@ export function createTextureTools(host){
      * What a device's capabilities say about textures.
      *
      * @param {number} device @param {any} thread
-     * @returns {Promise<{ textureCaps: number, maxWidth: number, maxHeight: number } | number>}
+     * @returns {Promise<{ textureCaps: number, maxWidth: number, maxHeight: number,
+     *     maxVolume: number } | number>}
      */
     const capsOf = async(device, thread)=>{
         const heap = /** @type {NonNullable<TextureToolsHost['heap']>} */ (host.heap);
@@ -224,7 +230,7 @@ export function createTextureTools(host){
                 return answer;
             }
             return { textureCaps: u32(at + CAPS_TEXTURE), maxWidth: u32(at + CAPS_MAX_WIDTH),
-                maxHeight: u32(at + CAPS_MAX_HEIGHT) };
+                maxHeight: u32(at + CAPS_MAX_HEIGHT), maxVolume: u32(at + CAPS_MAX_VOLUME_EXTENT) };
         }
         finally
         {
@@ -243,6 +249,147 @@ export function createTextureTools(host){
         await null;
         const caps = await capsOf(device, thread);
         return typeof caps === 'number' ? caps : textureRequirements(asked, caps);
+    };
+
+    /**
+     * A cube's corrections: a square of the size asked, a power of two
+     * where the device's cube maps need one.
+     *
+     * @param {number} device @param {number} size @param {number} levels @param {number} usage
+     * @param {number} format @param {any} thread
+     * @returns {Promise<Requirements | number>}
+     */
+    const cubeRequirements = async(device, size, levels, usage, format, thread)=>{
+        await null;
+        const caps = await capsOf(device, thread);
+        if (typeof caps === 'number')
+        {
+            return caps;
+        }
+        const pow2 = (caps.textureCaps & D3DPTEXTURECAPS_CUBEMAP_POW2) !== 0;
+        return textureRequirements({ width: size, height: size, levels, usage, format },
+            { textureCaps: pow2 ? D3DPTEXTURECAPS_POW2 : 0, maxWidth: caps.maxWidth,
+                maxHeight: caps.maxHeight });
+    };
+
+    /**
+     * A volume's: its width and height as a texture's under the volume caps,
+     * its depth 1 for 0 or D3DX_DEFAULT, each a power of two where the device
+     * needs one, none past the largest extent, and the full chain the longest
+     * side gives.
+     *
+     * @param {number} device @param {{ width: number, height: number, depth: number,
+     *     levels: number, usage: number, format: number }} asked @param {any} thread
+     * @returns {Promise<(Requirements & { depth: number }) | number>}
+     */
+    const volumeRequirements = async(device, asked, thread)=>{
+        await null;
+        const caps = await capsOf(device, thread);
+        if (typeof caps === 'number')
+        {
+            return caps;
+        }
+        const pow2 = (caps.textureCaps & D3DPTEXTURECAPS_VOLUMEMAP_POW2) !== 0;
+        const flat = textureRequirements({ ...asked, levels: 1 },
+            { textureCaps: pow2 ? D3DPTEXTURECAPS_POW2 : 0, maxWidth: caps.maxVolume,
+                maxHeight: caps.maxVolume });
+        let depth = asked.depth === 0 || asked.depth === D3DX_DEFAULT ? 1 : asked.depth;
+        depth = Math.min(pow2 ? nextPowerOfTwo(depth) : depth, caps.maxVolume || depth);
+        const chain = Math.floor(Math.log2(Math.max(flat.width, flat.height, depth))) + 1;
+        const levels = asked.levels === 0 || asked.levels === D3DX_DEFAULT ? chain
+            : Math.min(asked.levels, chain);
+        return { ...flat, depth, levels };
+    };
+
+    /**
+     * D3DXFillVolumeTexture's work, once its handler has returned: as
+     * `fillTexture`, a slice at a time.
+     *
+     * @param {number} texture @param {number} fill @param {number} data @param {any} thread
+     * @returns {Promise<number>}
+     */
+    const fillVolume = async(texture, fill, data, thread)=>{
+        await null;
+        const heap = /** @type {NonNullable<TextureToolsHost['heap']>} */ (host.heap);
+        const callGuest = /** @type {NonNullable<TextureToolsHost['callGuest']>} */ (
+            host.callGuest);
+        // The level's description, its locked box, then the out vector, the
+        // texel's centre and the texel's size the function is handed.
+        const scratch = heap.allocate(D3DVOLUME_DESC_BYTES + 12 + 16 + 24);
+        if (scratch === 0)
+        {
+            return E_OUTOFMEMORY;
+        }
+        const locked = scratch + D3DVOLUME_DESC_BYTES;
+        const out = locked + 12;
+        const coord = out + 16;
+        const size = coord + 12;
+        try
+        {
+            const levels = await method(thread, texture, VOLUME_TEXTURE.GetLevelCount, []);
+            for (let level = 0; level < levels; level++)
+            {
+                const described = await method(thread, texture, VOLUME_TEXTURE.GetLevelDesc,
+                    [level, scratch]);
+                if (described !== D3D_OK)
+                {
+                    return described;
+                }
+                const format = u32(scratch);
+                const width = u32(scratch + 16);
+                const height = u32(scratch + 20);
+                const depth = u32(scratch + 24);
+                if (!FLOATS.has(format) && !isSupported(format))
+                {
+                    host.divergence?.('D3DXFillVolumeTexture', `format ${format} is not one a `
+                        + 'fill writes: answered D3DERR_INVALIDCALL');
+                    return D3DERR_INVALIDCALL;
+                }
+                host.writeMemory(size, new Uint8Array(Float32Array.of(1 / width, 1 / height,
+                    1 / depth).buffer));
+                const answer = await method(thread, texture, VOLUME_TEXTURE.LockBox,
+                    [level, locked, 0, 0]);
+                if (answer !== D3D_OK)
+                {
+                    return answer;
+                }
+                const rowPitch = u32(locked);
+                const slicePitch = u32(locked + 4);
+                const bits = u32(locked + 8);
+                for (let z = 0; z < depth; z++)
+                {
+                    const rgba = new Float32Array(width * height * 4);
+                    for (let y = 0; y < height; y++)
+                    {
+                        for (let x = 0; x < width; x++)
+                        {
+                            host.writeMemory(out, new Uint8Array(16));
+                            host.writeMemory(coord, new Uint8Array(Float32Array.of(
+                                (x + 0.5) / width, (y + 0.5) / height, (z + 0.5) / depth).buffer));
+                            await callGuest({ entry: fill >>> 0, args: [out, coord, size,
+                                data >>> 0], ...(thread === undefined ? {} : { thread }) });
+                            rgba.set(new Float32Array(host.readMemory(out, 16).slice().buffer),
+                                (y * width + x) * 4);
+                        }
+                    }
+                    const packed = /** @type {Uint8Array} */ (packFilled(format, rgba, width,
+                        height));
+                    const rows = FLOATS.has(format) ? height : layoutOf(format, width, height).rows;
+                    const rowBytes = packed.length / rows;
+                    for (let row = 0; row < rows; row++)
+                    {
+                        host.writeMemory(bits + z * slicePitch + row * rowPitch,
+                            packed.subarray(row * rowBytes, (row + 1) * rowBytes));
+                    }
+                }
+                await method(thread, texture, VOLUME_TEXTURE.UnlockBox, [level]);
+            }
+            return D3D_OK;
+        }
+        finally
+        {
+            heap.free(scratch);
+        }
     };
 
     /** @param {number} at  A UINT in-out pointer: D3DX_DEFAULT when null. */
@@ -503,6 +650,84 @@ export function createTextureTools(host){
                         : method(thread, device, DEVICE.CreateTexture, [found.width,
                             found.height, found.levels, found.usage, found.format, pool >>> 0,
                             out >>> 0, 0])));
+            },
+        },
+
+        /**
+         * HRESULT D3DXCreateCubeTexture(LPDIRECT3DDEVICE9 pDevice, UINT Size,
+         *     UINT MipLevels, DWORD Usage, D3DFORMAT Format, D3DPOOL Pool,
+         *     LPDIRECT3DCUBETEXTURE9 *ppCubeTexture)
+         *
+         * The cube's requirements made with the device's CreateCubeTexture.
+         */
+        D3DXCreateCubeTexture: {
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: ([device, size, levels, usage, format, pool, out])=>{
+                if ((out >>> 0) !== 0)
+                {
+                    putU32s(out, [0]);
+                }
+                if ((device >>> 0) === 0 || (out >>> 0) === 0 || !host.callGuest || !host.heap)
+                {
+                    return D3DERR_INVALIDCALL;
+                }
+                const thread = host.currentThread?.();
+                return cubeRequirements(device >>> 0, size >>> 0, levels >>> 0, usage >>> 0,
+                    format >>> 0, thread).then(found=>(typeof found === 'number' ? found
+                    : method(thread, device, DEVICE.CreateCubeTexture, [found.width,
+                        found.levels, found.usage, found.format, pool >>> 0, out >>> 0, 0])));
+            },
+        },
+
+        /**
+         * HRESULT D3DXCreateVolumeTexture(LPDIRECT3DDEVICE9 pDevice, UINT Width,
+         *     UINT Height, UINT Depth, UINT MipLevels, DWORD Usage, D3DFORMAT Format,
+         *     D3DPOOL Pool, LPDIRECT3DVOLUMETEXTURE9 *ppVolumeTexture)
+         *
+         * The volume's requirements made with the device's CreateVolumeTexture.
+         */
+        D3DXCreateVolumeTexture: {
+            argBytes: 36,
+            /** @param {number[]} args */
+            handler: ([device, width, height, depth, levels, usage, format, pool, out])=>{
+                if ((out >>> 0) !== 0)
+                {
+                    putU32s(out, [0]);
+                }
+                if ((device >>> 0) === 0 || (out >>> 0) === 0 || !host.callGuest || !host.heap)
+                {
+                    return D3DERR_INVALIDCALL;
+                }
+                const thread = host.currentThread?.();
+                return volumeRequirements(device >>> 0, { width: width >>> 0,
+                    height: height >>> 0, depth: depth >>> 0, levels: levels >>> 0,
+                    usage: usage >>> 0, format: format >>> 0 }, thread)
+                    .then(found=>(typeof found === 'number' ? found
+                        : method(thread, device, DEVICE.CreateVolumeTexture, [found.width,
+                            found.height, found.depth, found.levels, found.usage, found.format,
+                            pool >>> 0, out >>> 0, 0])));
+            },
+        },
+
+        /**
+         * HRESULT D3DXFillVolumeTexture(LPDIRECT3DVOLUMETEXTURE9 pTexture,
+         *     LPD3DXFILL3D pFunction, LPVOID pData)
+         *
+         * The function is VOID WINAPI (D3DXVECTOR4 *pOut, const D3DXVECTOR3 *pTexCoord,
+         * const D3DXVECTOR3 *pTexelSize, LPVOID pData), called once a texel,
+         * the levels in order, each slice by slice and row by row.
+         */
+        D3DXFillVolumeTexture: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([texture, fill, data])=>{
+                if ((texture >>> 0) === 0 || (fill >>> 0) === 0 || !host.callGuest
+                    || !host.heap)
+                {
+                    return D3DERR_INVALIDCALL;
+                }
+                return fillVolume(texture >>> 0, fill >>> 0, data, host.currentThread?.());
             },
         },
 

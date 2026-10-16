@@ -37,8 +37,9 @@ export const IFF = Object.freeze({ BMP: 0, JPG: 1, TGA: 2, PNG: 3, DDS: 4 });
  * @property {Level[]} levels      Largest first; uncompressed ones already in the working form.
  * @property {Level[][]} [faces]   A cube map's six faces, +X, -X, +Y, -Y, +Z, -Z, each its
  *                                 levels as `levels` holds them; `levels` is the first face's.
- * @property {number} [depth]      A volume's slices: the volume is described, not read, and
- *                                 `levels` is empty.
+ * @property {number} [depth]      A volume's slices; `levels` is then empty.
+ * @property {Level[][]} [volume]  A volume's levels, each its slices in the file's own
+ *                                 format, front first; absent for a format not read.
  */
 
 /** An image this module cannot read: D3DXERR_INVALIDDATA, with the reason. */
@@ -313,10 +314,36 @@ function readDds(bytes){
     }
     if (depth > 1)
     {
-        // What D3DXGetImageInfo answers of one -- its depth and that it is a
-        // volume -- is in the header; no loader here makes a volume texture.
+        // Each level is its slices one after another, each slice packed as a
+        // 2D level is; kept in the file's format for the volume loader.
+        /** @type {Level[][] | undefined} */
+        let volume;
+        if (isSupported(format))
+        {
+            volume = [];
+            let at = 128;
+            for (let level = 0; level < mipCount; level++)
+            {
+                const w = Math.max(1, width >> level);
+                const h = Math.max(1, height >> level);
+                const { rowBytes, rows } = layoutOf(format, w, h);
+                const size = rowBytes * rows;
+                const count = Math.max(1, depth >> level);
+                if (at + size * count > bytes.length)
+                {
+                    if (level === 0)
+                    {
+                        throw new ImageError('a DDS file cut short');
+                    }
+                    break;
+                }
+                volume.push(Array.from({ length: count }, (_, z)=>({ width: w, height: h, format,
+                    data: bytes.subarray(at + z * size, at + (z + 1) * size) })));
+                at += size * count;
+            }
+        }
         return { fileFormat: IFF.DDS, width, height, depth, format, mipLevels: mipCount,
-            levels: [] };
+            levels: [], ...(volume ? { volume } : {}) };
     }
     const indexed = format === FMT.P8;
     if (!indexed && !isSupported(format))

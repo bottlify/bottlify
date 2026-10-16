@@ -77,6 +77,7 @@ function methodsFor(descriptor){
                 name: method.name,
                 argBytes: method.argBytes,
                 guest: method.guest,
+                inPlace: method.inPlace,
                 invoke: method.invoke
                     ? (/** @type {any} */ adapter, /** @type {number[]} */ args)=>
                         method.invoke(adapter.api, args) ?? 0

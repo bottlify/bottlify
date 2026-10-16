@@ -27,7 +27,8 @@ const D3DPOOL_DEFAULT = 0;
 /** What each slot is called, by kind, for the record. */
 const NAMES = {
     device: { 1: 'AddRef', 2: 'Release', 7: 'GetDeviceCaps', 23: 'CreateTexture',
-        25: 'CreateCubeTexture', 26: 'CreateVertexBuffer', 27: 'CreateIndexBuffer',
+        24: 'CreateVolumeTexture', 25: 'CreateCubeTexture', 26: 'CreateVertexBuffer',
+        27: 'CreateIndexBuffer',
         28: 'CreateRenderTarget', 29: 'CreateDepthStencilSurface',
         37: 'SetRenderTarget', 38: 'GetRenderTarget', 39: 'SetDepthStencilSurface',
         40: 'GetDepthStencilSurface', 41: 'BeginScene', 42: 'EndScene', 47: 'SetViewport',
@@ -40,6 +41,8 @@ const NAMES = {
         17: 'GetLevelDesc', 18: 'GetSurfaceLevel', 19: 'LockRect', 20: 'UnlockRect' },
     cube: { 1: 'AddRef', 2: 'Release', 3: 'GetDevice', 10: 'GetType', 13: 'GetLevelCount',
         17: 'GetLevelDesc', 18: 'GetCubeMapSurface', 19: 'LockRect', 20: 'UnlockRect' },
+    volume: { 1: 'AddRef', 2: 'Release', 10: 'GetType', 13: 'GetLevelCount',
+        17: 'GetLevelDesc', 19: 'LockBox', 20: 'UnlockBox' },
     surface: { 1: 'AddRef', 2: 'Release', 3: 'GetDevice', 10: 'GetType', 12: 'GetDesc',
         13: 'LockRect', 14: 'UnlockRect' },
     indices: { 1: 'AddRef', 2: 'Release', 11: 'Lock', 12: 'Unlock', 13: 'GetDesc' },
@@ -56,7 +59,8 @@ const BYTES = new Map([[20, 3], [21, 4], [22, 4], [23, 2], [24, 2], [25, 2], [26
     [32, 4], [50, 1], [51, 2], [113, 8], [114, 4], [116, 16]]);
 
 /**
- * @param {{ caps?: Partial<Record<'textureCaps' | 'maxWidth' | 'maxHeight', number>>,
+ * @param {{ caps?: Partial<Record<'textureCaps' | 'maxWidth' | 'maxHeight' | 'maxVolume',
+ *     number>>,
  *     viewport?: number[] }} [options]
  */
 export function deviceRig(options = {}){
@@ -136,7 +140,29 @@ export function deviceRig(options = {}){
         return object({ kind: 'cube', width: edge, height: edge, usage, format, pool, faces });
     };
 
-    const caps = { textureCaps: 0, maxWidth: 4096, maxHeight: 4096, ...options.caps };
+    /**
+     * A volume texture: each level its slices, packed, in memory of its own.
+     *
+     * @param {number} width @param {number} height @param {number} depth @param {number} levels
+     * @param {number} usage @param {number} format @param {number} pool
+     */
+    const volumeTexture = (width, height, depth, levels, usage, format, pool)=>{
+        const count = levels === 0
+            ? Math.floor(Math.log2(Math.max(width, height, depth))) + 1 : levels;
+        const chain = Array.from({ length: count }, (_, level)=>{
+            const w = Math.max(1, width >> level);
+            const h = Math.max(1, height >> level);
+            const d = Math.max(1, depth >> level);
+            const rowPitch = pitchOf(format, w);
+            const slicePitch = rowPitch * rowsOf(format, h);
+            return { width: w, height: h, depth: d, rowPitch, slicePitch, locked: false,
+                data: heap.allocate(slicePitch * d) };
+        });
+        return object({ kind: 'volume', usage, format, pool, levels: chain });
+    };
+
+    const caps = { textureCaps: 0, maxWidth: 4096, maxHeight: 4096, maxVolume: 256,
+        ...options.caps };
     let viewport = options.viewport ?? [0, 0, 640, 480, 0, 1];
     const backBuffer = surface({ width: viewport[2], height: viewport[3], format: 22,
         usage: D3DUSAGE_RENDERTARGET, pool: D3DPOOL_DEFAULT });
@@ -220,6 +246,12 @@ export function deviceRig(options = {}){
                     put(at + 60, caps.textureCaps);
                     put(at + 88, caps.maxWidth);
                     put(at + 92, caps.maxHeight);
+                    put(at + 96, caps.maxVolume);
+                    return 0;
+                }
+                case 24: {
+                    const [, width, height, slices, levels, usage, format, pool, out] = args;
+                    put(out, volumeTexture(width, height, slices, levels, usage, format, pool));
                     return 0;
                 }
                 case 23: {
@@ -287,6 +319,38 @@ export function deviceRig(options = {}){
                     return 0;
                 case 86:
                     put(args[2], object({ kind: 'declaration', at: args[1] }));
+                    return 0;
+                default:
+                    return 0;
+            }
+        }
+        if (self.kind === 'volume')
+        {
+            const level = self.levels[args[1]];
+            switch (slot)
+            {
+                case 10:
+                    return 4;
+                case 13:
+                    return self.levels.length;
+                case 17:
+                    if (!level)
+                    {
+                        return 0x8876086c;
+                    }
+                    putAll(args[2], [self.format, 2, self.usage, self.pool, level.width,
+                        level.height, level.depth]);
+                    return 0;
+                case 19:
+                    if (!level)
+                    {
+                        return 0x8876086c;
+                    }
+                    level.locked = true;
+                    putAll(args[2], [level.rowPitch, level.slicePitch, level.data]);
+                    return 0;
+                case 20:
+                    level.locked = false;
                     return 0;
                 default:
                     return 0;

@@ -216,7 +216,13 @@ export function parentOf(text){
  *           The task allocator's heap: a list handed out is freed with IMalloc.
  * @property {NamespaceMemory} memory
  * @property {NamespaceVolume} volume
+ * @property {() => string | null} [documents]
+ *           Where the user's documents are on the volume: the folder the
+ *           desktop's "My Documents" item is.
  */
+
+/** The desktop's "My Documents" item, as a parsing name names it. */
+const MY_DOCUMENTS = '::{450D8FBA-AD25-11D0-98A8-0800361B1103}';
 
 /**
  * @typedef {Object} NamespaceItem
@@ -228,7 +234,7 @@ export function parentOf(text){
 /**
  * @param {NamespaceDeps} deps
  */
-export function createShellNamespace({ publish, allocate, memory, volume }){
+export function createShellNamespace({ publish, allocate, memory, volume, documents }){
     /** @param {string} path @param {string} name */
     const join = (path, name)=>(path.endsWith('\\') ? path + name : `${path}\\${name}`);
 
@@ -270,6 +276,26 @@ export function createShellNamespace({ publish, allocate, memory, volume }){
         return entry.isDirectory
             ? directoryItem(text)
             : { text, name: text.split('\\').pop() ?? text, attributes: SFGAO_FILESYSTEM };
+    };
+
+    /**
+     * What a parsing name stands for: a path, or one of the desktop's own
+     * items by its CLSID, which the shell takes in any case -- "My
+     * Documents" the folder on the volume it is, "My Computer" itself.
+     *
+     * @param {string} text
+     */
+    const parsingName = text=>{
+        const upper = text.toUpperCase();
+        if (upper === MY_COMPUTER)
+        {
+            return MY_COMPUTER;
+        }
+        if (upper === MY_DOCUMENTS)
+        {
+            return documents?.() ?? text;
+        }
+        return text;
     };
 
     /**
@@ -378,7 +404,7 @@ export function createShellNamespace({ publish, allocate, memory, volume }){
                  */
         { name: 'ParseDisplayName', argBytes: 28,
             invoke: (object, [, , name, eaten, out, attributes])=>{
-                const item = itemFor(readWide(name >>> 0));
+                const item = itemFor(parsingName(readWide(name >>> 0)));
                 memory.writeMemory(out >>> 0, dword(0));
                 if (!item)
                 {

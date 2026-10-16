@@ -120,6 +120,8 @@ async function bridge(){
         worker,
         resumed,
         regs,
+        /** A word of the machine's memory. @param {number} at */
+        readU32: at=>cells.get(at >>> 0) ?? 0,
         /** Runs a registered function the way a guest `call` would. */
         /** @param {number} id @param {any} on @param {number} esp */
         trap: (id, on, esp)=>{
@@ -474,4 +476,82 @@ test('steps that call the guest for nothing answer as a plain handler does', asy
     machine.trap(machine.lastTrap(), machine.main, MAIN.top - 0x100);
     assert.equal(machine.regs.eax, 42);
     assert.deepEqual(machine.resumed, []);
+});
+
+/**
+ * An object with a method answered in place and one that is not, published
+ * on a machine with a heap; the slots of each and what the first was called with.
+ */
+async function inPlaceObject(){
+    const machine = await bridge();
+    let next = 0x5000;
+    machine.api.useHeap({ allocate: (/** @type {number} */ bytes)=>{
+        const at = next;
+        next += bytes;
+        return at;
+    } });
+    /** @type {number[][]} */
+    const made = [];
+    const methods = [
+        { name: 'SetValue', argBytes: 8, invoke: ()=>0,
+            inPlace: (/** @type {number[]} */ [, value])=>{
+                made.push([value]);
+                return value * 10;
+            } },
+        { name: 'Other', argBytes: 8, invoke: ()=>0 },
+    ];
+    const object = { interfaceFor: (/** @type {string} */ id)=>({ id, methods }) };
+    const pointer = machine.api.publishInterface(object, '{00000002-0000-0000-C000-000000000046}');
+    return { machine, pointer, made };
+}
+
+test('steps whose calls go to a method answered in place answer without entering the guest',
+    async()=>{
+        // A device's setter called from an effect's CommitChanges: what the guest
+        // would only have written into the ring is made by its handler here.
+        const { machine, pointer, made } = await inPlaceObject();
+        const table = machine.readU32(pointer);
+        const setValue = machine.readU32(table);
+        machine.api.register('TEST.dll!Commit', {
+            argBytes: 0,
+            handler: ()=>machine.api.drive((/** @returns {import('./internal/drive.js').Steps} */ function*(){
+                const a = yield { entry: setValue, args: [pointer, 3] };
+                const b = yield { entry: setValue, args: [pointer, 4] };
+                return a + b;
+            })()),
+        });
+        machine.trap(machine.lastTrap(), machine.main, MAIN.top - 0x100);
+        assert.equal(machine.regs.eax, 70, 'each call answered, and the steps with them');
+        assert.deepEqual(made, [[3], [4]]);
+        // Answered as a plain handler is, by the stub's own return: nothing
+        // entered, nothing parked.
+        assert.deepEqual(machine.resumed, []);
+        assert.equal(machine.api.suspended(), 0);
+        assert.equal(/** @type {any} */ (bridgeModule.diagnostics()).metrics.driveInPlace, 2);
+    });
+
+test('steps mixing calls answered in place with calls into the guest enter the guest for those'
+    + ' alone, in order', async()=>{
+    const { machine, pointer, made } = await inPlaceObject();
+    const table = machine.readU32(pointer);
+    const setValue = machine.readU32(table);
+    machine.api.register('TEST.dll!Mixed', {
+        argBytes: 0,
+        handler: ()=>machine.api.drive((/** @returns {import('./internal/drive.js').Steps} */ function*(){
+            const a = yield { entry: setValue, args: [pointer, 1] };
+            const b = yield { entry: 0x00402000, args: [a] };
+            const c = yield { entry: setValue, args: [pointer, b] };
+            return c;
+        })()),
+    });
+    const esp = MAIN.top - 0x100;
+    machine.trap(machine.lastTrap(), machine.main, esp);
+    assert.equal(machine.regs.eip, 0x00402000, 'the guest routine, entered after the first call');
+    assert.deepEqual(made, [[1]]);
+    machine.regs.esp = esp - 4 * 2 + 4;
+    machine.regs.ecx = 5;
+    machine.trap(/** @type {number} */ (machine.api.sentinelTrap()), machine.main, machine.regs.esp);
+    assert.deepEqual(made, [[1], [5]], 'the third made in place with what the guest answered');
+    assert.equal(machine.regs.eax, 50);
+    assert.equal(machine.regs.eip, 0x00401000);
 });

@@ -331,6 +331,22 @@ export function createStringFunctions(host, { A, W }){
         }),
 
         /**
+         * PSTR StrStrIA(PCSTR pszFirst, PCSTR pszSrch)
+         *
+         * StrStr with case ignored, folded a character at a time so a match's
+         * place in the folded text is its place in the caller's; NULL for an
+         * empty search (Wine's test_StrStrIA).
+         */
+        ...both('StrStrI', 8, (width, [first, second])=>{
+            const fold = (/** @type {string} */ value)=>
+                Array.from(value, c=>(c.toUpperCase().length === 1 ? c.toUpperCase() : c)).join('');
+            const text = width.read(first);
+            const wanted = width.read(second);
+            const at = text === null || !wanted ? -1 : fold(text).indexOf(fold(wanted));
+            return at < 0 ? 0 : (first >>> 0) + at * width.unit;
+        }),
+
+        /**
          * HRESULT StrRetToBufA(STRRET *pstr, PCUITEMID_CHILD pidl, LPSTR pszBuf, UINT cchBuf)
          * HRESULT StrRetToBufW(STRRET *pstr, PCUITEMID_CHILD pidl, LPWSTR pszBuf, UINT cchBuf)
          */

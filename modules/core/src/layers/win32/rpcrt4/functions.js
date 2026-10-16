@@ -167,6 +167,32 @@ export function createRpcFunctions(host){
         },
 
         /**
+         * RPC_STATUS UuidCreateSequential(UUID *Uuid)
+         *
+         * A version 1 UUID: 100 ns ticks since 1582-10-15 in the time fields,
+         * a random clock sequence, and a node of the adapter address the
+         * machine reports none of -- random, its multicast bit set as RFC 4122
+         * asks of a node that is not an address.
+         */
+        UuidCreateSequential: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([out])=>{
+                const ticks = BigInt(Date.now()) * 10000n + 0x01b21dd213814000n;
+                const bytes = new Uint8Array(GUID_SIZE);
+                crypto.getRandomValues(bytes.subarray(8));
+                const view = new DataView(bytes.buffer);
+                view.setUint32(0, Number(ticks & 0xffffffffn), true);
+                view.setUint16(4, Number((ticks >> 32n) & 0xffffn), true);
+                view.setUint16(6, Number((ticks >> 48n) & 0x0fffn) | 0x1000, true);
+                bytes[8] = (bytes[8] & 0x3f) | 0x80;
+                bytes[10] |= 0x01;
+                host.writeMemory(out >>> 0, bytes);
+                return RPC_S_OK;
+            },
+        },
+
+        /**
          * RPC_STATUS UuidFromStringA(RPC_CSTR StringUuid, UUID *Uuid)
          *
          * The string form has no braces, unlike the one COM speaks; a NULL

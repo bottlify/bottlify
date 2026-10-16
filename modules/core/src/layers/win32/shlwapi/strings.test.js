@@ -179,6 +179,23 @@ test('StrStr finds a string, case and all, and never an empty one', ()=>{
     }
 });
 
+test('StrStrI finds a string whatever its case, and never an empty one', ()=>{
+    // Wine's test_StrStrIA and test_StrStrIW.
+    for (const [suffix, wide] of WIDTHS)
+    {
+        const m = shlwapiMachine();
+        const unit = wide ? 2 : 1;
+        const hay = m.put('DeAdBeEf', wide);
+        const cases = /** @type {[string, number | null][]} */ ([['', null], ['DeAd', 0],
+            ['dead', 0], ['AdBe', 2], ['adbe', 2], ['BeEf', 4], ['beef', 4], ['cafe', null]]);
+        for (const [needle, index] of cases)
+        {
+            assert.equal(m.fns[`StrStrI${suffix}`].handler([hay, m.put(needle, wide)]),
+                index === null ? 0 : hay + index * unit, needle);
+        }
+    }
+});
+
 test('StrRetToBuf reads each kind of STRRET, frees a wide one, and cuts to the buffer', ()=>{
     // Wine's test_StrXXX_overflows: XP's answer to a string cut short is S_OK.
     const m = shlwapiMachine();
@@ -225,7 +242,7 @@ test('each string function declares the arguments it pops', ()=>{
         StrChrA: 8, StrChrW: 8, StrRChrA: 12, StrRChrW: 12, StrCmpW: 8, StrCmpIW: 8,
         StrCmpNA: 12, StrCmpNW: 12, StrCmpNIA: 12, StrCmpNIW: 12, StrCpyW: 8, StrCpyNW: 12,
         StrCatW: 8, StrCatBuffA: 12, StrCatBuffW: 12, StrDupA: 4, StrDupW: 4, StrStrA: 8,
-        StrStrW: 8, StrRetToBufA: 16, StrRetToBufW: 16,
+        StrStrW: 8, StrStrIA: 8, StrStrIW: 8, StrRetToBufA: 16, StrRetToBufW: 16,
     });
     for (const [name, bytes] of Object.entries(expected))
     {

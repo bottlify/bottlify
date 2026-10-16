@@ -98,7 +98,7 @@ test('a key sent to the layer arrives in the window queue the program pumps', as
 test('DirectInput is published beside the message path, not instead of it', async()=>{
     const { api } = await open();
     assert.deepEqual(Object.keys(api.libraries()),
-        ['DINPUT.dll', 'DINPUT8.dll', 'XINPUT9_1_0.dll', 'XINPUT1_4.dll']);
+        ['DINPUT.dll', 'DINPUT8.dll', 'XINPUT9_1_0.dll', 'XINPUT1_3.dll', 'XINPUT1_4.dll']);
     // No program has created a device, so there is nowhere for the event to be
     // kept -- and saying so is the answer, not silence.
     assert.equal(api.post({ kind: 'key', code: 0x11, down: true }), false);
@@ -112,7 +112,7 @@ test('XInput is answered too, with no pad in any slot', async()=>{
     // stops the process on its first call.
     const { api } = await open();
     const libraries = api.libraries();
-    for (const dll of ['XINPUT9_1_0.dll', 'XINPUT1_4.dll'])
+    for (const dll of ['XINPUT9_1_0.dll', 'XINPUT1_3.dll', 'XINPUT1_4.dll'])
     {
         assert.equal(libraries[dll].XInputGetState.handler([0, 0x100]), 1167,
             `${dll}: ERROR_DEVICE_NOT_CONNECTED`);
@@ -149,7 +149,7 @@ test('diagnostics report both halves of the layer', async()=>{
 
     const metrics = /** @type {any} */ (inputModule.diagnostics().metrics);
     assert.deepEqual(metrics.libraries,
-        ['DINPUT.dll', 'DINPUT8.dll', 'XINPUT9_1_0.dll', 'XINPUT1_4.dll']);
+        ['DINPUT.dll', 'DINPUT8.dll', 'XINPUT9_1_0.dll', 'XINPUT1_3.dll', 'XINPUT1_4.dll']);
     assert.deepEqual(metrics.xinput, { asked: 0, enabled: true });
     assert.deepEqual(metrics.devices, [], 'nothing has asked for a device yet');
     assert.deepEqual(metrics.keysDown, ['Space']);

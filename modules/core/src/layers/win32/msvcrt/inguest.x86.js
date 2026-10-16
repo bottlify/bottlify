@@ -2251,4 +2251,22 @@ export const COMPILED = /** @type {const} */ ({
             0xe9, 0x00, 0x00, 0x00, 0x00,
         ),
     },
+    encodePointer: {
+        convention: 'cdecl',
+        params: ['u32'],
+        returns: 'u32',
+        uses: [],
+        code: Uint8Array.of(
+            0x8b, 0x44, 0x24, 0x04, 0xc3,
+        ),
+    },
+    encodedNull: {
+        convention: 'cdecl',
+        params: [],
+        returns: 'u32',
+        uses: [],
+        code: Uint8Array.of(
+            0x31, 0xc0, 0xc3,
+        ),
+    },
 });

@@ -38,14 +38,17 @@ const DYNAMIC = 0x200;
 export function reportDynamicReads(drawsFrom, streams, first, count, indices, startIndex = 0,
     indexCount = 0, indexed = undefined)
 {
-    const named = indexed && indices ? namedRange(streams, count, indices, startIndex, indexCount,
+    // The streams may come as an iterator, which the range's scan would leave
+    // empty for the loop after it.
+    const all = [...streams];
+    const named = indexed && indices ? namedRange(all, count, indices, startIndex, indexCount,
         indexed) : null;
     if (named)
     {
         first = named.first;
         count = named.count;
     }
-    for (const stream of streams)
+    for (const stream of all)
     {
         const buffer = stream?.buffer;
         if (!buffer || (buffer.usage & DYNAMIC) === 0 || !(stream.stride > 0))
@@ -73,7 +76,7 @@ const reportClamped = (drawsFrom, buffer, from, to)=>{
         drawsFrom(buffer, start, end);
     }
 };
-
+
 /** Index bytes read for each byte of vertices the scan would spare comparing, at most. */
 const SCAN_RATIO = 4;
 

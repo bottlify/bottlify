@@ -278,8 +278,23 @@ test('DirectX\'s setup library is answered here even where the program brought i
     // A disc's dsetup.dll installs XP's DirectX over the system's and asks for
     // a restart a game's installer stops at; the table answers it is in place.
     const api = await win32Module.create({}, stubHost());
-    assert.deepEqual(api.runtimes(), ['DSETUP.dll']);
+    assert.deepEqual(api.runtimes(),
+        ['DSETUP.dll', 'MSVCR80.dll']);
     assert.ok('DSETUP.dll' in api.libraries(), 'with a table');
+    // The Visual C++ 2005 runtime likewise: a program built with it reads
+    // _acmdln through its import first thing, and a stub there is a pointer
+    // to nothing.
+    const vc8 = api.libraries()['MSVCR80.dll'];
+    assert.ok(vc8._acmdln?.data, '_acmdln a variable, as msvcrt\'s');
+    for (const name of ['_except_handler4_common', '_encode_pointer', '_decode_pointer',
+        '_configthreadlocale', '_invoke_watson', '_crt_debugger_hook', '_controlfp_s',
+        '_set_purecall_handler', '_vscprintf', '_vswprintf_c_l', '__getmainargs'])
+    {
+        assert.ok(vc8[name], name);
+    }
+    assert.equal(vc8._encode_pointer.handler([0x1234]), 0x1234);
+    assert.equal(vc8._configthreadlocale.handler([1]), 2, 'per-thread locales start off');
+    assert.equal(vc8._configthreadlocale.handler([0]), 1, 'and are on once asked');
 
     await win32Module.dispose();
 });

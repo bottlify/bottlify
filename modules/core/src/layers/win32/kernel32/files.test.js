@@ -1297,7 +1297,7 @@ test('a wide directory listing writes twice as wide a name, at the same offset',
     memory.bytes.fill(0xee, 0x600 + 320, 0x600 + 600);
 
     const search = fns.FindFirstFileW.handler(
-        [putWide(memory, NAME, 'C:\\GAME\\*'), 0x600]);
+        [putWide(memory, NAME, 'C:\\GAME\\*.DAT'), 0x600]);
     assert.notEqual(search, INVALID_HANDLE_VALUE);
 
     // cFileName is at 44 in both forms; here it is UTF-16.
@@ -1694,7 +1694,7 @@ test('a name in the upper half of the ANSI page goes back as the bytes it was re
         [...path, 0]);
 
     files.put('C:\\GAME\\\u20ac\u2122\u2014\u00e9', 'x');
-    memory.bytes.set([...bytesOf('C:\\GAME\\*'), 0], NAME);
+    memory.bytes.set([...bytesOf('C:\\GAME\\*'), 0xe9, 0], NAME);
     assert.notEqual(fns.FindFirstFileA.handler([NAME, FIND_DATA]), INVALID_HANDLE_VALUE);
     const found = FIND_DATA + WIN32_FIND_DATAA.cFileName;
     assert.deepEqual([...memory.bytes.subarray(found, found + name.length + 1)], [...name, 0]);
@@ -2247,3 +2247,34 @@ test('a read through an OVERLAPPED moves a synchronous handle\'s pointer, not an
         assert.equal(fns.SetFilePointer.handler([overlapped, 0, 0, FILE_CURRENT]), 3,
             'a read with no OVERLAPPED still moves it');
     });
+
+test('a folder lists itself and its parent first, and a drive\'s root does not', ()=>{
+    // A program that skips the first two entries unseen -- Titan Quest
+    // listing its characters -- loses the first real one without them.
+    const { memory, files, fns } = setup();
+    files.mkdir('C:\\GAME\\SAVE');
+    files.mkdir('C:\\GAME\\SAVE\\_ONE');
+    files.put('C:\\TOP.TXT', 'x');
+    const name = FIND_DATA + WIN32_FIND_DATAA.cFileName;
+    /** @param {string} pattern */
+    const listing = pattern=>{
+        memory.bytes.set([...Array.from(pattern, c=>c.charCodeAt(0)), 0], NAME);
+        const search = fns.FindFirstFileA.handler([NAME, FIND_DATA]);
+        if (search === INVALID_HANDLE_VALUE)
+        {
+            return [];
+        }
+        const names = [];
+        for (let more = true; more; more = fns.FindNextFileA.handler([search, FIND_DATA]) !== 0)
+        {
+            names.push(String.fromCharCode(...memory.bytes.subarray(name,
+                memory.bytes.indexOf(0, name))));
+        }
+        fns.FindClose.handler([search]);
+        return names;
+    };
+    assert.deepEqual(listing('C:\\GAME\\SAVE\\*'), ['.', '..', '_ONE']);
+    assert.deepEqual(listing('C:\\GAME\\SAVE\\?*'), ['.', '..', '_ONE']);
+    assert.deepEqual(listing('C:\\GAME\\SAVE\\_*'), ['_ONE'], 'a pattern with a name in it');
+    assert.ok(!listing('C:\\*').includes('.'), 'the root has neither');
+});

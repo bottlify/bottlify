@@ -29,6 +29,10 @@ test('a UUID is made random and read back from its braceless spelling', ()=>{
     assert.equal(fns.UuidCreate.handler([0]), 0, 'RPC_S_OK');
     assert.equal(memory[7] >> 4, 4, 'version 4');
     assert.equal(memory[8] >> 6, 2, 'variant 1');
+    assert.equal(fns.UuidCreateSequential.handler([0]), 0, 'RPC_S_OK');
+    assert.equal(memory[7] >> 4, 1, 'version 1');
+    assert.equal(memory[8] >> 6, 2, 'variant 1');
+    assert.equal(memory[10] & 1, 1, 'a node that is not an address');
     assert.equal(fns.UuidFromStringA.handler([64, 16]), 0);
     assert.deepEqual([...memory.subarray(16, 32)], [0x40, 0xfc, 0x29, 0x6b, 0x47, 0xca, 0x67, 0x10,
         0xb3, 0x1d, 0x00, 0xdd, 0x01, 0x06, 0x62, 0xda]);

@@ -10,9 +10,10 @@ import { FMT, decodeTexels, encodeTexels, halve, isCompressed, isSupported, layo
     from './pixels.js';
 
 /**
- * D3DX's texture loaders: an image file made into a texture or a cube
- * texture on the program's own device, through the device's own methods --
- * CreateTexture or CreateCubeTexture, the levels locked and written, and for
+ * D3DX's texture loaders: an image file made into a texture, a cube texture
+ * or a volume texture on the program's own device, through the device's own
+ * methods -- CreateTexture, CreateCubeTexture or CreateVolumeTexture, the
+ * levels locked and written, and for
  * a texture the device keeps where it cannot be locked (the default pool, not
  * dynamic), a system-memory copy handed over with UpdateTexture, as D3DX
  * itself does.
@@ -27,7 +28,8 @@ import { FMT, decodeTexels, encodeTexels, halve, isCompressed, isSupported, layo
  * does not hold are made with a box filter; a colour key replaces the texels
  * of that colour with transparent black. A cube texture is made only from a
  * cube map (a DDS file with all six faces), and a texture only from a file
- * that is not one.
+ * that is not one. A volume texture is made of a volume DDS's own levels, its
+ * size the file's, converted only to the format asked.
  */
 
 const D3D_OK = 0;
@@ -349,9 +351,98 @@ export function createTextureLoader(host){
             : mips === D3DX_FROM_FILE ? Math.min(full, image.mipLevels) : Math.min(full, mips);
         const faces = (image.faces ?? [image.levels]).map(levels=>
             levelsOf(levels, w, h, count, target, ask.colorKey));
-        return upload(device, { w, h, count, usage: ask.usage, pool: ask.pool, target, faces,
-            out: ask.out, cube, thread });
+        return upload(device, { w, h, depth: 0, count, usage: ask.usage, pool: ask.pool,
+            target, faces, out: ask.out, cube, thread });
     };
+
+    /**
+     * A volume loader's work: the file's levels as they are, in the format
+     * asked. D3DX would resize a volume asked another size and make the
+     * levels the file lacks; this keeps the file's, and says so.
+     *
+     * @param {string} api @param {number} device
+     * @param {Uint8Array | null | Promise<Uint8Array | null>} found
+     * @param {TextureAsk & { depth: number }} ask @param {any} thread
+     * @returns {Promise<number>}
+     */
+    const buildVolume = async(api, device, found, ask, thread)=>{
+        const image = await imageOf(api, found);
+        if (typeof image === 'number')
+        {
+            return image;
+        }
+        if (!image.depth || !image.volume)
+        {
+            host.divergence?.(api, `answered D3DXERR_INVALIDDATA: ${image.depth
+                ? `a volume of format ${image.format}, not read` : 'not a volume'}`);
+            return D3DXERR_INVALIDDATA;
+        }
+        if (ask.info !== 0)
+        {
+            writeInfo(ask.info, image);
+        }
+        /** @param {number} asked @param {number} file */
+        const kept = (asked, file)=>asked === 0 || asked === file || asked >= D3DX_FROM_FILE;
+        if (!kept(ask.width, image.width) || !kept(ask.height, image.height)
+            || !kept(ask.depth, image.depth))
+        {
+            host.divergence?.(api, `asked ${ask.width}x${ask.height}x${ask.depth}: the `
+                + `file's ${image.width}x${image.height}x${image.depth} is kept`);
+        }
+        const target = ask.format === FMT.UNKNOWN || ask.format === D3DX_FROM_FILE
+            ? image.format : ask.format;
+        const held = image.volume.length;
+        const count = ask.mips === 0 || ask.mips >= D3DX_FROM_FILE ? held
+            : Math.min(held, ask.mips);
+        const faces = [image.volume.slice(0, count).map(slices=>{
+            const converted = slices.map(slice=>(target === slice.format ? slice.data
+                : encodeTexels(target, decodeTexels(slice.format, slice.data, slice.width,
+                    slice.height), slice.width, slice.height)));
+            const out = new Uint8Array(converted.reduce((sum, d)=>sum + d.length, 0));
+            let at = 0;
+            for (const d of converted)
+            {
+                out.set(d, at);
+                at += d.length;
+            }
+            return out;
+        })];
+        return upload(device, { w: image.width, h: image.height, depth: image.depth, count,
+            usage: ask.usage, pool: ask.pool, target, faces, out: ask.out, cube: false, thread });
+    };
+
+    /**
+     * A volume loader's handler, as `loader` is a texture loader's.
+     *
+     * @param {string} api
+     * @param {(args: number[]) => { device: number, given: boolean,
+     *     found: () => Uint8Array | null | Promise<Uint8Array | null>,
+     *     ask: TextureAsk & { depth: number } }} parse
+     * @returns {(args: number[]) => number | Promise<number>}
+     */
+    const volumeLoader = (api, parse)=>args=>{
+        const { device, given, found, ask } = parse(args.map(a=>a >>> 0));
+        if (ask.out !== 0)
+        {
+            putU32s(ask.out, [0]);
+        }
+        if (device === 0 || !given || ask.out === 0 || !host.callGuest || !host.heap)
+        {
+            return D3DERR_INVALIDCALL;
+        }
+        return buildVolume(api, device, found(), ask, host.currentThread?.());
+    };
+
+    /**
+     * The Ex form's arguments after the image's source: Width, Height, Depth, then
+     * as a texture's.
+     *
+     * @param {number[]} rest
+     */
+    const volumeAskOf = ([width, height, depth, ...rest])=>({ ...askOf([width, height,
+        ...rest]), depth });
+    /** @param {number} out */
+    const plainVolumeAsk = out=>({ ...plainAsk(out), depth: D3DX_DEFAULT });
 
     /**
      * A loader's handler: the device, where the image is, and what is asked,
@@ -443,11 +534,12 @@ export function createTextureLoader(host){
 
     /**
      * The texture made on the device and its levels written: a cube
-     * texture's face by face.
+     * texture's face by face, a volume's level by level, each its slices.
      *
      * @param {number} device
-     * @param {{ w: number, h: number, count: number, usage: number, pool: number,
-     *     target: number, faces: Uint8Array[][], out: number, cube: boolean, thread: any }} plan
+     * @param {{ w: number, h: number, depth: number, count: number, usage: number,
+     *     pool: number, target: number, faces: Uint8Array[][], out: number, cube: boolean,
+     *     thread: any }} plan  `depth` 0 but for a volume.
      * @returns {Promise<number>}
      */
     const upload = async(device, plan)=>{
@@ -469,8 +561,11 @@ export function createTextureLoader(host){
             const answer = plan.cube
                 ? await method(device, DEVICE.CreateCubeTexture, [plan.w, plan.count, usage,
                     plan.target, pool, scratch, 0])
-                : await method(device, DEVICE.CreateTexture, [plan.w, plan.h, plan.count,
-                    usage, plan.target, pool, scratch, 0]);
+                : plan.depth
+                    ? await method(device, DEVICE.CreateVolumeTexture, [plan.w, plan.h,
+                        plan.depth, plan.count, usage, plan.target, pool, scratch, 0])
+                    : await method(device, DEVICE.CreateTexture, [plan.w, plan.h, plan.count,
+                        usage, plan.target, pool, scratch, 0]);
             if (answer !== D3D_OK)
             {
                 failed = answer;
@@ -493,6 +588,8 @@ export function createTextureLoader(host){
                 const which = plan.cube ? [face] : [];
                 for (let level = 0; level < plan.count; level++)
                 {
+                    // LockBox and UnlockBox stand where LockRect and UnlockRect
+                    // do; the box has a slice pitch between the row pitch and the bits.
                     const answer = await method(filled, TEXTURE.LockRect, [...which, level,
                         scratch + 4, 0, 0]);
                     if (answer !== D3D_OK)
@@ -501,14 +598,20 @@ export function createTextureLoader(host){
                         return answer;
                     }
                     const pitch = u32(scratch + 4);
-                    const bits = u32(scratch + 8);
+                    const slicePitch = plan.depth ? u32(scratch + 8) : 0;
+                    const bits = u32(scratch + (plan.depth ? 12 : 8));
                     const { rowBytes, rows } = layoutOf(plan.target, Math.max(1, plan.w >> level),
                         Math.max(1, plan.h >> level));
                     const bytes = plan.faces[face][level];
-                    for (let row = 0; row < rows; row++)
+                    const slices = plan.depth ? Math.max(1, plan.depth >> level) : 1;
+                    for (let z = 0; z < slices; z++)
                     {
-                        host.writeMemory(bits + row * pitch,
-                            bytes.subarray(row * rowBytes, (row + 1) * rowBytes));
+                        for (let row = 0; row < rows; row++)
+                        {
+                            const from = (z * rows + row) * rowBytes;
+                            host.writeMemory(bits + z * slicePitch + row * pitch,
+                                bytes.subarray(from, from + rowBytes));
+                        }
                     }
                     await method(filled, TEXTURE.UnlockRect, [...which, level]);
                 }
@@ -822,6 +925,25 @@ export function createTextureLoader(host){
                 found: ()=>sources.memory(data, size), ask: plainAsk(out) })) },
         D3DXGetImageInfoFromFileInMemory: { argBytes: 12, handler: imageInfo },
         /**
+         * HRESULT D3DXCreateVolumeTextureFromFileInMemory(LPDIRECT3DDEVICE9 pDevice,
+         *     LPCVOID pSrcData, UINT SrcDataSize, LPDIRECT3DVOLUMETEXTURE9 *ppVolumeTexture)
+         */
+        D3DXCreateVolumeTextureFromFileInMemory: { argBytes: 16,
+            handler: volumeLoader('D3DXCreateVolumeTextureFromFileInMemory', ([device, data,
+                size, out])=>({ device, given: data !== 0 && size !== 0,
+                found: ()=>sources.memory(data, size), ask: plainVolumeAsk(out) })) },
+        /**
+         * HRESULT D3DXCreateVolumeTextureFromFileInMemoryEx(LPDIRECT3DDEVICE9 pDevice,
+         *     LPCVOID pSrcData, UINT SrcDataSize, UINT Width, UINT Height, UINT Depth,
+         *     UINT MipLevels, DWORD Usage, D3DFORMAT Format, D3DPOOL Pool, DWORD Filter,
+         *     DWORD MipFilter, D3DCOLOR ColorKey, D3DXIMAGE_INFO *pSrcInfo,
+         *     PALETTEENTRY *pPalette, LPDIRECT3DVOLUMETEXTURE9 *ppVolumeTexture)
+         */
+        D3DXCreateVolumeTextureFromFileInMemoryEx: { argBytes: 64,
+            handler: volumeLoader('D3DXCreateVolumeTextureFromFileInMemoryEx', ([device, data,
+                size, ...rest])=>({ device, given: data !== 0 && size !== 0,
+                found: ()=>sources.memory(data, size), ask: volumeAskOf(rest) })) },
+        /**
          * HRESULT D3DXLoadSurfaceFromFileInMemory(LPDIRECT3DSURFACE9 pDestSurface,
          *     const PALETTEENTRY *pDestPalette, const RECT *pDestRect, LPCVOID pSrcData,
          *     UINT SrcData, const RECT *pSrcRect, DWORD Filter, D3DCOLOR ColorKey,
@@ -912,6 +1034,21 @@ export function createTextureLoader(host){
                     ask: askOf([edge, edge, ...rest]),
                     found: ()=>sources.resource(named('D3DXCreateCubeTextureFromResourceEx'),
                         module, name, wide) })) },
+            /**
+             * HRESULT D3DXCreateVolumeTextureFromFile(LPDIRECT3DDEVICE9 pDevice,
+             *     LPCTSTR pSrcFile, LPDIRECT3DVOLUMETEXTURE9 *ppVolumeTexture)
+             */
+            [named('D3DXCreateVolumeTextureFromFile')]: { argBytes: 12,
+                handler: volumeLoader(named('D3DXCreateVolumeTextureFromFile'), ([device, file,
+                    out])=>({ device, given: file !== 0, ask: plainVolumeAsk(out),
+                    found: ()=>sources.file(named('D3DXCreateVolumeTextureFromFile'), file,
+                        wide) })) },
+            /** The Ex form: the file, then as D3DXCreateVolumeTextureFromFileInMemoryEx. */
+            [named('D3DXCreateVolumeTextureFromFileEx')]: { argBytes: 60,
+                handler: volumeLoader(named('D3DXCreateVolumeTextureFromFileEx'), ([device, file,
+                    ...rest])=>({ device, given: file !== 0, ask: volumeAskOf(rest),
+                    found: ()=>sources.file(named('D3DXCreateVolumeTextureFromFileEx'), file,
+                        wide) })) },
             /** HRESULT D3DXGetImageInfoFromFile(LPCTSTR pSrcFile, D3DXIMAGE_INFO *pSrcInfo) */
             [named('D3DXGetImageInfoFromFile')]: { argBytes: 8,
                 handler: (/** @type {number[]} */ [file, info])=>((file >>> 0) === 0

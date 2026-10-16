@@ -176,8 +176,8 @@ test('an instruction no tier carries is an invalid-opcode fault, and the slice c
         // A fault the program's own handlers can take, as a processor raises
         // for an instruction it does not know, rather than the engine stopping.
         const h = host();
-        // Four nops, then sldt [eax]: the model has no case for it.
-        load(h, 0x1000, [0x90, 0x90, 0x90, 0x90, 0x0f, 0x00, 0x00, 0xf4]);
+        // Four nops, then lar eax, [eax]: the model has no case for it.
+        load(h, 0x1000, [0x90, 0x90, 0x90, 0x90, 0x0f, 0x02, 0x00, 0xf4]);
         h.runSlice(100);
         assert.equal(h.instructionCount(), 4, 'the four nops it ran, not the one it stopped on');
         const fault = h.fault();

@@ -49,9 +49,14 @@
  * @param {(target: any, pointers: Iterable<number>) => void} [released]
  *        Told when the program lets go of an object's last reference, before
  *        its pointers stop naming it.
+ * @param {Record<string, (call: number[]) => number | undefined>} [inPlace]  What a
+ *     call the host makes from driven steps is answered with in place, by method:
+ *     a device's setters, their records written into its ring (`appendCommand`).
  * @returns {import('./com.js').InterfaceDescriptor}
  */
-export function describe(id, slots, implemented = {}, guests = {}, released = undefined){
+export function describe(id, slots, implemented = {}, guests = {}, released = undefined,
+    inPlace = undefined)
+{
     return {
         id,
         released,
@@ -61,6 +66,9 @@ export function describe(id, slots, implemented = {}, guests = {}, released = un
             // A method that runs in the guest: its builder is handed the
             // method's own trap to fall back to, and answers the slot.
             guest: guests[name],
+            // A call the host makes to it from driven steps is answered by
+            // its handler in place (`answerInPlace`).
+            inPlace: inPlace?.[name],
             // The descriptor's own type says a number; a promise is what the
             // bridge suspends on, and it passes through the adapter untouched.
             invoke: /** @type {any} */ (implemented[name]),

@@ -109,7 +109,7 @@ export function createBridgeModule(){
              *          failure: Error | null, disposed: boolean,
              *          drive: { steps: number, ms: number, worstMs: number, worst: string,
              *              call: string, calls: number, callMs: number, worstCallMs: number,
-             *              worstCall: string } }}
+             *              worstCall: string, inPlace: number } }}
              */
             const state = {
                 dispatcher: null,
@@ -121,7 +121,7 @@ export function createBridgeModule(){
                 // The steps run from the sentinel (`drive`): outside every
                 // crossing's phase, and so, unmeasured, taken for the guest's.
                 drive: { steps: 0, ms: 0, worstMs: 0, worst: '', call: '', calls: 0, callMs: 0,
-                    worstCallMs: 0, worstCall: '' },
+                    worstCallMs: 0, worstCall: '', inPlace: 0 },
             };
             const driveProfiler = import.meta.BOTTLIFY_DIAGNOSTICS !== false
                 ? /** @type {any} */ (host.requireApi('log')) : null;
@@ -245,6 +245,15 @@ export function createBridgeModule(){
                     thread, entry: call.entry, args: call.args ?? [], stackAtRest, by: name,
                     onReturn: step,
                 });
+                /**
+                 * What a call's slot answers in place (`answerInPlace`): a
+                 * device's setter, which the guest would only have written
+                 * into its command ring, made here with no entry into the
+                 * guest and no trap back. Undefined for a call that goes in.
+                 *
+                 * @param {import('./internal/drive.js').GuestCall} call
+                 */
+                const inPlace = call=>state.vtables?.answerInPlace(call.entry, call.args ?? []);
                 /** @param {number} returned */
                 function step(returned){
                     /** @type {IteratorResult<import('./internal/drive.js').GuestCall, any>} */
@@ -252,6 +261,12 @@ export function createBridgeModule(){
                     try
                     {
                         next = token.steps.next(returned);
+                        for (let answered; !next.done
+                            && (answered = inPlace(next.value)) !== undefined;)
+                        {
+                            state.drive.inPlace++;
+                            next = token.steps.next(answered | 0);
+                        }
                     }
                     catch (e){
                         // As a promise's rejection: whoever drives the machine is
@@ -296,8 +311,24 @@ export function createBridgeModule(){
                 }
                 // The first call from where the call in flight left the stack;
                 // the rest from where it rests, as `callGuest` builds them.
-                enter(/** @type {import('./internal/drive.js').GuestCall} */ (token.first),
-                    freeStack);
+                const first = /** @type {import('./internal/drive.js').GuestCall} */ (token.first);
+                let answered;
+                try
+                {
+                    answered = inPlace(first);
+                }
+                catch (e){
+                    kernel.holdThread();
+                    state.failure ??= /** @type {Error} */ (e);
+                    return;
+                }
+                if (answered !== undefined)
+                {
+                    state.drive.inPlace++;
+                    step(answered | 0);
+                    return;
+                }
+                enter(first, freeStack);
             };
 
             // Reading the thread's last error belongs to win32, which sits above
@@ -308,6 +339,14 @@ export function createBridgeModule(){
             // code a program later complains about actually came from.
             state.dispatcher = createDispatcher({
                 cpu, memory, parking: state.parking, suspend, lastError: config?.lastError,
+                inPlace: call=>{
+                    const answered = state.vtables?.answerInPlace(call.entry, call.args ?? []);
+                    if (answered !== undefined)
+                    {
+                        state.drive.inPlace++;
+                    }
+                    return answered;
+                },
                 lastErrorOffset: config?.lastErrorOffset,
                 traceStrings: config?.traceStrings ?? false,
                 callPhases: config?.callPhases ?? false,
@@ -695,8 +734,19 @@ export function createBridgeModule(){
                  * @param {import('./internal/drive.js').Steps} steps
                  */
                 drive(steps){
+                    // A step its slot answers in place enters the guest down
+                    // neither path, so that both make the same guest calls.
                     return config?.driveGuestCalls === false || !live()
-                        ? stepsThroughPromises(steps, call=>this.callGuest(call))
+                        ? stepsThroughPromises(steps, call=>{
+                            const answered = state.vtables?.answerInPlace(call.entry,
+                                call.args ?? []);
+                            if (answered === undefined)
+                            {
+                                return this.callGuest(call);
+                            }
+                            state.drive.inPlace++;
+                            return Promise.resolve(answered | 0);
+                        })
                         : driven(steps);
                 },
 
@@ -1019,6 +1069,8 @@ export function createBridgeModule(){
                     ...instance.callbacks.diagnostics(),
                     ...instance.vtables ? instance.vtables.diagnostics() : {},
                     driveSteps: instance.drive.steps,
+                    // The steps answered in place, with no entry into the guest.
+                    driveInPlace: instance.drive.inPlace,
                     driveMs: Math.round(instance.drive.ms),
                     driveWorstMs: Math.round(instance.drive.worstMs * 1000) / 1000,
                     driveWorst: instance.drive.worst,

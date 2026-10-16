@@ -983,3 +983,20 @@ test('inc with dead flags keeps a pending record whole for the carry a later rea
     assert.equal(r.m.reg('edx') & 0xff, 0);
     agree(r);
 });
+
+test('the system-table stores answer 32-bit Windows\'s tables, in memory and in registers', ()=>{
+    // sidt [0x2000]; sgdt [0x2008]; sldt [0x2010]; str ax; smsw cx; hlt
+    const r = both([0x0f, 0x01, 0x0d, 0x00, 0x20, 0, 0, 0x0f, 0x01, 0x05, 0x08, 0x20, 0, 0,
+        0x0f, 0x00, 0x05, 0x10, 0x20, 0, 0, 0x0f, 0x00, 0xc8, 0x0f, 0x01, 0xe1, 0xf4],
+    { regs: { eax: 0x12345678, ecx: 0x9abcdef0 }, memory: [[0x2010, [0xaa, 0xbb, 0xcc]]] });
+    assert.equal(r.exit.kind, 3);
+    agree(r);
+    const bytes = (/** @type {number} */ at, /** @type {number} */ n)=>[...r.m.read(at, n)];
+    assert.deepEqual(bytes(0x2000, 6), [0xff, 0x07, 0x00, 0xf4, 0x03, 0x80],
+        'the IDT: limit, base');
+    assert.deepEqual(bytes(0x2008, 6), [0xff, 0x03, 0x00, 0xf0, 0x03, 0x80], 'the GDT');
+    assert.deepEqual(bytes(0x2010, 3), [0, 0, 0xcc], 'no LDT, sixteen bits of it');
+    assert.equal(r.m.reg('eax'), 0x12340028, 'the task register\'s selector in ax');
+    assert.equal(r.m.reg('ecx'), 0x9abc003b, 'CR0\'s low word in cx');
+    assert.deepEqual([...r.ram.subarray(0x2000, 0x2006)], bytes(0x2000, 6), 'and the model agrees');
+});

@@ -27,6 +27,7 @@ import { createCountCells, createPublisher } from './com.js';
 import { createGraphicsLibraries } from './exports.js';
 import { ADAPTER_GUID, describeAdapter } from './adapter.js';
 import { BUFFER, SHADOW, TEXTURE } from './shadow.js';
+import { FPU_SETUP } from './fpu.js';
 import {
     IDIRECT3D8_SLOTS, IDIRECT3DCUBETEXTURE8_SLOTS, IDIRECT3DDEVICE8_SLOTS,
     IDIRECT3DSURFACE8_SLOTS, IDIRECT3DTEXTURE8_SLOTS, IDIRECT3DVERTEXBUFFER8_SLOTS,
@@ -135,6 +136,15 @@ function machine(){
         heap: { allocate },
     });
 
+    /**
+     * A slot's trap: itself, or where the guest routine CreateDevice's slot holds
+     * (`fpu.js`) goes on to.
+     *
+     * @param {number} at
+     */
+    const trapOf = at=>(registered.has(at) || memory.readU32(at) !== FPU_SETUP.HEAD ? at
+        : (at + FPU_SETUP.LENGTH + (memory.readU32(at + FPU_SETUP.JUMP) | 0)) >>> 0);
+
     return {
         memory,
         allocate,
@@ -149,7 +159,7 @@ function machine(){
         /** @param {number} pointer @param {number} index @param {number[]} args */
         call(pointer, index, args = []){
             const table = memory.readU32(pointer);
-            const entry = registered.get(memory.readU32(table + index * 4));
+            const entry = registered.get(trapOf(memory.readU32(table + index * 4)));
             assert.ok(entry, `slot ${index} has an implementation`);
             return entry.fn.handler([pointer, ...args]) >>> 0;
         },
@@ -162,7 +172,7 @@ function machine(){
          */
         callRaw(pointer, index, args = []){
             const table = memory.readU32(pointer);
-            const entry = registered.get(memory.readU32(table + index * 4));
+            const entry = registered.get(trapOf(memory.readU32(table + index * 4)));
             assert.ok(entry, `slot ${index} has an implementation`);
             return entry.fn.handler([pointer, ...args]);
         },
@@ -190,7 +200,7 @@ function machine(){
         /** @param {number} pointer @param {number} index */
         argBytesOf(pointer, index){
             const table = memory.readU32(pointer);
-            return registered.get(memory.readU32(table + index * 4)).fn.argBytes;
+            return registered.get(trapOf(memory.readU32(table + index * 4))).fn.argBytes;
         },
     };
 }

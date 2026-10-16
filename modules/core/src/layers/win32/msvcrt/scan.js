@@ -125,9 +125,12 @@ function scanset(body){
  * @param {() => number} nextPointer  The next argument, taken only when a
  *        conversion is actually going to store through it.
  * @param {ScanStore} store
- * @param {{ wide?: boolean, progress?: ScanProgress }} [options]
+ * @param {{ wide?: boolean, secure?: boolean, progress?: ScanProgress }} [options]
  *        `wide` for the wscanf family, where %s and %c are wide and %S and
- *        %C narrow; `progress` is filled in with how far the scan read.
+ *        %C narrow; `secure` for the _s family, where each %c, %s and %[
+ *        takes its buffer's size in characters after its pointer, and text
+ *        that does not fit ends the scan with the buffer emptied;
+ *        `progress` is filled in with how far the scan read.
  * @returns {number} Assignments made, or SCAN_EOF.
  */
 export function runScan(input, format, nextPointer, store, options = {}){
@@ -288,9 +291,14 @@ export function runScan(input, format, nextPointer, store, options = {}){
             at += count;
             if (!suppress)
             {
+                const pointer = nextPointer();
+                if (options.secure && (nextPointer() >>> 0) < count)
+                {
+                    return stop();
+                }
                 // No terminator: %c reads characters, not a string, and the
                 // caller's buffer is exactly as long as it asked for.
-                store.text(nextPointer(), taken, false, wide);
+                store.text(pointer, taken, false, wide);
                 assigned++;
             }
             continue;
@@ -323,7 +331,13 @@ export function runScan(input, format, nextPointer, store, options = {}){
             }
             if (!suppress)
             {
-                store.text(nextPointer(), input.slice(start, at), true, wide);
+                const pointer = nextPointer();
+                if (options.secure && (nextPointer() >>> 0) < at - start + 1)
+                {
+                    store.text(pointer, '', true, wide);
+                    return stop();
+                }
+                store.text(pointer, input.slice(start, at), true, wide);
                 assigned++;
             }
             continue;
@@ -473,8 +487,9 @@ export function createScanFunctions(host){
      * @param {(args: number[]) => string} inputOf
      * @param {(pointer: number) => string} [formatOf]
      * @param {boolean} [wide]
+     * @param {boolean} [secure]
      */
-    const scanf = (fixed, inputOf, formatOf = readString, wide = false)=>({
+    const scanf = (fixed, inputOf, formatOf = readString, wide = false, secure = false)=>({
         convention: 'cdecl',
         // The pointers to store through are the variadic tail, and only as
         // many slots as are declared are read: with the fixed part alone,
@@ -484,7 +499,7 @@ export function createScanFunctions(host){
         handler: (/** @type {number[]} */ args)=>{
             let taken = fixed;
             const assigned = runScan(inputOf(args), formatOf(args[fixed - 1]),
-                ()=>args[taken++] ?? 0, store, { wide });
+                ()=>args[taken++] ?? 0, store, { wide, secure });
             // msvcrt's wide scan answers no input with nothing assigned, not
             // with EOF, as the later runtimes do.
             return wide && assigned === SCAN_EOF ? 0 : assigned;
@@ -508,6 +523,9 @@ export function createScanFunctions(host){
          */
         _snscanf: scanf(3, args=>readString(args[0]).slice(0, args[1] >>> 0)),
 
+        /** int sscanf_s(const char *buffer, const char *format, ...) */
+        sscanf_s: scanf(2, args=>readString(args[0]), readString, false, true),
+
         ...readMemory ? {
             /**
              * int swscanf(const wchar_t *buffer, const wchar_t *format, ...)
@@ -515,6 +533,9 @@ export function createScanFunctions(host){
              * %s and %c store wide text here, %S, %C and an h narrow.
              */
             swscanf: scanf(2, args=>readWide(args[0]), readWide, true),
+
+            /** int swscanf_s(const wchar_t *buffer, const wchar_t *format, ...) */
+            swscanf_s: scanf(2, args=>readWide(args[0]), readWide, true, true),
         } : {},
     };
 }

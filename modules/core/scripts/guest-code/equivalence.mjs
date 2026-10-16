@@ -242,11 +242,14 @@ export function equivalence(compiled, sources, model){
         {
             m.write(address, Array.from(bytes));
         }
+        // A thiscall case's first word is `this`, which the call passes in ECX.
+        const thiscall = fn.convention === 'thiscall';
+        const words = input.stack ?? [];
         m.writeU32(STACK, HALT);
-        (input.stack ?? []).forEach((word, i)=>m.writeU32(STACK + 4 + i * 4, word));
+        (thiscall ? words.slice(1) : words).forEach((word, i)=>m.writeU32(STACK + 4 + i * 4, word));
         m.setReg('esp', STACK);
         m.setReg('eax', 0xa5a5a5a5);
-        m.setReg('ecx', 0xc5c5c5c5);
+        m.setReg('ecx', thiscall ? (words[0] ?? 0) >>> 0 : 0xc5c5c5c5);
         m.setReg('edx', 0xd5d5d5d5);
         for (const [reg, value] of Object.entries(SAVED))
         {
@@ -318,9 +321,11 @@ export function equivalence(compiled, sources, model){
     const handOver = (name, m, input, double, before, slots, x87)=>{
         const view = new DataView(m.memory.buffer);
         const what = `${name}(${JSON.stringify(input.stack ?? [])}) handed to the host`;
-        assert.equal(m.reg('esp'), STACK, `${what}: ESP at the return address`);
-        assert.equal(m.readU32(STACK), HALT, `${what}: the return address kept`);
-        const args = Array.from({ length: slots }, (_, i)=>m.readU32(STACK + 4 + i * 4));
+        // A thiscall function hands over with `this` pushed under the return address.
+        const frame = compiledOf(name).convention === 'thiscall' ? STACK - 4 : STACK;
+        assert.equal(m.reg('esp'), frame, `${what}: ESP at the return address`);
+        assert.equal(m.readU32(frame), HALT, `${what}: the return address kept`);
+        const args = Array.from({ length: slots }, (_, i)=>m.readU32(frame + 4 + i * 4));
         assert.deepEqual(args, (input.stack ?? []).slice(0, slots).map(word=>word >>> 0),
             `${what}: the arguments kept`);
         assert.deepEqual({ ebx: m.reg('ebx'), esi: m.reg('esi'), edi: m.reg('edi'),
@@ -349,9 +354,9 @@ export function equivalence(compiled, sources, model){
         memory.set(data, DATA);
         const answer = double.host(memory, args, pushed);
         // The trap returns as the export does: a stdcall one pops the arguments.
-        const popped = compiledOf(name).convention === 'stdcall' ? slots * 4 : 0;
+        const popped = compiledOf(name).convention !== 'cdecl' ? slots * 4 : 0;
         return {
-            eax: typeof answer === 'number' ? answer >>> 0 : 0, edx: 0, esp: STACK + 4 + popped,
+            eax: typeof answer === 'number' ? answer >>> 0 : 0, edx: 0, esp: frame + 4 + popped,
             st: typeof answer === 'number' ? [] : [answer.st0], saved: SAVED, df: false,
             control: input.control ?? 0x37f, status: (input.status ?? 0) & 0xc7ff,
             data: memory.slice(DATA, DATA + data.length), handedOver: true,
@@ -462,9 +467,10 @@ export function equivalence(compiled, sources, model){
             assert.equal(x86.handedOver, js.handedOver,
                 `${what}: handed to the host by both or by neither`);
             assert.deepEqual(x86.saved, SAVED, `${what}: EBX, ESI, EDI and EBP kept`);
-            const popped = fn.convention === 'stdcall'
+            // A thiscall function's `this` came in ECX, not in a slot of the caller's.
+            const popped = fn.convention !== 'cdecl'
                 ? fn.params.reduce((sum, type)=>sum + (type === 'f64' ? 8
-                    : type === 'x87' ? 0 : 4), 0)
+                    : type === 'x87' ? 0 : 4), 0) - (fn.convention === 'thiscall' ? 4 : 0)
                 : 0;
             assert.equal(x86.esp, STACK + 4 + popped, `${what}: ESP past the return address`);
             assert.equal(x86.df, false, `${what}: the direction flag clear`);

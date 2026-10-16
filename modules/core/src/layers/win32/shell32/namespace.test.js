@@ -54,7 +54,7 @@ function machine(){
             free += (bytes + 3) & ~3;
             return at;
         },
-        folders: { Desktop: 'C:\\Desk' },
+        folders: { Desktop: 'C:\\Desk', Personal: 'C:\\Program Files\\Common' },
         volume: {
             drives: ()=>['C'],
             /** @param {string} path */
@@ -399,4 +399,20 @@ test('SHGetFolderLocation is SHGetSpecialFolderLocation, its reserved word zero'
     assert.equal(m.shell.SHGetFolderLocation.handler([0, 0x10, 0, 1, 0x100]) | 0,
         0x80070057 | 0, 'a reserved word that is not zero');
     assert.equal(m.shell.SHGetFolderLocation.argBytes, 20);
+});
+
+test('the desktop parses its own items by CLSID, in any case: My Documents is its folder', ()=>{
+    // A game finds where to save as ParseDisplayName("::{450d8fba-...}") on the
+    // desktop and SHGetPathFromIDList of what comes back; an item it could not
+    // parse leaves it saving under an empty path.
+    const m = machine();
+    assert.equal(m.shell.SHGetDesktopFolder.handler([0x104]), S_OK);
+    const desktop = m.u32(0x104);
+    assert.equal(m.call(desktop, FOLDER.ParseDisplayName, [0, 0,
+        m.wide('::{450d8fba-ad25-11d0-98a8-0800361b1103}'), 0, 0x108, 0]), S_OK);
+    assert.equal(m.shell.SHGetPathFromIDListA.handler([m.u32(0x108), 0x200]), 1);
+    assert.equal(m.string(0x200), 'C:\\Program Files\\Common');
+    assert.equal(m.call(desktop, FOLDER.ParseDisplayName, [0, 0,
+        m.wide('::{20d04fe0-3aea-1069-a2d8-08002b30309d}'), 0, 0x10c, 0]), S_OK,
+    'My Computer too');
 });

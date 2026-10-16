@@ -57,8 +57,10 @@ test('an indexed draw reports the vertices its indices name, never fewer than it
         const drawsFrom = (/** @type {any} */ buffer, /** @type {number} */ from,
             /** @type {number} */ to)=>reported.push([buffer, from, to]);
         const declaredCount = vertices - base;
-        reportDynamicReads(drawsFrom, [{ buffer: vertexBuffer, offset: 0, stride }], base,
-            declaredCount, indices, startIndex, indexCount,
+        // The streams as the devices pass them, an iterator over their table:
+        // read once by the scan of the indices, they reported nothing.
+        const streams = new Map([[0, { buffer: vertexBuffer, offset: 0, stride }]]).values();
+        reportDynamicReads(drawsFrom, streams, base, declaredCount, indices, startIndex, indexCount,
             { read: (at, length)=>memory.subarray(at, at + length), base });
         const vertexRange = reported.find(([buffer])=>buffer === vertexBuffer);
         assert.ok(vertexRange, `round ${round}: the vertices are reported`);

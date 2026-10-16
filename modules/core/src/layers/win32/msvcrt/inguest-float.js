@@ -165,6 +165,28 @@ export function _controlfp({ controlWord, setControlWord }, newControl, mask){
 }
 
 /**
+ * errno_t _controlfp_s(unsigned int *currentControl, unsigned int newControl,
+ * unsigned int mask) -- `_controlfp`, the word it answers written through a
+ * pointer that may be NULL, and zero.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} current @param {u32} newControl @param {u32} mask
+ * @returns {u32}
+ */
+export function _controlfp_s({ controlWord, setControlWord, setU32 }, current, newControl, mask){
+    const word = controlWord();
+    const changed = mask & CHANGEABLE & ~EM_DENORMAL;
+    const wanted = readBack(word) & ~changed | newControl & changed;
+    const loaded = word & RESERVED | loadable(wanted);
+    setControlWord(loaded);
+    if (current !== 0)
+    {
+        setU32(current, readBack(loaded) >>> 0);
+    }
+    return 0;
+}
+
+/**
  * unsigned int _statusfp(void) -- the exception flags raised, as the
  * runtime numbers them (`_SW_INVALID` 0x10 ... `_SW_INEXACT` 0x1).
  *

@@ -23,7 +23,7 @@
  */
 
 import { AF, CF, DF, OF, PF, SF, ZF } from '../decode/table.js';
-import { cpuidLeaves, topologyOf } from '../cpuid.js';
+import { SYSTEM_TABLES, cpuidLeaves, topologyOf } from '../cpuid.js';
 import { EMPTY } from '../wasm/encoder.js';
 import { I32, Kind, MASKS, SIGN_BITS, widthCode } from './flags.js';
 import { CallStack, Exit, Local, STATE_PARAMS } from './region.js';
@@ -427,6 +427,29 @@ export function emitInstruction(e, instruction, flagsLive){
                     e.close();
                 }
             }
+            return true;
+        }
+        case 'sgdt':
+        case 'sidt':
+        {
+            // Six bytes: the limit, then the base.
+            const table = instruction.op === 'sgdt' ? SYSTEM_TABLES.gdt : SYSTEM_TABLES.idt;
+            prepare(e, dst);
+            noteStore(e, 6);
+            b.localGet(Local.addr).i32const(table.limit)
+                .store('i32_16', { offset: e.layout.ramBase });
+            b.localGet(Local.addr).i32const(table.base | 0)
+                .store('i32', { offset: e.layout.ramBase + 2 });
+            return true;
+        }
+        case 'sldt':
+        case 'str':
+        case 'smsw':
+        {
+            const value = instruction.op === 'sldt' ? SYSTEM_TABLES.ldt
+                : instruction.op === 'str' ? SYSTEM_TABLES.tr : SYSTEM_TABLES.cr0 & 0xffff;
+            prepare(e, dst);
+            writeOp(e, dst, ()=>b.i32const(value));
             return true;
         }
         case 'rdtsc':

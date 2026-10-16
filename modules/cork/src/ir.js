@@ -21,7 +21,7 @@
  */
 
 import { AF, CF, DF, OF, PF, SF, ZF, conditionReads } from './decode/table.js';
-import { cpuidLeaf, topologyOf } from './cpuid.js';
+import { SYSTEM_TABLES, cpuidLeaf, topologyOf } from './cpuid.js';
 import { evaluateX87, fxrstor, fxsave, isX87Op } from './ir-x87.js';
 import { evaluateSimd, isSimdOp, mmxState } from './ir-simd.js';
 
@@ -944,6 +944,33 @@ export function evaluate(instruction, state){
             state.reg[1] = answer.ecx;
             state.reg[2] = answer.edx;
             state.reg[3] = answer.ebx;
+            return;
+        }
+        case 'sgdt':
+        case 'sidt':
+        {
+            const table = op === 'sgdt' ? SYSTEM_TABLES.gdt : SYSTEM_TABLES.idt;
+            const at = address(instruction.operands[0]);
+            state.memory.write(at, 2, table.limit);
+            state.memory.write((at + 2) >>> 0, 4, table.base);
+            return;
+        }
+        case 'sldt':
+        case 'str':
+        case 'smsw':
+        {
+            const [dst] = instruction.operands;
+            const value = op === 'sldt' ? SYSTEM_TABLES.ldt : op === 'str' ? SYSTEM_TABLES.tr
+                : SYSTEM_TABLES.cr0 & 0xffff;
+            if (dst.kind === 'mem')
+            {
+                state.memory.write(address(dst), 2, value);
+            }
+            else
+            {
+                const reg = /** @type {number} */ (dst.reg);
+                state.reg[reg] = (state.reg[reg] & 0xffff0000 | value) >>> 0;
+            }
             return;
         }
         case 'rdtsc':

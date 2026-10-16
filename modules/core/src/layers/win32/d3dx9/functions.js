@@ -101,6 +101,8 @@ const IN_GUEST = [[inGuest, COMPILED], [matrix, MATRIX], [vector, VECTOR],
  * @typedef {Object} D3dxHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {(address: number) => number} [readU32]  A word read in place.
+ * @property {(address: number, value: number) => void} [writeU32]  A word written in place.
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {{ publish: (object: any, interfaceId: string) => number }} [vtables]
  *           Where a COM object gets the interface pointer a program holds.

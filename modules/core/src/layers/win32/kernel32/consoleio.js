@@ -338,6 +338,20 @@ export function createConsoleIoFunctions(host){
         WriteConsoleOutputCharacterA: noConsole('WriteConsoleOutputCharacterA', 20),
         WriteConsoleOutputCharacterW: noConsole('WriteConsoleOutputCharacterW', 20),
 
+        /**
+         * The rest of the screen buffer's calls, refused as the ones above
+         * are: BOOL Read/WriteConsoleOutputA/W(HANDLE, PCHAR_INFO, COORD,
+         * COORD, PSMALL_RECT), BOOL Get/SetConsoleCursorInfo(HANDLE,
+         * PCONSOLE_CURSOR_INFO) and BOOL SetConsoleActiveScreenBuffer(HANDLE).
+         */
+        ReadConsoleOutputA: noConsole('ReadConsoleOutputA', 20),
+        ReadConsoleOutputW: noConsole('ReadConsoleOutputW', 20),
+        WriteConsoleOutputA: noConsole('WriteConsoleOutputA', 20),
+        WriteConsoleOutputW: noConsole('WriteConsoleOutputW', 20),
+        GetConsoleCursorInfo: noConsole('GetConsoleCursorInfo', 8),
+        SetConsoleCursorInfo: noConsole('SetConsoleCursorInfo', 8),
+        SetConsoleActiveScreenBuffer: noConsole('SetConsoleActiveScreenBuffer', 4),
+
         /** BOOL GetNumberOfConsoleInputEvents(HANDLE, LPDWORD lpcNumberOfEvents) */
         GetNumberOfConsoleInputEvents: {
             argBytes: 8,

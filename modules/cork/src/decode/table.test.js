@@ -77,7 +77,9 @@ test('the condition codes read the flags the manual says', ()=>{
 test('what the table leaves out is named as such: system forms are SYS, gaps are null', ()=>{
     assert.equal(ONE_BYTE[0xea], SYS, 'far jump');
     assert.equal(ONE_BYTE[0xcf], SYS, 'iret');
-    assert.equal(TWO_BYTE[0x01], SYS, 'lgdt and friends');
+    // 0F 01 stores the tables' places in user mode, and loads them only in the kernel.
+    assert.equal(/** @type {any} */ (TWO_BYTE[0x01]).entries[2], SYS, 'lgdt and friends');
+    assert.equal(/** @type {any} */ (TWO_BYTE[0x01]).entries[1].op, 'sidt');
     assert.equal(TWO_BYTE[0x38], null, 'SSSE3: added on measured need');
     assert.equal(TWO_BYTE[0x3a], null);
     let entries = 0;

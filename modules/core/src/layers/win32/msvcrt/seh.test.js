@@ -363,3 +363,47 @@ test('_seh_longjmp_unwind answers to its undecorated name and the decorated one'
     assert.equal(table._seh_longjmp_unwind, table['_seh_longjmp_unwind@4']);
     assert.equal(table._seh_longjmp_unwind.argBytes, 4);
 });
+
+test('_except_handler4_common reads Visual C++ 2005\'s frame: the table under the cookie, past'
+    + ' its header, -2 for no level', async()=>{
+    // A program built with Visual C++ 2005 registers its own _except_handler4,
+    // which hands the runtime its security cookie. Bound to a stub, every
+    // access violation inside a __try came back unanswered and the faulting
+    // instruction ran again for ever.
+    const COOKIE = 0xbb40e64e;
+    const COOKIE_AT = 0x70000;
+    const EH4_NONE = 0xfffffffe;
+    const m = machine({ answer: entry=>(entry === 0x63000 ? 1 : 0) });
+    m.put(COOKIE_AT, COOKIE);
+    m.put(FRAME + SCOPE_FRAME.TABLE, (TABLE ^ COOKIE) >>> 0);
+    m.put(FRAME + SCOPE_FRAME.TRY_LEVEL, 1);
+    m.put(FRAME + SCOPE_FRAME.SAVED_ESP, 0x1f000);
+    // The GS and EH cookie offsets, then the entries.
+    m.put(TABLE, 0xfffffffe);
+    const entries = [
+        { enclosing: EH4_NONE, filter: 0x63000, target: 0x64000 },
+        { enclosing: 0, filter: 0, target: 0x62000 },
+    ];
+    entries.forEach((entry, index)=>{
+        const at = TABLE + 0x10 + index * SCOPE_ENTRY.SIZE;
+        m.put(at + SCOPE_ENTRY.ENCLOSING, entry.enclosing);
+        m.put(at + SCOPE_ENTRY.FILTER, entry.filter);
+        m.put(at + SCOPE_ENTRY.TARGET, entry.target);
+    });
+    const handler = m.crt.table._except_handler4_common;
+    assert.equal(handler.argBytes, 24);
+    assert.equal(handler.convention, 'cdecl');
+
+    const answer = await handler.handler([COOKIE_AT, 0, m.record(0), FRAME, 0, 0]);
+
+    assert.deepEqual(m.called, [0x63000, 0x62000],
+        'the outer level\'s filter, then the inner finally as it is left');
+    assert.deepEqual(m.unwound, [{ targetFrame: FRAME, address: 0x64000 }]);
+    assert.equal(m.get(FRAME + SCOPE_FRAME.TRY_LEVEL), EH4_NONE, 'no level entered after');
+    assert.deepEqual(answer.continueAt.eip, 0x64000);
+
+    m.called.length = 0;
+    m.put(FRAME + SCOPE_FRAME.TRY_LEVEL, 1);
+    await handler.handler([COOKIE_AT, 0, m.record(EH_UNWINDING), FRAME, 0, 0]);
+    assert.deepEqual(m.called, [0x62000], 'unwinding runs the finally and stops at -2');
+});

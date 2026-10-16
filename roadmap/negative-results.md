@@ -916,3 +916,24 @@ None yet.
   The rate does not show it past the noise: 5 to 9 s of a 260 s thread is 2-3.5%, inside the
   4% two runs of one tree differ by. The thread's time freed went to translated code, whose own
   rate over its time did not rise with it (443-468 M/s before, 434-446 after).
+
+### 2026-10-16 -- a host call's device steps run as the device's methods in the host
+
+- **Idea.** `ID3DXEffect::CommitChanges` on the host drives the device's setters as guest calls,
+  each a turn into the guest and back. The guess was that answering those steps where they stand
+  (`InterfaceMethod.inPlace`), by running the setter's own host method, would make a commit
+  cheaper than entering the guest for each.
+- **Workload.** The Need for Speed Carbon demo bundle (`bundle.btl` sha256 `f5aec769a16ce7d8…`),
+  started from the launcher and driven into its first race, 640x480; host calls counted by
+  function over 10 s on the running page. The scenes of two runs are not the same.
+- **Values.** Host time per `CommitChanges` call: before, not recorded; with the steps run as the
+  device's methods, about 48 us; with the steps answered by writing the setter's command into the
+  ring as the guest routine would (`appendCommand`, the change that was kept), 34 then 18-24 us.
+  One run of each; spread and noise floor not recorded.
+- **Machine.** Chrome in a Parallels Windows 11 VM on its virtual GPU; version, driver and power
+  plan not recorded.
+- **Why it did not pay.** A setter's host method does the device's whole work at once (its state
+  checks, its shadow, its seam), where the guest routine only appends a command record.
+- **Correctness.** The bridge's tests of steps answered in place; the gate holding the host's
+  command records to the guest routine's byte for byte (`seam/commands-host.itest.js`).
+- **Decision.** Removed: steps are answered in place only by appending the command.

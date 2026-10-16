@@ -21,11 +21,13 @@ import { createCodeArena } from './kernel32/code-arena.js';
 import { createGuestHeap } from './kernel32/guest-heap.js';
 import { createCriticalSections } from './kernel32/critical.js';
 import { createLocaleFunctions, encodeAnsi } from './kernel32/locale.js';
-import { createEnvironmentFunctions, defaultEnvironment } from './kernel32/environment.js';
+import { createEnvironmentFunctions, createUserenvFunctions, defaultEnvironment }
+    from './kernel32/environment.js';
 import { createThreadPool } from './kernel32/pool.js';
 import { reportedVersion, windowsVersion } from './kernel32/versions.js';
 import { createSystemFunctions } from './kernel32/system.js';
-import { createProcessors } from './kernel32/processor.js';
+import { PROCESSOR, createProcessors } from './kernel32/processor.js';
+import { createPdhFunctions, createPowrprofFunctions } from './power/functions.js';
 import { createSpawner, createSpawnFunctions, writeThroughProtection } from './kernel32/spawn.js';
 import { createAtomFunctions } from './kernel32/atoms.js';
 import { createSeh } from './kernel32/seh.js';
@@ -43,6 +45,8 @@ import { createConsoleIoFunctions } from './kernel32/consoleio.js';
 import { createVolume } from './kernel32/vfs.js';
 import { createMsvcrtFunctions } from './msvcrt/functions.js';
 import { createCrtdllFunctions } from './msvcrt/crtdll.js';
+import { createMsvcr80Functions } from './msvcrt/msvcr80.js';
+import { createMsvcp80Functions } from './msvcrt/msvcp80.js';
 import { createWindowFunctions } from './user32/windows.js';
 import { createWindowDirectory } from './user32/directory.js';
 import { createMessageQueue } from './user32/messages.js';
@@ -111,8 +115,8 @@ import { createWintrustFunctions } from './wintrust/functions.js';
 import { createD3dxFunctions } from './d3dx9/functions.js';
 import { createSpoolerFunctions } from './winspool/functions.js';
 import { createNetworkFunctions } from './mpr/functions.js';
-import { createNetbiosFunctions, createSensFunctions, createTelephonyFunctions }
-    from './offline/functions.js';
+import { createNetbiosFunctions, createSensFunctions, createSessionNotificationFunctions,
+    createTelephonyFunctions } from './offline/functions.js';
 import { createAcmFunctions } from './msacm32/functions.js';
 import { createThemeFunctions } from './uxtheme/functions.js';
 import { createWininetFunctions } from './wininet/functions.js';
@@ -192,6 +196,19 @@ const KNOWN_DLLS = new Set([
     'setupapi.dll', 'shcore.dll', 'shell32.dll', 'shlwapi.dll', 'user32.dll',
     'wldap32.dll', 'wow64.dll', 'wow64cpu.dll', 'wow64win.dll', 'wowarmhw.dll',
     'ws2_32.dll', 'xtajit.dll', 'xtajit64.dll',
+]);
+
+/**
+ * What imagehlp.dll exports of dbghelp's (Wine's imagehlp.spec forwards them
+ * there): the 32-bit symbol calls, the stack walk and the name undecorator.
+ */
+const IMAGEHLP_EXPORTS = new Set([
+    'StackWalk', 'SymCleanup', 'SymFunctionTableAccess', 'SymGetModuleBase', 'SymGetOptions',
+    'SymGetSymFromAddr', 'SymGetLineFromAddr', 'SymInitialize', 'SymLoadModule',
+    'SymSetOptions', 'UnDecorateSymbolName', 'MakeSureDirectoryPathExists',
+    'StackWalk64', 'SymGetModuleBase64', 'SymFunctionTableAccess64', 'SymFromAddr',
+    'SymGetLineFromAddr64', 'SymGetModuleInfo64', 'SymEnumerateModules64',
+    'SearchTreeForFile',
 ]);
 
 /**
@@ -1487,6 +1504,9 @@ export function createWin32Module(){
                         threadBlock: threadMade,
                         park: (/** @type {any} */ thread)=>bridge.park(thread),
                         setLastError: setError,
+                        waitFor: (handle, milliseconds)=>libraries['KERNEL32.dll']
+                            .WaitForSingleObject.handler([handle, milliseconds]),
+                        threadReturn: ()=>threadReturnAddress(),
                     }).table,
                     ...createDebugFunctions({
                         readCString,
@@ -1897,6 +1917,7 @@ export function createWin32Module(){
                         // `exit` does not come back, so like ExitProcess it records
                         // the code and parks the calling thread rather than
                         // returning to a caller that no longer exists.
+                        processId,
                         exitProcess: (/** @type {number} */ code)=>endProcess(code),
                         // _spawn starts what CreateProcess starts.
                         launch: (named, line, flags)=>spawner.launch(named, line, flags),
@@ -1987,7 +2008,10 @@ export function createWin32Module(){
                 // One registry behind all three, as on a real machine: a socket
                 // opened through one of these names is the same socket seen through
                 // another, and they share one error domain.
-                'WSOCK32.dll': winsock.sockets,
+                // With the extensions it forwards to mswsock.
+                'WSOCK32.dll': { ...winsock.sockets,
+                    AcceptEx: winsock.extensions.AcceptEx,
+                    GetAcceptExSockaddrs: winsock.extensions.GetAcceptExSockaddrs },
 
                 // The adapters behind the sockets: one, on the network they reach.
                 'IPHLPAPI.dll': createIphlpapiFunctions({
@@ -2262,7 +2286,7 @@ export function createWin32Module(){
                 // The debug help library with no symbol files: what a crash
                 // reporter walks the faulting stack with.
                 'DBGHELP.dll': createDbghelpFunctions({
-                    writeMemory, readMemory, files: volume,
+                    writeMemory, readMemory, files: volume, setRegisters,
                     readCString: (/** @type {number} */ address)=>readCString(address, 260),
                     modules: ()=>modules.list?.() ?? [],
                     setLastError: setError,
@@ -2274,6 +2298,10 @@ export function createWin32Module(){
                     localAlloc: bytes=>libraries['KERNEL32.dll'].LocalAlloc
                         .handler([0x40, bytes]) >>> 0,
                 }),
+
+                'POWRPROF.dll': createPowrprofFunctions({ writeMemory, setLastError: setError,
+                    processors: processors.count(), mhz: config?.processorMhz ?? PROCESSOR.mhz }),
+                'pdh.dll': createPdhFunctions({ writeMemory }),
 
                 'SFC.dll': createSfcFunctions({ writeMemory, readCString, files: volume }),
 
@@ -2492,6 +2520,11 @@ export function createWin32Module(){
                 // functions, here for their stack width as much as their answers,
                 // since d3dx9 exports them undecorated though they are stdcall.
                 ...d3dxLibraries(createD3dxFunctions({ readMemory, writeMemory,
+                    // A word read and written in place: an effect's commit reads
+                    // a version word for every constant of its pass.
+                    readU32: (/** @type {number} */ at)=>memory.readU32(at),
+                    writeU32: (/** @type {number} */ at, /** @type {number} */ value)=>
+                        memory.writeU32(at, value),
                     divergence: config?.divergence, vtables: comVtables, heap,
                     shaderCompiled: config?.shaderCompiled,
                     // The font engine GDI draws with, for D3DX's font.
@@ -2552,6 +2585,13 @@ export function createWin32Module(){
                 // for its online modes: none of them on this machine.
                 'NETAPI32.dll': createNetbiosFunctions({ readMemory, writeMemory }),
                 'TAPI32.dll': createTelephonyFunctions({ readMemory, writeMemory }),
+                'WTSAPI32.dll': createSessionNotificationFunctions(),
+                'USERENV.dll': createUserenvFunctions({
+                    block: ()=>libraries['KERNEL32.dll'].GetEnvironmentStringsW.handler([]),
+                    free: block=>libraries['KERNEL32.dll'].FreeEnvironmentStringsW
+                        .handler([block]),
+                    writeMemory, setLastError: setError,
+                }),
                 'SensApi.dll': createSensFunctions({ readMemory, writeMemory,
                     setLastError: setError }),
 
@@ -3172,6 +3212,22 @@ export function createWin32Module(){
             // The runtime before msvcrt, built from it: the same entries under the
             // same names, and its own few beside them.
             libraries['CRTDLL.dll'] = createCrtdllFunctions(libraries['msvcrt.dll']);
+            // Visual C++ 2005's, likewise, with the names that runtime added.
+            // imagehlp, the older library dbghelp grew out of: the same
+            // functions under the names it had then.
+            libraries['IMAGEHLP.dll'] = Object.fromEntries(Object.entries(libraries['DBGHELP.dll'])
+                .filter(([name])=>IMAGEHLP_EXPORTS.has(name)));
+            libraries['MSVCR80.dll'] = createMsvcr80Functions(libraries['msvcrt.dll'],
+                { readMemory, writeMemory });
+            // And its C++ library, over that runtime's operator new and delete.
+            libraries['MSVCP80.dll'] = createMsvcp80Functions(libraries['MSVCR80.dll'],
+                { readMemory, writeMemory, fillMemory });
+            // Visual C++ 2003's: msvcrt's functions and the filter its DLLs
+            // start under, and the C++ library's strings, laid out as 2005's.
+            libraries['MSVCR71.dll'] = { ...libraries['msvcrt.dll'],
+                __CppXcptFilter: libraries['msvcrt.dll']._XcptFilter };
+            libraries['MSVCP71.dll'] = createMsvcp80Functions(libraries['MSVCR71.dll'],
+                { readMemory, writeMemory, fillMemory });
 
             // Added after the rest because it is built from them: nearly everything
             // ntdll exports is a second name for a function another library already
@@ -3237,11 +3293,16 @@ export function createWin32Module(){
                  * disc carries beside its redistributable and an installer
                  * loads from there -- the copy installs DirectX over the
                  * system's and asks for a restart, where this one answers
-                 * that everything is in place.
+                 * that everything is in place; and the Visual C++ 2005
+                 * runtime, whose calls the engine's own copy serves as guest
+                 * code where a program's copy is one more runtime for the
+                 * translator to carry. The C++ libraries are not among them
+                 * until they export all a program's own copy does: a copy the
+                 * program brought answers what this one does not have.
                  *
                  * @returns {string[]}
                  */
-                runtimes: ()=>['DSETUP.dll'],
+                runtimes: ()=>['DSETUP.dll', 'MSVCR80.dll'],
 
                 /**
                  * The libraries with a table here that are not Windows' own but a

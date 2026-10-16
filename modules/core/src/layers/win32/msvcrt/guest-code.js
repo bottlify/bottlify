@@ -32,7 +32,7 @@
  * What the build made of a `@guestCode` function.
  *
  * @typedef {Object} CompiledGuestCode
- * @property {'cdecl' | 'stdcall'} convention
+ * @property {'cdecl' | 'stdcall' | 'thiscall'} convention
  * @property {readonly ('i32' | 'u32' | 'f64' | 'f32' | 'x87')[]} params
  * @property {'i32' | 'u32' | 'f64' | 'f32' | 'i64' | 'void'} returns
  * @property {readonly string[]} uses   The guest's helpers the source takes.
@@ -91,6 +91,8 @@
  *     Byte by byte from the last, as `std; rep movsb` copies.
  * @property {(destination: number, value: number, count: number) => void} fill
  * @property {(fn: number, ...args: number[]) => number} call
+ * @property {(fn: number, ...args: number[]) => number} callStd
+ *     The same of a stdcall function, which pops its arguments itself.
  * @property {() => number} host
  *     The call answered by the host's handler, with the arguments it came
  *     with: only as `return host()`.
@@ -224,6 +226,14 @@ export function guestMemory(host){
             }
             return host.call(fn >>> 0, args.map(arg=>arg >>> 0)) | 0;
         },
+        // Who pops the arguments is the x86's business; the answer is the same.
+        callStd: (fn, ...args)=>{
+            if (!host.call)
+            {
+                throw new Error('guest code: no guest function can be run from here');
+            }
+            return host.call(fn >>> 0, args.map(arg=>arg >>> 0)) | 0;
+        },
         host: ()=>{
             throw new Error('guest code: host() is answered only in a handler with a fallback');
         },
@@ -275,7 +285,11 @@ export function guestExport(compiled, fallback){
             throw new Error('guest code: a function that hands calls to the host is bound with '
                 + 'a builder to register its trap');
         }
-        const trap = builder.register({ convention, argBytes, handler: fallback.handler });
+        // A thiscall function has put `this` on the stack by the time it
+        // hands over: the trap finds a stdcall frame.
+        const trap = builder.register({
+            convention: convention === 'thiscall' ? 'stdcall' : convention,
+            argBytes, handler: fallback.handler });
         if (compiled.code[host - 1] !== MOV_EAX)
         {
             builder.jump(host, trap);
@@ -304,7 +318,7 @@ export function guestExport(compiled, fallback){
  */
 export function guestEntry(source, compiled, host, fallback){
     const { params, returns, uses } = compiled;
-    if (uses.includes('call') && !host.call)
+    if ((uses.includes('call') || uses.includes('callStd')) && !host.call)
     {
         throw new Error('guest code: a function that calls the guest has no handler here '
             + '(guestExport)');

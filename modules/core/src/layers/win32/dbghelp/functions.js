@@ -21,6 +21,7 @@ const ERROR_MOD_NOT_FOUND = 126;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_PATH_NOT_FOUND = 3;
 const ERROR_ALREADY_EXISTS = 183;
+const ERROR_FILE_NOT_FOUND = 2;
 
 /** SymGetOptions before a program sets any: names are undecorated. */
 const SYMOPT_UNDNAME = 0x2;
@@ -34,8 +35,21 @@ const IMAGE_FILE_MACHINE_I386 = 0x14c;
  */
 const STACKFRAME = Object.freeze({
     AddrPC: 0, AddrReturn: 12, AddrFrame: 24, AddrStack: 36,
-    Params: 52, Reserved: 76, size: 88,
+    Params: 52, Reserved: 76, size: 88, wide: false,
 });
+
+/**
+ * STACKFRAME64: the ADDRESS64 records 16 bytes -- a DWORD64 Offset, Segment,
+ * Mode at 12 -- AddrBStore after the four, FuncTableEntry, then the
+ * parameters and Reserved as DWORD64s on their alignment, and KDHELP64.
+ */
+const STACKFRAME64 = Object.freeze({
+    AddrPC: 0, AddrReturn: 16, AddrFrame: 32, AddrStack: 48,
+    Params: 88, Reserved: 128, size: 264, wide: true,
+});
+
+/** IMAGEHLP_MODULE64's BaseOfImage and ImageSize. */
+const MODULE64 = Object.freeze({ BaseOfImage: 8, ImageSize: 16 });
 
 /** ADDRESS.Mode AddrModeFlat. */
 const ADDR_MODE_FLAT = 3;
@@ -55,6 +69,8 @@ const WALK_STARTED = 0x4b4c4157;
  * @property {() => { base: number, size: number }[]} modules
  *           The modules of the process, as Toolhelp lists them.
  * @property {(code: number) => void} setLastError
+ * @property {(values: Record<string, number>) => void} [setRegisters]
+ *           EDX, for a DWORD64 answer: the high half of an x86 address is zero.
  * @property {(address: number) => string} [readCString]
  * @property {{ stat: (path: string) => { exists: boolean, isDirectory: boolean } | null,
  *     mkdir: (path: string) => boolean, currentDirectory?: () => string }} [files]
@@ -97,6 +113,75 @@ export function createDbghelpFunctions(host){
     const fail = (answer, code)=>{
         host.setLastError(code);
         return answer;
+    };
+
+    /** A DWORD64 answer of an x86 address: EDX zero. @param {number} value */
+    const wide = value=>{
+        host.setRegisters?.({ edx: 0 });
+        return value >>> 0;
+    };
+
+    /**
+     * One frame a call along the EBP chain, in the layout given. The first
+     * call reports the frame the caller filled in from the context; each later
+     * one steps to the caller's frame. The walk ends, FALSE, where the chain
+     * leaves mapped memory or reaches a zero frame or return address. The
+     * memory read is this process's, which is what the default routines read;
+     * a routine the caller passes would answer the same.
+     *
+     * @param {typeof STACKFRAME | typeof STACKFRAME64} layout
+     */
+    const walk = layout=>(/** @type {number[]} */ [machine, , , frameAddress])=>{
+        if ((machine >>> 0) !== IMAGE_FILE_MACHINE_I386 || (frameAddress >>> 0) === 0)
+        {
+            return fail(0, ERROR_INVALID_PARAMETER);
+        }
+        const at = frameAddress >>> 0;
+        const field = (/** @type {number} */ offset)=>readU32(at + offset) ?? 0;
+        let pc = field(layout.AddrPC);
+        let frame = field(layout.AddrFrame);
+        let stack = field(layout.AddrStack);
+        if (field(layout.Reserved) === WALK_STARTED)
+        {
+            const caller = readU32(frame);
+            const returnTo = readU32(frame + 4);
+            if (caller === null || returnTo === null || returnTo === 0)
+            {
+                return 0;
+            }
+            pc = returnTo;
+            stack = (frame + 8) >>> 0;
+            frame = caller;
+        }
+        if (frame === 0 || pc === 0)
+        {
+            return 0;
+        }
+        const returnAddress = readU32(frame + 4);
+        if (returnAddress === null)
+        {
+            return 0;
+        }
+        const out = new DataView(new ArrayBuffer(layout.size));
+        const mode = layout.wide ? 12 : 8;
+        const slot = layout.wide ? 8 : 4;
+        /** @param {number} offset @param {number} value */
+        const address = (offset, value)=>{
+            out.setUint32(offset, value >>> 0, true);
+            out.setUint32(offset + mode, ADDR_MODE_FLAT, true);
+        };
+        address(layout.AddrPC, pc);
+        address(layout.AddrReturn, returnAddress);
+        address(layout.AddrFrame, frame);
+        address(layout.AddrStack, stack);
+        for (let index = 0; index < 4; index++)
+        {
+            const parameter = readU32(frame + 8 + index * 4) ?? 0;
+            out.setUint32(layout.Params + index * slot, parameter, true);
+        }
+        out.setUint32(layout.Reserved, WALK_STARTED, true);
+        host.writeMemory(at, new Uint8Array(out.buffer));
+        return 1;
     };
 
     return {
@@ -227,58 +312,101 @@ export function createDbghelpFunctions(host){
          * read is this process's, which is what the default routines read; a
          * routine the caller passes would answer the same.
          */
-        StackWalk: {
-            argBytes: 36,
+        StackWalk: { argBytes: 36, handler: walk(STACKFRAME) },
+
+        /** BOOL StackWalk64(...), StackWalk's arguments with an LPSTACKFRAME64. */
+        StackWalk64: { argBytes: 36, handler: walk(STACKFRAME64) },
+
+        /** DWORD64 SymGetModuleBase64(HANDLE hProcess, DWORD64 qwAddr) */
+        SymGetModuleBase64: {
+            argBytes: 12,
             /** @param {number[]} args */
-            handler: ([machine, , , frameAddress])=>{
-                if ((machine >>> 0) !== IMAGE_FILE_MACHINE_I386 || (frameAddress >>> 0) === 0)
+            handler: ([, address, high])=>{
+                const base = (high >>> 0) === 0 ? moduleBase(address) : 0;
+                return base !== 0 ? wide(base) : wide(fail(0, ERROR_MOD_NOT_FOUND));
+            },
+        },
+
+        /** PVOID SymFunctionTableAccess64(HANDLE hProcess, DWORD64 AddrBase): none on x86. */
+        SymFunctionTableAccess64: { argBytes: 12, handler: ()=>0 },
+
+        /**
+         * BOOL SymFromAddr(HANDLE hProcess, DWORD64 Address, PDWORD64 Displacement,
+         *     PSYMBOL_INFO Symbol): no symbol is known.
+         */
+        SymFromAddr: { argBytes: 20, handler: ()=>fail(0, ERROR_INVALID_ADDRESS) },
+
+        /**
+         * BOOL SymGetLineFromAddr64(HANDLE hProcess, DWORD64 qwAddr,
+         *     PDWORD pdwDisplacement, PIMAGEHLP_LINE64 Line): no line is known.
+         */
+        SymGetLineFromAddr64: { argBytes: 20, handler: ()=>fail(0, ERROR_INVALID_ADDRESS) },
+
+        /**
+         * BOOL SymGetModuleInfo64(HANDLE hProcess, DWORD64 qwAddr,
+         *     PIMAGEHLP_MODULE64 ModuleInfo)
+         *
+         * The module the address is in, by its base and size; SymType stays
+         * SymNone (0), as no symbols were loaded for it.
+         */
+        SymGetModuleInfo64: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([, address, high, info])=>{
+                const at = address >>> 0;
+                const module = (high >>> 0) === 0 ? host.modules().find(each=>
+                    at >= each.base >>> 0 && at < (each.base >>> 0) + (each.size >>> 0)) : null;
+                if (!module || (info >>> 0) === 0)
+                {
+                    return fail(0, module ? ERROR_INVALID_PARAMETER : ERROR_MOD_NOT_FOUND);
+                }
+                const out = new DataView(new ArrayBuffer(12));
+                out.setUint32(0, module.base >>> 0, true);
+                out.setUint32(MODULE64.ImageSize - MODULE64.BaseOfImage, module.size >>> 0, true);
+                host.writeMemory((info >>> 0) + MODULE64.BaseOfImage, new Uint8Array(out.buffer));
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL SymEnumerateModules64(HANDLE hProcess,
+         *     PSYM_ENUMMODULES_CALLBACK64 EnumModulesCallback, PVOID UserContext)
+         *
+         * The modules the session loaded symbols for: none, so the callback
+         * is not called, and the enumeration succeeds.
+         */
+        SymEnumerateModules64: { argBytes: 12, handler: ()=>1 },
+
+        /**
+         * BOOL SearchTreeForFile(PCSTR RootPath, PCSTR InputPathName, PSTR OutputPathBuffer)
+         *
+         * ponytail: not found without looking -- what it looks for is a symbol
+         * file, and this machine has none; search the volume when a program
+         * asks for anything else.
+         */
+        SearchTreeForFile: { argBytes: 12, handler: ()=>fail(0, ERROR_FILE_NOT_FOUND) },
+
+        /**
+         * DWORD UnDecorateSymbolName(PCSTR name, PSTR outputString, DWORD maxStringLength,
+         *     DWORD flags)
+         *
+         * A name that is not decorated comes back as it is; a decorated one
+         * is not undecorated here, and the answer is zero, as for one the
+         * library cannot read.
+         */
+        UnDecorateSymbolName: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([name, output, size])=>{
+                const text = host.readCString?.(name >>> 0) ?? '';
+                if (text.startsWith('?') || (output >>> 0) === 0 || (size >>> 0) === 0)
                 {
                     return fail(0, ERROR_INVALID_PARAMETER);
                 }
-                const at = frameAddress >>> 0;
-                const field = (/** @type {number} */ offset)=>readU32(at + offset) ?? 0;
-                let pc = field(STACKFRAME.AddrPC);
-                let frame = field(STACKFRAME.AddrFrame);
-                let stack = field(STACKFRAME.AddrStack);
-                if (field(STACKFRAME.Reserved) === WALK_STARTED)
-                {
-                    const caller = readU32(frame);
-                    const returnTo = readU32(frame + 4);
-                    if (caller === null || returnTo === null || returnTo === 0)
-                    {
-                        return 0;
-                    }
-                    pc = returnTo;
-                    stack = (frame + 8) >>> 0;
-                    frame = caller;
-                }
-                if (frame === 0 || pc === 0)
-                {
-                    return 0;
-                }
-                const returnAddress = readU32(frame + 4);
-                if (returnAddress === null)
-                {
-                    return 0;
-                }
-                const out = new DataView(new ArrayBuffer(STACKFRAME.size));
-                /** @param {number} offset @param {number} value */
-                const address = (offset, value)=>{
-                    out.setUint32(offset, value >>> 0, true);
-                    out.setUint32(offset + 8, ADDR_MODE_FLAT, true);
-                };
-                address(STACKFRAME.AddrPC, pc);
-                address(STACKFRAME.AddrReturn, returnAddress);
-                address(STACKFRAME.AddrFrame, frame);
-                address(STACKFRAME.AddrStack, stack);
-                for (let index = 0; index < 4; index++)
-                {
-                    const parameter = readU32(frame + 8 + index * 4) ?? 0;
-                    out.setUint32(STACKFRAME.Params + index * 4, parameter, true);
-                }
-                out.setUint32(STACKFRAME.Reserved, WALK_STARTED, true);
-                host.writeMemory(at, new Uint8Array(out.buffer));
-                return 1;
+                const kept = text.slice(0, (size >>> 0) - 1);
+                host.writeMemory(output >>> 0,
+                    Uint8Array.from(`${kept}\0`, c=>c.charCodeAt(0) & 0xff));
+                return kept.length;
             },
         },
     };
