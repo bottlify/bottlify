@@ -105,11 +105,28 @@ const ARENA_HANDLES = 8192;
  * table or 0 and its number; 0 when none is begun), where `Walk` is
  * (`effect-commit.js`), whether a technique is begun and the flags it was
  * begun with, the current technique's record (`TECHNIQUE`) and the
- * techniques (a count, then each one's handle and record).
+ * techniques (a count, then each one's handle and record), the table of the
+ * parameters' names (`nameTable`, 0 where a name is no handle) and where
+ * `Resolve` is (`effect-setters.js`).
  */
 export const EFFECT_BLOCK = Object.freeze({ RECORDING: 0, ARENA: 4, ARENA_BYTES: 8, CLOCK: 12,
     COMMIT: 16, ACTIVE: 20, PASSES: 24, WALK: 28, STARTED: 32, FLAGS: 36, TECHNIQUE: 40,
-    TECHNIQUES: 44, SIZE: 48 });
+    TECHNIQUES: 44, NAMES: 48, RESOLVE: 52, SIZE: 56 });
+
+/**
+ * A name's hash in the table of names, as `Resolve` in the guest takes it:
+ * FNV-1a over its bytes.
+ *
+ * @param {string} name
+ */
+export function nameHash(name){
+    let hash = 0x811c9dc5 | 0;
+    for (let i = 0; i < name.length; i++)
+    {
+        hash = Math.imul(hash ^ (name.charCodeAt(i) & 0xff), 16777619);
+    }
+    return hash >>> 0;
+}
 /**
  * A technique's record in guest memory: its passes as the block's PASSES
  * lists them for the state manager set, and its state blocks by the two
@@ -315,6 +332,9 @@ const COLOR_SCALE = 255;
  *     absent until it is first begun.
  * @property {Map<number, number>} [begins]   The same tables where BeginPass may walk
  *     them too, 0 where a state of the pass is set only by the host's.
+ * @property {Map<number, { version: number, date: number, what: string }[]>} [handOvers]
+ *     what sends a commit of a table to the host, by state manager: a version that,
+ *     newer than its date, does -- said when the host's CommitChanges finds one
  */
 
 /**
@@ -2235,6 +2255,66 @@ export function createEffects(host, helpers, options = {}){
         }
         return walkAt;
     };
+    /** Where `Resolve` is in guest memory, placed with the first table of names; 0 for none. */
+    let resolveAt = -1;
+    const placeResolve = ()=>{
+        if (resolveAt < 0)
+        {
+            const code = /** @type {Uint8Array} */ (/** @type {any} */ (SETTERS_IN_GUEST)
+                .Resolve.code);
+            resolveAt = host.heap ? (heap().allocateCode ?? heap().allocate)(code.length) : 0;
+            if (resolveAt !== 0)
+            {
+                host.writeMemory(resolveAt, code);
+            }
+        }
+        return resolveAt;
+    };
+
+    /**
+     * The table of an effect's parameters' names the setters in the guest look a
+     * name given for a handle up in (`Resolve`): a mask, then slots of a name's
+     * hash, where its copy is and its parameter's record, found by the hash's
+     * low bits and the slots after. Each full name a parameter has, as
+     * `paramOf` finds it, whose record is in the arena; 0 where a name is no
+     * handle (D3DXFX_LARGEADDRESSAWARE) or there is no room.
+     *
+     * @param {EffectState} effect
+     * @returns {number}
+     */
+    const nameTable = effect=>{
+        if (effect.flags & FX.LARGEADDRESSAWARE)
+        {
+            return 0;
+        }
+        const named = [...effect.byName].filter(([name, p])=>inArena(p.handle) && name.length > 0
+            && name.length < 256);
+        let slots = 8;
+        while (slots < named.length * 2)
+        {
+            slots *= 2;
+        }
+        const table = heap().allocate(4 + 12 * slots);
+        if (table === 0)
+        {
+            return 0;
+        }
+        effect.owned.push(table);
+        const slotWords = new Uint32Array(1 + 3 * slots);
+        slotWords[0] = slots - 1;
+        const copies = strings(effect.owned, named.map(([name])=>name));
+        named.forEach(([name, p], i)=>{
+            const hash = nameHash(name);
+            let slot = hash & (slots - 1);
+            while (slotWords[1 + 3 * slot + 2] !== 0)
+            {
+                slot = (slot + 1) & (slots - 1);
+            }
+            slotWords.set([hash, copies[i], p.handle], 1 + 3 * slot);
+        });
+        host.writeMemory(table, new Uint8Array(slotWords.buffer));
+        return table;
+    };
 
     /**
      * The table an effect's block names for CommitChanges in the guest: a
@@ -2319,6 +2399,8 @@ export function createEffects(host, helpers, options = {}){
         const triggers = [];
         /** Each expression input's version and its cell's date. @type {number[]} */
         const stale = [];
+        /** The triggers and the stale pairs, said. @type {{ version: number, date: number, what: string }[]} */
+        const handOvers = [];
         /** @param {string} name */
         const slotOf = name=>SETTERS[name][effect.manager ? 1 : 0];
         /**
@@ -2535,6 +2617,9 @@ export function createEffects(host, helpers, options = {}){
                     if (named)
                     {
                         stale.push(named.store.at, cell + CELL.DATE);
+                        handOvers.push({ version: named.store.at, date: cell + CELL.DATE,
+                            what: `${constant.name}, an input of ${state.name}'s expression, `
+                                + 'was written since it was worked out' });
                     }
                 }
                 entries.push([COMMIT_KIND.STATE, cell + CELL.DATE, call[0], call[1], call[2],
@@ -2575,6 +2660,8 @@ export function createEffects(host, helpers, options = {}){
                     {
                         // The sampler set whole sets all its states: the host's.
                         triggers.push(param.store.at);
+                        handOvers.push({ version: param.store.at, date: pass.appliedAt,
+                            what: `sampler ${param.model.name ?? ''} was set whole` });
                         for (let k = 0; k < Math.max(1, constant.count); k++)
                         {
                             const element = param.model.elements ? param.members[k] : param;
@@ -2633,6 +2720,7 @@ export function createEffects(host, helpers, options = {}){
             entries.length,
             effect.commitScratch, triggers.length, stale.length / 2, ...triggers, ...stale,
             ...entries.flat(), 0, ...fixed]));
+        (pass.handOvers ??= new Map()).set(effect.manager, handOvers);
         return table;
     };
 
@@ -2814,6 +2902,18 @@ export function createEffects(host, helpers, options = {}){
             if (!pass)
             {
                 return D3D_OK;
+            }
+            if ((pass.commits?.get(effect.manager) ?? 0) !== 0)
+            {
+                // A pass with a table, committed here: said once a reason, the
+                // first that holds.
+                const why = pass.handOvers?.get(effect.manager)?.find(h=>u32(h.version)
+                    > u32(h.date));
+                if (why)
+                {
+                    host.divergence?.('ID3DXEffect::CommitChanges', `pass '${pass.model.name
+                        ?? ''}' commits on the host: ${why.what}`);
+                }
             }
             const thread = host.currentThread?.();
             return answerWith(applyPass(effect, pass, false, thread));
@@ -3361,7 +3461,7 @@ export function createEffects(host, helpers, options = {}){
                 effect.owned.push(effect.block);
                 tick();
                 putU32s(effect.block, [0, arenaAt, arenaAt === 0 ? 0 : ARENA_HANDLES * HANDLE.SIZE,
-                    clockAt, 0, 0, 0, placeWalk(), 0, 0, 0, 0]);
+                    clockAt, 0, 0, 0, placeWalk(), 0, 0, 0, 0, nameTable(effect), placeResolve()]);
             }
             effect.techniques = model.techniques.map(t=>{
                 const [handle] = strings(effect.owned, [t.name ?? '']);

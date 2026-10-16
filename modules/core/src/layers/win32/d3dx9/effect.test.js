@@ -1672,15 +1672,28 @@ test('the setters in the guest answer, write and date what the host\'s do: rando
         return { data: held, version: g.u32(g.u32(h + HANDLE.VERSION)) };
     });
     const HOST = Symbol('host');
+    // A name given for a handle goes to Resolve, where the block's RESOLVE says: its JavaScript.
+    const resolveAt = g.u32(effectB.guestState() + EFFECT_BLOCK.RESOLVE);
+    assert.notEqual(resolveAt, 0, 'the effect\'s block names Resolve');
     const helpers = { u32: g.u32, setU32: (/** @type {number} */ at, /** @type {number} */ v)=>
-        g.view.setUint32(at, v >>> 0, true), host: ()=>HOST };
+        g.view.setUint32(at, v >>> 0, true), host: ()=>HOST,
+    callStd: (/** @type {number} */ fn, /** @type {number[]} */ ...args)=>{
+        assert.equal(fn, resolveAt, 'a setter calls Resolve alone');
+        return /** @type {any} */ (sources).Resolve({ u8: (/** @type {number} */ at)=>
+            g.memory[at], u32: g.u32 }, ...args);
+    } };
     const SETTERS = ['SetMatrix', 'SetMatrixTranspose', 'SetVector', 'SetVectorArray', 'SetFloat',
-        'SetInt', 'SetBool', 'SetTexture', 'SetValue'];
+        'SetInt', 'SetBool', 'SetTexture', 'SetValue', 'SetIntArray', 'SetFloatArray',
+        'SetBoolArray', 'SetMatrixArray', 'SetMatrixTransposeArray', 'SetMatrixPointerArray',
+        'SetMatrixTransposePointerArray'];
     let next = 0x2545f491;
     const rand = ()=>(next = (Math.imul(next, 1103515245) + 12345) >>> 0);
     const input = g.heap.allocate(256);
+    // Matrices where the pointer-array setters' pointers say, a null among them now and then.
+    const pointers = g.heap.allocate(16);
     let recording = false;
     let handedOver = 0;
+    let namedInGuest = 0;
     for (let round = 0; round < 3000; round++)
     {
         for (let at = input; at < input + 256; at += 4)
@@ -1696,14 +1709,25 @@ test('the setters in the guest answer, write and date what the host\'s do: rando
             recording = !recording;
         }
         const which = rand() % names.length;
-        const byName = rand() % 10 === 0;
+        // The high bits: the generator's low ones repeat with a short period,
+        // and from them a name was never drawn.
+        const byName = (rand() >>> 16) % 10 === 0;
         const hA = byName ? g.put(names[which]) : handlesA[which];
         const hB = byName ? g.put(names[which]) : handlesB[which];
         const setter = SETTERS[rand() % SETTERS.length];
         const pointer = rand() % 10 === 0 ? 0 : input;
+        for (let k = 0; k < 4; k++)
+        {
+            g.view.setUint32(pointers + 4 * k, rand() % 8 === 0 ? 0 : input + 64 * (rand() % 3),
+                true);
+        }
         const args = setter === 'SetVectorArray' ? [pointer, rand() % 7]
             : setter === 'SetValue' ? [pointer, 4 * (rand() % 40)]
-                : /^Set(Matrix|Vector)/.test(setter) ? [pointer] : [rand()];
+                : /^Set(Int|Float|Bool)Array$/.test(setter) ? [pointer, rand() % 20]
+                    : /PointerArray$/.test(setter) ? [rand() % 10 === 0 ? 0 : pointers,
+                        rand() % 4]
+                        : /^SetMatrix\w*Array$/.test(setter) ? [pointer, rand() % 3]
+                            : /^Set(Matrix|Vector)/.test(setter) ? [pointer] : [rand()];
         const before = state(handlesB);
         const beforeA = state(handlesA);
         const answerA = await g.call(fxA, setter, hA, ...args);
@@ -1712,6 +1736,10 @@ test('the setters in the guest answer, write and date what the host\'s do: rando
         {
             handedOver++;
             answerB = await g.call(fxB, setter, hB, ...args);
+        }
+        else if (byName)
+        {
+            namedInGuest++;
         }
         /** @type {string} */
         const label = `round ${round}: ${setter}(${names[which]}${byName ? ' by name' : ''},`
@@ -1726,6 +1754,7 @@ test('the setters in the guest answer, write and date what the host\'s do: rando
         });
     }
     assert.ok(handedOver > 300 && handedOver < 2700, `${handedOver} calls handed to the host`);
+    assert.ok(namedInGuest > 40, `${namedInGuest} calls by name answered in the guest`);
 });
 
 test('SetTechnique and GetTechnique in the guest answer as the host\'s, and Begin and BeginPass'
