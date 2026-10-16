@@ -339,8 +339,11 @@ There are no page tables: each 4 KiB page has one byte of flags — `INACCESSIBL
 ### Execution in Bottlify
 
 - **Counting instructions.** Each block subtracts its instruction count from a budget on the way
-  out, and the budget is checked on backward jumps. The scheduler's quantum is 100,000 instructions,
-  but translated code is given its budget 10,000 at a time, so a thread can be preempted promptly.
+  out, and the budget is checked on backward jumps. The scheduler's quantum is 100,000 instructions;
+  among ready threads on one executor a turn is as many as a quarter of a millisecond takes at the
+  rate the executor runs, when that is more (fast translated code: about 750,000), and never more
+  than a solo turn, with no deadline within a millisecond. Translated code is given its budget
+  10,000 at a time, so a thread can be preempted promptly.
 - **Two interpreters.** The first 8192 units of a process's work (instructions, plus 128 for each new
   jump target) run on the JS interpreter, the rest on the wasm interpreter.
 - **Memory and self-modifying code.** Outside precise mode reads are not checked: the address simply

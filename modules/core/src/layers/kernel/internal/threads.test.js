@@ -216,6 +216,86 @@ test('a thread no other is ready beside gets a longer turn, until a deadline com
     assert.equal(sched.diagnostics().overruns, 0, 'a solo turn is not an overrun');
 });
 
+test('among ready threads a turn lasts turnMs at the executor\'s rate: no less than a quantum,'
+    + ' no more than a solo turn, and a quantum with a deadline near', ()=>{
+    let wall = 0;
+    let clock = 0;
+    // Instructions the fake executor retires a host ms: fast code, then slow.
+    let perMs = 3_000_000;
+    const cpu = fakeCpu(Infinity);
+    cpu.runSlice = max=>{
+        wall += max / perMs;
+        return max;
+    };
+    const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 5000,
+        soloQuantum: 1_000_000, turnMs: 0.25, wall: ()=>wall, now: ()=>clock });
+    sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'a' });
+    const b = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'b' });
+
+    assert.equal(sched.runOnce().instructions, 5000, 'no rate yet: the quantum');
+    assert.equal(sched.runOnce().instructions, 750_000, 'a quarter of a ms at 3 G a second');
+    perMs = 10_000;
+    for (let turn = 0; turn < 40; turn++)
+    {
+        sched.runOnce();
+    }
+    assert.equal(sched.runOnce().instructions, 5000, 'slow code: never below the quantum');
+    perMs = 100_000_000;
+    for (let turn = 0; turn < 40; turn++)
+    {
+        sched.runOnce();
+    }
+    assert.equal(sched.runOnce().instructions, 1_000_000, 'never above a solo turn');
+
+    // b waits with a deadline half a ms off: the turns beside it keep the
+    // quantum, so the wait ends when it would have.
+    sched.block(b, 'a timed wait', { deadline: clock + 0.5 });
+    assert.equal(sched.runOnce().instructions, 5000, 'a deadline near: the quantum');
+});
+
+test('a thread woken during a turn that runs past a quantum ends it, as a woken thread\'s boost'
+    + ' would; a quantum\'s turn it does not', ()=>{
+    /**
+     * Three threads, the third waiting; the running one lets it go in the
+     * middle of its turn once the turns run long.
+     *
+     * @param {number | undefined} turnMs
+     */
+    const run = turnMs=>{
+        let wall = 0;
+        let stops = 0;
+        /** @type {any} */
+        let waiting = null;
+        const cpu = fakeCpu(Infinity);
+        /** @type {any} */
+        const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 5000,
+            soloQuantum: 1_000_000, turnMs, wall: ()=>wall });
+        cpu.runSlice = max=>{
+            wall += max / 3_000_000;
+            if (waiting !== null)
+            {
+                sched.wake(waiting);
+                waiting = null;
+            }
+            return max;
+        };
+        Object.assign(cpu, { stop: ()=>stops++ });
+        sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'a' });
+        sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'b' });
+        const c = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xc000, name: 'c' });
+        sched.block(c, 'an event');
+        sched.runOnce();
+        const turn = sched.runOnce().instructions;
+        waiting = c;
+        sched.runOnce();
+        return { turn, stops };
+    };
+    assert.deepEqual(run(0.25), { turn: 750_000, stops: 1 },
+        'a long turn among ready threads, ended by the wake');
+    assert.deepEqual(run(undefined), { turn: 5000, stops: 0 },
+        'a quantum\'s turn: the woken thread waits for its end, as before');
+});
+
 test('a thread parked on a host call is not a candidate for a turn', ()=>{
     // It is stopped on `hlt` with nothing of its own to run. Counted as ready it
     // gave the scheduler someone to hand a turn to for ever, so the branch below

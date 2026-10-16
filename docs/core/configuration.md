@@ -48,7 +48,7 @@ publishing). The tables list only the settings that are data. `memory` and `load
 
 | Setting | Default | What it does |
 | --- | --- | --- |
-| `quantum` | 100 000 | Guest instructions per scheduler turn. |
+| `quantum` | 100 000 | Guest instructions per scheduler turn. Unless it is given, a turn among ready threads with no deadline within a millisecond and no other executor running a thread is as many instructions as a quarter of a millisecond takes at the rate the executor retires them, when that is more, up to a solo turn: a turn's own cost is a few microseconds, a fifth of a quantum of fast translated code. Given, every such turn is that many, to the instruction. |
 | `soloQuantum` | 10 quanta | Guest instructions per turn of a thread no other is ready beside, in a process with one executor, while no timed wait or timer is due within 16 ms: with nobody to share the processor with, a turn only costs the host its own bookkeeping. |
 | `preemption` | `false` | End a turn early when a thread of higher priority is due. |
 | `pendingYieldMs` | 1 | While a host answer is outstanding and other threads still run, how often the loop leaves for the event loop to hear it. |

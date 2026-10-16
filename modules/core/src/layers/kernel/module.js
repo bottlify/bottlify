@@ -15,6 +15,9 @@ import { STILL_ACTIVE, createProcessTable } from './internal/processes.js';
 import { createClock } from './internal/time.js';
 import { createStackPool } from './internal/stacks.js';
 
+/** Host ms a turn among ready threads lasts at least (`createScheduler`'s `turnMs`). */
+const TURN_MS = 0.25;
+
 /**
  * kernel — the execution core: threads, the scheduler, synchronisation, handles
  * and the guest's clock.
@@ -162,6 +165,8 @@ export function createKernelModule(){
                 // Below a page the emulator cannot honour a smaller quantum anyway,
                 // so asking for one would only be a lie in the configuration.
                 quantum: config?.quantum ?? 100_000,
+                // A quantum asked for is kept to the instruction: a test's, a profile's.
+                turnMs: config?.quantum === undefined ? TURN_MS : undefined,
                 soloQuantum: config?.soloQuantum,
                 ids: config?.ids,
                 ...published(cpu, log),

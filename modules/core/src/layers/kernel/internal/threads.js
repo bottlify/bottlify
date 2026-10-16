@@ -77,6 +77,9 @@ const SHORT_WAIT_MS = 20;
 /** A short-period thread kept off the processor this long, in host ms, is counted late. */
 const LATE_GAP_MS = 40;
 
+/** How many turns of `turnMs` a deadline must be beyond for a turn to take one. */
+const TURN_CLEAR = 4;
+
 /** Turns kept to say what held the processor through a late thread's gap. */
 const RECENT_TURNS = 256;
 
@@ -165,6 +168,9 @@ const readyNow = thread=>{
  * @param {any} options.cpu        The cpu layer's API.
  * @param {any} options.switcher   The single switch primitive.
  * @param {number} [options.quantum]  Retired instructions per turn.
+ * @param {number} [options.turnMs]  Host ms a turn among ready threads lasts at least, as
+ *        the instructions the executor retires a ms make it: no fewer than a quantum, no more
+ *        than a solo one. Unset, every such turn is a quantum.
  * @param {number} [options.soloQuantum]  Retired instructions per turn of a thread no other
  *        is ready beside, with no other executor and no deadline near (`SOLO_CLEAR_MS`); ten
  *        quanta unless given.
@@ -194,6 +200,13 @@ const readyNow = thread=>{
 export function createScheduler(options){
     const { cpu, switcher, quantum = 100_000, now = ()=>0, skipTo = ()=>0 } = options;
     const soloQuantum = options.soloQuantum ?? quantum * 10;
+    const turnMs = options.turnMs ?? 0;
+    /**
+     * Instructions this executor retires a host ms, from its turns that ran
+     * their whole budget -- host calls inside them included, so code that
+     * calls out a lot is slower by it -- averaged over the last few.
+     */
+    let perMs = 0;
     // A gigabyte's worth of pages when nobody says: what a machine is given
     // by default, and small enough to make for every scheduler a test builds.
     const pages = options.pages ?? new Float64Array(1024 * 1024 * 1024 / PAGE + 1);
@@ -884,21 +897,35 @@ export function createScheduler(options){
     let answering = false;
     /** Set while this executor's thread runs a long turn with the others free (`runHere`). */
     let soloShared = false;
+    /** Set while a turn among ready threads runs past a quantum (`turnMs`). */
+    let longTurn = false;
 
     /**
      * A thread made ready during a long turn here that one of the other
      * executors is free to run ends the turn, so it starts there now rather
-     * than at the turn's end.
+     * than at the turn's end. One made ready during a turn among ready threads
+     * that runs past a quantum ends it too, at the running thread's next call
+     * into the host, as Windows' boost of a thread its wait let go puts it
+     * ahead of the one that let it go: the turn is long for threads that only
+     * compute, and a thread woken by another -- a loader's event for the
+     * thread that draws -- waited out a quarter of a millisecond, the loading
+     * screen of a game a fifth slower in frames.
      *
      * @param {any} thread
      */
     const noteReady = thread=>{
-        if (!soloShared || !inSlice || answering || thread === current
+        if (!inSlice || answering || thread === current
             || thread.state !== ThreadState.READY || thread.suspendCount > 0)
         {
             return;
         }
-        if ((cpu.executors?.() ?? []).some((/** @type {any} */ remote)=>!remote.busy()
+        if (longTurn)
+        {
+            longTurn = false;
+            cpu.stop?.();
+            return;
+        }
+        if (soloShared && (cpu.executors?.() ?? []).some((/** @type {any} */ remote)=>!remote.busy()
             && allowedOn(thread, remote.index)))
         {
             soloShared = false;
@@ -1168,12 +1195,27 @@ export function createScheduler(options){
         // readied mid-turn that one of them could take ends the turn at once
         // (`noteReady`) -- on two executors 7-Zip's single-threaded benchmark
         // ran a fifth slower in turns of a quantum.
-        const asked = (!shared || placed.size === 0) && readyAtSlice.size === 0
-            && (noDeadlineBefore === null || noDeadlineBefore - now() > SOLO_CLEAR_MS)
-            ? soloQuantum : quantum;
-        soloShared = shared && asked === soloQuantum;
+        // Among ready threads a turn is a quantum, or as many instructions as
+        // `turnMs` takes at this executor's rate when that is more: a quantum
+        // is 30 us of translated code at its fastest, and a turn's own cost
+        // about 9 us, so threads taking turns on one executor lost a fifth to
+        // turning where a lone thread lost nothing; code that runs slower
+        // keeps the quantum, and no ready thread waits longer than it did for
+        // a quantum of it. Not with a deadline within a few such turns, nor
+        // with other executors' threads running: their calls are answered
+        // between turns.
+        const clear = noDeadlineBefore === null ? Infinity : noDeadlineBefore - now();
+        const solo = (!shared || placed.size === 0) && readyAtSlice.size === 0
+            && clear > SOLO_CLEAR_MS;
+        const asked = solo ? soloQuantum
+            : turnMs > 0 && placed.size === 0 && clear > turnMs * TURN_CLEAR
+                ? Math.min(soloQuantum, Math.max(quantum, Math.floor(perMs * turnMs)))
+                : quantum;
+        soloShared = shared && solo;
+        longTurn = !solo && asked > quantum;
         let instructions = cpu.runSlice(asked);
         soloShared = false;
+        longTurn = false;
         inSlice = false;
         lastSlice = instructions;
         // A slice that ran out inside a routine the host placed to run
@@ -1184,6 +1226,11 @@ export function createScheduler(options){
             && next.state === ThreadState.RUNNING && insideAtomic(cpu.eip?.() ?? 0); more++)
         {
             instructions += cpu.runSlice(ATOMIC_STEP);
+        }
+        const held = wall() - began;
+        if (instructions >= asked && held > 0)
+        {
+            perMs = perMs === 0 ? instructions / held : perMs * 0.75 + instructions / held * 0.25;
         }
         account(next, instructions, began, from, cpu.eip?.() ?? 0, asked);
         // A slice that ended on a host call still answering: the answer is the

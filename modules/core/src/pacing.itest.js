@@ -97,6 +97,9 @@ for (const cores of [1, 2])
                 imagePath: 'C:\\App\\Pacing.exe',
                 engine: 'cork',
                 cpu: { cores },
+                // Turns of a quantum, as counted: one among ready threads is
+                // otherwise as long as a quarter of a millisecond takes.
+                quantum: 100_000,
                 pacing: {
                     yield: pending=>{
                         turns++;
