@@ -306,8 +306,11 @@ test('x87 regions compiled each for the precision control it runs under leave wh
     // The programs load single, double and extended in their loops and functions: an entry
     // first formed under one meets another, leaves, is compiled for it, and for a test at
     // every rounding instruction once it has met both (`precisionAt`).
+    // An entry is compiled `mixed` once it has met both controls twice; of 400 programs
+    // seven get there, and the ones that do depend on how regions cover each other:
+    // 250 programs hold five of them.
     const seen = { wide: 0, narrow: 0, mixed: 0, switches: 0 };
-    for (let seed = 2001; seed < 2101; seed++)
+    for (let seed = 2001; seed < 2251; seed++)
     {
         const code = generate(seed * 7919);
         const testing = await runProgram(code, true, 10_000_000, true, { wideFirst: false });

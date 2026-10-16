@@ -1005,7 +1005,8 @@ test('with a store, a second runtime takes its regions from the store; a changed
         assert.equal(exit.kind, 'halt', 'the stored module runs');
         assert.equal(second.reg(1), 0);
         assert.equal(exit.retired, 1 + 2 * 1000 + 1);
-        // One byte changed: another hash, a miss, and the store grows.
+        // One byte changed: another hash, a miss; the region's record is the new one,
+        // beside another batch module.
         const third = machine({ store, bundleId: 'test' });
         third.write(CODE, [0xb9, 0xe9, 0x03, 0, 0, 0x49, 0x75, 0xfd, 0xf4]); // 1001 rounds
         third.setReg(4, 0x80000);
@@ -1013,7 +1014,8 @@ test('with a store, a second runtime takes its regions from the store; a changed
         await third.runtime.translatePending();
         await settle();
         assert.equal(third.runtime.diagnostics().cacheMisses, 1);
-        assert.equal(store.size(), 4);
+        assert.equal(third.runtime.diagnostics().missChanged, 1, 'a record of other bytes');
+        assert.equal(store.size(), 3);
         // Another bundle: its own namespace.
         const fourth = machine({ store, bundleId: 'other' });
         fourth.write(CODE, COUNTDOWN);
@@ -1022,7 +1024,98 @@ test('with a store, a second runtime takes its regions from the store; a changed
         await fourth.runtime.translatePending();
         await settle();
         assert.equal(fourth.runtime.diagnostics().cacheMisses, 1);
-        assert.equal(store.size(), 6);
+        assert.equal(fourth.runtime.diagnostics().missNoRecord, 1);
+        assert.equal(store.size(), 5);
+    });
+
+test('a region formed beside another one is found by a run that would form it whole', async()=>{
+    const { memoryTranslationStore } = await import('./cache.js');
+    const settle = ()=>new Promise(resolve=>setTimeout(resolve, 0));
+    const store = memoryTranslationStore();
+    const LOOP = CODE + 5;
+    /** @param {number[]} order */
+    const run = async order=>{
+        const m = machine({ store, bundleId: 'test' });
+        m.write(CODE, COUNTDOWN);
+        m.setReg(4, 0x80000);
+        for (const at of order)
+        {
+            m.runtime.noteHot(at);
+            await m.runtime.translatePending();
+            await settle();
+        }
+        const exit = m.runtime.run(m.runtime.entryOf(CODE), 1_000_000);
+        assert.equal(exit.kind, 'halt');
+        assert.equal(m.reg(1), 0);
+        assert.equal(exit.retired, 1 + 2 * 1000 + 1);
+        return m.runtime.diagnostics();
+    };
+    // The loop first: the function's entry, formed after it, stops at the loop's head and
+    // leaves to its region.
+    const first = await run([LOOP, CODE]);
+    assert.equal(first.cacheMisses, 2);
+    assert.equal(first.regions, 2);
+    // The entry first: formed whole here, formed again as stored, and taken.
+    const second = await run([CODE, LOOP]);
+    assert.equal(second.cacheMisses, 0, 'both from the store');
+    assert.equal(second.cacheHits, 2);
+    assert.equal(second.hitsFormedAgain, 1, 'the entry formed as its record says');
+    assert.equal(store.size(), 4, 'nothing stored again');
+});
+
+test('an entry that moved to another precision control is taken from the store as it moved',
+    async()=>{
+        const { memoryTranslationStore } = await import('./cache.js');
+        const settle = ()=>new Promise(resolve=>setTimeout(resolve, 0));
+        const store = memoryTranslationStore();
+        /** @param {ReturnType<typeof machine>} m @param {number} control */
+        const round = async(m, control)=>{
+            const view = new DataView(m.memory.buffer);
+            view.setUint16(m.layout.x87Control, control, true);
+            view.setUint32(m.layout.eip, CODE, true);
+            view.setUint8(m.layout.x87Empty, 0xff);
+            view.setUint8(m.layout.x87Top, 0);
+            if (m.runtime.entryOf(CODE, 0) < 0)
+            {
+                m.runtime.noteHot(CODE, 0);
+                await m.runtime.translatePending();
+                await settle();
+            }
+            return m.runtime.run(m.runtime.entryOf(CODE, 0), 100).kind;
+        };
+        // First met under single, then run under double: it moves to double.
+        const first = machine({ store, bundleId: 'test' });
+        first.write(CODE, ROUNDING);
+        assert.equal(await round(first, 0x07f), 'halt');
+        assert.equal(await round(first, 0x27f), 'untranslated');
+        assert.equal(await round(first, 0x27f), 'halt');
+        assert.equal(first.runtime.diagnostics().precisionSwitches, 1);
+        // Met under single again, the next run takes the double region it stored.
+        const second = machine({ store, bundleId: 'test' });
+        second.write(CODE, ROUNDING);
+        new DataView(second.memory.buffer).setUint16(second.layout.x87Control, 0x07f, true);
+        second.runtime.noteHot(CODE, 0);
+        await second.runtime.translatePending();
+        await settle();
+        assert.equal(await round(second, 0x27f), 'halt');
+        const d = second.runtime.diagnostics();
+        assert.equal(d.cacheHits, 1);
+        assert.equal(d.cacheMisses, 0);
+        assert.equal(d.precisionSwitches, 0, 'nothing to learn again');
+        assert.deepEqual(d.precision, { wide: 1, narrow: 0, mixed: 0 });
+    });
+
+test('a block of an x87 region formed earlier in the batch is not formed again beside it',
+    async()=>{
+        const m = machine({ batchRegions: 2, maxBatchRegions: 2 });
+        // mov ecx, 10; L: fld1; fstp st0; dec ecx; jnz L; hlt -- the loop's head at the
+        // entry's top, so an entry of the region there.
+        m.write(CODE, [0xb9, 0x0a, 0, 0, 0, 0xd9, 0xe8, 0xdd, 0xd8, 0x49, 0x75, 0xf9, 0xf4]);
+        m.runtime.noteHot(CODE, 0, 64);
+        m.runtime.noteHot(CODE + 5, 0, 2);
+        await m.runtime.translatePending();
+        assert.ok(m.runtime.entryOf(CODE + 5, 0) >= 0, 'the head is an entry of the region');
+        assert.equal(m.runtime.diagnostics().regions, 1, 'the head is not a region of its own');
     });
 
 test('precise keeps the x87 exception flags, in a store entry of its own; the default counts'

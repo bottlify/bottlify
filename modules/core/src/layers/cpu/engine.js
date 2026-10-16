@@ -442,6 +442,12 @@
  * @property {number} retired          Instructions retired in the engine, for a frame's share.
  * @property {number} cacheHits        Regions taken from the store.
  * @property {number} cacheMisses
+ * @property {number} [missNoRecord]   Misses the store had nothing for at the region's entry.
+ * @property {number} [missChanged]    Misses where it had another region: other bytes, or one
+ *     compiled for what this run does not give the entry (its precision, its stack's shape).
+ * @property {number} [missNoModule]   Misses whose record named a module the store no longer had.
+ * @property {number} [hitsFormedAgain]  Hits formed again as their record says, the region formed
+ *     here otherwise (beside other regions, or before its callees were known).
  * @property {number} [lookedUpNow]    Batches the store answered without a turn of the event loop.
  * @property {number} [lookedUpLater]  Batches it answered a turn of the event loop later.
  * @property {number} [lookedUpInPart]  Calls that left a batch's answers half read (`holdMs`).
