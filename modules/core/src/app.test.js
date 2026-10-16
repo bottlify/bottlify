@@ -1819,6 +1819,30 @@ test('the cpu setup\'s cores are the executors, a whole number from 1 to 32 that
     assert.throws(()=>withCpuSetup({ cpu: { cores: 2 }, executors: 4 }), /one number/);
 });
 
+test('a run that names no cores gets one fewer than a browser host\'s processors where it shares'
+    + ' memory, at most eight, and one where it cannot; in node the cores BOTTLIFY_CORES names',
+()=>{
+    const browser = { node: false, processors: 4, shareable: true };
+    assert.equal(withCpuSetup({}, browser).executors, 3, 'four processors: three cores');
+    assert.equal(withCpuSetup({}, { ...browser, processors: 16 }).executors, 8, 'at most eight');
+    assert.equal(withCpuSetup({}, { ...browser, processors: 2 }).executors, 1);
+    assert.equal(withCpuSetup({}, { ...browser, processors: 1 }).executors, undefined, 'one');
+    assert.equal(withCpuSetup({}, { ...browser, processors: undefined }).executors, undefined,
+        'a host that does not say: one');
+    assert.equal(withCpuSetup({}, { ...browser, shareable: false }).executors, undefined,
+        'a page that is not cross-origin isolated: one');
+    assert.equal(withCpuSetup({ mode: 'compatible' }, browser).executors, undefined);
+    assert.equal(withCpuSetup({ cork: { config: { sharedMemory: false } } }, browser).executors,
+        undefined);
+    assert.equal(withCpuSetup({ engine: 'emulator' }, browser).executors, undefined);
+    assert.equal(withCpuSetup({ cpu: { cores: 1 } }, browser).executors, 1, 'named, as named');
+    assert.equal(withCpuSetup({ executors: 2 }, browser).executors, 2, 'executors, as named');
+    const node = { node: true, processors: 4, shareable: true };
+    assert.equal(withCpuSetup({}, node).executors, undefined, 'node: one, the same everywhere');
+    assert.equal(withCpuSetup({}, { ...node, named: '4' }).executors, 4, 'BOTTLIFY_CORES');
+    assert.equal(withCpuSetup({}, { ...node, named: '' }).executors, undefined);
+});
+
 test('the pool lends a process the host\'s cores its own leave, less two, and never none', ()=>{
     assert.equal(translatorsBeside(1, 4), 1, 'four cores, one for the program: one translator');
     assert.equal(translatorsBeside(4, 4), 1, 'the program takes them all: still one');

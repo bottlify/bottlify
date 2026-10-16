@@ -436,6 +436,21 @@ against x0.58 to x0.74 -- those threads now all on the process's executor. 7-Zip
 values): one core 1253 (1173 1314 1253) against 1239 (1239 1205 1262), two 2073 (2109 2073 2023)
 against 2047 (2047 2050 1985), four 3757 (3809 3757 3630) against 3634 (3442 3742 3634).
 
+**Measured** (2026-10-16, the program's cores chosen by default -- one fewer than the host's
+processors, at most eight, where the page can share memory, so three on this VM -- with the
+scheduler of the paragraph above; Chromium and conditions as there, three runs an arm, alternated):
+Far Cry's loading screen 11.6, 12.2 and 12.1 frames a second on three cores against 12.0, 12.7 and
+12.0 on one, the other two executors running 189 to 195 slices and 0.9 to 1.0% of the instructions;
+Gothic 3 4.4, 4.6 and 4.4 against 4.2, 4.6 and 4.4 (476 to 684 slices, 0.6 to 1.2%) -- before that
+scheduler, three cores had drawn 10.8, 12.7, 12.8 against 13.2, 13.0, 12.9 and 3.4, 4.1, 4.3 against
+4.6, 4.6, 4.8. The cork benchmark, a program of one thread, on the first of three executors with the
+atomic variant against one core (node 22.22.0, each workload in a process of its own, three runs,
+medians): geometric mean x0.98, per workload x0.88 to x1.14, where the same tree against itself
+measured x0.984 to x1.001. A page opened with no cores named opened the two executors and drew 11.8
+frames a second. Taken: a run that names no cores gets them so in a browser; one where the page
+cannot share memory, in the `compatible` mode and under the emulator; in node one unless
+`BOTTLIFY_CORES` names more, so a suite runs the same on every machine.
+
 **What it costs, and when it pays.** The atomic variant makes every executor slower by the tax *t*
 measured before stage 1. Two executors win when their speedup *S* satisfies *S* × (1 − *t*) > 1.
 At *t* = 20 % that is *S* > 1.25, which by Amdahl's law needs more than 40 % of the work to run in

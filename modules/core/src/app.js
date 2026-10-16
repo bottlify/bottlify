@@ -49,7 +49,7 @@ import { loadZstdWasm } from './zstd-wasm.js';
 import { createClassTable } from './layers/win32/ole32/remote.js';
 import { comHandlers, remoteClassTable } from './com-link.js';
 import { createCallRepeats } from './call-repeats.js';
-import { withRunMode } from './mode.js';
+import { canShareMemory, withRunMode } from './mode.js';
 import { createLinkMemory, openLink } from './system/link.js';
 import { systemHandlers } from './system-link.js';
 import { storeHandlers } from './layers/cpu/internal/store-link.js';
@@ -274,8 +274,11 @@ const hashText = (hash, text)=>{
  * @property {{ cores?: number, eager?: boolean }} [cpu]  The machine's processor. `cores`: how many
  *           processors the program is told it has -- by every road Windows has to say
  *           it -- and the executors that run its threads at once, each a worker past
- *           the process's own thread; 1 to 32, default 1. Under cork, on a page that
- *           can share memory; elsewhere the program runs on one and is told of one.
+ *           the process's own thread; 1 to 32. Unset, in a browser whose page can share
+ *           memory one fewer than the host's processors, at most eight
+ *           (`automaticCores`); elsewhere, and in node unless `BOTTLIFY_CORES` names
+ *           them, one. Under cork, on a page that can share memory; elsewhere the
+ *           program runs on one and is told of one.
  *           Each is opened when a thread wants it, some tens of milliseconds before it
  *           runs one; `eager`, all of them before the program starts -- for a gate or
  *           a measurement that wants threads at once from the first instruction.
@@ -1575,13 +1578,15 @@ export const translatorsBeside = (cores, host)=>Math.max(1, Math.floor(host) - c
  * anything is built when it is not a whole number from 1 to 32, or when
  * `executors` says otherwise.
  *
- * @template {{ cpu?: { cores?: number, eager?: boolean }, executors?: number }} T
+ * @template {{ cpu?: { cores?: number, eager?: boolean }, executors?: number, mode?: string,
+ *     engine?: string, cork?: any }} T
  * @param {T} options
+ * @param {CoresHost} [host]  where the run is made (`coresHost`)
  * @returns {T & { executors?: number }}
  */
-export function withCpuSetup(options){
+export function withCpuSetup(options, host = coresHost()){
     const cores = options.cpu?.cores
-        ?? (options.executors === undefined ? coresFromHost() : undefined);
+        ?? (options.executors === undefined ? automaticCores(options, host) : undefined);
     if (cores === undefined)
     {
         return options;
@@ -1600,14 +1605,52 @@ export function withCpuSetup(options){
 }
 
 /**
- * The cores a run that names none gets from where it runs: `BOTTLIFY_CORES` in node, so
- * every suite can be run with its programs on several executors; none (one) elsewhere.
+ * Where a run is made, as far as its cores go: whether it is node, the cores
+ * `BOTTLIFY_CORES` names there, the host's processors and whether its threads
+ * can share memory.
  *
- * @returns {number | undefined}
+ * @typedef {{ node: boolean, named?: string, processors?: number, shareable: boolean }} CoresHost
  */
-function coresFromHost(){
-    const named = /** @type {any} */ (globalThis).process?.env?.BOTTLIFY_CORES;
-    return named === undefined || named === '' ? undefined : Number(named);
+
+/** @returns {CoresHost} */
+export function coresHost(){
+    const scope = /** @type {any} */ (globalThis);
+    return { node: scope.process?.versions?.node !== undefined,
+        named: scope.process?.env?.BOTTLIFY_CORES,
+        processors: scope.navigator?.hardwareConcurrency, shareable: canShareMemory() };
+}
+
+/** The most cores a run that names none is given: an estimate, not a measurement. */
+export const AUTOMATIC_CORES = 8;
+
+/**
+ * The cores a run that names none gets from where it runs. In a browser whose
+ * page shares memory, one fewer than the host's processors -- the page, the
+ * graphics worker and a translator take about one between them -- and at most
+ * `AUTOMATIC_CORES`; the program is told of them from its first instruction and
+ * sizes its threads to them, and their executors open as its threads want them.
+ * One where its memory cannot be shared (a page that is not cross-origin
+ * isolated, `compatible`) or under the emulator. In node, `BOTTLIFY_CORES`, so
+ * every suite can be run with its programs on several executors, and otherwise
+ * one: a suite runs the same on every machine.
+ *
+ * @param {{ mode?: string, engine?: string, cork?: any }} options
+ * @param {CoresHost} host
+ * @returns {number | undefined}  none: one
+ */
+export function automaticCores(options, host){
+    if (host.node)
+    {
+        return host.named === undefined || host.named === '' ? undefined : Number(host.named);
+    }
+    if (!host.shareable || options.mode === 'compatible'
+        || options.cork?.config?.sharedMemory === false
+        || (options.engine ?? DEFAULT_ENGINE) === 'emulator'
+        || !(Number(host.processors) >= 2))
+    {
+        return undefined;
+    }
+    return Math.min(AUTOMATIC_CORES, Math.floor(Number(host.processors)) - 1);
 }
 
 /**

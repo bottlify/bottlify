@@ -360,7 +360,9 @@ There are no page tables: each 4 KiB page has one byte of flags — `INACCESSIBL
   100 ms is marked volatile (`VOLATILE`) and interpreted for 2 s, twice as long each time it is
   marked again, then translated again. With several executors a page still loses all its
   translations on every such write.
-- **Several executors of a process** (stage 3 of `roadmap/v2/`, `createApp`'s `executors`). Each
+- **Several executors of a process** (stage 3 of `roadmap/v2/`, `createApp`'s `cpu.cores`). A run
+  that names none gets, on a page that can share memory, one fewer than the host's processors (at
+  most eight), and one elsewhere; the executors past the first open as its threads want them. Each
   thread has an executor of its own, where its translations are: the process's first thread runs on
   the process's own, each later one on the other executor fewest live threads call theirs. A turn
   gives every free executor the next ready thread whose executor it is; a thread whose executor is
