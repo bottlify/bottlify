@@ -2556,7 +2556,8 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
                 const storeAt = clock();
                 trace(storeTrace.put, metas[i]);
                 store.put(regionKey(metas[i]), packRegion({ ...result.region,
-                    module: new Uint8Array(0), moduleKey: key }, cacheVersion)).catch(()=>{});
+                    module: new Uint8Array(0), moduleKey: key }, cacheVersion),
+                key === undefined ? undefined : { needs: key }).catch(()=>{});
                 counts.storeMs += clock() - storeAt;
             }
             if (waiting !== null)
@@ -2579,7 +2580,10 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
      * A relinked chunk: its module instantiated once, and every region of it
      * still running switched to its function there -- the same labels, so the
      * entries and the table slot stand and only the function under them moves.
-     * The old batch modules go when no region uses them any more.
+     * The old batch modules go when no region uses them any more -- in the
+     * store as well: each region's record names the relinked module from then
+     * on, and a batch module no record names is dead there. A later run takes
+     * the relinked regions as they are and relinks only what it adds.
      *
      * @param {RegionRecord[]} records  the chunk, in the order its jobs went
      * @param {import('./emit-built.js').BuiltBatch} batch
@@ -2684,7 +2688,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
                 loose: record.loose };
             store.put(regionKey(one), packRegion({ ...region,
                 module: new Uint8Array(0), moduleKey: key, linked: true },
-            cacheVersion)).catch(()=>{});
+            cacheVersion), key === undefined ? undefined : { needs: key }).catch(()=>{});
         }
     };
 
@@ -3451,12 +3455,17 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         }
         else if (cached.moduleKey !== undefined)
         {
-            // Its batch's instance, held until the region is published.
+            // Its batch's instance, held until the region is published. The
+            // module is not read for it, and counts as used all the same.
             one.batchInstance = batchInstances.get(cached.moduleKey);
             if (one.batchInstance === undefined)
             {
                 counts.missNoModule++;
                 one.cached = null;
+            }
+            else
+            {
+                settings.store?.touch?.(cached.moduleKey);
             }
         }
         if (one.cached !== null)
@@ -4723,6 +4732,8 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
                 cacheMisses: counts.cacheMisses,
                 missNoRecord: counts.missNoRecord,
                 missNoModule: counts.missNoModule,
+                // What the store holds and what its opening kept, where it says.
+                store: settings.store?.stats?.() ?? null,
                 lookedUpNow: counts.lookedUpNow,
                 lookedUpLater: counts.lookedUpLater,
                 lookedUpInPart: counts.lookedUpInPart,

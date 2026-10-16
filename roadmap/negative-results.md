@@ -1088,3 +1088,19 @@ None yet.
 - **Since.** The sweep calls GetACP, says how many calls the other executors made and what share
   of the instructions they retired, and stops with an error at a point whose workers' calls never
   reached the host.
+
+### 2026-10-16 -- a translation store without relinked modules
+
+- **Idea.** Keep only the batch modules regions were emitted in, never a relink's module (named by
+  its bytes, a new record every run), so a store holds each region's code once.
+- **Conditions.** Far Cry demo (`farcry-demo`), `tools/cdp_test/game.mjs --worker --coi --no-video
+  --fake-gpu --args "map fort" --run-seconds 200 --executors 1 --store local`, a fresh browser
+  profile, one cold run and two warm ones; headless Chromium 141, the 4-core KVM VM, power plan
+  not recorded; one run each (single runs: a frame varies by a quarter between runs).
+- **Measured.** The cold run stored 404 MB against about 1.1 GB. Every warm run relinked its
+  regions again: the translation worker's time 56 and 58 s against 23 and 20 s with the relinked
+  modules stored, the map reached at 128 and 132 s against 121 and 122, the first minute on it at
+  18.7 and 17.3 frames a second against 20.5 and 19.6.
+- **Decision.** Not taken. A relink's module is stored, each relinked region's record names it,
+  and a batch module no region names any more is dead at the next opening -- the store holds each
+  region's code once without a later run relinking what an earlier one did.

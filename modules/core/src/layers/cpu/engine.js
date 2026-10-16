@@ -353,9 +353,15 @@
  *
  * @typedef {Object} TranslationStore
  * @property {(key: string) => Promise<Uint8Array | null>} get
- * @property {(key: string, bytes: Uint8Array) => Promise<void>} put  The bytes are the store's
- *     from the call on: a directory store hands a record that is the whole of its buffer to the
- *     worker that writes it, and the caller's view of it is then empty.
+ * @property {(key: string, bytes: Uint8Array, options?: { needs?: string }) => Promise<void>} put
+ *     The bytes are the store's from the call on: a directory store hands a record that is the
+ *     whole of its buffer to the worker that writes it, and the caller's view of it is then
+ *     empty. `needs` names the record this one's code is in (a region's batch module), which
+ *     the store keeps as long as it keeps this one.
+ * @property {(key: string) => void} [touch]  Counts a record as used without reading it (a
+ *     module whose instance the run holds already). Optional.
+ * @property {() => any} [stats]  What the store holds and what its opening kept, for the
+ *     report. Optional.
  * @property {(key: string) => Uint8Array | null | undefined} [getNow]  The record at once,
  *     without a turn of the event loop, where the store can answer so; undefined where it
  *     cannot yet, and the translator asks `get`. Optional.
@@ -366,8 +372,8 @@
  *     directory store reads its index). Optional.
  * @property {() => Promise<void>} [flush]  Writes any pending bookkeeping
  *     (a directory store's index) before the run ends. Optional.
- * @property {() => void} [close]  Lets go of what the store holds open (a directory
- *     store's access handle on its records file). Optional; after `flush`.
+ * @property {() => (void | Promise<void>)} [close]  Lets go of what the store holds open (a
+ *     directory store's access handle on its records file) once its writes are done. Optional.
  */
 
 /**

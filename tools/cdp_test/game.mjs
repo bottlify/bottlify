@@ -837,6 +837,17 @@ function describeCork(cork, say){
         + ` (no record ${cork.missNoRecord ?? 0}, no module ${cork.missNoModule ?? 0})`
         + `  store batches: ${cork.lookedUpNow ?? 0} at once / ${cork.lookedUpLater ?? 0}`
         + ' a turn later');
+    if (cork.store)
+    {
+        // The store's opening: what it found, what it kept, what the cap left out.
+        const { opened: o, records, bytes } = cork.store;
+        const mb = (/** @type {number} */ n)=>(n / 1048576).toFixed(0);
+        say(`    store: ${records} records, ${mb(bytes)} MB; opened with ${o.records} records,`
+            + ` ${mb(o.bytes)} MB, kept ${o.kept} (${mb(o.keptBytes)} MB), ${mb(o.overCap)} MB past`
+            + ` the cap, ${o.orphans} regions without their module,`
+            + ` ${o.compacted ? 'copied' : 'not copied'} in ${o.ms.toFixed(0)} ms;`
+            + ` this run emitted ${mb(cork.moduleBytes ?? 0)} MB of modules`);
+    }
     if (cork.staleRegions)
     {
         // --cork-config checkStale: translated code a write left standing.

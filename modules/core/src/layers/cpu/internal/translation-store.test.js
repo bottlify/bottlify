@@ -386,6 +386,10 @@ test('a compaction cut short before its generation is named leaves the old one w
     const second = await createDirectoryTranslationStore(root, 'bundle');
     assert.deepEqual([...(await second.get('a') ?? [])], [1, 2, 3], 'the old generation read');
     await second.flush();
+    // A run that used something else, so 'a' is no longer the last run's.
+    const between = await createDirectoryTranslationStore(root, 'bundle');
+    await between.put('z', new Uint8Array([7]));
+    await between.close();
     // A later compaction writes over the strays rather than after them.
     const third = await createDirectoryTranslationStore(root, 'bundle',
         { keepSessions: 4, compactFloor: 0, cap: 2 });
@@ -394,7 +398,7 @@ test('a compaction cut short before its generation is named leaves the old one w
     await fourth.put('b', new Uint8Array([5]));
     await fourth.flush();
     assert.equal(new TextDecoder().decode(directory.children.get('current').bytes), '1');
-    assert.deepEqual([...directory.children.get('records.1').bytes], [5],
+    assert.deepEqual([...directory.children.get('records.1').bytes], [7, 5],
         'the stray bytes replaced, not appended to');
     assert.ok(!directory.children.has('records'), 'the old generation removed');
     const fifth = await createDirectoryTranslationStore(root, 'bundle');
@@ -441,12 +445,172 @@ test('past the cap the records least recently used go first', async()=>{
         await store.flush();
     }
     const store = await createDirectoryTranslationStore(root, 'bundle',
-        { keepSessions: 100, compactFloor: 1 << 20, cap: 25 });
+        { keepSessions: 100, compactFloor: 0, cap: 25 });
     assert.equal(await store.get('r0'), null);
     assert.equal(await store.get('r1'), null);
     assert.equal((await store.get('r2'))?.[0], 2);
     assert.equal((await store.get('r3'))?.[0], 3);
     assert.equal(recordsSize(root), 20);
+});
+
+test('the last run\'s records stay whole however far past the cap they are', async()=>{
+    // A game's session used 1.9 GB against a cap of 1: cut to the cap at every
+    // start, the run after it translated half of what it had just stored.
+    const root = fakeDirectory();
+    const old = await createDirectoryTranslationStore(root, 'bundle');
+    await old.put('old', new Uint8Array(10));
+    await old.close();
+    const big = await createDirectoryTranslationStore(root, 'bundle');
+    for (let i = 0; i < 8; i++)
+    {
+        await big.put(`r${i}`, new Uint8Array(10).fill(i));
+    }
+    await big.close();
+    const store = await createDirectoryTranslationStore(root, 'bundle',
+        { keepSessions: 4, compactFloor: 0, cap: 25 });
+    for (let i = 0; i < 8; i++)
+    {
+        assert.equal((await store.get(`r${i}`))?.[0], i, `r${i}, the last run's`);
+    }
+    assert.deepEqual({ ...store.stats().opened, ms: 0 }, { records: 9, bytes: 90, kept: 8,
+        keptBytes: 80, overCap: 10, orphans: 0, compacted: false, ms: 0 },
+    'past the cap only what an older run used, and a ninth of the file is no copy\'s worth');
+    assert.equal((await store.get('old'))?.length, 10, 'readable until a copy leaves it out');
+});
+
+test('a region\'s module lives as long as the region, read or not', async()=>{
+    // A run that has the module's instance already reads only the region: the
+    // module went as unused, and every region of it missed for want of it.
+    const root = fakeDirectory();
+    const limits = { keepSessions: 2, compactFloor: 0, cap: 1 << 20 };
+    const first = await createDirectoryTranslationStore(root, 'bundle', limits);
+    await first.put('module/m', new Uint8Array(100).fill(9));
+    await first.put('region/a', new Uint8Array([1]), { needs: 'module/m' });
+    await first.put('region/b', new Uint8Array([2]), { needs: 'module/m' });
+    await first.close();
+    for (let run = 0; run < 6; run++)
+    {
+        const store = await createDirectoryTranslationStore(root, 'bundle', limits);
+        assert.deepEqual([...await store.get('region/a') ?? []], [1], `run ${run}`);
+        await store.put(`other/${run}`, new Uint8Array(200));
+        await store.close();
+    }
+    const store = await createDirectoryTranslationStore(root, 'bundle', limits);
+    assert.equal((await store.get('module/m'))?.[0], 9, 'the module of a region in use');
+    assert.equal(await store.get('region/b'), null, 'a region unused for long goes');
+    assert.equal(await store.get('other/0'), null);
+});
+
+test('a region whose module is gone is no record, and past the cap the two go together',
+    async()=>{
+        const root = fakeDirectory();
+        const first = await createDirectoryTranslationStore(root, 'bundle');
+        // Named, never written: a page that went away between the two puts.
+        await first.put('region/lost', new Uint8Array([1]), { needs: 'module/never' });
+        await first.put('module/old', new Uint8Array(40).fill(4));
+        await first.put('region/old', new Uint8Array([4]), { needs: 'module/old' });
+        await first.close();
+        const second = await createDirectoryTranslationStore(root, 'bundle');
+        await second.put('module/new', new Uint8Array(40).fill(5));
+        await second.put('region/new', new Uint8Array([5]), { needs: 'module/new' });
+        await second.close();
+        const store = await createDirectoryTranslationStore(root, 'bundle',
+            { keepSessions: 4, compactFloor: 0, cap: 60 });
+        assert.equal(await store.get('region/lost'), null, 'no module, no region');
+        assert.equal(store.stats().opened.orphans, 1);
+        assert.equal((await store.get('region/new'))?.[0], 5);
+        assert.equal((await store.get('module/new'))?.[0], 5);
+        assert.equal(await store.get('region/old'), null, 'the older pair past the cap');
+        assert.equal(await store.get('module/old'), null, 'its module with it, not one alone');
+    });
+
+test('a module no region names any more is dead, however recently it was written',
+    async()=>{
+        // A relink moves its regions to a module of its own, each region's
+        // record written again to name it: the batch's module is then named by
+        // none, and kept for a session it is only weight.
+        const root = fakeDirectory();
+        const limits = { keepSessions: 4, compactFloor: 0, cap: 1 << 20 };
+        const run = await createDirectoryTranslationStore(root, 'bundle', limits);
+        await run.put('module/batch', new Uint8Array(400).fill(1));
+        await run.put('region/a', new Uint8Array([1]), { needs: 'module/batch' });
+        await run.put('region/b', new Uint8Array([2]), { needs: 'module/batch' });
+        await run.put('module/relinked', new Uint8Array(400).fill(2));
+        await run.put('region/a', new Uint8Array([3]), { needs: 'module/relinked' });
+        await run.put('region/b', new Uint8Array([4]), { needs: 'module/relinked' });
+        await run.close();
+        const next = await createDirectoryTranslationStore(root, 'bundle', limits);
+        assert.equal(await next.get('module/batch'), null, 'named by none');
+        assert.equal((await next.get('module/relinked'))?.[0], 2);
+        assert.deepEqual([(await next.get('region/a'))?.[0], (await next.get('region/b'))?.[0]],
+            [3, 4]);
+        assert.equal(next.stats().opened.compacted, true, 'more than half the file was dead');
+        assert.equal(next.stats().bytes, 402, 'the relinked module and its two regions');
+    });
+
+test('a store closed straight after its puts has them on disk for the next run', async()=>{
+    for (const sync of [false, true])
+    {
+        const root = fakeDirectory(undefined, sync);
+        const first = await createDirectoryTranslationStore(root, 'bundle');
+        const puts = [];
+        for (let i = 0; i < 20; i++)
+        {
+            puts.push(first.put(`r${i}`, new Uint8Array([i])));
+        }
+        // Not awaited, and no flush: the run's end closes the store as it goes.
+        const closed = first.close();
+        await Promise.all([...puts, closed]);
+        const next = await createDirectoryTranslationStore(root, 'bundle');
+        for (let i = 0; i < 20; i++)
+        {
+            assert.equal((await next.get(`r${i}`))?.[0], i, `r${i}${sync ? ' (worker)' : ''}`);
+        }
+        assert.equal(await first.get('late'), null);
+        await first.put('late', new Uint8Array([1]));
+        assert.equal(await next.get('late'), null, 'a put after the close keeps nothing');
+    }
+    // With a writer of its own, which a close ends: its writes still held go
+    // with it unless the close waits for them.
+    const root = fakeDirectory(undefined, true);
+    const writer = heldWriter();
+    const first = await createDirectoryTranslationStore(root, 'bundle', undefined,
+        { writer: writer.factory });
+    await first.prepare();
+    const puts = [];
+    for (let i = 0; i < 5; i++)
+    {
+        puts.push(first.put(`w${i}`, new Uint8Array([i])));
+    }
+    const closed = first.close();
+    await new Promise(resolve=>setTimeout(resolve, 0));
+    writer.release();
+    await Promise.all([...puts, closed]);
+    const next = await createDirectoryTranslationStore(root, 'bundle');
+    for (let i = 0; i < 5; i++)
+    {
+        assert.equal((await next.get(`w${i}`))?.[0], i, `w${i}, written through the writer`);
+    }
+});
+
+test('a run that only reads keeps what it read young', async()=>{
+    // Its touches were written only past 512 lines: a warm run reading a
+    // hundred records left them as old as the run that wrote them.
+    const root = fakeDirectory();
+    const limits = { keepSessions: 2, compactFloor: 0, cap: 1 << 20 };
+    const first = await createDirectoryTranslationStore(root, 'bundle', limits);
+    await first.put('read', new Uint8Array(10).fill(3));
+    await first.put('unread', new Uint8Array(10));
+    await first.close();
+    for (let run = 0; run < 4; run++)
+    {
+        const store = await createDirectoryTranslationStore(root, 'bundle', limits);
+        assert.equal((await store.get('read'))?.[0], 3, `run ${run}`);
+        await store.close();
+    }
+    const store = await createDirectoryTranslationStore(root, 'bundle', limits);
+    assert.equal(await store.get('unread'), null);
+    assert.equal((await store.get('read'))?.[0], 3);
 });
 
 /**
@@ -587,7 +751,7 @@ test('inside a worker an open store answers a lookup at once, without a turn', a
     assert.equal(counter.syncReads, reads + 1, 'one read at the record\'s offset');
     assert.equal(store.getNow('cork/1/b'), null, 'a miss reads nothing');
     assert.equal(counter.syncReads, reads + 1);
-    store.close();
+    await store.close();
     assert.equal(store.getNow('cork/1/a'), undefined, 'the handle let go of');
     assert.deepEqual([...await store.get('cork/1/a') ?? []], [1, 2, 3], 'get still answers');
 });
@@ -724,9 +888,10 @@ test('a store whose files fail it answers and keeps nothing rather than throwing
  * time while the store's thread goes on.
  */
 function heldWriter(){
-    /** @type {(() => void)[]} */
+    /** @type {{ go: () => void, fail: () => void }[]} */
     const held = [];
     let holding = true;
+    let closed = false;
     /** @type {any} */
     let handle = null;
     const state = { writes: 0 };
@@ -742,9 +907,13 @@ function heldWriter(){
                 reject(e);
             }
         };
-        if (holding)
+        if (closed)
         {
-            held.push(go);
+            reject(new Error('the records writer was closed'));
+        }
+        else if (holding)
+        {
+            held.push({ go, fail: ()=>reject(new Error('the records writer was closed')) });
         }
         else
         {
@@ -755,7 +924,7 @@ function heldWriter(){
         state,
         release(){
             holding = false;
-            for (const go of held.splice(0))
+            for (const { go } of held.splice(0))
             {
                 go();
             }
@@ -780,7 +949,15 @@ function heldWriter(){
                 });
             },
             flush: ()=>later(()=>handle.flush()),
-            close: ()=>handle?.close(),
+            // As a worker that ends: what it held is never written.
+            close: ()=>{
+                closed = true;
+                for (const { fail } of held.splice(0))
+                {
+                    fail();
+                }
+                handle?.close();
+            },
         }),
     };
 }

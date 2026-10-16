@@ -1510,6 +1510,60 @@ test('with a store, a relinked region runs through collections, its batches held
         assert.equal(m.reg(1), 4);
     });
 
+test('a stored region names the module its code is in, the relinked one once relinked',
+    async()=>{
+        // The store keeps a module as long as a region names it, and drops one
+        // none names: a batch's once its regions were relinked, so the store
+        // holds each region's code once, where a later run finds it relinked.
+        /** @type {{ key: string, needs?: string }[]} */
+        const puts = [];
+        const store = {
+            /** @type {Map<string, Uint8Array>} */
+            records: new Map(),
+            get: async(/** @type {string} */ key)=>store.records.get(key) ?? null,
+            /** @param {string} key @param {Uint8Array} bytes @param {{ needs?: string }} [options] */
+            put: async(key, bytes, options)=>{
+                puts.push({ key, needs: options?.needs });
+                store.records.set(key, bytes);
+            },
+        };
+        // The store answers through a turn: each batch is published after one.
+        const settle = ()=>new Promise(resolve=>setTimeout(resolve, 0));
+        const m = machine({ relinkAfter: 1, store, bundleId: 'test' });
+        m.write(CODE + 0x100, [0x43, 0xeb, 0x01, 0x90, 0x49, 0xf4]);
+        m.runtime.noteHot(CODE + 0x104);
+        m.runtime.noteHot(CODE + 0x104);
+        await m.runtime.translatePending();
+        await settle();
+        m.runtime.noteHot(CODE + 0x100, 0, 64);
+        await m.runtime.translatePending();
+        await settle();
+        await m.runtime.translatePending();
+        await settle();
+        assert.ok((m.runtime.diagnostics().relinked ?? 0) >= 2, 'relinked');
+        const modules = new Set(puts.filter(put=>put.key.includes('/module/')).map(put=>put.key));
+        /** The module each region's last record names. @type {Map<string, string | undefined>} */
+        const last = new Map();
+        /** @type {Map<string, string | undefined>} */
+        const first = new Map();
+        for (const put of puts.filter(one=>!one.key.includes('/module/')))
+        {
+            if (!first.has(put.key))
+            {
+                first.set(put.key, put.needs);
+            }
+            last.set(put.key, put.needs);
+        }
+        assert.equal(last.size, 2, 'two regions');
+        for (const [region, module] of last)
+        {
+            assert.ok(module !== undefined && modules.has(module),
+                `${region} names a module the store has`);
+            assert.notEqual(module, first.get(region), 'its relinked one, not its batch\'s');
+        }
+        assert.equal(new Set(last.values()).size, 1, 'both in the one relinked module');
+    });
+
 test('a relink gathers the running regions into one module; an entry another region'
     + ' holds keeps running that region\'s code', async()=>{
     // B at CODE+0x104: dec ecx; hlt. A at CODE+0x100: inc ebx; jmp CODE+0x104 -- A holds a
