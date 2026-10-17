@@ -44,6 +44,64 @@ const TECHNIQUE = DATA + 0x1c0;
 const TECHNIQUES = DATA + 0x1e0;
 const BLOCK_VTABLE = DATA + 0x200;
 const OUT = DATA + 0x220;
+/** Eight expressions' cells (`CELL`), a program they may share, and its registers. */
+const CELLS = DATA + 0xc00;
+const PROGRAM = DATA + 0xc80;
+const REGISTERS = DATA + 0xe00;
+const SLOTS = 28;
+/** The operations Evaluate runs, each with how many inputs it takes. */
+const EVALUATED = [[256, 1], [257, 1], [259, 1], [260, 1], [262, 1], [263, 1], [268, 1],
+    [512, 2], [513, 2], [514, 2], [515, 2], [516, 2], [517, 2], [518, 2], [520, 2], [768, 3],
+    [1280, 2]];
+
+/**
+ * A double at random, the edges among them: zeros of both signs, NaN, the
+ * infinities, huge and tiny values.
+ *
+ * @param {() => number} next
+ */
+const randomDouble = next=>{
+    const pick = next() % 12;
+    return pick < 5 ? (next() % 2000 - 1000) / 37
+        : [0, -0, NaN, Infinity, -Infinity, 1e30, -1e-30][pick - 5];
+};
+
+/**
+ * A program at random (`EXPRESSION`): inputs read from the words, then
+ * instructions of every operation over registers in range, with the literals
+ * and every register at random beforehand.
+ *
+ * @param {(at: number, value: number) => void} put
+ * @param {(at: number, value: number) => void} putDouble
+ * @param {() => number} next
+ */
+const program = (put, putDouble, next)=>{
+    const inputs = next() % 3;
+    const count = next() % 7;
+    [inputs, count, REGISTERS, SLOTS, next() % 5, next() % SLOTS, next() % 6]
+        .forEach((value, k)=>put(PROGRAM + 4 * k, value));
+    let at = PROGRAM + 28;
+    for (let i = 0; i < inputs; i++, at += 20)
+    {
+        // A register's components, or a register each for a scalar array.
+        const step = next() % 2 === 0 ? 1 : 4;
+        const words = 1 + next() % 4;
+        [WORDS + 4 * (next() % 60), next() % 3, words,
+            next() % (SLOTS - (step === 4 ? 4 * words : 4)), step]
+            .forEach((value, k)=>put(at + 4 * k, value));
+    }
+    for (let k = 0; k < count; k++, at += 32)
+    {
+        const [op, arity] = EVALUATED[next() % EVALUATED.length];
+        [op, arity, 1 + next() % 4, next() % 3 === 0 ? 1 : 0, next() % (SLOTS - 4),
+            next() % (SLOTS - 4), next() % (SLOTS - 4), next() % (SLOTS - 4)]
+            .forEach((value, j)=>put(at + 4 * j, value));
+    }
+    for (let slot = 0; slot < SLOTS; slot++)
+    {
+        putDouble(REGISTERS + 8 * slot, randomDouble(next));
+    }
+};
 
 /** @param {number} value */
 const le = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff];
@@ -108,6 +166,8 @@ function layout(next){
         view.setUint32(at - DATA, value >>> 0, true);
     const putF = (/** @type {number} */ at, /** @type {number} */ value)=>
         view.setFloat32(at - DATA, value, true);
+    const putDouble = (/** @type {number} */ at, /** @type {number} */ value)=>
+        view.setFloat64(at - DATA, value, true);
     put(SELF + 4, next() % 20 === 0 ? 0 : BLOCK);
     put(BLOCK + 12, CLOCK);
     put(BLOCK + 16, next() % 15 === 0 ? 0 : TABLE);
@@ -184,10 +244,19 @@ function layout(next){
     {
         put(TABLE + 24 + 4 * t, VERSIONS + 4 * (next() % 16));
     }
+    // Each cell's date either side of the versions, and a program, or none:
+    // the host's then.
+    program(put, putDouble, next);
+    for (let k = 0; k < 8; k++)
+    {
+        put(CELLS + 16 * k, next());
+        put(CELLS + 16 * k + 4, applied - 50 + next() % 100);
+        put(CELLS + 16 * k + 8, next() % 2 === 0 ? PROGRAM : 0);
+    }
     for (let k = 0; k < stale; k++)
     {
         put(TABLE + 24 + 4 * triggers + 8 * k, VERSIONS + 4 * (next() % 16));
-        put(TABLE + 28 + 4 * triggers + 8 * k, VERSIONS + 4 * (next() % 16));
+        put(TABLE + 28 + 4 * triggers + 8 * k, CELLS + 16 * (next() % 8) + 4);
     }
     for (let e = 0; e < entries; e++)
     {
@@ -212,6 +281,35 @@ function layout(next){
     }
     return bytes;
 }
+
+test('Evaluate in the guest works an expression out as its JavaScript: every operation, edges'
+    + ' of every kind, under the program\'s control word or another', ()=>{
+    const next = random(31);
+    for (let round = 0; round < 3000; round++)
+    {
+        const bytes = new Uint8Array(0x1100);
+        const view = new DataView(bytes.buffer);
+        const put = (/** @type {number} */ at, /** @type {number} */ value)=>
+            view.setUint32(at - DATA, value >>> 0, true);
+        program(put, (at, value)=>view.setFloat64(at - DATA, value, true), next);
+        for (let w = 0; w < 64; w++)
+        {
+            if (next() % 2 === 0)
+            {
+                view.setFloat32(WORDS - DATA + 4 * w, randomDouble(next), true);
+            }
+            else
+            {
+                put(WORDS + 4 * w, next() % 3 === 0 ? next() % 5 : next());
+            }
+        }
+        put(CELLS + 8, PROGRAM);
+        put(CLOCK, 1000 + next() % 100);
+        same('Evaluate', { stack: [CELLS, CLOCK], memory: [[DATA, bytes]],
+            control: [0x27f, 0x07f, 0xc7f][round % 3] }, HANDED);
+    }
+    assert.ok(true);
+});
 
 test('Walk in the guest calls and dates as its JavaScript, every entry or the changed ones', ()=>{
     const next = random(23);

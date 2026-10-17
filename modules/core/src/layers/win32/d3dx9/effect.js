@@ -44,6 +44,7 @@
 import { createComObject } from '../ole32/objects.js';
 import { DEVICE, UNKNOWN_RELEASE, createDeviceCalls } from './device.js';
 import { parseConstantTable, registerValues } from './constants.js';
+import { TABLE } from './preshader.js';
 import { compileShader } from './hlsl-compile.js';
 import { PARAMETER, PC, PT, buildEffect, isSampler, isShader, isTexture } from './effect-model.js';
 import { FX_2_0, readCompiledEffect } from './effect-binary.js';
@@ -150,11 +151,41 @@ export const TECHNIQUE = Object.freeze({ PASSES: 0, SAVED: 4, SIZE: 20 });
 export const COMMIT = Object.freeze({ DEVICE: 0, APPLIED: 4, ENTRIES: 8, SCRATCH: 12,
     TRIGGERS: 16, STALE: 20, HEADER: 24, ENTRY: 32 });
 /**
- * A state expression's cell in guest memory: the word the host last set the
- * state to from it, and the clock's reading before that evaluation -- every
- * input written since is dated later.
+ * A state expression's cell in guest memory: the word the state was last set
+ * to from it, the clock's reading before that evaluation -- every input
+ * written since is dated later -- and the expression as a program the guest
+ * works out again itself (`EXPRESSION`), zero for one that is the host's.
  */
-export const CELL = Object.freeze({ VALUE: 0, DATE: 4, SIZE: 8 });
+export const CELL = Object.freeze({ VALUE: 0, DATE: 4, PROGRAM: 8, SIZE: 12 });
+/**
+ * A state expression as the guest's Evaluate runs it (`effect-commit.js`): how
+ * many inputs and instructions, where its registers are (doubles: the
+ * literals, then the input, temporary and output tables), how many, the first
+ * the literals do not fill, the result's register and how it becomes the
+ * state's word (`RESULT`); then each input -- the parameter's data, its type
+ * (0 float, 1 int, 2 bool), how many words, its first register, and how far
+ * apart its words land: 1 a register's components, 4 a register each -- and each
+ * instruction: opcode, inputs, components, whether the first input is one
+ * component, the three inputs' registers and the output's.
+ */
+export const EXPRESSION = Object.freeze({ INPUTS: 0, INSTRUCTIONS: 4, REGISTERS: 8, SLOTS: 12,
+    FIRST: 16, RESULT: 20, MODE: 24, HEADER: 28, INPUT: 20, INSTRUCTION: 32 });
+/**
+ * How an expression's first output becomes the state's word, as `valueOf`
+ * makes it: a float's bits, a bool's as a float, an int's as a float, a bool,
+ * an int, a float truncated into a dword.
+ */
+export const RESULT = Object.freeze({ FLOAT: 0, BOOL_FLOAT: 1, INT_FLOAT: 2, BOOL: 3, INT: 4,
+    FLOAT_DWORD: 5 });
+/**
+ * The preshader operations the guest works out to the bit, by opcode, and
+ * how many inputs each takes: no sine or cosine, which the x87 takes only
+ * below 2^63, no exponent, arc sine or arc cosine, which it has no one
+ * instruction for.
+ */
+const EVALUATED = new Map([[256, 1], [257, 1], [259, 1], [260, 1], [262, 1], [263, 1], [268, 1],
+    [512, 2], [513, 2], [514, 2], [515, 2], [516, 2], [517, 2], [518, 2], [520, 2], [768, 3],
+    [1280, 2]]);
 /**
  * The kinds of a commit entry: constants as the parameter's words, as bools
  * of an int's or of a float's, as floats of an int's or of a bool's, as ints
@@ -1790,6 +1821,150 @@ export function createEffects(host, helpers, options = {}){
         return shaped(state, p.model.type, held, numbersIn(p, held), p, dirty);
     };
 
+    /** Why each state's expression is the host's, as `expressionProgram` said. @type {WeakMap<object, string>} */
+    const refusedFor = new WeakMap();
+    /** Why `expressionProgram` left the last expression it was given to the host. */
+    let programRefused = '';
+    /**
+     * An instruction as a report says it: opcode and inputs, components, and
+     * each operand's table and offset, a register found through another
+     * marked so.
+     *
+     * @param {import('./preshader.js').Instruction} ins
+     */
+    const describeInstruction = ins=>`${ins.opcode}:${ins.arity}x${ins.count}`
+        + `${ins.scalar ? 's' : ''} ${[...ins.inputs, ins.output].map(o=>`${o.index ? '@' : ''}`
+            + `t${o.table}[${o.offset}]`).join(',')}`;
+    /**
+     * A state's expression as a program the guest works out itself
+     * (`EXPRESSION`), in the heap the effect owns: or 0 where the guest would
+     * not answer what `valueOf` does -- an operation it does not run to the
+     * bit, a register found through another, a table but the literals, the
+     * inputs, temporaries and outputs, an input not a float scalar or vector
+     * of one register, more than one output word, or a state whose word is
+     * not a dword, a colour of one or a float.
+     *
+     * @param {EffectState} effect @param {StateModel} state
+     * @returns {number}
+     */
+    const expressionProgram = (effect, state)=>{
+        const source = state.source;
+        if (source.kind !== 'expression' || source.count !== 1)
+        {
+            programRefused = source.kind === 'expression' ? `${source.count} output words`
+                : source.kind;
+            return 0;
+        }
+        const { instructions, immediates, inputs } = source.program;
+        const type = source.type;
+        const mode = state.value === 'float'
+            ? (type === PT.FLOAT ? RESULT.FLOAT : type === PT.BOOL ? RESULT.BOOL_FLOAT
+                : RESULT.INT_FLOAT)
+            : state.value === 'color' || state.value === 'dword'
+                ? (type === PT.BOOL ? RESULT.BOOL : type === PT.INT ? RESULT.INT
+                    : state.value === 'color' ? RESULT.FLOAT : RESULT.FLOAT_DWORD)
+                : -1;
+        if (mode < 0 || (type !== PT.FLOAT && type !== PT.BOOL && type !== PT.INT))
+        {
+            programRefused = `a ${state.value} state of type ${type}`;
+            return 0;
+        }
+        /** How far each table is read or written, in components. @type {Map<number, number>} */
+        const reach = new Map([[TABLE.IMMED, immediates.length], [TABLE.CONST, 0],
+            [TABLE.TEMP, 0], [TABLE.OCONST, 1]]);
+        const reaches = (/** @type {{ table: number, offset: number, index: any }} */ o)=>{
+            if (o.index || !reach.has(o.table))
+            {
+                return false;
+            }
+            reach.set(o.table, Math.max(/** @type {number} */ (reach.get(o.table)), o.offset + 4));
+            return true;
+        };
+        for (const ins of instructions)
+        {
+            if (EVALUATED.get(ins.opcode) !== ins.arity || !ins.inputs.every(reaches)
+                || !reaches(ins.output) || (ins.output.table !== TABLE.TEMP
+                    && ins.output.table !== TABLE.OCONST))
+            {
+                programRefused = `the instruction ${describeInstruction(ins)} of `
+                    + instructions.map(describeInstruction).join('; ');
+                return 0;
+            }
+        }
+        /** @type {[number, number, number, number, number][]} data, type, words, register, step */
+        const loads = [];
+        for (const constant of inputs)
+        {
+            // As `registerValues` lays an input out: a scalar a register's first
+            // component, an array of them one a register; a vector a register's
+            // components, an array of four-component ones one after another.
+            const scalar = constant.cls === PC.SCALAR;
+            if (constant.set !== 2 || constant.rows > 1 || constant.count < 1
+                || (!scalar && constant.cls !== PC.VECTOR)
+                || (!scalar && constant.count > 1 && constant.columns !== 4))
+            {
+                programRefused = `the input ${constant.name}: set ${constant.set}, class `
+                    + `${constant.cls}, ${constant.count} registers`;
+                return 0;
+            }
+            reach.set(TABLE.CONST, Math.max(/** @type {number} */ (reach.get(TABLE.CONST)),
+                (constant.index + constant.count) * 4));
+            const p = effect.byName.get(constant.name);
+            if (!p)
+            {
+                continue;
+            }
+            const m = p.model;
+            // An array's first words, as `registerValues` fills one register.
+            if ((m.cls !== PC.SCALAR && m.cls !== PC.VECTOR) || m.bytes < 4
+                || (m.type !== PT.FLOAT && m.type !== PT.INT && m.type !== PT.BOOL))
+            {
+                programRefused = `the parameter ${constant.name}: class ${m.cls}, type ${m.type}`
+                    + `, ${m.elements} elements`;
+                return 0;
+            }
+            loads.push([dataAt(p), m.type === PT.FLOAT ? 0 : m.type === PT.INT ? 1 : 2,
+                Math.min(scalar ? constant.count : constant.count * constant.columns,
+                    m.bytes >>> 2),
+                constant.index * 4, scalar ? 4 : 1]);
+        }
+        // The tables one after another: literals, inputs, temporaries, outputs.
+        const base = new Map();
+        let slots = 0;
+        for (const table of [TABLE.IMMED, TABLE.CONST, TABLE.TEMP, TABLE.OCONST])
+        {
+            base.set(table, slots);
+            slots += /** @type {number} */ (reach.get(table));
+        }
+        const slotOf = (/** @type {{ table: number, offset: number }} */ o)=>base.get(o.table)
+            + o.offset;
+        const header = [loads.length, instructions.length, 0, slots,
+            /** @type {number} */ (reach.get(TABLE.IMMED)), base.get(TABLE.OCONST), mode];
+        const body = [
+            ...loads.flatMap(([data, kind, count, register, step])=>[data, kind, count,
+                base.get(TABLE.CONST) + register, step]),
+            ...instructions.flatMap(ins=>[ins.opcode, ins.arity, ins.count, ins.scalar ? 1 : 0,
+                ...[0, 1, 2].map(k=>(ins.inputs[k] ? slotOf(ins.inputs[k]) : 0)),
+                slotOf(ins.output)]),
+        ];
+        const length = EXPRESSION.HEADER / 4 + body.length;
+        const program = heap().allocate(length * 4 + 8 + slots * 8);
+        if (program === 0)
+        {
+            programRefused = 'no room';
+            return 0;
+        }
+        effect.owned.push(program);
+        const registers = (program + length * 4 + 7) & ~7;
+        header[EXPRESSION.REGISTERS / 4] = registers;
+        putU32s(program, [...header, ...body]);
+        // The literals, once: nothing writes them.
+        const literals = new Float64Array(slots);
+        literals.set(immediates);
+        host.writeMemory(registers, new Uint8Array(literals.buffer));
+        return program;
+    };
+
     /** A state's value nothing changed, which applyState does not set. */
     const UNCHANGED = Object.freeze({ words: /** @type {number[]} */ ([]), param: null,
         dirty: false });
@@ -2609,6 +2784,9 @@ export function createEffects(host, helpers, options = {}){
                     }
                     effect.owned.push(cell);
                     effect.cells.set(state, cell);
+                    programRefused = '';
+                    putU32(cell + CELL.PROGRAM, expressionProgram(effect, state));
+                    refusedFor.set(state, programRefused);
                     valueOf(effect, null, state);
                 }
                 for (const constant of source.program.inputs)
@@ -2617,9 +2795,15 @@ export function createEffects(host, helpers, options = {}){
                     if (named)
                     {
                         stale.push(named.store.at, cell + CELL.DATE);
-                        handOvers.push({ version: named.store.at, date: cell + CELL.DATE,
-                            what: `${constant.name}, an input of ${state.name}'s expression, `
-                                + 'was written since it was worked out' });
+                        // An input the guest works the expression out again for sends
+                        // nothing here; one it has no program for does.
+                        if (refusedFor.get(state))
+                        {
+                            handOvers.push({ version: named.store.at, date: cell + CELL.DATE,
+                                what: `${constant.name}, an input of ${state.name}'s `
+                                    + 'expression, was written since it was worked out, and the'
+                                    + ` guest has no program for it: ${refusedFor.get(state)}` });
+                        }
                     }
                 }
                 entries.push([COMMIT_KIND.STATE, cell + CELL.DATE, call[0], call[1], call[2],
@@ -2903,18 +3087,18 @@ export function createEffects(host, helpers, options = {}){
             {
                 return D3D_OK;
             }
-            if ((pass.commits?.get(effect.manager) ?? 0) !== 0)
-            {
-                // A pass with a table, committed here: said once a reason, the
-                // first that holds.
-                const why = pass.handOvers?.get(effect.manager)?.find(h=>u32(h.version)
-                    > u32(h.date));
-                if (why)
-                {
-                    host.divergence?.('ID3DXEffect::CommitChanges', `pass '${pass.model.name
-                        ?? ''}' commits on the host: ${why.what}`);
-                }
-            }
+            // Why the guest's commit came here, said once each: the first that holds.
+            const table = pass.commits?.get(effect.manager) ?? 0;
+            const why = table === 0 ? null : pass.handOvers?.get(effect.manager)?.find(h=>
+                u32(h.version) > u32(h.date));
+            const name = pass.model.name ?? '';
+            host.divergence?.('ID3DXEffect::CommitChanges', table === 0
+                ? `pass '${name}' commits on the host: it has no table for this manager`
+                : effect.block !== 0 && u32(effect.block + EFFECT_BLOCK.COMMIT) !== table
+                    ? `pass '${name}' commits on the host: the block names another table`
+                    : why ? `pass '${name}' commits on the host: ${why.what}`
+                        : `pass '${name}' commits on the host with nothing in its table stale:`
+                            + ' the guest\'s CommitChanges was not the one called');
             const thread = host.currentThread?.();
             return answerWith(applyPass(effect, pass, false, thread));
         } },
