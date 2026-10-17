@@ -4,6 +4,7 @@
  * See LICENSE for details
  */
 
+import { MIRROR, createEventMirror } from './internal/event-mirror.js';
 import { createHandleTable } from './internal/handles.js';
 import { createSwitcher } from './internal/switch.js';
 import {
@@ -191,13 +192,17 @@ export function createKernelModule(){
                 cpu.setYieldCheck?.(()=>!state.disposed
                     && state.scheduler.preemptionDue(state.refreshClock));
             }
+            // The words the guest reads its events by, once kernel32 places
+            // the table (`mirrorEvents`); until then nothing is written.
+            const mirror = createEventMirror((address, value)=>memory.writeU32(address, value));
             state.sync = createSyncObjects({ scheduler: state.scheduler,
-                remote: config?.remoteObjects ?? null });
+                remote: config?.remoteObjects ?? null,
+                eventChanged: event=>mirror.changed(event) });
             // A wait of this process on another's object, across a link,
             // ends there; the word comes back here.
             config?.remoteObjects?.onWake?.((/** @type {number} */ token,
                 /** @type {number} */ result)=>state.sync?.wakeRemote(token, result));
-            state.handles = createHandleTable();
+            state.handles = createHandleTable({ watch: mirror });
             state.processes = createProcessTable(config?.ids);
 
             /**
@@ -212,6 +217,8 @@ export function createKernelModule(){
             return {
                 ThreadState,
                 WaitResult,
+                // What a handle's word says (`mirrorEvents`).
+                EventMirror: MIRROR,
 
                 /**
                  * Creates a thread, giving it a stack of its own.
@@ -705,6 +712,20 @@ export function createKernelModule(){
                     live() ? state.sync.releaseMutex(object, thread) : false,
                 releaseSemaphore: (/** @type {any} */ object, /** @type {number} */ count)=>
                     live() ? state.sync.releaseSemaphore(object, count) : 0,
+
+                /**
+                 * Keeps a word for each handle below `count` at `table` in guest
+                 * memory saying whether the event it names is signalled
+                 * (`event-mirror.js`), from the events already open on.
+                 *
+                 * @param {number} table @param {number} count
+                 */
+                mirrorEvents: (table, count)=>{
+                    if (live())
+                    {
+                        mirror.attach(table, count, state.handles.list());
+                    }
+                },
 
                 handles: {
                     /** @param {string} type @param {any} object */

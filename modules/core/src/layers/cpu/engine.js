@@ -193,6 +193,9 @@
  *     the count of answers posted, and the doorbell the engine thread sleeps on. A
  *     thread that is not given its event loop on a timer hears an answer by them
  *     rather than at its next yield. Absent, nothing is rung.
+ * @property {() => boolean} [awaited]  Whether another executor waits for this thread's
+ *     answer: forming and looking up regions stop at the next region, as when their time is
+ *     up, and go on once it is answered. Absent, nothing waits.
  * @property {number} [inFlightMs]  How long a batch may be with the worker before it is given
  *     up, on time the engine thread was free to hear its answer -- past it by the clock and the
  *     event loop come round twice since. Default 10000; tests shorten it.

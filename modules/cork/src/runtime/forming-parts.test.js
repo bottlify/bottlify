@@ -93,6 +93,37 @@ for (const seed of [34, 35, 36])
         });
 }
 
+for (const seed of [51, 52, 53])
+{
+    test(`a batch formed a region a call while another executor waits for this thread runs as`
+        + ` one formed whole (seed ${seed})`, async()=>{
+        const config = { worker: true, translators: 1, batchRegions: 4, maxBatchRegions: 4,
+            holdMs: 0 };
+        const whole = await observe(seed, config);
+        const asked = await observe(seed, { ...config, awaited: ()=>true });
+        assert.ok(!whole.runs.includes('untranslated'), 'every start translated');
+        assert.equal(whole.answeredFirst, 0);
+        assert.ok(asked.answeredFirst > 0 && asked.formedInPart > 0,
+            'forming stopped at a region for the ask');
+        assert.deepEqual(asked.runs, whole.runs);
+    });
+}
+
+for (const seed of [54, 55])
+{
+    test(`a batch's lookups stopped for another executor's ask run as answered at once`
+        + ` (seed ${seed})`, async()=>{
+        const config = { worker: true, translators: 1, batchRegions: 4, maxBatchRegions: 4,
+            bundleId: 'test', holdMs: 0 };
+        const store = storeNow();
+        const filled = await observe(seed, { ...config, store });
+        const asked = await observe(seed, { ...config, store, awaited: ()=>true });
+        assert.ok(asked.cacheHits > 0, 'the store answered');
+        assert.ok(asked.lookedUpInPart > 0, 'answers read over several calls');
+        assert.deepEqual(asked.runs, filled.runs);
+    });
+}
+
 for (const seed of [41, 42])
 {
     test(`regions a relink moves a region a call run as moved at once (seed ${seed})`,

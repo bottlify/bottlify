@@ -42,8 +42,10 @@ export const FIRST_HANDLE = 0x40;
  *
  * @param {Object} [options]
  * @param {number} [options.limit]  Highest handle to issue before reusing closed ones.
+ * @param {{ opened: (handle: number, type: string, object: any) => void,
+ *     closed: (handle: number) => void }} [options.watch]  told of every open and close
  */
-export function createHandleTable({ limit = 0x40000000 } = {}){
+export function createHandleTable({ limit = 0x40000000, watch } = {}){
     /** @type {Map<number, { type: string, object: any }>} */
     const entries = new Map();
     /** @type {number[]} */
@@ -75,6 +77,7 @@ export function createHandleTable({ limit = 0x40000000 } = {}){
             }
             entries.set(handle, { type, object });
             opened++;
+            watch?.opened(handle, type, object);
             return handle;
         },
 
@@ -147,12 +150,14 @@ export function createHandleTable({ limit = 0x40000000 } = {}){
             entries.delete(handle);
             free.push(handle);
             closed++;
+            watch?.closed(handle);
             return entry.object;
         },
 
-        /** @returns {{ handle: number, type: string }[]} */
+        /** @returns {{ handle: number, type: string, object: any }[]} */
         list(){
-            return [...entries.entries()].map(([handle, entry])=>({ handle, type: entry.type }));
+            return [...entries.entries()].map(([handle, entry])=>({ handle, type: entry.type,
+                object: entry.object }));
         },
 
         diagnostics(){

@@ -1518,6 +1518,10 @@ export function createWin32Module(){
                         /** @param {any} node */
                         retainNode: node=>volume.retain(node),
                         queueApc: (thread, routine, args)=>apcs.queue(thread, routine, args),
+                        /** @param {number} bytes */
+                        allocate: bytes=>heap.allocate(bytes),
+                        /** @param {number} bytes */
+                        allocateCode: bytes=>heap.allocateCode(bytes),
                     }),
                     ...apcs.table,
                     ...createThreadPool({
