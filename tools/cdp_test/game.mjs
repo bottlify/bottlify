@@ -959,10 +959,14 @@ function describeCork(cork, say){
     if (byTarget.length > 0)
     {
         say(`    untranslated exits by target:`);
-        for (const { address, count, reason } of byTarget)
+        for (const { address, count, reason, first, last } of byTarget)
         {
+            // From the first exit to the last seen (to a thousand exits): a loading
+            // phase's wait for a translation, or one still paid in play.
+            const when = first >= 0 ? `  ${(first / 1000).toFixed(1)}-${(last / 1000).toFixed(1)} s`
+                : '';
             say(`      0x${(address >>> 0).toString(16).padStart(8, '0')}`
-                + ` x${count}  ${reason}`);
+                + ` x${count}  ${reason}${when}`);
         }
     }
 }

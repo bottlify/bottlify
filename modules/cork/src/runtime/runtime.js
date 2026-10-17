@@ -774,8 +774,11 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
     // candidates, but what the translator never reached is exactly what this
     // is read for. Bounded like `misses`; the coldest target makes room. With
     // the count, the tops its exits were at, a bit each.
-    /** @type {Map<number, { count: number, held: number, tops: number }>} */
+    /** @type {Map<number, { count: number, held: number, tops: number, first: number,
+     *     last: number }>} */
     const exitTargets = new Map();
+    /** When the runtime was made, for the exits' times. */
+    const bornAt = performance.now();
     const EXIT_TARGETS_CAP = settings.exitTargets;
     /**
      * How often the machine stood at an address that has a region for another
@@ -4696,10 +4699,19 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
             let target = exitTargets.get(address);
             if (target === undefined)
             {
-                target = { count: 0, held: 0, tops: 0 };
+                target = { count: 0, held: 0, tops: 0, first: -1, last: -1 };
                 exitTargets.set(address, target);
             }
             target.count++;
+            // When: a loading phase's wait for a translation, or one that play
+            // still pays. A whole millisecond is enough, and a clock read a
+            // thousandth of the exits.
+            if ((target.count & 1023) === 1)
+            {
+                const now = Math.round(performance.now() - bornAt);
+                target.first = target.first < 0 ? now : target.first;
+                target.last = now;
+            }
             if (held)
             {
                 target.held++;
@@ -5190,8 +5202,8 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
                 // (HELD) is `held` -- its address is translated and no link is
                 // missing; the reason of the rest is read now, not at the exit.
                 exitsByTarget: [...exitTargets].sort((a, b)=>b[1].count - a[1].count).slice(0, 32)
-                    .map(([address, { count, held }])=>({ address, count, held,
-                        reason: held === count ? 'held' : missReason(address) })),
+                    .map(([address, { count, held, first, last }])=>({ address, count, held,
+                        first, last, reason: held === count ? 'held' : missReason(address) })),
                 refused: { ...refused },
                 refusedWhy: { ...refusedWhy },
                 // Where a program reads what `precise: false` leaves: a title that
