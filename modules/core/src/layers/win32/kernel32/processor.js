@@ -34,7 +34,11 @@ const EDX = Object.freeze({
 /** And its ECX bits. */
 const ECX = Object.freeze({ SSE3: 1 << 0, POPCNT: 1 << 23, RDRAND: 1 << 30 });
 
-/** What the emulated processor answers to CPUID: leaf 0, leaf 1 and leaf 4. */
+/**
+ * What the emulated processor answers to CPUID, leaf 0, leaf 1 and leaf 4, as
+ * one processor: with more, leaf 1 also sets HTT and names the count and the
+ * asking processor in EBX (cork's `cpuidLeaves`).
+ */
 export const CPUID = Object.freeze({
     vendor: 'GenuineIntel',
     signature: 0x00000673,

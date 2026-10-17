@@ -178,6 +178,42 @@ evidence again.
 - **Correctness.** Every checksum the processor's.
 - **Decision.** Left off.
 
+### 2026-10-15 -- the shared layout's bases as other kinds of global
+
+- **Idea.** Under the process's shared layout (`sharedLayout`, every executor's translation the
+  same bytes) the state block and the tables are addressed from two immutable imported globals,
+  `env.stateBase` and `env.tablesBase`. A seven-instruction loop (an LCG step and a
+  read-modify-write, 600 million instructions) ran 1.34 times as long under it as under one
+  executor's own layout; V8's code for the region kept the loop's `eax` in a stack slot, the base
+  read in the prologue staying live through the loop to the exits that write the state back.
+  Three ways to keep that value from living across the loop were tried: the globals imported
+  mutable (read where used, through the instance's table of imported mutable globals); a second
+  pair of immutable globals for every use after the prologue (`split`); and mutable globals the
+  module defines, initialised from the imported pair (`defined`).
+- **Workload.** The cork benchmark (`tools/cork-bench/bench.mjs`, its 22 workloads) on one
+  executor with the shared layout forced on, against the same tree's own layout; 10 reps of each,
+  each workload's figure the mean of its three fastest reps (`best3Us`, µs an iteration); the
+  checksum (`eax`) the same in every arm. Tree: `cork2` at `a53a1ec6` with the change under way.
+  Bundle hash: not applicable. Per-rep values: not recorded (the bench kept the fastest and the
+  three fastest's mean).
+- **Values.** Geometric mean over the 22 against the own layout, three campaigns in the same
+  hour: immutable (as committed) 1.054, 1.069, 1.070; mutable 1.166; split 1.057; defined
+  1.073. Mutable won the loop (161 against 215 ms in a micro test of the region, 1710 against
+  2249 ms in the engine) and lost calls: through a table of 8 targets 1.45-1.68, of 4096 targets
+  1.54, Lua 1.26. Split won the micro test (151 ms) and not the engine (2224 ms). Defined won the
+  loop (1633 ms) and lost calls about as much as it won elsewhere. The noise floor: the own
+  layout's figure for one workload moved by up to a fifth between campaigns (game-pc24 616-750).
+- **Where the time goes.** A small called function's code is a sixth larger under the shared
+  layout (488 bytes of machine code against 572): every access adds a base, and the loads of the
+  flag record from the state block that its own layout's code drops as dead stay, a load from a
+  computed address being one that may fault.
+- **Machine.** Node 22.22.0 (V8 12.4.254.21-node.33), a 4-core x86-64 Linux VM, Intel Xeon @
+  2.80 GHz. No browser. Power plan: not recorded.
+- **Correctness.** Every arm's checksums equal the own layout's.
+- **Decision.** The globals stay immutable imports. The process's own executor translates for its
+  own layout instead (`cork-host.js`): it runs the first thread and any thread alone, and the
+  shared layout is the other executors' alone.
+
 ## Invalidated
 
 None yet.
@@ -917,6 +953,71 @@ None yet.
   4% two runs of one tree differ by. The thread's time freed went to translated code, whose own
   rate over its time did not rise with it (443-468 M/s before, 434-446 after).
 
+### 2026-10-15 -- the process's executor looking for the others' words between its regions
+
+- **Idea.** With other executors running threads, the process's own executor answers their calls
+  into the host and takes their slices' ends only at its own crossings and between its turns, so
+  its turns stay one quantum (100 000 instructions) long; 7-Zip's benchmark with one thread on two
+  executors ran a fifth slower than on one in such turns. Turns as long as a lone thread's, ended
+  between regions as soon as the executors' bell rang -- the kernel's `yieldCheck`, which runs
+  translated code in budgets of `yieldChunk` (10 000) and asks between them -- would answer them
+  as soon and lose nothing to the turn.
+- **Workload.** 7-Zip 26.04 x86 `7zr.exe b -md22` (sha256 `256feca8e274e5da…`) through
+  `createApp` with `cpu: { cores: 1 }`, the kernel's `preemption` on (the same chunked budget and
+  a check between regions) against off; `cork2` at `a6925e9b` with `89ab808d`'s scheduler changes
+  under way (the check is the kernel's own, which they do not touch).
+- **Values.** One run each, MIPS (compressing / decompressing / total): off 809 / 1413 / 1111,
+  on 525 / 667 / 596.
+- **Machine.** Node 22.22.0, a 4-core x86-64 Linux VM (KVM, Intel Xeon @ 2.80 GHz). No browser.
+  Power plan: not recorded.
+- **Why it did not pay.** A budget of 10 000 instructions brings the slice back to the host
+  every 10 microseconds or so, and the round trip and the check cost as much as the code: half the
+  rate gone before any bell is looked at.
+- **Correctness.** Not judged: measured once for speed.
+- **Decision.** Not used for the executors' bell. The process's executor takes a lone thread's
+  long turn only while no other executor runs a thread (nobody's calls to answer), and a thread
+  made ready during it that a free executor could take ends it (`noteReady` in `threads.js`).
+
+### 2026-10-16 -- the program's cores chosen from the host's by default (roadmap/v2 C1)
+
+- **Idea.** A run that names no cores, in a browser whose page shares memory, gets one fewer
+  than the host's processors (at most eight): the program sizes its threads to them, the
+  executors open only as its threads want them (B2), the process's turns stay long while they
+  run (B1), and an executor keeps its thread a turn while others wait (B5).
+- **Workload.** Far Cry demo (bundle sha256 `ec81f9c260efb780…`) settled 40 s and watched 40 s,
+  Gothic 3 (`bundles/g3`) settled 120 s and watched 40 s, in `tools/cdp_test/frames.mjs` with
+  the page cross-origin isolated and the engine in a worker of the page in both arms
+  (`--coi --worker`); `--cores 1` against `--cores 3` and against `--cores 2`; `cork2` at
+  `f72be67b`. Three runs an arm, alternated.
+- **Values.** Frames a second. Far Cry, 1 core 13.2 13.0 12.9 against 3 cores 10.8 12.7 12.8;
+  1 core 13.0 13.1 12.6 against 2 cores 10.1 11.3 8.5. Gothic 3, 1 core 4.6 4.6 4.8 against
+  3 cores 3.4 4.1 4.3; 1 core 4.6 4.5 4.6 against 2 cores 3.4 4.2 4.1.
+- **Machine.** Headless Chromium 141 (`chromium-1194`), SwiftShader, a 4-core x86-64 KVM VM
+  (Intel Xeon @ 2.80 GHz). Power plan: not recorded.
+- **What was found.** Not the program's own path for several processors: Far Cry told of two
+  and kept on the process's executor drew 11.6 and 12.7 frames a second, as on one. Not the host
+  out of cores: the VM was 77% busy on one core and 71% on two. What changes is a thread running
+  on the other executor: the game's sound thread (priority 15, a 10 ms sleep between runs that
+  spin on the sound cursor) took it -- 2.39 G instructions in 38 s there, 1126 slices, 0.39 ms a
+  call waiting for the answer -- and the renderer on the process's executor retired as many
+  instructions as on one core (18.81 G against 18.88 G) and drew a fifth fewer frames, the
+  process's executor idle 10.5 s of the 38 waiting for the other. With a fake GPU (no
+  SwiftShader) the renderer's rate was the same on one core and three.
+- **Tried, without a positive signal.** (1) The process's executor to the thread calling into
+  the host more often a millisecond (twice as often and at least once): 9.5, 7.6 frames a second
+  on two cores. (2) A thread calling into the host more than once in 30 000 instructions kept on
+  the process's executor and called back from another: 9.0, 7.1, 9.2, 8.5, 10.0 -- the sound
+  thread spins between its calls and is placed between them as one that computes. (3) An idle
+  wait of the process's run loop ended by the other executors' bell: 8.8, 8.0.
+- **Correctness.** Every run drew its frames to the end of its window; none of the three was
+  judged on the suites.
+- **Decision.** One core stays the default; `cpu.cores` and the player's modes give more. None of
+  the three placements is kept; the scheduler keeps each thread's calls into the host and their
+  rate an instruction (`x` in `byThread`) and the last placements (`recentPlacements`), and
+  `frames.mjs` runs the page isolated with the engine in a worker for `--cores` past one -- before
+  it, every browser measurement of frames ran the `compatible` mode on the page's own thread,
+  where a run asking for cores ran on one (`executorsRefused`).
+
 ### 2026-10-16 -- a host call's device steps run as the device's methods in the host
 
 - **Idea.** `ID3DXEffect::CommitChanges` on the host drives the device's setters as guest calls,
@@ -937,6 +1038,72 @@ None yet.
 - **Correctness.** The bridge's tests of steps answered in place; the gate holding the host's
   command records to the guest routine's byte for byte (`seam/commands-host.itest.js`).
 - **Decision.** Removed: steps are answered in place only by appending the command.
+
+### 2026-10-16 -- a host answer let in at once, and the renderer kept by its rate of calls, each alone (roadmap/v2 C1)
+
+- **Idea.** Two cores drew fewer of Far Cry's frames than one (the entry of the same date above).
+  Two steps were measured alone before the change that was kept: (a) the process's turn with
+  nothing of its own to run leaves at once while a call into the host is still to be answered
+  through the event loop -- a graphics worker's answer -- rather than waiting up to 4 ms on the
+  other executors' bell, a wait in which that answer cannot come in; (b) with (a), of two threads
+  the process's executor may run, the one calling into the host twice as often an instruction
+  keeps it and the other goes to the other executor.
+- **Workload.** Far Cry demo (bundle sha256 `ec81f9c260efb780…`) settled 40 s and watched 40 s in
+  `tools/cdp_test/frames.mjs --coi --worker --cores N --threads`; `cork2` at `20eb483b` with the
+  step. Three runs an arm for (a), one for (b).
+- **Values.** Frames a second. (a) 1 core 13.4 13.8 13.6, 2 cores 5.7 11.1 10.5 (2822 to 3026
+  slices on the other executor, 5.5 to 6.0% of the instructions retired while it ran). (b) 2
+  cores 10.4 (3040 slices there). Before either (the entry above, at `f72be67b`), 2 cores 10.1 11.3 8.5.
+- **Machine.** Headless Chromium 141 (`chromium-1194`), SwiftShader, a 4-core x86-64 KVM VM
+  (Intel Xeon @ 2.80 GHz). Power plan: not recorded.
+- **What was found.** Both left threads that call into the host often running on the other
+  executor, where each call is a round trip to the process's: of the last 16 placements there, in
+  (a) 13 to 15 a run were a priority-15 thread that sleeps 10 ms between runs, at 0.4 to 1.6 calls
+  a hundred instructions, and 1 to 3 the renderer (the main thread); in (b) 15 and 1. (b) decides
+  only between two threads that want the process's executor at the same moment; a thread placed
+  elsewhere because that executor was busy was placed by the old rule.
+- **Correctness.** Every run drew its frames to the end of its window.
+- **Decision.** Neither kept alone: (a) is part of the change that was kept, with a thread kept on
+  the process's executor by its rate of calls into the host or by how its runs elsewhere end
+  (roadmap/v2/README, 2026-10-16); (b) was replaced by it.
+
+### 2026-10-16 -- invalidated: the host calls of `tools/executor-sweep.mjs` (2026-10-08 to 2026-10-16)
+
+- **What was wrong.** The sweep's host call, every H-th turn of each thread, was GetTickCount,
+  which kernel32 answers as guest code -- a read of the clock word in the process block -- since
+  before the tool was written: the call never left its executor, and no point with H measured a
+  call into the host. Its figures stand for what ran: a guest routine every H-th turn and a test
+  and branch on every turn, beside the locks and the computing.
+- **Cited as host calls in.** "2026-10-08 -- more threads than other executors, or one other
+  executor" above (its host-call combinations), and roadmap/v2/README's measurements of
+  2026-10-08 ("the more locks and host calls, the larger the gain"), of the interrupt word ("four
+  on two with host calls") and of more ready threads than executors (the sweep's host-call points).
+- **Measured again with a call the host answers** (GetACP; node 22.22.0, a 4-core x86-64 KVM VM,
+  Intel Xeon @ 2.80 GHz, power plan not recorded; `cork2` at `9791153d`; 200 M turns over T
+  threads, five runs a point, the mean of the fastest three, two rounds): against one executor, a
+  call every 256 turns (about one in 2 300 instructions) x0.58 to x0.74 on two and four executors
+  for two and four threads; every 1024 turns x0.91 to x1.18; every 4096 turns x1.04 to x1.28 --
+  where the computing alone gave x1.24 to x1.45 on two (400 M turns, the same day). The other executors retired 10 to 63% of the
+  instructions.
+- **Since.** The sweep calls GetACP, says how many calls the other executors made and what share
+  of the instructions they retired, and stops with an error at a point whose workers' calls never
+  reached the host.
+
+### 2026-10-16 -- a translation store without relinked modules
+
+- **Idea.** Keep only the batch modules regions were emitted in, never a relink's module (named by
+  its bytes, a new record every run), so a store holds each region's code once.
+- **Conditions.** Far Cry demo (`farcry-demo`), `tools/cdp_test/game.mjs --worker --coi --no-video
+  --fake-gpu --args "map fort" --run-seconds 200 --executors 1 --store local`, a fresh browser
+  profile, one cold run and two warm ones; headless Chromium 141, the 4-core KVM VM, power plan
+  not recorded; one run each (single runs: a frame varies by a quarter between runs).
+- **Measured.** The cold run stored 404 MB against about 1.1 GB. Every warm run relinked its
+  regions again: the translation worker's time 56 and 58 s against 23 and 20 s with the relinked
+  modules stored, the map reached at 128 and 132 s against 121 and 122, the first minute on it at
+  18.7 and 17.3 frames a second against 20.5 and 19.6.
+- **Decision.** Not taken. A relink's module is stored, each relinked region's record names it,
+  and a batch module no region names any more is dead at the next opening -- the store holds each
+  region's code once without a later run relinking what an earlier one did.
 
 ### 2026-10-16 -- an effect's constants handed to the setter where the parameter lies
 
@@ -1045,3 +1212,35 @@ None yet.
 - **What stands.** The two numbers compare the same scene, the card, one run each; they say
   nothing about a race. The race was measured once, by the user in the launcher: about 66 to 81.7
   fps, conditions not recorded.
+
+### 2026-10-17 -- a region stopping at every block another region has an entry for
+
+- **Idea.** Far Cry's cold run stored 842 MB for 3.1 MB of x86 it ran, each byte in 6.9 regions.
+  A region that stops at a block another region (published, or formed and on its way) has an
+  entry for, and leaves to that region there, translates a function's code once (`regionStops`,
+  `0b6289c7`, on by default there).
+- **Workload.** The Far Cry demo bundle, `tools/cdp_test/game.mjs farcry-demo --worker --coi
+  --no-video --fake-gpu --args "map fort" --run-seconds 200 --executors 1 --store local`, a fresh
+  profile, one cold run a mode, on `6328903b` with the mode set by `cork.config`; and the transfers
+  between regions (`countTransfers`) of xz 5.8.4 (`-3 -T1` on 16 MiB), Stockfish 8 (`bench 16 1
+  12`) and 7-Zip (`7zr b -md22`), one executor, one run a mode -- the guest instructions retired
+  are the same in every mode (xz 9.976 billion to within 3 000), so the transfers are counts, not
+  timings.
+- **Values.** Stopping at any such block / at another region's own entry only / never:
+  Far Cry stored 246 / 336 / 345 MB (modules emitted 229 / 316 / 324 MB, 13 481 / 13 709 /
+  13 608 regions); xz 179.3 / 116.2 / 103.0 million transfers (`f74d60e9`, before both:
+  103.0 million); Stockfish 137.5 / 101.8 / 100.9 million; 7-Zip 74.4 / 68.3 / 68.3 million. The
+  CPU suite on `0b6289c7` with the parked scheduler change (6 of 10 rounds, the machine loaded by
+  two full check runs in some of them) had xz 10 to 17% and Stockfish 3 to 5% slower than
+  `9a8f577e` on one core.
+- **Machine.** The 4-core KVM VM after a container restart (Intel Xeon @ 2.80 GHz, slower than
+  the one before it: xz 16 to 19 s here against 10 to 11 s there), node 22.22.0, headless
+  Chromium 141. Power plan not recorded. Far Cry runs single, the figures in MB of one run.
+- **Decision.** Off by default (`regionStops: false`). A third of Far Cry's store is the price of
+  the cut it makes in hot code: a block another region holds is often inside the loop or the path
+  this region runs, and every pass through it is a transfer, its registers stored and loaded
+  again. Stopping only at other regions' entries keeps little of the saving (336 MB) and still
+  costs xz 13%. The covering of regions on their way to being published, which kept candidates
+  from being formed over them, stays on: it cost no transfer (xz 103.0 million) and took Far Cry
+  from 842 to 345 MB. A stop that keeps out of hot code -- stopping only in code that runs rarely,
+  or forming a region again without its stops once a transfer at one turns hot -- is still open.

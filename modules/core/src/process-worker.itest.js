@@ -5,7 +5,7 @@
  */
 
 /**
- * A child in a worker of its own (roadmap/v2, stage 2): its machine in that
+ * A child in a worker of its own: its machine in that
  * worker, the run's registry, volume, windows and ids answered from the
  * parent's thread across a link. The compiled parent starts its child twice
  * and checks, one property per line, what each left: the exit code, the file

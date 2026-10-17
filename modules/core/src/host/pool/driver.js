@@ -5,7 +5,7 @@
  */
 
 /**
- * The pool's driver (roadmap/v2, stage 2, "The rule"): from what each
+ * The pool's driver: from what each
  * process's translation workers did in the last window, which of them a
  * worker joins and which one leaves. A pure function of its state and the
  * sample, so the same decisions are taken in the engine and in a test that

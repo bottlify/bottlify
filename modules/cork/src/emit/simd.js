@@ -31,6 +31,7 @@ import { Local, MMX_HELD, MMX_TOP } from './region.js';
 import { emitAddress, readOp, writeOp, writeReg } from './integer.js';
 import { checkAccess, noteStore } from './memory.js';
 import { x87Forget, x87FromMmx } from './x87.js';
+import { atState } from './bases.js';
 
 const F32 = Object.freeze({
     eq: 0x5b, ne: 0x5c, lt: 0x5d, gt: 0x5e, le: 0x5f, ge: 0x60, add: 0x92, sub: 0x93, mul: 0x94,
@@ -323,12 +324,12 @@ function emitForm(e, instruction, flagsLive){
             prepareAddress(e, dst, true);
             noteStore(e, 4);
             b.localGet(Local.addr);
-            b.i32const(0).load('i32', { offset: e.layout.mxcsr });
+            atState(e.context, b).load('i32', { offset: e.layout.mxcsr });
             b.store('i32', { offset: e.layout.ramBase });
             return true;
         case 'ldmxcsr':
             prepareAddress(e, dst);
-            b.i32const(0);
+            atState(e.context, b);
             b.localGet(Local.addr).load('i32', { offset: e.layout.ramBase });
             b.store('i32', { offset: e.layout.mxcsr });
             return true;
@@ -424,7 +425,7 @@ function emitForm(e, instruction, flagsLive){
             }
             else
             {
-                b.i32const(0).i32const(0xff).store('i32_8',
+                atState(e.context, b).i32const(0xff).store('i32_8',
                     { offset: e.layout.x87Empty });
             }
             b.localGet(e.mmxTouchedLocal()).i32const(~MMX_HELD).op(I32.and)
@@ -1122,7 +1123,7 @@ function roundByMxcsr(e, local, ops, vector){
         b.localSet(local);
     };
     // The mode in `count`, a local no conversion holds anything in.
-    b.i32const(0).load('i32', { offset: e.layout.mxcsr }).i32const(13).op(I32.shrU)
+    atState(e.context, b).load('i32', { offset: e.layout.mxcsr }).i32const(13).op(I32.shrU)
         .i32const(3).op(I32.and).localSet(Local.count);
     b.localGet(Local.count).op(I32.eqz);
     e.openIf('nearest', EMPTY);

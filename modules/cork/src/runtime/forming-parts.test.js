@@ -369,6 +369,13 @@ test('with no translator left, a batch emitted here is one region', async()=>{
     const m = machine({ worker: true, translators: 0, batchRegions: 4, maxBatchRegions: 4 });
     const starts = [0x2000, 0x3000, 0x4000];
     const translated = ()=>starts.filter(at=>m.runtime.entryOf(at) >= 0).length;
+    // Counted by module, each batch emitted here being one: a call that overdrew the
+    // credit (`holdMs`) has the runtime call itself back once it is back, which may be
+    // during a turn below, so the regions one of these calls finds new may be two batches.
+    const batchesOfOne = ()=>{
+        const { regions, modules } = /** @type {any} */ (m.runtime.diagnostics());
+        return regions === modules;
+    };
     try
     {
         const gone = heldTranslator();
@@ -381,12 +388,11 @@ test('with no translator left, a batch emitted here is one region', async()=>{
         }
         for (let i = 0; i < 200 && translated() < starts.length; i++)
         {
-            const before = translated();
             await turn();
             await m.runtime.translatePending();
-            assert.ok(translated() - before <= 1, 'a region a call');
+            assert.ok(batchesOfOne(), 'a region a batch');
         }
-        assert.equal(translated(), starts.length, 'each emitted here in a call of its own');
+        assert.equal(translated(), starts.length, 'each emitted here in a batch of its own');
     }
     finally
     {

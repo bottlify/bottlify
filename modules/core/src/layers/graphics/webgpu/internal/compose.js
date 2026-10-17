@@ -5,8 +5,8 @@
  */
 
 /**
- * The screen from several processes' pictures (roadmap/v2/windows.md, step
- * 3). Each process draws its own windows on its own desktop, in its own
+ * The screen from several processes' pictures.
+ * Each process draws its own windows on its own desktop, in its own
  * order -- the run's order for its windows -- and sends that picture: a layer.
  * The screen is one layer, the base, with every visible top-level window of
  * the run copied over it from its own process's layer, bottom to top.

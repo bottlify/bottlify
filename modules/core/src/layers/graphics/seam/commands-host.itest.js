@@ -9,7 +9,7 @@
  * setter of Direct3D 9 and 8 the host writes into the ring in place of the
  * guest's routine, random blocks -- the slow path's flags, a ring nearly full,
  * the draw bits, the render states the device answers for, the values it has
- * seen validated -- and random arguments go through the routine on cork and
+ * seen validated, the device's lock -- and random arguments go through the routine on cork and
  * through the host's writer; each must go to the host where the other does,
  * and otherwise leave the block, the ring and the record the same, byte for
  * byte.
@@ -19,7 +19,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createCorkHost } from '../../cpu/internal/cork-host.js';
 import * as cork from '../../../../../cork/src/index.js';
-import { SHADOW, SURFACE, appendCommand, usagesOf, commandCode } from './shadow.js';
+import { HELD_GUEST, HELD_HOST, SHADOW, SURFACE, appendCommand, usagesOf, commandCode }
+    from './shadow.js';
 import { COMMANDS, commandSlot } from '../d3d9/commands.js';
 import { D3D8_COMMANDS } from '../d3d8/commands.js';
 import { COMMAND_MIRRORS as MIRRORS_9, HOST_COMMAND_MIRRORS as HOST_9 } from './d3d9.js';
@@ -110,6 +111,9 @@ function gate(version, list){
         {
             put(at, next() % 4 === 0 ? next() : 0);
         }
+        // The device's lock free, or now and then held -- by a routine on
+        // another executor, or the host -- where both go to the host.
+        put(BLOCK + SHADOW.HELD, next() % 8 === 0 ? [HELD_GUEST, HELD_HOST][next() % 2] : 0);
         const flagPick = next() % 10;
         put(BLOCK + SHADOW.FLAGS, flagPick < 7 ? 0 : [1, 2, 4][flagPick - 7]);
         put(BLOCK + SHADOW.COMMANDS, next() % 30 === 0 ? 0 : RING);

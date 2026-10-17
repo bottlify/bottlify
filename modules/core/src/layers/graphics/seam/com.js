@@ -253,7 +253,9 @@ function adapt(api, interfaces, onGone, onReferenced, onForgotten, cells){
  *
  * @param {{ allocate: (bytes: number) => number,
  *           memory: { readU32: (address: number) => number,
- *                     writeU32: (address: number, value: number) => void } }} deps
+ *                     writeU32: (address: number, value: number) => void,
+ *                     compareExchangeU32?: (address: number, expected: number,
+ *                         value: number) => number } }} deps
  * @returns {CountCells}
  */
 export function createCountCells({ allocate, memory }){
@@ -299,6 +301,11 @@ export function createCountCells({ allocate, memory }){
                     address,
                     read: ()=>memory.readU32(address),
                     write: value=>memory.writeU32(address, value >>> 0),
+                    ...(memory.compareExchangeU32 === undefined ? {} : {
+                        exchange: (/** @type {number} */ expected, /** @type {number} */ value)=>
+                            /** @type {(a: number, e: number, v: number) => number} */
+                            (memory.compareExchangeU32)(address, expected >>> 0, value >>> 0),
+                    }),
                 });
             }
             return counter.placed;

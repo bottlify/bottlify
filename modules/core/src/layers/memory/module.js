@@ -155,6 +155,44 @@ export function createMemoryModule(){
              * does nothing -- rather than dereferencing what disposal took away.
              */
             const live = ()=>!state.disposed;
+            /** The RAM as dwords, where it is shared with other threads; null where not. */
+            /** @type {Int32Array | null | undefined} */
+            let ramWords;
+            const sharedWords = ()=>{
+                if (ramWords === undefined)
+                {
+                    /** @type {Uint8Array | null} */
+                    let ram;
+                    try
+                    {
+                        ram = cpu.ramView?.() ?? null;
+                    }
+                    catch {
+                        // No machine yet: asked again next time.
+                        return null;
+                    }
+                    ramWords = ram && typeof SharedArrayBuffer === 'function'
+                        && ram.buffer instanceof SharedArrayBuffer && ram.byteOffset % 4 === 0
+                        ? new Int32Array(ram.buffer, ram.byteOffset, ram.byteLength >>> 2) : null;
+                }
+                return ramWords;
+            };
+            /** The same RAM by quadword, for the 64-bit swap. @type {BigInt64Array | null | undefined} */
+            let ramQuads;
+            const sharedQuads = ()=>{
+                if (ramQuads === undefined)
+                {
+                    const words = sharedWords();
+                    if (words === null)
+                    {
+                        return null;
+                    }
+                    ramQuads = words.byteOffset % 8 === 0
+                        ? new BigInt64Array(words.buffer, words.byteOffset, words.length >>> 1)
+                        : null;
+                }
+                return ramQuads;
+            };
 
             current = state;
             return {
@@ -261,6 +299,18 @@ export function createMemoryModule(){
                 window: (/** @type {number} */ address, /** @type {number} */ length)=>
                     live() ? state.accessors.window(address, length) : EMPTY,
                 /**
+                 * Watches the range for writes, the program's and the host's: the
+                 * caller reads the bytes after this, and the watch's `take`
+                 * answers the pages that may differ since. Null where the engine
+                 * cannot say, and every byte is to be looked at.
+                 *
+                 * @param {number} address @param {number} length
+                 * @returns {{ take: (address: number, length: number) => number[] } | null}
+                 */
+                watchWrites: (/** @type {number} */ address, /** @type {number} */ length)=>
+                    (live() && typeof cpu.watchWrites === 'function'
+                        ? cpu.watchWrites(address, length) : null),
+                /**
                  * The RAM as a view over a SharedArrayBuffer, byte 0 at address
                  * 0, for a worker to read and write in place; null where the
                  * memory is not shared.
@@ -340,6 +390,96 @@ export function createMemoryModule(){
                     {
                         state.accessors.writeU32(address, value);
                     }
+                },
+                /**
+                 * The dwords of [address, address + length) as an array over the
+                 * RAM itself, for a block the engine keeps and the program only
+                 * reads -- a clock it moves at every turn: a store through it is
+                 * charged to nothing and reaches no translated code nor a write
+                 * watch (`watchWrites`), and costs a store. Null where the RAM is
+                 * not shared (it can move as it grows) or the address is not
+                 * 4-aligned.
+                 *
+                 * @param {number} address @param {number} length  bytes
+                 * @returns {Int32Array | null}
+                 */
+                wordsOver: (address, length)=>{
+                    const shared = live() ? sharedWords() : null;
+                    if (shared === null || (address & 3) !== 0
+                        || (address >>> 0) + length > shared.byteLength)
+                    {
+                        return null;
+                    }
+                    return shared.subarray(address >>> 2, (address >>> 2) + Math.ceil(length / 4));
+                },
+                /**
+                 * The dword at `address` replaced by `value` if it is `expected`, as
+                 * one indivisible step against the threads running on other
+                 * executors where the RAM is shared; answers what it was. How the
+                 * host takes a lock the guest's own code takes with `xchg`.
+                 *
+                 * @param {number} address  4-aligned @param {number} expected
+                 * @param {number} value
+                 * @returns {number}
+                 */
+                compareExchangeU32: (address, expected, value)=>{
+                    if (!live())
+                    {
+                        return 0;
+                    }
+                    const shared = sharedWords();
+                    if (shared !== null && (address & 3) === 0)
+                    {
+                        const was = Atomics.compareExchange(shared, address >>> 2, expected | 0,
+                            value | 0) >>> 0;
+                        if (was === expected >>> 0)
+                        {
+                            state.accessors.adopt(address, 4);
+                        }
+                        return was;
+                    }
+                    const was = state.accessors.readU32(address);
+                    if (was === expected >>> 0)
+                    {
+                        state.accessors.writeU32(address, value);
+                    }
+                    return was;
+                },
+                /**
+                 * The same for a quadword, as `lock cmpxchg8b` takes one: a
+                 * 64-bit word the guest's threads move that way -- a counter's
+                 * last answer, an SList's header -- moved by the host too.
+                 * Indivisible where the RAM is shared and the address
+                 * 8-aligned; a read then a write elsewhere.
+                 *
+                 * @param {number} address @param {bigint} expected @param {bigint} value
+                 * @returns {bigint}  what the quadword held, unsigned
+                 */
+                compareExchangeU64: (address, expected, value)=>{
+                    if (!live())
+                    {
+                        return 0n;
+                    }
+                    const shared = sharedQuads();
+                    if (shared !== null && (address & 7) === 0)
+                    {
+                        const was = BigInt.asUintN(64, Atomics.compareExchange(shared,
+                            address >>> 3, BigInt.asIntN(64, expected), BigInt.asIntN(64, value)));
+                        if (was === BigInt.asUintN(64, expected))
+                        {
+                            state.accessors.adopt(address, 8);
+                        }
+                        return was;
+                    }
+                    const was = BigInt(state.accessors.readU32(address))
+                        | BigInt(state.accessors.readU32(address + 4)) << 32n;
+                    if (was === BigInt.asUintN(64, expected))
+                    {
+                        const bytes = new Uint8Array(8);
+                        new DataView(bytes.buffer).setBigUint64(0, BigInt.asUintN(64, value), true);
+                        state.accessors.writeBytes(address, bytes);
+                    }
+                    return was;
                 },
                 /** @param {number} address @param {number} [limit] */
                 readCString: (address, limit)=>

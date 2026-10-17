@@ -18,8 +18,10 @@ import {
     TIER_SLOT, emitRegion, enterRegion, finishModule, prepareModule, mathImports,
 } from '../emit/region.js';
 import { buildHelpersModule } from '../emit/helpers.js';
-import { PAGE, Tables, executorBytes, executorLayout, ownLayout, pagesFor, tablesSize }
-    from '../runtime/layout.js';
+import {
+    PAGE, Tables, basesOf, executorBytes, executorLayout, ownLayout, pagesFor, sharedLayout,
+    tablesSize,
+} from '../runtime/layout.js';
 import { createPageTable } from '../runtime/pages.js';
 import { ANY_TOP, createEntries } from '../runtime/entries.js';
 import { SHAPE, isX87 } from '../emit/x87.js';
@@ -33,7 +35,7 @@ const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
  *     trap?: (value: number) => number, rdtsc?: () => bigint,
  *     leaveOut?: string[], precise?: boolean, structure?: boolean,
  *     resume?: boolean, looseStacks?: boolean, executor?: number, hashSlots?: number,
- *     processors?: number }} [given]
+ *     processors?: number, shared?: boolean }} [given]
  *     trapPort: `out dx, eax` to it calls
  *     `trap` from inside the region (answering 1 when it moved EIP), as under a host with
  *     a call channel; without `trap`, one that answers 0; precise: nothing relaxed -- on
@@ -44,11 +46,13 @@ const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
  *     table's `TIER_SLOT`; looseStacks: a store through esp alone tests no page, outside
  *     precise (`prepareModule`); executor: the machine is that executor of a memory with room
  *     for it, its state page and tables past the first's (`executorLayout`), 0 by default;
- *     processors: the executors `cpuid` says the machine has (`ownLayout`), one by default
+ *     processors: the executors `cpuid` says the machine has (`ownLayout`), one by default;
+ *     shared: regions translated for the process's shared layout (`sharedLayout`) and run
+ *     here with this executor's bases, as every executor of a process runs them
  */
 export function createTestMachine(given = {}){
     const { ramSize = 1 << 20, codePages = false, trapPort, trap, rdtsc, leaveOut = [],
-        precise = true, resume = false, looseStacks = false, executor = 0 } = given;
+        precise = true, resume = false, looseStacks = false, executor = 0, shared = false } = given;
     const forced = globalThis.process?.env?.CORK_STRUCTURE;
     const structure = given.structure
         ?? (forced === '1' ? true : forced === '0' ? false : undefined);
@@ -63,6 +67,10 @@ export function createTestMachine(given = {}){
         : executorLayout(first, firstPages * PAGE + (executor - 1) * executorBytes(first),
             executor);
     const layout = codePages ? { ...own, codePages: own.tables + Tables.UNDO_RING } : own;
+    // What regions are translated for, and the two globals that place them here.
+    const emitLayout = shared ? sharedLayout(first) : layout;
+    const bases = shared ? Object.fromEntries(Object.entries(basesOf(layout)).map(([name, value])=>
+        [name, new WebAssembly.Global({ value: 'i32', mutable: false }, value)])) : {};
     const memory = new WebAssembly.Memory({
         initial: firstPages + executor * executorBytes(first) / PAGE });
     const pages = createPageTable(memory, layout);
@@ -168,7 +176,7 @@ export function createTestMachine(given = {}){
             const read = (/** @type {number} */ address)=>bytes()[layout.ramBase + address];
             const region = formRegion(read, entry, regionOptions);
             const m = new ModuleBuilder();
-            const context = prepareModule(m, layout, found, {}, {
+            const context = prepareModule(m, emitLayout, found, {}, {
                 undoLog, hash: table !== null && hash, wide, narrow, precise, resume, looseStacks,
                 ...(structure === undefined ? {} : { structure }),
                 ...(trapPort === undefined ? {} : { trapPort }), leaveOut: new Set(leaveOut),
@@ -186,7 +194,7 @@ export function createTestMachine(given = {}){
                 env: {
                     memory, ...mathImports(), ...helperImports(), ...(table ? { table } : {}),
                     trap: trap ?? (()=>0),
-                    rdtsc: rdtsc ?? (()=>0n),
+                    rdtsc: rdtsc ?? (()=>0n), ...bases,
                 },
             });
             const run = /** @type {import('../runtime/entries.js').Entry['fn']} */ (

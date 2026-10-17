@@ -2,7 +2,7 @@
 
 Русская версия: [architecture.ru.md](architecture.ru.md).
 
-Paths without a prefix are relative to `modules/` in bottlify; paths starting with `ui/` are
+Paths without a prefix are relative to [`modules/`](../modules/) in bottlify; paths starting with `ui/` are
 relative to the root of bottlify-ui. Where a diagram and the code disagree, the code is right.
 
 1. [What it is](#1-what-it-is)
@@ -18,8 +18,9 @@ relative to the root of bottlify-ui. Where a diagram and the code disagree, the 
 
 ## 1. What it is
 
-Bottlify runs 32-bit Windows applications right in a browser tab, with no Windows and nothing to
-install. It has two halves; together they do what Rosetta 2 and Wine do, rebuilt for the browser:
+Bottlify is a set of packages a web page uses to run 32-bit Windows applications right in a
+browser tab, with no Windows and nothing to install. Its two main packages together do what
+Rosetta 2 and Wine do, rebuilt for the browser:
 
 - **cork, the translator.** A browser has no x86 processor, so cork translates the program's
   machine code into WebAssembly, and the browser then compiles that for the device's own processor.
@@ -39,9 +40,10 @@ files and forwards network traffic.
 | What an application needs | What provides it | What it runs on |
 | --- | --- | --- |
 | An x86 processor | cork, translating x86 to wasm | WebAssembly |
-| System DLLs | the `win32` layer: functions in JS that the program sees as real PE images | — |
+| System DLLs | the `win32` layer: functions in JS that the program sees as real PE images | |
 | DirectDraw, Direct3D 7–10, OpenGL, Vulkan, GDI | the `graphics` layer | WebGPU |
-| DirectSound, waveOut, DirectMusic | the `audio` layer | AudioWorklet, SharedArrayBuffer |
+| DirectSound, waveOut, DirectMusic | the `audio` layer | AudioWorklet, SharedArrayBuffer where the page has it |
+| Several processors | the `cpu` layer's executors, each a worker over the program's memory | Web Workers, SharedArrayBuffer |
 | DirectInput, XInput, window messages | the `input` layer | keyboard and mouse events, Gamepad API |
 | DirectShow cinematics | the `media` layer, FFmpeg in wasm | WebAssembly |
 | A disk | a bundle read block by block, with a session on top | fetch with Range, OPFS |
@@ -65,13 +67,13 @@ platforms went away, and the games written for them stopped running. By the earl
 left.
 
 Bottlify works the other way round. It needs no plugin: it uses only standards every modern browser
-already has — WebAssembly, WebGPU, Web Audio, OPFS. And it needs no programs written for it: it runs
-the ones that already exist, ordinary Windows `.exe` files, unchanged.
+already has: WebAssembly, WebGPU, Web Audio, OPFS. And it needs no programs written for it: with it,
+the ones that already exist, ordinary Windows `.exe` files, run unchanged.
 
 There is a practical reason as well: a game is the best test for a system like this.
 
 - **A game exercises everything at once.** Integer code, x87 and SSE, Direct3D, sound, input, files,
-  threads, sometimes the network — one run goes through nearly every layer of the engine.
+  threads, sometimes the network: one run goes through nearly every layer of the engine.
 - **A game measures itself.** Many games ship built-in benchmarks and timedemos: the same scene
   every time, and frames per second at the end. Two runs compare as numbers, so a regression shows at
   once rather than by eye.
@@ -83,7 +85,7 @@ There is a practical reason as well: a game is the best test for a system like t
 
 The engine is never bent to fit one game. When a game stumbles, the shared layer it stumbled on is
 fixed, and the fix reaches every program that takes the same path. That is why what games need is
-the most developed part today — DirectX and OpenGL, sound, input, cinematics and networking — and
+the most developed part today (DirectX and OpenGL, sound, input, cinematics and networking), and
 it works the same for any application.
 
 ## 2. What it is made of
@@ -102,19 +104,20 @@ a local server that serves the application, the engine, the bundles and the rela
 
 The engine is split into layers. Each layer has its own interface, configuration and tests, and
 talks to other layers only through what it declares in `requires`. This is more than a convention:
-`npm run check:boundaries` checks it against the code. Any layer can be switched off and a stub takes
-its place; with `graphics: null`, for instance, a game runs with no picture.
+`npm run check:boundaries` checks it against the code. Any layer can be switched off; where another
+layer needs it, a stub takes its place. With `graphics: null`, for instance, a game runs with no
+picture.
 
 | Layer | Responsible for | `requires` |
 | --- | --- | --- |
-| `log` | the journal, counters, phase profile | — |
+| `log` | the journal, counters, phase profile | |
 | `cpu` | running x86 code through cork, trapping calls into the bridge | `log` |
 | `memory` | the program's address space: reservation, pages, protection | `cpu`, `log` |
 | `kernel` | processes, threads, the scheduler, wait objects | `cpu`, `memory`, `log` |
 | `loader` | loading PE images and building the system DLLs | `cpu`, `memory`, `log` |
 | `bridge` | calling conventions, parking threads, callbacks, COM in the program's memory | `cpu`, `kernel`, `memory`, `log` |
 | `filesystem` | the bundle, the block cache, the `C:` drive, the files the program writes | `log` |
-| `win32` | kernel32, user32, gdi32, advapi32, ole32, msvcrt, winmm, wsock32 and some thirty more DLLs | `bridge`, `kernel`, `memory`, `loader`, `filesystem`, `log` |
+| `win32` | kernel32, user32, gdi32, advapi32, ole32, msvcrt, winmm, wsock32 and some thirty more DLLs | `bridge`, `kernel`, `memory`, `loader`, `filesystem`, `media`, `log` |
 | `graphics` | DirectDraw, Direct3D 7/8/9/10, OpenGL, Vulkan and the WebGPU backend under them | `win32`, `bridge`, `memory` |
 | `audio` | DirectSound, DirectMusic, the mixer, MP3 for Miles | `win32`, `bridge`, `memory` |
 | `input` | DirectInput, XInput, keyboard and mouse in the message queue | `win32`, `bridge`, `memory` |
@@ -122,13 +125,22 @@ its place; with `graphics: null`, for instance, a game runs with no picture.
 
 ## 3. Threads: who starts whom, and why
 
-A tab runs seven kinds of thread, two of them several times over. The page starts three: the engine
-thread, the log keeper and the AudioWorklet. The engine thread starts the graphics thread, a process
-thread for each process where processes run at once, and the run's pool of translation threads,
-which it lends to the processes.
+A tab runs nine kinds of thread, three of them several times over. The page starts three: the
+engine thread, the log keeper and the AudioWorklet. The engine thread starts the graphics thread, a
+process thread for each process where processes run at once, the run's pool of translation
+threads, which it lends to the processes, and the writer of the translation store. The thread a
+process runs on starts that process's executors: one worker for each processor core the program is
+given past the first.
 
-Nearly all the work happens on the engine thread. The others take from it what can run in
-parallel, or what the browser only allows off the main thread.
+Nearly all the work happens on the thread the program runs on: the engine thread, or, where
+processes run at once, the process's own thread. The others take from it what can run in parallel,
+or what the browser only allows off the main thread.
+
+How a run is laid out depends on whether the page is cross-origin isolated:
+
+![Without cross-origin isolation: one thread runs the program](runs-alone.svg)
+
+![With cross-origin isolation: processes and cores run at once](runs-isolated.svg)
 
 ```mermaid
 %%{init: {"theme": "base", "flowchart": {"curve": "step", "nodeSpacing": 30, "rankSpacing": 56, "padding": 10}, "themeVariables": {"fontFamily": "Inter, Segoe UI, Helvetica, Arial, sans-serif", "fontSize": "13px", "primaryColor": "#FFFFFF", "primaryBorderColor": "#2F3A40", "primaryTextColor": "#1B2328", "lineColor": "#5C6970", "clusterBkg": "#F3F5F6", "clusterBorder": "#9AA6AC", "edgeLabelBackground": "#FFFFFF"}}}%%
@@ -139,22 +151,31 @@ flowchart TB
   A["<b>AudioWorklet</b><br/>core/src/layers/audio/output/worklet.js"]
   G["<b>Graphics thread</b><br/>core/src/host/graphics.worker.js"]
   T["<b>Translation threads</b><br/>cork/src/runtime/translator.worker.js"]
+  R["<b>Process threads</b><br/>core/src/host/process.worker.js"]
+  X["<b>Executors</b><br/>core/src/layers/cpu/internal/executor.worker.js"]
+  W["<b>Store writer</b><br/>core/src/layers/cpu/internal/translation-store.writer.js"]
   P -->|"new Worker"| E
   P -->|"new Worker"| K
   P -->|"audioWorklet.addModule<br/>new AudioWorkletNode"| A
   E -->|"new Worker<br/>at start, if there is a canvas"| G
   E -->|"new Worker<br/>the run's pool"| T
+  E -->|"new Worker<br/>with concurrency, a process"| R
+  E -->|"new Worker<br/>a store on OPFS"| W
+  E -->|"new Worker<br/>its process's cores"| X
+  R -->|"new Worker<br/>its process's cores"| X
 ```
 
 | Thread | Started by | When | Why a thread of its own |
 | --- | --- | --- | --- |
 | Page main thread | the browser | always | The launcher's interface, the `createApp` call and DOM events live here. Per frame it does one thing only: polls the gamepads (`requestAnimationFrame` → `input.poll`) |
-| Engine thread | the page, `core/src/host/create.js` | always. With `?host=thread` the engine runs on the page's thread instead, over the same protocol | The program runs in long quanta. On the page's thread it would be interrupted by garbage collection and the interface's rendering, and a click would wait for the quantum to end. Synchronous OPFS access also exists only in a worker. A WebGPU device cannot move between threads, so the worker opens its own and gets the canvas as an `OffscreenCanvas` |
-| Log keeper | the page, `core/src/host/remote.js` | always. Without `Worker`, a `MessageChannel` on the page takes its place | The engine writes its journal, counters and tables into shared memory and answers no questions. The keeper drains the ring before it laps, keeps the history and works out frames, the profile and the per-module breakdown. Logging then costs neither the page nor the engine anything |
-| Graphics thread | the engine thread, `core/src/host/graphics-worker.js` (called from `serve.js`) | at start, if the engine has a canvas and `device.graphicsWorker: false` is not set (`?graphicsWorker=off` in the launcher). Survives a change of program. If it opens no device within 10 s, everything draws on the engine thread | Its job is to draw all the graphics, so the engine thread only keeps state and answers the program. Today Direct3D 7, 8, 9 and OpenGL are played here on a WebGPU device of its own; Direct3D 10 and Vulkan will move here too. It arrived in cork 1.3. In the `tools/graphics-bench --remote` bench the engine thread spends 0.69 ms a Direct3D frame instead of 2.95 |
-| Translation threads | the run's pool, `core/src/host/pool/pool.js` (made in `app.js`) | when the engine is cork and a translator would use a worker. Each process is lent one from its start to its exit, and more join it while its translation lags, as the pool's driver decides (`driver.js`). Until the first answers `ready`, regions are translated on the process's own thread | Emits wasm for regions, builds a module and compiles it. The process's thread does not wait for it: it posts a batch and publishes the result between frames, whenever it arrives. A translation thread works for one process at a time, over a port of its own; one that works for none sleeps and holds nothing of any process |
-| AudioWorklet | the page, `ui/src/engine/session.js` | if the page is cross-origin isolated (`crossOriginIsolated`) and sound is on | The Web Audio real-time thread. It reads the voices from shared memory on its own clock, so sound does not break up even while the engine is busy |
-| Process thread | the engine thread, `core/src/host/process-worker.js` (called from `app.js`) | with `concurrency` 2 or 4, once per process, the program the page started included, for as long as it runs | A process -- the launcher, and the game it starts -- runs on a thread of its own, beside its parent, with its own memory and translator. It blocks while it waits instead of taking turns with the engine's event loop, and the engine's thread runs no program at all |
+| Engine thread | the page, [`core/src/host/create.js`](../modules/core/src/host/create.js) | always. With `?host=thread` the engine runs on the page's thread instead, over the same protocol | The program runs in long quanta. On the page's thread it would be interrupted by garbage collection and the interface's rendering, and a click would wait for the quantum to end. Synchronous OPFS access also exists only in a worker. A WebGPU device cannot move between threads, so the worker opens its own and gets the canvas as an `OffscreenCanvas` |
+| Log keeper | the page, [`core/src/host/remote.js`](../modules/core/src/host/remote.js) | always. Without `Worker`, a `MessageChannel` on the page takes its place | The engine writes its journal, counters and tables into shared memory and answers no questions. The keeper drains the ring before it laps, keeps the history and works out frames, the profile and the per-module breakdown. Logging then costs neither the page nor the engine anything |
+| Graphics thread | the engine thread, [`core/src/host/graphics-worker.js`](../modules/core/src/host/graphics-worker.js) (called from `serve.js`) | at start, if the engine has a canvas and `device.graphicsWorker: false` is not set (`?graphicsWorker=off` in the launcher). Survives a change of program. If it opens no device within 10 s, everything draws on the engine thread | Its job is to draw all the graphics, so the engine thread only keeps state and answers the program. Today Direct3D 7, 8, 9 and OpenGL are played here on a WebGPU device of its own; Direct3D 10 and Vulkan will move here too. In the `tools/graphics-bench --remote` bench the engine thread spends 0.69 ms a Direct3D frame instead of 2.95 |
+| Translation threads | the run's pool, [`core/src/host/pool/pool.js`](../modules/core/src/host/pool/pool.js) (made in `app.js`) | when the engine is cork, the page can share memory and a translator would use a worker; elsewhere each process opens a translator of its own. Each process is lent one from its start to its exit, and more join it while its translation lags, as the pool's driver decides (`driver.js`), up to the host's processors less the program's cores and two. The pool lends to the process's own thread; its other executors each open a translator of their own. Until the first answers `ready`, regions are translated on the process's own thread | Emits wasm for regions, builds a module and compiles it. The process's thread does not wait for it: it posts a batch and publishes the result between frames, whenever it arrives. A translation thread works for one process at a time, over a port of its own; one that works for none sleeps and holds nothing of any process |
+| Executors | the thread a process runs on, [`core/src/layers/cpu/internal/executor.js`](../modules/core/src/layers/cpu/internal/executor.js) | under cork, on a page that can share memory, when the process has more than one core (`cpu.cores`; unset, in a browser one fewer than the host's processors, at most eight): one for each core past the first, opened when a thread of the program wants one | Runs the program's threads at once with the process's own thread, over the process's memory itself. A call into Win32 or the kernel, and a fault, waits while the process's thread answers it over the executor's registers. Each opens a translator of its own and takes translations from the run's store through the process |
+| Store writer | the engine thread, [`core/src/layers/cpu/internal/translation-store.js`](../modules/core/src/layers/cpu/internal/translation-store.js) | where the run's translation store is a directory on OPFS | Writes the store's records through a handle of its own: a write through the synchronous handle waits for the disk, which on the engine thread held a frame |
+| AudioWorklet | the page, `ui/src/engine/session.js` | if sound is on | The Web Audio real-time thread. On a cross-origin isolated page it reads the voices from shared memory on its own clock, so sound does not break up even while the engine is busy; elsewhere the engine posts it the mix down a channel of their own and it says back what it played |
+| Process thread | the engine thread, [`core/src/host/process-worker.js`](../modules/core/src/host/process-worker.js) (called from `app.js`) | with `concurrency` 2 or 4 under cork, once per process, the program the page started included, for as long as it runs | A process (the launcher, and the game it starts) runs on a thread of its own, beside its parent, with its own memory and translator. It blocks while it waits instead of taking turns with the engine's event loop, and the engine's thread runs no program at all |
 
 How the threads exchange data. ⇄ means both ways; SAB is `SharedArrayBuffer`, that is, shared
 memory.
@@ -167,13 +188,18 @@ flowchart LR
   E -->|"SAB: journal ring"| K
   E -->|"MessageChannel ⇄"| G["Graphics thread"]
   E -->|"MessagePort ⇄<br/>SAB: cache arena, busy cells"| T["Translation threads"]
-  E -->|"SAB: voice table"| A["AudioWorklet"]
+  E -->|"SAB: voice table<br/>or MessagePort: the mix"| A["AudioWorklet"]
+  E -->|"link: two rings in SAB"| R["Process threads"]
+  E -->|"SAB: the program's memory,<br/>channel words"| X["Executors"]
+  R -->|"SAB: the program's memory,<br/>channel words"| X
 ```
 
 - **Page ⇄ engine.** Requests and input go by `postMessage`. Along with each message the page
   increments a signal word in shared memory, so the engine notices the message right away, between
-  two turns of the scheduler, rather than at its next scheduled pause. The canvas is handed over
-  once (`transferControlToOffscreen`), and from then on only the engine draws into it.
+  two turns of the scheduler, rather than at its next scheduled pause. Where processes run at once,
+  input and visibility go through a ring in shared memory instead, read between two turns, and
+  requests are still posted. The canvas is handed over once (`transferControlToOffscreen`), and
+  from then on only the engine draws into it.
 - **Engine → log keeper.** Shared memory only: the keeper looks into the ring every 200 ms. Without
   `SharedArrayBuffer` the page forwards the records to it as messages.
 - **Engine ⇄ graphics.** Direct3D 7, 8, 9 and OpenGL each have a `MessageChannel` of their own. Calls go into one
@@ -181,8 +207,17 @@ flowchart LR
   `ImageBitmap` and the answers to calls only the renderer knows.
 - **Engine ⇄ translation.** Regions missing from the store go one way; module bytes and an already
   compiled `WebAssembly.Module` come back.
-- **Engine → AudioWorklet.** No messages at all. The voice table lives in shared memory: the page
-  gets it in the answer to the start request and hands it to the `AudioWorkletNode`.
+- **Engine → AudioWorklet.** On a cross-origin isolated page, no messages at all. The voice table
+  lives in shared memory: the page gets it in the answer to the start request and hands it to the
+  `AudioWorkletNode`. Elsewhere the page gives the engine and the worklet the two ends of a
+  `MessageChannel`, the engine posts the mix down it, and the worklet says back what it played.
+- **A process ⇄ its executors.** The program's memory is shared with them as it is; a few words
+  of shared memory per executor carry its turns. The process asks for a slice, and every call into
+  Win32 or the kernel and every fault the slice reaches waits while the process's thread answers it
+  with its own handlers, the executor's registers put in place of its own for the answer. The other
+  executors' translations are made once for all of them, in one arena; each one's translator asks
+  the run's translation store through the process. Each executor also counts its runs of guest code
+  there, which the graphics recorder's write watch reads (section 7).
 
 **Processes.** With `concurrency` 1, the default, the program runs on the engine thread and a
 child process takes its parent's place there until it exits. With 2 or 4
@@ -191,34 +226,34 @@ page started too, and a child starts at `CreateProcess` and runs beside its pare
 processes at once; one more runs beside its parent taking turns with it on the parent's thread. The
 engine thread is then the system alone: before any process starts it mounts the bundle, lays the
 session and the page's files on the volume, makes the registry and opens the journal and the sound
-output (`buildSystemHost` in `core/src/app.js`), and what the page asks of the program it asks the
+output (`buildSystemHost` in [`core/src/app.js`](../modules/core/src/app.js)), and what the page asks of the program it asks the
 program's thread. It
 needs shared memory: asked for where there is none, the run falls back to `compatible` with one
-process at a time and raises a `fallback` event. What the processes of a run share -- the
+process at a time and raises a `fallback` event. What the processes of a run share stays on the engine thread: the
 registry, the volume and the sharing of its open files, the window directory, ids, named events,
-semaphores and mutexes, the bundle, COM's class table (`core/src/com-link.js`), the translation store (`core/src/layers/cpu/internal/store-link.js`) -- stays on the engine thread, which answers a process thread
+semaphores and mutexes, the bundle, COM's class table ([`core/src/com-link.js`](../modules/core/src/com-link.js)), the translation store ([`core/src/layers/cpu/internal/store-link.js`](../modules/core/src/layers/cpu/internal/store-link.js)). The engine thread answers a process thread
 across a link: two rings in shared memory, one each way, with a doorbell word per side
-(`core/src/system/link.js`, values encoded by `codec.js`). The process thread blocks on its doorbell
+([`core/src/system/link.js`](../modules/core/src/system/link.js), values encoded by `codec.js`). The process thread blocks on its doorbell
 for each answer and answers what it is asked meanwhile (the engine asks it about its windows); a
 message longer than a ring holds goes in parts. Each side looks at its doorbell for a few
 microseconds before it sleeps on it, since a thread woken from sleep costs far more than the answer.
 The volume is mostly not asked: every change to a drive raises a word per drive letter in shared
-memory, and a process thread keeps what it read of a drive -- 64 KB pieces of files, sizes, entries,
-listings -- until that word moves; and the sharing every open is settled against is a table in
+memory, and a process thread keeps what it read of a drive (64 KB pieces of files, sizes, entries,
+listings) until that word moves; and the sharing every open is settled against is a table in
 shared memory under a lock, which a process thread settles its own opens in
-(`core/src/layers/filesystem/internal/volume-link.js`, `shared-sharing.js`). Its Direct3D devices draw on the graphics thread
+([`core/src/layers/filesystem/internal/volume-link.js`](../modules/core/src/layers/filesystem/internal/volume-link.js), `shared-sharing.js`). Its Direct3D devices draw on the graphics thread
 through a port of their own, its DirectDraw and GDI pictures come to the engine as bytes, its sound
 is mixed on the run's voice table in a span its parent lends it, and the page's input reaches it
 as the run's window manager routes it (section 7). What it cannot have yet is in [`core/limits.md`](core/limits.md).
 
 **Modes.** `createApp({ mode })` says how much of this rides on shared memory, and the run's mode is
-in the `app` layer's diagnostics (`core/src/mode.js`):
+in the `app` layer's diagnostics ([`core/src/mode.js`](../modules/core/src/mode.js)):
 
 | Mode | Needs | What it does |
 | --- | --- | --- |
-| `isolated` | a cross-origin isolated page | The program's memory is a `SharedArrayBuffer`. The graphics thread reads the bytes an unlock let the program write straight out of it, and writes read-backs into it in place. Refused at `createApp` on a page that cannot share memory |
-| `compatible` | nothing | The program's memory is the engine thread's own, and whatever crosses to another thread is copied. Runs on any page |
-| `auto` (the default) | — | `isolated` where the page is cross-origin isolated, `compatible` elsewhere |
+| `isolated` | a cross-origin isolated page | The program's memory is a `SharedArrayBuffer`. The graphics thread reads the bytes an unlock let the program write straight out of it, and writes read-backs into it in place, and the program's threads can run on several cores at once. Refused at `createApp` on a page that cannot share memory |
+| `compatible` | nothing | The program's memory is the engine thread's own, and whatever crosses to another thread is copied. The program runs on one core and is told of one. Runs on any page |
+| `auto` (the default) | | `isolated` where the page is cross-origin isolated, `compatible` elsewhere |
 
 The launcher takes `auto` unless `?mode=compatible` or `?mode=isolated` asks for one.
 Which to choose, and what each costs the page, is in
@@ -250,16 +285,16 @@ sequenceDiagram
   E->>S: WebSocket /relay, if networking is wanted
   Note over E,O: the engine's createApp, core/src/app.js
   E->>O: cork's translation directory
+  E->>S: /engine/cork/index.js
   E->>E: layers in requires order
   E->>O: session: registry and files from last time
-  E->>S: /engine/cork/index.js
-  E->>T: new Worker(translator.worker.js), lent to the process by the run's pool
   E->>S: bundle header and table of contents (Range)
   E->>O: block cache, translations from the bundle
   E->>E: loader: .exe, DLLs, TLS, the program's main thread into the scheduler
+  E->>T: new Worker(translator.worker.js), lent to the process by the run's pool
   E-->>P: start answer: voice table, journal memory
   P->>K: journal memory
-  P->>A: new AudioWorkletNode(voice table)
+  P->>A: new AudioWorkletNode(voice table, or a port for the mix)
   P->>E: run
   Note over E: the program's first instruction
   loop every frame
@@ -280,13 +315,17 @@ The order matters in three places.
   Libraries' `DllMain` and TLS callbacks are the program's code too: a stub at the start of the main
   thread calls them, not the host.
 
+With processes at once (`concurrency` 2 or 4), the engine thread builds the run's system instead
+(the journal, the sound output, the volume and bundle, the registry: `buildSystemHost`), and
+the steps from the layers to the program's first instruction run in the program's process thread.
+
 Where to look in the code: `ui/src/engine/session.js` (what the launcher passes),
-`core/src/host/create.js` and `remote.js` (the page side), `serve.js` (the engine side),
-`core/src/app.js` (`createApp`, `buildApp`, the loader).
+[`core/src/host/create.js`](../modules/core/src/host/create.js) and `remote.js` (the page side), `serve.js` (the engine side),
+[`core/src/app.js`](../modules/core/src/app.js) (`createApp`, `buildApp`, the loader).
 
 ## 5. cork, the execution core
 
-cork, our x86-32 to WebAssembly translator with a runtime of its own (the `cork/` package), runs all
+cork, our x86-32 to WebAssembly translator with a runtime of its own (the [`cork/`](../modules/cork/) package), runs all
 of the program's code. What it is, how it translates and runs code, what it supports and how fast it
 is: [`modules/cork/README.md`](../modules/cork/README.md). This section is about how it sits in
 Bottlify.
@@ -309,8 +348,9 @@ x86 read or write becomes an equally ordinary `i32.load` or `i32.store` with an 
 stack, and cork's tables follow right after the program's memory. A memory made for more than one
 executor of a process has, past these, a 64 KiB state page and tables for each further executor
 (`executorLayout`): its translations carry its own addresses, the program's memory is everyone's.
-There are no page tables: each 4 KiB page has one byte of flags — `INACCESSIBLE`,
-`HAS_CODE`, `VOLATILE`, `CLOSED`, `NO_EXECUTE`.
+There are no page tables: each 4 KiB page has one byte of flags: `INACCESSIBLE`,
+`HAS_CODE`, `VOLATILE`, `CLOSED`, `NO_EXECUTE`, and `WATCH` or `WRITTEN` on a page watched for
+writes (section 7).
 
 ### Translation in Bottlify
 
@@ -327,75 +367,144 @@ There are no page tables: each 4 KiB page has one byte of flags — `INACCESSIBL
   Each join is a trial: unless the process's regions a second rise by half of what one more thread
   adds at best, the joined thread leaves and the process keeps that count as its ceiling. On four
   cores one translation thread already leaves no core free while a game loads, and a second made
-  Doom 3 and Tron load slower (`roadmap/negative-results.md`, 2026-10-07). There a joined thread
+  Doom 3 and Tron load slower ([`roadmap/negative-results.md`](../roadmap/negative-results.md), 2026-10-07). There a joined thread
   leaves after its trial. Joined threads leave at once when the process stops translating to wait,
   and after 3 s of a median under 40 % otherwise. Every decision is in the pool's journal
   (`translationPool()` on the run).
-- **The store.** A translation's key is made of the cache version, the browser's features, the
-  memory layout, the bundle id, the entry address, a 64-bit FNV hash of the region's bytes and the
-  x87 stack top. A second run takes from the store everything the first one translated. A bundle may
-  bring translations along (`CORKSEED`); they are seeded before the first instruction.
+- **Regions do not repeat each other.** A candidate at a block of a region formed and not yet
+  published (earlier in its batch, with a translator, or its module compiling) is not formed
+  again beside it (for a region with x87 in it, at the top that region was formed for): it has an
+  entry there once that region is published. A region may also stop at a block another region has
+  an entry for and leave to it there (`regionStops`), so a function's code is translated once; that
+  is off, because the hot code it cuts crosses between regions (`SETTINGS.md`). A small leaf callee
+  is formed into each caller, for the call it saves.
+- **The store.** A translation is kept under the cache version, the browser's features, the memory
+  layout, the bundle id, the entry address, the x87 stack top (any top for a region with no x87 in
+  it) and the run's modes. Its record says
+  what forming made of it: a 64-bit FNV hash of the region's bytes, the blocks it left to other
+  regions, the callees formed into it, its x87 precision. A run that forms the region otherwise
+  (before its callees were known, or beside other regions) forms it again as the record says and
+  takes it when the bytes hash the same. The store also keeps where its regions have entries: a
+  run that meets a block of a stored region before the region's entry forms that region, which the
+  store answers, rather than a new one there. Every process of a run adds its regions to that map
+  when it flushes, to the map as the store holds it then, and writes it back only when it adds a
+  64th of it: a tool a game starts many times a run would otherwise write the whole map each time. A second run takes from the store everything the
+  first one translated. A bundle may bring translations along (`CORKSEED`); they are seeded before
+  the first instruction.
 
 ### Execution in Bottlify
 
 - **Counting instructions.** Each block subtracts its instruction count from a budget on the way
-  out, and the budget is checked on backward jumps. The scheduler's quantum is 100,000 instructions,
-  but translated code is given its budget 10,000 at a time, so a thread can be preempted promptly.
+  out, and the budget is checked on backward jumps. The scheduler's quantum is 100,000 instructions;
+  among ready threads on one executor a turn is as many as a quarter of a millisecond takes at the
+  rate the executor runs, when that is more (fast translated code: about 750,000), and never more
+  than a solo turn, with no deadline within a millisecond. A thread with no other ready beside it
+  and no deadline within 16 ms gets a solo turn, ten quanta (with other executors running threads,
+  only where their calls interrupt the process's slice). Translated code is given its budget
+  10,000 at a time, so a thread can be preempted promptly.
 - **Two interpreters.** The first 8192 units of a process's work (instructions, plus 128 for each new
   jump target) run on the JS interpreter, the rest on the wasm interpreter.
-- **Memory and self-modifying code.** Outside precise mode reads are not checked: the address simply
-  wraps into the program's memory. Every write checks the page's flag byte. When the program writes
+- **Memory and self-modifying code.** Outside precise mode reads are not checked until the program
+  first touches a page it cannot reach: the address simply wraps into the program's memory. From
+  that fault on, every region tests the pages it reads, and the regions that wrapped are translated
+  again. Every write checks the page's flag byte (the accesses a block makes off one register once
+  for all of them, as one window), except a store through `esp` alone, which goes unchecked while
+  no translated code lies on a thread's stack (`looseStacks`); once code is translated there, every
+  region checks those too. When the program writes
   where translated code lies on a page, the region exits. The first such write drops all of that
   page's translations; the regions formed there afterwards keep a copy of every byte they were
-  formed from, and a later write drops only those whose bytes it actually changed -- a mixer that
+  formed from, and a later write drops only those whose bytes it actually changed: a mixer that
   rewrites its voice patches with the bytes already there keeps its code, and the code it drops is
   asked for again at once. A page keeps one range of the 32-byte granules its code covers, so
   data between two pieces of code is inside it. A write there that touches no region's bytes is
-  judged against a copy of the page: if it changed what was there -- a variable written every
-  turn of a loop -- the page loses its translations as before, since kept as code it would send
+  judged against a copy of the page: if it changed what was there (a variable written every
+  turn of a loop), the page loses its translations as before, since kept as code it would send
   every such write to the interpreter; if it wrote the bytes already there, the page stays. A page that loses its translations 8 times within
   100 ms is marked volatile (`VOLATILE`) and interpreted for 2 s, twice as long each time it is
   marked again, then translated again. With several executors a page still loses all its
   translations on every such write.
-- **Several executors of a process** (stage 3 of `roadmap/v2/`, `createApp`'s `executors`). Each
+- **Several executors of a process** (`createApp`'s `cpu.cores`). A run
+  that names none gets, on a page that can share memory, one fewer than the host's processors (at
+  most eight), and one elsewhere; the executors past the first open as its threads want them. Each
   thread has an executor of its own, where its translations are: the process's first thread runs on
   the process's own, each later one on the other executor fewest live threads call theirs. A turn
   gives every free executor the next ready thread whose executor it is; a thread whose executor is
-  busy then goes to one left free -- the process's own first -- and has its code translated there
-  too, rather than leave a processor idle. A thread is never started while another executor still
+  busy then goes to one left free (the process's own first) and has its code translated there
+  too, rather than leave a processor idle. Two kinds of thread run on the process's own executor
+  only, where they may: one calling into the host more often than once in 30 000 instructions over
+  its last million or so instructions (however many slices cut them: a thread that wakes, runs a few
+  dozen instructions and waits again weighs as little as those), every such call a round trip back
+  to it from another executor, and one whose
+  runs on another executor have mostly ended with the process's executor left nothing to run and
+  calling it back: a thread that takes turns with the process's threads rather than running beside
+  them (the share halves every second, so it tries again). A thread of either kind waiting for the
+  process's executor takes it from one that computes, which goes to the other executor in its place.
+  A thread is never started while another executor still
   runs it: one that waited there is made ready by its wake before that slice is taken, and the
   scheduler refuses the second start. Only the executors in a thread's affinity mask are its to
-  run on: the program is told it has one processor for each executor -- by GetSystemInfo, the
-  process block, `cpuid` and the rest -- and `cpuid` answers each executor's number as its APIC
+  run on: the program is told it has one processor for each executor (by GetSystemInfo, the
+  process block, `cpuid` and the rest), and `cpuid` answers each executor's number as its APIC
   id, so a thread pinned to a processor reads that processor's. The process's own thread runs its threads
-  too, and answers the calls the others' threads make -- at each of its own crossings into the host
-  and between its turns, each caller the current thread while it is answered. An executor past the
-  first is a cork host in a worker of its own over the
-  process's memory
-  (`core/src/layers/cpu/internal/executor.worker.js`), with its own state page, entry hash and
-  translations. The page flags and the code bounds are the process's: a write on any executor into
+  too, and answers the calls the others' threads make: at each of its own crossings into the host,
+  between its turns, and inside them: an executor that needs its answer (a call, a fault, a slice's
+  end) stores a word the process's translated code reads at every back edge as the floor of its
+  budget, so its slice leaves there, the calls are answered and the slice goes on, each caller the
+  current thread while it is answered. An executor keeps its
+  thread slice after slice while no ready thread waits for one and the process wants none back
+  (suspended, ended by another): its event loop turns in between, and the process hears of the
+  thread at most every 250 ms. While ready threads wait for an executor, it keeps its thread for a
+  turn, 1 ms (`executorHoldMs`), and gives it up at the first slice's end past that, as a processor
+  keeps a thread to its quantum's end. The process's thread with nothing of its own to run waits for the
+  others until its soonest deadline, 4 ms at most, and an executor keeping a thread the process's
+  executor may run lets it go at its slice's end and the thread comes to the process's executor, so
+  a program whose one working thread was started while its first still ran runs it there. While a
+  call into the host is still to answer through the event loop (a graphics worker's answer, a
+  fetched block), the turn does not wait: the run loop waits for that answer and the others' bell
+  together. Its own turns are as long while other executors run threads as while none does,
+  and a thread made ready that a free executor could take ends such a turn, whether its own thread
+  or an answer to another's made it ready, as does another executor's slice ending. An executor past the first is a cork host
+  in a worker of its own over the process's memory, opened when a ready thread wants one (a thread
+  more than the open executors run, or one whose affinity mask names it): a program of one thread
+  opens none
+  ([`core/src/layers/cpu/internal/executor.worker.js`](../modules/core/src/layers/cpu/internal/executor.worker.js)), with its own state page, entry hash and
+  instances of translations. The translations of the executors past the first are theirs together:
+  made for the process's shared layout (`sharedLayout`), which addresses the state block and the
+  tables from two bases each instance is given, their bytes are the same on each of them, and one
+  arena of emitted functions serves them all and their translators: a region one of them emitted,
+  the others take from it. The process's own executor translates for a layout of its own, the state
+  and the tables at constant addresses, as with one executor: the shared layout's bases cost a
+  sixth more machine code in a small function and 7 % of the benchmark, and the process's executor
+  runs the first thread and any thread alone. Code run on both sides is translated twice, never
+  once per executor. The process keeps the run's translation store; the others' translators ask it
+  through the process, a lookup answered on its event loop and a record handed over unwaited, so
+  a thread that ran on another executor in one run takes its regions from the store in the next. The page flags and the code bounds are the process's: a write on any executor into
   code any of them translated is found, the finder drops its own translations and puts the range in
   a ring in shared memory, and every other executor drops its own at its next slice
-  (`cork/src/runtime/shared-code.js`). A trap or a fault on such an executor waits for the process's
+  ([`cork/src/runtime/shared-code.js`](../modules/cork/src/runtime/shared-code.js)). A trap or a fault on such an executor waits for the process's
   thread, which answers it with its own handlers over the executor's registers, swapped into its
-  state block for the call (`executor.js`).
+  state block for the call (`executor.js`). A run that ends inside one of the host's routines no
+  slice ends inside (a command record reserved and not yet finished) goes on to the routine's
+  end first, on every executor (`unbroken.js`): taken off there, the thread would hold back every
+  record after it until it ran again.
 - **Exact exceptions.** A region exits right before the faulting instruction, with its EIP and
-  registers. Division by zero gives #DE, an unknown instruction #UD, a write to a closed page #GP, a
-  jump below `0x10000` (a call through a null pointer, say) #PF. `int3` is finished by the
+  registers. Division by zero gives #DE, an unknown instruction #UD, an access to a page the program cannot
+  reach #PF with its address (translated code leaves, and the JavaScript interpreter runs the
+  instruction once more to name the address), a jump below `0x10000` (a call through a null
+  pointer, say) #PF. `int3` is finished by the
   interpreter. The exception then goes to the program's SEH, where #GP and #PF become
   `EXCEPTION_ACCESS_VIOLATION`.
 
-Where to look in the code: `cork/src/decode/`, `cork/src/region.js`, `cork/src/emit/`,
-`cork/src/wasm/`, `cork/src/runtime/`, `cork/src/interp.js`, `cork/src/interp-wasm.c`; the engine
-glue is `core/src/layers/cpu/internal/cork-host.js`. Where cork goes next is
-`roadmap/v2/`.
+Where to look in the code: [`cork/src/decode/`](../modules/cork/src/decode/), [`cork/src/region.js`](../modules/cork/src/region.js), [`cork/src/emit/`](../modules/cork/src/emit/),
+[`cork/src/wasm/`](../modules/cork/src/wasm/), [`cork/src/runtime/`](../modules/cork/src/runtime/), [`cork/src/interp.js`](../modules/cork/src/interp.js), [`cork/src/interp-wasm.c`](../modules/cork/src/interp-wasm.c); the engine
+glue is [`core/src/layers/cpu/internal/cork-host.js`](../modules/core/src/layers/cpu/internal/cork-host.js). Where cork goes next is
+[`roadmap/x64.md`](../roadmap/x64.md).
 
 ## 6. Win32 in JavaScript: how a DLL comes about
 
 Each system library is a set of tables in JS. For every function they record which handler runs it,
 how many bytes of arguments to take off the stack, and its calling convention (stdcall unless
 stated). For example, `AddAtomA: { argBytes: 4, handler: ([p]) => add(p) }` in
-`core/src/layers/win32/kernel32/atoms.js`.
+[`core/src/layers/win32/kernel32/atoms.js`](../modules/core/src/layers/win32/kernel32/atoms.js).
 
 When a process starts, the loader builds real PE32 images of `kernel32.dll`, `d3d9.dll` and the rest
 from these tables and places them in the program's memory. To the program they are ordinary DLLs,
@@ -404,7 +513,7 @@ was bound to.
 
 | Where | What lives there |
 | --- | --- |
-| Engine thread | The function tables, image building, the bridge and the handlers |
+| Engine thread (a process's own thread with `concurrency` above 1) | The function tables, image building, the bridge and the handlers |
 | Program memory | The DLL images; the stub table from `0x100000` (16,384 slots of 16 bytes); COM objects and their method tables |
 
 ```mermaid
@@ -414,11 +523,11 @@ flowchart TB
     TBL["Function tables in JS<br/>win32/dll/*.js: name → argBytes, handler"]
     SYN["Image synthesis<br/>loader/internal/synth.js"]
   end
-  subgraph IMG["kernel32.dll in program memory, a real PE32"]
+  subgraph IMG["A system DLL in program memory, a real PE32"]
     H1["MZ and PE headers"]
     H2["Export table: names, ordinals, addresses"]
-    H3["A 16-byte slot per function: JMP to the stub, int3"]
-    H4[".data: _iob, __pioinfo, _environ"]
+    H3["A 16-byte slot per function: mov edi, edi, JMP to the stub, int3"]
+    H4[".data, msvcrt's: _iob, __pioinfo, _environ"]
     H5["Functions written as x86 machine code"]
   end
   subgraph STB["Stub table, 0x100000"]
@@ -456,7 +565,7 @@ sequenceDiagram
   participant C as cork
   participant B as Bridge
   participant H as JS handler
-  X->>K: call [IAT] — ReadFile, 5 arguments
+  X->>K: call [IAT]: ReadFile, 5 arguments
   K->>Z: JMP rel32
   Z->>C: out dx, eax
   C->>B: bridge call from the region, registers in the state block
@@ -472,13 +581,16 @@ sequenceDiagram
   end
 ```
 
-- **COM objects** — Direct3D, DirectSound, DirectInput — live in the program's memory too. The
-  object's first word points at its method table, and each method there is a stub like any other.
-  Methods are stdcall, with the interface pointer as the first argument on the stack.
-- **Callbacks** — a window procedure, a COM callback, `DllMain`. The bridge stops the thread, builds a
+- **COM objects** (Direct3D, DirectSound, DirectInput) live in the program's memory too. The
+  object's first word points at its method table, and each method there is a stub like any
+  other, except those that run in the guest: IUnknown's `AddRef` and `Release` for an object
+  whose count lives in guest memory, and the Direct3D 8 and 9 methods a program calls most
+  (section 7). Methods are stdcall, with the interface pointer as the first argument on the
+  stack.
+- **Callbacks:** a window procedure, a COM callback, `DllMain`. The bridge stops the thread, builds a
   frame on the program's stack and runs the program's code until it returns into a sentinel trap.
-  A host call that calls the program back many times in a row -- a D3DX effect's pass setting each
-  state through the program's own state manager -- is written as steps (`bridge.drive`): a generator
+  A host call that calls the program back many times in a row (a D3DX effect's pass setting each
+  state through the program's own state manager) is written as steps (`bridge.drive`): a generator
   that yields each guest call. The bridge then sends the thread into each routine in the slice the
   call came in and takes its answer at the sentinel there, with no park and no turn of the run loop
   between them. It is on by default (`driveGuestCalls`): through promises every guest call of a
@@ -486,9 +598,16 @@ sequenceDiagram
   than in the program. The bridge's `driveMs` and `driveCallMs` split the steps' time between the
   steps and the guest. Off, the same steps run through promises; `effect-steps.itest.js` holds the
   two to the same results.
-- **Some code lives in program memory directly.** Some exports are ready x86 machine code: msvcrt and
-  kernel32 functions, and handing out small heap blocks (up to 1 KiB). They run with no trap, at
-  cork's speed, and only what they cannot handle themselves goes to the bridge.
+- **Some code lives in program memory directly.** Some exports and methods are x86 machine code
+  the program runs itself, with no trap, at cork's speed; only what they cannot handle goes to
+  the bridge. Some are written as x86: msvcrt's and kernel32's functions a program calls most,
+  among them the interlocked calls, critical sections, slim reader/writer locks, one-time
+  initialisation, SLists and the heap's small blocks (up to 1 KiB). Others are written once in
+  JavaScript, marked `@guestCode`, and compiled to i386 by the build ([`core/scripts/guest-code/`](../modules/core/scripts/guest-code/)):
+  the compiled bytes sit beside the source as `*.x86.js`, the JavaScript stays the host's
+  handler and the reference a test holds the x86 to, and `return host()` hands a rare case to
+  that handler. D3DX's vector, matrix and quaternion math and its effect setters, msvcrt's
+  string, float and math functions and GLU are written so.
 - **When a function is missing.** Each name has a stub of its own. If it is known how many bytes of
   arguments to take off (an `@N` decoration, a C++ name, a cdecl library, or a library the program
   brought), it simply returns 0. Otherwise the program stops with `unimplemented import`, and the
@@ -501,35 +620,39 @@ sequenceDiagram
 flowchart TD
   A["The program needs a DLL: an import or LoadLibrary"] --> B{"A KnownDLL, or a library<br/>an engine layer replaces?"}
   B -->|"yes"| OUR["Ours: a synthesised image"]
-  B -->|"no"| C{"File found?<br/>.exe folder → system32 →<br/>C:\WINDOWS → current folder"}
+  B -->|"no"| C{"File found?<br/>.exe folder → system32 → C:\WINDOWS<br/>(only for a name with no table) → current folder"}
   C -->|"yes"| REAL["The real DLL: relocations, dependencies,<br/>imports, DllMain. cork runs its code"]
   C -->|"no"| D{"Does the engine<br/>have a table for it?"}
   D -->|"yes"| OUR
   D -->|"no"| X["Not loaded:<br/>LoadLibrary returns 0"]
 ```
 
-- **Always ours:** the KnownDLLs (`kernel32`, `user32`, `msvcrt`, `ole32` and others) and the
-  libraries an engine layer replaces: `Mp3dec.asi` (sound) and `ijl15.dll` (media).
+- **Always ours:** the KnownDLLs (`kernel32`, `user32`, `msvcrt`, `ole32` and others), the
+  runtimes the engine stands in for whoever's copy it is (`DSETUP.dll`, `MSVCR80.dll`,
+  `Mp3dec.asi` for sound and `ijl15.dll` for media), and the C runtime's API sets
+  (`api-ms-win-crt-*`), which are `ucrtbase.dll` under the names they are imported by.
 - **Where `LoadLibrary` looks:** the `.exe` folder, then `C:\WINDOWS\system32\`, `C:\WINDOWS\` and
-  the current folder. Static imports are looked up the same way, without the current folder.
+  the current folder. Static imports are looked up the same way, without the current folder. For
+  a name the engine has a table for, the system directories are skipped: a copy an installer put
+  there would be a second library of the name in the process beside the engine's.
 - **A real DLL** is parsed and relocated by the loader, its dependencies are loaded first, its
   imports (delayed ones included) are bound, and its `DllMain` is called through the bridge as
   program code. TLS is supported for the main image and for statically loaded libraries.
 - **DirectX's redistributables** (`d3dx9_*` and the rest) are not part of the engine: a game brings
   them, through its installer's DirectX setup, which puts them in `C:\WINDOWS\system32\`, or as DLLs
-  beside its `.exe`. Without them, the engine's table answers for `d3dx9_*`.
+  beside its `.exe`. A copy beside the `.exe` is loaded as the real DLL; for every other the
+  engine's table answers `d3dx9_*`, the copy in `system32` included.
 
-Where to look in the code: `core/src/layers/loader/internal/synth.js` (the image),
-`core/src/layers/cpu/internal/thunks.js` (the stubs), `core/src/layers/bridge/` (the bridge), the
-tables in `core/src/layers/win32/<dll>/`, the search order in `core/src/app.js`
+Where to look in the code: [`core/src/layers/loader/internal/synth.js`](../modules/core/src/layers/loader/internal/synth.js) (the image),
+[`core/src/layers/cpu/internal/thunks.js`](../modules/core/src/layers/cpu/internal/thunks.js) (the stubs), [`core/src/layers/bridge/`](../modules/core/src/layers/bridge/) (the bridge), the
+tables in `core/src/layers/win32/<dll>/`, the search order in [`core/src/app.js`](../modules/core/src/app.js)
 (`libraryCandidates`, `answeredByEngine`).
 
 ## 7. Graphics
 
 The graphics thread is there to draw all of the program's graphics. The engine thread keeps only
 the devices' state and answers the program, while their twins draw on the graphics thread, on a
-WebGPU device of its own. The graphics thread arrived in cork 1.3, for Direct3D 8 and 9 at first;
-OpenGL and Direct3D 7 moved there in cork 1.6. Direct3D 10 and Vulkan still draw on the engine
+WebGPU device of its own. Direct3D 7, 8 and 9 and OpenGL draw there. Direct3D 10 and Vulkan still draw on the engine
 thread and will move to the graphics thread next.
 
 | Where | What it does |
@@ -558,25 +681,56 @@ flowchart TB
 ```
 
 - **How calls travel.** Each call is written into a binary batch as it is made (`remote/wire.js`).
-  The batch goes at the end of the turn (`queueMicrotask`), or at once if a call waits for an answer.
-  Resource bytes ride in the same batch. For a Direct3D buffer that is what the program wrote between
-  `Lock` and `Unlock`; for a texture, everything written up to the next call that may read it.
+  A batch goes at most once a millisecond while no call waits on it (a timer sends what the
+  turns left behind, and a long turn sends its own), and at once when a call waits for an
+  answer. Resource bytes ride in the same batch. For a Direct3D buffer that is what the program
+  wrote between `Lock` and `Unlock`; for a texture, everything written up to the next call that
+  may read it. Where the program's memory is shared, what a Direct3D 8 or 9 unlock let the
+  program write is lent rather than copied: the batch says where the bytes lie, and the graphics
+  thread copies them out of guest memory when it plays the record (`remote/lending.js`).
+- **The Direct3D 8 and 9 command ring.** A program sets states, transforms and textures hundreds
+  of times a frame and locks a buffer around every draw. Those setters and draws, a buffer's
+  `Lock` and `Unlock`, and the getters of render states, transforms, texture stage states and
+  the viewport (and Direct3D 9's sampler states) run in the guest: a setter or a draw writes a
+  record into a ring in the device's block in guest memory, a getter reads the value its setter
+  wrote there. The host makes the ring's calls, in order, through the device's own methods on
+  its way into any method of its own (`graphics/seam/shadow.js`, `d3d8/commands.js`).
   OpenGL reads the program's memory at the call itself, so whatever a call read goes ahead of it.
   The DirectDraw surfaces Direct3D 7 draws into cross by number and are described again when they
   change. A renderer on the engine thread reads the bytes at those same moments, so the picture comes out the
   same wherever Direct3D draws.
+- **Dynamic buffers.** A program may write a dynamic buffer through the pointer a lock gave it,
+  after the `Unlock`, and draw from it with no lock between; so a draw sends what changed in the
+  range it reads since the buffer was last sent. Under cork it compares only the part of the
+  range on pages written since it last compared them: a store into a watched page marks it by
+  the same page-flag test that finds translated
+  code (one compare-and-swap, the first store after the page is armed), and the host's writes
+  and a worker's writes in place mark it too. The cpu layer's write watch
+  (`cpu/internal/write-clock.js`) gives each buffer its own view of the marks, since one look
+  arms a page again for everyone, and takes a page armed while another executor was running
+  guest code as written at every look until that run has ended: a store tested before the
+  arming lands after it unmarked. Under the emulator every byte of the range is compared.
 - **Who waits for whom.** `Present` waits for the graphics thread only when it is more than two frames
-  behind. Only the calls whose result only the renderer knows wait for an answer. For Direct3D 8/9 those are
-  `GetData` (occlusion queries included), `GetRenderTargetData`, `GetFrontBuffer(Data)`, plus `LockRect`,
-  `GetDC` and `CopyRects` on a render target. And what waits is the program's thread, not the
-  engine's: the bridge parks it in the scheduler, and the program's other threads keep running.
-  An occlusion query's answer brings with it every other count the renderer already holds, each
-  marked with the `Issue(END)` it belongs to. A program that waits on its queries one after another
-  pays one round trip for all the counts one GPU read brought back, not one per query.
+  behind. It does wait for the display, as a driver does: under every presentation interval but
+  `IMMEDIATE` (windowed Direct3D 8 only under `COPY_VSYNC`) the calling thread stops until the next
+  blank of the guest's raster, or as many blanks on as the interval says, at the rate of the mode
+  the device asked for when the display lists it and 60 Hz otherwise; how often the page shows a
+  frame does not pace the program. Only the calls whose result only the renderer knows wait for
+  an answer. For Direct3D 8/9 those are `GetData` on a query other than an event or occlusion
+  query, `GetRenderTargetData`, `GetFrontBuffer(Data)`, plus `LockRect` and `GetDC` on a render
+  target, and `CopyRects` out of one something has drawn into since it was last read back. And
+  what waits is the program's thread, not the engine's: the bridge parks it in the scheduler,
+  and the program's other threads keep running. An event query answers on the program's side.
+  An occlusion query's count is asked of the renderer once its end is issued, and the program's
+  polls are answered `S_FALSE`, as a driver answers them, until the count comes back; each answer
+  brings every other count the renderer already holds, each marked with the `Issue(END)` it
+  belongs to.
 - **Shaders.** Direct3D 8/9 shader bytecode is parsed and translated to WGSL
   (`graphics/d3d9/shader.js`, `wgsl.js`). For the fixed-function pipeline, WGSL is generated
   (`webgpu/internal/fixedfunction.js`).
-- **Textures** go to the GPU as `bgra8unorm`, and DXT-compressed ones are decoded on the CPU by
+- **Textures** of up to eight bits a channel go to the GPU as `bgra8unorm`, those of sixteen and
+  thirty-two bits a channel as half floats (`rgba16float`, `rg16float`, `r16float`), the formats
+  every WebGPU device filters and blends; DXT-compressed ones are decoded on the CPU by
   default. They reach the GPU in their BC format only with the `graphics.compressedTextures` flag,
   and only on a device with `texture-compression-bc`.
 - **Windows on surfaces of their own.** Inside a process the screen is composed as Windows 7's
@@ -586,7 +740,7 @@ flowchart TB
   or closed paints nothing; the screen is composed again.
 - **Several processes, one screen.** Each process's user32 tells the run's window manager
   (`win32/user32/manager.js`, on the engine thread beside the window directory) what every window
-  of its is -- class, title, style, rectangle, visibility -- and the manager holds the z-order of
+  of its is (class, title, style, rectangle, visibility), and the manager holds the z-order of
   the run's top-level windows, the one keyboard focus (a window taking it brings its top-level
   window up and takes it from every other, whichever process each is) and the window that
   captured the mouse, for every process alike. Every frame says which process drew it; the presenter keeps each process's
@@ -601,9 +755,10 @@ flowchart TB
   `D3DERR_DEVICELOST` (`D3DERR_DEVICEREMOVED` on 9Ex). There is no recovery: new frames simply stop
   arriving.
 
-Where to look in the code: `core/src/layers/graphics/` (`d3d7`, `d3d8`, `d3d9`, `d3d10`, `ddraw`,
-`gdi`, `opengl`, `vulkan`, `webgpu`); the graphics thread is `graphics/remote/` and
-`core/src/host/graphics.worker.js`.
+Where to look in the code: [`core/src/layers/graphics/`](../modules/core/src/layers/graphics/) (`d3d7`, `d3d8`, `d3d9`, `d3d10`, `ddraw`,
+`gdi`, `opengl`, `glu`, `vulkan`, `webgpu`, and `seam`: the interfaces and exports the program
+calls, the routines that run in the guest, the command ring and the raster); the graphics thread
+is `graphics/remote/` and [`core/src/host/graphics.worker.js`](../modules/core/src/host/graphics.worker.js).
 
 ## 8. Sound
 
@@ -632,7 +787,7 @@ flowchart TB
     DM["DirectMusic: tracks"]
     MX["Mixer<br/>output/mixer.js"]
   end
-  TB["<b>Shared memory</b><br/>voice table:<br/>64 slots of 128 bytes<br/>and a copy arena, 16 MiB"]
+  TB["<b>Shared memory</b><br/>voice table:<br/>64 slots, each a 128-byte header<br/>and a 64 KiB ring,<br/>and a copy arena, 16 MiB"]
   RD["<b>AudioWorklet</b><br/>reads on its own clock,<br/>resamples, mixes<br/>output/mix.js"]
   DS --> DB
   WO --> WM
@@ -661,8 +816,8 @@ flowchart TB
 - **MP3 for Miles.** In place of the program's own `Mp3dec.asi`, our provider runs, attached through
   `mss32.dll`'s `RIB` entry points. Decoding is minimp3 built to wasm (`audio/asi/`). There is also an
   MP3 codec for ACM.
-- **Limits.** With no free slot, a buffer plays through a queue track, and its cursor follows the
-  clock instead. The DirectSound 3D interfaces exist and keep their parameters, but they do not change
+- **Limits.** With no free slot, or no room for its copy in the arena, a buffer plays through a
+  queue track, and its cursor follows the clock instead. The DirectSound 3D interfaces exist and keep their parameters, but they do not change
   the sound. Capture returns `DSERR_NODRIVER`.
 - **Without cross-origin isolation** (the COOP/COEP headers, which `ui/server.mjs` sets unless
   `ISOLATION=off`) there is no `SharedArrayBuffer`. The engine then mixes into a ring of its own,
@@ -671,9 +826,9 @@ flowchart TB
   got every four blocks, and that report is what the ring counts as consumed. A DirectSound
   buffer's cursor follows the clock here.
 
-Where to look in the code: `core/src/layers/audio/` — `output/mixer.js`, `output/mix.js`,
+Where to look in the code: [`core/src/layers/audio/`](../modules/core/src/layers/audio/): `output/mixer.js`, `output/mix.js`,
 `output/worklet.js`, `dsound/buffers.js`, `asi/provider.js`; waveOut is
-`core/src/layers/win32/winmm/functions.js`.
+[`core/src/layers/win32/winmm/functions.js`](../modules/core/src/layers/win32/winmm/functions.js).
 
 ## 9. Networking
 
@@ -709,8 +864,10 @@ flowchart TB
   LAN. Each tab gets the lowest free address in `10.86.0.0/16`, and a room holds up to 32 peers.
   Broadcasts reach only the peers in the room listening on that UDP port.
 - **The outside is closed by default.** Unconfigured, the relay is a LAN, not an open proxy. Which
-  hosts are allowed is set by `RELAY_ALLOW` when the server starts: a comma-separated list, where
-  `*.` means a suffix. The relay resolves host names itself and remembers them, so the policy judges
+  hosts are allowed is set when the relay starts: `--allow host` for the relay run on its own
+  (`node src/server/cli.js`, port 8787 by default; repeat it for more), the comma-separated
+  `RELAY_ALLOW` for the launcher's; `*.` means a suffix, and `*` alone allows every host.
+  `--origin` limits which pages may connect. The relay resolves host names itself and remembers them, so the policy judges
   the name, not just the address. With an empty list, DNS answers nothing at all.
 - **Frames.** Joining a room is JSON: `hello`, answered by `welcome` with the address and the list of
   peers. Data travels in binary frames: a 20-byte header and up to 64 KiB of payload. One `send()` is
@@ -731,8 +888,8 @@ flowchart TB
 TCP goes like this: `DIAL`, answered by `OPENED` (or `HANGUP` with `REJECT`), then data in `STREAM`.
 `shutdown(SD_SEND)` is `HANGUP` with the `HALF` flag. All fields are little-endian.
 
-Where to look in the code: `core/src/layers/win32/wsock32/` (sockets and transport),
-`networking/src/` (the client, `protocol.js`, the server); the wiring is in `ui/server.mjs` and
+Where to look in the code: [`core/src/layers/win32/wsock32/`](../modules/core/src/layers/win32/wsock32/) (sockets and transport),
+[`networking/src/`](../modules/networking/src/) (the client, `protocol.js`, the server); the wiring is in `ui/server.mjs` and
 `ui/src/engine/session.js`.
 
 ## 10. Storage
@@ -746,9 +903,9 @@ address: from another machine, without a secure context, there is neither OPFS n
 | Store | Where | What it holds | How it works |
 | --- | --- | --- | --- |
 | Block cache | OPFS: `<id>.blocks`, `<id>.present`, `<id>.order` | bundle blocks already fetched from the server | Block N sits at offset N × the block size (taken from the bundle's header, 256 KiB by default). `.present` is a bitmap of the fetched blocks, `.order` the order they were first asked for in (up to 4096). Access goes through synchronous handles: at most 16 are open, and the one unused the longest closes first |
-| cork translations | OPFS: `cork/<id>.v3/` | translated regions | `records` holds the records one after another, `index` a log of where each one is. The index is read once, a miss touches no disk, a hit is one read at an offset. New records are appended in batches; the file is compacted, with a 1 GiB cap |
+| cork translations | OPFS: `cork/<id>.v3/` | translated regions, each keyed by its entry, the x87 stack top it was made for (any, for a region with no x87 in it) and the run's modes; the modules their code is in; and a map from every stored block to the region holding it, so a run that meets a block first in another order takes that region | `records` holds the records one after another, `index` a log of where each one is. The index is read once, a miss touches no disk, a hit is one read at an offset. New records are appended in batches. A worker of the store's own writes them, where the browser lets two handles stand on one file, so the engine thread never waits for the disk. A region's record names the batch module its code is in, and the module lives as long as a region naming it. On opening, the last run's records stay whole; older ones stay while they fit under 1 GiB with them, the most recently used first, a region and its module together, and a record no run has used in the last four is dead. The file is copied, live records only, when half of it is dead and it is past 64 MiB, or when the index has grown past 4 MiB and four times the lines its live records need. A relinked module is stored too, and the regions it holds name it from then on: a later run takes them as they are and relinks only what it adds |
 | Session | OPFS: `<id>.files/` | the files the program wrote, and its registry | One entry per file, named by a hash of its path, which it holds inside; the registry is an entry of its own. Applied before the first instruction; 250 ms after the program stops writing, only the files it changed are written or removed. An older `<id>.session` (one deflate-raw stream) is read once and replaced. The bundle itself never changes |
-| Settings | localStorage | the launcher's settings, time to first frame | — |
+| Settings | localStorage | the launcher's settings, time to first frame | |
 
 How the program reads a file:
 
@@ -775,7 +932,7 @@ flowchart TD
   OPFS waits for nothing, and `ReadFile` on a block already fetched answers at once.
 - **The session** is read and written asynchronously (`getFile`, `createWritable`).
 
-Where to look in the code: `core/src/layers/filesystem/internal/bundle/cache.js` (blocks),
-`core/src/layers/filesystem/internal/opfs-store.js` (handles),
-`core/src/layers/cpu/internal/translation-store.js` (translations), `core/src/storage.js`
+Where to look in the code: [`core/src/layers/filesystem/internal/bundle/cache.js`](../modules/core/src/layers/filesystem/internal/bundle/cache.js) (blocks),
+[`core/src/layers/filesystem/internal/opfs-store.js`](../modules/core/src/layers/filesystem/internal/opfs-store.js) (handles),
+[`core/src/layers/cpu/internal/translation-store.js`](../modules/core/src/layers/cpu/internal/translation-store.js) (translations), [`core/src/storage.js`](../modules/core/src/storage.js)
 (sessions).

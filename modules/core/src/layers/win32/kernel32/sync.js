@@ -115,6 +115,11 @@ const FILETIME_EPOCH_MS = 11644473600000;
  * @property {any} kernel                        The kernel layer's API.
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {(address: number, expected: number, value: number) => number} [compareExchangeU32]
+ *           A dword swapped only if it holds `expected`, indivisible against the
+ *           guest's threads on the process's other executors; answers what it held.
+ * @property {(address: number, expected: bigint, value: bigint) => bigint} [compareExchangeU64]
+ *           The same for a quadword, as `lock cmpxchg8b` takes one.
  * @property {() => any} currentThread
  * @property {(thread?: any) => any} park        Stops a thread; returns the parked token.
  * @property {ReturnType<typeof import('./critical.js').createCriticalSections>} critical
@@ -1016,7 +1021,9 @@ export function createSyncFunctions(host){
          *
          * The groups ContextFlags asks for, from the running registers for
          * the calling thread and from the state saved when another was last
-         * switched away. A thread that has ended has no context to read.
+         * switched away -- one running on another executor brought back first,
+         * so a thread SuspendThread stopped is read where it stopped. A thread
+         * that has ended has no context to read.
          */
         GetThreadContext: {
             argBytes: 8,
@@ -1033,8 +1040,12 @@ export function createSyncFunctions(host){
                     host.setLastError?.(ERROR_GEN_FAILURE);
                     return 0;
                 }
-                const registers = thread === host.currentThread()
-                    ? host.registers?.() ?? {} : savedRegisters(thread.context);
+                const own = thread === host.currentThread();
+                if (!own)
+                {
+                    kernel.settleThread?.(thread);
+                }
+                const registers = own ? host.registers?.() ?? {} : savedRegisters(thread.context);
                 writeThreadContext(out >>> 0, registers);
                 return 1;
             },

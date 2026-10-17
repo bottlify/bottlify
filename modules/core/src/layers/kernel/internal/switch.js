@@ -66,7 +66,7 @@ export function createSwitcher({ cpu }){
             // is older than what it has done since.
             if (outgoing)
             {
-                outgoing.context = cpu.captureContext();
+                outgoing.context = cpu.captureContext(outgoing.context);
             }
             if (resume)
             {

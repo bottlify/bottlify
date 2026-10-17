@@ -249,7 +249,12 @@ export function ownLayout({ ramSize, hashSlots = Tables.HASH_SLOTS, processors =
         // The entry hash's slot is the top bits of eip times the golden ratio,
         // as many as the hash has slots for.
         hashShift: 32 - Math.log2(hashSlots),
-        ...processors > 1 ? { processors, processor: 0 } : {},
+        // Past `nanFirst` and short of the wasm interpreter's statics: a word
+        // another executor stores when it needs this one's answer, which the
+        // translated code reads at every back edge as the floor its budget is
+        // looked at against (`spentTest`), so a slice ends there however long
+        // it was given -- only where other executors run beside this one.
+        ...processors > 1 ? { processors, processor: 0, interrupt: 2048 } : {},
     };
     return { ...fields, id: layoutId(fields) };
 }
@@ -257,7 +262,7 @@ export function ownLayout({ ramSize, hashSlots = Tables.HASH_SLOTS, processors =
 /** The fields of a layout that lie in an executor's state page, each its own. */
 const STATE_FIELDS = Object.freeze(['regs', 'eip', 'previousIp', 'eflags', 'flagRecord',
     'flagsChanged', 'x87', 'x87Top', 'x87Empty', 'x87Control', 'x87Status', 'x87Exact', 'xmm',
-    'mxcsr', 'fsBase', 'gsBase', 'counter', 'callProfile', 'origin', 'nanFirst']);
+    'mxcsr', 'fsBase', 'gsBase', 'counter', 'callProfile', 'origin', 'nanFirst', 'interrupt']);
 
 /**
  * Where the page flags lie: the process's, which every executor of it reads and
@@ -330,6 +335,47 @@ export function executorLayout(layout, base, index = 1){
     fields.codeRanges = codeRangesAt(layout);
     return /** @type {any} */ ({ ...fields, id: layoutId(fields) });
 }
+
+/**
+ * The process's shared layout over `layout`, its first executor's (`ownLayout`): the
+ * state fields where they are in every executor's state page, the tables at 0 --
+ * both offsets from the bases each instance is given (`emit/bases.js`) -- and the
+ * page flags and code granules where they are, the process's own. A translation
+ * made for it runs on every executor of the process, so it is made, kept and
+ * compiled once; its id is the same on all of them. No processor is named in it:
+ * which executor runs a translation is not known when it is made.
+ *
+ * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
+ * @returns {import('../../../core/src/layers/cpu/engine.js').StateLayout}
+ */
+export function sharedLayout(layout){
+    if (layout.regs !== 0)
+    {
+        throw new Error('layout: the shared layout is made from the first executor\'s');
+    }
+    /** @type {Record<string, any>} */
+    const fields = { ...layout };
+    delete fields.id;
+    delete fields.processor;
+    // The other executors are not interrupted: the process ends a chain of
+    // their slices at a slice's end (`goOn`), and their back edges stay as
+    // one executor's are.
+    delete fields.interrupt;
+    fields.pageFlags = pageFlagsAt(layout);
+    fields.codeRanges = codeRangesAt(layout);
+    fields.tables = 0;
+    fields.shared = true;
+    return /** @type {any} */ ({ ...fields, id: layoutId(fields) });
+}
+
+/**
+ * Where an executor's state block and tables are, as the shared layout's
+ * instances are given them: `layout` is the executor's own (`executorLayout`).
+ *
+ * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
+ * @returns {{ stateBase: number, tablesBase: number }}
+ */
+export const basesOf = layout=>({ stateBase: layout.regs, tablesBase: layout.tables });
 
 /**
  * The identity of a layout, for cache keys: every field's value, hashed.

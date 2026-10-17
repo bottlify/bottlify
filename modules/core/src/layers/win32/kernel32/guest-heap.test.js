@@ -181,6 +181,36 @@ test('what the guest\'s path does not take goes to the host', ()=>{
     assert.deepEqual(w.call('HeapFree', [w.heap, 0, block.eax]), { eax: 1, handed: false });
 });
 
+test('the host takes a heap\'s lock to touch its cache, as one step, and leaves a held one alone',
+    ()=>{
+        const w = world();
+        /** What each compare-and-swap found. @type {number[]} */
+        const found = [];
+        Object.assign(w.memory, {
+            /** @param {number} at @param {number} expected @param {number} value */
+            compareExchangeU32(at, expected, value){
+                const was = w.memory.readU32(at);
+                if (was === expected)
+                {
+                    w.memory.writeU32(at, value);
+                }
+                found.push(was);
+                return was;
+            },
+        });
+        const block = w.allocator.allocate(8, { owner: w.heap });
+        assert.ok(block !== 0);
+        assert.deepEqual(found, [0], 'taken free');
+        assert.equal(w.memory.readU32(w.heap + CONTROL.LOCK), 0, 'and given back');
+        // Held by a thread running on another executor: the host keeps off the cache.
+        w.memory.writeU32(w.heap + CONTROL.LOCK, 1);
+        const cache = w.guest.diagnostics();
+        assert.ok(w.allocator.free(block));
+        assert.deepEqual(found, [0, 1]);
+        assert.equal(w.memory.readU32(w.heap + CONTROL.LOCK), 1, 'still the other thread\'s');
+        assert.deepEqual(w.guest.diagnostics().cached, cache.cached, 'the cache untouched');
+    });
+
 test('HEAP_ZERO_MEMORY and calloc zero a recycled block, and a grown one past its old end', ()=>{
     const w = world();
     w.allocator.free(w.allocator.allocate(100, { owner: w.heap }));

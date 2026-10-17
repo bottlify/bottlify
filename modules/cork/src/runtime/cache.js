@@ -8,20 +8,27 @@
  * The per-bundle translation cache: a region's module is a pure function
  * of its bytes, its entry, the layout and this emitter, so the second run
  * of a program translates nothing it ran the first time. A region is still
- * formed (a decode, cheap) on every run, which is what gives its hash; what
- * the store saves is the emitting and the encoding, the costly part.
+ * formed (a decode, cheap) on every run, which is what checks its bytes;
+ * what the store saves is the emitting and the encoding, the costly part.
+ *
+ * A region is kept under its entry, the x87 top it is entered at and the
+ * run's modes -- what a run knows before it forms it. What forming made of
+ * it is in its record (`RegionShape`): where it stopped at other regions'
+ * blocks and which callees it formed in depend on what the run had
+ * translated by then, and a run that formed it otherwise forms it again as
+ * the record says before it compares the bytes.
  *
  * A record is the module's bytes behind a small header of what the
  * runtime needs to publish it without the emitter: the block starts and
  * their labels, the labels cut, the x87 top it was compiled for, the
- * instruction count.
+ * instruction count, the shape.
  */
 
 /**
  * Bumped whenever the emitter changes what it emits for the same bytes, or
  * the record's format changes: a record of another version is a miss.
  */
-export const CACHE_VERSION = 89;
+export const CACHE_VERSION = 91;
 
 const MAGIC = 0x4b524f43; // 'CORK'
 
@@ -39,11 +46,11 @@ const flagsOf = (features, variant)=>(features.simd ? 's' : '-') + (features.tai
 /**
  * @param {{ version: number, features: { simd: boolean, tailCalls: boolean,
  *     defaultNaNNegative?: boolean }, variant?: string, layoutId: string, bundleId: string,
- *     entry: number, hash: string }} of
+ *     entry: number, kept: string }} of  kept: what the region is kept under at its entry
  */
-export function cacheKey({ version, features, variant = '', layoutId, bundleId, entry, hash }){
+export function cacheKey({ version, features, variant = '', layoutId, bundleId, entry, kept }){
     return `cork/${version}${flagsOf(features, variant)}/${layoutId}/${bundleId}/`
-        + `${entry.toString(16)}/${hash}`;
+        + `${entry.toString(16)}/${kept}`;
 }
 
 /**
@@ -84,6 +91,19 @@ export function moduleKey({ version, features, variant = '', layoutId, bundleId 
 }
 
 /**
+ * What forming made of a stored region, and what it was compiled as: its
+ * bytes' hash, the blocks it left to other regions (`stops`), by indirect
+ * call the callees formed in (`targets`), its x87 precision and float
+ * arithmetic, whether that precision is one its run moved the entry to
+ * (`moved`), whether its entries test the x87 stack's shape (`checked`
+ * not), and whether its loops' blocks have entries of their own (`copies`).
+ *
+ * @typedef {{ hash: string, stops?: number[], targets?: [number, number[]][],
+ *     wide?: boolean, narrow?: boolean, floats?: boolean, moved?: boolean,
+ *     checked?: boolean, copies?: boolean }} RegionShape
+ */
+
+/**
  * @typedef {Object} CachedRegion
  * @property {Uint8Array} module       the wasm module holding the region; empty in a
  *     record whose module is a batch's, kept apart under `moduleKey`
@@ -96,6 +116,7 @@ export function moduleKey({ version, features, variant = '', layoutId, bundleId 
  *     (`closed` of a translation)
  * @property {number} entryTop
  * @property {number} instructions
+ * @property {RegionShape} [shape]     a region's, not a module's
  */
 
 /** @param {CachedRegion} region @returns {Uint8Array} */
@@ -107,6 +128,7 @@ export function packRegion(region, version = CACHE_VERSION){
         ...(region.moduleKey === undefined ? {} : { moduleKey: region.moduleKey }),
         ...(region.linked ? { linked: true } : {}),
         ...(region.closed?.length ? { closed: region.closed } : {}),
+        ...(region.shape === undefined ? {} : { shape: region.shape }),
     }));
     const out = new Uint8Array(12 + header.length + region.module.length);
     const view = new DataView(out.buffer);
@@ -153,6 +175,7 @@ export function unpackRegion(bytes, version = CACHE_VERSION){
             ...(typeof header.moduleKey === 'string' ? { moduleKey: header.moduleKey } : {}),
             ...(header.linked === true ? { linked: true } : {}),
             ...(Array.isArray(header.closed) ? { closed: header.closed } : {}),
+            ...(typeof header.shape?.hash === 'string' ? { shape: header.shape } : {}),
         };
     }
     catch {

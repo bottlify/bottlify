@@ -21,6 +21,13 @@
  * size, writer); a writer takes an index with an atomic add, fills the slot,
  * and stamps it last. A reader more than the ring behind has lost entries, and
  * drops everything it holds rather than guess which.
+ *
+ * Beside them, what one executor learns of the process that changes how every
+ * executor translates: the pages of the threads' stacks, which only the
+ * process's own executor is told of, and the switches a runtime flips once
+ * for good (`SharedSwitch`) -- the process's translations are one, and an
+ * executor that went on compiling the other way would keep the hazard the
+ * switch was flipped for.
  */
 
 import { Tables } from './layout.js';
@@ -29,9 +36,18 @@ import { Tables } from './layout.js';
 export const CODE_WRITE_SLOTS = 4096;
 /** Words a slot takes: its stamp, the address, the size and the writer. */
 const SLOT_WORDS = 4;
-/** Bytes the holders and the ring take, from where the host places them. */
+/** Words of the stack pages' bitmap: a bit for every page. */
+const STACK_WORDS = Tables.PAGE_FLAGS_SIZE / 32;
+/** Bytes the holders, the ring and the stack pages take, from where the host places them. */
 export const SHARED_CODE_BYTES = Tables.PAGE_FLAGS_SIZE * 4 + 16
-    + CODE_WRITE_SLOTS * SLOT_WORDS * 4;
+    + CODE_WRITE_SLOTS * SLOT_WORDS * 4 + STACK_WORDS * 4;
+
+/**
+ * What a runtime switches to for good and every executor of the process with it:
+ * stores through esp tested (code was translated on a stack page), reads tested
+ * (the program reached a page it cannot read).
+ */
+export const SharedSwitch = Object.freeze({ STACKS_TESTED: 1, READS_CHECKED: 2 });
 
 /**
  * The shared record at `at` of `memory`, as executor `index` (below 32) sees it.
@@ -47,6 +63,8 @@ export function createSharedCode(memory, at, index){
     const head = new Int32Array(memory.buffer, at + Tables.PAGE_FLAGS_SIZE * 4, 4);
     const slots = new Int32Array(memory.buffer, at + Tables.PAGE_FLAGS_SIZE * 4 + 16,
         CODE_WRITE_SLOTS * SLOT_WORDS);
+    const stacks = new Int32Array(memory.buffer,
+        at + Tables.PAGE_FLAGS_SIZE * 4 + 16 + CODE_WRITE_SLOTS * SLOT_WORDS * 4, STACK_WORDS);
     const bit = 1 << index;
     // Entries written before this executor existed are not its to apply: it
     // holds no code they could have reached.
@@ -57,6 +75,24 @@ export function createSharedCode(memory, at, index){
         hold(page){
             Atomics.or(holders, page, bit);
         },
+        /**
+         * Pages `first` to `last` hold a thread's stack.
+         * @param {number} first @param {number} last
+         */
+        noteStack(first, last){
+            for (let page = first; page <= last; page++)
+            {
+                Atomics.or(stacks, page >>> 5, 1 << (page & 31));
+            }
+        },
+        /** Whether the page holds a thread's stack. @param {number} page */
+        onStack: page=>(Atomics.load(stacks, page >>> 5) & 1 << (page & 31)) !== 0,
+        /** Flips switches for every executor (`SharedSwitch`). @param {number} bits */
+        raise(bits){
+            Atomics.or(head, 1, bits);
+        },
+        /** The switches flipped so far. */
+        switches: ()=>Atomics.load(head, 1),
         /**
          * This executor holds no more code on the page: whether any other still does.
          * @param {number} page

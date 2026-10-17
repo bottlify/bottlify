@@ -1005,7 +1005,8 @@ test('with a store, a second runtime takes its regions from the store; a changed
         assert.equal(exit.kind, 'halt', 'the stored module runs');
         assert.equal(second.reg(1), 0);
         assert.equal(exit.retired, 1 + 2 * 1000 + 1);
-        // One byte changed: another hash, a miss, and the store grows.
+        // One byte changed: another hash, a miss; the region's record is the new one,
+        // beside another batch module.
         const third = machine({ store, bundleId: 'test' });
         third.write(CODE, [0xb9, 0xe9, 0x03, 0, 0, 0x49, 0x75, 0xfd, 0xf4]); // 1001 rounds
         third.setReg(4, 0x80000);
@@ -1013,7 +1014,8 @@ test('with a store, a second runtime takes its regions from the store; a changed
         await third.runtime.translatePending();
         await settle();
         assert.equal(third.runtime.diagnostics().cacheMisses, 1);
-        assert.equal(store.size(), 4);
+        assert.equal(third.runtime.diagnostics().missChanged, 1, 'a record of other bytes');
+        assert.equal(store.size(), 3);
         // Another bundle: its own namespace.
         const fourth = machine({ store, bundleId: 'other' });
         fourth.write(CODE, COUNTDOWN);
@@ -1022,7 +1024,217 @@ test('with a store, a second runtime takes its regions from the store; a changed
         await fourth.runtime.translatePending();
         await settle();
         assert.equal(fourth.runtime.diagnostics().cacheMisses, 1);
-        assert.equal(store.size(), 6);
+        assert.equal(fourth.runtime.diagnostics().missNoRecord, 1);
+        assert.equal(store.size(), 5);
+    });
+
+test('a region formed beside another one is found by a run that would form it whole', async()=>{
+    const { memoryTranslationStore } = await import('./cache.js');
+    const settle = ()=>new Promise(resolve=>setTimeout(resolve, 0));
+    const store = memoryTranslationStore();
+    const LOOP = CODE + 5;
+    /** @param {number[]} order */
+    const run = async order=>{
+        const m = machine({ store, bundleId: 'test', regionStops: true });
+        m.write(CODE, COUNTDOWN);
+        m.setReg(4, 0x80000);
+        for (const at of order)
+        {
+            m.runtime.noteHot(at);
+            await m.runtime.translatePending();
+            await settle();
+        }
+        const exit = m.runtime.run(m.runtime.entryOf(CODE), 1_000_000);
+        assert.equal(exit.kind, 'halt');
+        assert.equal(m.reg(1), 0);
+        assert.equal(exit.retired, 1 + 2 * 1000 + 1);
+        return m.runtime.diagnostics();
+    };
+    // The loop first: the function's entry, formed after it, stops at the loop's head and
+    // leaves to its region.
+    const first = await run([LOOP, CODE]);
+    assert.equal(first.cacheMisses, 2);
+    assert.equal(first.regions, 2);
+    // The entry first: formed whole here, formed again as stored, and taken.
+    const second = await run([CODE, LOOP]);
+    assert.equal(second.cacheMisses, 0, 'both from the store');
+    assert.equal(second.cacheHits, 2);
+    assert.equal(second.hitsFormedAgain, 1, 'the entry formed as its record says');
+    assert.equal(store.size(), 4, 'nothing stored again');
+});
+
+test('a region with no x87 in it is taken from the store at another top, one with x87 is not',
+    async()=>{
+        const { memoryTranslationStore } = await import('./cache.js');
+        const settle = ()=>new Promise(resolve=>setTimeout(resolve, 0));
+        const store = memoryTranslationStore();
+        /** @param {number[]} code @param {number} top */
+        const hits = async(code, top)=>{
+            const m = machine({ store, bundleId: 'test' });
+            m.write(CODE, code);
+            m.runtime.noteHot(CODE, top);
+            await m.runtime.translatePending();
+            await settle();
+            assert.ok(m.runtime.entryOf(CODE, top) >= 0);
+            return m.runtime.diagnostics().cacheHits;
+        };
+        assert.equal(await hits(COUNTDOWN, 0), 0);
+        assert.equal(await hits(COUNTDOWN, 3), 1, 'the same code at every top');
+        const other = [0x90, ...ROUNDING];
+        assert.equal(await hits(other, 0), 0);
+        assert.equal(await hits(other, 3), 0, 'compiled for the top it was formed at');
+        assert.equal(await hits(other, 0), 1);
+    });
+
+test('a block of a stored region met first takes that region from the store', async()=>{
+    const { memoryTranslationStore } = await import('./cache.js');
+    const settle = ()=>new Promise(resolve=>setTimeout(resolve, 0));
+    const store = memoryTranslationStore();
+    const LOOP = CODE + 5;
+    const first = machine({ store, bundleId: 'test' });
+    first.write(CODE, COUNTDOWN);
+    await settle();
+    first.runtime.noteHot(CODE);
+    await first.runtime.translatePending();
+    await settle();
+    assert.ok(first.runtime.entryOf(LOOP) >= 0, 'the loop\'s head is an entry of the region');
+    await first.runtime.flush();
+    // The loop's head first: the store's region that holds it is formed, not another one.
+    const second = machine({ store, bundleId: 'test' });
+    second.write(CODE, COUNTDOWN);
+    second.setReg(4, 0x80000);
+    await settle();
+    second.runtime.noteHot(LOOP);
+    await second.runtime.translatePending();
+    await settle();
+    const d = second.runtime.diagnostics();
+    assert.equal(d.toStoredRegion, 1);
+    assert.equal(d.cacheHits, 1);
+    assert.equal(d.cacheMisses, 0);
+    assert.equal(d.regions, 1);
+    assert.ok(second.runtime.entryOf(LOOP) >= 0);
+    second.setReg(1, 1000);
+    const exit = second.runtime.run(second.runtime.entryOf(LOOP), 1_000_000);
+    assert.equal(exit.kind, 'halt');
+    assert.equal(second.reg(1), 0);
+});
+
+test('every runtime of a run adds its blocks to the store\'s map, and one that adds none puts '
+    + 'no map', async()=>{
+    const { memoryTranslationStore } = await import('./cache.js');
+    const settle = ()=>new Promise(resolve=>setTimeout(resolve, 0));
+    const inner = memoryTranslationStore();
+    let maps = 0;
+    let mapKey = '';
+    const store = { ...inner, put: (/** @type {string} */ key, /** @type {Uint8Array} */ bytes)=>{
+        if (key.endsWith('/blocks'))
+        {
+            maps++;
+            mapKey = key;
+        }
+        return inner.put(key, bytes);
+    } };
+    const OTHER = CODE + 0x100;
+    /** Hot at `at`, a countdown's entry or its loop's head, whose loop has an entry then.
+     * @param {ReturnType<typeof machine>} m @param {number} at @param {number} loop */
+    const runAt = async(m, at, loop)=>{
+        m.write(CODE, COUNTDOWN);
+        m.write(OTHER, COUNTDOWN);
+        await settle();
+        m.runtime.noteHot(at);
+        await m.runtime.translatePending();
+        await settle();
+        assert.ok(m.runtime.entryOf(loop) >= 0);
+        return m.runtime.diagnostics();
+    };
+    // Two processes of one run, the tool's runtime started before the program's put its map.
+    const tool = machine({ store, bundleId: 'test' });
+    const program = machine({ store, bundleId: 'test' });
+    await runAt(program, CODE, CODE + 5);
+    await program.runtime.flush();
+    await runAt(tool, OTHER, OTHER + 5);
+    await tool.runtime.flush();
+    assert.equal(maps, 2);
+    for (const at of [CODE, OTHER])
+    {
+        const next = machine({ store, bundleId: 'test' });
+        const d = await runAt(next, at + 5, at + 5);
+        assert.equal(d.toStoredRegion, 1, `the region holding ${at.toString(16)}'s loop`);
+        assert.equal(d.cacheMisses, 0);
+        await next.runtime.flush();
+    }
+    assert.equal(maps, 2, 'runs that added nothing to the map');
+    // A map of a thousand blocks more: a run adding its three is not worth putting it whole.
+    const held = /** @type {Uint8Array} */ (await inner.get(mapKey));
+    const larger = new Uint8Array(held.length + 1000 * 12);
+    larger.set(held);
+    const more = new DataView(larger.buffer, held.length);
+    for (let at = 0; at < 1000; at++)
+    {
+        more.setUint32(at * 12, 0x200000 + at * 16, true);
+        more.setUint32(at * 12 + 4, 0x200000, true);
+    }
+    await inner.put(mapKey, larger);
+    const third = machine({ store, bundleId: 'test' });
+    third.write(CODE + 0x200, COUNTDOWN);
+    await runAt(third, CODE + 0x200, CODE + 0x205);
+    await third.runtime.flush();
+    assert.equal(maps, 2, 'three blocks added to a thousand');
+});
+
+test('an entry that moved to another precision control is taken from the store as it moved',
+    async()=>{
+        const { memoryTranslationStore } = await import('./cache.js');
+        const settle = ()=>new Promise(resolve=>setTimeout(resolve, 0));
+        const store = memoryTranslationStore();
+        /** @param {ReturnType<typeof machine>} m @param {number} control */
+        const round = async(m, control)=>{
+            const view = new DataView(m.memory.buffer);
+            view.setUint16(m.layout.x87Control, control, true);
+            view.setUint32(m.layout.eip, CODE, true);
+            view.setUint8(m.layout.x87Empty, 0xff);
+            view.setUint8(m.layout.x87Top, 0);
+            if (m.runtime.entryOf(CODE, 0) < 0)
+            {
+                m.runtime.noteHot(CODE, 0);
+                await m.runtime.translatePending();
+                await settle();
+            }
+            return m.runtime.run(m.runtime.entryOf(CODE, 0), 100).kind;
+        };
+        // First met under single, then run under double: it moves to double.
+        const first = machine({ store, bundleId: 'test' });
+        first.write(CODE, ROUNDING);
+        assert.equal(await round(first, 0x07f), 'halt');
+        assert.equal(await round(first, 0x27f), 'untranslated');
+        assert.equal(await round(first, 0x27f), 'halt');
+        assert.equal(first.runtime.diagnostics().precisionSwitches, 1);
+        // Met under single again, the next run takes the double region it stored.
+        const second = machine({ store, bundleId: 'test' });
+        second.write(CODE, ROUNDING);
+        new DataView(second.memory.buffer).setUint16(second.layout.x87Control, 0x07f, true);
+        second.runtime.noteHot(CODE, 0);
+        await second.runtime.translatePending();
+        await settle();
+        assert.equal(await round(second, 0x27f), 'halt');
+        const d = second.runtime.diagnostics();
+        assert.equal(d.cacheHits, 1);
+        assert.equal(d.cacheMisses, 0);
+        assert.equal(d.precisionSwitches, 0, 'nothing to learn again');
+        assert.deepEqual(d.precision, { wide: 1, narrow: 0, mixed: 0 });
+    });
+
+test('a block of an x87 region formed earlier in the batch is not formed again beside it',
+    async()=>{
+        const m = machine({ batchRegions: 2, maxBatchRegions: 2 });
+        // mov ecx, 10; L: fld1; fstp st0; dec ecx; jnz L; hlt -- the loop's head at the
+        // entry's top, so an entry of the region there.
+        m.write(CODE, [0xb9, 0x0a, 0, 0, 0, 0xd9, 0xe8, 0xdd, 0xd8, 0x49, 0x75, 0xf9, 0xf4]);
+        m.runtime.noteHot(CODE, 0, 64);
+        m.runtime.noteHot(CODE + 5, 0, 2);
+        await m.runtime.translatePending();
+        assert.ok(m.runtime.entryOf(CODE + 5, 0) >= 0, 'the head is an entry of the region');
+        assert.equal(m.runtime.diagnostics().regions, 1, 'the head is not a region of its own');
     });
 
 test('precise keeps the x87 exception flags, in a store entry of its own; the default counts'
@@ -1508,6 +1720,60 @@ test('with a store, a relinked region runs through collections, its batches held
         assert.equal(exit.kind, 'halt');
         assert.equal(m.reg(3), 1);
         assert.equal(m.reg(1), 4);
+    });
+
+test('a stored region names the module its code is in, the relinked one once relinked',
+    async()=>{
+        // The store keeps a module as long as a region names it, and drops one
+        // none names: a batch's once its regions were relinked, so the store
+        // holds each region's code once, where a later run finds it relinked.
+        /** @type {{ key: string, needs?: string }[]} */
+        const puts = [];
+        const store = {
+            /** @type {Map<string, Uint8Array>} */
+            records: new Map(),
+            get: async(/** @type {string} */ key)=>store.records.get(key) ?? null,
+            /** @param {string} key @param {Uint8Array} bytes @param {{ needs?: string }} [options] */
+            put: async(key, bytes, options)=>{
+                puts.push({ key, needs: options?.needs });
+                store.records.set(key, bytes);
+            },
+        };
+        // The store answers through a turn: each batch is published after one.
+        const settle = ()=>new Promise(resolve=>setTimeout(resolve, 0));
+        const m = machine({ relinkAfter: 1, store, bundleId: 'test' });
+        m.write(CODE + 0x100, [0x43, 0xeb, 0x01, 0x90, 0x49, 0xf4]);
+        m.runtime.noteHot(CODE + 0x104);
+        m.runtime.noteHot(CODE + 0x104);
+        await m.runtime.translatePending();
+        await settle();
+        m.runtime.noteHot(CODE + 0x100, 0, 64);
+        await m.runtime.translatePending();
+        await settle();
+        await m.runtime.translatePending();
+        await settle();
+        assert.ok((m.runtime.diagnostics().relinked ?? 0) >= 2, 'relinked');
+        const modules = new Set(puts.filter(put=>put.key.includes('/module/')).map(put=>put.key));
+        /** The module each region's last record names. @type {Map<string, string | undefined>} */
+        const last = new Map();
+        /** @type {Map<string, string | undefined>} */
+        const first = new Map();
+        for (const put of puts.filter(one=>!one.key.includes('/module/')))
+        {
+            if (!first.has(put.key))
+            {
+                first.set(put.key, put.needs);
+            }
+            last.set(put.key, put.needs);
+        }
+        assert.equal(last.size, 2, 'two regions');
+        for (const [region, module] of last)
+        {
+            assert.ok(module !== undefined && modules.has(module),
+                `${region} names a module the store has`);
+            assert.notEqual(module, first.get(region), 'its relinked one, not its batch\'s');
+        }
+        assert.equal(new Set(last.values()).size, 1, 'both in the one relinked module');
     });
 
 test('a relink gathers the running regions into one module; an entry another region'

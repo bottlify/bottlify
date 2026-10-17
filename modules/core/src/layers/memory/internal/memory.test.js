@@ -524,6 +524,22 @@ test('a fill over executable memory goes the way a write there does', ()=>{
         'data has nothing to tell the compiler, so it is filled in place');
 });
 
+test('bytes a worker wrote in place reach a write watch: through the write path over code, '
+    + 'as a mark elsewhere', ()=>{
+    const raw = { ...machineMemory(), marked: /** @type {number[][]} */ ([]),
+        /** @param {number} address @param {number} length */
+        markWritten(address, length){
+            raw.marked.push([address, length]);
+        } };
+    const accessors = createAccessors({ raw, regions: mapWithPages() });
+    accessors.adopt(0x8000, 16);
+    assert.deepEqual(raw.took, ['writePhysical']);
+    assert.deepEqual(raw.marked, []);
+    accessors.adopt(0x4ff8, 16);
+    assert.deepEqual(raw.took, ['writePhysical'], 'data is not written again');
+    assert.deepEqual(raw.marked, [[0x4ff8, 16]], 'but marked, across its pages');
+});
+
 test('a fill still fills where the memory offers no fill of its own', ()=>{
     // A build whose memory is a plain buffer: the primitive is on the memory
     // layer's interface either way, and falls back to the write path.

@@ -218,3 +218,25 @@ test('one focus for the run: the window that takes it comes up, and every other 
         assert.deepEqual([manager.focus(), manager.foreground()], [0, 0],
             'gone with the window');
     });
+
+test('the report keeps the top-level windows made, by whom, after they are gone', ()=>{
+    // A window that comes and goes between two looks at the windows standing
+    // was missed by a look on a timer; the report says it was made.
+    const manager = createWindowManager();
+    manager.publish(state(1, { className: 'Host' }));
+    manager.publish(state(2, { processId: 0x200, className: 'Guest' }));
+    manager.publish(state(3, { parent: 2, className: 'Child' }));
+    manager.publish(state(2, { processId: 0x200, className: 'Guest', title: 'renamed' }));
+    manager.remove(2);
+    assert.deepEqual(manager.diagnostics().made, [
+        { hwnd: '0x1', process: 0x100, className: 'Host' },
+        { hwnd: '0x2', process: 0x200, className: 'Guest' },
+    ], 'each once, a child and a change not among them, the one gone still there');
+    for (let hwnd = 10; hwnd < 50; hwnd++)
+    {
+        manager.publish(state(hwnd));
+    }
+    const made = manager.diagnostics().made;
+    assert.equal(made.length, 32, 'the last ones only');
+    assert.equal(made.at(-1)?.hwnd, '0x31');
+});

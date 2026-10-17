@@ -15,6 +15,9 @@ import { STILL_ACTIVE, createProcessTable } from './internal/processes.js';
 import { createClock } from './internal/time.js';
 import { createStackPool } from './internal/stacks.js';
 
+/** Host ms a turn among ready threads lasts at least (`createScheduler`'s `turnMs`). */
+const TURN_MS = 0.25;
+
 /**
  * kernel — the execution core: threads, the scheduler, synchronisation, handles
  * and the guest's clock.
@@ -111,7 +114,8 @@ export function createKernelModule(){
              *
              * @type {{ scheduler: any, sync: any, handles: any, clock: any, switcher: any,
              *          processes: any, stacks: any, disposed: boolean, resumeLog: string[],
-             *          refreshClock: (() => void) | undefined }}
+             *          refreshClock: (() => void) | undefined,
+             *          hostAnswering: (() => boolean) | undefined }}
              */
             const state = {
                 stacks,
@@ -123,6 +127,7 @@ export function createKernelModule(){
                 processes: null,
                 disposed: false,
                 refreshClock: undefined,
+                hostAnswering: undefined,
                 // The last parks, holds and scheduled resumes, newest last: what a
                 // thread that sits in the park loop is read by.
                 resumeLog: [],
@@ -162,8 +167,11 @@ export function createKernelModule(){
                 // Below a page the emulator cannot honour a smaller quantum anyway,
                 // so asking for one would only be a lie in the configuration.
                 quantum: config?.quantum ?? 100_000,
+                // A quantum asked for is kept to the instruction: a test's, a profile's.
+                turnMs: config?.quantum === undefined ? TURN_MS : undefined,
                 soloQuantum: config?.soloQuantum,
                 ids: config?.ids,
+                hostAnswering: ()=>state.hostAnswering?.() === true,
                 ...published(cpu, log),
             });
             if (typeof log.metrics?.onFrame === 'function')
@@ -389,6 +397,17 @@ export function createKernelModule(){
                 refreshClockWith(refresh){
                     state.refreshClock = refresh;
                 },
+                /**
+                 * How the scheduler tells a host call still to answer through
+                 * the event loop -- not a caller parked on the guest's own
+                 * message queue -- from none: a turn with nothing to run then
+                 * leaves rather than wait for the other executors.
+                 *
+                 * @param {() => boolean} answering
+                 */
+                hostAnsweringWith(answering){
+                    state.hostAnswering = answering;
+                },
                 threads: ()=>live() ? state.scheduler.all() : [],
                 /**
                  * The processors the machine has: the process's executors,
@@ -486,6 +505,15 @@ export function createKernelModule(){
                  *     thread already carries the most suspensions it can
                  */
                 suspendThread: thread=>live() ? state.scheduler.suspend(thread) : null,
+
+                /**
+                 * Brings a thread running on another of the process's executors
+                 * back to it, its registers saved (`scheduler.settle`).
+                 *
+                 * @param {any} thread
+                 * @returns {boolean} whether it runs nowhere now
+                 */
+                settleThread: thread=>!live() || state.scheduler.settle(thread),
 
                 /**
                  * @param {any} thread

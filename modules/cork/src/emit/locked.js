@@ -5,7 +5,7 @@
  */
 
 /**
- * The atomic variant's locked instructions (roadmap/v2, stage 3): where more
+ * The atomic variant's locked instructions: where more
  * than one executor runs a process's threads at once, an x86 `lock`-prefixed
  * read-modify-write -- and `xchg` with memory, locked whether it says so or
  * not -- must be one indivisible access, as the processor makes it.
@@ -26,7 +26,7 @@
  * Plain loads and stores stay plain. On an x86 host the engine's ordinary
  * loads and stores are the processor's, in its order; elsewhere what a
  * program's plain stores promise another thread is the open question of the
- * atomic tax (roadmap/v2, "Open questions").
+ * atomic tax.
  */
 
 import { CF, ZF } from '../decode/table.js';

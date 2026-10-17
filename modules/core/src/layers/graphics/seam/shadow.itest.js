@@ -19,6 +19,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createCorkHost } from '../../cpu/internal/cork-host.js';
+import { runToHalt } from '../../cpu/internal/halt.fixture.js';
 import * as cork from '../../../../../cork/src/index.js';
 import {
     BUFFER, FLAG_SLOW_PATH, SHADOW, TEXTURE, getRenderStateCode, getSurfaceLevelCode,
@@ -144,7 +145,7 @@ function processor(){
         run(at){
             host.writeReg32('eip', at);
             host.writeReg32('esp', STACK);
-            host.runSlice(1000);
+            runToHalt(host, 1000);
         },
         eip: ()=>host.readReg32('eip'),
         esp: ()=>host.readReg32('esp'),

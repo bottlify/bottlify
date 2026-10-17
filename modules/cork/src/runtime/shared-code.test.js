@@ -6,7 +6,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { CODE_WRITE_SLOTS, SHARED_CODE_BYTES, createSharedCode } from './shared-code.js';
+import { CODE_WRITE_SLOTS, SHARED_CODE_BYTES, SharedSwitch, createSharedCode }
+    from './shared-code.js';
 import { PAGE } from './layout.js';
 
 /** A shared memory with room for the record at its start. */
@@ -62,4 +63,26 @@ test('a reader the ring lapped is told everything went', ()=>{
     seen.length = 0;
     b.take((address, size)=>seen.push([address, size]));
     assert.deepEqual(seen, [[0x5000, 4]], 'and goes on from there');
+});
+
+test('stack pages one executor is told of, and switches one flips, every executor reads', ()=>{
+    const m = memory();
+    const [a, b] = [0, 1].map(index=>createSharedCode(m, 0, index));
+    a.noteStack(0x50, 0x5f);
+    a.noteStack(0xfffff, 0xfffff);
+    assert.equal(b.onStack(0x50), true);
+    assert.equal(b.onStack(0x5f), true);
+    assert.equal(b.onStack(0x60), false);
+    assert.equal(b.onStack(0x4f), false);
+    assert.equal(b.onStack(0xfffff), true, 'the last page');
+    assert.equal(b.switches(), 0);
+    b.raise(SharedSwitch.READS_CHECKED);
+    a.raise(SharedSwitch.STACKS_TESTED);
+    assert.equal(a.switches(), SharedSwitch.READS_CHECKED | SharedSwitch.STACKS_TESTED);
+    // The ring is untouched by either.
+    a.publish(0x1000, 4);
+    /** @type {number[][]} */
+    const seen = [];
+    b.take((address, size)=>seen.push([address, size]));
+    assert.deepEqual(seen, [[0x1000, 4]]);
 });

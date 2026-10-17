@@ -5,7 +5,7 @@
  */
 
 /**
- * The run's translation store, across a link (roadmap/v2, stage 2): one store
+ * The run's translation store, across a link: one store
  * for every process of the run, kept by the system's thread, and asked from a
  * process in a worker of its own.
  *
@@ -51,8 +51,10 @@ export function storeHandlers(store){
             },
             /** @param {string} key */
             get: key=>store.get(key),
-            /** @param {string} key @param {Uint8Array} bytes */
-            put: (key, bytes)=>store.put(key, bytes),
+            /** @param {string} key @param {Uint8Array} bytes @param {{ needs?: string }} [options] */
+            put: (key, bytes, options)=>store.put(key, bytes, options),
+            /** @param {string} key */
+            touch: key=>store.touch?.(key),
         },
     };
 }
@@ -87,9 +89,14 @@ export function remoteStore(link){
         getNow: key=>getManyNow([key])?.[0],
         /** @param {string} key */
         get: key=>link.call('get', [key]).catch(()=>null),
-        /** @param {string} key @param {Uint8Array} bytes */
-        put: async(key, bytes)=>{
-            link.call('put', [key, bytes]).catch(()=>{});
+        /** @param {string} key @param {Uint8Array} bytes @param {{ needs?: string }} [options] */
+        put: async(key, bytes, options)=>{
+            link.call('put', options === undefined ? [key, bytes] : [key, bytes, options])
+                .catch(()=>{});
+        },
+        /** @param {string} key */
+        touch: key=>{
+            link.call('touch', [key]).catch(()=>{});
         },
     };
 }

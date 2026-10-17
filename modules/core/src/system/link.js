@@ -7,7 +7,7 @@
 /**
  * Calls between two threads, through a pair of rings: how a process in a
  * worker of its own asks the system half of Win32 something and how the
- * system asks the process back (roadmap/v2, the Win32 split).
+ * system asks the process back.
  *
  * Each side calls the other by a target and a method, with values for
  * arguments (`codec.js`), and answers the other's calls from the handlers it

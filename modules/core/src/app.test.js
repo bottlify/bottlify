@@ -1049,6 +1049,19 @@ test('the wait is named for what is being waited on', ()=>{
         'and the name says which of the two waits it took');
 });
 
+test('a call on the host while the other executors run waits for its answer or for them', ()=>{
+    // The turn the others ran retired nothing here and resets the count, so a
+    // machine whose one thread here waits on the host came straight back for
+    // as long as they ran -- or, before, the turn itself waited for them and
+    // held the answer back, the event loop being where it comes.
+    assert.equal(waitOn({ suspended: 1, others: true }).timer, true);
+    assert.equal(waitOn({ suspended: 1, others: true }).phase, 'idle-host-wait');
+    assert.equal(idleWait(busy({ others: true })), null,
+        'with nothing on the host the next turn is the others\' work');
+    assert.equal(idleWait(busy({ idlers: 1, others: true })), null,
+        'nor a caller on the guest\'s own queue: its look is the next turn');
+});
+
 test("a caller parked on the guest's own queue is no wait while the guest still runs", ()=>{
     // An installer's window thread sits in GetMessage while another thread
     // copies; the window thread looks at its queue every turn without the
@@ -1804,6 +1817,30 @@ test('the cpu setup\'s cores are the executors, a whole number from 1 to 32 that
         assert.throws(()=>withCpuSetup({ cpu: { cores } }), /from 1 to 32/);
     }
     assert.throws(()=>withCpuSetup({ cpu: { cores: 2 }, executors: 4 }), /one number/);
+});
+
+test('a run that names no cores gets one fewer than a browser host\'s processors where it shares'
+    + ' memory, at most eight, and one where it cannot; in node the cores BOTTLIFY_CORES names',
+()=>{
+    const browser = { node: false, processors: 4, shareable: true };
+    assert.equal(withCpuSetup({}, browser).executors, 3, 'four processors: three cores');
+    assert.equal(withCpuSetup({}, { ...browser, processors: 16 }).executors, 8, 'at most eight');
+    assert.equal(withCpuSetup({}, { ...browser, processors: 2 }).executors, 1);
+    assert.equal(withCpuSetup({}, { ...browser, processors: 1 }).executors, undefined, 'one');
+    assert.equal(withCpuSetup({}, { ...browser, processors: undefined }).executors, undefined,
+        'a host that does not say: one');
+    assert.equal(withCpuSetup({}, { ...browser, shareable: false }).executors, undefined,
+        'a page that is not cross-origin isolated: one');
+    assert.equal(withCpuSetup({ mode: 'compatible' }, browser).executors, undefined);
+    assert.equal(withCpuSetup({ cork: { config: { sharedMemory: false } } }, browser).executors,
+        undefined);
+    assert.equal(withCpuSetup({ engine: 'emulator' }, browser).executors, undefined);
+    assert.equal(withCpuSetup({ cpu: { cores: 1 } }, browser).executors, 1, 'named, as named');
+    assert.equal(withCpuSetup({ executors: 2 }, browser).executors, 2, 'executors, as named');
+    const node = { node: true, processors: 4, shareable: true };
+    assert.equal(withCpuSetup({}, node).executors, undefined, 'node: one, the same everywhere');
+    assert.equal(withCpuSetup({}, { ...node, named: '4' }).executors, 4, 'BOTTLIFY_CORES');
+    assert.equal(withCpuSetup({}, { ...node, named: '' }).executors, undefined);
 });
 
 test('the pool lends a process the host\'s cores its own leave, less two, and never none', ()=>{

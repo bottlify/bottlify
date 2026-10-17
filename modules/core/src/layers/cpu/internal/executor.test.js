@@ -17,6 +17,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createCorkHost } from './cork-host.js';
 import { createBell, createRemoteExecutor } from './executor.js';
+import { unbrokenTable } from './unbroken.js';
 import * as engine from '../../../../../cork/src/index.js';
 
 const ENGINE_URL = new URL('../../../../../cork/src/index.js', import.meta.url).href;
@@ -173,6 +174,68 @@ test('programs run on another executor in a worker leave what they leave on the 
         }
     });
 
+test('another executor\'s translator keeps its regions in the run\'s store through the process, '
+    + 'and the next run there takes them and translates nothing', async()=>{
+    /** @type {Map<string, Uint8Array>} */
+    const records = new Map();
+    const asked = { gets: 0, puts: 0 };
+    const store = {
+        get: async(/** @type {string} */ key)=>{
+            asked.gets++;
+            return records.get(key) ?? null;
+        },
+        put: async(/** @type {string} */ key, /** @type {Uint8Array} */ bytes)=>{
+            asked.puts++;
+            records.set(key, bytes);
+        },
+    };
+    const config = { ...CONFIG, executors: 2, cork: { ...CONFIG.cork, bundleId: 'test' } };
+    const next = random(0x5703);
+    const code = program(next);
+    const seed = next(1 << 30);
+    const run = async()=>{
+        const process = createCorkHost({ ...config, engine });
+        handle(process);
+        const remote = await createRemoteExecutor({ host: process, index: 1, engineUrl: ENGINE_URL,
+            config, store });
+        try
+        {
+            begin(process, code, random(seed));
+            remote.block().set(process.block());
+            let slice = remote.runSlice(50);
+            for (let turn = 1; turn < 10_000 && !slice.halted; turn++)
+            {
+                await settle();
+                slice = remote.runSlice(50);
+            }
+            assert.equal(slice.fault, null);
+            // The records it put, and the answers it waits for, cross meanwhile.
+            for (let turn = 0; turn < 20; turn++)
+            {
+                await settle();
+            }
+            const view = new DataView(remote.block().buffer, remote.block().byteOffset);
+            const layout = process.blockLayout();
+            return { figures: await remote.diagnostics(), outcome: outcome(process,
+                name=>view.getUint32(layout.regs + REGISTERS.indexOf(name) * 4, true)) };
+        }
+        finally
+        {
+            await remote.close();
+        }
+    };
+    const cold = await run();
+    assert.ok(cold.figures?.cacheMisses > 0 && cold.figures?.cacheHits === 0, 'nothing there yet');
+    assert.ok(asked.puts > 0 && records.size > 0,
+        'what it translated went to the process\'s store');
+    const puts = asked.puts;
+    const warm = await run();
+    assert.ok(warm.figures?.cacheHits > 0, 'taken from the store');
+    assert.equal(warm.figures?.cacheMisses, 0, 'nothing translated again');
+    assert.equal(asked.puts, puts, 'nothing stored again');
+    assert.deepEqual(warm.outcome, cold.outcome, 'and it ran the same');
+});
+
 test('a store on one executor into code another translated reaches the other\'s next slice',
     async()=>{
         const process = createCorkHost({ ...CONFIG, engine, executors: 2 });
@@ -253,6 +316,59 @@ test('a store on one executor into code another translated reaches the other\'s 
             remote.close();
         }
     });
+
+test('what one executor learns of the process reaches the others: the stacks the process\'s own'
+    + ' was told of, code translated on one of them, a read that faulted', async()=>{
+    const process = createCorkHost({ ...CONFIG, engine, executors: 2 });
+    handle(process);
+    const remote = await createRemoteExecutor({ host: process, index: 1, engineUrl: ENGINE_URL,
+        config: { ...CONFIG, executors: 2 } });
+    // A thread's stack, told to the process's executor alone, as the kernel tells it.
+    const STACK = 0x50000;
+    process.noteStack(STACK, 0x10000);
+    const LOOP = STACK + 0x8000;
+    // L: add ebx, ecx; dec ecx; jnz L; hlt -- code on a stack page, as a program that
+    // builds a thunk on its stack has.
+    const loop = [0x01, 0xcb, 0x49, 0x75, 0xfb, 0xf4];
+    const view = new DataView(remote.block().buffer, remote.block().byteOffset);
+    const layout = process.blockLayout();
+    /** @param {string} name @param {number} value */
+    const setRemote = (name, value)=>(name === 'eip'
+        ? view.setUint32(layout.eip, value, true)
+        : view.setUint32(layout.regs + REGISTERS.indexOf(name) * 4, value >>> 0, true));
+    try
+    {
+        process.writePhysical(LOOP, new Uint8Array(loop));
+        setRemote('ecx', 100_000);
+        setRemote('esp', 0x300000);
+        setRemote('eip', LOOP);
+        let slice = remote.runSlice(5000);
+        for (let turn = 1; turn < 2000 && !slice.halted; turn++)
+        {
+            await settle();
+            slice = remote.runSlice(5000);
+        }
+        await settle();
+        const there = await remote.diagnostics();
+        assert.ok(there?.modules > 0, 'the loop was translated on the other executor');
+        assert.equal(there?.stackCode, 1, 'which knew the page for a stack page');
+        // The process's executor stores through esp tested from its next slice on.
+        process.writeReg32('eip', LOOP + loop.length - 1);
+        process.runSlice(10);
+        assert.equal(process.cork().diagnostics().stackCode, 1, 'and so does the process\'s');
+
+        // A read that faulted on the process's executor: the other tests its reads too.
+        process.cork().readsFaulted();
+        setRemote('eip', LOOP + loop.length - 1);
+        remote.runSlice(10);
+        await settle();
+        assert.equal((await remote.diagnostics())?.readSwitches, 1);
+    }
+    finally
+    {
+        remote.close();
+    }
+});
 
 test('two executors at once: interlocked counters, a spin lock and a compare-and-swap loop '
     + 'lose no update', async()=>{
@@ -345,3 +461,59 @@ test('two executors at once: interlocked counters, a spin lock and a compare-and
         remotes.forEach(remote=>remote.close());
     }
 });
+
+for (const told of [true, false])
+{
+    test(`another executor ends a thread's run outside a routine no slice ends inside`
+        + `${told ? '' : ' -- and inside one when not told of it'}`, async()=>{
+        // A thread calls a routine over and over that spends most of its time
+        // inside: told of the routine, the executor runs every slice that ends
+        // in it on to its end, as the process's own does.
+        const process = createCorkHost({ ...CONFIG, engine, executors: 2 });
+        handle(process);
+        const ROUTINE = 0x42000;
+        // mov eax, 300; R: dec eax; jnz R; ret
+        const routine = [0xb8, ...u32(300), 0x48, 0x75, 0xfd, 0xc3];
+        // L: call ROUTINE; jmp L
+        const caller = [0xe8, ...u32(ROUTINE - (CODE + 5)), 0xeb, 0xf9];
+        const table = unbrokenTable();
+        if (told)
+        {
+            table.add(ROUTINE, routine.length);
+        }
+        const remote = await createRemoteExecutor({ host: process, index: 1, engineUrl: ENGINE_URL,
+            config: { ...CONFIG, executors: 2 }, unbroken: table.buffer });
+        try
+        {
+            process.writePhysical(CODE, new Uint8Array(caller));
+            process.writePhysical(ROUTINE, new Uint8Array(routine));
+            process.writeReg32('esp', 0x300000);
+            process.writeReg32('eip', CODE);
+            remote.block().set(process.block());
+            const view = new DataView(remote.block().buffer, remote.block().byteOffset);
+            const layout = process.blockLayout();
+            const next = random(0x5eed);
+            let inside = 0;
+            for (let slice = 0; slice < 200; slice++)
+            {
+                const ended = remote.runSlice(1 + next(400));
+                assert.equal(ended.fault, null);
+                const eip = view.getUint32(layout.eip, true);
+                inside += eip >= ROUTINE && eip < ROUTINE + routine.length ? 1 : 0;
+                await settle();
+            }
+            if (told)
+            {
+                assert.equal(inside, 0, 'slices that ended inside the routine');
+            }
+            else
+            {
+                assert.ok(inside > 0, 'the routine is where most slices end, untold');
+            }
+        }
+        finally
+        {
+            remote.close();
+        }
+    });
+}

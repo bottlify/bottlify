@@ -46,23 +46,21 @@ for (const [concurrency, flag, sends] of /** @type {const} */ ([
         const output = [];
         app.attachLog((/** @type {number} */ _handle, /** @type {string} */ text)=>
             output.push(text));
-        // The run's window manager, looked at while the processes stand:
-        // each top-level window it held, with the process it said made it.
+        const code = await app.run({ timeoutMs: 60000 });
+        assert.equal(code, 0, output.join(''));
+        // The run's window manager's report: each top-level window made, with
+        // the process it said made it -- read after, not looked at on a timer
+        // while the processes stood, which missed a window that came and went
+        // between two looks on a loaded machine.
+        const after = app.diagnostics().find((/** @type {any} */ each)=>each.name === 'windows');
         /** @type {Map<string, Set<number>>} */
         const seen = new Map();
-        const watching = setInterval(()=>{
-            const table = app.diagnostics().find((/** @type {any} */ each)=>
-                each.name === 'windows');
-            for (const window of table?.metrics.topLevel ?? [])
-            {
-                const processes = seen.get(window.className) ?? new Set();
-                processes.add(window.process);
-                seen.set(window.className, processes);
-            }
-        }, 20);
-        const code = await app.run({ timeoutMs: 60000 });
-        clearInterval(watching);
-        assert.equal(code, 0, output.join(''));
+        for (const window of after?.metrics.made ?? [])
+        {
+            const processes = seen.get(window.className) ?? new Set();
+            processes.add(window.process);
+            seen.set(window.className, processes);
+        }
         const host = [...seen.get('BottlifyHost') ?? []];
         const guest = [...seen.get('BottlifyGuest') ?? []];
         assert.equal(host.length, 1, `the run held the parent's window: ${JSON.stringify(
@@ -73,7 +71,6 @@ for (const [concurrency, flag, sends] of /** @type {const} */ ([
             assert.equal(guest.length, 1, 'and the child\'s');
             assert.notEqual(host[0], guest[0], 'each as its own process\'s');
         }
-        const after = app.diagnostics().find((/** @type {any} */ each)=>each.name === 'windows');
         assert.deepEqual(after?.metrics.topLevel, [], 'and none once their processes ended');
         const lines = output.join('');
         // Each process writes a check's verdict and its name apart, and two

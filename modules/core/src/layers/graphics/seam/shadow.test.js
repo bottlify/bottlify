@@ -7,7 +7,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    BUFFER, COMMAND, FLAG_SLOW_PATH, FLAG_STALE, SHADOW, TEXTURE, createShadow, getRenderStateCode,
+    BUFFER, COMMAND, COMMAND_RING_BYTES, FLAG_SLOW_PATH, FLAG_STALE, HELD_GUEST, HELD_HOST, SHADOW,
+    TEXTURE,
+    createCommandReader, createShadow, getRenderStateCode,
     getSurfaceLevelCode, getTextureStageStateCode, getTransformCode, lockCode, transformSlot,
     transformType, unlockCode,
 } from './shadow.js';
@@ -97,7 +99,10 @@ function fakeDevice(){
 
 /**
  * @param {{ readU32?: boolean, commands?: boolean,
- *     phases?: import('./shadow.js').ShadowPhases }} [options]
+ *     phases?: import('./shadow.js').ShadowPhases,
+ *     exchange?: (address: number) => void }} [options]  exchange: a
+ *     compare-and-swap of the memory's, as with threads on other executors,
+ *     told of each swap first
  */
 function machine(options = {}){
     const memory = new Uint8Array(0x240000);
@@ -136,6 +141,17 @@ function machine(options = {}){
             }
             : undefined,
         writeMemory: (address, bytes)=>memory.set(bytes, address),
+        compareExchangeU32: options.exchange
+            ? (address, expected, value)=>{
+                options.exchange?.(address);
+                const held = view.getUint32(address, true);
+                if (held === expected >>> 0)
+                {
+                    view.setUint32(address, value >>> 0, true);
+                }
+                return held;
+            }
+            : undefined,
         device,
         divergence: (api, detail)=>divergences.push(`${api}: ${detail}`),
         commands: options.commands
@@ -218,7 +234,10 @@ test('the block fits its two pages and its regions follow one another', ()=>{
     assert.equal(SHADOW.FVF_STRIDES + SHADOW.FVF_STRIDE_PAIRS * 8, SHADOW.STATE_BLOCKS);
     // A bit per token, of the blocks held and of those holding what a draw checks.
     assert.equal(SHADOW.STATE_BLOCKS + SHADOW.STATE_BLOCK_TOKENS / 8, SHADOW.STATE_BLOCK_DRAWS);
-    assert.equal(SHADOW.STATE_BLOCK_DRAWS + SHADOW.STATE_BLOCK_TOKENS / 8, SHADOW.SIZE);
+    assert.equal(SHADOW.STATE_BLOCK_DRAWS + SHADOW.STATE_BLOCK_TOKENS / 8, SHADOW.HELD);
+    // The device's lock, a word the routines take with xchg: aligned.
+    assert.equal(SHADOW.HELD % 4, 0);
+    assert.equal(SHADOW.HELD + 4, SHADOW.SIZE);
     assert.equal(BUFFER.SIZE, 36);
     assert.equal(TEXTURE.LEVELS + TEXTURE.LEVEL_SLOTS * 4, TEXTURE.SIZE);
     // Enough for the longest chain a texture of this era can have: a 32768
@@ -255,25 +274,41 @@ test('the routines end in a jump to their own trap, and check the flag first', (
         unlock: [unlockCode(0x20300, 0x105030), 4],
         stageState: [getTextureStageStateCode(0x20400, 0x105040, STAGE_STATE_TYPES), 16],
     };
+    /** Where `bytes` first are in `code`, or -1. @param {Uint8Array} code @param {number[]} bytes */
+    const find = (code, bytes)=>[...code].findIndex((_, at)=>bytes
+        .every((byte, i)=>code[at + i] === byte));
+    /** @param {number} value */
+    const le = value=>[...new Uint8Array(Uint32Array.of(value).buffer)];
     for (const [name, [code, popped]] of Object.entries(rets))
     {
         assert.equal(code[code.length - 5], 0xe9, `${name} ends in the jump`);
-        assert.deepEqual([...code.slice(code.length - 10, code.length - 5)],
-            [0x31, 0xc0, 0xc2, popped, 0x00], `${name} answers D3D_OK and pops ${popped}`);
+        assert.notEqual(find(code, [0x31, 0xc0, 0xc2, popped, 0x00]), -1,
+            `${name} answers D3D_OK and pops ${popped}`);
         assert.deepEqual([...code.slice(0, 7)], [...rs.slice(0, 7)], `${name} starts the same`);
     }
     const lock = rets.lock[0];
-    assert.equal(lock[lock.length - 11], 0x5b, 'the lock pops what it pushed first');
-
-    // The two buffer routines count the call last, in the device's block:
-    // through EBX for the lock, EDX for the unlock, each holding it.
     const unlock = rets.unlock[0];
-    assert.deepEqual([...lock.slice(lock.length - 17, lock.length - 11)],
-        [0xff, 0x83, ...new Uint8Array(Uint32Array.of(SHADOW.LOCK_CALLS).buffer)],
-        'the lock counts the call last');
-    assert.deepEqual([...unlock.slice(unlock.length - 16, unlock.length - 10)],
-        [0xff, 0x82, ...new Uint8Array(Uint32Array.of(SHADOW.UNLOCK_CALLS).buffer)],
-        'the unlock counts the call last');
+    // The two buffer routines take the device's lock, through EDX, before
+    // they look at the buffer.
+    const takeLock = [0xb8, ...le(1), 0x87, 0x82, ...le(SHADOW.HELD), 0x85, 0xc0];
+    assert.ok(find(lock, takeLock) > 0 && find(lock, takeLock) < 40, 'the lock takes it first');
+    assert.ok(find(unlock, takeLock) > 0 && find(unlock, takeLock) < 30,
+        'and so does the unlock');
+    // They count the call in the device's block and let the lock go last --
+    // before the lock writes the program's pointer, which may fault.
+    const counted = find(lock, [0xff, 0x83, ...le(SHADOW.LOCK_CALLS)]);
+    assert.notEqual(counted, -1, 'the lock counts the call');
+    assert.deepEqual([...lock.slice(counted + 6, counted + 16)],
+        [0xc7, 0x83, ...le(SHADOW.HELD), ...le(0)], 'then lets the device go');
+    assert.deepEqual([...lock.slice(counted + 16, counted + 23)],
+        [0x8b, 0x5c, 0x24, 0x14, 0x89, 0x03, 0x5b], 'then answers the pointer and pops');
+    const uncounted = find(unlock, [0xff, 0x82, ...le(SHADOW.UNLOCK_CALLS)]);
+    assert.notEqual(uncounted, -1, 'the unlock counts the call');
+    assert.deepEqual([...unlock.slice(uncounted + 6, uncounted + 16)],
+        [0xc7, 0x82, ...le(SHADOW.HELD), ...le(0)], 'then lets the device go');
+    // A refused unlock lets it go too, on its way to the host.
+    assert.deepEqual([...unlock.slice(unlock.length - 15, unlock.length - 5)],
+        [0xc7, 0x82, ...le(SHADOW.HELD), ...le(0)], 'and so does the way to the host');
 
     // The level getter refuses a level the texture has not got, and reads
     // the count out of the block rather than assuming the table's length is it.
@@ -922,4 +957,146 @@ test('a Direct3D 9 device\'s render states, stage states and transforms are mirr
         + (SHADOW.STAGE_STATE_STRIDE + D3DTSS9.COLOROP) * 4, true), 2);
     assert.equal(view.getFloat32(at + SHADOW.TRANSFORMS + transformSlot(256) * 64 + 12 * 4,
         true), 12);
+});
+
+test('a ring started over keeps the record a routine on another executor took space for meanwhile',
+    ()=>{
+        // The host has read every record up to a head past the point where it
+        // starts the ring over; between its read and the start over, a routine
+        // on another executor takes the next eight bytes and writes a record.
+        const memory = new Uint8Array(0x20000);
+        const words = new DataView(memory.buffer);
+        const block = 0x1000;
+        const ring = 0x2000;
+        const head = COMMAND_RING_BYTES - 1024;
+        /** @param {number} at @param {number} slot */
+        const write = (at, slot)=>{
+            words.setUint32(ring + at + COMMAND.SLOT, slot, true);
+            words.setUint32(ring + at + COMMAND.BYTES, 8, true);
+        };
+        for (let at = 0; at < head; at += 8)
+        {
+            write(at, 1);
+        }
+        words.setUint32(block + SHADOW.COMMAND_HEAD, head, true);
+        let raced = false;
+        /** @type {number[]} */
+        const slots = [];
+        const reader = createCommandReader({
+            block, ring,
+            readWord: address=>words.getUint32(address, true),
+            readWords: (address, count)=>new Uint32Array(memory.slice(address, address + count * 4)
+                .buffer),
+            writeMemory: (address, bytes)=>memory.set(bytes, address),
+            compareExchangeU32: (address, expected, value)=>{
+                if (!raced)
+                {
+                    raced = true;
+                    write(head, 2);
+                    words.setUint32(block + SHADOW.COMMAND_HEAD, head + 8, true);
+                }
+                const held = words.getUint32(address, true);
+                if (held === expected)
+                {
+                    words.setUint32(address, value, true);
+                }
+                return held;
+            },
+            take: records=>{
+                const taken = new Uint32Array(records.buffer, records.byteOffset,
+                    records.byteLength >>> 2);
+                for (let i = 0; i < taken.length; i += 2)
+                {
+                    slots.push(taken[i]);
+                }
+                return taken.length / 2;
+            },
+            refuse: detail=>assert.fail(detail),
+        });
+        reader.take();
+        reader.take();
+        assert.equal(raced, true, 'the host started the ring over');
+        assert.equal(slots.length, head / 8 + 1, 'every record, the raced one with them');
+        assert.equal(slots[slots.length - 1], 2);
+        // And once nothing took space past it, the ring starts over.
+        reader.take();
+        assert.equal(words.getUint32(block + SHADOW.COMMAND_HEAD, true), 0);
+    });
+
+test('the host holds the device while it replays what a routine left, and lets it go after', ()=>{
+    // A routine on another executor that finds it held leaves for the host
+    // rather than merge a range, or write the unlock ring, under the replay.
+    const m = machine({ exchange: ()=>{} });
+    const at = m.shadow.address();
+    const vb = fakeBuffer(0x8000, 0x100);
+    const block = m.shadow.attachBuffer(vb);
+    /** @type {number[]} */
+    const seen = [];
+    const lock = vb.Lock.bind(vb);
+    /** @param {number} offset @param {number} size @param {any} out @param {number} [flags] */
+    vb.Lock = (offset, size, out, flags)=>{
+        seen.push(m.u32(at + SHADOW.HELD));
+        return lock(offset, size, out, flags);
+    };
+    m.put32(block + BUFFER.FROM, 16);
+    m.put32(block + BUFFER.TO, 48);
+    m.put32(at + SHADOW.RING, block);
+    m.put32(at + SHADOW.RING_HEAD, 1);
+    m.shadow.sync();
+    assert.deepEqual(seen, [HELD_HOST], 'held through the replay');
+    assert.equal(m.u32(at + SHADOW.HELD), 0, 'and free after');
+    // Its operations nest: one inside another takes it once and lets it go once.
+    m.shadow.settled();
+    m.shadow.slowPath(true);
+    m.shadow.fresh();
+    assert.equal(m.u32(at + SHADOW.HELD), 0);
+});
+
+test('a routine holding the device is waited for, and one that never lets go is taken from',
+    ()=>{
+        let tries = 0;
+        /** @type {(() => void) | null} */
+        let finish = null;
+        const m = machine({ exchange: ()=>{
+            tries++;
+            if (tries === 3)
+            {
+                finish?.();
+            }
+        } });
+        const at = m.shadow.address();
+        // A routine on another executor holds it; it lets go a few looks later.
+        m.put32(at + SHADOW.HELD, HELD_GUEST);
+        finish = ()=>m.put32(at + SHADOW.HELD, 0);
+        m.shadow.sync();
+        assert.ok(tries >= 3, 'the host waited for it');
+        assert.deepEqual(m.divergences, []);
+        assert.equal(m.u32(at + SHADOW.HELD), 0);
+        // One whose thread faulted inside never does: taken, and said.
+        m.put32(at + SHADOW.HELD, HELD_GUEST);
+        finish = null;
+        const from = performance.now();
+        m.shadow.sync();
+        assert.ok(performance.now() - from >= 150, 'after a wait');
+        assert.equal(m.divergences.length, 1);
+        assert.match(m.divergences[0], /held the device/);
+        assert.equal(m.u32(at + SHADOW.HELD), 0, 'and let go after');
+    });
+
+test('a mirror the host writes from the device comes after the calls the ring holds', ()=>{
+    // A routine on another executor recorded a call and wrote its mirror
+    // while the host made a call of its own: the host's mirror of the device
+    // is written once the ring's calls are made, not over the guest's.
+    const m = machine({ commands: true });
+    const at = m.shadow.address();
+    const ring = m.u32(at + SHADOW.COMMANDS);
+    m.put32(ring, 7);
+    m.put32(ring + COMMAND.BYTES, 16);
+    m.put32(ring + COMMAND.ARGS, 1);
+    m.put32(ring + COMMAND.ARGS + 4, 2);
+    m.put32(at + SHADOW.COMMAND_HEAD, 16);
+    m.shadow.settled();
+    assert.deepEqual(m.taken, [[7, 16, 1, 2]], 'the ring made first');
+    m.shadow.remirror({ renderStates: [] });
+    assert.equal(m.taken.length, 1, 'and only once');
 });

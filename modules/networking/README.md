@@ -2,15 +2,15 @@
 
 TCP and UDP for a browser tab, over one WebSocket.
 
-A page cannot open a TCP connection or bind a UDP port; it can open a WebSocket. This package is
-both ends of the way around that: a **relay** server (Node, no dependencies) that holds real
-sockets, and a **client** that gives the page sockets through it — streams, datagrams, listening
-ports, name lookups. Pages that join the same **room** share a private network, `10.86.0.0/16`,
+A page cannot open a TCP connection or bind a UDP port; it can open a WebSocket. This package gets
+around that from both ends: a **relay** server (Node, no dependencies) that holds real sockets, and
+a **client** that gives the page sockets through it (streams, datagrams, listening ports, name
+lookups). Pages that join the same **room** share a private network, `10.86.0.0/16`,
 and reach each other directly; anything outside the room is a real connection the relay opens,
 only to the hosts you allow.
 
-It is how `@bottlify/core` gives a Windows program Winsock, and it works without it: a game, an
-emulator or a tool of your own can use the same transport.
+`@bottlify/core` uses it to give a Windows program Winsock, but it does not need the engine: a
+game, an emulator or a tool of your own can use the same transport.
 
 ```
 page A ── wss ──┐                ┌── page B        (same room: 10.86.0.1 ↔ 10.86.0.2)
@@ -35,7 +35,7 @@ node src/server/cli.js --port 8787 --origin https://play.example.com
 | `--origin url` | any | Only pages from these origins may connect (checked at the handshake). Repeat for more. |
 
 With no `--allow`, a relay is a private LAN per room and never an open proxy. A page served over
-HTTPS may only open `wss://`, so in a deployment put TLS in front of it — or attach it to the
+HTTPS may only open `wss://`, so in a deployment put TLS in front of it, or attach it to the
 HTTPS server you already have:
 
 ```js
@@ -104,10 +104,10 @@ client runs there too.
 `@bottlify/networking/protocol` is shared by both halves, so they cannot drift apart. Joining and
 the roster are JSON text frames; everything else is a binary frame with a twenty-byte header the
 relay routes without reading the payload, so one `send` is one frame and a datagram keeps its
-boundaries. The RFC 6455 server side is in `src/server/websocket.js`, about a hundred lines.
+boundaries. The RFC 6455 server side is in [`src/server/websocket.js`](src/server/websocket.js), about a hundred lines.
 
 Inside `@bottlify/core` the seam is the transport contract in
-`modules/core/src/layers/win32/wsock32/transport.js`: every part of it is optional, and what is
+[`modules/core/src/layers/win32/wsock32/transport.js`](../core/src/layers/win32/wsock32/transport.js): every part of it is optional, and what is
 missing behaves as no network. `createApp({ win32: { network: transport } })` takes any object
 implementing it, when the engine runs on the page's own thread (`host: 'thread'`).
 

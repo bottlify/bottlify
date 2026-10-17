@@ -49,7 +49,7 @@ import { loadZstdWasm } from './zstd-wasm.js';
 import { createClassTable } from './layers/win32/ole32/remote.js';
 import { comHandlers, remoteClassTable } from './com-link.js';
 import { createCallRepeats } from './call-repeats.js';
-import { withRunMode } from './mode.js';
+import { canShareMemory, withRunMode } from './mode.js';
 import { createLinkMemory, openLink } from './system/link.js';
 import { systemHandlers } from './system-link.js';
 import { storeHandlers } from './layers/cpu/internal/store-link.js';
@@ -113,7 +113,7 @@ const hashText = (hash, text)=>{
  *     `store` here is a request -- `'local'` (the default) for the origin's private file
  *     system, a store of your own when the app runs in this thread, `null` for none.
  * @property {boolean} [cork.pool]  The run's pool of translation workers, lent to its
- *     processes as their translation needs (roadmap/v2): on by default wherever a machine's
+ *     processes as their translation needs: on by default wherever a machine's
  *     translator would open a worker of its own, unless `cork.config.translators` is set.
  * @property {number} [cork.poolPerProcess]  Workers of the pool at most for one process:
  *     `navigator.hardwareConcurrency` by default.
@@ -271,15 +271,21 @@ const hashText = (hash, text)=>{
  * @property {number} [soloQuantum]  Guest instructions per turn of a thread no other is
  *           ready beside, in a process with one executor, while no timed wait or timer is
  *           due within 16 ms. Default ten quanta.
- * @property {{ cores?: number }} [cpu]  The machine's processor. `cores`: how many
+ * @property {{ cores?: number, eager?: boolean }} [cpu]  The machine's processor. `cores`: how many
  *           processors the program is told it has -- by every road Windows has to say
  *           it -- and the executors that run its threads at once, each a worker past
- *           the process's own thread; 1 to 32, default 1. Under cork, on a page that
- *           can share memory; elsewhere the program runs on one and is told of one.
+ *           the process's own thread; 1 to 32. Unset, in a browser whose page can share
+ *           memory one fewer than the host's processors, at most eight
+ *           (`automaticCores`); elsewhere, and in node unless `BOTTLIFY_CORES` names
+ *           them, one. Under cork, on a page that can share memory; elsewhere the
+ *           program runs on one and is told of one.
+ *           Each is opened when a thread wants it, some tens of milliseconds before it
+ *           runs one; `eager`, all of them before the program starts -- for a gate or
+ *           a measurement that wants threads at once from the first instruction.
  * @property {number} [executors]  `cpu.cores` by its older name: executors of the
  *           program's process under cork, past the process's own thread each a worker
  *           running one of its threads at once with the others, the locked
- *           instructions atomic (roadmap/v2, stage 3). Default 1.
+ *           instructions atomic. Default 1.
  * @property {boolean} [preemption]  End a slice early when a thread of higher
  *           priority comes due, as Windows preempts (the kernel's option; off).
  * @property {(eip: number, instructions: number) => void} [sample]
@@ -1257,9 +1263,11 @@ const SOUND_PUMP_MS = 1;
  * @param {number} state.suspended  Host calls suspended on the host, the
  *     callers parked on the guest's own queue left out.
  * @param {number} state.spun       Turns in a row that retired no instruction.
+ * @param {boolean} [state.others]  The process's other executors still run its
+ *     threads, the last turn having left without waiting for them.
  * @returns {{ phase: string, timer: boolean } | null} null to go straight on.
  */
-export function idleWait({ fetching, idlers, suspended, spun }){
+export function idleWait({ fetching, idlers, suspended, spun, others = false }){
     if (idlers === 0 && suspended === 0)
     {
         return null;
@@ -1272,7 +1280,10 @@ export function idleWait({ fetching, idlers, suspended, spun }){
         return null;
     }
     const on = fetching > 0 ? 'fetch' : idlers > 0 ? 'message' : 'host';
-    const timer = spun >= IDLE_SPINS_BEFORE_TIMER;
+    // A turn the others ran retired nothing here and still resets the count:
+    // with a call waiting on the host, the loop would come straight back for
+    // as long as they run. Their bell ends the wait as the answer does.
+    const timer = spun >= IDLE_SPINS_BEFORE_TIMER || others && suspended > 0;
     return { phase: `idle-${on}${timer ? '-wait' : ''}`, timer };
 }
 
@@ -1295,6 +1306,16 @@ export function answeredByEngine(knownDlls, runtimes){
 }
 
 /**
+ * The API sets Windows 10 resolves by its schema rather than by file, and the
+ * library each is: a program imports `api-ms-win-crt-stdio-l1-1-0.dll` and is
+ * bound to ucrtbase.dll, which GetModuleHandle names it too -- one module, not
+ * a copy for each set, and a copy of one a program carries is never loaded.
+ *
+ * @type {[RegExp, string][]}
+ */
+const API_SETS = [[/^api-ms-win-crt-[a-z0-9-]+$/, 'ucrtbase']];
+
+/**
  * The key a module is known by: its file name, without directory, case or
  * the extension a program is free to leave off.
  *
@@ -1307,7 +1328,8 @@ export function answeredByEngine(knownDlls, runtimes){
  */
 export function moduleKeyOf(name){
     const file = name.slice(Math.max(name.lastIndexOf('\\'), name.lastIndexOf('/')) + 1);
-    return file.toLowerCase().replace(/\.dll$/, '');
+    const key = file.toLowerCase().replace(/\.dll$/, '');
+    return API_SETS.find(([set])=>set.test(key))?.[1] ?? key;
 }
 
 // `relocatablePrefix` and `jumpBytes` live in `layers/loader/internal/hooks.js`
@@ -1506,7 +1528,7 @@ export function corkArtifacts(asked, here = import.meta.url){
 }
 
 /**
- * The run's pool of translation workers (roadmap/v2, stage 2), where every
+ * The run's pool of translation workers, where every
  * machine's translator would otherwise open a worker of its own: on cork, with
  * shared memory and ports to lend through, and unless the caller turned it off
  * (`cork.pool: false`) or set the translators a machine opens itself
@@ -1540,6 +1562,7 @@ async function openTranslationPool(options){
         open: ()=>openProcessWorker(url),
         perProcess: cork.poolPerProcess ?? translatorsBeside(processorsFor({
             engine: options.engine ?? DEFAULT_ENGINE, executors: options.executors,
+            sharedMemory: options.cork?.config?.sharedMemory,
         }), globalThis.navigator?.hardwareConcurrency ?? 4),
         ...(cork.poolWindowMs === undefined ? {} : { windowMs: cork.poolWindowMs }),
         driver: cork.poolDriver ?? {},
@@ -1566,12 +1589,15 @@ export const translatorsBeside = (cores, host)=>Math.max(1, Math.floor(host) - c
  * anything is built when it is not a whole number from 1 to 32, or when
  * `executors` says otherwise.
  *
- * @template {{ cpu?: { cores?: number }, executors?: number }} T
+ * @template {{ cpu?: { cores?: number, eager?: boolean }, executors?: number, mode?: string,
+ *     engine?: string, cork?: any }} T
  * @param {T} options
+ * @param {CoresHost} [host]  where the run is made (`coresHost`)
  * @returns {T & { executors?: number }}
  */
-export function withCpuSetup(options){
-    const cores = options.cpu?.cores;
+export function withCpuSetup(options, host = coresHost()){
+    const cores = options.cpu?.cores
+        ?? (options.executors === undefined ? automaticCores(options, host) : undefined);
     if (cores === undefined)
     {
         return options;
@@ -1587,6 +1613,55 @@ export function withCpuSetup(options){
             + ' number; set cores alone');
     }
     return { ...options, executors: cores };
+}
+
+/**
+ * Where a run is made, as far as its cores go: whether it is node, the cores
+ * `BOTTLIFY_CORES` names there, the host's processors and whether its threads
+ * can share memory.
+ *
+ * @typedef {{ node: boolean, named?: string, processors?: number, shareable: boolean }} CoresHost
+ */
+
+/** @returns {CoresHost} */
+export function coresHost(){
+    const scope = /** @type {any} */ (globalThis);
+    return { node: scope.process?.versions?.node !== undefined,
+        named: scope.process?.env?.BOTTLIFY_CORES,
+        processors: scope.navigator?.hardwareConcurrency, shareable: canShareMemory() };
+}
+
+/** The most cores a run that names none is given: an estimate, not a measurement. */
+export const AUTOMATIC_CORES = 8;
+
+/**
+ * The cores a run that names none gets from where it runs. In a browser whose
+ * page shares memory, one fewer than the host's processors -- the page, the
+ * graphics worker and a translator take about one between them -- and at most
+ * `AUTOMATIC_CORES`; the program is told of them from its first instruction and
+ * sizes its threads to them, and their executors open as its threads want them.
+ * One where its memory cannot be shared (a page that is not cross-origin
+ * isolated, `compatible`) or under the emulator. In node, `BOTTLIFY_CORES`, so
+ * every suite can be run with its programs on several executors, and otherwise
+ * one: a suite runs the same on every machine.
+ *
+ * @param {{ mode?: string, engine?: string, cork?: any }} options
+ * @param {CoresHost} host
+ * @returns {number | undefined}  none: one
+ */
+export function automaticCores(options, host){
+    if (host.node)
+    {
+        return host.named === undefined || host.named === '' ? undefined : Number(host.named);
+    }
+    if (!host.shareable || options.mode === 'compatible'
+        || options.cork?.config?.sharedMemory === false
+        || (options.engine ?? DEFAULT_ENGINE) === 'emulator'
+        || !(Number(host.processors) >= 2))
+    {
+        return undefined;
+    }
+    return Math.min(AUTOMATIC_CORES, Math.floor(Number(host.processors)) - 1);
 }
 
 /**
@@ -2588,7 +2663,7 @@ async function mountBundle({ options, cpu, events, translationStore }){
         if (codec === 2)
         {
             // Counted: the decoding a guest read waits for is what a pool
-            // worker would take off this thread (roadmap/v2, stage 2).
+            // worker would take off this thread.
             const startedAt = performance.now();
             const plain = zstdForEngine(bytes, expectedLength ?? 0);
             decoded.blocks++;
@@ -3782,6 +3857,7 @@ async function buildApp(options){
             noExecuteBelow: 0x10000,
             engine: options.engine ?? DEFAULT_ENGINE,
             executors: options.executors ?? 1,
+            eagerExecutors: options.cpu?.eager === true,
             engineUrl: (options.engine ?? DEFAULT_ENGINE) !== 'emulator'
                 ? corkArtifacts(options.cork).moduleUrl : null,
             cork: {
@@ -6348,6 +6424,9 @@ async function buildApp(options){
     const CLOCK_CREDIT_CAP_MS = 250;
     const creditClock = clockCredit(clockSource, clock, CLOCK_CREDIT_CAP_MS);
     kernel.refreshClockWith?.(()=>creditClock());
+    // Callers parked on the guest's own queue are suspended calls too, answered
+    // at the look each turn gives them.
+    kernel.hostAnsweringWith?.(()=>bridge.suspended() > idlers.length);
 
     const breathe = createMacrotask();
     const jsSampler = options.sampleJs ? createJsSampler() : null;
@@ -6509,6 +6588,13 @@ async function buildApp(options){
             // the host, which are the same shape from here and want opposite
             // waits.
             let spun = 0;
+            /**
+             * The process's other executors' bell as the last turn left it
+             * without waiting for them, a call waiting on the host: the idle
+             * wait ends on its ring too. Null otherwise.
+             * @type {number | null}
+             */
+            let othersRung = null;
             /** When the sound was last pumped (`SOUND_PUMP_MS`). */
             let pumpedAt = -Infinity;
             while (worked < maxTurns && !expired())
@@ -6651,7 +6737,8 @@ async function buildApp(options){
                     // together. The timer is kept for the case it is right for,
                     // which is a machine that really can do nothing until the
                     // host answers.
-                    const wait = idleWait({ fetching, idlers: queued, suspended: onHost, spun });
+                    const wait = idleWait({ fetching, idlers: queued, suspended: onHost, spun,
+                        others: othersRung !== null });
                     if (wait)
                     {
                         journal.begin(wait.phase, journal.PhaseKind.HOST);
@@ -6695,6 +6782,10 @@ async function buildApp(options){
                         if (wait.timer && bridge.suspended() > 0)
                         {
                             wakes.push(bridge.answered());
+                        }
+                        if (wait.timer && othersRung !== null)
+                        {
+                            wakes.push(cpu.executorBell().waitAsync(othersRung, IDLE_LOOK_MS));
                         }
                         await pacing.wait({
                             timer: wait.timer, sleep: wait.timer,
@@ -6841,7 +6932,13 @@ async function buildApp(options){
                         kernel.noteHostAnswer?.(tick, !step.ran.awaitingHost);
                     }
 
-                    spun = step.instructions === 0 ? spun + 1 : 0;
+                    // A turn spent waiting on the process's other executors is
+                    // the guest at work there, not a machine with nothing to do:
+                    // counted as a spin, every one went round the event loop and,
+                    // with a thread in GetMessage, slept on a timer while the
+                    // others waited for their traps to be answered.
+                    spun = step.instructions === 0 && !step.elsewhere ? spun + 1 : 0;
+                    othersRung = step.elsewhere && step.rung !== undefined ? step.rung : null;
 
                     // The guest ran for real, so its clock moves. Nothing else in
                     // the engine does this, and without it the clock only ever
@@ -6863,7 +6960,10 @@ async function buildApp(options){
                     {
                         worked++;
                     }
-                    if (!step.ran)
+                    // A turn whose threads all ran on the process's other
+                    // executors is no idle machine: it came back for the clock
+                    // and the event loop, theirs still running.
+                    if (!step.ran && !step.elsewhere)
                     {
                         // Nobody is ready. When a child is waiting to be started
                         // that is not a deadlock but its turn: the parent has not
@@ -7906,7 +8006,7 @@ async function buildSystemHost(deps){
         // The keys a process in a worker reads are these: they name as many
         // processors as its cpu layer will say it has.
         processors: processorsFor({ engine: options.engine ?? DEFAULT_ENGINE,
-            executors: options.executors }),
+            executors: options.executors, sharedMemory: options.cork?.config?.sharedMemory }),
     });
     system.windows = createWindowDirectory();
     const { seeded, saver, stopSavingRegistry } = await openSession({ options, events,

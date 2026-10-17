@@ -28,6 +28,12 @@ test('a record round-trips, and bytes of another version or shape are a miss', (
     assert.equal(back.closed, undefined, 'no closed blocks, none kept');
     assert.deepEqual(unpackRegion(packRegion({ ...region, closed: [0x1010] }))?.closed, [0x1010],
         'the blocks inside the loops with no entry, which the runtime answers for');
+    assert.equal(back.shape, undefined, 'a module\'s record has no shape');
+    /** @type {import('./cache.js').RegionShape} */
+    const shape = { hash: '0123456789abcdef', stops: [0x1020], targets: [[0x1004, [0x2000]]],
+        narrow: true, checked: true };
+    assert.deepEqual(unpackRegion(packRegion({ ...region, shape }))?.shape, shape,
+        'what forming made of the region, to form it again so');
     const other = new Uint8Array(bytes);
     new DataView(other.buffer).setUint32(4, CACHE_VERSION + 1, true);
     assert.equal(unpackRegion(other), null, 'another version');
@@ -41,13 +47,13 @@ test('a record round-trips, and bytes of another version or shape are a miss', (
 test('the key changes with every input', ()=>{
     const base = {
         version: 1, features: { simd: true, tailCalls: true }, layoutId: 'abc', bundleId: 'game',
-        entry: 0x401000, hash: 'deadbeef',
+        entry: 0x401000, kept: '3-s',
     };
     const key = cacheKey(base);
-    assert.equal(key, 'cork/1st-/abc/game/401000/deadbeef');
+    assert.equal(key, 'cork/1st-/abc/game/401000/3-s');
     for (const change of [
         { version: 2 }, { features: { simd: false, tailCalls: true } }, { layoutId: 'abd' },
-        { bundleId: 'other' }, { entry: 0x401001 }, { hash: 'deadbeee' },
+        { bundleId: 'other' }, { entry: 0x401001 }, { kept: '3' },
         { features: { simd: true, tailCalls: true, defaultNaNNegative: true } },
         { variant: 'S' }, { variant: 'pb077' },
     ])

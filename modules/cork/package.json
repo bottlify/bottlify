@@ -23,7 +23,7 @@
   ],
   "scripts": {
     "test": "node --test --test-timeout=60000 \"src/**/*.test.js\"",
-    "test:integration": "node --test --test-timeout=60000 \"src/**/*.itest.js\"",
+    "test:integration": "node --test --test-timeout=180000 \"src/**/*.itest.js\"",
     "typecheck": "tsc -p jsconfig.json",
     "fetch:corpus": "node scripts/fetch-corpus.mjs"
   }

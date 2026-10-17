@@ -56,6 +56,7 @@ import {
     planLoop, planRegion, readsWrapped,
 } from './memory.js';
 import { importHelpers } from './helpers.js';
+import { atState, atTables, importBases, intoTables } from './bases.js';
 import { Mechanism, Tables, blockProfileAt, blockSlot, hashSlotsOf, mechanismAt,
     pageFlagsAt, transferTargetAt }
     from '../runtime/layout.js';
@@ -223,6 +224,9 @@ const LOCAL_TYPES = [
  * @property {number} regionType       the function type (`STATE_PARAMS` × i32) → i32
  * @property {number} materialise      the flag helper's function index
  * @property {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
+ * @property {number} [stateBase]  under the process's shared layout, the global holding where
+ *     the executor's state block is (`bases.js`)
+ * @property {number} [tablesBase]  and the one holding where its tables are
  * @property {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean }} features
  * @property {number} [undo]           the undo helper's function index, in a differential build
  * @property {boolean} [callReturn] a call out of a region is a wasm call the matching `ret`
@@ -330,6 +334,7 @@ export function prepareModule(m, layout, features, memory = {},
         min: 1, ...(memory.maxPages === undefined ? {} : { max: memory.maxPages }),
         shared: memory.shared ?? false,
     });
+    const bases = importBases(m, layout);
     const hashed = hash && features.tailCalls;
     if (hashed)
     {
@@ -376,7 +381,7 @@ export function prepareModule(m, layout, features, memory = {},
     const context = {
         m, regionType, materialise, layout, features, f80ToF64, f64ToF80, round, math,
         hash: hashed, codeHit, spanHit, windowHit, f64ToBcd, x87Invalid, remainder, rdtsc,
-        leaveOut,
+        leaveOut, ...bases,
     };
     if (trapPort !== undefined)
     {
@@ -451,7 +456,7 @@ export function prepareModule(m, layout, features, memory = {},
         context.transfer = m.function(regionType, [], new Uint8Array([0x00, 0x0b]));
         if (resume && (layout.flagRecord ?? -1) >= 0)
         {
-            context.resume = addResume(m, layout, materialise, context.transfer);
+            context.resume = addResume(m, layout, bases, materialise, context.transfer);
         }
     }
     if (hashed && place > 0)
@@ -526,8 +531,8 @@ export function finishModule(context, functions){
     // The first slot before the probe's loop, which only a collision enters:
     // V8 checks the stack at every loop's head.
     const slot = (/** @type {number} */ depth)=>{
-        b.localGet(index).i32const(Tables.HASH_SLOT).op(I32.mul).i32const(hashBase).op(I32.add)
-            .localSet(slotAt);
+        b.localGet(index).i32const(Tables.HASH_SLOT).op(I32.mul).i32const(hashBase).op(I32.add);
+        intoTables(context, b).localSet(slotAt);
         b.localGet(slotAt).load('i32').localTee(key).localGet(eip).op(I32.eq);
         b.if(EMPTY);
         // Compiled for any top, or for the one the machine has.
@@ -536,7 +541,8 @@ export function finishModule(context, functions){
         b.if(ValType.i32);
         b.i32const(1);
         b.else();
-        b.localGet(key).i32const(0).load('i32_8u', { offset: layout.x87Top }).op(I32.eq);
+        b.localGet(key);
+        atState(context, b).load('i32_8u', { offset: layout.x87Top }).op(I32.eq);
         b.end();
         b.brIf(depth + 1);
         b.localGet(eip).localSet(key);
@@ -555,12 +561,13 @@ export function finishModule(context, functions){
     if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && context.blockProfile)
     {
         const at = layout.tables + mechanismAt(layout, Mechanism.TRANSFER);
-        b.i32const(0).i32const(0).load('i64', { offset: at }).i64const(1n).op(I64_ADD)
-            .store('i64', { offset: at });
+        atTables(context, atTables(context, b)).load('i64', { offset: at }).i64const(1n)
+            .op(I64_ADD).store('i64', { offset: at });
         // And where to, by the target's slot (`blockSlot`, computed here): the
         // address, which a collision overwrites, and the count.
         b.localGet(eip).i32const(0x9e3779b1 | 0).op(I32.mul).i32const(12).op(I32.shrU)
-            .i32const(Tables.TRANSFER_SLOT).op(I32.mul).localTee(key);
+            .i32const(Tables.TRANSFER_SLOT).op(I32.mul);
+        intoTables(context, b).localTee(key);
         b.localGet(eip).store('i32', { offset: layout.tables + transferTargetAt(layout, 0) });
         b.localGet(key).localGet(key)
             .load('i32', { offset: layout.tables + transferTargetAt(layout, 0) + 4 })
@@ -570,8 +577,8 @@ export function finishModule(context, functions){
     if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && context.countTransfers)
     {
         const at = layout.tables + Tables.TRANSFERS;
-        b.i32const(0).i32const(0).load('i32', { offset: at }).i32const(1).op(I32.add)
-            .store('i32', { offset: at });
+        atTables(context, atTables(context, b)).load('i32', { offset: at }).i32const(1)
+            .op(I32.add).store('i32', { offset: at });
     }
     if (carried && context.callReturn === true)
     {
@@ -622,23 +629,24 @@ export function finishModule(context, functions){
         const origin = /** @type {number} */ (layout.origin);
         for (let r = 0; r < CARRIED_REGS; r++)
         {
-            b.i32const(0).localGet(Local.reg + r).store('i32', { offset: layout.regs + r * 4 });
+            atState(context, b).localGet(Local.reg + r)
+                .store('i32', { offset: layout.regs + r * 4 });
         }
         if (layout.flagsChanged >= 0)
         {
-            b.i32const(0).i32const(0).store('i32', { offset: layout.flagsChanged });
+            atState(context, b).i32const(0).store('i32', { offset: layout.flagsChanged });
         }
-        b.i32const(0).localGet(eip).store('i32', { offset: layout.eip });
+        atState(context, b).localGet(eip).store('i32', { offset: layout.eip });
         if (layout.previousIp >= 0)
         {
-            b.i32const(0).localGet(eip).store('i32', { offset: layout.previousIp });
+            atState(context, b).localGet(eip).store('i32', { offset: layout.previousIp });
         }
-        b.i32const(0);
-        b.i32const(0).load('i32', { offset: layout.counter })
-            .i32const(0).load('i32', { offset: origin }).op(I32.add)
+        atState(context, b);
+        atState(context, b).load('i32', { offset: layout.counter });
+        atState(context, b).load('i32', { offset: origin }).op(I32.add)
             .localGet(Local.budget).op(I32.sub);
         b.store('i32', { offset: layout.counter });
-        b.i32const(0).localGet(Local.budget).store('i32', { offset: origin });
+        atState(context, b).localGet(Local.budget).store('i32', { offset: origin });
     }
     if (context.resume !== undefined && carried)
     {
@@ -677,34 +685,34 @@ function emptyReturn(context, b, slotAt, code){
     const flags = pageFlagsAt(layout);
     b.localGet(slotAt).load('i32_8u', { offset: 11 }).localTee(code);
     b.if(EMPTY);
-    b.i32const(0).load('i32', { offset: layout.tables + CallStack.DEPTH }).localTee(depth);
+    atTables(context, b).load('i32', { offset: layout.tables + CallStack.DEPTH }).localTee(depth);
     b.if(EMPTY);
-    b.i32const(0).load('i32', { offset: layout.regs + 16 }).localTee(esp);
+    atState(context, b).load('i32', { offset: layout.regs + 16 }).localTee(esp);
     b.i32const(12).op(I32.shrU).load('i32_8u', { offset: flags });
     b.localGet(esp).i32const(3).op(I32.add).i32const(12).op(I32.shrU)
         .load('i32_8u', { offset: flags });
     b.op(I32.or).i32const(PageFlag.INACCESSIBLE).op(I32.and).op(I32.eqz);
     b.if(EMPTY);
-    b.localGet(depth).i32const(2).op(I32.shl)
-        .load('i32', { offset: layout.tables + CallStack.STACK - 4 })
+    b.localGet(depth).i32const(2).op(I32.shl);
+    intoTables(context, b).load('i32', { offset: layout.tables + CallStack.STACK - 4 })
         .localGet(esp).load('i32', { offset: layout.ramBase }).op(I32.eq);
     b.if(EMPTY);
     if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && context.blockProfile)
     {
         const at = layout.tables + mechanismAt(layout, Mechanism.EMPTY_RETURN);
-        b.i32const(0).i32const(0).load('i64', { offset: at }).i64const(1n).op(I64_ADD)
-            .store('i64', { offset: at });
+        atTables(context, atTables(context, b)).load('i64', { offset: at }).i64const(1n)
+            .op(I64_ADD).store('i64', { offset: at });
     }
-    b.i32const(0).localGet(depth).i32const(1).op(I32.sub)
+    atTables(context, b).localGet(depth).i32const(1).op(I32.sub)
         .store('i32', { offset: layout.tables + CallStack.DEPTH });
     // The low six bits are the dwords popped plus one: the return address's and the rest.
-    b.i32const(0).localGet(esp).localGet(code).i32const(63).op(I32.and).i32const(2)
+    atState(context, b).localGet(esp).localGet(code).i32const(63).op(I32.and).i32const(2)
         .op(I32.shl).op(I32.add).store('i32', { offset: layout.regs + 16 });
     for (let r = 0; r < CARRIED_REGS; r++)
     {
-        b.i32const(0).localGet(Local.reg + r).store('i32', { offset: layout.regs + r * 4 });
+        atState(context, b).localGet(Local.reg + r).store('i32', { offset: layout.regs + r * 4 });
     }
-    b.i32const(0).localGet(Local.budget).localGet(code).i32const(6).op(I32.shrU)
+    atTables(context, b).localGet(Local.budget).localGet(code).i32const(6).op(I32.shrU)
         .i32const(1).op(I32.add).op(I32.sub)
         .store('i32', { offset: layout.tables + CallStack.BUDGET });
     b.i32const(Exit.RETURNED).return();
@@ -731,25 +739,26 @@ function emptyReturn(context, b, slotAt, code){
  *
  * @param {import('../wasm/encoder.js').ModuleBuilder} m
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
+ * @param {import('./bases.js').Bases} bases
  * @param {number} materialise @param {number} transfer
  * @returns {number} the function's index
  */
-function addResume(m, layout, materialise, transfer){
+function addResume(m, layout, bases, materialise, transfer){
     const record = /** @type {number} */ (layout.flagRecord);
     const [budget, code, left] = [0, 1, 2];
     const tierType = m.type({ params: [ValType.i32], results: [ValType.i32] });
     const b = new Body();
     // The record folded into the word, as `eflagsOf` folds it for the tier's own runs.
-    b.i32const(0).load('i32', { offset: record }).localTee(code);
+    atState(bases, b).load('i32', { offset: record }).localTee(code);
     b.if(EMPTY);
-    b.i32const(0).localGet(code);
+    atState(bases, b).localGet(code);
     for (let i = 1; i < 5; i++)
     {
-        b.i32const(0).load('i32', { offset: record + i * 4 });
+        atState(bases, b).load('i32', { offset: record + i * 4 });
     }
-    b.i32const(0).load('i32', { offset: layout.eflags });
+    atState(bases, b).load('i32', { offset: layout.eflags });
     b.call(materialise).store('i32', { offset: layout.eflags });
-    b.i32const(0).i32const(0).store('i32', { offset: record });
+    atState(bases, b).i32const(0).store('i32', { offset: record });
     b.end();
     b.localGet(budget).i32const(TIER_SLOT).callIndirect(tierType, 0).localTee(code);
     b.op(I32.eqz);
@@ -762,12 +771,13 @@ function addResume(m, layout, materialise, transfer){
         .localGet(left).i32const(0).op(I32.gtS).op(I32.and);
     b.if(EMPTY);
     // The run goes on from what is left, counted from here.
-    b.i32const(0).localGet(left).store('i32', { offset: /** @type {number} */ (layout.origin) });
-    b.i32const(0).load('i32', { offset: layout.eip });
+    atState(bases, b).localGet(left)
+        .store('i32', { offset: /** @type {number} */ (layout.origin) });
+    atState(bases, b).load('i32', { offset: layout.eip });
     b.localGet(left);
     for (let r = 0; r < CARRIED_REGS; r++)
     {
-        b.i32const(0).load('i32', { offset: layout.regs + r * 4 });
+        atState(bases, b).load('i32', { offset: layout.regs + r * 4 });
     }
     b.returnCall(transfer);
     b.end();
@@ -1312,15 +1322,16 @@ export class RegionEmitter {
      * @param {boolean} [fromParams]
      */
     loadState(fromParams = false){
-        const { b, layout } = this;
-        b.i32const(0).load('i32', { offset: layout.eflags }).localSet(Local.flags);
+        const { b, layout, context } = this;
+        atState(context, b).load('i32', { offset: layout.eflags }).localSet(Local.flags);
         if (this.flagRecord >= 0)
         {
             // The record the last region left, as it left it: its kind is not
             // known here, and a read folds it only when it must.
             for (const [i, local] of RECORD_LOCALS.entries())
             {
-                b.i32const(0).load('i32', { offset: this.flagRecord + i * 4 }).localSet(local);
+                atState(context, b).load('i32', { offset: this.flagRecord + i * 4 })
+                    .localSet(local);
             }
             this.pending = null;
         }
@@ -1328,18 +1339,18 @@ export class RegionEmitter {
         {
             // The other executor keeps some flags lazy: when its record says
             // so, its own fold gives the whole word.
-            b.i32const(0).load('i32', { offset: layout.flagsChanged });
+            atState(context, b).load('i32', { offset: layout.flagsChanged });
             this.openIf('lazy', EMPTY);
             b.call(this.context.getEflags).localSet(Local.flags);
             this.close();
         }
         for (const [index, local] of this.xmmLocals)
         {
-            b.i32const(0).loadV128({ offset: layout.xmm + index * 16 }).localSet(local);
+            atState(context, b).loadV128({ offset: layout.xmm + index * 16 }).localSet(local);
         }
         for (const [index, local] of this.mmLocals)
         {
-            b.i32const(0).load('i64', { offset: layout.x87 + index * 16 }).localSet(local);
+            atState(context, b).load('i64', { offset: layout.x87 + index * 16 }).localSet(local);
         }
         if (this.x87.active)
         {
@@ -1369,7 +1380,7 @@ export class RegionEmitter {
             b.localGet(Local.budget).localSet(Local.origin);
             if (this.flagRecord >= 0)
             {
-                b.i32const(0).localGet(Local.budget)
+                atState(this.context, b).localGet(Local.budget)
                     .store('i32', { offset: /** @type {number} */ (this.layout.origin) });
             }
         }
@@ -1421,7 +1432,7 @@ export class RegionEmitter {
      * flags, EIP and the count.
      */
     storeCarriedState(){
-        const { b, layout } = this;
+        const { b, layout, context } = this;
         if (this.flagRecord >= 0)
         {
             // The record goes as it is: the helper at every exit would be a
@@ -1429,7 +1440,8 @@ export class RegionEmitter {
             // flags before it reads them. Whoever reads the word folds it.
             for (const [i, local] of RECORD_LOCALS.entries())
             {
-                b.i32const(0).localGet(local).store('i32', { offset: this.flagRecord + i * 4 });
+                atState(context, b).localGet(local)
+                    .store('i32', { offset: this.flagRecord + i * 4 });
             }
         }
         else
@@ -1437,18 +1449,18 @@ export class RegionEmitter {
             this.materialise();
         }
         this.deferred.push({ at: b.length, kind: 'store', regs: 'all', x87: false });
-        b.i32const(0).localGet(Local.flags).store('i32', { offset: layout.eflags });
+        atState(context, b).localGet(Local.flags).store('i32', { offset: layout.eflags });
         if (layout.flagsChanged >= 0)
         {
-            b.i32const(0).i32const(0).store('i32', { offset: layout.flagsChanged });
+            atState(context, b).i32const(0).store('i32', { offset: layout.flagsChanged });
         }
-        b.i32const(0).localGet(Local.eip).store('i32', { offset: layout.eip });
+        atState(context, b).localGet(Local.eip).store('i32', { offset: layout.eip });
         if (layout.previousIp >= 0)
         {
-            b.i32const(0).localGet(Local.eip).store('i32', { offset: layout.previousIp });
+            atState(context, b).localGet(Local.eip).store('i32', { offset: layout.previousIp });
         }
-        b.i32const(0);
-        b.i32const(0).load('i32', { offset: layout.counter });
+        atState(context, b);
+        atState(context, b).load('i32', { offset: layout.counter });
         this.pushOrigin();
         b.op(I32.add).localGet(Local.budget).op(I32.sub);
         b.store('i32', { offset: layout.counter });
@@ -1458,7 +1470,8 @@ export class RegionEmitter {
     pushOrigin(){
         if (this.flagRecord >= 0)
         {
-            this.b.i32const(0).load('i32', { offset: /** @type {number} */ (this.layout.origin) });
+            atState(this.context, this.b)
+                .load('i32', { offset: /** @type {number} */ (this.layout.origin) });
         }
         else
         {
@@ -1472,13 +1485,13 @@ export class RegionEmitter {
      * record and the flags word.
      */
     storeUncarriedState(){
-        const { b, layout } = this;
+        const { b, layout, context } = this;
         this.deferred.push({ at: b.length, kind: 'store', regs: 'uncarried', x87: false });
         for (const [i, local] of RECORD_LOCALS.entries())
         {
-            b.i32const(0).localGet(local).store('i32', { offset: this.flagRecord + i * 4 });
+            atState(context, b).localGet(local).store('i32', { offset: this.flagRecord + i * 4 });
         }
-        b.i32const(0).localGet(Local.flags).store('i32', { offset: layout.eflags });
+        atState(context, b).localGet(Local.flags).store('i32', { offset: layout.eflags });
     }
 
     /**
@@ -1501,10 +1514,11 @@ export class RegionEmitter {
         this.deferred.push({ at: b.length, kind: 'store', regs: 'all', x87: false });
         for (const [i, local] of RECORD_LOCALS.entries())
         {
-            b.i32const(0).localGet(local).store('i32', { offset: this.flagRecord + i * 4 });
+            atState(this.context, b).localGet(local)
+                .store('i32', { offset: this.flagRecord + i * 4 });
         }
-        b.i32const(0).localGet(Local.flags).store('i32', { offset: layout.eflags });
-        b.i32const(0).localGet(Local.budget)
+        atState(this.context, b).localGet(Local.flags).store('i32', { offset: layout.eflags });
+        atTables(this.context, b).localGet(Local.budget)
             .store('i32', { offset: layout.tables + CallStack.BUDGET });
         b.i32const(Exit.RETURNED).return();
     }
@@ -1518,7 +1532,7 @@ export class RegionEmitter {
         this.deferred.push({ at: b.length, kind: 'store', regs: 'none', x87: true });
         for (const index of this.xmmWritten)
         {
-            b.i32const(0).localGet(this.xmmLocal(index))
+            atState(this.context, b).localGet(this.xmmLocal(index))
                 .storeV128({ offset: layout.xmm + index * 16 });
         }
         if (this.x87.active && this.x87.hasMmx)
@@ -1541,13 +1555,13 @@ export class RegionEmitter {
         }
         for (const index of this.mmWritten)
         {
-            b.i32const(0).localGet(this.mmLocal(index))
+            atState(this.context, b).localGet(this.mmLocal(index))
                 .store('i64', { offset: layout.x87 + index * 16 });
             if (layout.x87Format === 'tagged80')
             {
                 // An MMX write leaves the register's exponent all ones, as the
                 // processor does, so the emulator sees it as it would its own.
-                b.i32const(0).i32const(0xffff)
+                atState(this.context, b).i32const(0xffff)
                     .store('i32_16', { offset: layout.x87 + index * 16 + 8 });
             }
         }
@@ -1564,11 +1578,11 @@ export class RegionEmitter {
             // the first of them set.
             b.localGet(Local.mmxTouched).i32const(MMX_TOP).op(I32.and);
             b.if(EMPTY);
-            b.i32const(0).i32const(0).store('i32_8', { offset: layout.x87Top });
+            atState(this.context, b).i32const(0).store('i32_8', { offset: layout.x87Top });
             b.end();
             b.localGet(Local.mmxTouched).i32const(MMX_HELD).op(I32.and);
             b.if(EMPTY);
-            b.i32const(0).i32const(0).store('i32_8', { offset: layout.x87Empty });
+            atState(this.context, b).i32const(0).store('i32_8', { offset: layout.x87Empty });
             b.end();
         }
     }
@@ -1607,11 +1621,11 @@ export class RegionEmitter {
                 }
                 if (kind === 'load' && (always || main.uses(Local.reg + r)))
                 {
-                    b.i32const(0).load('i32', { offset }).localSet(Local.reg + r);
+                    atState(this.context, b).load('i32', { offset }).localSet(Local.reg + r);
                 }
                 if (kind === 'store' && (always || main.writes(Local.reg + r)))
                 {
-                    b.i32const(0).localGet(Local.reg + r).store('i32', { offset });
+                    atState(this.context, b).localGet(Local.reg + r).store('i32', { offset });
                 }
             }
             if (x87 && this.x87.active && !this.x87.hasMmx)
@@ -1657,10 +1671,10 @@ export class RegionEmitter {
                 b.localGet(Local.x87Dirty).i32const(1 << p).op(I32.and);
                 this.openIf(`mixed${p}`, EMPTY);
             }
-            b.i32const(0).localGet(mm).store('i64', { offset: at });
+            atState(this.context, b).localGet(mm).store('i64', { offset: at });
             if (layout.x87Format === 'tagged80')
             {
-                b.i32const(0);
+                atState(this.context, b);
                 b.i32const(0xffff);
                 b.i32const(0x7ffe);
                 b.localGet(x.form).i32const(1 << p).op(I32.and);
@@ -2486,7 +2500,7 @@ export class RegionEmitter {
             this.charge();
             this.pushBranchCondition(last);
             this.openIf('taken');
-            b.localGet(Local.budget).i32const(0).op(I32.leS);
+            this.spentTest();
             this.openGuard('spent');
             this.exitAt(block.start, Exit.BUDGET);
             this.close();
@@ -2537,14 +2551,15 @@ export class RegionEmitter {
         const { b } = this;
         const at = this.layout.tables + blockProfileAt(this.layout)
             + blockSlot(start) * Tables.BLOCK_SLOT;
-        b.i32const(0).i32const(0).load('i32', { offset: at + 4 }).i32const(1).op(I32.add)
-            .store('i32', { offset: at + 4 });
-        b.i32const(0).load('i32', { offset: at }).i32const(start | 0).op(I32.ne);
+        const { context } = this;
+        atTables(context, atTables(context, b)).load('i32', { offset: at + 4 }).i32const(1)
+            .op(I32.add).store('i32', { offset: at + 4 });
+        atTables(context, b).load('i32', { offset: at }).i32const(start | 0).op(I32.ne);
         this.openIf('profileSlot');
-        b.i32const(0).i32const(0).load('i32', { offset: at + 8 })
-            .i32const(0).load('i32', { offset: at }).i32const(0).op(I32.ne).op(I32.or)
+        atTables(context, atTables(context, b)).load('i32', { offset: at + 8 });
+        atTables(context, b).load('i32', { offset: at }).i32const(0).op(I32.ne).op(I32.or)
             .store('i32', { offset: at + 8 });
-        b.i32const(0).i32const(start | 0).store('i32', { offset: at });
+        atTables(context, b).i32const(start | 0).store('i32', { offset: at });
         this.close();
     }
 
@@ -2560,8 +2575,8 @@ export class RegionEmitter {
             return;
         }
         const at = this.layout.tables + mechanismAt(this.layout, mechanism);
-        this.b.i32const(0).i32const(0).load('i64', { offset: at }).i64const(1n).op(I64_ADD)
-            .store('i64', { offset: at });
+        atTables(this.context, atTables(this.context, this.b)).load('i64', { offset: at })
+            .i64const(1n).op(I64_ADD).store('i64', { offset: at });
     }
 
     /**
@@ -2684,6 +2699,28 @@ export class RegionEmitter {
     }
 
     /**
+     * Whether a back edge leaves for the host: the budget spent -- at or under
+     * zero, or, where other executors run beside this one, under the word they
+     * store when they need its answer (`layout.interrupt`), all ones but the
+     * sign then. An atomic load, not a plain one: a loop that stores nothing
+     * would have its plain load of the word taken out of the loop, and the
+     * other executor's store never seen. On x86 it is the plain load.
+     */
+    spentTest(){
+        const { b } = this;
+        b.localGet(Local.budget);
+        if (this.layout.interrupt === undefined)
+        {
+            b.i32const(0);
+        }
+        else
+        {
+            atState(this.context, b).atomic('load_i32', { offset: this.layout.interrupt });
+        }
+        b.op(I32.leS);
+    }
+
+    /**
      * Charges the block's instructions so far to the budget, which is the
      * count too (`origin`). On a conditional path (inside an `if` the block
      * opened) the count stays owed: the path that falls through charges it at
@@ -2739,7 +2776,7 @@ export class RegionEmitter {
                     // repeat the body past a fall-through it never took.
                     this.pushBranchCondition(last);
                     this.openIf('taken');
-                    this.b.localGet(Local.budget).i32const(0).op(I32.leS);
+                    this.spentTest();
                     this.openGuard('spent');
                     this.exitAt(block.start, Exit.BUDGET);
                     this.close();
@@ -2918,7 +2955,7 @@ export class RegionEmitter {
         // to a block the dispatch does not hold, out through the entry hash:
         // a copy's (`emitCopies`), or, from a copy, the region's own.
         const around = !this.copying && this.ranges.some(range=>range.loop && range.lo === label);
-        b.localGet(Local.budget).i32const(0).op(I32.leS);
+        this.spentTest();
         this.openGuard('spent');
         this.exitAfterEdge(target, Exit.BUDGET);
         this.close();

@@ -5,7 +5,7 @@
  */
 
 /**
- * The executors' gate (roadmap/v2, stage 3): a program whose threads
+ * The executors' gate: a program whose threads
  * synchronise through memory alone -- an interlocked counter, a spin lock on
  * `xchg` guarding a plain increment, a compare-and-swap loop -- ends the same
  * with its threads on the process's one executor, taking turns, as on several
@@ -102,7 +102,8 @@ function buildRaceExe(crossing = false){
  * @param {number} executors @param {boolean} [crossing]
  */
 async function race(executors, crossing = false){
-    const app = await createApp({ executable: buildRaceExe(crossing), executors });
+    const app = await createApp({ executable: buildRaceExe(crossing), executors,
+        cpu: { eager: true } });
     try
     {
         const code = await app.run({ timeoutMs: 60_000 });

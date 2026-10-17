@@ -5,7 +5,7 @@
  */
 
 /**
- * A process in a worker of its own (roadmap/v2, stage 2): its machine, its
+ * A process in a worker of its own: its machine, its
  * memory and its translator here, and the run's system half -- registry,
  * volume, windows, ids -- asked across a link to the thread that started it.
  *

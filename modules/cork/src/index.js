@@ -27,7 +27,8 @@ import { createCorkRuntime, translatorWorkerUrl } from './runtime/runtime.js';
 import { replaySlice } from './testing/differential.js';
 
 export {
-    ownLayout, executorLayout, executorBytes, pagesFor, layoutId, Tables, tablesSize,
+    ownLayout, executorLayout, executorBytes, sharedLayout, basesOf, pagesFor, layoutId, Tables,
+    tablesSize,
     STATE_BLOCK_SIZE, PAGE,
 } from './runtime/layout.js';
 export { interpret, blockState } from './interp.js';
@@ -36,6 +37,7 @@ export {
 } from './interp-wasm.js';
 export { eflagsOf, setEflags } from './emit/flags.js';
 export { SHARED_CODE_BYTES } from './runtime/shared-code.js';
+export { createArena } from './runtime/arena.js';
 export { snapshot, restore, compare } from './testing/snapshot.js';
 export { readUndoLog, resetUndoLog, spansOf } from './emit/memory.js';
 export { slotOf } from './runtime/entries.js';

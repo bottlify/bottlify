@@ -1,33 +1,12 @@
 # Roadmap
 
-- **[`v2/`](v2/README.md)** — the plan: the engine becomes a multi-worker platform whose capacity
-  follows the load, single-thread mode first and exactly as today; then x86-64 on that platform,
-  Direct3D 11, and ARM and ARM64. Start there; in Russian, [`v2/README.ru.md`](v2/README.ru.md).
-  [`v2/release-run.md`](v2/release-run.md) is the scenario a branch is measured by before it goes
-  to main: gates, synthetic load on the executors, the benchmark against main, and titles in the
-  browser in each run mode.
-- **[`cork/`](cork/README.md)** — cork's hottest regions, Gothic 3 and Far Cry first: what the
-  measurements show (calls between regions, not bodies, are what costs), the instruments to measure
-  it, and the steps — fewer and cheaper calls, polls answered without crossing to the host,
-  `rdtsc` inside wasm. In Russian, [`cork/README.ru.md`](cork/README.ru.md).
-- **[`bottles/`](bottles/README.md)** — bottles made, kept, changed and started on the device, and
-  the bottle editor: entries, arguments, mode and network; the server is where a bottle is shared.
-  In Russian, [`bottles/README.ru.md`](bottles/README.ru.md).
-- **[`steam/`](steam/README.md)** — Steam in a bottle: SteamCMD signs in and downloads on the
-  person's own account, the download becomes a bottle, and titles that need the client wait on v2.
-  In Russian, [`steam/README.ru.md`](steam/README.ru.md).
-- **[`decisions.md`](decisions.md)** — behaviour this project chose rather than derived from a
-  specification, each entry dated and defended on its merits; the ones v2 will replace say so.
-- **[`negative-results.md`](negative-results.md)** — what was measured and did not pay, with the
-  conditions of each measurement, so it is not tried again for nothing.
+- **[`x64.md`](x64.md):** 64-bit programs ([in Russian](x64.ru.md)).
+- **[`direct3d.md`](direct3d.md):** Direct3D 11 and 12 ([in Russian](direct3d.ru.md)).
+- **[`opengl.md`](opengl.md):** OpenGL 2.0 to 4.x ([in Russian](opengl.ru.md)).
+- **[`decisions.md`](decisions.md):** behaviour chosen rather than derived from a specification.
+- **[`negative-results.md`](negative-results.md):** what was measured and did not pay.
 
-The documents before v2 — the phase history and cork's design and integration plan — were retired
-when v2 was written. They remain in git history.
+How the engine works today is in [`docs/architecture.md`](../docs/architecture.md).
 
-The `00-*` files beside these are **not in git** (`.gitignore` excludes `roadmap/00-*`):
-`00-TODO-list.md` is an index of them -- the week's goal and one file per area (cork,
-graphics, win32 and kernel, audio and input, installers and bundles, diagnostics), each holding
-that area's open work and then its pitfalls, the ones that each cost weeks and are required reading
-before touching the kernel, bridge, graphics or audio layers -- beside `00-product-plan.md`, what
-is decided and not yet built around the engine, and `00-references.md`.
-A fresh clone has everything here except those files.
+The `00-*` files beside these are local working notes, not in git (`.gitignore` excludes
+`roadmap/00-*`).

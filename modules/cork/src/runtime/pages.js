@@ -27,10 +27,43 @@ import { Tables, codeRangesAt, pageFlagsAt } from './layout.js';
  * NO_EXECUTE marks a page that reads but runs nothing -- the null range: a
  * fetch there leaves the wasm tier for the host, which faults it, and nothing
  * there is translated.
+ *
+ * WATCH and WRITTEN are a watched page's two states (`takeWrites`): armed, or
+ * written since it was armed. A store that finds WATCH up turns it into WRITTEN
+ * before it writes, in one compare-and-swap (`markWritten`), and every later
+ * store to the page goes by as to any other; the host reads WRITTEN and arms
+ * the page again in another (`takeWritten`). A watched page is in one state or
+ * the other, never both and never neither, whoever wins a race.
  */
 export const PageFlag = Object.freeze({
-    INACCESSIBLE: 1, HAS_CODE: 2, VOLATILE: 4, CLOSED: 8, NO_EXECUTE: 16,
+    INACCESSIBLE: 1, HAS_CODE: 2, VOLATILE: 4, CLOSED: 8, NO_EXECUTE: 16, WATCH: 32,
+    WRITTEN: 64,
 });
+
+/**
+ * What a store tests its page for past INACCESSIBLE: translated code there, or
+ * a watch to mark.
+ */
+export const STORE_FLAGS = PageFlag.HAS_CODE | PageFlag.WATCH;
+
+/**
+ * A store's mark on a watched page: WATCH becomes WRITTEN; any other page is
+ * left as it is.
+ *
+ * @param {Uint8Array} flags  the page flags @param {number} page
+ */
+export function markWritten(flags, page){
+    for (;;)
+    {
+        const now = Atomics.load(flags, page);
+        if ((now & PageFlag.WATCH) === 0
+            || Atomics.compareExchange(flags, page, now,
+                (now & ~PageFlag.WATCH) | PageFlag.WRITTEN) === now)
+        {
+            return;
+        }
+    }
+}
 
 /** Bytes in a guest page. */
 export const GUEST_PAGE = 4096;
@@ -40,6 +73,10 @@ export const GUEST_PAGE = 4096;
  * @property {(page: number, flag: number) => void} set
  * @property {(page: number, flag: number) => void} clear
  * @property {(page: number) => number} get
+ * @property {(page: number) => boolean} takeWritten  whether the page was written since it was
+ *     armed, or never was -- armed again from now
+ * @property {(address: number, length: number) => void} markWrittenRange  a host write's mark
+ *     on the watched pages it reaches
  * @property {(address: number, length: number) => void} markCode  the flag and the granules
  * @property {(page: number) => void} clearCode  the flag and the range
  * @property {(page: number) => [number, number]} codeRange  the page's code granules, [from, to)
@@ -66,14 +103,19 @@ export function createPageTable(memory, layout, shared = null){
     // view made per call costs more than the lookup it serves, and the runtime
     // asks once per untranslated start. A shared memory's old buffer is not
     // detached, and its views still cover the table, which never moves.
+    //
+    // The flags and ranges are the process's, written by every executor: each
+    // change is one atomic operation, a page's range one 16-bit pair, so two
+    // executors publishing on one page at once lose neither's flag nor its
+    // granules -- a lost HAS_CODE left a store into the code unseen for good.
     let flagView = new Uint8Array(0);
-    let rangeView = flagView;
+    let rangePairs = new Uint16Array(0);
     let words = new DataView(new ArrayBuffer(0));
     const fresh = ()=>{
         const buffer = memory.buffer;
         flagView = new Uint8Array(buffer, pageFlagsAt(layout),
             Tables.PAGE_FLAGS_SIZE);
-        rangeView = new Uint8Array(buffer, codeRangesAt(layout), 1 << 21);
+        rangePairs = new Uint16Array(buffer, codeRangesAt(layout), 1 << 20);
         words = new DataView(buffer);
     };
     const flags = ()=>{
@@ -83,12 +125,13 @@ export function createPageTable(memory, layout, shared = null){
         }
         return flagView;
     };
-    const ranges = ()=>{
-        if (rangeView.byteLength === 0)
+    /** The ranges as one 16-bit pair a page, low granule in the low byte. */
+    const pairs = ()=>{
+        if (rangePairs.byteLength === 0)
         {
             fresh();
         }
-        return rangeView;
+        return rangePairs;
     };
     const tableWords = ()=>{
         if (words.byteLength === 0)
@@ -108,10 +151,38 @@ export function createPageTable(memory, layout, shared = null){
     };
     return {
         set(page, flag){
-            flags()[page] |= flag;
+            Atomics.or(flags(), page, flag);
+        },
+        takeWritten(page){
+            const table = flags();
+            for (;;)
+            {
+                const now = Atomics.load(table, page);
+                if ((now & PageFlag.WATCH) !== 0)
+                {
+                    return false;
+                }
+                // Written, or never armed: either way the bytes may differ.
+                const armed = (now & ~PageFlag.WRITTEN) | PageFlag.WATCH;
+                if (Atomics.compareExchange(table, page, now, armed) === now)
+                {
+                    return true;
+                }
+            }
+        },
+        markWrittenRange(address, length){
+            const table = flags();
+            const [first, last] = pagesOf(address, length);
+            for (let page = first; page <= last; page++)
+            {
+                if ((table[page] & PageFlag.WATCH) !== 0)
+                {
+                    markWritten(table, page);
+                }
+            }
         },
         clear(page, flag){
-            flags()[page] &= ~flag;
+            Atomics.and(flags(), page, ~flag);
         },
         get(page){
             return flags()[page];
@@ -125,18 +196,28 @@ export function createPageTable(memory, layout, shared = null){
         markCode(address, length){
             const [first, last] = pagesOf(address, length);
             const table = flags();
-            const range = ranges();
+            const range = pairs();
             const end = address + length - 1;
             for (let page = first; page <= last; page++)
             {
                 shared?.hold(page);
-                table[page] |= PageFlag.HAS_CODE;
                 const from = page === first ? (address & 0xfff) >>> GRANULE : 0;
                 const to = (page === last ? (end & 0xfff) >>> GRANULE : (0xfff >>> GRANULE)) + 1;
-                const lo = range[page * 2];
-                const hi = range[page * 2 + 1];
-                range[page * 2] = hi === 0 ? from : Math.min(lo, from);
-                range[page * 2 + 1] = hi === 0 ? to : Math.max(hi, to);
+                // Widened before the flag says there is code, so a reader that
+                // sees the flag sees the granules with it.
+                for (;;)
+                {
+                    const was = Atomics.load(range, page);
+                    const lo = was & 0xff;
+                    const hi = was >>> 8;
+                    const now = (hi === 0 ? from : Math.min(lo, from))
+                        | (hi === 0 ? to : Math.max(hi, to)) << 8;
+                    if (now === was || Atomics.compareExchange(range, page, was, now) === was)
+                    {
+                        break;
+                    }
+                }
+                Atomics.or(table, page, PageFlag.HAS_CODE);
             }
         },
         /** No translated code on the page: the flag and the range cleared. @param {number} page */
@@ -147,20 +228,20 @@ export function createPageTable(memory, layout, shared = null){
                 // the range stays as wide as it was.
                 return;
             }
-            flags()[page] &= ~PageFlag.HAS_CODE;
-            ranges()[page * 2] = 0;
-            ranges()[page * 2 + 1] = 0;
+            Atomics.and(flags(), page, ~PageFlag.HAS_CODE);
+            Atomics.store(pairs(), page, 0);
         },
         /** The page's code granules, [from, to). @param {number} page */
         codeRange(page){
-            return [ranges()[page * 2], ranges()[page * 2 + 1]];
+            const pair = Atomics.load(pairs(), page);
+            return [pair & 0xff, pair >>> 8];
         },
         markRange(address, length, flag){
             const [first, last] = pagesOf(address, length);
             const table = flags();
             for (let page = first; page <= last; page++)
             {
-                table[page] |= flag;
+                Atomics.or(table, page, flag);
             }
         },
         clearRange(address, length, flag){
@@ -168,7 +249,7 @@ export function createPageTable(memory, layout, shared = null){
             const table = flags();
             for (let page = first; page <= last; page++)
             {
-                table[page] &= ~flag;
+                Atomics.and(table, page, ~flag);
             }
         },
         staleAddress(){

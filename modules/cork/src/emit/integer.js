@@ -29,8 +29,9 @@ import { I32, Kind, MASKS, SIGN_BITS, widthCode } from './flags.js';
 import { CallStack, Exit, Local, STATE_PARAMS } from './region.js';
 import { checkAccess, emitStaleExit, looseStackStore, noteStore, stackAccess } from './memory.js';
 import { CALL_STRIDE, Mechanism, Tables, pageFlagsAt } from '../runtime/layout.js';
-import { PageFlag } from '../runtime/pages.js';
+import { PageFlag, STORE_FLAGS } from '../runtime/pages.js';
 import { emitSimd } from './simd.js';
+import { atState, atTables, intoState, intoTables } from './bases.js';
 import { emitLocked, isLocked } from './locked.js';
 import { emitX87, isX87, topAfterCall, x87AfterCall, x87Normalise, x87Reloaded } from './x87.js';
 
@@ -123,16 +124,17 @@ function profileCall(e, site){
         return;
     }
     const at = /** @type {number} */ (e.layout.callProfile);
-    const { b } = e;
-    b.i32const(0).load('i32', { offset: at });
+    const { b, context } = e;
+    atState(context, b).load('i32', { offset: at });
     e.openIf('profile');
-    b.i32const(0).i32const(0).load('i32', { offset: at + 4 }).localTee(Local.t1)
+    atState(context, atState(context, b)).load('i32', { offset: at + 4 }).localTee(Local.t1)
         .i32const(1).op(I32.add).store('i32', { offset: at + 4 });
     b.localGet(Local.t1).i32const(0x9e3779b1 | 0).op(I32.mul)
         .i32const(32 - Math.log2(CALL_STRIDE)).op(I32.shrU).op(I32.eqz);
     e.openIf('sampled');
     b.localGet(Local.t1).i32const(Math.log2(CALL_STRIDE)).op(I32.shrU).i32const(15).op(I32.and)
-        .i32const(3).op(I32.shl).localTee(Local.t1)
+        .i32const(3).op(I32.shl);
+    intoState(context, b).localTee(Local.t1)
         .i32const(site | 0).store('i32', { offset: at + 8 });
     b.localGet(Local.t1).localGet(Local.count).store('i32', { offset: at + 12 });
     e.close();
@@ -183,7 +185,7 @@ function countApart(e){
  * @param {number} mechanism  what a profiling run counts it as (`Mechanism`)
  */
 function callAndReturn(e, next, pushTarget, mechanism){
-    const { b, layout } = e;
+    const { b, layout, context } = e;
     const depth = layout.tables + CallStack.DEPTH;
     e.countMechanism(mechanism);
     countApart(e);
@@ -205,8 +207,8 @@ function callAndReturn(e, next, pushTarget, mechanism){
     {
         const hash = layout.tables + Tables.HASH;
         b.localGet(Local.eip).i32const(0x9e3779b1 | 0).op(I32.mul)
-            .i32const(layout.hashShift ?? 16).op(I32.shrU).i32const(Tables.HASH_SLOT).op(I32.mul)
-            .localTee(Local.t1).load('i32_8u', { offset: hash + 11 });
+            .i32const(layout.hashShift ?? 16).op(I32.shrU).i32const(Tables.HASH_SLOT).op(I32.mul);
+        intoTables(context, b).localTee(Local.t1).load('i32_8u', { offset: hash + 11 });
         b.i32const(0);
         b.localGet(Local.t1).load('i32', { offset: hash }).localGet(Local.eip).op(I32.eq);
         b.select().localTee(Local.t1);
@@ -219,15 +221,17 @@ function callAndReturn(e, next, pushTarget, mechanism){
             .op(I32.add).op(I32.sub).localSet(Local.budget);
         b.else();
     }
-    b.i32const(0).load('i32', { offset: depth }).localTee(Local.t1)
+    atTables(context, b).load('i32', { offset: depth }).localTee(Local.t1)
         .i32const(CallStack.LIMIT).op(I32.geU)
         .localGet(Local.budget).i32const(0).op(I32.leS).op(I32.or);
     e.openGuard('plain');
     e.exitDynamic(Exit.UNTRANSLATED);
     e.close();
-    b.localGet(Local.t1).i32const(2).op(I32.shl).i32const(next)
+    b.localGet(Local.t1).i32const(2).op(I32.shl);
+    intoTables(context, b).i32const(next)
         .store('i32', { offset: layout.tables + CallStack.STACK });
-    b.i32const(0).localGet(Local.t1).i32const(1).op(I32.add).store('i32', { offset: depth });
+    atTables(context, b).localGet(Local.t1).i32const(1).op(I32.add)
+        .store('i32', { offset: depth });
     // What the callee does not take in its parameters goes through the state
     // block; the count is left alone, the callee answering what is left of
     // the budget when it returns.
@@ -249,10 +253,10 @@ function callAndReturn(e, next, pushTarget, mechanism){
     e.openGuard('elsewhere');
     e.countMechanism(Mechanism.CALL_ELSEWHERE);
     // Left for the host somewhere inside: the state block holds it all.
-    b.i32const(0).localGet(Local.t1).store('i32', { offset: depth });
+    atTables(context, b).localGet(Local.t1).store('i32', { offset: depth });
     b.localGet(Local.t0).return();
     e.close();
-    b.i32const(0).load('i32', { offset: layout.tables + CallStack.BUDGET })
+    atTables(context, b).load('i32', { offset: layout.tables + CallStack.BUDGET })
         .localSet(Local.budget);
     e.loadState();
     if (e.x87.active)
@@ -276,16 +280,17 @@ function callAndReturn(e, next, pushTarget, mechanism){
  * @param {import('./region.js').RegionEmitter} e
  */
 function returnToCall(e){
-    const { b, layout } = e;
+    const { b, layout, context } = e;
     const depth = layout.tables + CallStack.DEPTH;
-    b.i32const(0).load('i32', { offset: depth }).localTee(Local.t1);
+    atTables(context, b).load('i32', { offset: depth }).localTee(Local.t1);
     e.openIf('called');
-    b.localGet(Local.t1).i32const(2).op(I32.shl)
-        .load('i32', { offset: layout.tables + CallStack.STACK - 4 })
+    b.localGet(Local.t1).i32const(2).op(I32.shl);
+    intoTables(context, b).load('i32', { offset: layout.tables + CallStack.STACK - 4 })
         .localGet(Local.eip).op(I32.eq);
     e.openIf('returns');
     e.countMechanism(Mechanism.RET_TO_CALL);
-    b.i32const(0).localGet(Local.t1).i32const(1).op(I32.sub).store('i32', { offset: depth });
+    atTables(context, b).localGet(Local.t1).i32const(1).op(I32.sub)
+        .store('i32', { offset: depth });
     e.returnToCaller();
     e.close();
     e.close();
@@ -384,7 +389,7 @@ export function emitInstruction(e, instruction, flagsLive){
             b.localGet(Local.reg).i32const(0xff).op(I32.and).op(I32.add);
             if (instruction.operands[0].segment === 4)
             {
-                b.i32const(0).load('i32', { offset: e.layout.fsBase }).op(I32.add);
+                atState(e.context, b).load('i32', { offset: e.layout.fsBase }).op(I32.add);
             }
             b.localSet(Local.addr);
             checkAccess(e, 1);
@@ -395,6 +400,13 @@ export function emitInstruction(e, instruction, flagsLive){
         }
         case 'cpuid':
         {
+            if (e.context.stateBase !== undefined)
+            {
+                // Under the shared layout one translation runs on every
+                // executor, and each is a processor of its own (its APIC id):
+                // the interpreter answers, with the executor's own layout.
+                return false;
+            }
             // The leaves the pinned emulator answers, as constants -- with the
             // processors of the executor the code is translated for, whose
             // layout it is -- and a leaf with no entry answers four zeros. The
@@ -1000,7 +1012,7 @@ export function emitInstruction(e, instruction, flagsLive){
                     b.localGet(Local.reg).call(e.context.trap).localSet(Local.t1);
                     e.loadState();
                     x87Reloaded(e);
-                    b.i32const(0).load('i32', { offset: e.layout.eip }).localSet(Local.eip);
+                    atState(e.context, b).load('i32', { offset: e.layout.eip }).localSet(Local.eip);
                     endTurnIfAsked(e);
                     e.exitDynamic(Exit.UNTRANSLATED);
                     e.dead = true;
@@ -1018,7 +1030,7 @@ export function emitInstruction(e, instruction, flagsLive){
                 b.localGet(Local.reg).call(e.context.trap).localTee(Local.t1);
                 e.openGuard('moved');
                 e.loadState();
-                b.i32const(0).load('i32', { offset: e.layout.eip }).localSet(Local.eip);
+                atState(e.context, b).load('i32', { offset: e.layout.eip }).localSet(Local.eip);
                 endTurnIfAsked(e);
                 e.exitDynamic(Exit.UNTRANSLATED);
                 e.close();
@@ -1169,7 +1181,7 @@ export function emitAddress(e, operand, withSegment){
     // interpreter: nothing here gives it one.
     if (withSegment && operand.segment === 4)
     {
-        b.i32const(0).load('i32', { offset: e.layout.fsBase }).op(I32.add);
+        atState(e.context, b).load('i32', { offset: e.layout.fsBase }).op(I32.add);
     }
 }
 
@@ -2379,7 +2391,7 @@ function bulkString(e, instruction){
     turn.run(movs ? [edi, esi] : [edi]);
     b.localGet(Local.t0).i32const(elementShift).op(I32.shl).localSet(Local.t1);
     b.localGet(Local.t0).i32const(0).op(I32.ne);
-    turn.clear(edi, PageFlag.INACCESSIBLE | PageFlag.HAS_CODE);
+    turn.clear(edi, PageFlag.INACCESSIBLE | STORE_FLAGS);
     b.op(I32.and);
     if (movs)
     {
@@ -2609,7 +2621,7 @@ function stringInstruction(e, instruction){
         b.localGet(pointer);
         if (pointer === esi && fsSource)
         {
-            b.i32const(0).load('i32', { offset: e.layout.fsBase }).op(I32.add);
+            atState(e.context, b).load('i32', { offset: e.layout.fsBase }).op(I32.add);
         }
         b.localSet(Local.addr);
         checkAccess(e, size, { counted });

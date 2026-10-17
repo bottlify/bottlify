@@ -5,7 +5,7 @@
  */
 
 /**
- * The run's volume for a process in another thread (roadmap/v2, stage 2).
+ * The run's volume for a process in another thread.
  *
  * A process reaches a drive through its overlay's operations, and each of
  * them is already in values: a path's components in, an entry or bytes out

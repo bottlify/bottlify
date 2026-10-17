@@ -5,8 +5,7 @@
  */
 
 /**
- * The windows of a whole run, as the system half of user32 knows them
- * (roadmap/v2, stage 1, the Win32 split).
+ * The windows of a whole run, as the system half of user32 knows them.
  *
  * A window handle is the system's, not a process's: a program finds another
  * program's window by its class or title, asks which process made it, and

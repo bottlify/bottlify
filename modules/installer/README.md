@@ -1,12 +1,12 @@
 # `@bottlify/installer`
 
-Make a bottle out of a game's installer — for whoever hosts the games, not for the people who
-play them. A player opens a page and presses Start; this package is how the bottle behind that
+Make a bottle out of a game's installer. This is for whoever hosts the games, not for the people
+who play them. A player opens a page and presses Start; this package is how the bottle behind that
 page was made when all you had was `Setup.exe` or a disc image.
 
 The installer runs inside the engine, unchanged: its own wizard, its own dialogs, clicked through
-by a person or answered unattended. When it exits, what it wrote — the installed tree, the
-registry keys, the runtime DLLs it put in `system32` — is the bottle.
+by a person or answered unattended. When it exits, what it wrote (the installed tree, the
+registry keys, the runtime DLLs it put in `system32`) is the bottle.
 
 ## Three ways to do it
 
@@ -22,15 +22,15 @@ node tools/play.mjs mygame
 processes is doing and which windows it shows, and with `--shots` saves the screen as PNGs, so you
 can see where a wizard waits. A wizard that waits for you is driven by input given in advance:
 `--key Enter@40` presses Enter forty seconds in, `--click 320,400@55` clicks a point of the screen.
-`--collect` prints a `COLLECT root … entry …` line — the directory the setup installed to and the
-program to start — and the files; `--collect-to DIR` also writes that tree out, with the registry
+`--collect` prints a `COLLECT root … entry …` line (the directory the setup installed to and the
+program to start) and the files; `--collect-to DIR` also writes that tree out, with the registry
 in `.bottlify\registry.json`, for `make-btl`. Give `make-btl pack` the root as `--root` and, if its
 guess differs, the entry as `--entry`: the bottle is then mounted where the setup put it, so the
 paths it wrote into the registry hold. Its header lists every option
 (`--minutes`, `--screen 1024x768`, `--list`, `--cat` a setup's log, `--attended`, …).
 
-A setup that has an unattended mode — Wise, InstallShield, WinZip and WinRAR self-extractors —
-can skip the wizard altogether: `silentOptions(media)` below.
+A setup that has an unattended mode (Wise, InstallShield, WinZip and WinRAR self-extractors) can
+skip the wizard altogether: `silentOptions(media)` below.
 
 ### 2. In the browser, with the wizard on screen
 
@@ -69,8 +69,8 @@ await publish({ prefix, id: 'mygame', endpoint: { url: '', token } });   // POST
 ```
 
 `endpoint.url` is where the bottle server is, as the page reaches it. The server sends no CORS
-headers, so serve it from the page's own origin — a reverse proxy passing `/bottles/` to it, as the
-launcher's server does — and `url: ''` is that origin.
+headers, so serve it from the page's own origin (a reverse proxy passing `/bottles/` to it, as the
+launcher's server does); `url: ''` is that origin.
 
 `discOptions(media)` does the same for a disc image (mounted as `D:`, started from its
 `autorun.inf`), and `silentOptions(media)` returns the command line and answer files that run a
@@ -82,13 +82,13 @@ known setup unattended, or null when the setup is not one it knows.
 
 The engine already has both halves of an overlay: a bundle is read-only and the
 writable layer sits on top of it. So an install is a bundle-shaped hole. Mount
-nothing beneath, let the program write, and keep the writable layer whole —
-Wine's model, and it deletes the hardest part of the alternative. Nothing has to
+nothing beneath, let the program write, and keep the writable layer whole.
+This is Wine's model, and it removes the hardest part of the alternative. Nothing has to
 diff anything, because by construction everything in that layer is what the
 installer produced.
 
 The one thing there before the program runs is the program itself: a distribution
-reads its own file — an appended archive, an overlay, a resource — so it has to
+reads its own file (an appended archive, an overlay, a resource), so it has to
 be somewhere the guest can open. `prefixOptions` seeds it at `C:\Install\` and
 `collect` subtracts it again by path, so it is never mistaken for output.
 
@@ -101,8 +101,8 @@ program changed afterwards stays changed.
 
 What the installation added to `C:\WINDOWS\system32` comes out too, under
 `.bottlify\system32\` (`SYSTEM_PATH`) beside the registry: a setup puts the
-runtime its program links against there -- the D3DX libraries a DirectX setup
-installs -- and the program looks for it nowhere else. The engine maps that
+runtime its program links against there (the D3DX libraries a DirectX setup
+installs), and the program looks for it nowhere else. The engine maps that
 directory back to `C:\WINDOWS\system32\` when it mounts the bottle, its files
 read a block at a time and copied up on a write like any other file of the
 bottle, so the loader finds those libraries by its ordinary search. A file there
@@ -116,15 +116,15 @@ The manifest says where the installation put the tree, `root`
 (`C:\Program Files\Vendor\Game`), and `placementOf(manifest)` answers where to
 mount the bottle and start its program from: there again, so the install path the
 registry names, and the working directory a launcher changes to, are the bottle's
-own. A bottle without a root on C: -- made by hand, published before the root was
-recorded -- is mounted at `C:\App`, as any bundle is.
+own. A bottle without a root on C: (made by hand, or published before the root was
+recorded) is mounted at `C:\App`, as any bundle is.
 
 ### From a disc image
 
 A disc image (`.iso`, ISO 9660 with Joliet names; told apart by its contents,
 never its name: `isDiscImage`) is not unpacked and not seeded. `discOptions(media)`
-reads only as much of it as finding its program takes -- the descriptors, the
-directories, `autorun.inf` and that program -- and hands `createApp` the image
+reads only as much of it as finding its program takes (the descriptors, the
+directories, `autorun.inf` and that program) and hands `createApp` the image
 itself under `discs`: the engine mounts it as D:, a CD-ROM, read-only, with the
 disc's label and serial number, and reads it a range at a time from the file the
 person chose.
@@ -137,8 +137,8 @@ run of words that names a file on the disc, `.exe` added to a bare name); then
 at the root. It starts as `D:\<program>` with the arguments the disc gives it, in
 the disc's root as AutoPlay starts it (`startDirectory`, `D:\`, which a menu in a
 subfolder relies on to find the setup by a relative name), and `entry` names
-another program on the disc instead, started where it lives. Anything it starts in turn --
-an autorun menu starting the setup -- runs on the same machine, with the disc still
+another program on the disc instead, started where it lives. Anything it starts in turn
+(an autorun menu starting the setup) runs on the same machine, with the disc still
 in its drive.
 
 Nothing of the disc is ever in what the install produced, so `collectFrom` has
@@ -150,7 +150,7 @@ in `C:\Install`.
 ### Running without the wizard
 
 `silentOptions(media)` is the other way through: the engine's own unattended
-mode, when the engine is recognised from the bytes of the entry -- the runtime
+mode, when the engine is recognised from the bytes of the entry: the runtime
 a Wise stub extracts, the `_winzip_` section of a WinZip self-extractor, the RAR
 signature behind a WinRAR SFX, the InstallShield player with its `data1.cab`,
 `engine32.cab` and `setup.ini` behind or beside it. It answers with the command
@@ -190,38 +190,38 @@ publishing it is a separate act; a server with no token refuses to start.
 
 Its routes, all authenticated with the token:
 
-- `/bottles/<id>/blocks?at=<offset>` — packed block bytes, in order. A part out
+- `/bottles/<id>/blocks?at=<offset>`: packed block bytes, in order. A part out
   of order is refused rather than leaving a hole the digest never saw.
-- `/bottles/<id>/finish` — the header and the index, which do not exist until the
+- `/bottles/<id>/finish`: the header and the index, which do not exist until the
   last block has been packed and so cannot travel in the stream. The server
   writes them where they belong, computes the block region's digest, and writes
   `manifest.json` beside `bundle.btl`.
-- `/bottles/<id>/manifest` — a bottle's settings changed in its `manifest.json`
+- `/bottles/<id>/manifest`: a bottle's settings changed in its `manifest.json`
   without sending it again: `title`, `description`, `source` (a web address
   the bottle's files came from, or nothing), `year` (when the program
   came out), `rightsHolder` (who owns it now), `version`, `labels`
   (`demo`, `benchmark`, `test`), `kind` (`game`, `application`), `windows`,
   `graphics`. Any other field is refused; the entry and the bundle record are
   the upload's.
-- `/bottles/<id>/art/cover`, `/bottles/<id>/art/wallpaper` — a picture (PNG,
+- `/bottles/<id>/art/cover`, `/bottles/<id>/art/wallpaper`: a picture (PNG,
   JPEG, WebP or GIF, by its `Content-Type`) kept beside the manifest under a
   name taken from its bytes and named there as `./<name>`: `coverLarge` and
   `coverSmall` for the cover, `wallpaper` for the stage. A JPEG cover is kept
   only as two smaller JPEGs, fitted into 800×1200 for the details panel and
   400×600 for the card; a cover in another format is kept as given, in both.
   The one it replaces is removed.
-- `DELETE /bottles/<id>` — the bottle removed whole, for everyone: its bundle,
+- `DELETE /bottles/<id>`: the bottle removed whole, for everyone: its bundle,
   its manifest and its pictures. Refused while it is still being uploaded.
 
 `publish()`'s own `manifest` option passes straight through to that file, field
 for field, so a title's own launch arguments travel with it: `commandLine` is
 the arguments the program is started with, appended after the quoted image
-path (`docs/core/api.md`'s `commandLine` option), for example
-`"commandLine": "+set s_realTimeDecoding 0"` — a setting a program only reads
+path ([`docs/core/api.md`](../../docs/core/api.md)'s `commandLine` option), for example
+`"commandLine": "+set s_realTimeDecoding 0"`, a setting a program only reads
 from its command line, set there instead of by editing the bundle.
 
 `windows` is the Windows the bottle runs under, optional: one of `win2000`,
-`winxp`, `win7` and `win10` (`docs/core/api.md`'s `windows` option), and absent
+`winxp`, `win7` and `win10` ([`docs/core/api.md`](../../docs/core/api.md)'s `windows` option), and absent
 means the engine's default, XP with its third service pack. Whatever starts the
 bottle passes it to `createApp`, and the install itself runs under the same one
 (`prefixOptions(media, { windows })`), since an installer acts on the Windows it

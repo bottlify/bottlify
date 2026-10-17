@@ -5,7 +5,7 @@
  */
 
 /**
- * The run's pool of translation workers (roadmap/v2, stage 2). Each process
+ * The run's pool of translation workers. Each process
  * has a worker of the pool from its start to its exit; more join it while its
  * translation lags and leave when it subsides, as the driver decides
  * (`driver.js`). A worker works for one process at a time, over a port of

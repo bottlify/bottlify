@@ -36,6 +36,12 @@
  * @property {() => Uint8Array | null} [ramView]
  *     The RAM in place, byte 0 at address 0; stale once empty or detached.
  * @property {(address: number, bytes: Uint8Array) => void} writePhysical
+ * @property {(address: number, length: number) => void} [markWritten]
+ *     Bytes another thread wrote in place: a watch of their pages finds them
+ *     written. Absent where the engine watches no writes.
+ * @property {(address: number, length: number) =>
+ *     ({ take: (address: number, length: number) => number[] } | null)} [watchWrites]
+ *     A watch over the range's writes (`write-clock.js`); null where the engine cannot say.
  */
 
 /**
@@ -444,6 +450,10 @@ export function createAccessors({ raw, regions, charge = null, reader = null }){
             if (!raw.writeData || regions.executable(address))
             {
                 raw.writePhysical(address, raw.readPhysical(address, length).slice());
+            }
+            else
+            {
+                raw.markWritten?.(address, length);
             }
         },
 

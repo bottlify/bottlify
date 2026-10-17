@@ -92,6 +92,8 @@ import { decode } from './decode/decoder.js';
  *                                       them -- a callee, a jump's target, a table
  *                                       (`sourcesOf`)
  * @property {Map<string, number>} refused   opcode → times a refusal cut a block
+ * @property {number[]} [stops]          the blocks forming went to and left to another region
+ *                                       (`entered`): a worker forming it again stops there too
  */
 
 /** Exits that end a block and are not followed into another block of this region. */
@@ -516,7 +518,8 @@ export function formShared(){
  *     translatable?: (eip: number) => boolean, leafCalls?: boolean,
  *     callTargets?: Map<number, number[]>, shared?: FormShared,
  *     helpers?: boolean | readonly import('./helpers.js').RuntimeHelper[],
- *     bytesOf?: (start: number, end: number) => Uint8Array }} [options]
+ *     bytesOf?: (start: number, end: number) => Uint8Array,
+ *     entered?: (eip: number) => boolean }} [options]
  *     leafCalls: a small leaf callee is formed into its caller (see `isLeaf`), of
  *     `leafBlocks` blocks and `leafBytes` bytes at most; formDepth: how many levels of
  *     callees formed in may have direct calls of their own, formed in in turn when small
@@ -539,7 +542,12 @@ export function formShared(){
  *     shared: what forming found, for other regions formed over the same bytes with the
  *     same `translatable` (`formShared`);
  *     bytesOf: `[start, end)` of what `read` answers, copied at once -- the region's
- *     `sources` are read so where given, a byte at a time through `read` otherwise
+ *     `sources` are read so where given, a byte at a time through `read` otherwise;
+ *     entered: whether another region has an entry at an address -- a block of the entry's
+ *     own function there is not formed again here: a jump or a fall-through to it leaves to
+ *     that region, so a function's code is translated once however many of its blocks start
+ *     regions. Not the blocks this region's calls return to (in the region a call is a wasm
+ *     call and its return comes back into it), nor a callee formed in
  * @returns {Region}
  */
 export function formRegion(read, entry,
@@ -547,7 +555,7 @@ export function formRegion(read, entry,
         callTargets, shared, helpers = true, leafBlocks = LEAF_BLOCKS, leafBytes = LEAF_BYTES,
         formDepth = 1, predictedRoom = PREDICTED_ROOM,
         ownRoom = { blocks: maxBlocks, bytes: maxBytes },
-        switchEntries = SWITCH_ENTRIES, bytesOf } = {})
+        switchEntries = SWITCH_ENTRIES, bytesOf, entered } = {})
 {
     // Every page forming reads decides what it forms -- an import slot a call is predicted
     // through, a callee looked at for a leaf or a runtime helper -- so a worker forms the
@@ -633,6 +641,18 @@ export function formRegion(read, entry,
     const predictedStarts = new Set();
     /** Whether the block being decoded was reached through such a callee. */
     let inPredicted = false;
+    /** The blocks this region's calls return to, which it keeps whoever has them. @type {Set<number>} */
+    const returns = new Set();
+    /** The blocks left to another region (`entered`). @type {Set<number>} */
+    const stops = new Set();
+    /**
+     * Whether a block of the entry's own function is left to the region that has it.
+     * A callee formed in keeps its blocks: a small leaf is formed into its callers for
+     * the call it saves.
+     * @param {number} at @param {number} depth
+     */
+    const elsewhere = (at, depth)=>depth === 0 && at !== entry && !returns.has(at)
+        && entered?.(at) === true;
     /** @param {number} at @param {number} depth */
     const follow = (at, depth)=>{
         if (inPredicted)
@@ -760,6 +780,12 @@ export function formRegion(read, entry,
         {
             overlapping = true;
         }
+        if (elsewhere(start, depth))
+        {
+            // Another region has it: whoever jumps here leaves to that one.
+            stops.add(start);
+            continue;
+        }
         inPredicted = predictedStarts.has(start);
         // The entry's own function is decoded first (`pendingAt`): it may take its room
         // past the caps, and the callees after it stop at them.
@@ -779,9 +805,10 @@ export function formRegion(read, entry,
         let eip = start;
         for (;;)
         {
-            if (eip !== start && (blocks.has(eip) || containing(eip)))
+            if (eip !== start && (blocks.has(eip) || containing(eip) || elsewhere(eip, depth)))
             {
-                // Ran into a block already decoded: fall through to it.
+                // Ran into a block already decoded, here or by another region:
+                // fall through to it.
                 block.exit = { kind: 'fallthrough', targets: [eip], next: eip, backEdge: false };
                 follow(eip, depth);
                 break;
@@ -889,6 +916,7 @@ export function formRegion(read, entry,
                 // between functions with int3, and following each to the next
                 // byte made a block of every byte of the padding, until the
                 // region had none left for the callees it forms in.
+                returns.add(exit.next);
                 follow(exit.next, depth);
                 const listed = exit.kind !== 'indirect' ? undefined : callTargets?.get(decoded.eip);
                 // Named with no callees, the call's samples showed none worth forming
@@ -991,6 +1019,7 @@ export function formRegion(read, entry,
         hash: hashRegion(read, { blocks: ordered, tables }),
         sources: copiesOf(source, spans, bytesOf),
         refused,
+        ...(stops.size > 0 ? { stops: [...stops].sort((a, b)=>a - b) } : {}),
     };
 }
 

@@ -114,6 +114,16 @@ function partOf(args){
  * @typedef {{ address: number, length: number | null, readOnly?: boolean }} Locked
  */
 
+/**
+ * What was last sent of a dynamic buffer a draw read: its address then, its
+ * bytes, the watch over its writes since, null where the engine has none, and
+ * the pages written that have not been compared whole since.
+ *
+ * @typedef {{ base: number, bytes: Uint8Array,
+ *     watch: { take: (address: number, length: number) => number[] } | null,
+ *     dirty: Set<number> }} Sent
+ */
+
 /** D3DLOCK_READONLY, the same number in both versions of the API. */
 const LOCK_READ_ONLY = 0x10;
 
@@ -384,6 +394,11 @@ const sharedNow = ()=>performance.timeOrigin + performance.now();
  * @param {(address: number, length: number) => Uint8Array} [options.windowMemory]
  *     the same bytes in place, for those copied into the batch before anything
  *     can write them
+ * @param {(address: number, length: number) => ({ take: (address: number, length: number)
+ *     => number[] } | null)} [options.watchWrites]
+ *     a watch over a range, the program's writes and the host's, whose `take`
+ *     answers the pages that may differ since its last look; null, or absent,
+ *     where the engine cannot say, and every byte is looked at
  * @param {Transport} options.transport
  * @param {(target: any, name: string, args: any[]) => boolean} [options.answered]
  *     whether a call's answer is the other side's: what only its renderer
@@ -419,7 +434,7 @@ const sharedNow = ()=>performance.timeOrigin + performance.now();
  */
 export function createRecording(options){
     const { root, readMemory, transport, answered = ()=>false, answers = new Set(),
-        observe = null, applyMoves = null } = options;
+        observe = null, applyMoves = null, watchWrites = null } = options;
     const windowMemory = options.windowMemory ?? readMemory;
     const { writer } = transport;
     const lender = transport.lender ?? null;
@@ -501,7 +516,9 @@ export function createRecording(options){
      * read, by the buffer: it is what was last sent of it, by its unlocks
      * and by draws (`drawsFrom`), and a draw sends only what differs from it.
      *
-     * @type {WeakMap<object, { base: number, bytes: Uint8Array }>}
+     * `watch`: the writes to it since (`changedIn`), where the engine says.
+     *
+     * @type {WeakMap<object, Sent>}
      */
     const sentOf = new WeakMap();
     /** What the current call's draws read of dynamic buffers that had changed. @type {{ address: number, bytes: Uint8Array }[] | null} */
@@ -539,6 +556,64 @@ export function createRecording(options){
             into.push({ address: sent.base + start, bytes: sent.bytes.subarray(start, end) });
         }
         return into;
+    };
+
+    /**
+     * `changedSince` over the parts of `[from, to)` on pages written since
+     * they were last compared whole: never more than the range, which is what
+     * it compares where the engine cannot say. A game that skins into one
+     * buffer compared all of it at every draw -- twenty megabytes a frame --
+     * for the pages it wrote.
+     *
+     * @param {Sent} sent
+     * @param {number} from @param {number} to  in the buffer
+     * @param {{ address: number, bytes: Uint8Array }[]} into
+     * @returns {number} the bytes compared
+     */
+    const changedIn = (sent, from, to, into)=>{
+        if (sent.watch === null)
+        {
+            changedSince(sent, from, to, into);
+            return to - from;
+        }
+        for (const page of sent.watch.take(sent.base + from, to - from))
+        {
+            sent.dirty.add(page);
+        }
+        if (sent.dirty.size === 0)
+        {
+            return 0;
+        }
+        let length = 0;
+        const last = (sent.base + to - 1) >>> 12;
+        for (let page = (sent.base + from) >>> 12; page <= last; page++)
+        {
+            if (!sent.dirty.has(page))
+            {
+                continue;
+            }
+            // A run of such pages, compared as one span.
+            let end = page;
+            while (end < last && sent.dirty.has(end + 1))
+            {
+                end++;
+            }
+            const lo = Math.max(from, page * 4096 - sent.base);
+            const hi = Math.min(to, (end + 1) * 4096 - sent.base);
+            changedSince(sent, lo, hi, into);
+            length += hi - lo;
+            for (let done = page; done <= end; done++)
+            {
+                // Clean once all of it the buffer holds is compared.
+                if (Math.max(0, done * 4096 - sent.base) >= lo
+                    && Math.min(sent.bytes.length, (done + 1) * 4096 - sent.base) <= hi)
+                {
+                    sent.dirty.delete(done);
+                }
+            }
+            page = end;
+        }
+        return length;
     };
 
     /**
@@ -1309,7 +1384,7 @@ export function createRecording(options){
                             const into = [];
                             for (let part = 0; part < open.length; part += 2)
                             {
-                                changedSince(sent, open[part], open[part + 1], into);
+                                changedIn(sent, open[part], open[part + 1], into);
                             }
                             return into;
                         })
@@ -1807,9 +1882,11 @@ export function createRecording(options){
             if (!sent || sent.base !== base)
             {
                 // What the played side holds of the buffer is not known until
-                // something is sent of all of it: once, at its first draw.
+                // something is sent of all of it: once, at its first draw,
+                // watched from before the read.
+                const watch = watchWrites?.(base, buffer.length) ?? null;
                 const bytes = readMemory(base, buffer.length);
-                sentOf.set(buffer, { base, bytes });
+                sentOf.set(buffer, { base, bytes, watch, dirty: new Set() });
                 compared.take(buffer, 0, buffer.length);
                 (drawn ??= []).push({ address: base, bytes });
                 return;
@@ -1818,8 +1895,7 @@ export function createRecording(options){
             let length = 0;
             for (let part = 0; part < open.length; part += 2)
             {
-                changedSince(sent, open[part], open[part + 1], drawn ??= []);
-                length += open[part + 1] - open[part];
+                length += changedIn(sent, open[part], open[part + 1], drawn ??= []);
             }
             if (length > 0)
             {

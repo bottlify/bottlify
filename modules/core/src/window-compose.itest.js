@@ -5,8 +5,8 @@
  */
 
 /**
- * The screen composed of two programs' pictures (roadmap/v2/windows.md, step
- * 3). The fixture's parent shows a red window at the screen's corner, its
+ * The screen composed of two programs' pictures.
+ * The fixture's parent shows a red window at the screen's corner, its
  * child a blue one over the parent's lower right quarter; each draws only its
  * own desktop. The canvas, read back, has the parent's red where only its
  * window is, the child's blue where the child's window is -- over the parent's

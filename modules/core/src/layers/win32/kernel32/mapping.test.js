@@ -21,7 +21,7 @@ const FILE_MAP_READ = 0x0004;
  *   and every pointer reads as the empty name, which is no name at all.
  */
 function setup(names = {}){
-    const bytes = new Uint8Array(0x30000);
+    const bytes = new Uint8Array(0x100000);
     /** Where a view was placed by address, so a second one there is refused. */
     const placed = new Set();
     /** @type {Map<number, { type: string, object: any }>} */
@@ -48,9 +48,9 @@ function setup(names = {}){
         setLastError: code=>{
             errors.push(code);
         },
-        allocate: size=>{
-            const address = nextAddress;
-            nextAddress += size + 16;
+        allocate: (size, { alignment = 8 } = {})=>{
+            const address = Math.ceil(nextAddress / alignment) * alignment;
+            nextAddress = address + size + 16;
             return address;
         },
         allocateAt: (address, size)=>{
@@ -122,6 +122,20 @@ function setup(names = {}){
 /** @param {Uint8Array} bytes @param {number} at */
 const dword = (bytes, at)=>
     (bytes[at] | bytes[at + 1] << 8 | bytes[at + 2] << 16 | bytes[at + 3] << 24) >>> 0;
+
+test('a view starts on an allocation granule, as every view on Windows does', ()=>{
+    // A program that maps a file a window at a time unmaps at the granule it
+    // works out from the view's address; one mid-granule had it unmap
+    // nothing and stop reading.
+    const { fns } = setup();
+    const mapping = fns.CreateFileMappingA.handler([INVALID_HANDLE_VALUE, 0, PAGE_READWRITE, 0,
+        0x100, 0]);
+    const first = fns.MapViewOfFile.handler([mapping, FILE_MAP_WRITE, 0, 0, 0x100]);
+    const second = fns.MapViewOfFile.handler([mapping, FILE_MAP_WRITE, 0, 0, 0x100]);
+    assert.deepEqual([first % 0x10000, second % 0x10000], [0, 0]);
+    assert.notEqual(first, second);
+    assert.equal(fns.UnmapViewOfFile.handler([second]), 1);
+});
 
 test('a view of a file starts as that file, and is written back when unmapped', ()=>{
     // The whole point of the copy: a read through the view sees the file, and a

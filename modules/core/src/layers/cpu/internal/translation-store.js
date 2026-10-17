@@ -30,9 +30,21 @@
 /** @typedef {import('../engine.js').TranslationStore} TranslationStore */
 /** @typedef {{ offset: number, length: number, session: number }} Place */
 /**
+ * What a store holds and what its opening found and kept (`stats`): records and
+ * bytes before, the records kept and their bytes, the bytes the cap left out,
+ * the regions dropped for a module gone, whether the file was copied, and how
+ * long the opening's sorting and copying took.
+ *
+ * @typedef {{ session: number, generation: number, records: number, bytes: number,
+ *     regionsWithModule: number, broken: boolean,
+ *     opened: { records: number, bytes: number, kept: number, keptBytes: number,
+ *         overCap: number, orphans: number, compacted: boolean, ms: number } }} StoreStats
+ */
+/**
  * @typedef {TranslationStore & {
- *     flush: () => Promise<void>, close: () => void, prepare: () => Promise<void>,
+ *     flush: () => Promise<void>, close: () => Promise<void>, prepare: () => Promise<void>,
  *     getNow: (key: string) => Uint8Array | null | undefined,
+ *     touch: (key: string) => void, stats: () => StoreStats,
  *     seed: (source: Uint8Array | null | Promise<Uint8Array | null>, identity?: string)
  *         => Promise<{ taken: boolean, added: number, present: number }>,
  *     seededWith: () => Promise<string | null>,
@@ -239,18 +251,29 @@ export function unpackSeed(seed){
 /**
  * The store is kept to what recent runs used. A session is one opening; the
  * index marks each (`# <n>`) and names again a record read or written in it,
- * so every record carries the last session that used it. On opening, a
- * records file past `compactFloor` of which half is not live -- superseded by
- * a later write of its name, or unused for `keepSessions` sessions, which is
- * what a translator version's records become once the version changes and
- * what a relink's module no region names any more becomes -- is copied, live
- * records only, into the next generation; and live records past `cap` go, the
- * least recently used first. Without it every run's relinked modules and every
- * re-put stayed for ever: a profile reached 29 GB. The index is judged on its
- * own as well: a warm run touches every record it reads, a line each, so with
+ * so every record carries the last session that used it. A region's record
+ * names the record its code is in, its batch's module (`= <region> <module>`
+ * in the index), and the module is as old as the youngest region naming it:
+ * a run that has the module's instance already reads only the region, and
+ * the module, read by nobody, went as unused while its regions stayed --
+ * each of them then a miss for want of its module (a thousand a run of a
+ * game's).
+ *
+ * On opening, the records of the last session stay whatever their size: they
+ * are what the program needs to start as it did. Older ones stay while they
+ * fit under `cap` with them, the most recently used first, a region and its
+ * module together; past `keepSessions` sessions unused, or a region whose
+ * module is gone, a record is dead. A cap under what one session used cut
+ * that session's own records at every start, and the next run translated
+ * half of them again (a game's session used 1.9 GB against a cap of 1). The
+ * records file is copied, live records only, into the next generation when
+ * half of it is dead and it is past `compactFloor` -- a copy at a start is
+ * seconds for a gigabyte, so not for less -- or when the index has outgrown
+ * its records: a warm run touches every record it reads, a line each, so with
  * the records under the floor it grew by a run's reads every run and was read
  * whole at every open; past `indexFloor` and four times the lines the live
- * records need, it is rewritten with them.
+ * records need, it is rewritten with them. Records past the cap stay readable
+ * until such a copy: one a later run reads again is young again.
  */
 const LIMITS = { keepSessions: 4, compactFloor: 64 << 20, cap: 1 << 30, indexFloor: 4 << 20 };
 
@@ -486,6 +509,24 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
     let indexEnd = 0;
     /** Lines put since the last append. @type {string[]} */
     let pendingLines = [];
+    /**
+     * By a region record's name, the name of the record its code is in (its
+     * batch's module), which lives as long as the region does.
+     * @type {Map<string, string>}
+     */
+    const needsOf = new Map();
+    /**
+     * Every record a region has named as its module: one no region names any
+     * more -- a batch's, once a relink moved its regions to their relinked
+     * module -- is dead, whatever its age.
+     * @type {Set<string>}
+     */
+    const modules = new Set();
+    /** Closed: a put after it keeps nothing, and its writes are let finish first. */
+    let closing = false;
+    /** What this opening found and kept, for the report (`stats`). */
+    const found = { records: 0, bytes: 0, kept: 0, keptBytes: 0, overCap: 0,
+        orphans: 0, compacted: false, ms: 0 };
 
     /** Opens the current generation's records file: its handle, access and size. */
     const openRecords = async()=>{
@@ -551,29 +592,92 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
     };
 
     /**
-     * Copies the live records into the next generation when the file is
-     * mostly dead weight or the live ones are past the cap. The generation is
-     * switched by the `current` file, written last: a page that goes away
-     * before it leaves the old generation current and whole.
+     * The last session each record was used in: its own, or a later one of a
+     * region naming it as its module.
+     *
+     * @returns {Map<string, number>}
+     */
+    const agesOf = ()=>{
+        const all = /** @type {Map<string, Place>} */ (places);
+        /** @type {Map<string, number>} */
+        const ages = new Map();
+        for (const [recordName, place] of all)
+        {
+            ages.set(recordName, place.session);
+        }
+        for (const [region, module] of needsOf)
+        {
+            const used = all.get(region)?.session;
+            if (used !== undefined && used > (ages.get(module) ?? Infinity))
+            {
+                ages.set(module, used);
+            }
+        }
+        return ages;
+    };
+
+    /**
+     * The records this opening keeps (the comment at `LIMITS`), dropping the
+     * regions whose module is gone, and copied into the next generation when
+     * half the file is dead weight. The generation is switched by the
+     * `current` file, written last: a page that goes away before it leaves
+     * the old generation current and whole.
      */
     const compact = async()=>{
+        const startedAt = performance.now();
         const all = /** @type {Map<string, Place>} */ (places);
-        let live = [...all].filter(([, place])=>place.session >= session - limits.keepSessions);
-        let liveBytes = live.reduce((sum, [, place])=>sum + place.length, 0);
+        found.records = all.size;
+        found.bytes = end;
+        for (const [region, module] of needsOf)
+        {
+            if (!all.has(module) || !all.has(region))
+            {
+                found.orphans += all.delete(region) ? 1 : 0;
+                needsOf.delete(region);
+            }
+        }
+        const ages = agesOf();
+        const age = (/** @type {string} */ recordName)=>/** @type {number} */ (ages.get(recordName));
+        const newest = session - 1;
+        // A module goes with the regions naming it, not on its own: one that
+        // none names is dead.
+        const candidates = [...all.keys()].filter(recordName=>!modules.has(recordName)
+            && age(recordName) >= session - limits.keepSessions)
+            .sort((a, b)=>age(b) - age(a));
+        /** @type {Set<string>} */
+        const kept = new Set();
+        let keptBytes = 0;
+        for (const recordName of candidates)
+        {
+            const module = needsOf.get(recordName);
+            const unit = module === undefined || kept.has(module) ? [recordName]
+                : [recordName, module];
+            const bytes = unit.reduce((sum, one)=>sum
+                + /** @type {Place} */ (all.get(one)).length, 0);
+            if (age(recordName) < newest && keptBytes + bytes > limits.cap)
+            {
+                found.overCap += bytes;
+                continue;
+            }
+            for (const one of unit)
+            {
+                kept.add(one);
+            }
+            keptBytes += bytes;
+        }
+        found.kept = kept.size;
+        found.keptBytes = keptBytes;
         // A live record's line is some fifty bytes.
         const indexBloated = indexEnd > Math.max(limits.indexFloor ?? LIMITS.indexFloor,
-            live.length * 200);
-        if (liveBytes <= limits.cap && !indexBloated
-            && (end < limits.compactFloor || liveBytes * 2 > end))
+            kept.size * 200);
+        if (!indexBloated && (end < limits.compactFloor || (end - keptBytes) * 2 < end))
         {
+            found.ms = performance.now() - startedAt;
             return;
         }
-        if (liveBytes > limits.cap)
-        {
-            live.sort((a, b)=>b[1].session - a[1].session);
-            liveBytes = 0;
-            live = live.filter(([, place])=>(liveBytes += place.length) <= limits.cap);
-        }
+        found.compacted = true;
+        const live = [...kept].map(recordName=>
+            /** @type {[string, Place]} */ ([recordName, all.get(recordName)]));
         const next = generation + 1;
         const target = await directory.getFileHandle(generationName(RECORDS, next),
             { create: true });
@@ -624,8 +728,16 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
             lines.push(`${recordName} ${place.offset} ${place.length}\n`);
             bySession.set(place.session, lines);
         }
+        for (const [region, module] of [...needsOf])
+        {
+            if (!moved.has(region) || !moved.has(module))
+            {
+                needsOf.delete(region);
+            }
+        }
         const indexBytes = new TextEncoder().encode([...bySession].sort((a, b)=>a[0] - b[0])
-            .map(([number, lines])=>`# ${number}\n${lines.join('')}`).join(''));
+            .map(([number, lines])=>`# ${number}\n${lines.join('')}`).join('')
+            + [...needsOf].map(([region, module])=>`= ${region} ${module}\n`).join(''));
         await writeWhole(directory, generationName(INDEX, next), indexBytes);
         await writeWhole(directory, CURRENT, new TextEncoder().encode(String(next)));
         access?.close();
@@ -633,6 +745,7 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
         generation = next;
         places = moved;
         indexEnd = indexBytes.length;
+        found.ms = performance.now() - startedAt;
         await openRecords();
         if (typeof directory.removeEntry === 'function')
         {
@@ -671,6 +784,13 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
                         {
                             // A session's mark: the lines after it are that session's.
                             last = Math.max(last, Number(offsetText) || 0);
+                            continue;
+                        }
+                        if (recordName === '=' && parts.length === 3 && lengthText !== '')
+                        {
+                            // A region and the module its code is in.
+                            needsOf.set(offsetText, lengthText);
+                            modules.add(lengthText);
                             continue;
                         }
                         const offset = Number(offsetText);
@@ -851,19 +971,103 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
      *
      * @param {string} key
      */
-    const use = key=>{
-        const recordName = fileNameOf(key);
+    const use = key=>useName(fileNameOf(key));
+
+    /**
+     * Writes any index not yet on disk and flushes the records. `put`
+     * already queues its own, so this is for a caller that finishes a run.
+     */
+    const flush = async()=>{
+        await appending;
+        // The touches of the last reads, and the session's mark where it made
+        // no put: published only past 512 lines otherwise, so a run that read
+        // without writing left its records as old as before.
+        if (opened && !broken && pendingLines.length > 0)
+        {
+            await publish();
+        }
+        if (publishing !== null)
+        {
+            await publishing;
+        }
+        await flushRecords();
+    };
+
+    /**
+     * `use` by the record's name, and the module a region's code is in with it.
+     *
+     * @param {string} recordName
+     */
+    const useName = recordName=>{
         const place = /** @type {Map<string, Place>} */ (places).get(recordName);
         if (place && place.session !== session)
         {
             place.session = session;
             pendingLines.push(`${recordName} ${place.offset} ${place.length}\n`);
+            const module = needsOf.get(recordName);
+            if (module !== undefined)
+            {
+                useName(module);
+            }
             if (pendingLines.length >= 512)
             {
                 publish();
             }
         }
         return place;
+    };
+
+    /** The puts under way, which a close waits for. @type {Set<Promise<void>>} */
+    const puts = new Set();
+
+    /**
+     * Appends a record and names it in the index (`put`).
+     *
+     * @param {string} key @param {Uint8Array} bytes @param {{ needs?: string }} [options]
+     */
+    const putNow = async(key, bytes, { needs } = {})=>{
+        const recordName = fileNameOf(key);
+        const turn = ++putTurns;
+        latestPut.set(recordName, turn);
+        await ready();
+        if (broken)
+        {
+            return;
+        }
+        try
+        {
+            const offset = end;
+            // Read first: a writer takes the bytes away.
+            const { length } = bytes;
+            end += length;
+            await appendRecords([[offset, bytes]]);
+            if (latestPut.get(recordName) !== turn)
+            {
+                return;
+            }
+            latestPut.delete(recordName);
+            /** @type {Map<string, Place>} */ (places)
+                .set(recordName, { offset, length, session });
+            pendingLines.push(`${recordName} ${offset} ${length}\n`);
+            const module = needs === undefined ? undefined : fileNameOf(needs);
+            if (module !== needsOf.get(recordName))
+            {
+                if (module === undefined)
+                {
+                    needsOf.delete(recordName);
+                }
+                else
+                {
+                    needsOf.set(recordName, module);
+                    modules.add(module);
+                    pendingLines.push(`= ${recordName} ${module}\n`);
+                }
+            }
+            await publish();
+        }
+        catch {
+            broken = true;
+        }
     };
 
     return {
@@ -915,47 +1119,38 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
         },
         /** Opens the store ahead of its first lookup: its index read, its files open. */
         prepare: ()=>open(),
-        async put(key, bytes){
-            const recordName = fileNameOf(key);
-            const turn = ++putTurns;
-            latestPut.set(recordName, turn);
-            await ready();
-            if (broken)
+        /**
+         * @param {string} key @param {Uint8Array} bytes
+         * @param {{ needs?: string }} [options]  `needs`: the key of the record
+         *     this one's code is in (a region's batch module), kept as long as it is
+         */
+        put(key, bytes, options){
+            if (closing)
             {
-                return;
+                return Promise.resolve();
             }
-            try
+            const putting = putNow(key, bytes, options);
+            puts.add(putting);
+            putting.finally(()=>puts.delete(putting));
+            return putting;
+        },
+        flush,
+        /**
+         * Counts a record as used in this session without reading it: a
+         * region's module whose instance the run holds already.
+         *
+         * @param {string} key
+         */
+        touch(key){
+            if (opened && !broken && !closing)
             {
-                const offset = end;
-                // Read first: a writer takes the bytes away.
-                const { length } = bytes;
-                end += length;
-                await appendRecords([[offset, bytes]]);
-                if (latestPut.get(recordName) !== turn)
-                {
-                    return;
-                }
-                latestPut.delete(recordName);
-                /** @type {Map<string, Place>} */ (places)
-                    .set(recordName, { offset, length, session });
-                pendingLines.push(`${recordName} ${offset} ${length}\n`);
-                await publish();
-            }
-            catch {
-                broken = true;
+                use(key);
             }
         },
-        /**
-         * Writes any index not yet on disk and flushes the records. `put`
-         * already queues its own, so this is for a caller that finishes a run.
-         */
-        async flush(){
-            await appending;
-            if (publishing !== null)
-            {
-                await publishing;
-            }
-            await flushRecords();
+        /** What the opening found and kept, and what the store holds now. */
+        stats(){
+            return { session, generation, records: places?.size ?? 0, bytes: end,
+                regionsWithModule: needsOf.size, broken, opened: { ...found } };
         },
         /**
          * Takes in a seed's records this store does not hold: appended, named
@@ -1059,12 +1254,31 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
             }
             return packSeed(select ? select(out) : out);
         },
-        /** Lets go of the records file's access handle; nothing else holds one. */
+        /**
+         * Lets go of the records file's access handle, nothing else holding
+         * one, once the writes under way and the index lines they wait for are
+         * on disk: closed at once, a run's last records were written and the
+         * index never named them. A put after it keeps nothing.
+         */
         close(){
-            access?.close();
-            access = null;
-            writer?.close();
-            writer = null;
+            closing = true;
+            const closed = (async()=>{
+                try
+                {
+                    // The puts made before it, still waiting for the opening
+                    // or for their bytes to be written.
+                    await Promise.all([...puts]);
+                    await flush();
+                }
+                catch {
+                    // A store that failed keeps nothing to wait for.
+                }
+                access?.close();
+                access = null;
+                writer?.close();
+                writer = null;
+            })();
+            return closed;
         },
     };
 }
@@ -1219,10 +1433,9 @@ export async function resolveTranslationStore(spec, name){
     {
         const store = await createDirectoryTranslationStore(await storage.getDirectory(), name);
         const close = store.close;
-        store.close = ()=>{
-            close();
-            release();
-        };
+        // The lock goes once the store's last writes are on disk, not before:
+        // the next run of the bundle opens the files as soon as it has it.
+        store.close = ()=>Promise.resolve(close()).finally(release);
         return store;
     }
     catch {

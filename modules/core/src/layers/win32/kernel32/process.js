@@ -96,15 +96,26 @@ const PERFORMANCE_FREQUENCY = 1_000_000_000n;
  * where the guest can read it, and reading it is what the clock exports do.
  */
 export const CLOCK = {
+    /**
+     * Odd while the engine writes the block: the counter's two words are read
+     * between two looks at it that found it the same and even. A thread on
+     * another executor otherwise read the low word before a move and the high
+     * after it -- 4.3 seconds ahead at a wrap, kept as the last answer, and
+     * the counter stood still that long.
+     */
+    SEQUENCE: 0,
+    /** Milliseconds since boot, as GetTickCount and timeGetTime answer it: one word, read whole. */
+    TICKS: 4,
     /** The performance counter, 64-bit, in performance-frequency ticks. */
-    COUNTER: 0,
-    /** Milliseconds since boot, as GetTickCount and timeGetTime answer it. */
-    TICKS: 8,
-    /** The counter's last answer, 64-bit: the next is always later. */
-    LAST: 12,
-    /** What the engine writes when the clock moves: the counter and the ticks. */
+    COUNTER: 8,
+    /**
+     * The counter's last answer, 64-bit and 8-aligned: the next is always
+     * later, every thread's, moved by `lock cmpxchg8b`.
+     */
+    LAST: 16,
+    /** What the engine writes when the clock moves, the sequence aside: the ticks and the counter. */
     WRITTEN: 12,
-    SIZE: 20,
+    SIZE: 24,
 };
 
 /**
@@ -142,6 +153,11 @@ const ERROR_NOACCESS = 998;
  *     (`PERFORMANCE_FREQUENCY` by default); a whole number a 32-bit immediate holds.
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {(address: number, expected: bigint, value: bigint) => bigint} [compareExchangeU64]
+ * @property {(address: number, length: number) => Int32Array | null} [wordsOver]
+ *     the dwords of a block the engine keeps, over the RAM itself, where it can be had
+ *     A quadword swapped only if it holds `expected`, indivisible against the
+ *     guest's `lock cmpxchg8b` on the process's other executors; answers what it held.
  * @property {(address: number, maxLength: number) => string} readCString
  * @property {(address: number, maxLength: number) => string} [readWideString]
  * @property {() => any} currentThread     The record per-thread state hangs on.
@@ -355,28 +371,50 @@ export function tlsSetValueCode(at, trap){
  * client never drew again. The answers stay what a trap would give, which
  * keeps the same last answer (`nextCount`).
  *
+ * With threads on several executors the counter is read between two looks at
+ * the block's sequence (`CLOCK.SEQUENCE`), and the last answer is moved by
+ * `lock cmpxchg8b`, so every thread's answer is later than every answer
+ * before it.
+ *
  *     mov ecx, [esp+4]
  *     test ecx, ecx
  *     jz slow                     ; a null pointer is the host's, as before
- *     mov eax, [block]
- *     mov edx, [block+4]
- *     cmp edx, [last+4]
- *     ja take
- *     jb bump
- *     cmp eax, [last]
- *     ja take
- *   bump:
+ *     push ebx / esi / edi / ebp
+ *     mov ebp, ecx
+ *   read:
+ *     mov eax, [sequence]
+ *     test al, 1
+ *     jnz spin                    ; the engine is writing the block
+ *     mov edi, [counter]
+ *     mov esi, [counter+4]
+ *     cmp eax, [sequence]
+ *     jne read
  *     mov eax, [last]
  *     mov edx, [last+4]
- *     add eax, 1
- *     adc edx, 0
- *   take:
- *     mov [last], eax
- *     mov [last+4], edx
- *     mov [ecx], eax
- *     mov [ecx+4], edx
+ *   next:                         ; ecx:ebx = the counter if later, else last + 1
+ *     mov ebx, edi
+ *     mov ecx, esi
+ *     cmp ecx, edx
+ *     ja swap
+ *     jb bump
+ *     cmp ebx, eax
+ *     ja swap
+ *   bump:
+ *     mov ebx, eax
+ *     mov ecx, edx
+ *     add ebx, 1
+ *     adc ecx, 0
+ *   swap:
+ *     lock cmpxchg8b [last]       ; edx:eax the last answer another took meanwhile
+ *     jne next
+ *     mov [ebp], ebx
+ *     mov [ebp+4], ecx
+ *     pop ebp / edi / esi / ebx
  *     mov eax, 1
  *     ret 4
+ *   spin:
+ *     pause
+ *     jmp read
  *   slow:
  *     jmp trap
  *
@@ -385,32 +423,51 @@ export function tlsSetValueCode(at, trap){
  * @param {number} block  The clock block.
  */
 export function queryPerformanceCounterCode(at, trap, block){
-    const slow = 78;
+    const slow = 114;
+    const sequence = block + CLOCK.SEQUENCE;
+    const counter = block + CLOCK.COUNTER;
     const last = block + CLOCK.LAST;
     return new Uint8Array([
         0x8b, 0x4c, 0x24, 0x04,                                      // mov ecx, [esp+4]
         0x85, 0xc9,                                                  // test ecx, ecx
-        0x74, slow - 8,                                              // jz slow
-        0xa1, ...dword(block + CLOCK.COUNTER),                       // mov eax, [block]
-        0x8b, 0x15, ...dword(block + CLOCK.COUNTER + 4),             // mov edx, [block+4]
-        0x3b, 0x15, ...dword(last + 4),                              // cmp edx, [last+4]
-        0x77, 54 - 27,                                               // ja take
-        0x72, 37 - 29,                                               // jb bump
-        0x3b, 0x05, ...dword(last),                                  // cmp eax, [last]
-        0x77, 54 - 37,                                               // ja take
-        // bump:
+        0x0f, 0x84, ...dword(slow - 12),                             // jz slow
+        0x53, 0x56, 0x57, 0x55,                                      // push ebx, esi, edi, ebp
+        0x89, 0xcd,                                                  // mov ebp, ecx
+        // read: (18)
+        0xa1, ...dword(sequence),                                    // mov eax, [sequence]
+        0xa8, 0x01,                                                  // test al, 1
+        0x75, 110 - 27,                                              // jnz spin
+        0x8b, 0x3d, ...dword(counter),                               // mov edi, [counter]
+        0x8b, 0x35, ...dword(counter + 4),                           // mov esi, [counter+4]
+        0x3b, 0x05, ...dword(sequence),                              // cmp eax, [sequence]
+        0x75, (18 - 47) & 0xff,                                      // jne read
         0xa1, ...dword(last),                                        // mov eax, [last]
         0x8b, 0x15, ...dword(last + 4),                              // mov edx, [last+4]
-        0x83, 0xc0, 0x01,                                            // add eax, 1
-        0x83, 0xd2, 0x00,                                            // adc edx, 0
-        // take:
-        0xa3, ...dword(last),                                        // mov [last], eax
-        0x89, 0x15, ...dword(last + 4),                              // mov [last+4], edx
-        0x89, 0x01,                                                  // mov [ecx], eax
-        0x89, 0x51, 0x04,                                            // mov [ecx+4], edx
+        // next: (58)
+        0x89, 0xfb,                                                  // mov ebx, edi
+        0x89, 0xf1,                                                  // mov ecx, esi
+        0x39, 0xd1,                                                  // cmp ecx, edx
+        0x77, 82 - 66,                                               // ja swap
+        0x72, 72 - 68,                                               // jb bump
+        0x39, 0xc3,                                                  // cmp ebx, eax
+        0x77, 82 - 72,                                               // ja swap
+        // bump: (72)
+        0x89, 0xc3,                                                  // mov ebx, eax
+        0x89, 0xd1,                                                  // mov ecx, edx
+        0x83, 0xc3, 0x01,                                            // add ebx, 1
+        0x83, 0xd1, 0x00,                                            // adc ecx, 0
+        // swap: (82)
+        0xf0, 0x0f, 0xc7, 0x0d, ...dword(last),                      // lock cmpxchg8b [last]
+        0x75, (58 - 92) & 0xff,                                      // jne next
+        0x89, 0x5d, 0x00,                                            // mov [ebp], ebx
+        0x89, 0x4d, 0x04,                                            // mov [ebp+4], ecx
+        0x5d, 0x5f, 0x5e, 0x5b,                                      // pop ebp, edi, esi, ebx
         0xb8, ...dword(1),                                           // mov eax, 1
         0xc2, 0x04, 0x00,                                            // ret 4
-        // slow:
+        // spin: (110)
+        0xf3, 0x90,                                                  // pause
+        0xeb, (18 - 114) & 0xff,                                     // jmp read
+        // slow: (114)
         0xe9, ...dword(trap - (at + slow + 5)),                      // jmp trap
     ]);
 }
@@ -618,29 +675,65 @@ export function createProcessFunctions(host){
      */
     const nextCount = ()=>{
         const clock = ticksOf(host.now());
-        const last = clockAt === 0 ? lastCount
-            : BigInt(memory.readU32(clockAt + CLOCK.LAST))
-                | BigInt(memory.readU32(clockAt + CLOCK.LAST + 4)) << 32n;
-        const answer = clock > last ? clock : last + 1n;
         if (clockAt === 0)
         {
-            lastCount = answer;
+            lastCount = clock > lastCount ? clock : lastCount + 1n;
+            return lastCount;
         }
-        else
+        const at = clockAt + CLOCK.LAST;
+        let last = BigInt(memory.readU32(at)) | BigInt(memory.readU32(at + 4)) << 32n;
+        for (;;)
         {
-            writeU64(clockAt + CLOCK.LAST, answer);
+            const answer = clock > last ? clock : last + 1n;
+            if (host.compareExchangeU64 === undefined)
+            {
+                writeU64(at, answer);
+                return answer;
+            }
+            // As the routine's `lock cmpxchg8b`: another thread's answer taken
+            // meanwhile is the last one to be later than.
+            const was = host.compareExchangeU64(at, last, answer);
+            if (was === last)
+            {
+                return answer;
+            }
+            last = was;
         }
-        return answer;
     };
+    /** The block's sequence, the engine's alone to move: even, odd while it writes. */
+    let sequence = 0;
+    /**
+     * The block's dwords over the RAM itself, where the memory layer has them:
+     * written at every turn, through the memory's checked path that was the
+     * largest of a turn's costs when threads took turns on one executor.
+     *
+     * @type {Int32Array | null}
+     */
+    let clockWords = null;
     const refreshClock = ()=>{
         if (clockAt === 0)
         {
             return;
         }
         const milliseconds = host.now();
-        clockView.setBigUint64(CLOCK.COUNTER, ticksOf(milliseconds), true);
-        clockView.setUint32(CLOCK.TICKS, Math.floor(milliseconds) >>> 0, true);
-        host.writeMemory(clockAt, clockBytes);
+        if (clockWords !== null)
+        {
+            const counter = ticksOf(milliseconds);
+            // The sequence by Atomics: odd before the words move, even after,
+            // in that order for a reader on another executor.
+            Atomics.store(clockWords, CLOCK.SEQUENCE >> 2, ++sequence);
+            clockWords[CLOCK.TICKS >> 2] = Math.floor(milliseconds);
+            clockWords[CLOCK.COUNTER >> 2] = Number(counter & 0xffffffffn) | 0;
+            clockWords[(CLOCK.COUNTER >> 2) + 1] = Number(counter >> 32n) | 0;
+            Atomics.store(clockWords, CLOCK.SEQUENCE >> 2, ++sequence);
+            return;
+        }
+        // The span written runs from the ticks to the counter's end.
+        clockView.setUint32(0, Math.floor(milliseconds) >>> 0, true);
+        clockView.setBigUint64(CLOCK.COUNTER - CLOCK.TICKS, ticksOf(milliseconds), true);
+        memory.writeU32(clockAt + CLOCK.SEQUENCE, ++sequence);
+        host.writeMemory(clockAt + CLOCK.TICKS, clockBytes);
+        memory.writeU32(clockAt + CLOCK.SEQUENCE, ++sequence);
     };
     /**
      * The block, taken once and alone on its page, with the engine told where
@@ -660,6 +753,7 @@ export function createProcessFunctions(host){
             return 0;
         }
         clockAt = (span + PAGE - 1) & ~(PAGE - 1);
+        clockWords = host.wordsOver?.(clockAt, CLOCK.SIZE) ?? null;
         refreshClock();
         host.publishClock(refreshClock);
         return clockAt;

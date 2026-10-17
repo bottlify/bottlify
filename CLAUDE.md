@@ -1,6 +1,6 @@
 # Bottlify
 
-Bottlify runs Win32 x86 programs in the browser: **cork**, our x86 → wasm translator
+Bottlify is a set of packages for running Win32 x86 programs in the browser: **cork**, our x86 → wasm translator
 (`modules/cork`), in a Web Worker, under a from-scratch Win32/DirectX layer (`modules/core`) on
 WebGPU, WebAudio and OPFS. Where this file and the tree disagree, the tree is right and this file
 is the bug.
@@ -16,7 +16,7 @@ outward-facing action) or for a wait a rule imposes, and say what waits on what.
 
 ## Priorities
 
-1. **x86-64 and the multi-worker process runner** (`roadmap/v2/`). Work on the workers — the
+1. **x86-64 and the multi-worker process runner** (`roadmap/x64.md`). Work on the workers — the
    engine, graphics, translation and audio threads and what crosses between them — pays off for the
    whole application, not one title.
 2. **Correctness, speed, reuse.** Optimisation and standardisation are part of the job, not
@@ -34,8 +34,9 @@ outward-facing action) or for a wait a rule imposes, and say what waits on what.
 - `docs/core/` — `@bottlify/core`'s public contract: API, configuration, current limits. Kept
   current as work lands; written for someone outside the project.
 - `modules/cork/README.md` — the translator and its runtime.
-- `roadmap/README.md` — the index of the plans: `v2/` (the plan), `bottles/`, `steam/`, and
-  `decisions.md` (behaviour chosen rather than derived from a specification).
+- `roadmap/README.md` — the index of the plans: `x64.md`, `direct3d.md` (Direct3D 11 and 12),
+  `opengl.md` (OpenGL 2.0 to 4.x), and `decisions.md` (behaviour chosen rather than derived from a
+  specification).
 - `roadmap/00-*` — local working notes, not in git (`.gitignore` excludes exactly these): the TODO
   index, per-area open work and **pitfalls** (read the area's pitfalls before touching the kernel,
   bridge, graphics or audio layers), plans and reports. Everything else in `roadmap/` ships with

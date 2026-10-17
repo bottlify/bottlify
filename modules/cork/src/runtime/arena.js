@@ -8,7 +8,7 @@
  * The translation cache arena: the functions a process's translation emitted,
  * kept as bytes in shared memory, so every translation worker working for
  * the process takes what any of them emitted, and a worker that leaves takes
- * nothing with it (roadmap/v2, stage 2). A worker's own heap cannot be shared
+ * nothing with it. A worker's own heap cannot be shared
  * or handed on; a `SharedArrayBuffer` can.
  *
  * Layout: a header of words, an index of slots, and the data, cut into

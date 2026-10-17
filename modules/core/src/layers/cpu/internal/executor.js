@@ -19,7 +19,7 @@
  * stacks need no carrying.
  */
 
-import { CHANNEL_BYTES, Said, Turn, channelOf, waitWhile } from './executor-channel.js';
+import { CHANNEL_BYTES, Said, Turn, Word, channelOf, waitWhile } from './executor-channel.js';
 
 /**
  * A worker, as a page's `Worker` or Node's `worker_threads` makes one.
@@ -34,7 +34,9 @@ async function openWorker(url){
             post: (/** @type {any} */ message)=>worker.postMessage(message),
             onMessage: (/** @type {(data: any) => void} */ handler)=>worker.addEventListener(
                 'message', (/** @type {any} */ event)=>handler(event.data)),
-            terminate: ()=>worker.terminate(),
+            // The page's worker runs nothing more once terminated: there is no
+            // exit to wait for.
+            terminate: async()=>worker.terminate(),
         };
     }
     const { Worker } = await import('node:worker_threads');
@@ -42,7 +44,9 @@ async function openWorker(url){
     return {
         post: (/** @type {any} */ message)=>worker.postMessage(message),
         onMessage: (/** @type {(data: any) => void} */ handler)=>worker.on('message', handler),
-        terminate: ()=>void worker.terminate(),
+        terminate: async()=>{
+            await worker.terminate();
+        },
     };
 }
 
@@ -61,7 +65,7 @@ async function openWorker(url){
  */
 export function createBell(){
     // The count of turns rung, then whether an executor may go on with its
-    // thread past a slice (`goOn`).
+    // thread past a slice: 1 on, 0 not, 2 for a turn's length (`goOn`, `hold`).
     const buffer = new SharedArrayBuffer(8);
     const word = new Int32Array(buffer);
     return {
@@ -76,6 +80,17 @@ export function createBell(){
             waitWhile(word, 0, seen, ms);
         },
         /**
+         * The same wait without blocking: for a caller whose other wake comes
+         * through the event loop, which a blocking wait holds back.
+         *
+         * @param {number} seen @param {number} ms
+         * @returns {Promise<void>}
+         */
+        waitAsync(seen, ms){
+            const waiting = /** @type {any} */ (Atomics).waitAsync(word, 0, seen, ms);
+            return waiting.async ? waiting.value.then(()=>{}) : Promise.resolve();
+        },
+        /**
          * Whether no ready thread waits for an executor: then one whose slice
          * ends with its thread still running goes on with it, a slice after
          * another, without a word to the process -- which a round trip a
@@ -86,6 +101,17 @@ export function createBell(){
         goOn(on){
             Atomics.store(word, 1, on ? 1 : 0);
         },
+        /**
+         * Ready threads wait for an executor, none of them at once: one whose
+         * slice ends with its thread still running goes on with it until it has
+         * held it a turn (`executorHoldMs`), as a processor keeps a thread to
+         * its quantum's end -- given back after every slice, a thread past the
+         * executors cost a round trip through the process each quantum, and
+         * four threads on two executors ran barely faster than on one.
+         */
+        hold(){
+            Atomics.store(word, 1, 2);
+        },
     };
 }
 
@@ -94,12 +120,17 @@ export function createBell(){
  *
  * @param {{ host: any, index: number, engineUrl: string,
  *     config: Omit<import('./cork-host.js').CorkHostConfig, 'engine' | 'memory' | 'executor'>,
- *     workerUrl?: URL, bell?: ReturnType<typeof createBell> }} options
+ *     workerUrl?: URL, bell?: ReturnType<typeof createBell>,
+ *     unbroken?: SharedArrayBuffer | ArrayBuffer,
+ *     store?: import('../engine.js').TranslationStore | null }} options
  *     host: the process's cork host, made for `config.executors`; config: the configuration
- *     it was made with; bell: the one its executors share, when it waits on several
+ *     it was made with; bell: the one its executors share, when it waits on several;
+ *     unbroken: the routines no slice ends inside (`unbroken.js`), the process's table;
+ *     store: the run's translation store, which the executor's translator asks through here
  */
 export async function createRemoteExecutor({ host, index, engineUrl, config,
-    workerUrl = new URL('./executor.worker.js', import.meta.url), bell = createBell() })
+    workerUrl = new URL('./executor.worker.js', import.meta.url), bell = createBell(),
+    unbroken = undefined, store = null })
 {
     const memory = host.wasmMemory();
     if (typeof SharedArrayBuffer !== 'function' || !(memory.buffer instanceof SharedArrayBuffer))
@@ -114,6 +145,38 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
     /** Diagnostics asked for and not yet answered, by id. @type {Map<number, (value: any) => void>} */
     const asked = new Map();
     let asks = 0;
+    /**
+     * What the executor's translator asks of the run's store: a record looked
+     * up is answered with a copy (the store may keep the bytes it read), one
+     * put or touched is the store's from here on.
+     *
+     * @param {{ id?: number, method: string, key: string, bytes?: Uint8Array,
+     *     options?: { needs?: string } }} ask
+     */
+    const answerStore = ask=>{
+        if (store === null)
+        {
+            if (ask.method === 'get')
+            {
+                worker.post({ type: 'store', id: ask.id, bytes: null });
+            }
+            return;
+        }
+        if (ask.method === 'put' && ask.bytes instanceof Uint8Array)
+        {
+            Promise.resolve(store.put(ask.key, ask.bytes, ask.options)).catch(()=>{});
+            return;
+        }
+        if (ask.method === 'touch')
+        {
+            store.touch?.(ask.key);
+            return;
+        }
+        const now = store.getNow?.(ask.key);
+        // An answer to an executor closed meanwhile goes nowhere.
+        Promise.resolve(now !== undefined ? now : store.get(ask.key)).catch(()=>null)
+            .then(bytes=>worker.post({ type: 'store', id: ask.id, bytes })).catch(()=>{});
+    };
     await new Promise((resolve, reject)=>{
         worker.onMessage(data=>{
             if (data?.type === 'ready')
@@ -130,9 +193,13 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
                 asked.get(data.id)?.(data.value);
                 asked.delete(data.id);
             }
+            else if (data?.type === 'store')
+            {
+                answerStore(data);
+            }
         });
         worker.post({ type: 'start', engineUrl, memory, channel: buffer, bell: bell.buffer,
-            config: { ...config, executor: index } });
+            unbroken, store: store !== null, config: { ...config, executor: index } });
     });
     const own = /** @type {Uint8Array} */ (host.block());
     const theirs = new Uint8Array(memory.buffer, host.executorBase(index), own.length);
@@ -169,6 +236,8 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
 
     /** Whether a slice is out: started and its end not yet taken. */
     let running = false;
+    /** Whether an answer halted or stopped the slice's thread: its end is coming, not yet taken. */
+    let ending = false;
     /** What the process's side said last, which the executor's next turn ends.
      * @type {number} */
     let mine = Turn.IDLE;
@@ -177,6 +246,12 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
         index,
         /** Whether a slice is out. */
         busy: ()=>running,
+        /**
+         * Whether an answer given to its slice halted or stopped the thread and
+         * the slice's end has not been taken: the end is coming, and until it is
+         * taken the thread's state is the executor's, not the process's.
+         */
+        ending: ()=>ending,
         /**
          * Starts a slice of at most `budget` instructions on the executor's
          * block, the thread it holds; `step` answers what it raises.
@@ -226,6 +301,7 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
                         return 0;
                     });
                 });
+                ending ||= (flags & (Said.HALTED | Said.STOPPED)) !== 0;
                 mine = Turn.REPLY;
                 channel.say(Turn.REPLY, 0, flags);
                 return null;
@@ -238,6 +314,7 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
                 around(()=>{
                     flags = answer(()=>(host.offerFault(fault) ? Said.CLAIMED : 0));
                 });
+                ending ||= (flags & (Said.HALTED | Said.STOPPED)) !== 0;
                 mine = Turn.REPLY;
                 channel.say(Turn.REPLY, 0, flags);
                 return null;
@@ -247,6 +324,7 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
                 return null;
             }
             running = false;
+            ending = false;
             mine = Turn.IDLE;
             const flags = channel.flags();
             return {
@@ -288,6 +366,8 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
         },
         /** The executor's block: the state of the thread it runs. */
         block: ()=>theirs,
+        /** Its runs of guest code so far, odd while one is on (`Word.EPOCH`). */
+        epoch: ()=>Atomics.load(channel.words, Word.EPOCH),
         /**
          * Its translator's diagnostics, answered between slices.
          * @returns {Promise<Record<string, any> | null>}
@@ -299,9 +379,14 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
                 worker.post({ type: 'diagnostics', id });
             });
         },
+        /**
+         * Ends the executor; resolved once its worker can no longer touch the
+         * process's memory, which a later process may then be given.
+         * @returns {Promise<void>}
+         */
         close(){
             channel.say(Turn.CLOSE);
-            worker.terminate();
+            return worker.terminate();
         },
     };
     return executor;

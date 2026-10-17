@@ -119,7 +119,8 @@ const pageRound = bytes=>Math.ceil(bytes / PAGE_SIZE) * PAGE_SIZE;
  * @property {{ views: number, waited: number, failed: number }} [metrics]
  *           Counted in place: views mapped, views that waited for their
  *           bytes, views whose bytes never came.
- * @property {(bytes: number) => number} allocate  Guest memory, or 0.
+ * @property {(bytes: number, options?: { alignment?: number }) => number} allocate  Guest
+ *     memory, or 0.
  * @property {(address: number, bytes: number) => boolean} [allocateAt]
  *           Guest memory at exactly that address, when all of it is free.
  * @property {(address: number) => void} release
@@ -625,8 +626,13 @@ export function createMappingFunctions(host){
                 }
 
                 // At the address asked for, when one is and all of the view
-                // fits there; anywhere, when none is.
-                const address = placed === 0 ? host.allocate(wanted)
+                // fits there; anywhere on a granule, when none is -- Windows puts
+                // every view on one, and a program that keeps its own windows over
+                // a file unmaps at the granule it computed from the view's address
+                // (a video encoder reading its input through views stopped after
+                // two frames when its view began mid-granule).
+                const address = placed === 0
+                    ? host.allocate(wanted, { alignment: ALLOCATION_GRANULARITY })
                     : host.allocateAt?.(placed, wanted) ? placed : 0;
                 if (address === 0)
                 {

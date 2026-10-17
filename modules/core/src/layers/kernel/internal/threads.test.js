@@ -94,7 +94,7 @@ test('a slice that runs out inside an unbroken routine runs on to its end, on th
     assert.equal(asked.length, 4, 'the quantum, then three steps until EIP left the routine');
     assert.equal(asked[0], 5000);
     assert.ok(asked.slice(1).every(max=>max < 5000), 'each step a short one');
-    assert.equal(a.instructions, 1000 + 3 * 512, 'and every step charged to the thread');
+    assert.equal(a.instructions, 1000 + 3, 'and every step charged to the thread');
     assert.equal(sched.runOnce().ran?.name, 'b', 'then the next thread has its turn');
     assert.equal(asked.length, 5, 'whose slice ended outside any routine');
 });
@@ -214,6 +214,86 @@ test('a thread no other is ready beside gets a longer turn, until a deadline com
     sched.runOnce();
     assert.equal(sched.runOnce().instructions, 40_000, 'a deadline far off: the solo quantum');
     assert.equal(sched.diagnostics().overruns, 0, 'a solo turn is not an overrun');
+});
+
+test('among ready threads a turn lasts turnMs at the executor\'s rate: no less than a quantum,'
+    + ' no more than a solo turn, and a quantum with a deadline near', ()=>{
+    let wall = 0;
+    let clock = 0;
+    // Instructions the fake executor retires a host ms: fast code, then slow.
+    let perMs = 3_000_000;
+    const cpu = fakeCpu(Infinity);
+    cpu.runSlice = max=>{
+        wall += max / perMs;
+        return max;
+    };
+    const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 5000,
+        soloQuantum: 1_000_000, turnMs: 0.25, wall: ()=>wall, now: ()=>clock });
+    sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'a' });
+    const b = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'b' });
+
+    assert.equal(sched.runOnce().instructions, 5000, 'no rate yet: the quantum');
+    assert.equal(sched.runOnce().instructions, 750_000, 'a quarter of a ms at 3 G a second');
+    perMs = 10_000;
+    for (let turn = 0; turn < 40; turn++)
+    {
+        sched.runOnce();
+    }
+    assert.equal(sched.runOnce().instructions, 5000, 'slow code: never below the quantum');
+    perMs = 100_000_000;
+    for (let turn = 0; turn < 40; turn++)
+    {
+        sched.runOnce();
+    }
+    assert.equal(sched.runOnce().instructions, 1_000_000, 'never above a solo turn');
+
+    // b waits with a deadline half a ms off: the turns beside it keep the
+    // quantum, so the wait ends when it would have.
+    sched.block(b, 'a timed wait', { deadline: clock + 0.5 });
+    assert.equal(sched.runOnce().instructions, 5000, 'a deadline near: the quantum');
+});
+
+test('a thread woken during a turn that runs past a quantum ends it, as a woken thread\'s boost'
+    + ' would; a quantum\'s turn it does not', ()=>{
+    /**
+     * Three threads, the third waiting; the running one lets it go in the
+     * middle of its turn once the turns run long.
+     *
+     * @param {number | undefined} turnMs
+     */
+    const run = turnMs=>{
+        let wall = 0;
+        let stops = 0;
+        /** @type {any} */
+        let waiting = null;
+        const cpu = fakeCpu(Infinity);
+        /** @type {any} */
+        const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 5000,
+            soloQuantum: 1_000_000, turnMs, wall: ()=>wall });
+        cpu.runSlice = max=>{
+            wall += max / 3_000_000;
+            if (waiting !== null)
+            {
+                sched.wake(waiting);
+                waiting = null;
+            }
+            return max;
+        };
+        Object.assign(cpu, { stop: ()=>stops++ });
+        sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'a' });
+        sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'b' });
+        const c = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xc000, name: 'c' });
+        sched.block(c, 'an event');
+        sched.runOnce();
+        const turn = sched.runOnce().instructions;
+        waiting = c;
+        sched.runOnce();
+        return { turn, stops };
+    };
+    assert.deepEqual(run(0.25), { turn: 750_000, stops: 1 },
+        'a long turn among ready threads, ended by the wake');
+    assert.deepEqual(run(undefined), { turn: 5000, stops: 0 },
+        'a quantum\'s turn: the woken thread waits for its end, as before');
 });
 
 test('a thread parked on a host call is not a candidate for a turn', ()=>{
@@ -566,7 +646,9 @@ test('the report says what priority each thread runs at and how often it was boo
     const feeder = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'feeder' });
     feeder.priority = 2;
 
-    assert.match(sched.diagnostics().byThread, /main 0 ready p8 b0 \| feeder 0 ready p10 b0/);
+    assert.match(sched.diagnostics().byThread,
+        /main 0 ready p8 b0 x0\.0 \| feeder 0 ready p10 b0 x0\.0/,
+        'and its calls into the host a hundred thousand instructions');
     clock = 10;
     sched.runOnce();
     assert.match(sched.diagnostics().byThread, /main 1000 ready p8 b1/,
@@ -936,4 +1018,195 @@ test('a thread whose slice ended on a host call goes on once it is answered', ()
     cpu.runSlice = max=>Math.min(max, 1000);
     clock += 10_000;
     assert.equal(sched.runOnce().ran.name, 'audio', 'starved, it is not passed over again');
+});
+
+/**
+ * The cpu of a process on two executors: the other's slices never end on their
+ * own, and the bell records the waits a turn takes for it.
+ */
+function twoExecutors(){
+    const cpu = fakeCpu();
+    const remote = {
+        index: 1,
+        started: 0,
+        busy: ()=>remote.started > 0,
+        start: ()=>{
+            remote.started++;
+        },
+        /** @type {() => ({ instructions: number, fault: any } | null)} */
+        step: ()=>null,
+        ending: ()=>false,
+    };
+    /** @type {number[]} */
+    const waits = [];
+    /** What the turns last told the other executor of keeping its thread. */
+    const told = { goOn: /** @type {boolean | null} */ (null) };
+    const bell = {
+        rung: ()=>0,
+        /** @param {number} seen @param {number} ms */
+        wait: (seen, ms)=>waits.push(ms),
+        /** @param {boolean} on */
+        goOn(on){
+            told.goOn = on;
+        },
+        hold(){},
+    };
+    return {
+        cpu: { ...cpu, executors: ()=>[remote], executorBell: ()=>bell, eip: ()=>0,
+            /** @param {number} index @param {() => void} work */
+            onExecutor: (index, work)=>work() },
+        waits,
+        told,
+    };
+}
+
+test('a turn with nothing to run here leaves at once while a host call is still to answer', ()=>{
+    // The answer comes through the event loop, which a wait for the other
+    // executor holds back: with a game's sound thread on the other one, its
+    // renderer waited for the graphics worker's answers a wait at a time.
+    const { cpu, waits } = twoExecutors();
+    let answering = false;
+    const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 5000,
+        hostAnswering: ()=>answering });
+    const main = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
+    const worker = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'worker' });
+    assert.equal(sched.runOnce().ran, main);
+    assert.equal(sched.processorOf(worker), 1, 'the worker runs on the other executor');
+
+    main.awaitingHost = true;
+    const queued = sched.runOnce();
+    assert.equal(queued.elsewhere, true);
+    assert.deepEqual(waits, [4],
+        'a caller parked on the guest\'s own queue: the turn waits for the other executor');
+
+    answering = true;
+    const left = sched.runOnce();
+    assert.deepEqual({ elsewhere: left.elsewhere, rung: left.rung }, { elsewhere: true, rung: 0 },
+        'it says where the bell stood, for its caller to wait for both');
+    assert.deepEqual(waits, [4], 'and took no wait of its own');
+});
+
+test('a thread calling into the host often runs on the process\'s executor and no other', ()=>{
+    // A game's sound thread, woken at priority 15, took the turn, and its
+    // renderer -- a call into the host every hundred instructions -- went to
+    // the other executor, every call a round trip back.
+    const two = ()=>{
+        const { cpu, told } = twoExecutors();
+        const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 5000 });
+        const main = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
+        const sound = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'sound' });
+        Object.assign(sound, { home: 0, priority: 15 });
+        Object.assign(main, { crossSeen: true, crossRate: 1 / 100 });
+        return { sched, main, sound, told };
+    };
+
+    // The sound thread computes: it takes the other executor, the renderer this one.
+    const computing = two();
+    Object.assign(computing.sound, { crossSeen: true, crossRate: 1 / 100_000 });
+    assert.equal(computing.sched.runOnce().ran, computing.main);
+    assert.equal(computing.sched.processorOf(computing.sound), 1);
+
+    // Both call into the host: they take turns here, as on one processor, the
+    // one of higher priority first, and the other executor is not asked for.
+    const calling = two();
+    Object.assign(calling.sound, { crossSeen: true, crossRate: 1 / 150 });
+    assert.equal(calling.sched.runOnce().ran, calling.sound);
+    assert.equal(calling.sched.processorOf(calling.main), 0,
+        'the renderer waits for its turn here');
+
+    // One placed there while it computed, calling into the host since: it is
+    // let go at its slice's end, to come back here.
+    computing.sound.crossRate = 1 / 150;
+    computing.sched.runOnce();
+    assert.equal(computing.told.goOn, false, 'the other executor gives it up');
+});
+
+test('a thread\'s calls into the host are counted over its instructions, not its slices', ()=>{
+    // x264's frame threads woke, ran a few dozen instructions and called the
+    // host to wait again between runs of millions: a call in a million
+    // instructions, rated a call in 34 to 80 a slice at a time, and kept here.
+    /** @type {() => void} */
+    let crossing = ()=>{};
+    const cpu = { ...fakeCpu(), beforeTrap: (/** @type {() => void} */ hook)=>{
+        crossing = hook;
+    } };
+    const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 5000 });
+    const frames = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'frames' });
+    /** @param {number} instructions @param {number} calls */
+    const slice = (instructions, calls)=>{
+        cpu.runSlice = ()=>{
+            for (let call = 0; call < calls; call++)
+            {
+                crossing();
+            }
+            return instructions;
+        };
+        sched.runOnce();
+    };
+
+    for (let round = 0; round < 8; round++)
+    {
+        slice(1_000_000, 0);
+        slice(40, 1);
+        slice(60, 1);
+    }
+    assert.ok(frames.crossRate < 1 / 300_000,
+        `two calls a million instructions, not one in fifty (${frames.crossRate})`);
+    assert.ok(frames.crossRate > 1 / 2_000_000, 'and the calls still count');
+
+    // A steady rate is itself, whatever the slices: a renderer's call every
+    // hundred instructions.
+    const renderer = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'renderer' });
+    sched.block(frames, 'done');
+    for (let round = 0; round < 40; round++)
+    {
+        slice(100_000, 1000);
+    }
+    assert.ok(renderer.crossRate > 0.9 / 100 && renderer.crossRate <= 1 / 100,
+        `a call every hundred (${renderer.crossRate})`);
+});
+
+test('a thread this executor keeps calling back from the other one stays here a while', ()=>{
+    // A game's sound thread, placed on the other executor whenever it was ready
+    // beside the renderer, was called back 1 312 times of 1 319 as the renderer
+    // waited on it: the two took turns, each run there a round trip.
+    const { cpu, told } = twoExecutors();
+    const [remote] = cpu.executors();
+    // The other executor's slice ends when it is told to give its thread up.
+    remote.step = ()=>{
+        if (remote.started === 0 || told.goOn !== false)
+        {
+            return null;
+        }
+        remote.started = 0;
+        told.goOn = null;
+        return { instructions: 1000, fault: null };
+    };
+    let clock = 0;
+    const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 5000,
+        wall: ()=>clock });
+    const main = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
+    const sound = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'sound' });
+    // The renderer calls into the host and stays here; the sound thread computes.
+    Object.assign(main, { crossSeen: true, crossRate: 1 / 100 });
+    /** Both ready: where the sound thread goes, then the renderer waits on it. */
+    const round = ()=>{
+        assert.equal(sched.runOnce().ran, main);
+        const where = sched.processorOf(sound);
+        if (where === 1)
+        {
+            sched.block(main, 'the sound');
+            assert.equal(sched.runOnce().ran, sound,
+                'left nothing to run here, it calls the sound back and runs it');
+            sched.wake(main);
+        }
+        return where;
+    };
+
+    assert.deepEqual([round(), round(), round()], [1, 1, 1],
+        'called back once and twice, it still goes there');
+    assert.equal(round(), 0, 'called back three times running, it takes its turns here');
+    assert.equal(remote.started, 0, 'and the other executor is not started for it');
+    clock += 3000;
+    assert.equal(round(), 1, 'three seconds on, it tries the other executor again');
 });

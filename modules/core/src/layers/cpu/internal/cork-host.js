@@ -100,6 +100,12 @@ const UNTIERED_KEPT = 16;
  * run the whole stretch.
  */
 const WASM_AFTER = 8192;
+/**
+ * The longest host write into the RAM made a dword at a time (`copyIn`): the
+ * structures a call fills in, past which a byte copy is faster and has no
+ * thread reading it as it is written.
+ */
+const WORDWISE_BYTES = 256;
 const NEW_TARGET_WORK = 128;
 /** The names an engine module must export for this host. */
 const ENGINE_EXPORTS = Object.freeze([
@@ -223,7 +229,7 @@ export function createCorkHost(config){
         throw new Error(`cpu: a memory of ${given.buffer.byteLength} bytes has no room for`
             + ` ${executors} executors`);
     }
-    const taken = given === undefined && reused !== undefined && executors === 1
+    const taken = given === undefined && reused !== undefined
         && reused.memory.buffer.byteLength === pages * 65536
         && (typeof SharedArrayBuffer === 'function'
             && reused.memory.buffer instanceof SharedArrayBuffer) === shared
@@ -234,7 +240,8 @@ export function createCorkHost(config){
     {
         // A new memory is zero; this one is made so where it was used: its
         // state block and the guest's RAM up to where the guest was given
-        // memory, and the engine's tables past the RAM.
+        // memory, and everything past the RAM -- the engine's tables, the
+        // other executors' pages and the record they kept together.
         const bytes = new Uint8Array(memory.buffer);
         const guestEnd = Math.min(Math.max(reused?.guestEnd ?? memorySize, 0), memorySize);
         bytes.fill(0, 0, own.ramBase + guestEnd);
@@ -249,11 +256,55 @@ export function createCorkHost(config){
     const xmm = new Uint32Array(memory.buffer, layout.xmm, 32);
     const ram = new Uint8Array(memory.buffer, layout.ramBase, layout.ramSize);
     const whole = new DataView(memory.buffer);
+    const wholeWords = new Int32Array(memory.buffer);
+    // The process's own executor's interrupt word (`layout.interrupt`), where
+    // the process has others: they store it when they need its answer, and its
+    // translated code leaves at the next back edge; it reads and clears it.
+    const interruptWord = own.interrupt === undefined ? -1 : own.interrupt >>> 2;
+    const interruptible = executor === 0 && interruptWord >= 0;
+    /**
+     * Answers what the other executors stored the word for (`onInterrupt`).
+     *
+     * @type {(() => void) | null}
+     */
+    let interruptHandler = null;
+    let interrupts = 0;
+    /** Whether another executor stored the word since this one last took it. */
+    const interrupted = ()=>interruptible && Atomics.load(wholeWords, interruptWord) !== 0;
 
     /** The flags word, whole: the record a region left is folded into it first. */
     const eflagsWord = ()=>eflagsOf(blockView, own) >>> 0;
     /** @param {number} address  A guest address. */
     const ramOffset = address=>layout.ramBase + address;
+    /**
+     * The host's write into the RAM. A short one at an aligned address goes in
+     * a dword at a time, each one store, as an x86 dword store is: the shared
+     * memory's copy went a byte at a time unless both ends were 8-aligned, and
+     * a pointer, count or flag the host published was read half written by a
+     * thread on another executor (3.4 M of 157 M reads in a probe). A long one
+     * -- a texture, a file read -- has no such reader and keeps the copy.
+     *
+     * @param {number} address @param {Uint8Array} bytes
+     */
+    const copyIn = (address, bytes)=>{
+        const length = bytes.length;
+        if (length > WORDWISE_BYTES || (address & 3) !== 0)
+        {
+            ram.set(bytes, address);
+            return;
+        }
+        const first = ramOffset(address) >>> 2;
+        let at = 0;
+        for (; at + 4 <= length; at += 4)
+        {
+            wholeWords[first + (at >>> 2)] = bytes[at] | bytes[at + 1] << 8 | bytes[at + 2] << 16
+                | bytes[at + 3] << 24;
+        }
+        for (; at < length; at++)
+        {
+            ram[address + at] = bytes[at];
+        }
+    };
 
     // The boot state: the registers the ROM would have left, and nothing run.
     block.fill(0);
@@ -450,6 +501,20 @@ export function createCorkHost(config){
     const runtime = createEngine({
         memory,
         layout,
+        // One translation for every other executor of the process: made for
+        // the shared layout, it is the same on each, so the arena and the
+        // store keep it once whichever of them asked for it first. The
+        // process's own keeps its own layout, the state and the tables at
+        // constant addresses: under the shared one each access adds a base, a
+        // load from the state block may fault and so is never dropped as dead,
+        // and the base itself stays live across loops -- a called function's
+        // code was a sixth larger, a seven-instruction loop kept eax on the
+        // stack, and the benchmark ran 7 % slower (geometric mean, a call
+        // through a table of 4096 targets 35 %). It runs the process's first
+        // thread and any thread alone; what it runs elsewhere too is
+        // translated twice, never once per executor.
+        ...(executors > 1 && executor !== 0 && typeof engine.sharedLayout === 'function'
+            ? { sharedLayout: engine.sharedLayout(own) } : {}),
         config: { ...(trapPort === undefined ? {} : { trapPort }), ...corkConfig,
             ...(sharedAt < 0 ? {} : { sharedCode: { at: sharedAt, index: executor } }) },
         read: (/** @type {number} */ address)=>ram[address],
@@ -1065,6 +1130,15 @@ export function createCorkHost(config){
         let jumpedIn = false;
         while (remaining > 0 && !isHalted() && !isStopped() && !isFeedDue())
         {
+            if (interrupted())
+            {
+                // Cleared before it is answered: a store after the answer
+                // looked is the next one's.
+                Atomics.store(wholeWords, interruptWord, 0);
+                interrupts++;
+                interruptHandler?.();
+                continue;
+            }
             if (yieldCheck !== null && ran > 0 && yieldCheck())
             {
                 break;
@@ -1152,6 +1226,12 @@ export function createCorkHost(config){
                 }
                 if (exit.kind === 'budget')
                 {
+                    if (remaining > 0 && interrupted())
+                    {
+                        // Left at a back edge for the word, not the budget:
+                        // answered above, and the slice goes on.
+                        continue;
+                    }
                     break;
                 }
                 if (exit.retired === 0 && eip() === at)
@@ -1292,6 +1372,13 @@ export function createCorkHost(config){
         },
         stop(){
             stopped = true;
+            // Where the others interrupt this one, the stop takes the same
+            // road: the slice ends at its next back edge, not at its next
+            // region's end.
+            if (interruptible)
+            {
+                Atomics.store(wholeWords, interruptWord, 0x7fffffff);
+            }
         },
         /** Whether something asked the turn to end since the slice began (`stop`). */
         stopRequested: ()=>stopped,
@@ -1305,6 +1392,32 @@ export function createCorkHost(config){
         setYieldCheck(check){
             yieldCheck = check;
         },
+        /**
+         * Whether this executor's translated code leaves at a back edge when
+         * another stores its interrupt word: the process's own, with others.
+         */
+        interruptible,
+        /**
+         * What this executor runs, inside a slice, when another stored the word
+         * (`interruptProcess`); the slice goes on after.
+         *
+         * @param {(() => void) | null} handler
+         */
+        onInterrupt(handler){
+            interruptHandler = handler;
+        },
+        /**
+         * Asks the process's own executor for its answer before its slice ends:
+         * stored after the ask is said, so the answer finds it.
+         */
+        interruptProcess(){
+            if (interruptWord >= 0)
+            {
+                Atomics.store(wholeWords, interruptWord, 0x7fffffff);
+            }
+        },
+        /** The slices the word interrupted. */
+        interrupts: ()=>interrupts,
         runSlice,
 
         /** One byte of guest memory, for the runtime's decoder. @param {number} address */
@@ -1346,7 +1459,8 @@ export function createCorkHost(config){
         /** @param {number} address @param {number} length @returns {Uint8Array} */
         readPhysical: (address, length)=>ram.subarray(address, address + length),
         /** @param {number} address */
-        readU32: address=>whole.getUint32(ramOffset(address), true),
+        readU32: address=>((address & 3) === 0 ? wholeWords[ramOffset(address) >>> 2] >>> 0
+            : whole.getUint32(ramOffset(address), true)),
         /**
          * Dwords, signed, into an array: a host call's stack words in one call.
          *
@@ -1366,14 +1480,14 @@ export function createCorkHost(config){
         writePhysical: (address, bytes)=>{
             hostWrites++;
             hostWrittenBytes += bytes.length;
-            ram.set(bytes, address);
+            copyIn(address, bytes);
             invalidate(address, bytes.length);
         },
         /** @param {number} address @param {Uint8Array} bytes */
         writeData: (address, bytes)=>{
             hostWrites++;
             hostWrittenBytes += bytes.length;
-            ram.set(bytes, address);
+            copyIn(address, bytes);
             invalidate(address, bytes.length);
         },
         /** @param {number} address @param {number} value @param {number} length */
@@ -1425,6 +1539,13 @@ export function createCorkHost(config){
         registerFile: ()=>reg32,
         /** @param {number} base @param {number} size */
         noteStack: (base, size)=>runtime.noteStack(base, size),
+        /**
+         * @param {number} address @param {number} length
+         * @returns {number[] | null}
+         */
+        takeWrites: (address, length)=>runtime.takeWrites?.(address, length) ?? null,
+        /** @param {number} address @param {number} length */
+        markWritten: (address, length)=>runtime.markWritten?.(address, length),
         /**
          * Opens or closes pages to the program, as a reservation's commit and
          * VirtualProtect do: a closed one faults any access, with its address.
@@ -1596,7 +1717,7 @@ export function createCorkHost(config){
     host.useGuestClock = readMs=>{
         guestClock = readMs;
     };
-    host.captureContext = ()=>captureBlockContext(host);
+    host.captureContext = (/** @type {any} */ into)=>captureBlockContext(host, into);
     host.restoreContext = (/** @type {any} */ context)=>{
         restoreBlockContext(host, context);
         entered = true;

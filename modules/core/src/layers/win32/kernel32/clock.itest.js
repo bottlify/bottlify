@@ -16,6 +16,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createCorkHost } from '../../cpu/internal/cork-host.js';
+import { runToHalt } from '../../cpu/internal/halt.fixture.js';
 import * as cork from '../../../../../cork/src/index.js';
 import {
     CLOCK, queryPerformanceCounterCode, queryPerformanceFrequencyCode, tickCountCode,
@@ -103,7 +104,7 @@ test('the clock routines answer out of the block and leave a null pointer alone'
     const { bytes: image, starts, end } = program();
     host.writePhysical(PROGRAM, image);
     host.writePhysical(0x7000, new Uint8Array(u32(PROGRAM)));
-    host.runSlice(1000);
+    runToHalt(host, 1000);
 
     /** @param {number} at */
     const read = at=>{
@@ -123,7 +124,7 @@ test('the clock routines answer out of the block and leave a null pointer alone'
         host.writeReg32('eip', starts[index]);
         host.writeReg32('esp', STACK);
         host.wake();
-        host.runSlice(1000);
+        runToHalt(host, 1000);
         if (eip() === TRAP + 1)
         {
             return 'trap';

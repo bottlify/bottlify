@@ -704,3 +704,53 @@ test('addresses below closedBelow fault on a fetch and a store; none are closed 
         assert.equal(open.runSlice(100), 2);
         assert.equal(open.fault(), null);
     });
+
+test('a dword the host writes or reads is whole to a thread on the same memory', async()=>{
+    // As an x86 dword store and load are: a pointer, a count or a flag the host
+    // publishes is read by guest code on another executor while it is written.
+    const { Worker } = await import('node:worker_threads');
+    const h = host();
+    const address = 0x2004; // 4-aligned, not 8-aligned: the shared copy's byte path
+    const index = (h.blockLayout().ramBase + address) / 4;
+    const control = new Int32Array(new SharedArrayBuffer(16));
+    const worker = new Worker(`
+        const { workerData } = require('node:worker_threads');
+        const words = new Int32Array(workerData.buffer);
+        const control = new Int32Array(workerData.control);
+        Atomics.store(control, 0, 1);
+        let torn = 0;
+        for (let turn = 0; Atomics.load(control, 1) === 0; turn++)
+        {
+            const seen = words[workerData.index];
+            torn += seen !== 0 && seen !== -1 ? 1 : 0;
+            // Writing for the host's reads, between its own.
+            words[workerData.index + 1] = turn & 1 ? -1 : 0;
+        }
+        Atomics.store(control, 2, torn);
+        Atomics.store(control, 0, 2);
+        Atomics.notify(control, 0);
+    `, { eval: true,
+        workerData: { buffer: h.wasmMemory().buffer, control: control.buffer, index } });
+    try
+    {
+        Atomics.wait(control, 0, 0, 5000);
+        const zero = new Uint8Array(4);
+        const ones = new Uint8Array(4).fill(0xff);
+        let tornHere = 0;
+        const until = performance.now() + 300;
+        for (let turn = 0; performance.now() < until; turn++)
+        {
+            h.writeData(address, turn & 1 ? ones : zero);
+            const seen = h.readU32(address + 4);
+            tornHere += seen !== 0 && seen !== 0xffffffff ? 1 : 0;
+        }
+        Atomics.store(control, 1, 1);
+        Atomics.wait(control, 0, 1, 5000);
+        assert.equal(control[2], 0, 'the host\'s writes seen half written');
+        assert.equal(tornHere, 0, 'the other thread\'s writes read half written');
+    }
+    finally
+    {
+        await worker.terminate();
+    }
+});

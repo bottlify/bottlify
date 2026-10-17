@@ -987,3 +987,46 @@ test('a compressed rectangle that starts inside a block moves every block it tou
     assert.equal(move.rowBytes, 16, 'two blocks a row');
     assert.equal(move.rows, 2, 'two block rows');
 });
+
+test('a count kept in the guest is moved by compare-and-swap past the guest\'s own on another '
+    + 'executor', ()=>{
+    // The host reads 3 to take a reference; before it stores 4, a thread on
+    // another executor releases one in the guest (3 -> 2). The count ends at 3,
+    // not 4; and a release meanwhile an AddRef ends where both leave it.
+    let word = 0;
+    /** @type {(() => void) | null} */
+    let between = null;
+    const count = createReferenceCount();
+    count.addRef();
+    count.addRef();
+    // Placed, the count goes into the word: 3.
+    count.place({
+        address: 0x1000,
+        read: ()=>word,
+        write: value=>{
+            word = value >>> 0;
+        },
+        exchange: (expected, value)=>{
+            const meanwhile = between;
+            between = null;
+            meanwhile?.();
+            const held = word;
+            if (held === expected)
+            {
+                word = value >>> 0;
+            }
+            return held;
+        },
+    });
+    between = ()=>{
+        word -= 1;
+    };
+    assert.equal(count.addRef(), 3, 'its own reference on top of the 2 left');
+    assert.equal(word, 3);
+    between = ()=>{
+        word += 1;
+    };
+    assert.equal(count.release(), 3, 'one gone from the 4 the guest\'s AddRef made');
+    assert.equal(word, 3);
+    assert.equal(count.destroyed, false);
+});

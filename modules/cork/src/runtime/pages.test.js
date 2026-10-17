@@ -93,3 +93,62 @@ test('the table reads and writes the same bytes after the memory grows', ()=>{
     pages.clearStale();
     assert.equal(pages.staleSize(), 0, 'nothing once looked at');
 });
+
+test('two threads changing one page at once lose neither\'s flag nor its granules', async()=>{
+    const { Worker } = await import('node:worker_threads');
+    const layout = ownLayout({ ramSize: 1 << 20, hashSlots: 1 << 16 });
+    const size = pagesFor(layout, tablesSize(layout));
+    const memory = new WebAssembly.Memory({ initial: size, maximum: size, shared: true });
+    const pages = createPageTable(memory, layout);
+    const PAGE = 0x40;
+    const MS = 300;
+    // Both start together (the word) and go on for the same time: each sets a
+    // flag of its own on the page and clears it again, the other thread doing
+    // the same with another flag, and one that finds its flag gone right after
+    // setting it lost it to the other's write. Each widens one end of the
+    // page's code range as it goes.
+    const start = new Int32Array(new SharedArrayBuffer(8));
+    const other = new Worker(`
+        const { workerData, parentPort } = require('node:worker_threads');
+        import(workerData.pages).then(({ PageFlag, createPageTable })=>{
+            const pages = createPageTable(workerData.memory, workerData.layout);
+            Atomics.store(workerData.start, 0, 1);
+            Atomics.notify(workerData.start, 0);
+            Atomics.wait(workerData.start, 1, 0);
+            let lost = 0;
+            const until = performance.now() + workerData.ms;
+            for (let turn = 0; performance.now() < until; turn++)
+            {
+                pages.set(workerData.page, PageFlag.VOLATILE);
+                lost += (pages.get(workerData.page) & PageFlag.VOLATILE) === 0 ? 1 : 0;
+                pages.clear(workerData.page, PageFlag.VOLATILE);
+                pages.markCode(workerData.page * 4096 + 0xf00 - (turn & 0x7f), 1);
+            }
+            parentPort.postMessage(lost);
+        });
+    `, { eval: true, workerData: { pages: new URL('./pages.js', import.meta.url).href, memory,
+        layout, ms: MS, page: PAGE, start } });
+    const done = new Promise(resolve=>other.once('message', resolve));
+    while (Atomics.load(start, 0) === 0)
+    {
+        await new Promise(resolve=>setTimeout(resolve, 1));
+    }
+    Atomics.store(start, 1, 1);
+    Atomics.notify(start, 1);
+    let lost = 0;
+    const until = performance.now() + MS;
+    for (let turn = 0; performance.now() < until; turn++)
+    {
+        pages.set(PAGE, PageFlag.CLOSED);
+        lost += (pages.get(PAGE) & PageFlag.CLOSED) === 0 ? 1 : 0;
+        pages.clear(PAGE, PageFlag.CLOSED);
+        pages.markCode(PAGE * 4096 + 0x100 + (turn & 0x7f), 1);
+    }
+    const lostThere = await done;
+    await other.terminate();
+    assert.equal(lost, 0, 'this thread\'s flag');
+    assert.equal(lostThere, 0, 'the other\'s');
+    assert.equal(pages.get(PAGE) & PageFlag.HAS_CODE, PageFlag.HAS_CODE);
+    // Granules of 32 bytes: 0x100 is the 9th, 0xf00 the 121st.
+    assert.deepEqual(pages.codeRange(PAGE), [0x100 >>> 5, (0xf00 >>> 5) + 1]);
+});

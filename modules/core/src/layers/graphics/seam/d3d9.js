@@ -759,9 +759,11 @@ export function createDirect3D9Seam(
                 const answer = handBack(held.surface, surfaceInterfaces, IID_IDirect3DSurface9,
                     out >>> 0, E_OUTOFMEMORY, owners.get(texture));
                 // Published, so the guest may hand the level out itself from
-                // now on: publishing is memoised, and this is its pointer.
+                // now on: publishing is memoised, and this is its pointer --
+                // the publisher's, not read back from the program's variable,
+                // which another thread may have written meanwhile.
                 shadowOf(owners.get(texture))?.noteLevel(texture, level >>> 0,
-                    fields.readU32(out >>> 0));
+                    publisher.publish(held.surface, surfaceInterfaces, IID_IDirect3DSurface9));
                 return answer;
             }
             return hr;
@@ -3167,6 +3169,7 @@ export function createDirect3D9Seam(
                 readMemory: memory.windowMemory ?? memory.readMemory,
                 readU32: memory.readU32,
                 writeMemory: memory.writeMemory,
+                compareExchangeU32: memory.compareExchangeU32,
                 device: held.device,
                 divergence,
                 phases,

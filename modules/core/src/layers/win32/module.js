@@ -47,6 +47,7 @@ import { createMsvcrtFunctions } from './msvcrt/functions.js';
 import { createCrtdllFunctions } from './msvcrt/crtdll.js';
 import { createMsvcr80Functions } from './msvcrt/msvcr80.js';
 import { createMsvcp80Functions } from './msvcrt/msvcp80.js';
+import { createUcrtbaseFunctions } from './msvcrt/ucrtbase.js';
 import { createWindowFunctions } from './user32/windows.js';
 import { createWindowDirectory } from './user32/directory.js';
 import { createMessageQueue } from './user32/messages.js';
@@ -141,7 +142,8 @@ import { registerQuartzClasses } from './quartz/graph.js';
 
 /**
  * The libraries whose undecorated exports are cdecl: the C runtime and its
- * versioned and debug siblings, `crtdll`, and the universal runtime.
+ * versioned and debug siblings, `crtdll`, and the universal runtime under its
+ * own name and its API sets'.
  *
  * Every other library Windows ships exports stdcall, and its undecorated names
  * say nothing about how many bytes the callee pops. That is what a stub
@@ -152,7 +154,16 @@ import { registerQuartzClasses } from './quartz/graph.js';
  * the tables, because it is a fact about the library and not about any one
  * name in it.
  */
-const CDECL_LIBRARIES = /^(msvcrt|msvcr\d+d?|msvcp\d+d?|crtdll|ucrtbase|cabinet)\.dll$/i;
+const CDECL_LIBRARIES =
+    /^(msvcrt|msvcr\d+d?|msvcp\d+d?|crtdll|ucrtbase|api-ms-win-crt-[a-z0-9-]+|cabinet)\.dll$/i;
+
+/**
+ * The runtimes built over msvcrt's table, msvcrt first: whichever of them a
+ * program loaded holds the variables the runtime's state lives in -- a program
+ * of the universal runtime loads ucrtbase and never msvcrt, and its standard
+ * streams were records at address zero.
+ */
+const CRT_IMAGES = ['msvcrt.dll', 'ucrtbase.dll', 'MSVCR80.dll', 'MSVCR71.dll', 'CRTDLL.dll'];
 
 /** The reason a DllMain is called with when its library is unloaded, or the process ends. */
 const DLL_PROCESS_DETACH = 0;
@@ -433,6 +444,8 @@ export function createWin32Module(){
                 memory.readCString(address, maxLength);
             /** Where kernel32 put one of its routines that runs in the guest. @param {string} name */
             const kernel32Export = name=>modules.find('kernel32.dll')?.addressOf?.(name) ?? 0;
+            /** The C runtime image the program loaded (`CRT_IMAGES`), or null before it has one. */
+            const crtImage = ()=>CRT_IMAGES.map(name=>modules.find(name)).find(Boolean) ?? null;
             // The scan under the C string functions whose answer is a position
             // rather than a text: it walks the same chunks readCString does and
             // never materialises the string.
@@ -708,6 +721,8 @@ export function createWin32Module(){
                     readBytes: (address, length)=>memory.readBytes(address, length),
                     writeBytes: (address, bytes)=>memory.writeBytes(address, bytes),
                     fillBytes: (address, value, length)=>memory.fillBytes(address, value, length),
+                    compareExchangeU32: (address, expected, value)=>
+                        memory.compareExchangeU32(address, expected, value),
                 },
             });
             const allocator = guestHeap.wrap();
@@ -1543,6 +1558,9 @@ export function createWin32Module(){
                         readMemory,
                         processId,
                         writeMemory,
+                        compareExchangeU64: (address, expected, value)=>
+                            memory.compareExchangeU64(address, expected, value),
+                        wordsOver: (address, length)=>memory.wordsOver?.(address, length) ?? null,
                         readCString,
                         readWideString,
                         currentThread: ()=>kernel.currentThread(),
@@ -1622,6 +1640,10 @@ export function createWin32Module(){
                         volume,
                         readMemory,
                         writeMemory,
+                        compareExchangeU32: (address, expected, value)=>
+                            memory.compareExchangeU32(address, expected, value),
+                        compareExchangeU64: (address, expected, value)=>
+                            memory.compareExchangeU64(address, expected, value),
                         currentThread: ()=>kernel.currentThread(),
                         park: (/** @type {any} */ thread)=>bridge.park(thread),
                         critical,
@@ -1693,8 +1715,8 @@ export function createWin32Module(){
                         setLastError: setError,
                         namedObjects,
                         metrics: mappings,
-                        /** @param {number} bytes */
-                        allocate: bytes=>allocator.allocate(bytes),
+                        /** @param {number} bytes @param {{ alignment?: number }} [options] */
+                        allocate: (bytes, options)=>allocator.allocate(bytes, options),
                         /** @param {number} address @param {number} bytes */
                         allocateAt: (address, bytes)=>allocator.allocateAt(address, bytes),
                         /** @param {number} address */
@@ -1955,11 +1977,11 @@ export function createWin32Module(){
                         },
                         // The standard streams are records in the runtime's own
                         // image, wherever the loader put its `_iob`.
-                        iob: ()=>modules.find('msvcrt.dll')?.addressOf?.('_iob') ?? 0,
+                        iob: ()=>crtImage()?.addressOf?.('_iob') ?? 0,
                         // And the tables a program reads in place -- `_mbctype`,
                         // `_environ`, the time zone's -- are rewritten where the
                         // loader placed them.
-                        addressOf: name=>modules.find('msvcrt.dll')?.addressOf?.(name) ?? 0,
+                        addressOf: name=>crtImage()?.addressOf?.(name) ?? 0,
                         // The runtime's copy of the environment starts as the
                         // variables kernel32 starts the process with.
                         environment: startingEnvironment,
@@ -3228,6 +3250,14 @@ export function createWin32Module(){
                 { readMemory, writeMemory, fillMemory });
             // Visual C++ 2003's: msvcrt's functions and the filter its DLLs
             // start under, and the C++ library's strings, laid out as 2005's.
+            // The universal runtime of Visual C++ 2015 on, over 2005's: the same
+            // functions, reached through the entries its headers call instead.
+            libraries['ucrtbase.dll'] = createUcrtbaseFunctions(libraries['MSVCR80.dll'], {
+                readMemory,
+                writeMemory,
+                callGuest: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
+                currentThread: ()=>kernel.currentThread(),
+            });
             libraries['MSVCR71.dll'] = { ...libraries['msvcrt.dll'],
                 __CppXcptFilter: libraries['msvcrt.dll']._XcptFilter };
             libraries['MSVCP71.dll'] = createMsvcp80Functions(libraries['MSVCR71.dll'],
@@ -3310,10 +3340,13 @@ export function createWin32Module(){
 
                 /**
                  * The libraries with a table here that are not Windows' own but a
-                 * redistributable a setup installs -- the D3DX helpers. The
-                 * table only stands in for a program that brought none; a copy
-                 * an installation put in system32 is what a program means to
-                 * load, where a copy of Windows' own would displace the engine's.
+                 * redistributable a setup installs -- the D3DX helpers -- so a
+                 * bottle may carry them where it carries no copy of Windows' own.
+                 * A copy beside the program's executable is loaded in place of the
+                 * table; one an installation put in system32 is not, as for every
+                 * name with a table (`libraryCandidates`): two of one library in a
+                 * process -- the installed D3DX compiling an effect the engine's is
+                 * then asked to read -- is a format neither side shares.
                  *
                  * @returns {string[]}
                  */

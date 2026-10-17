@@ -10,6 +10,9 @@
  * queue every turn without the host, and on a page a trip costs more than a
  * turn of the working thread's guest code. The program's main thread waits
  * in GetMessage while a thread it made counts down and then posts it WM_QUIT.
+ * On several processors the counting thread runs on another executor and the
+ * process's turns wait for it: those are the guest working too, not a machine
+ * with nothing to do, and make no trip either.
  */
 
 import { test } from 'node:test';
@@ -23,10 +26,15 @@ const u32 = value=>[
 ];
 
 const WM_QUIT = 0x12;
-/** Twice this many instructions: hundreds of turns of a hundred thousand. */
+/**
+ * Twice this many instructions: hundreds of turns of a hundred thousand on
+ * one processor; on several, the process's turns wait a few milliseconds each
+ * for the other executor, and the count is twenty times as long to make as many.
+ */
 const COUNT = 30_000_000;
 
-function buildProgram(){
+/** @param {number} count */
+function buildProgram(count){
     return buildExe({
         imports: {
             'KERNEL32.dll': ['GetCurrentThreadId', 'CreateThread', 'ExitProcess'],
@@ -52,7 +60,7 @@ function buildProgram(){
                 0x6a, 0x00, ...call('ExitProcess'),
             ];
             const worker = [
-                0xb9, ...u32(COUNT), //                          mov ecx, COUNT
+                0xb9, ...u32(count), //                          mov ecx, count
                 0x49, //                                         W: dec ecx
                 0x75, 0xfd, //                                   jnz W
                 0x6a, 0x00, 0x6a, 0x00, 0x6a, WM_QUIT, //        lParam, wParam, Msg
@@ -66,38 +74,45 @@ function buildProgram(){
     });
 }
 
-test('a thread waiting in GetMessage beside one that works costs no trip a turn',
-    { timeout: 60000 }, async t=>{
-        let turns = 0;
-        let trips = 0;
-        // The page's own pacing, with a clock that never moves, so a trip is
-        // only ever one the loop asked for because something was pending.
-        const paced = pagePacing({
-            macrotask: ()=>{
-                trips++;
-                return new Promise(resolve=>{
-                    setImmediate(resolve);
-                });
-            },
-            hidden: ()=>false,
-            now: ()=>0,
-        });
-        const app = await createApp({
-            executable: buildProgram(),
-            imagePath: 'C:\\App\\Pacing.exe',
-            engine: 'cork',
-            pacing: {
-                yield: pending=>{
-                    turns++;
-                    return paced.yield(pending);
+for (const cores of [1, 2])
+{
+    test(`a thread waiting in GetMessage beside one that works costs no trip a turn (${cores})`,
+        { timeout: 60000 }, async t=>{
+            let turns = 0;
+            let trips = 0;
+            // The page's own pacing, with a clock that never moves, so a trip is
+            // only ever one the loop asked for because something was pending.
+            const paced = pagePacing({
+                macrotask: ()=>{
+                    trips++;
+                    return new Promise(resolve=>{
+                        setImmediate(resolve);
+                    });
                 },
-                wait: paced.wait,
-            },
-        });
-        t.after(()=>app.dispose());
+                hidden: ()=>false,
+                now: ()=>0,
+            });
+            const app = await createApp({
+                executable: buildProgram(cores > 1 ? COUNT * 20 : COUNT),
+                imagePath: 'C:\\App\\Pacing.exe',
+                engine: 'cork',
+                cpu: { cores },
+                // Turns of a quantum, as counted: one among ready threads is
+                // otherwise as long as a quarter of a millisecond takes.
+                quantum: 100_000,
+                pacing: {
+                    yield: pending=>{
+                        turns++;
+                        return paced.yield(pending);
+                    },
+                    wait: paced.wait,
+                },
+            });
+            t.after(()=>app.dispose());
 
-        assert.equal(await app.run({ timeoutMs: 40000 }), 0);
-        assert.ok(turns > 200, `the count ran across many turns, not ${turns}`);
-        assert.ok(trips < turns / 20,
-            `${trips} trips round the event loop in ${turns} turns`);
-    });
+            assert.equal(await app.run({ timeoutMs: 40000 }), 0);
+            assert.ok(turns > 200, `the count ran across many turns, not ${turns}`);
+            assert.ok(trips < turns / 20,
+                `${trips} trips round the event loop in ${turns} turns`);
+        });
+}

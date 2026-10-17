@@ -60,6 +60,9 @@ export const D3DLOCK_NO_DIRTY_UPDATE = 0x00008000;
  * @property {number} address
  * @property {() => number} read
  * @property {(value: number) => void} write
+ * @property {(expected: number, value: number) => number} [exchange]  `value` stored
+ *           only if the word holds `expected`, indivisible against the guest's
+ *           AddRef and Release on the process's other executors; answers what it held.
  */
 
 /**
@@ -105,6 +108,36 @@ export function createReferenceCount(options = {}){
             }
         },
     };
+    /**
+     * The count moved by `step` from what it holds, unless that is 0 and the
+     * step down: the guest's AddRef and Release, on another executor, move a
+     * placed count with `lock cmpxchg` meanwhile, and a read then a write of
+     * it lost theirs -- a reference too many and the object never freed, or
+     * one too few and freed while a thread still held it.
+     *
+     * @param {number} step  1 or -1
+     * @returns {{ was: number, now: number }}
+     */
+    const move = step=>{
+        for (;;)
+        {
+            const was = count.value >>> 0;
+            if (was === 0 && step < 0)
+            {
+                return { was, now: 0 };
+            }
+            const now = (was + step) >>> 0;
+            if (cell?.exchange === undefined)
+            {
+                count.value = now;
+                return { was, now };
+            }
+            if ((cell.exchange(was, now) >>> 0) === was)
+            {
+                return { was, now };
+            }
+        }
+    };
     // The device's references to a resource bound to it. Windows keeps a
     // bound resource alive past the program's last Release, with a count of
     // zero, and hands the same object back when asked for what is bound; it
@@ -130,18 +163,20 @@ export function createReferenceCount(options = {}){
             {
                 throw new Error('AddRef on a resource whose last reference was released');
             }
+            // A count at 0 moves only here -- the guest's AddRef asks the host
+            // there -- so what is read as 0 stays 0 until this step.
             if (count.value === 0)
             {
                 options.onFirstRef?.();
             }
-            return ++count.value;
+            return move(1).now;
         },
         release(){
-            if (count.value === 0)
+            const { was, now: left } = move(-1);
+            if (was === 0)
             {
                 return 0;
             }
-            const left = --count.value;
             if (left === 0)
             {
                 options.onZero?.();

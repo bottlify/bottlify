@@ -301,6 +301,14 @@ export function connectGraphicsWorker(options){
             bitmap?.close?.();
             return;
         }
+        // A frame counted, not sent: presented with no picture to show.
+        if (!bitmap && !pixels)
+        {
+            frames++;
+            presentTo(drewFor === undefined ? { surface: null, frameIndex }
+                : { surface: null, frameIndex, source: drewFor });
+            return;
+        }
         const width = bitmap ? bitmap.width : /** @type {number} */ (size.width);
         const height = bitmap ? bitmap.height : /** @type {number} */ (size.height);
         if (!surface || surface.width !== width || surface.height !== height

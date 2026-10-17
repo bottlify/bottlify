@@ -77,6 +77,11 @@
  *     -- the process's executors -- where more than one; absent, one.
  * @property {number} [processor]  Cork's own: which of them this layout's executor is, the
  *     initial APIC id `cpuid` gives code running there.
+ * @property {number} [interrupt]  Cork's own, outside the state block, where the process has
+ *     several executors: an i32 another executor stores when it needs this one's answer --
+ *     not zero, every back edge of this one's translated code leaves as on a spent budget.
+ * @property {boolean} [shared]  Cork's own: the process's shared layout (`sharedLayout`), whose
+ *     state fields and tables are offsets from bases each instance is given.
  * @property {string} id           A hash of every field above.
  */
 
@@ -86,6 +91,9 @@
  * @typedef {Object} EngineEnv
  * @property {WebAssembly.Memory} memory  The layer's memory (the emulator's in hybrid).
  * @property {StateLayout} layout
+ * @property {StateLayout} [sharedLayout]  Cork's own: the process's shared layout
+ *     (`sharedLayout`), translations are made for where it has several executors -- the same
+ *     bytes on all of them, each instance given this executor's bases.
  * @property {EngineConfig} config
  * @property {(address: number) => number} read   One byte of guest memory.
  * @property {(start: number, end: number) => Uint8Array} [readBytes]  The bytes `read`
@@ -231,6 +239,8 @@
  * @property {boolean} [dispatch]  Each module placed in a range of the table, a transfer inside
  *     it a direct tail call. Default false.
  * @property {boolean} [leafCalls]  A small leaf callee formed into its caller. Default true.
+ * @property {boolean} [regionStops]  A region stops at a block another region has an entry for
+ *     and leaves to it there; off by default (it cuts hot code: `SETTINGS.md`).
  * @property {number} [leafBlocks]  Its blocks at most. Default 16.
  * @property {number} [leafBytes]  Its bytes at most. Default 512.
  * @property {number} [formDepth]  How many levels of callees formed in may keep direct calls
@@ -276,6 +286,8 @@
  *     pool lends them). Default 1.
  * @property {number} [arenaBytes]  Bytes of the shared translation arena (0: none). Default
  *     48 MiB.
+ * @property {SharedArrayBuffer} [arena]  The arena itself, made by the host for every executor of
+ *     a process (cork's `createArena`): what one executor's translators emitted, the others take.
  * @property {number} [loadingBatch]  While the translation worker loads, the largest batch
  *     emitted on the engine thread -- none where `holdMs` bounds the work there: a batch waits
  *     for the worker. Default 16.
@@ -303,6 +315,8 @@
  *     before its event loop does. Default 2.
  * @property {number} [executorYieldMs]  The longest an executor goes without a turn of its
  *     event loop. Default 4.
+ * @property {number} [executorHoldMs]  How long an executor keeps a thread past its slice while
+ *     other ready threads wait for one: its turn. Default 1.
  */
 
 /**
@@ -341,9 +355,15 @@
  *
  * @typedef {Object} TranslationStore
  * @property {(key: string) => Promise<Uint8Array | null>} get
- * @property {(key: string, bytes: Uint8Array) => Promise<void>} put  The bytes are the store's
- *     from the call on: a directory store hands a record that is the whole of its buffer to the
- *     worker that writes it, and the caller's view of it is then empty.
+ * @property {(key: string, bytes: Uint8Array, options?: { needs?: string }) => Promise<void>} put
+ *     The bytes are the store's from the call on: a directory store hands a record that is the
+ *     whole of its buffer to the worker that writes it, and the caller's view of it is then
+ *     empty. `needs` names the record this one's code is in (a region's batch module), which
+ *     the store keeps as long as it keeps this one.
+ * @property {(key: string) => void} [touch]  Counts a record as used without reading it (a
+ *     module whose instance the run holds already). Optional.
+ * @property {() => any} [stats]  What the store holds and what its opening kept, for the
+ *     report. Optional.
  * @property {(key: string) => Uint8Array | null | undefined} [getNow]  The record at once,
  *     without a turn of the event loop, where the store can answer so; undefined where it
  *     cannot yet, and the translator asks `get`. Optional.
@@ -354,8 +374,8 @@
  *     directory store reads its index). Optional.
  * @property {() => Promise<void>} [flush]  Writes any pending bookkeeping
  *     (a directory store's index) before the run ends. Optional.
- * @property {() => void} [close]  Lets go of what the store holds open (a directory
- *     store's access handle on its records file). Optional; after `flush`.
+ * @property {() => (void | Promise<void>)} [close]  Lets go of what the store holds open (a
+ *     directory store's access handle on its records file) once its writes are done. Optional.
  */
 
 /**
@@ -424,6 +444,14 @@
  * @property {number} retired          Instructions retired in the engine, for a frame's share.
  * @property {number} cacheHits        Regions taken from the store.
  * @property {number} cacheMisses
+ * @property {number} [missNoRecord]   Misses the store had nothing for at the region's entry.
+ * @property {number} [missChanged]    Misses where it had another region: other bytes, or one
+ *     compiled for what this run does not give the entry (its precision, its stack's shape).
+ * @property {number} [missNoModule]   Misses whose record named a module the store no longer had.
+ * @property {number} [hitsFormedAgain]  Hits formed again as their record says, the region formed
+ *     here otherwise (beside other regions, or before its callees were known).
+ * @property {number} [toStoredRegion]  Candidates at a block of a region the store holds, formed
+ *     as that region instead.
  * @property {number} [lookedUpNow]    Batches the store answered without a turn of the event loop.
  * @property {number} [lookedUpLater]  Batches it answered a turn of the event loop later.
  * @property {number} [lookedUpInPart]  Calls that left a batch's answers half read (`holdMs`).
@@ -571,6 +599,13 @@
  *     A hold of the engine thread since that `performance.now`, kept when over the floor.
  * @property {(page: number) => boolean} holdsPage  Whether a published region spans the page
  *     (the pages the emulator's handoff bit is set for).
+ * @property {(address: number, length: number) => number[]} [takeWrites]  The range's pages
+ *     written since they were armed (or never armed, or on a stack whose stores go untested),
+ *     each armed from now: a store finds an armed page by the flag its page check reads
+ *     already. One set of marks for every caller, and blind to a store another executor
+ *     tested before the arming: the cpu layer's write watch (`write-clock.js`) answers both.
+ * @property {(address: number, length: number) => void} [markWritten]  Bytes another
+ *     thread wrote into guest memory in place: the armed pages they reach are marked.
  * @property {(base: number, size: number) => void} noteStack  A thread's stack: a store
  *     through esp may go untested while no translated code lies on one.
  * @property {() => EngineDiagnostics} diagnostics  The whole snapshot, for a report: it

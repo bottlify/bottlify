@@ -20,19 +20,23 @@
  * launch runs a program.
  *
  *   node tools/cork-bench/bench.mjs [name...] [--warm N] [--iters N] [--reps N]
- *       [--cork JSON] [--root DIR] [--json] [--store fresh | --seed DIR | --capture DIR]
+ *       [--cork JSON] [--cores N] [--root DIR] [--json]
+ *       [--store fresh | --seed DIR | --capture DIR]
  *
  * Each rep makes a fresh host, times its first iteration (`coldMs`: the
  * interpreter, the translator and the tier-up, what a new stretch of code
  * costs), runs `--warm` iterations and times `--iters` more (`usPerIter`, the
- * best rep: translated code in its steady state). `firstMs` is the first
+ * best rep: translated code in its steady state; `best3Us` the three best reps'
+ * mean). `firstMs` is the first
  * rep's first iteration alone: in a process that has run nothing before --
  * the first workload named, or any under `compare.mjs`, which runs each in a
  * process of its own -- the engine's own JavaScript and wasm are cold too, as
  * at a launch, where `coldMs` leaves the first reps out to time the
  * translator warm. `eax` is the program's own
  * checksum and must not change with the engine. `--cork` is the translator's
- * configuration (`{"translate":false}` times the interpreter alone), `--root`
+ * configuration (`{"translate":false}` times the interpreter alone), `--cores`
+ * lays the memory out for that many executors and runs the program on the
+ * first, as a process of one thread on a machine of several runs, `--root`
  * a checkout whose engine to run, so one tree compares against another
  * (`compare.mjs`). A steady-state figure moves by five to ten per cent between
  * processes; `node --no-liftoff` takes the baseline tier out of it.
@@ -59,6 +63,7 @@ const warm = Number(flag('--warm', '20'));
 const iters = Number(flag('--iters', '40'));
 const reps = Number(flag('--reps', '5'));
 const cork = JSON.parse(flag('--cork', '{}'));
+const cores = Number(flag('--cores', '1'));
 const root = pathToFileURL(resolve(flag('--root', new URL('../..', import.meta.url).pathname)) + '/');
 const only = args.filter((one, at)=>!one.startsWith('--') && !args[at - 1]?.startsWith('--'));
 
@@ -85,6 +90,7 @@ function makeHost(image, store){
     const host = createCorkHost({
         engine, memorySize: 16 << 20, trapPort: 0xb077, entryVector: ENTRY_VECTOR,
         initialStack: 0x800000, cork: store === null ? cork : { ...cork, store },
+        ...(cores > 1 ? { executors: cores } : {}),
     });
     host.writePhysical(IMAGE_BASE, image);
     const vector = new Uint8Array(4);
@@ -207,6 +213,9 @@ for (const name of names)
         coldMs: Number(median(colds.length > 3 ? colds.slice(2) : colds).toFixed(2)),
         firstMs: Number(colds[0].toFixed(2)),
         usPerIter: Number(best.toFixed(1)),
+        // The three best reps' mean: steadier than the best alone against one lucky rep.
+        ...(steady.length >= 3 ? { best3Us: Number((steady.toSorted((a, b)=>a - b).slice(0, 3)
+            .reduce((sum, one)=>sum + one, 0) / 3).toFixed(1)) } : {}),
         nsPerInstr: Number((best * 1000 / summary.instructions).toFixed(3)),
         instructions: Math.round(summary.instructions),
         share: Number(summary.share.toFixed(3)),

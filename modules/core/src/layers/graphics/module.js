@@ -445,6 +445,13 @@ export function createGraphicsModule(){
                 windowMemory: (address, length)=>(memory.window
                     ? memory.window(address, length)
                     : memory.readBytes(address, length)),
+                /**
+                 * Watches a range for writes: what a draw from a dynamic buffer
+                 * compares is the pages written since its last look.
+                 *
+                 * @param {number} address @param {number} length
+                 */
+                watchWrites: (address, length)=>memory.watchWrites?.(address, length) ?? null,
                 /** A dword, read in place. @param {number} address */
                 readU32: address=>memory.readU32(address),
                 /**
@@ -466,6 +473,16 @@ export function createGraphicsModule(){
                 readF32sInto: (address, count, into)=>memory.readF32sInto(address, count, into),
                 /** @param {number} address @param {Uint8Array} bytes */
                 writeMemory: (address, bytes)=>memory.writeBytes(address, bytes),
+                /**
+                 * A dword swapped only if it holds `expected`, indivisible against
+                 * the guest's threads on the process's other executors: a word
+                 * a guest routine takes with `lock cmpxchg` that the host also
+                 * moves. Answers what the word held.
+                 */
+                compareExchangeU32: typeof memory.compareExchangeU32 === 'function'
+                    ? (/** @type {number} */ address, /** @type {number} */ expected,
+                        /** @type {number} */ value)=>memory.compareExchangeU32(address, expected, value)
+                    : undefined,
                 /**
                  * Whether the guest may write `length` bytes at an address: an
                  * out-parameter the system probes before it writes through it,

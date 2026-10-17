@@ -5,8 +5,8 @@
  */
 
 /**
- * The run's named kernel objects, for a process across a link (roadmap/v2,
- * stage 2): what it creates by name lives here, in the run's one namespace,
+ * The run's named kernel objects, for a process across a link:
+ * what it creates by name lives here, in the run's one namespace,
  * and what it opens by name is whichever process's object holds the name.
  * The process holds a stand-in and asks here for every change and every wait.
  *

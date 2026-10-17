@@ -16,7 +16,29 @@ differently raises a `divergence` event naming the API.
 
 ## Processes
 
-- A program is told it has one processor for each of its executors (`executors`, one by default). A thread's affinity mask keeps it to those executors. Not done: a child process does not inherit its parent's narrowed process mask, a process handle other than the caller's own reads and sets the caller's mask, `NtSetInformationProcess(ProcessAffinityMask)` is accepted and ignored, and `NtQueryInformationThread`/`NtSetInformationThread` know no affinity; GetActiveProcessorCount, GetLogicalProcessorInformationEx and the processor-group calls are not exported.
+- With several executors (`cpu.cores`), what one thread does is seen by the others as the host
+  orders it. The locked instructions, `xchg` and the kernel's own objects are atomic and ordered
+  everywhere; a plain store is ordered after the stores before it only on a host that keeps that
+  order itself (x86 does). On a host that does not -- an ARM machine -- a program passing a
+  message through plain stores alone (a flag after its payload, a spinlock released with `mov`)
+  may see the flag before the payload. Not measured on such a host yet.
+- With several executors, a store into bytes another executor is translating at that instant can
+  be missed when the store's page check came before the other set the page's code flag and the
+  store landed after it read the bytes back -- a window of a few instructions, longer (at most a
+  loop's checked turns) for a loop's stores checked once for several turns. The translation then
+  keeps the old bytes. Windows makes no promise either until the thread running the code
+  synchronises with the one writing it; here the old translation stays after that too. A store
+  made before the code was translated, or after its page was flagged, is always seen. Memory
+  another thread frees or protects meanwhile is not faulted by a loop's accesses checked before.
+- HeapLock and HeapUnlock check the handle and exclude nothing: another thread's heap calls go
+  on meanwhile, each one whole, so a HeapWalk between them can meet a block another thread
+  allocated or freed.
+- A program is told it has one processor for each of its executors (`cpu.cores`: in a browser whose page can share memory one fewer than the host's processors, at most eight, by default; one elsewhere). A thread's affinity mask keeps it to those executors. Not done: a child process does not inherit its parent's narrowed process mask, a process handle other than the caller's own reads and sets the caller's mask, `NtSetInformationProcess(ProcessAffinityMask)` is accepted and ignored, and `NtQueryInformationThread`/`NtSetInformationThread` know no affinity; GetActiveProcessorCount, GetLogicalProcessorInformationEx and the processor-group calls are not exported.
+- With several executors the translations of the process's own executor and of the others are
+  kept apart in the translation store (the others translate for the layout they share), and so
+  are those of one executor and of several (the locked instructions are atomic on several):
+  changing `cpu.cores` starts cold once, and a thread that ran on the process's own executor in
+  one run and on another in the next warms up there again.
 - A child started with `CreateProcess` runs while its parent waits; the parent resumes when the
   child ends. With `concurrency` 2 or 4 every process runs in a worker of its own, the program the
   page started too, and a child starts at `CreateProcess` and runs beside its parent; one past

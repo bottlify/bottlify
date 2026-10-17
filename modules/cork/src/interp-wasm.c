@@ -60,6 +60,9 @@ enum
 /* A page with a block closed in a translated loop (PageFlag.CLOSED): see enter. */
 #define CLOSED 8u
 #define NO_EXECUTE 16u
+/* A page watched for writes (PageFlag.WATCH): a store there is left to the
+ * JavaScript tier, which marks the page written; the next is a store as any. */
+#define WATCH 32u
 #define NONE 0xffffffffu
 
 static u8 *ram;
@@ -253,7 +256,7 @@ static u32 repeatBulk(u32 kind, u32 size, u32 down)
         if (room < n) n = room;
     }
     u32 bytes = n << SIZE_INDEX(size);
-    if (n == 0 || (pageFlags[to >> 12] & (INACCESSIBLE | HAS_CODE)) != 0) return 0;
+    if (n == 0 || (pageFlags[to >> 12] & (INACCESSIBLE | HAS_CODE | WATCH)) != 0) return 0;
     /* The run's lowest bytes: going down, the pointers less the bytes before
      * their own elements. */
     u32 low = down ? to + size - bytes : to;
@@ -701,9 +704,10 @@ static inline double loadF64(u32 at, u32 *status)
 #define POP_ST() do { xp |= 1u << top; empty |= 1u << top; top = (top + 1) & 7; } while (0)
 #define X_READ(a, size) do { if (touches((a), (size), INACCESSIBLE)) { code = X_FAULT; goto done; } } while (0)
 #define X_WRITE(a, size) do { u32 _a = (a); \
-        if (touches(_a, (size), INACCESSIBLE | HAS_CODE)) \
+        if (touches(_a, (size), INACCESSIBLE | HAS_CODE | WATCH)) \
         { \
             if (touches(_a, (size), INACCESSIBLE)) { code = X_FAULT; goto done; } \
+            if (touches(_a, (size), WATCH)) { code = X_LEAVE; goto done; } \
             if (codeHit(_a) || codeHit(_a + (size) - 1)) { xWrite = _a; xWriteSize = (size); } \
         } } while (0)
 
@@ -2412,9 +2416,10 @@ static u32 runInteger(u32 budget)
         /* A store's page test: a fault before it, a note of translated code for after it. */
         u32 codeWrite = NONE, codeWriteSize = 0;
 #define WRITE_CHECK(a, size) do { u32 _a = (a); \
-            if (touches(_a, (size), INACCESSIBLE | HAS_CODE)) \
+            if (touches(_a, (size), INACCESSIBLE | HAS_CODE | WATCH)) \
             { \
                 if (touches(_a, (size), INACCESSIBLE)) FAULT(13); \
+                if (touches(_a, (size), WATCH)) LEAVE(W_UNSUPPORTED); \
                 if (codeHit(_a) || codeHit(_a + (size) - 1)) { codeWrite = _a; codeWriteSize = (size); } \
             } } while (0)
 #define RM_READ(size, out) do { \
@@ -2532,7 +2537,7 @@ static u32 runInteger(u32 budget)
             /* pushad: all eight stores tested before any, so a fault leaves the registers. */
             if (opsize != 4) LEAVE(W_UNSUPPORTED);
             u32 esp = regs[4], at = esp - 32;
-            if (touches(at, 32, INACCESSIBLE | HAS_CODE)) LEAVE(W_UNSUPPORTED);
+            if (touches(at, 32, INACCESSIBLE | HAS_CODE | WATCH)) LEAVE(W_UNSUPPORTED);
             for (u32 i = 0; i < 8; i++) *(u32 *)(ram + esp - 4 * (i + 1)) = i == 4 ? esp : regs[i];
             regs[4] = at;
             break;

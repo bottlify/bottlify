@@ -17,8 +17,14 @@
  * instructions it retired in `VALUE`.
  */
 
-/** Where each word lies, as indices into the channel's `Int32Array`. */
-export const Word = Object.freeze({ STATE: 0, VALUE: 1, FLAGS: 2, LENGTH: 3 });
+/**
+ * Where each word lies, as indices into the channel's `Int32Array`. `EPOCH`
+ * counts the executor's runs of guest code, odd while one is on: a slice
+ * makes it odd and its end even, and so do a trap's wait for its answer and
+ * the answer -- no test of a page's flags that stores rely on spans a call into
+ * the host. The process's write watch reads it (`write-clock.js`).
+ */
+export const Word = Object.freeze({ STATE: 0, VALUE: 1, FLAGS: 2, LENGTH: 3, EPOCH: 4 });
 
 /** The states, each set by the side whose turn it ends. */
 export const Turn = Object.freeze({
