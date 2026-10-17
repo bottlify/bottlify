@@ -466,6 +466,30 @@ test('ConvertSidToStringSid refuses no SID and one that is not a SID', ()=>{
     assert.deepEqual(errors, [87, 87]);
 });
 
+test('ConvertStringSidToSid lays out the SID its text names, and the text ConvertSidToStringSid'
+    + ' writes back is the same', ()=>{
+    const { bytes, errors, fns, dword } = setup();
+    assert.equal(fns.ConvertStringSidToSidA.argBytes, 8);
+    const text = putNarrow(bytes, 0x300, 'S-1-5-21-1-2-3-1001');
+    assert.equal(fns.ConvertStringSidToSidA.handler([text, OUT]), 1);
+    assert.equal(fns.ConvertSidToStringSidA.handler([dword(OUT), OUT]), 1);
+    const back = dword(OUT);
+    assert.equal(String.fromCharCode(...bytes.subarray(back, back + 19)), 'S-1-5-21-1-2-3-1001');
+    assert.equal(fns.ConvertStringSidToSidW.handler([putWide(bytes, 0x300, 'ba'), OUT]), 1);
+    assert.deepEqual([...bytes.subarray(dword(OUT), dword(OUT) + 16)],
+        [1, 2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0, 0x20, 2, 0, 0], 'BA: the Administrators group');
+    const narrow = fns.ConvertStringSidToSidA.handler;
+    assert.equal(narrow([putNarrow(bytes, 0x300, 'S-1-0x10000000000-7'), OUT]), 1);
+    assert.deepEqual([...bytes.subarray(dword(OUT), dword(OUT) + 8)], [1, 1, 1, 0, 0, 0, 0, 0],
+        'an authority past 32 bits, big-endian');
+    for (const bad of ['', 'S-1', 'S-2-5', 'S-1-5-x', 'S-1-5-4294967296', 'XX'])
+    {
+        assert.equal(narrow([putNarrow(bytes, 0x300, bad), OUT]), 0, bad);
+    }
+    assert.equal(fns.ConvertStringSidToSidA.handler([0, OUT]), 0);
+    assert.deepEqual(errors.filter(code=>code !== 0), [1337, 1337, 1337, 1337, 1337, 1337, 87]);
+});
+
 /** @param {Uint8Array} bytes @param {number} at @param {string} text */
 const putNarrow = (bytes, at, text)=>{
     bytes.set([...text, '\0'].map(unit=>unit.charCodeAt(0)), at);

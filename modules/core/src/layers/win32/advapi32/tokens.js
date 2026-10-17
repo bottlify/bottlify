@@ -253,6 +253,83 @@ export const sidBytes = sid=>{
     return bytes;
 };
 
+/**
+ * The two-letter names SDDL gives the well-known SIDs, as ConvertStringSidToSid
+ * reads them; the domain's own are this machine's.
+ *
+ * @type {Record<string, Sid>}
+ */
+const SDDL_SIDS = {
+    WD: { authority: 1, subAuthorities: [0] },
+    CO: { authority: 3, subAuthorities: [0] },
+    CG: { authority: 3, subAuthorities: [1] },
+    OW: { authority: 3, subAuthorities: [4] },
+    NU: { authority: 5, subAuthorities: [2] },
+    IU: { authority: 5, subAuthorities: [4] },
+    SU: { authority: 5, subAuthorities: [6] },
+    AN: { authority: 5, subAuthorities: [7] },
+    ED: { authority: 5, subAuthorities: [9] },
+    PS: { authority: 5, subAuthorities: [10] },
+    AU: { authority: 5, subAuthorities: [11] },
+    RC: { authority: 5, subAuthorities: [12] },
+    SY: { authority: 5, subAuthorities: [18] },
+    LS: { authority: 5, subAuthorities: [19] },
+    NS: { authority: 5, subAuthorities: [20] },
+    BA: { authority: 5, subAuthorities: [32, 544] },
+    BU: { authority: 5, subAuthorities: [32, 545] },
+    BG: { authority: 5, subAuthorities: [32, 546] },
+    PU: { authority: 5, subAuthorities: [32, 547] },
+    AO: { authority: 5, subAuthorities: [32, 548] },
+    SO: { authority: 5, subAuthorities: [32, 549] },
+    PO: { authority: 5, subAuthorities: [32, 550] },
+    BO: { authority: 5, subAuthorities: [32, 551] },
+    RE: { authority: 5, subAuthorities: [32, 552] },
+    RU: { authority: 5, subAuthorities: [32, 554] },
+    RD: { authority: 5, subAuthorities: [32, 555] },
+    NO: { authority: 5, subAuthorities: [32, 556] },
+    LA: { authority: 5, subAuthorities: [...MACHINE_DOMAIN, 500] },
+    LG: { authority: 5, subAuthorities: [...MACHINE_DOMAIN, 501] },
+    AC: { authority: 15, subAuthorities: [2, 1] },
+    LW: { authority: 16, subAuthorities: [0x1000] },
+    ME: { authority: 16, subAuthorities: [0x2000] },
+    HI: { authority: 16, subAuthorities: [0x3000] },
+    SI: { authority: 16, subAuthorities: [0x4000] },
+};
+
+/**
+ * A SID's text -- "S-1-<authority>-<sub>...", the authority decimal or 0x
+ * hex, up to fifteen sub-authorities, or an SDDL name -- laid out, or null
+ * for text that is not one.
+ *
+ * @param {string} text @returns {Uint8Array | null}
+ */
+export const parseSid = text=>{
+    const named = SDDL_SIDS[text.toUpperCase()];
+    if (named)
+    {
+        return sidBytes(named);
+    }
+    const parts = /^S-1-(0x[0-9a-f]{1,12}|\d{1,15})((?:-\d{1,10}){0,15})$/i.exec(text);
+    if (!parts)
+    {
+        return null;
+    }
+    const authority = Number(parts[1]);
+    const subs = parts[2] ? parts[2].slice(1).split('-').map(Number) : [];
+    if (authority >= 2 ** 48 || subs.some(sub=>sub > 0xffffffff))
+    {
+        return null;
+    }
+    const bytes = new Uint8Array(8 + 4 * subs.length);
+    const view = new DataView(bytes.buffer);
+    bytes[0] = 1;
+    bytes[1] = subs.length;
+    view.setUint16(2, Math.floor(authority / 2 ** 32));
+    view.setUint32(4, authority % 2 ** 32);
+    subs.forEach((sub, at)=>view.setUint32(8 + at * 4, sub, true));
+    return bytes;
+};
+
 /** @param {Uint8Array} left @param {Uint8Array} right */
 const sameBytes = (left, right)=>left.length === right.length
     && left.every((byte, at)=>byte === right[at]);
@@ -892,6 +969,28 @@ export function createTokenFunctions(host){
         return wide ? wideTextAt(host.readMemory, pointer, limit)
             : host.readCString(pointer >>> 0, limit);
     };
+
+    /** @param {boolean} wide */
+    const convertText = wide=>({
+        argBytes: 8,
+        /** @param {number[]} args */
+        handler: ([text, out])=>{
+            if ((text >>> 0) === 0 || (out >>> 0) === 0)
+            {
+                return fail(ERROR_INVALID_PARAMETER);
+            }
+            const sid = parseSid(/** @type {string} */ (textAt(text, wide, 256)));
+            if (!sid)
+            {
+                return fail(ERROR_INVALID_SID);
+            }
+            const block = host.allocate(sid.length);
+            host.writeMemory(block, sid);
+            writeDword(out >>> 0, block);
+            host.setLastError(ERROR_SUCCESS);
+            return 1;
+        },
+    });
 
     /** @param {boolean} wide */
     const lookupPrivilegeValue = wide=>({
@@ -2023,6 +2122,16 @@ export function createTokenFunctions(host){
          */
         ConvertSidToStringSidA: convertSid(false),
         ConvertSidToStringSidW: convertSid(true),
+
+        /**
+         * BOOL ConvertStringSidToSidA(LPCSTR StringSid, PSID *Sid)
+         * BOOL ConvertStringSidToSidW(LPCWSTR StringSid, PSID *Sid)
+         *
+         * The SID a text names (parseSid), in a LocalAlloc block the caller
+         * frees with LocalFree; text that names none is ERROR_INVALID_SID.
+         */
+        ConvertStringSidToSidA: convertText(false),
+        ConvertStringSidToSidW: convertText(true),
 
         /**
          * BOOL CopySid(DWORD nDestinationSidLength, PSID pDestinationSid, PSID pSourceSid)
