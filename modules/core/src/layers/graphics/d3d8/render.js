@@ -5709,7 +5709,8 @@ export function createRenderer(options){
             markMips(drawnInto);
         }
         const depth = depthFor(model, target);
-        frame.commands.push({ kind: 'pass', target, depth, ...clearing });
+        frame.commands.push({ kind: 'pass', target, depth, ...clearing,
+            ...(liveDump ? { targetId: drawnInto?.id ?? '' } : {}) });
         frame.pass = { target, depth };
         frame.viewport = null;
         frame.scissor = '';
@@ -7374,6 +7375,8 @@ export function createRenderer(options){
         /** @type {boolean[]} */
         const intoTexture = [];
         let target = null;
+        /** The pass the next draw opens, written on that draw's line: its target and clears. */
+        let opened = '';
         /** Draws by the surface they went into, and the last of each. */
         /** @type {Map<any, { count: number, last: number }>} */
         const into = new Map();
@@ -7382,6 +7385,12 @@ export function createRenderer(options){
             if (command.kind === 'pass')
             {
                 target = command.target;
+                const cleared = `${command.clearColor ? 'c' : ''}`
+                    + `${command.clearDepth !== undefined ? 'z' : ''}`
+                    + `${command.clearStencil !== undefined ? 's' : ''}`;
+                opened = ` pass=s${resourceId(target)}`
+                    + `${command.targetId ? `=${command.targetId}` : ''}`
+                    + `${cleared ? `/clear:${cleared}` : ''}`;
                 continue;
             }
             if (command.kind !== 'draw')
@@ -7397,9 +7406,20 @@ export function createRenderer(options){
                 .join(' ');
             const offscreen = target !== lastShown.surface;
             intoTexture.push(offscreen);
+            // The constants as the draw's own blocks hold them: what reached
+            // the GPU, not the device's file at some other moment.
+            const vertexShader = liveShaders.get(`vs${command.state?.vertexShader}`);
+            const pixelShader = liveShaders.get(`ps${command.state?.pixelShader}`);
+            const blocks = command.program
+                ? ` vc=${describeConstants(vertexShader?.parsed ?? null,
+                    command.program.vertexBlocks?.[0] ?? new Float32Array(0))}`
+                    + ` pc=${describeConstants(pixelShader?.parsed ?? null,
+                        command.program.pixelBlocks?.[0] ?? new Float32Array(0))}`
+                : '';
             lines.push(`#${lines.length} vs=${command.state?.vertexShader ?? '?'}`
                 + ` ps=${command.state?.pixelShader ?? '?'}`
-                + `${offscreen ? ' !backbuffer' : ''} [${bound}]`);
+                + `${offscreen ? ' !backbuffer' : ''}${opened} [${bound}]${blocks}`);
+            opened = '';
         }
         let at = lines.length;
         while (at > 0 && !intoTexture[at - 1])

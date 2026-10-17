@@ -1350,7 +1350,16 @@ export function translateShader(parsed, options = {}){
                 const read = dest.type === REGISTER.ADDR && legacy && !phased
                     ? `in.t${dest.index}`
                     : registerName(dest, false);
-                emit(`if (any(${read}.xyz < vec3f(0.0))) { discard; }`);
+                // Model 1 tests the coordinate's first three components; from
+                // model 2 every component the register is named with does --
+                // HLSL's clip(float4) is a texkill of all four, and a frustum
+                // test that keeps its last plane in w would pass what it cuts.
+                const tested = legacy
+                    ? 'xyz'
+                    : [...'xyzw'].filter((_, at)=>((dest.writeMask || 0xf) >> at) & 1).join('');
+                emit(tested.length === 1
+                    ? `if (${read}.${tested} < 0.0) { discard; }`
+                    : `if (any(${read}.${tested} < vec${tested.length}f(0.0))) { discard; }`);
                 break;
             }
             case OPCODE.TEX:

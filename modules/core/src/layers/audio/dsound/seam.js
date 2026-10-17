@@ -1961,6 +1961,32 @@ export function createDirectSound({
             // between for the mixer to play.
             skippedBytes: buffers.reduce((sum, buffer)=>sum + buffer.skipped.bytes, 0),
             skips: buffers.reduce((sum, buffer)=>sum + buffer.skipped.count, 0),
+            // What each live buffer holds now: whether a stream the program
+            // writes is sound or silence, which nothing else here can say.
+            contents: buffers
+                .filter(buffer=>!buffer.destroyed && !buffer.primary && buffer.bytes > 0)
+                .map(buffer=>{
+                    const held = memory.readMemory(buffer.address >>> 0, buffer.bytes);
+                    const sixteen = buffer.format?.bitsPerSample === 16;
+                    let peak = 0;
+                    let nonzero = 0;
+                    if (sixteen)
+                    {
+                        const samples = new Int16Array(held.buffer, held.byteOffset,
+                            held.byteLength >> 1);
+                        for (const sample of samples)
+                        {
+                            peak = Math.max(peak, Math.abs(sample));
+                            nonzero += sample !== 0 ? 1 : 0;
+                        }
+                    }
+                    return { address: buffer.address >>> 0, bytes: buffer.bytes,
+                        format: buffer.format ? `${buffer.format.sampleRate}/`
+                            + `${buffer.format.bitsPerSample}/${buffer.format.channels}` : '-',
+                        status: buffer.status(), volume: buffer.volume, pan: buffer.pan,
+                        frequency: buffer.frequency, peak: sixteen ? peak : null,
+                        nonzero: sixteen ? nonzero : null };
+                }),
         }),
     };
 }

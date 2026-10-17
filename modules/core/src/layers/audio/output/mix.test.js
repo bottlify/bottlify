@@ -198,16 +198,17 @@ test('WRITTEN/READ crossing 2^31 bytes does not stall the ring', ()=>{
  * A DMA voice over a whole table: slot 0's header, and \`samples\` (signed
  * 16-bit mono) as its mirror at the start of the arena.
  *
- * @param {number[]} samples @param {{ looping?: boolean, rate?: number }} [options]
+ * @param {number[]} samples
+ * @param {{ looping?: boolean, rate?: number, channels?: number }} [options]
  */
-function voice(samples, { looping = true, rate = 48000 } = {}){
+function voice(samples, { looping = true, rate = 48000, channels = 1 } = {}){
     const table = new ArrayBuffer(TABLE_BYTES);
     const header = new Int32Array(table, slotHeaderOffset(0), SLOT_HEADER_INT32);
     const arena = new Uint8Array(table, ARENA_OFFSET, ARENA_BYTES);
     arena.set(pcm16(samples), 0);
     for (const [field, value] of /** @type {[number, number][]} */ ([
         [KIND, KIND_DMA], [BASE, 0], [LENGTH, samples.length * 2], [RATE, rate],
-        [CHANNELS, 1], [BITS, 16], [GAIN, GAIN_SCALE], [LOOPING, looping ? 1 : 0],
+        [CHANNELS, channels], [BITS, 16], [GAIN, GAIN_SCALE], [LOOPING, looping ? 1 : 0],
         [PLAYING, 1], [STATE, STATE_OPEN],
     ]))
     {
@@ -220,7 +221,8 @@ function voice(samples, { looping = true, rate = 48000 } = {}){
         const produced = resampleInto({ block, blockFrames: frames, header, pcm: new Uint8Array(0),
             arena, outputRate: 48000, seam });
         const left = [...block].filter((_, at)=>at % 2 === 0).map(v=>Math.round(v * 32768));
-        return { produced, left };
+        const right = [...block].filter((_, at)=>at % 2 === 1).map(v=>Math.round(v * 32768));
+        return { produced, left, right };
     };
     return { header, mix };
 }
@@ -238,6 +240,24 @@ test('a DMA voice reads its mirror on the device\'s own clock, round and round',
     assert.equal(Atomics.load(header, LAPS), 1);
     assert.equal(Atomics.load(header, POSITION), 2 * 2);
     assert.equal(Atomics.load(header, PLAYING), 1, 'a loop keeps playing');
+});
+
+test('a 5.1 voice is folded into stereo: its centre and surrounds are heard, its LFE is not', ()=>{
+    // A film mixed into 5.1 keeps its voice in the centre; heard through the
+    // first two channels only, it was silence.
+    const frames = [
+        [0, 0, 10000, 0, 0, 0],
+        [1000, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 2000, 0],
+        [0, 0, 0, 0, 0, 2000],
+        [0, 0, 0, 30000, 0, 0],
+    ];
+    const { mix } = voice(frames.flat(), { channels: 6, looping: false });
+    const out = mix(5);
+    assert.deepEqual(out.left, [7071, 1000, 1414, 0, 0]);
+    assert.deepEqual(out.right, [7071, 0, 0, 1414, 0]);
+    const stereo = voice([300, -300, 500, -500], { channels: 2, looping: false }).mix(2);
+    assert.deepEqual([stereo.left, stereo.right], [[300, 500], [-300, -500]], 'stereo as it is');
 });
 
 test('a DMA voice that does not loop stops itself at the end, as a sound card does', ()=>{

@@ -170,8 +170,14 @@ test('the pixel-stage instructions become the statements they mean', ()=>{
             'r0 = textureSampleLevel(tex0, samp0, in.t0.xy, in.t0.w);'],
         ['texldd', [op(OPCODE.TEXLDD, 5), dst(r, 0), src(t, 0), src(s, 0), src(r, 1), src(r, 2)],
             'r0 = textureSampleGrad(tex0, samp0, in.t0.xy, r1.xy, r2.xy);'],
+        // From model 2 texkill tests every component it names, w too: HLSL's
+        // clip(float4) -- a frustum test keeping its last plane in w.
         ['texkill', [op(OPCODE.TEXKILL, 1), dst(r, 1)],
-            'if (any(r1.xyz < vec3f(0.0))) { discard; }'],
+            'if (any(r1.xyzw < vec4f(0.0))) { discard; }'],
+        ['texkill .xy', [op(OPCODE.TEXKILL, 1), dst(r, 1, 0x3)],
+            'if (any(r1.xy < vec2f(0.0))) { discard; }'],
+        ['texkill .w', [op(OPCODE.TEXKILL, 1), dst(r, 1, 0x8)],
+            'if (r1.w < 0.0) { discard; }'],
         ['cmp', [op(OPCODE.CMP, 4), dst(r, 0), src(r, 1), src(r, 2), src(r, 3)],
             'r0 = select(r3, r2, r1 >= vec4f(0.0));'],
         ['cnd', [op(OPCODE.CND, 4), dst(r, 0), src(r, 1), src(r, 2), src(r, 3)],

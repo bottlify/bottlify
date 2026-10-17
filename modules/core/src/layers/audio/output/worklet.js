@@ -118,6 +118,44 @@ const HELD = 23;
  */
 const GIVE_UP_SECONDS = 0.25;
 
+/** A centre or surround channel's share of a front one when folded to stereo: -3 dB. */
+const FOLD = Math.SQRT1_2;
+
+/**
+ * One side of the stereo output (0 left, 1 right) from a frame of a voice: a
+ * mono or stereo voice as it is; a surround one folded down as ITU-R BS.775
+ * does, that side's front with the centre and that side's surrounds at -3 dB
+ * and the LFE left out. Without the fold only the first two channels were
+ * heard, and a film mixed into 5.1 kept its voice in the centre: silence. The
+ * orders are the WAVEFORMATEXTENSIBLE default masks' -- 3 FL FR FC, 4 FL FR
+ * BL BR, 5 FL FR FC BL BR, 6 FL FR FC LFE BL BR, 8 the six and SL SR.
+ *
+ * @param {(frame: number, channel: number) => number} read
+ * @param {number} frame @param {number} side @param {number} channels
+ * @returns {number}
+ */
+function sideOf(read, frame, side, channels){
+    if (channels <= 2)
+    {
+        return read(frame, Math.min(side, channels - 1));
+    }
+    let value = read(frame, side);
+    if (channels !== 4)
+    {
+        value += read(frame, 2) * FOLD;
+    }
+    const surround = channels === 4 ? 2 : channels === 5 ? 3 : channels >= 6 ? 4 : -1;
+    if (surround >= 0)
+    {
+        value += read(frame, surround + side) * FOLD;
+    }
+    if (channels >= 8)
+    {
+        value += read(frame, 6 + side) * FOLD;
+    }
+    return value;
+}
+
 const STATE_FREE = 0;
 const STATE_OPEN = 1;
 /** Closed by the engine; the reader frees it (back to `STATE_FREE`) once it
@@ -276,6 +314,16 @@ function resampleInto({ block, blockFrames, header, pcm, arena, outputRate, seam
         return value / 32768;
     };
 
+    /**
+     * A stereo side of a frame; before the first, the side the last block
+     * carried over, already folded.
+     *
+     * @param {number} frame @param {number} side
+     */
+    const readSide = (frame, side)=>(frame < 0 && seam.tail
+        ? seam.tail[side]
+        : sideOf(readSample, Math.max(frame, 0), side, channels));
+
     /** @type {number} */
     let produced;
     /** @type {number} */
@@ -289,7 +337,7 @@ function resampleInto({ block, blockFrames, header, pcm, arena, outputRate, seam
         {
             for (let channel = 0; channel < 2; channel++)
             {
-                block[frame * 2 + channel] += readSample(frame, Math.min(channel, channels - 1))
+                block[frame * 2 + channel] += readSide(frame, channel)
                     * (channel === 0 ? leftGain : rightGain);
             }
         }
@@ -308,9 +356,8 @@ function resampleInto({ block, blockFrames, header, pcm, arena, outputRate, seam
             const blend = pos - left;
             for (let channel = 0; channel < 2; channel++)
             {
-                const which = Math.min(channel, channels - 1);
                 block[frame * 2 + channel] +=
-                    (readSample(left, which) * (1 - blend) + readSample(left + 1, which) * blend)
+                    (readSide(left, channel) * (1 - blend) + readSide(left + 1, channel) * blend)
                     * (channel === 0 ? leftGain : rightGain);
             }
             pos += step;
@@ -339,8 +386,7 @@ function resampleInto({ block, blockFrames, header, pcm, arena, outputRate, seam
             }
             for (let channel = 0; channel < 2; channel++)
             {
-                seam.tail[channel] =
-                    readSample(availableFrames - 1, Math.min(channel, channels - 1));
+                seam.tail[channel] = readSide(availableFrames - 1, channel);
             }
         }
     }
@@ -445,9 +491,9 @@ function playVoice({ block, blockFrames, header, arena, outputRate, seam }){
         const right = Math.min(left + 1, last);
         for (let channel = 0; channel < 2; channel++)
         {
-            const which = Math.min(channel, channels - 1);
             block[produced * 2 + channel] +=
-                (sample(left, which) * (1 - blend) + sample(right, which) * blend)
+                (sideOf(sample, left, channel, channels) * (1 - blend)
+                    + sideOf(sample, right, channel, channels) * blend)
                 * (channel === 0 ? leftGain : rightGain);
         }
         pos += step;
