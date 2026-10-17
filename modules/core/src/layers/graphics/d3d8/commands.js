@@ -114,7 +114,7 @@ const first = (kind, length)=>{
  * @property {{ type: number, fvf: number, count: number, most: number }} [fvfVertices]
  * @property {{ type: number, count: number, stride: number, most: number }} [vertices]
  *     or the vertices a draw's primitives span, `stride` bytes each (`commandCode`)
- * @property {boolean} [kept]  its copy is taken with `copy` alone, not through the scratch
+ * @property {boolean} [kept]  its copy is read in place (`view`, `copy`), not through the scratch
  * @property {boolean} [self]  the first argument is the object the method is of, not the device
  * @property {boolean} [stale]  it may change state the device's block mirrors
  * @property {'empty' | 'any'} [nullable]  its pointer may be null: with a count of zero
@@ -415,7 +415,7 @@ export const SHARED_COMMANDS = {
         vertices: { type: 0, count: 1, stride: 3, most: UP_BYTES },
         needs: DRAW.SCENE | DRAW.DECLARED, fresh: true,
         make: (d, c)=>d.DrawPrimitiveUP(c.arg(0), c.arg(1),
-            c.copy(vertexCountOf(c.arg(0), c.arg(1)) * c.arg(3)), c.arg(3)) },
+            c.view(vertexCountOf(c.arg(0), c.arg(1)) * c.arg(3)), c.arg(3)) },
 };
 
 /**

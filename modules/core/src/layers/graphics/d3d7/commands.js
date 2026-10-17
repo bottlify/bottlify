@@ -60,7 +60,7 @@ export const D3D7_COMMANDS = commandSet(IDIRECT3DDEVICE7_SLOTS, {
     DrawPrimitive: { args: 5, pointer: 2, kept: true, draws: true, needs: DRAW.SCENE,
         fvfVertices: { type: 0, fvf: 1, count: 3, most: UP_BYTES },
         make: (d, c)=>d.DrawPrimitive(c.arg(0), c.arg(1),
-            c.copy(c.arg(3) * decodeFvf(c.arg(1)).stride), c.arg(3)) },
+            c.view(c.arg(3) * decodeFvf(c.arg(1)).stride), c.arg(3)) },
     // A block the device holds, by its handle: an apply leaves what the block
     // mirrors to the host (`stale`).
     ApplyStateBlock: { args: 1, token: 0, stale: true,
@@ -85,6 +85,6 @@ export const D3D7_COMMANDS = commandSet(IDIRECT3DDEVICE7_SLOTS, {
         make: (d, c)=>{
             const buffer = c.object();
             return d.DrawIndexedPrimitiveVB(c.arg(0), buffer, c.arg(2), c.arg(3),
-                c.copy(c.arg(5) * 2), c.arg(5), clippedBy(buffer, c.arg(6)));
+                c.view(c.arg(5) * 2), c.arg(5), clippedBy(buffer, c.arg(6)));
         } },
 });
