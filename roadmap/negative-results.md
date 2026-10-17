@@ -1025,3 +1025,13 @@ None yet.
   cost a third of the frame rate and drew wrong. Where the rate went was not found.
 - **Decision.** Reverted. Before another attempt: find which host Locks of which buffers cross in
   the scene that is to be sped up, and a gate that draws what the road drew wrong.
+
+### 2026-10-17 -- invalidated: the streaked road in "a dynamic buffer's DISCARD made in the guest by trading two storages" (2026-10-17)
+
+- **What was wrong.** That entry's **Picture** read the road drawn streaked, its lane line gone,
+  as the trade's doing. The same streaks were seen later the same night in a build without the
+  trade (07162c7e + 02f5ea86), right after the level loaded, and gone 25 s later in the same run:
+  the road as it first appears, whatever the build. The entry's screenshot was one, taken at
+  that moment.
+- **What stands.** Its frame rates and host calls: 15.1 fps before, 5.7 after, one run each.
+  The picture is not evidence against the trade, and the gates' silence is not a gap they have.
