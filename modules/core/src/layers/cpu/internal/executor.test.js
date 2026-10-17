@@ -174,6 +174,68 @@ test('programs run on another executor in a worker leave what they leave on the 
         }
     });
 
+test('another executor\'s translator keeps its regions in the run\'s store through the process, '
+    + 'and the next run there takes them and translates nothing', async()=>{
+    /** @type {Map<string, Uint8Array>} */
+    const records = new Map();
+    const asked = { gets: 0, puts: 0 };
+    const store = {
+        get: async(/** @type {string} */ key)=>{
+            asked.gets++;
+            return records.get(key) ?? null;
+        },
+        put: async(/** @type {string} */ key, /** @type {Uint8Array} */ bytes)=>{
+            asked.puts++;
+            records.set(key, bytes);
+        },
+    };
+    const config = { ...CONFIG, executors: 2, cork: { ...CONFIG.cork, bundleId: 'test' } };
+    const next = random(0x5703);
+    const code = program(next);
+    const seed = next(1 << 30);
+    const run = async()=>{
+        const process = createCorkHost({ ...config, engine });
+        handle(process);
+        const remote = await createRemoteExecutor({ host: process, index: 1, engineUrl: ENGINE_URL,
+            config, store });
+        try
+        {
+            begin(process, code, random(seed));
+            remote.block().set(process.block());
+            let slice = remote.runSlice(50);
+            for (let turn = 1; turn < 10_000 && !slice.halted; turn++)
+            {
+                await settle();
+                slice = remote.runSlice(50);
+            }
+            assert.equal(slice.fault, null);
+            // The records it put, and the answers it waits for, cross meanwhile.
+            for (let turn = 0; turn < 20; turn++)
+            {
+                await settle();
+            }
+            const view = new DataView(remote.block().buffer, remote.block().byteOffset);
+            const layout = process.blockLayout();
+            return { figures: await remote.diagnostics(), outcome: outcome(process,
+                name=>view.getUint32(layout.regs + REGISTERS.indexOf(name) * 4, true)) };
+        }
+        finally
+        {
+            await remote.close();
+        }
+    };
+    const cold = await run();
+    assert.ok(cold.figures?.cacheMisses > 0 && cold.figures?.cacheHits === 0, 'nothing there yet');
+    assert.ok(asked.puts > 0 && records.size > 0,
+        'what it translated went to the process\'s store');
+    const puts = asked.puts;
+    const warm = await run();
+    assert.ok(warm.figures?.cacheHits > 0, 'taken from the store');
+    assert.equal(warm.figures?.cacheMisses, 0, 'nothing translated again');
+    assert.equal(asked.puts, puts, 'nothing stored again');
+    assert.deepEqual(warm.outcome, cold.outcome, 'and it ran the same');
+});
+
 test('a store on one executor into code another translated reaches the other\'s next slice',
     async()=>{
         const process = createCorkHost({ ...CONFIG, engine, executors: 2 });

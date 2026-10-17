@@ -603,12 +603,15 @@ export function createCpuModule(){
                         if (several)
                         {
                             // What crosses to a worker is data: the translation store
-                            // and anything callable stay with the process's own.
-                            // The doorbell is the process's link's, rung for the process's
-                            // own batches. A run's pool lends translators to the process's
-                            // own executor alone (`translators: 0`): another one waiting for
-                            // a lend would interpret all but what it emits inline while it
-                            // loads, so it opens a translator of its own.
+                            // stays with the process's own executor, and another one's
+                            // translator asks it through here (`createRemoteExecutor`),
+                            // so a warm start is warm on every executor; anything else
+                            // callable stays. The doorbell is the process's link's, rung
+                            // for the process's own batches. A run's pool lends
+                            // translators to the process's own executor alone
+                            // (`translators: 0`): another one waiting for a lend would
+                            // interpret all but what it emits inline while it loads, so it
+                            // opens a translator of its own.
                             const cork = Object.fromEntries(Object.entries(hostConfig.cork)
                                 .filter(([key, value])=>key !== 'store' && key !== 'doorbell'
                                     && typeof value !== 'function'));
@@ -622,6 +625,7 @@ export function createCpuModule(){
                             state.openExecutor = index=>createRemoteExecutor({ host, index,
                                 engineUrl: settings.engineUrl, bell,
                                 unbroken: state.unbroken.buffer,
+                                store: hostConfig.cork?.store ?? null,
                                 config: { ...hostConfig, cork } });
                             if (config?.eagerExecutors === true)
                             {
@@ -1421,6 +1425,8 @@ export function createCpuModule(){
                             retired: figures.retired,
                             translatedShare: figures.translatedShare,
                             regions: figures.regions,
+                            cacheHits: figures.cacheHits,
+                            cacheMisses: figures.cacheMisses,
                             translateMs: figures.translateMs,
                             workerBusyMs: figures.workerBusyMs,
                             spent: figures.spent,

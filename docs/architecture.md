@@ -421,7 +421,9 @@ There are no page tables: each 4 KiB page has one byte of flags — `INACCESSIBL
   and the tables at constant addresses, as with one executor: the shared layout's bases cost a
   sixth more machine code in a small function and 7 % of the benchmark, and the process's executor
   runs the first thread and any thread alone. Code run on both sides is translated twice, never
-  once per executor. The page flags and the code bounds are the process's: a write on any executor into
+  once per executor. The process keeps the run's translation store; the others' translators ask it
+  through the process, a lookup answered on its event loop and a record handed over unwaited, so
+  a thread that ran on another executor in one run takes its regions from the store in the next. The page flags and the code bounds are the process's: a write on any executor into
   code any of them translated is found, the finder drops its own translations and puts the range in
   a ring in shared memory, and every other executor drops its own at its next slice
   (`cork/src/runtime/shared-code.js`). A trap or a fault on such an executor waits for the process's

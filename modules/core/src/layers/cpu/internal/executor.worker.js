@@ -33,6 +33,7 @@ import { UNBROKEN_STEP, UNBROKEN_STEPS, unbrokenTable } from './unbroken.js';
  * @property {SharedArrayBuffer} channel
  * @property {SharedArrayBuffer} bell  the process's word for all its executors' turns
  * @property {SharedArrayBuffer | ArrayBuffer} [unbroken]  the routines no slice ends inside
+ * @property {boolean} [store]  the process answers for the run's translation store
  */
 
 /** How long the executor waits in place for the next slice before its event loop does. */
@@ -61,6 +62,40 @@ const FEED_MS = 1;
 /** The executor's host, once started. @type {any} */
 let running = null;
 
+/** The store's answers awaited, by the ask's id. @type {Map<number, (bytes: Uint8Array | null) => void>} */
+const storeAnswers = new Map();
+let storeAsks = 0;
+
+/**
+ * The run's translation store as this executor reaches it: through the
+ * process, which holds it -- a directory store's records file takes one
+ * handle, the process's. A lookup is answered on the process's event loop,
+ * a turn or a few later, and the runtime interprets meanwhile as it does
+ * while any store answers late; a record goes and is not waited on.
+ *
+ * @param {(message: any, transfer?: any[]) => void} send
+ * @returns {import('../engine.js').TranslationStore}
+ */
+function processStore(send){
+    return {
+        get: key=>new Promise(resolve=>{
+            const id = ++storeAsks;
+            storeAnswers.set(id, resolve);
+            send({ type: 'store', id, method: 'get', key });
+        }),
+        put(key, bytes, options){
+            // The bytes are the store's from the call on (`TranslationStore`):
+            // a record that is the whole of its buffer goes without a copy.
+            const whole = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength
+                && bytes.buffer instanceof ArrayBuffer;
+            send({ type: 'store', method: 'put', key, bytes, options },
+                whole ? [bytes.buffer] : []);
+            return Promise.resolve();
+        },
+        touch: key=>send({ type: 'store', method: 'touch', key }),
+    };
+}
+
 /**
  * Where the executor's time went since it started, in milliseconds: in slices
  * (`slicesMs`, which holds `answerWaitMs`, waiting there for the process to
@@ -75,11 +110,12 @@ const spent = { startedAt: 0, slicesMs: 0, answerWaitMs: 0, idleMs: 0, slices: 0
 
 /**
  * @param {ExecutorStart} start
- * @param {(message: any) => void} send
+ * @param {(message: any, transfer?: any[]) => void} send
  */
-async function serve({ engineUrl, config, memory, channel: buffer, bell, unbroken }, send){
+async function serve({ engineUrl, config, memory, channel: buffer, bell, unbroken, store }, send){
     const engine = await import(engineUrl);
-    const host = createCorkHost({ ...config, engine, memory });
+    const host = createCorkHost({ ...config, engine, memory,
+        ...(store === true ? { cork: { ...config.cork, store: processStore(send) } } : {}) });
     running = host;
     const bellWords = new Int32Array(bell);
     const routines = unbroken === undefined ? null : unbrokenTable(unbroken);
@@ -270,7 +306,7 @@ async function serve({ engineUrl, config, memory, channel: buffer, bell, unbroke
 
 /**
  * @param {(handler: (data: any) => void) => void} listen
- * @param {(message: any) => void} send
+ * @param {(message: any, transfer?: any[]) => void} send
  */
 function bind(listen, send){
     listen(data=>{
@@ -278,6 +314,11 @@ function bind(listen, send){
         {
             serve(data, send).catch(e=>send({ type: 'failed',
                 message: String(e?.stack ?? e) }));
+        }
+        else if (data?.type === 'store')
+        {
+            storeAnswers.get(data.id)?.(data.bytes ?? null);
+            storeAnswers.delete(data.id);
         }
         else if (data?.type === 'diagnostics')
         {
@@ -294,7 +335,7 @@ if (typeof self !== 'undefined' && typeof (/** @type {any} */ (self)).postMessag
     const scope = /** @type {any} */ (self);
     bind(handler=>{
         scope.onmessage = (/** @type {{ data: any }} */ event)=>handler(event.data);
-    }, message=>scope.postMessage(message));
+    }, (message, transfer = [])=>scope.postMessage(message, transfer));
 }
 else
 {
@@ -302,6 +343,6 @@ else
     if (!isMainThread && parentPort)
     {
         bind(handler=>parentPort.on('message', handler),
-            message=>parentPort.postMessage(message));
+            (message, transfer = [])=>parentPort.postMessage(message, transfer));
     }
 }

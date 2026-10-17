@@ -121,14 +121,16 @@ export function createBell(){
  * @param {{ host: any, index: number, engineUrl: string,
  *     config: Omit<import('./cork-host.js').CorkHostConfig, 'engine' | 'memory' | 'executor'>,
  *     workerUrl?: URL, bell?: ReturnType<typeof createBell>,
- *     unbroken?: SharedArrayBuffer | ArrayBuffer }} options
+ *     unbroken?: SharedArrayBuffer | ArrayBuffer,
+ *     store?: import('../engine.js').TranslationStore | null }} options
  *     host: the process's cork host, made for `config.executors`; config: the configuration
  *     it was made with; bell: the one its executors share, when it waits on several;
- *     unbroken: the routines no slice ends inside (`unbroken.js`), the process's table
+ *     unbroken: the routines no slice ends inside (`unbroken.js`), the process's table;
+ *     store: the run's translation store, which the executor's translator asks through here
  */
 export async function createRemoteExecutor({ host, index, engineUrl, config,
     workerUrl = new URL('./executor.worker.js', import.meta.url), bell = createBell(),
-    unbroken = undefined })
+    unbroken = undefined, store = null })
 {
     const memory = host.wasmMemory();
     if (typeof SharedArrayBuffer !== 'function' || !(memory.buffer instanceof SharedArrayBuffer))
@@ -143,6 +145,38 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
     /** Diagnostics asked for and not yet answered, by id. @type {Map<number, (value: any) => void>} */
     const asked = new Map();
     let asks = 0;
+    /**
+     * What the executor's translator asks of the run's store: a record looked
+     * up is answered with a copy (the store may keep the bytes it read), one
+     * put or touched is the store's from here on.
+     *
+     * @param {{ id?: number, method: string, key: string, bytes?: Uint8Array,
+     *     options?: { needs?: string } }} ask
+     */
+    const answerStore = ask=>{
+        if (store === null)
+        {
+            if (ask.method === 'get')
+            {
+                worker.post({ type: 'store', id: ask.id, bytes: null });
+            }
+            return;
+        }
+        if (ask.method === 'put' && ask.bytes instanceof Uint8Array)
+        {
+            Promise.resolve(store.put(ask.key, ask.bytes, ask.options)).catch(()=>{});
+            return;
+        }
+        if (ask.method === 'touch')
+        {
+            store.touch?.(ask.key);
+            return;
+        }
+        const now = store.getNow?.(ask.key);
+        // An answer to an executor closed meanwhile goes nowhere.
+        Promise.resolve(now !== undefined ? now : store.get(ask.key)).catch(()=>null)
+            .then(bytes=>worker.post({ type: 'store', id: ask.id, bytes })).catch(()=>{});
+    };
     await new Promise((resolve, reject)=>{
         worker.onMessage(data=>{
             if (data?.type === 'ready')
@@ -159,9 +193,13 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
                 asked.get(data.id)?.(data.value);
                 asked.delete(data.id);
             }
+            else if (data?.type === 'store')
+            {
+                answerStore(data);
+            }
         });
         worker.post({ type: 'start', engineUrl, memory, channel: buffer, bell: bell.buffer,
-            unbroken, config: { ...config, executor: index } });
+            unbroken, store: store !== null, config: { ...config, executor: index } });
     });
     const own = /** @type {Uint8Array} */ (host.block());
     const theirs = new Uint8Array(memory.buffer, host.executorBase(index), own.length);

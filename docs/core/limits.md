@@ -34,13 +34,11 @@ differently raises a `divergence` event naming the API.
   on meanwhile, each one whole, so a HeapWalk between them can meet a block another thread
   allocated or freed.
 - A program is told it has one processor for each of its executors (`cpu.cores`: in a browser whose page can share memory one fewer than the host's processors, at most eight, by default; one elsewhere). A thread's affinity mask keeps it to those executors. Not done: a child process does not inherit its parent's narrowed process mask, a process handle other than the caller's own reads and sets the caller's mask, `NtSetInformationProcess(ProcessAffinityMask)` is accepted and ignored, and `NtQueryInformationThread`/`NtSetInformationThread` know no affinity; GetActiveProcessorCount, GetLogicalProcessorInformationEx and the processor-group calls are not exported.
-- With several executors only the process's own takes translations from the translation store
-  and puts its own there; the others translate for the layout they share afresh on every start
-  (sharing what any of them made in the run, one arena for all of them), so the threads that run
-  on them warm up again each time -- a game whose main thread calls into the host often keeps it
-  on the process's executor and starts warm. The translations of one executor and of several
-  are kept apart (the locked instructions are atomic on several), so changing `cpu.cores` starts
-  cold once.
+- With several executors the translations of the process's own executor and of the others are
+  kept apart in the translation store (the others translate for the layout they share), and so
+  are those of one executor and of several (the locked instructions are atomic on several):
+  changing `cpu.cores` starts cold once, and a thread that ran on the process's own executor in
+  one run and on another in the next warms up there again.
 - A child started with `CreateProcess` runs while its parent waits; the parent resumes when the
   child ends. With `concurrency` 2 or 4 every process runs in a worker of its own, the program the
   page started too, and a child starts at `CreateProcess` and runs beside its parent; one past
