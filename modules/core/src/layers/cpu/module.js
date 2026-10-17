@@ -81,6 +81,13 @@ export const DEFAULT_THUNK_BASE = 0x100000;
 export const DEFAULT_THUNK_CAPACITY = 16384 * 16;
 
 /**
+ * The record in the run's translation store of how many executors past the
+ * process's own its threads opened, the most any run of the bundle opened: one
+ * byte, the count.
+ */
+export const EXECUTORS_OPENED_KEY = 'cpu/executors-opened';
+
+/**
  * cpu — the guest CPU and the channel the guest calls us through.
  *
  * The only layer that knows which engine is underneath. Everything above it
@@ -212,7 +219,8 @@ export function createCpuModule(){
              *          unbroken: ReturnType<typeof unbrokenTable>,
              *          beforeTrap: (() => void) | null,
              *          remoteFigures: Map<number, any>, executorsRefused: string | null,
-             *          writes: { host: any, clock: ReturnType<typeof createWriteClock> } | null }}
+             *          writes: { host: any, clock: ReturnType<typeof createWriteClock> } | null,
+             *          learned: { store: any, opened: number } | null }}
              */
             const state = {
                 host: null, thunks: null, running: false, tableWritten: false,
@@ -234,6 +242,9 @@ export function createCpuModule(){
                 remoteFigures: new Map(),
                 // Why fewer executors run than were asked, if they do.
                 executorsRefused: null,
+                // The store the executors this bundle's threads opened are kept in,
+                // and the most it holds, once read: none in a run that opens them all.
+                learned: null,
                 // The write watch over the host's page marks, made at the first watch.
                 writes: null,
                 faultHandler: null,
@@ -465,6 +476,13 @@ export function createCpuModule(){
                     }
                     state.remotes = [...state.remotes, remote]
                         .sort((a, b)=>a.index - b.index);
+                    const learned = state.learned;
+                    if (learned !== null && state.remotes.length > learned.opened)
+                    {
+                        learned.opened = state.remotes.length;
+                        Promise.resolve(learned.store.put(EXECUTORS_OPENED_KEY,
+                            Uint8Array.of(learned.opened))).catch(()=>{});
+                    }
                     return undefined;
                 }, (/** @type {any} */ error)=>{
                     state.opening.delete(index);
@@ -631,10 +649,38 @@ export function createCpuModule(){
                                 unbroken: state.unbroken.buffer,
                                 store: hostConfig.cork?.store ?? null,
                                 config: { ...hostConfig, cork } });
+                            const store = hostConfig.cork?.store ?? null;
                             if (config?.eagerExecutors === true)
                             {
                                 wantExecutors(settings.executors - 1);
                                 await Promise.all(state.opening.values());
+                            }
+                            else if (store !== null)
+                            {
+                                // As many as the bundle's threads opened in an earlier
+                                // run, opened now, during the start: one opened when a
+                                // thread first wants it comes some tens of milliseconds
+                                // late, a stall in the middle of a game, and one no
+                                // thread wants this time only sleeps. Counted from the
+                                // record's answer on, so an executor opened before it
+                                // cannot write a smaller count over it.
+                                Promise.resolve(store.get(EXECUTORS_OPENED_KEY))
+                                    .catch(()=>null).then(bytes=>{
+                                        const had = bytes?.[0] ?? 0;
+                                        if (state.disposed || state.openExecutor === null)
+                                        {
+                                            return;
+                                        }
+                                        state.learned = { store,
+                                            opened: Math.max(had, state.remotes.length) };
+                                        if (state.learned.opened > had)
+                                        {
+                                            Promise.resolve(store.put(EXECUTORS_OPENED_KEY,
+                                                Uint8Array.of(state.learned.opened)))
+                                                .catch(()=>{});
+                                        }
+                                        wantExecutors(Math.min(had, settings.executors - 1));
+                                    });
                             }
                         }
                         state.cork = state.host.cork();
