@@ -239,6 +239,8 @@
  * @property {boolean} [dispatch]  Each module placed in a range of the table, a transfer inside
  *     it a direct tail call. Default false.
  * @property {boolean} [leafCalls]  A small leaf callee formed into its caller. Default true.
+ * @property {boolean} [regionStops]  A region stops at a block another region has an entry for
+ *     and leaves to it there; off by default (it cuts hot code: `SETTINGS.md`).
  * @property {number} [leafBlocks]  Its blocks at most. Default 16.
  * @property {number} [leafBytes]  Its bytes at most. Default 512.
  * @property {number} [formDepth]  How many levels of callees formed in may keep direct calls

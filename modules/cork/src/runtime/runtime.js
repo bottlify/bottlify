@@ -200,6 +200,12 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         // Diagnostic: every store key put and every one missed, as
         // `entry:hash:top`, in the diagnostics -- what tells two runs' keys apart.
         traceStore: false,
+        // A region stops at a block another region has an entry for, or one formed
+        // and on its way to being published, and leaves to it there (`entered` in
+        // `formRegion`): a function's code translated once, a third less stored in
+        // Far Cry -- and the hot code it cuts crossing between regions, 74% more
+        // transfers in xz. Off until the cut is kept out of hot code.
+        regionStops: false,
         // Diagnostic: the regions still published whose bytes no longer form
         // as they did -- translated code a write left standing -- in the
         // diagnostics (`staleRegions`), formed again when they are asked for.
@@ -3274,7 +3280,8 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
             }
             const region = formRegion(read, record.entry,
                 { ...formHere, translatable, callTargets: targets,
-                    entered: enteredFor(record.entryTop, record) });
+                    ...(settings.regionStops !== true ? {}
+                        : { entered: enteredFor(record.entryTop, record) }) });
             const starts = new Set(region.blocks.map(block=>block.start));
             // Formed without the profile at a quiet call, the region is worth
             // publishing whether or not a callee was formed in.
@@ -3354,7 +3361,8 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
             const called = record.targets === undefined ? {}
                 : { callTargets: new Map(record.targets) };
             const region = formRegion(read, record.entry, { ...formHere, translatable,
-                ...called, entered: enteredFor(record.entryTop, record) });
+                ...called, ...(settings.regionStops !== true ? {}
+                    : { entered: enteredFor(record.entryTop, record) }) });
             formed.push({ region, entryTop: record.entryTop, stamp: stamp(region.pages),
                 cached: null, ...precisionFlags(region, record.entryTop), loose,
                 wrapped: !readsChecked,
@@ -4246,8 +4254,9 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
             // region formed before this one in the batch, or on its way to being
             // published: their entries are there by the time this region runs.
             const region = formRegion(read, eip, { ...formHere, translatable, shared,
-                entered: address=>coveredIn(covered, address, entryTop)
-                    || coveredIn(coveredOut, address, entryTop) || publishedAt(address) });
+                ...(settings.regionStops !== true ? {} : { entered: address=>
+                    coveredIn(covered, address, entryTop)
+                    || coveredIn(coveredOut, address, entryTop) || publishedAt(address) }) });
             // What the region calls directly lands in the same batch, so
             // the call and the return transfer without a miss -- each
             // callee at the top the call site has, which the tracker

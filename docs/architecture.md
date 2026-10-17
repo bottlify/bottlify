@@ -331,17 +331,19 @@ There are no page tables: each 4 KiB page has one byte of flags — `INACCESSIBL
   leaves after its trial. Joined threads leave at once when the process stops translating to wait,
   and after 3 s of a median under 40 % otherwise. Every decision is in the pool's journal
   (`translationPool()` on the run).
-- **One translation of each piece of code.** A region stops at a block another region has an
-  entry for -- published, formed earlier in the same batch, or on its way back from a translator
-  -- and a jump there leaves to that region: a function's code is translated once however many of
-  its blocks start regions. A small leaf callee is still formed into each caller, for the call it
-  saves.
+- **Regions do not repeat each other.** A candidate at a block of a region formed and not yet
+  published -- earlier in its batch, with a translator, or its module compiling -- is not formed
+  again beside it (for a region with x87 in it, at the top that region was formed for): it has an
+  entry there once that region is published. A region may also stop at a block another region has
+  an entry for and leave to it there (`regionStops`), so a function's code is translated once; that
+  is off, because the hot code it cuts crosses between regions (`SETTINGS.md`). A small leaf callee
+  is formed into each caller, for the call it saves.
 - **The store.** A translation is kept under the cache version, the browser's features, the memory
   layout, the bundle id, the entry address, the x87 stack top and the run's modes. Its record says
   what forming made of it: a 64-bit FNV hash of the region's bytes, the blocks it left to other
-  regions, the callees formed into it, its x87 precision. Where it stops depends on what was
-  translated by then, so a run that forms the region otherwise forms it again as the record says
-  and takes it when the bytes hash the same. A second run takes from the store everything the
+  regions, the callees formed into it, its x87 precision. A run that forms the region otherwise --
+  before its callees were known, or beside other regions -- forms it again as the record says and
+  takes it when the bytes hash the same. A second run takes from the store everything the
   first one translated. A bundle may bring translations along (`CORKSEED`); they are seeded before
   the first instruction.
 

@@ -1163,3 +1163,35 @@ None yet.
 - **Decision.** Kept, as less garbage at no cost; no frame rate is claimed for it. A frame spread
   on this machine is measured with the tab visible, and set against an unrelated loop before it
   is read as the engine's.
+
+### 2026-10-17 -- a region stopping at every block another region has an entry for
+
+- **Idea.** Far Cry's cold run stored 842 MB for 3.1 MB of x86 it ran, each byte in 6.9 regions.
+  A region that stops at a block another region (published, or formed and on its way) has an
+  entry for, and leaves to that region there, translates a function's code once (`regionStops`,
+  `0b6289c7`, on by default there).
+- **Workload.** The Far Cry demo bundle, `tools/cdp_test/game.mjs farcry-demo --worker --coi
+  --no-video --fake-gpu --args "map fort" --run-seconds 200 --executors 1 --store local`, a fresh
+  profile, one cold run a mode, on `6328903b` with the mode set by `cork.config`; and the transfers
+  between regions (`countTransfers`) of xz 5.8.4 (`-3 -T1` on 16 MiB), Stockfish 8 (`bench 16 1
+  12`) and 7-Zip (`7zr b -md22`), one executor, one run a mode -- the guest instructions retired
+  are the same in every mode (xz 9.976 billion to within 3 000), so the transfers are counts, not
+  timings.
+- **Values.** Stopping at any such block / at another region's own entry only / never:
+  Far Cry stored 246 / 336 / 345 MB (modules emitted 229 / 316 / 324 MB, 13 481 / 13 709 /
+  13 608 regions); xz 179.3 / 116.2 / 103.0 million transfers (`f74d60e9`, before both:
+  103.0 million); Stockfish 137.5 / 101.8 / 100.9 million; 7-Zip 74.4 / 68.3 / 68.3 million. The
+  CPU suite on `0b6289c7` with the parked scheduler change (6 of 10 rounds, the machine loaded by
+  two full check runs in some of them) had xz 10 to 17% and Stockfish 3 to 5% slower than
+  `9a8f577e` on one core.
+- **Machine.** The 4-core KVM VM after a container restart (Intel Xeon @ 2.80 GHz, slower than
+  the one before it: xz 16 to 19 s here against 10 to 11 s there), node 22.22.0, headless
+  Chromium 141. Power plan not recorded. Far Cry runs single, the figures in MB of one run.
+- **Decision.** Off by default (`regionStops: false`). A third of Far Cry's store is the price of
+  the cut it makes in hot code: a block another region holds is often inside the loop or the path
+  this region runs, and every pass through it is a transfer, its registers stored and loaded
+  again. Stopping only at other regions' entries keeps little of the saving (336 MB) and still
+  costs xz 13%. The covering of regions on their way to being published, which kept candidates
+  from being formed over them, stays on: it cost no transfer (xz 103.0 million) and took Far Cry
+  from 842 to 345 MB. A stop that keeps out of hot code -- stopping only in code that runs rarely,
+  or forming a region again without its stops once a transfer at one turns hot -- is still open.

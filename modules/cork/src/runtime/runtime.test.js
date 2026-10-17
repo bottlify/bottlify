@@ -1035,7 +1035,7 @@ test('a region formed beside another one is found by a run that would form it wh
     const LOOP = CODE + 5;
     /** @param {number[]} order */
     const run = async order=>{
-        const m = machine({ store, bundleId: 'test' });
+        const m = machine({ store, bundleId: 'test', regionStops: true });
         m.write(CODE, COUNTDOWN);
         m.setReg(4, 0x80000);
         for (const at of order)
