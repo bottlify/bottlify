@@ -172,6 +172,8 @@ const ERROR_NOACCESS = 998;
  *           pinned one is never let go.
  * @property {(milliseconds: number) => void} sleep
  * @property {() => any} park  The token that says the caller has been stopped.
+ * @property {(reason: string, result: number) => void} [reschedule]  The caller gives up
+ *           its turn and is woken at once with `result`, its processor chosen again.
  * @property {() => boolean} [yieldTurn]  Puts the caller behind another thread ready to
  *           run at its priority or above, for Sleep(0); false, and nothing done, when
  *           there is none.
@@ -1281,7 +1283,11 @@ export function createProcessFunctions(host){
          *
          * Puts the process, and every thread of it, on the processors the mask
          * names. A mask naming none, or a processor the machine does not have,
-         * is ERROR_INVALID_PARAMETER and changes nothing.
+         * is ERROR_INVALID_PARAMETER and changes nothing. A caller the mask
+         * moves off the processor it is on gives up its turn, as with
+         * SetThreadAffinityMask: an engine timing each processor pins its
+         * process to each in turn and reads the APIC id next, at a priority
+         * no Sleep(0) yields at.
          */
         SetProcessAffinityMask: {
             argBytes: 8,
@@ -1291,6 +1297,13 @@ export function createProcessFunctions(host){
                 {
                     setError(ERROR_INVALID_PARAMETER);
                     return 0;
+                }
+                const self = host.currentThread();
+                if (self && host.reschedule
+                    && ((mask >>> 0) >>> processors.processorOf(self) & 1) === 0)
+                {
+                    host.reschedule('SetProcessAffinityMask', 1);
+                    return host.park();
                 }
                 return 1;
             },

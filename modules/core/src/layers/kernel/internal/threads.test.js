@@ -1210,3 +1210,25 @@ test('a thread this executor keeps calling back from the other one stays here a 
     clock += 3000;
     assert.equal(round(), 1, 'three seconds on, it tries the other executor again');
 });
+
+test('a thread whose mask names only processors whose executors cannot open runs where any may',
+    ()=>{
+        // An engine timing each processor pins its process to each in turn;
+        // with the executor of one it named failed to open, the thread had
+        // nowhere it could run, and the run stopped with no thread left.
+        const { cpu } = twoExecutors();
+        const sched = createScheduler({ cpu: { ...cpu, wantExecutor: ()=>false,
+            wantExecutors: ()=>1 }, switcher: createSwitcher({ cpu }), quantum: 5000 });
+        const main = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
+        main.affinityMask = 1 << 2;
+        assert.equal(sched.runOnce().ran, main);
+
+        // And with no other executor open at all.
+        const alone = fakeCpu();
+        const single = createScheduler({
+            cpu: { ...alone, executors: ()=>[], wantExecutor: ()=>false, wantExecutors: ()=>0 },
+            switcher: createSwitcher({ cpu: alone }), quantum: 5000 });
+        const first = single.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
+        first.affinityMask = 1 << 1;
+        assert.equal(single.runOnce().ran, first);
+    });

@@ -1595,6 +1595,11 @@ export function createWin32Module(){
                         /** @param {number} milliseconds */
                         sleep: milliseconds=>kernel.sleep(kernel.currentThread(), milliseconds),
                         park: ()=>bridge.park(),
+                        // The caller gives up its turn and is woken at once with
+                        // `result`: the scheduler chooses its processor again.
+                        /** @param {string} reason @param {number} result */
+                        reschedule: (reason, result)=>kernel.block(kernel.currentThread(), reason,
+                            { deadline: kernel.clock.virtualTime(), result }),
                         // Sleep(0): the rest of the turn to another thread ready to
                         // run at the caller's priority or above, the caller behind
                         // it; false, and nothing given, when there is none. The
