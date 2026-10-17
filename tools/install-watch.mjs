@@ -11,7 +11,7 @@
  * An install several processes deep that has stopped shows here which process
  * waits on which; the facade alone speaks for one of them.
  *
- *   node tools/install-watch.mjs <setup.exe | disc.iso | archive.zip|.rar [--entry PATH]>
+ *   node tools/install-watch.mjs <setup.exe | disc.iso | archive.zip [--entry PATH]>
  *       | --bundle ID [--which PATH]
  *       [--every 30] [--minutes 20]
  *       [--journal SECONDS] [--memory MB] [--key Code@S]... [--click X,Y@S]...
@@ -74,7 +74,7 @@ import { openBundle } from './btl.mjs';
 import { isButtonClass, label } from './wizard-buttons.mjs';
 import { createApp } from '../modules/core/src/app.js';
 import { createFakeDevice } from '../modules/core/src/layers/graphics/webgpu/internal/fake-device.js';
-import { archiveDisc, collectFrom, discOptions, placementOf, prefixOptions, readRar, readZip }
+import { archiveDisc, collectFrom, discOptions, placementOf, prefixOptions, readZip }
     from '../modules/installer/src/index.js';
 
 const argv = process.argv.slice(2);
@@ -174,7 +174,7 @@ const besideSetup = ()=>readdirSync(dirname(file), { withFileTypes: true })
     .map(one=>({ name: one.name,
         bytes: new Uint8Array(readFileSync(join(dirname(file), one.name))) }));
 /**
- * A disc image, or a zip or rar built into one as the page builds it, mounted as D:
+ * A disc image, or a zip built into one as the page builds it, mounted as D:
  * with the program it names started from there -- the autorun's, or the one
  * `--entry PATH` names on it.
  */
@@ -184,13 +184,13 @@ let collectable = null;
 const discMedia = async()=>{
     const name = basename(file);
     const bytes = new Uint8Array(readFileSync(file));
-    const read = /\.zip$/i.test(name) ? readZip : /\.rar$/i.test(name) ? readRar : null;
+    const read = /\.zip$/i.test(name) ? readZip : null;
     const disc = read ? archiveDisc(name, await read(new Blob([bytes]))) : { name, disc: bytes };
     collectable = disc;
     return discOptions(disc, argv.includes('--entry')
         ? { entry: argv[argv.indexOf('--entry') + 1] } : {});
 };
-const isDisc = !bundleId && /\.(iso|zip|rar)$/i.test(file);
+const isDisc = !bundleId && /\.(iso|zip)$/i.test(file);
 const media = bundleId || isDisc ? null : {
     name: basename(file),
     bytes: new Uint8Array(readFileSync(file)),
