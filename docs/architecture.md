@@ -380,7 +380,9 @@ There are no page tables: each 4 KiB page has one byte of flags — `INACCESSIBL
   busy then goes to one left free -- the process's own first -- and has its code translated there
   too, rather than leave a processor idle. Two kinds of thread run on the process's own executor
   only, where they may: one calling into the host more often than once in 30 000 instructions over
-  its last slices, every such call a round trip back to it from another executor, and one whose
+  its last million or so instructions (however many slices cut them: a thread that wakes, runs a few
+  dozen instructions and waits again weighs as little as those), every such call a round trip back
+  to it from another executor, and one whose
   runs on another executor have mostly ended with the process's executor left nothing to run and
   calling it back -- a thread that takes turns with the process's threads rather than running beside
   them (the share halves every second, so it tries again). A thread of either kind waiting for the

@@ -90,6 +90,17 @@ const LATE_GAP_MS = 40;
 const HOST_BOUND = 1 / 30_000;
 
 /**
+ * The instructions over which a thread's calls into the host are counted
+ * (`crossRate`), as a half-life: the rate is calls an instruction over about
+ * the last million, however many slices cut them. Taken a slice at a time, a
+ * thread that woke, ran a few dozen instructions and called the host again to
+ * wait counted as a call every few dozen: x264's frame threads, a call in a
+ * million instructions, rated a call in 34 to 80 and were kept on this
+ * executor, the other three idle three quarters of the run.
+ */
+const CROSS_HALF = 1_000_000;
+
+/**
  * The share of a thread's last runs on another executor that ended with this
  * one called it back, nothing of its own to run, past which it runs here
  * (`coupled`): it and this executor's threads take turns rather than run at
@@ -785,8 +796,12 @@ export function createScheduler(options){
         const crossed = next.crossings - next.crossingsAt;
         if (instructions > 0 || crossed > 0)
         {
-            const rate = crossed / Math.max(1, instructions);
-            next.crossRate = next.crossSeen ? next.crossRate * 0.75 + rate * 0.25 : rate;
+            // Each call adds its share of the window, the slice's instructions
+            // age what was there: a steady rate stays itself, and a short slice
+            // ending in a call weighs as little as its few instructions.
+            const kept = 0.5 ** (instructions / CROSS_HALF);
+            const each = instructions > 0 ? (1 - kept) / instructions : Math.LN2 / CROSS_HALF;
+            next.crossRate = next.crossRate * kept + crossed * each;
             next.crossSeen = true;
         }
         next.crossingsAt = next.crossings;
@@ -1395,7 +1410,7 @@ export function createScheduler(options){
     /**
      * Whether `thread` runs on this executor and no other, where it may run
      * here: it calls into the host more often than `HOST_BOUND` over its last
-     * slices (`crossRate`) -- elsewhere every such call is a round trip back
+     * million or so instructions (`crossRate`) -- elsewhere every such call is a round trip back
      * here, and the thread waits on its calls longer than it computes: a
      * game's renderer, a call every hundred instructions, was put on the other
      * executor when its sound thread took this one's turn, and drew a fifth
@@ -1765,9 +1780,9 @@ export function createScheduler(options){
                 home: threads.length === 0 ? 0 : undefined,
                 /**
                  * Its calls into the host, wherever it ran, and how many an
-                 * instruction it made over its last slices (`crossRate`,
-                 * `account`): what running it on another executor costs in
-                 * crossings, for the report.
+                 * instruction it made over its last million or so instructions
+                 * (`crossRate`, `account`): what running it on another executor
+                 * costs in crossings, for the report.
                  */
                 crossings: 0,
                 crossingsAt: 0,

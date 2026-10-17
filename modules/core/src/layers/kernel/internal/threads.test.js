@@ -1121,6 +1121,51 @@ test('a thread calling into the host often runs on the process\'s executor and n
     assert.equal(computing.told.goOn, false, 'the other executor gives it up');
 });
 
+test('a thread\'s calls into the host are counted over its instructions, not its slices', ()=>{
+    // x264's frame threads woke, ran a few dozen instructions and called the
+    // host to wait again between runs of millions: a call in a million
+    // instructions, rated a call in 34 to 80 a slice at a time, and kept here.
+    /** @type {() => void} */
+    let crossing = ()=>{};
+    const cpu = { ...fakeCpu(), beforeTrap: (/** @type {() => void} */ hook)=>{
+        crossing = hook;
+    } };
+    const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 5000 });
+    const frames = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'frames' });
+    /** @param {number} instructions @param {number} calls */
+    const slice = (instructions, calls)=>{
+        cpu.runSlice = ()=>{
+            for (let call = 0; call < calls; call++)
+            {
+                crossing();
+            }
+            return instructions;
+        };
+        sched.runOnce();
+    };
+
+    for (let round = 0; round < 8; round++)
+    {
+        slice(1_000_000, 0);
+        slice(40, 1);
+        slice(60, 1);
+    }
+    assert.ok(frames.crossRate < 1 / 300_000,
+        `two calls a million instructions, not one in fifty (${frames.crossRate})`);
+    assert.ok(frames.crossRate > 1 / 2_000_000, 'and the calls still count');
+
+    // A steady rate is itself, whatever the slices: a renderer's call every
+    // hundred instructions.
+    const renderer = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'renderer' });
+    sched.block(frames, 'done');
+    for (let round = 0; round < 40; round++)
+    {
+        slice(100_000, 1000);
+    }
+    assert.ok(renderer.crossRate > 0.9 / 100 && renderer.crossRate <= 1 / 100,
+        `a call every hundred (${renderer.crossRate})`);
+});
+
 test('a thread this executor keeps calling back from the other one stays here a while', ()=>{
     // A game's sound thread, placed on the other executor whenever it was ready
     // beside the renderer, was called back 1 312 times of 1 319 as the renderer
