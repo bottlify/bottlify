@@ -137,9 +137,40 @@ workers answer nothing to a direct attach.
 | `report-diff.mjs` | what happened between two of the launcher's reports of one run: frames and rate, host calls by time (calls, seconds, a frame, a call), bytes sent to the worker a frame; a window of a scene rather than a whole run | `node tools/cdp_test/live/report-diff.mjs before.json after.json [top]` |
 | `bottle-contents.mjs` | what an installation finished in the driven tab would put in its bottle, by directory and size, after the collection rule, and what that rule leaves out; read it before Save | `node tools/cdp_test/live/bottle-contents.mjs [depth] [port]` |
 | `record-output.mjs` | what the person hears, uncompressed off the output node, the last two minutes (`arm` keeps a tap across reloads; `save` writes a WAV) | `node tools/cdp_test/live/record-output.mjs arm` then `… save [seconds] [file]` |
+| `snapshot.mjs` | textures of the running program as the GPU holds them, as PNGs: the targets and shadow maps a frame dump names; a float format stretched between its smallest and largest values | `node tools/cdp_test/live/snapshot.mjs t4414 t754 [--out DIR]` |
 
 `tools/wav-scan.mjs <file.wav>` reads such a recording for what is wrong in it: gaps of
 silence inside sound, clicks (a step far beyond the signal's own), and exact repeats.
+
+### Switches on the running engine
+
+`window.__bottlify__.app.debug.<name>(...)` in the launcher tab (through `eval.mjs`), each a
+promise of what the engine answers; they act on the game as it runs, no restart. The graphics
+ones need the graphics worker.
+
+| switch | what it does |
+|---|---|
+| `dumpFrames(n)`, then `dumped()` | the next n frames written down, every draw with its shaders, stages and state; `dumped()` is the last |
+| `snapshot('t4414')`, then `snapped('t4414')` | a texture as the GPU holds it at the end of the next frame: an intermediate target or a shadow map a dump names |
+| `pick(x, y)` | which draw painted that pixel: the program paused while the frame is taken apart |
+| `freeze(on)` | shows the last frame over and over, the program paused, so a cut is seen on a still picture |
+| `maxDraws(n)` | keeps the first n draws of every frame (-1 all): bisects which draw paints a region |
+| `skipTexture('t12,t40')` | drops every draw sampling those textures (names as a dump gives them) |
+| `skipShader('vs12,ps40')` | drops every draw made with those shaders |
+| `stageLimit(n)` | keeps the first n texture stages of fixed-function draws |
+| `textureStats('t642')` | adds to each dump what that texture's top level holds in guest memory |
+| `occlusion(mode)` | how occlusion counts are answered from now on ('' as measured) |
+| `bufferLocks(mode)` | how buffer locks are taken ('' as asked, 'rename' renaming at each) |
+| `windows()`, `desktop()` | every live window as the window manager lists it; the desktop picture |
+| `modules()`, `moduleAt(address)` | every image mapped and where; which image an address is in |
+| `read(address, length)` | guest memory |
+| `hook(address, how)` | a watch in front of a routine: its calls in the trace with arguments and answer |
+| `ringTrace(n)`, `callRingSkip('A,B')` | the bridge's recent calls; names kept out of that ring |
+| `processes()`, `diagnosticsOf(id)` | every process standing; one process's diagnostics |
+| `registry`, `exported(lib, name)` | the program's registry; whether a system library exports a name |
+
+`app.diagnostics()` is the whole engine's account (what a report holds), and two reports of
+one run diffed (`report-diff.mjs`) are a scene's window.
 
 [`tools/install-watch.mjs`](../install-watch.mjs) is the same question for an installer in Node: it
 runs one unattended and prints every process's threads, waits and parked

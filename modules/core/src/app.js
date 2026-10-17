@@ -8334,27 +8334,63 @@ function liveDumpOf(worker, control){
     /** @type {{ lines: string[], frame: number } | null} */
     let last = null;
     let listening = false;
+    /** The textures read off the GPU on asking (`snapshot`), by the id a dump gives. @type {Map<string, any>} */
+    const shots = new Map();
+    const listen = ()=>{
+        if (listening || !worker)
+        {
+            return;
+        }
+        listening = true;
+        worker.addEventListener('message', (/** @type {{ data: any }} */ event)=>{
+            if (event.data?.type === 'dumped')
+            {
+                last = { lines: event.data.lines, frame: event.data.frame };
+            }
+            if (event.data?.type === 'snapped')
+            {
+                const { id, width, height, format, data } = event.data;
+                shots.set(id, { width, height, format, data });
+            }
+        });
+    };
     /** @param {number} [frames] */
     const dumpFrames = (frames = 1)=>{
         if (!worker)
         {
             throw new Error('dumpFrames: this run draws without a graphics worker');
         }
-        if (!listening)
-        {
-            listening = true;
-            worker.addEventListener('message', (/** @type {{ data: any }} */ event)=>{
-                if (event.data?.type === 'dumped')
-                {
-                    last = { lines: event.data.lines, frame: event.data.frame };
-                }
-            });
-        }
+        listen();
         worker.postMessage({ type: 'debug', dumpFrames: frames });
         return frames;
     };
     return {
         dumpFrames,
+        /**
+         * A texture as the GPU holds it at the end of the next frame -- `t4414`
+         * as a frame dump names it, its top level, in its GPU format -- for
+         * `snapped` to hand over: what an intermediate target or a shadow
+         * map holds, which a dump of the draws cannot show.
+         *
+         * @param {string} id
+         */
+        snapshot: id=>{
+            if (!worker)
+            {
+                throw new Error('snapshot: this run draws without a graphics worker');
+            }
+            listen();
+            shots.delete(String(id));
+            worker.postMessage({ type: 'debug', snapshot: String(id) });
+            return String(id);
+        },
+        /**
+         * The texture `snapshot` asked for, once the frame has read it: its size,
+         * GPU format and texels, or null until then.
+         *
+         * @param {string} id
+         */
+        snapped: id=>shots.get(String(id)) ?? null,
         /**
          * How the worker's devices take buffer locks from now on: '' as the
          * program asked, 'rename' renaming at every one.

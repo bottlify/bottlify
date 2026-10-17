@@ -2908,6 +2908,9 @@ const CLEAR_STRIDE = 20;
  * @property {{ dumpFrames: number, bufferLocks?: string, skipTexture?: string,
  *     skipShader?: string, occlusion?: string, stageLimit?: number, textureStats?: string,
  *     maxDraws?: number, written?: (lines: string[], frame: number) => void,
+ *     snapshot?: string,
+ *     snapped?: (id: string, shot: { width: number, height: number, data: Uint8Array,
+ *         format: string }) => void,
  *     replayLast?: (cut?: number) => boolean,
  *     shownDraws?: () => { lines: string[], sceneDraws: number },
  *     pick?: (x?: number, y?: number, tolerance?: number, depth?: number)
@@ -4960,6 +4963,27 @@ export function createRenderer(options){
         {
             counters.failures.push(String(error && error.message ? error.message : error));
         }
+    };
+
+    /**
+     * The texture a running program's `app.debug.snapshot` names -- `t4414`
+     * as a frame dump names it -- read off the GPU at the end of the next
+     * frame, its top level as the GPU holds it; asked once, then forgotten.
+     *
+     * @param {{ snapshot?: string }} live
+     * @returns {{ id: string, gpu: any } | null}
+     */
+    const snapshotAsked = live=>{
+        const id = live.snapshot ?? '';
+        live.snapshot = '';
+        for (const entry of roster)
+        {
+            if (entry.id === id && entry.gpu)
+            {
+                return { id, gpu: entry.gpu };
+            }
+        }
+        return null;
     };
 
     /**
@@ -9984,8 +10008,13 @@ export function createRenderer(options){
             }
             frameStats = blankFrameStats();
             const replayed = ++counters.frames;
-            chain = chain.then(()=>replay(recorded, surface)).then(()=>{
+            const shotAsked = liveDump?.snapshot ? snapshotAsked(liveDump) : null;
+            chain = chain.then(()=>replay(recorded, surface, shotAsked?.gpu ?? null)).then(shot=>{
                 submittedFrames = replayed;
+                if (shotAsked && shot)
+                {
+                    liveDump?.snapped?.(shotAsked.id, { ...shot, format: shotAsked.gpu.format });
+                }
             }).catch(failure);
             if (liveDump)
             {

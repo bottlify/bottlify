@@ -123,6 +123,15 @@ export function serveGraphics(scope, deps){
         shownDraws: undefined,
         /** @type {((x?: number, y?: number, tolerance?: number, depth?: number) => Promise<any>) | undefined} */
         pick: undefined,
+        /** A texture to read off the GPU at the next frame's end (`app.debug.snapshot`). */
+        snapshot: '',
+        /**
+         * @param {string} id
+         * @param {{ width: number, height: number, data: Uint8Array, format: string }} shot
+         */
+        snapped: (id, shot)=>{
+            scope.postMessage({ type: 'snapped', id, ...shot }, [shot.data.buffer]);
+        },
         /** @param {string[]} lines @param {number} frame */
         written: (lines, frame)=>{
             const dumped = { type: 'dumped', lines, frame };
@@ -545,6 +554,10 @@ export function serveGraphics(scope, deps){
                 if ('textureStats' in data)
                 {
                     liveDump.textureStats = String(data.textureStats ?? '');
+                }
+                if ('snapshot' in data)
+                {
+                    liveDump.snapshot = String(data.snapshot ?? '');
                 }
                 if ('stageLimit' in data)
                 {
