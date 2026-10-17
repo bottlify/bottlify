@@ -249,15 +249,42 @@ function machine(version, lent = false){
     const held = new Uint8Array(LENGTH);
     /** @type {{ offset: number, length: number } | null} */
     let locking = null;
-    /** Unlocked ranges a draw has yet to lend. @type {{ offset: number, length: number, now?: Uint8Array }[]} */
+    /**
+     * Unlocked ranges a draw has yet to lend, each of the storage it was
+     * written in: a DISCARD the guest makes trades a dynamic buffer's two.
+     *
+     * @type {{ base: number, offset: number, length: number, now?: Uint8Array }[]}
+     */
     let unlent = [];
     /**
      * What the worker plays, in order: lends (their bytes once claimed) and draws.
      *
-     * @type {({ offset: number, length: number, bytes: Uint8Array | null }
+     * @type {({ base: number, offset: number, length: number, bytes: Uint8Array | null }
      *     | { start: number, count: number })[]}
      */
     const played = [];
+    /**
+     * The recorder's claim (`remote/replay.js`): lends of a storage, from
+     * `from` to `to`, not yet read keep the bytes they have now.
+     *
+     * @param {number} base @param {number} from @param {number} to
+     */
+    const claim = (base, from, to)=>{
+        for (const entry of played)
+        {
+            if ('offset' in entry && !entry.bytes && entry.base === base && entry.offset < to
+                && from < entry.offset + entry.length)
+            {
+                entry.bytes = readMemory(base + entry.offset, entry.length).slice();
+            }
+        }
+    };
+    /** What is unlocked is lent at the next call the recorder records, a draw or a trade. */
+    const lendNow = ()=>{
+        played.push(...unlent.map(range=>({ base: range.base, offset: range.offset,
+            length: range.length, bytes: range.now ?? null })));
+        unlent = [];
+    };
     const lock = buffer.Lock.bind(buffer);
     const unlock = buffer.Unlock.bind(buffer);
     /** @param {number} offset @param {number} size @param {any} result @param {number} flags */
@@ -270,14 +297,7 @@ function machine(version, lent = false){
             // but NOOVERWRITE alone all of the buffer, one with it its range.
             const [from, to] = flags !== D3DLOCK_NOOVERWRITE ? [0, LENGTH]
                 : [offset, offset + locking.length];
-            for (const entry of played)
-            {
-                if ('offset' in entry && !entry.bytes && entry.offset < to
-                    && from < entry.offset + entry.length)
-                {
-                    entry.bytes = readMemory(buffer.base + entry.offset, entry.length).slice();
-                }
-            }
+            claim(buffer.base, from, to);
         }
         return hr;
     };
@@ -287,7 +307,7 @@ function machine(version, lent = false){
         {
             if (lent)
             {
-                unlent.push(locking);
+                unlent.push({ base: buffer.base, ...locking });
             }
             else
             {
@@ -312,15 +332,14 @@ function machine(version, lent = false){
         }
         else if (locking)
         {
-            unlent.push({ offset: locking.offset, length: locking.length,
+            unlent.push({ base: buffer.base, offset: locking.offset, length: locking.length,
                 now: readMemory(buffer.base + locking.offset, locking.length).slice() });
         }
         const hr = draw(type, start, count);
         if (hr === D3D_OK && lent)
         {
-            played.push(...unlent.map(range=>({ offset: range.offset, length: range.length,
-                bytes: range.now ?? null })), { start, count });
-            unlent = [];
+            lendNow();
+            played.push({ start, count });
         }
         else if (hr === D3D_OK)
         {
@@ -334,7 +353,7 @@ function machine(version, lent = false){
         {
             if ('offset' in entry)
             {
-                held.set(entry.bytes ?? readMemory(buffer.base + entry.offset, entry.length),
+                held.set(entry.bytes ?? readMemory(entry.base + entry.offset, entry.length),
                     entry.offset);
             }
             else
@@ -345,6 +364,22 @@ function machine(version, lent = false){
         }
         played.length = 0;
         return reads;
+    };
+    // The trade the ring makes for a DISCARD in the guest: lent, the storage
+    // left is claimed whole, as the recorder claims it.
+    const rename = buffer.Rename.bind(buffer);
+    buffer.Rename = ()=>{
+        const left = buffer.base;
+        if (lent)
+        {
+            lendNow();
+        }
+        const hr = rename();
+        if (hr === D3D_OK && lent)
+        {
+            claim(left, 0, LENGTH);
+        }
+        return hr;
     };
     version.bind(device, buffer);
     assert.equal(device.BeginScene(), D3D_OK);
@@ -419,12 +454,16 @@ function guest(version, steps, lent = false){
         machine(version, lent);
     const shadow = createShadow({
         allocate, readMemory, readU32, writeMemory, device,
-        commands: { take: records=>device.commands(records,
-            version.commands.commandObjects(records, ()=>null)) },
+        commands: {
+            renameSlot: version.commands.commandSlot('Buffer.Rename'),
+            take: records=>device.commands(records, version.commands.commandObjects(records,
+                (/** @type {number} */ pointer)=>(pointer === BUFFER_IF ? buffer : null))),
+        },
     });
     host.writePhysical(DEVICE + 4, new Uint8Array(u32(shadow.address())));
     host.writePhysical(BUFFER_IF + 4, new Uint8Array(u32(shadow.attachBuffer(buffer))));
-    host.writePhysical(LOCK, lockCode(LOCK, LOCK_TRAP));
+    host.writePhysical(LOCK, lockCode(LOCK, LOCK_TRAP,
+        version.commands.commandSlot('Buffer.Rename')));
     host.writePhysical(UNLOCK, unlockCode(UNLOCK, UNLOCK_TRAP));
     host.writePhysical(DRAW, commandCode(DRAW, DRAW_TRAP, {
         ...version.commands.COMMANDS.DrawPrimitive,
@@ -553,8 +592,12 @@ function guest(version, steps, lent = false){
     }
     // A present, or any call at the end of the frame, plays what is left.
     shadow.sync();
+    trades += shadow.diagnostics().trades;
     return drained();
 }
+
+/** DISCARDs the guest runs made by trading the buffer's storages, all seeds together. */
+let trades = 0;
 
 test('a draw reads the vertices its buffer held when the program made it, however the locks'
     + ' around it were taken and whenever the worker reads what was lent', ()=>{
@@ -576,4 +619,5 @@ test('a draw reads the vertices its buffer held when the program made it, howeve
             }
         }
     }
+    assert.ok(trades > 100, `the guest traded storages for a DISCARD ${trades} times`);
 });

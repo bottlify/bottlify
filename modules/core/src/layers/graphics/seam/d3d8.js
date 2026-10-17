@@ -980,7 +980,8 @@ export function createDirect3D8Seam(
     /** @type {Record<string, (builder: { trap: number }) => number>} */
     const bufferGuests = guestsBut('locks', allocate
         ? {
-            Lock: ({ trap })=>placeCode(at=>lockCode(at, trap)),
+            Lock: ({ trap })=>placeCode(at=>lockCode(at, trap,
+                D3D8_COMMANDS.commandSlot('Buffer.Rename'))),
             Unlock: ({ trap })=>placeCode(at=>unlockCode(at, trap)),
         }
         : {});
@@ -2744,19 +2745,22 @@ export function createDirect3D8Seam(
                         }
                         work();
                     },
-                    commands: { take: records=>{
-                        const made = held.device.commands(records,
-                            D3D8_COMMANDS.commandObjects(records, publisher.objectAt));
-                        // A target set in the ring is a new viewport, and
-                        // what a draw is checked against is the device's.
-                        if (shadow.stale())
-                        {
-                            shadow.remirror({ viewport: true });
-                            shadow.settled();
-                            shadow.fresh();
-                        }
-                        return made;
-                    } },
+                    commands: {
+                        renameSlot: D3D8_COMMANDS.commandSlot('Buffer.Rename'),
+                        take: records=>{
+                            const made = held.device.commands(records,
+                                D3D8_COMMANDS.commandObjects(records, publisher.objectAt));
+                            // A target set in the ring is a new viewport, and
+                            // what a draw is checked against is the device's.
+                            if (shadow.stale())
+                            {
+                                shadow.remirror({ viewport: true });
+                                shadow.settled();
+                                shadow.fresh();
+                            }
+                            return made;
+                        },
+                    },
                 });
                 shadows.set(held.device, shadow);
                 held.device.guestState = ()=>shadow.address();

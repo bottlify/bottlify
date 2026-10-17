@@ -1403,6 +1403,13 @@ export function createRecording(options){
                 }
             }
             bindAll(result, making ? args : NOTHING, bind);
+            // A buffer traded its storage for its spare: what was lent of the
+            // one it left keeps its bytes before the guest writes there.
+            const left = name === 'Rename' && !failed ? /** @type {any} */ (target).spare : 0;
+            if (typeof left === 'number' && left !== 0)
+            {
+                claim(left, null);
+            }
             if (LEVELS.has(name))
             {
                 const out = args[count - 1];

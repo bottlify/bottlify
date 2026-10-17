@@ -51,7 +51,9 @@ const D3DFMT_A8R8G8B8 = 21;
 const D3DFMT_D24S8 = 75;
 const D3DFMT_D24X8 = 77;
 const D3DFMT_INDEX16 = 101;
+const D3DPOOL_DEFAULT = 0;
 const D3DPOOL_MANAGED = 1;
+const D3DUSAGE_DYNAMIC = 0x200;
 const D3DSWAPEFFECT_DISCARD = 1;
 const FVF_XYZ_DIFFUSE = 0x042;
 const D3DSBT_ALL = 1;
@@ -461,6 +463,17 @@ const shared = drawable=>({
         { label: 'outside a scene', args: [4, 1, 'data', 16], data: TRIANGLE },
         { label: 'a type there is not', args: [9, 1, 'data', 16], data: TRIANGLE,
             setup: drawable },
+    ],
+    // Written by the lock routine for a buffer with a spare it may take; its
+    // routine here only says the device makes the trade it records.
+    'Buffer.Rename': [
+        { label: 'a dynamic buffer', args: ['buffer'], setup: (device, made)=>{
+            /** @type {{ buffer?: any }} */
+            const out = {};
+            assert.equal(device.CreateVertexBuffer(1024, D3DUSAGE_DYNAMIC, FVF_XYZ_DIFFUSE,
+                D3DPOOL_DEFAULT, out), D3D_OK);
+            made.buffer = out.buffer;
+        } },
     ],
 });
 

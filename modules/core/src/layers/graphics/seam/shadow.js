@@ -217,7 +217,18 @@ export const BUFFER = {
      * write over it is the host's, which claims the bytes first.
      */
     LENT: 32,
-    SIZE: 36,
+    /**
+     * A dynamic buffer's second storage, zero for none, and whether the guest
+     * may write it: set by the host once nothing it plays or lent reads it.
+     * A DISCARD the guest's lock would otherwise leave to the host -- under a
+     * draw the ring holds, or over lent bytes -- trades the two and writes
+     * the trade into the ring (`Buffer.Rename`), which the host plays in order.
+     */
+    SPARE: 36,
+    SPARE_FREE: 40,
+    /** Set by that trade until the host plays it: until then the block's range is the new storage's. */
+    RENAMED: 44,
+    SIZE: 48,
 };
 
 /**
@@ -312,9 +323,14 @@ export function placeCommandRing(block, ring, writeMemory){
  * @param {(address: number, bytes: Uint8Array) => void} deps.writeMemory
  * @param {(records: Uint8Array) => number} deps.take  makes the calls, says how many
  * @param {(detail: string) => void} deps.refuse
+ * @param {number} [deps.splitAfter]  a slot whose record ends a run of them: the rest
+ *     are taken in a run of their own, after `between`
+ * @param {() => void} [deps.between]  what the host does between two runs: work of
+ *     its own a recording sees as calls of their own, in order with the ring's
  */
 export function createCommandReader(deps){
-    const { block, ring, readWord, readWords, writeMemory, take, refuse } = deps;
+    const { block, ring, readWord, readWords, writeMemory, take, refuse, splitAfter,
+        between } = deps;
     let tail = 0;
     let taken = 0;
     const zero = new Uint8Array(4);
@@ -343,6 +359,8 @@ export function createCommandReader(deps){
             }
             const words = readWords(ring + tail, (head - tail) >>> 2);
             let whole = 0;
+            /** Where a run ends, past a record of `splitAfter`. @type {number[]} */
+            const cuts = [];
             while (whole < words.length)
             {
                 const length = words[whole + (COMMAND.BYTES >>> 2)] >>> 2;
@@ -356,12 +374,29 @@ export function createCommandReader(deps){
                     whole = words.length;
                     break;
                 }
+                if (words[whole] === splitAfter)
+                {
+                    cuts.push(whole + length);
+                }
                 whole += length;
             }
             if (whole > 0)
             {
                 before?.();
-                taken += take(new Uint8Array(words.buffer, words.byteOffset, whole * 4));
+                let from = 0;
+                for (const cut of [...cuts, whole])
+                {
+                    if (cut > from)
+                    {
+                        taken += take(new Uint8Array(words.buffer, words.byteOffset + from * 4,
+                            (cut - from) * 4));
+                    }
+                    if (cut < whole || cuts.includes(cut))
+                    {
+                        between?.();
+                    }
+                    from = cut;
+                }
             }
             tail += whole * 4;
             if (tail === head && head > COMMAND_RING_BYTES - COMMAND_SLACK)
@@ -611,6 +646,13 @@ export function getRenderStateCode(at, trap){
  * while what was unlocked may be lent to the graphics worker: the host
  * claims it before the program writes over it.
  *
+ * Unless the buffer has a spare storage the host has let go of (`SPARE`,
+ * `SPARE_FREE`), a DISCARD alone, and nothing unlocked the host has yet to
+ * look at: then the two storages are traded in the block and the trade goes
+ * into the device's command ring (`renameSlot`, the buffer's own pointer),
+ * where the host makes it after the draws before it. The draws read the
+ * storage they were made with; the program writes the other.
+ *
  *     cmp dword [ecx+LOCKED], 0
  *     jne slow
  *     test dword [esp+20], READONLY
@@ -624,7 +666,45 @@ export function getRenderStateCode(at, trap){
  *     mov eax, [esp+20]
  *     and eax, NOOVERWRITE | DISCARD
  *     cmp eax, NOOVERWRITE
+ *     je free
+ *     cmp eax, DISCARD
  *     jne slow
+ *     cmp dword [ecx+SPARE_FREE], 0
+ *     je slow
+ *     mov eax, [ecx+TO]
+ *     cmp eax, [ecx+FROM]
+ *     jne slow                    ; unlocked bytes the host has not seen
+ *     push ebx
+ *     push esi
+ *     mov ebx, [ecx+DEVICE]
+ *     cmp dword [ebx+COMMANDS], 0
+ *     je full
+ *   reserve:                      ; the record: slot, 12, this
+ *     mov eax, [ebx+COMMAND_HEAD]
+ *     lea esi, [eax+12]
+ *     cmp esi, [ebx+COMMAND_BYTES]
+ *     ja full
+ *     lock cmpxchg [ebx+COMMAND_HEAD], esi
+ *     jne reserve
+ *     add eax, [ebx+COMMANDS]
+ *     mov dword [eax], renameSlot
+ *     mov dword [eax+4], 12
+ *     mov esi, [esp+12]           ; this, two words further for the pushes
+ *     mov [eax+8], esi
+ *     mov eax, [ecx+BASE]         ; the trade
+ *     mov esi, [ecx+SPARE]
+ *     mov [ecx+BASE], esi
+ *     mov [ecx+SPARE], eax
+ *     mov dword [ecx+SPARE_FREE], 0
+ *     mov dword [ecx+LENT], 0
+ *     mov dword [ecx+RENAMED], 1
+ *     pop esi
+ *     pop ebx
+ *     jmp free
+ *   full:
+ *     pop esi
+ *     pop ebx
+ *     jmp slow
  *   free:
  *     mov eax, [esp+8]            ; offset
  *     mov edx, [esp+12]           ; size
@@ -677,10 +757,50 @@ export function getRenderStateCode(at, trap){
  *     ret 20
  *
  * @param {number} at @param {number} trap
+ * @param {number} [renameSlot]  `Buffer.Rename`'s slot in the device's ring; without it a
+ *     DISCARD under draws or over lent bytes is always the host's
  * @returns {Uint8Array}
  */
-export function lockCode(at, trap){
-    return routine(at, trap, [
+export function lockCode(at, trap, renameSlot){
+    /** The trade of storages, for a DISCARD alone: the comment's, from `guarded`. */
+    const rename = renameSlot === undefined ? [{ jcc: 0xeb, to: 'hop' }] : [
+        [0x3d, ...dword(D3DLOCK_DISCARD)],                       // cmp eax, DISCARD
+        { jcc: 0x75, to: 'hop' },                                // jne hop
+        [0x83, 0x79, BUFFER.SPARE_FREE, 0x00],                   // cmp dword [ecx+40], 0
+        { jcc: 0x74, to: 'hop' },                                // je hop
+        [0x8b, 0x41, BUFFER.TO],                                 // mov eax, [ecx+20]
+        [0x3b, 0x41, BUFFER.FROM],                               // cmp eax, [ecx+16]
+        { jcc: 0x75, to: 'hop' },                                // jne hop
+        [0x53, 0x56],                                            // push ebx; push esi
+        [0x8b, 0x59, BUFFER.DEVICE],                             // mov ebx, [ecx+28]
+        [0x83, 0xbb, ...dword(SHADOW.COMMANDS), 0x00],           // cmp dword [ebx+disp], 0
+        { jcc: 0x74, to: 'full' },                               // je full
+        { label: 'reserve' },
+        [0x8b, 0x83, ...dword(SHADOW.COMMAND_HEAD)],             // mov eax, [ebx+disp]
+        [0x8d, 0x70, COMMAND.ARGS + 4],                          // lea esi, [eax+12]
+        [0x3b, 0xb3, ...dword(SHADOW.COMMAND_BYTES)],            // cmp esi, [ebx+disp]
+        { jcc: 0x77, to: 'full' },                               // ja full
+        [0xf0, 0x0f, 0xb1, 0xb3, ...dword(SHADOW.COMMAND_HEAD)], // lock cmpxchg [ebx+disp], esi
+        { jcc: 0x75, to: 'reserve' },                            // jne reserve
+        [0x03, 0x83, ...dword(SHADOW.COMMANDS)],                 // add eax, [ebx+disp]
+        [0xc7, 0x00, ...dword(renameSlot)],                      // mov dword [eax], slot
+        [0xc7, 0x40, COMMAND.BYTES, ...dword(COMMAND.ARGS + 4)], // mov dword [eax+4], 12
+        [0x8b, 0x74, 0x24, 0x0c],                                // mov esi, [esp+12]
+        [0x89, 0x70, COMMAND.ARGS],                              // mov [eax+8], esi
+        [0x8b, 0x41, BUFFER.BASE],                               // mov eax, [ecx+4]
+        [0x8b, 0x71, BUFFER.SPARE],                              // mov esi, [ecx+36]
+        [0x89, 0x71, BUFFER.BASE],                               // mov [ecx+4], esi
+        [0x89, 0x41, BUFFER.SPARE],                              // mov [ecx+36], eax
+        [0xc7, 0x41, BUFFER.SPARE_FREE, ...dword(0)],            // mov dword [ecx+40], 0
+        [0xc7, 0x41, BUFFER.LENT, ...dword(0)],                  // mov dword [ecx+32], 0
+        [0xc7, 0x41, BUFFER.RENAMED, ...dword(1)],               // mov dword [ecx+44], 1
+        [0x5e, 0x5b],                                            // pop esi; pop ebx
+        { jcc: 0xeb, to: 'free' },                               // jmp free
+        { label: 'full' },
+        [0x5e, 0x5b],                                            // pop esi; pop ebx
+        { jcc: 0xeb, to: 'hop' },                                // jmp hop
+    ];
+    const parts = [
         ...prologue('hop'),
         [0x83, 0x79, BUFFER.LOCKED, 0x00],                       // cmp dword [ecx+12], 0
         { jcc: 0x75, to: 'hop' },                                // jne hop
@@ -695,7 +815,8 @@ export function lockCode(at, trap){
         [0x8b, 0x44, 0x24, 0x14],                                // mov eax, [esp+20]
         [0x25, ...dword(D3DLOCK_NOOVERWRITE | D3DLOCK_DISCARD)], // and eax, 0x3000
         [0x3d, ...dword(D3DLOCK_NOOVERWRITE)],                   // cmp eax, 0x1000
-        { jcc: 0x75, to: 'hop' },                                // jne hop
+        { jcc: 0x74, to: 'free' },                               // je free
+        ...rename,
         { label: 'free' },
         [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
         [0x8b, 0x54, 0x24, 0x0c],                                // mov edx, [esp+12]
@@ -746,7 +867,10 @@ export function lockCode(at, trap){
         [0x5b],                                                  // pop ebx
         [0x31, 0xc0],                                            // xor eax, eax
         [0xc2, 0x14, 0x00],                                      // ret 20
-    ]);
+    ];
+    // The trade puts the checks further from `hop` than a byte reaches.
+    return routine(at, trap, renameSlot === undefined ? parts : parts.map(part=>(
+        'jcc' in part && part.jcc !== 0xeb ? { ...part, near: true } : part)));
 }
 
 /**
@@ -1838,6 +1962,8 @@ export const stageStateMirror = types=>[
  * @property {number} type        D3DRTYPE, which says which interface it is published as.
  * @property {number} refCount
  * @property {number} [usage]     D3DUSAGE, of which DYNAMIC says it may be held locked while drawn.
+ * @property {number} [spare]     A dynamic one's second storage, which `Rename` trades for.
+ * @property {(hr: number) => void} [renamed]  Told by the ring's `Buffer.Rename` once made.
  * @property {() => number} release
  * @property {(offset: number, size: number, out: { pBits?: number }, flags?: number) => number
  *     } Lock
@@ -1903,6 +2029,9 @@ export function settledAfter(shadow, call){
  * @typedef {Object} ShadowCommands
  * @property {(records: Uint8Array) => number} take  makes the calls a run of
  *     whole records holds, in order, and says how many it made
+ * @property {number} [renameSlot]  `Buffer.Rename`'s slot: a run ends after its
+ *     record, and what the guest wrote into the storage it moves to is sent
+ *     before the next (`traded`)
  */
 
 /**
@@ -2239,6 +2368,77 @@ export function createShadow(deps){
         }
     };
 
+    /** Buffers whose unlocked range waits for the ring's trade of storages (`settle`). */
+    /** @type {Set<number>} */
+    const awaitingTrade = new Set();
+    /**
+     * A buffer the guest traded storages for: a lock the host took and the
+     * guest let go of before the trade is let go of here, before it -- the
+     * buffer refuses a trade while locked -- and what the guest wrote since
+     * waits for the trade.
+     *
+     * @param {{ buffer: ShadowBuffer, hostLocked: boolean }} entry @param {number} block
+     */
+    const beforeTrade = (entry, block)=>{
+        if (entry.hostLocked)
+        {
+            entry.buffer.Unlock();
+            entry.hostLocked = false;
+        }
+        awaitingTrade.add(block);
+    };
+    /**
+     * The ring's `Buffer.Rename` has been made: the block names the storages
+     * as the buffer has them, the one left is the guest's to take again --
+     * every draw before the trade has been made, and what was lent of it the
+     * recorder has claimed -- and a range the guest wrote since is settled.
+     *
+     * @param {number} block @param {number} hr
+     */
+    const traded = (block, hr)=>{
+        const entry = blocks.get(block);
+        if (!entry)
+        {
+            return;
+        }
+        trades++;
+        if (hr !== 0)
+        {
+            refuse('IDirect3DVertexBuffer::Lock', 'a DISCARD the guest made a trade of storages'
+                + ' for was refused by the buffer');
+        }
+        deps.writeMemory(block + BUFFER.BASE, dwordBytes(entry.buffer.base));
+        deps.writeMemory(block + BUFFER.SPARE,
+            dwordsBytes([entry.buffer.spare ?? 0, hr === 0 ? 1 : 0, 0]));
+        if (awaitingTrade.delete(block))
+        {
+            tradedNow.push(block);
+        }
+    };
+    let trades = 0;
+    /** Buffers traded in the run of the ring just made, with what was written since to send. */
+    /** @type {number[]} */
+    const tradedNow = [];
+    /**
+     * Between two runs of the ring: what the guest wrote into a storage a
+     * trade moved to is sent now, outside the run -- a recording takes it as
+     * calls of its own, which the played side then makes too -- and before
+     * the draws of the next run read it.
+     */
+    const settleTraded = ()=>{
+        for (const block of tradedNow.splice(0))
+        {
+            if (readWord(block + BUFFER.LOCKED) !== 0)
+            {
+                flushHeld(block);
+            }
+            else
+            {
+                settle(block);
+            }
+        }
+    };
+
     /**
      * Replays what the guest did to one buffer against the real one. The
      * block says whether a lock is held and what range was locked since the
@@ -2260,6 +2460,13 @@ export function createShadow(deps){
             return;
         }
         const words = readWords(block, BUFFER.SIZE / 4);
+        if (words[BUFFER.RENAMED / 4] !== 0)
+        {
+            // The range is the storage the ring's trade moves to: the
+            // buffer still reads the other until the host plays it.
+            beforeTrade(entry, block);
+            return;
+        }
         const locked = words[BUFFER.LOCKED / 4] !== 0;
         const from = words[BUFFER.FROM / 4];
         const to = words[BUFFER.TO / 4];
@@ -2400,6 +2607,13 @@ export function createShadow(deps){
         {
             return false;
         }
+        if (readWord(block + BUFFER.RENAMED) !== 0)
+        {
+            // Held across the trade too: what it wrote is the new storage's,
+            // sent once the ring has made the trade.
+            beforeTrade(entry, block);
+            return true;
+        }
         if (entry.hostLocked)
         {
             return true;
@@ -2419,7 +2633,9 @@ export function createShadow(deps){
         }
         if ((flags & D3DLOCK_DISCARD) !== 0)
         {
-            flagWord[0] = flags & ~D3DLOCK_DISCARD;
+            // What it writes after is the same lock's, beside what the draws
+            // since were made from: NOOVERWRITE's promise, not a plain lock's.
+            flagWord[0] = (flags & ~D3DLOCK_DISCARD) | D3DLOCK_NOOVERWRITE;
             deps.writeMemory(block + BUFFER.LOCK_FLAGS, flagBytes);
         }
         return true;
@@ -2492,6 +2708,7 @@ export function createShadow(deps){
                         held.end('ring-held', inner);
                     }
                 });
+                settleTraded();
             }
             finally
             {
@@ -2529,6 +2746,7 @@ export function createShadow(deps){
             // them: settling at every entry read every held range again
             // at each of thousands of host calls a frame.
             commandReader?.take(settleHeld);
+            settleTraded();
         }
     };
 
@@ -2550,7 +2768,8 @@ export function createShadow(deps){
                     commandReader = createCommandReader({ block: address, ring: commands,
                         readWord, readWords, writeMemory: deps.writeMemory,
                         take: /** @type {ShadowCommands} */ (deps.commands).take,
-                        refuse: detail=>refuse(`${name}::commands`, detail) });
+                        refuse: detail=>refuse(`${name}::commands`, detail),
+                        splitAfter: deps.commands?.renameSlot, between: settleTraded });
                 }
             }
         }
@@ -2723,9 +2942,11 @@ export function createShadow(deps){
             {
                 return 0;
             }
-            deps.writeMemory(block,
-                dwordsBytes([0, buffer.base, buffer.length, 0, 0, 0, 0, owner, 0]));
+            const spare = buffer.spare ?? 0;
+            deps.writeMemory(block, dwordsBytes([0, buffer.base, buffer.length, 0, 0, 0, 0, owner,
+                0, spare, spare !== 0 ? 1 : 0, 0]));
             blocks.set(block, { buffer, hostLocked: false });
+            buffer.renamed = (/** @type {number} */ hr)=>traded(block, hr);
             // A dynamic buffer is the kind a program holds locked while it
             // draws from it, from its very first lock.
             if (((buffer.usage ?? 0) & D3DUSAGE_DYNAMIC) !== 0)
@@ -2895,6 +3116,8 @@ export function createShadow(deps){
             refused,
             // Calls the command ring carried past the bridge.
             commandCalls: commandReader?.taken() ?? 0,
+            // DISCARDs the guest made by trading a buffer's storages, as the ring played them.
+            trades,
         }),
     };
 }

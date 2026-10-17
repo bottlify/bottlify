@@ -214,7 +214,10 @@ test('the block fits its two pages and its regions follow one another', ()=>{
     assert.equal(SHADOW.LOCK_RING_CAPACITY & (SHADOW.LOCK_RING_CAPACITY - 1), 0);
     assert.equal(SHADOW.LOCK_RING + SHADOW.LOCK_RING_CAPACITY * 4, SHADOW.COOPERATIVE);
     assert.equal(SHADOW.COOPERATIVE + 4, SHADOW.SIZE);
-    assert.equal(BUFFER.SIZE, 36);
+    assert.equal(BUFFER.LENT + 4, BUFFER.SPARE);
+    assert.equal(BUFFER.SPARE + 4, BUFFER.SPARE_FREE);
+    assert.equal(BUFFER.SPARE_FREE + 4, BUFFER.RENAMED);
+    assert.equal(BUFFER.SIZE, 48);
     assert.equal(TEXTURE.LEVELS + TEXTURE.LEVEL_SLOTS * 4, TEXTURE.SIZE);
     // Enough for the longest chain a texture of this era can have: a 32768
     // texel side is sixteen levels, and no device of the era reports one.
