@@ -192,7 +192,7 @@ test('a program of one thread on a machine of four opens no executor past the pr
             ],
             worker: [],
         }));
-        const app = await createApp({ executable, cpu: { cores: 4 } });
+        const app = await createApp({ executable, cpu: { cores: 4, eager: false } });
         try
         {
             assert.equal((await app.run({ timeoutMs: 60_000 })) >>> 0, 7);
@@ -222,7 +222,7 @@ test('two threads computing open the executor they want, and run at once on it',
                 ],
             };
         });
-    const app = await createApp({ executable, cpu: { cores: 4 } });
+    const app = await createApp({ executable, cpu: { cores: 4, eager: false } });
     try
     {
         assert.equal((await app.run({ timeoutMs: 60_000 })) >>> 0, 7);
@@ -278,7 +278,7 @@ test('the process\'s first thread keeps the process\'s own executor when the exe
     // run in three put it on the other executor (13592 crossings), so three.
     for (let attempt = 0; attempt < 3; attempt++)
     {
-        const app = await createApp({ executable, cpu: { cores: 4 } });
+        const app = await createApp({ executable, cpu: { cores: 4, eager: false } });
         try
         {
             assert.equal((await app.run({ timeoutMs: 60_000 })) >>> 0, 7);

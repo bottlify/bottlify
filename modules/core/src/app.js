@@ -279,9 +279,9 @@ const hashText = (hash, text)=>{
  *           (`automaticCores`); elsewhere, and in node unless `BOTTLIFY_CORES` names
  *           them, one. Under cork, on a page that can share memory; elsewhere the
  *           program runs on one and is told of one.
- *           Each is opened when a thread wants it, some tens of milliseconds before it
- *           runs one; `eager`, all of them before the program starts -- for a gate or
- *           a measurement that wants threads at once from the first instruction.
+ *           Named, they all open before the program starts; automatic, each opens
+ *           when a thread wants it, some tens of milliseconds before it runs one, so
+ *           a program of one thread pays for none. `eager` says which outright.
  * @property {number} [executors]  `cpu.cores` by its older name: executors of the
  *           program's process under cork, past the process's own thread each a worker
  *           running one of its threads at once with the others, the locked
@@ -1598,20 +1598,25 @@ export const translatorsBeside = (cores, host)=>Math.max(1, Math.floor(host) - c
  * processors the program is told it has, is the executors that run its threads
  * at once -- `executors` by its older name, which it sets. Refused before
  * anything is built when it is not a whole number from 1 to 32, or when
- * `executors` says otherwise.
+ * `executors` says otherwise. Cores the caller named open before the program
+ * starts (`cpu.eager`, unless it says otherwise): opened as a thread first wants
+ * one, each came some tens of milliseconds late, a stall in the middle of a
+ * game. Automatic cores stay lazy, so a program of one thread pays for none.
  *
  * @template {{ cpu?: { cores?: number, eager?: boolean }, executors?: number, mode?: string,
  *     engine?: string, cork?: any }} T
  * @param {T} options
  * @param {CoresHost} [host]  where the run is made (`coresHost`)
- * @returns {T & { executors?: number }}
+ * @returns {T & { executors?: number, cpu?: { cores?: number, eager?: boolean } }}
  */
 export function withCpuSetup(options, host = coresHost()){
+    const named = options.cpu?.cores !== undefined || options.executors !== undefined;
     const cores = options.cpu?.cores
         ?? (options.executors === undefined ? automaticCores(options, host) : undefined);
     if (cores === undefined)
     {
-        return options;
+        return named ? { ...options, cpu: { ...options.cpu, eager: options.cpu?.eager ?? true } }
+            : options;
     }
     if (!Number.isInteger(cores) || cores < 1 || cores > MAX_EXECUTORS)
     {
@@ -1623,7 +1628,8 @@ export function withCpuSetup(options, host = coresHost()){
         throw new Error(`cpu: ${cores} cores and ${options.executors} executors -- they are one`
             + ' number; set cores alone');
     }
-    return { ...options, executors: cores };
+    return { ...options, executors: cores,
+        cpu: { ...options.cpu, eager: options.cpu?.eager ?? named } };
 }
 
 /**

@@ -1819,6 +1819,19 @@ test('the cpu setup\'s cores are the executors, a whole number from 1 to 32 that
     assert.throws(()=>withCpuSetup({ cpu: { cores: 2 }, executors: 4 }), /one number/);
 });
 
+test('cores the caller names open before the program starts, automatic ones as threads want them',
+    ()=>{
+        const browser = { node: false, processors: 4, shareable: true };
+        assert.equal(withCpuSetup({ cpu: { cores: 4 } }).cpu?.eager, true);
+        assert.equal(withCpuSetup({ executors: 3 }).cpu?.eager, true, 'executors, as named');
+        assert.equal(withCpuSetup({ cpu: { cores: 4, eager: false } }).cpu?.eager, false,
+            'unless the caller says otherwise');
+        assert.equal(withCpuSetup({}, browser).cpu?.eager, false, 'automatic: lazy');
+        assert.equal(withCpuSetup({ cpu: { eager: true } }, browser).cpu?.eager, true);
+        assert.equal(withCpuSetup({}, { node: true, processors: 4, shareable: true, named: '4' })
+            .cpu?.eager, false, 'BOTTLIFY_CORES is the suite\'s choice, not the caller\'s');
+    });
+
 test('a run that names no cores gets one fewer than a browser host\'s processors where it shares'
     + ' memory, at most eight, and one where it cannot; in node the cores BOTTLIFY_CORES names',
 ()=>{
