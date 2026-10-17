@@ -1898,6 +1898,11 @@ export function createHarness(canvas, how = {}){
             others: (metrics('cpu').executors ?? []).length,
             slices: metrics('kernel').executorSlices ?? null,
             mostAtOnce: metrics('kernel').mostAtOnce ?? null,
+            // Where each executor's time went: the process's own from the
+            // scheduler's account, the others' as each last answered.
+            own: metrics('kernel').sharedTime ?? null,
+            remotes: (metrics('cpu').executors ?? []).map((/** @type {any} */ one)=>({
+                index: one.index, retired: one.retired ?? null, spent: one.spent ?? null })),
         };
         result.threads = {
             byState: metrics('kernel').byState ?? {},

@@ -993,6 +993,36 @@ function describe(result, context, calls, symbols){
     {
         say(`  executors: ${executors.others + 1}, ${executors.slices ?? 'not measured'} slices`
             + ` on the others, at most ${executors.mostAtOnce ?? 'not measured'} threads at once`);
+        // Each executor's time and how fast it ran guest code in it: an executor the
+        // system put on a slower core, or one that mostly waits on the process's
+        // answers, shows here.
+        /** @param {number} ms */
+        const seconds = ms=>`${(ms / 1000).toFixed(1)} s`;
+        /** @param {number} retired @param {number} ms */
+        const rate = (retired, ms)=>(ms > 0 ? `${Math.round(retired / ms / 1000)} M/s` : 'not measured');
+        const own = executors.own;
+        if (own)
+        {
+            say(`    e0: own slices ${seconds(own.hereMs)} (answers inside them included),`
+                + ` answering ${seconds(own.answerMs)}, waiting ${seconds(own.waitMs)},`
+                + ` between turns ${seconds(own.betweenMs)}; retired`
+                + ` ${(own.hereRetired / 1e9).toFixed(1)} G, ${rate(own.hereRetired, own.hereMs)}`
+                + ' in its slices');
+        }
+        for (const one of executors.remotes ?? [])
+        {
+            const spent = one.spent;
+            if (!spent || one.retired === null)
+            {
+                say(`    e${one.index}: not answered yet`);
+                continue;
+            }
+            const computing = spent.slicesMs - spent.answerWaitMs;
+            say(`    e${one.index}: slices ${seconds(spent.slicesMs)} of ${seconds(spent.wallMs)},`
+                + ` answer waits ${seconds(spent.answerWaitMs)} (${spent.traps} traps), idle`
+                + ` ${seconds(spent.idleMs)}; retired ${(one.retired / 1e9).toFixed(1)} G,`
+                + ` ${rate(one.retired, computing)} computing`);
+        }
     }
     say(`  adapter: ${JSON.stringify(result.adapter)}`);
     say(`  ran for ${result.elapsedMs}ms, ${result.instructions} guest instructions`);
