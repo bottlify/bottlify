@@ -1676,6 +1676,49 @@ test('Direct3D 9 and 8: runs of the command ring that bind objects and draw play
     });
 });
 
+test('Direct3D 8: a texture written, then bound by a state block applied by its token in a run of'
+    + ' the command ring and drawn, is drawn as written', async()=>{
+    // The run names neither the block nor the texture it binds: what waits to
+    // be sent goes ahead of the run all the same.
+    await same(8, async run=>{
+        const { device, vertices, indices } = await device8(run);
+        const tex = await makeTexture(run, device, 'tex', { levels: 1, seed: 190 });
+        await run.call('BeginStateBlock', ()=>device.BeginStateBlock());
+        await run.call('SetTexture in block', ()=>device.SetTexture(0, tex));
+        /** @type {{ handle?: number }} */
+        const block = {};
+        await run.call('EndStateBlock', ()=>device.EndStateBlock(block), [block]);
+        await run.call('SetTexture none', ()=>device.SetTexture(0, null));
+        const slot = D3D8_COMMANDS.commandSlot;
+        for (let frame = 0; frame < 2; frame++)
+        {
+            const records = new Uint32Array([
+                ...record(slot('BeginScene'), []),
+                ...record(slot('SetStreamSource'), [0, 0x2000, STRIDE]),
+                ...record(slot('SetIndices'), [0x3000, 0]),
+                ...record(slot('SetVertexShader'), [FVF_LIT]),
+                ...record(slot('ApplyStateBlock'), [Number(block.handle)]),
+                ...record(slot('DrawIndexedPrimitive'), [D3DPT.TRIANGLELIST, 0, 4, 0, 2]),
+                ...record(slot('EndScene'), []),
+            ]);
+            await fillLevel(run, tex, `tex ${frame}`, 0, 191 + frame);
+            await run.call('commands', ()=>device.commands(new Uint8Array(records.buffer),
+                [vertices, indices]));
+            await run.call('Present', ()=>device.Present(null, null, 0, null));
+            await run.call('idle', ()=>device.idle());
+            await run.look(`frame ${frame}`);
+            await run.call('SetTexture none again', ()=>device.SetTexture(0, null));
+        }
+        await run.call('DeleteStateBlock', ()=>device.DeleteStateBlock(block.handle));
+        for (const [name, object] of /** @type {[string, any][]} */ ([['tex', tex],
+            ['vertices', vertices], ['indices', indices], ['device', device]]))
+        {
+            await run.call(`Release ${name}`, ()=>object.release());
+        }
+        await run.look('end');
+    });
+});
+
 test('Direct3D 8: a texture locked and written again before the twin has played the draw that'
     + ' samples it is drawn as it was at the draw', async()=>{
     await same(8, async run=>{

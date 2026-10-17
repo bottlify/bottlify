@@ -1790,6 +1790,14 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         },
 
         /**
+         * Whether a run of the ring applies a state block by its token, whose
+         * bindings the run does not name (`remote/replay.js`).
+         *
+         * @param {Uint8Array} records
+         */
+        appliesStateBlocks: records=>D3D8_COMMANDS.appliesBlocks(records),
+
+        /**
          * The calls a run of the command ring carried, made in order
          * (`commands.js`). The program was told D3D_OK for each when it made
          * it, so one this device refuses is a divergence, said once.
@@ -1890,6 +1898,10 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 clipPlanes: CLIP_PLANES,
                 cooperative: device.TestCooperativeLevel() === D3D_OK ? 0 : 1,
                 elsewhere: services.renderedElsewhere === true ? 1 : 0,
+                // Which blocks an apply changes what a draw's checks read with.
+                stateBlocks: [...stateBlocks].map(([handle, block])=>/** @type {[number, boolean]} */ (
+                    [handle, block.vertexShader !== undefined || block.streams.size > 0
+                        || block.indices !== undefined])),
                 taken: [isShaderHandle(boundVertexShader) ? boundVertexShader >>> 0 : 0,
                     boundPixelShader >>> 0],
                 takes: [(/** @type {number} */ handle)=>vertexShaders.has(handle),

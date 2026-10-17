@@ -712,6 +712,9 @@ export function createRecording(options){
             }
         }
         const run = name === 'commands';
+        // A state block applied by its token names nothing either.
+        applies ||= run && typeof target.appliesStateBlocks === 'function'
+            && args[0] instanceof Uint8Array && target.appliesStateBlocks(args[0]) === true;
         if (!run && !name.startsWith('Draw'))
         {
             return key=>!isTexture(key) || named.has(key);

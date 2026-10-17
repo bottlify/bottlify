@@ -61,6 +61,11 @@ export const D3D7_COMMANDS = commandSet(IDIRECT3DDEVICE7_SLOTS, {
         fvfVertices: { type: 0, fvf: 1, count: 3, most: UP_BYTES },
         make: (d, c)=>d.DrawPrimitive(c.arg(0), c.arg(1),
             c.copy(c.arg(3) * decodeFvf(c.arg(1)).stride), c.arg(3)) },
+    // A block the device holds, by its handle: an apply leaves what the block
+    // mirrors to the host (`stale`).
+    ApplyStateBlock: { args: 1, token: 0, stale: true,
+        make: (d, c)=>d.ApplyStateBlock(c.arg(0)) },
+    CaptureStateBlock: { args: 1, token: 0, make: (d, c)=>d.CaptureStateBlock(c.arg(0)) },
     // DrawPrimitiveVB(type, buffer, start, count, flags): a buffer with a
     // block, unlocked, holding the vertices drawn (`vertexRange`).
     DrawPrimitiveVB: { args: 5, objects: [1], draws: true, needs: DRAW.SCENE,

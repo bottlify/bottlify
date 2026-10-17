@@ -957,6 +957,11 @@ export function createDirect3D7(ddraw, services = {}){
                 return inScene;
             },
 
+            /** The state blocks held, by handle, for what a block applied in the ring changed. */
+            get stateBlocks(){
+                return stateBlocks;
+            },
+
             /**
              * The textures bound to the stages, without the reference
              * GetTexture hands out: what a draw made now samples, for a
@@ -1013,6 +1018,10 @@ export function createDirect3D7(ddraw, services = {}){
                     taken: [],
                     cooperative: 0,
                     strides,
+                    // A block holds render and stage states and transforms:
+                    // nothing a draw's checks read.
+                    stateBlocks: [...stateBlocks.keys()].map(handle=>
+                        /** @type {[number, boolean]} */ ([handle, false])),
                 };
             },
 

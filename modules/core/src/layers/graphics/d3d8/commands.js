@@ -107,6 +107,7 @@ const first = (kind, length)=>{
  * @property {{ arg: number, mask: number, nullable?: boolean }
  *     | readonly { arg: number, mask: number, nullable?: boolean }[]} [surfaceUsage]
  * @property {{ buffer: number, start: number, count: number }} [vertexRange]
+ * @property {number} [token]
  * @property {number} [needs] @property {number} [refuses] @property {boolean} [fresh]
  *     what the routine checks before it answers for the call, so that the
  *     device takes every call it answered for (`commandChecks`)
@@ -198,6 +199,44 @@ export function commandSet(slots, table){
     };
 
     /**
+     * The tokens of the state blocks a run applies (`stale` commands that
+     * take one): what the device's block mirrors of them is brought up to date
+     * after the run.
+     *
+     * @param {Uint8Array} records
+     * @returns {number[]}
+     */
+    const tokensApplied = records=>{
+        const all = new Uint32Array(records.buffer, records.byteOffset, records.byteLength >>> 2);
+        /** @type {number[]} */
+        const tokens = [];
+        let at = 0;
+        while (at < all.length)
+        {
+            const entry = bySlot[all[at]];
+            const length = all[at + 1] >>> 2;
+            if (entry === undefined || length === 0)
+            {
+                break;
+            }
+            if (entry.stale && entry.token !== undefined)
+            {
+                tokens.push(all[at + ARGS + entry.token]);
+            }
+            at += length;
+        }
+        return tokens;
+    };
+    /**
+     * Whether a run applies a state block by its token: what it binds the run
+     * does not name, so a recording sends every texture's waiting bytes ahead
+     * of it.
+     *
+     * @param {Uint8Array} records
+     */
+    const appliesBlocks = records=>tokensApplied(records).length > 0;
+
+    /**
      * Makes each call in `records`, in order, on `device`. A record the
      * routines could not have written ends the run, and is reported as one.
      * Nothing is kept of `records`, which may be guest memory the program
@@ -275,7 +314,8 @@ export function commandSet(slots, table){
         return made;
     };
 
-    return { COMMANDS: table, commandSlot, commandObjects, runCommands };
+    return { COMMANDS: table, commandSlot, commandObjects, runCommands, appliesBlocks,
+        tokensApplied };
 }
 
 /**
@@ -394,6 +434,12 @@ export const D3D8_COMMANDS = commandSet(IDIRECT3DDEVICE8_SLOTS, {
     // draws elsewhere (`COPY_GUARD_8`), as Direct3D 9's StretchRect.
     CopyRects: { args: 5, objects: [0, 3],
         make: (d, c)=>d.CopyRects(c.object(), null, 0, c.object(), null) },
+    // A block the device holds, by its token: an apply leaves what the block
+    // mirrors to the host (`stale`), and what a draw checks too when the block
+    // holds it -- a vertex shader, a stream, the indices.
+    ApplyStateBlock: { args: 1, token: 0, stale: true,
+        make: (d, c)=>d.ApplyStateBlock(c.arg(0)) },
+    CaptureStateBlock: { args: 1, token: 0, make: (d, c)=>d.CaptureStateBlock(c.arg(0)) },
     // Both targets: a surface made to be one, and a depth surface or none. The
     // block's viewport becomes the target's whole and Clear's checks learn the
     // depth surface (`renderTargetMirror`, `depthStencilMirror`); keeping the

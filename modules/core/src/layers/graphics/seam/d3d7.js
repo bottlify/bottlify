@@ -195,6 +195,13 @@ export function createDirect3D7Seam(
     /** @param {any} device */
     const shadowOf = device=>(device ? shadows.get(device) : undefined);
     /**
+     * A transform as this version numbers it, from the number its device keeps
+     * it under (Direct3D 8's: WORLD 256, WORLD1..3 257..259; the rest alike).
+     *
+     * @param {number} key
+     */
+    const typeOf7 = key=>(key === 256 ? 1 : key > 256 && key < 260 ? key - 253 : key);
+    /**
      * Makes what every device's command ring holds, then `call`, then has
      * each block say what its routines check against again: around a call
      * of the DirectDraw seam's -- a Flip shows the draws made before it, a
@@ -1374,7 +1381,26 @@ export function createDirect3D7Seam(
                                 drawingFrom(object);
                             }
                         }
-                        return device.commands(records, named);
+                        const count = device.commands(records, named);
+                        // A state block applied in the ring: the block is
+                        // brought to what the blocks applied hold, and the
+                        // getters may read it again.
+                        if (shadow.stale())
+                        {
+                            for (const token of D3D7_COMMANDS.tokensApplied(records))
+                            {
+                                const applied = device.stateBlocks?.get(token);
+                                if (applied)
+                                {
+                                    shadow.remirror({ renderStates: applied.renderStates.keys(),
+                                        transforms: [...applied.transforms.keys()].map(typeOf7),
+                                        stageStates: applied.stageStates.keys() });
+                                }
+                            }
+                            shadow.settled();
+                            shadow.fresh();
+                        }
+                        return count;
                     } },
                 });
                 shadows.set(device, shadow);

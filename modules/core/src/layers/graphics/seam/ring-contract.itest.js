@@ -132,6 +132,18 @@ const machine = ()=>{
         });
         words[(SHADOW.COOPERATIVE - SHADOW.DRAWABLE) / 4] = state.cooperative ?? 1;
         words[(SHADOW.ELSEWHERE - SHADOW.DRAWABLE) / 4] = state.elsewhere ?? 0;
+        for (const [token, draws] of state.stateBlocks ?? [])
+        {
+            if (token < SHADOW.STATE_BLOCK_TOKENS)
+            {
+                for (const [map, set] of /** @type {[number, boolean][]} */ ([
+                    [SHADOW.STATE_BLOCKS, true], [SHADOW.STATE_BLOCK_DRAWS, draws]]))
+                {
+                    const at = (map - SHADOW.DRAWABLE) / 4 + (token >>> 5);
+                    words[at] = (words[at] | (set ? 1 << (token & 31) : 0)) >>> 0;
+                }
+            }
+        }
         (state.strides ?? []).slice(0, SHADOW.FVF_STRIDE_PAIRS).forEach(([fvf, stride], index)=>{
             words[(SHADOW.FVF_STRIDES - SHADOW.DRAWABLE) / 4 + index * 2] = fvf;
             words[(SHADOW.FVF_STRIDES - SHADOW.DRAWABLE) / 4 + index * 2 + 1] = stride;
@@ -388,6 +400,23 @@ const drawable8 = (/** @type {any} */ device, /** @type {Record<string, any>} */
 
 /** A device that records for one drawing elsewhere, as one in a graphics worker. */
 const ELSEWHERE = { renderedElsewhere: true };
+
+/** A state block of one render state, recorded: its token, the device's first, is 1. */
+const renderStateBlock = (/** @type {any} */ device)=>{
+    assert.equal(device.BeginStateBlock(), D3D_OK);
+    assert.equal(device.SetRenderState(7, 1), D3D_OK);
+    /** @type {{ handle?: number }} */
+    const out = {};
+    assert.equal(device.EndStateBlock(out), D3D_OK);
+    assert.equal(out.handle, 1);
+};
+/** A state block of everything the device holds, a vertex format and streams among it. */
+const wholeBlock = (/** @type {any} */ device)=>{
+    /** @type {{ handle?: number }} */
+    const out = {};
+    assert.equal(device.CreateStateBlock(D3DSBT_ALL, out), D3D_OK);
+    assert.equal(out.handle, 1);
+};
 
 /** Three targets, two of one size, as a pass that shrinks its picture makes. */
 const targets = (/** @type {any} */ device, /** @type {Record<string, any>} */ made)=>{
@@ -714,6 +743,23 @@ test('Direct3D 8: every call the command ring answers for in the guest is one th
     ()=>{
         gate({ ...D3D8_COMMANDS, mirrors: MIRRORS_8, device: device8 }, {
             ...shared(drawable8),
+            // By its token: a block the device holds, and none past the map.
+            ApplyStateBlock: [
+                { label: 'a block of render states', args: [1], setup: renderStateBlock },
+                { label: 'a block of everything', args: [1], setup: wholeBlock },
+                { label: 'no such block', args: [5], setup: renderStateBlock },
+                { label: 'a block deleted', args: [1], setup: device=>{
+                    renderStateBlock(device);
+                    assert.equal(device.DeleteStateBlock(1), D3D_OK);
+                } },
+                { label: 'a token past the map', args: [SHADOW.STATE_BLOCK_TOKENS + 1],
+                    setup: renderStateBlock },
+            ],
+            CaptureStateBlock: [
+                { label: 'a block of render states', args: [1], setup: renderStateBlock },
+                { label: 'no such block', args: [2], setup: renderStateBlock },
+                { label: 'none at all', args: [0] },
+            ],
             // A whole target onto another of its size, where the device draws elsewhere.
             CopyRects: [
                 { label: 'two targets of one size', args: ['small', 0, 0, 'other', 0],
@@ -930,6 +976,25 @@ test('Direct3D 8: the routines keep what a draw needs as the device does, call a
         assert.equal(device.CreateDepthStencilSurface(16, 16, D3DFMT_D24S8, out), D3D_OK);
         made.stencil = out.surface;
     };
+    // A block of render states applied leaves the draws in the guest; one
+    // holding a vertex format and streams has them wait for the host.
+    sequence(api, (device, made)=>{
+        buffers(device, made);
+        renderStateBlock(device);
+        /** @type {{ handle?: number }} */
+        const out = {};
+        assert.equal(device.CreateStateBlock(D3DSBT_ALL, out), D3D_OK);
+    }, [
+        ['BeginScene', [], 'ok'],
+        ['SetVertexShader', [FVF_XYZ_DIFFUSE], 'ok'],
+        ['SetStreamSource', [0, 'vertices', 16], 'ok'],
+        ['ApplyStateBlock', [1], 'ok'],
+        ['DrawPrimitive', [4, 0, 1], 'ok'],
+        ['CaptureStateBlock', [2], 'ok'],
+        ['DrawPrimitive', [4, 0, 1], 'ok'],
+        ['ApplyStateBlock', [2], 'ok'],
+        ['DrawPrimitive', [4, 0, 1], 'trap'],
+    ]);
     sequence(api, depthTargets, [
         ['SetRenderTarget', ['target', 'depth'], 'ok'],
         ['Clear', [0, 0, 3, 0, ONE, 0], 'ok'],
@@ -1018,6 +1083,19 @@ test('Direct3D 7: every call the command ring answers for in the guest is one th
                         drawnWith(device);
                         assert.equal(device.EndScene(), D3D_OK);
                     } },
+            ],
+            ApplyStateBlock: [
+                { label: 'a block of render states', args: [1], setup: renderStateBlock },
+                { label: 'a block of everything', args: [1], setup: wholeBlock },
+                { label: 'no such block', args: [5], setup: renderStateBlock },
+                { label: 'a block deleted', args: [1], setup: device=>{
+                    renderStateBlock(device);
+                    assert.equal(device.DeleteStateBlock(1), D3D_OK);
+                } },
+            ],
+            CaptureStateBlock: [
+                { label: 'a block of render states', args: [1], setup: renderStateBlock },
+                { label: 'none at all', args: [0] },
             ],
             // A depth clear needs a depth buffer attached to the target.
             Clear: [

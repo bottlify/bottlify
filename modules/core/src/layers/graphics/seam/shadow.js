@@ -162,7 +162,16 @@ export const SHADOW = {
      */
     FVF_STRIDES: 5352 + 8,
     FVF_STRIDE_PAIRS: 8,
-    SIZE: 5352 + 8 + 8 * 8,
+    /**
+     * The state blocks a device of Direct3D 8 or 7 holds, by token, a bit
+     * each below `STATE_BLOCK_TOKENS`, written by the host: what an Apply or a
+     * Capture by token in the ring may name. And beside them, the blocks that
+     * hold what a draw's checks read (`FLAG_DRAW_STALE`).
+     */
+    STATE_BLOCKS: 5424,
+    STATE_BLOCK_DRAWS: 5424 + 32,
+    STATE_BLOCK_TOKENS: 256,
+    SIZE: 5424 + 64,
 };
 
 /** Byte offsets within a query's block. */
@@ -1305,6 +1314,15 @@ function commandChecks(shape, at){
             { jcc: 0x74, to: 'out', near: true },                // jz out
             { label: `usable${index}` });
     });
+    if (shape.token !== undefined)
+    {
+        parts.push(
+            [0x8b, 0x44, 0x24, at(shape.token)],                 // mov eax, [esp+token]
+            [0x3d, ...dword(SHADOW.STATE_BLOCK_TOKENS)],         // cmp eax, 256
+            { jcc: 0x73, to: 'out', near: true },                // jae out
+            [0x0f, 0xa3, 0x81, ...dword(SHADOW.STATE_BLOCKS)],   // bt [ecx+STATE_BLOCKS], eax
+            { jcc: 0x73, to: 'out', near: true });               // jnc out: none held
+    }
     if (shape.vertexRange)
     {
         const { buffer, start, count } = shape.vertexRange;
@@ -1408,6 +1426,10 @@ function commandChecks(shape, at){
  *     argument the device takes only as a surface whose usage has a bit of `mask`, read
  *     from the surface's block (`SURFACE`, the word after its interface): a surface
  *     with no block is the host's, and so is a null one unless `nullable`; or several
+ * @property {number} [token]  an argument the device takes only as the token of a
+ *     state block it holds (`SHADOW.STATE_BLOCKS`): with `stale`, the block's
+ *     apply is one a draw waits for the host after when the block holds what
+ *     its checks read (`SHADOW.STATE_BLOCK_DRAWS`)
  * @property {{ buffer: number, start: number, count: number }} [vertexRange]  a Direct3D 7
  *     vertex buffer argument and the range of its vertices a draw reads: taken only for a
  *     buffer with a block (`VERTEX_BUFFER7`), not locked, holding the range whole
@@ -1723,7 +1745,18 @@ export function commandCode(at, trap, shape){
     {
         parts.push([0xc7, 0x83, ...dword(SHADOW.DRAWS_PENDING), ...dword(1)]); // mov [ebx+disp], 1
     }
-    if (stale)
+    if (stale && shape.token !== undefined)
+    {
+        // As the token's block says: what the draws' checks read too, or not.
+        parts.push(
+            [0x8b, 0x44, 0x24, pushed + 4 * shape.token],        // mov eax, [esp+token]
+            [0x0f, 0xa3, 0x83, ...dword(SHADOW.STATE_BLOCK_DRAWS)], // bt [ebx+disp], eax
+            [0x19, 0xc0],                                        // sbb eax, eax
+            [0x83, 0xe0, FLAG_DRAW_STALE],                       // and eax, 4
+            [0x83, 0xc8, FLAG_STALE],                            // or eax, 2
+            [0xf0, 0x09, 0x03]);                                 // lock or [ebx], eax
+    }
+    else if (stale)
     {
         parts.push([0xf0, 0x83, 0x0b,                            // lock or dword [ebx], 2|4
             staleDraws ? FLAG_STALE | FLAG_DRAW_STALE : FLAG_STALE]);
@@ -2186,6 +2219,9 @@ export function settledAfter(shadow, call){
  *     or draws nothing (`SHADOW.ELSEWHERE`)
  * @property {readonly [number, number][]} [strides]  vertex formats drawn with and their
  *     widths, the latest first (`SHADOW.FVF_STRIDES`)
+ * @property {readonly [number, boolean][]} [stateBlocks]  the state blocks held by
+ *     token, each with whether it holds what a draw's checks read
+ *     (`SHADOW.STATE_BLOCKS`)
  */
 
 /**
@@ -2519,6 +2555,20 @@ export function createShadow(deps){
                 pairs[index * 2 + 1] = stride;
             });
             deps.writeMemory(address + SHADOW.FVF_STRIDES, new Uint8Array(pairs.buffer));
+        }
+        if (state.stateBlocks)
+        {
+            const bits = new Uint8Array(SHADOW.STATE_BLOCK_TOKENS / 4);
+            for (const [token, draws] of state.stateBlocks)
+            {
+                if (token < SHADOW.STATE_BLOCK_TOKENS)
+                {
+                    bits[token >>> 3] |= 1 << (token & 7);
+                    bits[SHADOW.STATE_BLOCK_TOKENS / 8 + (token >>> 3)] |= draws ? 1 << (token & 7)
+                        : 0;
+                }
+            }
+            deps.writeMemory(address + SHADOW.STATE_BLOCKS, bits);
         }
     };
 
@@ -3545,6 +3595,11 @@ export function appendCommand(m, shape, mirror, call){
         }
     }
     const range = shape.vertexRange;
+    if (shape.token !== undefined
+        && !(a[shape.token] < SHADOW.STATE_BLOCK_TOKENS && tokenBit(m, block, a[shape.token])))
+    {
+        return undefined;
+    }
     if (range)
     {
         const owner = a[range.buffer] === 0 ? 0 : m.u32(a[range.buffer] + 4);
@@ -3587,10 +3642,20 @@ export function appendCommand(m, shape, mirror, call){
     }
     if (stale)
     {
-        m.setU32(block, m.u32(block) | (staleDraws ? FLAG_STALE | FLAG_DRAW_STALE : FLAG_STALE));
+        const drawsToo = staleDraws || (shape.token !== undefined
+            && tokenBit(m, block + SHADOW.STATE_BLOCK_DRAWS - SHADOW.STATE_BLOCKS, a[shape.token]));
+        m.setU32(block, m.u32(block) | (drawsToo ? FLAG_STALE | FLAG_DRAW_STALE : FLAG_STALE));
     }
     return 0;
 }
+
+/**
+ * A token's bit in the block's map of state blocks (`SHADOW.STATE_BLOCKS`).
+ *
+ * @param {GuestWords} m @param {number} block @param {number} token  below the tokens kept
+ */
+const tokenBit = (m, block, token)=>
+    ((m.u32(block + SHADOW.STATE_BLOCKS + 4 * (token >>> 5)) >>> (token & 31)) & 1) === 1;
 
 /** The arguments of the call `appendCommand` is writing, one array for every call. */
 const ARGUMENTS = /** @type {number[]} */ (new Array(16).fill(0));

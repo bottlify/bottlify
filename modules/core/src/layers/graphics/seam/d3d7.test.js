@@ -34,7 +34,7 @@ import {
     D3DDEVICEDESC7, D3DPRIMCAPS, D3DRECT, D3DVERTEXBUFFERDESC, D3DVIEWPORT7,
 } from './structs.js';
 import { guidBytes } from './d3d7.js';
-import { COMMAND, DRAW, SHADOW, VERTEX_BUFFER7 } from './shadow.js';
+import { COMMAND, DRAW, FLAG_STALE, SHADOW, VERTEX_BUFFER7 } from './shadow.js';
 import { D3D7_COMMANDS } from '../d3d7/commands.js';
 import { createDirectDraw } from '../ddraw/objects.js';
 import { DDSURFACEDESC2, writeSurfaceDesc } from '../ddraw/structs.js';
@@ -1066,6 +1066,7 @@ test('with guest memory, a device\'s setters and getters run in the guest, and w
     const { hr, device } = h.createDevice(d3d, target);
     assert.equal(hr, D3D_OK);
     for (const name of ['SetRenderState', 'SetTransform', 'SetTextureStageState', 'SetViewport',
+        'ApplyStateBlock', 'CaptureStateBlock',
         'LightEnable', 'BeginScene', 'EndScene', 'DrawPrimitive', 'SetTexture', 'GetRenderState',
         'GetTextureStageState', 'GetViewport', 'GetTransform', 'Clear', 'DrawPrimitiveVB',
         'DrawIndexedPrimitiveVB'])
@@ -1172,4 +1173,55 @@ test('with guest memory, a vertex buffer\'s block says its vertices and its lock
     h.release(target);
     h.release(ddraw);
     h.assertAllReleased();
+});
+
+test('with guest memory, a state block applied in the ring leaves the block what it holds', ()=>{
+    // An apply's routine marks the block stale (FLAG_STALE) and the getters go
+    // to the host; the run brings the block to the states the applied block
+    // holds -- a transform under this version's own number -- and they read it
+    // again in the guest.
+    const h = seamed({ guest: true });
+    const ddraw = h.create7();
+    const d3d = h.direct3D(ddraw);
+    const target = h.surface(ddraw);
+    const { device } = h.createDevice(d3d, target);
+    const world = 0x6800;
+    const scaled = [2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 1];
+    scaled.forEach((value, index)=>h.box.memory.writeU32(world + index * 4,
+        new Uint32Array(new Float32Array([value]).buffer)[0]));
+    assert.equal(h.box.trap(device, 'BeginStateBlock'), D3D_OK);
+    assert.equal(h.box.trap(device, 'SetRenderState', [7, 0]), D3D_OK);
+    assert.equal(h.box.trap(device, 'SetTransform', [1, world]), D3D_OK);
+    assert.equal(h.box.trap(device, 'EndStateBlock', [0x6900]), D3D_OK);
+    const token = h.box.memory.readU32(0x6900);
+    assert.equal(h.box.trap(device, 'SetRenderState', [7, 1]), D3D_OK);
+    const identity = 0x6b00;
+    [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1].forEach((value, index)=>h.box.memory.writeU32(
+        identity + index * 4, new Uint32Array(new Float32Array([value]).buffer)[0]));
+    assert.equal(h.box.trap(device, 'SetTransform', [1, identity]), D3D_OK);
+    const block = h.box.memory.readU32(device + 4);
+    assert.equal(h.box.memory.readU32(block + SHADOW.TRANSFORMS + 1 * 64),
+        new Uint32Array(new Float32Array([1]).buffer)[0],
+        'WORLD the identity before the apply');
+    assert.equal(h.box.memory.readU32(block + SHADOW.RENDER_STATES + 7 * 4), 1);
+    assert.equal((h.box.memory.readU32(block + SHADOW.STATE_BLOCKS) >>> token) & 1, 1,
+        'the token is the block\'s');
+
+    // What the routine writes: the record, and the flag.
+    const ring = h.box.memory.readU32(block + SHADOW.COMMANDS);
+    const head = h.box.memory.readU32(block + SHADOW.COMMAND_HEAD);
+    h.box.memory.writeU32(ring + head + COMMAND.SLOT, D3D7_COMMANDS.commandSlot('ApplyStateBlock'));
+    h.box.memory.writeU32(ring + head + COMMAND.ARGS, token);
+    h.box.memory.writeU32(ring + head + COMMAND.BYTES, COMMAND.ARGS + 4);
+    h.box.memory.writeU32(block + SHADOW.COMMAND_HEAD, head + COMMAND.ARGS + 4);
+    h.box.memory.writeU32(block + SHADOW.FLAGS,
+        h.box.memory.readU32(block + SHADOW.FLAGS) | FLAG_STALE);
+
+    assert.equal(h.box.trap(device, 'GetRenderState', [7, 0x6a00]), D3D_OK, 'the ring played');
+    assert.equal(h.box.memory.readU32(0x6a00), 0, 'the device holds the block\'s state');
+    assert.equal(h.box.memory.readU32(block + SHADOW.RENDER_STATES + 7 * 4), 0, 'and the block');
+    assert.equal(h.box.memory.readU32(block + SHADOW.TRANSFORMS + 1 * 64),
+        new Uint32Array(new Float32Array([2]).buffer)[0], 'WORLD in its own slot, 1');
+    assert.equal(h.box.memory.readU32(block + SHADOW.FLAGS) & FLAG_STALE, 0, 'and is fresh');
+    assert.equal(h.release(device), 0);
 });

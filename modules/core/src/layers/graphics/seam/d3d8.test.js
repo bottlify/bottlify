@@ -2510,3 +2510,26 @@ test('a surface\'s description is in its block, which the guest\'s GetDesc answe
         'this version\'s Size among them');
     assert.equal(h.box.memory.readU32(block + SURFACE.DESC + D3DSURFACE_DESC8.Width), 32);
 });
+
+test('a state block\'s token is in the device\'s block while the device holds it, and its Apply'
+    + ' and Capture are guest code', ()=>{
+    const h = seamed({ shadow: true });
+    const root = h.create();
+    const device = h.createDevice(root);
+    for (const name of ['ApplyStateBlock', 'CaptureStateBlock'])
+    {
+        assert.ok(h.box.isGuest(device, slot(IDIRECT3DDEVICE8_SLOTS, name)), name);
+    }
+    const out = 0x3400;
+    assert.equal(h.box.trap(device, 'CreateStateBlock', [D3DSBT.ALL, out]), D3D_OK);
+    const token = h.box.memory.readU32(out);
+    const block = h.box.memory.readU32(device + 4);
+    /** @param {number} map */
+    const bit = map=>(h.box.memory.readU32(block + map + 4 * (token >>> 5)) >>> (token & 31)) & 1;
+    assert.equal(bit(SHADOW.STATE_BLOCKS), 1, 'held');
+    assert.equal(bit(SHADOW.STATE_BLOCK_DRAWS), 1, 'holding a vertex format and streams');
+    assert.equal(h.box.trap(device, 'DeleteStateBlock', [token]), D3D_OK);
+    assert.equal(bit(SHADOW.STATE_BLOCKS), 0, 'and not once deleted');
+    assert.equal(h.release(device), 0);
+    h.release(root);
+});

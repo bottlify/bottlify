@@ -215,7 +215,10 @@ test('the block fits its two pages and its regions follow one another', ()=>{
     assert.equal(SHADOW.LOCK_RING + SHADOW.LOCK_RING_CAPACITY * 4, SHADOW.COOPERATIVE);
     assert.equal(SHADOW.COOPERATIVE + 4, SHADOW.ELSEWHERE);
     assert.equal(SHADOW.ELSEWHERE + 4, SHADOW.FVF_STRIDES);
-    assert.equal(SHADOW.FVF_STRIDES + SHADOW.FVF_STRIDE_PAIRS * 8, SHADOW.SIZE);
+    assert.equal(SHADOW.FVF_STRIDES + SHADOW.FVF_STRIDE_PAIRS * 8, SHADOW.STATE_BLOCKS);
+    // A bit per token, of the blocks held and of those holding what a draw checks.
+    assert.equal(SHADOW.STATE_BLOCKS + SHADOW.STATE_BLOCK_TOKENS / 8, SHADOW.STATE_BLOCK_DRAWS);
+    assert.equal(SHADOW.STATE_BLOCK_DRAWS + SHADOW.STATE_BLOCK_TOKENS / 8, SHADOW.SIZE);
     assert.equal(BUFFER.SIZE, 36);
     assert.equal(TEXTURE.LEVELS + TEXTURE.LEVEL_SLOTS * 4, TEXTURE.SIZE);
     // Enough for the longest chain a texture of this era can have: a 32768
