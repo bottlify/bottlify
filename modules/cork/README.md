@@ -15,20 +15,22 @@ Plain JavaScript and WebAssembly, not a single dependency, at home in a browser 
 
 ## What it runs
 
-- 32-bit user-mode x86: integer instructions, the x87, MMX, SSE, SSE2 and SSE3. Exactly the set
-  cork reports through `cpuid`.
+- 32-bit user-mode x86: integer instructions, the x87, MMX, SSE, SSE2 and SSE3, with POPCNT and
+  RDRAND. Exactly the set cork reports through `cpuid`.
 - Code that rewrites itself. When the program writes over code that is already translated, the old
-  translation is thrown away and a new one made.
-- Several threads over one memory. `lock`-prefixed instructions run as WebAssembly atomics, so
-  threads do not lose each other's writes.
+  translation is thrown away and a new one made. A page rewritten over and over (eight times within
+  100 ms) is left to the interpreter for a while.
+- Several threads over one memory. With the `atomic` setting, which Bottlify turns on when a
+  process runs on several executors, `lock`-prefixed instructions and `xchg` with memory run as
+  WebAssembly atomics, so threads do not lose each other's writes.
 - Exact faults. A division by zero, an unknown instruction or a write to a closed page stops right
   at that instruction, with the registers a real processor would have.
 
 ## What it does not run
 
 - 64-bit code (planned, see [`roadmap/v2/`](../../roadmap/v2/README.md)), 16-bit code, privileged
-  instructions, segments other than the `fs` and `gs` bases.
-- SSSE3 and anything newer: SSE4, AVX.
+  instructions, segments other than the `fs` base (a `gs:` override adds nothing).
+- SSSE3 and anything newer: SSE4.1, SSE4.2 (POPCNT aside), AVX.
 - The x87's 80-bit precision. The FPU registers are plain 64-bit doubles: single and double
   precision are honoured, extended is computed as double. Sine, logarithm and the rest come from
   `Math`. Exception masks are not honoured: every x87 exception behaves as masked.
@@ -51,8 +53,8 @@ tight loops. On the same bytes it is 5 to 8 times faster than v86, the best-know
 - **Translated code stays in WebAssembly.** Regions go from one to another with plain calls between
   WebAssembly functions, never through JavaScript.
 - **It guesses where virtual calls go.** cork watches where calls through a pointer actually land.
-  When a call has one or two real targets, they are built right into the region and the call
-  becomes a comparison.
+  When a call goes mostly to a few small functions (up to four, each taking at least an eighth of
+  its calls), they are built right into the region and the call becomes a comparison.
 - **The program never waits for the translator.** Translation runs in worker threads while the
   program keeps going in the interpreter. The main thread gives the translator a few milliseconds
   at a time at most, so a game does not freeze when it reaches new code.
@@ -84,13 +86,13 @@ flowchart LR
 ```
 
 1. **Interpreter.** New code runs in the interpreter, which also counts how many times the program
-   jumps to each address. An address reached often enough (twice, in Bottlify) becomes a candidate
-   for translation.
+   jumps to each address. An address reached often enough (twice in Bottlify, 50 times on cork's
+   own machine) becomes a candidate for translation.
 2. **Region.** From the candidate cork gathers every block reachable by ordinary jumps (up to 128
    blocks or 8 KiB of code) and builds in the small functions they call.
-3. **Translation.** Regions go to the translation thread in batches of 32, each batch one
-   WebAssembly module. While the thread translates and compiles, the program keeps running in the
-   interpreter.
+3. **Translation.** Regions go to the translation thread in batches of 32 or more (a deep queue,
+   as while a game loads, sends a quarter of what waits, up to 256), each batch one WebAssembly
+   module. While the thread translates and compiles, the program keeps running in the interpreter.
 4. **Running.** Translated regions call each other directly. They leave only when there is no
    other way:
 
@@ -105,8 +107,10 @@ flowchart LR
   R -->|"fault"| F["Host, with the exact<br/>address and registers"]
 ```
 
-5. **The next run.** Translations are kept in OPFS, so the second run of the same program just
-   loads them and translates nothing again.
+5. **The next run.** Translations are kept in OPFS, so the second run of the same program loads
+   what the first one translated instead of translating it again. A region is kept under its entry,
+   the x87 stack top it is entered at (any top when it has no x87 code) and the translator's modes,
+   and a block reached first in another order is taken as the stored region that holds it.
 
 All of the program's memory is one `WebAssembly.Memory`. The program's address `a` is at offset
 `0x10000 + a` in it:
@@ -114,7 +118,10 @@ All of the program's memory is one `WebAssembly.Memory`. The program's address `
 ```
 0x00000   registers and cork's own state (64 KiB)
 0x10000   the program's memory: its address 0 is here (1 GiB in Bottlify)
-  end     cork's tables: one byte of flags for every 4 KiB page, the entry hash
+  end     cork's tables: one byte of flags for every 4 KiB page (closed, holds translated code,
+          watched for writes, ...), where code lies in each page, the entry hash
+  past    with several executors, each other executor's state and tables; the page flags
+          stay one table for all of them
 ```
 
 ## Speed
@@ -153,8 +160,8 @@ xychart-beta
 Bars: Chromium 141. Line: Node 22.
 
 `spread` and `entities` are the slowest. Both make many calls through function pointers whose
-targets keep changing. When a call has one or two real targets cork guesses them, but `spread` has
-hundreds, and each such call looks its target up in a table. Tight loops over data (`path`,
+targets keep changing. When a call goes mostly to a few functions cork guesses them, but `spread`
+has hundreds, and each such call looks its target up in a table. Tight loops over data (`path`,
 `containers`) get closest to the processor: about half of its speed.
 
 What translation buys, x87 build in Node:
@@ -264,7 +271,8 @@ eax 0x00000001  ecx 0x00000000  edx 0x00000000  ebx 0x00000000  esp 0x00ffffe4  
 | `--config '<json>'` | Settings ([`SETTINGS.md`](SETTINGS.md)). |
 | `--json` | The report as one line of JSON. |
 
-The exit status: the program's own with `--linux`, 0 after a `hlt`, 1 for anything else.
+The exit status: the program's own with `--linux`, 0 after a `hlt`, 1 for any other stop, 2 for a
+bad command line or an error.
 
 The program from the example above, which needs no C library:
 
@@ -285,7 +293,8 @@ void _start(void){
 ```
 
 `cork translate <file> --entry addr -o out.wasm` saves the region cork forms from that address as a
-WebAssembly module of its own, to look at with `wasm2wat` or `wasm-objdump`. It does not run on its
+WebAssembly module of its own, to look at with `wasm2wat` or `wasm-objdump` (`--at` places flat
+code as for `run`; `--precise` translates as the `precise` setting does). It does not run on its
 own: it takes its memory and helpers from cork.
 
 From JavaScript:
@@ -329,9 +338,9 @@ until the program needs something from outside:
 
 `stop.retired` is how many instructions ran, `stop.translated` how many of them in translated code.
 The machine also has `load`, `read`, `reg` and `setReg` (the eight general registers, `eip`,
-`eflags`), `memory` (the `WebAssembly.Memory`), `layout` (where each register is in it),
-`diagnostics()` and `dispose()`. `regionModule({ code, at, entry })` does what `cork translate`
-does, from code.
+`eflags`), `memory` (the `WebAssembly.Memory`), `layout` (where each register is in it), `runtime`
+(the translator behind it), `diagnostics()` and `dispose()`. `regionModule({ code, at, entry })`
+does what `cork translate` does, from code.
 
 Every threshold and size cork works with can be set: the list is in [`SETTINGS.md`](SETTINGS.md).
 The defaults are the ones games were measured with.
@@ -347,10 +356,10 @@ cork on its own, or to load another build with `createApp({ cork: { moduleUrl } 
 | --- | --- | --- |
 | Decoder | `src/decode/` | Turns bytes into instructions. The opcode tables are written by hand: for each instruction the decoder knows its operands, its length, which flags it reads and writes, and how it can fault. An unknown opcode stops it, named. |
 | Region former | `src/region.js`, `src/helpers.js` | Forms a region from an entry. Recognises compiler helpers such as MSVC's `_ftol2` by their bytes and puts what they do in place of the call. |
-| Emitter | `src/emit/` | Turns a region into one WebAssembly function: integer instructions, flags, memory, the x87, MMX and SSE, each in a file of its own. It works straight from the decoded instructions, with no intermediate language. |
+| Emitter | `src/emit/` | Turns a region into one WebAssembly function: integer instructions, flags, memory, the x87, MMX and SSE (`simd.js`), `lock`-prefixed instructions as atomics (`locked.js`), each in a file of its own. It works straight from the decoded instructions, with no intermediate language. |
 | Encoder | `src/wasm/` | Writes the WebAssembly bytes, and finds out what the engine supports (SIMD, tail calls). |
-| Runtime | `src/runtime/` | Everything around translation: the candidate queue, batches, translation workers (`translator.worker.js`), the shared memory finished code is kept in (`arena.js`), publishing, the entry hash, page flags, dropping rewritten code, indirect call prediction, gathering small modules into big ones. |
-| Interpreters | `src/interp.js`, `src/fast.js`, `src/interp-wasm.c` | An interpreter in JavaScript for the very first steps, then one built from C into WebAssembly. |
+| Runtime | `src/runtime/` | Everything around translation: the candidate queue, batches, translation workers (`translator.worker.js`), the shared memory finished code is kept in (`arena.js`), publishing, the entry hash, page flags (`pages.js`), dropping rewritten code, indirect call prediction, gathering small modules into big ones, the records kept in the translation store (`cache.js`), and what the executors of one process share about code (`shared-code.js`). |
+| Interpreters | `src/interp.js`, `src/fast.js`, `src/interp-wasm.c` | An interpreter in JavaScript for the very first steps, then one built from C into WebAssembly (in Bottlify; cork's own machine keeps to the JavaScript one). |
 | Instruction model | `src/ir.js`, `src/ir-x87.js`, `src/ir-simd.js` | A slow, simple account of what each instruction does. The JavaScript interpreter runs on it, and translated code is checked against it. |
 
 How cork sits in Bottlify (threads, the translation pool, several executors of one process):

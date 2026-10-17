@@ -34,11 +34,12 @@ something only with a measurement beside it.
 | `volatileAfter` | 8 | Writes that drop one page's code, within `volatileWindowMs`, before the page is left to the interpreter. A write that leaves the bytes as they were drops nothing. | Higher for a program that rewrites code often but runs it long; lower if it keeps rewriting. |
 | `volatileWindowMs` | 100 | The window `volatileAfter` counts in. | Longer to give up on a page rewritten less often. |
 | `volatileHoldMs` | 2000 | How long a volatile page is interpreted before it is translated again; doubles each time it is left again. | Longer for code that keeps changing for good. |
-| `worker` | on where `Worker` exists | Emit and compile in translation workers. | `false` translates on the calling thread: simpler, but every batch stalls it. |
+| `worker` | on where `Worker` exists, unless `feed` is `'slice'` | Emit and compile in translation workers; a `workerUrl` given turns it on. | `false` translates on the calling thread: simpler, but every batch stalls it. A run with no frames (`feed: 'slice'`) has none to hide a worker's round trip behind, so it translates inline unless asked. |
 | `workerUrl` | beside the runtime | Where `translator.worker.js` is. | When a bundler moves it. |
 | `translators` | 1 | Workers the runtime opens itself; 0 when a host's pool lends them. | More when cores are spare and loading translates a lot. |
-| `arenaBytes` | 48 MiB | The shared memory every translator of a process keeps emitted code in (0: none). | Larger for programs with many hundreds of thousands of blocks. |
+| `arenaBytes` | 48 MiB | The shared memory every translator of a process keeps emitted code in (0: each translator keeps a cache of its own). | Larger for programs with many hundreds of thousands of blocks. |
 | `arena` | none | The arena itself, made by the host (`createArena`) and given to every executor of a process, whose translations share one layout (`sharedLayout`): what one emitted, the others take. Absent, the runtime makes its own of `arenaBytes`. | Set by the cpu layer for several executors; not a knob. |
+| `sharedCode`, `doorbell` | none | Where the process's record of code shared between its executors lies and which executor this runtime is; the words a translation worker rings after it answers, so an engine thread sleeping on them wakes. | Set by the cpu layer and the process worker; not knobs. |
 
 **What a region is and how regions meet**
 
@@ -57,7 +58,7 @@ something only with a measurement beside it.
 | `emptySites` | `false` | With `emptyCalls`, a call out of a region (outside x87 code) reads its target's slot in the entry hash first and returns from such a function in place, without calling the transfer. | A call to an empty method costs about a third of what the transfer leaves it; every other call out of a region reads one more slot, about a nanosecond. |
 | `callTargets` | `true` | Indirect calls sampled and their few small callees formed in; a call found to have none worth forming in is sampled no more. | Off to rule it out. Far Cry ran 2-6% faster with it in Chromium; regions formed again for it are formed under `holdMs`. |
 | `predictAfter`, `predictShare`, `predictCallees`, `reforms`, `callWindow` | 48, 8, 4, 3, 1024 | With `callTargets`: samples before callees are looked at, the share a callee must take (one in this many), callees compared, times a region is formed again, the readings of the profile a call's samples are kept for. | Tuning `callTargets`. |
-| `dispatch` | `false` | A module placed in a range of the table, a transfer inside it a direct tail call. | Measured slower in games with `callTargets`; try alone. |
+| `dispatch` | `false` | A module placed in a range of the table, a transfer inside it a direct tail call. | The benchmark gains a few per cent at most; games ran slower with it, alone and beside `callTargets`. |
 | `relinkAfter`, `relinkRegions` | 16, 512 | Batch modules published before running regions are gathered into large ones, and how many go into each (0: never). | Fewer, larger modules make transfers cheaper; gathering 4096 regions held a thread 160 ms. |
 | `mergeAfter` | 2^16 | Transfers between two modules before they are gathered into one (0: never). | Lower merges more eagerly: more rebuilding. |
 | `mergeSample`, `mergeEvery`, `mergePerRegion`, `mergesARegion` | 2^20, 2^23, 2^19, 2 | How often crossings are read, the fewest instructions between merges, per region merged, and merges one region may join. | Bounds on merging's own cost. |
@@ -68,7 +69,7 @@ something only with a measurement beside it.
 | Setting | Default | What it does | When to change it, and the risk |
 | --- | --- | --- | --- |
 | `wideFirst` | `true` | Each region compiled for the precision control it runs under, tested once a block; one seen under both tests at every rounding operation. | Off tests precision on every operation. |
-| `floatSingles` | `true` | A region compiled for single precision computes its arithmetic, square roots and loads in f32 where the operands are floats, each result the processor's 24-bit one; a result past a float's range, or a product under its smallest normal, leaves for the host to compute, and an entry that keeps leaving is compiled again rounding doubles. | Off rounds every result from a double, as before; no other effect. |
+| `floatSingles` | `true` | A region compiled for single precision computes its arithmetic, square roots and loads in f32 where the operands are floats, each result the processor's 24-bit one; a result past a float's range, or a product under its smallest normal, leaves for the host to compute, and an entry that keeps leaving is compiled again rounding doubles. | Off rounds every result from a double; no other effect. |
 | `x87Shapes` | `true` | Regions compiled for the stack's shape at their entries. | Off checks every register access. |
 | `checkedAfter` | 4 | Failed shape tests before a region is formed again without one. | Lower for code entered with varying stacks. |
 
@@ -79,12 +80,12 @@ something only with a measurement beside it.
 | `hashSlots` | 2^20 | Slots of the entry hash translated code looks targets up in (12 bytes each, a power of two). | A program past ~780k block starts needs more; a full hash sends its overflow through the host on every transfer. |
 | `hashLoad` | 0.75 | Share of slots live past which new entries stay out of the hash. | Higher packs more in with longer probes. |
 | `exitTargets`, `missesKept`, `callSitesKept` | 4096, 4096, 16384 | Bounded records of exit targets, miss counts and tried call sites. | Larger for diagnostics on big programs. |
-| `sharedMemory` | `true` where possible | Guest memory a `SharedArrayBuffer`. | `false` keeps it private (no other executor can run on it). |
 
 **The core's host (in `@bottlify/core`)**
 
 | Setting | Default | What it does | When to change it, and the risk |
 | --- | --- | --- | --- |
+| `sharedMemory` | `true` where possible | Guest memory a `SharedArrayBuffer`, where the host has one and the page is cross-origin isolated (`createMachine`'s memory is never shared). | `false` keeps it private: no other executor can run on it, and the program runs on one. |
 | `wasmInterpreter` | `true` | The interpreter's integer, x87 and SSE instructions in wasm. | Off runs the JavaScript interpreter alone: slower. |
 | `wasmInterpreterAfter`, `newTargetWork` | 8192, 128 | Work the JavaScript interpreter does before the wasm tier takes over, a new target counting as 128. | 0 starts the wasm tier at once. |
 | `feed` | `'frame'` | When candidates are formed: once a frame, or after every slice (`'slice'`). | `'slice'` for programs that never present. |
@@ -108,7 +109,8 @@ The core also takes `cork.pool`, `cork.poolPerProcess`, `cork.poolWindowMs` and 
 | `countTransfers` | Transfers between regions. |
 | `undoLog` | The store's undo log, for replay. |
 
-They all cost speed, so they belong in an investigation and nowhere else.
+They all cost speed, so they belong in an investigation and nowhere else. A run with
+`blockProfile` or `undoLog`, or with classes left out (`leaveOut`), keeps no translation store.
 
 **Store**
 
@@ -116,7 +118,7 @@ They all cost speed, so they belong in an investigation and nowhere else.
 | --- | --- |
 | `store` | Where translations are kept between runs (the core gives a store per bundle in OPFS). |
 | `bundleId` | The store's namespace. |
-| `cacheVersion` | A version above the translator's own empties every store of a lower one. |
+| `cacheVersion` | A version above the translator's own: every record stored under another version misses, as in an empty store. |
 
 A few sizes stay fixed because translated code or the prebuilt wasm interpreter are built around
 them: the state block's offsets, the page-flag table (one byte per 4 KiB page), the code-granule
