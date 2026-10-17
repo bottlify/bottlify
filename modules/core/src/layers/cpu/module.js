@@ -5,7 +5,7 @@
  */
 
 import { createV86Host } from './internal/v86-host.js';
-import { createCorkHost } from './internal/cork-host.js';
+import { createCorkHost, createTsc } from './internal/cork-host.js';
 import { createBell, createRemoteExecutor } from './internal/executor.js';
 import { unbrokenTable } from './internal/unbroken.js';
 import { createWriteClock } from './internal/write-clock.js';
@@ -619,6 +619,8 @@ export function createCpuModule(){
                             closedBelow: settings.closedBelow,
                             noExecuteBelow: settings.noExecuteBelow,
                             executors: settings.executors,
+                            // One time-stamp counter for every executor (`useGuestClock`).
+                            ...(several ? { tsc: createTsc() } : {}),
                         };
                         state.host = createCorkHost({ ...hostConfig, engine: engineModule,
                             reused: settings.reused });
@@ -1198,16 +1200,21 @@ export function createCpuModule(){
                 /**
                  * The guest's clock, for the time-stamp counter: under cork `rdtsc`
                  * then counts nanoseconds of the time QueryPerformanceCounter reads.
-                 * The emulator's counter is its own and is not moved by this.
+                 * The emulator's counter is its own and is not moved by this. Each
+                 * move is published for the process's other executors, whose
+                 * counter is the same one.
                  *
                  * @param {() => number} readMs  milliseconds of guest time
+                 * @param {(listener: () => void) => void} [whenMoved]  tells the
+                 *     listener after every move of the clock
                  */
-                useGuestClock(readMs){
+                useGuestClock(readMs, whenMoved){
                     state.guestClock = readMs;
                     if (typeof state.host?.useGuestClock === 'function')
                     {
                         state.host.useGuestClock(readMs);
                     }
+                    whenMoved?.(()=>state.host?.publishGuestClock?.());
                 },
 
                 /** @returns {any} the running thread's full CPU state */

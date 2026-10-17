@@ -148,7 +148,23 @@ const hex = (value, width = 8)=>(value >>> 0).toString(16).padStart(width, '0');
  *     and a parent starting one short-lived child after another would otherwise hold one
  *     memory per child. Below `guestEnd` the guest may have written, and that is zeroed with
  *     the engine's own pages; above it the guest's memory is as it was made.
+ * @property {SharedArrayBuffer} [tsc]  The time-stamp counter every executor of the process
+ *     shares (`TscWord`): the guest's clock as the process last published it, and the last
+ *     count any of them read.
  */
+
+/**
+ * The words of the shared time-stamp counter (`CorkHostConfig.tsc`), each a BigInt64.
+ * The guest's clock is in microseconds, -1 until the process publishes it.
+ */
+export const TscWord = Object.freeze({ GUEST_US: 0, LAST: 1 });
+
+/** @returns {SharedArrayBuffer} a shared time-stamp counter, the guest's clock not yet published */
+export function createTsc(){
+    const tsc = new SharedArrayBuffer(16);
+    new BigInt64Array(tsc)[TscWord.GUEST_US] = -1n;
+    return tsc;
+}
 
 /**
  * The rate cork's time-stamp counter advances at, in MHz, which is the speed
@@ -167,7 +183,7 @@ export const CORK_TSC_MHZ = 3000;
 export function createCorkHost(config){
     const { engine, memorySize, trapPort, entryVector, initialStack, cork: corkConfig,
         closedBelow = 0, noExecuteBelow = 0, executors = 1, executor = 0, memory: given,
-        reused } = config;
+        reused, tsc } = config;
     // Where code may run from: a closed range runs nothing either.
     const runsFrom = Math.max(closedBelow, noExecuteBelow) >>> 0;
     for (const name of ENGINE_EXPORTS)
@@ -466,19 +482,57 @@ export function createCorkHost(config){
     // guest's clock moves between slices, so within one the counter goes on at
     // the page's rate from its last move, at most a credit's worth, and never
     // backward.
+    //
+    // Another executor's guest clock is the one the process publishes in the
+    // shared counter (`tsc`), and the last count is shared too, so a thread
+    // reads one counter wherever it runs, as on a machine whose cores' counters
+    // are in step: counted from this worker's own page clock, a thread that ran
+    // a slice here saw the time go back by however long the process had run
+    // before this executor opened, and a game timing its frames by it slept
+    // that long.
     const tscBase = performance.now();
     const TICKS_PER_MS = CORK_TSC_MHZ * 1000;
+    const tscWords = tsc === undefined ? null : new BigInt64Array(tsc);
     /** @type {(() => number) | null} milliseconds of guest time */
     let guestClock = null;
+    /** @returns {number | null} milliseconds of guest time, if any is given or published */
+    const guestNow = ()=>{
+        if (guestClock !== null)
+        {
+            return guestClock();
+        }
+        const us = tscWords === null ? -1n : Atomics.load(tscWords, TscWord.GUEST_US);
+        return us < 0n ? null : Number(us) / 1000;
+    };
     let guestMs = 0;
     let guestMovedAt = 0;
     let lastTsc = 0;
+    /** @param {number} ticks @returns {bigint} the count read: past every count read before */
+    const later = ticks=>{
+        if (tscWords === null)
+        {
+            lastTsc = Math.max(lastTsc + 1, ticks);
+            return BigInt(lastTsc);
+        }
+        const wanted = BigInt(ticks);
+        let seen = Atomics.load(tscWords, TscWord.LAST);
+        for (;;)
+        {
+            const next = wanted > seen ? wanted : seen + 1n;
+            const was = Atomics.compareExchange(tscWords, TscWord.LAST, seen, next);
+            if (was === seen)
+            {
+                return next;
+            }
+            seen = was;
+        }
+    };
     const readTsc = ()=>{
         const now = performance.now();
         let ticks = (now - tscBase) * TICKS_PER_MS;
-        if (guestClock !== null)
+        const ms = guestNow();
+        if (ms !== null)
         {
-            const ms = guestClock();
             if (ms !== guestMs)
             {
                 guestMs = ms;
@@ -486,8 +540,7 @@ export function createCorkHost(config){
             }
             ticks = (guestMs + Math.min(now - guestMovedAt, tscDriftMs)) * TICKS_PER_MS;
         }
-        lastTsc = Math.max(lastTsc + 1, Math.floor(ticks));
-        return BigInt(lastTsc);
+        return later(Math.floor(ticks));
     };
     const ports = createPorts(()=>Number(readTsc()) / TICKS_PER_MS);
     // A slow slice's account of itself reads the clock around every range the
@@ -1716,6 +1769,14 @@ export function createCorkHost(config){
      */
     host.useGuestClock = readMs=>{
         guestClock = readMs;
+        host.publishGuestClock();
+    };
+    /** Writes the guest's clock where the process's other executors read it, if they do. */
+    host.publishGuestClock = ()=>{
+        if (tscWords !== null && guestClock !== null)
+        {
+            Atomics.store(tscWords, TscWord.GUEST_US, BigInt(Math.round(guestClock() * 1000)));
+        }
     };
     host.captureContext = (/** @type {any} */ into)=>captureBlockContext(host, into);
     host.restoreContext = (/** @type {any} */ context)=>{

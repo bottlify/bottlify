@@ -145,8 +145,9 @@ export function createKernelModule(){
             state.clock = createClock(config?.clock);
             // The time-stamp counter counts the same time QueryPerformanceCounter
             // reads, so a program calibrating one against the other measures the
-            // frequency CPUID states.
-            cpu.useGuestClock?.(()=>state.clock.virtualTime());
+            // frequency CPUID states, on whichever executor it reads it.
+            cpu.useGuestClock?.(()=>state.clock.virtualTime(),
+                (/** @type {() => void} */ listener)=>state.clock.whenMoved(listener));
             state.scheduler = createScheduler({
                 cpu,
                 switcher: state.switcher,
