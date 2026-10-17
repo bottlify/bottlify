@@ -1035,3 +1035,13 @@ None yet.
   that moment.
 - **What stands.** Its frame rates and host calls: 15.1 fps before, 5.7 after, one run each.
   The picture is not evidence against the trade, and the gates' silence is not a gap they have.
+
+### 2026-10-17 -- invalidated: the scene of "d3dx9: a state's preshader expression is worked out in the guest" (10321baf)
+
+- **What was wrong.** The commit says its numbers (frames 18 463 to 21 276, host time 55.9 to
+  31.1 s, crossings 3.61 to 0.84 million, 220 s each) were taken in the Most Wanted demo's Quick
+  Race by its route. Both runs stood at the "CLICK to continue" card: the route clicks the card at
+  60 s, and the demo passes it on Space only, so no step after it was taken.
+- **What stands.** The two numbers compare the same scene, the card, one run each; they say
+  nothing about a race. The race was measured once, by the user in the launcher: about 66 to 81.7
+  fps, conditions not recorded.
