@@ -101,6 +101,72 @@ export const JMP_COOKIE = 0x56433230;
 /** How many words of unwind data a buffer has room for. */
 const UNWIND_DATA_WORDS = 6;
 
+/** @param {number} value @returns {number[]} */
+const le32 = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff];
+
+/**
+ * The start both setjmps share, as the guest runs it: the registers, the stack
+ * as the return leaves it, the return address and the head of the chain.
+ *
+ *     mov edx, [esp+4]       ; the buffer
+ *     mov [edx], ebp ; mov [edx+4], ebx ; mov [edx+8], edi ; mov [edx+12], esi
+ *     lea eax, [esp+4] ; mov [edx+16], eax
+ *     mov eax, [esp] ; mov [edx+20], eax
+ *     mov eax, fs:[0] ; mov [edx+24], eax
+ */
+const SETJMP_MARK = [
+    0x8b, 0x54, 0x24, 0x04,
+    0x89, 0x2a, 0x89, 0x5a, 0x04, 0x89, 0x7a, 0x08, 0x89, 0x72, 0x0c,
+    0x8d, 0x44, 0x24, 0x04, 0x89, 0x42, 0x10,
+    0x8b, 0x04, 0x24, 0x89, 0x42, 0x14,
+    0x64, 0xa1, 0x00, 0x00, 0x00, 0x00, 0x89, 0x42, 0x18,
+];
+
+/**
+ * A word of what `_setjmp3` was given after its count into the buffer, or
+ * `missing` where the count gives it fewer: `count >= words` (unsigned) puts
+ * [esp + 8 + 4 * words] at `slot`.
+ *
+ *     mov eax, missing      ; xor eax, eax for zero
+ *     cmp ecx, words
+ *     jb .kept
+ *     mov eax, [esp + 8 + 4 * words]
+ * .kept:
+ *     mov [edx + slot], eax
+ *
+ * @param {number} words @param {number} slot @param {number} missing
+ */
+const unwindWord = (words, slot, missing)=>[
+    ...(missing === 0 ? [0x31, 0xc0] : [0xb8, ...le32(missing)]),
+    0x83, 0xf9, words,
+    0x72, 0x04,
+    0x8b, 0x44, 0x24, 8 + 4 * words,
+    0x89, 0x42, slot,
+];
+
+/**
+ * `_setjmp` and `_setjmp3` as the guest runs them: a setjmp is a few stores,
+ * and an interpreter sets one at every protected call -- the Crysis demo's
+ * scripts 65 488 in a 420 s run of its CPU benchmark, each a crossing of some
+ * 70 us. The handlers below write the same buffer and are the reference the
+ * code is gated against. What they keep beside it, where the caller's frame
+ * stands above setjmp's arguments, a longjmp after the code's setjmp takes
+ * from the buffer's stack word instead: only those arguments lie between.
+ */
+export const SETJMP_CODE = Object.freeze({
+    setjmp: Uint8Array.from([...SETJMP_MARK, 0x31, 0xc0, 0xc3]),
+    setjmp3: Uint8Array.from([
+        ...SETJMP_MARK,
+        0xc7, 0x42, JMP_BUF.COOKIE, ...le32(JMP_COOKIE),
+        0x8b, 0x4c, 0x24, 0x08, //                  mov ecx, [esp+8] ; the count
+        ...unwindWord(1, JMP_BUF.UNWIND_FUNC, 0),
+        ...unwindWord(2, JMP_BUF.TRY_LEVEL, NO_TRY_LEVEL),
+        ...Array.from({ length: UNWIND_DATA_WORDS }, (_, index)=>
+            unwindWord(3 + index, JMP_BUF.UNWIND_DATA + index * 4, 0)).flat(),
+        0x31, 0xc0, 0xc3, //                        xor eax, eax ; ret
+    ]),
+});
+
 /**
  * @typedef {Object} CrtSehHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
@@ -501,6 +567,7 @@ export function createCrtSeh(host){
             _setjmp: {
                 convention: 'cdecl',
                 argBytes: 4,
+                code: ()=>SETJMP_CODE.setjmp,
                 /**
                  * @param {number[]} args
                  * @param {{ callerStack: number, hostReturn: number }} [frame]
@@ -519,6 +586,7 @@ export function createCrtSeh(host){
             _setjmp3: {
                 convention: 'cdecl',
                 argBytes: 8,
+                code: ()=>SETJMP_CODE.setjmp3,
                 /**
                  * @param {number[]} args
                  * @param {{ callerStack: number, hostReturn: number }} [frame]
