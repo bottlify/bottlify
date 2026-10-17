@@ -183,6 +183,14 @@ export function createDirect3D7Seam(
      * @type {WeakMap<object, ReturnType<typeof createShadow>>}
      */
     const shadows = new WeakMap();
+    /**
+     * Every block made, for `syncDevices`.
+     * ponytail: never pruned -- a program makes a device or two -- prune on release if one
+     * remakes them by the thousand.
+     *
+     * @type {Set<ReturnType<typeof createShadow>>}
+     */
+    const madeShadows = new Set();
     /** @param {any} device */
     const shadowOf = device=>(device ? shadows.get(device) : undefined);
     /** @param {(at: number) => Uint8Array} code */
@@ -1305,6 +1313,7 @@ export function createDirect3D7Seam(
                         D3D7_COMMANDS.commandObjects(records, publisher.objectAt)) },
                 });
                 shadows.set(device, shadow);
+                madeShadows.add(shadow);
                 device.guestState = ()=>shadow.address();
                 device.settleGuestRefs = ()=>shadow.sync();
             }
@@ -1383,6 +1392,18 @@ export function createDirect3D7Seam(
 
         /** What the device made last drew, as Direct3D 8's and 9's seams answer it. */
         diagnostics: ()=>lastDevice?.diagnostics?.() ?? null,
+
+        /**
+         * Makes what every device's command ring holds: before a call of the
+         * DirectDraw seam's -- a Flip shows the draws made before it, a Lock
+         * or a Blt of a target reads them.
+         */
+        syncDevices(){
+            for (const shadow of madeShadows)
+            {
+                shadow.sync();
+            }
+        },
 
         /**
          * What the Direct3D of DirectX 3, 5 and 6 shares with this one: the

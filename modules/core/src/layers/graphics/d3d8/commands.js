@@ -108,6 +108,7 @@ const first = (kind, length)=>{
  * @property {number} [needs] @property {number} [refuses] @property {boolean} [fresh]
  *     what the routine checks before it answers for the call, so that the
  *     device takes every call it answered for (`commandChecks`)
+ * @property {{ type: number, fvf: number, count: number, most: number }} [fvfVertices]
  * @property {{ type: number, count: number, stride: number, most: number }} [vertices]
  *     or the vertices a draw's primitives span, `stride` bytes each (`commandCode`)
  * @property {boolean} [kept]  its copy is taken with `copy` alone, not through the scratch

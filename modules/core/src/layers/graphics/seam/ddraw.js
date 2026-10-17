@@ -302,16 +302,36 @@ const S3TC_OF_FOURCC = Object.freeze({
  * @param {(api: string, detail: string) => void} [deps.divergence]
  *     Told of a copy this build refuses between two formats, with both of them.
  *        The screen is this size now, and a fullscreen window is placed over it.
+ * @param {() => void} [deps.beforeCall]  run before each method of a surface or the
+ *     DirectDraw object: Direct3D 7's command rings made first
  */
 export function createDirectDrawSeam(
     { publisher, memory, screen, gdi, present, flipQueued, callGuest, currentThread, scratch,
         extraInterfaces = [], extraSurfaceInterfaces = [], now = ()=>performance.now(),
         refresh = ()=>REFRESH_HZ, schedule = (ms, run)=>{
             setTimeout(run, ms);
-        }, identity, videoMemory, gamma, deactivated, deactivations, resolution, divergence },
+        }, identity, videoMemory, gamma, deactivated, deactivations, resolution, divergence,
+        beforeCall },
 )
 {
     const fields = createFields(memory);
+    /**
+     * A table's methods, each running `beforeCall` first: what Direct3D 7
+     * holds in its command ring is drawn before a surface is shown or read.
+     *
+     * @template {Record<string, any>} T
+     * @param {T} methods
+     * @returns {T}
+     */
+    const afterDevices = methods=>(beforeCall
+        ? /** @type {T} */ (Object.fromEntries(Object.entries(methods).map(([name, method])=>[
+            name, typeof method === 'function'
+                ? (/** @type {any[]} */ ...args)=>{
+                    beforeCall();
+                    return method(...args);
+                }
+                : method])))
+        : methods);
     /**
      * The objects that took exclusive mode, for another one's
      * TestCooperativeLevel: the screen is one, whichever object holds it.
@@ -1266,7 +1286,7 @@ export function createDirectDrawSeam(
     /** Every surface generation, so a QueryInterface across them succeeds. */
     const surfaceInterfaces = [
         ...SURFACE_GENERATIONS.map(generation=>
-            describe(generation.id, generation.slots, surfaceMethods(generation), {},
+            describe(generation.id, generation.slots, afterDevices(surfaceMethods(generation)), {},
                 privateData.released)),
         gammaInterface,
         ...extraSurfaceInterfaces,
@@ -1820,7 +1840,7 @@ export function createDirectDrawSeam(
     const ddrawInterfaces = [
         .../** @type {[1, 2, 4, 7]} */ ([1, 2, 4, 7]).map(version=>
             describe(GENERATIONS[version].id, GENERATIONS[version].slots,
-                ddrawMethods(GENERATIONS[version], version))),
+                afterDevices(ddrawMethods(GENERATIONS[version], version)))),
         ...extraInterfaces,
     ];
 

@@ -782,6 +782,28 @@ export function createDirect3D7(ddraw, services = {}){
             return D3D_OK;
         };
 
+        /**
+         * The vertex formats drawn with lately and their widths, the latest
+         * first: what a draw in the guest copies by (`ringState`).
+         *
+         * @type {[number, number][]}
+         */
+        const strides = [];
+        /** @param {number} fvf @param {number} stride */
+        const drawnWith = (fvf, stride)=>{
+            if (strides[0]?.[0] === fvf)
+            {
+                return;
+            }
+            const at = strides.findIndex(([seen])=>seen === fvf);
+            if (at >= 0)
+            {
+                strides.splice(at, 1);
+            }
+            strides.unshift([fvf >>> 0, stride]);
+            strides.length = Math.min(strides.length, 8);
+        };
+
         /** @param {number} type @param {number} vertexCount */
         const primitiveCountOf = (type, vertexCount)=>{
             for (let primitives = vertexCount; primitives > 0; primitives--)
@@ -968,6 +990,7 @@ export function createDirect3D7(ddraw, services = {}){
                     clipPlanes: 32,
                     taken: [],
                     cooperative: 0,
+                    strides,
                 };
             },
 
@@ -1567,6 +1590,7 @@ export function createDirect3D7(ddraw, services = {}){
                     return DDERR_INVALIDPARAMS;
                 }
                 drawFvf = fvf;
+                drawnWith(fvf, stride);
                 renderer?.drawPrimitiveUp(model, type, primitiveCount, vertices, stride);
                 return D3D_OK;
             },

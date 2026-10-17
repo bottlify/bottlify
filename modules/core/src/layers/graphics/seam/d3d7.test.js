@@ -1065,13 +1065,13 @@ test('with guest memory, a device\'s setters and getters run in the guest, and w
     const { hr, device } = h.createDevice(d3d, target);
     assert.equal(hr, D3D_OK);
     for (const name of ['SetRenderState', 'SetTransform', 'SetTextureStageState', 'SetViewport',
-        'LightEnable', 'BeginScene', 'EndScene', 'GetRenderState', 'GetTextureStageState',
-        'GetViewport'])
+        'LightEnable', 'BeginScene', 'EndScene', 'DrawPrimitive', 'GetRenderState',
+        'GetTextureStageState', 'GetViewport'])
     {
         assert.ok(h.box.isGuest(device, slot(IDIRECT3DDEVICE7_SLOTS, name)),
             `${name} is guest code`);
     }
-    for (const name of ['SetTexture', 'Clear', 'DrawPrimitive', 'GetTransform'])
+    for (const name of ['SetTexture', 'Clear', 'DrawIndexedPrimitive', 'GetTransform'])
     {
         assert.ok(!h.box.isGuest(device, slot(IDIRECT3DDEVICE7_SLOTS, name)), `${name} is a trap`);
     }

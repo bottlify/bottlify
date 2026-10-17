@@ -131,6 +131,10 @@ const machine = ()=>{
         });
         words[(SHADOW.COOPERATIVE - SHADOW.DRAWABLE) / 4] = state.cooperative ?? 1;
         words[(SHADOW.ELSEWHERE - SHADOW.DRAWABLE) / 4] = state.elsewhere ?? 0;
+        (state.strides ?? []).slice(0, SHADOW.FVF_STRIDE_PAIRS).forEach(([fvf, stride], index)=>{
+            words[(SHADOW.FVF_STRIDES - SHADOW.DRAWABLE) / 4 + index * 2] = fvf;
+            words[(SHADOW.FVF_STRIDES - SHADOW.DRAWABLE) / 4 + index * 2 + 1] = stride;
+        });
         host.writePhysical(BLOCK + SHADOW.DRAWABLE, new Uint8Array(words.buffer));
         host.writePhysical(BLOCK + SHADOW.RENDER_STATE_VALID, valid);
         host.writePhysical(RING, new Uint8Array(RING_BYTES));
@@ -900,5 +904,69 @@ test('Direct3D 7: every call the command ring answers for in the guest is one th
             SetClipPlane: common.SetClipPlane,
             BeginScene: common.BeginScene,
             EndScene: common.EndScene,
+            // By pointer, so many vertices as whole primitives, of a format the
+            // host has drawn with: its width is the block's.
+            DrawPrimitive: [
+                { label: 'a triangle', args: [4, FVF_TL, 'data', 3, 0], data: TL_TRIANGLE,
+                    setup: drawnWith },
+                { label: 'a strip of three', args: [5, FVF_TL, 'data', 3, 0], data: TL_TRIANGLE,
+                    setup: drawnWith },
+                { label: 'a point', args: [1, FVF_TL, 'data', 1, 0], data: TL_TRIANGLE,
+                    setup: drawnWith },
+                { label: 'a format not drawn with', args: [4, FVF_TL | 0x20, 'data', 3, 0],
+                    data: [...TL_TRIANGLE, 0, 0, 0], setup: drawnWith },
+                { label: 'four vertices of a list', args: [4, FVF_TL, 'data', 4, 0],
+                    data: [...TL_TRIANGLE, ...TL_TRIANGLE.slice(0, 5)], setup: drawnWith },
+                { label: 'three of a line list', args: [2, FVF_TL, 'data', 3, 0],
+                    data: TL_TRIANGLE, setup: drawnWith },
+                { label: 'a type there is not', args: [7, FVF_TL, 'data', 3, 0],
+                    data: TL_TRIANGLE, setup: drawnWith },
+                { label: 'outside a scene', args: [4, FVF_TL, 'data', 3, 0], data: TL_TRIANGLE,
+                    setup: device=>{
+                        drawnWith(device);
+                        assert.equal(device.EndScene(), D3D_OK);
+                    } },
+            ],
         });
     });
+
+/** Transformed, lit vertices: a position with its RHW and a colour, five words. */
+const FVF_TL = 0x044;
+/** Three of them. */
+const TL_TRIANGLE = [...floats([0, 0, 0, 1]), 0xffffffff, ...floats([8, 0, 0, 1]), 0xffffffff,
+    ...floats([0, 8, 0, 1]), 0xffffffff];
+/** A scene, and a draw made on the host with the format, which the block learns the width of. */
+const drawnWith = (/** @type {any} */ device)=>{
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.DrawPrimitive(4, FVF_TL, new Uint8Array(new Uint32Array(TL_TRIANGLE)
+        .buffer), 3), D3D_OK);
+};
+
+test('Direct3D 7: a draw by pointer carries the program\'s vertices, as wide as its format\'s'
+    + ' entry in the block, whole', ()=>{
+    const { host, run } = machine();
+    const routine = commandCode(ROUTINE, TRAP, { ...D3D7_COMMANDS.COMMANDS.DrawPrimitive,
+        slot: D3D7_COMMANDS.commandSlot('DrawPrimitive') });
+    const device = device7();
+    drawnWith(device);
+    // Two formats drawn with, the second wider: each draw copies by its own.
+    const WIDE = FVF_TL | 0x80;
+    assert.equal(device.DrawPrimitive(4, WIDE, new Uint8Array(3 * 24), 3), D3D_OK);
+    const state = device.ringState();
+    assert.deepEqual(state.strides.slice(0, 2), [[WIDE, 24], [FVF_TL, 20]]);
+    for (const [fvf, width] of [[FVF_TL, 20], [WIDE, 24]])
+    {
+        const vertices = Uint8Array.from({ length: 6 * width },
+            (unused, i)=>(i * 7 + width) & 0xff);
+        host.writePhysical(DATA, vertices);
+        const record = run(routine, DEVICE, [4, fvf, DATA, 6, 0], state, renderStatesOf(device));
+        assert.ok(record, `the draw of format 0x${fvf.toString(16)} is taken in the guest`);
+        const words = new Uint32Array(record.buffer, record.byteOffset, record.byteLength >>> 2);
+        assert.equal(words[1], 8 + 5 * 4 + 6 * width,
+            'the record is the arguments and the vertices');
+        // The pointer names the copy, just past the record's five arguments.
+        assert.deepEqual([...words.subarray(2, 7)], [4, fvf, RING + 28, 6, 0]);
+        assert.deepEqual([...record.subarray(28, 28 + 6 * width)], [...vertices],
+            'every byte of every vertex');
+    }
+});

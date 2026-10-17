@@ -154,7 +154,15 @@ export const SHADOW = {
      * GPU's whatever it stretches, and the guest's StretchRect may answer it.
      */
     ELSEWHERE: 5352 + 4,
-    SIZE: 5352 + 8,
+    /**
+     * Vertex formats the device has drawn with and how wide a vertex of
+     * each is, eight pairs, written by the host: what a draw by pointer with
+     * its format as an argument (Direct3D 7's) copies is its vertices times
+     * that width, and a format not here is the host's.
+     */
+    FVF_STRIDES: 5352 + 8,
+    FVF_STRIDE_PAIRS: 8,
+    SIZE: 5352 + 8 + 8 * 8,
 };
 
 /** Byte offsets within a query's block. */
@@ -1292,6 +1300,10 @@ function commandChecks(shape, at){
  * @property {number} [bytes]  how many bytes that is, or else
  * @property {{ arg: number, shift: number, most: number }} [count]  the argument
  *     counting its elements, `1 << shift` bytes each, at most `most` of them
+ * @property {{ type: number, fvf: number, count: number, most: number }} [fvfVertices]
+ *     or the vertices a draw by pointer names -- `count` of them, a whole
+ *     number of primitives of `type` -- each as wide as `fvf` is in
+ *     `SHADOW.FVF_STRIDES`: at most `most` bytes
  * @property {{ type: number, count: number, stride: number, most: number }} [vertices]
  *     or the vertices a draw's primitives span, of the type and count those
  *     arguments give, `stride` bytes each: at most `most` bytes
@@ -1395,14 +1407,15 @@ export function commandCode(at, trap, shape){
     const recordLength = ragged
         ? [[0x8d, 0xb2, ...dword(header + 3)], [0x83, 0xe6, 0xfc]] // lea esi, [edx+h+3]; and -4
         : [[0x8d, 0xb2, ...dword(header)]];                    // lea esi, [edx+header]
-    if (self && (thread || pointer >= 0 || count || choose || vertices))
+    if (self && (thread || pointer >= 0 || count || choose || vertices || shape.fvfVertices))
     {
         throw new Error('shadow: a record of the object itself copies nothing');
     }
     // What the routine pops: the record's arguments, the object's own pointer
     // among them when it is the first.
     const popped = self ? args - 1 : args;
-    if (pointer >= 0 && !count && !choose && !vertices && (bytes <= 0 || (bytes & 3) !== 0))
+    if (pointer >= 0 && !count && !choose && !vertices && !shape.fvfVertices
+        && (bytes <= 0 || (bytes & 3) !== 0))
     {
         throw new Error(`shadow: a command copies whole dwords, not ${bytes} bytes`);
     }
@@ -1440,6 +1453,68 @@ export function commandCode(at, trap, shape){
             { jcc: 0x75, to: `case${index}` },                   // jne next
             [0xba, ...dword(size)],                              // mov edx, size
             { label: `case${index}` }));
+    }
+    else if (shape.fvfVertices)
+    {
+        // So many vertices as whole primitives of the type -- a point or
+        // more, an even number of two or more, two or more, a multiple of
+        // three, three or more -- each as wide as the format's entry in the
+        // block says; a format with none, or a copy past `most`, is the host's.
+        const { type, fvf, count: vertexCount, most } = shape.fvfVertices;
+        parts.push(
+            [0x8b, 0x44, 0x24, entry + 4 * type],                // mov eax, [esp+entry+4t]
+            [0x8b, 0x54, 0x24, entry + 4 * vertexCount],         // mov edx, [esp+entry+4c]
+            [0x85, 0xd2],                                        // test edx, edx
+            { jcc: 0x74, to: 'out', near: true },                // jz out
+            [0x81, 0xfa, ...dword(most)],                        // cmp edx, most
+            { jcc: 0x77, to: 'out', near: true },                // ja out
+            [0x83, 0xf8, 0x01],                                  // cmp eax, 1
+            { jcc: 0x74, to: 'counted', near: true },            // je counted: points
+            [0x83, 0xf8, 0x02],                                  // cmp eax, 2
+            { jcc: 0x75, to: 'notLines' },                       // jne notLines
+            [0xf6, 0xc2, 0x01],                                  // test dl, 1
+            { jcc: 0x75, to: 'out', near: true },                // jnz out: odd
+            { label: 'notLines' },
+            [0x83, 0xf8, 0x03],                                  // cmp eax, 3
+            { jcc: 0x77, to: 'notStrip' },                       // ja notStrip
+            [0x83, 0xfa, 0x02],                                  // cmp edx, 2
+            { jcc: 0x72, to: 'out', near: true },                // jb out
+            { jcc: 0xeb, to: 'counted', near: true },            // jmp counted
+            { label: 'notStrip' },
+            [0x83, 0xf8, 0x06],                                  // cmp eax, 6
+            { jcc: 0x77, to: 'out', near: true },                // ja out: no such type
+            [0x83, 0xfa, 0x03],                                  // cmp edx, 3
+            { jcc: 0x72, to: 'out', near: true },                // jb out
+            [0x83, 0xf8, 0x04],                                  // cmp eax, 4
+            { jcc: 0x75, to: 'counted', near: true },            // jne counted
+            // A multiple of three: n times the inverse of three modulo 2^32 is
+            // at most a third of the range exactly when it is.
+            [0x69, 0xc2, ...dword(0xaaaaaaab)],                  // imul eax, edx, 0xaaaaaaab
+            [0x3d, ...dword(0x55555555)],                        // cmp eax, 0x55555555
+            { jcc: 0x77, to: 'out', near: true },                // ja out
+            { label: 'counted' },
+            [0x8b, 0x44, 0x24, entry + 4 * fvf]);                // mov eax, [esp+entry+4f]
+        for (let index = 0; index < SHADOW.FVF_STRIDE_PAIRS; index++)
+        {
+            parts.push(
+                [0x3b, 0x81, ...dword(SHADOW.FVF_STRIDES + 8 * index)], // cmp eax, [ecx+fvf i]
+                { jcc: 0x75, to: `stride${index}` },             // jne next
+                [0x8b, 0x81, ...dword(SHADOW.FVF_STRIDES + 8 * index + 4)], // mov eax, [ecx+width]
+                { jcc: 0xeb, to: 'strided', near: true },        // jmp strided
+                { label: `stride${index}` });
+        }
+        parts.push(
+            { jcc: 0xeb, to: 'out', near: true },                // jmp out: a format not drawn yet
+            { label: 'strided' },
+            [0x85, 0xc0],                                        // test eax, eax
+            { jcc: 0x74, to: 'out', near: true },                // jz out
+            [0xa8, 0x03],                                        // test al, 3
+            { jcc: 0x75, to: 'out', near: true },                // jnz out
+            [0x3d, ...dword(most)],                              // cmp eax, most
+            { jcc: 0x77, to: 'out', near: true },                // ja out
+            [0x0f, 0xaf, 0xd0],                                  // imul edx, eax
+            [0x81, 0xfa, ...dword(most)],                        // cmp edx, most
+            { jcc: 0x77, to: 'out', near: true });               // ja out
     }
     else if (vertices)
     {
@@ -1987,6 +2062,8 @@ export function settledAfter(shadow, call){
  * @property {number} [cooperative]  zero while TestCooperativeLevel answers D3D_OK
  * @property {number} [elsewhere]  one when the device records for one drawing elsewhere,
  *     or draws nothing (`SHADOW.ELSEWHERE`)
+ * @property {readonly [number, number][]} [strides]  vertex formats drawn with and their
+ *     widths, the latest first (`SHADOW.FVF_STRIDES`)
  */
 
 /**
@@ -2309,6 +2386,15 @@ export function createShadow(deps){
         deps.writeMemory(address + SHADOW.DRAWABLE, new Uint8Array(words.buffer));
         deps.writeMemory(address + SHADOW.COOPERATIVE,
             dwordsBytes([state.cooperative ?? 1, state.elsewhere ?? 0]));
+        if (state.strides)
+        {
+            const pairs = new Uint32Array(SHADOW.FVF_STRIDE_PAIRS * 2);
+            state.strides.slice(0, SHADOW.FVF_STRIDE_PAIRS).forEach(([fvf, stride], index)=>{
+                pairs[index * 2] = fvf;
+                pairs[index * 2 + 1] = stride;
+            });
+            deps.writeMemory(address + SHADOW.FVF_STRIDES, new Uint8Array(pairs.buffer));
+        }
     };
 
     const mirror = ()=>{

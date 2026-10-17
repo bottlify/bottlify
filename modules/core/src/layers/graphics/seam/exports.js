@@ -357,6 +357,7 @@ export function createGraphicsLibraries(
     }));
     const ddraw = built('DDRAW.dll', ()=>createDirectDrawSeam({
         publisher, memory, screen, gdi, present, flipQueued, callGuest, currentThread, scratch,
+        beforeCall: ()=>d3d7.syncDevices(),
         now, schedule, refresh,
         extraInterfaces: [d3d7.interface, ...d3dLegacy.interfaces],
         extraSurfaceInterfaces: d3dLegacy.surfaceInterfaces,
