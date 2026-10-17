@@ -84,8 +84,11 @@ export function signalledNow(object){
  *     The run's named objects, where this process reaches them across a link
  *     (`system-objects.js`): an object of this table that names one of those
  *     by `remote` is a stand-in, and every change and wait on it is asked there.
+ * @param {(event: any) => void} [options.eventChanged]  told each time an
+ *     event's signalled state is written, for the words the guest reads it by
+ *     (`event-mirror.js`)
  */
-export function createSyncObjects({ scheduler, remote = null }){
+export function createSyncObjects({ scheduler, remote = null, eventChanged }){
     /** @type {any[]} */
     const objects = [];
     /** How many of each kind were ever made; the cheap answer about the table. */
@@ -367,9 +370,19 @@ export function createSyncObjects({ scheduler, remote = null }){
          * @param {string} [options.name]
          */
         createEvent({ manualReset = false, signalled = false, name } = {}){
+            let state = signalled;
             const object = {
                 kind: SyncKind.EVENT, name: name ?? 'event',
-                manualReset, signalled, waiters: [],
+                manualReset, waiters: [],
+                // Every write goes by here, wherever it is made: a guest's
+                // word left behind one would answer a poll from the past.
+                get signalled(){
+                    return state;
+                },
+                set signalled(value){
+                    state = value;
+                    eventChanged?.(object);
+                },
             };
             objects.push(object);
             created[SyncKind.EVENT]++;

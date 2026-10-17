@@ -607,7 +607,10 @@ sequenceDiagram
   the program runs itself, with no trap, at cork's speed; only what they cannot handle goes to
   the bridge. Some are written as x86: msvcrt's and kernel32's functions a program calls most,
   among them the interlocked calls, critical sections, slim reader/writer locks, one-time
-  initialisation, SLists and the heap's small blocks (up to 1 KiB). Others are written once in
+  initialisation, SLists, the heap's small blocks (up to 1 KiB) and WaitForSingleObject's poll of
+  an event that is not signalled, read from a word the kernel keeps for each handle onto an
+  event, so a thread on another executor polling for work never waits for the process's
+  executor to answer. Others are written once in
   JavaScript, marked `@guestCode`, and compiled to i386 by the build ([`core/scripts/guest-code/`](../modules/core/scripts/guest-code/)):
   the compiled bytes sit beside the source as `*.x86.js`, the JavaScript stays the host's
   handler and the reference a test holds the x86 to, and `return host()` hands a rare case to

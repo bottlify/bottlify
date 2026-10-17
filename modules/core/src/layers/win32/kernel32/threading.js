@@ -8,6 +8,7 @@ import { encodeAnsi } from './locale.js';
 import { isStandardHandle, untagged } from './handle-tags.js';
 import { TAKEN } from './named-objects.js';
 import { STATUS, toDosError } from '../ntdll/status.js';
+import { EVENT_SLOTS, eventPollCode } from './event-poll.js';
 
 /**
  * The kernel32 surface a threaded program calls.
@@ -20,6 +21,14 @@ import { STATUS, toDosError } from '../ntdll/status.js';
  * where it is and the CPU must go elsewhere. So a blocking function reports
  * that it blocked, and the caller parks the thread -- the same mechanism that
  * ends a process, reused rather than reinvented.
+ */
+
+/**
+ * What the export binding hands WaitForSingleObject's guest code (sync.js's
+ * GuestBuilder, which this module cannot name: sync.js imports it).
+ *
+ * @typedef {{ register: (name: string, fn: { argBytes: number, handler: Function }) => number }}
+ *     PollBuilder
  */
 
 /** Waits with this timeout never give up. */
@@ -128,6 +137,10 @@ const DUPLICATE_CLOSE_SOURCE = 0x00000001;
  *           One more hold on an open file's node, given back when the handle
  *           that holds it is closed: what a duplicate of a file or mapping
  *           handle takes, so closing its source leaves the file open.
+ * @property {(bytes: number) => number} [allocate]
+ * @property {(bytes: number) => number} [allocateCode]
+ *           Guest memory for the table of event words and for code: without
+ *           them every wait is the host's.
  * @property {(thread: any, routine: number, args: number[]) => void} [queueApc]
  *           Queues a routine to a thread, to run when it next waits alertably:
  *           what a waitable timer's completion routine becomes at each expiry.
@@ -666,6 +679,41 @@ export function createThreadingFunctions(host){
         return handle;
     });
 
+    /** Where WaitForSingleObject's guest code went, once placed. @type {number | null} */
+    let pollAt = null;
+    /**
+     * WaitForSingleObject's guest code and the kernel's table of event words
+     * it reads, placed on the first bind; the trap alone where there is no
+     * guest memory to place them in.
+     *
+     * @param {PollBuilder} builder
+     */
+    const placedPoll = builder=>{
+        if (pollAt !== null)
+        {
+            return pollAt;
+        }
+        const trap = builder.register('KERNEL32.dll!WaitForSingleObject', {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: args=>table.WaitForSingleObject.handler(args),
+        });
+        if (!host.allocate || typeof kernel.mirrorEvents !== 'function')
+        {
+            pollAt = trap;
+            return trap;
+        }
+        const words = host.allocate(EVENT_SLOTS * 4);
+        host.writeMemory(words, new Uint8Array(EVENT_SLOTS * 4));
+        const clear = kernel.EventMirror.CLEAR;
+        const allocate = host.allocateCode ?? host.allocate;
+        const at = allocate(eventPollCode(0, trap, words, clear).length);
+        host.writeMemory(at, eventPollCode(at, trap, words, clear));
+        kernel.mirrorEvents(words, EVENT_SLOTS);
+        pollAt = at;
+        return at;
+    };
+
     const table = {
         /** HANDLE CreateThread(LPSECURITY_ATTRIBUTES, SIZE_T, LPTHREAD_START_ROUTINE, LPVOID, DWORD, LPDWORD) */
         CreateThread: {
@@ -810,9 +858,16 @@ export function createThreadingFunctions(host){
             },
         },
 
-        /** DWORD WaitForSingleObject(HANDLE, DWORD dwMilliseconds) */
+        /**
+         * DWORD WaitForSingleObject(HANDLE, DWORD dwMilliseconds)
+         *
+         * Guest code first: a poll of an event that is not signalled times
+         * out there (`event-poll.js`), and everything else comes here.
+         */
         WaitForSingleObject: {
             argBytes: 8,
+            /** @param {PollBuilder} builder */
+            guest: builder=>placedPoll(builder),
             /** @param {number[]} args */
             handler: ([handle, timeout])=>{
                 // A standard stream is always ready to be written, and one
