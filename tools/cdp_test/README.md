@@ -138,6 +138,7 @@ workers answer nothing to a direct attach.
 | `bottle-contents.mjs` | what an installation finished in the driven tab would put in its bottle, by directory and size, after the collection rule, and what that rule leaves out; read it before Save | `node tools/cdp_test/live/bottle-contents.mjs [depth] [port]` |
 | `record-output.mjs` | what the person hears, uncompressed off the output node, the last two minutes (`arm` keeps a tap across reloads; `save` writes a WAV) | `node tools/cdp_test/live/record-output.mjs arm` then `… save [seconds] [file]` |
 | `snapshot.mjs` | textures of the running program as the GPU holds them, as PNGs: the targets and shadow maps a frame dump names; a float format stretched between its smallest and largest values | `node tools/cdp_test/live/snapshot.mjs t4414 t754 [--out DIR]` |
+| `console.mjs` | the page's console as it happens, each line timed: WebGPU validation errors the page never shows, which Chrome stops printing after a few hundred per device -- start it with the session | `node tools/cdp_test/live/console.mjs > dbg/console.log` |
 
 `tools/wav-scan.mjs <file.wav>` reads such a recording for what is wrong in it: gaps of
 silence inside sound, clicks (a step far beyond the signal's own), and exact repeats.

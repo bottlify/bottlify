@@ -8347,6 +8347,11 @@ function liveDumpOf(worker, control){
             {
                 last = { lines: event.data.lines, frame: event.data.frame };
             }
+            if (event.data?.type === 'frozen')
+            {
+                // The frame a pause holds, as a dump: what `snapshot` then reads from.
+                last = { lines: event.data.lines, frame: -1 };
+            }
             if (event.data?.type === 'snapped')
             {
                 const { id, width, height, format, data } = event.data;
@@ -8508,6 +8513,7 @@ function liveDumpOf(worker, control){
             {
                 throw new Error('freeze: this run draws without a graphics worker');
             }
+            listen();
             worker.postMessage({ type: 'debug', freeze: on });
             return on;
         },

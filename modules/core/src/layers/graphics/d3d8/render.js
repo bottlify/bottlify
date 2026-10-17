@@ -4966,24 +4966,51 @@ export function createRenderer(options){
     };
 
     /**
-     * The texture a running program's `app.debug.snapshot` names -- `t4414`
-     * as a frame dump names it -- read off the GPU at the end of the next
-     * frame, its top level as the GPU holds it; asked once, then forgotten.
+     * The textures a running program's `app.debug.snapshot` names -- `t4414,t754`
+     * as a frame dump names them -- read off the GPU at the end of the next
+     * frame played, a new one or the last one again (`freeze`), all in that one
+     * frame, each top level as the GPU holds it; asked once, then forgotten. A
+     * name no texture has is answered at once, empty.
      *
-     * @param {{ snapshot?: string }} live
-     * @returns {{ id: string, gpu: any } | null}
+     * @param {{ snapshot?: string, snapped?: (id: string, shot: any) => void }} live
+     * @returns {{ id: string, gpu: any }[] | null}
      */
     const snapshotAsked = live=>{
-        const id = live.snapshot ?? '';
+        const ids = (live.snapshot ?? '').split(',').filter(Boolean);
         live.snapshot = '';
-        for (const entry of roster)
+        /** @type {{ id: string, gpu: any }[]} */
+        const found = [];
+        for (const id of ids)
         {
-            if (entry.id === id && entry.gpu)
+            const entry = [...roster].find(each=>each.id === id && each.gpu);
+            if (entry)
             {
-                return { id, gpu: entry.gpu };
+                found.push({ id, gpu: entry.gpu });
+            }
+            else
+            {
+                live.snapped?.(id,
+                    { width: 0, height: 0, format: 'missing', data: new Uint8Array(0) });
             }
         }
-        return null;
+        return found.length > 0 ? found : null;
+    };
+    /**
+     * What a played frame's snapshots read handed to the page.
+     *
+     * @param {{ id: string, gpu: any }[] | null} asked @param {any} shots
+     */
+    const handSnapshots = (asked, shots)=>{
+        if (!asked || !Array.isArray(shots))
+        {
+            return;
+        }
+        asked.forEach((one, index)=>{
+            if (shots[index])
+            {
+                liveDump?.snapped?.(one.id, { ...shots[index], format: one.gpu.format });
+            }
+        });
     };
 
     /**
@@ -5592,7 +5619,7 @@ export function createRenderer(options){
             arena.reset();
             recording = {
                 commands: [], pipelines: [], pass: null, viewport: null, scissor: '', arena,
-                drawsTaken: 0, cut: /** @type {number | undefined} */ (undefined),
+                drawsTaken: 0, cut: /** @type {number | undefined} */ (undefined), parked: false,
             };
         }
         return recording;
@@ -7202,7 +7229,10 @@ export function createRenderer(options){
             return false;
         }
         replayingLast = true;
-        chain = chain.then(()=>replay(shown.recorded, shown.surface, null, { cut }))
+        const shotAsked = liveDump?.snapshot ? snapshotAsked(liveDump) : null;
+        chain = chain.then(()=>replay(shown.recorded, shown.surface,
+            shotAsked ? shotAsked.map(one=>one.gpu) : null, { cut }))
+            .then(shots=>handSnapshots(shotAsked, shots))
             .catch(failure).finally(()=>{
                 replayingLast = false;
             });
@@ -10009,15 +10039,17 @@ export function createRenderer(options){
             frameStats = blankFrameStats();
             const replayed = ++counters.frames;
             const shotAsked = liveDump?.snapshot ? snapshotAsked(liveDump) : null;
-            chain = chain.then(()=>replay(recorded, surface, shotAsked?.gpu ?? null)).then(shot=>{
+            chain = chain.then(()=>replay(recorded, surface,
+                shotAsked ? shotAsked.map(one=>one.gpu) : null)).then(shots=>{
                 submittedFrames = replayed;
-                if (shotAsked && shot)
-                {
-                    liveDump?.snapped?.(shotAsked.id, { ...shot, format: shotAsked.gpu.format });
-                }
+                handSnapshots(shotAsked, shots);
             }).catch(failure);
             if (liveDump)
             {
+                if (lastShown?.recorded.parked)
+                {
+                    arenas.push(lastShown.recorded.arena);
+                }
                 lastShown = { recorded, surface };
                 liveDump.replayLast = replayLast;
                 liveDump.shownDraws = shownDraws;
@@ -10271,7 +10303,12 @@ export function createRenderer(options){
             }
             if (snapshot)
             {
-                shot = frame.snapshot(snapshot);
+                shot = Array.isArray(snapshot)
+                    ? (()=>{
+                        const readers = snapshot.map(one=>frame.snapshot(one));
+                        return ()=>Promise.all(readers.map(reader=>reader()));
+                    })()
+                    : frame.snapshot(snapshot);
             }
             // After the draws, so the copies see the buffers as the draws did:
             // a flush at the end of the frame lands before the whole command
@@ -10312,7 +10349,16 @@ export function createRenderer(options){
         {
             if (recorded.arena && again === null)
             {
-                arenas.push(recorded.arena);
+                // The frame a paused run plays again keeps its arena -- its
+                // draws and their blocks -- until another frame is shown.
+                if (recorded === lastShown?.recorded)
+                {
+                    recorded.parked = true;
+                }
+                else
+                {
+                    arenas.push(recorded.arena);
+                }
             }
             // Ended whatever happened. One object owns the command encoder and
             // one call releases it, so a throw anywhere above -- a command
@@ -10469,6 +10515,7 @@ export function createRenderer(options){
      * @param {number} [cut]  draws played before the rest are passed over; -1 all
      */
     function replayInto(frame, pipelines, recorded, surface, cut = -1){
+        const droppedShaders = skipShaders();
         /** Draws reached so far, against `cut`. */
         let drawsReached = 0;
         /**
@@ -10635,6 +10682,14 @@ export function createRenderer(options){
                 continue;
             }
             const pipeline = outcome.value;
+            if (command.program && droppedShaders.size > 0
+                && (droppedShaders.has(`vs${command.state?.vertexShader}`)
+                    || droppedShaders.has(`ps${command.state?.pixelShader}`)))
+            {
+                // A frame played again on a paused program (`freeze`) drops what
+                // `skipShader` names too: its draws were recorded before.
+                continue;
+            }
             if (command.program)
             {
                 replayProgram(pass, pipeline, command);

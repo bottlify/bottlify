@@ -6,8 +6,9 @@
 /**
  * Textures of the running program as the GPU holds them, written as PNGs:
  * the targets and shadow maps a frame dump names (`t4414`, `t754`), which a
- * dump of the draws cannot show. The program has to be drawing: the texture is
- * read at the end of its next frame (`app.debug.snapshot`).
+ * dump of the draws cannot show, all read in one frame (`app.debug.snapshot`).
+ * Paused, the frame on the screen is played again (`freeze`) and read: the
+ * picture a person stopped on, not the next one.
  *
  *   node tools/cdp_test/live/snapshot.mjs t4414 t754 [--out DIR]
  *
@@ -84,9 +85,15 @@ const png = (width, height, rgba)=>{
         chunk('IHDR', header), chunk('IDAT', deflateSync(rows)), chunk('IEND', Buffer.alloc(0))]);
 };
 
+const paused = await page.evaluate(`[...document.querySelectorAll('button')]`
+    + `.some(b=>b.getAttribute('aria-label')==='resume')`);
+if (paused)
+{
+    await page.evaluate('window.__bottlify__.app.debug.freeze(true)');
+}
+await page.evaluate(`window.__bottlify__.app.debug.snapshot(${JSON.stringify(ids.join(','))})`);
 for (const id of ids)
 {
-    await page.evaluate(`window.__bottlify__.app.debug.snapshot(${JSON.stringify(id)})`);
     /** @type {any} */
     let shot = null;
     for (let tries = 0; tries < 100 && !shot; tries++)
@@ -98,7 +105,7 @@ for (const id of ids)
             + `(...s.data.subarray(i, i + 0x8000)); return { width: s.width, height: s.height,`
             + ` format: s.format, data: btoa(b) }; })()`);
     }
-    if (!shot)
+    if (!shot || shot.format === 'missing')
     {
         console.log(`${id}: nothing came back -- is the program drawing,`
             + ` and does a dump name ${id}?`);
@@ -163,5 +170,9 @@ for (const id of ids)
     writeFileSync(file, png(width, height, rgba));
     const range = floating ? ` values ${low}..${high}` : '';
     console.log(`${id}: ${width}x${height} ${format}${range} -> ${file}`);
+}
+if (paused)
+{
+    await page.evaluate('window.__bottlify__.app.debug.freeze(false)');
 }
 process.exit(0);
