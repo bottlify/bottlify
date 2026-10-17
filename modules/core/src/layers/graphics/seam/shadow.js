@@ -285,7 +285,14 @@ export const BUFFER = {
      * write over it is the host's, which claims the bytes first.
      */
     LENT: 32,
-    SIZE: 36,
+    /**
+     * Set by the routine that put the block on the device's ring, cleared by
+     * the host that empties it: a buffer already there is not put there
+     * again, since the host settles the union of its ranges once whatever
+     * number of unlocks named it.
+     */
+    QUEUED: 36,
+    SIZE: 40,
 };
 
 /**
@@ -1063,18 +1070,22 @@ export function lock7Code(at, trap){
 
 /**
  * HRESULT Unlock(this), as guest code. The buffer's block goes on the
- * device's ring for the host to find; the device's lock held, a full ring,
- * or no lock to release, is the host's.
+ * device's ring for the host to find, once until the host empties it; the
+ * device's lock held, a full ring, or no lock to release, is the host's.
  *
  *     mov edx, [ecx+DEVICE]
  *     (take the device's lock through EDX, or slow)
  *     cmp dword [ecx+LOCKED], 0
  *     je held
+ *     cmp dword [ecx+QUEUED], 0
+ *     jne queued                  ; on the ring already
  *     mov eax, [edx+RING_HEAD]
  *     cmp eax, RING_CAPACITY
  *     jae held
  *     mov [edx + eax*4 + RING], ecx
  *     inc dword [edx+RING_HEAD]
+ *     mov dword [ecx+QUEUED], 1
+ *   queued:
  *     mov dword [ecx+LOCKED], 0
  *     inc dword [edx+UNLOCK_CALLS]
  *     mov dword [edx+HELD], 0
@@ -1096,11 +1107,15 @@ export function unlockCode(at, trap){
         ...takeHeld(EDX, 'slow'),
         [0x83, 0x79, BUFFER.LOCKED, 0x00],                       // cmp dword [ecx+12], 0
         { jcc: 0x74, to: 'held' },                               // je held
+        [0x83, 0x79, BUFFER.QUEUED, 0x00],                       // cmp dword [ecx+36], 0
+        { jcc: 0x75, to: 'queued' },                             // jne queued
         [0x8b, 0x82, ...dword(SHADOW.RING_HEAD)],                // mov eax, [edx+disp]
         [0x3d, ...dword(SHADOW.RING_CAPACITY)],                  // cmp eax, 64
         { jcc: 0x73, to: 'held' },                               // jae held
         [0x89, 0x8c, 0x82, ...dword(SHADOW.RING)],               // mov [edx+eax*4+disp], ecx
         [0xff, 0x82, ...dword(SHADOW.RING_HEAD)],                // inc dword [edx+disp]
+        [0xc7, 0x41, BUFFER.QUEUED, ...dword(1)],                // mov dword [ecx+36], 1
+        { label: 'queued' },
         [0xc7, 0x41, BUFFER.LOCKED, ...dword(0)],                // mov dword [ecx+12], 0
         [0xff, 0x82, ...dword(SHADOW.UNLOCK_CALLS)],             // inc dword [edx+disp]
         letHeldGo(EDX),                                          // mov dword [edx+HELD], 0
@@ -3185,6 +3200,7 @@ export function createShadow(deps){
         unlockCalls = words[1];
         for (const buffer of words.subarray(3))
         {
+            deps.writeMemory(buffer + BUFFER.QUEUED, ZERO_WORD);
             lockedInGuest.add(buffer);
             settle(buffer);
         }
@@ -3546,7 +3562,7 @@ export function createShadow(deps){
                 return 0;
             }
             deps.writeMemory(block,
-                dwordsBytes([0, buffer.base, buffer.length, 0, 0, 0, 0, owner, 0]));
+                dwordsBytes([0, buffer.base, buffer.length, 0, 0, 0, 0, owner, 0, 0]));
             blocks.set(block, { buffer, hostLocked: false });
             // A dynamic buffer is the kind a program holds locked while it
             // draws from it, from its very first lock.

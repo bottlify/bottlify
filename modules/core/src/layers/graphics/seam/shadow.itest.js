@@ -33,7 +33,7 @@ const STAGE_STATE_TYPES = Object.values(D3DTSS).reduce((mask, type)=>mask | (1 <
 const PROGRAM = 0x8000;
 /** Past the program, which is a few hundred bytes of pushes and calls; lockCode is the longest. */
 const ROUTINES = {
-    lock: 0x8800, unlock: 0x8900, surfaceLevel: 0x8980, getState: 0x8a00, getStage: 0x8a80,
+    lock: 0x8800, unlock: 0x8c00, surfaceLevel: 0x8980, getState: 0x8a00, getStage: 0x8a80,
     getTransform: 0x8b00,
 };
 /** Where the routines jump when they leave the case to the host: a halt here. */
@@ -258,6 +258,7 @@ async function routines(){
     assert.equal(read(VBLOCK + BUFFER.LOCKED), 0);
     assert.equal(read(BLOCK + SHADOW.RING_HEAD), 1);
     assert.equal(read(BLOCK + SHADOW.RING), VBLOCK, 'the buffer\'s block is on the ring');
+    assert.equal(read(VBLOCK + BUFFER.QUEUED), 1, 'and says so');
     assert.equal(read(BLOCK + SHADOW.UNLOCK_CALLS), 1);
 
     assert.equal(run(3), 'trap', 'an unlock with no lock held');
@@ -274,11 +275,16 @@ async function routines(){
     assert.equal(read(BLOCK + SHADOW.LOCK_CALLS), 2);
 
     write(BLOCK + SHADOW.RING_HEAD, SHADOW.RING_CAPACITY);
-    assert.equal(run(6), 'trap', 'with the ring full, an unlock is the host\'s');
+    assert.equal(run(6), 'ok', 'a buffer the ring names already needs no room on it');
+    assert.equal(read(VBLOCK + BUFFER.LOCKED), 0);
+    assert.equal(read(BLOCK + SHADOW.UNLOCK_CALLS), 2);
+    assert.equal(run(5), 'ok');
+    write(VBLOCK + BUFFER.QUEUED, 0);
+    assert.equal(run(6), 'trap', 'with the ring full of others, an unlock is the host\'s');
     assert.equal(read(VBLOCK + BUFFER.LOCKED), 1, 'and the lock is still held');
     write(VBLOCK + BUFFER.LOCKED, 0);
     assert.equal(run(7), 'trap', 'a lock for reading is the host\'s');
-    assert.equal(read(BLOCK + SHADOW.LOCK_CALLS), 2);
+    assert.equal(read(BLOCK + SHADOW.LOCK_CALLS), 3);
 
     write(OUT, 0);
     assert.equal(run(8), 'ok');
@@ -330,5 +336,5 @@ async function routines(){
     assert.equal(run(26), 'trap', 'a null pointer');
 
     // The getters wrote nothing the host reads: the counts are the buffers'.
-    assert.deepEqual([read(BLOCK + SHADOW.LOCK_CALLS), read(BLOCK + SHADOW.UNLOCK_CALLS)], [2, 1]);
+    assert.deepEqual([read(BLOCK + SHADOW.LOCK_CALLS), read(BLOCK + SHADOW.UNLOCK_CALLS)], [3, 2]);
 }
