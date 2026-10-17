@@ -211,8 +211,10 @@ function machine(){
  * @param {{ caps?: object, shadow?: boolean,
  *           windowClientSize?: ((window: number) => { width: number,
  *               height: number } | null) | null,
- *           screen?: typeof SCREEN & { refresh?: number }, paced?: boolean }} [options]
- *     `screen` the display, its rate among it; `paced` a Present's wait counted
+ *           screen?: typeof SCREEN & { refresh?: number }, paced?: boolean,
+ *           traps?: Set<string> }} [options]
+ *     `screen` the display, its rate among it; `paced` a Present's wait counted; `traps`
+ *     the guest routines kept as traps, by name or group
  */
 function seamed(options = {}){
     const box = machine();
@@ -264,6 +266,7 @@ function seamed(options = {}){
             : [w, h, where?.window, where?.fullscreen]),
         identity: ()=>({ vendor: 'nvidia', architecture: 'ampere', description: '' }),
         allocate: options.shadow ? box.allocate : undefined,
+        traps: options.traps,
     });
     // The device reports its own divergences: the assembling caller hands
     // the same sink to both, and so does this.
@@ -2090,8 +2093,9 @@ test('a texture locked by the host comes after the draws the command ring holds 
     ()=>{
         // A program draws with a texture, then rewrites it in the same frame:
         // the draw is in the ring, and must be made before the lock lets the
-        // texture change under it.
-        const h = seamed({ shadow: true });
+        // texture change under it. The lock is the host's here, as the guest's
+        // routine leaves it while a draw waits in the ring.
+        const h = seamed({ shadow: true, traps: new Set(['locks']) });
         const root = h.create();
         const { device } = h.createDevice(root);
         const owner = h.box.memory.readU32(device + 4);

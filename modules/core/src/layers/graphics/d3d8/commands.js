@@ -23,7 +23,7 @@
 
 import { IDIRECT3DDEVICE8_SLOTS } from '../seam/vtables.js';
 import { DRAW, SHADOW } from '../seam/shadow.js';
-import { D3DFVF_RESERVED0, D3DUSAGE } from './constants.js';
+import { D3DERR_INVALIDCALL, D3DFVF_RESERVED0, D3DUSAGE } from './constants.js';
 import { lightFromDwords } from '../seam/structs.js';
 import { vertexCountOf } from './render.js';
 
@@ -117,6 +117,7 @@ const first = (kind, length)=>{
  *     or the vertices a draw's primitives span, `stride` bytes each (`commandCode`)
  * @property {boolean} [kept]  its copy is read in place (`view`, `copy`), not through the scratch
  * @property {boolean} [self]  the first argument is the object the method is of, not the device
+ * @property {'rect' | 'box'} [dirty]  a texture's dirty rectangle or box (`dirtyPrologue`)
  * @property {boolean} [stale]  it may change state the device's block mirrors
  * @property {'empty' | 'any'} [nullable]  its pointer may be null: with a count of zero
  *     alone, or whatever the count
@@ -420,12 +421,37 @@ export const SHARED_COMMANDS = {
 };
 
 /**
+ * A texture's own calls the ring carries, numbered past the device's: the
+ * record names the texture first (`self`), and the rectangle or box it adds
+ * to what UpdateTexture carries, which the guest has checked against the
+ * texture's extent (`dirty`, `TEXTURE.WIDTH`). The same in both versions.
+ */
+export const TEXTURE_SLOTS = /** @type {[string, number][]} */ ([
+    ['Texture.AddDirtyRect', 1],
+    ['VolumeTexture.AddDirtyBox', 1],
+]);
+
+/** @type {Readonly<Record<string, CommandEntry>>} */
+export const TEXTURE_COMMANDS = {
+    'Texture.AddDirtyRect': { args: 2, self: true, objects: [0], pointer: 1, bytes: 16,
+        dirty: 'rect',
+        make: (d, c)=>c.object()?.AddDirtyRect({ left: c.words[0], top: c.words[1],
+            right: c.words[2], bottom: c.words[3] }) ?? D3DERR_INVALIDCALL },
+    'VolumeTexture.AddDirtyBox': { args: 2, self: true, objects: [0], pointer: 1, bytes: 24,
+        dirty: 'box',
+        make: (d, c)=>c.object()?.AddDirtyBox({ left: c.words[0], top: c.words[1],
+            right: c.words[2], bottom: c.words[3], front: c.words[4], back: c.words[5] })
+            ?? D3DERR_INVALIDCALL },
+};
+
+/**
  * Direct3D 8's: its streams take a stride and no offset, its indices a base
  * vertex, its shaders are handles, its indexed draw has no base vertex, and
  * its shader constants are floats alone, up to what a 1.x shader has.
  */
-export const D3D8_COMMANDS = commandSet(IDIRECT3DDEVICE8_SLOTS, {
+export const D3D8_COMMANDS = commandSet([...IDIRECT3DDEVICE8_SLOTS, ...TEXTURE_SLOTS], {
     ...SHARED_COMMANDS,
+    ...TEXTURE_COMMANDS,
     SetTexture: { args: 2, objects: [1], within: [{ arg: 0, ranges: [[0, 7]] }],
         make: (d, c)=>d.SetTexture(c.arg(0), c.object()) },
     SetStreamSource: { args: 3, objects: [1],

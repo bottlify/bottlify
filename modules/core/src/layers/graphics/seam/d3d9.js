@@ -78,6 +78,7 @@ import {
     getSamplerStateCode, getSurfaceDescCode, getSurfaceLevelCode, getTextureStageStateCode,
     getTransformCode, getViewportCode, lockCode, settledAfter, stageStateMirror,
     unlockCode, HOST_MIRRORS, POLLS_BETWEEN, QUERY, appendCommand, guestWords,
+    createLevelLocks, lockLevelCode, unlockLevelCode,
 } from './shadow.js';
 import { COMPILED as IN_GUEST } from './inguest.x86.js';
 import { D3DTSS9 } from '../d3d9/samplerstates.js';
@@ -607,6 +608,54 @@ export function createDirect3D9Seam(
         return null;
     };
 
+    /**
+     * The levels the guest locks (`createLevelLocks`): a level in system
+     * memory is never lent, since the recording makes an update's copy out of
+     * it itself (`remote/replay.js`).
+     */
+    const levelLocks = createLevelLocks({ shadowOf, twinCopies: false });
+    /**
+     * A lock or unlock of a level the host made, told to the level's block
+     * when it was answered D3D_OK.
+     *
+     * @param {any} object  a texture or a surface
+     * @param {number | null} index  the texture's level
+     * @param {boolean} locked @param {any} hr
+     */
+    const noteLevel = (object, index, locked, hr)=>{
+        if (hr === D3D_OK)
+        {
+            levelLocks.locked(owners.get(object) ?? owners.get(object.container), object, index,
+                locked);
+        }
+        return hr;
+    };
+    /** @param {string} name */
+    const levelGroup = name=>(name.startsWith('AddDirty') ? 'ring'
+        : name.startsWith('Lock') || name.startsWith('Unlock') ? 'locks' : 'levels');
+    /**
+     * A texture's or a surface's lock and unlock as guest code, and a
+     * texture's dirty region as a record of the device's ring.
+     *
+     * @param {'texture' | 'surface'} find @param {boolean} [box]
+     */
+    const levelGuests = (find, box = false)=>{
+        const lock = box ? 'LockBox' : 'LockRect';
+        const unlock = box ? 'UnlockBox' : 'UnlockRect';
+        const dirty = box ? 'VolumeTexture.AddDirtyBox' : 'Texture.AddDirtyRect';
+        return {
+            [lock]: (/** @type {{ trap: number }} */ { trap })=>
+                placeCode(at=>lockLevelCode(at, trap, { find, box })),
+            [unlock]: (/** @type {{ trap: number }} */ { trap })=>
+                placeCode(at=>unlockLevelCode(at, trap, { find })),
+            ...(find === 'texture'
+                ? { [box ? 'AddDirtyBox' : 'AddDirtyRect']: (/** @type {{ trap: number }} */
+                    { trap })=>placeCode(at=>commandCode(at, trap,
+                    { ...COMMANDS[dirty], slot: commandSlot(dirty) })) }
+                : {}),
+        };
+    };
+
     /** @type {import('./com.js').InterfaceDescriptor[]} */
     const surfaceInterfaces = [describeResource(IID_IDirect3DSurface9, IDIRECT3DSURFACE9_SLOTS, {
         ...resourceMethods(D3DRTYPE.SURFACE),
@@ -623,10 +672,11 @@ export function createDirect3D9Seam(
             return hr;
         },
         /** @param {any} surface @param {number[]} args */
-        LockRect: (surface, [out, rect, flags])=>lockRectInto(fields, out,
-            locked=>surface.LockRect(locked, readRect(rect), flags >>> 0)),
+        LockRect: (surface, [out, rect, flags])=>noteLevel(surface, null, true,
+            lockRectInto(fields, out, locked=>surface.LockRect(locked, readRect(rect),
+                flags >>> 0))),
         /** @param {any} surface */
-        UnlockRect: surface=>surface.UnlockRect(),
+        UnlockRect: surface=>noteLevel(surface, null, false, surface.UnlockRect()),
         /** @param {any} surface @param {number[]} args */
         GetDC: (surface, [out])=>{
             if ((out >>> 0) === 0 || !gdi)
@@ -640,6 +690,9 @@ export function createDirect3D9Seam(
                 if (hr === D3D_OK)
                 {
                     fields.writeU32(out >>> 0, held.dc ?? 0);
+                    // Every level's lock is the host's while it is held.
+                    shadowOf(owners.get(surface) ?? owners.get(surface.container))
+                        ?.familyBusy(surface.container ?? surface, true);
                 }
                 return hr;
             };
@@ -647,7 +700,15 @@ export function createDirect3D9Seam(
             return hr instanceof Promise ? hr.then(answer) : answer(hr);
         },
         /** @param {any} surface @param {number[]} args */
-        ReleaseDC: (surface, [dc])=>(gdi ? surface.ReleaseDC(dc >>> 0, gdi) : D3DERR_INVALIDCALL),
+        ReleaseDC: (surface, [dc])=>{
+            const hr = gdi ? surface.ReleaseDC(dc >>> 0, gdi) : D3DERR_INVALIDCALL;
+            if (hr === D3D_OK)
+            {
+                shadowOf(owners.get(surface) ?? owners.get(surface.container))
+                    ?.familyBusy(surface.container ?? surface, false);
+            }
+            return hr;
+        },
 
         /**
          * QueryInterface on what holds the surface: the texture a level
@@ -682,9 +743,9 @@ export function createDirect3D9Seam(
             }
             return queryAs(publisher, fields, device, deviceInterfacesOf(device), id, out);
         },
-    }, guestsBut('levels', allocate
+    }, guestsBut(levelGroup, allocate
         ? { GetDesc: (/** @type {{ trap: number }} */ { trap })=>
-            placeCode(at=>getSurfaceDescCode(at, trap)) }
+            placeCode(at=>getSurfaceDescCode(at, trap)), ...levelGuests('surface') }
         : {}), privateData.released)];
 
     /**
@@ -773,10 +834,12 @@ export function createDirect3D9Seam(
             return hr;
         },
         /** @param {any} texture @param {number[]} args */
-        LockRect: (texture, [level, out, rect, flags])=>lockRectInto(fields, out,
-            locked=>texture.LockRect(level >>> 0, locked, readRect(rect), flags >>> 0)),
+        LockRect: (texture, [level, out, rect, flags])=>noteLevel(texture, level >>> 0, true,
+            lockRectInto(fields, out, locked=>texture.LockRect(level >>> 0, locked,
+                readRect(rect), flags >>> 0))),
         /** @param {any} texture @param {number[]} args */
-        UnlockRect: (texture, [level])=>texture.UnlockRect(level >>> 0),
+        UnlockRect: (texture, [level])=>noteLevel(texture, level >>> 0, false,
+            texture.UnlockRect(level >>> 0)),
         /** @param {any} texture @param {number[]} args */
         AddDirtyRect: (texture, [rect])=>texture.AddDirtyRect(readRect(rect)),
     };
@@ -825,9 +888,9 @@ export function createDirect3D9Seam(
             sharedWith: id },
     ];
     const textureInterfaces = textureFamily(IID_IDirect3DTexture9, IDIRECT3DTEXTURE9_SLOTS,
-        textureMethods, guestsBut('levels', allocate
+        textureMethods, guestsBut(levelGroup, allocate
             ? { GetSurfaceLevel: (/** @type {{ trap: number }} */ { trap })=>
-                placeCode(at=>getSurfaceLevelCode(at, trap)) }
+                placeCode(at=>getSurfaceLevelCode(at, trap)), ...levelGuests('texture') }
             : {}));
     const cubeTextureInterfaces = textureFamily(IID_IDirect3DCubeTexture9,
         IDIRECT3DCUBETEXTURE9_SLOTS, cubeTextureMethods);
@@ -943,16 +1006,19 @@ export function createDirect3D9Seam(
                 E_OUTOFMEMORY, owners.get(texture));
         },
         /** @param {any} texture @param {number[]} args */
-        LockBox: (texture, [level, out, box, flags])=>lockBox(out,
-            locked=>texture.LockBox(level >>> 0, locked, readBox(box), flags >>> 0)),
+        LockBox: (texture, [level, out, box, flags])=>noteLevel(texture, level >>> 0, true,
+            lockBox(out, locked=>texture.LockBox(level >>> 0, locked, readBox(box),
+                flags >>> 0))),
         /** @param {any} texture @param {number[]} args */
-        UnlockBox: (texture, [level])=>texture.UnlockBox(level >>> 0),
+        UnlockBox: (texture, [level])=>noteLevel(texture, level >>> 0, false,
+            texture.UnlockBox(level >>> 0)),
         /** @param {any} texture @param {number[]} args */
         AddDirtyBox: (texture, [box])=>texture.AddDirtyBox(readBox(box)),
     };
     /** @type {import('./com.js').InterfaceDescriptor[]} */
     const volumeTextureInterfaces = textureFamily(IID_IDirect3DVolumeTexture9,
-        IDIRECT3DVOLUMETEXTURE9_SLOTS, volumeTextureMethods);
+        IDIRECT3DVOLUMETEXTURE9_SLOTS, volumeTextureMethods,
+        guestsBut(levelGroup, allocate ? levelGuests('texture', true) : {}));
 
     /**
      * A buffer hands back an address in the guest's own memory, so locking is
@@ -1752,7 +1818,7 @@ export function createDirect3D9Seam(
                 if (shadow)
                 {
                     texture.guestState = ()=>shadow.attachTexture(texture,
-                        publisher.countCell(texture));
+                        publisher.countCell(texture), [width >>> 0, height >>> 0, 1]);
                 }
                 return handBack(held.texture, textureInterfaces, IID_IDirect3DTexture9,
                     out >>> 0, D3DERR_OUTOFVIDEOMEMORY, device);
@@ -1773,6 +1839,14 @@ export function createDirect3D9Seam(
                 levels >>> 0, usage >>> 0, format >>> 0, pool >>> 0, held);
             if (hr === D3D_OK && held.texture)
             {
+                // Its block, for the guest's locks of its levels and its dirty boxes.
+                const shadow = shadowOf(device);
+                const texture = held.texture;
+                if (shadow)
+                {
+                    texture.guestState = ()=>shadow.attachTexture(texture,
+                        publisher.countCell(texture), [width >>> 0, height >>> 0, depth >>> 0]);
+                }
                 return handBack(held.texture, volumeTextureInterfaces,
                     IID_IDirect3DVolumeTexture9, out >>> 0, D3DERR_OUTOFVIDEOMEMORY, device);
             }
