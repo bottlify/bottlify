@@ -8432,6 +8432,20 @@ function liveDumpOf(worker, control){
          *
          * @param {string} [ids]
          */
+        /**
+         * Significant digits a frame dump writes constants with from now on
+         * (4, up to 9 -- every digit a float holds).
+         *
+         * @param {number} [digits]
+         */
+        dumpDigits: (digits = 4)=>{
+            if (!worker)
+            {
+                throw new Error('dumpDigits: this run draws without a graphics worker');
+            }
+            worker.postMessage({ type: 'debug', dumpDigits: digits });
+            return digits;
+        },
         skipShader: (ids = '')=>{
             if (!worker)
             {

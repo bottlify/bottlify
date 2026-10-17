@@ -1662,8 +1662,14 @@ function inverseRotation(view){
  * @property {{ floats: Float32Array, ints: Int32Array, bools: Uint32Array }} pixelConstants
  */
 
-/** A number of a dump line, four digits at most. @param {number} x */
-const brief = x=>String(Number(x.toPrecision(4)));
+/**
+ * Significant digits a dump writes constants with (`app.debug.dumpDigits`):
+ * four read at a glance, and a matrix row times a position of a million needs
+ * all of them to be checked against another.
+ */
+export const dumpDigits = { value: 4 };
+/** A number of a dump line. @param {number} x */
+const brief = x=>String(Number(x.toPrecision(dumpDigits.value)));
 
 /**
  * The float constants a shader reads, as a dump line gives them: each register
