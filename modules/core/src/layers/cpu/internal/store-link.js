@@ -5,7 +5,7 @@
  */
 
 /**
- * The run's translation store, across a link (roadmap/v2, stage 2): one store
+ * The run's translation store, across a link: one store
  * for every process of the run, kept by the system's thread, and asked from a
  * process in a worker of its own.
  *

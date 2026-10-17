@@ -5,7 +5,7 @@
  */
 
 /**
- * The gate of an executor keeping its thread past a slice (roadmap/v2, stage 3):
+ * The gate of an executor keeping its thread past a slice:
  * while no ready thread waits for an executor, another executor runs its thread
  * slice after slice without a word to the process -- a word a slice cost as much
  * as the slice's own work, and 7-Zip's benchmark had the second of two

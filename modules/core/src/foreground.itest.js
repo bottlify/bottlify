@@ -5,7 +5,7 @@
  */
 
 /**
- * The foreground window across processes (roadmap/v2/windows.md, step 2):
+ * The foreground window across processes:
  * the run's, whichever process's window it is. The fixture's child takes it
  * from its parent, finds the parent's window under a point and among every
  * top-level window, and gives it back; each program is told as Windows tells

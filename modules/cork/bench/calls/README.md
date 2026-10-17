@@ -65,8 +65,8 @@ Not decided on, recorded beside: Liftoff (translated code runs Liftoff only unti
 it), depths 2 and 32, `entities`, `params+flags`.
 
 Why these numbers: calls and returns are ~13% (Far Cry) to ~36% (spread) of the wasm bytes cork's
-hot code runs through (`roadmap/cork/README.md`, step 0a). A call 30% cheaper is then 4–11% of
-guest time; less than that does not pay for a second translation path with its own gate.
+hot code runs through. A call 30% cheaper is then 4–11% of guest time; less than that does not pay
+for a second translation path with its own gate.
 
 ## Running it
 
@@ -103,7 +103,7 @@ beside it when it comes.
 
 **Status: the rule below was written and committed before the run it decides on (2026-10-13).**
 
-Plan step 2 (`roadmap/cork/README.md`) keeps cork's convention and cuts what a call site writes
+Step 2 keeps cork's convention and cuts what a call site writes
 back and loads again: after the return only the registers the continuation reads before it
 writes them. The arm `state-live` is `state` that reloads only esp and the `live after a
 return` registers of the workload, and no flags: more than step 2 can reach (a region's exits

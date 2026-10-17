@@ -5,8 +5,8 @@
  */
 
 /**
- * One translation for every executor of a process past its own (roadmap/v2,
- * stage 3): their translations are made for the process's shared layout, the
+ * One translation for every executor of a process past its own:
+ * their translations are made for the process's shared layout, the
  * same bytes on each, and kept in one arena all of them and their translators
  * share. A routine made hot by a thread on one of them and then run by a
  * thread on another is not emitted there again: the second takes the first's

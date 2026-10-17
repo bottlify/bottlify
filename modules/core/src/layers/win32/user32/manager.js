@@ -5,7 +5,7 @@
  */
 
 /**
- * The run's window manager (roadmap/v2/windows.md): every window of every
+ * The run's window manager: every window of every
  * process, as its process's user32 tells it, and what only the run can know
  * of them -- the order of top-level windows across processes, the foreground
  * window, the window that has the mouse captured.

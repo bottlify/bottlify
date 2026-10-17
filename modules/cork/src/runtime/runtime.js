@@ -306,8 +306,8 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         // True tests from the start, false never.
         checkReads: undefined,
         // Locked instructions as wasm atomics, each one indivisible on the shared
-        // memory: for a process whose threads run on more than one executor
-        // (roadmap/v2, stage 3). Off, a process on one executor pays nothing.
+        // memory: for a process whose threads run on more than one executor.
+        // Off, a process on one executor pays nothing.
         atomic: false,
         // Where the process's record of shared code lies and which executor this
         // runtime is (`shared-code.js`), when other executors share its page flags;

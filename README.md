@@ -43,9 +43,9 @@ without any one of them, degraded but not broken.
 - [`modules/networking/README.md`](modules/networking/README.md) and
   [`modules/installer/README.md`](modules/installer/README.md) — the socket relay, and adding a
   program by running its installer.
-- [`roadmap/`](roadmap/README.md) — the plan: [`v2/`](roadmap/v2/README.md) (a multi-worker
-  platform, then x86-64, Direct3D 11, ARM and ARM64), [`bottles/`](roadmap/bottles/README.md),
-  [`steam/`](roadmap/steam/README.md), and [`decisions.md`](roadmap/decisions.md).
+- [`roadmap/`](roadmap/README.md) — the plan: [x86-64](roadmap/x64.md),
+  [Direct3D 11 and 12](roadmap/direct3d.md), [OpenGL 2.0 to 4.x](roadmap/opengl.md), and
+  [`decisions.md`](roadmap/decisions.md).
 
 ## Building and testing
 

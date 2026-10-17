@@ -7,7 +7,7 @@
 /**
  * The registry as the system half of Win32 offers it to a process: the
  * hive's own operations, with every key named by a number rather than handed
- * out as the hive's object (roadmap/v2, stage 1, the Win32 split).
+ * out as the hive's object.
  *
  * A key the hive hands out is a node of its tree, which only the thread that
  * holds the tree can follow. A process that runs in a worker of its own

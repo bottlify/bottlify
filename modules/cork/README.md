@@ -28,7 +28,7 @@ Plain JavaScript and WebAssembly, not a single dependency, at home in a browser 
 
 ## What it does not run
 
-- 64-bit code (planned, see [`roadmap/v2/`](../../roadmap/v2/README.md)), 16-bit code, privileged
+- 64-bit code (planned, see [`roadmap/x64.md`](../../roadmap/x64.md)), 16-bit code, privileged
   instructions, segments other than the `fs` base (a `gs:` override adds nothing).
 - SSSE3 and anything newer: SSE4.1, SSE4.2 (POPCNT aside), AVX.
 - The x87's 80-bit precision. The FPU registers are plain 64-bit doubles: single and double

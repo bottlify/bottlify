@@ -5,7 +5,7 @@
  */
 
 /**
- * The run's system half, across a link (roadmap/v2, stage 2): what a process
+ * The run's system half, across a link: what a process
  * in a worker of its own is handed in place of the `system` object the
  * processes on the engine's thread share.
  *

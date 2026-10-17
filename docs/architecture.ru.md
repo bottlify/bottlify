@@ -134,6 +134,12 @@ Bottlify устроен наоборот. Плагин ему не нужен: �
 одновременно, — в потоке самого процесса. Остальные забирают у него то, что можно делать
 параллельно, или то, что браузер разрешает только вне главного потока.
 
+Как раскладывается запуск, зависит от того, есть ли у страницы cross-origin isolation:
+
+![Без cross-origin isolation: программу ведёт один поток](runs-alone.ru.svg)
+
+![С cross-origin isolation: процессы и ядра работают одновременно](runs-isolated.ru.svg)
+
 ```mermaid
 %%{init: {"theme": "base", "flowchart": {"curve": "step", "nodeSpacing": 30, "rankSpacing": 56, "padding": 10}, "themeVariables": {"fontFamily": "Inter, Segoe UI, Helvetica, Arial, sans-serif", "fontSize": "13px", "primaryColor": "#FFFFFF", "primaryBorderColor": "#2F3A40", "primaryTextColor": "#1B2328", "lineColor": "#5C6970", "clusterBkg": "#F3F5F6", "clusterBorder": "#9AA6AC", "edgeLabelBackground": "#FFFFFF"}}}%%
 flowchart TB
@@ -421,7 +427,7 @@ cork идут сразу за памятью игры. В памяти, сдел
   100 мс, считается летучей (`VOLATILE`) и 2 с интерпретируется, при каждом повторе вдвое дольше,
   а потом переводится снова. При нескольких исполнителях страница по-прежнему теряет все переводы
   при каждой такой записи.
-- **Несколько исполнителей процесса** (этап 3 из `roadmap/v2/`, `cpu.cores` у `createApp`). Запуск,
+- **Несколько исполнителей процесса** (`cpu.cores` у `createApp`). Запуск,
   который не называет их, получает на странице, которая может делить память, на один меньше, чем
   процессоров у хоста (не больше восьми), а в остальных случаях — один; исполнители сверх первого
   открываются, когда их захотят потоки программы. У
@@ -498,7 +504,7 @@ cork идут сразу за памятью игры. В памяти, сдел
 
 Где смотреть в коде: `cork/src/decode/`, `cork/src/region.js`, `cork/src/emit/`, `cork/src/wasm/`,
 `cork/src/runtime/`, `cork/src/interp.js`, `cork/src/interp-wasm.c`; связка с движком —
-`core/src/layers/cpu/internal/cork-host.js`. Куда cork идёт дальше — в `roadmap/v2/`.
+`core/src/layers/cpu/internal/cork-host.js`. Куда cork идёт дальше — в `roadmap/x64.ru.md`.
 
 ## 6. Win32 на JavaScript: как получается DLL
 

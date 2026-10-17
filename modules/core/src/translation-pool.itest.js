@@ -5,7 +5,7 @@
  */
 
 /**
- * The run's translation pool (roadmap/v2, stage 2) under a real run: every
+ * The run's translation pool under a real run: every
  * process is lent a worker of the pool from its start and gives it back at
  * its exit, its translator emitting through the worker over the port it was
  * lent, and the program reads what it reads without the pool. The spawn

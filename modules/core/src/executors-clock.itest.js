@@ -5,7 +5,7 @@
  */
 
 /**
- * The clock read by threads on two executors at once (roadmap/v2, stage 3):
+ * The clock read by threads on two executors at once:
  * QueryPerformanceCounter's guest routine answers each thread later than its
  * last answer while the engine moves the clock underneath and the other
  * thread takes answers of its own -- the counter read whole between two looks

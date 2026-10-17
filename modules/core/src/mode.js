@@ -13,7 +13,7 @@
  * SharedArrayBuffer, so `isolated` cannot run on it; `auto` -- the default --
  * takes `isolated` where it can and `compatible` where it cannot.
  *
- * `concurrency` is how many processes run at once (roadmap/v2): 1, the default,
+ * `concurrency` is how many processes run at once: 1, the default,
  * is one at a time -- a child takes its parent's place until it exits; 2 or 4
  * is that many side by side, each child in a worker of its own. More than one
  * shares memory between threads, so it runs only `isolated`. Where that cannot

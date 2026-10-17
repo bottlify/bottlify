@@ -135,6 +135,12 @@ Nearly all the work happens on the thread the program runs on: the engine thread
 processes run at once, the process's own thread. The others take from it what can run in parallel,
 or what the browser only allows off the main thread.
 
+How a run is laid out depends on whether the page is cross-origin isolated:
+
+![Without cross-origin isolation: one thread runs the program](runs-alone.svg)
+
+![With cross-origin isolation: processes and cores run at once](runs-isolated.svg)
+
 ```mermaid
 %%{init: {"theme": "base", "flowchart": {"curve": "step", "nodeSpacing": 30, "rankSpacing": 56, "padding": 10}, "themeVariables": {"fontFamily": "Inter, Segoe UI, Helvetica, Arial, sans-serif", "fontSize": "13px", "primaryColor": "#FFFFFF", "primaryBorderColor": "#2F3A40", "primaryTextColor": "#1B2328", "lineColor": "#5C6970", "clusterBkg": "#F3F5F6", "clusterBorder": "#9AA6AC", "edgeLabelBackground": "#FFFFFF"}}}%%
 flowchart TB
@@ -416,7 +422,7 @@ writes (section 7).
   100 ms is marked volatile (`VOLATILE`) and interpreted for 2 s, twice as long each time it is
   marked again, then translated again. With several executors a page still loses all its
   translations on every such write.
-- **Several executors of a process** (stage 3 of `roadmap/v2/`, `createApp`'s `cpu.cores`). A run
+- **Several executors of a process** (`createApp`'s `cpu.cores`). A run
   that names none gets, on a page that can share memory, one fewer than the host's processors (at
   most eight), and one elsewhere; the executors past the first open as its threads want them. Each
   thread has an executor of its own, where its translations are: the process's first thread runs on
@@ -490,7 +496,7 @@ writes (section 7).
 Where to look in the code: `cork/src/decode/`, `cork/src/region.js`, `cork/src/emit/`,
 `cork/src/wasm/`, `cork/src/runtime/`, `cork/src/interp.js`, `cork/src/interp-wasm.c`; the engine
 glue is `core/src/layers/cpu/internal/cork-host.js`. Where cork goes next is
-`roadmap/v2/`.
+`roadmap/x64.md`.
 
 ## 6. Win32 in JavaScript: how a DLL comes about
 

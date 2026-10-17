@@ -113,7 +113,7 @@ const hashText = (hash, text)=>{
  *     `store` here is a request -- `'local'` (the default) for the origin's private file
  *     system, a store of your own when the app runs in this thread, `null` for none.
  * @property {boolean} [cork.pool]  The run's pool of translation workers, lent to its
- *     processes as their translation needs (roadmap/v2): on by default wherever a machine's
+ *     processes as their translation needs: on by default wherever a machine's
  *     translator would open a worker of its own, unless `cork.config.translators` is set.
  * @property {number} [cork.poolPerProcess]  Workers of the pool at most for one process:
  *     `navigator.hardwareConcurrency` by default.
@@ -285,7 +285,7 @@ const hashText = (hash, text)=>{
  * @property {number} [executors]  `cpu.cores` by its older name: executors of the
  *           program's process under cork, past the process's own thread each a worker
  *           running one of its threads at once with the others, the locked
- *           instructions atomic (roadmap/v2, stage 3). Default 1.
+ *           instructions atomic. Default 1.
  * @property {boolean} [preemption]  End a slice early when a thread of higher
  *           priority comes due, as Windows preempts (the kernel's option; off).
  * @property {(eip: number, instructions: number) => void} [sample]
@@ -1528,7 +1528,7 @@ export function corkArtifacts(asked, here = import.meta.url){
 }
 
 /**
- * The run's pool of translation workers (roadmap/v2, stage 2), where every
+ * The run's pool of translation workers, where every
  * machine's translator would otherwise open a worker of its own: on cork, with
  * shared memory and ports to lend through, and unless the caller turned it off
  * (`cork.pool: false`) or set the translators a machine opens itself
@@ -2663,7 +2663,7 @@ async function mountBundle({ options, cpu, events, translationStore }){
         if (codec === 2)
         {
             // Counted: the decoding a guest read waits for is what a pool
-            // worker would take off this thread (roadmap/v2, stage 2).
+            // worker would take off this thread.
             const startedAt = performance.now();
             const plain = zstdForEngine(bytes, expectedLength ?? 0);
             decoded.blocks++;

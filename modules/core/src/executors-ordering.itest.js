@@ -5,7 +5,7 @@
  */
 
 /**
- * The executors' order gate (roadmap/v2, stage 3): a message passed between
+ * The executors' order gate: a message passed between
  * two threads through plain stores alone -- the payload, then a flag after it,
  * and an answer back -- arrives whole, as x86 orders stores, with the two
  * threads on two executors running at once. No locked instruction, no call

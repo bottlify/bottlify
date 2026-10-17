@@ -5,7 +5,7 @@
  */
 
 /**
- * Libraries on threads that run at once (roadmap/v2, stage 3): a program's own
+ * Libraries on threads that run at once: a program's own
  * library called from threads on several executors, one loaded by a thread
  * that is not the process's own executor's, and the system's -- kernel32's
  * critical sections and thread-local slots, the process heap and msvcrt's

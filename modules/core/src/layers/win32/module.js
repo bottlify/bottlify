@@ -3336,10 +3336,13 @@ export function createWin32Module(){
 
                 /**
                  * The libraries with a table here that are not Windows' own but a
-                 * redistributable a setup installs -- the D3DX helpers. The
-                 * table only stands in for a program that brought none; a copy
-                 * an installation put in system32 is what a program means to
-                 * load, where a copy of Windows' own would displace the engine's.
+                 * redistributable a setup installs -- the D3DX helpers -- so a
+                 * bottle may carry them where it carries no copy of Windows' own.
+                 * A copy beside the program's executable is loaded in place of the
+                 * table; one an installation put in system32 is not, as for every
+                 * name with a table (`libraryCandidates`): two of one library in a
+                 * process -- the installed D3DX compiling an effect the engine's is
+                 * then asked to read -- is a format neither side shares.
                  *
                  * @returns {string[]}
                  */

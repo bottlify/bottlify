@@ -12,7 +12,7 @@
  * they carry the same name.
  *
  * A mode is what `createApp` is given beyond the bottle: `executors`, the
- * program's threads on that many executors at once (roadmap/v2, stage 3), and
+ * program's threads on that many executors at once, and
  * `cork`, the translator's settings (`EngineConfig`). `default` is the
  * configuration every program runs with when nobody chooses.
  */

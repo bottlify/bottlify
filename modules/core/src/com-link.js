@@ -5,7 +5,7 @@
  */
 
 /**
- * COM between processes in workers of their own (roadmap/v2, stage 2): the
+ * COM between processes in workers of their own: the
  * run's class table (`ole32/remote.js`'s `createClassTable`, the service
  * control manager's) stays with the system, and a process across a link is
  * handed one of the same shape that asks it.

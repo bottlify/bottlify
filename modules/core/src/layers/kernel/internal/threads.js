@@ -526,7 +526,7 @@ export function createScheduler(options){
      * instructions of every slice, by how many threads could have run during
      * it -- the one running and those ready beside it, 1, 2, 3, 4 or more.
      * What a second executor would have had to run is the share past the
-     * first column (roadmap/v2, stage 3).
+     * first column.
      */
     const parallel = { ms: [0, 0, 0, 0], instructions: [0, 0, 0, 0] };
 
