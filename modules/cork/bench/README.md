@@ -29,8 +29,8 @@ engine was.
     node modules/cork/bench/run.mjs --native --only spread,vm --reps 3
     node modules/cork/bench/run.mjs --cork '{"callTargets":true}'
 
-`run.mjs --help` is its header comment. A run's time includes translation and
-the cold code before it, which a program pays too.
+`run.mjs --help` prints its header comment. A run's time includes translation
+and the cold code before it, which a program pays too.
 
 ## In the browser
 
@@ -47,9 +47,9 @@ instruments folded out):
 At a workload's own iterations a run is a few hundred milliseconds, and the
 load, the translation and the engine's compiles are a quarter to most of it:
 such a run measures the start. `--scale 10` runs ten times the iterations,
-which leaves a few per cent of that, so it measures the translated code; with
-`bin/peload` (Linux) the processor runs the same and its rate is shown
-beside, the loss against the hardware:
+which leaves a few per cent of that, so it measures the translated code. With
+`bin/peload` (Linux) the processor runs the same workloads and its rate is
+shown alongside, which gives the loss against the hardware:
 
     node modules/cork/bench/browser/suite.mjs '{"head":{}}' --scale 10 --reps 3
 

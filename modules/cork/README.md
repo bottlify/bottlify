@@ -11,7 +11,7 @@ about Windows: when the program makes a system call, writes to a port or hits a 
 and hands control back to whoever started it. In Bottlify that is
 [`@bottlify/core`](../core/README.md), home of the Windows API, DirectX, sound and the rest.
 
-Plain JavaScript and WebAssembly, not a single dependency, at home in a browser and in Node.
+Plain JavaScript and WebAssembly, with no dependencies. It runs in a browser and in Node.
 
 ## What it runs
 
@@ -90,9 +90,10 @@ flowchart LR
    own machine) becomes a candidate for translation.
 2. **Region.** From the candidate cork gathers every block reachable by ordinary jumps (up to 128
    blocks or 8 KiB of code) and builds in the small functions they call.
-3. **Translation.** Regions go to the translation thread in batches of 32 or more (a deep queue,
-   as while a game loads, sends a quarter of what waits, up to 256), each batch one WebAssembly
-   module. While the thread translates and compiles, the program keeps running in the interpreter.
+3. **Translation.** Regions go to the translation thread in batches of 32 or more, each batch one
+   WebAssembly module. When the queue is deep, as while a game loads, a batch takes a quarter of
+   what waits, up to 256. While the thread translates and compiles, the program keeps running in
+   the interpreter.
 4. **Running.** Translated regions call each other directly. They leave only when there is no
    other way:
 

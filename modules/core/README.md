@@ -1,12 +1,12 @@
 # `@bottlify/core`
 
-Run a 32-bit Windows program in a browser tab — the original `.exe`, unchanged.
+Run a 32-bit Windows program in a browser tab: the original `.exe`, unchanged.
 
 The package is a machine and an operating system written for the web: the program's x86 code runs
-on an execution engine in a Web Worker, and its calls into Windows — `kernel32`, `user32`, `gdi32`,
-DirectDraw, Direct3D 7–10, OpenGL, DirectSound, Winsock and the rest — are answered by this package,
-drawing with WebGPU, playing through Web Audio and keeping files in the origin's private file
-system (OPFS). There is no Windows underneath and no Windows code inside.
+on an execution engine in a Web Worker, and its calls into Windows (`kernel32`, `user32`, `gdi32`,
+DirectDraw, Direct3D 7–10, OpenGL, DirectSound, Winsock and the rest) are answered by this
+package, drawing with WebGPU, playing through Web Audio and keeping files in the origin's private
+file system (OPFS). There is no Windows underneath and no Windows code inside.
 
 The engine is **cork**, the translator in [`modules/cork`](../cork/README.md), which ships built
 inside this package. The **v86** emulator is the other engine, when you bring a build of it
@@ -30,11 +30,12 @@ Open the address in Chrome or Edge (WebGPU) and press Start.
 
 - **The folder** is the game as it is installed: its `.exe`, its DLLs, its data. `pack` takes a
   directory, not an archive: unpack a `.zip` first (`unzip game.zip -d game`).
-- **The entry** — the program to start — is guessed as the largest `.exe` that is not a setup or a
+- **The entry**, the program to start, is guessed as the largest `.exe` that is not a setup or a
   launcher. If the guess is wrong, set `"entry"` in `bundles/mygame/manifest.json` (a path inside
   the bundle, e.g. `"Bin\\Game.exe"`) and delete `bundles/mygame/entry` if it exists.
-- **An installer** instead of an installed folder: see [`@bottlify/installer`](../installer/README.md)
-  — it runs the setup inside the engine and makes the bottle from what it installed.
+- **An installer** instead of an installed folder: see
+  [`@bottlify/installer`](../installer/README.md), which runs the setup inside the engine and
+  makes the bottle from what it installed.
 - Other bottle commands: `node tools/make-btl.mjs verify mygame`, `list mygame [pattern]`,
   `extract mygame [file]`.
 
@@ -128,8 +129,8 @@ The package carries no v86; `engine: 'emulator'` without a build is refused.
 
 ### In Node
 
-The same `createApp` runs headless in Node — no canvas, the engine on the calling thread. That is
-how the tests run programs, and it suits console programs and installers:
+The same `createApp` runs headless in Node, with no canvas and the engine on the calling thread.
+That is how the tests run programs, and it suits console programs and installers:
 
 ```js
 import { readFile } from 'node:fs/promises';
@@ -152,11 +153,12 @@ await app.dispose();
 
 ## Documentation
 
-- [`docs/core/`](../../docs/core/README.md) — the page, the modes, sound; [`api.md`](../../docs/core/api.md)
-  every option and event; [`configuration.md`](../../docs/core/configuration.md) each layer's
-  settings; [`limits.md`](../../docs/core/limits.md) what is not there yet.
-- [`docs/architecture.md`](../../docs/architecture.md) — how it works inside.
-- [`@bottlify/networking`](../networking/README.md) — multiplayer and the internet for the program.
+- [`docs/core/`](../../docs/core/README.md): the page, the modes, sound;
+  [`api.md`](../../docs/core/api.md) has every option and event,
+  [`configuration.md`](../../docs/core/configuration.md) each layer's settings, and
+  [`limits.md`](../../docs/core/limits.md) what is not there yet.
+- [`docs/architecture.md`](../../docs/architecture.md): how it works inside.
+- [`@bottlify/networking`](../networking/README.md): multiplayer and the internet for the program.
 
 ## Licence
 

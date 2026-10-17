@@ -17,7 +17,7 @@ question has another answer on the machine the product is measured on.
 ## The workloads
 
 Not synthetic: `profiles.json` holds the shape of the calls of three block profiles, measured by
-`tools/cork-calls.mjs` — guest instructions between calls, the share of indirect calls, the
+`tools/cork-calls.mjs`: guest instructions between calls, the share of indirect calls, the
 registers the code after a return reads first, how many functions the calls go through:
 
 | workload | functions | instructions a call | indirect | live after a return |
@@ -31,12 +31,12 @@ How deeply calls nest is not in a block profile (`not measured`): every workload
 
 ## The arms
 
-- **state** — cork's call today, as `callAndReturn`/`returnToCall` emit it.
-- **state-direct** — the same convention with a direct `call` (or `call_indirect` by index): what
+- **state:** cork's call today, as `callAndReturn`/`returnToCall` emit it.
+- **state-direct:** the same convention with a direct `call` (or `call_indirect` by index): what
   the transfer's probe costs, apart from the convention.
-- **params** — all eight registers and the budget in parameters and results; the flags through
+- **params:** all eight registers and the budget in parameters and results; the flags through
   memory as today; the callee answers the address its `ret` took, which the caller compares.
-- **params+flags** — the six flag words in parameters and results too.
+- **params+flags:** the six flag words in parameters and results too.
 
 Every arm does the same guest work and must end with the same registers; the runner stops if one
 does not.
@@ -103,12 +103,12 @@ beside it when it comes.
 
 **Status: the rule below was written and committed before the run it decides on (2026-10-13).**
 
-Step 2 keeps cork's convention and cuts what a call site writes
-back and loads again: after the return only the registers the continuation reads before it
-writes them. The arm `state-live` is `state` that reloads only esp and the `live after a
-return` registers of the workload, and no flags: more than step 2 can reach (a region's exits
-read every register, and its flags are dead after a call only where the code says so), so its
-gain is the ceiling. Its guest results differ from the others' and are not compared.
+Step 2 keeps cork's convention and cuts what a call site writes back and loads again: after the
+return only the registers the continuation reads before it writes them. The arm `state-live` is
+`state` that reloads only esp and the `live after a return` registers of the workload, and no
+flags. That is more than step 2 can reach (a region's exits read every register, and its flags are
+dead after a call only where the code says so), so its gain is the ceiling. Its guest results
+differ from the others' and are not compared.
 
 Timed by `paired.mjs`: `state` and `state-live` alternated in 15 pairs of ~200 ms runs after 3
 warming pairs, at depth 8, TurboFan; the ratio `state-live` / `state` of each pair.

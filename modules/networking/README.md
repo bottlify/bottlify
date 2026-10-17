@@ -2,15 +2,15 @@
 
 TCP and UDP for a browser tab, over one WebSocket.
 
-A page cannot open a TCP connection or bind a UDP port; it can open a WebSocket. This package is
-both ends of the way around that: a **relay** server (Node, no dependencies) that holds real
-sockets, and a **client** that gives the page sockets through it — streams, datagrams, listening
-ports, name lookups. Pages that join the same **room** share a private network, `10.86.0.0/16`,
+A page cannot open a TCP connection or bind a UDP port; it can open a WebSocket. This package gets
+around that from both ends: a **relay** server (Node, no dependencies) that holds real sockets, and
+a **client** that gives the page sockets through it (streams, datagrams, listening ports, name
+lookups). Pages that join the same **room** share a private network, `10.86.0.0/16`,
 and reach each other directly; anything outside the room is a real connection the relay opens,
 only to the hosts you allow.
 
-It is how `@bottlify/core` gives a Windows program Winsock, and it works without it: a game, an
-emulator or a tool of your own can use the same transport.
+`@bottlify/core` uses it to give a Windows program Winsock, but it does not need the engine: a
+game, an emulator or a tool of your own can use the same transport.
 
 ```
 page A ── wss ──┐                ┌── page B        (same room: 10.86.0.1 ↔ 10.86.0.2)
@@ -35,7 +35,7 @@ node src/server/cli.js --port 8787 --origin https://play.example.com
 | `--origin url` | any | Only pages from these origins may connect (checked at the handshake). Repeat for more. |
 
 With no `--allow`, a relay is a private LAN per room and never an open proxy. A page served over
-HTTPS may only open `wss://`, so in a deployment put TLS in front of it — or attach it to the
+HTTPS may only open `wss://`, so in a deployment put TLS in front of it, or attach it to the
 HTTPS server you already have:
 
 ```js

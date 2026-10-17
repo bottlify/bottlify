@@ -1,18 +1,22 @@
 # Bottlify
 
 Bottlify runs Windows x86 programs and games in a browser tab, with no Windows, no plugin and
-nothing to install. It has two halves:
+nothing to install. It is four packages; the first two run a program, the other two are optional:
 
-- **[cork](modules/cork/README.md)** (`@bottlify/cork`) — our x86 → WebAssembly translator and its
-  runtime. It translates the program's machine code into wasm, which the browser compiles for the
-  device's own processor, so the same build runs on x86 and ARM machines alike. cork is a
-  translator, not an emulator.
-- **core** (`@bottlify/core`) — a Windows environment written from scratch in JavaScript:
-  `kernel32`, `user32`, `gdi32`, DirectX, OpenGL, DirectSound, Winsock and the rest of the system
-  libraries, on top of WebGPU, WebAudio and OPFS.
-
-A page starts it with one call, `createApp()`. The engine runs in a Web Worker; graphics,
-translation and sound each have a thread of their own.
+- **[core](modules/core/README.md)** (`@bottlify/core`): a Windows environment written from scratch
+  in JavaScript: `kernel32`, `user32`, `gdi32`, DirectX, OpenGL, DirectSound, Winsock and the rest
+  of the system libraries, on top of WebGPU, WebAudio and OPFS. A page starts it with one call,
+  `createApp()`; the engine runs in a Web Worker, and graphics, translation and sound each have a
+  thread of their own.
+- **[cork](modules/cork/README.md)** (`@bottlify/cork`, [in Russian](modules/cork/README.ru.md)):
+  our x86 → WebAssembly translator and its runtime. It translates the program's machine code into
+  wasm, which the browser compiles for the device's own processor, so the same build runs on x86
+  and ARM machines alike.
+- **[networking](modules/networking/README.md)** (`@bottlify/networking`, optional): TCP and UDP for
+  a browser tab over one WebSocket, a relay server and its client. Without it a program reaches
+  only the loopback inside its tab.
+- **[installer](modules/installer/README.md)** (`@bottlify/installer`, optional): makes a bottle out
+  of a game's installer, run unchanged inside the engine.
 
 ## What it covers
 
@@ -26,24 +30,19 @@ translation and sound each have a thread of their own.
 - **Files and network:** a program's files come out of a bundle read by byte range, and what it
   writes persists as a session; sockets go through a WebSocket relay (`@bottlify/networking`).
 
-Every layer — `cpu`, `memory`, `kernel`, `bridge`, `loader`, `log`, `filesystem`, `win32`,
-`graphics`, `audio`, `input`, `media` — is a module with a declared interface, and the system runs
+Every layer (`cpu`, `memory`, `kernel`, `bridge`, `loader`, `log`, `filesystem`, `win32`,
+`graphics`, `audio`, `input`, `media`) is a module with a declared interface, and the system runs
 without any one of them, degraded but not broken.
 
 ## Documentation
 
-- [`docs/architecture.md`](docs/architecture.md) — how Bottlify works inside: threads, startup,
+- [`docs/architecture.md`](docs/architecture.md): how Bottlify works inside: threads, startup,
   cork, the system libraries, graphics, sound, networking and storage
   ([in Russian](docs/architecture.ru.md)).
-- [`docs/core/`](docs/core/README.md) — `@bottlify/core` for its users: the
+- [`docs/core/`](docs/core/README.md): `@bottlify/core` for its users: the
   [API](docs/core/api.md), the [configuration](docs/core/configuration.md) and the current
   [limits](docs/core/limits.md).
-- [`modules/cork/README.md`](modules/cork/README.md) — the translator: what it runs, how it works,
-  how fast it is against the processor and v86 ([in Russian](modules/cork/README.ru.md)).
-- [`modules/networking/README.md`](modules/networking/README.md) and
-  [`modules/installer/README.md`](modules/installer/README.md) — the socket relay, and adding a
-  program by running its installer.
-- [`roadmap/`](roadmap/README.md) — the plan: [x86-64](roadmap/x64.md),
+- [`roadmap/`](roadmap/README.md): the plan: [x86-64](roadmap/x64.md),
   [Direct3D 11 and 12](roadmap/direct3d.md), [OpenGL 2.0 to 4.x](roadmap/opengl.md), and
   [`decisions.md`](roadmap/decisions.md).
 
@@ -59,12 +58,11 @@ npm run cdp:probe   # boots the engine in a real headless Chrome
 
 ## Layout
 
-- `modules/core/` — `@bottlify/core`: `src/system/` the module contract, `src/layers/<name>/` one
-  directory per layer, `src/host/` the page and worker ends of `createApp`.
-- `modules/cork/` — `@bottlify/cork`, which the core loads by URL.
-- `modules/networking/`, `modules/installer/` — `@bottlify/networking` and `@bottlify/installer`.
-- `tools/` — development tools: the browser harness (`cdp_test/`), import audits, benchmarks.
-- `docs/`, `roadmap/` — as above.
+- `modules/<package>/`: the four packages above. In `modules/core/`, `src/system/` holds the
+  module contract, `src/layers/<name>/` one directory per layer, `src/host/` the page and worker
+  ends of `createApp`.
+- `tools/` holds development tools: the browser harness (`cdp_test/`), import audits, benchmarks.
+- `docs/` and `roadmap/` are described above.
 
 The launcher and the bottle interface live in a repository of their own,
 [`bottlify-ui`](https://github.com/bottlify/bottlify-ui).
