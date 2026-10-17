@@ -35,19 +35,23 @@ const WORKER_OFFSET = 0x200;
  * @param {string[]} imports  KERNEL32's, CreateThread among them
  * @param {Record<string, number[]>} data
  * @param {(tools: { call: (name: string) => number[], at: (name: string) => number,
- *     start: (slot: string) => number[] }) => { main: number[], worker: number[] }} parts
+ *     start: (slot: string, flags?: number) => number[] }) => { main: number[],
+ *     worker: number[] }} parts
  */
 function buildProgram(imports, data, parts){
     return buildExe({
         imports: { 'KERNEL32.dll': imports },
-        codeSize: WORKER_OFFSET + 0x40,
+        codeSize: WORKER_OFFSET + 0x80,
         data,
         code: ({ iat, at, code })=>{
             /** @param {string} name */
             const call = name=>[0xff, 0x15, ...u32(iat(name))];
-            /** CreateThread(NULL, 0, worker, NULL, 0, NULL), the handle to `slot`. @param {string} slot */
-            const start = slot=>[
-                0x6a, 0x00, 0x6a, 0x00, 0x6a, 0x00, 0x68, ...u32(code(WORKER_OFFSET)),
+            /**
+             * CreateThread(NULL, 0, worker, NULL, flags, NULL), the handle to `slot`.
+             * @param {string} slot @param {number} [flags]
+             */
+            const start = (slot, flags = 0)=>[
+                0x6a, 0x00, 0x6a, flags, 0x6a, 0x00, 0x68, ...u32(code(WORKER_OFFSET)),
                 0x6a, 0x00, 0x6a, 0x00, ...call('CreateThread'), 0xa3, ...u32(at(slot)),
             ];
             const { main, worker } = parts({ call, at, start });
@@ -295,6 +299,117 @@ test('a run keeps in its store how many executors its threads opened, and the ne
     assert.deepEqual(kept(), [first], 'kept as they opened');
     assert.equal(await opened(oneSleeping), first, 'opened at the start of the next run');
     assert.deepEqual(kept(), [first], 'and kept, not lowered');
+});
+
+test('a worker its main thread waits on each round, both computing as much between, runs on its'
+    + ' own executor and is not kept on the process\'s', async()=>{
+    // A frame and its render thread: the main thread sets `go`, computes,
+    // waits for `done`; the worker waits for `go`, computes, sets `done`. Each
+    // wait leaves the process's executor idle and calls the worker back from
+    // its own; counted as the two taking turns, it came to be kept here, the
+    // two running one after the other while the other executor idled.
+    const ROUNDS = 150;
+    const WORK = 1_000_000;
+    const executable = buildProgram(
+        ['CreateEventA', 'CreateThread', 'SetEvent', 'WaitForSingleObject', 'ExitProcess'],
+        { go: [0, 0, 0, 0], done: [0, 0, 0, 0], first: [0, 0, 0, 0] }, ({ call, at, start })=>{
+            /** CreateEventA(NULL, FALSE, FALSE, NULL), the handle to `slot`. @param {string} slot */
+            const event = slot=>[0x6a, 0x00, 0x6a, 0x00, 0x6a, 0x00, 0x6a, 0x00,
+                ...call('CreateEventA'), 0xa3, ...u32(at(slot))];
+            /** WaitForSingleObject([slot], INFINITE) @param {string} slot */
+            const wait = slot=>[0x6a, 0xff, 0xff, 0x35, ...u32(at(slot)),
+                ...call('WaitForSingleObject')];
+            /** SetEvent([slot]) @param {string} slot */
+            const set = slot=>[0xff, 0x35, ...u32(at(slot)), ...call('SetEvent')];
+            // mov ecx, WORK; L: dec ecx; jnz L
+            const compute = [0xb9, ...u32(WORK), 0x49, 0x75, 0xfd];
+            const round = [...set('go'), ...compute, ...wait('done'), 0x4e]; // ...; dec esi
+            const work = [...wait('go'), ...compute, ...set('done')];
+            return {
+                main: [...event('go'), ...event('done'), ...start('first'),
+                    0xbe, ...u32(ROUNDS), //       mov esi, ROUNDS
+                    ...round, 0x0f, 0x85, ...u32(-(round.length + 6) >>> 0), // jnz round
+                    0x6a, 0x07, ...call('ExitProcess')],
+                worker: [...work, 0xe9, ...u32(-(work.length + 5) >>> 0)], // jmp work
+            };
+        });
+    const { code, scheduler } = await run(executable, 2);
+    assert.equal(code, 7);
+    const shared = JSON.parse(scheduler?.sharedTime ?? '{}');
+    const elsewhere = shared.elsewhereRetired ?? 0;
+    const total = (shared.hereRetired ?? 0) + elsewhere;
+    // The worker's half on the other executor, a fifth on a machine busy with
+    // other runs; kept here, a hundredth.
+    assert.ok(total >= ROUNDS * WORK * 2 && elsewhere > total * 0.15,
+        `${elsewhere} of ${total} instructions on the other executor`);
+});
+
+test('a thread reads one time-stamp counter on every executor: never back, whichever it last'
+    + ' ran on', async()=>{
+    // The main thread is pinned to the process's executor and the worker to
+    // the other; they take turns reading the counter, each comparing with the
+    // last read of either. The other executor opens once the main thread has
+    // run a while: counted from that executor's own opening, its counter was
+    // behind by as long, every read there went back, and a game timing its
+    // frames by it slept as long.
+    const ROUNDS = 100;
+    // rdtsc; if edx:eax is below [last], inc [backward]; [last] = edx:eax
+    /** @param {(name: string) => number} at */
+    const read = at=>[
+        0x0f, 0x31, //                                     rdtsc
+        0x3b, 0x15, ...u32(at('last') + 4), //             cmp edx, [last+4]
+        0x77, 16, //                                       ja keep
+        0x72, 8, //                                        jb back
+        0x3b, 0x05, ...u32(at('last')), //                 cmp eax, [last]
+        0x73, 6, //                                        jae keep
+        0xff, 0x05, ...u32(at('backward')), //             back: inc dword [backward]
+        0xa3, ...u32(at('last')), //                       keep: mov [last], eax
+        0x89, 0x15, ...u32(at('last') + 4), //             mov [last+4], edx
+    ];
+    const executable = buildProgram(['CreateEventA', 'CreateThread', 'ResumeThread', 'SetEvent',
+        'SetThreadAffinityMask', 'Sleep', 'WaitForSingleObject', 'ExitProcess'],
+    { go: [0, 0, 0, 0], done: [0, 0, 0, 0], first: [0, 0, 0, 0], last: new Array(8).fill(0),
+        backward: [0, 0, 0, 0] }, ({ call, at, start })=>{
+        /** CreateEventA(NULL, FALSE, FALSE, NULL), the handle to `slot`. @param {string} slot */
+        const event = slot=>[0x6a, 0x00, 0x6a, 0x00, 0x6a, 0x00, 0x6a, 0x00,
+            ...call('CreateEventA'), 0xa3, ...u32(at(slot))];
+        /** WaitForSingleObject([slot], INFINITE) @param {string} slot */
+        const wait = slot=>[0x6a, 0xff, 0xff, 0x35, ...u32(at(slot)),
+            ...call('WaitForSingleObject')];
+        /** SetEvent([slot]) @param {string} slot */
+        const set = slot=>[0xff, 0x35, ...u32(at(slot)), ...call('SetEvent')];
+        const round = [...read(at), ...set('go'), ...wait('done'), 0x4e]; // ...; dec esi
+        const turn = [...wait('go'), ...read(at), ...set('done')];
+        return {
+            main: [
+                0x6a, 0x01, 0x6a, 0xfe, ...call('SetThreadAffinityMask'), // (current, 1)
+                0x68, ...u32(300), ...call('Sleep'), //  Sleep(300)
+                ...event('go'), ...event('done'),
+                ...start('first', 4), //             CREATE_SUSPENDED
+                0x6a, 0x02, 0xff, 0x35, ...u32(at('first')), ...call('SetThreadAffinityMask'),
+                0xff, 0x35, ...u32(at('first')), ...call('ResumeThread'),
+                0xbe, ...u32(ROUNDS), //             mov esi, ROUNDS
+                ...round, 0x0f, 0x85, ...u32(-(round.length + 6) >>> 0), // jnz round
+                0xff, 0x35, ...u32(at('backward')), ...call('ExitProcess'),
+            ],
+            worker: [...turn, 0xe9, ...u32(-(turn.length + 5) >>> 0)], // jmp turn
+        };
+    });
+    const app = await createApp({ executable, cpu: { cores: 2, eager: false } });
+    try
+    {
+        assert.equal((await app.run({ timeoutMs: 60_000 })) >>> 0, 0,
+            'reads that went back from the one before');
+        const tables = await app.diagnostics();
+        const kernel = (Array.isArray(tables) ? tables : []).find(table=>table.name === 'kernel');
+        const shared = JSON.parse((kernel?.metrics?.scheduler ?? kernel?.metrics)
+            ?.sharedTime ?? '{}');
+        assert.ok(shared.elsewhereRetired > 0, 'the worker ran on the other executor');
+    }
+    finally
+    {
+        await app.dispose();
+    }
 });
 
 test('the process\'s first thread keeps the process\'s own executor when the executor a thread'

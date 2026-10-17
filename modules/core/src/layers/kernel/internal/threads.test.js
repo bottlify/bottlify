@@ -1187,8 +1187,10 @@ test('a thread this executor keeps calling back from the other one stays here a 
         wall: ()=>clock });
     const main = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
     const sound = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'sound' });
-    // The renderer calls into the host and stays here; the sound thread computes.
+    // The renderer calls into the host and stays here, computing a whole slice;
+    // the sound thread, a fifth of that beside it (it ran 3% of the instructions).
     Object.assign(main, { crossSeen: true, crossRate: 1 / 100 });
+    cpu.runSlice = (/** @type {number} */ max)=>max;
     /** Both ready: where the sound thread goes, then the renderer waits on it. */
     const round = ()=>{
         assert.equal(sched.runOnce().ran, main);
@@ -1231,4 +1233,44 @@ test('a thread whose mask names only processors whose executors cannot open runs
         const first = single.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
         first.affinityMask = 1 << 1;
         assert.equal(single.runOnce().ran, first);
+    });
+
+test('a thread called back after doing as much beside this executor as it did keeps the other one',
+    ()=>{
+        // A game's render thread, the main thread waiting on it some 1 400 times
+        // a second while both computed between: called back at each wait and kept
+        // here, the two took turns at full slices while the other executors idled.
+        const { cpu, told } = twoExecutors();
+        const [remote] = cpu.executors();
+        // Called back, its slice there ends having run as much as the main thread's here.
+        remote.step = ()=>{
+            if (remote.started === 0 || told.goOn !== false)
+            {
+                return null;
+            }
+            remote.started = 0;
+            told.goOn = null;
+            return { instructions: 5000, fault: null };
+        };
+        const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 5000,
+            wall: ()=>0 });
+        const main = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
+        const render = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'render' });
+        Object.assign(main, { crossSeen: true, crossRate: 1 / 100 });
+        cpu.runSlice = (/** @type {number} */ max)=>max;
+        /** Both ready, then the main thread waits on the render thread. */
+        const round = ()=>{
+            assert.equal(sched.runOnce().ran, main);
+            const where = sched.processorOf(render);
+            if (where === 1)
+            {
+                sched.block(main, 'the frame');
+                assert.equal(sched.runOnce().ran, render, 'called back, it finishes here');
+                sched.wake(main);
+            }
+            return where;
+        };
+
+        assert.deepEqual([round(), round(), round(), round(), round(), round()],
+            [1, 1, 1, 1, 1, 1], 'called back round after round, it still goes there');
     });

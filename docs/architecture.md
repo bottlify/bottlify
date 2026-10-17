@@ -438,8 +438,11 @@ writes (section 7).
   dozen instructions and waits again weighs as little as those), every such call a round trip back
   to it from another executor, and one whose
   runs on another executor have mostly ended with the process's executor left nothing to run and
-  calling it back: a thread that takes turns with the process's threads rather than running beside
-  them (the share halves every second, so it tries again). A thread of either kind waiting for the
+  calling it back, the run having done less than half of what the process's executor did
+  meanwhile: a thread that takes turns with the process's threads rather than running beside
+  them (the share halves every second, so it tries again). A thread called back after doing at
+  least half as much ran at once with them, as a render thread its main thread waits on each
+  frame, and stays on its own executor. A thread of either kind waiting for the
   process's executor takes it from one that computes, which goes to the other executor in its place.
   A thread is never started while another executor still
   runs it: one that waited there is made ready by its wake before that slice is taken, and the
