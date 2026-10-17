@@ -79,7 +79,7 @@ const slot = (slots, name)=>{
 
 /** A flat address space with the bridge's vtable publisher over it. */
 function machine(){
-    const low = new Uint8Array(1 << 20);
+    const low = new Uint8Array(4 << 20);
     const high = new Uint8Array(8 << 20);
     // Above every address a test writes its own arguments and answers at, so
     // that what the seam allocates -- its routines, blocks and rings -- never

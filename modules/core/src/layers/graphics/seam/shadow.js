@@ -282,6 +282,13 @@ export const FLAG_DRAW_STALE = 4;
  * found no room is always followed by a start over.
  */
 export const COMMAND_RING_BYTES = 64 * 1024;
+/**
+ * A Direct3D 8 or 9 device's: it holds a frame. A ring that fills sends its
+ * next call to the host, a pause of the program that compares again every
+ * dynamic buffer the draws read, and a frame of Call of Duty 4's first level
+ * writes some 13 000 records.
+ */
+export const DEVICE_RING_BYTES = 1024 * 1024;
 const COMMAND_SLACK = 20 * 1024;
 
 /**
@@ -290,10 +297,11 @@ const COMMAND_SLACK = 20 * 1024;
  *
  * @param {number} block @param {number} ring
  * @param {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @param {number} [bytes]  its size
  */
-export function placeCommandRing(block, ring, writeMemory){
-    writeMemory(ring, new Uint8Array(COMMAND_RING_BYTES));
-    const header = new Uint32Array([ring, COMMAND_RING_BYTES]);
+export function placeCommandRing(block, ring, writeMemory, bytes = COMMAND_RING_BYTES){
+    writeMemory(ring, new Uint8Array(bytes));
+    const header = new Uint32Array([ring, bytes]);
     writeMemory(block + SHADOW.COMMANDS, new Uint8Array(header.buffer));
 }
 
@@ -312,9 +320,11 @@ export function placeCommandRing(block, ring, writeMemory){
  * @param {(address: number, bytes: Uint8Array) => void} deps.writeMemory
  * @param {(records: Uint8Array) => number} deps.take  makes the calls, says how many
  * @param {(detail: string) => void} deps.refuse
+ * @param {number} [deps.bytes]  the ring's size, `COMMAND_RING_BYTES` unless given
  */
 export function createCommandReader(deps){
-    const { block, ring, readWord, readWords, writeMemory, take, refuse } = deps;
+    const { block, ring, readWord, readWords, writeMemory, take, refuse,
+        bytes = COMMAND_RING_BYTES } = deps;
     let tail = 0;
     let taken = 0;
     const zero = new Uint8Array(4);
@@ -335,7 +345,7 @@ export function createCommandReader(deps){
             {
                 return;
             }
-            if (head < tail || head > COMMAND_RING_BYTES)
+            if (head < tail || head > bytes)
             {
                 refuse('the command ring\'s head went back');
                 tail = head;
@@ -364,7 +374,7 @@ export function createCommandReader(deps){
                 taken += take(new Uint8Array(words.buffer, words.byteOffset, whole * 4));
             }
             tail += whole * 4;
-            if (tail === head && head > COMMAND_RING_BYTES - COMMAND_SLACK)
+            if (tail === head && head > bytes - COMMAND_SLACK)
             {
                 // A routine between reading the head and taking its space finds
                 // the head moved and takes it again, from the start.
@@ -2543,14 +2553,15 @@ export function createShadow(deps){
                 mirror();
                 // Pages of its own, as the block's are: the routines write it
                 // on every command.
-                commands = deps.commands ? allocatePage(COMMAND_RING_BYTES) : 0;
+                commands = deps.commands ? allocatePage(DEVICE_RING_BYTES) : 0;
                 if (commands !== 0)
                 {
-                    placeCommandRing(address, commands, deps.writeMemory);
+                    placeCommandRing(address, commands, deps.writeMemory, DEVICE_RING_BYTES);
                     commandReader = createCommandReader({ block: address, ring: commands,
                         readWord, readWords, writeMemory: deps.writeMemory,
                         take: /** @type {ShadowCommands} */ (deps.commands).take,
-                        refuse: detail=>refuse(`${name}::commands`, detail) });
+                        refuse: detail=>refuse(`${name}::commands`, detail),
+                        bytes: DEVICE_RING_BYTES });
                 }
             }
         }

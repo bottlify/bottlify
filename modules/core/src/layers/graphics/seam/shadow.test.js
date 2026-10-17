@@ -100,7 +100,7 @@ function fakeDevice(){
  *     phases?: import('./shadow.js').ShadowPhases }} [options]
  */
 function machine(options = {}){
-    const memory = new Uint8Array(0x40000);
+    const memory = new Uint8Array(0x240000);
     /**
      * How often guest memory was copied out, which regions of it relative to
      * the block, and which words were read in place.
@@ -895,7 +895,7 @@ test('a Direct3D 9 device\'s render states, stage states and transforms are mirr
     const device = out.device;
     assert.equal(device.SetTextureStageState(1, D3DTSS9.COLOROP, 2), 0);
     assert.equal(device.SetTransform(256, Float32Array.from({ length: 16 }, (unused, i)=>i)), 0);
-    const memory = new Uint8Array(0x20000);
+    const memory = new Uint8Array(0x220000);
     const view = new DataView(memory.buffer);
     let free = 0x1008;
     const shadow = createShadow({
