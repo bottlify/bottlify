@@ -67,7 +67,7 @@ const ask = (method, params, sessionId, ms = 5000)=>Promise.race([
 
 const { targetInfos } = await cdp.send('Target.getTargets');
 const page = targetInfos.find((/** @type {any} */ one)=>one.type === 'page'
-    && /127.0.0.1:5180/.test(one.url));
+    && /:5180[/]/.test(one.url));
 if (!page)
 {
     console.log('no launcher tab to profile');
