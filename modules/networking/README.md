@@ -104,10 +104,10 @@ client runs there too.
 `@bottlify/networking/protocol` is shared by both halves, so they cannot drift apart. Joining and
 the roster are JSON text frames; everything else is a binary frame with a twenty-byte header the
 relay routes without reading the payload, so one `send` is one frame and a datagram keeps its
-boundaries. The RFC 6455 server side is in `src/server/websocket.js`, about a hundred lines.
+boundaries. The RFC 6455 server side is in [`src/server/websocket.js`](src/server/websocket.js), about a hundred lines.
 
 Inside `@bottlify/core` the seam is the transport contract in
-`modules/core/src/layers/win32/wsock32/transport.js`: every part of it is optional, and what is
+[`modules/core/src/layers/win32/wsock32/transport.js`](../core/src/layers/win32/wsock32/transport.js): every part of it is optional, and what is
 missing behaves as no network. `createApp({ win32: { network: transport } })` takes any object
 implementing it, when the engine runs on the page's own thread (`host: 'thread'`).
 

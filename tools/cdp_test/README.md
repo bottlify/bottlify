@@ -7,7 +7,7 @@ The scripts here put the engine in front of a real browser with a real
 GPU, drive it, and ask what happened.
 
 Nothing here is a unit test and nothing here is imported by a package. The
-scenarios serve `modules/core` and the translator beside it (`modules/cork`)
+scenarios serve [`modules/core`](../../modules/core) and the translator beside it ([`modules/cork`](../../modules/cork))
 from source, with no build step, and the engine is cork: there is nothing to
 fetch first. The one prebuilt file a page reads is the optional video decoder,
 `modules/core/vendor/prebuilt/video-decoder.wasm` (`npm run fetch:video-decoder`);
@@ -20,20 +20,20 @@ the guest, its files directly in that directory.
 
 | script | what it is | run it as |
 |---|---|---|
-| `game.mjs` | starts the engine on a bundle in a GPU browser, waits, writes a report | `npm run cdp:game -- <bundle-id> [flags]` |
-| `frames.mjs` | lets a title settle, watches a window, reports what a frame costs and why | `npm run cdp:frames -- <bundle-id> [flags]` |
-| `launcher.mjs` | starts a title in the launcher the way a person does and profiles the page thread | `node tools/cdp_test/launcher.mjs <bundle-id> [flags]` (launcher running: `npm run ui`) |
-| `triangle.mjs` | the graphics acceptance scenario: a fixture draws a triangle, four pixels are compared byte for byte; `--graphics-worker pixels` draws it in the graphics worker (`bitmap`, its default way of sending frames back, makes headless SwiftShader lose the read-back's `mapAsync`) | `node tools/cdp_test/triangle.mjs [--graphics-worker pixels] [--isolated]`; `--isolated` serves the page cross-origin isolated, so guest memory is shared |
-| `probe.mjs` / `cli.mjs` | the acceptance probe: browser, page, worker, ping, screenshot | `npm run cdp:probe` |
-| `gl-lighting-gate.mjs` | the GL lighting gate: seeded random lights, materials and vertices, the processor's `lightVertex` against the vertex stage's `glLit` run as a compute dispatch on the device | `npm run cdp:lighting [-- --count 60 --vertices 32 --seed 1]` |
-| `browser.mjs` | finds and launches a Chromium with a CDP endpoint | library |
-| `cdp.mjs` | a minimal CDP client over WebSocket | library |
-| `server.mjs` | a static server for the sandbox pages, the sources and a bundle | library |
-| `device-lag.mjs` | counts the engine's GPU submits and those the device finished, for a run that waits on the device | library |
+| [`game.mjs`](game.mjs) | starts the engine on a bundle in a GPU browser, waits, writes a report | `npm run cdp:game -- <bundle-id> [flags]` |
+| [`frames.mjs`](frames.mjs) | lets a title settle, watches a window, reports what a frame costs and why | `npm run cdp:frames -- <bundle-id> [flags]` |
+| [`launcher.mjs`](launcher.mjs) | starts a title in the launcher the way a person does and profiles the page thread | `node tools/cdp_test/launcher.mjs <bundle-id> [flags]` (launcher running: `npm run ui`) |
+| [`triangle.mjs`](triangle.mjs) | the graphics acceptance scenario: a fixture draws a triangle, four pixels are compared byte for byte; `--graphics-worker pixels` draws it in the graphics worker (`bitmap`, its default way of sending frames back, makes headless SwiftShader lose the read-back's `mapAsync`) | `node tools/cdp_test/triangle.mjs [--graphics-worker pixels] [--isolated]`; `--isolated` serves the page cross-origin isolated, so guest memory is shared |
+| [`probe.mjs`](probe.mjs) / [`cli.mjs`](cli.mjs) | the acceptance probe: browser, page, worker, ping, screenshot | `npm run cdp:probe` |
+| [`gl-lighting-gate.mjs`](gl-lighting-gate.mjs) | the GL lighting gate: seeded random lights, materials and vertices, the processor's `lightVertex` against the vertex stage's `glLit` run as a compute dispatch on the device | `npm run cdp:lighting [-- --count 60 --vertices 32 --seed 1]` |
+| [`browser.mjs`](browser.mjs) | finds and launches a Chromium with a CDP endpoint | library |
+| [`cdp.mjs`](cdp.mjs) | a minimal CDP client over WebSocket | library |
+| [`server.mjs`](server.mjs) | a static server for the sandbox pages, the sources and a bundle | library |
+| [`device-lag.mjs`](device-lag.mjs) | counts the engine's GPU submits and those the device finished, for a run that waits on the device | library |
 
 Reports land in `tools/cdp_test/reports/` (gitignored).
 
-## `game.mjs`: a title, a run, a report
+## [`game.mjs`](game.mjs): a title, a run, a report
 
 ```
 node tools/cdp_test/game.mjs <bundle-id> [--wait 900] [--turns 200000] [--calls 40]
@@ -87,11 +87,11 @@ node tools/cdp_test/game.mjs <bundle-id> [--wait 900] [--turns 200000] [--calls 
 | `after` as `12s` | frames | any `after` above may be a time since the first presented frame instead of a frame count (`--click 520,400,12s`); a route timed in seconds survives a change in the frame rate, since the program's screens arrive on the clock |
 | `--command-line STRING` | the bundle's manifest | what the program believes it was started with, image path first: `'"C:\App\Game.exe" +set r_mode 3'`. The manifest's `commandLine` is the default, so a title's usual arguments need not be repeated |
 | `--args STRING` | the manifest's `commandLine` | the arguments alone, as the launcher takes them: the quoted image path is put in front, `--args 'map fort'` |
-| `--windows NAME` | the bundle's manifest, else `winxp` | the Windows the title runs under (`docs/core/api.md`'s `windows`): `win2000`, `winxp`, `win7` or `win10`. The manifest's `windows` is the default; any other name is refused before the browser starts. `frames.mjs` takes it too |
+| `--windows NAME` | the bundle's manifest, else `winxp` | the Windows the title runs under ([`docs/core/api.md`](../../docs/core/api.md)'s `windows`): `win2000`, `winxp`, `win7` or `win10`. The manifest's `windows` is the default; any other name is refused before the browser starts. [`frames.mjs`](frames.mjs) takes it too |
 | `--file HOST=GUEST` | none | a file put on the volume before the program's first instruction, from a host path to a guest one (`dbg/bench.demo=C:\App\base\demos\bench.demo`): what one run wrote, handed to the next. Repeatable |
 | `--save-files` | text | keep every file the program wrote as the bytes it wrote, whole, beside the report. Without it a file is saved as text and capped at a megabyte, which reads a log and ruins anything binary |
 | `--graphics-api CHOICE` | none | the graphics a bottle chooses in the launcher, `createApp`'s `graphicsApi`: `directx7`, `directx8`, `directx9`, `directx10` or `opengl`. It decides which system libraries the machine has and which DirectX release it reports |
-| `--graphics-config JSON` | none | fields of the graphics layer's configuration (`docs/core/configuration.md`, graphics) merged into `createApp`'s `graphics` option: `--graphics-config '{"compressedTextures":true}'` turns the block-compressed upload path on for one run |
+| `--graphics-config JSON` | none | fields of the graphics layer's configuration ([`docs/core/configuration.md`](../../docs/core/configuration.md), graphics) merged into `createApp`'s `graphics` option: `--graphics-config '{"compressedTextures":true}'` turns the block-compressed upload path on for one run |
 | `--audio-config JSON` | none | fields of the audio layer's configuration merged into `createApp`'s `audio` option: `--audio-config '{"mp3":false}'` runs the program's own MP3 decoder instead of the hosted one, an A/B of the two |
 | `--capture-audio FROM:TO` | off | what the sound device mixed from FROM to TO seconds of the run, written as `game-<stamp>-audio.wav` (16-bit stereo at the device rate). With `--worker --coi` the device runs on the page, off the engine's thread, as a launcher's worklet does, so a program the engine cannot keep fed is heard, and counted in the audio layer's `staleBytes`, as in the launcher |
 | `--entry PATH` | the manifest's | another program of the bundle to start, with `--command-line` for its arguments: `--entry tool.exe --command-line '"C:\App\tool.exe" -x'` |
@@ -112,9 +112,9 @@ node tools/cdp_test/game.mjs <bundle-id> [--wait 900] [--turns 200000] [--calls 
 | `--export-translations FILE` | off | once the run ends, what the translator made of the title (`app.exportTranslations()`, the store kept to what its lookups can reach) is written to FILE as the seed a bundle carries; `node tools/make-btl.mjs translations <bundle-id> FILE` puts it into the bundle, so every first run of it starts from those translations. The store is the origin's file system (`--worker` for its synchronous handles), so a run on a kept profile (`--user-data-dir`, `--port`) exports what earlier runs made as well |
 
 The run is headless unless `--headed`, on a fresh profile unless `--user-data-dir` names one.
-The browser flags it needs are in `browser.mjs` (below).
+The browser flags it needs are in [`browser.mjs`](browser.mjs) (below).
 
-## `live/`: watching a title a person is playing
+## [`live/`](live/): watching a title a person is playing
 
 A person plays in the shared headed browser; these scripts attach to it over
 CDP (port 9333, `CDP_PORT` to change) and read the launcher tab and its
@@ -125,7 +125,7 @@ workers answer nothing to a direct attach.
 
 | script | what it answers | run it as |
 |---|---|---|
-| `browser.mjs` | opens the headed browser on the launcher, profile kept in `dbg/chrome-profile` | `node tools/cdp_test/live/browser.mjs [url]` |
+| [`browser.mjs`](browser.mjs) | opens the headed browser on the launcher, profile kept in `dbg/chrome-profile` | `node tools/cdp_test/live/browser.mjs [url]` |
 | `eval.mjs` | the value of an expression in the launcher tab (`window.__bottlify__` is the engine) | `node tools/cdp_test/live/eval.mjs "<expression>"` |
 | `audio-watch.mjs` | four times a second, with the clock: laps replayed, silence held, blocks starved, writer skips, late guest threads: what a crackle was | `node tools/cdp_test/live/audio-watch.mjs` |
 | `memory-watch.mjs` | every five seconds: the tab's private memory and each worker's JS heap | `node tools/cdp_test/live/memory-watch.mjs` |
@@ -140,7 +140,7 @@ workers answer nothing to a direct attach.
 `tools/wav-scan.mjs <file.wav>` reads such a recording for what is wrong in it: gaps of
 silence inside sound, clicks (a step far beyond the signal's own), and exact repeats.
 
-`tools/install-watch.mjs` is the same question for an installer in Node: it
+[`tools/install-watch.mjs`](../install-watch.mjs) is the same question for an installer in Node: it
 runs one unattended and prints every process's threads, waits and parked
 calls every few seconds (`app.standing()`), and with `--journal S` the last
 cross-process COM calls S seconds in. `--bundle ID` runs an installed
@@ -166,7 +166,7 @@ entry of the win32 layer pops against Wine's export spec files kept locally:
 one argument too many moves the caller's stack a call at a time, and the
 program returns to nowhere far from the call that did it.
 
-## `frames.mjs`: where a frame's time goes
+## [`frames.mjs`](frames.mjs): where a frame's time goes
 
 The whole-run scenario is the wrong question for a frame rate: a run is
 dominated by starting up. This one lets the title settle, watches for a fixed
@@ -184,7 +184,7 @@ A frame is counted where the engine presents.
 | `--quantum N` | engine default | guest instructions per scheduler turn, the one number that decides how long a thread may hold the machine |
 | `--no-trace` | trace on | without the per-call string peeks, which read guest memory on every host call |
 
-## `launcher.mjs`: the launcher path, profiled
+## [`launcher.mjs`](launcher.mjs): the launcher path, profiled
 
 The launcher is a different path from the scenarios: a real audio thread, a
 decoder, a settings panel, and its own way of putting a frame on the screen. A
@@ -209,7 +209,7 @@ It also prints two frame counts over the window: frames the engine drew into
 the canvas, and frames the browser composed for the screen. They differ, and
 the second is the one a person sees.
 
-## `browser.mjs`: launching a browser that has a GPU
+## [`browser.mjs`](browser.mjs): launching a browser that has a GPU
 
 `findBrowser()` takes `CDP_TEST_CHROME` or `CHROME_BIN`, then the usual Chrome
 and Edge install paths. Two launchers:
@@ -231,7 +231,7 @@ the handle carries `browserWs` (the CDP endpoint), `proc` and `profileRoot`.
 `shutdown(handle)` kills the browser and removes the profile. `headed: true`
 drops `--headless=new` and nothing else.
 
-## `cdp.mjs`
+## [`cdp.mjs`](cdp.mjs)
 
 `CdpEndpoint(wsUrl)`: `open()`, `send(method, params, sessionId)` (answers
 the result or rejects with the protocol's error), `on(event, handler)`,
@@ -241,7 +241,7 @@ here evaluates expressions in the page with `Runtime.evaluate
 { returnByValue: true, awaitPromise: true }` and polls, because a command sent
 while the engine holds the page's thread is not answered until it yields.
 
-## `server.mjs`
+## [`server.mjs`](server.mjs)
 
 `serveStatic({ sandboxDir, srcDir, extra })` serves `sandboxDir` under
 `/sandbox/`, `srcDir` under `/src/` and any extra prefix, on a free port.
@@ -341,7 +341,7 @@ Compare the addresses with a run that does not fail.
 The page's report reads the last frame back, and that read waits until the
 device has finished every frame queued before it. A present waits for the
 device once it is the graphics layer's bound of frames behind
-(`maxFrameLatency`, three by default; `docs/core/configuration.md`,
+(`maxFrameLatency`, three by default; [`docs/core/configuration.md`](../../docs/core/configuration.md),
 graphics), so the report answers soon after the run. On a software adapter
 (SwiftShader, what a machine without a GPU hands out) the program then goes
 at the device's pace, several times slower than it would present. With the
@@ -355,7 +355,7 @@ So bound the run (`--run-seconds`, or a scene that ends by itself, such as a
 title's own timed demo that quits when done) and give `--wait` the run plus
 its drain. While it waits, the driver says how far behind the device is every
 30 s once the oldest unfinished submit is five seconds old, and a timeout's
-reason ends with the same count (`device-lag.mjs` wraps `GPUQueue.submit` in
+reason ends with the same count ([`device-lag.mjs`](device-lag.mjs) wraps `GPUQueue.submit` in
 the realm the engine runs in, the page or its worker); a report that did
 answer says how long after the start it did, and how many presents waited for
 the device and for how long in all.

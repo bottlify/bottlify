@@ -1,8 +1,8 @@
 # cork bench
 
 A benchmark of guest code for the translator: one 32-bit Windows program,
-`bin/bench-x87.exe` (x87 arithmetic, as compilers of the era emitted it) and
-`bin/bench-sse.exe` (scalar SSE2), built from `src/` with clang for the MSVC ABI
+[`bin/bench-x87.exe`](bin/bench-x87.exe) (x87 arithmetic, as compilers of the era emitted it) and
+[`bin/bench-sse.exe`](bin/bench-sse.exe) (scalar SSE2), built from [`src/`](src/) with clang for the MSVC ABI
 and no C runtime. Each run executes one workload and exits with its checksum.
 
 | workload | what it is |
@@ -17,10 +17,10 @@ and no C runtime. Each run executes one workload and exits with its checksum.
 | `api` | kernel32 and msvcrt calls in a frame's proportions between short stretches of the program's own work |
 
 Nothing in a checksum depends on who ran the program: no time, handle, thread
-id or address reaches one. `native/peload.c` is a small 32-bit Linux loader
+id or address reaches one. [`native/peload.c`](native/peload.c) is a small 32-bit Linux loader
 that maps the same executable at its base, binds its imports to functions of
 its own and runs it on the processor, so the reference checksums in
-`expected.json` are what the hardware computed from the very bytes the engine
+[`expected.json`](expected.json) are what the hardware computed from the very bytes the engine
 translates, and a run with `--native` also reports how many times slower the
 engine was.
 
@@ -37,7 +37,7 @@ and the cold code before it, which a program pays too.
 Node is not where the engine runs: Chromium's V8 is newer, inlines and tiers
 wasm differently, and the engine there is the product's bundle with its
 translation worker, so a change is judged by its figures from Chromium.
-`browser/` runs the same workloads there, each run in a fresh tab and a
+[`browser/`](browser/) runs the same workloads there, each run in a fresh tab and a
 dedicated worker of a production-style bundle (minified, the diagnostic
 instruments folded out):
 
@@ -56,9 +56,9 @@ shown alongside, which gives the loss against the hardware:
 Its runs differ by about a tenth from one rep to the next, where the runs at
 their own iterations differed by up to two thirds.
 
-`build.mjs` takes any number of checkouts, so an A/B is two bundles,
+[`build.mjs`](build.mjs) takes any number of checkouts, so an A/B is two bundles,
 `'{"base":"../base","new":"."}'`, and two configurations naming them; a
 configuration's `cork` is the translator's configuration, so a flag is A/B'd
 on one bundle. Both builds of every workload, two reps of each, take about a
 minute and a half. The browser is `CDP_TEST_CHROME` or the first one
-`tools/cdp_test` finds.
+[`tools/cdp_test`](../../../tools/cdp_test) finds.

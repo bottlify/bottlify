@@ -355,13 +355,13 @@ cork on its own, or to load another build with `createApp({ cork: { moduleUrl } 
 
 | Part | Files | What it does |
 | --- | --- | --- |
-| Decoder | `src/decode/` | Turns bytes into instructions. The opcode tables are written by hand: for each instruction the decoder knows its operands, its length, which flags it reads and writes, and how it can fault. An unknown opcode stops it, named. |
-| Region former | `src/region.js`, `src/helpers.js` | Forms a region from an entry. Recognises compiler helpers such as MSVC's `_ftol2` by their bytes and puts what they do in place of the call. |
-| Emitter | `src/emit/` | Turns a region into one WebAssembly function: integer instructions, flags, memory, the x87, MMX and SSE (`simd.js`), `lock`-prefixed instructions as atomics (`locked.js`), each in a file of its own. It works straight from the decoded instructions, with no intermediate language. |
-| Encoder | `src/wasm/` | Writes the WebAssembly bytes, and finds out what the engine supports (SIMD, tail calls). |
-| Runtime | `src/runtime/` | Everything around translation: the candidate queue, batches, translation workers (`translator.worker.js`), the shared memory finished code is kept in (`arena.js`), publishing, the entry hash, page flags (`pages.js`), dropping rewritten code, indirect call prediction, gathering small modules into big ones, the records kept in the translation store (`cache.js`), and what the executors of one process share about code (`shared-code.js`). |
-| Interpreters | `src/interp.js`, `src/fast.js`, `src/interp-wasm.c` | An interpreter in JavaScript for the very first steps, then one built from C into WebAssembly (in Bottlify; cork's own machine keeps to the JavaScript one). |
-| Instruction model | `src/ir.js`, `src/ir-x87.js`, `src/ir-simd.js` | A slow, simple account of what each instruction does. The JavaScript interpreter runs on it, and translated code is checked against it. |
+| Decoder | [`src/decode/`](src/decode/) | Turns bytes into instructions. The opcode tables are written by hand: for each instruction the decoder knows its operands, its length, which flags it reads and writes, and how it can fault. An unknown opcode stops it, named. |
+| Region former | [`src/region.js`](src/region.js), [`src/helpers.js`](src/helpers.js) | Forms a region from an entry. Recognises compiler helpers such as MSVC's `_ftol2` by their bytes and puts what they do in place of the call. |
+| Emitter | [`src/emit/`](src/emit/) | Turns a region into one WebAssembly function: integer instructions, flags, memory, the x87, MMX and SSE (`simd.js`), `lock`-prefixed instructions as atomics (`locked.js`), each in a file of its own. It works straight from the decoded instructions, with no intermediate language. |
+| Encoder | [`src/wasm/`](src/wasm/) | Writes the WebAssembly bytes, and finds out what the engine supports (SIMD, tail calls). |
+| Runtime | [`src/runtime/`](src/runtime/) | Everything around translation: the candidate queue, batches, translation workers (`translator.worker.js`), the shared memory finished code is kept in (`arena.js`), publishing, the entry hash, page flags (`pages.js`), dropping rewritten code, indirect call prediction, gathering small modules into big ones, the records kept in the translation store (`cache.js`), and what the executors of one process share about code (`shared-code.js`). |
+| Interpreters | [`src/interp.js`](src/interp.js), [`src/fast.js`](src/fast.js), [`src/interp-wasm.c`](src/interp-wasm.c) | An interpreter in JavaScript for the very first steps, then one built from C into WebAssembly (in Bottlify; cork's own machine keeps to the JavaScript one). |
+| Instruction model | [`src/ir.js`](src/ir.js), [`src/ir-x87.js`](src/ir-x87.js), [`src/ir-simd.js`](src/ir-simd.js) | A slow, simple account of what each instruction does. The JavaScript interpreter runs on it, and translated code is checked against it. |
 
 How cork sits in Bottlify (threads, the translation pool, several executors of one process):
 [`docs/architecture.md`](../../docs/architecture.md), section 5.
@@ -375,10 +375,10 @@ npm run test:integration -w @bottlify/cork  # the suites over the corpus
 node modules/cork/bench/run.mjs             # the benchmark (bench/README.md)
 ```
 
-- **Instruction corpus** (`npm run fetch:corpus`, its version pinned in `corpus-lock.json`): cases
+- **Instruction corpus** (`npm run fetch:corpus`, its version pinned in [`corpus-lock.json`](corpus-lock.json)): cases
   recorded on real processors. Each goes through the decoder, both interpreters and translated code,
   and the result has to match the hardware.
-- **Sequence corpus** (`src/testing/sequences-judge.js`): generated chains of instructions run on
+- **Sequence corpus** ([`src/testing/sequences-judge.js`](src/testing/sequences-judge.js)): generated chains of instructions run on
   the model and in translated code and are compared bit for bit.
 - **Gates**: every fast path has a slow twin, and the two are compared on generated programs.
   Translated against interpreted (`machine.test.js`), a worker's translation against one on the

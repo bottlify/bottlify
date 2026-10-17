@@ -52,8 +52,8 @@ npm run test:integration && npm run build
 npm run cdp:probe   # boots the engine in a real headless Chrome
 ```
 
-The modules are in `modules/`, development tools (the browser harness, import audits, benchmarks)
-in `tools/`. The launcher and the bottle interface live in a repository of their own,
+The modules are in [`modules/`](modules/), development tools (the browser harness, import audits, benchmarks)
+in [`tools/`](tools/). The launcher and the bottle interface live in a repository of their own,
 [`bottlify-ui`](https://github.com/bottlify/bottlify-ui).
 
 Bottlify is licensed under the MPL-2.0. Components and code from others are listed in

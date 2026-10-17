@@ -43,17 +43,17 @@ exactly: asm.js-style integers (`|0`, `>>>0`), doubles as the x87's arithmetic, 
 functions that are one x87 instruction, loops, module-level constants, exported typed-array
 tables, and one-`return` helpers that are inlined. Anything outside the subset is refused with
 its place in the source rather than approximated. The full rules are in the header of
-`compile.mjs`.
+[`compile.mjs`](compile.mjs).
 
 ## Files
 
 | file | what |
 | --- | --- |
-| `compile.mjs` | the compiler: the subset, register allocation, the code |
-| `x86.mjs` | the instructions it emits and the assembler that lays them out |
-| `equivalence.mjs` | runs a function both ways (JavaScript handler and x86 on cork's test machine) and compares results, x87 stack, memory and what a callee owes its caller |
-| `model.mjs` | the x87's model of a module under single precision, the reference there |
-| `compile.test.js` | the compiler's own tests |
+| [`compile.mjs`](compile.mjs) | the compiler: the subset, register allocation, the code |
+| [`x86.mjs`](x86.mjs) | the instructions it emits and the assembler that lays them out |
+| [`equivalence.mjs`](equivalence.mjs) | runs a function both ways (JavaScript handler and x86 on cork's test machine) and compares results, x87 stack, memory and what a callee owes its caller |
+| [`model.mjs`](model.mjs) | the x87's model of a module under single precision, the reference there |
+| [`compile.test.js`](compile.test.js) | the compiler's own tests |
 | `../build-guest-code.mjs` | compiles every `@guestCode` module under `src/` |
 
 Binding at run time is `guestEntry` in `src/layers/win32/msvcrt/guest-code.js`: an export
@@ -62,7 +62,7 @@ whose code is the compiled bytes and whose handler is the JavaScript.
 ## Workflow
 
 1. Write or change the `@guestCode` function.
-2. `npm run build` (or `node scripts/build-guest-code.mjs` in `modules/core`) rewrites the
+2. `npm run build` (or `node scripts/build-guest-code.mjs` in [`modules/core`](../..)) rewrites the
    `*.x86.js` modules. `node scripts/build-guest-code.mjs --check` fails when one is stale.
 3. The module's test compiles the source again, fails when the committed bytes differ, and runs
    `equivalence` over random inputs and edge cases under several control words. See

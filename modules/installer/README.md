@@ -216,12 +216,12 @@ Its routes, all authenticated with the token:
 `publish()`'s own `manifest` option passes straight through to that file, field
 for field, so a title's own launch arguments travel with it: `commandLine` is
 the arguments the program is started with, appended after the quoted image
-path (`docs/core/api.md`'s `commandLine` option), for example
+path ([`docs/core/api.md`](../../docs/core/api.md)'s `commandLine` option), for example
 `"commandLine": "+set s_realTimeDecoding 0"`, a setting a program only reads
 from its command line, set there instead of by editing the bundle.
 
 `windows` is the Windows the bottle runs under, optional: one of `win2000`,
-`winxp`, `win7` and `win10` (`docs/core/api.md`'s `windows` option), and absent
+`winxp`, `win7` and `win10` ([`docs/core/api.md`](../../docs/core/api.md)'s `windows` option), and absent
 means the engine's default, XP with its third service pack. Whatever starts the
 bottle passes it to `createApp`, and the install itself runs under the same one
 (`prefixOptions(media, { windows })`), since an installer acts on the Windows it
