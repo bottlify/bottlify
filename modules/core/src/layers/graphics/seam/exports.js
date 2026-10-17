@@ -346,7 +346,8 @@ export function createGraphicsLibraries(
     const vulkan = built('vulkan-1.dll',
         ()=>createVulkanSeam({ graphics, memory, divergence, resolution }));
     const d3d7 = built('DDRAW.dll', ()=>createDirect3D7Seam({
-        publisher, memory, render, callGuest, currentThread, scratch,
+        publisher, memory, render, callGuest, currentThread, scratch, divergence,
+        allocate: guestAllocate, allocateCode: guestAllocateCode, traps: new Set(guestTraps),
     }));
     const d3dLegacy = built('DDRAW.dll', ()=>createLegacyDirect3DSeam({
         publisher, memory, d3d7: d3d7.shared, callGuest, currentThread, scratch,

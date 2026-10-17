@@ -39,6 +39,36 @@ import {
 } from '../d3d7/constants.js';
 import { DDPF_ALPHAPIXELS, DDPF_RGB } from '../ddraw/constants.js';
 import { createDirect3D7 } from '../d3d7/device.js';
+import { D3D7_COMMANDS } from '../d3d7/commands.js';
+import { D3DTSS_MAX } from '../d3d7/constants.js';
+import { D3DTSS } from '../d3d8/constants.js';
+import { createDefaultStageStates } from '../d3d8/stagestates.js';
+import {
+    DRAWABLE_MIRRORS, RENDER_STATE_MIRROR, TRANSFORM_MIRROR_7, VIEWPORT_GUARD_8, VIEWPORT_MIRROR,
+    commandCode, createShadow, getRenderStateCode, getTextureStageStateCode, getViewportCode,
+    settledAfter, stageStateMirror,
+} from './shadow.js';
+
+/**
+ * The stage states Direct3D 7 takes, as a mask: those a stage has, through
+ * TEXTURETRANSFORMFLAGS.
+ */
+const STAGE_STATE_TYPES_7 = [...createDefaultStageStates(0).keys()]
+    .filter(type=>type >= 1 && type <= D3DTSS_MAX && type !== D3DTSS.ADDRESSW - 13)
+    .reduce((mask, type)=>mask | 1 << type, 0) >>> 0;
+
+/**
+ * What the command routines keep in the block beside the record: the values
+ * the getters in the guest read, and what later calls are checked against.
+ */
+export const COMMAND_MIRRORS = {
+    SetRenderState: [...RENDER_STATE_MIRROR],
+    SetTextureStageState: stageStateMirror(STAGE_STATE_TYPES_7),
+    SetTransform: [...TRANSFORM_MIRROR_7],
+    SetViewport: [...VIEWPORT_GUARD_8, ...VIEWPORT_MIRROR],
+    BeginScene: [...DRAWABLE_MIRRORS.BeginScene],
+    EndScene: [...DRAWABLE_MIRRORS.EndScene],
+};
 import { loadTexture } from '../d3d7/load.js';
 import { D3DVOP, processVertices } from '../d3d7/process.js';
 import { decodeFvf } from '../webgpu/internal/vertexformat.js';
@@ -128,15 +158,108 @@ export function guidBytes(guid){
  *              => Promise<number>} [callGuest]
  * @property {() => any} [currentThread]
  * @property {{ allocate: (bytes: number) => number }} [scratch]
+ * @property {(bytes: number) => number} [allocate]  Guest memory, for a device's block
+ *     of the state its setters write without leaving the guest, and its command ring.
+ * @property {(bytes: number) => number} [allocateCode]  Pages of their own for those
+ *     setters' code.
+ * @property {Set<string>} [traps]  Guest routines kept as traps, by name or group
+ *     (`getters`, `ring`).
+ * @property {(api: string, detail: string) => void} [divergence]
  */
 
 /**
  * @param {Direct3D7Deps} deps
  */
 export function createDirect3D7Seam(
-    { publisher, memory, render, callGuest, currentThread, scratch })
+    { publisher, memory, render, callGuest, currentThread, scratch, allocate, allocateCode,
+        traps = new Set(), divergence })
 {
     const fields = createFields(memory);
+
+    /**
+     * Each device's block, its command ring and the routines over them
+     * (`shadow.js`): made with the device where there is guest memory for it.
+     *
+     * @type {WeakMap<object, ReturnType<typeof createShadow>>}
+     */
+    const shadows = new WeakMap();
+    /** @param {any} device */
+    const shadowOf = device=>(device ? shadows.get(device) : undefined);
+    /** @param {(at: number) => Uint8Array} code */
+    const placeCode = code=>{
+        // Sized by a throwaway rendering: the bytes depend on where they
+        // land only through relative jumps, never in length.
+        const at = (allocateCode ?? /** @type {(bytes: number) => number} */ (allocate))(
+            code(0).length);
+        memory.writeMemory(at, code(at));
+        return at;
+    };
+    /**
+     * The guest routines a device offers, less those `traps` keeps as traps:
+     * by name, or by group -- `getters`, `ring`.
+     *
+     * @type {Record<string, (builder: { trap: number }) => number>}
+     */
+    const deviceGuests = allocate
+        ? Object.fromEntries(Object.entries({
+            GetRenderState: (/** @type {{ trap: number }} */ { trap })=>placeCode(at=>
+                getRenderStateCode(at, trap)),
+            GetTextureStageState: (/** @type {{ trap: number }} */ { trap })=>placeCode(at=>
+                getTextureStageStateCode(at, trap, STAGE_STATE_TYPES_7)),
+            GetViewport: (/** @type {{ trap: number }} */ { trap })=>placeCode(at=>
+                getViewportCode(at, trap)),
+            ...Object.fromEntries(Object.entries(D3D7_COMMANDS.COMMANDS).map(([name, shape])=>[
+                name, (/** @type {{ trap: number }} */ { trap })=>placeCode(at=>commandCode(at,
+                    trap, { ...shape, slot: D3D7_COMMANDS.commandSlot(name),
+                        mirror: /** @type {Record<string, any>} */ (COMMAND_MIRRORS)[name] }))])),
+        }).filter(([name])=>!traps.has(name)
+            && !traps.has(name.startsWith('Get') ? 'getters' : 'ring')))
+        : {};
+    /**
+     * What a call the host made changed of what the block mirrors, brought
+     * to the block after it: a set the host makes -- its routine kept as a
+     * trap, the slow path up -- is one the guest's getters read too. A state
+     * block being recorded captures what is set rather than changing it: the
+     * guest's setters give way to the host until it ends.
+     *
+     * @type {Record<string, (shadow: ReturnType<typeof createShadow>, args: number[],
+     *     hr: number) => void>}
+     */
+    const MIRRORED = {
+        SetRenderState: (shadow, [state])=>shadow.remirror({ renderStates: [state >>> 0] }),
+        SetTransform: (shadow, [type])=>shadow.refreshTransform(type >>> 0),
+        MultiplyTransform: (shadow, [type])=>shadow.refreshTransform(type >>> 0),
+        SetTextureStageState: (shadow, [stage, type])=>shadow.remirror({
+            stageStates: [(stage & 0xffffff) << 8 | type & 0xff] }),
+        SetViewport: shadow=>shadow.remirror({ viewport: true }),
+        SetRenderTarget: shadow=>shadow.remirror({ viewport: true }),
+        ApplyStateBlock: shadow=>shadow.remirror(),
+        BeginStateBlock: (shadow, args, hr)=>{
+            if (hr === D3D_OK)
+            {
+                shadow.slowPath(true);
+            }
+        },
+        EndStateBlock: shadow=>shadow.slowPath(false),
+    };
+    /**
+     * Every method first makes what the guest wrote into the ring, and after
+     * it what the routines check their calls against is the device's again.
+     *
+     * @param {Record<string, any>} methods
+     * @returns {Record<string, any>}
+     */
+    const synced = methods=>Object.fromEntries(Object.entries(methods)
+        .map(([name, method])=>[name, (/** @type {any} */ device, /** @type {number[]} */ args)=>{
+            const shadow = shadowOf(device);
+            const hr = settledAfter(shadow, ()=>method(device, args));
+            const after = MIRRORED[name];
+            if (shadow && after)
+            {
+                after(shadow, args, typeof hr === 'number' ? hr : D3D_OK);
+            }
+            return hr;
+        }]));
 
     /** One D3D7 object per DirectDraw object, made when first asked for. */
     /** @type {WeakMap<object, any>} */
@@ -1090,7 +1213,7 @@ export function createDirect3D7Seam(
     };
 
     const deviceInterfaces = [
-        describe(IID_IDirect3DDevice7, IDIRECT3DDEVICE7_SLOTS, deviceMethods),
+        describe(IID_IDirect3DDevice7, IDIRECT3DDEVICE7_SLOTS, synced(deviceMethods), deviceGuests),
     ];
 
     // A surface handed back here was made through IDirectDraw7 and published
@@ -1156,6 +1279,35 @@ export function createDirect3D7Seam(
             }
             madeThrough.set(made.device, root);
             lastDevice = made.device;
+            if (allocate)
+            {
+                // The block, which the guest methods find one word past the
+                // interface pointer: made before the interface is published,
+                // which is when that word is written.
+                const device = made.device;
+                const shadow = createShadow({
+                    allocate,
+                    readMemory: memory.windowMemory ?? memory.readMemory,
+                    readU32: memory.readU32,
+                    writeMemory: memory.writeMemory,
+                    device,
+                    divergence,
+                    name: 'IDirect3DDevice7',
+                    still: work=>{
+                        if (typeof device.whileStill === 'function')
+                        {
+                            device.whileStill(work);
+                            return;
+                        }
+                        work();
+                    },
+                    commands: { take: records=>device.commands(records,
+                        D3D7_COMMANDS.commandObjects(records, publisher.objectAt)) },
+                });
+                shadows.set(device, shadow);
+                device.guestState = ()=>shadow.address();
+                device.settleGuestRefs = ()=>shadow.sync();
+            }
             fields.writeU32(out >>> 0,
                 publisher.publish(made.device, deviceInterfaces, IID_IDirect3DDevice7));
             return D3D_OK;

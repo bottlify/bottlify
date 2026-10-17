@@ -27,6 +27,14 @@ import { COMMAND_MIRRORS as MIRRORS_9 } from './d3d9.js';
 import { COMMAND_MIRRORS as MIRRORS_8 } from './d3d8.js';
 import * as D3D9 from '../d3d9/commands.js';
 import { D3D8_COMMANDS } from '../d3d8/commands.js';
+import { D3D7_COMMANDS } from '../d3d7/commands.js';
+import { COMMAND_MIRRORS as MIRRORS_7 } from './d3d7.js';
+import { createDirect3D7 } from '../d3d7/device.js';
+import { DEVICE_IDS as DEVICE_IDS_7 } from '../d3d7/constants.js';
+import { createDirectDraw } from '../ddraw/objects.js';
+import {
+    DDSCAPS_3DDEVICE, DDSCAPS_OFFSCREENPLAIN, DDSCL_NORMAL, DDSD_CAPS, DDSD_HEIGHT, DDSD_WIDTH,
+} from '../ddraw/constants.js';
 import { createDirect3D9 } from '../d3d9/device.js';
 import { createDirect3D8 } from '../d3d8/device.js';
 import { D3DDECLTYPE, D3DDECLUSAGE } from '../d3d9/declaration.js';
@@ -850,3 +858,47 @@ test('Direct3D 8: the routines keep what a draw needs as the device does, call a
         ['EndScene', [], 'trap'],
     ]);
 });
+
+/** Direct3D 7: a HAL device on a target of its own, through a DirectDraw object. */
+const device7 = ()=>{
+    const root = createDirectDraw({ version: 7, screenWidth: 64, screenHeight: 64 });
+    root.setCooperativeLevel(0x00010044, DDSCL_NORMAL);
+    const target = root.createSurface({ flags: DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT,
+        caps: DDSCAPS_3DDEVICE | DDSCAPS_OFFSCREENPLAIN, width: 64, height: 64 });
+    assert.equal(target.hr, D3D_OK);
+    const made = createDirect3D7(root).createDevice(DEVICE_IDS_7.HAL, target.surface);
+    assert.equal(made.hr, D3D_OK);
+    return made.device;
+};
+
+test('Direct3D 7: every call the command ring answers for in the guest is one the device takes',
+    ()=>{
+        const common = shared(()=>{});
+        gate({ ...D3D7_COMMANDS, mirrors: MIRRORS_7, device: device7 }, {
+            SetRenderState: common.SetRenderState,
+            // This version's own numbers: WORLD is 1 and WORLD1..3 4..6, and 256 is none.
+            SetTransform: [
+                { label: 'WORLD', args: [1, 'data'], data: IDENTITY },
+                { label: 'VIEW', args: [2, 'data'], data: IDENTITY },
+                { label: 'WORLD3', args: [6, 'data'], data: IDENTITY },
+                { label: 'TEXTURE7', args: [23, 'data'], data: IDENTITY },
+                { label: 'Direct3D 8\'s WORLD', args: [256, 'data'], data: IDENTITY },
+                { label: 'a type below TEXTURE0', args: [7, 'data'], data: IDENTITY },
+                { label: 'none', args: [0, 'data'], data: IDENTITY },
+            ],
+            SetTextureStageState: [
+                ...common.SetTextureStageState,
+                // Stored in its own numbering, read back in the program's.
+                { label: 'MAGFILTER', args: [0, 16, 3] },
+                { label: 'MIPFILTER', args: [1, 18, 0] },
+                { label: 'past TEXTURETRANSFORMFLAGS', args: [0, 25, 0] },
+            ],
+            SetMaterial: common.SetMaterial,
+            SetViewport: common.SetViewport,
+            SetLight: common.SetLight,
+            LightEnable: common.LightEnable,
+            SetClipPlane: common.SetClipPlane,
+            BeginScene: common.BeginScene,
+            EndScene: common.EndScene,
+        });
+    });

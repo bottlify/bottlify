@@ -831,6 +831,8 @@ const invalidTail = popped=>[
 
 /** The transform types below WORLD a device answers for: VIEW, PROJECTION, TEXTURE0..7. */
 const ANSWERED_TRANSFORMS = (1 << 2 | 1 << 3 | 0xff << 16) >>> 0;
+/** Direct3D 7's: WORLD, VIEW, PROJECTION, WORLD1..3 and TEXTURE0..7. */
+const TRANSFORMS_7 = (0x7e | 0xff << 16) >>> 0;
 
 /**
  * HRESULT GetTransform(this, D3DTRANSFORMSTATETYPE type, D3DMATRIX *), as
@@ -1631,6 +1633,23 @@ export const TRANSFORM_MIRROR = Object.freeze([
     [0xf3, 0xa5],                                                // rep movsd
     [0x89, 0xd1],                                                // mov ecx, edx
     [0x5f, 0x5e],                                                // pop edi; pop esi
+]);
+
+/**
+ * The same for Direct3D 7's SetTransform: its types are its own -- WORLD 1,
+ * WORLD1..3 4..6, VIEW 2, PROJECTION 3, TEXTURE0..7 16..23 -- and each goes
+ * into the slot of its number, as the shadow reads them back
+ * (`transformType`); any other type is the host's to refuse.
+ */
+export const TRANSFORM_MIRROR_7 = Object.freeze([
+    [0x8b, 0x44, 0x24, 0x08],                                    // mov eax, [esp+8]
+    [0x3d, ...dword(WORLD_SLOT)],                                // cmp eax, 24
+    { jcc: 0x73, to: 'out', near: true },                        // jae out
+    [0xba, ...dword(TRANSFORMS_7)],                              // mov edx, imm32
+    [0x0f, 0xa3, 0xc2],                                          // bt edx, eax
+    { jcc: 0x73, to: 'out', near: true },                        // jnc out
+    ...TRANSFORM_MIRROR.slice(TRANSFORM_MIRROR.findIndex(part=>'label' in part
+        && part.label === 'slot') + 1),
 ]);
 
 /** The same for SetViewport: the six dwords into the block. */

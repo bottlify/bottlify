@@ -34,6 +34,7 @@ import {
     D3DDEVICEDESC7, D3DPRIMCAPS, D3DRECT, D3DVERTEXBUFFERDESC, D3DVIEWPORT7,
 } from './structs.js';
 import { guidBytes } from './d3d7.js';
+import { DRAW, SHADOW } from './shadow.js';
 import { createDirectDraw } from '../ddraw/objects.js';
 import { DDSURFACEDESC2, writeSurfaceDesc } from '../ddraw/structs.js';
 import {
@@ -70,7 +71,7 @@ const slot = (slots, name)=>{
 
 /** A flat address space with the bridge's vtable publisher over it. */
 function machine(){
-    const bytes = new Uint8Array(1 << 20);
+    const bytes = new Uint8Array(4 << 20);
     let next = 0x100;
     const memory = {
         /** @param {number} at @param {number} length */
@@ -136,6 +137,33 @@ function machine(){
             assert.ok(entry, `slot ${index} has an implementation`);
             return entry.fn.handler([pointer, ...args]) >>> 0;
         },
+        /**
+         * Whether a slot holds guest code rather than a trap.
+         *
+         * @param {number} pointer @param {number} index
+         */
+        isGuest: (pointer, index)=>!registered.has(memory.readU32(memory.readU32(pointer)
+            + index * 4)),
+        /**
+         * The host's path of a method whose slot holds guest code: the trap
+         * its routine falls back to, found by its name.
+         *
+         * @param {number} pointer @param {string} name @param {number[]} args
+         */
+        trap(pointer, name, args = []){
+            const entry = [...registered.values()].find(one=>one.name.endsWith(`::${name}`));
+            assert.ok(entry, `${name} has a trap`);
+            return entry.fn.handler([pointer, ...args]) >>> 0;
+        },
+        /** Guest memory for the device's block, its ring and its routines, apart from the rest. */
+        allocateGuest: (()=>{
+            let guestNext = 0x200000;
+            return (/** @type {number} */ size)=>{
+                const at = guestNext;
+                guestNext += size + 0xfff & ~0xfff;
+                return at;
+            };
+        })(),
         /** @param {number} pointer @param {number} index */
         argBytesOf(pointer, index){
             const table = memory.readU32(pointer);
@@ -158,8 +186,12 @@ function machine(){
     };
 }
 
-/** The whole assembly, as a program reaches it: DDRAW.dll and what it leads to. */
-function seamed(){
+/**
+ * The whole assembly, as a program reaches it: DDRAW.dll and what it leads to.
+ *
+ * @param {{ guest?: boolean }} [made]  `guest`: guest memory for a device's block and routines
+ */
+function seamed(made = {}){
     const box = machine();
     /** @type {any[]} */
     const roots = [];
@@ -178,11 +210,12 @@ function seamed(){
             },
             available: ()=>false,
         },
-        memory: box.services,
+        memory: made.guest ? { ...box.services, readU32: box.memory.readU32 } : box.services,
         publishInterface: box.publishInterface,
         screen: ()=>SCREEN,
         publisher,
         present: ()=>{},
+        allocate: made.guest ? box.allocateGuest : undefined,
     });
     const ddrawDll = libraries.libraries['DDRAW.dll'];
 
@@ -1019,4 +1052,43 @@ test('EnumZBufferFormats offers depth alone and depth with stencil', async()=>{
         'and the flag is what makes it a depth format rather than a colour one');
     assert.equal(h.d3d('EnumZBufferFormats', [riid, 0, 0]), DDERR_INVALIDPARAMS >>> 0);
     assert.equal(h.root.release('IDirectDraw7'), 0);
+});
+
+test('with guest memory, a device\'s setters and getters run in the guest, and what the host does'
+    + ' is in the block they read', ()=>{
+    // The routines themselves run on the processor in the ring's gates; here
+    // the device is made with its block and its host paths keep it.
+    const h = seamed({ guest: true });
+    const ddraw = h.create7();
+    const d3d = h.direct3D(ddraw);
+    const target = h.surface(ddraw);
+    const { hr, device } = h.createDevice(d3d, target);
+    assert.equal(hr, D3D_OK);
+    for (const name of ['SetRenderState', 'SetTransform', 'SetTextureStageState', 'SetViewport',
+        'LightEnable', 'BeginScene', 'EndScene', 'GetRenderState', 'GetTextureStageState',
+        'GetViewport'])
+    {
+        assert.ok(h.box.isGuest(device, slot(IDIRECT3DDEVICE7_SLOTS, name)),
+            `${name} is guest code`);
+    }
+    for (const name of ['SetTexture', 'Clear', 'DrawPrimitive', 'GetTransform'])
+    {
+        assert.ok(!h.box.isGuest(device, slot(IDIRECT3DDEVICE7_SLOTS, name)), `${name} is a trap`);
+    }
+    const block = h.box.memory.readU32(device + 4);
+    assert.notEqual(block, 0, 'the block is one word past the interface');
+    // D3DRENDERSTATE_ZENABLE (7) set on the host's path is the block's at once.
+    assert.equal(h.box.trap(device, 'SetRenderState', [7, 0]), D3D_OK);
+    assert.equal(h.box.memory.readU32(block + SHADOW.RENDER_STATES + 7 * 4), 0);
+    assert.equal(h.box.trap(device, 'SetRenderState', [7, 1]), D3D_OK);
+    assert.equal(h.box.memory.readU32(block + SHADOW.RENDER_STATES + 7 * 4), 1);
+    // A scene begun on the host is one the guest's EndScene may end.
+    assert.equal(h.box.trap(device, 'BeginScene'), D3D_OK);
+    assert.equal(h.box.memory.readU32(block + SHADOW.DRAWABLE) & DRAW.SCENE, DRAW.SCENE);
+    assert.equal(h.box.trap(device, 'EndScene'), D3D_OK);
+    assert.equal(h.box.memory.readU32(block + SHADOW.DRAWABLE) & DRAW.SCENE, 0);
+    // The target's size, which a viewport in the guest is checked against.
+    assert.deepEqual([h.box.memory.readU32(block + SHADOW.TARGET_WIDTH),
+        h.box.memory.readU32(block + SHADOW.TARGET_HEIGHT)], [8, 8]);
+    assert.equal(h.release(device), 0);
 });

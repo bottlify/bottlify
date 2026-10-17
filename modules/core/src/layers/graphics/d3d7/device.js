@@ -43,6 +43,8 @@ import {
     DDLOCK_NOOVERWRITE, DDLOCK_READONLY, DEVICE_IDS, transformStateOf,
 } from './constants.js';
 import { DEVICE_DESCRIPTIONS } from './caps.js';
+import { D3D7_COMMANDS } from './commands.js';
+import { DRAW } from '../seam/shadow.js';
 import { D3DCLEAR, D3DLOCK, D3DFMT_INDEX, D3DTSS } from '../d3d8/constants.js';
 import { createDefaultRenderStates } from '../d3d8/renderstates.js';
 import { createDefaultStageStates } from '../d3d8/stagestates.js';
@@ -109,6 +111,8 @@ const FILTER_NUMBERING = Object.freeze({
  *     asking (app.debug.dumpFrames), as Direct3D 8 and 9 devices take it
  * @property {'legacy' | 'current'} [driverRules]  The renderer's (`createRenderer`).
  * @property {(ddraw: any, services: RenderServices) => any} [remote]
+ * @property {(api: string, detail: string) => void} [divergence]  told of a call the
+ *     guest made in the command ring that the device refused
  *     Makes the Direct3D 7 object in this one's place, whose devices draw
  *     elsewhere (`remote/d3d7.js`).
  */
@@ -922,6 +926,49 @@ export function createDirect3D7(ddraw, services = {}){
             GetCaps(out){
                 out.caps = { ...description.caps };
                 return D3D_OK;
+            },
+
+            /**
+             * The calls the guest wrote into the command ring, made in order
+             * (`d3d7/commands.js`). One the device refuses is the guest's
+             * mistake: its routine answered D3D_OK.
+             *
+             * @param {Uint8Array} records @param {readonly any[]} [objects]
+             */
+            commands(records, objects = []){
+                renderer?.pause(true);
+                try
+                {
+                    return D3D7_COMMANDS.runCommands(device, records, objects, (name, hr)=>
+                        services.divergence?.('IDirect3DDevice7::commands', name === 'commands'
+                            ? 'a command ring held a record its routines could not have written'
+                            : `${name} made in the guest was answered D3D_OK; the device answers ${
+                                hr.toString(16)}`));
+                }
+                finally
+                {
+                    renderer?.pause(false);
+                }
+            },
+
+            /**
+             * What the command routines check a call against (`seam/shadow.js`):
+             * a scene, a depth surface -- of which this version's Clear asks
+             * no more, stencil or not -- the target's size and the planes.
+             *
+             * @returns {import('../seam/shadow.js').ShadowRingState}
+             */
+            ringState(){
+                const depth = attachedDepth(renderTarget) !== null;
+                return {
+                    drawable: (inScene ? DRAW.SCENE : 0)
+                        | (depth ? DRAW.DEPTH | DRAW.STENCIL : 0),
+                    targetWidth: renderTarget.width,
+                    targetHeight: renderTarget.height,
+                    clipPlanes: 32,
+                    taken: [],
+                    cooperative: 0,
+                };
             },
 
             BeginScene(){
