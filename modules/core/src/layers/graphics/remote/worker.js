@@ -577,8 +577,11 @@ export function serveGraphics(scope, deps){
                     if (data.freeze)
                     {
                         frozen = setInterval(()=>liveDump.replayLast?.(liveDump.maxDraws), 150);
-                        scope.postMessage({ type: 'frozen',
-                            ...(liveDump.shownDraws?.() ?? { lines: [], sceneDraws: 0 }) });
+                        // Lines and a count only: the device's answer also holds the
+                        // scene's surface, a GPU texture no message can carry.
+                        const { lines, sceneDraws } = liveDump.shownDraws?.()
+                            ?? { lines: [], sceneDraws: 0 };
+                        scope.postMessage({ type: 'frozen', lines, sceneDraws });
                     }
                 }
                 break;
