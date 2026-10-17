@@ -19,7 +19,8 @@
  *   query's count is the GPU's: once the host has asked for it, a poll is
  *   S_FALSE in the guest until the host writes it into the block, and the
  *   count after (`QUERY.STATE`) -- a program that waits for a count polls
- *   millions of times a minute.
+ *   millions of times a minute -- but for one poll in so many, which is the
+ *   host's (`QUERY.BUDGET`).
  *
  * The offsets are the blocks' (`shadow.js`); the test holds them to it.
  */
@@ -35,9 +36,10 @@
 const COOPERATIVE = 5352;
 /** `QUERY.TYPE`. */
 const QUERY_TYPE = 4;
-/** `QUERY.STATE` and `QUERY.COUNT`. */
+/** `QUERY.STATE`, `QUERY.COUNT` and `QUERY.BUDGET`. */
 const QUERY_STATE = 8;
 const QUERY_COUNT = 12;
+const QUERY_BUDGET = 16;
 const D3DQUERYTYPE_EVENT = 8;
 const D3DQUERYTYPE_OCCLUSION = 9;
 /** `QUERY.STATE`: asked for and not back; back. */
@@ -137,6 +139,13 @@ export function QueryGetData({ u32, setU32, host }, self, data, size, flags){
         const state = u32(block + QUERY_STATE);
         if (state === COUNT_ASKED)
         {
+            // Every so many polls one is the host's, which looks for the count.
+            const left = u32(block + QUERY_BUDGET);
+            if (left === 0)
+            {
+                return host();
+            }
+            setU32(block + QUERY_BUDGET, left - 1);
             return S_FALSE;
         }
         if (state !== COUNT_BACK)

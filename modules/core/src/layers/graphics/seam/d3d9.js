@@ -77,7 +77,7 @@ import {
     STRETCH_GUARD, compiledAt, createShadow, getRenderStateCode,
     getSamplerStateCode, getSurfaceDescCode, getSurfaceLevelCode, getTextureStageStateCode,
     getTransformCode, getViewportCode, lockCode, settledAfter, stageStateMirror,
-    unlockCode, HOST_MIRRORS, QUERY, appendCommand, guestWords,
+    unlockCode, HOST_MIRRORS, POLLS_BETWEEN, QUERY, appendCommand, guestWords,
 } from './shadow.js';
 import { COMPILED as IN_GUEST } from './inguest.x86.js';
 import { D3DTSS9 } from '../d3d9/samplerstates.js';
@@ -1194,7 +1194,8 @@ export function createDirect3D9Seam(
     const queryBlocks = new WeakMap();
     /**
      * An occlusion query's count as its block tells the guest's GetData
-     * (`QUERY.STATE`): 0 the host's, 1 asked for, 2 back with `count`.
+     * (`QUERY.STATE`): 0 the host's, 1 asked for -- so many polls answered
+     * in the guest before one comes here again -- 2 back with `count`.
      *
      * @param {any} query @param {number} state @param {number} [count]
      */
@@ -1203,6 +1204,7 @@ export function createDirect3D9Seam(
         if (block)
         {
             fields.writeU32(block + QUERY.COUNT, count >>> 0);
+            fields.writeU32(block + QUERY.BUDGET, state === 1 ? POLLS_BETWEEN : 0);
             fields.writeU32(block + QUERY.STATE, state);
         }
     };

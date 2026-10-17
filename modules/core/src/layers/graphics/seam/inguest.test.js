@@ -36,6 +36,7 @@ test('the offsets the guest code reads are the blocks\'', async()=>{
     assert.equal(literal('QUERY_TYPE'), QUERY.TYPE);
     assert.equal(literal('QUERY_STATE'), QUERY.STATE);
     assert.equal(literal('QUERY_COUNT'), QUERY.COUNT);
+    assert.equal(literal('QUERY_BUDGET'), QUERY.BUDGET);
     assert.equal(literal('FLAG_SLOW_PATH'), FLAG_SLOW_PATH);
 });
 
@@ -63,6 +64,7 @@ test('a query\'s methods in the guest answer and write as their JavaScript', ()=
         // An occlusion count the host's, asked for, back, or a state there is not.
         view.setUint32(0x10 + QUERY.STATE, [0, 1, 2, 2, 3][next() % 5], true);
         view.setUint32(0x10 + QUERY.COUNT, next(), true);
+        view.setUint32(0x10 + QUERY.BUDGET, [0, 1, 2, 128][next() % 4], true);
         view.setUint32(0x40, next(), true);
         const data = next() % 6 === 0 ? 0 : OUT;
         const size = [0, 1, 3, 4, 4, 8, 0xffffffff][next() % 7];

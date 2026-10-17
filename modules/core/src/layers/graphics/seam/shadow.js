@@ -208,8 +208,19 @@ export const QUERY = {
      */
     STATE: 8,
     COUNT: 12,
-    SIZE: 16,
+    /**
+     * How many more polls the guest answers S_FALSE before one goes to the
+     * host, which looks for the count as it did before (`POLLS_BETWEEN`).
+     */
+    BUDGET: 16,
+    SIZE: 20,
 };
+/**
+ * The polls of an occlusion count asked for that the guest answers between
+ * two the host does: the host's look is what brings a count in where the
+ * guest alone spun on S_FALSE -- the Gothic 3 demo stopped there.
+ */
+export const POLLS_BETWEEN = 128;
 
 /**
  * A function `scripts/guest-code` compiled, as bytes placed at `at`: its
@@ -3503,7 +3514,7 @@ export function createShadow(deps){
             {
                 return 0;
             }
-            deps.writeMemory(block, dwordsBytes([0, query.type, 0, 0]));
+            deps.writeMemory(block, dwordsBytes([0, query.type, 0, 0, 0]));
             queryBlocks.set(query, block);
             return block;
         },

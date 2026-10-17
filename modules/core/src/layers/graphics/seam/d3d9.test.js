@@ -22,7 +22,9 @@ import assert from 'node:assert/strict';
 import { createVtables } from '../../bridge/internal/vtable.js';
 import { createPublisher } from './com.js';
 import { createDirect3D9Seam } from './d3d9.js';
-import { BUFFER, DRAW, FLAG_STALE, SHADOW, SURFACE, transformSlot } from './shadow.js';
+import {
+    BUFFER, DRAW, FLAG_STALE, POLLS_BETWEEN, SHADOW, SURFACE, transformSlot,
+} from './shadow.js';
 import * as guestCode from './inguest.js';
 import { FPU_SETUP } from './fpu.js';
 import { commandSlot } from '../d3d9/commands.js';
@@ -2337,6 +2339,47 @@ test('the guest\'s TestCooperativeLevel and a query\'s methods answer and write 
     assert.ok(inGuest > 800, `${inGuest} answered in the guest`);
     assert.equal(guestCode.TestCooperativeLevel(guest, device), HANDED,
         'a lost device is the host\'s');
+});
+
+test('an occlusion count that does not come leaves one poll in so many to the host', ()=>{
+    // The Gothic 3 demo stopped with every poll S_FALSE in the guest: the
+    // count it waited for never reached the block. The host's look at a poll
+    // is what brought it in before; so many polls on, one is the host's again.
+    const h = seamed({ shadow: true });
+    const root = h.create();
+    const { device } = h.createDevice(root);
+    const memory = h.box.memory;
+    const HANDED = -1;
+    const guest = /** @type {any} */ ({
+        u32: (/** @type {number} */ at)=>memory.readU32(at),
+        setU32: (/** @type {number} */ at, /** @type {number} */ value)=>
+            memory.writeU32(at, value >>> 0),
+        host: ()=>HANDED,
+    });
+    const out = 0x3200;
+    assert.equal(h.device(device, 'CreateQuery', [D3DQUERYTYPE.OCCLUSION, out]), D3D_OK);
+    const query = memory.readU32(out);
+    const object = h.publisher.objectAt(query);
+    let hostPolls = 0;
+    object.GetData = ()=>{
+        hostPolls++;
+        object.countsLater = true;
+        return S_FALSE;
+    };
+    const data = 0x3300;
+    assert.equal(h.box.trap(query, 'GetData', [data, 4, 0]), S_FALSE);
+    for (let round = 0; round < 3; round++)
+    {
+        let inGuest = 0;
+        while (guestCode.QueryGetData(guest, query, data, 4, 0) === S_FALSE)
+        {
+            inGuest++;
+            assert.ok(inGuest <= POLLS_BETWEEN, 'never more than so many in a row');
+        }
+        assert.equal(inGuest, POLLS_BETWEEN);
+        assert.equal(h.box.trap(query, 'GetData', [data, 4, 0]), S_FALSE, 'then the host\'s');
+    }
+    assert.equal(hostPolls, 4);
 });
 
 test('an occlusion count told as it comes is polled in the guest as the host answers it, S_FALSE'
