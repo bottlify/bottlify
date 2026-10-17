@@ -297,6 +297,49 @@ test('a run keeps in its store how many executors its threads opened, and the ne
     assert.deepEqual(kept(), [first], 'and kept, not lowered');
 });
 
+test('a worker its main thread waits on each round, both computing as much between, runs on its'
+    + ' own executor and is not kept on the process\'s', async()=>{
+    // A frame and its render thread: the main thread sets `go`, computes,
+    // waits for `done`; the worker waits for `go`, computes, sets `done`. Each
+    // wait leaves the process's executor idle and calls the worker back from
+    // its own; counted as the two taking turns, it came to be kept here, the
+    // two running one after the other while the other executor idled.
+    const ROUNDS = 150;
+    const WORK = 1_000_000;
+    const executable = buildProgram(
+        ['CreateEventA', 'CreateThread', 'SetEvent', 'WaitForSingleObject', 'ExitProcess'],
+        { go: [0, 0, 0, 0], done: [0, 0, 0, 0], first: [0, 0, 0, 0] }, ({ call, at, start })=>{
+            /** CreateEventA(NULL, FALSE, FALSE, NULL), the handle to `slot`. @param {string} slot */
+            const event = slot=>[0x6a, 0x00, 0x6a, 0x00, 0x6a, 0x00, 0x6a, 0x00,
+                ...call('CreateEventA'), 0xa3, ...u32(at(slot))];
+            /** WaitForSingleObject([slot], INFINITE) @param {string} slot */
+            const wait = slot=>[0x6a, 0xff, 0xff, 0x35, ...u32(at(slot)),
+                ...call('WaitForSingleObject')];
+            /** SetEvent([slot]) @param {string} slot */
+            const set = slot=>[0xff, 0x35, ...u32(at(slot)), ...call('SetEvent')];
+            // mov ecx, WORK; L: dec ecx; jnz L
+            const compute = [0xb9, ...u32(WORK), 0x49, 0x75, 0xfd];
+            const round = [...set('go'), ...compute, ...wait('done'), 0x4e]; // ...; dec esi
+            const work = [...wait('go'), ...compute, ...set('done')];
+            return {
+                main: [...event('go'), ...event('done'), ...start('first'),
+                    0xbe, ...u32(ROUNDS), //       mov esi, ROUNDS
+                    ...round, 0x0f, 0x85, ...u32(-(round.length + 6) >>> 0), // jnz round
+                    0x6a, 0x07, ...call('ExitProcess')],
+                worker: [...work, 0xe9, ...u32(-(work.length + 5) >>> 0)], // jmp work
+            };
+        });
+    const { code, scheduler } = await run(executable, 2);
+    assert.equal(code, 7);
+    const shared = JSON.parse(scheduler?.sharedTime ?? '{}');
+    const elsewhere = shared.elsewhereRetired ?? 0;
+    const total = (shared.hereRetired ?? 0) + elsewhere;
+    // The worker's half on the other executor, a fifth on a machine busy with
+    // other runs; kept here, a hundredth.
+    assert.ok(total >= ROUNDS * WORK * 2 && elsewhere > total * 0.15,
+        `${elsewhere} of ${total} instructions on the other executor`);
+});
+
 test('the process\'s first thread keeps the process\'s own executor when the executor a thread'
     + ' it started wants opens', async()=>{
     // The main thread calls into the host CALLS times while its worker spins

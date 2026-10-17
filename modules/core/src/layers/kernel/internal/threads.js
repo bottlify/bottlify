@@ -112,6 +112,18 @@ const CROSS_HALF = 1_000_000;
 const COUPLED = 0.5;
 const COUPLED_HALF_MS = 1000;
 
+/**
+ * The share of what this executor retired meanwhile below which a run called
+ * back counts towards `coupled`: past it, the thread did as much beside this
+ * executor's as that one did, and taking turns with it would give that up. A
+ * game's render thread, its main thread waiting on it some 1 400 times a second
+ * while both computed between, was called back at each wait and kept here, the
+ * two taking turns at full slices while four executors idled; a worker and the
+ * main thread each computing as much a round and meeting at an event ran 1.66
+ * times as fast on its own executor as kept here.
+ */
+const COUPLED_WORK = 0.5;
+
 /** How many turns of `turnMs` a deadline must be beyond for a turn to take one. */
 const TURN_CLEAR = 4;
 
@@ -908,10 +920,12 @@ export function createScheduler(options){
 
     /**
      * The thread each of the process's other executors is running, when and
-     * where its slice began, and whether this executor, left nothing to run,
-     * has called it back (`recalled`).
+     * where its slice began, what this executor had retired by then
+     * (`hereFrom`), and whether this executor, left nothing to run, has called
+     * it back (`recalled`).
      *
-     * @type {Map<any, { thread: any, began: number, from: number, recalled?: boolean }>}
+     * @type {Map<any, { thread: any, began: number, from: number, hereFrom: number,
+     *     recalled?: boolean }>}
      */
     const placed = new Map();
     /** The processor time every slice of the process has taken, in milliseconds. */
@@ -1177,7 +1191,7 @@ export function createScheduler(options){
             sharedTime.gaps++;
             bucket(sharedTime.gapsUnder, began - taken);
         }
-        placed.set(remote, { thread: next, began, from });
+        placed.set(remote, { thread: next, began, from, hereFrom: sharedTime.hereRetired });
         recentPlacements.push(`${next.name}>${remote.index} x${(next.crossRate * 100_000)
             .toFixed(1)}${next.crossSeen ? '' : '?'}`);
         if (recentPlacements.length > 16)
@@ -1252,7 +1266,13 @@ export function createScheduler(options){
                     cpu.remoteFault?.(ended.fault);
                 }
                 account(on.thread, ended.instructions, on.began, on.from, at);
-                on.thread.coupled = coupledNow(on.thread) * 0.75 + (on.recalled ? 0.25 : 0);
+                // Called back after little beside what this executor did
+                // meanwhile, or nothing: the two take turns. Called back after
+                // as much, the two ran at once and are to go on doing so.
+                const beside = sharedTime.hereRetired - on.hereFrom;
+                const tookTurns = on.recalled === true
+                    && (beside === 0 || ended.instructions < COUPLED_WORK * beside);
+                on.thread.coupled = coupledNow(on.thread) * 0.75 + (tookTurns ? 0.25 : 0);
                 on.thread.coupledAt = wall();
                 sharedTime.elsewhereRetired += ended.instructions;
                 ran = on.thread;
