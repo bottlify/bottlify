@@ -13,7 +13,10 @@ export const COMPILED = /** @type {const} */ ({
         convention: 'stdcall',
         params: ['u32'],
         returns: 'u32',
-        uses: ['u32', 'i32', 'f32', 'f64', 'setU32', 'setF32', 'setF64', 'controlWord', 'setControlWord', 'callStd', 'host'],
+        uses: [
+            'u32', 'i32', 'f32', 'f64', 'setU32', 'setF32', 'setF64', 'controlWord',
+            'setControlWord', 'callStd', 'host',
+        ],
         host: 281,
         code: Uint8Array.of(
             0x53, 0x56, 0x57, 0x55, 0x83, 0xec, 0x0c, 0x8b, 0x44, 0x24, 0x20, 0x8b,
@@ -208,7 +211,10 @@ export const COMPILED = /** @type {const} */ ({
         convention: 'stdcall',
         params: ['u32', 'u32'],
         returns: 'u32',
-        uses: ['u32', 'i32', 'f32', 'f64', 'setU32', 'setF32', 'setF64', 'controlWord', 'setControlWord', 'callStd', 'host'],
+        uses: [
+            'u32', 'i32', 'f32', 'f64', 'setU32', 'setF32', 'setF64', 'controlWord',
+            'setControlWord', 'callStd', 'host',
+        ],
         host: 328,
         code: Uint8Array.of(
             0x53, 0x56, 0x57, 0x55, 0x83, 0xec, 0x08, 0x8b, 0x44, 0x24, 0x1c, 0x8b,
@@ -602,7 +608,10 @@ export const COMPILED = /** @type {const} */ ({
         convention: 'cdecl',
         params: ['u32', 'u32'],
         returns: 'void',
-        uses: ['u32', 'i32', 'f32', 'f64', 'setU32', 'setF32', 'setF64', 'controlWord', 'setControlWord'],
+        uses: [
+            'u32', 'i32', 'f32', 'f64', 'setU32', 'setF32', 'setF64', 'controlWord',
+            'setControlWord',
+        ],
         code: Uint8Array.of(
             0x53, 0x56, 0x57, 0x55, 0x81, 0xec, 0x84, 0x00, 0x00, 0x00, 0x8b, 0x84,
             0x24, 0x98, 0x00, 0x00, 0x00, 0x8b, 0x40, 0x08, 0x89, 0x84, 0x24, 0x80,
