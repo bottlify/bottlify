@@ -633,7 +633,7 @@ test('a handler is called with the dispatch\'s own frame at the head, as the C r
     // then left it at the head after its function had returned.
     const DISPATCHER = 0x5f000;
     const m = machine();
-    m.host.dispatcherHandler = ()=>DISPATCHER;
+    Object.assign(m.host, { dispatcherHandler: ()=>DISPATCHER });
     const seh = createSeh(m.host);
     // Above the stack, where a program's frames are: the dispatch's own
     // frame is below them.
@@ -674,7 +674,7 @@ test('a handler is called with the dispatch\'s own frame at the head, as the C r
 
 test('a handler that declines leaves the head where it was', async()=>{
     const m = machine();
-    m.host.dispatcherHandler = ()=>0x5f000;
+    Object.assign(m.host, { dispatcherHandler: ()=>0x5f000 });
     const seh = createSeh(m.host);
     const frames = m.registerFrames([0x51000, 0x52000]);
 
