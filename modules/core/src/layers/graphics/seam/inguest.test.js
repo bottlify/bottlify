@@ -34,6 +34,8 @@ test('the offsets the guest code reads are the blocks\'', async()=>{
     const literal = name=>Number(new RegExp(`^const ${name} = (\\d+);`, 'm').exec(text)?.[1]);
     assert.equal(literal('COOPERATIVE'), SHADOW.COOPERATIVE);
     assert.equal(literal('QUERY_TYPE'), QUERY.TYPE);
+    assert.equal(literal('QUERY_STATE'), QUERY.STATE);
+    assert.equal(literal('QUERY_COUNT'), QUERY.COUNT);
     assert.equal(literal('FLAG_SLOW_PATH'), FLAG_SLOW_PATH);
 });
 
@@ -57,7 +59,10 @@ test('a query\'s methods in the guest answer and write as their JavaScript', ()=
         const bytes = new Uint8Array(0x80);
         const view = new DataView(bytes.buffer);
         view.setUint32(4, next() % 8 === 0 ? 0 : BLOCK, true);
-        view.setUint32(0x10 + QUERY.TYPE, [8, 8, 8, 9, 2, 0][next() % 6], true);
+        view.setUint32(0x10 + QUERY.TYPE, [8, 8, 8, 9, 9, 2, 0][next() % 7], true);
+        // An occlusion count the host's, asked for, back, or a state there is not.
+        view.setUint32(0x10 + QUERY.STATE, [0, 1, 2, 2, 3][next() % 5], true);
+        view.setUint32(0x10 + QUERY.COUNT, next(), true);
         view.setUint32(0x40, next(), true);
         const data = next() % 6 === 0 ? 0 : OUT;
         const size = [0, 1, 3, 4, 4, 8, 0xffffffff][next() % 7];

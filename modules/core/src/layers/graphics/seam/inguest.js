@@ -16,7 +16,10 @@
  *   host's.
  * - An event query is signalled as soon as it is issued, as the device has
  *   it: its Issue and its GetData take nothing from the host. An occlusion
- *   query's count is the GPU's, and the host's.
+ *   query's count is the GPU's: once the host has asked for it, a poll is
+ *   S_FALSE in the guest until the host writes it into the block, and the
+ *   count after (`QUERY.STATE`) -- a program that waits for a count polls
+ *   millions of times a minute.
  *
  * The offsets are the blocks' (`shadow.js`); the test holds them to it.
  */
@@ -32,7 +35,15 @@
 const COOPERATIVE = 5352;
 /** `QUERY.TYPE`. */
 const QUERY_TYPE = 4;
+/** `QUERY.STATE` and `QUERY.COUNT`. */
+const QUERY_STATE = 8;
+const QUERY_COUNT = 12;
 const D3DQUERYTYPE_EVENT = 8;
+const D3DQUERYTYPE_OCCLUSION = 9;
+/** `QUERY.STATE`: asked for and not back; back. */
+const COUNT_ASKED = 1;
+const COUNT_BACK = 2;
+const S_FALSE = 1;
 const D3DISSUE_BEGIN = 2;
 const FLAG_SLOW_PATH = 1;
 
@@ -104,8 +115,10 @@ export function QueryIssue({ u32, host }, self, flags){
 
 /**
  * HRESULT GetData(this, void *data, DWORD size, DWORD flags): an event is
- * done, TRUE in its four bytes. A buffer too small for them is the host's to
- * refuse, and every other query is the host's.
+ * done, TRUE in its four bytes; an occlusion query the host has asked for is
+ * not done yet, S_FALSE, and one whose count is back has it in its four bytes.
+ * A buffer too small for them is the host's to refuse, and every other query,
+ * and an occlusion count the host has not asked for, is the host's.
  *
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} self @param {u32} data @param {u32} size
@@ -114,8 +127,29 @@ export function QueryIssue({ u32, host }, self, flags){
  */
 export function QueryGetData({ u32, setU32, host }, self, data, size, flags){
     const block = u32(self + 4);
-    if (block === 0 || u32(block + QUERY_TYPE) !== D3DQUERYTYPE_EVENT
-        || (size !== 0 && size < 4) || flags > 1)
+    if (block === 0 || (size !== 0 && size < 4) || flags > 1)
+    {
+        return host();
+    }
+    const type = u32(block + QUERY_TYPE);
+    if (type === D3DQUERYTYPE_OCCLUSION)
+    {
+        const state = u32(block + QUERY_STATE);
+        if (state === COUNT_ASKED)
+        {
+            return S_FALSE;
+        }
+        if (state !== COUNT_BACK)
+        {
+            return host();
+        }
+        if (data !== 0 && size !== 0)
+        {
+            setU32(data, u32(block + QUERY_COUNT));
+        }
+        return 0;
+    }
+    if (type !== D3DQUERYTYPE_EVENT)
     {
         return host();
     }

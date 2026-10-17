@@ -2339,6 +2339,103 @@ test('the guest\'s TestCooperativeLevel and a query\'s methods answer and write 
         'a lost device is the host\'s');
 });
 
+test('an occlusion count told as it comes is polled in the guest as the host answers it, S_FALSE'
+    + ' till then and the count after, each measurement anew', ()=>{
+    // A device recorded for a graphics worker asks for a count at the first
+    // poll and is told it later (`whenCounted`); the Gothic 3 demo polled
+    // 28.5 million times waiting, every poll a crossing. Here a query counts
+    // as that one does, the count coming at random between the calls.
+    const h = seamed({ shadow: true });
+    const root = h.create();
+    const { device } = h.createDevice(root);
+    const memory = h.box.memory;
+    const HANDED = -1;
+    const guest = /** @type {any} */ ({
+        u32: (/** @type {number} */ at)=>memory.readU32(at),
+        setU32: (/** @type {number} */ at, /** @type {number} */ value)=>
+            memory.writeU32(at, value >>> 0),
+        host: ()=>HANDED,
+    });
+    const out = 0x3200;
+    assert.equal(h.device(device, 'CreateQuery', [D3DQUERYTYPE.OCCLUSION, out]), D3D_OK);
+    const query = memory.readU32(out);
+    const object = h.publisher.objectAt(query);
+    /** The measurement's count once it has come, null while it has not. */
+    let counted = /** @type {number | null} */ (null);
+    let asked = false;
+    let measured = 0;
+    object.Issue = ()=>{
+        counted = null;
+        asked = false;
+        measured++;
+        return D3D_OK;
+    };
+    object.GetData = (/** @type {{ value?: number } | null} */ held)=>{
+        if (counted === null)
+        {
+            asked = true;
+            object.countsLater = true;
+            return S_FALSE;
+        }
+        if (held)
+        {
+            held.value = counted;
+        }
+        return D3D_OK;
+    };
+    const data = 0x3300;
+    const next = (seed=>()=>(seed = (Math.imul(seed, 1103515245) + 12345) >>> 0) >>> 8)(11);
+    let inGuest = 0;
+    let polledInGuest = 0;
+    /** @param {(...args: any[]) => number} js @param {string} name @param {number[]} args */
+    const both = (js, name, args)=>{
+        memory.writeU32(data, 0xdeadbeef);
+        const answer = js(guest, query, ...args) >>> 0;
+        const written = memory.readU32(data);
+        memory.writeU32(data, 0xdeadbeef);
+        const hostAnswer = h.box.trap(query, name, args);
+        if (answer === HANDED >>> 0)
+        {
+            return;
+        }
+        inGuest++;
+        if (answer === S_FALSE)
+        {
+            polledInGuest++;
+        }
+        assert.equal(answer, hostAnswer >>> 0, `${name}(${args})`);
+        assert.equal(written, memory.readU32(data), `${name}(${args}) writes`);
+    };
+    for (let round = 0; round < 600; round++)
+    {
+        const roll = next() % 10;
+        if (roll === 0)
+        {
+            both(guestCode.QueryIssue, 'Issue', [[1, 2][next() % 2]]);
+        }
+        else if (roll === 1 && asked && counted === null)
+        {
+            // The count comes, as the played side sends it: a measurement's.
+            counted = next() % 1000;
+            object.whenCounted?.(counted);
+        }
+        else if (roll === 2 && asked && counted === null)
+        {
+            // An answer that was no count yet: the next poll asks again.
+            asked = false;
+            object.whenCounted?.(null);
+        }
+        else
+        {
+            both(guestCode.QueryGetData, 'GetData', [next() % 5 === 0 ? 0 : data,
+                [0, 4, 8][next() % 3], next() % 2]);
+        }
+    }
+    assert.ok(measured > 20, `${measured} measurements`);
+    assert.ok(polledInGuest > 50 && inGuest > polledInGuest,
+        `${polledInGuest} polls not done and ${inGuest - polledInGuest} counts in the guest`);
+});
+
 test('a Present under vertical sync is held to the display\'s rate, and to a mode it shows', ()=>{
     // The display's rate is the person's (the bottle's maxFps): 120 there holds
     // a windowed device's frames to 120; a full-screen device asking for 120 on

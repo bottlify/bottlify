@@ -77,7 +77,7 @@ import {
     STRETCH_GUARD, compiledAt, createShadow, getRenderStateCode,
     getSamplerStateCode, getSurfaceDescCode, getSurfaceLevelCode, getTextureStageStateCode,
     getTransformCode, getViewportCode, lockCode, settledAfter, stageStateMirror,
-    unlockCode, HOST_MIRRORS, appendCommand, guestWords,
+    unlockCode, HOST_MIRRORS, QUERY, appendCommand, guestWords,
 } from './shadow.js';
 import { COMPILED as IN_GUEST } from './inguest.x86.js';
 import { D3DTSS9 } from '../d3d9/samplerstates.js';
@@ -137,7 +137,10 @@ export const HOST_COMMAND_MIRRORS = {
 };
 
 const D3D_OK = 0;
+const S_FALSE = 1;
 const D3DERR_INVALIDCALL = 0x8876086c | 0;
+/** D3DQUERYTYPE_OCCLUSION. */
+const D3DQUERYTYPE_OCCLUSION = 9;
 const D3DERR_NOTAVAILABLE = 0x8876086a | 0;
 const D3DSCANLINEORDERING_PROGRESSIVE = 1;
 const D3DSCANLINEORDERING_INTERLACED = 2;
@@ -1183,6 +1186,27 @@ export function createDirect3D9Seam(
             : stateBlockInterfaces, IID_IDirect3DStateBlock9, out, E_OUTOFMEMORY, device);
     };
 
+    /**
+     * The blocks of the queries that have one (`QUERY`), by query.
+     *
+     * @type {WeakMap<object, number>}
+     */
+    const queryBlocks = new WeakMap();
+    /**
+     * An occlusion query's count as its block tells the guest's GetData
+     * (`QUERY.STATE`): 0 the host's, 1 asked for, 2 back with `count`.
+     *
+     * @param {any} query @param {number} state @param {number} [count]
+     */
+    const countState = (query, state, count = 0)=>{
+        const block = queryBlocks.get(query);
+        if (block)
+        {
+            fields.writeU32(block + QUERY.COUNT, count >>> 0);
+            fields.writeU32(block + QUERY.STATE, state);
+        }
+    };
+
     const queryInterfaces = [describeResource(IID_IDirect3DQuery9, IDIRECT3DQUERY9_SLOTS, {
         GetDevice: getDevice,
         /** @param {any} query */
@@ -1190,7 +1214,11 @@ export function createDirect3D9Seam(
         /** @param {any} query */
         GetDataSize: query=>query.GetDataSize(),
         /** @param {any} query @param {number[]} args */
-        Issue: (query, [flags])=>query.Issue(flags >>> 0),
+        Issue: (query, [flags])=>{
+            // A new measurement: its count is the host's to ask for again.
+            countState(query, 0);
+            return query.Issue(flags >>> 0);
+        },
         // A count is written in as many of its four bytes as the caller has
         // room for, and the caller of a flush waits while it comes back.
         /** @param {any} query @param {number[]} args */
@@ -1207,6 +1235,14 @@ export function createDirect3D9Seam(
                 return hr;
             };
             const hr = query.GetData((data >>> 0) === 0 ? null : held, size >>> 0, flags >>> 0);
+            // An occlusion count asked for, whose answer will be told as it
+            // comes (`whenCounted`): the guest answers the polls till then.
+            if (hr === S_FALSE && query.type === D3DQUERYTYPE_OCCLUSION && query.countsLater)
+            {
+                query.whenCounted ??= (/** @type {number | null} */ count)=>(count === null
+                    ? countState(query, 0) : countState(query, 2, count));
+                countState(query, 1);
+            }
             return hr instanceof Promise ? hr.then(write) : write(hr);
         },
     }, guestsBut('queries', allocate
@@ -2640,7 +2676,12 @@ export function createDirect3D9Seam(
                 const shadow = shadowOf(device);
                 if (shadow)
                 {
-                    held.query.guestState = ()=>shadow.attachQuery(held.query);
+                    const query = held.query;
+                    query.guestState = ()=>{
+                        const block = shadow.attachQuery(query);
+                        queryBlocks.set(query, block);
+                        return block;
+                    };
                 }
                 return handBack(held.query, queryInterfaces, IID_IDirect3DQuery9, out >>> 0,
                     E_OUTOFMEMORY, device);

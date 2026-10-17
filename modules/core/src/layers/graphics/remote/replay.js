@@ -1040,6 +1040,7 @@ export function createRecording(options){
             }
             counts.set(query, { reply: { answer: 0, outs: [{ value }] }, beside: true, sentAt,
                 cameAt });
+            /** @type {any} */ (query).whenCounted?.(value);
             const measured = timed ? waiting.get(query) : undefined;
             measured?.events.push(['beside', sharedNow(), measured.polls]);
         }
@@ -1653,6 +1654,10 @@ export function createRecording(options){
                 const asking = { reply: /** @type {PlayedAnswer | null} */ (null), beside: false,
                     sentAt: timed ? performance.now() : 0, cameAt: 0 };
                 counts.set(target, asking);
+                // Its answer is told (`whenCounted`) as it comes, a count or
+                // null for one to ask for again: a caller may poll it without
+                // asking here.
+                /** @type {any} */ (target).countsLater = true;
                 const asked = timed ? waiting.get(target) : undefined;
                 if (asked)
                 {
@@ -1669,15 +1674,22 @@ export function createRecording(options){
                         if (played.answer === 0)
                         {
                             asking.reply = played;
+                            /** @type {any} */ (target).whenCounted?.(
+                                /** @type {any} */ (played.outs[0])?.value ?? 0);
                         }
                         else
                         {
                             counts.delete(target);
+                            /** @type {any} */ (target).whenCounted?.(null);
                         }
                     }
                     takeCounts(target, played.counts, asking.sentAt, asking.cameAt);
                 }, ()=>{
-                    counts.delete(target);
+                    if (counts.get(target) === asking)
+                    {
+                        counts.delete(target);
+                        /** @type {any} */ (target).whenCounted?.(null);
+                    }
                 });
                 return S_FALSE;
             }

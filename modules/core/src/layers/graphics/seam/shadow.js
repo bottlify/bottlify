@@ -201,7 +201,14 @@ export const QUERY = {
     FLAGS: 0,
     /** Its D3DQUERYTYPE. */
     TYPE: 4,
-    SIZE: 8,
+    /**
+     * An occlusion query's count as the guest's GetData answers it, written
+     * by the host: 0 the host's to ask for, 1 asked for and not back (the
+     * guest answers S_FALSE), 2 back, in COUNT.
+     */
+    STATE: 8,
+    COUNT: 12,
+    SIZE: 16,
 };
 
 /**
@@ -3496,7 +3503,7 @@ export function createShadow(deps){
             {
                 return 0;
             }
-            deps.writeMemory(block, dwordsBytes([0, query.type]));
+            deps.writeMemory(block, dwordsBytes([0, query.type, 0, 0]));
             queryBlocks.set(query, block);
             return block;
         },
