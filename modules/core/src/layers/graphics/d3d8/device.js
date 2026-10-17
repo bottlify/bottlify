@@ -1221,23 +1221,13 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
      */
     const createBuffer = spec=>{
         const base = allocate(spec.length);
-        // A dynamic one's spare, which `Rename` trades its storage for, as
-        // a Direct3D 9 buffer's.
-        const spare = (spec.usage & D3DUSAGE.DYNAMIC) !== 0 ? allocate(spec.length) : 0;
         // Its storage goes back with its last reference, as a Direct3D 9
         // buffer's does.
-        const bufferCount = explicitCount(spec.pool, ()=>{
-            free(buffer.base);
-            if (buffer.spare !== 0)
-            {
-                free(buffer.spare);
-            }
-        }, spec.length);
+        const bufferCount = explicitCount(spec.pool, ()=>free(base), spec.length);
         let locked = false;
         const buffer = {
             ...spec,
             base,
-            spare,
             ...createPriority(spec.pool),
             get refCount(){
                 return bufferCount.value;
@@ -1288,26 +1278,11 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                     return D3DERR_INVALIDCALL;
                 }
                 locked = true;
-                out.pBits = buffer.base + offset;
+                out.pBits = base + offset;
                 if (renderer)
                 {
                     renderer.lockBuffer(buffer, offset, length, flags);
                 }
-                return D3D_OK;
-            },
-            /**
-             * A dynamic buffer's storage traded for its spare: what DISCARD
-             * means, done so that a draw made before it still reads what it
-             * was made with, as a driver renames the buffer. The command ring
-             * carries it from the guest's lock (`seam/shadow.js`), in order
-             * with the draws; a buffer with no spare, or one locked, refuses.
-             */
-            Rename(){
-                if (locked || buffer.spare === 0)
-                {
-                    return D3DERR_INVALIDCALL;
-                }
-                [buffer.base, buffer.spare] = [buffer.spare, buffer.base];
                 return D3D_OK;
             },
 

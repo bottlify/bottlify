@@ -989,7 +989,7 @@ export function createDirect3D9Seam(
     /** @type {Record<string, (builder: { trap: number }) => number>} */
     const bufferGuests = guestsBut('locks', allocate
         ? {
-            Lock: ({ trap })=>placeCode(at=>lockCode(at, trap, commandSlot('Buffer.Rename'))),
+            Lock: ({ trap })=>placeCode(at=>lockCode(at, trap)),
             Unlock: ({ trap })=>placeCode(at=>unlockCode(at, trap)),
         }
         : {});
@@ -3175,7 +3175,7 @@ export function createDirect3D9Seam(
                     work();
                 },
                 name: 'IDirect3DDevice9',
-                commands: { renameSlot: commandSlot('Buffer.Rename'), take: records=>{
+                commands: { take: records=>{
                     const objects = commandObjects(records, publisher.objectAt);
                     const made = held.device.commands(records, objects);
                     if (shadow.stale())

@@ -1301,8 +1301,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
     /**
      * A vertex or index buffer. Its storage is guest memory at `base`, which is
      * what a lock hands back; the renderer reads the locked range from there on
-     * unlock, under the flags the lock was taken with. A dynamic one has a
-     * second storage of the same size, `spare`, which `Rename` trades it for.
+     * unlock, under the flags the lock was taken with.
      *
      * @param {{ length: number, usage: number, pool: number, type: number, fvf?: number,
      *           format?: number }} options
@@ -1310,20 +1309,12 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
     const createBuffer = options=>{
         // Its storage goes back when the last reference does, the program's or
         // the device's binding, whichever is later.
-        const bufferCount = explicitCount(options.pool, ()=>{
-            free(buffer.base);
-            if (buffer.spare !== 0)
-            {
-                free(buffer.spare);
-            }
-        }, options.length);
+        const bufferCount = explicitCount(options.pool, ()=>free(base), options.length);
         const base = allocate(options.length);
-        const spare = (options.usage & D3DUSAGE.DYNAMIC) !== 0 ? allocate(options.length) : 0;
         let locked = false;
         const buffer = {
             ...options,
             base,
-            spare,
             ...createPriority(options.pool),
             get refCount(){
                 return bufferCount.value;
@@ -1359,23 +1350,8 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                     return D3DERR_INVALIDCALL;
                 }
                 locked = true;
-                out.pBits = buffer.base + offset;
+                out.pBits = base + offset;
                 renderer?.lockBuffer(buffer, offset, length, flags);
-                return D3D_OK;
-            },
-            /**
-             * A dynamic buffer's storage traded for its spare: what DISCARD
-             * means, done so that a draw made before it still reads what it
-             * was made with, as a driver renames the buffer. The command ring
-             * carries it from the guest's lock (`seam/shadow.js`), in order
-             * with the draws; a buffer with no spare, or one locked, refuses.
-             */
-            Rename(){
-                if (locked || buffer.spare === 0)
-                {
-                    return D3DERR_INVALIDCALL;
-                }
-                [buffer.base, buffer.spare] = [buffer.spare, buffer.base];
                 return D3D_OK;
             },
 

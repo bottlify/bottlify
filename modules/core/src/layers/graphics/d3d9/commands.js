@@ -13,7 +13,7 @@
  */
 
 import { IDIRECT3DDEVICE9_SLOTS } from './interfaces.js';
-import { BUFFER_SLOTS, SHARED_COMMANDS, commandSet } from '../d3d8/commands.js';
+import { SHARED_COMMANDS, commandSet } from '../d3d8/commands.js';
 import { DRAW } from '../seam/shadow.js';
 import { D3DERR_INVALIDCALL } from './constants.js';
 
@@ -44,7 +44,7 @@ const STATE_BLOCK_SLOTS = /** @type {[string, number][]} */ ([
     ['StateBlock.Apply', 0],
 ]);
 
-const set = commandSet([...IDIRECT3DDEVICE9_SLOTS, ...STATE_BLOCK_SLOTS, ...BUFFER_SLOTS], {
+const set = commandSet([...IDIRECT3DDEVICE9_SLOTS, ...STATE_BLOCK_SLOTS], {
     ...SHARED_COMMANDS,
     // The stages, the displacement map's sampler and the vertex shader's four.
     SetTexture: { args: 2, objects: [1], within: [{ arg: 0, ranges: [[0, 15], [256, 260]] }],

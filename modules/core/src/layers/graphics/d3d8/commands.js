@@ -23,7 +23,7 @@
 
 import { IDIRECT3DDEVICE8_SLOTS } from '../seam/vtables.js';
 import { DRAW, SHADOW } from '../seam/shadow.js';
-import { D3DERR_INVALIDCALL, D3DFVF_RESERVED0 } from './constants.js';
+import { D3DFVF_RESERVED0 } from './constants.js';
 import { lightFromDwords } from '../seam/structs.js';
 import { vertexCountOf } from './render.js';
 
@@ -373,31 +373,14 @@ export const SHARED_COMMANDS = {
         needs: DRAW.SCENE | DRAW.DECLARED, fresh: true,
         make: (d, c)=>d.DrawPrimitiveUP(c.arg(0), c.arg(1),
             c.copy(vertexCountOf(c.arg(0), c.arg(1)) * c.arg(3)), c.arg(3)) },
-    // A dynamic buffer's DISCARD under draws the ring holds: the buffer trades
-    // its storage for its spare here, after those draws, before any later
-    // one (`lockCode`). The guest's lock routine writes the record; the
-    // shadow hears of it (`renamed`) to free the storage left.
-    'Buffer.Rename': { args: 1, self: true, objects: [0],
-        make: (d, c)=>{
-            const buffer = c.object();
-            const hr = buffer ? buffer.Rename() : D3DERR_INVALIDCALL;
-            buffer?.renamed?.(hr);
-            return hr;
-        } },
 };
-
-/**
- * The methods a command ring carries past a version's device's own: numbered
- * after them, so a record names them as it names the device's.
- */
-export const BUFFER_SLOTS = /** @type {[string, number][]} */ ([['Buffer.Rename', 0]]);
 
 /**
  * Direct3D 8's: its streams take a stride and no offset, its indices a base
  * vertex, its shaders are handles, its indexed draw has no base vertex, and
  * its shader constants are floats alone, up to what a 1.x shader has.
  */
-export const D3D8_COMMANDS = commandSet([...IDIRECT3DDEVICE8_SLOTS, ...BUFFER_SLOTS], {
+export const D3D8_COMMANDS = commandSet(IDIRECT3DDEVICE8_SLOTS, {
     ...SHARED_COMMANDS,
     SetTexture: { args: 2, objects: [1], within: [{ arg: 0, ranges: [[0, 7]] }],
         make: (d, c)=>d.SetTexture(c.arg(0), c.object()) },
