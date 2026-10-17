@@ -316,6 +316,19 @@ export function createDirectDrawSeam(
 {
     const fields = createFields(memory);
     /**
+     * An object whose count is read or lowered meets what Direct3D 7's rings
+     * hold first: a texture the guest bound in a ring is held by the device
+     * once the ring is made, and a Release before that would end it.
+     *
+     * @param {any} object
+     */
+    const settlesDevices = object=>{
+        if (beforeCall && object && typeof object === 'object')
+        {
+            object.settleGuestRefs ??= beforeCall;
+        }
+    };
+    /**
      * A table's methods, each running `beforeCall` first: what Direct3D 7
      * holds in its command ring is drawn before a surface is shown or read.
      *
@@ -462,6 +475,7 @@ export function createDirectDrawSeam(
      * @param {number} out
      */
     const handBack = (object, interfaces, id, out)=>{
+        settlesDevices(object);
         const pointer = publisher.publish(object, interfaces, id);
         fields.writeU32(out, pointer);
         return pointer;
@@ -1308,6 +1322,7 @@ export function createDirectDrawSeam(
         for (const surface of list)
         {
             surface.addRef();
+            settlesDevices(surface);
             const pointer = publisher.publish(surface, surfaceInterfaces, generation.id);
             const desc = descriptorScratch();
             writeSurfaceDesc(memory, desc, generation.layout, descriptorOf(surface));

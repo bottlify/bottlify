@@ -33,7 +33,8 @@ import { createDirect3D7 } from '../d3d7/device.js';
 import { DEVICE_IDS as DEVICE_IDS_7 } from '../d3d7/constants.js';
 import { createDirectDraw } from '../ddraw/objects.js';
 import {
-    DDSCAPS_3DDEVICE, DDSCAPS_OFFSCREENPLAIN, DDSCL_NORMAL, DDSD_CAPS, DDSD_HEIGHT, DDSD_WIDTH,
+    DDSCAPS_3DDEVICE, DDSCAPS_OFFSCREENPLAIN, DDSCAPS_TEXTURE, DDSCL_NORMAL, DDSD_CAPS,
+    DDSD_HEIGHT, DDSD_WIDTH,
 } from '../ddraw/constants.js';
 import { createDirect3D9 } from '../d3d9/device.js';
 import { createDirect3D8 } from '../d3d8/device.js';
@@ -863,6 +864,11 @@ test('Direct3D 8: the routines keep what a draw needs as the device does, call a
     ]);
 });
 
+/** Each Direct3D 7 device's DirectDraw object, for a case that makes surfaces. */
+const roots7 = new WeakMap();
+/** @param {any} device */
+const device7Root = device=>roots7.get(device);
+
 /** Direct3D 7: a HAL device on a target of its own, through a DirectDraw object. */
 const device7 = ()=>{
     const root = createDirectDraw({ version: 7, screenWidth: 64, screenHeight: 64 });
@@ -872,6 +878,7 @@ const device7 = ()=>{
     assert.equal(target.hr, D3D_OK);
     const made = createDirect3D7(root).createDevice(DEVICE_IDS_7.HAL, target.surface);
     assert.equal(made.hr, D3D_OK);
+    roots7.set(made.device, root);
     return made.device;
 };
 
@@ -904,6 +911,12 @@ test('Direct3D 7: every call the command ring answers for in the guest is one th
             SetClipPlane: common.SetClipPlane,
             BeginScene: common.BeginScene,
             EndScene: common.EndScene,
+            SetTexture: [
+                { label: 'a texture', args: [0, 'texture'], setup: texture7 },
+                { label: 'the last stage', args: [7, 'texture'], setup: texture7 },
+                { label: 'none', args: [0, 0] },
+                { label: 'a stage past the last', args: [8, 'texture'], setup: texture7 },
+            ],
             // By pointer, so many vertices as whole primitives, of a format the
             // host has drawn with: its width is the block's.
             DrawPrimitive: [
@@ -929,6 +942,14 @@ test('Direct3D 7: every call the command ring answers for in the guest is one th
             ],
         });
     });
+
+/** A texture surface of the device's DirectDraw object. */
+const texture7 = (/** @type {any} */ device, /** @type {Record<string, any>} */ made)=>{
+    const surface = device7Root(device).createSurface({ flags: DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT,
+        caps: DDSCAPS_TEXTURE, width: 8, height: 8 });
+    assert.equal(surface.hr, D3D_OK);
+    made.texture = surface.surface;
+};
 
 /** Transformed, lit vertices: a position with its RHW and a colour, five words. */
 const FVF_TL = 0x044;

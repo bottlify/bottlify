@@ -1065,18 +1065,21 @@ test('with guest memory, a device\'s setters and getters run in the guest, and w
     const { hr, device } = h.createDevice(d3d, target);
     assert.equal(hr, D3D_OK);
     for (const name of ['SetRenderState', 'SetTransform', 'SetTextureStageState', 'SetViewport',
-        'LightEnable', 'BeginScene', 'EndScene', 'DrawPrimitive', 'GetRenderState',
+        'LightEnable', 'BeginScene', 'EndScene', 'DrawPrimitive', 'SetTexture', 'GetRenderState',
         'GetTextureStageState', 'GetViewport'])
     {
         assert.ok(h.box.isGuest(device, slot(IDIRECT3DDEVICE7_SLOTS, name)),
             `${name} is guest code`);
     }
-    for (const name of ['SetTexture', 'Clear', 'DrawIndexedPrimitive', 'GetTransform'])
+    for (const name of ['Clear', 'DrawIndexedPrimitive', 'DrawIndexedPrimitiveVB', 'GetTransform'])
     {
         assert.ok(!h.box.isGuest(device, slot(IDIRECT3DDEVICE7_SLOTS, name)), `${name} is a trap`);
     }
     const block = h.box.memory.readU32(device + 4);
     assert.notEqual(block, 0, 'the block is one word past the interface');
+    // A surface's count is read or lowered after the rings are made: a texture
+    // bound in one is held by the device by then.
+    assert.equal(typeof h.publisher.objectAt(target).settleGuestRefs, 'function');
     // D3DRENDERSTATE_ZENABLE (7) set on the host's path is the block's at once.
     assert.equal(h.box.trap(device, 'SetRenderState', [7, 0]), D3D_OK);
     assert.equal(h.box.memory.readU32(block + SHADOW.RENDER_STATES + 7 * 4), 0);
