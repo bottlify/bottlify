@@ -35,18 +35,18 @@ import { readGuid } from './ddraw.js';
 import { writePixelFormat } from '../ddraw/structs.js';
 import { depthFormatForDepth } from '../ddraw/objects.js';
 import {
-    D3DDP_DONOTCLIP, D3DVBCAPS_DONOTCLIP, DDERR_INVALIDPARAMS, D3D_OK,
+    D3DVBCAPS_DONOTCLIP, DDERR_INVALIDPARAMS, D3D_OK,
 } from '../d3d7/constants.js';
 import { DDPF_ALPHAPIXELS, DDPF_RGB } from '../ddraw/constants.js';
 import { createDirect3D7 } from '../d3d7/device.js';
-import { D3D7_COMMANDS } from '../d3d7/commands.js';
+import { D3D7_COMMANDS, clippedBy } from '../d3d7/commands.js';
 import { D3DTSS_MAX } from '../d3d7/constants.js';
 import { D3DTSS } from '../d3d8/constants.js';
 import { createDefaultStageStates } from '../d3d8/stagestates.js';
 import {
-    DRAWABLE_MIRRORS, RENDER_STATE_MIRROR, TRANSFORM_MIRROR_7, VIEWPORT_GUARD_8, VIEWPORT_MIRROR,
-    commandCode, createShadow, getRenderStateCode, getTextureStageStateCode, getViewportCode,
-    settledAfter, stageStateMirror,
+    DRAWABLE_MIRRORS, RENDER_STATE_MIRROR, TRANSFORM_MIRROR_7, VERTEX_BUFFER7, VIEWPORT_GUARD_8,
+    VIEWPORT_MIRROR, commandCode, createShadow, getRenderStateCode, getTextureStageStateCode,
+    getTransformCode, getViewportCode, settledAfter, stageStateMirror,
 } from './shadow.js';
 
 /**
@@ -185,7 +185,7 @@ export function createDirect3D7Seam(
      */
     const shadows = new WeakMap();
     /**
-     * Every block made, for `syncDevices`.
+     * Every block made, for `aroundDevices`.
      * ponytail: never pruned -- a program makes a device or two -- prune on release if one
      * remakes them by the thousand.
      *
@@ -194,6 +194,47 @@ export function createDirect3D7Seam(
     const madeShadows = new Set();
     /** @param {any} device */
     const shadowOf = device=>(device ? shadows.get(device) : undefined);
+    /**
+     * Makes what every device's command ring holds, then `call`, then has
+     * each block say what its routines check against again: around a call
+     * of the DirectDraw seam's -- a Flip shows the draws made before it, a
+     * Lock or a Blt of a target reads them, a depth buffer attached is one a
+     * clear may ask for -- and of a vertex buffer's, whose Lock may write
+     * over what a draw that waits reads.
+     *
+     * @template T
+     * @param {() => T} call
+     * @returns {T}
+     */
+    const aroundDevices = call=>{
+        let run = call;
+        for (const shadow of madeShadows)
+        {
+            const inner = run;
+            run = ()=>settledAfter(shadow, inner);
+        }
+        return run();
+    };
+    /**
+     * Each vertex buffer's block (`VERTEX_BUFFER7`): what a draw from it in
+     * the ring checks. Where there is guest memory for one.
+     *
+     * @type {WeakMap<object, number>}
+     */
+    const vertexBlocks = new WeakMap();
+    /**
+     * A buffer's lock as its block says it, after a call that may have taken
+     * or let go of one.
+     *
+     * @param {any} buffer
+     */
+    const noteLocked = buffer=>{
+        const block = buffer ? vertexBlocks.get(buffer) : undefined;
+        if (block !== undefined)
+        {
+            fields.writeU32(block + VERTEX_BUFFER7.LOCKED, buffer.locked ? 1 : 0);
+        }
+    };
     /** @param {(at: number) => Uint8Array} code */
     const placeCode = code=>{
         // Sized by a throwaway rendering: the bytes depend on where they
@@ -217,6 +258,8 @@ export function createDirect3D7Seam(
                 getTextureStageStateCode(at, trap, STAGE_STATE_TYPES_7)),
             GetViewport: (/** @type {{ trap: number }} */ { trap })=>placeCode(at=>
                 getViewportCode(at, trap)),
+            GetTransform: (/** @type {{ trap: number }} */ { trap })=>placeCode(at=>
+                getTransformCode(at, trap, true)),
             ...Object.fromEntries(Object.entries(D3D7_COMMANDS.COMMANDS).map(([name, shape])=>[
                 name, (/** @type {{ trap: number }} */ { trap })=>placeCode(at=>commandCode(at,
                     trap, { ...shape, slot: D3D7_COMMANDS.commandSlot(name),
@@ -568,13 +611,10 @@ export function createDirect3D7Seam(
         {
             return DDERR_INVALIDPARAMS;
         }
-        if ((op & D3DVOP.CLIP) !== 0 && (buffer.caps & D3DVBCAPS_DONOTCLIP) === 0)
+        const clips = (op & D3DVOP.CLIP) !== 0 && (buffer.caps & D3DVBCAPS_DONOTCLIP) === 0;
+        if (buffer.clipCodes !== clips)
         {
-            clipCoded.add(buffer);
-        }
-        else
-        {
-            clipCoded.delete(buffer);
+            buffer.ClipCodes(clips);
         }
         // Only the vertices written are locked, and the one after them, whose
         // first four bytes take the last RHW (`processVertices`); a buffer no
@@ -635,28 +675,37 @@ export function createDirect3D7Seam(
     };
 
     /**
-     * The vertex buffers whose last ProcessVertices was asked to clip, into a
-     * buffer made without D3DVBCAPS_DONOTCLIP: the runtime keeps each vertex's
-     * clip codes and clips the triangles when such a buffer is drawn, unless
-     * the draw says D3DDP_DONOTCLIP (decisions.md A45). Kept here, beside the
-     * call that knows it, so a device drawn elsewhere is told it with the draw.
-     *
-     * @type {WeakSet<object>}
-     */
-    const clipCoded = new WeakSet();
-    /**
      * Readies a buffer for a draw from it (`drawingFrom`), and answers what
-     * the draw is told of its clipping.
+     * the draw is told of its clipping: a buffer whose last ProcessVertices
+     * was asked to clip, made without D3DVBCAPS_DONOTCLIP, keeps each
+     * vertex's clip codes, and the runtime clips the triangles when it is
+     * drawn unless the draw says D3DDP_DONOTCLIP (decisions.md A45). The
+     * buffer holds it (`ClipCodes`), so a device drawn elsewhere has it too.
      *
      * @param {any} buffer @param {number} flags D3DDP @returns {number}
      */
     const clippedDraw = (buffer, flags)=>{
         drawingFrom(buffer);
-        return buffer && clipCoded.has(buffer) && ((flags >>> 0) & D3DDP_DONOTCLIP) === 0
-            ? 1 : 0;
+        return clippedBy(buffer, flags >>> 0);
     };
 
-    const bufferMethods = {
+    /**
+     * Each method first makes what the rings hold -- a draw from the buffer
+     * waiting in one reads it as it was -- and after it the buffer's block
+     * says whether it is locked.
+     *
+     * @template {Record<string, (buffer: any, args: number[]) => any>} T
+     * @param {T} methods
+     * @returns {T}
+     */
+    const bufferSynced = methods=>/** @type {T} */ (Object.fromEntries(Object.entries(methods)
+        .map(([name, method])=>[name, (/** @type {any} */ buffer, /** @type {number[]} */ args)=>{
+            const hr = aroundDevices(()=>method(buffer, args));
+            noteLocked(buffer);
+            return hr;
+        }])));
+
+    const bufferMethods = bufferSynced({
         /** @param {any} buffer @param {number[]} args */
         Lock: (buffer, [flags, out, sizeOut])=>{
             if ((out >>> 0) === 0)
@@ -757,7 +806,7 @@ export function createDirect3D7Seam(
                 },
             });
         },
-    };
+    });
     const bufferInterfaces = [
         describe(IID_IDirect3DVertexBuffer7, IDIRECT3DVERTEXBUFFER7_SLOTS, bufferMethods),
     ];
@@ -1311,8 +1360,22 @@ export function createDirect3D7Seam(
                         }
                         work();
                     },
-                    commands: { take: records=>device.commands(records,
-                        D3D7_COMMANDS.commandObjects(records, publisher.objectAt)) },
+                    commands: { take: records=>{
+                        const named = D3D7_COMMANDS.commandObjects(records,
+                            publisher.objectAt);
+                        // A buffer a draw in the run reads is readied as the draw
+                        // made on the host readies it: nothing it reads changes
+                        // between the draw and here, every call that may is the
+                        // host's and makes the ring first.
+                        for (const object of named)
+                        {
+                            if (vertexBlocks.has(object))
+                            {
+                                drawingFrom(object);
+                            }
+                        }
+                        return device.commands(records, named);
+                    } },
                 });
                 shadows.set(device, shadow);
                 madeShadows.add(shadow);
@@ -1341,6 +1404,17 @@ export function createDirect3D7Seam(
             if (made.hr !== D3D_OK)
             {
                 return made.hr;
+            }
+            const own = allocate ? allocate(VERTEX_BUFFER7.SIZE) : 0;
+            if (own !== 0)
+            {
+                // Found one word past the interface pointer, which publishing writes.
+                fields.writeU32(own + VERTEX_BUFFER7.LOCKED, 0);
+                fields.writeU32(own + VERTEX_BUFFER7.VERTICES, made.buffer.numVertices >>> 0);
+                vertexBlocks.set(made.buffer, own);
+                made.buffer.guestState = ()=>own;
+                // A draw in a ring holds the buffer from when the ring is made.
+                made.buffer.settleGuestRefs = ()=>aroundDevices(()=>undefined);
             }
             fields.writeU32(out >>> 0,
                 publisher.publish(made.buffer, bufferInterfaces, IID_IDirect3DVertexBuffer7));
@@ -1395,17 +1469,7 @@ export function createDirect3D7Seam(
         /** What the device made last drew, as Direct3D 8's and 9's seams answer it. */
         diagnostics: ()=>lastDevice?.diagnostics?.() ?? null,
 
-        /**
-         * Makes what every device's command ring holds: before a call of the
-         * DirectDraw seam's -- a Flip shows the draws made before it, a Lock
-         * or a Blt of a target reads them.
-         */
-        syncDevices(){
-            for (const shadow of madeShadows)
-            {
-                shadow.sync();
-            }
-        },
+        aroundDevices,
 
         /**
          * What the Direct3D of DirectX 3, 5 and 6 shares with this one: the

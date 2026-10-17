@@ -281,6 +281,19 @@ export const SURFACE = {
     SIZE: 4 + 8 * 4 + 4,
 };
 
+/**
+ * Byte offsets within a Direct3D 7 vertex buffer's block: what a draw from it
+ * is refused for, which the host writes after each call on the buffer -- its
+ * locks are the host's.
+ */
+export const VERTEX_BUFFER7 = {
+    /** Whether a lock is held. */
+    LOCKED: 0,
+    /** How many vertices it holds, which a draw's range may not pass. */
+    VERTICES: 4,
+    SIZE: 8,
+};
+
 export const FLAG_SLOW_PATH = 1;
 /**
  * Bit 1, set by a state block's Apply in the ring: what the block mirrors may
@@ -907,23 +920,29 @@ const TRANSFORMS_7 = (0x7e | 0xff << 16) >>> 0;
  *   slow:
  *     jmp trap
  *
- * @param {number} at @param {number} trap
+ * Direct3D 7's numbers are their own slots, all below 24 (`TRANSFORM_MIRROR_7`):
+ * a type from 24 is the host's, and the types answered are that version's.
+ *
+ * @param {number} at @param {number} trap @param {boolean} [version7]
  * @returns {Uint8Array}
  */
-export function getTransformCode(at, trap){
+export function getTransformCode(at, trap, version7 = false){
     return routine(at, trap, [
         ...getterPrologue(),
         [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
         [0x3d, ...dword(WORLD_SLOT)],                            // cmp eax, 24
         { jcc: 0x72, to: 'low' },                                // jb low
-        [0x2d, ...dword(WORLD_TYPE - WORLD_SLOT)],               // sub eax, 232
-        [0x3d, ...dword(WORLD_SLOT)],                            // cmp eax, 24
-        { jcc: 0x72, to: 'slow' },                               // jb slow
-        [0x3d, ...dword(SHADOW.TRANSFORM_SLOTS)],                // cmp eax, 28
-        { jcc: 0x73, to: 'slow' },                               // jae slow
-        { jcc: 0xeb, to: 'slot' },                               // jmp slot
+        ...(version7 ? [] : [
+            [0x2d, ...dword(WORLD_TYPE - WORLD_SLOT)],           // sub eax, 232
+            [0x3d, ...dword(WORLD_SLOT)],                        // cmp eax, 24
+            { jcc: 0x72, to: 'slow' },                           // jb slow
+            [0x3d, ...dword(SHADOW.TRANSFORM_SLOTS)],            // cmp eax, 28
+            { jcc: 0x73, to: 'slow' },                           // jae slow
+            { jcc: 0xeb, to: 'slot' },                           // jmp slot
+        ]),
+        ...(version7 ? [{ jcc: 0xeb, to: 'slow' }] : []),        // jmp slow
         { label: 'low' },
-        [0xba, ...dword(ANSWERED_TRANSFORMS)],                   // mov edx, imm32
+        [0xba, ...dword(version7 ? TRANSFORMS_7 : ANSWERED_TRANSFORMS)], // mov edx, imm32
         [0x0f, 0xa3, 0xc2],                                      // bt edx, eax
         { jcc: 0x73, to: 'slow' },                               // jnc slow
         { label: 'slot' },
@@ -1277,6 +1296,24 @@ function commandChecks(shape, at){
             { jcc: 0x74, to: 'out', near: true },                // jz out
             { label: 'usable' });
     }
+    if (shape.vertexRange)
+    {
+        const { buffer, start, count } = shape.vertexRange;
+        parts.push(
+            [0x8b, 0x44, 0x24, at(buffer)],                      // mov eax, [esp+buffer]
+            [0x85, 0xc0],                                        // test eax, eax
+            { jcc: 0x74, to: 'out', near: true },                // jz out
+            [0x8b, 0x40, 0x04],                                  // mov eax, [eax+4]: its block
+            [0x85, 0xc0],                                        // test eax, eax
+            { jcc: 0x74, to: 'out', near: true },                // jz out
+            [0x83, 0x78, VERTEX_BUFFER7.LOCKED, 0x00],           // cmp dword [eax+LOCKED], 0
+            { jcc: 0x75, to: 'out', near: true },                // jne out
+            [0x8b, 0x54, 0x24, at(start)],                       // mov edx, [esp+start]
+            [0x03, 0x54, 0x24, at(count)],                       // add edx, [esp+count]
+            { jcc: 0x72, to: 'out', near: true },                // jc out
+            [0x3b, 0x50, VERTEX_BUFFER7.VERTICES],               // cmp edx, [eax+VERTICES]
+            { jcc: 0x77, to: 'out', near: true });               // ja out
+    }
     if (shape.flagNeeds)
     {
         const { arg, pairs } = shape.flagNeeds;
@@ -1361,6 +1398,9 @@ function commandChecks(shape, at){
  *     argument the device takes only as a surface whose usage has a bit of `mask`, read
  *     from the surface's block (`SURFACE`, the word after its interface): a surface
  *     with no block is the host's, and so is a null one unless `nullable`
+ * @property {{ buffer: number, start: number, count: number }} [vertexRange]  a Direct3D 7
+ *     vertex buffer argument and the range of its vertices a draw reads: taken only for a
+ *     buffer with a block (`VERTEX_BUFFER7`), not locked, holding the range whole
  * @property {{ arg: number, pairs: readonly [number, number][] }} [flagNeeds]  flags of
  *     an argument the device takes only with `DRAW` bits: for each pair, an argument
  *     with a bit of the first needs every bit of the second
@@ -3431,6 +3471,17 @@ export function appendCommand(m, shape, mirror, call){
         const owner = surface === 0 ? 0 : m.u32(surface + 4);
         if (surface === 0 ? !usage.nullable
             : owner === 0 || (m.u32(owner + SURFACE.DESC + 8) & usage.mask) === 0)
+        {
+            return undefined;
+        }
+    }
+    const range = shape.vertexRange;
+    if (range)
+    {
+        const owner = a[range.buffer] === 0 ? 0 : m.u32(a[range.buffer] + 4);
+        const end = a[range.start] + a[range.count];
+        if (owner === 0 || m.u32(owner + VERTEX_BUFFER7.LOCKED) !== 0 || end > 0xffffffff
+            || end > m.u32(owner + VERTEX_BUFFER7.VERTICES))
         {
             return undefined;
         }

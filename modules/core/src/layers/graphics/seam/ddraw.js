@@ -302,8 +302,9 @@ const S3TC_OF_FOURCC = Object.freeze({
  * @param {(api: string, detail: string) => void} [deps.divergence]
  *     Told of a copy this build refuses between two formats, with both of them.
  *        The screen is this size now, and a fullscreen window is placed over it.
- * @param {() => void} [deps.beforeCall]  run before each method of a surface or the
- *     DirectDraw object: Direct3D 7's command rings made first
+ * @param {<T>(call: () => T) => T} [deps.aroundCall]  runs each method of a surface or
+ *     the DirectDraw object: Direct3D 7's command rings made first, and what their
+ *     routines check said again after
  */
 export function createDirectDrawSeam(
     { publisher, memory, screen, gdi, present, flipQueued, callGuest, currentThread, scratch,
@@ -311,7 +312,7 @@ export function createDirectDrawSeam(
         refresh = ()=>REFRESH_HZ, schedule = (ms, run)=>{
             setTimeout(run, ms);
         }, identity, videoMemory, gamma, deactivated, deactivations, resolution, divergence,
-        beforeCall },
+        aroundCall },
 )
 {
     const fields = createFields(memory);
@@ -323,26 +324,23 @@ export function createDirectDrawSeam(
      * @param {any} object
      */
     const settlesDevices = object=>{
-        if (beforeCall && object && typeof object === 'object')
+        if (aroundCall && object && typeof object === 'object')
         {
-            object.settleGuestRefs ??= beforeCall;
+            object.settleGuestRefs ??= ()=>aroundCall(()=>undefined);
         }
     };
     /**
-     * A table's methods, each running `beforeCall` first: what Direct3D 7
-     * holds in its command ring is drawn before a surface is shown or read.
+     * A table's methods, each run by `aroundCall`: what Direct3D 7 holds in
+     * its command ring is drawn before a surface is shown or read.
      *
      * @template {Record<string, any>} T
      * @param {T} methods
      * @returns {T}
      */
-    const afterDevices = methods=>(beforeCall
+    const afterDevices = methods=>(aroundCall
         ? /** @type {T} */ (Object.fromEntries(Object.entries(methods).map(([name, method])=>[
             name, typeof method === 'function'
-                ? (/** @type {any[]} */ ...args)=>{
-                    beforeCall();
-                    return method(...args);
-                }
+                ? (/** @type {any[]} */ ...args)=>aroundCall(()=>method(...args))
                 : method])))
         : methods);
     /**

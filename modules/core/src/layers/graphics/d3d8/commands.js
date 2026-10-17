@@ -105,6 +105,7 @@ const first = (kind, length)=>{
  * @property {{ arg: number, when: number, table?: number }} [validated]
  * @property {{ arg: number, pairs: readonly [number, number][] }} [flagNeeds]
  * @property {{ arg: number, mask: number, nullable?: boolean }} [surfaceUsage]
+ * @property {{ buffer: number, start: number, count: number }} [vertexRange]
  * @property {number} [needs] @property {number} [refuses] @property {boolean} [fresh]
  *     what the routine checks before it answers for the call, so that the
  *     device takes every call it answered for (`commandChecks`)

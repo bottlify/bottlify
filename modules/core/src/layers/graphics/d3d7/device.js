@@ -470,6 +470,19 @@ export function createDirect3D7(ddraw, services = {}){
                 buffer.caps = (buffer.caps | D3DVBCAPS_OPTIMIZED) >>> 0;
                 return D3D_OK;
             },
+
+            /**
+             * Whether the last ProcessVertices into the buffer kept clip
+             * codes, which its draws clip by unless they say D3DDP_DONOTCLIP
+             * (decisions.md A45): the seam says so, which makes the call, and
+             * a draw the command ring carries reads it here.
+             */
+            clipCodes: false,
+            /** @param {boolean} on */
+            ClipCodes(on){
+                buffer.clipCodes = on;
+                return D3D_OK;
+            },
         };
         return buffer;
     }
@@ -942,6 +955,15 @@ export function createDirect3D7(ddraw, services = {}){
 
             get inScene(){
                 return inScene;
+            },
+
+            /**
+             * The textures bound to the stages, without the reference
+             * GetTexture hands out: what a draw made now samples, for a
+             * recording that sends a texture's bytes ahead of the draws.
+             */
+            get boundTextures(){
+                return textures.values();
             },
 
             /** @param {{ caps?: any }} out */
@@ -1656,18 +1678,20 @@ export function createDirect3D7(ddraw, services = {}){
             /**
              * Indices by pointer and vertices in a buffer. The indices are the
              * program's array, read through the scratch record whose address
-             * is set to it for the duration of the lock.
+             * is set to it for the duration of the lock -- or their bytes, as
+             * the command ring copies them.
              *
              * @param {number} type
              * @param {any} buffer
              * @param {number} startVertex
              * @param {number} vertexCount
-             * @param {number} indexAddress  Guest address of the 16-bit indices.
+             * @param {number | Uint8Array} indices  Guest address of the 16-bit indices, or
+             *     the indices.
              * @param {number} indexCount
              * @param {number} [clipped]  As DrawPrimitiveVB takes it.
              */
             DrawIndexedPrimitiveVB(
-                type, buffer, startVertex, vertexCount, indexAddress, indexCount, clipped = 0,
+                type, buffer, startVertex, vertexCount, indices, indexCount, clipped = 0,
             )
             {
                 const primitiveCount = primitiveCountOf(type, indexCount);
@@ -1678,7 +1702,9 @@ export function createDirect3D7(ddraw, services = {}){
                 {
                     return hr;
                 }
-                if (buffer.locked || (indexAddress >>> 0) === 0
+                const bytes = typeof indices === 'number' ? null : indices;
+                if (buffer.locked || (bytes ? bytes.byteLength < indexCount * 2
+                    : (/** @type {number} */ (indices) >>> 0) === 0)
                     || startVertex + vertexCount > buffer.numVertices)
                 {
                     return DDERR_INVALIDPARAMS;
@@ -1693,9 +1719,9 @@ export function createDirect3D7(ddraw, services = {}){
                     {
                         indexScratch.length = indexCount * 2;
                     }
-                    indexScratch.base = indexAddress >>> 0;
+                    indexScratch.base = bytes ? 0 : /** @type {number} */ (indices) >>> 0;
                     renderer.lockBuffer(indexScratch, 0, indexCount * 2, D3DLOCK.DISCARD);
-                    renderer.unlockBuffer(indexScratch);
+                    renderer.unlockBuffer(indexScratch, bytes ?? undefined);
                     clipsTransformed = clipped !== 0
                         && (renderStates.get(D3DRENDERSTATE.CLIPPING) ?? 1) !== 0;
                     renderer.drawIndexedPrimitive(model, type, 0, primitiveCount);

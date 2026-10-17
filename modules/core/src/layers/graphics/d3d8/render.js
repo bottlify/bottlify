@@ -8902,10 +8902,12 @@ export function createRenderer(options){
          * The bytes the program wrote are read from guest memory now, and only
          * the locked range: after a DISCARD the rest of the buffer is
          * undefined by contract, and resending it would be the §14.1 traffic.
+         * Bytes handed over -- a record's copy -- are the buffer's from its
+         * start instead.
          *
-         * @param {any} buffer
+         * @param {any} buffer @param {Uint8Array} [bytes]
          */
-        unlockBuffer(buffer){
+        unlockBuffer(buffer, bytes){
             const unlocks = counters.shapes.unlocks;
             unlocks[buffer.length] = (unlocks[buffer.length] ?? 0) + 1;
             const entry = buffers.get(buffer);
@@ -8918,7 +8920,8 @@ export function createRenderer(options){
             // enough, and the copy a read makes was a measured share of a
             // frame in a match, where a program refills its buffers every
             // draw.
-            const now = windowMemory(buffer.base + held.offset, held.length);
+            const now = bytes ? bytes.subarray(held.offset, held.offset + held.length)
+                : windowMemory(buffer.base + held.offset, held.length);
             if (held.length < DIFFED_UNLOCK)
             {
                 held.data.set(now);

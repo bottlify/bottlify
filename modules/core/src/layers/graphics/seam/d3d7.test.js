@@ -34,7 +34,8 @@ import {
     D3DDEVICEDESC7, D3DPRIMCAPS, D3DRECT, D3DVERTEXBUFFERDESC, D3DVIEWPORT7,
 } from './structs.js';
 import { guidBytes } from './d3d7.js';
-import { DRAW, SHADOW } from './shadow.js';
+import { COMMAND, DRAW, SHADOW, VERTEX_BUFFER7 } from './shadow.js';
+import { D3D7_COMMANDS } from '../d3d7/commands.js';
 import { createDirectDraw } from '../ddraw/objects.js';
 import { DDSURFACEDESC2, writeSurfaceDesc } from '../ddraw/structs.js';
 import {
@@ -1066,12 +1067,14 @@ test('with guest memory, a device\'s setters and getters run in the guest, and w
     assert.equal(hr, D3D_OK);
     for (const name of ['SetRenderState', 'SetTransform', 'SetTextureStageState', 'SetViewport',
         'LightEnable', 'BeginScene', 'EndScene', 'DrawPrimitive', 'SetTexture', 'GetRenderState',
-        'GetTextureStageState', 'GetViewport'])
+        'GetTextureStageState', 'GetViewport', 'GetTransform', 'Clear', 'DrawPrimitiveVB',
+        'DrawIndexedPrimitiveVB'])
     {
         assert.ok(h.box.isGuest(device, slot(IDIRECT3DDEVICE7_SLOTS, name)),
             `${name} is guest code`);
     }
-    for (const name of ['Clear', 'DrawIndexedPrimitive', 'DrawIndexedPrimitiveVB', 'GetTransform'])
+    // By pointer to both its vertices and its indices: two copies, which a record has not.
+    for (const name of ['DrawIndexedPrimitive'])
     {
         assert.ok(!h.box.isGuest(device, slot(IDIRECT3DDEVICE7_SLOTS, name)), `${name} is a trap`);
     }
@@ -1094,4 +1097,79 @@ test('with guest memory, a device\'s setters and getters run in the guest, and w
     assert.deepEqual([h.box.memory.readU32(block + SHADOW.TARGET_WIDTH),
         h.box.memory.readU32(block + SHADOW.TARGET_HEIGHT)], [8, 8]);
     assert.equal(h.release(device), 0);
+});
+
+test('with guest memory, a vertex buffer\'s block says its vertices and its lock, and a draw from'
+    + ' it in the ring is made, the buffer readied first, before the buffer is locked again', ()=>{
+    const h = seamed({ guest: true });
+    const ddraw = h.create7();
+    const d3d = h.direct3D(ddraw);
+    const target = h.surface(ddraw);
+    const { device } = h.createDevice(d3d, target);
+    const desc = 0x6400;
+    h.box.memory.writeU32(desc + D3DVERTEXBUFFERDESC.dwSize, D3DVERTEXBUFFERDESC.SIZE);
+    h.box.memory.writeU32(desc + D3DVERTEXBUFFERDESC.dwCaps, 0);
+    h.box.memory.writeU32(desc + D3DVERTEXBUFFERDESC.dwFVF, FVF_TL);
+    h.box.memory.writeU32(desc + D3DVERTEXBUFFERDESC.dwNumVertices, 64);
+    assert.equal(h.box.call(d3d, slot(IDIRECT3D7_SLOTS, 'CreateVertexBuffer'),
+        [desc, 0x6500, 0]), D3D_OK);
+    const buffer = h.box.memory.readU32(0x6500);
+    const own = h.box.memory.readU32(buffer + 4);
+    assert.notEqual(own, 0, 'the buffer\'s block is one word past its interface');
+    assert.equal(h.box.memory.readU32(own + VERTEX_BUFFER7.VERTICES), 64);
+    assert.equal(h.buffer(buffer, 'Lock', [0, 0x6600, 0]), D3D_OK);
+    assert.equal(h.box.memory.readU32(own + VERTEX_BUFFER7.LOCKED), 1, 'a lock says so');
+    assert.equal(h.buffer(buffer, 'Unlock'), D3D_OK);
+    assert.equal(h.box.memory.readU32(own + VERTEX_BUFFER7.LOCKED), 0, 'and its unlock');
+
+    /** @type {string[]} */
+    const calls = [];
+    const vertices = h.publisher.objectAt(buffer);
+    for (const method of ['Lock', 'Unlock', 'LockInPlace'])
+    {
+        const was = vertices[method];
+        vertices[method] = (/** @type {any[]} */ ...args)=>{
+            calls.push(`buffer.${method}`);
+            return was(...args);
+        };
+    }
+    const model = h.publisher.objectAt(device);
+    const draw = model.DrawIndexedPrimitiveVB;
+    model.DrawIndexedPrimitiveVB = (/** @type {any[]} */ ...args)=>{
+        calls.push(`draw ${[...new Uint16Array(args[4].buffer, args[4].byteOffset, args[5])]}`
+            + ` clipped ${args[6]}`);
+        return draw(...args);
+    };
+    // What the guest's routines write: a scene, and an indexed draw of a quad
+    // from the buffer, its six indices copied into the record.
+    const block = h.box.memory.readU32(device + 4);
+    const ring = h.box.memory.readU32(block + SHADOW.COMMANDS);
+    let head = h.box.memory.readU32(block + SHADOW.COMMAND_HEAD);
+    /** @param {string} name @param {number[]} words */
+    const write = (name, words)=>{
+        const at = ring + head;
+        const length = COMMAND.ARGS + 4 * words.length;
+        h.box.memory.writeU32(at + COMMAND.SLOT, D3D7_COMMANDS.commandSlot(name));
+        words.forEach((word, index)=>h.box.memory.writeU32(at + COMMAND.ARGS + 4 * index, word));
+        h.box.memory.writeU32(at + COMMAND.BYTES, length);
+        head += length;
+        h.box.memory.writeU32(block + SHADOW.COMMAND_HEAD, head);
+        return at;
+    };
+    write('BeginScene', []);
+    const indices = [0, 1, 2, 2, 1, 3];
+    const pairs = new Uint32Array(Uint16Array.from(indices).buffer);
+    const at = ring + head;
+    write('DrawIndexedPrimitiveVB', [4, buffer, 0, 4, at + COMMAND.ARGS + 28, 6, 0, ...pairs]);
+    assert.equal(h.buffer(buffer, 'Lock', [0, 0x6600, 0]), D3D_OK);
+    assert.deepEqual(calls, ['buffer.Lock', 'buffer.Unlock', 'draw 0,1,2,2,1,3 clipped 0',
+        'buffer.Lock'], 'written in place, read whole for the draw, drawn, then locked');
+    assert.equal(h.buffer(buffer, 'Unlock'), D3D_OK);
+
+    h.release(buffer);
+    assert.equal(h.release(device), 0);
+    h.release(d3d);
+    h.release(target);
+    h.release(ddraw);
+    h.assertAllReleased();
 });

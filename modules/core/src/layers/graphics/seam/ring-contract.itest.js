@@ -22,7 +22,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createCorkHost } from '../../cpu/internal/cork-host.js';
 import * as cork from '../../../../../cork/src/index.js';
-import { SHADOW, SURFACE, commandCode } from './shadow.js';
+import { SHADOW, SURFACE, VERTEX_BUFFER7, commandCode } from './shadow.js';
 import { COMMAND_MIRRORS as MIRRORS_9 } from './d3d9.js';
 import { COMMAND_MIRRORS as MIRRORS_8 } from './d3d8.js';
 import * as D3D9 from '../d3d9/commands.js';
@@ -33,8 +33,8 @@ import { createDirect3D7 } from '../d3d7/device.js';
 import { DEVICE_IDS as DEVICE_IDS_7 } from '../d3d7/constants.js';
 import { createDirectDraw } from '../ddraw/objects.js';
 import {
-    DDSCAPS_3DDEVICE, DDSCAPS_OFFSCREENPLAIN, DDSCAPS_TEXTURE, DDSCL_NORMAL, DDSD_CAPS,
-    DDSD_HEIGHT, DDSD_WIDTH,
+    DDSCAPS_3DDEVICE, DDSCAPS_OFFSCREENPLAIN, DDSCAPS_TEXTURE, DDSCAPS_ZBUFFER, DDSCL_NORMAL,
+    DDSD_CAPS, DDSD_HEIGHT, DDSD_WIDTH, DDSD_ZBUFFERBITDEPTH,
 } from '../ddraw/constants.js';
 import { createDirect3D9 } from '../d3d9/device.js';
 import { createDirect3D8 } from '../d3d8/device.js';
@@ -247,7 +247,17 @@ function gate(api, table){
                 const surface = typeof made[key].LockRect === 'function'
                     && typeof made[key].GetDesc === 'function'
                     && made[key].GetDesc(held) === D3D_OK && held.desc;
-                const block = surface ? SURFACES + i * SURFACE.SIZE : BLOCK;
+                // A Direct3D 7 vertex buffer's: whether it is locked, and its vertices.
+                const vertices = !surface && typeof made[key].numVertices === 'number'
+                    && typeof made[key].LockInPlace === 'function';
+                const block = surface || vertices ? SURFACES + i * SURFACE.SIZE : BLOCK;
+                if (vertices)
+                {
+                    const words = new Uint32Array(VERTEX_BUFFER7.SIZE / 4);
+                    words[VERTEX_BUFFER7.LOCKED / 4] = made[key].locked ? 1 : 0;
+                    words[VERTEX_BUFFER7.VERTICES / 4] = made[key].numVertices;
+                    host.writePhysical(block, new Uint8Array(words.buffer));
+                }
                 if (surface)
                 {
                     // And the texture it is a level of, numbered as the shadow numbers them.
@@ -940,8 +950,87 @@ test('Direct3D 7: every call the command ring answers for in the guest is one th
                         assert.equal(device.EndScene(), D3D_OK);
                     } },
             ],
+            // A depth clear needs a depth buffer attached to the target.
+            Clear: [
+                { label: 'the target', args: [0, 0, 1, 0, ONE, 0] },
+                { label: 'two rectangles', args: [2, 'data', 1, 0, ONE, 0],
+                    data: [0, 0, 8, 8, 8, 8, 16, 16] },
+                { label: 'depth without a depth buffer', args: [0, 0, 3, 0, ONE, 0] },
+                { label: 'target, depth and stencil', args: [0, 0, 7, 0, ONE, 0],
+                    setup: depth7 },
+                { label: 'nothing to clear', args: [0, 0, 0, 0, ONE, 0] },
+                { label: 'rectangles without a pointer', args: [2, 0, 1, 0, ONE, 0] },
+            ],
+            // From a buffer with a block, unlocked, holding the range drawn.
+            DrawPrimitiveVB: [
+                { label: 'a strip', args: [5, 'vb', 0, 4, 0], setup: buffer7 },
+                { label: 'a list past the first vertex', args: [4, 'vb', 1, 3, 0],
+                    setup: buffer7 },
+                { label: 'without clipping', args: [4, 'vb', 0, 3, 4], setup: buffer7 },
+                { label: 'past the last vertex', args: [4, 'vb', 2, 3, 0], setup: buffer7 },
+                { label: 'a start that wraps', args: [4, 'vb', 0xfffffffe, 3, 0],
+                    setup: buffer7 },
+                { label: 'a locked buffer', args: [4, 'vb', 0, 3, 0], setup: lockedBuffer7 },
+                { label: 'two of a list', args: [4, 'vb', 0, 2, 0], setup: buffer7 },
+                { label: 'a type there is not', args: [7, 'vb', 0, 3, 0], setup: buffer7 },
+                { label: 'no buffer', args: [4, 0, 0, 3, 0], setup: buffer7 },
+                { label: 'outside a scene', args: [4, 'vb', 0, 3, 0],
+                    setup: (device, made)=>{
+                        buffer7(device, made);
+                        assert.equal(device.EndScene(), D3D_OK);
+                    } },
+            ],
+            // The same, and the indices: 16-bit, copied whole.
+            DrawIndexedPrimitiveVB: [
+                { label: 'a quad', args: [4, 'vb', 0, 4, 'data', 6, 0], data: QUAD_INDICES,
+                    setup: buffer7 },
+                { label: 'an odd count', args: [5, 'vb', 0, 4, 'data', 3, 0],
+                    data: QUAD_INDICES, setup: buffer7 },
+                { label: 'past the last vertex', args: [4, 'vb', 1, 4, 'data', 6, 0],
+                    data: QUAD_INDICES, setup: buffer7 },
+                { label: 'a locked buffer', args: [4, 'vb', 0, 4, 'data', 6, 0],
+                    data: QUAD_INDICES, setup: lockedBuffer7 },
+                { label: 'no indices', args: [4, 'vb', 0, 4, 0, 6, 0], setup: buffer7 },
+                { label: 'two indices', args: [4, 'vb', 0, 4, 'data', 2, 0],
+                    data: QUAD_INDICES, setup: buffer7 },
+                { label: 'a type there is not', args: [0, 'vb', 0, 4, 'data', 6, 0],
+                    data: QUAD_INDICES, setup: buffer7 },
+                { label: 'outside a scene', args: [4, 'vb', 0, 4, 'data', 6, 0],
+                    data: QUAD_INDICES, setup: (device, made)=>{
+                        buffer7(device, made);
+                        assert.equal(device.EndScene(), D3D_OK);
+                    } },
+            ],
         });
     });
+
+/** A quad's six 16-bit indices, two to a dword. */
+const QUAD_INDICES = [...new Uint32Array(Uint16Array.from([0, 1, 2, 2, 1, 3]).buffer)];
+
+/** A scene, and a buffer of four transformed vertices. */
+const buffer7 = (/** @type {any} */ device, /** @type {Record<string, any>} */ made)=>{
+    const made7 = createDirect3D7(device7Root(device)).createVertexBuffer({ caps: 0,
+        fvf: FVF_TL, numVertices: 4 });
+    assert.equal(made7.hr, D3D_OK);
+    made.vb = made7.buffer;
+    assert.equal(device.BeginScene(), D3D_OK);
+};
+/** The same, locked. */
+const lockedBuffer7 = (/** @type {any} */ device, /** @type {Record<string, any>} */ made)=>{
+    buffer7(device, made);
+    assert.equal(made.vb.Lock(0, {}), D3D_OK);
+};
+/** A depth buffer attached to the device's target. */
+const depth7 = (/** @type {any} */ device)=>{
+    const depth = device7Root(device).createSurface({
+        flags: DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_ZBUFFERBITDEPTH,
+        caps: DDSCAPS_ZBUFFER, width: 64, height: 64, zBufferBitDepth: 16 });
+    assert.equal(depth.hr, D3D_OK);
+    /** @type {{ surface?: any }} */
+    const held = {};
+    assert.equal(device.GetRenderTarget(held), D3D_OK);
+    assert.equal(held.surface.addAttachedSurface(depth.surface), D3D_OK);
+};
 
 /** A texture surface of the device's DirectDraw object. */
 const texture7 = (/** @type {any} */ device, /** @type {Record<string, any>} */ made)=>{
