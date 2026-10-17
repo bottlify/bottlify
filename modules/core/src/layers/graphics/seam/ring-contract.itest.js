@@ -23,7 +23,7 @@ import assert from 'node:assert/strict';
 import { createCorkHost } from '../../cpu/internal/cork-host.js';
 import { runToHalt } from '../../cpu/internal/halt.fixture.js';
 import * as cork from '../../../../../cork/src/index.js';
-import { SHADOW, SURFACE, VERTEX_BUFFER7, commandCode } from './shadow.js';
+import { SHADOW, SURFACE, TEXTURE, VERTEX_BUFFER7, commandCode } from './shadow.js';
 import { COMMAND_MIRRORS as MIRRORS_9 } from './d3d9.js';
 import { COMMAND_MIRRORS as MIRRORS_8 } from './d3d8.js';
 import * as D3D9 from '../d3d9/commands.js';
@@ -51,6 +51,8 @@ const DATA = 0x14000;
 const OBJECTS = 0x18000;
 /** Each surface's block (`SURFACE`), the word after its interface pointing there. */
 const SURFACES = 0x19000;
+/** Each texture's block (`TEXTURE`), for a texture's own calls. */
+const TEXTURES = 0x1b000;
 const STACK = 0x300000;
 /** The device's interface: its block one word on. */
 const DEVICE = OBJECTS + 0x800;
@@ -225,10 +227,14 @@ const renderStatesOf = device=>{
  * Direct3D 7 vertex buffer's with its lock and its vertices, as the seams
  * publish them; any other's is the device's block.
  *
+ * A texture's own call (`dirty`) finds the texture's block there instead,
+ * with the device's block and the top level's extent, as the seams write it.
+ *
  * @param {ReturnType<typeof machine>['host']} host @param {Record<string, any>} made
+ * @param {boolean} [textures]
  * @returns {Map<number, any>} the objects by pointer
  */
-function placeObjects(host, made){
+function placeObjects(host, made, textures = false){
     /** @type {Map<number, any>} */
     const pointers = new Map();
     /** @type {Map<object, number>} */
@@ -242,7 +248,29 @@ function placeObjects(host, made){
             && made[key].GetDesc(held) === D3D_OK && held.desc;
         const vertices = !surface && typeof made[key].numVertices === 'number'
             && typeof made[key].LockInPlace === 'function';
-        const block = surface || vertices ? SURFACES + i * SURFACE.SIZE : BLOCK;
+        const texture = textures && (typeof made[key].AddDirtyRect === 'function'
+            || typeof made[key].AddDirtyBox === 'function');
+        const block = texture ? TEXTURES + i * TEXTURE.SIZE
+            : surface || vertices ? SURFACES + i * SURFACE.SIZE : BLOCK;
+        if (texture)
+        {
+            /** @type {{ surface?: any }} */
+            const level = {};
+            /** @type {{ desc?: any }} */
+            const top = {};
+            const volume = made[key].GetSurfaceLevel === undefined;
+            if (!volume)
+            {
+                assert.equal(made[key].GetSurfaceLevel(0, level), D3D_OK);
+                level.surface.GetDesc(top);
+                level.surface.release();
+            }
+            const words = new Uint32Array(TEXTURE.SIZE / 4);
+            words.set(volume
+                ? [BLOCK, made[key].width, made[key].height, made[key].depth]
+                : [BLOCK, top.desc.Width, top.desc.Height, 1], TEXTURE.DEVICE / 4);
+            host.writePhysical(block, new Uint8Array(words.buffer));
+        }
         if (vertices)
         {
             const words = new Uint32Array(VERTEX_BUFFER7.SIZE / 4);
@@ -296,7 +324,7 @@ function gate(api, table){
             const made = {};
             setup?.(device, made);
             const names = Object.keys(made);
-            const pointers = placeObjects(host, made);
+            const pointers = placeObjects(host, made, shape.dirty !== undefined);
             /** @param {number | string} arg */
             const value = arg=>(typeof arg === 'number' ? arg >>> 0
                 : arg === 'data' ? DATA : OBJECTS + names.indexOf(arg) * 16);
@@ -357,6 +385,15 @@ const texture = (device, made)=>{
     assert.equal(device.CreateTexture(16, 16, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, out),
         D3D_OK);
     made.texture = out.texture;
+};
+
+/** @param {any} device @param {Record<string, any>} made */
+const volumeTexture = (device, made)=>{
+    /** @type {{ texture?: any }} */
+    const out = {};
+    assert.equal(device.CreateVolumeTexture(8, 8, 4, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, out),
+        D3D_OK);
+    made.volume = out.texture;
 };
 
 /** A vertex buffer of position-and-colour vertices, bound as stream 0. @param {any} device */
@@ -463,6 +500,37 @@ const CONSTANTS = new Array(64).fill(ONE);
  * @returns {Record<string, Case[]>}
  */
 const shared = drawable=>({
+    // A rectangle of the top level, as the device takes one: within it and not
+    // empty; none, all of it, is the host's.
+    'Texture.AddDirtyRect': [
+        { label: 'a rectangle within', args: ['texture', 'data'], data: [1, 2, 9, 10],
+            setup: texture },
+        { label: 'all of it', args: ['texture', 'data'], data: [0, 0, 16, 16], setup: texture },
+        { label: 'past the right edge', args: ['texture', 'data'], data: [0, 0, 17, 16],
+            setup: texture },
+        { label: 'past the bottom', args: ['texture', 'data'], data: [0, 0, 16, 17],
+            setup: texture },
+        { label: 'empty', args: ['texture', 'data'], data: [4, 4, 4, 8], setup: texture },
+        { label: 'turned round', args: ['texture', 'data'], data: [4, 9, 8, 2], setup: texture },
+        { label: 'a negative edge', args: ['texture', 'data'], data: [-1, 0, 4, 4],
+            setup: texture },
+        { label: 'none', args: ['texture', 0], setup: texture },
+    ],
+    'VolumeTexture.AddDirtyBox': [
+        { label: 'a box within', args: ['volume', 'data'], data: [1, 2, 5, 6, 1, 3],
+            setup: volumeTexture },
+        { label: 'all of it', args: ['volume', 'data'], data: [0, 0, 8, 8, 0, 4],
+            setup: volumeTexture },
+        { label: 'past the back', args: ['volume', 'data'], data: [0, 0, 8, 8, 0, 5],
+            setup: volumeTexture },
+        { label: 'empty in depth', args: ['volume', 'data'], data: [0, 0, 8, 8, 2, 2],
+            setup: volumeTexture },
+        { label: 'past the right edge', args: ['volume', 'data'], data: [0, 0, 9, 8, 0, 4],
+            setup: volumeTexture },
+        { label: 'a negative front', args: ['volume', 'data'], data: [0, 0, 8, 8, -1, 4],
+            setup: volumeTexture },
+        { label: 'none', args: ['volume', 0], setup: volumeTexture },
+    ],
     SetRenderState: [
         { label: 'a state the device has', args: [7, 1] },
         { label: 'a state past the block', args: [300, 1] },

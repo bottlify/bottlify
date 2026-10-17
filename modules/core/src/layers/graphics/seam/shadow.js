@@ -51,7 +51,9 @@
  * flag every routine checks first, and leaves to the trap.
  */
 
-import { D3DERR_INVALIDCALL, D3DFVF_RESERVED0, D3DFMT } from '../d3d8/constants.js';
+import {
+    D3DERR_INVALIDCALL, D3DFVF_RESERVED0, D3DFMT, D3DPOOL, D3DUSAGE, FORMAT_INFO, surfacePitch,
+} from '../d3d8/constants.js';
 
 /** The one depth format with a stencil the devices take a stencil clear on. */
 const D3DFMT_D24S8 = D3DFMT.D24S8;
@@ -329,7 +331,18 @@ export const TEXTURE = {
     /** A pointer per level, zero for one the host has not published yet. */
     LEVELS: 12,
     LEVEL_SLOTS: 16,
-    SIZE: 12 + 16 * 4,
+    /**
+     * The device's block, whose ring the texture's AddDirtyRect and
+     * AddDirtyBox write into; zero sends them to the host.
+     */
+    DEVICE: 12 + 16 * 4,
+    /** The top level's extent, which a dirty rectangle or box may not leave. */
+    WIDTH: 80,
+    HEIGHT: 84,
+    DEPTH: 88,
+    /** A level's block (`LEVEL`) per level, zero for one the guest does not lock. */
+    LOCKS: 92,
+    SIZE: 92 + 16 * 4,
 };
 
 /**
@@ -347,7 +360,48 @@ export const SURFACE = {
      * zero for none: two levels of one texture are one texture to the GPU.
      */
     CONTAINER: 4 + 8 * 4,
-    SIZE: 4 + 8 * 4 + 4,
+    /** Its block as a level the guest locks (`LEVEL`), zero for none. */
+    LEVEL: 4 + 8 * 4 + 4,
+    SIZE: 4 + 8 * 4 + 8,
+};
+
+/**
+ * Byte offsets within the block of a level the guest locks: a surface of a
+ * texture, a volume of a volume texture, or a surface of its own. Its bytes
+ * are guest memory at one address whatever is locked of them, so a lock is
+ * an address worked out and a lock remembered, which the host replays on the
+ * level at its next entry; the words the buffers' are where a buffer's block
+ * has them.
+ */
+export const LEVEL = {
+    /** Bit 0 set by the host: take the slow path. */
+    FLAGS: 0,
+    BASE: 4,
+    /** Whether a lock is held, through either path. */
+    LOCKED: BUFFER.LOCKED,
+    /** A lock the guest took that the host has not replayed yet: the next is the host's. */
+    TAKEN: 16,
+    ROW_PITCH: 20,
+    /** That lock's D3DLOCK flags. */
+    LOCK_FLAGS: BUFFER.LOCK_FLAGS,
+    DEVICE: BUFFER.DEVICE,
+    SLICE_PITCH: 32,
+    /** On the device's ring of blocks to settle (`SHADOW.RING`), until the host empties it. */
+    QUEUED: BUFFER.QUEUED,
+    WIDTH: 40,
+    HEIGHT: 44,
+    DEPTH: 48,
+    TEXEL_BYTES: 52,
+    /**
+     * Set when a draw may read the level: a lock in the guest then waits for
+     * the draws in the ring, as a buffer's does. One in system memory is
+     * never drawn from.
+     */
+    SAMPLED: 56,
+    /** Whether that lock named a box, and the box, as D3DBOX lays it out. */
+    BOXED: 60,
+    BOX: 64,
+    SIZE: 64 + 6 * 4,
 };
 
 /**
@@ -747,6 +801,58 @@ const getterPrologue = ()=>prologue('slow', FLAG_SLOW_PATH | FLAG_STALE);
  */
 const threadPrologue = (slow = 'slow')=>[
     [0x64, 0x8b, 0x0d, ...dword(TEB_GL_CONTEXT)],            // mov ecx, fs:[disp]
+    [0x85, 0xc9],                                            // test ecx, ecx
+    { jcc: 0x74, to: slow },                                 // jz slow
+    [0xf7, 0x01, ...dword(FLAG_SLOW_PATH)],                  // test dword [ecx], 1
+    { jcc: 0x75, to: slow },                                 // jnz slow
+];
+
+/**
+ * The prologue of a texture's AddDirtyRect or AddDirtyBox: the object's block
+ * is the texture's (`TEXTURE`), which the rectangle or box must lie within,
+ * not empty along any axis, as the device takes one; then the device's block,
+ * whose ring the record goes into, is the routine's. None -- all of the
+ * texture -- is the host's, and so is one the checks refuse, which the host
+ * refuses. Unsigned compares refuse a negative edge with the rest.
+ *
+ *     mov ecx, [esp+4]
+ *     mov ecx, [ecx+4]            ; the texture's block
+ *     test ecx, ecx
+ *     jz slow
+ *     test dword [ecx], 1
+ *     jnz slow
+ *     mov eax, [esp+8]            ; the rectangle or box
+ *     test eax, eax
+ *     jz slow
+ *     mov edx, [eax+8]            ; right
+ *     cmp edx, [ecx+WIDTH]
+ *     ja slow
+ *     cmp [eax], edx              ; left
+ *     jae slow
+ *     (bottom and top against HEIGHT, [back and front against DEPTH])
+ *     mov ecx, [ecx+DEVICE]
+ *     test ecx, ecx
+ *     jz slow
+ *     test dword [ecx], 1
+ *     jnz slow
+ *
+ * @param {'rect' | 'box'} kind @param {string} slow
+ * @returns {(number[] | { jcc: number, to: string })[]}
+ */
+const dirtyPrologue = (kind, slow)=>[
+    ...prologue(slow),
+    [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
+    [0x85, 0xc0],                                            // test eax, eax
+    { jcc: 0x74, to: slow },                                 // jz slow
+    ...[[8, 0, TEXTURE.WIDTH], [12, 4, TEXTURE.HEIGHT],
+        ...(kind === 'box' ? [[20, 16, TEXTURE.DEPTH]] : [])].flatMap(([far, near, extent])=>[
+        [0x8b, 0x50, far],                                   // mov edx, [eax+far]
+        [0x3b, 0x51, extent],                                // cmp edx, [ecx+extent]
+        { jcc: 0x77, to: slow },                             // ja slow
+        [0x39, 0x50, near],                                  // cmp [eax+near], edx
+        { jcc: 0x73, to: slow },                             // jae slow
+    ]),
+    [0x8b, 0x49, TEXTURE.DEVICE],                            // mov ecx, [ecx+76]
     [0x85, 0xc9],                                            // test ecx, ecx
     { jcc: 0x74, to: slow },                                 // jz slow
     [0xf7, 0x01, ...dword(FLAG_SLOW_PATH)],                  // test dword [ecx], 1
@@ -1153,6 +1259,285 @@ export function unlockCode(at, trap){
         letHeldGo(EDX),                                          // mov dword [edx+HELD], 0
         [0x31, 0xc0],                                            // xor eax, eax
         [0xc2, 0x04, 0x00],                                      // ret 4
+        { label: 'held' },
+        letHeldGo(EDX),                                          // mov dword [edx+HELD], 0
+    ]);
+}
+
+/**
+ * The level a texture's or a surface's lock names, its block into ECX
+ * (`LEVEL`), from the object's block the prologue left there: a texture's
+ * table of them (`TEXTURE.LOCKS`) at the level its first argument names, or
+ * a surface's own. No block, or the host's flag on it, leaves for `slow`.
+ *
+ *   texture:
+ *     mov eax, [esp+8]            ; level
+ *     cmp eax, [ecx+LEVEL_COUNT]
+ *     jae slow                    ; the host refuses it
+ *     cmp eax, LEVEL_SLOTS
+ *     jae slow
+ *     mov ecx, [ecx + eax*4 + LOCKS]
+ *   surface:
+ *     mov ecx, [ecx+LEVEL]
+ *   both:
+ *     test ecx, ecx
+ *     jz slow
+ *     test dword [ecx], 1
+ *     jnz slow
+ *
+ * @param {'texture' | 'surface'} find @param {string} slow
+ * @returns {(number[] | { jcc: number, to: string })[]}
+ */
+const findLevel = (find, slow)=>[
+    ...(find === 'texture'
+        ? [
+            [0x8b, 0x44, 0x24, 0x08],                            // mov eax, [esp+8]
+            [0x3b, 0x41, TEXTURE.LEVEL_COUNT],                   // cmp eax, [ecx+4]
+            { jcc: 0x73, to: slow },                             // jae slow
+            [0x3d, ...dword(TEXTURE.LEVEL_SLOTS)],               // cmp eax, 16
+            { jcc: 0x73, to: slow },                             // jae slow
+            [0x8b, 0x8c, 0x81, ...dword(TEXTURE.LOCKS)],         // mov ecx, [ecx+eax*4+disp]
+        ]
+        : [[0x8b, 0x49, SURFACE.LEVEL]]),                        // mov ecx, [ecx+40]
+    [0x85, 0xc9],                                                // test ecx, ecx
+    { jcc: 0x74, to: slow },                                     // jz slow
+    [0xf7, 0x01, ...dword(FLAG_SLOW_PATH)],                      // test dword [ecx], 1
+    { jcc: 0x75, to: slow },                                     // jnz slow
+];
+
+/**
+ * HRESULT LockRect(this, [UINT level,] D3DLOCKED_RECT *out, const RECT *rect,
+ * DWORD flags) of a texture or a surface, and HRESULT LockBox(this, UINT
+ * level, D3DLOCKED_BOX *out, const D3DBOX *box, DWORD flags) of a volume
+ * texture, as guest code for a level with a block (`LEVEL`). The address
+ * handed back is the level's own bytes at the rectangle or box, which is
+ * kept with the flags for the host to replay the lock with at its next
+ * entry; the block goes on the device's ring of blocks to settle at once,
+ * so a lock held across an entry is the host's from then on too.
+ *
+ * The cases left to the host: the device's lock held, a lock of the level
+ * already held, one the host has not replayed yet (a second would leave it
+ * one box to replay for two), a null out-pointer, a full ring, a rectangle
+ * or box that is empty or leaves the level -- which the
+ * versions answer differently -- and, for a level a draw may read, a draw in
+ * the device's command ring the host has not made: it reads the bytes the
+ * program would write over. The device's lock is let go before the
+ * program's out-pointer is written, which may fault.
+ *
+ *     (the object's block, then the level's: slow)
+ *     mov edx, [ecx+DEVICE]
+ *     (take the device's lock through EDX, or slow)
+ *     cmp dword [ecx+LOCKED], 0
+ *     jne held
+ *     cmp dword [ecx+TAKEN], 0
+ *     jne held
+ *     cmp dword [ecx+SAMPLED], 0
+ *     je unsampled
+ *     cmp dword [edx+DRAWS_PENDING], 0
+ *     jne held
+ *   unsampled:
+ *     cmp dword [ecx+QUEUED], 0
+ *     jne room
+ *     cmp dword [edx+RING_HEAD], RING_CAPACITY
+ *     jae held
+ *   room:
+ *     cmp dword [esp+out], 0
+ *     je held
+ *     push ebx; push esi; push edi
+ *     mov esi, [esp+rect+12]
+ *     xor ebx, ebx                ; the byte offset of what is locked
+ *     mov [ecx+BOXED], ebx
+ *     test esi, esi
+ *     jz take                     ; all of it
+ *     (right <= WIDTH, left < right, bottom <= HEIGHT, top < bottom,
+ *      [back <= DEPTH, front < back], unsigned: or refused)
+ *     ebx = left*TEXEL_BYTES + top*ROW_PITCH [+ front*SLICE_PITCH]
+ *     (the rectangle or box into BOX, a rectangle one slice deep)
+ *     mov dword [ecx+BOXED], 1
+ *   take:
+ *     mov eax, [esp+flags+12]
+ *     mov [ecx+LOCK_FLAGS], eax
+ *     mov dword [ecx+LOCKED], 1
+ *     mov dword [ecx+TAKEN], 1
+ *     mov edx, [ecx+DEVICE]
+ *     cmp dword [ecx+QUEUED], 0
+ *     jne queued
+ *     mov eax, [edx+RING_HEAD]
+ *     mov [edx + eax*4 + RING], ecx
+ *     inc dword [edx+RING_HEAD]
+ *     mov dword [ecx+QUEUED], 1
+ *   queued:
+ *     mov dword [edx+HELD], 0
+ *     mov eax, ebx
+ *     add eax, [ecx+BASE]
+ *     mov edi, [esp+out+12]
+ *     (ROW_PITCH [, SLICE_PITCH], then the address, into [edi])
+ *     pop edi; pop esi; pop ebx
+ *     xor eax, eax
+ *     ret 4*args
+ *   refused:
+ *     pop edi; pop esi; pop ebx
+ *   held:
+ *     mov eax, [ecx+DEVICE]
+ *     mov dword [eax+HELD], 0     ; and on to the host
+ *
+ * @param {number} at @param {number} trap
+ * @param {{ find: 'texture' | 'surface', box?: boolean }} kind  a box only for a texture
+ * @returns {Uint8Array}
+ */
+export function lockLevelCode(at, trap, { find, box = false }){
+    // Where the out-pointer, the rectangle or box and the flags are on entry.
+    const out = find === 'texture' ? 12 : 8;
+    const rect = out + 4;
+    const flags = out + 8;
+    /** `mov eax, [esi+from]; mov [ecx+to], eax`. @param {number} from @param {number} to */
+    const copy = (from, to)=>[[0x8b, 0x46, from], [0x89, 0x41, to]];
+    return routine(at, trap, [
+        ...prologue('early'),
+        ...findLevel(find, 'early'),
+        { jcc: 0xeb, to: 'body' },                               // jmp body
+        { label: 'early' },
+        { jcc: 0xeb, to: 'slow', near: true },                   // jmp slow
+        { label: 'body' },
+        [0x8b, 0x51, LEVEL.DEVICE],                              // mov edx, [ecx+28]
+        [0x85, 0xd2],                                            // test edx, edx
+        { jcc: 0x74, to: 'early' },                              // jz early
+        ...takeHeld(EDX, 'slow'),
+        [0x83, 0x79, LEVEL.LOCKED, 0x00],                        // cmp dword [ecx+12], 0
+        { jcc: 0x75, to: 'held', near: true },                   // jne held
+        [0x83, 0x79, LEVEL.TAKEN, 0x00],                         // cmp dword [ecx+16], 0
+        { jcc: 0x75, to: 'held', near: true },                   // jne held
+        [0x83, 0x79, LEVEL.SAMPLED, 0x00],                       // cmp dword [ecx+56], 0
+        { jcc: 0x74, to: 'unsampled' },                          // je unsampled
+        [0x83, 0xba, ...dword(SHADOW.DRAWS_PENDING), 0x00],      // cmp dword [edx+disp], 0
+        { jcc: 0x75, to: 'held', near: true },                   // jne held
+        { label: 'unsampled' },
+        [0x83, 0x79, LEVEL.QUEUED, 0x00],                        // cmp dword [ecx+36], 0
+        { jcc: 0x75, to: 'room' },                               // jne room
+        [0x81, 0xba, ...dword(SHADOW.RING_HEAD), ...dword(SHADOW.RING_CAPACITY)], // cmp [edx+d], 64
+        { jcc: 0x73, to: 'held', near: true },                   // jae held
+        { label: 'room' },
+        [0x83, 0x7c, 0x24, out, 0x00],                           // cmp dword [esp+out], 0
+        { jcc: 0x74, to: 'held', near: true },                   // je held
+        [0x53, 0x56, 0x57],                                      // push ebx; push esi; push edi
+        [0x8b, 0x74, 0x24, rect + 12],                           // mov esi, [esp+rect+12]
+        [0x31, 0xdb],                                            // xor ebx, ebx
+        [0x89, 0x59, LEVEL.BOXED],                               // mov [ecx+60], ebx
+        [0x85, 0xf6],                                            // test esi, esi
+        { jcc: 0x74, to: 'take', near: true },                   // jz take
+        [0x8b, 0x46, 0x08],                                      // mov eax, [esi+8]: right
+        [0x3b, 0x41, LEVEL.WIDTH],                               // cmp eax, [ecx+40]
+        { jcc: 0x77, to: 'refused', near: true },                // ja refused
+        [0x39, 0x06],                                            // cmp [esi], eax: left
+        { jcc: 0x73, to: 'refused', near: true },                // jae refused
+        [0x8b, 0x46, 0x0c],                                      // mov eax, [esi+12]: bottom
+        [0x3b, 0x41, LEVEL.HEIGHT],                              // cmp eax, [ecx+44]
+        { jcc: 0x77, to: 'refused', near: true },                // ja refused
+        [0x39, 0x46, 0x04],                                      // cmp [esi+4], eax: top
+        { jcc: 0x73, to: 'refused', near: true },                // jae refused
+        ...(box
+            ? [
+                [0x8b, 0x46, 0x14],                              // mov eax, [esi+20]: back
+                [0x3b, 0x41, LEVEL.DEPTH],                       // cmp eax, [ecx+48]
+                { jcc: 0x77, to: 'refused', near: true },        // ja refused
+                [0x39, 0x46, 0x10],                              // cmp [esi+16], eax: front
+                { jcc: 0x73, to: 'refused', near: true },        // jae refused
+            ]
+            : []),
+        [0x8b, 0x1e],                                            // mov ebx, [esi]
+        [0x0f, 0xaf, 0x59, LEVEL.TEXEL_BYTES],                   // imul ebx, [ecx+52]
+        [0x8b, 0x46, 0x04],                                      // mov eax, [esi+4]
+        [0x0f, 0xaf, 0x41, LEVEL.ROW_PITCH],                     // imul eax, [ecx+20]
+        [0x01, 0xc3],                                            // add ebx, eax
+        ...(box
+            ? [
+                [0x8b, 0x46, 0x10],                              // mov eax, [esi+16]
+                [0x0f, 0xaf, 0x41, LEVEL.SLICE_PITCH],           // imul eax, [ecx+32]
+                [0x01, 0xc3],                                    // add ebx, eax
+            ]
+            : []),
+        ...[0, 4, 8, 12].flatMap(offset=>copy(offset, LEVEL.BOX + offset)),
+        ...(box
+            ? [...copy(16, LEVEL.BOX + 16), ...copy(20, LEVEL.BOX + 20)]
+            : [
+                [0xc7, 0x41, LEVEL.BOX + 16, ...dword(0)],       // mov dword [ecx+80], 0
+                [0xc7, 0x41, LEVEL.BOX + 20, ...dword(1)],       // mov dword [ecx+84], 1
+            ]),
+        [0xc7, 0x41, LEVEL.BOXED, ...dword(1)],                  // mov dword [ecx+60], 1
+        { label: 'take' },
+        [0x8b, 0x44, 0x24, flags + 12],                          // mov eax, [esp+flags+12]
+        [0x89, 0x41, LEVEL.LOCK_FLAGS],                          // mov [ecx+24], eax
+        [0xc7, 0x41, LEVEL.LOCKED, ...dword(1)],                 // mov dword [ecx+12], 1
+        [0xc7, 0x41, LEVEL.TAKEN, ...dword(1)],                  // mov dword [ecx+16], 1
+        [0x8b, 0x51, LEVEL.DEVICE],                              // mov edx, [ecx+28]
+        [0x83, 0x79, LEVEL.QUEUED, 0x00],                        // cmp dword [ecx+36], 0
+        { jcc: 0x75, to: 'queued' },                             // jne queued
+        [0x8b, 0x82, ...dword(SHADOW.RING_HEAD)],                // mov eax, [edx+disp]
+        [0x89, 0x8c, 0x82, ...dword(SHADOW.RING)],               // mov [edx+eax*4+disp], ecx
+        [0xff, 0x82, ...dword(SHADOW.RING_HEAD)],                // inc dword [edx+disp]
+        [0xc7, 0x41, LEVEL.QUEUED, ...dword(1)],                 // mov dword [ecx+36], 1
+        { label: 'queued' },
+        letHeldGo(EDX),                                          // mov dword [edx+HELD], 0
+        [0x89, 0xd8],                                            // mov eax, ebx
+        [0x03, 0x41, LEVEL.BASE],                                // add eax, [ecx+4]
+        [0x8b, 0x7c, 0x24, out + 12],                            // mov edi, [esp+out+12]
+        [0x8b, 0x51, LEVEL.ROW_PITCH],                           // mov edx, [ecx+20]
+        [0x89, 0x17],                                            // mov [edi], edx
+        ...(box
+            ? [
+                [0x8b, 0x51, LEVEL.SLICE_PITCH],                 // mov edx, [ecx+32]
+                [0x89, 0x57, 0x04],                              // mov [edi+4], edx
+                [0x89, 0x47, 0x08],                              // mov [edi+8], eax
+            ]
+            : [[0x89, 0x47, 0x04]]),                             // mov [edi+4], eax
+        [0x5f, 0x5e, 0x5b],                                      // pop edi; pop esi; pop ebx
+        [0x31, 0xc0],                                            // xor eax, eax
+        [0xc2, flags, 0x00],                                     // ret: this and the arguments
+        { label: 'refused' },
+        [0x5f, 0x5e, 0x5b],                                      // pop edi; pop esi; pop ebx
+        { label: 'held' },
+        [0x8b, 0x41, LEVEL.DEVICE],                              // mov eax, [ecx+28]
+        letHeldGo(0),                                            // mov dword [eax+HELD], 0
+    ]);
+}
+
+/**
+ * HRESULT UnlockRect(this, [UINT level]) of a texture or a surface, and
+ * HRESULT UnlockBox(this, UINT level) of a volume texture, as guest code for
+ * a level with a block: the buffers' Unlock (`unlockCode`), less their count
+ * of unlocks, which a level's lock does not keep either.
+ *
+ * @param {number} at @param {number} trap
+ * @param {{ find: 'texture' | 'surface' }} kind
+ * @returns {Uint8Array}
+ */
+export function unlockLevelCode(at, trap, { find }){
+    return routine(at, trap, [
+        ...prologue('early'),
+        ...findLevel(find, 'early'),
+        { jcc: 0xeb, to: 'body' },                               // jmp body
+        { label: 'early' },
+        { jcc: 0xeb, to: 'slow', near: true },                   // jmp slow
+        { label: 'body' },
+        [0x8b, 0x51, LEVEL.DEVICE],                              // mov edx, [ecx+28]
+        [0x85, 0xd2],                                            // test edx, edx
+        { jcc: 0x74, to: 'early' },                              // jz early
+        ...takeHeld(EDX, 'slow'),
+        [0x83, 0x79, LEVEL.LOCKED, 0x00],                        // cmp dword [ecx+12], 0
+        { jcc: 0x74, to: 'held' },                               // je held
+        [0x83, 0x79, LEVEL.QUEUED, 0x00],                        // cmp dword [ecx+36], 0
+        { jcc: 0x75, to: 'queued' },                             // jne queued
+        [0x8b, 0x82, ...dword(SHADOW.RING_HEAD)],                // mov eax, [edx+disp]
+        [0x3d, ...dword(SHADOW.RING_CAPACITY)],                  // cmp eax, 64
+        { jcc: 0x73, to: 'held' },                               // jae held
+        [0x89, 0x8c, 0x82, ...dword(SHADOW.RING)],               // mov [edx+eax*4+disp], ecx
+        [0xff, 0x82, ...dword(SHADOW.RING_HEAD)],                // inc dword [edx+disp]
+        [0xc7, 0x41, LEVEL.QUEUED, ...dword(1)],                 // mov dword [ecx+36], 1
+        { label: 'queued' },
+        [0xc7, 0x41, LEVEL.LOCKED, ...dword(0)],                 // mov dword [ecx+12], 0
+        letHeldGo(EDX),                                          // mov dword [edx+HELD], 0
+        [0x31, 0xc0],                                            // xor eax, eax
+        [0xc2, find === 'texture' ? 8 : 4, 0x00],                // ret 8 or 4
         { label: 'held' },
         letHeldGo(EDX),                                          // mov dword [edx+HELD], 0
     ]);
@@ -1915,6 +2300,8 @@ function commandChecks(shape, at){
  *     what it reads waits for the host to make it
  * @property {boolean} [thread]  a function rather than a method: no `this`, and
  *     the block is the calling thread's (`threadPrologue`)
+ * @property {'rect' | 'box'} [dirty]  a texture's AddDirtyRect or AddDirtyBox, its
+ *     object's block a texture's (`dirtyPrologue`)
  */
 
 /**
@@ -1981,13 +2368,19 @@ export function commandCode(at, trap, shape){
     const recordLength = ragged
         ? [[0x8d, 0xb2, ...dword(header + 3)], [0x83, 0xe6, 0xfc]] // lea esi, [edx+h+3]; and -4
         : [[0x8d, 0xb2, ...dword(header)]];                    // lea esi, [edx+header]
-    if (self && (thread || pointer >= 0 || count || choose || vertices || shape.fvfVertices))
+    if (self && (thread || count || choose || vertices || shape.fvfVertices))
     {
-        throw new Error('shadow: a record of the object itself copies nothing');
+        throw new Error('shadow: a record of the object itself copies no more than a structure');
+    }
+    if (shape.dirty && !self)
+    {
+        throw new Error('shadow: a dirty region is a call of the texture itself');
     }
     // What the routine pops: the record's arguments, the object's own pointer
     // among them when it is the first.
     const popped = self ? args - 1 : args;
+    // An argument's place on the stack, past the object's own when the record names it first.
+    const shift = self ? 1 : 0;
     if (pointer >= 0 && !count && !choose && !vertices && !shape.fvfVertices
         && (bytes <= 0 || (bytes & 3) !== 0))
     {
@@ -2000,7 +2393,8 @@ export function commandCode(at, trap, shape){
     /** @type {(number[] | { label: string } | { jcc: number, to: string, near?: boolean })[]} */
     const parts = [
         ...(thread ? threadPrologue('early')
-            : prologue('early', fresh ? FLAG_SLOW_PATH | FLAG_DRAW_STALE : FLAG_SLOW_PATH)),
+            : shape.dirty ? dirtyPrologue(shape.dirty, 'early')
+                : prologue('early', fresh ? FLAG_SLOW_PATH | FLAG_DRAW_STALE : FLAG_SLOW_PATH)),
         [0x83, 0xb9, ...dword(SHADOW.COMMANDS), 0x00],           // cmp dword [ecx+disp], 0
         { jcc: 0x74, to: 'early' },                              // je early
         { jcc: 0xeb, to: 'body' },                               // jmp body
@@ -2015,7 +2409,7 @@ export function commandCode(at, trap, shape){
     if (pointer >= 0)
     {
         parts.push(
-            [0x8b, 0x44, 0x24, entry + 4 * pointer],             // mov eax, [esp+entry+4p]
+            [0x8b, 0x44, 0x24, entry + 4 * (pointer - shift)],   // mov eax, [esp+entry+4p]
             [0x85, 0xc0],                                        // test eax, eax
             { jcc: 0x74, to: nullable ? 'none' : 'out', near: true }); // jz out
     }
@@ -2189,7 +2583,7 @@ export function commandCode(at, trap, shape){
         if (arg === pointer && nullable)
         {
             parts.push(
-                [0x8b, 0x44, 0x24, pushed + 4 * arg],            // mov eax, [esp+pushed+4p]
+                [0x8b, 0x44, 0x24, pushed + 4 * (arg - shift)],  // mov eax, [esp+pushed+4p]
                 [0x85, 0xc0],                                    // test eax, eax
                 { jcc: 0x74, to: 'null' },                       // jz null: it stays 0
                 [0x8d, 0x87, ...dword(header)],                  // lea eax, [edi+header]
@@ -2207,7 +2601,7 @@ export function commandCode(at, trap, shape){
     {
         parts.push(
             [0x89, 0xf8],                                        // mov eax, edi
-            [0x8b, 0x74, 0x24, pushed + 4 * pointer],            // mov esi, [esp+pushed+4p]
+            [0x8b, 0x74, 0x24, pushed + 4 * (pointer - shift)],  // mov esi, [esp+pushed+4p]
             [0x8d, 0xbf, ...dword(header)],                      // lea edi, [edi+header]
             [0x89, 0xd1],                                        // mov ecx, edx
             [0xc1, 0xe9, 0x02],                                  // shr ecx, 2
@@ -2681,6 +3075,19 @@ export function settledAfter(shadow, call){
  * @typedef {Object} ShadowTexture
  * @property {number} levels
  *
+ * @typedef {Object} ShadowLevel  A level the guest locks (`attachLevel`).
+ * @property {{ refCount: number }} level  the surface or volume
+ * @property {object} family  the texture it is a level of, or the surface itself: a device
+ *     context held on one of them is every level's lock
+ * @property {(box: { left: number, top: number, right: number, bottom: number,
+ *     front: number, back: number } | null, flags: number) => number} lock
+ *     the host's lock of it, with the box the guest's named or none
+ * @property {() => number} unlock
+ * @property {boolean} hostLocked
+ * @property {boolean} lends  its bytes may be lent to the graphics worker by a recording
+ *     that lends (`ShadowDevice.lendsMemory`): a draw may read it, or a twin copies from it
+ * @property {boolean} slow  the guest never locks it: compressed, or a target
+ *
  * @typedef {Object} ShadowDevice
  * @property {boolean} [lendsMemory]  a recording for the graphics worker that lends what is
  *     unlocked rather than copying it (`remote/replay.js`)
@@ -2801,6 +3208,24 @@ export function createShadow(deps){
     let hostReleased = 0;
     /** The textures with a block. @type {WeakMap<object, { block: number }>} */
     const textureBlocks = new WeakMap();
+    /**
+     * The levels the guest locks, by their blocks (`attachLevel`): one is
+     * forgotten when its block is settled after its texture has gone.
+     * ponytail: a level released while not on the ring keeps its entry and its block;
+     * free them from the texture's release if a program that streams textures shows it.
+     *
+     * @type {Map<number, ShadowLevel>}
+     */
+    const levels = new Map();
+    /** @type {WeakMap<object, number>} */
+    const levelBlocks = new WeakMap();
+    /**
+     * The textures, or surfaces of their own, a device context is held on:
+     * their levels' locks are the host's, which refuses them while it is.
+     *
+     * @type {WeakSet<object>}
+     */
+    const busyFamilies = new WeakSet();
     /** The surfaces with a block. @type {WeakMap<object, number>} */
     const surfaceBlocks = new WeakMap();
     /** @type {WeakMap<object, number>} */
@@ -3167,6 +3592,60 @@ export function createShadow(deps){
     };
 
     /**
+     * Whether a level's locks are the host's: a level the guest cannot lock,
+     * one a device context is held on, and one whose bytes a recording may
+     * lend to the graphics worker (`ShadowLevel.lends`), which only the
+     * host's lock claims back before the program writes over them.
+     *
+     * @param {ShadowLevel} entry
+     */
+    const levelFlags = entry=>(entry.slow || busyFamilies.has(entry.family)
+        || (device.lendsMemory === true && entry.lends) ? FLAG_SLOW_PATH : 0);
+
+    /**
+     * Replays what the guest did to a level, as `settle` a buffer's: the lock
+     * it took, with its box and flags, and the unlock if it has let go since.
+     *
+     * @param {number} block @param {ShadowLevel} entry
+     */
+    const settleLevel = (block, entry)=>{
+        if (entry.level.refCount <= 0)
+        {
+            levels.delete(block);
+            return;
+        }
+        const words = readWords(block, LEVEL.SIZE / 4);
+        const locked = words[LEVEL.LOCKED / 4] !== 0;
+        if (words[LEVEL.TAKEN / 4] !== 0)
+        {
+            const at = LEVEL.BOX / 4;
+            const box = words[LEVEL.BOXED / 4] === 0 ? null : {
+                left: words[at], top: words[at + 1], right: words[at + 2],
+                bottom: words[at + 3], front: words[at + 4], back: words[at + 5],
+            };
+            const flags = words[LEVEL.LOCK_FLAGS / 4];
+            if (entry.hostLocked)
+            {
+                // The host's own lock, let go of in the guest before this one.
+                entry.unlock();
+                entry.hostLocked = false;
+            }
+            entry.hostLocked = entry.lock(box, flags) === 0;
+            if (!entry.hostLocked)
+            {
+                refuse('LockRect', 'a lock of a level taken in the guest was accepted;'
+                    + ' the level refuses it');
+            }
+            deps.writeMemory(block + LEVEL.TAKEN, ZERO_WORD);
+        }
+        if (entry.hostLocked && !locked)
+        {
+            entry.unlock();
+            entry.hostLocked = false;
+        }
+    };
+
+    /**
      * Replays what the guest did to one buffer against the real one. The
      * block says whether a lock is held and what range was locked since the
      * host last looked; the host's own lock mirrors the guest's, so that the
@@ -3378,6 +3857,12 @@ export function createShadow(deps){
         for (const buffer of words.subarray(3))
         {
             deps.writeMemory(buffer + BUFFER.QUEUED, ZERO_WORD);
+            const level = levels.get(buffer);
+            if (level)
+            {
+                settleLevel(buffer, level);
+                continue;
+            }
             lockedInGuest.add(buffer);
             settle(buffer);
         }
@@ -3816,14 +4301,17 @@ export function createShadow(deps){
          *
          * @param {ShadowTexture} texture
          * @param {number} [count]  the word its count is kept in, 0 for none
+         * @param {number[]} [extent]  its top level's width, height and depth, which
+         *     a dirty rectangle or box in the guest may not leave
          * @returns {number} the block, or 0 when there is no memory for one
          */
-        attachTexture(texture, count = 0){
+        attachTexture(texture, count = 0, extent = [0, 0, 0]){
             const existing = textureBlocks.get(texture);
             if (existing)
             {
                 return existing.block;
             }
+            const owner = place();
             const block = carve(TEXTURE.SIZE);
             if (block === 0)
             {
@@ -3832,6 +4320,8 @@ export function createShadow(deps){
             const zeroed = new Uint8Array(TEXTURE.SIZE);
             zeroed.set(dwordBytes(texture.levels ?? 1), TEXTURE.LEVEL_COUNT);
             zeroed.set(dwordBytes(count), TEXTURE.COUNT);
+            // No extent, no dirty region in the guest: an empty one refuses them all.
+            zeroed.set(dwordsBytes([owner, ...extent]), TEXTURE.DEVICE);
             deps.writeMemory(block, zeroed);
             textureBlocks.set(texture, { block });
             return block;
@@ -3857,6 +4347,7 @@ export function createShadow(deps){
             }
             deps.writeMemory(block, new Uint8Array(SURFACE.SIZE));
             describe(block + SURFACE.DESC);
+            deps.writeMemory(block + SURFACE.LEVEL, dwordBytes(levelBlocks.get(surface) ?? 0));
             const container = /** @type {{ container?: object }} */ (surface).container;
             if (container)
             {
@@ -3893,6 +4384,111 @@ export function createShadow(deps){
             deps.writeMemory(block, dwordsBytes([0, query.type, 0, 0, 0]));
             queryBlocks.set(query, block);
             return block;
+        },
+
+        /**
+         * A level's block (`LEVEL`), made the first time the guest is to lock
+         * it -- the second the host locked it, so that a level written once
+         * as it loads gets none -- and written where the guest finds it: the
+         * texture's table, at `index`, and the surface's own block.
+         *
+         * @param {ShadowLevel['level']} level
+         * @param {{ family: object, lock: ShadowLevel['lock'], unlock: ShadowLevel['unlock'],
+         *     locked: boolean, lends: boolean, slow: boolean, base: number,
+         *     rowPitch: number, slicePitch: number, width: number, height: number,
+         *     depth: number, texelBytes: number, sampled: boolean,
+         *     texture?: ShadowTexture, index?: number }} info
+         * @returns {number} the block, or 0 when there is no memory for one
+         */
+        attachLevel(level, info){
+            let block = levelBlocks.get(level);
+            if (block === undefined)
+            {
+                const owner = place();
+                block = owner === 0 ? 0 : carve(LEVEL.SIZE);
+                if (block === 0)
+                {
+                    return 0;
+                }
+                /** @type {ShadowLevel} */
+                const entry = { level, family: info.family, lock: info.lock, unlock: info.unlock,
+                    hostLocked: info.locked, lends: info.lends, slow: info.slow };
+                const words = new Uint32Array(LEVEL.SIZE / 4);
+                words[LEVEL.FLAGS / 4] = levelFlags(entry);
+                words[LEVEL.BASE / 4] = info.base;
+                words[LEVEL.LOCKED / 4] = info.locked ? 1 : 0;
+                words[LEVEL.ROW_PITCH / 4] = info.rowPitch;
+                words[LEVEL.DEVICE / 4] = owner;
+                words[LEVEL.SLICE_PITCH / 4] = info.slicePitch;
+                words[LEVEL.WIDTH / 4] = info.width;
+                words[LEVEL.HEIGHT / 4] = info.height;
+                words[LEVEL.DEPTH / 4] = info.depth;
+                words[LEVEL.TEXEL_BYTES / 4] = info.texelBytes;
+                words[LEVEL.SAMPLED / 4] = info.sampled ? 1 : 0;
+                deps.writeMemory(block, new Uint8Array(words.buffer));
+                levels.set(block, entry);
+                levelBlocks.set(level, block);
+                const surface = surfaceBlocks.get(level);
+                if (surface !== undefined)
+                {
+                    deps.writeMemory(surface + SURFACE.LEVEL, dwordBytes(block));
+                }
+            }
+            const table = info.texture ? textureBlocks.get(info.texture) : undefined;
+            const index = info.index ?? TEXTURE.LEVEL_SLOTS;
+            if (table && index < TEXTURE.LEVEL_SLOTS)
+            {
+                deps.writeMemory(table.block + TEXTURE.LOCKS + index * 4, dwordBytes(block));
+            }
+            return block;
+        },
+
+        /**
+         * After the host locked or unlocked a level itself, what the guest did
+         * to it replayed first (`sync`): the block says so, and the guest's
+         * routines refuse a second lock the way the host would.
+         *
+         * @param {object} level @param {boolean} locked
+         */
+        noteLevelLocked(level, locked){
+            const block = levelBlocks.get(level);
+            const entry = block === undefined ? undefined : levels.get(block);
+            if (block === undefined || !entry)
+            {
+                return;
+            }
+            holding(()=>{
+                entry.hostLocked = locked;
+                deps.writeMemory(block + LEVEL.LOCKED, dwordBytes(locked ? 1 : 0));
+                deps.writeMemory(block + LEVEL.FLAGS, dwordBytes(levelFlags(entry)));
+            });
+        },
+
+        /**
+         * A device context taken or given back on a texture's level, or on a
+         * surface of its own: while it is held, every level's lock is the
+         * host's, which refuses it.
+         *
+         * @param {object} family @param {boolean} busy
+         */
+        familyBusy(family, busy){
+            if (busy)
+            {
+                busyFamilies.add(family);
+            }
+            else
+            {
+                busyFamilies.delete(family);
+            }
+            holding(()=>{
+                for (const [block, entry] of levels)
+                {
+                    if (entry.family === family)
+                    {
+                        deps.writeMemory(block + LEVEL.FLAGS, dwordBytes(levelFlags(entry)));
+                    }
+                }
+            });
         },
 
         /**
@@ -4202,6 +4798,125 @@ export const HOST_MIRRORS = Object.freeze({
         return true;
     },
 });
+
+/**
+ * The host's side of the levels the guest locks, as both versions' seams
+ * keep it: after each lock or unlock the host made itself, the level's block
+ * is told (`noteLevelLocked`), and the second time the host locks a level it
+ * gets one (`attachLevel`), described from the level -- its bytes, pitches
+ * and extent, whether a draw may read it -- with the lock and unlock the host
+ * replays the guest's through. A level of a texture is reached by its index,
+ * once; a surface of its own is its own level.
+ *
+ * @param {{ shadowOf: (object: any) => (ReturnType<typeof createShadow> | null | undefined),
+ *     twinCopies: boolean }} seam  `twinCopies`: the version's played device copies an
+ *     update out of the source's bytes as they were sent (Direct3D 8's), so a level
+ *     in system memory is lent too
+ */
+export function createLevelLocks({ shadowOf, twinCopies }){
+    /** Each texture's levels the host has reached, by index. @type {WeakMap<object, any[]>} */
+    const reached = new WeakMap();
+    /** Levels the host has locked once. @type {WeakSet<object>} */
+    const lockedOnce = new WeakSet();
+
+    /**
+     * A texture's level, taken and given back as GetSurfaceLevel and a
+     * Release would, and kept.
+     *
+     * @param {any} texture @param {number} index
+     */
+    const levelOf = (texture, index)=>{
+        let levels = reached.get(texture);
+        if (!levels)
+        {
+            levels = [];
+            reached.set(texture, levels);
+        }
+        if (!levels[index])
+        {
+            /** @type {{ surface?: any, volume?: any }} */
+            const out = {};
+            const hr = typeof texture.GetVolumeLevel === 'function'
+                ? texture.GetVolumeLevel(index, out) : texture.GetSurfaceLevel(index, out);
+            const level = out.volume ?? out.surface;
+            if (hr !== 0 || !level)
+            {
+                return null;
+            }
+            level.release();
+            levels[index] = level;
+        }
+        return levels[index];
+    };
+
+    /**
+     * What the guest's routines need of a level: null for one it does not
+     * lock at all.
+     *
+     * @param {any} level
+     */
+    const describe = level=>{
+        /** @type {{ desc?: any }} */
+        const held = {};
+        if (typeof level.base !== 'number' || level.GetDesc(held) !== 0 || !held.desc)
+        {
+            return null;
+        }
+        const { Format, Usage, Pool, Width, Height, Depth = 1 } = held.desc;
+        const format = FORMAT_INFO[Format];
+        // A block of texels, or a pair of them sharing their colour, is not
+        // addressed a texel at a time; a target or a depth surface reads back.
+        const whole = format !== undefined && format.blockSize === undefined
+            && format.video !== true;
+        const rowPitch = surfacePitch(Format, Width);
+        const sampled = Pool !== D3DPOOL.SYSTEMMEM && Pool !== D3DPOOL.SCRATCH;
+        return {
+            base: level.base, rowPitch, slicePitch: rowPitch * Height, width: Width,
+            height: Height, depth: Depth, texelBytes: whole ? format.bytesPerPixel : 0, sampled,
+            lends: sampled || twinCopies,
+            slow: !whole || (Usage & (D3DUSAGE.RENDERTARGET | D3DUSAGE.DEPTHSTENCIL)) !== 0,
+        };
+    };
+
+    return {
+        /**
+         * After the host's own lock or unlock of a level that answered D3D_OK.
+         *
+         * @param {any} owner  the device
+         * @param {any} object  the texture, or the surface
+         * @param {number | null} index  the texture's level, null for a surface
+         * @param {boolean} locked
+         */
+        locked(owner, object, index, locked){
+            const shadow = shadowOf(owner);
+            const level = index === null ? object : levelOf(object, index);
+            if (!shadow || !level)
+            {
+                return;
+            }
+            if (locked && !lockedOnce.has(level))
+            {
+                lockedOnce.add(level);
+                return;
+            }
+            const info = locked ? describe(level) : null;
+            if (info)
+            {
+                const volume = typeof level.LockBox === 'function';
+                shadow.attachLevel(level, {
+                    ...info, locked: true, family: level.container ?? level,
+                    texture: index === null ? undefined : object, index: index ?? undefined,
+                    lock: volume
+                        ? (box, flags)=>level.LockBox({}, box, flags)
+                        : (box, flags)=>level.LockRect({}, box && { left: box.left,
+                            top: box.top, right: box.right, bottom: box.bottom }, flags),
+                    unlock: volume ? ()=>level.UnlockBox() : ()=>level.UnlockRect(),
+                });
+            }
+            shadow.noteLevelLocked(level, locked);
+        },
+    };
+}
 
 /**
  * A command routine's work done by the host (`commandCode`): for a call the

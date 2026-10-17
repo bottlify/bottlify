@@ -68,7 +68,7 @@ import {
     getTransformCode,
     getViewportCode, lockCode, stageStateMirror, unlockCode, HOST_MIRRORS, appendCommand,
     getShaderCode, getTargetCode, shaderMirror,
-    guestWords,
+    guestWords, createLevelLocks, lockLevelCode, unlockLevelCode,
 } from './shadow.js';
 import { COMPILED as IN_GUEST } from './inguest.x86.js';
 import { D3D8_COMMANDS, materialOf } from '../d3d8/commands.js';
@@ -463,9 +463,56 @@ export function createDirect3D8Seam(
         }) ?? 0;
     };
 
+    /**
+     * The levels the guest locks (`createLevelLocks`): this version's played
+     * device copies an update out of its source as it was sent, so a level
+     * in system memory is lent too.
+     */
+    const levelLocks = createLevelLocks({ shadowOf, twinCopies: true });
+    /**
+     * A lock or unlock of a level the host made, told to the level's block
+     * when it was answered D3D_OK.
+     *
+     * @param {any} object  a texture or a surface
+     * @param {number | null} index  the texture's level
+     * @param {boolean} locked @param {any} hr
+     */
+    const noteLevelLock = (object, index, locked, hr)=>{
+        if (hr === D3D_OK)
+        {
+            levelLocks.locked(ownerOf(object), object, index, locked);
+        }
+        return hr;
+    };
+    /** @param {string} name */
+    const levelGroup = name=>(name.startsWith('AddDirty') ? 'ring'
+        : name.startsWith('Lock') || name.startsWith('Unlock') ? 'locks' : 'levels');
+    /**
+     * A texture's or a surface's lock and unlock as guest code, and a
+     * texture's dirty region as a record of the device's ring.
+     *
+     * @param {'texture' | 'surface'} find @param {boolean} [box]
+     * @returns {Record<string, (builder: { trap: number }) => number>}
+     */
+    const levelGuests = (find, box = false)=>{
+        const dirty = box ? 'VolumeTexture.AddDirtyBox' : 'Texture.AddDirtyRect';
+        return {
+            [box ? 'LockBox' : 'LockRect']: ({ trap })=>
+                placeCode(at=>lockLevelCode(at, trap, { find, box })),
+            [box ? 'UnlockBox' : 'UnlockRect']: ({ trap })=>
+                placeCode(at=>unlockLevelCode(at, trap, { find })),
+            ...(find === 'texture'
+                ? { [box ? 'AddDirtyBox' : 'AddDirtyRect']: (/** @type {{ trap: number }} */
+                    { trap })=>placeCode(at=>commandCode(at, trap,
+                    { ...D3D8_COMMANDS.COMMANDS[dirty], slot: D3D8_COMMANDS.commandSlot(dirty) })) }
+                : {}),
+        };
+    };
+
     /** @type {Record<string, (builder: { trap: number }) => number>} */
-    const textureGuests = guestsBut('levels', allocate
-        ? { GetSurfaceLevel: ({ trap })=>placeCode(at=>getSurfaceLevelCode(at, trap)) }
+    const textureGuests = guestsBut(levelGroup, allocate
+        ? { GetSurfaceLevel: ({ trap })=>placeCode(at=>getSurfaceLevelCode(at, trap)),
+            ...levelGuests('texture') }
         : {});
 
     /**
@@ -474,15 +521,17 @@ export function createDirect3D8Seam(
      * published.
      *
      * @param {any} device @param {any} texture
+     * @param {number[]} [extent]  its top level's, which a dirty region in the guest may not leave
      */
-    const attachTexture = (device, texture)=>{
+    const attachTexture = (device, texture, extent)=>{
         const shadow = shadowOf(device);
         if (!shadow)
         {
             return;
         }
         resourceShadows.set(texture, shadow);
-        texture.guestState = ()=>shadow.attachTexture(texture, publisher.countCell?.(texture) ?? 0);
+        texture.guestState = ()=>shadow.attachTexture(texture, publisher.countCell?.(texture) ?? 0,
+            extent);
     };
 
     /**
@@ -725,13 +774,14 @@ export function createDirect3D8Seam(
             return hr;
         },
         /** @param {any} surface @param {number[]} args */
-        LockRect: (surface, [out, rect, flags])=>lockRectInto(fields, out,
-            locked=>surface.LockRect(locked, readRect(rect), flags >>> 0)),
+        LockRect: (surface, [out, rect, flags])=>noteLevelLock(surface, null, true,
+            lockRectInto(fields, out, locked=>surface.LockRect(locked, readRect(rect),
+                flags >>> 0))),
         /** @param {any} surface */
-        UnlockRect: surface=>surface.UnlockRect(),
-    }, guestsBut('levels', allocate
+        UnlockRect: surface=>noteLevelLock(surface, null, false, surface.UnlockRect()),
+    }, guestsBut(levelGroup, allocate
         ? { GetDesc: (/** @type {{ trap: number }} */ { trap })=>
-            placeCode(at=>getSurfaceDescCode(at, trap)) }
+            placeCode(at=>getSurfaceDescCode(at, trap)), ...levelGuests('surface') }
         : {}), retire)];
 
     const textureMethods = {
@@ -776,11 +826,13 @@ export function createDirect3D8Seam(
         // Locking a level through the texture and through the level's own
         // surface are one lock, which is what makes taking both an error.
         /** @param {any} texture @param {number[]} args */
-        LockRect: (texture, [level, out, rect, flags])=>lockRectInto(fields, out,
-            locked=>texture.LockRect(level >>> 0, locked, readRect(rect), flags >>> 0)),
+        LockRect: (texture, [level, out, rect, flags])=>noteLevelLock(texture, level >>> 0, true,
+            lockRectInto(fields, out, locked=>texture.LockRect(level >>> 0, locked,
+                readRect(rect), flags >>> 0))),
 
         /** @param {any} texture @param {number[]} args */
-        UnlockRect: (texture, [level])=>texture.UnlockRect(level >>> 0),
+        UnlockRect: (texture, [level])=>noteLevelLock(texture, level >>> 0, false,
+            texture.UnlockRect(level >>> 0)),
 
         /** @param {any} texture @param {number[]} args */
         AddDirtyRect: (texture, [rect])=>texture.AddDirtyRect(readRect(rect)),
@@ -949,17 +1001,20 @@ export function createDirect3D8Seam(
             return handBack(held.volume, volumeInterfaces, IID_IDirect3DVolume8, out >>> 0);
         },
         /** @param {any} texture @param {number[]} args */
-        LockBox: (texture, [level, out, box, flags])=>lockBox(out,
-            locked=>texture.LockBox(level >>> 0, locked, readBox(box), flags >>> 0)),
+        LockBox: (texture, [level, out, box, flags])=>noteLevelLock(texture, level >>> 0, true,
+            lockBox(out, locked=>texture.LockBox(level >>> 0, locked, readBox(box),
+                flags >>> 0))),
         /** @param {any} texture @param {number[]} args */
-        UnlockBox: (texture, [level])=>texture.UnlockBox(level >>> 0),
+        UnlockBox: (texture, [level])=>noteLevelLock(texture, level >>> 0, false,
+            texture.UnlockBox(level >>> 0)),
         /** @param {any} texture @param {number[]} args */
         AddDirtyBox: (texture, [box])=>texture.AddDirtyBox(readBox(box)),
     };
     /** @type {import('./com.js').InterfaceDescriptor[]} */
     const volumeTextureInterfaces = [
         describeResource(IID_IDirect3DVolumeTexture8, IDIRECT3DVOLUMETEXTURE8_SLOTS,
-            volumeTextureMethods, {}, retire),
+            volumeTextureMethods, guestsBut(levelGroup, allocate ? levelGuests('texture', true)
+                : {}), retire),
         { ...describeResource(IID_IDirect3DBaseTexture8, IDIRECT3DBASETEXTURE8_SLOTS,
             volumeTextureMethods), sharedWith: IID_IDirect3DVolumeTexture8 },
         { ...describeResource(IID_IDirect3DResource8, IDIRECT3DRESOURCE8_SLOTS,
@@ -1372,7 +1427,7 @@ export function createDirect3D8Seam(
                 format >>> 0, pool >>> 0, held);
             if (hr === D3D_OK && held.texture && (out >>> 0) !== 0)
             {
-                attachTexture(device, held.texture);
+                attachTexture(device, held.texture, [width >>> 0, height >>> 0, 1]);
                 return handBack(held.texture, textureInterfaces, IID_IDirect3DTexture8,
                     out >>> 0, D3DERR_OUTOFVIDEOMEMORY, device);
             }
@@ -1794,7 +1849,7 @@ export function createDirect3D8Seam(
                 levels >>> 0, usage >>> 0, format >>> 0, pool >>> 0, held);
             if (hr === D3D_OK && held.texture)
             {
-                attachTexture(device, held.texture);
+                attachTexture(device, held.texture, [width >>> 0, height >>> 0, depth >>> 0]);
                 return handBack(held.texture, volumeTextureInterfaces,
                     IID_IDirect3DVolumeTexture8, out >>> 0, D3DERR_OUTOFVIDEOMEMORY, device);
             }

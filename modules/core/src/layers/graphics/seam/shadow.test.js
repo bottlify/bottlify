@@ -7,8 +7,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    BUFFER, COMMAND, COMMAND_RING_BYTES, FLAG_SLOW_PATH, FLAG_STALE, HELD_GUEST, HELD_HOST, SHADOW,
-    TEXTURE,
+    BUFFER, COMMAND, COMMAND_RING_BYTES, FLAG_SLOW_PATH, FLAG_STALE, HELD_GUEST, HELD_HOST, LEVEL,
+    SHADOW, SURFACE, TEXTURE,
     createCommandReader, createShadow, getRenderStateCode,
     getSurfaceLevelCode, getTextureStageStateCode, getTransformCode, lockCode, transformSlot,
     transformType, unlockCode,
@@ -244,7 +244,17 @@ test('the block fits its two pages and its regions follow one another', ()=>{
     assert.equal(SHADOW.TARGETS + 16, SHADOW.TARGETS_VALID);
     assert.equal(SHADOW.TARGETS_VALID + 4, SHADOW.SIZE);
     assert.equal(BUFFER.QUEUED + 4, BUFFER.SIZE);
-    assert.equal(TEXTURE.LEVELS + TEXTURE.LEVEL_SLOTS * 4, TEXTURE.SIZE);
+    assert.equal(TEXTURE.LEVELS + TEXTURE.LEVEL_SLOTS * 4, TEXTURE.DEVICE);
+    assert.deepEqual([TEXTURE.WIDTH, TEXTURE.HEIGHT, TEXTURE.DEPTH, TEXTURE.LOCKS],
+        [TEXTURE.DEVICE + 4, TEXTURE.DEVICE + 8, TEXTURE.DEVICE + 12, TEXTURE.DEVICE + 16]);
+    assert.equal(TEXTURE.LOCKS + TEXTURE.LEVEL_SLOTS * 4, TEXTURE.SIZE);
+    // The words a level's routines share with a buffer's, where a buffer's block has them.
+    assert.deepEqual([LEVEL.LOCKED, LEVEL.LOCK_FLAGS, LEVEL.DEVICE, LEVEL.QUEUED],
+        [BUFFER.LOCKED, BUFFER.LOCK_FLAGS, BUFFER.DEVICE, BUFFER.QUEUED]);
+    assert.equal(LEVEL.BOX + 24, LEVEL.SIZE);
+    // A displacement of a byte reaches every word of it.
+    assert.ok(LEVEL.SIZE <= 128 && TEXTURE.DEPTH < 128 && SURFACE.LEVEL < 128);
+    assert.equal(SURFACE.LEVEL + 4, SURFACE.SIZE);
     // Enough for the longest chain a texture of this era can have: a 32768
     // texel side is sixteen levels, and no device of the era reports one.
     assert.ok(TEXTURE.LEVEL_SLOTS >= 14);
