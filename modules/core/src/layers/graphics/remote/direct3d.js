@@ -287,6 +287,11 @@ export function playedDirect3D(factory, services){
         windowMemory: services.readMemory
             && ((/** @type {number} */ address, /** @type {number} */ length)=>
                 mirror.window(address, length)),
+        // Only what is sent writes the mirror, so it says what was written:
+        // the renderer uploads that, and compares nothing.
+        watchWrites: services.readMemory
+            && ((/** @type {number} */ address, /** @type {number} */ length)=>
+                mirror.watch(address, length)),
         writeMemory: write && ((/** @type {number} */ address, /** @type {Uint8Array} */ bytes)=>{
             mirror.write(address, bytes);
             if (!playing)

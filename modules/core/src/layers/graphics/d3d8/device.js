@@ -257,6 +257,10 @@ function isTransformType(type){
  * @property {any} [backend]         The rendering backend.
  * @property {(address: number, length: number)=>Uint8Array} [readMemory]
  * @property {(address: number, length: number)=>Uint8Array} [windowMemory]
+ * @property {(address: number, length: number) => ({ take: (address: number, length: number)
+ *     => number[] } | null)} [watchWrites]
+ *     Which pages of a range were written since a look: what a dynamic buffer
+ *     uploads, compared against nothing. Absent where nothing can say.
  *     The same bytes without the copy, for a reader done with them at once.
  * @property {(address: number, bytes: Uint8Array)=>void} [writeMemory]
  *     How a lock of a render target brings the drawn pixels into the guest's
@@ -417,7 +421,7 @@ export function createDirect3D8(options = {}){
         free: giveBack, dumpDraws, dumpEvery, liveDump, maxDraws, divergence, skipTexture,
         probeTexture, fog, mips, nanProbe, driverRules, onDeviceLost, gamma, frameQueued, drawsFrom,
         occlusionCounted,
-        whileStill, rectangleBump, renderedElsewhere, ...caps
+        whileStill, rectangleBump, renderedElsewhere, watchWrites, ...caps
     } = options;
     /** @type {DeviceCaps} */
     const resolved = { ...DEFAULT_CAPS, ...caps, fullscreenGamma: gamma?.applies() === true };
@@ -427,7 +431,7 @@ export function createDirect3D8(options = {}){
         free: giveBack, dumpDraws, dumpEvery, liveDump, maxDraws, divergence, skipTexture,
         probeTexture, fog, mips, nanProbe, driverRules, onDeviceLost, gamma, frameQueued, drawsFrom,
         occlusionCounted,
-        whileStill, rectangleBump, renderedElsewhere,
+        whileStill, rectangleBump, renderedElsewhere, watchWrites,
     };
     if (backend && !readMemory)
     {
@@ -781,6 +785,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             readMemory: /** @type {(address: number, length: number)=>Uint8Array} */ (
                 services.readMemory),
             windowMemory: services.windowMemory,
+            watchWrites: services.watchWrites,
             createSampler: services.createSampler ?? null,
             dumpDraws: services.dumpDraws === true,
             dumpEvery: services.dumpEvery,

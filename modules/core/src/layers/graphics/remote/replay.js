@@ -24,7 +24,7 @@
  */
 
 import { OP, SECTION, SERVICE_REF, WAIT, createReader, createSite } from './wire.js';
-import { changedSpans, createCompared } from '../webgpu/internal/changed.js';
+import { changedSpans, createCompared, writtenSpans } from '../webgpu/internal/changed.js';
 
 /**
  * The calls whose answer the played device holds back while it has too many
@@ -76,10 +76,10 @@ const UNLOCKS = new Set(['Unlock', 'UnlockRect', 'UnlockCubeRect', 'UnlockBox', 
 
 /**
  * Whether a call reads no resource's bytes on the played side -- a state set,
- * a lock -- so that bytes unlocked before it wait for one that may (`readBy`
- * says which): a renderer takes a texture's bytes at the first draw that
- * samples it after the unlock, not at the unlock, and the program's writes
- * between the two are in what it draws. A buffer's are taken at the unlock,
+ * a lock, a dirty region marked -- so that bytes unlocked before it wait for
+ * one that may (`readBy` says which): a renderer takes a texture's bytes at
+ * the first draw that samples it after the unlock, not at the unlock, and the
+ * program's writes between the two are in what it draws. A buffer's are taken at the unlock,
  * there and here.
  *
  * @param {string} name
@@ -88,7 +88,7 @@ function readsNothing(name){
     return (name.startsWith('Set') && name !== 'SetCursorProperties')
         || name.startsWith('Lock') || name.startsWith('Unlock')
         || name === 'BeginScene' || name === 'LightEnable' || name === 'AddRef'
-        || name === 'addRef';
+        || name === 'addRef' || name.startsWith('AddDirty');
 }
 
 /**
@@ -115,14 +115,25 @@ function partOf(args){
  */
 
 /**
- * What was last sent of a dynamic buffer a draw read: its address then, its
- * bytes, the watch over its writes since, null where the engine has none, and
- * the pages written that have not been compared whole since.
+ * What was last sent of a dynamic buffer a draw read: its address then and
+ * its length, the watch over its writes since, null where the engine has
+ * none, the pages written that have not been sent whole since, and -- only
+ * without a watch, to compare against -- its bytes as sent.
  *
- * @typedef {{ base: number, bytes: Uint8Array,
+ * @typedef {{ base: number, length: number, bytes: Uint8Array | null,
  *     watch: { take: (address: number, length: number) => number[] } | null,
  *     dirty: Set<number> }} Sent
  */
+
+/**
+ * Direct3D 9's copies whose first argument is the surface or texture they
+ * read: what they carry of it is the rows they wrote, not what was unlocked
+ * of it.
+ */
+const MOVES_OUT_OF = new Set(['UpdateTexture', 'UpdateSurface']);
+
+/** D3DPOOL_SYSTEMMEM, the same number in both versions of the API. */
+const D3DPOOL_SYSTEMMEM = 2;
 
 /** D3DLOCK_READONLY, the same number in both versions of the API. */
 const LOCK_READ_ONLY = 0x10;
@@ -539,7 +550,8 @@ export function createRecording(options){
     /**
      * Where a buffer's bytes in guest memory differ from what was sent of
      * them, made what is sent: four bytes at a time against the copy on this
-     * side, since it runs for every draw from such a buffer.
+     * side, since it runs for every draw from such a buffer. Only where the
+     * engine has no write watch to say what was written.
      *
      * @param {{ base: number, bytes: Uint8Array }} sent
      * @param {number} from @param {number} to  in the buffer
@@ -559,11 +571,12 @@ export function createRecording(options){
     };
 
     /**
-     * `changedSince` over the parts of `[from, to)` on pages written since
-     * they were last compared whole: never more than the range, which is what
-     * it compares where the engine cannot say. A game that skins into one
-     * buffer compared all of it at every draw -- twenty megabytes a frame --
-     * for the pages it wrote.
+     * What of `[from, to)` the played side may not have: with the engine's
+     * write watch, the pages written since they were last sent, as they are
+     * -- a write the watch saw is all a comparison could find, and comparing
+     * them against a copy of the buffer kept here was most of a skinning
+     * game's draws on the engine thread, and the played side compared them
+     * again; without one, `changedSince` over the range.
      *
      * @param {Sent} sent
      * @param {number} from @param {number} to  in the buffer
@@ -573,47 +586,17 @@ export function createRecording(options){
     const changedIn = (sent, from, to, into)=>{
         if (sent.watch === null)
         {
-            changedSince(sent, from, to, into);
+            changedSince(/** @type {{ base: number, bytes: Uint8Array }} */ (sent), from, to,
+                into);
             return to - from;
         }
-        for (const page of sent.watch.take(sent.base + from, to - from))
+        const spans = writtenSpans(/** @type {any} */ (sent), sent.base, sent.length, from, to);
+        for (let index = 0; index < spans.length; index += 2)
         {
-            sent.dirty.add(page);
+            into.push({ address: sent.base + spans[index],
+                bytes: windowMemory(sent.base + spans[index], spans[index + 1] - spans[index]) });
         }
-        if (sent.dirty.size === 0)
-        {
-            return 0;
-        }
-        let length = 0;
-        const last = (sent.base + to - 1) >>> 12;
-        for (let page = (sent.base + from) >>> 12; page <= last; page++)
-        {
-            if (!sent.dirty.has(page))
-            {
-                continue;
-            }
-            // A run of such pages, compared as one span.
-            let end = page;
-            while (end < last && sent.dirty.has(end + 1))
-            {
-                end++;
-            }
-            const lo = Math.max(from, page * 4096 - sent.base);
-            const hi = Math.min(to, (end + 1) * 4096 - sent.base);
-            changedSince(sent, lo, hi, into);
-            length += hi - lo;
-            for (let done = page; done <= end; done++)
-            {
-                // Clean once all of it the buffer holds is compared.
-                if (Math.max(0, done * 4096 - sent.base) >= lo
-                    && Math.min(sent.bytes.length, (done + 1) * 4096 - sent.base) <= hi)
-                {
-                    sent.dirty.delete(done);
-                }
-            }
-            page = end;
-        }
-        return length;
+        return 0;
     };
 
     /**
@@ -801,6 +784,28 @@ export function createRecording(options){
         }
         const sampled = new Set(bound);
         return key=>!isTexture(key) || named.has(key) || sampled.has(key);
+    };
+
+    /**
+     * Whether a resource's bytes live only in system memory, where Direct3D
+     * 8 and 9 draw nothing from: a texture or volume texture made so, or a
+     * surface or volume whose description says so.
+     *
+     * @param {any} object
+     */
+    const inSystemMemory = object=>{
+        if (typeof object?.pool === 'number')
+        {
+            return object.pool === D3DPOOL_SYSTEMMEM;
+        }
+        if (typeof object?.GetDesc !== 'function')
+        {
+            return false;
+        }
+        /** @type {{ desc?: { Pool?: number } }} */
+        const out = {};
+        object.GetDesc(out);
+        return out.desc?.Pool === D3DPOOL_SYSTEMMEM;
     };
 
     /**
@@ -1301,13 +1306,35 @@ export function createRecording(options){
                 }
                 return known.reply.answer;
             }
+            // Direct3D 9's copy out of a surface or a texture in system memory
+            // carries what it moves, not what was unlocked of its source: the
+            // recording device makes the copy in guest memory and sends the
+            // rows it wrote over the twin's. A game that locks a system-memory
+            // volume every frame, marks a few boxes dirty and updates its twin
+            // from it sent and stashed the whole volume each frame for the
+            // boxes. Direct3D 8's device -- the one with CopyRects -- leaves
+            // its copies to the caller, and its twin copies from what it was
+            // sent of the source, which goes first as before.
+            const raw = MOVES_OUT_OF.has(name) && typeof (/** @type {any} */ (target)).CopyRects
+                !== 'function' && args[0] !== null && typeof args[0] === 'object'
+                ? keyOf(raws.get(args[0]) ?? args[0]) : null;
+            const source = raw && inSystemMemory(raw) ? raw : null;
             if (pending.addresses.size > 0 && !quiet)
             {
-                shipPending(readBy(target, name, args));
+                const readable = readBy(target, name, args);
+                shipPending(source ? key=>key !== source && readable(key) : readable);
             }
-            else if (pending.addresses.size > 0 && !unlocking
+            else if (pending.addresses.size > 0 && !unlocking && !name.startsWith('AddDirty')
+                && !(locking && inSystemMemory(keyOf(target)))
                 && [...pending.owners.values()].includes(keyOf(target)))
             {
+                // A lock of a resource the played side reads -- a texture its
+                // draws sample, a target its renderer answers for -- has what
+                // was unlocked there first. One in system memory it never
+                // reads: a copy out of it carries the rows it moves, and the
+                // bytes sent ahead of the lock were stashed again by the lock.
+                // A dirty region marked reads nothing: whatever reads it later
+                // has the bytes sent first.
                 shipPending();
             }
             number ??= /** @type {number} */ (numbers.get(target));
@@ -1372,7 +1399,7 @@ export function createRecording(options){
                         ? ranges.flatMap(range=>{
                             const from = range.address - sent.base;
                             const to = from + extentOf(range.address, range.length);
-                            if (from < 0 || to > sent.bytes.length)
+                            if (from < 0 || to > sent.length)
                             {
                                 return rangeFrom(range);
                             }
@@ -1898,7 +1925,9 @@ export function createRecording(options){
                 // watched from before the read.
                 const watch = watchWrites?.(base, buffer.length) ?? null;
                 const bytes = readMemory(base, buffer.length);
-                sentOf.set(buffer, { base, bytes, watch, dirty: new Set() });
+                // Kept only to compare against where there is no watch to say.
+                sentOf.set(buffer, { base, length: buffer.length, bytes: watch ? null : bytes,
+                    watch, dirty: new Set() });
                 compared.take(buffer, 0, buffer.length);
                 (drawn ??= []).push({ address: base, bytes });
                 return;
@@ -2277,13 +2306,24 @@ export function createPlayer({ root, ship, read, borrow }){
 
 /**
  * A guest memory of only the bytes sent to it, in 64 KiB pages made as they
- * are written: what a renderer behind a played device reads.
+ * are written: what a renderer behind a played device reads. It is written
+ * only by what is sent, so it says which 4 KiB pages were written since a
+ * reader last looked (`watch`), as the engine's write watch does for guest
+ * memory: a dynamic buffer's upload is those pages, not a comparison.
  */
 export function createMirror(){
     const SHIFT = 16;
     const SIZE = 1 << SHIFT;
     /** @type {Map<number, Uint8Array>} */
     const pages = new Map();
+    /**
+     * Each 4 KiB page's last write, numbered; a watch keeps the number it last
+     * saw of each.
+     *
+     * @type {Map<number, number>}
+     */
+    const stamps = new Map();
+    let stamp = 0;
     /** @param {number} page */
     const pageOf = page=>{
         let bytes = pages.get(page);
@@ -2297,6 +2337,15 @@ export function createMirror(){
     return {
         /** @param {number} address @param {Uint8Array} bytes */
         write(address, bytes){
+            if (bytes.length > 0)
+            {
+                stamp++;
+                const last = (address + bytes.length - 1) >>> 12;
+                for (let page = address >>> 12; page <= last; page++)
+                {
+                    stamps.set(page, stamp);
+                }
+            }
             let done = 0;
             while (done < bytes.length)
             {
@@ -2306,6 +2355,37 @@ export function createMirror(){
                 pageOf(at >>> SHIFT).set(bytes.subarray(done, done + take), offset);
                 done += take;
             }
+        },
+        /**
+         * A watch over a range, as the engine's (`watchWrites`): its `take`
+         * answers the pages written since its own last look at them, every
+         * page ever written at its first.
+         *
+         * @param {number} address @param {number} length
+         * @returns {{ take: (from: number, bytes: number) => number[] }}
+         */
+        watch(address, length){
+            /** @type {Map<number, number>} */
+            const seen = new Map();
+            const first = address >>> 12;
+            const end = (address + Math.max(length, 1) - 1) >>> 12;
+            return {
+                take(from, bytes){
+                    /** @type {number[]} */
+                    const taken = [];
+                    const last = Math.min(end, (from + Math.max(bytes, 1) - 1) >>> 12);
+                    for (let page = Math.max(first, from >>> 12); page <= last; page++)
+                    {
+                        const at = stamps.get(page);
+                        if (at !== undefined && at !== seen.get(page))
+                        {
+                            seen.set(page, at);
+                            taken.push(page);
+                        }
+                    }
+                    return taken;
+                },
+            };
         },
         /** @param {number} address @param {number} length @returns {Uint8Array} */
         read(address, length){

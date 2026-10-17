@@ -546,6 +546,8 @@ export function playedDirect3D7(services){
     const root = direct3D7Root(ddraw, {
         ...services,
         readMemory: mirror.read,
+        watchWrites: (/** @type {number} */ address, /** @type {number} */ length)=>
+            mirror.watch(address, length),
         writeMemory: (address, bytes)=>{
             mirror.write(address, bytes);
             if (!playing)

@@ -108,7 +108,7 @@ function adapt(api, interfaces, onGone, onReferenced, onForgotten, cells){
      * read or lowered here -- a binding it made in a command ring that holds
      * the object -- is made first.
      */
-    const settle = ()=>api.settleGuestRefs?.();
+    const settle = ()=>api.settleGuestRefs?.(adapter.pointers);
     /** Whether the latest release ended the object, which the bridge asks next. */
     let gone = false;
 

@@ -675,6 +675,49 @@ test('the command ring is made with the block, and its whole records are taken i
     assert.equal(m.shadow.diagnostics().refused, 1);
 });
 
+test('a count is settled with the ring taken only when what waits can bind or unbind it', ()=>{
+    // A texture let go of mid-frame played a frame's records for nothing.
+    const m = machine({ commands: true });
+    const at = m.shadow.address();
+    const ring = m.u32(at + SHADOW.COMMANDS);
+    const texture = 0x5000;
+    const other = 0x6000;
+    const free = { counter: { held: 0 } };
+    // A record that binds the other one, written where the routines would.
+    const append = ()=>{
+        const head = m.u32(at + SHADOW.COMMAND_HEAD);
+        record(7, [0, other]).forEach((word, i)=>m.put32(ring + head + i * 4, word));
+        m.put32(at + SHADOW.COMMAND_HEAD, head + 16);
+    };
+    append();
+    m.shadow.syncFor(free, new Set([texture]));
+    assert.equal(m.taken.length, 0, 'no record names it: the ring waits');
+    m.shadow.syncFor(free, undefined);
+    assert.equal(m.taken.length, 1, 'where it was published is not known: taken');
+
+    /** @param {object} object @param {Set<number>} pointers */
+    const takes = (object, pointers)=>{
+        append();
+        const before = m.taken.length;
+        m.shadow.syncFor(object, pointers);
+        const took = m.taken.length > before;
+        m.shadow.sync();
+        return took;
+    };
+    assert.equal(takes(free, new Set([texture])), false);
+    assert.equal(takes(free, new Set([texture, other])), true,
+        'a record names one of its pointers');
+    assert.equal(takes({ counter: { held: 1 } }, new Set([texture])), true, 'bound now');
+    assert.equal(takes({ counter: { held: 0 }, container: {} }, new Set([texture])), true,
+        'a level, counted with its container');
+    assert.equal(takes({ counter: {} }, new Set([texture])), true, 'a count that does not say');
+    m.put32(at + SHADOW.FLAGS, FLAG_STALE);
+    assert.equal(takes(free, new Set([texture])), true, 'a state block applied in the ring');
+    m.put32(at + SHADOW.FLAGS, 0);
+    assert.equal(takes(free, new Set([texture])), false);
+    assert.deepEqual(m.divergences, []);
+});
+
 test('a buffer the guest holds locked is sent only when the ring has calls that may read it', ()=>{
     // Sent at every entry, the held range was read again at each of
     // thousands of host calls a frame.
