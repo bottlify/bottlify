@@ -1,5 +1,7 @@
 # Bottlify
 
+[По-русски](README.ru.md)
+
 Bottlify runs Windows x86 programs and games in a browser tab, with no Windows, no plugin and
 nothing to install. It is four packages; the first two run a program, the other two are optional:
 
@@ -23,8 +25,8 @@ nothing to install. It is four packages; the first two run a program, the other 
 - **Programs:** 32-bit PE images; the loader maps them and gives every system library a real
   module in guest memory, so `GetProcAddress` answers the address an import was bound to. Threads
   run under a scheduler whose quantum is retired guest instructions.
-- **Graphics:** DirectDraw, Direct3D 7, 8, 9 and 10 (with DXGI), OpenGL 1.x and Vulkan, all through
-  one WebGPU backend, on a graphics worker of its own.
+- **Graphics:** DirectDraw, Direct3D 7, 8, 9 and 10 (with DXGI), OpenGL 1.1 with extensions and
+  Vulkan, all through one WebGPU backend, on a graphics worker of its own.
 - **Sound and video:** DirectSound, DirectMusic and waveOut through a mixer an `AudioWorklet` plays;
   video through DirectShow over an FFmpeg build compiled to WebAssembly.
 - **Files and network:** a program's files come out of a bundle read by byte range, and what it
