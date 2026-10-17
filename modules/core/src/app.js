@@ -4921,7 +4921,7 @@ async function buildApp(options){
             /** @param {number} at @param {number} target */
             jump: (at, target)=>void jumps.push({ at, target }),
         });
-        return { code, jumps };
+        return { code, jumps, pointers: fn.pointers };
     };
     // Each system module where the one before it ends, at the granularity
     // every image is placed at: the window they share is the room left for

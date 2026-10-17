@@ -65,6 +65,64 @@ const MAX_STRING = 1 << 20;
 /** The largest number `rand` produces, which a caller scales its range by. */
 const RAND_MAX = 0x7fff;
 
+/** The variable `srand` and `rand` keep the generator in, and where it starts. */
+export const RAND_SEED = '_holdrand';
+
+/**
+ * int rand(void), as the guest runs it: the generator below on the library's
+ * own variable, whose address the loader writes at 1 and 17.
+ *
+ *     mov eax, [seed]
+ *     imul eax, eax, 214013
+ *     add eax, 2531011
+ *     mov [seed], eax
+ *     shr eax, 16
+ *     and eax, RAND_MAX
+ *     ret
+ */
+export const RAND_CODE = Object.freeze({
+    code: new Uint8Array([
+        0xa1, 0, 0, 0, 0,
+        0x69, 0xc0, 0xfd, 0x43, 0x03, 0x00,
+        0x05, 0xc3, 0x9e, 0x26, 0x00,
+        0xa3, 0, 0, 0, 0,
+        0xc1, 0xe8, 0x10,
+        0x25, 0xff, 0x7f, 0x00, 0x00,
+        0xc3,
+    ]),
+    seedAt: [1, 17],
+});
+
+/**
+ * void srand(unsigned int seed), as the guest runs it: the seed into the
+ * variable, whose address the loader writes at 5.
+ *
+ *     mov eax, [esp+4]
+ *     mov [seed], eax
+ *     ret
+ */
+export const SRAND_CODE = Object.freeze({
+    code: new Uint8Array([0x8b, 0x44, 0x24, 0x04, 0xa3, 0, 0, 0, 0, 0xc3]),
+    seedAt: [5],
+});
+
+/**
+ * An export whose body is `code` with the generator's variable written at
+ * `seedAt`, and whose handler answers as the code does where a handler is
+ * asked for directly.
+ *
+ * @template {(...args: any[]) => number} H
+ * @param {{ code: Uint8Array, seedAt: readonly number[] }} made
+ * @param {number} argBytes @param {H} handler
+ */
+const seededCode = (made, argBytes, handler)=>({
+    convention: 'cdecl',
+    argBytes,
+    handler,
+    code: ()=>made.code,
+    pointers: made.seedAt.map(at=>({ at, to: RAND_SEED })),
+});
+
 
 /**
  * @typedef {Object} MsvcrtHost
@@ -537,28 +595,27 @@ export function createMsvcrtFunctions(host){
          * anything else changes what the program produces, and the arithmetic
          * below is small enough that there is no reason to.
          *
-         * One sequence for the process, where this runtime keeps one per thread.
+         * One sequence for the library, where this runtime keeps one per thread.
          * The difference shows only in which thread draws which number, and no
          * program can depend on that ordering in the first place.
+         *
+         * Both are code in the guest over the library's own variable
+         * (`RAND_SEED`): a program draws numbers by the hundred thousand -- the
+         * Crysis demo 423 716 in 172 s -- and each was a crossing into the host
+         * for an instruction's worth of work. The handlers are the reference
+         * the code is tested against, with a sequence of their own.
          */
-        srand: {
-            convention: 'cdecl',
-            argBytes: 4,
-            /** @param {number[]} args */
-            handler: ([seed])=>{
-                randomSeed = seed >>> 0;
-                return 0; // void
-            },
-        },
+        srand: seededCode(SRAND_CODE, 4, ([seed])=>{
+            randomSeed = seed >>> 0;
+            return 0; // void
+        }),
 
-        rand: {
-            convention: 'cdecl',
-            argBytes: 0,
-            handler: ()=>{
-                randomSeed = (Math.imul(randomSeed, 214013) + 2531011) >>> 0;
-                return (randomSeed >>> 16) & RAND_MAX;
-            },
-        },
+        rand: seededCode(RAND_CODE, 0, ()=>{
+            randomSeed = (Math.imul(randomSeed, 214013) + 2531011) >>> 0;
+            return (randomSeed >>> 16) & RAND_MAX;
+        }),
+
+        [RAND_SEED]: { data: ()=>new Uint8Array([1, 0, 0, 0]) },
 
         /**
          * void qsort(void *base, size_t num, size_t width, int (*cmp)(const void*, const void*))

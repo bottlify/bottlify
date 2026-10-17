@@ -489,6 +489,24 @@ test('a variable may hold other exports\' addresses, and be exported part way in
     }), /points at "none"/);
 });
 
+test('a function\'s code may hold the address of a variable of its library', ()=>{
+    // `mov eax, [seed]; ret`: the state a function keeps, on the variables' pages.
+    const module = synthesiseModule({
+        name: 'MSVCRT.dll',
+        base: BASE,
+        exports: [
+            { name: 'draw', code: new Uint8Array([0xa1, 0, 0, 0, 0, 0xc3]),
+                pointers: [{ at: 1, to: 'seed' }] },
+            { name: 'seed', data: new Uint8Array(4) },
+        ],
+    });
+    const draw = /** @type {number} */ (module.addressOf('draw'));
+    const seed = /** @type {number} */ (module.addressOf('seed'));
+    assert.ok(seed - BASE >= module.dataRva, 'the variable is on the writable pages');
+    assert.equal(new DataView(module.bytes.buffer).getUint32(draw - BASE + 1, true), seed);
+    assert.equal(module.bytes[draw - BASE + 5], 0xc3, 'and the rest of the code as it was');
+});
+
 test('a program is an executable whose entry calls one routine and exits with its answer', ()=>{
     const program = synthesiseProgram({ library: 'bottlify.dll', routine: 'msiexec' });
     const image = parsePe(program.bytes);

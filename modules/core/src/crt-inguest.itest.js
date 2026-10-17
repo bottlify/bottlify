@@ -19,6 +19,7 @@ import { createApp } from './app.js';
 import { buildExe } from '../../../tools/make-pe.mjs';
 import { assemble } from './layers/win32/msvcrt/guest-code.js';
 import { ERANGE } from './layers/win32/msvcrt/globals.js';
+import { createMsvcrtFunctions } from './layers/win32/msvcrt/functions.js';
 
 /** @param {number} value */
 const u32 = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff];
@@ -750,3 +751,20 @@ test(`qsort sorts through the program's comparator, in the guest`,
         assert.equal(await exitCodeOf(buildSortExe(60, 12)), 0,
             'sixty records of twelve bytes, each moved whole');
     });
+
+test('rand draws the runtime\'s sequence through the import, in the guest, on the library\'s'
+    + ' own variable', { timeout: 60000 }, async()=>{
+    // The handler is the reference; the library's variable starts where it does.
+    const reference = createMsvcrtFunctions(/** @type {any} */ ({
+        readMemory: (/** @type {number} */ address, /** @type {number} */ length)=>
+            new Uint8Array(length),
+        writeMemory: ()=>{}, fillMemory: ()=>{}, readCString: ()=>'',
+        scanCString: ()=>({ index: 0, byte: 0 }), write: ()=>{}, callGuest: ()=>Promise.resolve(0),
+    }));
+    /** @type {Call[]} */
+    const calls = Array.from({ length: 20 }, ()=>({ name: 'rand', args: ()=>[],
+        returns: /** @type {'eax'} */ ('eax'), expected: [reference.rand.handler()] }));
+    const { code, crossed } = await runCounting(buildCallsExe(calls, {}));
+    assert.equal(code, 0, 'the number of the first draw that came back wrong');
+    assert.equal(crossed.get('msvcrt.dll!rand') ?? 0, 0, 'none crossed into the host');
+});
