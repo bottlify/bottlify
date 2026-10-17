@@ -87,8 +87,12 @@ export function signalledNow(object){
  * @param {(event: any) => void} [options.eventChanged]  told each time an
  *     event's signalled state is written, for the words the guest reads it by
  *     (`event-mirror.js`)
+ * @param {{ made: (mutex: any) => void, settle: () => void } | null} [options.mutexWords]
+ *     The words the guest takes and releases mutexes by (`mutex-words.js`): told of
+ *     each mutex made, and asked after every call here and every wait run out to
+ *     hand back to the guest the words of mutexes nobody waits for
  */
-export function createSyncObjects({ scheduler, remote = null, eventChanged }){
+export function createSyncObjects({ scheduler, remote = null, eventChanged, mutexWords = null }){
     /** @type {any[]} */
     const objects = [];
     /** How many of each kind were ever made; the cheap answer about the table. */
@@ -139,6 +143,7 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged }){
         }
         thread.queuedOn = null;
         thread.waitSet = null;
+        mutexWords?.settle();
     };
     scheduler.onTimeout?.(stopWaiting);
 
@@ -397,6 +402,7 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged }){
             };
             objects.push(object);
             created[SyncKind.MUTEX]++;
+            mutexWords?.made(object);
             return object;
         },
 
@@ -867,5 +873,26 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged }){
         },
     };
 
+    // Every call here may have taken a mutex's word for the host; each hands
+    // back those nobody waits for once it is done (`mutex-words.js`).
+    if (mutexWords !== null)
+    {
+        for (const [name, call] of Object.entries(api))
+        {
+            if (typeof call === 'function')
+            {
+                /** @type {any} */ (api)[name] = (/** @type {any[]} */ ...args)=>{
+                    try
+                    {
+                        return call(...args);
+                    }
+                    finally
+                    {
+                        mutexWords.settle();
+                    }
+                };
+            }
+        }
+    }
     return api;
 }

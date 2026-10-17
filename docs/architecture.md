@@ -619,10 +619,13 @@ sequenceDiagram
   the program runs itself, with no trap, at cork's speed; only what they cannot handle goes to
   the bridge. Some are written as x86: msvcrt's and kernel32's functions a program calls most,
   among them the interlocked calls, critical sections, slim reader/writer locks, one-time
-  initialisation, SLists, the heap's small blocks (up to 1 KiB) and WaitForSingleObject's poll of
+  initialisation, SLists, the heap's small blocks (up to 1 KiB), WaitForSingleObject's poll of
   an event that is not signalled, read from a word the kernel keeps for each handle onto an
   event, so a thread on another executor polling for work never waits for the process's
-  executor to answer. Others are written once in
+  executor to answer; a mutex nobody else wants, taken and given back with `lock cmpxchg` on a
+  word of the mutex's own that the host takes over (one flag) as soon as anyone waits, the
+  mutex is abandoned or the host otherwise touches it; and Sleep(0) while no thread waits to
+  run, read from a count the scheduler keeps. Others are written once in
   JavaScript, marked `@guestCode`, and compiled to i386 by the build ([`core/scripts/guest-code/`](../modules/core/scripts/guest-code/)):
   the compiled bytes sit beside the source as `*.x86.js`, the JavaScript stays the host's
   handler and the reference a test holds the x86 to, and `return host()` hands a rare case to

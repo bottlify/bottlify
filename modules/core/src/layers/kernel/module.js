@@ -4,7 +4,8 @@
  * See LICENSE for details
  */
 
-import { MIRROR, createEventMirror } from './internal/event-mirror.js';
+import { MIRROR, MUTEX_TAG, createEventMirror } from './internal/event-mirror.js';
+import { createMutexWords } from './internal/mutex-words.js';
 import { createHandleTable } from './internal/handles.js';
 import { createSwitcher } from './internal/switch.js';
 import {
@@ -116,7 +117,8 @@ export function createKernelModule(){
              * @type {{ scheduler: any, sync: any, handles: any, clock: any, switcher: any,
              *          processes: any, stacks: any, disposed: boolean, resumeLog: string[],
              *          refreshClock: (() => void) | undefined,
-             *          hostAnswering: (() => boolean) | undefined }}
+             *          hostAnswering: (() => boolean) | undefined, readyWord: number,
+             *          mutexWords: any }}
              */
             const state = {
                 stacks,
@@ -129,6 +131,10 @@ export function createKernelModule(){
                 disposed: false,
                 refreshClock: undefined,
                 hostAnswering: undefined,
+                // The guest word the scheduler keeps its ready count in (`mirrorReady`).
+                readyWord: 0,
+                // The words of the process's mutexes (`mutex-words.js`).
+                mutexWords: null,
                 // The last parks, holds and scheduled resumes, newest last: what a
                 // thread that sits in the park loop is read by.
                 resumeLog: [],
@@ -177,6 +183,13 @@ export function createKernelModule(){
                 placement: config?.placement === 'spread' || config?.placement === 'concentrate'
                     ? config.placement : null,
                 placementTiming: config?.placementTiming,
+                // The guest's Sleep reads it (`mirrorReady`).
+                readyChanged: (/** @type {number} */ count)=>{
+                    if (state.readyWord !== 0)
+                    {
+                        memory.writeU32(state.readyWord, count);
+                    }
+                },
                 ids: config?.ids,
                 hostAnswering: ()=>state.hostAnswering?.() === true,
                 ...published(cpu, log),
@@ -200,9 +213,15 @@ export function createKernelModule(){
             // The words the guest reads its events by, once kernel32 places
             // the table (`mirrorEvents`); until then nothing is written.
             const mirror = createEventMirror((address, value)=>memory.writeU32(address, value));
+            // The words the guest takes and releases mutexes by, once kernel32
+            // places them (`mirrorEvents`): a thread's id is what FS:[0x24] holds.
+            const mutexWords = createMutexWords(/** @type {any} */ (memory), id=>state.scheduler.all()
+                .find((/** @type {any} */ thread)=>thread.id === id
+                    && thread.state !== ThreadState.TERMINATED) ?? null);
+            state.mutexWords = mutexWords;
             state.sync = createSyncObjects({ scheduler: state.scheduler,
                 remote: config?.remoteObjects ?? null,
-                eventChanged: event=>mirror.changed(event) });
+                eventChanged: event=>mirror.changed(event), mutexWords });
             // A wait of this process on another's object, across a link,
             // ends there; the word comes back here.
             config?.remoteObjects?.onWake?.((/** @type {number} */ token,
@@ -224,6 +243,7 @@ export function createKernelModule(){
                 WaitResult,
                 // What a handle's word says (`mirrorEvents`).
                 EventMirror: MIRROR,
+                MUTEX_TAG,
 
                 /**
                  * Creates a thread, giving it a stack of its own.
@@ -728,14 +748,38 @@ export function createKernelModule(){
                 /**
                  * Keeps a word for each handle below `count` at `table` in guest
                  * memory saying whether the event it names is signalled
-                 * (`event-mirror.js`), from the events already open on.
+                 * (`event-mirror.js`), from the events already open on; and,
+                 * with room for them, each mutex's own word, `mutexCount` of
+                 * them at `mutexTable`, its handles' words pointing there
+                 * (`mutex-words.js`).
                  *
                  * @param {number} table @param {number} count
+                 * @param {number} [mutexTable] @param {number} [mutexCount]
                  */
-                mirrorEvents: (table, count)=>{
+                mirrorEvents: (table, count, mutexTable = 0, mutexCount = 0)=>{
                     if (live())
                     {
+                        if (mutexTable !== 0 && mutexCount > 0)
+                        {
+                            state.mutexWords.attach(mutexTable, mutexCount);
+                        }
                         mirror.attach(table, count, state.handles.list());
+                    }
+                },
+
+                /**
+                 * Keeps the word at `address` in guest memory saying how many
+                 * threads are ready to run with no executor running them
+                 * (the scheduler's `readyCount`): the guest's Sleep(0) returns
+                 * at once while it is zero.
+                 *
+                 * @param {number} address
+                 */
+                mirrorReady: address=>{
+                    if (live())
+                    {
+                        state.readyWord = address >>> 0;
+                        memory.writeU32(state.readyWord, state.scheduler.readyCount());
                     }
                 },
 

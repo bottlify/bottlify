@@ -177,6 +177,9 @@ const ERROR_NOACCESS = 998;
  * @property {() => boolean} [yieldTurn]  Puts the caller behind another thread ready to
  *           run at its priority or above, for Sleep(0); false, and nothing done, when
  *           there is none.
+ * @property {(address: number) => void} [readyWord]  Has the kernel keep the word at
+ *           `address` saying how many threads are ready to run with no executor
+ *           running them, which Sleep's guest code reads (`sleepCode`).
  * @property {() => number} [tlsBlock]  The running thread's array of TLS slots,
  *           as the compiler reaches it through FS; zero when there is none.
  *           Records that the guest asked to wait. Actually waiting is the scheduler's.
@@ -497,6 +500,42 @@ export function queryPerformanceFrequencyCode(at, trap, frequency = Number(PERFO
 }
 
 /**
+ * Sleep as guest code: Sleep(0) gives the rest of the turn to a thread ready to
+ * run, and returns at once when none is -- which the guest reads in the
+ * kernel's word (`readyWord`) and answers by itself, with no crossing. Every
+ * other call, a time to sleep or a thread waiting to run, goes to the host.
+ * Call of Duty 4's threads waited on each other with Sleep(0) round and round,
+ * 16.8 million calls a run, four of every five crossings into the host; on
+ * another executor each waited for the process's executor to answer.
+ *
+ *     mov eax, [esp+4]        ; dwMilliseconds
+ *     test eax, eax
+ *     jnz slow
+ *     cmp dword [word], 0     ; threads ready with no executor
+ *     jne slow
+ *     ret 4
+ *   slow:
+ *     jmp trap
+ *
+ * @param {number} at    Where the code lands, for the jump to the trap.
+ * @param {number} trap  The host's Sleep.
+ * @param {number} word  The kernel's count of threads waiting to run.
+ */
+export function sleepCode(at, trap, word){
+    const slow = 20;
+    return new Uint8Array([
+        0x8b, 0x44, 0x24, 0x04,                                      // mov eax, [esp+4]
+        0x85, 0xc0,                                                  // test eax, eax
+        0x75, slow - 8,                                              // jnz slow
+        0x83, 0x3d, ...dword(word), 0x00,                            // cmp dword [word], 0
+        0x75, slow - 17,                                             // jne slow
+        0xc2, 0x04, 0x00,                                            // ret 4
+        // slow: (20)
+        0xe9, ...dword(trap - (at + slow + 5)),                      // jmp trap
+    ]);
+}
+
+/**
  * GetTickCount as guest code -- and WINMM's timeGetTime, bound to the same
  * routine (`win32/module.js`), which answers the same milliseconds. Neither
  * takes an argument and neither can fail, so there is no case left for the
@@ -807,6 +846,38 @@ export function createProcessFunctions(host){
             ticks: place('<tick-count>', 'GetTickCount', ()=>tickCountCode(block)),
         };
         return clocks;
+    };
+
+    /** Where Sleep's guest code went, once placed. @type {number | null} */
+    let sleepAt = null;
+    /**
+     * Sleep's guest code and the word of the kernel's it reads, placed on the
+     * first bind (`sleepCode`).
+     *
+     * @param {import('./sync.js').GuestBuilder} builder
+     */
+    const placedSleep = builder=>{
+        if (sleepAt !== null)
+        {
+            return sleepAt;
+        }
+        const trap = builder.register('KERNEL32.dll!Sleep', {
+            argBytes: table.Sleep.argBytes,
+            /** @param {number[]} args */
+            handler: args=>table.Sleep.handler(args),
+        });
+        const allocate = host.allocateCode ?? host.allocate;
+        if (!host.allocate || !allocate || !host.readyWord)
+        {
+            sleepAt = trap;
+            return trap;
+        }
+        const word = host.allocate(4);
+        const at = allocate(sleepCode(0, trap, word).length);
+        host.writeMemory(at, sleepCode(at, trap, word));
+        host.readyWord(word);
+        sleepAt = at;
+        return at;
     };
 
     /**
@@ -1215,7 +1286,12 @@ export function createProcessFunctions(host){
             ...clockGuest('frequency'),
         },
 
-        /** VOID Sleep(DWORD dwMilliseconds) */
+        /**
+         * VOID Sleep(DWORD dwMilliseconds)
+         *
+         * Guest code first: Sleep(0) with no thread waiting to run returns
+         * there (`sleepCode`), and everything else comes here.
+         */
         Sleep: {
             argBytes: 4,
             /** @param {number[]} args */
@@ -1234,6 +1310,12 @@ export function createProcessFunctions(host){
                 host.sleep(wait);
                 return host.park();
             },
+            ...host.allocate && host.readyWord
+                ? {
+                    /** @param {import('./sync.js').GuestBuilder} builder */
+                    guest: builder=>placedSleep(builder),
+                }
+                : {},
         },
 
         /**

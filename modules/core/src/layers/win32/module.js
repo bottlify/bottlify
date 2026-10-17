@@ -1622,6 +1622,11 @@ export function createWin32Module(){
                         // clock moves with what runs, and two threads handing
                         // each other turns of a few instructions would move it
                         // not at all -- every timed wait of theirs stood still.
+                        // Where Sleep's guest code reads how many threads wait
+                        // to run: the kernel keeps the word (`mirrorReady`).
+                        readyWord: typeof kernel.mirrorReady === 'function'
+                            ? (/** @type {number} */ address)=>kernel.mirrorReady(address)
+                            : undefined,
                         yieldTurn: ()=>{
                             const self = kernel.currentThread();
                             const mine = self?.priority ?? 0;

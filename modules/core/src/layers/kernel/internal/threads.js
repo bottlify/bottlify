@@ -254,6 +254,8 @@ const readyNow = thread=>{
  *        (`placement.js`).
  * @param {Partial<import('./placement.js').PlacementOptions>} [options.placementTiming]
  *        The trials' windows, holds and margin, where a test shortens them.
+ * @param {(count: number) => void} [options.readyChanged]  Told how many threads are
+ *        ready to run with no executor running them, as that changes (`readyCount`).
  */
 export function createScheduler(options){
     const { cpu, switcher, quantum = 100_000, now = ()=>0, skipTo = ()=>0 } = options;
@@ -496,6 +498,28 @@ export function createScheduler(options){
     const ready = ()=>threads.filter(thread=>
         thread.state === ThreadState.READY && !thread.awaitingHost
         && !(thread.suspendCount > 0));
+
+    /**
+     * How many threads are ready to run with no executor running them, as last
+     * told (`readyChanged`): what Sleep(0) gives its turn to, read by the
+     * guest's Sleep, which returns at once while it is zero and crosses into
+     * the host otherwise. Told at each slice's start, as a turn chooses, and as
+     * a thread is woken, made, suspended or resumed -- a host call's answer
+     * coming back counts at the next turn, at most a slice late.
+     */
+    let readyTold = -1;
+    const publishReady = ()=>{
+        if (!options.readyChanged)
+        {
+            return;
+        }
+        const count = ready().length;
+        if (count !== readyTold)
+        {
+            readyTold = count;
+            options.readyChanged(count);
+        }
+    };
 
     /**
      * Where a thread's stack pointer stood at the end of its slice.
@@ -1007,6 +1031,7 @@ export function createScheduler(options){
      * @param {any} thread
      */
     const noteReady = thread=>{
+        publishReady();
         if (inSlice && answering)
         {
             // Made ready by another executor's call answered inside this one's
@@ -1411,6 +1436,7 @@ export function createScheduler(options){
                 : quantum;
         soloShared = shared && solo;
         longTurn = !solo && asked > quantum;
+        publishReady();
         let instructions = cpu.runSlice(asked);
         soloShared = false;
         longTurn = false;
@@ -1687,6 +1713,7 @@ export function createScheduler(options){
         for (;;)
         {
             const here = choose(remotes, bell);
+            publishReady();
             if (here !== null)
             {
                 const hereFrom = wall();
@@ -1963,6 +1990,9 @@ export function createScheduler(options){
             placement.frame();
         },
 
+        /** How many threads are ready to run with no executor running them. */
+        readyCount: ()=>ready().length,
+
         /**
          * The executor `thread` runs on now -- the processor it would read
          * as its own: another executor's index while that one holds it,
@@ -2190,6 +2220,7 @@ export function createScheduler(options){
                 return null;
             }
             thread.suspendCount = previous + 1;
+            publishReady();
             // Running on another executor, the thread stops at that one's next
             // slice end rather than at whatever turn of this one comes next.
             if ([...placed.values()].some(on=>on.thread === thread))

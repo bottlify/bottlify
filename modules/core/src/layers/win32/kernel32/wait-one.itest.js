@@ -15,8 +15,9 @@ import assert from 'node:assert/strict';
 import { createCorkHost } from '../../cpu/internal/cork-host.js';
 import { runToHalt } from '../../cpu/internal/halt.fixture.js';
 import * as cork from '../../../../../cork/src/index.js';
-import { MIRROR } from '../../kernel/internal/event-mirror.js';
-import { EVENT_SLOTS, eventPollCode } from './event-poll.js';
+import { MIRROR, MUTEX_TAG } from '../../kernel/internal/event-mirror.js';
+import { MUTEX_WORD } from '../../kernel/internal/mutex-words.js';
+import { EVENT_SLOTS, releaseMutexCode, waitOneCode } from './wait-one.js';
 
 const PROGRAM = 0x8000;
 const POLL = 0x8200;
@@ -40,7 +41,7 @@ test('the guest poll times out an unsignalled event and leaves every other wait 
             initialStack: STACK,
             cork: {},
         });
-        host.writePhysical(POLL, eventPollCode(POLL, TRAP, TABLE, MIRROR.CLEAR));
+        host.writePhysical(POLL, waitOneCode(POLL, TRAP, TABLE, MIRROR.CLEAR, MUTEX_TAG));
         host.writePhysical(TRAP, new Uint8Array([0xf4]));
         /** @param {number} handle @param {number} value */
         const word = (handle, value)=>host.writePhysical(TABLE + (handle >>> 2) * 4,
@@ -93,6 +94,104 @@ test('the guest poll times out an unsignalled event and leaves every other wait 
 
         host.stop();
     });
+
+test('the guest takes a free mutex or its own again, gives back its own, and leaves every other'
+    + ' mutex call to the host', async()=>{
+    const RELEASE = 0x8600;
+    const MUTEX = 0x110000;
+    const HANDLE = 0x160;
+    const ME = 0x2c;
+    const host = createCorkHost({
+        engine: cork,
+        memorySize: 64 * 1024 * 1024,
+        trapPort: 0xb077,
+        entryVector: 0x7000,
+        initialStack: STACK,
+        cork: {},
+    });
+    host.writePhysical(POLL, waitOneCode(POLL, TRAP, TABLE, MIRROR.CLEAR, MUTEX_TAG));
+    host.writePhysical(RELEASE, releaseMutexCode(RELEASE, TRAP, TABLE, MUTEX_TAG));
+    host.writePhysical(TRAP, new Uint8Array([0xf4]));
+    // FS's base is zero here: FS:[0x24], the caller's id, is linear 0x24.
+    host.writePhysical(0x24, new Uint8Array(u32(ME)));
+    host.writePhysical(TABLE + (HANDLE >>> 2) * 4, new Uint8Array(u32((MUTEX | MUTEX_TAG) >>> 0)));
+    host.writePhysical(PROGRAM, new Uint8Array([0xf4]));
+    host.writePhysical(0x7000, new Uint8Array(u32(PROGRAM)));
+    runToHalt(host, 1000);
+
+    /** @param {number} value */
+    const setWord = value=>host.writePhysical(MUTEX, new Uint8Array(u32(value)));
+    const word = ()=>{
+        const bytes = host.readPhysical(MUTEX, 4);
+        return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
+    };
+    /**
+     * Calls a routine with `args` pushed, from a fresh stack: its answer, or
+     * 'host' where it left for the host with the call as it was made.
+     *
+     * @param {number} routine @param {number[]} args
+     */
+    const call = (routine, args)=>{
+        const pushes = args.slice().reverse().flatMap(value=>[0x68, ...u32(value)]);
+        const at = PROGRAM + pushes.length;
+        const code = [...pushes, 0xe8, ...u32((routine - (at + 5)) | 0), 0xf4];
+        host.writePhysical(PROGRAM, new Uint8Array(code));
+        host.writeReg32('eip', PROGRAM);
+        host.writeReg32('esp', STACK);
+        host.writeReg32('eax', 0x5a5a5a5a);
+        host.wake();
+        runToHalt(host, 1000);
+        if (host.readReg32('eip') === TRAP + 1)
+        {
+            assert.equal(host.readReg32('esp'), STACK - 4 - 4 * args.length,
+                'the host is reached with the call as it was made');
+            return 'host';
+        }
+        assert.equal(host.readReg32('eip'), PROGRAM + code.length);
+        assert.equal(host.readReg32('esp'), STACK, 'its arguments popped');
+        return host.readReg32('eax');
+    };
+    const mine = (/** @type {number} */ count)=>((ME << MUTEX_WORD.OWNER_SHIFT) | count) >>> 0;
+    const theirs = ((0x30 << MUTEX_WORD.OWNER_SHIFT) | 1) >>> 0;
+
+    setWord(0);
+    assert.equal(call(POLL, [HANDLE, 0xffffffff]), 0, 'a free mutex is taken');
+    assert.equal(word(), mine(1));
+    assert.equal(call(POLL, [HANDLE | 3, 0]), 0, 'taken again by its owner, the low bits aside');
+    assert.equal(word(), mine(2));
+    assert.equal(call(RELEASE, [HANDLE]), 1, 'given back once');
+    assert.equal(word(), mine(1));
+    assert.equal(call(RELEASE, [HANDLE]), 1, 'and freed');
+    assert.equal(word(), 0);
+    assert.equal(call(RELEASE, [HANDLE]), 'host', 'a free mutex released: the host\'s error');
+    assert.equal(word(), 0);
+
+    setWord(theirs);
+    assert.equal(call(POLL, [HANDLE, 0xffffffff]), 'host', 'another thread\'s: the host waits');
+    assert.equal(call(POLL, [HANDLE, 0]), 'host');
+    assert.equal(call(RELEASE, [HANDLE]), 'host', 'not the caller\'s to release');
+    assert.equal(word(), theirs, 'untouched');
+
+    for (const kept of [MUTEX_WORD.HOST, mine(1) | MUTEX_WORD.HOST, theirs | MUTEX_WORD.HOST])
+    {
+        setWord(kept);
+        assert.equal(call(POLL, [HANDLE, 0xffffffff]), 'host', 'the host keeps it');
+        assert.equal(call(RELEASE, [HANDLE]), 'host');
+        assert.equal(word(), kept >>> 0, 'untouched');
+    }
+
+    setWord(mine(MUTEX_WORD.RECURSION));
+    assert.equal(call(POLL, [HANDLE, 0]), 'host', 'a count the word cannot carry one more of');
+    assert.equal(call(RELEASE, [HANDLE]), 1, 'but it is given back');
+    assert.equal(word(), mine(MUTEX_WORD.RECURSION - 1));
+
+    host.writePhysical(TABLE + (HANDLE >>> 2) * 4, new Uint8Array(u32(MIRROR.CLEAR)));
+    assert.equal(call(RELEASE, [HANDLE]), 'host', 'an event\'s handle is the host\'s to refuse');
+    host.writePhysical(TABLE + (HANDLE >>> 2) * 4, new Uint8Array(u32(MIRROR.NONE)));
+    assert.equal(call(RELEASE, [HANDLE]), 'host');
+    assert.equal(call(RELEASE, [EVENT_SLOTS * 4]), 'host', 'past the table');
+    host.stop();
+});
 
 /**
  * Seeded random programs over four event slots, built twice: polling and

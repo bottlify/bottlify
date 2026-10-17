@@ -8,7 +8,7 @@ import { encodeAnsi } from './locale.js';
 import { isStandardHandle, untagged } from './handle-tags.js';
 import { TAKEN } from './named-objects.js';
 import { STATUS, toDosError } from '../ntdll/status.js';
-import { EVENT_SLOTS, eventPollCode } from './event-poll.js';
+import { EVENT_SLOTS, MUTEX_SLOTS, releaseMutexCode, waitOneCode } from './wait-one.js';
 
 /**
  * The kernel32 surface a threaded program calls.
@@ -679,38 +679,61 @@ export function createThreadingFunctions(host){
         return handle;
     });
 
-    /** Where WaitForSingleObject's guest code went, once placed. @type {number | null} */
-    let pollAt = null;
     /**
-     * WaitForSingleObject's guest code and the kernel's table of event words
-     * it reads, placed on the first bind; the trap alone where there is no
-     * guest memory to place them in.
+     * The kernel's table of handle words and its mutexes' own words
+     * (`wait-one.js`), placed once, on the first bind of a routine that reads
+     * them; null where there is no guest memory to place them in.
      *
-     * @param {PollBuilder} builder
+     * @type {number | null | undefined}
      */
-    const placedPoll = builder=>{
-        if (pollAt !== null)
+    let handleWords;
+    const placedTable = ()=>{
+        if (handleWords !== undefined)
         {
-            return pollAt;
+            return handleWords;
         }
-        const trap = builder.register('KERNEL32.dll!WaitForSingleObject', {
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: args=>table.WaitForSingleObject.handler(args),
-        });
         if (!host.allocate || typeof kernel.mirrorEvents !== 'function')
         {
-            pollAt = trap;
-            return trap;
+            handleWords = null;
+            return null;
         }
         const words = host.allocate(EVENT_SLOTS * 4);
         host.writeMemory(words, new Uint8Array(EVENT_SLOTS * 4));
-        const clear = kernel.EventMirror.CLEAR;
+        const mutexes = host.allocate(MUTEX_SLOTS * 4);
+        host.writeMemory(mutexes, new Uint8Array(MUTEX_SLOTS * 4));
+        kernel.mirrorEvents(words, EVENT_SLOTS, mutexes, MUTEX_SLOTS);
+        handleWords = words;
+        return words;
+    };
+
+    /** Where each routine reading the table went, once placed. @type {Map<string, number>} */
+    const placedRoutines = new Map();
+    /**
+     * A routine reading the table, or the trap alone where there is no table.
+     *
+     * @param {PollBuilder} builder @param {'WaitForSingleObject' | 'ReleaseMutex'} name
+     * @param {(at: number, trap: number, words: number) => Uint8Array} code
+     */
+    const placedRoutine = (builder, name, code)=>{
+        const done = placedRoutines.get(name);
+        if (done !== undefined)
+        {
+            return done;
+        }
+        const trap = builder.register(`KERNEL32.dll!${name}`, {
+            argBytes: table[name].argBytes,
+            /** @param {number[]} args */
+            handler: args=>table[name].handler(args),
+        });
+        const words = placedTable();
         const allocate = host.allocateCode ?? host.allocate;
-        const at = allocate(eventPollCode(0, trap, words, clear).length);
-        host.writeMemory(at, eventPollCode(at, trap, words, clear));
-        kernel.mirrorEvents(words, EVENT_SLOTS);
-        pollAt = at;
+        let at = trap;
+        if (words !== null && allocate)
+        {
+            at = allocate(code(0, trap, words).length);
+            host.writeMemory(at, code(at, trap, words));
+        }
+        placedRoutines.set(name, at);
         return at;
     };
 
@@ -862,12 +885,15 @@ export function createThreadingFunctions(host){
          * DWORD WaitForSingleObject(HANDLE, DWORD dwMilliseconds)
          *
          * Guest code first: a poll of an event that is not signalled times
-         * out there (`event-poll.js`), and everything else comes here.
+         * out there, and a free mutex or one the caller owns is taken there
+         * (`wait-one.js`); everything else comes here.
          */
         WaitForSingleObject: {
             argBytes: 8,
             /** @param {PollBuilder} builder */
-            guest: builder=>placedPoll(builder),
+            guest: builder=>placedRoutine(builder, 'WaitForSingleObject',
+                (at, trap, words)=>waitOneCode(at, trap, words, kernel.EventMirror.CLEAR,
+                    kernel.MUTEX_TAG)),
             /** @param {number[]} args */
             handler: ([handle, timeout])=>{
                 // A standard stream is always ready to be written, and one
@@ -1145,9 +1171,17 @@ export function createThreadingFunctions(host){
         CreateMutexExA: createMutexEx.ansi,
         CreateMutexExW: createMutexEx.wide,
 
-        /** BOOL ReleaseMutex(HANDLE) */
+        /**
+         * BOOL ReleaseMutex(HANDLE)
+         *
+         * Guest code first: a mutex the caller owns, which the host does not
+         * keep, is given back there (`wait-one.js`); everything else comes here.
+         */
         ReleaseMutex: {
             argBytes: 4,
+            /** @param {PollBuilder} builder */
+            guest: builder=>placedRoutine(builder, 'ReleaseMutex',
+                (at, trap, words)=>releaseMutexCode(at, trap, words, kernel.MUTEX_TAG)),
             /** @param {number[]} args */
             handler: ([handle])=>{
                 const mutex = object(handle >>> 0, 'mutex');

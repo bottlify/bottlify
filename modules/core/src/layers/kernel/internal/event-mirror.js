@@ -33,6 +33,13 @@ export const MIRROR = Object.freeze({
     SET: 3,
 });
 
+/**
+ * A handle onto a mutex of this process has the address of the mutex's own
+ * word (`mutex-words.js`) with these low bits set, which no event's word has:
+ * the guest's WaitForSingleObject and ReleaseMutex take and give it there.
+ */
+export const MUTEX_TAG = 2;
+
 /** Handles are multiples of four; the two bits below are the program's own. */
 const HANDLE_SHIFT = 2;
 
@@ -69,18 +76,29 @@ export function createEventMirror(write){
         },
 
         /**
-         * A handle was opened onto an object. Only an event of this process
-         * has a word: one another process holds changes there, unseen here.
+         * A handle was opened onto an object. Only an event of this process,
+         * and a mutex of it with a word of its own, has a word: one another
+         * process holds changes there, unseen here.
          *
          * @param {number} handle @param {string} type @param {any} object
          */
         opened(handle, type, object){
             const index = handle >>> HANDLE_SHIFT;
-            if (slots === 0 || type !== 'event' || object.remote || index >= slots)
+            if (slots === 0 || object.remote || index >= slots)
             {
                 return;
             }
             const address = table + index * 4;
+            if (type === 'mutex' && typeof object.word === 'number')
+            {
+                byHandle.set(handle, object);
+                write(address, (object.word | MUTEX_TAG) >>> 0);
+                return;
+            }
+            if (type !== 'event')
+            {
+                return;
+            }
             byHandle.set(handle, object);
             const held = words.get(object);
             if (held)
@@ -103,8 +121,11 @@ export function createEventMirror(write){
             }
             byHandle.delete(handle);
             const address = table + (handle >>> HANDLE_SHIFT) * 4;
-            const held = words.get(object) ?? [];
-            held.splice(held.indexOf(address), 1);
+            const held = words.get(object);
+            if (held !== undefined && held.includes(address))
+            {
+                held.splice(held.indexOf(address), 1);
+            }
             write(address, MIRROR.NONE);
         },
 
