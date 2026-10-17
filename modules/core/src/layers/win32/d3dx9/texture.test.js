@@ -320,6 +320,20 @@ test('D3DXLoadSurfaceFromSurface copies a whole surface into a rectangle of anot
     assert.match(diverged.join(' | '), /D3DXLoadSurfaceFromSurface: the source would not lock/);
 });
 
+test('D3DXLoadSurfaceFromSurface between two surfaces of one compressed format and size copies'
+    + ' the blocks as they are', async()=>{
+    const { textures, loader, surface, memory } = rig();
+    const source = surface(4, 4, FMT.DXT1);
+    const dest = surface(4, 4, FMT.DXT1);
+    // Red and blue at the ends and every texel two thirds of the way: one
+    // colour, which a block encoded afresh says with other ends.
+    const block = [0x00, 0xf8, 0x1f, 0x00, 0xaa, 0xaa, 0xaa, 0xaa];
+    memory.set(block, textures.get(source).data);
+    assert.equal(await loader.loadSurface([dest, 0, 0, source, 0, 0, 1, 0]), 0);
+    const at = textures.get(dest).data;
+    assert.deepEqual([...memory.subarray(at, at + 8)], block, 'byte for byte, not encoded again');
+});
+
 test('D3DXLoadSurfaceFromMemory reads the source rectangle of an image at its pitch into a'
     + ' surface, in its format; a null source rectangle is refused', async()=>{
     const { textures, calls, loader, place, surface, memory } = rig();
