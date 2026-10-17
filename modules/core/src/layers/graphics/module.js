@@ -445,6 +445,13 @@ export function createGraphicsModule(){
                 windowMemory: (address, length)=>(memory.window
                     ? memory.window(address, length)
                     : memory.readBytes(address, length)),
+                /**
+                 * Watches a range for writes: what a draw from a dynamic buffer
+                 * compares is the pages written since its last look.
+                 *
+                 * @param {number} address @param {number} length
+                 */
+                watchWrites: (address, length)=>memory.watchWrites?.(address, length) ?? null,
                 /** A dword, read in place. @param {number} address */
                 readU32: address=>memory.readU32(address),
                 /**

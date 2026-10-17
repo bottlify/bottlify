@@ -42,12 +42,13 @@ export const HELPER_NAMES = Object.freeze([
  *
  * @param {ModuleBuilder} m
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
+ * @param {boolean} [shared]  whether the memory is shared
  */
-export function defineHelpers(m, layout){
+export function defineHelpers(m, layout, shared = false){
     const materialise = addMaterialiseHelper(m);
     const { f80ToF64, f64ToF80 } = addF80Helpers(m);
     const round = addRoundHelper(m);
-    const codeHit = addCodeHitHelper(m, layout);
+    const codeHit = addCodeHitHelper(m, layout, shared);
     const f64ToBcd = addBcdHelper(m);
     const x87Invalid = addInvalidHelper(m, layout);
     const remainder = addRemainderHelper(m);
@@ -69,7 +70,7 @@ export function defineHelpers(m, layout){
 export function buildHelpersModule(layout, memory = {}){
     const m = new ModuleBuilder();
     m.importMemory('env', 'memory', { min: 1, max: memory.maxPages, shared: memory.shared });
-    const helpers = defineHelpers(m, layout);
+    const helpers = defineHelpers(m, layout, memory.shared === true);
     for (const name of HELPER_NAMES)
     {
         m.exportFunction(name, helpers[/** @type {keyof typeof helpers} */ (name)]);

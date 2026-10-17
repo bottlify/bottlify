@@ -620,6 +620,16 @@ flowchart TB
   The DirectDraw surfaces Direct3D 7 draws into cross by number and are described again when they
   change. A renderer on the engine thread reads the bytes at those same moments, so the picture comes out the
   same wherever Direct3D draws.
+- **Dynamic buffers.** A program may write a dynamic buffer through the pointer a lock gave it,
+  after the `Unlock`, and draw from it with no lock between; so a draw sends what changed in the
+  range it reads since the buffer was last sent. Under cork it compares only the pages written
+  since: a store into a watched page marks it by the same page-flag test that finds translated
+  code (one compare-and-swap, the first store after the page is armed), and the host's writes
+  and a worker's writes in place mark it too. The cpu layer's write watch
+  (`cpu/internal/write-clock.js`) gives each buffer its own view of the marks, since one look
+  arms a page again for everyone, and takes a page armed while another executor was running
+  guest code as written at every look until that run has ended: a store tested before the
+  arming lands after it unmarked. Under the emulator every byte of the range is compared.
 - **Who waits for whom.** `Present` waits for the graphics thread only when it is more than two frames
   behind. Only the calls whose result only the renderer knows wait for an answer. For Direct3D 8/9 those are
   `GetData` (occlusion queries included), `GetRenderTargetData`, `GetFrontBuffer(Data)`, plus `LockRect`,

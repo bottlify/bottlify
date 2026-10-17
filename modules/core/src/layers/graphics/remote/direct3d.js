@@ -144,6 +144,7 @@ export function recordedDirect3D(factory, services, transport){
         readMemory: services.readMemory ?? ((/** @type {number} */ address,
             /** @type {number} */ length)=>new Uint8Array(length)),
         windowMemory: services.windowMemory,
+        watchWrites: services.watchWrites,
         transport,
         answered: targets.answered,
         answers: CANDIDATES,

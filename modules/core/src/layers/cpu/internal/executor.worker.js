@@ -19,7 +19,7 @@
  */
 
 import { createCorkHost } from './cork-host.js';
-import { SPIN_MS, Said, Turn, channelOf, waitWhile } from './executor-channel.js';
+import { SPIN_MS, Said, Turn, Word, channelOf, waitWhile } from './executor-channel.js';
 import { UNBROKEN_STEP, UNBROKEN_STEPS, unbrokenTable } from './unbroken.js';
 
 /**
@@ -119,6 +119,23 @@ async function serve({ engineUrl, config, memory, channel: buffer, bell, unbroke
     running = host;
     const bellWords = new Int32Array(bell);
     const routines = unbroken === undefined ? null : unbrokenTable(unbroken);
+    // The pacing the config names (`EngineConfig`), these defaults otherwise.
+    const spinMs = config.cork?.spinMs ?? SPIN_MS;
+    const idleMs = config.cork?.executorIdleMs ?? IDLE_MS;
+    const yieldMs = config.cork?.executorYieldMs ?? YIELD_MS;
+    const holdMs = config.cork?.executorHoldMs ?? HOLD_MS;
+    const channel = channelOf(buffer, bellWords, spinMs);
+    const { words } = channel;
+    /**
+     * A slice, its run of guest code counted (`Word.EPOCH`).
+     * @param {number} budget
+     */
+    const runSlice = budget=>{
+        Atomics.add(words, Word.EPOCH, 1);
+        const retired = host.runSlice(budget);
+        Atomics.add(words, Word.EPOCH, 1);
+        return retired;
+    };
     /**
      * A run that ended inside a routine no slice ends inside runs on to its
      * end, as on the process's own executor: the thread goes back to the
@@ -136,23 +153,19 @@ async function serve({ engineUrl, config, memory, channel: buffer, bell, unbroke
         for (let step = 0; step < UNBROKEN_STEPS && !host.halted() && !host.stopRequested()
             && host.fault() === null && routines.inside(host.eip()); step++)
         {
-            retired += host.runSlice(UNBROKEN_STEP);
+            retired += runSlice(UNBROKEN_STEP);
         }
         return retired;
     };
-    // The pacing the config names (`EngineConfig`), these defaults otherwise.
-    const spinMs = config.cork?.spinMs ?? SPIN_MS;
-    const idleMs = config.cork?.executorIdleMs ?? IDLE_MS;
-    const yieldMs = config.cork?.executorYieldMs ?? YIELD_MS;
-    const holdMs = config.cork?.executorHoldMs ?? HOLD_MS;
-    const channel = channelOf(buffer, bellWords, spinMs);
     host.onTrap((/** @type {number} */ value)=>{
         const asked = performance.now();
+        Atomics.add(words, Word.EPOCH, 1);
         channel.say(Turn.TRAP, value);
         // The process's slice ends at its next back edge to answer, not at its
         // next crossing or its end.
         host.interruptProcess();
         channel.await(Turn.TRAP);
+        Atomics.add(words, Word.EPOCH, 1);
         spent.answerWaitMs += performance.now() - asked;
         spent.traps++;
         const flags = channel.flags();
@@ -176,7 +189,6 @@ async function serve({ engineUrl, config, memory, channel: buffer, bell, unbroke
         return (channel.flags() & Said.CLAIMED) !== 0;
     });
     send({ type: 'ready' });
-    const { words } = channel;
     // A turn of the event loop that waits for no timer: node's setImmediate,
     // or a message to itself. Not the message in node: its first message event
     // loads its fetch, http2 and TLS modules, 50 ms the first thread placed here
@@ -253,7 +265,7 @@ async function serve({ engineUrl, config, memory, channel: buffer, bell, unbroke
             let fedAt = chained;
             for (;;)
             {
-                retired += host.runSlice(budget);
+                retired += runSlice(budget);
                 const now = performance.now();
                 const go = Atomics.load(bellWords, 1);
                 const end = host.halted() ? 'halted' : host.stopRequested() ? 'stopped'

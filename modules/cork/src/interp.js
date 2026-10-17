@@ -23,7 +23,7 @@ import { ZF } from './decode/table.js';
 import { compileFast } from './fast.js';
 import { eflagsOf } from './emit/flags.js';
 import { Tables, codeRangesAt, pageFlagsAt } from './runtime/layout.js';
-import { PageFlag } from './runtime/pages.js';
+import { PageFlag, STORE_FLAGS, markWritten } from './runtime/pages.js';
 
 export { Fault, Unsupported, createState };
 
@@ -482,10 +482,30 @@ class BlockMemory {
         {
             this.hit = true;
         }
+        this.markWritten(address, size);
         if (this.onCodeWrite !== null
             && (this.codeHit(address) || (size > 1 && this.codeHit(address + size - 1))))
         {
             this.onCodeWrite(address, size);
+        }
+    }
+
+    /**
+     * A store's mark on the watched pages it reaches, as translated code's
+     * `codeHit` makes it.
+     *
+     * @param {number} address @param {number} size
+     */
+    markWritten(address, size){
+        const { pageFlags } = this;
+        if ((pageFlags[address >>> 12] & PageFlag.WATCH) !== 0)
+        {
+            markWritten(pageFlags, address >>> 12);
+        }
+        const last = (address + size - 1) >>> 12;
+        if (last !== address >>> 12 && (pageFlags[last] & PageFlag.WATCH) !== 0)
+        {
+            markWritten(pageFlags, last);
         }
     }
 
@@ -552,12 +572,16 @@ class BlockMemory {
     /** @param {number} address @param {number} size @param {number} value */
     write(address, size, value){
         const plain = (address & 0xfff) <= 0x1000 - size
-            && (this.pageFlags[address >>> 12] & (PageFlag.INACCESSIBLE | PageFlag.HAS_CODE)) === 0;
+            && (this.pageFlags[address >>> 12] & (PageFlag.INACCESSIBLE | STORE_FLAGS)) === 0;
         // A store within one page of plain memory -- neither inaccessible nor
-        // holding translated code -- has nothing to test after its flag.
+        // holding translated code nor watched -- has nothing to test after its flag.
         if (!plain && this.inaccessible(address, size))
         {
             throw this.fault(address, size, true);
+        }
+        if (!plain)
+        {
+            this.markWritten(address, size);
         }
         if (size === 1)
         {
@@ -604,7 +628,7 @@ class BlockMemory {
         }
         const bytes = n * size;
         if (n === 0
-            || (pageFlags[to >>> 12] & (PageFlag.INACCESSIBLE | PageFlag.HAS_CODE)) !== 0)
+            || (pageFlags[to >>> 12] & (PageFlag.INACCESSIBLE | STORE_FLAGS)) !== 0)
         {
             return 0;
         }

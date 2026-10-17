@@ -299,6 +299,18 @@ export function createMemoryModule(){
                 window: (/** @type {number} */ address, /** @type {number} */ length)=>
                     live() ? state.accessors.window(address, length) : EMPTY,
                 /**
+                 * Watches the range for writes, the program's and the host's: the
+                 * caller reads the bytes after this, and the watch's `take`
+                 * answers the pages that may differ since. Null where the engine
+                 * cannot say, and every byte is to be looked at.
+                 *
+                 * @param {number} address @param {number} length
+                 * @returns {{ take: (address: number, length: number) => number[] } | null}
+                 */
+                watchWrites: (/** @type {number} */ address, /** @type {number} */ length)=>
+                    (live() && typeof cpu.watchWrites === 'function'
+                        ? cpu.watchWrites(address, length) : null),
+                /**
                  * The RAM as a view over a SharedArrayBuffer, byte 0 at address
                  * 0, for a worker to read and write in place; null where the
                  * memory is not shared.
@@ -383,9 +395,10 @@ export function createMemoryModule(){
                  * The dwords of [address, address + length) as an array over the
                  * RAM itself, for a block the engine keeps and the program only
                  * reads -- a clock it moves at every turn: a store through it is
-                 * charged to nothing and reaches no translated code, and costs a
-                 * store. Null where the RAM is not shared (it can move as it
-                 * grows) or the address is not 4-aligned.
+                 * charged to nothing and reaches no translated code nor a write
+                 * watch (`watchWrites`), and costs a store. Null where the RAM is
+                 * not shared (it can move as it grows) or the address is not
+                 * 4-aligned.
                  *
                  * @param {number} address @param {number} length  bytes
                  * @returns {Int32Array | null}

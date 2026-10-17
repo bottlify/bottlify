@@ -599,6 +599,13 @@
  *     A hold of the engine thread since that `performance.now`, kept when over the floor.
  * @property {(page: number) => boolean} holdsPage  Whether a published region spans the page
  *     (the pages the emulator's handoff bit is set for).
+ * @property {(address: number, length: number) => number[]} [takeWrites]  The range's pages
+ *     written since they were armed (or never armed, or on a stack whose stores go untested),
+ *     each armed from now: a store finds an armed page by the flag its page check reads
+ *     already. One set of marks for every caller, and blind to a store another executor
+ *     tested before the arming: the cpu layer's write watch (`write-clock.js`) answers both.
+ * @property {(address: number, length: number) => void} [markWritten]  Bytes another
+ *     thread wrote into guest memory in place: the armed pages they reach are marked.
  * @property {(base: number, size: number) => void} noteStack  A thread's stack: a store
  *     through esp may go untested while no translated code lies on one.
  * @property {() => EngineDiagnostics} diagnostics  The whole snapshot, for a report: it

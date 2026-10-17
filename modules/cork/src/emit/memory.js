@@ -22,7 +22,7 @@ import { Body, EMPTY, ValType } from '../wasm/encoder.js';
 import { DF } from '../decode/table.js';
 import { isX87Opcode } from '../decode/decoder.js';
 import { Tables, codeRangesAt, pageFlagsAt } from '../runtime/layout.js';
-import { PageFlag } from '../runtime/pages.js';
+import { PageFlag, STORE_FLAGS } from '../runtime/pages.js';
 import { I32 } from './flags.js';
 import { Exit, Local } from './region.js';
 import { atTables } from './bases.js';
@@ -72,8 +72,9 @@ const noted = new WeakMap();
  *
  * The common case is one test: the flags of the access's page and of the
  * next one, read as a halfword (the last byte lies in one of the two),
- * against INACCESSIBLE -- and for `store` against HAS_CODE too, the store's
- * code note being made here rather than in a second test in `noteStore`.
+ * against INACCESSIBLE -- and for `store` against HAS_CODE and WATCH too
+ * (`STORE_FLAGS`), the store's code note and its mark of a watched page made
+ * here rather than in a second test in `noteStore`.
  * Only when a flag is up are the last byte's own flags read, so an access
  * beside an unmapped page or a code page is neither a fault nor a note
  * unless it reaches it.
@@ -104,7 +105,7 @@ export function checkAccess(e, size, { counted = true, store = false } = {}){
     }
     const table = pageFlagsAt(e.layout);
     const noting = store && e.layout.codePages < 0 && size <= 16;
-    const bits = PageFlag.INACCESSIBLE | (noting ? PageFlag.HAS_CODE : 0);
+    const bits = PageFlag.INACCESSIBLE | (noting ? STORE_FLAGS : 0);
     b.localGet(Local.addr).i32const(12).op(I32.shrU)
         .load(size > 1 ? 'i32_16u' : 'i32_8u', { offset: table })
         .localTee(Local.pflags).i32const(size > 1 ? bits * 0x101 : bits).op(I32.and);
@@ -128,7 +129,7 @@ export function checkAccess(e, size, { counted = true, store = false } = {}){
     e.close();
     if (noting)
     {
-        b.localGet(Local.pflags).i32const(PageFlag.HAS_CODE).op(I32.and);
+        b.localGet(Local.pflags).i32const(STORE_FLAGS).op(I32.and);
         e.openGuard('maybeCode', EMPTY);
         noteCodeStore(e, size);
         e.close();
@@ -182,7 +183,7 @@ export function noteStore(e, size){
                 .load('i32_8u', { offset: pageFlagsAt(e.layout) }).op(I32.or);
         }
         // The next page's flag too: a wide access's halfword holds it.
-        b.i32const(PageFlag.HAS_CODE * 0x101).op(I32.and);
+        b.i32const(STORE_FLAGS * 0x101).op(I32.and);
         e.openGuard('maybeCode', EMPTY);
         noteCodeStore(e, size);
         e.close();
@@ -251,20 +252,51 @@ function noteCodeStore(e, size){
 /**
  * Adds the helper `codeHit(address) -> 0|1`: whether the byte lies in
  * translated code -- its page flagged, and its 32-byte granule within the
- * page's code range.
+ * page's code range. A store's every flagged page comes here, so here too a
+ * watched page is marked written (`PageFlag.WATCH` to `WRITTEN`, as
+ * `markWritten` does): in one compare-and-swap on a memory other executors
+ * share, a plain store on one only this one writes.
  *
  * @param {import('../wasm/encoder.js').ModuleBuilder} m
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
+ * @param {boolean} [shared]  whether the memory is shared
  * @returns {number} the function index
  */
-export function addCodeHitHelper(m, layout){
+export function addCodeHitHelper(m, layout, shared = false){
     const type = m.type({ params: [ValType.i32], results: [ValType.i32] });
     const b = new Body();
     const flags = pageFlagsAt(layout);
     const ranges = codeRangesAt(layout);
-    // local 1: the page; local 2: the granule
+    // local 1: the page; local 2: the granule; local 3: the page's flags
     b.localGet(0).i32const(12).op(I32.shrU).localSet(1);
-    b.localGet(1).load('i32_8u', { offset: flags }).i32const(PageFlag.HAS_CODE).op(I32.and);
+    b.localGet(1).load('i32_8u', { offset: flags }).localTee(3)
+        .i32const(PageFlag.WATCH).op(I32.and);
+    b.if(EMPTY);
+    /** The flags with the page marked written. */
+    const marked = ()=>b.localGet(3).i32const(~PageFlag.WATCH & 0xff).op(I32.and)
+        .i32const(PageFlag.WRITTEN).op(I32.or);
+    if (shared)
+    {
+        b.block(EMPTY);
+        b.loop(EMPTY);
+        b.localGet(1).localGet(3);
+        marked();
+        b.atomic('cmpxchg_i32_8', { offset: flags }).localTee(2);
+        b.localGet(3).op(I32.eq).brIf(1);
+        // Changed under it: tried again while still watched.
+        b.localGet(2).localTee(3).i32const(PageFlag.WATCH).op(I32.and).op(I32.eqz).brIf(1);
+        b.br(0);
+        b.end();
+        b.end();
+    }
+    else
+    {
+        b.localGet(1);
+        marked();
+        b.store('i32_8', { offset: flags });
+    }
+    b.end();
+    b.localGet(3).i32const(PageFlag.HAS_CODE).op(I32.and);
     b.op(I32.eqz);
     b.if(EMPTY);
     b.i32const(0).op(0x0f); // return
@@ -276,7 +308,7 @@ export function addCodeHitHelper(m, layout){
     b.localGet(2).localGet(1).i32const(1).op(I32.shl).load('i32_8u', { offset: ranges + 1 })
         .op(I32.ltU);
     b.op(I32.and);
-    return m.function(type, [ValType.i32, ValType.i32], b.toBytes());
+    return m.function(type, [ValType.i32, ValType.i32, ValType.i32], b.toBytes());
 }
 
 /**
@@ -379,13 +411,14 @@ function storeSpans(list, lo){
 // accesses lie in a window known from the register values at its first
 // access, and a window of at most 4096 bytes spans at most two pages. So the
 // group is checked once, at its first access: the flags of its page and the
-// next against INACCESSIBLE and, for a group that stores, HAS_CODE -- then,
-// only when one is up, the window's own pages and the stores' granules,
-// through `codeHit`. A clean window leaves every access of the group with no
-// test at all. A window that would fault or note a store into code leaves
-// the region before that first access, untranslated, and the interpreter
-// runs on from there with a check on every access: the fault is raised at
-// its instruction and the note made at its store, as they would be here.
+// next against INACCESSIBLE and, for a group that stores, HAS_CODE and WATCH
+// -- then, only when one is up, the window's own pages and the stores'
+// granules, through `codeHit`, which marks a watched page written and goes
+// on. A clean window leaves every access of the group with no test at all.
+// A window that would fault or note a store into code leaves the region
+// before that first access, untranslated, and the interpreter runs on from
+// there with a check on every access: the fault is raised at its
+// instruction and the note made at its store, as they would be here.
 //
 // A group reaches past its block into the blocks that take their windows
 // from it (`planRegion`): what is accessible changes inside a run only in the
@@ -1408,11 +1441,11 @@ export function emitGroupChecks(e, checks, at = -1){
             .localSet(Local.addr);
         // The common case is one test, as for a single access: the flags of
         // the window's page and the next, read as a halfword (the window lies
-        // in the two), against INACCESSIBLE -- and against HAS_CODE for a
-        // group that stores. Only when a flag is up are the window's own
+        // in the two), against INACCESSIBLE -- and against HAS_CODE and WATCH
+        // for a group that stores. Only when a flag is up are the window's own
         // pages and the stores' granules looked at.
         const stores = group.list.some(access=>access.store);
-        const bits = PageFlag.INACCESSIBLE | (stores ? PageFlag.HAS_CODE : 0);
+        const bits = PageFlag.INACCESSIBLE | (stores ? STORE_FLAGS : 0);
         b.localGet(Local.addr).i32const(12).op(I32.shrU).load('i32_16u', { offset: table })
             .i32const(bits * 0x101).op(I32.and);
         // Out of line: a window seldom finds a flag up, and its test inline
@@ -1621,7 +1654,7 @@ export function emitStreamWindow(e, streams, turns, forward = false){
             b.localGet(Local.reg + stream.index).i32const(stream.scale).op(I32.mul).op(I32.add);
         }
         b.i32const(from | 0).op(I32.add).localSet(Local.addr);
-        const bits = PageFlag.INACCESSIBLE | (stream.store ? PageFlag.HAS_CODE : 0);
+        const bits = PageFlag.INACCESSIBLE | (stream.store ? STORE_FLAGS : 0);
         [0, Math.min(4096, width - 1), width - 1].forEach((at, k)=>{
             b.localGet(Local.addr);
             if (at !== 0)

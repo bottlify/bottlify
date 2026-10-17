@@ -1540,6 +1540,13 @@ export function createCorkHost(config){
         /** @param {number} base @param {number} size */
         noteStack: (base, size)=>runtime.noteStack(base, size),
         /**
+         * @param {number} address @param {number} length
+         * @returns {number[] | null}
+         */
+        takeWrites: (address, length)=>runtime.takeWrites?.(address, length) ?? null,
+        /** @param {number} address @param {number} length */
+        markWritten: (address, length)=>runtime.markWritten?.(address, length),
+        /**
          * Opens or closes pages to the program, as a reservation's commit and
          * VirtualProtect do: a closed one faults any access, with its address.
          * Not with `checkReads: false`, where translated reads never test -- a

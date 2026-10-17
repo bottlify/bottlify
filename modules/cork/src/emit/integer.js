@@ -29,7 +29,7 @@ import { I32, Kind, MASKS, SIGN_BITS, widthCode } from './flags.js';
 import { CallStack, Exit, Local, STATE_PARAMS } from './region.js';
 import { checkAccess, emitStaleExit, looseStackStore, noteStore, stackAccess } from './memory.js';
 import { CALL_STRIDE, Mechanism, Tables, pageFlagsAt } from '../runtime/layout.js';
-import { PageFlag } from '../runtime/pages.js';
+import { PageFlag, STORE_FLAGS } from '../runtime/pages.js';
 import { emitSimd } from './simd.js';
 import { atState, atTables, intoState, intoTables } from './bases.js';
 import { emitLocked, isLocked } from './locked.js';
@@ -2391,7 +2391,7 @@ function bulkString(e, instruction){
     turn.run(movs ? [edi, esi] : [edi]);
     b.localGet(Local.t0).i32const(elementShift).op(I32.shl).localSet(Local.t1);
     b.localGet(Local.t0).i32const(0).op(I32.ne);
-    turn.clear(edi, PageFlag.INACCESSIBLE | PageFlag.HAS_CODE);
+    turn.clear(edi, PageFlag.INACCESSIBLE | STORE_FLAGS);
     b.op(I32.and);
     if (movs)
     {

@@ -27,10 +27,43 @@ import { Tables, codeRangesAt, pageFlagsAt } from './layout.js';
  * NO_EXECUTE marks a page that reads but runs nothing -- the null range: a
  * fetch there leaves the wasm tier for the host, which faults it, and nothing
  * there is translated.
+ *
+ * WATCH and WRITTEN are a watched page's two states (`takeWrites`): armed, or
+ * written since it was armed. A store that finds WATCH up turns it into WRITTEN
+ * before it writes, in one compare-and-swap (`markWritten`), and every later
+ * store to the page goes by as to any other; the host reads WRITTEN and arms
+ * the page again in another (`takeWritten`). A watched page is in one state or
+ * the other, never both and never neither, whoever wins a race.
  */
 export const PageFlag = Object.freeze({
-    INACCESSIBLE: 1, HAS_CODE: 2, VOLATILE: 4, CLOSED: 8, NO_EXECUTE: 16,
+    INACCESSIBLE: 1, HAS_CODE: 2, VOLATILE: 4, CLOSED: 8, NO_EXECUTE: 16, WATCH: 32,
+    WRITTEN: 64,
 });
+
+/**
+ * What a store tests its page for past INACCESSIBLE: translated code there, or
+ * a watch to mark.
+ */
+export const STORE_FLAGS = PageFlag.HAS_CODE | PageFlag.WATCH;
+
+/**
+ * A store's mark on a watched page: WATCH becomes WRITTEN; any other page is
+ * left as it is.
+ *
+ * @param {Uint8Array} flags  the page flags @param {number} page
+ */
+export function markWritten(flags, page){
+    for (;;)
+    {
+        const now = Atomics.load(flags, page);
+        if ((now & PageFlag.WATCH) === 0
+            || Atomics.compareExchange(flags, page, now,
+                (now & ~PageFlag.WATCH) | PageFlag.WRITTEN) === now)
+        {
+            return;
+        }
+    }
+}
 
 /** Bytes in a guest page. */
 export const GUEST_PAGE = 4096;
@@ -40,6 +73,10 @@ export const GUEST_PAGE = 4096;
  * @property {(page: number, flag: number) => void} set
  * @property {(page: number, flag: number) => void} clear
  * @property {(page: number) => number} get
+ * @property {(page: number) => boolean} takeWritten  whether the page was written since it was
+ *     armed, or never was -- armed again from now
+ * @property {(address: number, length: number) => void} markWrittenRange  a host write's mark
+ *     on the watched pages it reaches
  * @property {(address: number, length: number) => void} markCode  the flag and the granules
  * @property {(page: number) => void} clearCode  the flag and the range
  * @property {(page: number) => [number, number]} codeRange  the page's code granules, [from, to)
@@ -115,6 +152,34 @@ export function createPageTable(memory, layout, shared = null){
     return {
         set(page, flag){
             Atomics.or(flags(), page, flag);
+        },
+        takeWritten(page){
+            const table = flags();
+            for (;;)
+            {
+                const now = Atomics.load(table, page);
+                if ((now & PageFlag.WATCH) !== 0)
+                {
+                    return false;
+                }
+                // Written, or never armed: either way the bytes may differ.
+                const armed = (now & ~PageFlag.WRITTEN) | PageFlag.WATCH;
+                if (Atomics.compareExchange(table, page, now, armed) === now)
+                {
+                    return true;
+                }
+            }
+        },
+        markWrittenRange(address, length){
+            const table = flags();
+            const [first, last] = pagesOf(address, length);
+            for (let page = first; page <= last; page++)
+            {
+                if ((table[page] & PageFlag.WATCH) !== 0)
+                {
+                    markWritten(table, page);
+                }
+            }
         },
         clear(page, flag){
             Atomics.and(flags(), page, ~flag);

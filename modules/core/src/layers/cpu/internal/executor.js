@@ -19,7 +19,7 @@
  * stacks need no carrying.
  */
 
-import { CHANNEL_BYTES, Said, Turn, channelOf, waitWhile } from './executor-channel.js';
+import { CHANNEL_BYTES, Said, Turn, Word, channelOf, waitWhile } from './executor-channel.js';
 
 /**
  * A worker, as a page's `Worker` or Node's `worker_threads` makes one.
@@ -366,6 +366,8 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
         },
         /** The executor's block: the state of the thread it runs. */
         block: ()=>theirs,
+        /** Its runs of guest code so far, odd while one is on (`Word.EPOCH`). */
+        epoch: ()=>Atomics.load(channel.words, Word.EPOCH),
         /**
          * Its translator's diagnostics, answered between slices.
          * @returns {Promise<Record<string, any> | null>}

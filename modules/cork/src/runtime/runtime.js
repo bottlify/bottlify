@@ -489,6 +489,13 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
     /** The pages of the threads' stacks the host named (`noteStack`). @type {Set<number>} */
     const stackPages = new Set();
     /**
+     * Whether a write to the page marks it (`takeWrites`): not on a thread's
+     * stack while stores through esp test no page.
+     * @param {number} page
+     */
+    const watchable = page=>!(loose
+        && (stackPages.has(page) || codeShared?.onStack(page) === true));
+    /**
      * Whether a block at an address is another region's (`entered` in
      * `formRegion`): one with an entry at the top the region's own is formed for,
      * or one indifferent to the x87 stack -- not the region `replaces`, which a
@@ -4901,6 +4908,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
          *     interpreter, rather than the host's write
          */
         stored(address, size, own = false){
+            pages.markWrittenRange(address, size);
             storedInto(address, size, own);
         },
         /**
@@ -4914,8 +4922,45 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
             {
                 return;
             }
+            pages.markWrittenRange(address, size);
             storedInto(address, size);
             codeShared?.publish(address, size);
+        },
+        /**
+         * The pages of `[address, address + length)` written since they were
+         * armed, or never armed, each armed from now: a store finds an armed
+         * page by the flag its page check already reads (`PageFlag.WATCH`),
+         * and only its first store after the arming does more than any store
+         * does. A page on a thread's stack is always among them while stores
+         * through esp go untested (`looseStacks`): no store there would mark
+         * it. A store another executor tested before this call and makes after
+         * it lands unmarked, and arming a page wipes its mark for every caller:
+         * the host's write watch (`write-clock.js` in the cpu layer) answers both.
+         *
+         * @param {number} address @param {number} length
+         * @returns {number[]}
+         */
+        takeWrites(address, length){
+            /** @type {number[]} */
+            const written = [];
+            const last = length > 0 ? (address + length - 1) >>> 12 : address >>> 12;
+            for (let page = address >>> 12; page <= last; page++)
+            {
+                if (!watchable(page) || pages.takeWritten(page))
+                {
+                    written.push(page);
+                }
+            }
+            return written;
+        },
+        /**
+         * Bytes another thread wrote into guest memory in place, outside every
+         * path a write takes here: the armed pages they reach are marked.
+         *
+         * @param {number} address @param {number} length
+         */
+        markWritten(address, length){
+            pages.markWrittenRange(address, length);
         },
         /**
          * The stores into code the process's other executors met since this

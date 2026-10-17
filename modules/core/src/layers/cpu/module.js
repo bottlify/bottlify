@@ -8,6 +8,7 @@ import { createV86Host } from './internal/v86-host.js';
 import { createCorkHost } from './internal/cork-host.js';
 import { createBell, createRemoteExecutor } from './internal/executor.js';
 import { unbrokenTable } from './internal/unbroken.js';
+import { createWriteClock } from './internal/write-clock.js';
 import { createFpu } from './internal/fpu.js';
 import { createThunkTable, FORWARD_SAVE } from './internal/thunks.js';
 import {
@@ -210,7 +211,8 @@ export function createCpuModule(){
              *          bell: ReturnType<typeof createBell> | null,
              *          unbroken: ReturnType<typeof unbrokenTable>,
              *          beforeTrap: (() => void) | null,
-             *          remoteFigures: Map<number, any>, executorsRefused: string | null }}
+             *          remoteFigures: Map<number, any>, executorsRefused: string | null,
+             *          writes: { host: any, clock: ReturnType<typeof createWriteClock> } | null }}
              */
             const state = {
                 host: null, thunks: null, running: false, tableWritten: false,
@@ -232,6 +234,8 @@ export function createCpuModule(){
                 remoteFigures: new Map(),
                 // Why fewer executors run than were asked, if they do.
                 executorsRefused: null,
+                // The write watch over the host's page marks, made at the first watch.
+                writes: null,
                 faultHandler: null,
                 // The guest's clock once the kernel gives it (`useGuestClock`).
                 guestClock: null,
@@ -1277,6 +1281,52 @@ export function createCpuModule(){
                 noteStack(base, size){
                     state.stacks.push([base >>> 0, size >>> 0]);
                     state.host?.noteStack?.(base >>> 0, size >>> 0);
+                },
+                /**
+                 * Watches the range for writes, the program's on any executor and
+                 * the host's (`write-clock.js`): the caller reads the bytes after
+                 * this, and the watch's `take` answers the pages that may differ
+                 * since. Null where the engine cannot say which (the emulator),
+                 * and every byte is to be looked at.
+                 *
+                 * @param {number} address @param {number} length
+                 * @returns {import('./internal/write-clock.js').WriteWatch | null}
+                 */
+                watchWrites(address, length){
+                    const host = state.host;
+                    if (typeof host?.takeWrites !== 'function')
+                    {
+                        return null;
+                    }
+                    let writes = state.writes;
+                    if (writes === null || writes.host !== host)
+                    {
+                        writes = state.writes = { host, clock: createWriteClock({
+                            // Every page, where the engine cannot say which.
+                            take: (from, bytes)=>host.takeWrites(from, bytes)
+                                ?? Array.from({ length: ((from + bytes - 1) >>> 12)
+                                    - (from >>> 12) + 1 }, (_, at)=>(from >>> 12) + at),
+                            epochs: ()=>{
+                                /** @type {number[]} */
+                                const counts = [];
+                                for (const remote of state.remotes)
+                                {
+                                    counts[remote.index] = remote.epoch?.() ?? 0;
+                                }
+                                return counts;
+                            },
+                        }) };
+                    }
+                    return writes.clock.watch(address >>> 0, length >>> 0);
+                },
+                /**
+                 * Bytes another thread wrote into guest memory in place: a watch
+                 * of their pages finds them written.
+                 *
+                 * @param {number} address @param {number} length
+                 */
+                markWritten(address, length){
+                    state.host?.markWritten?.(address >>> 0, length >>> 0);
                 },
                 /**
                  * Opens or closes pages to the program (the host's `pageAccess`):
