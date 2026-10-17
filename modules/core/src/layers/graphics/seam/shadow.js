@@ -1434,6 +1434,16 @@ function commandChecks(shape, at){
             { jcc: 0xeb, to: 'out', near: true },                // jmp out
             { label: `within${index}` });
     });
+    if (shape.refusedWhen)
+    {
+        const { arg, equals, flagsOf, mask } = shape.refusedWhen;
+        parts.push(
+            [0x81, 0x7c, 0x24, at(arg), ...dword(equals)],       // cmp dword [esp+arg], equals
+            { jcc: 0x75, to: 'paired' },                         // jne paired
+            [0xf7, 0x44, 0x24, at(flagsOf), ...dword(mask)],     // test dword [esp+flags], mask
+            { jcc: 0x75, to: 'out', near: true },                // jnz out
+            { label: 'paired' });
+    }
     if (shape.span !== undefined && shape.count)
     {
         parts.push(
@@ -1562,6 +1572,9 @@ function commandChecks(shape, at){
  *     or else the bytes chosen by an argument's value: its case's, or `otherwise`
  * @property {{ arg: number, ranges: readonly [number, number][] }[]} [within]  arguments
  *     the device takes only within ranges, inclusive and unsigned; any other is the host's
+ * @property {{ arg: number, equals: number, flagsOf: number, mask: number }} [refusedWhen]
+ *     a pair the device refuses: an argument of one value while another has a bit of
+ *     `mask` -- the host's
  * @property {number} [span]  the argument that starts what `count` counts: the
  *     two together may not reach past `count.most`
  * @property {{ arg: number, word: number }} [below]  an argument the device takes
@@ -3871,6 +3884,11 @@ function recordCommand(m, shape, mirror, block, a){
         {
             return undefined;
         }
+    }
+    const paired = shape.refusedWhen;
+    if (paired && a[paired.arg] === paired.equals >>> 0 && (a[paired.flagsOf] & paired.mask) !== 0)
+    {
+        return undefined;
     }
     if (shape.span !== undefined && count)
     {

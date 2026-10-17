@@ -668,6 +668,16 @@ test('Direct3D 9: every call the command ring answers for in the guest is one th
                 { label: 'indices', args: ['indices'], setup: indices },
                 { label: 'none', args: [0] },
             ],
+            SetStreamSourceFreq: [
+                { label: 'once each', args: [0, 1] },
+                { label: 'the indexed geometry, drawn four times', args: [0, 0x40000004] },
+                { label: 'the instances, one each', args: [1, 0x80000001] },
+                { label: 'a divider of zero', args: [0, 0x40000000] },
+                { label: 'none at all', args: [1, 0] },
+                { label: 'both kinds at once', args: [1, 0xc0000001] },
+                { label: 'the instances on the first stream', args: [0, 0x80000001] },
+                { label: 'a stream past the last', args: [16, 1] },
+            ],
             SetVertexDeclaration: [
                 { label: 'a declaration', args: ['declaration'], setup: declaration },
                 { label: 'none', args: [0] },

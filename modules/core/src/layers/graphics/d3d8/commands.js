@@ -101,6 +101,7 @@ const first = (kind, length)=>{
  * @property {{ arg: number, cases: readonly [number, number][], otherwise: number }} [choose]
  *     or a size chosen by an argument's value: the bytes of the case it equals, or `otherwise`
  * @property {{ arg: number, ranges: readonly [number, number][] }[]} [within]
+ * @property {{ arg: number, equals: number, flagsOf: number, mask: number }} [refusedWhen]
  * @property {number} [span] @property {{ arg: number, word: number }} [below]
  * @property {{ arg: number, when: number, table?: number }} [validated]
  * @property {{ arg: number, pairs: readonly [number, number][] }} [flagNeeds]
