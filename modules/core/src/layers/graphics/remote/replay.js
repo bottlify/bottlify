@@ -76,10 +76,10 @@ const UNLOCKS = new Set(['Unlock', 'UnlockRect', 'UnlockCubeRect', 'UnlockBox', 
 
 /**
  * Whether a call reads no resource's bytes on the played side -- a state set,
- * a lock -- so that bytes unlocked before it wait for one that may (`readBy`
- * says which): a renderer takes a texture's bytes at the first draw that
- * samples it after the unlock, not at the unlock, and the program's writes
- * between the two are in what it draws. A buffer's are taken at the unlock,
+ * a lock, a dirty region marked -- so that bytes unlocked before it wait for
+ * one that may (`readBy` says which): a renderer takes a texture's bytes at
+ * the first draw that samples it after the unlock, not at the unlock, and the
+ * program's writes between the two are in what it draws. A buffer's are taken at the unlock,
  * there and here.
  *
  * @param {string} name
@@ -88,7 +88,7 @@ function readsNothing(name){
     return (name.startsWith('Set') && name !== 'SetCursorProperties')
         || name.startsWith('Lock') || name.startsWith('Unlock')
         || name === 'BeginScene' || name === 'LightEnable' || name === 'AddRef'
-        || name === 'addRef';
+        || name === 'addRef' || name.startsWith('AddDirty');
 }
 
 /**
@@ -124,6 +124,16 @@ function partOf(args){
  *     watch: { take: (address: number, length: number) => number[] } | null,
  *     dirty: Set<number> }} Sent
  */
+
+/**
+ * Direct3D 9's copies whose first argument is the surface or texture they
+ * read: what they carry of it is the rows they wrote, not what was unlocked
+ * of it.
+ */
+const MOVES_OUT_OF = new Set(['UpdateTexture', 'UpdateSurface']);
+
+/** D3DPOOL_SYSTEMMEM, the same number in both versions of the API. */
+const D3DPOOL_SYSTEMMEM = 2;
 
 /** D3DLOCK_READONLY, the same number in both versions of the API. */
 const LOCK_READ_ONLY = 0x10;
@@ -777,6 +787,28 @@ export function createRecording(options){
     };
 
     /**
+     * Whether a resource's bytes live only in system memory, where Direct3D
+     * 8 and 9 draw nothing from: a texture or volume texture made so, or a
+     * surface or volume whose description says so.
+     *
+     * @param {any} object
+     */
+    const inSystemMemory = object=>{
+        if (typeof object?.pool === 'number')
+        {
+            return object.pool === D3DPOOL_SYSTEMMEM;
+        }
+        if (typeof object?.GetDesc !== 'function')
+        {
+            return false;
+        }
+        /** @type {{ desc?: { Pool?: number } }} */
+        const out = {};
+        object.GetDesc(out);
+        return out.desc?.Pool === D3DPOOL_SYSTEMMEM;
+    };
+
+    /**
      * The pending bytes a call may read, as a record of their own ahead of
      * it: copied into the batch now, out of the guest's memory in place,
      * before the call can write over them. The rest wait on.
@@ -1274,13 +1306,35 @@ export function createRecording(options){
                 }
                 return known.reply.answer;
             }
+            // Direct3D 9's copy out of a surface or a texture in system memory
+            // carries what it moves, not what was unlocked of its source: the
+            // recording device makes the copy in guest memory and sends the
+            // rows it wrote over the twin's. A game that locks a system-memory
+            // volume every frame, marks a few boxes dirty and updates its twin
+            // from it sent and stashed the whole volume each frame for the
+            // boxes. Direct3D 8's device -- the one with CopyRects -- leaves
+            // its copies to the caller, and its twin copies from what it was
+            // sent of the source, which goes first as before.
+            const raw = MOVES_OUT_OF.has(name) && typeof (/** @type {any} */ (target)).CopyRects
+                !== 'function' && args[0] !== null && typeof args[0] === 'object'
+                ? keyOf(raws.get(args[0]) ?? args[0]) : null;
+            const source = raw && inSystemMemory(raw) ? raw : null;
             if (pending.addresses.size > 0 && !quiet)
             {
-                shipPending(readBy(target, name, args));
+                const readable = readBy(target, name, args);
+                shipPending(source ? key=>key !== source && readable(key) : readable);
             }
-            else if (pending.addresses.size > 0 && !unlocking
+            else if (pending.addresses.size > 0 && !unlocking && !name.startsWith('AddDirty')
+                && !(locking && inSystemMemory(keyOf(target)))
                 && [...pending.owners.values()].includes(keyOf(target)))
             {
+                // A lock of a resource the played side reads -- a texture its
+                // draws sample, a target its renderer answers for -- has what
+                // was unlocked there first. One in system memory it never
+                // reads: a copy out of it carries the rows it moves, and the
+                // bytes sent ahead of the lock were stashed again by the lock.
+                // A dirty region marked reads nothing: whatever reads it later
+                // has the bytes sent first.
                 shipPending();
             }
             number ??= /** @type {number} */ (numbers.get(target));

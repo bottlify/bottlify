@@ -278,7 +278,8 @@ function rig(version, way, caps = {}){
                     await turns(2);
                 }
             };
-            shipped = ()=>sender.shippedBytes();
+            shipped = ()=>({ ...sender.shippedBytes(),
+                lent: sender.lender?.diagnostics().lentBytes ?? 0 });
             d3d = recordedDirect3D(factory, services, sender);
         }
         else
@@ -304,7 +305,8 @@ function rig(version, way, caps = {}){
                 port1.close();
                 port2.close();
             };
-            shipped = ()=>sender.shippedBytes();
+            shipped = ()=>({ ...sender.shippedBytes(),
+                lent: sender.lender?.diagnostics().lentBytes ?? 0 });
             d3d = recordedDirect3D(factory, services, sender);
         }
     }
@@ -1034,6 +1036,125 @@ const writtenAfterUnlock = version=>async(/** @type {ReturnType<typeof runner>} 
     await run.call('Release device', ()=>device.release());
     await run.look('end');
 };
+
+/** D3DLOCK_NO_DIRTY_UPDATE: a lock that marks nothing for UpdateTexture to carry. */
+const NO_DIRTY_UPDATE = 0x8000;
+
+/**
+ * A volume and a texture in system memory, locked every frame without a dirty
+ * update, a few boxes and a rectangle of them marked dirty by hand and carried
+ * into their twins in video memory by UpdateTexture, which are drawn -- the
+ * way a game keeps a volume of lighting current. The played side reads
+ * nothing of a resource in system memory but what a copy out of it moves, and
+ * Direct3D 9's recording device sends the rows its copies write: what its
+ * batches carry after the first frame is what the updates move, not the
+ * resources, and a lock of one sends nothing ahead of it. Direct3D 8's twin
+ * copies from what it was sent of the source, which goes whole.
+ *
+ * @param {8 | 9} version
+ */
+const systemMemoryUpdates = version=>async(/** @type {ReturnType<typeof runner>} */ run)=>{
+    const { device, vertices, indices } = version === 9 ? await device9(run) : await device8(run);
+    if (version === 9)
+    {
+        await run.call('SetFVF', ()=>device.SetFVF(FVF_LIT));
+        await run.call('SetRenderState LIGHTING', ()=>device.SetRenderState(D3DRS.LIGHTING, 0));
+        await run.call('SetStreamSource', ()=>device.SetStreamSource(0, vertices, 0, STRIDE));
+        await run.call('SetIndices', ()=>device.SetIndices(indices));
+    }
+    const draw = version === 9 ? drawQuad9 : drawQuad8;
+    const size = 32;
+    const depth = 16;
+    /** @type {Record<string, any>} */
+    const made = { system: {}, video: {}, systemTexture: {}, videoTexture: {} };
+    await run.call('CreateVolumeTexture system', ()=>device.CreateVolumeTexture(size, size, depth,
+        1, 0, D3DFMT.A8R8G8B8, D3DPOOL.SYSTEMMEM, made.system), [made.system]);
+    await run.call('CreateVolumeTexture video', ()=>device.CreateVolumeTexture(size, size, depth,
+        1, 0, D3DFMT.A8R8G8B8, D3DPOOL.DEFAULT, made.video), [made.video]);
+    await run.call('CreateTexture system', ()=>device.CreateTexture(size, size, 1, 0,
+        D3DFMT.A8R8G8B8, D3DPOOL.SYSTEMMEM, made.systemTexture), [made.systemTexture]);
+    await run.call('CreateTexture video', ()=>device.CreateTexture(size, size, 1, 0,
+        D3DFMT.A8R8G8B8, D3DPOOL.DEFAULT, made.videoTexture), [made.videoTexture]);
+    /** @param {string} label @param {any} source @param {any} destination */
+    const update = async(label, source, destination)=>{
+        if (version === 9)
+        {
+            await run.call(label, ()=>device.UpdateTexture(source, destination));
+            return;
+        }
+        /** @type {{ moves?: any[] }} */
+        const held = {};
+        await run.call(label, ()=>device.UpdateTexture(source, destination, held));
+        applyMoves(run, held);
+    };
+    /** @type {number[]} */
+    const carried = [];
+    for (let frame = 0; frame < 4; frame++)
+    {
+        /** @type {{ pBits?: number, RowPitch?: number, SlicePitch?: number }} */
+        const box = {};
+        await run.call(`LockBox ${frame}`, ()=>made.system.texture.LockBox(0, box, null,
+            NO_DIRTY_UPDATE), [box]);
+        for (const left of [0, 4])
+        {
+            for (let slice = frame; slice < frame + 4; slice++)
+            {
+                fillRows(run, /** @type {number} */ (box.pBits)
+                    + slice * /** @type {number} */ (box.SlicePitch) + left * 4,
+                /** @type {number} */ (box.RowPitch), 4, 16, 9 * frame + slice + left);
+            }
+            await run.call(`AddDirtyBox ${frame} ${left}`, ()=>made.system.texture.AddDirtyBox({
+                left, top: 0, right: left + 4, bottom: 4, front: frame, back: frame + 4 }));
+        }
+        await run.call(`UnlockBox ${frame}`, ()=>made.system.texture.UnlockBox(0));
+        /** @type {{ pBits?: number, Pitch?: number }} */
+        const rect = {};
+        await run.call(`LockRect ${frame}`, ()=>made.systemTexture.texture.LockRect(0, rect, null,
+            NO_DIRTY_UPDATE), [rect]);
+        fillRows(run, /** @type {number} */ (rect.pBits) + frame * /** @type {number} */ (rect.Pitch),
+            /** @type {number} */ (rect.Pitch), 2, 32, 70 + frame);
+        await run.call(`AddDirtyRect ${frame}`, ()=>made.systemTexture.texture.AddDirtyRect({
+            left: 0, top: frame, right: 8, bottom: frame + 2 }));
+        await run.call(`UnlockRect ${frame}`, ()=>made.systemTexture.texture.UnlockRect(0));
+        await update(`UpdateTexture volume ${frame}`, made.system.texture, made.video.texture);
+        await update(`UpdateTexture ${frame}`, made.systemTexture.texture,
+            made.videoTexture.texture);
+        await run.call('BeginScene', ()=>device.BeginScene());
+        await run.call('Clear', ()=>device.Clear(0, null, D3DCLEAR.TARGET | D3DCLEAR.ZBUFFER,
+            0xff000040 + frame, 1, 0));
+        await draw(run, device, `volume ${frame}`, made.video.texture, 0);
+        await draw(run, device, `texture ${frame}`, made.videoTexture.texture, 0.2);
+        await run.call('EndScene', ()=>device.EndScene());
+        await run.call('Present', ()=>device.Present(null, null, 0, null));
+        await run.call('idle', ()=>device.idle());
+        await run.look(`frame ${frame}`);
+        const bytes = run.on.shipped();
+        if (bytes)
+        {
+            carried.push(Object.values(bytes).reduce((sum, value)=>sum + value, 0));
+        }
+    }
+    // A frame moves two boxes of four by four by four and two rows: never a
+    // quarter of the volume, which the batches carried whole before.
+    for (let frame = 1; frame < (version === 9 ? carried.length : 0); frame++)
+    {
+        const sent = carried[frame] - carried[frame - 1];
+        assert.ok(sent < size * size * depth, `frame ${frame} carried ${sent} bytes`);
+    }
+    for (const one of Object.values(made))
+    {
+        await run.call('Release', ()=>one.texture.release());
+    }
+    await run.call('Release device', ()=>device.release());
+    await run.look('end');
+};
+
+test('Direct3D 9 and 8: a volume and a texture in system memory, locked with no dirty update,'
+    + ' marked by hand and carried by UpdateTexture, draw what the device drew and carry what'
+    + ' they move', async()=>{
+    await same(9, systemMemoryUpdates(9));
+    await same(8, systemMemoryUpdates(8));
+});
 
 test('Direct3D 9 and 8: a dynamic buffer written after its unlock draws, through every way,'
     + ' what was written, and carries only that', async()=>{
