@@ -23,6 +23,7 @@
  *                                  [--mode NAME] [--executors N] [--cork-config JSON]
  *                                  [--graphics-worker] [--fake-gpu] [--journal-calls]
  *                                  [--command-line STRING] [--args STRING] [--windows NAME]
+ *                                  [--gpu sm1|sm2|sm3|sm4|host]
  *                                  [--file HOST=GUEST] [--save-files]
  *                                  [--user-data-dir DIR] [--port N] [--store local] [--prefetch]
  *                                  [--cpu-profile SECONDS] [--heap-profile [old]]
@@ -57,6 +58,7 @@ import { describeDevice, watchDevice } from './device-lag.mjs';
 import { openBundle } from '../btl.mjs';
 import { placementOf } from '../../modules/installer/src/prefix.js';
 import { windowsVersion } from '../../modules/core/src/layers/win32/kernel32/versions.js';
+import { GPU_PROFILES } from '../../modules/core/src/layers/graphics/seam/adapter.js';
 import { disassemble } from '../../modules/core/src/layers/win32/d3dx9/d3d9-machine.fixture.js';
 import { disassembleShader } from '../../modules/core/src/layers/win32/d3dx9/shader-asm.js';
 import { modeOf } from '../play/modes.js';
@@ -267,6 +269,10 @@ function parse(argv){
         args: argv.includes('--args') ? argv[argv.indexOf('--args') + 1] : null,
         // The Windows the title runs under, over the one its manifest names.
         windows: argv.includes('--windows') ? argv[argv.indexOf('--windows') + 1] : null,
+        // The card the adapter is shown as (`createApp`'s `gpuProfile`), over
+        // the one the manifest names: a title picks its render path, and the
+        // settings it offers, from the card and its shader model.
+        gpu: argv.includes('--gpu') ? argv[argv.indexOf('--gpu') + 1] : null,
         // Files put on the volume before the program starts, as `HOST=GUEST`:
         // what one run wrote, handed to the next.
         files: argv.flatMap((flag, index)=>{
@@ -1533,6 +1539,14 @@ export async function game(options){
     // if it were not one of its four -- refused here, before a browser starts.
     const windows = options.windows ?? manifest.windows ?? undefined;
     windowsVersion(windows);
+    // A profile the adapter does not know would be shown as the browser's
+    // card without a word: refused here instead.
+    const gpuProfile = options.gpu ?? manifest.gpuProfile ?? undefined;
+    if (gpuProfile !== undefined && gpuProfile !== 'host' && !(gpuProfile in GPU_PROFILES))
+    {
+        throw new Error(`--gpu ${gpuProfile}: not one of ${Object.keys(GPU_PROFILES).join(', ')}`
+            + ', host');
+    }
 
     // A bundle's own hooks.json/hooks.mjs, beside its manifest.json and never
     // inside the bundle: read here, the same way this driver already reads
@@ -1652,6 +1666,7 @@ export async function game(options){
                 ?? ((options.args ?? manifest.commandLine)
                     ? `"${imagePath}" ${options.args ?? manifest.commandLine}` : undefined),
             windows,
+            gpuProfile,
             sidecarHooks,
             hooks: options.watches,
             record: options.record,

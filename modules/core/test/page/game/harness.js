@@ -1420,6 +1420,7 @@ export function createHarness(canvas, how = {}){
      *           commandLine?: string,
      *           concurrency?: import('../../../src/mode.js').Concurrency,
      *           windows?: 'win2000' | 'winxp' | 'win7' | 'win10',
+     *           gpuProfile?: 'sm1' | 'sm2' | 'sm3' | 'sm4' | 'host',
      *           sidecarHooks?: { spec: any, source: string },
      *           logCategories?: Record<string, string>,
      *           logCapacity?: number, logBytes?: number,
@@ -1613,6 +1614,8 @@ export function createHarness(canvas, how = {}){
             // The Windows the bottle runs under, from its manifest; absent is
             // the engine's default, and a name it does not know fails the run.
             windows: request.windows,
+            // The card the adapter is shown as, from the bottle's shader profile.
+            gpuProfile: request.gpuProfile,
             // A bundle's own hooks.json/hooks.mjs, read by the tool that
             // started this run from beside the bundle -- never from the
             // bundle itself.

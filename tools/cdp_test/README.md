@@ -40,7 +40,7 @@ node tools/cdp_test/game.mjs <bundle-id> [--wait 900] [--turns 200000] [--calls 
     [--log FILE [--log-lines N]] [--profile [QUANTUM]]
     [--dump-draws] [--max-draws N] [--skip-texture tN] [--probe tN]
     [--pointer x,y[,down]] [--click x,y[,after]] [--key Code[,after[,frames]]] [--turn dx,dy,after,frames] [--screen WxH]
-    [--run-seconds N] [--command-line STRING] [--args STRING] [--windows NAME] [--file HOST=GUEST] [--save-files]
+    [--run-seconds N] [--command-line STRING] [--args STRING] [--windows NAME] [--gpu PROFILE] [--file HOST=GUEST] [--save-files]
     [--profile-calls] [--no-video] [--no-fog] [--no-mips] [--trace]
     [--worker [--pacing page|event]] [--coi]
     [--user-data-dir DIR] [--port N] [--store local] [--prefetch] [--export-translations FILE]
@@ -88,6 +88,7 @@ node tools/cdp_test/game.mjs <bundle-id> [--wait 900] [--turns 200000] [--calls 
 | `--command-line STRING` | the bundle's manifest | what the program believes it was started with, image path first: `'"C:\App\Game.exe" +set r_mode 3'`. The manifest's `commandLine` is the default, so a title's usual arguments need not be repeated |
 | `--args STRING` | the manifest's `commandLine` | the arguments alone, as the launcher takes them: the quoted image path is put in front, `--args 'map fort'` |
 | `--windows NAME` | the bundle's manifest, else `winxp` | the Windows the title runs under ([`docs/core/api.md`](../../docs/core/api.md)'s `windows`): `win2000`, `winxp`, `win7` or `win10`. The manifest's `windows` is the default; any other name is refused before the browser starts. [`frames.mjs`](frames.mjs) takes it too |
+| `--gpu PROFILE` | the bundle's manifest (`gpuProfile`), else the browser's card | the card the adapter is shown as: `sm1` (GeForce4 Ti), `sm2` (Radeon 9800 Pro), `sm3` (GeForce 7800 GTX), `sm4` (GeForce 8800 GTX) or `host`. A title picks its render path and the settings it offers from the card it knows. Any other name is refused before the browser starts |
 | `--file HOST=GUEST` | none | a file put on the volume before the program's first instruction, from a host path to a guest one (`dbg/bench.demo=C:\App\base\demos\bench.demo`): what one run wrote, handed to the next. Repeatable |
 | `--save-files` | text | keep every file the program wrote as the bytes it wrote, whole, beside the report. Without it a file is saved as text and capped at a megabyte, which reads a log and ruins anything binary |
 | `--graphics-api CHOICE` | none | the graphics a bottle chooses in the launcher, `createApp`'s `graphicsApi`: `directx7`, `directx8`, `directx9`, `directx10` or `opengl`. It decides which system libraries the machine has and which DirectX release it reports |
