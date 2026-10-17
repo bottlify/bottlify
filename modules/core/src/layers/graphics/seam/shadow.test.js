@@ -213,7 +213,8 @@ test('the block fits its two pages and its regions follow one another', ()=>{
     // The lock routine's own, which the host only reads.
     assert.equal(SHADOW.LOCK_RING_CAPACITY & (SHADOW.LOCK_RING_CAPACITY - 1), 0);
     assert.equal(SHADOW.LOCK_RING + SHADOW.LOCK_RING_CAPACITY * 4, SHADOW.COOPERATIVE);
-    assert.equal(SHADOW.COOPERATIVE + 4, SHADOW.SIZE);
+    assert.equal(SHADOW.COOPERATIVE + 4, SHADOW.ELSEWHERE);
+    assert.equal(SHADOW.ELSEWHERE + 4, SHADOW.SIZE);
     assert.equal(BUFFER.SIZE, 36);
     assert.equal(TEXTURE.LEVELS + TEXTURE.LEVEL_SLOTS * 4, TEXTURE.SIZE);
     // Enough for the longest chain a texture of this era can have: a 32768

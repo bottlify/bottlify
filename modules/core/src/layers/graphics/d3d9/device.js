@@ -2410,6 +2410,8 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 clipPlanes: caps.maxUserClipPlanes,
                 taken: [vertexDeclaration.fvf >>> 0],
                 cooperative: device.TestCooperativeLevel() === D3D_OK ? 0 : 1,
+                elsewhere: services.renderedElsewhere === true || services.drawsNothing === true
+                    ? 1 : 0,
             };
         },
 

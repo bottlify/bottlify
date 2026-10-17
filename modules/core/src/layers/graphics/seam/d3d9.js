@@ -74,7 +74,7 @@ import { D3D_PRIVATE_DATA, createPrivateData } from './privatedata.js';
 import {
     DRAWABLE_MIRRORS, RENDER_STATE_MIRROR, SAMPLER_STATE_MIRROR, TRANSFORM_MIRROR,
     DEPTH_STENCIL_MIRROR, RENDER_TARGET_MIRROR, VIEWPORT_GUARD_9, VIEWPORT_MIRROR, commandCode,
-    compiledAt, createShadow, getRenderStateCode,
+    STRETCH_GUARD, compiledAt, createShadow, getRenderStateCode,
     getSamplerStateCode, getSurfaceDescCode, getSurfaceLevelCode, getTextureStageStateCode,
     getTransformCode, getViewportCode, lockCode, settledAfter, stageStateMirror,
     unlockCode, HOST_MIRRORS, appendCommand, guestWords,
@@ -111,6 +111,7 @@ export const COMMAND_MIRRORS = {
     DrawPrimitiveUP: [...DRAWABLE_MIRRORS.DrawPrimitiveUP],
     SetRenderTarget: [...RENDER_TARGET_MIRROR],
     SetDepthStencilSurface: [...DEPTH_STENCIL_MIRROR],
+    StretchRect: [...STRETCH_GUARD],
 };
 
 /**
@@ -132,6 +133,7 @@ export const HOST_COMMAND_MIRRORS = {
     SetIndices: HOST_MIRRORS.indices,
     SetRenderTarget: HOST_MIRRORS.renderTarget,
     SetDepthStencilSurface: HOST_MIRRORS.depthStencil,
+    StretchRect: HOST_MIRRORS.stretch,
 };
 
 const D3D_OK = 0;

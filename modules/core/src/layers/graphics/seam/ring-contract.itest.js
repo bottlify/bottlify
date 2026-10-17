@@ -51,7 +51,9 @@ const D3DFMT_A8R8G8B8 = 21;
 const D3DFMT_D24S8 = 75;
 const D3DFMT_D24X8 = 77;
 const D3DFMT_INDEX16 = 101;
+const D3DPOOL_DEFAULT = 0;
 const D3DPOOL_MANAGED = 1;
+const D3DUSAGE_RENDERTARGET = 0x1;
 const D3DSWAPEFFECT_DISCARD = 1;
 const FVF_XYZ_DIFFUSE = 0x042;
 const D3DSBT_ALL = 1;
@@ -119,6 +121,8 @@ const machine = ()=>{
             words[(SHADOW.VALIDATED - SHADOW.DRAWABLE) / 4 + table * SHADOW.VALIDATED_SLOTS] =
                 value;
         });
+        words[(SHADOW.COOPERATIVE - SHADOW.DRAWABLE) / 4] = state.cooperative ?? 1;
+        words[(SHADOW.ELSEWHERE - SHADOW.DRAWABLE) / 4] = state.elsewhere ?? 0;
         host.writePhysical(BLOCK + SHADOW.DRAWABLE, new Uint8Array(words.buffer));
         host.writePhysical(BLOCK + SHADOW.RENDER_STATE_VALID, valid);
         host.writePhysical(RING, new Uint8Array(RING_BYTES));
@@ -218,6 +222,8 @@ function gate(api, table){
             /** @type {Map<number, any>} */
             const pointers = new Map();
             const names = Object.keys(made);
+            /** @type {Map<object, number>} */
+            const containers = new Map();
             names.forEach((key, i)=>{
                 const at = OBJECTS + i * 16;
                 // An object's interface points at its block one word on; a
@@ -231,9 +237,16 @@ function gate(api, table){
                 const block = surface ? SURFACES + i * SURFACE.SIZE : BLOCK;
                 if (surface)
                 {
+                    // And the texture it is a level of, numbered as the shadow numbers them.
+                    const container = made[key].container;
+                    if (container && !containers.has(container))
+                    {
+                        containers.set(container, containers.size + 1);
+                    }
                     const { Format, Type, Usage, Pool, Width, Height } = held.desc;
                     host.writePhysical(block, new Uint8Array(new Uint32Array([0, Format, Type,
-                        Usage, Pool, 0, 0, Width, Height]).buffer));
+                        Usage, Pool, 0, 0, Width, Height,
+                        container ? /** @type {number} */ (containers.get(container)) : 0]).buffer));
                 }
                 host.writePhysical(at + 4, new Uint8Array(u32(block)));
                 pointers.set(at, made[key]);
@@ -338,6 +351,21 @@ const drawable8 = (/** @type {any} */ device, /** @type {Record<string, any>} */
     assert.equal(device.SetIndices(made.indices, 0), D3D_OK);
     assert.equal(device.SetVertexShader(FVF_XYZ_DIFFUSE), D3D_OK);
     assert.equal(device.BeginScene(), D3D_OK);
+};
+
+/** A device that records for one drawing elsewhere, as one in a graphics worker. */
+const ELSEWHERE = { renderedElsewhere: true };
+
+/** Three targets, two of one size, as a pass that shrinks its picture makes. */
+const targets = (/** @type {any} */ device, /** @type {Record<string, any>} */ made)=>{
+    for (const [name, size] of /** @type {[string, number][]} */ ([['big', 32], ['small', 16],
+        ['other', 16]]))
+    {
+        /** @type {{ surface?: any }} */
+        const out = {};
+        assert.equal(device.CreateRenderTarget(size, size, D3DFMT_X8R8G8B8, 0, out), D3D_OK);
+        made[name] = out.surface;
+    }
 };
 
 /** A target of its own and a depth surface with no stencil, as an offscreen pass makes. */
@@ -510,6 +538,37 @@ test('Direct3D 9: every call the command ring answers for in the guest is one th
                         const out = {};
                         assert.equal(made.texture.GetSurfaceLevel(0, out), D3D_OK);
                         made.level = out.surface;
+                    } },
+            ],
+            // A copy between two targets, made on the GPU where the device draws elsewhere.
+            StretchRect: [
+                { label: 'two targets, stretched', args: ['big', 0, 'small', 0, 2],
+                    caps: ELSEWHERE, setup: targets },
+                { label: 'two targets of one size', args: ['small', 0, 'other', 0, 0],
+                    caps: ELSEWHERE, setup: targets },
+                { label: 'a device drawing itself', args: ['big', 0, 'small', 0, 2],
+                    setup: targets },
+                { label: 'a rectangle', args: ['big', 'data', 'small', 0, 2], data: [0, 0, 8, 8],
+                    caps: ELSEWHERE, setup: targets },
+                { label: 'a filter past anisotropic', args: ['big', 0, 'small', 0, 4],
+                    caps: ELSEWHERE, setup: targets },
+                { label: 'the same surface', args: ['big', 0, 'big', 0, 2], caps: ELSEWHERE,
+                    setup: targets },
+                { label: 'a depth surface', args: ['depth', 0, 'target', 0, 0], caps: ELSEWHERE,
+                    setup: offscreen },
+                { label: 'two levels of one target texture', args: ['top', 0, 'level', 0, 2],
+                    caps: ELSEWHERE, setup: (device, made)=>{
+                        /** @type {{ texture?: any }} */
+                        const out = {};
+                        assert.equal(device.CreateTexture(16, 16, 2, D3DUSAGE_RENDERTARGET,
+                            D3DFMT_X8R8G8B8, D3DPOOL_DEFAULT, out), D3D_OK);
+                        /** @type {{ surface?: any }} */
+                        const top = {};
+                        const level = {};
+                        assert.equal(out.texture.GetSurfaceLevel(0, top), D3D_OK);
+                        assert.equal(out.texture.GetSurfaceLevel(1, level), D3D_OK);
+                        made.top = top.surface;
+                        made.level = /** @type {any} */ (level).surface;
                     } },
             ],
             SetDepthStencilSurface: [

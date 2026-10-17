@@ -55,6 +55,8 @@ import { D3DERR_INVALIDCALL, D3DFVF_RESERVED0, D3DFMT } from '../d3d8/constants.
 
 /** The one depth format with a stencil the devices take a stencil clear on. */
 const D3DFMT_D24S8 = D3DFMT.D24S8;
+/** D3DUSAGE_RENDERTARGET. */
+const D3DUSAGE_RENDERTARGET = 0x1;
 
 /**
  * The block takes pages of its own. The routines that write it are guest
@@ -146,7 +148,13 @@ export const SHADOW = {
      * lost device is the host's.
      */
     COOPERATIVE: 5288 + 16 * 4,
-    SIZE: 5352 + 4,
+    /**
+     * Set by the host when the device records for one that draws elsewhere,
+     * or draws nothing: a copy between two of its render targets is then the
+     * GPU's whatever it stretches, and the guest's StretchRect may answer it.
+     */
+    ELSEWHERE: 5352 + 4,
+    SIZE: 5352 + 8,
 };
 
 /** Byte offsets within a query's block. */
@@ -254,9 +262,15 @@ export const TEXTURE = {
 export const SURFACE = {
     /** Bit 0 set by the host: take the slow path. */
     FLAGS: 0,
-    /** D3DSURFACE_DESC, as the version lays it out. */
+    /** D3DSURFACE_DESC, as the version lays it out: eight words. */
     DESC: 4,
-    SIZE: 4 + 8 * 4,
+    DESC_WORDS: 8,
+    /**
+     * The texture it is a level or face of, as a number of the shadow's own,
+     * zero for none: two levels of one texture are one texture to the GPU.
+     */
+    CONTAINER: 4 + 8 * 4,
+    SIZE: 4 + 8 * 4 + 4,
 };
 
 export const FLAG_SLOW_PATH = 1;
@@ -1026,7 +1040,7 @@ export function getSurfaceDescCode(at, trap){
         [0x56, 0x57],                                            // push esi; push edi
         [0x8d, 0x71, SURFACE.DESC],                              // lea esi, [ecx+4]
         [0x89, 0xd7],                                            // mov edi, edx
-        [0xb9, ...dword((SURFACE.SIZE - SURFACE.DESC) / 4)],     // mov ecx, 8
+        [0xb9, ...dword(SURFACE.DESC_WORDS)],                    // mov ecx, 8
         [0xf3, 0xa5],                                            // rep movsd
         [0x5f, 0x5e],                                            // pop edi; pop esi
         [0x31, 0xc0],                                            // xor eax, eax
@@ -1660,6 +1674,51 @@ const markDrawable = bits=>[0x83, 0x89, ...dword(SHADOW.DRAWABLE), bits];
 const unmarkDrawable = bits=>[0x83, 0xa1, ...dword(SHADOW.DRAWABLE), ~bits & 0xff];
 
 /**
+ * What Direct3D 9's StretchRect has to be for the guest to take it: no
+ * rectangles, so each is its surface whole; two surfaces with blocks, not the
+ * same one and not levels of one texture, both render targets in the default
+ * pool; and a device that records for one drawing elsewhere (`ELSEWHERE`),
+ * which copies or stretches between two such surfaces on the GPU, whatever
+ * their sizes and formats. The filter is the routine's `within`.
+ */
+export const STRETCH_GUARD = Object.freeze([
+    [0x83, 0x7c, 0x24, 0x0c, 0x00],                              // cmp dword [esp+12], 0
+    { jcc: 0x75, to: 'out', near: true },                        // jne out: a source rectangle
+    [0x83, 0x7c, 0x24, 0x14, 0x00],                              // cmp dword [esp+20], 0
+    { jcc: 0x75, to: 'out', near: true },                        // jne out: a target rectangle
+    [0x83, 0xb9, ...dword(SHADOW.ELSEWHERE), 0x00],              // cmp dword [ecx+disp], 0
+    { jcc: 0x74, to: 'out', near: true },                        // je out
+    [0x8b, 0x44, 0x24, 0x08],                                    // mov eax, [esp+8]: the source
+    [0x85, 0xc0],                                                // test eax, eax
+    { jcc: 0x74, to: 'out', near: true },                        // jz out
+    [0x8b, 0x40, 0x04],                                          // mov eax, [eax+4]: its block
+    [0x85, 0xc0],                                                // test eax, eax
+    { jcc: 0x74, to: 'out', near: true },                        // jz out
+    [0x8b, 0x54, 0x24, 0x10],                                    // mov edx, [esp+16]: the target
+    [0x85, 0xd2],                                                // test edx, edx
+    { jcc: 0x74, to: 'out', near: true },                        // jz out
+    [0x8b, 0x52, 0x04],                                          // mov edx, [edx+4]: its block
+    [0x85, 0xd2],                                                // test edx, edx
+    { jcc: 0x74, to: 'out', near: true },                        // jz out
+    [0x39, 0xd0],                                                // cmp eax, edx
+    { jcc: 0x74, to: 'out', near: true },                        // je out: the same surface
+    [0x83, 0x78, SURFACE.DESC + 12, 0x00],                       // cmp dword [eax+Pool], 0
+    { jcc: 0x75, to: 'out', near: true },                        // jne out
+    [0x83, 0x7a, SURFACE.DESC + 12, 0x00],                       // cmp dword [edx+Pool], 0
+    { jcc: 0x75, to: 'out', near: true },                        // jne out
+    [0xf7, 0x40, SURFACE.DESC + 8, ...dword(D3DUSAGE_RENDERTARGET)], // test [eax+Usage], RT
+    { jcc: 0x74, to: 'out', near: true },                        // jz out
+    [0xf7, 0x42, SURFACE.DESC + 8, ...dword(D3DUSAGE_RENDERTARGET)], // test [edx+Usage], RT
+    { jcc: 0x74, to: 'out', near: true },                        // jz out
+    [0x8b, 0x40, SURFACE.CONTAINER],                             // mov eax, [eax+CONTAINER]
+    [0x85, 0xc0],                                                // test eax, eax
+    { jcc: 0x74, to: 'stretchApart' },                           // jz apart
+    [0x3b, 0x42, SURFACE.CONTAINER],                             // cmp eax, [edx+CONTAINER]
+    { jcc: 0x74, to: 'out', near: true },                        // je out: one texture
+    { label: 'stretchApart' },
+]);
+
+/**
  * The same for Direct3D 9's SetDepthStencilSurface, after its checks have
  * found the surface a depth surface with a block, or none: whether a depth
  * surface is set and whether it holds a stencil, which Clear's checks read.
@@ -1907,6 +1966,8 @@ export function settledAfter(shadow, call){
  * @property {readonly ((value: number) => boolean)[]} [takes]  per table, whether it
  *     still takes one
  * @property {number} [cooperative]  zero while TestCooperativeLevel answers D3D_OK
+ * @property {number} [elsewhere]  one when the device records for one drawing elsewhere,
+ *     or draws nothing (`SHADOW.ELSEWHERE`)
  */
 
 /**
@@ -1988,6 +2049,9 @@ export function createShadow(deps){
     const surfaceBlocks = new WeakMap();
     /** @type {WeakMap<object, number>} */
     const queryBlocks = new WeakMap();
+    /** The textures surfaces are levels of, numbered (`SURFACE.CONTAINER`). @type {WeakMap<object, number>} */
+    const containerNumbers = new WeakMap();
+    let containersNumbered = 0;
     /** Resource blocks are carved from pages of their own, for the same reason as the device's. */
     const pool = { at: 0, left: 0 };
     /** The command ring's bytes in guest memory, 0 for none, and how far the host has read it. */
@@ -2224,7 +2288,8 @@ export function createShadow(deps){
                 + table * SHADOW.VALIDATED_SLOTS);
         });
         deps.writeMemory(address + SHADOW.DRAWABLE, new Uint8Array(words.buffer));
-        deps.writeMemory(address + SHADOW.COOPERATIVE, dwordBytes(state.cooperative ?? 1));
+        deps.writeMemory(address + SHADOW.COOPERATIVE,
+            dwordsBytes([state.cooperative ?? 1, state.elsewhere ?? 0]));
     };
 
     const mirror = ()=>{
@@ -2795,6 +2860,17 @@ export function createShadow(deps){
             }
             deps.writeMemory(block, new Uint8Array(SURFACE.SIZE));
             describe(block + SURFACE.DESC);
+            const container = /** @type {{ container?: object }} */ (surface).container;
+            if (container)
+            {
+                let number = containerNumbers.get(container);
+                if (number === undefined)
+                {
+                    number = ++containersNumbered;
+                    containerNumbers.set(container, number);
+                }
+                deps.writeMemory(block + SURFACE.CONTAINER, dwordBytes(number));
+            }
             surfaceBlocks.set(surface, block);
             return block;
         },
@@ -3037,6 +3113,25 @@ export const HOST_MIRRORS = Object.freeze({
         m.setU32(block + SHADOW.VIEWPORT + 16, 0);
         m.setU32(block + SHADOW.VIEWPORT + 20, 0x3f800000);
         return true;
+    },
+    /** @type {HostMirror} */
+    stretch: (m, block, [source, sourceRect, target, targetRect])=>{
+        if (sourceRect !== 0 || targetRect !== 0 || m.u32(block + SHADOW.ELSEWHERE) === 0
+            || source === 0 || target === 0)
+        {
+            return false;
+        }
+        const from = m.u32(source + 4);
+        const to = m.u32(target + 4);
+        if (from === 0 || to === 0 || from === to
+            || m.u32(from + SURFACE.DESC + 12) !== 0 || m.u32(to + SURFACE.DESC + 12) !== 0
+            || (m.u32(from + SURFACE.DESC + 8) & D3DUSAGE_RENDERTARGET) === 0
+            || (m.u32(to + SURFACE.DESC + 8) & D3DUSAGE_RENDERTARGET) === 0)
+        {
+            return false;
+        }
+        const container = m.u32(from + SURFACE.CONTAINER);
+        return container === 0 || container !== m.u32(to + SURFACE.CONTAINER);
     },
     /** @type {HostMirror} */
     depthStencil: (m, block, [surface])=>{
