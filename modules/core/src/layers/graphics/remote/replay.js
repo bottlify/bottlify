@@ -501,9 +501,37 @@ export function createRecording(options){
      * read, by the buffer: it is what was last sent of it, by its unlocks
      * and by draws (`drawsFrom`), and a draw sends only what differs from it.
      *
+     * Kept for each storage the buffer has had: a dynamic buffer trades two
+     * (`Rename`), and the played side's memory holds what was sent of each.
+     *
      * @type {WeakMap<object, { base: number, bytes: Uint8Array }>}
      */
     const sentOf = new WeakMap();
+    /** @type {WeakMap<object, Map<number, object>>} */
+    const storages = new WeakMap();
+    /**
+     * The key of a buffer's storage, for what was sent of it and what a pause
+     * compared of it: after a trade the same range of the other storage is
+     * another range.
+     *
+     * @param {object} buffer
+     */
+    const storageOf = buffer=>{
+        const base = /** @type {any} */ (buffer).base;
+        let keys = storages.get(buffer);
+        if (!keys)
+        {
+            keys = new Map();
+            storages.set(buffer, keys);
+        }
+        let key = keys.get(base);
+        if (!key)
+        {
+            key = { buffer };
+            keys.set(base, key);
+        }
+        return key;
+    };
     /** What the current call's draws read of dynamic buffers that had changed. @type {{ address: number, bytes: Uint8Array }[] | null} */
     let drawn = null;
     /**
@@ -1288,7 +1316,8 @@ export function createRecording(options){
                     // side, so its unlock sends only what differs: a program
                     // that unlocks all of a large one every frame sends what
                     // it wrote, not the buffer.
-                    const sent = sentOf.get(target);
+                    const storage = storageOf(target);
+                    const sent = sentOf.get(storage);
                     const unlocked = sent && sent.base === /** @type {any} */ (target).base
                         ? ranges.flatMap(range=>{
                             const from = range.address - sent.base;
@@ -1300,7 +1329,7 @@ export function createRecording(options){
                             // In a pause (`still`) counted compared, so that the
                             // draws after the unlock find it done. Outside one, what
                             // the last call compared is not what the program left.
-                            const open = still > 0 ? compared.take(target, from, to)
+                            const open = still > 0 ? compared.take(storage, from, to)
                                 : [from, to];
                             /** @type {{ address: number, bytes: Uint8Array }[]} */
                             const into = [];
@@ -1807,18 +1836,19 @@ export function createRecording(options){
             {
                 return;
             }
-            const sent = sentOf.get(buffer);
+            const storage = storageOf(buffer);
+            const sent = sentOf.get(storage);
             if (!sent || sent.base !== base)
             {
                 // What the played side holds of the buffer is not known until
                 // something is sent of all of it: once, at its first draw.
                 const bytes = readMemory(base, buffer.length);
-                sentOf.set(buffer, { base, bytes });
-                compared.take(buffer, 0, buffer.length);
+                sentOf.set(storage, { base, bytes });
+                compared.take(storage, 0, buffer.length);
                 (drawn ??= []).push({ address: base, bytes });
                 return;
             }
-            const open = compared.take(buffer, from, to);
+            const open = compared.take(storage, from, to);
             let length = 0;
             for (let part = 0; part < open.length; part += 2)
             {

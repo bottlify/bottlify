@@ -1278,3 +1278,79 @@ test('a batch that looks at the objects at zero says how long the look took', ()
     assert.equal(typeof swept[63], 'number');
     assert.ok(/** @type {number} */ (swept[63]) >= 0);
 });
+
+test('a dynamic buffer that trades its storages sends each whole once, then what differs; a'
+    + ' range compared in one storage is compared again in the other', ()=>{
+    const ram = new Uint8Array(4 << 20);
+    let next = RAM_BASE + (1 << 20);
+    const services = {
+        readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
+            ram.slice(at - RAM_BASE, at - RAM_BASE + length),
+        allocate: (/** @type {number} */ bytes)=>{
+            const at = next;
+            next += bytes + 0x100;
+            return at;
+        },
+    };
+    const played = playedDirect3D(createDirect3D9, { ...services, readMemory: true });
+    const sender = createSender({
+        post: message=>{
+            played.read(message.buffer, call=>{
+                played.play(call);
+            });
+        },
+        later: flush=>flush(),
+    });
+    const d3d = recordedDirect3D(createDirect3D9, services, sender);
+    /** @param {number} value */
+    const ok = value=>assert.equal(value, D3D_OK);
+    /** @type {{ device?: any }} */
+    const out = {};
+    ok(d3d.CreateDevice({ swapEffect: D3DSWAPEFFECT.DISCARD, backBufferCount: 1,
+        backBufferWidth: 8, backBufferHeight: 8, backBufferFormat: D3DFMT.X8R8G8B8 }, out));
+    const device = out.device;
+    const stride = 16;
+    const length = 64 * stride;
+    /** @type {{ buffer?: any }} */
+    const made = {};
+    ok(device.CreateVertexBuffer(length, 0x200, FVF.XYZ | FVF.DIFFUSE, D3DPOOL.DEFAULT, made));
+    ok(device.SetStreamSource(0, made.buffer, 0, stride));
+    ok(device.SetFVF(FVF.XYZ | FVF.DIFFUSE));
+    ok(device.BeginScene());
+    /** @param {number} value */
+    const write = value=>{
+        /** @type {{ pBits?: number }} */
+        const locked = {};
+        ok(made.buffer.Lock(0, 3 * stride, locked, 0));
+        const at = /** @type {number} */ (locked.pBits) - RAM_BASE;
+        ram.fill(value, at, at + 3 * stride);
+        ok(made.buffer.Unlock());
+    };
+    const draw = ()=>ok(device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1));
+    const shipped = ()=>sender.shippedBytes().buffers + sender.shippedBytes().compared;
+    write(1);
+    draw();
+    ok(made.buffer.Rename());
+    write(2);
+    draw();
+    // Both storages have been sent whole once; trading them back and forth
+    // from now on sends what was written, not the buffer.
+    for (let round = 3; round < 9; round++)
+    {
+        const before = shipped();
+        ok(made.buffer.Rename());
+        write(round);
+        draw();
+        assert.ok(shipped() - before <= 4 * 3 * stride,
+            `round ${round}: ${shipped() - before} bytes for ${3 * stride} written`);
+    }
+    // In one pause, a range compared in one storage is not taken as compared in the other.
+    const compared = ()=>sender.shippedBytes().compared;
+    const before = compared();
+    device.whileStill(()=>{
+        draw();
+        ok(made.buffer.Rename());
+        draw();
+    });
+    assert.equal(compared() - before, 2 * 3 * stride, 'each storage\'s range compared');
+});
