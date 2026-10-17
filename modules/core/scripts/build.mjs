@@ -227,8 +227,26 @@ await build({
 });
 const vendored = await copyVendor();
 // The audio worklet runs on the browser's audio thread, loaded by URL rather
-// than imported, so it ships as a file of its own beside the module.
-await copyFile(join(SRC, 'layers', 'audio', 'output', 'worklet.js'), join(DIST, 'worklet.js'));
+// than imported, so it ships as a file of its own beside the module -- with
+// the mixer's arithmetic taken from `mix.js` as built, not from the copy kept
+// in the worklet's source, so a change to the mixer reaches what is heard
+// even before the copy is brought in step (worklet.test.js asks for that).
+{
+    const output = join(SRC, 'layers', 'audio', 'output');
+    const begin = '/* WORKLET-SHARED:BEGIN */';
+    const end = '/* WORKLET-SHARED:END */';
+    const mix = await readFile(join(output, 'mix.js'), 'utf8');
+    const worklet = await readFile(join(output, 'worklet.js'), 'utf8');
+    const shared = mix.slice(mix.indexOf(begin), mix.indexOf(end) + end.length)
+        .replace(/^export /gm, '');
+    if (mix.indexOf(begin) < 0 || mix.indexOf(end) < 0 || worklet.indexOf(begin) < 0
+        || worklet.indexOf(end) < 0)
+    {
+        throw new Error('the WORKLET-SHARED markers are missing from mix.js or worklet.js');
+    }
+    await writeFile(join(DIST, 'worklet.js'), worklet.slice(0, worklet.indexOf(begin)) + shared
+        + worklet.slice(worklet.indexOf(end) + end.length));
+}
 // The licence and the notices live once, at the repository root; a published
 // package still has to carry its own, so they are copied rather than duplicated.
 for (const name of LEGAL)

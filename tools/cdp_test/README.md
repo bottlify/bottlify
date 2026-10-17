@@ -188,6 +188,22 @@ The person at the game holds the pause; nothing here presses resume or reloads t
    came out wrong (a component, a register, a coordinate).
 5. To prove which draw it is: `skipShader('ps585')` (or `skipTexture`) and look; on a paused
    game `freeze(true)` first, which plays the shown frame again with the switch applied.
+6. Never mix frames: a dump of one frame and textures of another disagree by however much the
+   camera moved and by whatever the program regenerates only some frames (shadow cascades, cached
+   maps), and the disagreement looks like a bug. Take the dump and the textures of one frame:
+   paused, `freeze(true)` then `maxDraws(n)` and `snapshot(...)` -- the frozen frame's lines
+   (`dumped()`) carry each draw's pass, target and the constants its recorded blocks hold. A
+   program that destroys its targets every frame breaks the frozen replay (the console says
+   `Destroyed texture used in a submit` and the snapshots come back zero); then let it run with
+   the player standing still and take `dumpFrames(1)` and `snapshot` together.
+7. A visual bisect is the person's to judge, not a screenshot's (a VM's GPU driver distorts
+   them): switch a group off and leave it, say what is off, wait for the verdict; keep what
+   is off off and add the next group. Per-draw groups come from what a draw reads:
+   `skipTexture('t727')` drops the one draw of a cascade's shadow mask that samples its map.
+8. Before blaming the data, run the shader on it: a small script that executes the dump's
+   bytecode line by line on the snapshots (`shader.mjs` gives the bytecode) says whether the
+   GPU's answer follows from its inputs. If it does, the inputs or the state around the draw
+   (stencil, which pixels it reaches) are wrong; if not, the translation is.
 
 `app.diagnostics()` is the whole engine's account (what a report holds), and two reports of
 one run diffed (`report-diff.mjs`) are a scene's window.
