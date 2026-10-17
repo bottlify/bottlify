@@ -29,7 +29,7 @@ import { createDirect3D7Seam } from './d3d7.js';
 import {
     IDIRECT3D7_SLOTS, IDIRECT3DDEVICE7_SLOTS, IDIRECT3DVERTEXBUFFER7_SLOTS, IDIRECTDRAW7_SLOTS,
 } from './vtables.js';
-import { IID_IDirect3D7, IID_IDirectDraw7 } from './iids.js';
+import { IID_IDirect3D7, IID_IDirect3DVertexBuffer7, IID_IDirectDraw7 } from './iids.js';
 import {
     D3DDEVICEDESC7, D3DPRIMCAPS, D3DRECT, D3DVERTEXBUFFERDESC, D3DVIEWPORT7,
 } from './structs.js';
@@ -152,7 +152,9 @@ function machine(){
          * @param {number} pointer @param {string} name @param {number[]} args
          */
         trap(pointer, name, args = []){
-            const entry = [...registered.values()].find(one=>one.name.endsWith(`::${name}`));
+            // A full name (`{IID}::Method`) names one interface's; a bare one the first.
+            const entry = [...registered.values()].find(one=>(name.includes('::')
+                ? one.name === name : one.name.endsWith(`::${name}`)));
             assert.ok(entry, `${name} has a trap`);
             return entry.fn.handler([pointer, ...args]) >>> 0;
         },
@@ -269,8 +271,13 @@ function seamed(made = {}){
         device: (device, name, args = [])=>
             box.call(device, slot(IDIRECT3DDEVICE7_SLOTS, name), args),
         /** @param {number} buffer @param {string} name @param {number[]} args */
-        buffer: (buffer, name, args = [])=>
-            box.call(buffer, slot(IDIRECT3DVERTEXBUFFER7_SLOTS, name), args),
+        buffer: (buffer, name, args = [])=>{
+            const index = slot(IDIRECT3DVERTEXBUFFER7_SLOTS, name);
+            // Lock and Unlock hold guest code: the host's path is their trap.
+            return box.isGuest(buffer, index)
+                ? box.trap(buffer, `${IID_IDirect3DVertexBuffer7}::${name}`, args)
+                : box.call(buffer, index, args);
+        },
         /** @param {number} pointer */
         release: pointer=>box.call(pointer, 2, []),
         /** Every root the seam made is dead. */

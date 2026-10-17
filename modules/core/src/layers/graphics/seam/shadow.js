@@ -334,16 +334,17 @@ export const SURFACE = {
 };
 
 /**
- * Byte offsets within a Direct3D 7 vertex buffer's block: what a draw from it
- * is refused for, which the host writes after each call on the buffer -- its
- * locks are the host's.
+ * Byte offsets within a Direct3D 7 vertex buffer's block: a buffer's block
+ * (`BUFFER`), which the guest's Lock and Unlock keep once a device's block
+ * has taken it (`adoptBuffer`, its DEVICE word), and after it how many
+ * vertices the buffer holds -- what a draw from it in the ring is refused for.
  */
 export const VERTEX_BUFFER7 = {
-    /** Whether a lock is held. */
-    LOCKED: 0,
+    /** Whether a lock is held, through either path. */
+    LOCKED: BUFFER.LOCKED,
     /** How many vertices it holds, which a draw's range may not pass. */
-    VERTICES: 4,
-    SIZE: 8,
+    VERTICES: BUFFER.SIZE,
+    SIZE: BUFFER.SIZE + 4,
 };
 
 export const FLAG_SLOW_PATH = 1;
@@ -940,6 +941,127 @@ export function lockCode(at, trap){
 }
 
 /**
+ * HRESULT Lock(this, DWORD flags, void **out, DWORD *size), as guest code for
+ * a Direct3D 7 vertex buffer: `lockCode`'s, of the whole buffer, as this
+ * version locks one -- its storage handed back and its length written where
+ * `size` points, if it points anywhere. A buffer no device's block has taken
+ * yet (DEVICE zero) is the host's, and so is every case `lockCode` leaves it.
+ * The DDLOCK flags it is given mean what D3DLOCK's do: READONLY,
+ * NOOVERWRITE and DISCARDCONTENTS are the same bits.
+ *
+ *     mov edx, [ecx+DEVICE]
+ *     test edx, edx
+ *     jz slow
+ *     (take the device's lock through EDX, or slow)
+ *     cmp dword [ecx+LOCKED], 0
+ *     jne held
+ *     test dword [esp+8], READONLY
+ *     jnz held
+ *     cmp dword [edx+DRAWS_PENDING], 0
+ *     jne guarded
+ *     cmp dword [ecx+LENT], 0
+ *     je free
+ *   guarded:
+ *     mov eax, [esp+8]
+ *     and eax, NOOVERWRITE | DISCARD
+ *     cmp eax, NOOVERWRITE
+ *     jne held
+ *   free:
+ *     cmp dword [esp+12], 0
+ *     jne take
+ *   held:
+ *     mov eax, [ecx+DEVICE]
+ *     mov dword [eax+HELD], 0
+ *     jmp slow
+ *   take:
+ *     push ebx
+ *     mov dword [ecx+FROM], 0     ; the whole buffer, which no pending range passes
+ *     mov eax, [ecx+LENGTH]
+ *     mov [ecx+TO], eax
+ *     mov ebx, [esp+12]           ; flags, one word further for the push
+ *     or [ecx+LOCK_FLAGS], ebx
+ *     mov dword [ecx+LOCKED], 1
+ *     mov ebx, [ecx+DEVICE]
+ *     mov edx, [ebx+LOCK_CALLS]
+ *     and edx, LOCK_RING_CAPACITY - 1
+ *     mov [ebx + edx*4 + LOCK_RING], ecx
+ *     inc dword [ebx+LOCK_CALLS]
+ *     mov dword [ebx+HELD], 0
+ *     mov ebx, [esp+20]           ; size
+ *     test ebx, ebx
+ *     jz unsized
+ *     mov [ebx], eax
+ *   unsized:
+ *     mov eax, [ecx+BASE]
+ *     mov ebx, [esp+16]           ; out
+ *     mov [ebx], eax
+ *     pop ebx
+ *     xor eax, eax
+ *     ret 16                      ; the object and its three arguments
+ *
+ * @param {number} at @param {number} trap
+ * @returns {Uint8Array}
+ */
+export function lock7Code(at, trap){
+    return routine(at, trap, [
+        ...prologue('early'),
+        { jcc: 0xeb, to: 'body' },                               // jmp body
+        { label: 'early' },
+        { jcc: 0xeb, to: 'slow', near: true },                   // jmp slow
+        { label: 'body' },
+        [0x8b, 0x51, BUFFER.DEVICE],                             // mov edx, [ecx+28]
+        [0x85, 0xd2],                                            // test edx, edx
+        { jcc: 0x74, to: 'slow', near: true },                   // jz slow
+        ...takeHeld(EDX, 'slow'),
+        [0x83, 0x79, BUFFER.LOCKED, 0x00],                       // cmp dword [ecx+12], 0
+        { jcc: 0x75, to: 'held' },                               // jne held
+        [0xf7, 0x44, 0x24, 0x08, ...dword(D3DLOCK_READONLY)],    // test dword [esp+8], 0x10
+        { jcc: 0x75, to: 'held' },                               // jnz held
+        [0x83, 0xba, ...dword(SHADOW.DRAWS_PENDING), 0x00],      // cmp dword [edx+disp], 0
+        { jcc: 0x75, to: 'guarded' },                            // jne guarded
+        [0x83, 0x79, BUFFER.LENT, 0x00],                         // cmp dword [ecx+32], 0
+        { jcc: 0x74, to: 'free' },                               // je free
+        { label: 'guarded' },
+        [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
+        [0x25, ...dword(D3DLOCK_NOOVERWRITE | D3DLOCK_DISCARD)], // and eax, 0x3000
+        [0x3d, ...dword(D3DLOCK_NOOVERWRITE)],                   // cmp eax, 0x1000
+        { jcc: 0x75, to: 'held' },                               // jne held
+        { label: 'free' },
+        [0x83, 0x7c, 0x24, 0x0c, 0x00],                          // cmp dword [esp+12], 0
+        { jcc: 0x75, to: 'take' },                               // jne take
+        { label: 'held' },
+        [0x8b, 0x41, BUFFER.DEVICE],                             // mov eax, [ecx+28]
+        letHeldGo(0),                                            // mov dword [eax+HELD], 0
+        { jcc: 0xeb, to: 'slow', near: true },                   // jmp slow
+        { label: 'take' },
+        [0x53],                                                  // push ebx
+        [0xc7, 0x41, BUFFER.FROM, ...dword(0)],                  // mov dword [ecx+16], 0
+        [0x8b, 0x41, BUFFER.LENGTH],                             // mov eax, [ecx+8]
+        [0x89, 0x41, BUFFER.TO],                                 // mov [ecx+20], eax
+        [0x8b, 0x5c, 0x24, 0x0c],                                // mov ebx, [esp+12]
+        [0x09, 0x59, BUFFER.LOCK_FLAGS],                         // or [ecx+24], ebx
+        [0xc7, 0x41, BUFFER.LOCKED, ...dword(1)],                // mov dword [ecx+12], 1
+        [0x8b, 0x59, BUFFER.DEVICE],                             // mov ebx, [ecx+28]
+        [0x8b, 0x93, ...dword(SHADOW.LOCK_CALLS)],               // mov edx, [ebx+disp]
+        [0x83, 0xe2, SHADOW.LOCK_RING_CAPACITY - 1],             // and edx, 15
+        [0x89, 0x8c, 0x93, ...dword(SHADOW.LOCK_RING)],          // mov [ebx+edx*4+disp], ecx
+        [0xff, 0x83, ...dword(SHADOW.LOCK_CALLS)],               // inc dword [ebx+disp]
+        letHeldGo(EBX),                                          // mov dword [ebx+HELD], 0
+        [0x8b, 0x5c, 0x24, 0x14],                                // mov ebx, [esp+20]
+        [0x85, 0xdb],                                            // test ebx, ebx
+        { jcc: 0x74, to: 'unsized' },                            // jz unsized
+        [0x89, 0x03],                                            // mov [ebx], eax
+        { label: 'unsized' },
+        [0x8b, 0x41, BUFFER.BASE],                               // mov eax, [ecx+4]
+        [0x8b, 0x5c, 0x24, 0x10],                                // mov ebx, [esp+16]
+        [0x89, 0x03],                                            // mov [ebx], eax
+        [0x5b],                                                  // pop ebx
+        [0x31, 0xc0],                                            // xor eax, eax
+        [0xc2, 0x10, 0x00],                                      // ret 16
+    ]);
+}
+
+/**
  * HRESULT Unlock(this), as guest code. The buffer's block goes on the
  * device's ring for the host to find; the device's lock held, a full ring,
  * or no lock to release, is the host's.
@@ -968,6 +1090,9 @@ export function unlockCode(at, trap){
     return routine(at, trap, [
         ...prologue(),
         [0x8b, 0x51, BUFFER.DEVICE],                             // mov edx, [ecx+28]
+        // A Direct3D 7 buffer no device's block has taken yet: the host's.
+        [0x85, 0xd2],                                            // test edx, edx
+        { jcc: 0x74, to: 'slow' },                               // jz slow
         ...takeHeld(EDX, 'slow'),
         [0x83, 0x79, BUFFER.LOCKED, 0x00],                       // cmp dword [ecx+12], 0
         { jcc: 0x74, to: 'held' },                               // je held
@@ -3431,6 +3556,37 @@ export function createShadow(deps){
             }
             blockOf.set(buffer, block);
             return block;
+        },
+
+        /**
+         * A Direct3D 7 vertex buffer's block, made beside its interface when
+         * the buffer was (`VERTEX_BUFFER7`), taken by this device's block:
+         * its storage and this block written into it, so the guest's Lock and
+         * Unlock keep it from here on and the host replays what they did, as
+         * `attachBuffer`'s. A buffer another device's block took stays that
+         * one's.
+         *
+         * @param {ShadowBuffer} buffer @param {number} block
+         * @returns {boolean} whether this device's block holds it
+         */
+        adoptBuffer(buffer, block){
+            const existing = blockOf.get(buffer);
+            if (existing !== undefined)
+            {
+                return existing === block;
+            }
+            const owner = place();
+            if (owner === 0 || block === 0 || readWord(block + BUFFER.DEVICE) !== 0)
+            {
+                return false;
+            }
+            holding(()=>{
+                deps.writeMemory(block + BUFFER.BASE, dwordsBytes([buffer.base, buffer.length]));
+                deps.writeMemory(block + BUFFER.DEVICE, dwordBytes(owner));
+            });
+            blocks.set(block, { buffer, hostLocked: readWord(block + BUFFER.LOCKED) !== 0 });
+            blockOf.set(buffer, block);
+            return true;
         },
 
         /**
