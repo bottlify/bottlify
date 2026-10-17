@@ -331,6 +331,9 @@ const FILE_OBJECTS = new Set(['file', 'directory', 'pipe-read', 'pipe-write']);
  * @property {FileSystem} files
  * @property {(code: number) => void} setLastError
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {(record: { path: string, error: number, access: number, share: number,
+ *     disposition: number, flags: number }) => void} [openRefused]  told of every open
+ *     CreateFile or NtCreateFile refused, with the error and what was asked
  * @property {(handle: number, text: string) => void} writeConsole
  *           Where a write to a standard handle goes instead of the filesystem.
  * @property {{ open: (type: string, object: any) => number,
@@ -1565,7 +1568,22 @@ export function createFileFunctions(host){
      * @param {{ access: number, share: number, disposition: number, flags: number }} request
      * @returns {{ handle: number, existed: boolean } | { error: number, cannotDelete?: boolean }}
      */
-    const openPath = (path, { access, share, disposition, flags })=>{
+    const openPath = (path, request)=>{
+        const result = openPathOnce(path, request);
+        if ('error' in result)
+        {
+            host.openRefused?.({ path, error: result.error, ...request });
+        }
+        return result;
+    };
+    /**
+     * `openPath` without the account of what it refused.
+     *
+     * @param {string} path
+     * @param {{ access: number, share: number, disposition: number, flags: number }} request
+     * @returns {{ handle: number, existed: boolean } | { error: number, cannotDelete?: boolean }}
+     */
+    const openPathOnce = (path, { access, share, disposition, flags })=>{
         const mode = openModes[disposition >>> 0];
         if (!mode)
         {

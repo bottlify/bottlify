@@ -174,6 +174,9 @@ const EXCEPTION_NONCONTINUABLE = 1;
 /** A path as GetModuleFileNameA writes one: MAX_PATH characters and the terminator. */
 const MAX_PATH_BYTES = 261;
 
+/** How many refused file opens a report names, the latest. */
+const REFUSED_OPENS_KEPT = 32;
+
 /**
  * Every version of the D3DX 9 helper library, d3dx9_24 to d3dx9_43, bound to
  * one table: the versions' mathematics is the same, and a program imports the
@@ -728,6 +731,13 @@ export function createWin32Module(){
             const allocator = guestHeap.wrap();
             // Counted by the mapping calls as they go.
             const mappings = { views: 0, waited: 0, failed: 0 };
+            /**
+             * The last opens refused (`refusedOpens`).
+             *
+             * @type {{ path: string, error: number, access: number, share: number,
+             *     disposition: number }[]}
+             */
+            const refusedOpens = [];
             // The guest code the engine writes itself, on pages nothing else is
             // handed (`code-arena.js`).
             const placeCode = createCodeArena(bytes=>allocator.allocate(bytes));
@@ -1859,6 +1869,13 @@ export function createWin32Module(){
                     // one that knows about files answers for all of them.
                     ...createFileFunctions({
                         divergence: config?.divergence,
+                        openRefused: record=>{
+                            refusedOpens.push(record);
+                            if (refusedOpens.length > REFUSED_OPENS_KEPT)
+                            {
+                                refusedOpens.shift();
+                            }
+                        },
                         readMemory,
                         windowMemory: typeof memory.window === 'function'
                             ? (address, length)=>memory.window(address, length)
@@ -3552,6 +3569,14 @@ export function createWin32Module(){
                 setLastError: code=>setError(code),
                 /** Views of files: how many were mapped, waited for their bytes, or failed. */
                 mappings: ()=>mappings,
+                /**
+                 * The last files CreateFile and NtCreateFile would not open, each
+                 * with the error and what was asked: a program that goes silent or
+                 * blank where a file of its own failed to open says nothing else.
+                 */
+                refusedOpens: ()=>refusedOpens.map(({ path, error, access, share, disposition })=>
+                    `${path}: error ${error}, access 0x${(access >>> 0).toString(16)}, share `
+                    + `${share >>> 0}, disposition ${disposition >>> 0}`),
 
                 /**
                  * Which threads are parked on a completion port, and for how long.
@@ -3789,6 +3814,7 @@ export function createWin32Module(){
                     // leak -- it tells the program to stop keeping things.
                     heap: current ? current.heap().diagnostics() : null,
                     mappings: current ? current.mappings() : null,
+                    refusedOpens: current ? current.refusedOpens() : [],
                     windows: current ? current.windows() : [],
                     windowProcedures: current ? current.windowProcedures() : [],
                     exitCode: current ? current.exitCode() : null,
