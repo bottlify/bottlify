@@ -50,6 +50,7 @@ const PC_SCALAR = 0;
 const PC_VECTOR = 1;
 const PC_MATRIX_ROWS = 2;
 const PC_MATRIX_COLUMNS = 3;
+const PC_OBJECT = 4;
 const PC_STRUCT = 5;
 
 /**
@@ -411,7 +412,7 @@ export function SetTexture({ u32, setU32, callStd, host }, self, h, texture){
 
 /**
  * HRESULT SetValue(D3DXHANDLE hParameter, LPCVOID pData, UINT Bytes): a numeric
- * parameter's words, or a structure's, as given.
+ * parameter's words, a structure's, or a texture's pointers, as given.
  *
  * @guestCode stdcall
  * @param {Guest} guest @param {u32} self @param {u32} h @param {u32} data @param {u32} bytes
@@ -440,7 +441,11 @@ export function SetValue({ u32, setU32, callStd, host }, self, h, data, bytes){
     }
     const cls = u32(p + 4);
     const size = u32(p + 20);
-    if ((cls > PC_MATRIX_COLUMNS && cls !== PC_STRUCT) || size > bytes || (size & 3) !== 0)
+    // A texture's pointers are words as a number's are; a sampler or a string is the host's.
+    const type = u32(p);
+    if ((cls > PC_MATRIX_COLUMNS && cls !== PC_STRUCT
+        && (cls !== PC_OBJECT || type < PT_TEXTURE || type > PT_TEXTURECUBE))
+        || size > bytes || (size & 3) !== 0)
     {
         return host();
     }

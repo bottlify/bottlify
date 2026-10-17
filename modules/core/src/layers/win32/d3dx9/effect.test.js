@@ -1757,6 +1757,76 @@ test('the setters in the guest answer, write and date what the host\'s do: rando
     assert.ok(namedInGuest > 40, `${namedInGuest} calls by name answered in the guest`);
 });
 
+test('a parameter made after nine thousand others still has a record the guest\'s setters read',
+    async()=>{
+        // The Battlefield 2 demo made 1 394 effects and ran past the 8 192
+        // records the arena held: every parameter after them was set on the host.
+        const g = guest();
+        const fx = await g.effect('float big[9000]; float last; technique T { pass P { } }');
+        const effect = /** @type {any} */ (g.published.get(fx)).object;
+        const self = g.heap.allocate(8);
+        g.view.setUint32(self + 4, effect.guestState(), true);
+        const HOST = Symbol('host');
+        const helpers = { u32: g.u32, setU32: (/** @type {number} */ at, /** @type {number} */ v)=>
+            g.view.setUint32(at, v >>> 0, true), host: ()=>HOST, callStd: ()=>0 };
+        const last = await g.handle(fx, 'last');
+        const value = g.heap.allocate(4);
+        g.view.setFloat32(value, 2.5, true);
+        assert.equal(/** @type {any} */ (sources).SetFloat(helpers, self, last,
+            g.u32(value)), 0, 'set in the guest');
+        assert.equal(g.view.getFloat32(g.u32(last + HANDLE.DATA), true), 2.5);
+    });
+
+test('effects past what one arena of records holds each have a record the guest reads, in an'
+    + ' arena their block names', async()=>{
+    const g = guest();
+    const source = 'float big[3000]; float last; technique T { pass P { } }';
+    const effects = [await g.effect(source), await g.effect(source), await g.effect(source)];
+    /** @param {number} fx */
+    const blockOf = fx=>/** @type {any} */ (g.published.get(fx)).object.guestState();
+    const arenas = effects.map(fx=>g.u32(blockOf(fx) + EFFECT_BLOCK.ARENA));
+    assert.notEqual(arenas[2], arenas[0], 'the third in an arena of its own');
+    for (const fx of effects)
+    {
+        const block = blockOf(fx);
+        const last = await g.handle(fx, 'last');
+        const offset = (last - g.u32(block + EFFECT_BLOCK.ARENA)) >>> 0;
+        assert.ok(offset < g.u32(block + EFFECT_BLOCK.ARENA_BYTES) && offset % 32 === 0,
+            'its last parameter\'s record within the bounds its block names');
+    }
+});
+
+test('an arena of records goes back to the heap with the last effect that names it, not before',
+    async()=>{
+        const g = guest();
+        const source = 'float x; technique T { pass P { } }';
+        const one = await g.effect(source);
+        const two = await g.effect(source);
+        /** @param {number} fx */
+        const blockOf = fx=>/** @type {any} */ (g.published.get(fx)).object.guestState();
+        const arena = g.u32(blockOf(one) + EFFECT_BLOCK.ARENA);
+        assert.notEqual(arena, 0);
+        assert.equal(g.u32(blockOf(two) + EFFECT_BLOCK.ARENA), arena, 'two small ones share it');
+        /** Sets x in the guest's code, as the setter in the effect's slot. @param {number} fx */
+        const setInGuest = async fx=>{
+            const self = g.heap.allocate(8);
+            g.view.setUint32(self + 4, blockOf(fx), true);
+            const helpers = { u32: g.u32, setU32: (/** @type {number} */ at,
+                /** @type {number} */ v)=>g.view.setUint32(at, v >>> 0, true),
+            host: ()=>-1, callStd: ()=>0 };
+            return /** @type {any} */ (sources).SetFloat(helpers, self, await g.handle(fx, 'x'),
+                0x40200000);
+        };
+        assert.equal(await g.call(one, 'Release'), 0);
+        assert.ok(!g.freed.includes(arena), 'kept while the other names it');
+        assert.equal(await setInGuest(two), 0, 'and the other sets in the guest still');
+        assert.equal(await g.call(two, 'Release'), 0);
+        assert.ok(g.freed.includes(arena), 'given back with the last');
+        const three = await g.effect(source);
+        assert.notEqual(g.u32(blockOf(three) + EFFECT_BLOCK.ARENA), 0, 'a later effect has one');
+        assert.equal(await setInGuest(three), 0);
+    });
+
 test('SetTechnique and GetTechnique in the guest answer as the host\'s, and Begin and BeginPass'
     + ' follow the technique they set', async()=>{
     const g = guest();

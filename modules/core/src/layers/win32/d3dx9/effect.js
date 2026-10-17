@@ -96,7 +96,12 @@ export const FX = Object.freeze({ DONOTSAVESTATE: 1, DONOTSAVESHADERSTATE: 2,
 export const HANDLE = Object.freeze({ TYPE: 0, CLASS: 4, ROWS: 8, COLUMNS: 12, ELEMENTS: 16,
     BYTES: 20, DATA: 24, VERSION: 28, SIZE: 32 });
 const RETIRED = 0xffffffff;
-/** How many records the arena holds; a parameter past them has a handle the host alone reads. */
+/**
+ * How many records an arena holds, or more for an effect that needs more: each effect's
+ * records are in one arena, whose bounds its block names. One arena for every effect, of
+ * 8 192, ran out under the Battlefield 2 demo's 1 394 effects, and every parameter after
+ * it was set on the host.
+ */
 const ARENA_HANDLES = 8192;
 /**
  * The effect's block, its interface's state word: whether a parameter block
@@ -382,6 +387,11 @@ const COLOR_SCALE = 255;
  */
 
 /**
+ * @typedef {{ at: number, size: number, used: number, retired: number[], effects: number }} Arena
+ *     Records for handles: where, how many, how many handed out, those let go of, and how
+ *     many live effects name it in their blocks -- none, and it goes back to the heap.
+ */
+/**
  * @typedef {Object} EffectState
  * @property {'effect' | 'compiler'} kind
  * @property {EffectModel} model
@@ -411,6 +421,7 @@ const COLOR_SCALE = 255;
  * @property {number[]} owned   Heap blocks that go with the effect.
  * @property {Set<string>} skip   Constants Ex was told not to set.
  * @property {number} block   Its block in guest memory (`EFFECT_BLOCK`), or 0.
+ * @property {Arena | null} [arena]  Where its handles' records are, the bounds its block names.
  * @property {number} [commitScratch]   The block its commits in the guest gather constants in.
  * @property {Map<StateModel, number>} [cells]  Each state expression's cell (`CELL`) a table
  *     sets the state from.
@@ -436,30 +447,67 @@ export function createEffects(host, helpers, options = {}){
      * guest memory, which the setters in the guest advance too.
      */
     let clockAt = 0;
-    /** The arena of handle records, and the records let go of. */
-    let arenaAt = 0;
-    let arenaUsed = 0;
-    /** @type {number[]} */
-    const retired = [];
-    /** A record for a handle, or 0 when the arena has none left. */
-    const handleRecord = ()=>{
-        if (arenaAt === 0)
+    /** The arenas of handle records. @type {Arena[]} */
+    const arenas = [];
+    /** @param {Arena} arena */
+    const roomIn = arena=>arena.retired.length + arena.size - arena.used;
+    /**
+     * An arena with room for `needed` records, one already made or a new one
+     * of at least `ARENA_HANDLES`; null where there is no memory for one.
+     *
+     * @param {number} needed @returns {Arena | null}
+     */
+    const arenaFor = needed=>{
+        const found = arenas.find(arena=>roomIn(arena) >= needed);
+        if (found)
         {
-            arenaAt = heap().allocate(ARENA_HANDLES * HANDLE.SIZE);
-            if (arenaAt === 0)
-            {
-                return 0;
-            }
+            return found;
         }
-        if (retired.length > 0)
+        const size = Math.max(ARENA_HANDLES, needed);
+        const at = host.heap ? heap().allocate(size * HANDLE.SIZE) : 0;
+        if (at === 0)
         {
-            return /** @type {number} */ (retired.pop());
+            return null;
         }
-        return arenaUsed < ARENA_HANDLES ? arenaAt + HANDLE.SIZE * arenaUsed++ : 0;
+        const made = { at, size, used: 0, retired: [], effects: 0 };
+        arenas.push(made);
+        return made;
+    };
+    /** A record for one of an effect's handles, from its arena, or 0. @param {EffectState} effect */
+    const handleRecord = effect=>{
+        const arena = effect.arena;
+        if (!arena)
+        {
+            return 0;
+        }
+        if (arena.retired.length > 0)
+        {
+            return /** @type {number} */ (arena.retired.pop());
+        }
+        return arena.used < arena.size ? arena.at + HANDLE.SIZE * arena.used++ : 0;
     };
     /** @param {number} handle */
-    const inArena = handle=>arenaAt !== 0 && handle >= arenaAt
-        && handle < arenaAt + ARENA_HANDLES * HANDLE.SIZE;
+    const arenaOf = handle=>arenas.find(arena=>handle >= arena.at
+        && handle < arena.at + arena.size * HANDLE.SIZE);
+    /** @param {number} handle */
+    const inArena = handle=>arenaOf(handle) !== undefined;
+    /**
+     * How many records an effect's handles take: its parameters, their
+     * members and annotations, and its techniques' and passes' annotations.
+     *
+     * @param {EffectModel} model
+     */
+    const recordsOf = model=>{
+        /** @param {any} p @returns {number} */
+        const one = p=>1 + (p.members ?? []).reduce((/** @type {number} */ sum,
+            /** @type {any} */ m)=>sum + one(m), 0) + (p.annotations ?? []).reduce(
+            (/** @type {number} */ sum, /** @type {any} */ a)=>sum + one(a), 0);
+        /** @param {any[]} list */
+        const all = list=>(list ?? []).reduce((sum, p)=>sum + one(p), 0);
+        return all(model.parameters) + (model.techniques ?? []).reduce((sum, t)=>sum
+            + all(t.annotations) + (t.passes ?? []).reduce((within, pass)=>within
+                + all(pass.annotations), 0), 0);
+    };
     /** A handle's record written from its parameter, as it is now. @param {Param} p */
     const recordHandle = p=>{
         if (inArena(p.handle))
@@ -553,7 +601,7 @@ export function createEffects(host, helpers, options = {}){
     const makeParam = (effect, model, fullName, top, store, offset)=>{
         const [named, nameAt, semanticAt] = strings(effect.owned,
             [fullName ?? model.name, model.name, model.semantic]);
-        const handle = handleRecord() || named;
+        const handle = handleRecord(effect) || named;
         /** @type {Param} */
         const param = { model, fullName, handle, nameAt, semanticAt, members: [], annotations: [],
             top, store, offset, flags: model.flags, effect };
@@ -3403,21 +3451,74 @@ export function createEffects(host, helpers, options = {}){
         methods: inGuest([...baseMethods(), ...effectMethods]),
     };
 
+    /** The setters and handles already said (`whyHost`), each once. @type {Set<string>} */
+    const toldWhy = new Set();
+    /**
+     * Why the guest's setter left a call to the host, as far as the effect
+     * says it: the first that holds of its own cases -- no block, a parameter
+     * block being recorded, a handle it cannot read -- or else the parameter's
+     * type and shape, which the setter's own checks did not take.
+     *
+     * @param {EffectState} effect @param {number} h
+     */
+    const whyHost = (effect, h)=>{
+        const block = effect.block ?? 0;
+        if (block === 0)
+        {
+            return 'the effect has no block in guest memory';
+        }
+        if (u32(block + EFFECT_BLOCK.RECORDING) !== 0)
+        {
+            return 'a parameter block is being recorded';
+        }
+        const offset = (h - u32(block + EFFECT_BLOCK.ARENA)) >>> 0;
+        const recorded = offset < u32(block + EFFECT_BLOCK.ARENA_BYTES) && (offset & 31) === 0;
+        if (!recorded && handles.get(h))
+        {
+            return 'a handle with no record the guest reads: the arena of records is full';
+        }
+        const p = paramOf(effect, h);
+        if (!p)
+        {
+            return h === 0 ? 'a null handle' : 'a handle that names no parameter';
+        }
+        if (!recorded)
+        {
+            return `the name '${p.model.name}' for a handle, not in the guest's table of names`;
+        }
+        return `'${p.model.name}', type ${p.model.type}, class ${p.model.cls},`
+            + ` ${p.model.rows}x${p.model.columns}, ${p.model.elements} elements`;
+    };
+
     /**
      * The setters with code in the guest given it: each slot holds the
      * compiled setter, whose cases it does not take jump to the method's own
-     * trap, the host's setter. Placed once per slot.
+     * trap, the host's setter. Placed once per slot. A setter left to the
+     * host says why, once each (`whyHost`).
      *
      * @param {ComMethod[]} methods @returns {ComMethod[]}
      */
     function inGuest(methods){
-        return methods.map(m=>{
+        return methods.map(given=>{
             const compiled = /** @type {Record<string, any>} */ ({ ...SETTERS_IN_GUEST,
-                ...COMMIT_IN_GUEST })[m.name];
+                ...COMMIT_IN_GUEST })[given.name];
             if (!compiled || !host.heap)
             {
-                return m;
+                return given;
             }
+            const invoke = given.invoke;
+            const m = given.name in SETTERS_IN_GUEST && invoke
+                ? /** @type {ComMethod} */ ({ ...given, invoke: (object, args)=>{
+                    const h = args[0] >>> 0;
+                    if (!toldWhy.has(`${given.name}:${h}`))
+                    {
+                        toldWhy.add(`${given.name}:${h}`);
+                        host.divergence?.(`ID3DXEffect::${given.name}`,
+                            `set on the host: ${whyHost(object.state, h)}`);
+                    }
+                    return invoke(object, args);
+                } })
+                : given;
             /** @type {Map<number, number>} */
             const placed = new Map();
             return /** @type {ComMethod} */ (/** @type {unknown} */ ({ ...m,
@@ -3626,6 +3727,13 @@ export function createEffects(host, helpers, options = {}){
                     effect.shaders.push(await makeShader(effect, shader, how.thread));
                 }
             }
+            // From here to its techniques' annotations nothing waits: no other
+            // effect takes records from this arena between its choice and its use.
+            effect.arena = arenaFor(recordsOf(model));
+            if (effect.arena)
+            {
+                effect.arena.effects++;
+            }
             for (const p of model.parameters)
             {
                 const top = makeParam(effect, p, p.name, null, newStore(p.bytes), 0);
@@ -3644,7 +3752,8 @@ export function createEffects(host, helpers, options = {}){
             {
                 effect.owned.push(effect.block);
                 tick();
-                putU32s(effect.block, [0, arenaAt, arenaAt === 0 ? 0 : ARENA_HANDLES * HANDLE.SIZE,
+                const arena = effect.arena;
+                putU32s(effect.block, [0, arena?.at ?? 0, arena ? arena.size * HANDLE.SIZE : 0,
                     clockAt, 0, 0, 0, placeWalk(), 0, 0, 0, 0, nameTable(effect), placeResolve()]);
             }
             effect.techniques = model.techniques.map(t=>{
@@ -3835,10 +3944,11 @@ export function createEffects(host, helpers, options = {}){
         /** @param {Param} p */
         const forget = p=>{
             handles.delete(p.handle);
-            if (inArena(p.handle))
+            const arena = arenaOf(p.handle);
+            if (arena)
             {
                 putU32(p.handle + HANDLE.TYPE, RETIRED);
-                retired.push(p.handle);
+                arena.retired.push(p.handle);
             }
             p.members.forEach(forget);
             forgetAnnotations(p.annotations);
@@ -3881,6 +3991,15 @@ export function createEffects(host, helpers, options = {}){
         effect.pool = null;
         effect.owned.forEach(at=>heap().free(at));
         effect.owned = [];
+        // An arena no live effect names goes back to the heap: one a block
+        // still named would let the guest read whatever is made there next.
+        const arena = effect.arena;
+        effect.arena = null;
+        if (arena && --arena.effects === 0)
+        {
+            arenas.splice(arenas.indexOf(arena), 1);
+            heap().free(arena.at);
+        }
     };
 
     /**
