@@ -101,6 +101,8 @@ function pair(version, label){
     const threw = new Set();
     let traps = 0;
     let saved = 0;
+    /** The calls the guest code answered with no trap at all, by method. @type {Map<string, number>} */
+    const inGuest = new Map();
     /** @param {string} shown */
     const where = shown=>`${label}, call ${transcript.length}: ${shown}\n      `
         + transcript.slice(-16).join('\n      ');
@@ -133,6 +135,10 @@ function pair(version, label){
         }
         traps += expected.traps.length;
         saved += expected.traps.length - answered.traps.length;
+        if (answered.traps.length === 0 && expected.traps.length > 0)
+        {
+            inGuest.set(call.method, (inGuest.get(call.method) ?? 0) + 1);
+        }
         const endedTrap = trap.ended();
         const endedGuest = guest.ended();
         const early = endedGuest.filter(key=>!endedTrap.includes(key));
@@ -160,7 +166,7 @@ function pair(version, label){
         transcript,
         threw,
         /** The traps the trap machine took, and how many of them the guest code answered. */
-        counts: ()=>({ traps, saved }),
+        counts: ()=>({ traps, saved, inGuest }),
         /** With nothing more to come, the host has let go of the same objects on both. */
         finish(){
             const endedTrap = trap.ended();
@@ -573,6 +579,8 @@ function gate(version, programs, steps){
     const threw = new Set();
     let traps = 0;
     let saved = 0;
+    /** @type {Map<string, number>} */
+    const inGuest = new Map();
     for (let seed = 1; seed <= programs; seed++)
     {
         const result = compare(version, seed, steps);
@@ -580,9 +588,17 @@ function gate(version, programs, steps){
         result.threw.forEach(what=>threw.add(what));
         traps += result.counts().traps;
         saved += result.counts().saved;
+        result.counts().inGuest.forEach((count, method)=>inGuest.set(method,
+            (inGuest.get(method) ?? 0) + count));
     }
     assert.ok(saved > traps / 10, `the guest code answered ${saved} of ${traps} calls the`
         + ' trap machine took to the host, so it was exercised');
+    // Each getter that hands out a reference in the guest did so, on the
+    // programs above: a path of its own the comparison has seen.
+    for (const method of ['GetRenderTarget', 'GetDepthStencilSurface'])
+    {
+        assert.ok((inGuest.get(method) ?? 0) > 0, `${method} was answered in the guest`);
+    }
     return { differences, threw: [...threw] };
 }
 

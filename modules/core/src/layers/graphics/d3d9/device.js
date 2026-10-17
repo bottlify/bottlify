@@ -2412,6 +2412,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 cooperative: device.TestCooperativeLevel() === D3D_OK ? 0 : 1,
                 elsewhere: services.renderedElsewhere === true || services.drawsNothing === true
                     ? 1 : 0,
+                targets: [target ?? null, depthStencil ?? null],
             };
         },
 

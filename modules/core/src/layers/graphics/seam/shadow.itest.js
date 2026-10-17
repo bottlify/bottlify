@@ -22,8 +22,8 @@ import { createCorkHost } from '../../cpu/internal/cork-host.js';
 import { runToHalt } from '../../cpu/internal/halt.fixture.js';
 import * as cork from '../../../../../cork/src/index.js';
 import {
-    BUFFER, FLAG_SLOW_PATH, SHADOW, TEXTURE, getRenderStateCode, getSurfaceLevelCode,
-    getTextureStageStateCode, getTransformCode, lockCode, unlockCode,
+    BUFFER, FLAG_SLOW_PATH, HELD_GUEST, SHADOW, TEXTURE, getRenderStateCode, getSurfaceLevelCode,
+    getTargetCode, getTextureStageStateCode, getTransformCode, lockCode, unlockCode,
 } from './shadow.js';
 import { D3DERR_INVALIDCALL, D3DTSS } from '../d3d8/constants.js';
 
@@ -338,3 +338,95 @@ async function routines(){
     // The getters wrote nothing the host reads: the counts are the buffers'.
     assert.deepEqual([read(BLOCK + SHADOW.LOCK_CALLS), read(BLOCK + SHADOW.UNLOCK_CALLS)], [3, 2]);
 }
+
+test('the target getters hand out the block\'s pair with the reference it owes, and leave a'
+    + ' count at zero, another index, a null pointer and a taken lock to the trap', ()=>{
+    const machine = processor();
+    const { host } = machine;
+    /** Direct3D 9's GetRenderTarget, its GetDepthStencilSurface, and Direct3D 8's GetRenderTarget. */
+    const NINE = 0x30000;
+    const DEPTH = 0x30200;
+    const EIGHT = 0x30400;
+    const TRAPPED = 0x30600;
+    const CELLS = 0x31000;
+    const TARGET = 0x4711;
+    const SURFACE = 0x4722;
+    const NOTFOUND = 0x88760866;
+    host.writePhysical(NINE, getTargetCode(NINE, TRAPPED, { depth: false, indexed: true }));
+    host.writePhysical(DEPTH, getTargetCode(DEPTH, TRAPPED, { depth: true, indexed: false }));
+    host.writePhysical(EIGHT, getTargetCode(EIGHT, TRAPPED, { depth: false, indexed: false }));
+    host.writePhysical(TRAPPED, new Uint8Array([0xf4]));
+    host.writePhysical(OBJECT + 4, new Uint8Array(u32(BLOCK)));
+    host.writePhysical(BLOCK, new Uint8Array(SHADOW.SIZE));
+    /** @param {number} at @param {number} value */
+    const write = (at, value)=>host.writePhysical(at, new Uint8Array(u32(value)));
+    /** @param {number} at */
+    const read = at=>{
+        const bytes = host.readPhysical(at, 4);
+        return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
+    };
+    /**
+     * @param {number[]} pairs  pointer and count word, the target's and the depth surface's
+     * @param {number} valid
+     */
+    const mirror = (pairs, valid)=>{
+        pairs.forEach((value, index)=>write(BLOCK + SHADOW.TARGETS + index * 4, value));
+        write(BLOCK + SHADOW.TARGETS_VALID, valid);
+    };
+    /**
+     * Calls `routine` on the device with `args` from a fresh stack: 'trap',
+     * or what it answered, the stack checked to be where it was.
+     *
+     * @param {number} routine @param {number[]} args
+     */
+    const call = (routine, args)=>{
+        const code = bytesOf({ target: routine, object: OBJECT, args }, PROGRAM);
+        host.writePhysical(PROGRAM, new Uint8Array(code));
+        machine.run(PROGRAM);
+        if (machine.eip() === TRAPPED + 1)
+        {
+            return 'trap';
+        }
+        assert.equal(machine.eip(), PROGRAM + code.length, 'halted after its call');
+        assert.equal(machine.esp(), STACK, 'the routine popped its arguments');
+        assert.equal(read(BLOCK + SHADOW.HELD), 0, 'and let the device\'s lock go');
+        return machine.eax();
+    };
+
+    mirror([TARGET, CELLS, SURFACE, CELLS + 4], 3);
+    write(CELLS, 1);
+    write(CELLS + 4, 2);
+    write(OUT, 0);
+    assert.equal(call(NINE, [0, OUT]), 0);
+    assert.equal(read(OUT), TARGET, 'the target\'s pointer');
+    assert.equal(read(CELLS), 2, 'and its reference taken');
+    assert.equal(call(EIGHT, [OUT]), 0, 'Direct3D 8\'s, with no index');
+    assert.equal(read(CELLS), 3);
+    assert.equal(call(DEPTH, [OUT]), 0);
+    assert.equal(read(OUT), SURFACE);
+    assert.equal(read(CELLS + 4), 3);
+
+    assert.equal(call(NINE, [1, OUT]), 'trap', 'another index is the host\'s');
+    assert.equal(call(NINE, [0, 0]), 'trap', 'and a null pointer');
+    assert.equal(call(DEPTH, [0]), 'trap');
+    write(CELLS, 0);
+    assert.equal(call(NINE, [0, OUT]), 'trap', 'a count at zero: a first reference is the host\'s');
+    assert.equal(read(CELLS), 0);
+    assert.equal(read(BLOCK + SHADOW.HELD), 0, 'the lock let go on the way');
+    write(CELLS, 1);
+    mirror([TARGET, 0, SURFACE, CELLS + 4], 3);
+    assert.equal(call(NINE, [0, OUT]), 'trap', 'a count the host keeps');
+    mirror([TARGET, CELLS, SURFACE, CELLS + 4], 2);
+    assert.equal(call(NINE, [0, OUT]), 'trap', 'a target the host has not said is the device\'s');
+    assert.equal(call(DEPTH, [OUT]), 0, 'while the depth pair is');
+    write(BLOCK + SHADOW.HELD, HELD_GUEST);
+    assert.equal(call(DEPTH, [OUT]), 'trap', 'the device\'s lock held elsewhere');
+    write(BLOCK + SHADOW.HELD, 0);
+
+    mirror([TARGET, CELLS, 0, 0], 3);
+    write(OUT, 0xdeadbeef);
+    assert.equal(call(DEPTH, [OUT]), NOTFOUND, 'no depth surface');
+    assert.equal(read(OUT), 0, 'and the pointer cleared, as the host clears it');
+    mirror([0, 0, 0, 0], 3);
+    assert.equal(call(NINE, [0, OUT]), 'trap', 'no target is the host\'s to answer');
+});

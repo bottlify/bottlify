@@ -74,7 +74,7 @@ import { D3D_PRIVATE_DATA, createPrivateData } from './privatedata.js';
 import {
     DRAWABLE_MIRRORS, RENDER_STATE_MIRROR, SAMPLER_STATE_MIRROR, TRANSFORM_MIRROR,
     DEPTH_STENCIL_MIRROR, RENDER_TARGET_MIRROR, VIEWPORT_GUARD_9, VIEWPORT_MIRROR, commandCode,
-    STRETCH_GUARD, compiledAt, createShadow, getRenderStateCode,
+    STRETCH_GUARD, compiledAt, createShadow, getRenderStateCode, getTargetCode,
     getSamplerStateCode, getSurfaceDescCode, getSurfaceLevelCode, getTextureStageStateCode,
     getTransformCode, getViewportCode, lockCode, settledAfter, stageStateMirror,
     unlockCode, HOST_MIRRORS, POLLS_BETWEEN, QUERY, appendCommand, guestWords,
@@ -210,7 +210,7 @@ export function createDirect3D9Seam(
 {
     /** The getters a device answers in the guest, as against the calls its ring carries. */
     const GUEST_GETTERS = new Set(['GetRenderState', 'GetTransform', 'GetTextureStageState',
-        'GetViewport', 'GetSamplerState']);
+        'GetViewport', 'GetSamplerState', 'GetRenderTarget', 'GetDepthStencilSurface']);
     /**
      * The guest routines a table offers, less those `traps` keeps as traps: by
      * method name, or by the group a routine belongs to -- `getters`, `ring`,
@@ -2726,6 +2726,10 @@ export function createDirect3D9Seam(
                 STAGE_STATE_TYPES_9)),
             GetViewport: ({ trap })=>placeCode(at=>getViewportCode(at, trap)),
             GetSamplerState: ({ trap })=>placeCode(at=>getSamplerStateCode(at, trap)),
+            GetRenderTarget: ({ trap })=>placeCode(at=>getTargetCode(at, trap,
+                { depth: false, indexed: true })),
+            GetDepthStencilSurface: ({ trap })=>placeCode(at=>getTargetCode(at, trap,
+                { depth: true, indexed: false })),
             TestCooperativeLevel: ({ trap })=>placeCode(at=>compiledAt(
                 IN_GUEST.TestCooperativeLevel, at, trap)),
             ...Object.fromEntries(Object.entries(COMMANDS).map(([name, shape])=>[name,
@@ -3216,6 +3220,13 @@ export function createDirect3D9Seam(
                 device: held.device,
                 divergence,
                 phases,
+                // What the guest's GetRenderTarget and GetDepthStencilSurface
+                // hand out: a surface the program was handed already, whose
+                // pointer and count word are there to give.
+                handedOut: surface=>((publisher.adapterFor(surface)?.pointers.size ?? 0) === 0
+                    ? [0, 0]
+                    : [publisher.publish(surface, surfaceInterfaces, IID_IDirect3DSurface9),
+                        publisher.countCell(surface)]),
                 // The buffers settled and the ring played as one pause: a
                 // recording compares a dynamic buffer once in it.
                 still: work=>{

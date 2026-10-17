@@ -192,7 +192,17 @@ export const SHADOW = {
      */
     SHADERS: 5424 + 68,
     SHADERS_VALID: 5424 + 76,
-    SIZE: 5424 + 80,
+    /**
+     * The render target and the depth surface as GetRenderTarget and
+     * GetDepthStencilSurface answer them: each a pair of the pointer the
+     * program was handed for it and the word its count is kept in. Written by
+     * the host after each of its entries; a bit of `TARGETS_VALID` says which
+     * pair is the device's -- a target set in the ring clears its own, and a
+     * depth pair of zeros with its bit set is no depth surface.
+     */
+    TARGETS: 5424 + 80,
+    TARGETS_VALID: 5424 + 96,
+    SIZE: 5424 + 100,
 };
 
 /** Byte offsets within a query's block. */
@@ -1379,6 +1389,125 @@ export function getShaderCode(at, trap, which){
     ]);
 }
 
+/** D3DERR_NOTFOUND: no depth surface is set. */
+const D3DERR_NOTFOUND = 0x88760866;
+
+/**
+ * HRESULT GetRenderTarget(this, [DWORD index,] IDirect3DSurface **out) or
+ * GetDepthStencilSurface(this, IDirect3DSurface **out), as guest code: the
+ * pointer the program was handed for the surface, out of the device's block
+ * (`SHADOW.TARGETS`) once the host has said the pair there is the device's,
+ * and the reference the call owes taken in the word the surface counts in. A
+ * count at zero -- the step the host takes, a first reference -- a null
+ * out-pointer, an index but the first and a pair the host has not written go
+ * to the host. A depth pair of zeros is no depth surface: the out-pointer is
+ * cleared, as the host clears it, and the answer is D3DERR_NOTFOUND.
+ *
+ *     (prologue)
+ *     [cmp dword [esp+8], 0       ; Direct3D 9's index
+ *      jne slow]
+ *     mov edx, [esp+out]
+ *     test edx, edx
+ *     jz slow
+ *     (take the device's lock through ECX, or slow)
+ *     test dword [ecx+TARGETS_VALID], bit
+ *     jz held
+ *     push ebx
+ *     mov ebx, [ecx + pair + 4]   ; the count's word
+ *     mov eax, [ecx + pair]       ; the pointer
+ *     test eax, eax
+ *     jz none
+ *     test ebx, ebx
+ *     jz busy
+ *   retry:
+ *     mov eax, [ebx]
+ *     test eax, eax
+ *     jz busy                     ; at zero: the host's
+ *     lea edx, [eax+1]
+ *     lock cmpxchg [ebx], edx
+ *     jne retry
+ *     mov eax, [ecx + pair]
+ *     pop ebx
+ *     mov dword [ecx+HELD], 0     ; let go before the program's pointer
+ *     mov edx, [esp+out]
+ *     mov [edx], eax
+ *     xor eax, eax                ; D3D_OK
+ *     ret n
+ *   none:                         ; the depth pair only; a target's is the host's
+ *     pop ebx
+ *     mov dword [ecx+HELD], 0
+ *     mov edx, [esp+out]
+ *     mov dword [edx], 0
+ *     mov eax, D3DERR_NOTFOUND
+ *     ret n
+ *   busy:
+ *     pop ebx
+ *   held:
+ *     mov dword [ecx+HELD], 0
+ *     jmp slow
+ *
+ * @param {number} at @param {number} trap
+ * @param {{ depth: boolean, indexed: boolean }} which  the depth surface or the
+ *     target; whether the call names the target by index (Direct3D 9's)
+ * @returns {Uint8Array}
+ */
+export function getTargetCode(at, trap, { depth, indexed }){
+    const out = indexed ? 0x0c : 0x08;
+    const popped = indexed ? 12 : 8;
+    const pair = SHADOW.TARGETS + (depth ? 8 : 0);
+    return routine(at, trap, [
+        ...prologue('early'),
+        { jcc: 0xeb, to: 'body' },                               // jmp body
+        { label: 'early' },
+        { jcc: 0xeb, to: 'slow', near: true },                   // jmp slow
+        { label: 'body' },
+        ...(indexed ? [
+            [0x83, 0x7c, 0x24, 0x08, 0x00],                      // cmp dword [esp+8], 0
+            { jcc: 0x75, to: 'slow', near: true },               // jne slow
+        ] : []),
+        [0x8b, 0x54, 0x24, out],                                 // mov edx, [esp+out]
+        [0x85, 0xd2],                                            // test edx, edx
+        { jcc: 0x74, to: 'slow', near: true },                   // jz slow
+        ...takeHeld(ECX, 'slow'),
+        [0xf7, 0x81, ...dword(SHADOW.TARGETS_VALID), ...dword(depth ? 2 : 1)], // test [ecx+d], bit
+        { jcc: 0x74, to: 'held', near: true },                   // jz held
+        [0x53],                                                  // push ebx
+        [0x8b, 0x99, ...dword(pair + 4)],                        // mov ebx, [ecx+disp]
+        [0x8b, 0x81, ...dword(pair)],                            // mov eax, [ecx+disp]
+        [0x85, 0xc0],                                            // test eax, eax
+        { jcc: 0x74, to: depth ? 'none' : 'busy', near: true },  // jz none
+        [0x85, 0xdb],                                            // test ebx, ebx
+        { jcc: 0x74, to: 'busy', near: true },                   // jz busy
+        { label: 'retry' },
+        [0x8b, 0x03],                                            // mov eax, [ebx]
+        [0x85, 0xc0],                                            // test eax, eax
+        { jcc: 0x74, to: 'busy', near: true },                   // jz busy
+        [0x8d, 0x50, 0x01],                                      // lea edx, [eax+1]
+        [0xf0, 0x0f, 0xb1, 0x13],                                // lock cmpxchg [ebx], edx
+        { jcc: 0x75, to: 'retry' },                              // jne retry
+        [0x8b, 0x81, ...dword(pair)],                            // mov eax, [ecx+disp]
+        [0x5b],                                                  // pop ebx
+        letHeldGo(ECX),                                          // mov dword [ecx+HELD], 0
+        [0x8b, 0x54, 0x24, out],                                 // mov edx, [esp+out]
+        [0x89, 0x02],                                            // mov [edx], eax
+        [0x31, 0xc0],                                            // xor eax, eax
+        [0xc2, popped, 0x00],                                    // ret n
+        ...(depth ? [
+            { label: 'none' },
+            [0x5b],                                              // pop ebx
+            letHeldGo(ECX),                                      // mov dword [ecx+HELD], 0
+            [0x8b, 0x54, 0x24, out],                             // mov edx, [esp+out]
+            [0xc7, 0x02, ...dword(0)],                           // mov dword [edx], 0
+            [0xb8, ...dword(D3DERR_NOTFOUND)],                   // mov eax, D3DERR_NOTFOUND
+            [0xc2, popped, 0x00],                                // ret n
+        ] : []),
+        { label: 'busy' },
+        [0x5b],                                                  // pop ebx
+        { label: 'held' },
+        letHeldGo(ECX),                                          // mov dword [ecx+HELD], 0
+    ]);
+}
+
 /**
  * HRESULT GetDesc(this, D3DSURFACE_DESC *out), as guest code for a surface:
  * the description out of the surface's block. A null pointer is the host's.
@@ -2186,10 +2315,13 @@ export const VIEWPORT_MIRROR = Object.freeze([
  * target with a block: the viewport a new target brings -- all of it, depths
  * 0 and 1 -- and the target's size, from the surface's description. The
  * surface is the argument at `[esp+at]`: Direct3D 9's second, 8's first.
+ * The target GetRenderTarget answers with is the host's to say again: the
+ * routine knows the pointer but not the word the surface counts in.
  *
  * @param {number} at
  */
 export const renderTargetMirror = at=>Object.freeze([
+    [0x83, 0xa1, ...dword(SHADOW.TARGETS_VALID), 0xfe],          // and dword [ecx+disp], ~1
     [0x8b, 0x44, 0x24, at],                                      // mov eax, [esp+at]: the surface
     [0x8b, 0x40, 0x04],                                          // mov eax, [eax+4]: its block
     [0x8b, 0x90, ...dword(SURFACE.DESC + 24)],                   // mov edx, [eax+Width]
@@ -2297,12 +2429,14 @@ export const COPY_GUARD_8 = Object.freeze([
  * The same for a depth surface set -- Direct3D 9's SetDepthStencilSurface,
  * 8's SetRenderTarget -- after its checks have found the surface a depth
  * surface with a block, or none: whether a depth surface is set and whether
- * it holds a stencil, which Clear's checks read. The surface is the argument
- * at `[esp+at]`.
+ * it holds a stencil, which Clear's checks read; and that the surface
+ * GetDepthStencilSurface answers with is the host's to say again. The surface
+ * is the argument at `[esp+at]`.
  *
  * @param {number} at
  */
 export const depthStencilMirror = at=>Object.freeze([
+    [0x83, 0xa1, ...dword(SHADOW.TARGETS_VALID), 0xfd],          // and dword [ecx+disp], ~2
     unmarkDrawable(DRAW.DEPTH | DRAW.STENCIL),
     [0x8b, 0x44, 0x24, at],                                      // mov eax, [esp+at]: the surface
     [0x85, 0xc0],                                                // test eax, eax
@@ -2555,6 +2689,9 @@ export function settledAfter(shadow, call){
  *     (`SHADOW.STATE_BLOCKS`)
  * @property {readonly [number, number]} [shaders]  the vertex and pixel shader as
  *     Direct3D 8's getters answer them (`SHADOW.SHADERS`)
+ * @property {readonly [any, any]} [targets]  the render target and the depth
+ *     surface, null for none, as GetRenderTarget and GetDepthStencilSurface
+ *     answer them (`SHADOW.TARGETS`)
  */
 
 /**
@@ -2577,6 +2714,10 @@ export function settledAfter(shadow, call){
  *     A dword swapped only if it holds `expected`, indivisible against the
  *     guest's threads on the process's other executors; answers what it held.
  * @property {ShadowDevice} device
+ * @property {(surface: any) => number[]} [handedOut]  the pointer the program was
+ *     handed for a surface and the word its count is kept in, zeros for one it
+ *     was not handed or whose count the host keeps: the targets the guest's
+ *     getters answer with (`SHADOW.TARGETS`)
  * @property {(api: string, detail: string) => void} [divergence]
  * @property {string} [name]  The device interface a refusal names.
  * @property {ShadowCommands} [commands]  The methods the device's command
@@ -2964,6 +3105,20 @@ export function createShadow(deps){
         {
             deps.writeMemory(address + SHADOW.SHADERS,
                 dwordsBytes([state.shaders[0] >>> 0, state.shaders[1] >>> 0, 1]));
+        }
+        if (state.targets && deps.handedOut)
+        {
+            /** A surface's pair, or null for one the guest cannot hand out. @param {any} surface */
+            const pairOf = surface=>{
+                const [pointer, cell] = /** @type {(surface: any) => number[]} */ (deps.handedOut)(
+                    surface);
+                return pointer !== 0 && cell !== 0 ? [pointer >>> 0, cell >>> 0] : null;
+            };
+            const target = state.targets[0] ? pairOf(state.targets[0]) : null;
+            // No depth surface is an answer the guest gives too.
+            const depth = state.targets[1] ? pairOf(state.targets[1]) : [0, 0];
+            deps.writeMemory(address + SHADOW.TARGETS, dwordsBytes([...target ?? [0, 0],
+                ...depth ?? [0, 0], (target ? 1 : 0) | (depth ? 2 : 0)]));
         }
     };
 
@@ -3889,6 +4044,7 @@ export const HOST_MIRRORS = Object.freeze({
         m.setU32(block + SHADOW.VIEWPORT + 4, 0);
         m.setU32(block + SHADOW.VIEWPORT + 16, 0);
         m.setU32(block + SHADOW.VIEWPORT + 20, 0x3f800000);
+        m.setU32(block + SHADOW.TARGETS_VALID, m.u32(block + SHADOW.TARGETS_VALID) & ~1);
         return true;
     },
     /** @type {HostMirror} */
@@ -3916,6 +4072,7 @@ export const HOST_MIRRORS = Object.freeze({
             : DRAW.DEPTH | (m.u32(m.u32(surface + 4) + SURFACE.DESC) === D3DFMT_D24S8
                 ? DRAW.STENCIL : 0);
         drawable(m, block, DRAW.DEPTH | DRAW.STENCIL, depth);
+        m.setU32(block + SHADOW.TARGETS_VALID, m.u32(block + SHADOW.TARGETS_VALID) & ~2);
         return true;
     },
     /** Direct3D 8's CopyRects, as `COPY_GUARD_8` takes it. @type {HostMirror} */

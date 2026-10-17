@@ -67,7 +67,7 @@ import {
     getRenderStateCode, getSurfaceDescCode, getSurfaceLevelCode, getTextureStageStateCode,
     getTransformCode,
     getViewportCode, lockCode, stageStateMirror, unlockCode, HOST_MIRRORS, appendCommand,
-    getShaderCode, shaderMirror,
+    getShaderCode, getTargetCode, shaderMirror,
     guestWords,
 } from './shadow.js';
 import { COMPILED as IN_GUEST } from './inguest.x86.js';
@@ -322,7 +322,8 @@ export function createDirect3D8Seam(
 {
     /** The getters a device answers in the guest, as against the calls its ring carries. */
     const GUEST_GETTERS = new Set(['GetRenderState', 'GetTransform', 'GetTextureStageState',
-        'GetViewport', 'GetSamplerState', 'GetVertexShader', 'GetPixelShader']);
+        'GetViewport', 'GetSamplerState', 'GetVertexShader', 'GetPixelShader', 'GetRenderTarget',
+        'GetDepthStencilSurface']);
     /**
      * The guest routines a table offers, less those `traps` keeps as traps: by
      * method name, or by the group a routine belongs to -- `getters`, `ring`,
@@ -2353,6 +2354,10 @@ export function createDirect3D8Seam(
             GetViewport: ({ trap })=>placeCode(at=>getViewportCode(at, trap)),
             GetVertexShader: ({ trap })=>placeCode(at=>getShaderCode(at, trap, 0)),
             GetPixelShader: ({ trap })=>placeCode(at=>getShaderCode(at, trap, 1)),
+            GetRenderTarget: ({ trap })=>placeCode(at=>getTargetCode(at, trap,
+                { depth: false, indexed: false })),
+            GetDepthStencilSurface: ({ trap })=>placeCode(at=>getTargetCode(at, trap,
+                { depth: true, indexed: false })),
             TestCooperativeLevel: ({ trap })=>placeCode(at=>compiledAt(
                 IN_GUEST.TestCooperativeLevel, at, trap)),
             ...Object.fromEntries(Object.entries(D3D8_COMMANDS.COMMANDS).map(([name, shape])=>[
@@ -2781,6 +2786,11 @@ export function createDirect3D8Seam(
                     device: held.device,
                     divergence,
                     phases,
+                    // The surfaces the guest's target getters hand out, as Direct3D 9's.
+                    handedOut: surface=>((publisher.adapterFor(surface)?.pointers.size ?? 0) === 0
+                        ? [0, 0]
+                        : [publisher.publish(surface, surfaceInterfaces, IID_IDirect3DSurface8),
+                            publisher.countCell(surface)]),
                     // The buffers settled and the ring played as one pause: a
                     // recording compares a dynamic buffer once in it.
                     still: work=>{

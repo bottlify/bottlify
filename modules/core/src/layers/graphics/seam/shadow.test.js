@@ -239,7 +239,10 @@ test('the block fits its two pages and its regions follow one another', ()=>{
     assert.equal(SHADOW.HELD % 4, 0);
     assert.equal(SHADOW.HELD + 4, SHADOW.SHADERS);
     assert.equal(SHADOW.SHADERS + 8, SHADOW.SHADERS_VALID);
-    assert.equal(SHADOW.SHADERS_VALID + 4, SHADOW.SIZE);
+    assert.equal(SHADOW.SHADERS_VALID + 4, SHADOW.TARGETS);
+    // Two pairs of the target getters, a pointer and a count's word each.
+    assert.equal(SHADOW.TARGETS + 16, SHADOW.TARGETS_VALID);
+    assert.equal(SHADOW.TARGETS_VALID + 4, SHADOW.SIZE);
     assert.equal(BUFFER.QUEUED + 4, BUFFER.SIZE);
     assert.equal(TEXTURE.LEVELS + TEXTURE.LEVEL_SLOTS * 4, TEXTURE.SIZE);
     // Enough for the longest chain a texture of this era can have: a 32768
