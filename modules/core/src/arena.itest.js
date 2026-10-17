@@ -88,3 +88,48 @@ test('the startup arena stays below the thread stacks when the libraries reach t
 
         assert.equal(await app.run({ timeoutMs: 40000 }), 7);
     });
+
+test('a program based inside the heap\'s span has the memory below its image', async()=>{
+    // A game whose image asks for 0x39000000 had the whole layout moved above
+    // it: the heap began past 0x43300000, and the 720 MiB below the image were
+    // no one's -- it ran out of memory with them idle. Here, on a gigabyte of
+    // RAM, that layout leaves no heap at all.
+    const IMAGE_BASE = 0x39000000;
+    const ASKED = 0x20000000;
+    const MEM_COMMIT_RESERVE = 0x3000;
+    const PAGE_READWRITE = 4;
+    const executable = buildExe({
+        imageBase: IMAGE_BASE,
+        imports: { 'KERNEL32.dll': ['VirtualAlloc', 'HeapAlloc', 'GetProcessHeap', 'ExitProcess'] },
+        code: ({ iat })=>{
+            /** @param {string} fn */
+            const call = fn=>[0xff, 0x15, ...u32(iat(fn))];
+            return [
+                // VirtualAlloc(NULL, 512 MiB, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)
+                0x6a, PAGE_READWRITE, 0x68, ...u32(MEM_COMMIT_RESERVE), 0x68, ...u32(ASKED),
+                0x6a, 0x00, ...call('VirtualAlloc'),
+                0x89, 0xc6, //                                   mov esi, eax
+                // HeapAlloc(GetProcessHeap(), 0, 64 MiB)
+                ...call('GetProcessHeap'),
+                0x68, ...u32(0x04000000), 0x6a, 0x00, 0x50, ...call('HeapAlloc'),
+                0x31, 0xff, //                                   xor edi, edi
+                0x85, 0xf6, 0x74, 0x01, 0x47, //                 test esi, esi; jz +1; inc edi
+                0x85, 0xc0, 0x74, 0x03, 0x83, 0xc7, 0x02, //     test eax, eax; jz +3; add edi, 2
+                0x57, ...call('ExitProcess'), //                 ExitProcess(edi)
+            ];
+        },
+    });
+    const app = await createApp({ executable, memorySize: 0x40000000 });
+    try
+    {
+        assert.equal(await app.run({ timeoutMs: 30_000 }), 3,
+            'both the 512 MiB reservation and the 64 MiB block were given');
+    }
+    finally
+    {
+        await app.dispose();
+    }
+    assert.deepEqual(spaceAbove(IMAGE_BASE + 0x2b0000, IMAGE_BASE),
+        { moduleBase: 0x02000000, stackPoolBase: 0x08000000, heapBase: 0x0c000000 },
+        'the layout stays where it is');
+});
