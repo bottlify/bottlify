@@ -1063,6 +1063,125 @@ test('a region formed beside another one is found by a run that would form it wh
     assert.equal(store.size(), 4, 'nothing stored again');
 });
 
+test('a region with no x87 in it is taken from the store at another top, one with x87 is not',
+    async()=>{
+        const { memoryTranslationStore } = await import('./cache.js');
+        const settle = ()=>new Promise(resolve=>setTimeout(resolve, 0));
+        const store = memoryTranslationStore();
+        /** @param {number[]} code @param {number} top */
+        const hits = async(code, top)=>{
+            const m = machine({ store, bundleId: 'test' });
+            m.write(CODE, code);
+            m.runtime.noteHot(CODE, top);
+            await m.runtime.translatePending();
+            await settle();
+            assert.ok(m.runtime.entryOf(CODE, top) >= 0);
+            return m.runtime.diagnostics().cacheHits;
+        };
+        assert.equal(await hits(COUNTDOWN, 0), 0);
+        assert.equal(await hits(COUNTDOWN, 3), 1, 'the same code at every top');
+        const other = [0x90, ...ROUNDING];
+        assert.equal(await hits(other, 0), 0);
+        assert.equal(await hits(other, 3), 0, 'compiled for the top it was formed at');
+        assert.equal(await hits(other, 0), 1);
+    });
+
+test('a block of a stored region met first takes that region from the store', async()=>{
+    const { memoryTranslationStore } = await import('./cache.js');
+    const settle = ()=>new Promise(resolve=>setTimeout(resolve, 0));
+    const store = memoryTranslationStore();
+    const LOOP = CODE + 5;
+    const first = machine({ store, bundleId: 'test' });
+    first.write(CODE, COUNTDOWN);
+    await settle();
+    first.runtime.noteHot(CODE);
+    await first.runtime.translatePending();
+    await settle();
+    assert.ok(first.runtime.entryOf(LOOP) >= 0, 'the loop\'s head is an entry of the region');
+    await first.runtime.flush();
+    // The loop's head first: the store's region that holds it is formed, not another one.
+    const second = machine({ store, bundleId: 'test' });
+    second.write(CODE, COUNTDOWN);
+    second.setReg(4, 0x80000);
+    await settle();
+    second.runtime.noteHot(LOOP);
+    await second.runtime.translatePending();
+    await settle();
+    const d = second.runtime.diagnostics();
+    assert.equal(d.toStoredRegion, 1);
+    assert.equal(d.cacheHits, 1);
+    assert.equal(d.cacheMisses, 0);
+    assert.equal(d.regions, 1);
+    assert.ok(second.runtime.entryOf(LOOP) >= 0);
+    second.setReg(1, 1000);
+    const exit = second.runtime.run(second.runtime.entryOf(LOOP), 1_000_000);
+    assert.equal(exit.kind, 'halt');
+    assert.equal(second.reg(1), 0);
+});
+
+test('every runtime of a run adds its blocks to the store\'s map, and one that adds none puts '
+    + 'no map', async()=>{
+    const { memoryTranslationStore } = await import('./cache.js');
+    const settle = ()=>new Promise(resolve=>setTimeout(resolve, 0));
+    const inner = memoryTranslationStore();
+    let maps = 0;
+    let mapKey = '';
+    const store = { ...inner, put: (/** @type {string} */ key, /** @type {Uint8Array} */ bytes)=>{
+        if (key.endsWith('/blocks'))
+        {
+            maps++;
+            mapKey = key;
+        }
+        return inner.put(key, bytes);
+    } };
+    const OTHER = CODE + 0x100;
+    /** Hot at `at`, a countdown's entry or its loop's head, whose loop has an entry then.
+     * @param {ReturnType<typeof machine>} m @param {number} at @param {number} loop */
+    const runAt = async(m, at, loop)=>{
+        m.write(CODE, COUNTDOWN);
+        m.write(OTHER, COUNTDOWN);
+        await settle();
+        m.runtime.noteHot(at);
+        await m.runtime.translatePending();
+        await settle();
+        assert.ok(m.runtime.entryOf(loop) >= 0);
+        return m.runtime.diagnostics();
+    };
+    // Two processes of one run, the tool's runtime started before the program's put its map.
+    const tool = machine({ store, bundleId: 'test' });
+    const program = machine({ store, bundleId: 'test' });
+    await runAt(program, CODE, CODE + 5);
+    await program.runtime.flush();
+    await runAt(tool, OTHER, OTHER + 5);
+    await tool.runtime.flush();
+    assert.equal(maps, 2);
+    for (const at of [CODE, OTHER])
+    {
+        const next = machine({ store, bundleId: 'test' });
+        const d = await runAt(next, at + 5, at + 5);
+        assert.equal(d.toStoredRegion, 1, `the region holding ${at.toString(16)}'s loop`);
+        assert.equal(d.cacheMisses, 0);
+        await next.runtime.flush();
+    }
+    assert.equal(maps, 2, 'runs that added nothing to the map');
+    // A map of a thousand blocks more: a run adding its three is not worth putting it whole.
+    const held = /** @type {Uint8Array} */ (await inner.get(mapKey));
+    const larger = new Uint8Array(held.length + 1000 * 12);
+    larger.set(held);
+    const more = new DataView(larger.buffer, held.length);
+    for (let at = 0; at < 1000; at++)
+    {
+        more.setUint32(at * 12, 0x200000 + at * 16, true);
+        more.setUint32(at * 12 + 4, 0x200000, true);
+    }
+    await inner.put(mapKey, larger);
+    const third = machine({ store, bundleId: 'test' });
+    third.write(CODE + 0x200, COUNTDOWN);
+    await runAt(third, CODE + 0x200, CODE + 0x205);
+    await third.runtime.flush();
+    assert.equal(maps, 2, 'three blocks added to a thousand');
+});
+
 test('an entry that moved to another precision control is taken from the store as it moved',
     async()=>{
         const { memoryTranslationStore } = await import('./cache.js');

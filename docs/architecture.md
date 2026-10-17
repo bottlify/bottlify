@@ -339,11 +339,14 @@ There are no page tables: each 4 KiB page has one byte of flags — `INACCESSIBL
   is off, because the hot code it cuts crosses between regions (`SETTINGS.md`). A small leaf callee
   is formed into each caller, for the call it saves.
 - **The store.** A translation is kept under the cache version, the browser's features, the memory
-  layout, the bundle id, the entry address, the x87 stack top and the run's modes. Its record says
+  layout, the bundle id, the entry address, the x87 stack top (any top for a region with no x87 in
+  it) and the run's modes. Its record says
   what forming made of it: a 64-bit FNV hash of the region's bytes, the blocks it left to other
   regions, the callees formed into it, its x87 precision. A run that forms the region otherwise --
   before its callees were known, or beside other regions -- forms it again as the record says and
-  takes it when the bytes hash the same. A second run takes from the store everything the
+  takes it when the bytes hash the same. The store also keeps where its regions have entries: a
+  run that meets a block of a stored region before the region's entry forms that region, which the
+  store answers, rather than a new one there. A second run takes from the store everything the
   first one translated. A bundle may bring translations along (`CORKSEED`); they are seeded before
   the first instruction.
 

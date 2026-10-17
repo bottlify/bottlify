@@ -55,6 +55,12 @@ import {
 /** @typedef {import('../../../core/src/layers/cpu/engine.js').ExitKind} ExitKind */
 /** @typedef {import('../emit/region.js').X87Precision} X87Precision */
 
+/**
+ * The least share of the store's map of blocks to regions (`storedBlocks`) a
+ * runtime adds before it puts the map again: one part in this many.
+ */
+const MAP_SHARE = 64;
+
 /** @param {import('../region.js').Region} region */
 const usesX87 = region=>region.blocks.some(block=>block.instructions.some(isX87));
 
@@ -818,6 +824,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
      * @property {boolean} [narrow]  an x87 region compiled for single precision
      * @property {boolean} [floats]  of those, one computing on floats in f32 (`floatSingles`)
      * @property {boolean} [loose]  compiled with its stores through esp untested (`looseStacks`)
+     * @property {boolean} [anyTop]  no x87 in it: kept in the store at any top (`regionKey`)
      * @property {boolean} [wrapped]  compiled with its reads wrapped into RAM, untested
      * @property {boolean} [checked]  an x87 region whose entries test nothing of the stack's shape
      * @property {boolean} [copies]  its blocks inside its loops are entered through copies
@@ -997,7 +1004,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         predictNoRegion: 0, predictHeld: 0, predictQuiet: 0,
         queueDrops: 0, queueEvictions: 0, emitFailures: 0,
         cacheHits: 0, cacheMisses: 0, missNoRecord: 0, missNoModule: 0, missChanged: 0,
-        hitsFormedAgain: 0, precisionSwitches: 0,
+        hitsFormedAgain: 0, toStoredRegion: 0, precisionSwitches: 0,
         readSwitches: 0,
         stackCode: 0,
         // Batches the store answered in the call that formed them, and a turn later.
@@ -2238,7 +2245,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
      *
      * @param {{ region: import('../region.js').Region, entryTop: number, stamp: string,
      *     wide?: boolean, narrow?: boolean, floats?: boolean, checked?: boolean, copies?: boolean,
-     *     loose?: boolean, wrapped?: boolean,
+     *     loose?: boolean, wrapped?: boolean, anyTop?: boolean,
      *     replaces?: RegionRecord, targets?: [number, number[]][], copying?: boolean,
      *     waited?: boolean }} one
      *     replaces: the region it is formed again from, with the callees of its indirect calls
@@ -2344,6 +2351,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
             narrow: one.narrow === true, floats: one.floats === true,
             checked: one.checked === true,
             copies: one.copies === true, closed, blocks: built.labels.length,
+            anyTop: one.anyTop ?? !usesX87(region),
             ...(region.stops === undefined ? {} : { stops: region.stops }),
             ...(one.targets === undefined ? {} : { targets: one.targets }),
         };
@@ -2523,13 +2531,22 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
      * The store key of one formed region: its entry, its top, and the run's modes its
      * code is made for -- what a run knows before it forms the region. The last region
      * stored there stands for it; what forming made of it is in its record (`shapeOf`).
-     * @param {{ region: { entry: number }, entryTop: number, loose?: boolean,
-     *     wrapped?: boolean }} one */
-    const regionKey = one=>cacheKey({
-        version: cacheVersion, features: found, variant, layoutId: emitLayout.id,
-        bundleId: settings.bundleId ?? 'unknown', entry: one.region.entry,
-        kept: `${one.entryTop}${one.loose ? '-s' : ''}${one.wrapped === false ? '-q' : ''}`,
-    });
+     * A region with no x87 in it is the same code at every top, and is kept at any
+     * (`anyTop`, found once for the formed region): of a warm Far Cry run's 2 072 misses,
+     * 362 were entries the store had at another top.
+     * @param {{ region: { entry: number, blocks?: import('../region.js').Block[] },
+     *     entryTop: number, loose?: boolean, wrapped?: boolean, anyTop?: boolean }} one */
+    const regionKey = one=>{
+        const { blocks } = one.region;
+        one.anyTop ??= blocks !== undefined
+            && !usesX87(/** @type {import('../region.js').Region} */ (one.region));
+        return cacheKey({
+            version: cacheVersion, features: found, variant, layoutId: emitLayout.id,
+            bundleId: settings.bundleId ?? 'unknown', entry: one.region.entry,
+            kept: `${one.anyTop ? 'x' : one.entryTop}${one.loose ? '-s' : ''}`
+                + `${one.wrapped === false ? '-q' : ''}`,
+        });
+    };
     /**
      * What forming made of a region and what it is compiled as, for its record.
      * @param {{ region: { entry: number, hash: string, stops?: number[] },
@@ -2617,6 +2634,85 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
             one.targets = shape.targets;
         }
         return cached;
+    };
+    /**
+     * Where the stored regions have entries: by `keyOf` of a block and the top its
+     * entry is keyed at (`ANY_TOP` for a region with no x87 in it), the region's own
+     * entry and top as `keyOf` packs them. A run that meets a block of a stored region
+     * before the region's entry -- a call's return, a loop entered from outside --
+     * forms the region it belongs to, which the store answers, rather than another
+     * there: of a warm Far Cry run's 2 072 misses, 803 were such blocks. Read from the
+     * store as the runtime starts, written back with this run's regions when it
+     * flushes. null until read.
+     * @type {Map<number, number> | null}
+     */
+    let storedBlocks = null;
+    const blocksKey = ()=>cacheKey({ version: cacheVersion, features: found, variant,
+        layoutId: emitLayout.id, bundleId: settings.bundleId ?? 'unknown', entry: 0,
+        kept: 'blocks' });
+    /**
+     * The store this runtime keeps its translations in: none for a diagnostic run
+     * with classes left out, or with an undo log the stored modules were built
+     * without.
+     * @returns {any}
+     */
+    const storeHere = ()=>(leaveOut.size > 0 || settings.undoLog || profiling
+        ? null : (settings.store ?? null));
+    /** `storedBlocks` as a record holds it: a block, an entry and their tops each.
+     * @param {Map<number, number>} blocks */
+    const packBlocks = blocks=>{
+        const bytes = new Uint8Array(blocks.size * 12);
+        const data = new DataView(bytes.buffer);
+        let at = 0;
+        for (const [block, owner] of blocks)
+        {
+            data.setUint32(at, Math.floor(block / 16), true);
+            data.setUint32(at + 4, Math.floor(owner / 16), true);
+            data.setUint32(at + 8, (block % 16) << 4 | owner % 16, true);
+            at += 12;
+        }
+        return bytes;
+    };
+    /** @param {Uint8Array} bytes @returns {Map<number, number>} */
+    const unpackBlocks = bytes=>{
+        const blocks = new Map();
+        const data = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        for (let at = 0; at + 12 <= bytes.length && bytes.length % 12 === 0; at += 12)
+        {
+            const tops = data.getUint32(at + 8, true);
+            blocks.set(keyOf(data.getUint32(at, true), tops >>> 4),
+                keyOf(data.getUint32(at + 4, true), tops & 15));
+        }
+        return blocks;
+    };
+    /** The read of `storedBlocks`, which a flush waits for before it writes them back. */
+    const blocksRead = (async()=>{
+        const store = storeHere();
+        try
+        {
+            const bytes = store === null || typeof store.get !== 'function' ? null
+                : await store.get(blocksKey());
+            storedBlocks = bytes === null ? new Map() : unpackBlocks(bytes);
+        }
+        catch {
+            storedBlocks = new Map();
+        }
+    })();
+    /**
+     * The region a candidate is a block of in the store, where that region is
+     * neither published nor on its way: its entry and top as `keyOf` packs them, or
+     * -1.
+     * @param {number} eip @param {number} top
+     */
+    const storedOwner = (eip, top)=>{
+        const owner = storedBlocks?.get(keyOf(eip, top)) ?? storedBlocks?.get(keyOf(eip, ANY_TOP));
+        if (owner === undefined || Math.floor(owner / 16) === eip)
+        {
+            return -1;
+        }
+        const at = Math.floor(owner / 16);
+        return entries.entryOf(at, owner % 16) >= 0 || inFlight.has(owner) || !translatable(at)
+            ? -1 : owner;
     };
 
     /** What asks a translator to digest and pack the module it answers with, where it is to be
@@ -2840,7 +2936,8 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
             const one = { region: { entry: record.entry, hash: record.hash, stops: record.stops },
                 entryTop: record.entryTop, wide: record.wide, narrow: record.narrow,
                 floats: record.floats, checked: record.checked, copies: record.copies,
-                loose: record.loose, wrapped: record.wrapped, targets: record.targets };
+                loose: record.loose, wrapped: record.wrapped, targets: record.targets,
+                anyTop: record.anyTop };
             store.put(regionKey(one), packRegion({ ...region,
                 module: new Uint8Array(0), moduleKey: key, linked: true, shape: shapeOf(one) },
             cacheVersion), key === undefined ? undefined : { needs: key }).catch(()=>{});
@@ -4234,9 +4331,20 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
             {
                 break;
             }
-            const [key, eip] = batch[step.next];
+            let [key, eip] = batch[step.next];
             unqueue(key);
             dropKey(key);
+            // A block of a region the store holds: that region is formed, which the
+            // store answers, and has an entry here once published.
+            const owner = storedOwner(eip, key % 16);
+            if (owner >= 0)
+            {
+                unqueue(owner);
+                dropKey(owner);
+                key = owner;
+                eip = Math.floor(owner / 16);
+                counts.toStoredRegion++;
+            }
             inFlight.set(key, takenAt);
             const entryTop = key % 16;
             const publishedAt = enteredFor(entryTop, null);
@@ -4698,6 +4806,51 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
          * process it starts, so a machine that goes would otherwise take it
          * from the processes still running. */
         async flush(){
+            const store = storeHere();
+            if (store !== null && regions.size > 0)
+            {
+                // Where this run's regions have entries, beside what the store
+                // holds now -- not what it held when this runtime started: every
+                // process of the run has a runtime of its own, and a program that
+                // runs a tool again and again (Far Cry, its shader compiler 45
+                // times a run) would have each one put back the map it read,
+                // dropping what the others added since, and put it whole even
+                // when it added nothing: 46 maps of 2.5 MB a run.
+                await blocksRead;
+                /** @type {Map<number, number> | null} */
+                let now = storedBlocks;
+                try
+                {
+                    const bytes = await store.get(blocksKey());
+                    now = bytes === null ? now : unpackBlocks(bytes);
+                }
+                catch {
+                    // The map read at the start stands for it.
+                }
+                const blocks = new Map(now ?? []);
+                let added = 0;
+                for (const record of regions)
+                {
+                    for (const slot of record.slots)
+                    {
+                        const { eip, top } = entries.at(slot);
+                        const block = keyOf(eip, top);
+                        const owner = keyOf(record.entry, record.entryTop);
+                        if (blocks.get(block) !== owner)
+                        {
+                            blocks.set(block, owner);
+                            added++;
+                        }
+                    }
+                }
+                // Put whole, the map is worth it only for what this runtime adds to
+                // it: a tool's process adding a few blocks to a game's map of
+                // 200 000 wrote 2.5 MB for each of its runs.
+                if (added > 0 && added * MAP_SHARE >= blocks.size)
+                {
+                    await store.put(blocksKey(), packBlocks(blocks)).catch(()=>{});
+                }
+            }
             await settings.store?.flush?.();
             // The worker holds nothing the store needs; end it and drop any
             // batch it still owes.
@@ -4898,6 +5051,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
                 missNoRecord: counts.missNoRecord,
                 missChanged: counts.missChanged,
                 hitsFormedAgain: counts.hitsFormedAgain,
+                toStoredRegion: counts.toStoredRegion,
                 missNoModule: counts.missNoModule,
                 // What the store holds and what its opening kept, where it says.
                 store: settings.store?.stats?.() ?? null,

@@ -450,6 +450,8 @@
  * @property {number} [missNoModule]   Misses whose record named a module the store no longer had.
  * @property {number} [hitsFormedAgain]  Hits formed again as their record says, the region formed
  *     here otherwise (beside other regions, or before its callees were known).
+ * @property {number} [toStoredRegion]  Candidates at a block of a region the store holds, formed
+ *     as that region instead.
  * @property {number} [lookedUpNow]    Batches the store answered without a turn of the event loop.
  * @property {number} [lookedUpLater]  Batches it answered a turn of the event loop later.
  * @property {number} [lookedUpInPart]  Calls that left a batch's answers half read (`holdMs`).
