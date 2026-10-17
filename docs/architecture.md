@@ -426,7 +426,8 @@ writes (section 7).
 - **Several executors of a process** (`createApp`'s `cpu.cores`). A run
   that names none gets, on a page that can share memory, one fewer than the host's processors (at
   most eight), and one elsewhere; the executors past the first open as its threads want them, or all
-  before the program starts when the run names its cores (`cpu.eager`). Each
+  before the program starts when the run names its cores (`cpu.eager`); how many a bundle's threads
+  opened is kept in the translation store, and the next run opens as many at its start. Each
   thread has an executor of its own, where its translations are: the process's first thread runs on
   the process's own, each later one on the other executor fewest live threads call theirs. A turn
   gives every free executor the next ready thread whose executor it is; a thread whose executor is
