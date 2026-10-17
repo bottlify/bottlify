@@ -20,7 +20,11 @@
  *   let the program see;
  * - every call the renderer made on the GPU between two looks, as the fake
  *   GPU device records them: buffer and texture writes with their bytes, the
- *   pipelines, bind groups and draws.
+ *   pipelines, bind groups and draws -- but for vertex and index buffers,
+ *   whose bytes are compared by what each holds at every submit rather than
+ *   by how the writes and copies that put them there were cut: a twin fed
+ *   only the pages the program wrote uploads those, where a device reading
+ *   the program's memory uploads what differs, and what is drawn is the same.
  *
  * A scenario that writes through a pointer a lock handed out after its unlock
  * is outside the contract a program is given, but some programs do it; the
@@ -70,9 +74,13 @@ const FACE_NEGATIVE_X = 1;
  *   answer or a scenario looks -- as late as the twin may play them;
  * - `port`: batches across a MessageChannel, as they cross to the worker;
  * - `lent`: either of the last two with the bytes an unlock let the program
- *   write lent in place out of shared guest memory (`lending.js`).
+ *   write lent in place out of shared guest memory (`lending.js`);
+ * - `watched`: held, with an engine's write watch (`watchWrites`) that says
+ *   every page of a range was written at every look -- the most it may say --
+ *   so the recording sends pages as they are and compares nothing.
  */
-const WAYS = /** @type {const} */ (['at once', 'held', 'held, lent', 'port', 'port, lent']);
+const WAYS = /** @type {const} */ (['at once', 'held', 'held, lent', 'port', 'port, lent',
+    'held, watched']);
 
 /** Turns of the event loop, for what crosses ports and settles in promises. */
 const turns = async(count = 8)=>{
@@ -113,6 +121,30 @@ function guestMemory(shared){
     };
 }
 
+/** GPUBufferUsage.INDEX and VERTEX: a buffer draws read. */
+const DRAWN_FROM = 0x10 | 0x20;
+
+/**
+ * An engine's write watch that says every page of the range it is asked about
+ * was written: the most a watch may say, and so the most a recording sends.
+ *
+ * @param {number} address @param {number} length
+ */
+const everyPage = (address, length)=>({
+    /** @param {number} from @param {number} bytes */
+    take(from, bytes){
+        const first = Math.max(address, from) >>> 12;
+        const last = (Math.min(address + length, from + bytes) - 1) >>> 12;
+        /** @type {number[]} */
+        const pages = [];
+        for (let page = first; page <= last; page++)
+        {
+            pages.push(page);
+        }
+        return pages;
+    },
+});
+
 /** @param {any} gpu */
 const backendOf = gpu=>createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
     now: ()=>0 });
@@ -133,8 +165,28 @@ function rig(version, way, caps = {}){
     const lend = way.endsWith('lent');
     const memory = guestMemory(lend);
     const gpu = createFakeDevice({ occlusionSamples: index=>17 + index });
+    // What each vertex and index buffer holds once a submit's writes and
+    // copies have landed: the bytes its draws read.
+    /** @type {any[]} */
+    const drawn = [];
+    const createBuffer = gpu.device.createBuffer;
+    gpu.device.createBuffer = (/** @type {any} */ descriptor)=>{
+        const made = createBuffer(descriptor);
+        if (((descriptor.usage ?? 0) & DRAWN_FROM) !== 0)
+        {
+            drawn.push(made);
+        }
+        return made;
+    };
+    const submit = gpu.queue.submit;
+    gpu.queue.submit = (/** @type {any[]} */ buffers)=>{
+        submit(buffers);
+        gpu.calls.push({ op: 'holds',
+            held: drawn.map(buffer=>({ buffer, bytes: buffer.bytes.slice() })) });
+    };
     const services = {
         ...caps,
+        ...(way.endsWith('watched') ? { watchWrites: everyPage } : {}),
         readMemory: memory.readMemory,
         // Direct3D 9's root is given no window; its copies read through readMemory.
         ...(version === 8 ? { windowMemory: memory.windowMemory } : {}),
@@ -377,6 +429,12 @@ function asked(calls){
     const stream = [];
     for (const call of calls)
     {
+        const into = call.op === 'writeBuffer' ? call.buffer
+            : call.op === 'copyBufferToBuffer' ? call.destination : null;
+        if (into && ((into.descriptor?.usage ?? 0) & DRAWN_FROM) !== 0)
+        {
+            continue;
+        }
         const flat = plain(call);
         const field = MADE[call.op];
         if (field && call.op !== 'getCompilationInfo')
@@ -955,7 +1013,9 @@ const writtenAfterUnlock = version=>async(/** @type {ReturnType<typeof runner>} 
         await run.call('Present', ()=>device.Present());
         await run.call('idle', ()=>device.idle());
         await run.look(`frame ${frame}`);
-        const bytes = run.on.shipped();
+        // A watch that says every page was written sends every page: what it
+        // carries is the most, which the watch's own gate bounds instead.
+        const bytes = run.on.way.endsWith('watched') ? null : run.on.shipped();
         if (bytes)
         {
             carried.push(bytes.buffers + bytes.dynamic);

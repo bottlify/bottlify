@@ -92,6 +92,10 @@ const FILTER_NUMBERING = Object.freeze({
  *     What a device that draws needs; absent, the device is the pure model.
  * @property {any} [backend]
  * @property {(address: number, length: number) => Uint8Array} [readMemory]
+ * @property {(address: number, length: number) => ({ take: (address: number, length: number)
+ *     => number[] } | null)} [watchWrites]
+ *     Which pages of a range were written since a look: what a buffer's unlock
+ *     uploads, compared against nothing. Absent where nothing can say.
  * @property {(address: number, bytes: Uint8Array) => void} [writeMemory]
  *     How a render target's pixels read back off the GPU reach its guest
  *     bytes; without it a lock of a target hands out bytes nobody drew.
@@ -272,6 +276,7 @@ export function createDirect3D7(ddraw, services = {}){
             backend: services.backend,
             readMemory: /** @type {(address: number, length: number) => Uint8Array} */ (
                 services.readMemory),
+            watchWrites: services.watchWrites,
             createSampler: services.createSampler ?? null,
             dumpDraws: services.dumpDraws === true,
             dumpEvery: services.dumpEvery,

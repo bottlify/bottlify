@@ -60,7 +60,7 @@ import { decodeS3tc } from '../webgpu/internal/s3tc.js';
 import { convertTexels } from '../d3d10/blocks.js';
 import { fromHalf, storedToHalves } from '../d3d9/half.js';
 import { passedSamples, reachableArea } from '../webgpu/internal/occlusion.js';
-import { changedSpans, createCompared } from '../webgpu/internal/changed.js';
+import { changedSpans, createCompared, writtenSpans } from '../webgpu/internal/changed.js';
 import {
     CLIP_LOCATION, clipStateOf, fixedFragmentStage, generates, generationOf, readsNormal, tailOf,
     vertexTailOf,
@@ -2886,6 +2886,10 @@ const CLEAR_STRIDE = 20;
  * @property {any} backend
  * @property {(address: number, length: number)=>Uint8Array} readMemory
  * @property {(address: number, length: number)=>Uint8Array} [windowMemory]
+ * @property {(address: number, length: number) => ({ take: (address: number, length: number)
+ *     => number[] } | null)} [watchWrites]
+ *     Which pages of a range were written since a look: what a dynamic buffer
+ *     uploads, compared against nothing. Absent where nothing can say.
  *     The same bytes without the copy, for a reader that is done with them
  *     before the guest runs again. Absent, a copy is read.
  * @property {((descriptor: any)=>any) | null} [createSampler]
@@ -2969,6 +2973,45 @@ const D3DUSAGE_DYNAMIC = 0x200;
 export function createRenderer(options){
     const { backend, readMemory } = options;
     const windowMemory = options.windowMemory ?? readMemory;
+    /**
+     * Each buffer's write watch and the pages it said were written that are
+     * not uploaded whole yet (`writtenSpans`): what a draw or an unlock
+     * uploads, where the memory read can say what was written, instead of a
+     * comparison of every byte against what the buffer holds. Every page is
+     * written at the first look, and for a copy on the GPU made anew, since
+     * what it holds is not known to match.
+     *
+     * @type {WeakMap<object, { base: number, gpu: any,
+     *     watch: { take: (address: number, length: number) => number[] },
+     *     dirty: Set<number> }>}
+     */
+    const writtenPages = new WeakMap();
+    /** @param {any} buffer @param {any} gpu  the copy the bytes go into */
+    const writtenOf = (buffer, gpu)=>{
+        if (!options.watchWrites || typeof buffer?.base !== 'number' || !(buffer.length > 0))
+        {
+            return null;
+        }
+        const known = writtenPages.get(buffer);
+        if (known && known.base === buffer.base && known.gpu === gpu)
+        {
+            return known;
+        }
+        const watch = options.watchWrites(buffer.base, buffer.length);
+        if (!watch)
+        {
+            return null;
+        }
+        const dirty = new Set();
+        const last = (buffer.base + buffer.length - 1) >>> 12;
+        for (let page = buffer.base >>> 12; page <= last; page++)
+        {
+            dirty.add(page);
+        }
+        const tracked = { base: buffer.base, gpu, watch, dirty };
+        writtenPages.set(buffer, tracked);
+        return tracked;
+    };
     const createSampler = options.createSampler ?? null;
     const dumpDraws = options.dumpDraws === true;
     const nanProbe = options.nanProbe === true;
@@ -4727,6 +4770,22 @@ export function createRenderer(options){
             // written once, before the frame's draws are submitted: a write
             // to the queue at each draw was a trip to the GPU a model, and
             // ordered nothing the one at the end does not.
+            const tracked = writtenOf(source, gpu);
+            if (tracked)
+            {
+                const spans = writtenSpans(tracked, source.base, source.length, from, to);
+                if (spans.length > 0)
+                {
+                    const stale = counters.shapes.staleDraws;
+                    stale[source.length] = (stale[source.length] ?? 0) + 1;
+                }
+                for (let index = 0; index < spans.length; index += 2)
+                {
+                    gpu.rewrite(spans[index], windowMemory(source.base + spans[index],
+                        spans[index + 1] - spans[index]));
+                }
+                return;
+            }
             // In a run of the command ring a range is compared once, however
             // many draws read it: the program does not run in between.
             const open = pausing ? compared.take(source, from, to) : [from, to];
@@ -8920,11 +8979,34 @@ export function createRenderer(options){
             // enough, and the copy a read makes was a measured share of a
             // frame in a match, where a program refills its buffers every
             // draw.
+            const tracked = bytes ? null : writtenOf(buffer, entry.gpu);
+            if (tracked && held.length >= DIFFED_UNLOCK)
+            {
+                // What was written of the lock's range, as it is: nothing else
+                // of it can differ from what the buffer holds.
+                const spans = writtenSpans(tracked, buffer.base, buffer.length, held.offset,
+                    held.offset + held.length);
+                for (let index = 0; index < spans.length; index += 2)
+                {
+                    held.data.set(windowMemory(buffer.base + spans[index],
+                        spans[index + 1] - spans[index]), spans[index] - held.offset);
+                }
+                entry.gpu.unlock(held, spans.length > 0 ? spans[0] - held.offset : 0,
+                    spans.length > 0 ? spans[spans.length - 1] - held.offset : 0);
+                entry.held = null;
+                return;
+            }
             const now = bytes ? bytes.subarray(held.offset, held.offset + held.length)
                 : windowMemory(buffer.base + held.offset, held.length);
             if (held.length < DIFFED_UNLOCK)
             {
                 held.data.set(now);
+                if (tracked)
+                {
+                    // Taken, so a draw after it does not upload them again.
+                    writtenSpans(tracked, buffer.base, buffer.length, held.offset,
+                        held.offset + held.length);
+                }
                 entry.gpu.unlock(held);
                 entry.held = null;
                 return;

@@ -24,7 +24,7 @@
  */
 
 import { OP, SECTION, SERVICE_REF, WAIT, createReader, createSite } from './wire.js';
-import { changedSpans, createCompared } from '../webgpu/internal/changed.js';
+import { changedSpans, createCompared, writtenSpans } from '../webgpu/internal/changed.js';
 
 /**
  * The calls whose answer the played device holds back while it has too many
@@ -115,11 +115,12 @@ function partOf(args){
  */
 
 /**
- * What was last sent of a dynamic buffer a draw read: its address then, its
- * bytes, the watch over its writes since, null where the engine has none, and
- * the pages written that have not been compared whole since.
+ * What was last sent of a dynamic buffer a draw read: its address then and
+ * its length, the watch over its writes since, null where the engine has
+ * none, the pages written that have not been sent whole since, and -- only
+ * without a watch, to compare against -- its bytes as sent.
  *
- * @typedef {{ base: number, bytes: Uint8Array,
+ * @typedef {{ base: number, length: number, bytes: Uint8Array | null,
  *     watch: { take: (address: number, length: number) => number[] } | null,
  *     dirty: Set<number> }} Sent
  */
@@ -539,7 +540,8 @@ export function createRecording(options){
     /**
      * Where a buffer's bytes in guest memory differ from what was sent of
      * them, made what is sent: four bytes at a time against the copy on this
-     * side, since it runs for every draw from such a buffer.
+     * side, since it runs for every draw from such a buffer. Only where the
+     * engine has no write watch to say what was written.
      *
      * @param {{ base: number, bytes: Uint8Array }} sent
      * @param {number} from @param {number} to  in the buffer
@@ -559,11 +561,12 @@ export function createRecording(options){
     };
 
     /**
-     * `changedSince` over the parts of `[from, to)` on pages written since
-     * they were last compared whole: never more than the range, which is what
-     * it compares where the engine cannot say. A game that skins into one
-     * buffer compared all of it at every draw -- twenty megabytes a frame --
-     * for the pages it wrote.
+     * What of `[from, to)` the played side may not have: with the engine's
+     * write watch, the pages written since they were last sent, as they are
+     * -- a write the watch saw is all a comparison could find, and comparing
+     * them against a copy of the buffer kept here was most of a skinning
+     * game's draws on the engine thread, and the played side compared them
+     * again; without one, `changedSince` over the range.
      *
      * @param {Sent} sent
      * @param {number} from @param {number} to  in the buffer
@@ -573,47 +576,17 @@ export function createRecording(options){
     const changedIn = (sent, from, to, into)=>{
         if (sent.watch === null)
         {
-            changedSince(sent, from, to, into);
+            changedSince(/** @type {{ base: number, bytes: Uint8Array }} */ (sent), from, to,
+                into);
             return to - from;
         }
-        for (const page of sent.watch.take(sent.base + from, to - from))
+        const spans = writtenSpans(/** @type {any} */ (sent), sent.base, sent.length, from, to);
+        for (let index = 0; index < spans.length; index += 2)
         {
-            sent.dirty.add(page);
+            into.push({ address: sent.base + spans[index],
+                bytes: windowMemory(sent.base + spans[index], spans[index + 1] - spans[index]) });
         }
-        if (sent.dirty.size === 0)
-        {
-            return 0;
-        }
-        let length = 0;
-        const last = (sent.base + to - 1) >>> 12;
-        for (let page = (sent.base + from) >>> 12; page <= last; page++)
-        {
-            if (!sent.dirty.has(page))
-            {
-                continue;
-            }
-            // A run of such pages, compared as one span.
-            let end = page;
-            while (end < last && sent.dirty.has(end + 1))
-            {
-                end++;
-            }
-            const lo = Math.max(from, page * 4096 - sent.base);
-            const hi = Math.min(to, (end + 1) * 4096 - sent.base);
-            changedSince(sent, lo, hi, into);
-            length += hi - lo;
-            for (let done = page; done <= end; done++)
-            {
-                // Clean once all of it the buffer holds is compared.
-                if (Math.max(0, done * 4096 - sent.base) >= lo
-                    && Math.min(sent.bytes.length, (done + 1) * 4096 - sent.base) <= hi)
-                {
-                    sent.dirty.delete(done);
-                }
-            }
-            page = end;
-        }
-        return length;
+        return 0;
     };
 
     /**
@@ -1372,7 +1345,7 @@ export function createRecording(options){
                         ? ranges.flatMap(range=>{
                             const from = range.address - sent.base;
                             const to = from + extentOf(range.address, range.length);
-                            if (from < 0 || to > sent.bytes.length)
+                            if (from < 0 || to > sent.length)
                             {
                                 return rangeFrom(range);
                             }
@@ -1898,7 +1871,9 @@ export function createRecording(options){
                 // watched from before the read.
                 const watch = watchWrites?.(base, buffer.length) ?? null;
                 const bytes = readMemory(base, buffer.length);
-                sentOf.set(buffer, { base, bytes, watch, dirty: new Set() });
+                // Kept only to compare against where there is no watch to say.
+                sentOf.set(buffer, { base, length: buffer.length, bytes: watch ? null : bytes,
+                    watch, dirty: new Set() });
                 compared.take(buffer, 0, buffer.length);
                 (drawn ??= []).push({ address: base, bytes });
                 return;
@@ -2277,13 +2252,24 @@ export function createPlayer({ root, ship, read, borrow }){
 
 /**
  * A guest memory of only the bytes sent to it, in 64 KiB pages made as they
- * are written: what a renderer behind a played device reads.
+ * are written: what a renderer behind a played device reads. It is written
+ * only by what is sent, so it says which 4 KiB pages were written since a
+ * reader last looked (`watch`), as the engine's write watch does for guest
+ * memory: a dynamic buffer's upload is those pages, not a comparison.
  */
 export function createMirror(){
     const SHIFT = 16;
     const SIZE = 1 << SHIFT;
     /** @type {Map<number, Uint8Array>} */
     const pages = new Map();
+    /**
+     * Each 4 KiB page's last write, numbered; a watch keeps the number it last
+     * saw of each.
+     *
+     * @type {Map<number, number>}
+     */
+    const stamps = new Map();
+    let stamp = 0;
     /** @param {number} page */
     const pageOf = page=>{
         let bytes = pages.get(page);
@@ -2297,6 +2283,15 @@ export function createMirror(){
     return {
         /** @param {number} address @param {Uint8Array} bytes */
         write(address, bytes){
+            if (bytes.length > 0)
+            {
+                stamp++;
+                const last = (address + bytes.length - 1) >>> 12;
+                for (let page = address >>> 12; page <= last; page++)
+                {
+                    stamps.set(page, stamp);
+                }
+            }
             let done = 0;
             while (done < bytes.length)
             {
@@ -2306,6 +2301,37 @@ export function createMirror(){
                 pageOf(at >>> SHIFT).set(bytes.subarray(done, done + take), offset);
                 done += take;
             }
+        },
+        /**
+         * A watch over a range, as the engine's (`watchWrites`): its `take`
+         * answers the pages written since its own last look at them, every
+         * page ever written at its first.
+         *
+         * @param {number} address @param {number} length
+         * @returns {{ take: (from: number, bytes: number) => number[] }}
+         */
+        watch(address, length){
+            /** @type {Map<number, number>} */
+            const seen = new Map();
+            const first = address >>> 12;
+            const end = (address + Math.max(length, 1) - 1) >>> 12;
+            return {
+                take(from, bytes){
+                    /** @type {number[]} */
+                    const taken = [];
+                    const last = Math.min(end, (from + Math.max(bytes, 1) - 1) >>> 12);
+                    for (let page = Math.max(first, from >>> 12); page <= last; page++)
+                    {
+                        const at = stamps.get(page);
+                        if (at !== undefined && at !== seen.get(page))
+                        {
+                            seen.set(page, at);
+                            taken.push(page);
+                        }
+                    }
+                    return taken;
+                },
+            };
         },
         /** @param {number} address @param {number} length @returns {Uint8Array} */
         read(address, length){

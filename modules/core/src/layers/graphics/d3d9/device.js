@@ -443,6 +443,10 @@ const isDepthFormat = format=>FORMAT_INFO[format] !== undefined && FORMAT_INFO[f
  * @property {(address: number, length: number)=>Uint8Array} [readMemory]
  *     Required alongside a backend: the bytes a draw reads are the guest's.
  * @property {(address: number, length: number)=>Uint8Array} [windowMemory]
+ * @property {(address: number, length: number) => ({ take: (address: number, length: number)
+ *     => number[] } | null)} [watchWrites]
+ *     Which pages of a range were written since a look: what a dynamic buffer
+ *     uploads, compared against nothing. Absent where nothing can say.
  * @property {(address: number, bytes: Uint8Array)=>void} [writeMemory]
  *     Where a fill or a copy between surfaces writes. Without it those calls
  *     describe their moves for the caller to make.
@@ -517,7 +521,8 @@ export function createDirect3D9(options = {}){
         free: giveBack, divergence, dumpDraws, dumpEvery, liveDump, maxDraws, skipTexture,
         probeTexture, fog, mips, driverRules, onDeviceLost, gamma, frameQueued, renderedElsewhere,
         occlusionCounted,
-        keepMemory, rereadBuffers, drawsFrom, whileStill, rectangleBump, drawsNothing, ...caps
+        keepMemory, rereadBuffers, drawsFrom, whileStill, rectangleBump, drawsNothing, watchWrites,
+        ...caps
     } = options;
     /** @type {DeviceCaps} */
     const resolved = { ...DEFAULT_CAPS, ...caps, fullscreenGamma: gamma?.applies() === true };
@@ -531,7 +536,7 @@ export function createDirect3D9(options = {}){
         liveDump, maxDraws, skipTexture,
         probeTexture, fog, mips, driverRules, onDeviceLost, gamma, frameQueued, renderedElsewhere,
         occlusionCounted,
-        rereadBuffers, drawsFrom, whileStill, rectangleBump, drawsNothing,
+        rereadBuffers, drawsFrom, whileStill, rectangleBump, drawsNothing, watchWrites,
     };
     if (backend && !readMemory)
     {
@@ -924,6 +929,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             readMemory: /** @type {(address: number, length: number)=>Uint8Array} */ (
                 services.readMemory),
             windowMemory: services.windowMemory,
+            watchWrites: services.watchWrites,
             createSampler: services.createSampler ?? null,
             dumpDraws: services.dumpDraws,
             dumpEvery: services.dumpEvery,
