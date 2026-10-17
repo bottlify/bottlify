@@ -206,6 +206,47 @@ test('the output reads: the program disassembles to what the source says', async
         'mad oC0, t0, v0, c0.x']);
 });
 
+test('a local set from a call whose body branches holds what the call returned', async()=>{
+    // The branch merges the caller's variables into a new environment as it is
+    // lowered; the local must land in that one, not in the one it replaced.
+    const body = 'float4 P;\nfloat f(float3 v) { float k = 1; if (v.z > 0.5) { k = P.x * v.z; }'
+        + ' return k; }\n';
+    for (const entry of ['float x = f(w); return x;', 'return f(w);'])
+    {
+        const result = await compile(`${body}float4 main(float3 w : TEXCOORD0) : COLOR0`
+            + ` { ${entry} }`, 'ps_2_0');
+        assert.equal(result.ok, true, result.messages);
+        const program = decode(/** @type {Uint32Array} */ (result.tokens));
+        const run = (/** @type {number} */ z)=>{
+            const f = new Float32Array(32 * 4);
+            f[0] = 3;
+            return execute(program, { inputs: { v: [], t: [[0, 0, z, 0]] }, constants: { f } })
+                .outputs.oC0[0];
+        };
+        assert.equal(run(0.25), 1, entry);
+        assert.equal(run(2), 6, entry);
+    }
+});
+
+test('a _centroid semantic is a centroid input to a pixel shader and a plain output', async()=>{
+    // One structure as a vertex shader's output and a pixel shader's input, as
+    // an engine shares it between the two.
+    const struct = 'struct V { float4 Pos : POSITION; float4 Tex : TEXCOORD0_centroid; };\n';
+    const pixel = await compile(`${struct}float4 main(V In) : COLOR0 { return In.Tex; }`,
+        'ps_2_0');
+    assert.equal(pixel.ok, true, pixel.messages);
+    assert.match(disassemble(/** @type {Uint32Array} */ (pixel.tokens)), /dcl_centroid t0/);
+    const three = await compile(`${struct}float4 main(V In) : COLOR0 { return In.Tex; }`,
+        'ps_3_0');
+    assert.equal(three.ok, true, three.messages);
+    assert.match(disassemble(/** @type {Uint32Array} */ (three.tokens)),
+        /dcl_texcoord_centroid v0/);
+    const vertex = await compile(`${struct}V main(float4 p : POSITION) { V o; o.Pos = p;`
+        + ' o.Tex = p; return o; }', 'vs_2_0');
+    assert.equal(vertex.ok, true, vertex.messages);
+    assert.doesNotMatch(disassemble(/** @type {Uint32Array} */ (vertex.tokens)), /centroid/);
+});
+
 test('a model 1 pixel shader may take a structure with a POSITION it does not read', async()=>{
     const struct = 'sampler2D S;\nstruct V { float4 Pos : POSITION; float2 Tex : TEXCOORD0; };\n';
     for (const profile of ['ps_1_1', 'ps_1_2', 'ps_1_3', 'ps_1_4'])

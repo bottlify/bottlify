@@ -49,6 +49,7 @@
  */
 
 import { createDirect3D8 } from '../d3d8/device.js';
+import { dumpDigits } from '../d3d8/render.js';
 import { createDirect3D9 } from '../d3d9/device.js';
 import { createOpenglRoot } from '../opengl/root.js';
 import { createBackend } from '../webgpu/backend.js';
@@ -123,6 +124,8 @@ export function serveGraphics(scope, deps){
         shownDraws: undefined,
         /** @type {((x?: number, y?: number, tolerance?: number, depth?: number) => Promise<any>) | undefined} */
         pick: undefined,
+        /** @type {((id: string) => any) | undefined} a drawn shader's bytecode and translations */
+        shaderText: undefined,
         /** A texture to read off the GPU at the next frame's end (`app.debug.snapshot`). */
         snapshot: '',
         /**
@@ -563,6 +566,11 @@ export function serveGraphics(scope, deps){
                 {
                     liveDump.stageLimit = Math.floor(Number(data.stageLimit ?? -1));
                 }
+                if ('dumpDigits' in data)
+                {
+                    dumpDigits.value = Math.min(9,
+                        Math.max(1, Math.floor(Number(data.dumpDigits)) || 4));
+                }
                 if ('skipShader' in data)
                 {
                     liveDump.skipShader = String(data.skipShader ?? '');
@@ -575,6 +583,11 @@ export function serveGraphics(scope, deps){
                 {
                     const cut = Math.floor(Number(data.maxDraws));
                     liveDump.maxDraws = Number.isFinite(cut) && cut >= 0 ? cut : -1;
+                }
+                if (data.shader)
+                {
+                    scope.postMessage({ type: 'shaderText', id: data.shader,
+                        result: liveDump.shaderText?.(String(data.shader)) ?? null });
                 }
                 if (data.pick)
                 {

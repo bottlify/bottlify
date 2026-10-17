@@ -168,6 +168,7 @@ export function registersOf(type){
  * @property {number} usage        USAGE.
  * @property {number} index
  * @property {number} width        Components the shader declares for it.
+ * @property {boolean} [centroid]  Sampled at the centroid (a `_centroid` semantic).
  * @property {number} [used]       Bitmask of the components that are read; filled by the back half.
  * @property {number} [reg]        Assigned by the back half.
  * @property {'v' | 't'} [file]   Which register file the back half gave it.

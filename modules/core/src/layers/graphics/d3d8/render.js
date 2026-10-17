@@ -1662,8 +1662,14 @@ function inverseRotation(view){
  * @property {{ floats: Float32Array, ints: Int32Array, bools: Uint32Array }} pixelConstants
  */
 
-/** A number of a dump line, four digits at most. @param {number} x */
-const brief = x=>String(Number(x.toPrecision(4)));
+/**
+ * Significant digits a dump writes constants with (`app.debug.dumpDigits`):
+ * four read at a glance, and a matrix row times a position of a million needs
+ * all of them to be checked against another.
+ */
+export const dumpDigits = { value: 4 };
+/** A number of a dump line. @param {number} x */
+const brief = x=>String(Number(x.toPrecision(dumpDigits.value)));
 
 /**
  * The float constants a shader reads, as a dump line gives them: each register
@@ -2914,7 +2920,8 @@ const CLEAR_STRIDE = 20;
  *     replayLast?: (cut?: number) => boolean,
  *     shownDraws?: () => { lines: string[], sceneDraws: number },
  *     pick?: (x?: number, y?: number, tolerance?: number, depth?: number)
- *         => Promise<any> }} [liveDump]
+ *         => Promise<any>,
+ *     shaderText?: (id: string) => any }} [liveDump]
  *     Set on a running program to have its next frames with draws written
  *     down as `dumpDraws` writes them; counts down as they are, and the last
  *     of them is handed to `written`.
@@ -5799,6 +5806,27 @@ export function createRenderer(options){
     /** What has been reported once already about a program. */
     const programReports = new Set();
 
+    /** The shaders drawn with so far by the id a dump names them ('ps585'), for `app.debug.shader`. */
+    const liveShaders = new Map();
+    /**
+     * A drawn shader's bytecode and every translation made of it, or null.
+     *
+     * @param {string} id
+     */
+    const shaderText = id=>{
+        const shader = liveShaders.get(id);
+        if (!shader)
+        {
+            return null;
+        }
+        return {
+            tokens: Array.from(shader.tokens ?? []),
+            translations: [...translations.get(shader) ?? new Map()].map(([tag, made])=>({
+                tag, wgsl: made.wgsl ?? '', error: made.error ?? null,
+            })),
+        };
+    };
+
     /**
      * @param {object} shader @param {string} tag @param {() => any} make
      */
@@ -6469,6 +6497,14 @@ export function createRenderer(options){
                     ...(rectangleBump ? { rectangleBump } : {}),
                     ...(discards ? { clip: planes } : {}),
                 }));
+        if (liveDump)
+        {
+            liveShaders.set(`ps${program.pixelId}`, pixelShader);
+            if (program.vertex)
+            {
+                liveShaders.set(`vs${program.vertexId}`, program.vertexShader);
+            }
+        }
         if (pixel.error)
         {
             skip('program');
@@ -10054,6 +10090,7 @@ export function createRenderer(options){
                 liveDump.replayLast = replayLast;
                 liveDump.shownDraws = shownDraws;
                 liveDump.pick = pickDraw;
+                liveDump.shaderText = shaderText;
             }
             if (handOver !== null)
             {

@@ -98,6 +98,7 @@ const END = 0x0000ffff;
  * @property {boolean} [relative] Addressed by a0.x as well.
  * @property {boolean} [sat]
  * @property {boolean} [pp]
+ * @property {boolean} [centroid] A pixel shader input declaration sampled at the centroid.
  * @property {number} [shift]     A destination's scale as the token holds it: 1 to 3 for x2 to x8,
  *                                15 to 13 for d2 to d8.
  */
@@ -139,6 +140,7 @@ function registerBits(operand){
 function destToken(operand){
     return (registerBits(operand) | ((operand.mask ?? 0xf) & 0xf) << 16
         | (operand.sat ? 1 << 20 : 0) | (operand.pp ? 2 << 20 : 0)
+        | (operand.centroid ? 4 << 20 : 0)
         | ((operand.shift ?? 0) & 0xf) << 24) >>> 0;
 }
 

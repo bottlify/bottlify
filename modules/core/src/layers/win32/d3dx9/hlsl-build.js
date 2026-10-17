@@ -907,9 +907,10 @@ export function createBuilder(profile){
      * The input a semantic names, made once.
      *
      * @param {number} usage @param {number} index @param {number} width
+     * @param {boolean} [centroid]
      * @returns {Input}
      */
-    const input = (usage, index, width)=>{
+    const input = (usage, index, width, centroid = false)=>{
         let found = inputs.find(i=>i.usage === usage && i.index === index);
         if (!found)
         {
@@ -917,6 +918,10 @@ export function createBuilder(profile){
             inputs.push(found);
         }
         found.width = Math.max(found.width, width);
+        if (centroid)
+        {
+            found.centroid = true;
+        }
         return found;
     };
 
