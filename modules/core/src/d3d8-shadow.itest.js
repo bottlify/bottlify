@@ -262,12 +262,13 @@ test(`what a Direct3D 8 program sets in the guest is what it reads back`,
         const { shadow } = result;
         assert.ok(shadow, 'the device kept its state in the guest');
         // The setters of both threads went through the command ring, the two
-        // threads' records interleaved, and the host made them -- all but the
-        // run the program wrote after its last entry into the host: the
-        // getters answer in the guest, and nothing drains the ring before it
-        // exits.
+        // threads' records interleaved: the host made those before its last
+        // entry, and the rest wait in the ring -- the getters answer in the
+        // guest, and nothing drains the ring before the program exits.
         const setters = MAIN * (3 + 2 + 2) + WORKER * (1 + 1);
-        assert.ok(shadow.commandCalls >= setters * 0.9 && shadow.commandCalls <= setters,
-            `${shadow.commandCalls} of ${setters} through the ring`);
+        const ringed = shadow.commandCalls + shadow.commandsQueued;
+        assert.ok(ringed >= setters * 0.9 && ringed <= setters,
+            `${shadow.commandCalls} made and ${shadow.commandsQueued} held of ${setters}`
+            + ' through the ring');
         assert.deepEqual(shadow.refused, 0);
     });

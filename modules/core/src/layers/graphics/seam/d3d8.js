@@ -277,6 +277,7 @@ const S_FALSE = 1;
  * @param {(bytes: number) => number} [deps.allocate]
  *        Guest memory for the state a program sets without crossing into the
  *        host; without it every setter stays a trap.
+ * @param {number} [deps.ringBytes]  A device's command ring's size (`shadow.js`).
  * @param {(bytes: number) => number} [deps.allocateCode]
  *        Pages of their own for the guest code this seam writes, where a store
  *        into the state beside it cannot invalidate it; `allocate` without it.
@@ -307,7 +308,7 @@ const S_FALSE = 1;
 export function createDirect3D8Seam(
     { publisher, memory, screen, allocate, allocateCode, divergence, cursor, resolution, identity,
         windowClientSize, now = ()=>performance.now(), waitUntil, refresh = ()=>REFRESH_HZ,
-        traps = new Set(), phases },
+        traps = new Set(), phases, ringBytes },
 )
 {
     /** The getters a device answers in the guest, as against the calls its ring carries. */
@@ -2725,6 +2726,7 @@ export function createDirect3D8Seam(
                 // zero, out of the host's sight.
                 /** @type {ReturnType<typeof createShadow>} */
                 const shadow = createShadow({
+                    ringBytes,
                     allocate,
                     // The block is read on every device call and compared
                     // in place, so the window, where there is one.

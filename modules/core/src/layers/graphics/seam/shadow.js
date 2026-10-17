@@ -407,6 +407,31 @@ export function createCommandReader(deps){
         },
         /** How many calls the ring has carried. */
         taken: ()=>taken,
+        /**
+         * How many finished records wait in the ring for the host's next
+         * entry: a program that writes a ring's worth and ends without one
+         * leaves them there.
+         */
+        queued(){
+            const head = readWord(block + SHADOW.COMMAND_HEAD);
+            if (head <= tail || head > bytes)
+            {
+                return 0;
+            }
+            const words = readWords(ring + tail, (head - tail) >>> 2);
+            let records = 0;
+            for (let at = 0; at < words.length;)
+            {
+                const length = words[at + (COMMAND.BYTES >>> 2)] >>> 2;
+                if (length < (COMMAND.ARGS >>> 2))
+                {
+                    break;
+                }
+                records++;
+                at += length;
+            }
+            return records;
+        },
     };
 }
 
@@ -2089,6 +2114,8 @@ export function settledAfter(shadow, call){
  *     ring carries (`commandCode`), and how the host makes one: a device
  *     without them gets no ring.
  * @property {ShadowPhases} [phases]  Where `sync`'s time is accounted.
+ * @property {number} [ringBytes]  The command ring's size, `DEVICE_RING_BYTES` unless
+ *     given: a gate that fills it many times over gives a smaller one.
  * @property {(work: () => void) => void} [still]  Runs `work` as one pause of the
  *     program's, which does not run until it is done: what the device compares of
  *     guest memory in it is compared once, however many of its calls read it.
@@ -2110,6 +2137,7 @@ export function settledAfter(shadow, call){
  * @param {ShadowDeps} deps
  */
 export function createShadow(deps){
+    const ringBytes = deps.ringBytes ?? DEVICE_RING_BYTES;
     const { device } = deps;
     // Nothing timed in a production bundle, and no phase looked for.
     const phases = import.meta.BOTTLIFY_DIAGNOSTICS !== false ? deps.phases ?? null : null;
@@ -2723,15 +2751,15 @@ export function createShadow(deps){
                 mirror();
                 // Pages of its own, as the block's are: the routines write it
                 // on every command.
-                commands = deps.commands ? allocatePage(DEVICE_RING_BYTES) : 0;
+                commands = deps.commands ? allocatePage(ringBytes) : 0;
                 if (commands !== 0)
                 {
-                    placeCommandRing(address, commands, deps.writeMemory, DEVICE_RING_BYTES);
+                    placeCommandRing(address, commands, deps.writeMemory, ringBytes);
                     commandReader = createCommandReader({ block: address, ring: commands,
                         readWord, readWords, writeMemory: deps.writeMemory,
                         take: /** @type {ShadowCommands} */ (deps.commands).take,
                         refuse: detail=>refuse(`${name}::commands`, detail),
-                        bytes: DEVICE_RING_BYTES });
+                        bytes: ringBytes });
                 }
             }
         }
@@ -3085,8 +3113,9 @@ export function createShadow(deps){
             unlockCalls,
             buffers: blocks.size,
             refused,
-            // Calls the command ring carried past the bridge.
+            // Calls the command ring carried past the bridge, and those it holds yet.
             commandCalls: commandReader?.taken() ?? 0,
+            commandsQueued: commandReader?.queued() ?? 0,
         }),
     };
 }

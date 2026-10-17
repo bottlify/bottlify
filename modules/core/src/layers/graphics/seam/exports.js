@@ -153,6 +153,7 @@ const E_OUTOFMEMORY = 0x8007000e | 0;
  * @param {(ms: number, run: () => void) => void} [deps.schedule]
  *        How a wait for the vertical blank is woken; a host timer when none is
  *        given.
+ * @param {number} [deps.ringBytes]  A device's command ring's size (`shadow.js`).
  * @param {import('./shadow.js').ShadowPhases} [deps.phases]
  *        Where a Direct3D 8 or 9 device's entry work is timed (`shadow.js` `sync`).
  * @param {boolean} [deps.guestCode]
@@ -182,7 +183,7 @@ export function createGraphicsLibraries(
         currentThread,
         scratch, render, allocate, allocateCode, divergence, cursor, resolution, windowClientSize,
         gamma, deactivated, deactivations, now = ()=>performance.now(), waitUntil,
-        refresh = ()=>REFRESH_HZ, guestCode = true, phases,
+        refresh = ()=>REFRESH_HZ, guestCode = true, phases, ringBytes,
         guestTraps = [],
         schedule = (ms, run)=>{
             setTimeout(run, ms);
@@ -324,14 +325,14 @@ export function createGraphicsLibraries(
     const guestAllocateCode = guestCode ? allocateCode : undefined;
     const d3d8 = built('D3D8.dll', ()=>createDirect3D8Seam({
         publisher, memory, screen, allocate: guestAllocate, allocateCode: guestAllocateCode,
-        traps: new Set(guestTraps), divergence, cursor, resolution,
+        traps: new Set(guestTraps), divergence, cursor, resolution, ringBytes,
         windowClientSize, now, waitUntil, refresh, phases,
         identity: ()=>graphics.adapter?.() ?? null,
     }));
     const d3d9 = built('D3D9.dll', ()=>createDirect3D9Seam({
         publisher, memory, screen, divergence, cursor, resolution, windowClientSize, gdi, now,
         waitUntil, refresh, phases, allocate: guestAllocate, allocateCode: guestAllocateCode,
-        traps: new Set(guestTraps),
+        traps: new Set(guestTraps), ringBytes,
         identity: ()=>graphics.adapter?.() ?? null,
     }));
     const d3d10 = built('D3D10.dll', ()=>createDirect3D10Seam({
@@ -348,6 +349,7 @@ export function createGraphicsLibraries(
     const d3d7 = built('DDRAW.dll', ()=>createDirect3D7Seam({
         publisher, memory, render, callGuest, currentThread, scratch, divergence,
         allocate: guestAllocate, allocateCode: guestAllocateCode, traps: new Set(guestTraps),
+        ringBytes,
     }));
     const d3dLegacy = built('DDRAW.dll', ()=>createLegacyDirect3DSeam({
         publisher, memory, d3d7: d3d7.shared, callGuest, currentThread, scratch,

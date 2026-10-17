@@ -165,6 +165,7 @@ export function guidBytes(guid){
  * @property {Set<string>} [traps]  Guest routines kept as traps, by name or group
  *     (`getters`, `ring`).
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {number} [ringBytes]  A device's command ring's size (`shadow.js`).
  */
 
 /**
@@ -172,7 +173,7 @@ export function guidBytes(guid){
  */
 export function createDirect3D7Seam(
     { publisher, memory, render, callGuest, currentThread, scratch, allocate, allocateCode,
-        traps = new Set(), divergence })
+        traps = new Set(), divergence, ringBytes })
 {
     const fields = createFields(memory);
 
@@ -1294,6 +1295,7 @@ export function createDirect3D7Seam(
                 // which is when that word is written.
                 const device = made.device;
                 const shadow = createShadow({
+                    ringBytes,
                     allocate,
                     readMemory: memory.windowMemory ?? memory.readMemory,
                     readU32: memory.readU32,

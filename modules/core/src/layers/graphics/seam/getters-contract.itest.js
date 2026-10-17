@@ -31,7 +31,7 @@ import { createCorkHost } from '../../cpu/internal/cork-host.js';
 import * as cork from '../../../../../cork/src/index.js';
 import { createVtables } from '../../bridge/internal/vtable.js';
 import { createGraphicsLibraries } from './exports.js';
-import { DEVICE_RING_BYTES } from './shadow.js';
+import { COMMAND_RING_BYTES } from './shadow.js';
 import { IID_IDirect3DDevice8 } from './iids.js';
 import {
     IDIRECT3D8_SLOTS, IDIRECT3D9_SLOTS, IDIRECT3DDEVICE8_SLOTS, IDIRECT3DSURFACE8_SLOTS,
@@ -170,7 +170,7 @@ function machine(version, options){
     let code = CODE;
     /** @param {number} bytes */
     const allocate = bytes=>{
-        if (options.ringRoom === false && bytes >= DEVICE_RING_BYTES)
+        if (options.ringRoom === false && bytes >= COMMAND_RING_BYTES)
         {
             return 0;
         }
@@ -790,7 +790,7 @@ function randomStep(version, states, rng, skip){
                 run: m=>{
                     // More than the ring holds without a host entry between:
                     // the last ones find no room and are the host's.
-                    const count = Math.ceil(DEVICE_RING_BYTES / 80) + 8;
+                    const count = Math.ceil(COMMAND_RING_BYTES / 80) + 8;
                     const local = random(seed);
                     for (let i = 0; i < count; i++)
                     {

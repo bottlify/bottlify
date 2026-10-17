@@ -66,7 +66,7 @@ const CALLS = [
     ['log', [10], false], ['log', [0], true, ERANGE], ['log', [-1], true, EDOM],
     ['log10', [1000], false], ['log10', [0.3], false],
     ['pow', [3, 2], false], ['pow', [10, 0.5], false], ['pow', [7, -1], false],
-    ['pow', [10, 2], false], ['pow', [2, 10], true], ['pow', [0, -1], true, ERANGE],
+    ['pow', [10, 2], false], ['pow', [2, 10], false], ['pow', [0, -1], true, ERANGE],
     ['pow', [-8, 1 / 3], true, EDOM],
     ['fmod', [7.5, 2], false], ['fmod', [-7.5, 2], false],
     ['sinh', [0.1], false], ['sinh', [5], false], ['cosh', [3], false], ['tanh', [0.2], false],

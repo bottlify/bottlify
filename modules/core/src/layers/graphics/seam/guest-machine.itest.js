@@ -23,7 +23,7 @@ import { createGraphicsLibraries } from './exports.js';
 import { createBackend } from '../webgpu/backend.js';
 import { playedAtOnce, playedDirect3D, recordedDirect3D } from '../remote/direct3d.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
-import { SHADOW } from './shadow.js';
+import { COMMAND_RING_BYTES, SHADOW } from './shadow.js';
 import { guidBytes } from './d3d7.js';
 import {
     IDIRECT3D8_SLOTS, IDIRECT3D9_SLOTS, IDIRECT3DBASETEXTURE8_SLOTS, IDIRECT3DCUBETEXTURE8_SLOTS,
@@ -425,6 +425,8 @@ export function machine(version, guestCode, options = {}){
         allocate,
         allocateCode,
         guestCode,
+        // A ring of the size the gates fill many times over (`getters-contract`'s bursts).
+        ringBytes: COMMAND_RING_BYTES,
         divergence: ()=>{},
         resolution: ()=>{},
         now: ()=>0,

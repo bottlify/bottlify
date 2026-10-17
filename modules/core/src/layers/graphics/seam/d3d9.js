@@ -193,6 +193,7 @@ const MAX_SHADER_DWORDS = 1 << 16;
  *     (`guestsBut`).
  * @param {(bytes: number) => number} [deps.allocate]  Guest memory, for a device's
  *     block of the state its setters write without leaving the guest.
+ * @param {number} [deps.ringBytes]  A device's command ring's size (`shadow.js`).
  * @param {(bytes: number) => number} [deps.allocateCode]  Pages of their own for
  *     those setters' code.
  * @param {import('./shadow.js').ShadowPhases} [deps.phases]  Where a device's entry work is timed.
@@ -200,7 +201,7 @@ const MAX_SHADER_DWORDS = 1 << 16;
 export function createDirect3D9Seam(
     { publisher, memory, screen, divergence, cursor, resolution, identity,
         windowClientSize, gdi, now = ()=>performance.now(), waitUntil, refresh = ()=>REFRESH_HZ,
-        allocate, allocateCode,
+        allocate, allocateCode, ringBytes,
         traps = new Set(), phases },
 )
 {
@@ -3159,6 +3160,7 @@ export function createDirect3D9Seam(
             // when the block's address is written one word past `this`.
             /** @type {ReturnType<typeof createShadow>} */
             const shadow = createShadow({
+                ringBytes,
                 allocate,
                 readMemory: memory.windowMemory ?? memory.readMemory,
                 readU32: memory.readU32,
