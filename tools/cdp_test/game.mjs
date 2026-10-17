@@ -21,6 +21,7 @@
  *                                  [--keep-images N,M] [--watch-import LIB.dll[#ord+ord]]
  *                                  [--click x,y[,after]] [--key Code[,after]] [--coi]
  *                                  [--mode NAME] [--executors N] [--cork-config JSON]
+ *                                  [--placement auto|spread|concentrate]
  *                                  [--graphics-worker] [--fake-gpu] [--journal-calls]
  *                                  [--command-line STRING] [--args STRING] [--windows NAME]
  *                                  [--gpu sm1|sm2|sm3|sm4|host]
@@ -607,6 +608,9 @@ function parse(argv){
         // Executors of the program's process (`createApp`'s `executors`): past
         // one, threads that are ready together run at once.
         executors: number('--executors', mode.executors ?? 0),
+        // Where the process's ready threads run past one executor (`createApp`'s
+        // `cpu.placement`): auto, spread or concentrate.
+        placement: argv.includes('--placement') ? argv[argv.indexOf('--placement') + 1] : null,
         // Direct3D and OpenGL drawn in a graphics worker, the program's thread
         // keeping only their state, as the player runs them.
         graphicsWorker: argv.includes('--graphics-worker'),
@@ -1004,6 +1008,15 @@ function describe(result, context, calls, symbols){
         const seconds = ms=>`${(ms / 1000).toFixed(1)} s`;
         /** @param {number} retired @param {number} ms */
         const rate = (retired, ms)=>(ms > 0 ? `${Math.round(retired / ms / 1000)} M/s` : 'not measured');
+        const placement = executors.placement;
+        if (placement)
+        {
+            say(`    placement: ${placement.mode}${placement.fixed ? ' (fixed)' : ''},`
+                + ` ${placement.trials} trials (spread ${placement.spread},`
+                + ` concentrate ${placement.concentrate},`
+                + ` ${placement.byFrames} by frames), hold ${seconds(placement.holdMs)};`
+                + ` last: ${placement.last || 'none'}`);
+        }
         const own = executors.own;
         if (own)
         {
@@ -1730,6 +1743,7 @@ export async function game(options){
             screen: options.screen,
             quantum: options.quantum,
             executors: options.executors,
+            placement: options.placement,
             graphicsWorker: options.graphicsWorker,
             fakeGpu: options.fakeGpu,
             ...options.journalCalls ? { logCapacity: 100000, logCategories: {

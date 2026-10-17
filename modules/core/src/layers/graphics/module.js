@@ -630,6 +630,7 @@ export function createGraphicsModule(){
                 // one API here that a headless build can run to a finished frame.
                 /** @returns {any} */
                 opengl: (/** @type {any} */ options)=>createOpengl({
+                    presented: config?.presented,
                     readMemory: services.readMemory,
                     windowMemory: services.windowMemory,
                     readF32sInto: services.readF32sInto,
@@ -1049,6 +1050,9 @@ export function createGraphicsModule(){
                 // calling thread stopped until then, by the assembling caller
                 // that owns the threads. Without it a Present answers at once.
                 waitUntil: config?.waitUntil,
+                // Told of every frame a Direct3D device presents (the kernel's
+                // `placement` measures by them).
+                presented: config?.presented,
                 // Told the resolution a device is created at, so the reported
                 // screen becomes that resolution.
                 resolution: config?.resolution,
@@ -1084,6 +1088,7 @@ export function createGraphicsModule(){
                 // makes of the burst the flip is in, once that is on the queue
                 // -- a Direct3D 7 target's replay, or the guest bytes' upload.
                 flipQueued: ()=>{
+                    config?.presented?.();
                     const burst = state.shown?.flushed() ?? null;
                     return burst ? frameQueued(burst) : null;
                 },

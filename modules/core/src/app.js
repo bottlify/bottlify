@@ -271,7 +271,9 @@ const hashText = (hash, text)=>{
  * @property {number} [soloQuantum]  Guest instructions per turn of a thread no other is
  *           ready beside, in a process with one executor, while no timed wait or timer is
  *           due within 16 ms. Default ten quanta.
- * @property {{ cores?: number, eager?: boolean }} [cpu]  The machine's processor. `cores`: how many
+ * @property {{ cores?: number, eager?: boolean, placement?: 'auto' | 'spread' | 'concentrate',
+ *           placementTiming?: Partial<import('./layers/kernel/internal/placement.js').PlacementOptions> }} [cpu]
+ *           The machine's processor. `cores`: how many
  *           processors the program is told it has -- by every road Windows has to say
  *           it -- and the executors that run its threads at once, each a worker past
  *           the process's own thread; 1 to 32. Unset, in a browser whose page can share
@@ -282,6 +284,11 @@ const hashText = (hash, text)=>{
  *           Named, they all open before the program starts; automatic, each opens
  *           when a thread wants it, some tens of milliseconds before it runs one, so
  *           a program of one thread pays for none. `eager` says which outright.
+ *           `placement`: where a process of several cores runs its ready threads --
+ *           `auto` (the default) tries spreading them over the cores and keeping
+ *           them on the process's own and keeps what draws more frames (or retires
+ *           more, for a program that draws none); `spread` or `concentrate` one way.
+ *           `placementTiming`: the trials' lengths, for a test that wants them short.
  * @property {number} [executors]  `cpu.cores` by its older name: executors of the
  *           program's process under cork, past the process's own thread each a worker
  *           running one of its threads at once with the others, the locked
@@ -3842,6 +3849,10 @@ async function buildApp(options){
             // A thread alone takes longer turns: the turn's own cost is what
             // a short one buys nothing for (the kernel's scheduler).
             soloQuantum: options.soloQuantum,
+            // Spread over the executors, kept on the process's own, or chosen by
+            // what the program gets done each way (the kernel's `placement`).
+            placement: options.cpu?.placement,
+            placementTiming: options.cpu?.placementTiming,
             // Off unless asked for: see the kernel's `preemption`.
             preemption: options.preemption,
             // Every thread gets the stack the image was linked to expect, the
@@ -4162,6 +4173,9 @@ async function buildApp(options){
             // runs on the guest's clock, which only this assembly can reach:
             // a program times its spin on the blank with its own timers.
             guestNow: ()=>core.api('kernel').clock.virtualTime(),
+            // A frame a program presented: what the scheduler measures where its
+            // threads go by (the kernel's `placement`).
+            presented: ()=>core.api('kernel').noteFrame?.(),
             // A device call that waits on the display -- a Present beat-synced
             // to the retrace -- stops the calling thread until that moment of
             // the guest's clock and returns what its call answers then.

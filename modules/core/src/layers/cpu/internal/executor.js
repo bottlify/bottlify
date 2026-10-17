@@ -269,6 +269,7 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
             }
             running = true;
             mine = Turn.RUN;
+            Atomics.store(channel.words, Word.RETIRED, 0);
             channel.say(Turn.RUN, budget);
         },
         /**
@@ -368,6 +369,8 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
         block: ()=>theirs,
         /** Its runs of guest code so far, odd while one is on (`Word.EPOCH`). */
         epoch: ()=>Atomics.load(channel.words, Word.EPOCH),
+        /** What the slice out has retired so far; 0 with none out (`Word.RETIRED`). */
+        retiredSoFar: ()=>(running ? Atomics.load(channel.words, Word.RETIRED) >>> 0 : 0),
         /**
          * Its translator's diagnostics, answered between slices.
          * @returns {Promise<Record<string, any> | null>}

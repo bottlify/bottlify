@@ -146,6 +146,7 @@ const E_OUTOFMEMORY = 0x8007000e | 0;
  *        The display's rate, in hertz: what its raster and a beat-synced
  *        Present run at and its current mode reports. REFRESH_HZ when none
  *        is given.
+ * @param {() => void} [deps.presented]  Told of every frame a Direct3D 8 or 9 device presents.
  * @param {(deadline: number, result: number) => any} [deps.waitUntil]
  *        Stops the calling thread until that time of `now`'s clock, where its
  *        call answers `result`: how a Direct3D 8 or 9 Present waits for the
@@ -182,7 +183,7 @@ export function createGraphicsLibraries(
         free, exportAddress, processHeapAllocate,
         currentThread,
         scratch, render, allocate, allocateCode, divergence, cursor, resolution, windowClientSize,
-        gamma, deactivated, deactivations, now = ()=>performance.now(), waitUntil,
+        gamma, deactivated, deactivations, now = ()=>performance.now(), waitUntil, presented,
         refresh = ()=>refreshOf(screen()), guestCode = true, phases, ringBytes,
         guestTraps = [],
         schedule = (ms, run)=>{
@@ -326,12 +327,13 @@ export function createGraphicsLibraries(
     const d3d8 = built('D3D8.dll', ()=>createDirect3D8Seam({
         publisher, memory, screen, allocate: guestAllocate, allocateCode: guestAllocateCode,
         traps: new Set(guestTraps), divergence, cursor, resolution, ringBytes,
-        windowClientSize, now, waitUntil, refresh, phases,
+        windowClientSize, now, waitUntil, presented, refresh, phases,
         identity: ()=>graphics.adapter?.() ?? null,
     }));
     const d3d9 = built('D3D9.dll', ()=>createDirect3D9Seam({
         publisher, memory, screen, divergence, cursor, resolution, windowClientSize, gdi, now,
-        waitUntil, refresh, phases, allocate: guestAllocate, allocateCode: guestAllocateCode,
+        waitUntil, presented, refresh, phases, allocate: guestAllocate,
+        allocateCode: guestAllocateCode,
         traps: new Set(guestTraps), ringBytes,
         identity: ()=>graphics.adapter?.() ?? null,
     }));

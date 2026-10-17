@@ -193,6 +193,7 @@ const MAX_SHADER_DWORDS = 1 << 16;
  * @param {(deadline: number, result: number) => any} [deps.waitUntil]  Stops the calling
  *     thread until that time of `now`'s clock, where its call answers `result`: how a
  *     Present waits for the blank its interval names. Absent, a Present answers at once.
+ * @param {() => void} [deps.presented]  Told of every frame a device presents.
  * @param {Set<string>} [deps.traps]  Guest routines kept as traps, by name or group
  *     (`guestsBut`).
  * @param {(bytes: number) => number} [deps.allocate]  Guest memory, for a device's
@@ -204,7 +205,8 @@ const MAX_SHADER_DWORDS = 1 << 16;
  */
 export function createDirect3D9Seam(
     { publisher, memory, screen, divergence, cursor, resolution, identity,
-        windowClientSize, gdi, now = ()=>performance.now(), waitUntil, refresh = ()=>REFRESH_HZ,
+        windowClientSize, gdi, now = ()=>performance.now(), waitUntil, presented,
+        refresh = ()=>REFRESH_HZ,
         allocate, allocateCode, ringBytes,
         traps = new Set(), phases },
 )
@@ -255,6 +257,10 @@ export function createDirect3D9Seam(
      * @returns {any}
      */
     const pacedPresent = hr=>{
+        if (typeof hr !== 'number' || hr === D3D_OK)
+        {
+            presented?.();
+        }
         if (!waitUntil || typeof hr !== 'number' || hr !== D3D_OK)
         {
             return hr;

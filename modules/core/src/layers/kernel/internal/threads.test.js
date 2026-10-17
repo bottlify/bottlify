@@ -1221,8 +1221,10 @@ test('a thread this executor keeps calling back from the other one stays here a 
         return { instructions: 1000, fault: null };
     };
     let clock = 0;
+    // Spread, the way this rule keeps a thread from: trials of the other way
+    // (`placement.js`) would begin before the three seconds below are out.
     const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 5000,
-        wall: ()=>clock });
+        wall: ()=>clock, placement: 'spread' });
     const main = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
     const sound = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'sound' });
     // The renderer calls into the host and stays here, computing a whole slice;

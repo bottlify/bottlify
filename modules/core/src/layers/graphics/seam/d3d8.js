@@ -310,13 +310,15 @@ const S_FALSE = 1;
  * @param {(deadline: number, result: number) => any} [deps.waitUntil]  Stops the calling
  *     thread until that time of `now`'s clock, where its call answers `result`: how a
  *     Present waits for the blank. Absent, a Present answers at once.
+ * @param {() => void} [deps.presented]  Told of every frame a device presents.
  * @param {Set<string>} [deps.traps]  Guest routines kept as traps, by name or group
  *     (`guestsBut`).
  * @param {import('./shadow.js').ShadowPhases} [deps.phases]  Where a device's entry work is timed.
  */
 export function createDirect3D8Seam(
     { publisher, memory, screen, allocate, allocateCode, divergence, cursor, resolution, identity,
-        windowClientSize, now = ()=>performance.now(), waitUntil, refresh = ()=>REFRESH_HZ,
+        windowClientSize, now = ()=>performance.now(), waitUntil, presented,
+        refresh = ()=>REFRESH_HZ,
         traps = new Set(), phases, ringBytes },
 )
 {
@@ -373,6 +375,10 @@ export function createDirect3D8Seam(
      * @returns {any}
      */
     const pacedPresent = hr=>{
+        if (typeof hr !== 'number' || hr === D3D_OK)
+        {
+            presented?.();
+        }
         if (!waitUntil || typeof hr !== 'number' || hr !== D3D_OK || pacing === null)
         {
             return hr;

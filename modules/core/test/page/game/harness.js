@@ -1685,6 +1685,8 @@ export function createHarness(canvas, how = {}){
             quantum: request.quantum || undefined,
             // Executors of the program's process: past one, its threads run at once.
             executors: request.executors || undefined,
+            // Where they run, when a run names it (the kernel's `placement`).
+            ...request.placement ? { cpu: { placement: request.placement } } : {},
             sample: request.profile || request.quantum ? recordSample : undefined,
             device: {
                 device: handle.device,
@@ -1833,7 +1835,9 @@ export function createHarness(canvas, how = {}){
             result.stopped = failure.message;
             result.error = failure.message;
             result.reason = failure.reason;
-            result.trace = failure.traceText;
+            // A failure of the host's own, a DOMException among them, carries no guest
+            // trace: its stack says where it was thrown.
+            result.trace = failure.traceText ?? failure.stack;
         }
         result.elapsedMs = Math.round(performance.now() - started);
         if (request.exportTranslations)
@@ -1900,7 +1904,10 @@ export function createHarness(canvas, how = {}){
             mostAtOnce: metrics('kernel').mostAtOnce ?? null,
             // Where each executor's time went: the process's own from the
             // scheduler's account, the others' as each last answered.
-            own: metrics('kernel').sharedTime ?? null,
+            placement: typeof metrics('kernel').placement === 'string'
+                ? JSON.parse(metrics('kernel').placement) : null,
+            own: typeof metrics('kernel').sharedTime === 'string'
+                ? JSON.parse(metrics('kernel').sharedTime) : metrics('kernel').sharedTime ?? null,
             remotes: (metrics('cpu').executors ?? []).map((/** @type {any} */ one)=>({
                 index: one.index, retired: one.retired ?? null, spent: one.spent ?? null })),
         };

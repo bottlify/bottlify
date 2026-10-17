@@ -22,6 +22,7 @@
 
 import { signalledNow } from './sync.js';
 import { takeId } from './processes.js';
+import { Placement, createPlacement } from './placement.js';
 
 /** @enum {string} */
 export const ThreadState = {
@@ -248,6 +249,11 @@ const readyNow = thread=>{
  * @param {(text: string) => number} [options.intern]  A name as a dictionary id.
  * @param {{ thread: number }} [options.ids]  The run's next thread id, shared with
  *        the schedulers of the processes beside or after this one.
+ * @param {'spread' | 'concentrate' | null} [options.placement]  One way of placing the
+ *        threads of a process with executors of its own; none: tried and chosen
+ *        (`placement.js`).
+ * @param {Partial<import('./placement.js').PlacementOptions>} [options.placementTiming]
+ *        The trials' windows, holds and margin, where a test shortens them.
  */
 export function createScheduler(options){
     const { cpu, switcher, quantum = 100_000, now = ()=>0, skipTo = ()=>0 } = options;
@@ -376,6 +382,12 @@ export function createScheduler(options){
     // and without them a report of a production run says nothing of which
     // thread the machine was spent on.
     const wall = options.wall ?? (()=>performance.now());
+    /**
+     * Whether the ready threads spread over the process's executors or take
+     * turns on its own, by what the program gets done each way (`placement.js`).
+     */
+    const placement = createPlacement({ now: wall, fixed: options.placement ?? null,
+        ...options.placementTiming });
     /**
      * Told what a parked thread is about to be resumed with: which wait it
      * was in and the value the call answers. The only record of that answer
@@ -1442,7 +1454,8 @@ export function createScheduler(options){
      *
      * @param {any} thread
      */
-    const keptHere = thread=>allowedOn(thread, 0) && (coupledNow(thread) > COUPLED
+    const keptHere = thread=>allowedOn(thread, 0)
+        && (placement.mode() === Placement.CONCENTRATE || coupledNow(thread) > COUPLED
         || thread.crossSeen === true && thread.crossRate > HOST_BOUND);
 
     /**
@@ -1616,6 +1629,10 @@ export function createScheduler(options){
             sharedTime.betweenMs += turnFrom - sharedTurnEnd;
         }
         sharedTime.turns++;
+        // The others' slices so far too: one runs on a quarter of a second
+        // while nothing else wants its executor, longer than a window.
+        placement.tick(remotes.reduce((sum, remote)=>sum + (remote.retiredSoFar?.() ?? 0),
+            sharedTime.hereRetired + sharedTime.elsewhereRetired));
         try
         {
             return takeEnding(runSharedTurn(remotes));
@@ -1940,6 +1957,11 @@ export function createScheduler(options){
 
         /** The processor time the process's threads have taken, in milliseconds. */
         cpuMs: ()=>cpuMs,
+
+        /** A frame the program presented: what its threads' placement is measured by. */
+        noteFrame(){
+            placement.frame();
+        },
 
         /**
          * The executor `thread` runs on now -- the processor it would read
@@ -2403,6 +2425,7 @@ export function createScheduler(options){
                 recentPlacements: [...recentPlacements],
                 mostAtOnce,
                 sharedTime: JSON.stringify(sharedTime),
+                placement: JSON.stringify(placement.diagnostics()),
                 recentWakes: recentWakes.slice(),
                 recentByThread: threads.filter(thread=>thread.state !== ThreadState.TERMINATED)
                     .map(thread=>`${thread.name}: ${(thread.recent ?? []).join(' > ')}`),

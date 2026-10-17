@@ -444,6 +444,18 @@ writes (section 7).
   least half as much ran at once with them, as a render thread its main thread waits on each
   frame, and stays on its own executor. A thread of either kind waiting for the
   process's executor takes it from one that computes, which goes to the other executor in its place.
+  All of this is one of two ways of placing threads, spread; the other, concentrated, keeps every
+  thread on the process's own executor where its mask allows, taking turns there as on one
+  processor (`cpu.placement`). Unless the run names one, the scheduler tries both now and then:
+  two windows of each in turn, concentrated first, each some hundreds of milliseconds after a
+  short settling, and keeps the faster, by frames presented a millisecond where the program
+  presents them (a game's thread spinning on its jobs retires instructions that are no progress)
+  and by instructions retired on every executor where it does not. Spreading must win by 5%. The
+  winner is kept 30 seconds, twice as long each time the same way wins again, up to four minutes;
+  a program that begins or stops presenting frames (a game's load, then its play) is tried again
+  three seconds after.
+  A game whose threads hand work to each other every frame runs concentrated, near its speed on
+  one core (the locked instructions stay atomic); a compressor's workers run spread.
   A thread is never started while another executor still
   runs it: one that waited there is made ready by its wake before that slice is taken, and the
   scheduler refuses the second start. Only the executors in a thread's affinity mask are its to

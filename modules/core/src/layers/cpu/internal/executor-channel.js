@@ -22,9 +22,14 @@
  * counts the executor's runs of guest code, odd while one is on: a slice
  * makes it odd and its end even, and so do a trap's wait for its answer and
  * the answer -- no test of a page's flags that stores rely on spans a call into
- * the host. The process's write watch reads it (`write-clock.js`).
+ * the host. The process's write watch reads it (`write-clock.js`). `RETIRED`
+ * is what the slice out has retired so far, zeroed by the process as it starts
+ * one: a slice runs on for a quarter of a second while nothing else wants the
+ * executor, and the scheduler measures what the program gets done by the
+ * millisecond (the kernel's `placement.js`).
  */
-export const Word = Object.freeze({ STATE: 0, VALUE: 1, FLAGS: 2, LENGTH: 3, EPOCH: 4 });
+export const Word = Object.freeze({ STATE: 0, VALUE: 1, FLAGS: 2, LENGTH: 3, EPOCH: 4,
+    RETIRED: 5 });
 
 /** The states, each set by the side whose turn it ends. */
 export const Turn = Object.freeze({

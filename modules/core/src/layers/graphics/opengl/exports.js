@@ -295,6 +295,7 @@ const LIST_TYPES = new Map([
  *           it, and then every non-null handle is its own drawable the size of
  *           the screen -- which is right for the one window a program of this
  *           era opens and wrong as soon as it opens two.
+ * @property {() => void} [presented]  Told of every frame a program swaps.
  * @property {() => number} [currentThread]
  * @property {() => number} [currentTeb]
  *           The calling thread's TEB, where the routines of the command ring
@@ -810,6 +811,7 @@ export function createOpengl(services){
      *     before it answers, or null
      */
     const presentCurrentFrame = ()=>{
+        services.presented?.();
         const context = current();
         if (!context || !services.present)
         {

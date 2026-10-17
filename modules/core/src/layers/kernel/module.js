@@ -172,6 +172,11 @@ export function createKernelModule(){
                 // A quantum asked for is kept to the instruction: a test's, a profile's.
                 turnMs: config?.quantum === undefined ? TURN_MS : undefined,
                 soloQuantum: config?.soloQuantum,
+                // Where a process of several executors runs its ready threads: one
+                // way when the caller names it, else tried and chosen (`placement.js`).
+                placement: config?.placement === 'spread' || config?.placement === 'concentrate'
+                    ? config.placement : null,
+                placementTiming: config?.placementTiming,
                 ids: config?.ids,
                 hostAnswering: ()=>state.hostAnswering?.() === true,
                 ...published(cpu, log),
@@ -381,6 +386,13 @@ export function createKernelModule(){
                     thread.resumeRegisters = registers ?? null;
                 },
                 currentThread: ()=>live() ? state.scheduler.current() : null,
+                /** A frame the program presented (`placement`). */
+                noteFrame: ()=>{
+                    if (live())
+                    {
+                        state.scheduler.noteFrame();
+                    }
+                },
                 /**
                  * Guest code no slice ends inside (see the scheduler's
                  * `atomicCode`): a routine of the host's that writes what other

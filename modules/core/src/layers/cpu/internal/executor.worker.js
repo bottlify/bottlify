@@ -127,13 +127,15 @@ async function serve({ engineUrl, config, memory, channel: buffer, bell, unbroke
     const channel = channelOf(buffer, bellWords, spinMs);
     const { words } = channel;
     /**
-     * A slice, its run of guest code counted (`Word.EPOCH`).
+     * A slice, its run of guest code counted (`Word.EPOCH`), and what it
+     * retired (`Word.RETIRED`).
      * @param {number} budget
      */
     const runSlice = budget=>{
         Atomics.add(words, Word.EPOCH, 1);
         const retired = host.runSlice(budget);
         Atomics.add(words, Word.EPOCH, 1);
+        Atomics.add(words, Word.RETIRED, retired);
         return retired;
     };
     /**
