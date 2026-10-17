@@ -24,7 +24,6 @@ import assert from 'node:assert/strict';
 import { createApp } from './app.js';
 import { createFakeDevice } from './layers/graphics/webgpu/internal/fake-device.js';
 import { IDIRECT3DDEVICE8_SLOTS } from './layers/graphics/seam/vtables.js';
-import { COMMAND_RING_BYTES } from './layers/graphics/seam/shadow.js';
 import { buildExe } from '../../../tools/make-pe.mjs';
 
 /** @param {number} value */
@@ -263,16 +262,13 @@ test(`what a Direct3D 8 program sets in the guest is what it reads back`,
         const { shadow } = result;
         assert.ok(shadow, 'the device kept its state in the guest');
         // The setters of both threads went through the command ring, the two
-        // threads' records interleaved, and the host made them -- all but the
-        // run the program wrote after its last entry into the host: the
-        // getters answer in the guest, and nothing drains the ring before it
-        // exits.
-        // At most a ring's worth, of the shortest records (a slot, a length
-        // and two arguments), is still there: with the threads on two
-        // executors the ring fills further before the host starts it over.
+        // threads' records interleaved: the host made those before its last
+        // entry, and the rest wait in the ring -- the getters answer in the
+        // guest, and nothing drains the ring before the program exits.
         const setters = MAIN * (3 + 2 + 2) + WORKER * (1 + 1);
-        const ringHolds = COMMAND_RING_BYTES / 16;
-        assert.ok(shadow.commandCalls >= setters - ringHolds && shadow.commandCalls <= setters,
-            `${shadow.commandCalls} of ${setters} through the ring`);
+        const ringed = shadow.commandCalls + shadow.commandsQueued;
+        assert.ok(ringed >= setters * 0.9 && ringed <= setters,
+            `${shadow.commandCalls} made and ${shadow.commandsQueued} held of ${setters}`
+            + ' through the ring');
         assert.deepEqual(shadow.refused, 0);
     });

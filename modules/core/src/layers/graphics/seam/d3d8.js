@@ -46,7 +46,7 @@ import { D3DPRESENT_PARAMETERS8, D3DDISPLAYMODE, D3DVIEWPORT8, D3DCAPS8,
     D3DBOX, D3DLOCKED_BOX, D3DVOLUME_DESC8, createLightReader, dwordsOf, floatsOf, putLight,
     putMaterial } from './structs.js';
 import { D3DDEVTYPE, D3DFMT_INDEX, D3DRTYPE, PRIMARY_MONITOR } from '../d3d8/constants.js';
-import { REFRESH_HZ, REFRESH_RATES, displayModes } from '../../win32/user32/display.js';
+import { REFRESH_HZ, displayModes, refreshRatesOf } from '../../win32/user32/display.js';
 import { ADAPTER_STRING_LENGTH, D3DADAPTER_IDENTIFIER8, D3DCLIPSTATUS8,
     D3DDEVICE_CREATION_PARAMETERS, D3DGAMMARAMP, D3DRASTER_STATUS,
     GAMMA_RAMP_ENTRIES } from '../d3d8/structs.js';
@@ -55,18 +55,22 @@ import { PALETTE_BYTES } from '../d3d9/device.js';
 import { createCursorTeller } from './cursor.js';
 import { fpuSetupCode } from './fpu.js';
 import { ADAPTER_GUID, describeAdapter } from './adapter.js';
-import { createRaster, presentWait, rasterStatus } from './raster.js';
+import { createPresentQueue, createRaster, rasterStatus } from './raster.js';
 import { TEXTURE_OP_CAPS } from '../d3d8/validity.js';
 import { D3D_PRIVATE_DATA, createPrivateData } from './privatedata.js';
 import { declarationLength } from '../d3d8/declaration.js';
 import { END_TOKEN } from '../d3d9/shader.js';
 import {
     DRAWABLE_MIRRORS, RENDER_STATE_MIRROR, TRANSFORM_MIRROR, VIEWPORT_GUARD_8, VIEWPORT_MIRROR,
-    commandCode, createShadow, settledAfter,
-    getRenderStateCode, getSurfaceLevelCode, getTextureStageStateCode, getTransformCode,
+    commandCode, compiledAt, createShadow, settledAfter, depthStencilMirror, renderTargetMirror,
+    COPY_GUARD_8,
+    getRenderStateCode, getSurfaceDescCode, getSurfaceLevelCode, getTextureStageStateCode,
+    getTransformCode,
     getViewportCode, lockCode, stageStateMirror, unlockCode, HOST_MIRRORS, appendCommand,
-    guestWords,
+    getShaderCode, getTargetCode, shaderMirror,
+    guestWords, createLevelLocks, lockLevelCode, unlockLevelCode,
 } from './shadow.js';
+import { COMPILED as IN_GUEST } from './inguest.x86.js';
 import { D3D8_COMMANDS, materialOf } from '../d3d8/commands.js';
 import { D3DTSS } from '../d3d8/constants.js';
 import { loudRefusals } from './refusals.js';
@@ -89,10 +93,14 @@ export const COMMAND_MIRRORS = {
     SetViewport: [...VIEWPORT_GUARD_8, ...VIEWPORT_MIRROR],
     BeginScene: [...DRAWABLE_MIRRORS.BeginScene],
     EndScene: [...DRAWABLE_MIRRORS.EndScene],
-    SetVertexShader: [...DRAWABLE_MIRRORS.SetVertexShader8],
+    SetVertexShader: [...DRAWABLE_MIRRORS.SetVertexShader8, ...shaderMirror(0)],
+    SetPixelShader: [...shaderMirror(1)],
     SetStreamSource: [...DRAWABLE_MIRRORS.SetStreamSource8],
     SetIndices: [...DRAWABLE_MIRRORS.SetIndices],
     DrawPrimitiveUP: [...DRAWABLE_MIRRORS.DrawPrimitiveUP],
+    // The target is the first argument, the depth surface the second.
+    SetRenderTarget: [...renderTargetMirror(0x08), ...depthStencilMirror(0x0c)],
+    CopyRects: [...COPY_GUARD_8],
 };
 
 /**
@@ -109,6 +117,8 @@ export const HOST_COMMAND_MIRRORS = {
     EndScene: HOST_MIRRORS.endScene,
     SetStreamSource: HOST_MIRRORS.streamSource8,
     SetIndices: HOST_MIRRORS.indices,
+    SetRenderTarget: HOST_MIRRORS.renderTarget8,
+    CopyRects: HOST_MIRRORS.copy8,
 };
 
 /**
@@ -276,6 +286,7 @@ const S_FALSE = 1;
  * @param {(bytes: number) => number} [deps.allocate]
  *        Guest memory for the state a program sets without crossing into the
  *        host; without it every setter stays a trap.
+ * @param {number} [deps.ringBytes]  A device's command ring's size (`shadow.js`).
  * @param {(bytes: number) => number} [deps.allocateCode]
  *        Pages of their own for the guest code this seam writes, where a store
  *        into the state beside it cannot invalidate it; `allocate` without it.
@@ -306,12 +317,13 @@ const S_FALSE = 1;
 export function createDirect3D8Seam(
     { publisher, memory, screen, allocate, allocateCode, divergence, cursor, resolution, identity,
         windowClientSize, now = ()=>performance.now(), waitUntil, refresh = ()=>REFRESH_HZ,
-        traps = new Set(), phases },
+        traps = new Set(), phases, ringBytes },
 )
 {
     /** The getters a device answers in the guest, as against the calls its ring carries. */
     const GUEST_GETTERS = new Set(['GetRenderState', 'GetTransform', 'GetTextureStageState',
-        'GetViewport', 'GetSamplerState']);
+        'GetViewport', 'GetSamplerState', 'GetVertexShader', 'GetPixelShader', 'GetRenderTarget',
+        'GetDepthStencilSurface']);
     /**
      * The guest routines a table offers, less those `traps` keeps as traps: by
      * method name, or by the group a routine belongs to -- `getters`, `ring`,
@@ -334,10 +346,11 @@ export function createDirect3D8Seam(
      * often the page shows a frame.
      */
     const modeRefresh = ()=>(pacing !== null && !pacing.windowed
-        && REFRESH_RATES.includes(pacing.rate) ? pacing.rate : refresh());
+        && refreshRatesOf(screen()).includes(pacing.rate) ? pacing.rate : refresh());
     const raster = createRaster({
         now, refresh: modeRefresh, height: ()=>screen().height,
     });
+    const presents = createPresentQueue(raster);
     /**
      * How the device presents, as its creation or last reset asked.
      *
@@ -350,10 +363,11 @@ export function createDirect3D8Seam(
         interval: parameters.fullScreenPresentationInterval >>> 0,
         rate: parameters.fullScreenRefreshRateInHz >>> 0 });
     /**
-     * A Present's answer, once the blank it waits for has come. Full screen
-     * Direct3D 8 beat-syncs presentation to the retrace for every interval but
-     * IMMEDIATE; windowed, only D3DSWAPEFFECT_COPY_VSYNC does, the others
-     * copying at once. An answer still to come already waited.
+     * A Present's answer, once its frame has room in the queue of frames
+     * waiting for their blanks (`createPresentQueue`). Full screen Direct3D 8
+     * beat-syncs presentation to the retrace for every interval but IMMEDIATE;
+     * windowed, only D3DSWAPEFFECT_COPY_VSYNC does, the others copying at once.
+     * An answer still to come already waited.
      *
      * @param {number | Promise<number>} hr
      * @returns {any}
@@ -366,7 +380,7 @@ export function createDirect3D8Seam(
         const interval = pacing.windowed
             ? (pacing.swapEffect === D3DSWAPEFFECT_COPY_VSYNC ? 1 : D3DPRESENT_INTERVAL_IMMEDIATE)
             : pacing.interval;
-        const wait = presentWait(raster, interval, modeRefresh());
+        const wait = presents.present(now(), interval);
         return wait > 0 ? waitUntil(now() + wait, hr) : hr;
     };
     const privateData = createPrivateData({ memory, publisher, rules: D3D_PRIVATE_DATA });
@@ -430,9 +444,75 @@ export function createDirect3D8Seam(
         return at;
     };
 
+    /**
+     * A surface's description in a block of its own, for the guest's GetDesc
+     * and the command routines that check what a surface is: nothing changes
+     * it while the surface lives. Made when the surface is first published,
+     * which writes the block's address one word past the interface.
+     *
+     * @param {any} device @param {any} surface
+     */
+    const describedSurface = (device, surface)=>{
+        surface.guestState ??= ()=>shadowOf(device)?.attachSurface(surface, at=>{
+            /** @type {{ desc?: any }} */
+            const held = {};
+            if (surface.GetDesc(held) === D3D_OK && held.desc)
+            {
+                fields.writeStruct(at, D3DSURFACE_DESC8, held.desc);
+            }
+        }) ?? 0;
+    };
+
+    /**
+     * The levels the guest locks (`createLevelLocks`): this version's played
+     * device copies an update out of its source as it was sent, so a level
+     * in system memory is lent too.
+     */
+    const levelLocks = createLevelLocks({ shadowOf, twinCopies: true });
+    /**
+     * A lock or unlock of a level the host made, told to the level's block
+     * when it was answered D3D_OK.
+     *
+     * @param {any} object  a texture or a surface
+     * @param {number | null} index  the texture's level
+     * @param {boolean} locked @param {any} hr
+     */
+    const noteLevelLock = (object, index, locked, hr)=>{
+        if (hr === D3D_OK)
+        {
+            levelLocks.locked(ownerOf(object), object, index, locked);
+        }
+        return hr;
+    };
+    /** @param {string} name */
+    const levelGroup = name=>(name.startsWith('AddDirty') ? 'ring'
+        : name.startsWith('Lock') || name.startsWith('Unlock') ? 'locks' : 'levels');
+    /**
+     * A texture's or a surface's lock and unlock as guest code, and a
+     * texture's dirty region as a record of the device's ring.
+     *
+     * @param {'texture' | 'surface'} find @param {boolean} [box]
+     * @returns {Record<string, (builder: { trap: number }) => number>}
+     */
+    const levelGuests = (find, box = false)=>{
+        const dirty = box ? 'VolumeTexture.AddDirtyBox' : 'Texture.AddDirtyRect';
+        return {
+            [box ? 'LockBox' : 'LockRect']: ({ trap })=>
+                placeCode(at=>lockLevelCode(at, trap, { find, box })),
+            [box ? 'UnlockBox' : 'UnlockRect']: ({ trap })=>
+                placeCode(at=>unlockLevelCode(at, trap, { find })),
+            ...(find === 'texture'
+                ? { [box ? 'AddDirtyBox' : 'AddDirtyRect']: (/** @type {{ trap: number }} */
+                    { trap })=>placeCode(at=>commandCode(at, trap,
+                    { ...D3D8_COMMANDS.COMMANDS[dirty], slot: D3D8_COMMANDS.commandSlot(dirty) })) }
+                : {}),
+        };
+    };
+
     /** @type {Record<string, (builder: { trap: number }) => number>} */
-    const textureGuests = guestsBut('levels', allocate
-        ? { GetSurfaceLevel: ({ trap })=>placeCode(at=>getSurfaceLevelCode(at, trap)) }
+    const textureGuests = guestsBut(levelGroup, allocate
+        ? { GetSurfaceLevel: ({ trap })=>placeCode(at=>getSurfaceLevelCode(at, trap)),
+            ...levelGuests('texture') }
         : {});
 
     /**
@@ -441,15 +521,17 @@ export function createDirect3D8Seam(
      * published.
      *
      * @param {any} device @param {any} texture
+     * @param {number[]} [extent]  its top level's, which a dirty region in the guest may not leave
      */
-    const attachTexture = (device, texture)=>{
+    const attachTexture = (device, texture, extent)=>{
         const shadow = shadowOf(device);
         if (!shadow)
         {
             return;
         }
         resourceShadows.set(texture, shadow);
-        texture.guestState = ()=>shadow.attachTexture(texture, publisher.countCell?.(texture) ?? 0);
+        texture.guestState = ()=>shadow.attachTexture(texture, publisher.countCell?.(texture) ?? 0,
+            extent);
     };
 
     /**
@@ -463,6 +545,11 @@ export function createDirect3D8Seam(
         if (!shadow)
         {
             return;
+        }
+        const device = ownerOf(texture);
+        if (device)
+        {
+            describedSurface(device, surface);
         }
         // Publishing is memoised, so this is the pointer the program now holds.
         shadow.noteLevel(texture, level,
@@ -503,7 +590,12 @@ export function createDirect3D8Seam(
         const device = ownerOf(object);
         if (device)
         {
-            object.settleGuestRefs ??= ()=>shadowOf(device)?.sync();
+            object.settleGuestRefs ??= (/** @type {Set<number>} */ pointers)=>
+                shadowOf(device)?.syncFor(object, pointers);
+            if (interfaces === surfaceInterfaces)
+            {
+                describedSurface(device, object);
+            }
         }
         const pointer = publisher.publish(object, interfaces, id);
         fields.writeU32(out, pointer);
@@ -682,11 +774,15 @@ export function createDirect3D8Seam(
             return hr;
         },
         /** @param {any} surface @param {number[]} args */
-        LockRect: (surface, [out, rect, flags])=>lockRectInto(fields, out,
-            locked=>surface.LockRect(locked, readRect(rect), flags >>> 0)),
+        LockRect: (surface, [out, rect, flags])=>noteLevelLock(surface, null, true,
+            lockRectInto(fields, out, locked=>surface.LockRect(locked, readRect(rect),
+                flags >>> 0))),
         /** @param {any} surface */
-        UnlockRect: surface=>surface.UnlockRect(),
-    }, {}, retire)];
+        UnlockRect: surface=>noteLevelLock(surface, null, false, surface.UnlockRect()),
+    }, guestsBut(levelGroup, allocate
+        ? { GetDesc: (/** @type {{ trap: number }} */ { trap })=>
+            placeCode(at=>getSurfaceDescCode(at, trap)), ...levelGuests('surface') }
+        : {}), retire)];
 
     const textureMethods = {
         ...resourceMethods(D3DRTYPE.TEXTURE),
@@ -730,11 +826,13 @@ export function createDirect3D8Seam(
         // Locking a level through the texture and through the level's own
         // surface are one lock, which is what makes taking both an error.
         /** @param {any} texture @param {number[]} args */
-        LockRect: (texture, [level, out, rect, flags])=>lockRectInto(fields, out,
-            locked=>texture.LockRect(level >>> 0, locked, readRect(rect), flags >>> 0)),
+        LockRect: (texture, [level, out, rect, flags])=>noteLevelLock(texture, level >>> 0, true,
+            lockRectInto(fields, out, locked=>texture.LockRect(level >>> 0, locked,
+                readRect(rect), flags >>> 0))),
 
         /** @param {any} texture @param {number[]} args */
-        UnlockRect: (texture, [level])=>texture.UnlockRect(level >>> 0),
+        UnlockRect: (texture, [level])=>noteLevelLock(texture, level >>> 0, false,
+            texture.UnlockRect(level >>> 0)),
 
         /** @param {any} texture @param {number[]} args */
         AddDirtyRect: (texture, [rect])=>texture.AddDirtyRect(readRect(rect)),
@@ -903,17 +1001,20 @@ export function createDirect3D8Seam(
             return handBack(held.volume, volumeInterfaces, IID_IDirect3DVolume8, out >>> 0);
         },
         /** @param {any} texture @param {number[]} args */
-        LockBox: (texture, [level, out, box, flags])=>lockBox(out,
-            locked=>texture.LockBox(level >>> 0, locked, readBox(box), flags >>> 0)),
+        LockBox: (texture, [level, out, box, flags])=>noteLevelLock(texture, level >>> 0, true,
+            lockBox(out, locked=>texture.LockBox(level >>> 0, locked, readBox(box),
+                flags >>> 0))),
         /** @param {any} texture @param {number[]} args */
-        UnlockBox: (texture, [level])=>texture.UnlockBox(level >>> 0),
+        UnlockBox: (texture, [level])=>noteLevelLock(texture, level >>> 0, false,
+            texture.UnlockBox(level >>> 0)),
         /** @param {any} texture @param {number[]} args */
         AddDirtyBox: (texture, [box])=>texture.AddDirtyBox(readBox(box)),
     };
     /** @type {import('./com.js').InterfaceDescriptor[]} */
     const volumeTextureInterfaces = [
         describeResource(IID_IDirect3DVolumeTexture8, IDIRECT3DVOLUMETEXTURE8_SLOTS,
-            volumeTextureMethods, {}, retire),
+            volumeTextureMethods, guestsBut(levelGroup, allocate ? levelGuests('texture', true)
+                : {}), retire),
         { ...describeResource(IID_IDirect3DBaseTexture8, IDIRECT3DBASETEXTURE8_SLOTS,
             volumeTextureMethods), sharedWith: IID_IDirect3DVolumeTexture8 },
         { ...describeResource(IID_IDirect3DResource8, IDIRECT3DRESOURCE8_SLOTS,
@@ -1326,7 +1427,7 @@ export function createDirect3D8Seam(
                 format >>> 0, pool >>> 0, held);
             if (hr === D3D_OK && held.texture && (out >>> 0) !== 0)
             {
-                attachTexture(device, held.texture);
+                attachTexture(device, held.texture, [width >>> 0, height >>> 0, 1]);
                 return handBack(held.texture, textureInterfaces, IID_IDirect3DTexture8,
                     out >>> 0, D3DERR_OUTOFVIDEOMEMORY, device);
             }
@@ -1748,7 +1849,7 @@ export function createDirect3D8Seam(
                 levels >>> 0, usage >>> 0, format >>> 0, pool >>> 0, held);
             if (hr === D3D_OK && held.texture)
             {
-                attachTexture(device, held.texture);
+                attachTexture(device, held.texture, [width >>> 0, height >>> 0, depth >>> 0]);
                 return handBack(held.texture, volumeTextureInterfaces,
                     IID_IDirect3DVolumeTexture8, out >>> 0, D3DERR_OUTOFVIDEOMEMORY, device);
             }
@@ -2307,6 +2408,14 @@ export function createDirect3D8Seam(
             GetTextureStageState: ({ trap })=>placeCode(at=>getTextureStageStateCode(at, trap,
                 STAGE_STATE_TYPES_8)),
             GetViewport: ({ trap })=>placeCode(at=>getViewportCode(at, trap)),
+            GetVertexShader: ({ trap })=>placeCode(at=>getShaderCode(at, trap, 0)),
+            GetPixelShader: ({ trap })=>placeCode(at=>getShaderCode(at, trap, 1)),
+            GetRenderTarget: ({ trap })=>placeCode(at=>getTargetCode(at, trap,
+                { depth: false, indexed: false })),
+            GetDepthStencilSurface: ({ trap })=>placeCode(at=>getTargetCode(at, trap,
+                { depth: true, indexed: false })),
+            TestCooperativeLevel: ({ trap })=>placeCode(at=>compiledAt(
+                IN_GUEST.TestCooperativeLevel, at, trap)),
             ...Object.fromEntries(Object.entries(D3D8_COMMANDS.COMMANDS).map(([name, shape])=>[
                 name, (/** @type {{ trap: number }} */ { trap })=>placeCode(at=>commandCode(at,
                     trap, { ...shape, slot: D3D8_COMMANDS.commandSlot(name),
@@ -2722,6 +2831,7 @@ export function createDirect3D8Seam(
                 // zero, out of the host's sight.
                 /** @type {ReturnType<typeof createShadow>} */
                 const shadow = createShadow({
+                    ringBytes,
                     allocate,
                     // The block is read on every device call and compared
                     // in place, so the window, where there is one.
@@ -2732,6 +2842,11 @@ export function createDirect3D8Seam(
                     device: held.device,
                     divergence,
                     phases,
+                    // The surfaces the guest's target getters hand out, as Direct3D 9's.
+                    handedOut: surface=>((publisher.adapterFor(surface)?.pointers.size ?? 0) === 0
+                        ? [0, 0]
+                        : [publisher.publish(surface, surfaceInterfaces, IID_IDirect3DSurface8),
+                            publisher.countCell(surface)]),
                     // The buffers settled and the ring played as one pause: a
                     // recording compares a dynamic buffer once in it.
                     still: work=>{
@@ -2745,10 +2860,23 @@ export function createDirect3D8Seam(
                     commands: { take: records=>{
                         const made = held.device.commands(records,
                             D3D8_COMMANDS.commandObjects(records, publisher.objectAt));
-                        // A target set in the ring is a new viewport, and
-                        // what a draw is checked against is the device's.
+                        // A state block applied or a target set in the ring:
+                        // the block is brought to what the blocks applied hold
+                        // and to the viewport, and what a draw is checked
+                        // against is the device's.
                         if (shadow.stale())
                         {
+                            for (const token of D3D8_COMMANDS.tokensApplied(records))
+                            {
+                                const applied = held.device.stateBlocks?.get(token);
+                                if (applied)
+                                {
+                                    shadow.remirror({ renderStates: applied.renderStates.keys(),
+                                        transforms: applied.transforms.keys(),
+                                        stageStates: applied.stageStates.keys(),
+                                        viewport: Boolean(applied.viewport) });
+                                }
+                            }
                             shadow.remirror({ viewport: true });
                             shadow.settled();
                             shadow.fresh();
@@ -2853,6 +2981,10 @@ export function createDirect3D8Seam(
 
         /** What the device this program is drawing through has counted. */
         diagnostics: ()=>lastDevice?.diagnostics?.() ?? null,
+
+        /** How Presents were paced, as Direct3D 9's seam says it. */
+        presentPacing: ()=>({ ...presents.diagnostics(),
+            windowed: pacing ? pacing.windowed : null, askedHz: pacing ? pacing.rate : null }),
 
         /** What the guest set without crossing, for the most recent device. */
         shadow: ()=>(lastDevice ? shadowOf(lastDevice)?.diagnostics() ?? null : null),

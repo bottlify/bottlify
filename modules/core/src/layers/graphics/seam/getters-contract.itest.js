@@ -6,13 +6,14 @@
 
 /**
  * The getters that answer in the guest, as a gate: GetRenderState,
- * GetTransform, GetTextureStageState, GetViewport and GetSamplerState read the
- * device's block, and a Direct3D 9 surface's GetDesc reads the surface's,
- * where the setters' command routines and the host's own changes keep what
- * the device holds. A program reads back what it set and goes on by the
- * answer, so a getter in the guest must answer what the device's own getter
- * answers at that point of the program, the calls the ring holds made up to
- * there -- the HRESULT, and every byte it writes or leaves alone.
+ * GetTransform, GetTextureStageState, GetViewport, GetSamplerState and
+ * Direct3D 8's GetVertexShader and GetPixelShader read the device's block,
+ * and a Direct3D 9 surface's GetDesc reads the surface's, where the setters'
+ * command routines and the host's own changes keep what the device holds. A
+ * program reads back what it set and goes on by the answer, so a getter in
+ * the guest must answer what the device's own getter answers at that point of
+ * the program, the calls the ring holds made up to there -- the HRESULT, and
+ * every byte it writes or leaves alone.
  *
  * Two processes run one program on the real processor (cork) over the real
  * seams (`createGraphicsLibraries`): one with the guest code on, where the
@@ -453,6 +454,26 @@ const EDGE_FLOATS = [0x80000000, 0x7fc00000, 0x7fc00001, 0xffc00000, 0x7f800001,
 /** @param {Random} rng */
 const value = rng=>(rng.chance(0.5) ? rng.pick(VALUES) : rng.u32());
 
+/** D3DVSD_STREAM(0), D3DVSD_REG(D3DVSDE_POSITION, D3DVSDT_FLOAT3), D3DVSD_END(). */
+const DECLARATION = [0x20000000, 0x40020000, 0xffffffff];
+/** vs_1_1: dp4 oPos.x..w, v0, c0..c3 -- Wine's simple_vs. */
+const VERTEX_SHADER = [0xfffe0101,
+    0x00000009, 0xc0010000, 0x90e40000, 0xa0e40000, 0x00000009, 0xc0020000, 0x90e40000, 0xa0e40001,
+    0x00000009, 0xc0040000, 0x90e40000, 0xa0e40002, 0x00000009, 0xc0080000, 0x90e40000, 0xa0e40003,
+    0x0000ffff];
+/** ps_1_1: def c1, tex t0, dp3, mul, mul -- Wine's simple_ps. */
+const PIXEL_SHADER = [0xffff0101,
+    0x00000051, 0xa00f0001, 0x3f800000, 0x00000000, 0x00000000, 0x00000000, 0x00000042, 0xb00f0000,
+    0x00000008, 0x800f0000, 0xa0e40001, 0xa0e40000, 0x00000005, 0x800f0000, 0x90e40000, 0x80e40000,
+    0x00000005, 0x800f0000, 0xb0e40000, 0x80e40000, 0x0000ffff];
+/**
+ * What Direct3D 8's SetVertexShader is given: vertex formats with a
+ * position, without one and with bits no format has, and numbers no shader
+ * was handed back as.
+ */
+const VERTEX_SHADER_VALUES = [0x002, 0x112, 0x142, 0x152, 0x1c4, 0x000, 0x100, 0x400, 0x401,
+    0x80000001, 0xffffffff];
+
 /** A signalling NaN: what a float's trip through a number makes quiet. */
 const SIGNALLING = 0x7f800001;
 
@@ -516,6 +537,12 @@ const getters = version=>({
             ? m.call('device', 'GetSamplerState', [sampler, type, none ? 0 : OUT], { out: 4 })
             : 'none'),
     }),
+    /** @param {'GetVertexShader' | 'GetPixelShader'} name @param {boolean} [none] */
+    shader: (name, none)=>/** @type {Step} */ ({
+        label: `${name}(${none ? 'NULL' : ''})`,
+        run: m=>(version.nine ? 'none'
+            : m.call('device', name, [none ? 0 : OUT], { out: 4 })),
+    }),
     /** @param {string} surface @param {boolean} [none] */
     desc: (surface, none)=>/** @type {Step} */ ({
         label: `${surface}.GetDesc(${none ? 'NULL' : ''})`,
@@ -548,7 +575,8 @@ const sweep = (version, states)=>{
                 .flatMap(sampler=>Array.from({ length: 17 }, (unused, type)=>
                     get.samplerState(sampler, type)))
             : []),
-        ...(version.nine ? SURFACES.map(surface=>get.desc(surface)) : []),
+        ...(version.nine ? SURFACES.map(surface=>get.desc(surface))
+            : [get.shader('GetVertexShader'), get.shader('GetPixelShader')]),
     ];
     return {
         label: 'every getter',
@@ -758,6 +786,41 @@ function randomStep(version, states, rng, skip){
                     return answers;
                 } };
         }],
+        ['CreateVertexShader', version.nine ? 0 : 1, ()=>({ label: 'CreateVertexShader as vs',
+            run: m=>{
+                m.put([...DECLARATION, ...VERTEX_SHADER]);
+                return m.call('device', 'CreateVertexShader',
+                    [DATA, DATA + 4 * DECLARATION.length, KEPT, 0], { keep: 'vs', kind: 'token' });
+            } })],
+        ['CreatePixelShader', version.nine ? 0 : 1, ()=>({ label: 'CreatePixelShader as ps',
+            run: m=>{
+                m.put(PIXEL_SHADER);
+                return m.call('device', 'CreatePixelShader', [DATA, KEPT],
+                    { keep: 'ps', kind: 'token' });
+            } })],
+        ['SetVertexShader', version.nine ? 0 : 6, ()=>{
+            const set = rng.chance(0.4) ? '@vs' : rng.chance(0.9) ? rng.pick(VERTEX_SHADER_VALUES)
+                : rng.u32();
+            const how = through('SetVertexShader');
+            return { label: `SetVertexShader(${typeof set === 'string' ? set : hex(set)})`
+                + `${how.host ? ' host' : ''}`,
+            run: m=>m.call('device', 'SetVertexShader', [set], how) };
+        }],
+        ['SetPixelShader', version.nine ? 0 : 5, ()=>{
+            const set = rng.chance(0.5) ? '@ps' : rng.chance(0.7) ? 0 : rng.u32();
+            const how = through('SetPixelShader');
+            return { label: `SetPixelShader(${typeof set === 'string' ? set : hex(set)})`
+                + `${how.host ? ' host' : ''}`,
+            run: m=>m.call('device', 'SetPixelShader', [set], how) };
+        }],
+        ['GetVertexShader', version.nine ? 0 : 6, ()=>get.shader('GetVertexShader', none())],
+        ['GetPixelShader', version.nine ? 0 : 6, ()=>get.shader('GetPixelShader', none())],
+        ['DeleteShader', version.nine ? 0 : 1, ()=>{
+            const pixel = rng.chance(0.5);
+            return { label: pixel ? 'DeletePixelShader(@ps)' : 'DeleteVertexShader(@vs)',
+                run: m=>(pixel ? m.call('device', 'DeletePixelShader', ['@ps'])
+                    : m.call('device', 'DeleteVertexShader', ['@vs'])) };
+        }],
         ['CreateStateBlock', 2, ()=>{
             const type = rng.pick([1, 2, 3, 0, 4]);
             return stateBlock(version, ['all', 'all', 'pixel', 'vertex', 'none'][type], type);
@@ -941,7 +1004,7 @@ const LENGTH = 300;
 function passed(version, { wrong, split }){
     assert.deepEqual(wrong, [], 'the guest answers what every call a trap answers');
     const read = ['GetRenderState', 'GetTransform', 'GetTextureStageState', 'GetViewport',
-        ...(version.nine ? ['GetSamplerState'] : [])];
+        ...(version.nine ? ['GetSamplerState'] : ['GetVertexShader', 'GetPixelShader'])];
     for (const name of read)
     {
         const { guest, host } = split('device', name);
@@ -957,7 +1020,7 @@ function passed(version, { wrong, split }){
         }
     }
     const setters = ['SetRenderState', 'SetTransform', 'SetTextureStageState', 'SetViewport',
-        ...(version.nine ? ['SetSamplerState'] : [])];
+        ...(version.nine ? ['SetSamplerState'] : ['SetVertexShader', 'SetPixelShader'])];
     for (const name of setters)
     {
         assert.ok(split('device', name).guest > 10, `${name} taken in the ring`);

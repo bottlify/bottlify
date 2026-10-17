@@ -1164,6 +1164,55 @@ None yet.
   on this machine is measured with the tab visible, and set against an unrelated loop before it
   is read as the engine's.
 
+### 2026-10-17 -- a dynamic buffer's DISCARD made in the guest by trading two storages
+
+- **Idea.** A DISCARD lock under a draw the command ring held, or over bytes lent to the graphics
+  worker, goes to the host: a pause of the ring each time. Give each dynamic buffer of Direct3D 8
+  and 9 a second storage; the guest's lock routine trades the two and writes the trade into the
+  ring (`Buffer.Rename`), which the host makes in order with the draws, sending what was written
+  into the new storage between runs of the ring. Commits 4ebf2f66 and 1a3040ca on `review`,
+  reverted by 43dc6cff and c4fa8cc6.
+- **Workload.** The Call of Duty 4 demo bundle (`1e3e2212825afcbe2415f0cd`, `bundle.btl` hash not
+  recorded), its first level from the player's spawn under the Autostrad sign, the player
+  standing; a 60 s window between two launcher reports taken about 3 minutes after Start Game.
+  One run each arm.
+- **Values.** Before (the engine at e1ed9944): 914 frames in 60 s, 15.1 fps; host calls 10.3 s, of
+  which no buffer Lock or Unlock among the first sixteen. After (4ebf2f66 + 1a3040ca): 345 frames,
+  5.7 fps; host calls 10.5 s, Lock and Unlock 21.9 a frame each at 18-20 us; 2449 trades in the
+  window. Bytes to the worker per frame about the same (2.7 MB both; compared 20 and 17 MB).
+  Noise floor not measured.
+- **Picture.** After, the road in front of the player was drawn streaked and its lane line was
+  gone; before, it was drawn right. The frame gates (`frames-contract-*-worker`, the locks
+  contract with trades) passed: they do not hold the case.
+- **Machine.** Chrome in a Parallels Windows 11 VM (4 vCPUs, Apple Silicon host) on its virtual
+  GPU, the driver tab (`tools/cdp_test/live/drive.mjs`) headed; versions and power plan not
+  recorded.
+- **Why it did not pay.** In this scene the buffer locks were not crossing into the host at all
+  (the 270 us locks of an earlier report were from a run that included loading), and the trade
+  cost a third of the frame rate and drew wrong. Where the rate went was not found.
+- **Decision.** Reverted. Before another attempt: find which host Locks of which buffers cross in
+  the scene that is to be sped up, and a gate that draws what the road drew wrong.
+
+### 2026-10-17 -- invalidated: the streaked road in "a dynamic buffer's DISCARD made in the guest by trading two storages" (2026-10-17)
+
+- **What was wrong.** That entry's **Picture** read the road drawn streaked, its lane line gone,
+  as the trade's doing. The same streaks were seen later the same night in a build without the
+  trade (07162c7e + 02f5ea86), right after the level loaded, and gone 25 s later in the same run:
+  the road as it first appears, whatever the build. The entry's screenshot was one, taken at
+  that moment.
+- **What stands.** Its frame rates and host calls: 15.1 fps before, 5.7 after, one run each.
+  The picture is not evidence against the trade, and the gates' silence is not a gap they have.
+
+### 2026-10-17 -- invalidated: the scene of "d3dx9: a state's preshader expression is worked out in the guest" (10321baf)
+
+- **What was wrong.** The commit says its numbers (frames 18 463 to 21 276, host time 55.9 to
+  31.1 s, crossings 3.61 to 0.84 million, 220 s each) were taken in the Most Wanted demo's Quick
+  Race by its route. Both runs stood at the "CLICK to continue" card: the route clicks the card at
+  60 s, and the demo passes it on Space only, so no step after it was taken.
+- **What stands.** The two numbers compare the same scene, the card, one run each; they say
+  nothing about a race. The race was measured once, by the user in the launcher: about 66 to 81.7
+  fps, conditions not recorded.
+
 ### 2026-10-17 -- a region stopping at every block another region has an entry for
 
 - **Idea.** Far Cry's cold run stored 842 MB for 3.1 MB of x86 it ran, each byte in 6.9 regions.

@@ -19,7 +19,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createCorkHost } from '../../cpu/internal/cork-host.js';
 import * as cork from '../../../../../cork/src/index.js';
-import { HELD_GUEST, HELD_HOST, SHADOW, appendCommand, commandCode } from './shadow.js';
+import { HELD_GUEST, HELD_HOST, SHADOW, SURFACE, appendCommand, usagesOf, commandCode }
+    from './shadow.js';
 import { COMMANDS, commandSlot } from '../d3d9/commands.js';
 import { D3D8_COMMANDS } from '../d3d8/commands.js';
 import { COMMAND_MIRRORS as MIRRORS_9, HOST_COMMAND_MIRRORS as HOST_9 } from './d3d9.js';
@@ -34,6 +35,11 @@ const RING = 0xc000;
 const RING_BYTES = 0x1000;
 const DATA = 0xd000;
 const HIGH = 0xe000;
+/** Two surfaces' interfaces and their blocks, in the data. */
+const SURFACE_OBJECT = DATA + 0xf00;
+const SURFACE_BLOCK = DATA + 0xf10;
+const OTHER_OBJECT = DATA + 0xf80;
+const OTHER_BLOCK = DATA + 0xf90;
 const ROUTINES = 0x20000;
 const STACK = 0x300000;
 
@@ -114,7 +120,7 @@ function gate(version, list){
         put(BLOCK + SHADOW.COMMAND_BYTES, RING_BYTES);
         put(BLOCK + SHADOW.COMMAND_HEAD, next() % 6 === 0 ? RING_BYTES - next() % 300
             : 4 * (next() % 256));
-        put(BLOCK + SHADOW.DRAWABLE, next() % 16);
+        put(BLOCK + SHADOW.DRAWABLE, next() % 64);
         for (let at = BLOCK + SHADOW.RENDER_STATE_VALID; at < BLOCK + SHADOW.RENDER_STATE_VALID
             + 32; at += 4)
         {
@@ -132,6 +138,35 @@ function gate(version, list){
         for (let at = DATA; at < HIGH; at += 4)
         {
             put(at, next());
+        }
+        // The objects a routine may look into are surfaces: each interface in
+        // the data, the word after it its block (`SURFACE`) of a format, a
+        // usage, a pool, a size and a texture at random -- or one with no
+        // block, or none, or the other's.
+        const surfaceArgs = [...entry.shape.objects ?? [],
+            ...usagesOf(entry.shape).map(usage=>usage.arg)];
+        [[SURFACE_OBJECT, SURFACE_BLOCK], [OTHER_OBJECT, OTHER_BLOCK]].forEach(([object, block])=>{
+            put(object + 4, next() % 6 === 0 ? 0 : block);
+            put(block + SURFACE.DESC, [75, 77, 22][next() % 3]);
+            put(block + SURFACE.DESC + 8, [0, 1, 2, 3, 0x200][next() % 5]);
+            put(block + SURFACE.DESC + 12, [0, 0, 0, 1, 2][next() % 5]);
+            put(block + SURFACE.DESC + 24, 1 + next() % 2048);
+            put(block + SURFACE.DESC + 28, 1 + next() % 2048);
+            put(block + SURFACE.CONTAINER, next() % 3);
+        });
+        put(BLOCK + SHADOW.ELSEWHERE, next() % 4 === 0 ? 0 : 1);
+        surfaceArgs.forEach((arg, index)=>{
+            const pick = next() % 8;
+            args[arg] = pick === 0 ? 0 : pick === 1 ? SURFACE_OBJECT
+                : index === 0 ? SURFACE_OBJECT : OTHER_OBJECT;
+        });
+        // A rectangle now and then where a routine takes none.
+        for (const arg of [1, 3])
+        {
+            if (entry.shape.objects?.length === 2 && next() % 4 !== 0)
+            {
+                args[arg] = 0;
+            }
         }
 
         const headBefore = view.getUint32(BLOCK + SHADOW.COMMAND_HEAD - LOW, true);

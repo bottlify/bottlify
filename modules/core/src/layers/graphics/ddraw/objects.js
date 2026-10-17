@@ -274,6 +274,9 @@ export function depthFormatForDepth(bitDepth){
  * @property {number | null} dc
  * @property {() => void} present
  * @property {(rect: Rect | null, value: number) => void} depthFilled
+ * @property {(rect: Rect | null, value: number) => boolean} colorFilled  whether whoever
+ *           keeps its pixels on the GPU filled them there, the guest bytes left to read
+ *           back when a program reads them
  * @property {(which: number, key: ColorKey | null) => number} setColorKey
  * @property {(which: number) => { hr: number, key: ColorKey | null }} getColorKey
  * @property {() => number} uniquenessValue
@@ -500,6 +503,13 @@ export function createDirectDraw(options = {}){
      * @type {Set<(surface: Surface, rect: Rect | null, value: number) => void>}
      */
     const depthFillWatchers = new Set();
+    /**
+     * Who draws into a surface on the GPU and fills it there itself: a colour
+     * fill handed to one is no read-back, fill and upload again.
+     *
+     * @type {Set<(surface: Surface, rect: Rect | null, value: number) => boolean>}
+     */
+    const colorFillWatchers = new Set();
     /**
      * Who keeps a surface's pixels somewhere other than its guest bytes -- a
      * Direct3D device, on the GPU -- and so is asked for them before they are
@@ -1162,6 +1172,17 @@ export function createDirectDraw(options = {}){
                 {
                     watcher(surface, rect, value);
                 }
+            },
+
+            /**
+             * A colour fill of this surface, to whoever keeps its pixels on the
+             * GPU: true when one filled them there.
+             *
+             * @param {Rect | null} rect  Null for all of it.
+             * @param {number} value      The fill, in the surface's own pixel format.
+             */
+            colorFilled(rect, value){
+                return [...colorFillWatchers].some(watcher=>watcher(surface, rect, value));
             },
 
             /** @param {number} value */
@@ -1942,6 +1963,17 @@ export function createDirectDraw(options = {}){
             depthFillWatchers.add(watcher);
             return ()=>{
                 depthFillWatchers.delete(watcher);
+            };
+        },
+
+        /**
+         * @param {(surface: Surface, rect: Rect | null, value: number) => boolean} watcher
+         * @returns {() => void} what stops it
+         */
+        watchColorFills(watcher){
+            colorFillWatchers.add(watcher);
+            return ()=>{
+                colorFillWatchers.delete(watcher);
             };
         },
 

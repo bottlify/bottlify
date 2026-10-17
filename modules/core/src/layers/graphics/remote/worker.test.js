@@ -403,3 +403,52 @@ test('a validation error of the worker\'s GPU is sent on, once and then every 25
         { type: 'refused', message: 'Invalid CommandBuffer "frame#255" is invalid.', seen: 256 },
     ], 'counted alike whichever frame it names');
 });
+
+test('frozen on a shown frame, the worker sends what a message can carry', async()=>{
+    const gpu = createFakeDevice();
+    Object.assign(gpu.device, { queue: gpu.queue });
+    /** @type {any[]} */
+    const posted = [];
+    // As a worker's postMessage: what cannot be cloned -- a GPU texture -- is refused.
+    /** @type {any} */
+    const scope = { postMessage: (/** @type {any} */ message)=>posted.push(structuredClone(message)),
+        onmessage: null };
+    serveGraphics(scope, {
+        gpu: { requestAdapter: async()=>({ features: new Set(), info: {},
+            requestDevice: async()=>gpu.device }) },
+        canvas: (width, height)=>Object.assign(gpu.canvas, { width, height,
+            transferToImageBitmap: ()=>({ width, height, close: ()=>{} }) }),
+    });
+    scope.onmessage({ data: { type: 'open', frames: 'pixels' } });
+    await settle();
+    const { port1, port2 } = new MessageChannel();
+    scope.onmessage({ data: { type: 'root', api: 'd3d9', options: {}, port: port2 } });
+    const sender = createSender({ post: (message, transfer)=>port1.postMessage(message,
+        transfer), framesAhead: 100 });
+    port1.onmessage = event=>sender.receive(event.data);
+    const d3d = recordedDirect3D(createDirect3D9, {}, sender);
+    /** @type {{ device?: any }} */
+    const out = {};
+    d3d.CreateDevice({ swapEffect: D3DSWAPEFFECT.DISCARD, backBufferCount: 1,
+        backBufferWidth: 8, backBufferHeight: 8, backBufferFormat: D3DFMT.X8R8G8B8 }, out);
+    try
+    {
+        out.device.BeginScene();
+        out.device.Clear(0, null, D3DCLEAR.TARGET, 0xff000001, 1, 0);
+        out.device.EndScene();
+        await out.device.Present();
+        await out.device.idle();
+        await settle();
+        scope.onmessage({ data: { type: 'debug', freeze: true } });
+        const frozen = posted.find(message=>message.type === 'frozen');
+        assert.ok(frozen, 'the frozen frame answered');
+        assert.deepEqual(Object.keys(frozen).sort(), ['lines', 'sceneDraws', 'type']);
+    }
+    finally
+    {
+        // The replay's timer stops whatever the answer did.
+        scope.onmessage({ data: { type: 'debug', freeze: false } });
+        port1.close();
+        port2.close();
+    }
+});

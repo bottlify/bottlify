@@ -1713,3 +1713,87 @@ export function encodePointer(pointer){
 export function encodedNull(){
     return 0;
 }
+
+/**
+ * size_t strspn(const char *text, const char *accept)
+ *
+ * How many bytes from the start are each a byte of `accept`; the terminator
+ * is never one.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} text @param {u32} accept
+ * @returns {u32}
+ */
+export function strspn({ u8 }, text, accept){
+    for (/** @type {u32} */ let at = text; ; at++)
+    {
+        const byte = u8(at);
+        let found = 0;
+        for (/** @type {u32} */ let set = accept; found === 0 && u8(set) !== 0; set++)
+        {
+            if (u8(set) === byte)
+            {
+                found = 1;
+            }
+        }
+        if (byte === 0 || found === 0)
+        {
+            return (at - text) >>> 0;
+        }
+    }
+}
+
+/**
+ * size_t strcspn(const char *text, const char *reject)
+ *
+ * How many bytes from the start are none of `reject`'s, up to the terminator.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} text @param {u32} reject
+ * @returns {u32}
+ */
+export function strcspn({ u8 }, text, reject){
+    for (/** @type {u32} */ let at = text; ; at++)
+    {
+        const byte = u8(at);
+        let found = 0;
+        for (/** @type {u32} */ let set = reject; found === 0 && u8(set) !== 0; set++)
+        {
+            if (u8(set) === byte)
+            {
+                found = 1;
+            }
+        }
+        if (byte === 0 || found !== 0)
+        {
+            return (at - text) >>> 0;
+        }
+    }
+}
+
+/**
+ * char *strpbrk(const char *text, const char *accept)
+ *
+ * The first byte that is one of `accept`'s, or null at the terminator.
+ *
+ * @guestCode cdecl
+ * @param {Guest} guest @param {u32} text @param {u32} accept
+ * @returns {u32}
+ */
+export function strpbrk({ u8 }, text, accept){
+    for (/** @type {u32} */ let at = text; ; at++)
+    {
+        const byte = u8(at);
+        if (byte === 0)
+        {
+            return 0;
+        }
+        for (/** @type {u32} */ let set = accept; u8(set) !== 0; set++)
+        {
+            if (u8(set) === byte)
+            {
+                return at;
+            }
+        }
+    }
+}

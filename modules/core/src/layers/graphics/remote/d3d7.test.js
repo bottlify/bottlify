@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createDirect3D7 } from '../d3d7/device.js';
+import { D3D7_COMMANDS } from '../d3d7/commands.js';
 import { D3DRENDERSTATE, D3D_OK, DEVICE_IDS } from '../d3d7/constants.js';
 import { D3DCLEAR, D3DPT, D3DTA, D3DTOP, D3DTSS } from '../d3d8/constants.js';
 import { createDirectDraw } from '../ddraw/objects.js';
@@ -94,10 +95,14 @@ function corners(/** @type {number[][]} */ points, /** @type {boolean} */ textur
  * in a vertex buffer rewritten every frame, and indexed through a pointer; a
  * DirectDraw depth fill; the target read back and written by the program;
  * the target's pixels traded with another surface's, as a flip trades them.
+ * With `ring`, every call the command ring carries goes as its records, a
+ * run of them between two calls that are not, as a program's routines write
+ * them and the host plays them.
  *
  * @param {(ddraw: any, services: any) => any} make
+ * @param {boolean} [ring]
  */
-async function framesThrough(make){
+async function framesThrough(make, ring = false){
     const gpu = createFakeDevice();
     const backend = createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
         now: ()=>0 });
@@ -112,6 +117,8 @@ async function framesThrough(make){
     root.setCooperativeLevel(0x00010044, DDSCL_NORMAL);
     /** @type {Map<number, () => unknown>} */
     const claims = new Map();
+    /** @type {string[]} */
+    const refused = [];
     const d3d = make(root, {
         backend,
         readMemory: (/** @type {number} */ address, /** @type {number} */ length)=>
@@ -125,6 +132,8 @@ async function framesThrough(make){
                 claims.set(buffer, show),
             release: (/** @type {number} */ buffer)=>claims.delete(buffer),
         },
+        divergence: (/** @type {string} */ api, /** @type {string} */ detail)=>
+            refused.push(`${api}: ${detail}`),
     });
     /** @param {any} request */
     const made = request=>{
@@ -161,6 +170,47 @@ async function framesThrough(make){
     assert.equal(vb.hr, D3D_OK);
     const indices = 0x80000;
     const ok = (/** @type {number} */ hr)=>assert.equal(hr, D3D_OK);
+    /** @type {Uint8Array[]} */
+    let records = [];
+    /** @type {any[]} */
+    let objects = [];
+    /** The records written since the last call that is not one, made as one run. */
+    const flush = ()=>{
+        if (records.length === 0)
+        {
+            return;
+        }
+        const run = new Uint8Array(records.reduce((sum, record)=>sum + record.length, 0));
+        let at = 0;
+        for (const record of records)
+        {
+            run.set(record, at);
+            at += record.length;
+        }
+        assert.equal(device.commands(run, objects), records.length);
+        records = [];
+        objects = [];
+    };
+    /**
+     * A call as its record: the arguments, an object's as a pointer, and the
+     * copy of what the pointer argument points at.
+     *
+     * @param {string} name @param {number[]} args @param {any[]} [named]
+     * @param {Uint8Array} [copy]
+     */
+    const ringed = (name, args, named = [], copy = new Uint8Array(0))=>{
+        const length = 8 + 4 * args.length + ((copy.length + 3) & ~3);
+        const record = new Uint8Array(length);
+        const view = new DataView(record.buffer);
+        view.setUint32(0, D3D7_COMMANDS.commandSlot(name), true);
+        view.setUint32(4, length, true);
+        args.forEach((arg, index)=>view.setUint32(8 + 4 * index, arg >>> 0, true));
+        record.set(copy, 8 + 4 * args.length);
+        records.push(record);
+        objects.push(...named);
+        return D3D_OK;
+    };
+    const ONE = 0x3f800000;
     ok(device.SetTextureStageState(0, D3DTSS.COLOROP, D3DTOP.MODULATE));
     ok(device.SetTextureStageState(0, D3DTSS.COLORARG1, D3DTA.TEXTURE));
 
@@ -168,22 +218,47 @@ async function framesThrough(make){
     const frames = [];
     for (let frame = 0; frame < 3; frame++)
     {
-        ok(device.BeginScene());
-        ok(device.Clear(0, null, D3DCLEAR.TARGET | D3DCLEAR.ZBUFFER, 0xff000000 + frame, 1, 0));
-        ok(device.SetTexture(0, mipped));
-        ok(device.DrawPrimitive(D3DPT.TRIANGLESTRIP, FVF_TL_TEX,
-            corners([[0, 0, 0, 0], [8, 0, 1, 0], [0, 8, 0, 1], [8, 8, 1, 1]], true), 4));
-        ok(device.SetTexture(0, keyed));
-        ok(device.SetRenderState(D3DRENDERSTATE.COLORKEYENABLE, frame & 1));
+        const strip = corners([[0, 0, 0, 0], [8, 0, 1, 0], [0, 8, 0, 1], [8, 8, 1, 1]], true);
+        if (ring)
+        {
+            ringed('BeginScene', []);
+            ringed('Clear', [0, 0, D3DCLEAR.TARGET | D3DCLEAR.ZBUFFER, 0xff000000 + frame, ONE, 0]);
+            ringed('SetTexture', [0, 1], [mipped]);
+            ringed('DrawPrimitive', [D3DPT.TRIANGLESTRIP, FVF_TL_TEX, 1, 4, 0], [], strip);
+            ringed('SetTexture', [0, 1], [keyed]);
+            ringed('SetRenderState', [D3DRENDERSTATE.COLORKEYENABLE, frame & 1]);
+            flush();
+        }
+        else
+        {
+            ok(device.BeginScene());
+            ok(device.Clear(0, null, D3DCLEAR.TARGET | D3DCLEAR.ZBUFFER, 0xff000000 + frame, 1,
+                0));
+            ok(device.SetTexture(0, mipped));
+            ok(device.DrawPrimitive(D3DPT.TRIANGLESTRIP, FVF_TL_TEX, strip, 4));
+            ok(device.SetTexture(0, keyed));
+            ok(device.SetRenderState(D3DRENDERSTATE.COLORKEYENABLE, frame & 1));
+        }
         /** @type {{ data?: number }} */
         const lock = {};
         ok(vb.buffer.Lock(0, lock));
         ram.set(corners([[frame, 0], [8, frame], [0, 8], [8, 8]], false),
             /** @type {number} */ (lock.data));
         ok(vb.buffer.Unlock());
-        ok(device.DrawPrimitiveVB(D3DPT.TRIANGLESTRIP, vb.buffer, 0, 4));
-        ram.set(new Uint8Array(Uint16Array.from([0, 1, 2, 2, 1, frame % 4]).buffer), indices);
-        ok(device.DrawIndexedPrimitiveVB(D3DPT.TRIANGLELIST, vb.buffer, 0, 4, indices, 6));
+        const order = new Uint8Array(Uint16Array.from([0, 1, 2, 2, 1, frame % 4]).buffer);
+        ram.set(order, indices);
+        if (ring)
+        {
+            ringed('DrawPrimitiveVB', [D3DPT.TRIANGLESTRIP, 1, 0, 4, 0], [vb.buffer]);
+            ringed('DrawIndexedPrimitiveVB', [D3DPT.TRIANGLELIST, 1, 0, 4, 1, 6, 0], [vb.buffer],
+                order);
+            flush();
+        }
+        else
+        {
+            ok(device.DrawPrimitiveVB(D3DPT.TRIANGLESTRIP, vb.buffer, 0, 4));
+            ok(device.DrawIndexedPrimitiveVB(D3DPT.TRIANGLELIST, vb.buffer, 0, 4, indices, 6));
+        }
         // Part of the buffer, as ProcessVertices writes it, and a draw told
         // the runtime clips it: only that part goes, and the clip with it.
         /** @type {{ data?: number }} */
@@ -191,12 +266,32 @@ async function framesThrough(make){
         ok(vb.buffer.LockRange(20, 40, 0, part));
         ram.set(corners([[frame + 1, 1], [7, frame + 2]], false), /** @type {number} */ (part.data));
         ok(vb.buffer.Unlock());
-        ok(device.DrawPrimitiveVB(D3DPT.TRIANGLESTRIP, vb.buffer, 0, 4, frame & 1));
+        if (ring)
+        {
+            // What the seam's ProcessVertices tells the buffer, which its
+            // draws read until it is told again: this one alone, as above.
+            ok(vb.buffer.ClipCodes((frame & 1) !== 0));
+            ringed('DrawPrimitiveVB', [D3DPT.TRIANGLESTRIP, 1, 0, 4, 0], [vb.buffer]);
+            flush();
+            ok(vb.buffer.ClipCodes(false));
+        }
+        else
+        {
+            ok(device.DrawPrimitiveVB(D3DPT.TRIANGLESTRIP, vb.buffer, 0, 4, frame & 1));
+        }
         if (frame === 1)
         {
             depth.depthFilled(null, 0x8000);
         }
-        ok(device.EndScene());
+        if (ring)
+        {
+            ringed('EndScene', []);
+            flush();
+        }
+        else
+        {
+            ok(device.EndScene());
+        }
         await /** @type {() => unknown} */ (claims.get(target.buffer))();
         if (frame === 2)
         {
@@ -231,6 +326,7 @@ async function framesThrough(make){
     ok(device.SetTexture(0, null));
     assert.equal(vb.buffer.release(), 0);
     assert.equal(device.release(), 0);
+    assert.deepEqual(refused, [], 'the device took every call');
     return { frames, ram: ram.slice(target.buffer, target.buffer + 8), claims };
 }
 
@@ -254,3 +350,17 @@ test('Direct3D 7 frames played from a record ask of the GPU what the device itse
             'the target read back reached the program\'s bytes alike');
         assert.equal(played.claims.size, 0, 'and the addresses drawn into went with the device');
     });
+
+test('Direct3D 7 frames made from command rings ask of the GPU what the calls asked, on the'
+    + ' device and played from a record', async()=>{
+    const direct = await framesThrough(createDirect3D7);
+    for (const [label, make] of /** @type {const} */ ([['the device', createDirect3D7],
+        ['played', loopback]]))
+    {
+        const ringed = await framesThrough(make, true);
+        assert.equal(ringed.frames.length, direct.frames.length);
+        ringed.frames.forEach((frame, index)=>assert.ok(frame === direct.frames[index],
+            `${label}: frame ${index} asked the same`));
+        assert.deepEqual([...ringed.ram], [...direct.ram], `${label}: the target read back alike`);
+    }
+});

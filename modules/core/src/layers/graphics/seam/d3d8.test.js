@@ -26,7 +26,8 @@ import { createVtables } from '../../bridge/internal/vtable.js';
 import { createCountCells, createPublisher } from './com.js';
 import { createGraphicsLibraries } from './exports.js';
 import { ADAPTER_GUID, describeAdapter } from './adapter.js';
-import { BUFFER, SHADOW, TEXTURE } from './shadow.js';
+import { BUFFER, SHADOW, SURFACE, TEXTURE } from './shadow.js';
+import * as inGuest from './inguest.js';
 import { FPU_SETUP } from './fpu.js';
 import {
     IDIRECT3D8_SLOTS, IDIRECT3DCUBETEXTURE8_SLOTS, IDIRECT3DDEVICE8_SLOTS,
@@ -76,7 +77,7 @@ const slot = (slots, name)=>{
 
 /** A flat address space with the bridge's vtable publisher over it. */
 function machine(){
-    const low = new Uint8Array(1 << 20);
+    const low = new Uint8Array(4 << 20);
     const high = new Uint8Array(8 << 20);
     // Above the low addresses the tests write answers to (0x3000 and the
     // like): a device's block placed there had a GetViewport written over its
@@ -2467,6 +2468,71 @@ test('without guest code every call of the device is a trap, and it has no block
     assert.equal(h.box.isGuest(device, slot(IDIRECT3DDEVICE8_SLOTS, 'DrawPrimitive')), false);
     assert.equal(h.box.memory.readU32(device + 4), 0, 'no block one word past the interface');
     assert.equal(h.device(device, 'SetRenderState', [22, 1]), D3D_OK, 'D3DRS_CULLMODE, trapped');
+    assert.equal(h.release(device), 0);
+    h.release(root);
+});
+
+test('the guest\'s TestCooperativeLevel answers as the host\'s, a lost device left to it', ()=>{
+    // The x86 is its JavaScript's (`inguest.test.js`); here the JavaScript
+    // reads the seam's own block beside the host's answer.
+    const h = seamed({ shadow: true });
+    const root = h.create();
+    const device = h.createDevice(root);
+    assert.ok(h.box.isGuest(device, slot(IDIRECT3DDEVICE8_SLOTS, 'TestCooperativeLevel')));
+    const HANDED = 0xffffffff;
+    // What the functions read of it: the rest of the guest's helpers are not theirs.
+    const guest = /** @type {any} */ ({
+        u32: (/** @type {number} */ at)=>h.box.memory.readU32(at), host: ()=>HANDED });
+    // The block is placed at the device's first entry.
+    assert.equal(h.box.trap(device, 'TestCooperativeLevel', []), 0);
+    assert.equal(inGuest.TestCooperativeLevel(guest, device) >>> 0, 0);
+    // A loss the host is told of at its next entry, the guest after it.
+    h.publisher.objectAt(device).injectDeviceLoss(true);
+    h.device(device, 'Present', [0, 0, 0, 0]);
+    assert.equal(inGuest.TestCooperativeLevel(guest, device) >>> 0, HANDED);
+    assert.notEqual(h.box.trap(device, 'TestCooperativeLevel', []), 0);
+});
+
+test('a surface\'s description is in its block, which the guest\'s GetDesc answers from', ()=>{
+    const h = seamed({ shadow: true });
+    const root = h.create();
+    const device = h.createDevice(root);
+    const out = 0x3200;
+    assert.equal(h.device(device, 'CreateRenderTarget',
+        [32, 16, D3DFMT.A8R8G8B8, 0, 1, out]), D3D_OK);
+    const surface = h.box.memory.readU32(out);
+    assert.ok(h.box.isGuest(surface, slot(IDIRECT3DSURFACE8_SLOTS, 'GetDesc')));
+    const block = h.box.memory.readU32(surface + 4);
+    assert.notEqual(block, 0);
+    const desc = 0x3300;
+    assert.equal(h.box.trap(surface, 'GetDesc', [desc]), D3D_OK, 'the host\'s answer');
+    assert.deepEqual(Array.from({ length: 8 },
+        (unused, i)=>h.box.memory.readU32(block + SURFACE.DESC + i * 4)),
+    Array.from({ length: 8 }, (unused, i)=>h.box.memory.readU32(desc + i * 4)), 'is the block\'s');
+    assert.equal(h.box.memory.readU32(block + SURFACE.DESC + D3DSURFACE_DESC8.Size), 32 * 16 * 4,
+        'this version\'s Size among them');
+    assert.equal(h.box.memory.readU32(block + SURFACE.DESC + D3DSURFACE_DESC8.Width), 32);
+});
+
+test('a state block\'s token is in the device\'s block while the device holds it, and its Apply'
+    + ' and Capture are guest code', ()=>{
+    const h = seamed({ shadow: true });
+    const root = h.create();
+    const device = h.createDevice(root);
+    for (const name of ['ApplyStateBlock', 'CaptureStateBlock'])
+    {
+        assert.ok(h.box.isGuest(device, slot(IDIRECT3DDEVICE8_SLOTS, name)), name);
+    }
+    const out = 0x3400;
+    assert.equal(h.box.trap(device, 'CreateStateBlock', [D3DSBT.ALL, out]), D3D_OK);
+    const token = h.box.memory.readU32(out);
+    const block = h.box.memory.readU32(device + 4);
+    /** @param {number} map */
+    const bit = map=>(h.box.memory.readU32(block + map + 4 * (token >>> 5)) >>> (token & 31)) & 1;
+    assert.equal(bit(SHADOW.STATE_BLOCKS), 1, 'held');
+    assert.equal(bit(SHADOW.STATE_BLOCK_DRAWS), 1, 'holding a vertex format and streams');
+    assert.equal(h.box.trap(device, 'DeleteStateBlock', [token]), D3D_OK);
+    assert.equal(bit(SHADOW.STATE_BLOCKS), 0, 'and not once deleted');
     assert.equal(h.release(device), 0);
     h.release(root);
 });

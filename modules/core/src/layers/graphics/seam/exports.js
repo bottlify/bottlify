@@ -32,7 +32,7 @@ import { createDirect3D9Seam } from './d3d9.js';
 import { createDirect3D10Seam } from './d3d10.js';
 import { createVulkanSeam } from './vulkan.js';
 import { createDirectDrawSeam, readGuid } from './ddraw.js';
-import { REFRESH_HZ } from '../../win32/user32/display.js';
+import { refreshOf } from '../../win32/user32/display.js';
 import { createDirect3D7Seam } from './d3d7.js';
 import { createLegacyDirect3DSeam } from './d3dlegacy.js';
 import { IID_IDirectDraw7, IID_IDirectDrawClipper } from './iids.js';
@@ -153,6 +153,7 @@ const E_OUTOFMEMORY = 0x8007000e | 0;
  * @param {(ms: number, run: () => void) => void} [deps.schedule]
  *        How a wait for the vertical blank is woken; a host timer when none is
  *        given.
+ * @param {number} [deps.ringBytes]  A device's command ring's size (`shadow.js`).
  * @param {import('./shadow.js').ShadowPhases} [deps.phases]
  *        Where a Direct3D 8 or 9 device's entry work is timed (`shadow.js` `sync`).
  * @param {boolean} [deps.guestCode]
@@ -182,7 +183,7 @@ export function createGraphicsLibraries(
         currentThread,
         scratch, render, allocate, allocateCode, divergence, cursor, resolution, windowClientSize,
         gamma, deactivated, deactivations, now = ()=>performance.now(), waitUntil,
-        refresh = ()=>REFRESH_HZ, guestCode = true, phases,
+        refresh = ()=>refreshOf(screen()), guestCode = true, phases, ringBytes,
         guestTraps = [],
         schedule = (ms, run)=>{
             setTimeout(run, ms);
@@ -324,14 +325,14 @@ export function createGraphicsLibraries(
     const guestAllocateCode = guestCode ? allocateCode : undefined;
     const d3d8 = built('D3D8.dll', ()=>createDirect3D8Seam({
         publisher, memory, screen, allocate: guestAllocate, allocateCode: guestAllocateCode,
-        traps: new Set(guestTraps), divergence, cursor, resolution,
+        traps: new Set(guestTraps), divergence, cursor, resolution, ringBytes,
         windowClientSize, now, waitUntil, refresh, phases,
         identity: ()=>graphics.adapter?.() ?? null,
     }));
     const d3d9 = built('D3D9.dll', ()=>createDirect3D9Seam({
         publisher, memory, screen, divergence, cursor, resolution, windowClientSize, gdi, now,
         waitUntil, refresh, phases, allocate: guestAllocate, allocateCode: guestAllocateCode,
-        traps: new Set(guestTraps),
+        traps: new Set(guestTraps), ringBytes,
         identity: ()=>graphics.adapter?.() ?? null,
     }));
     const d3d10 = built('D3D10.dll', ()=>createDirect3D10Seam({
@@ -346,7 +347,9 @@ export function createGraphicsLibraries(
     const vulkan = built('vulkan-1.dll',
         ()=>createVulkanSeam({ graphics, memory, divergence, resolution }));
     const d3d7 = built('DDRAW.dll', ()=>createDirect3D7Seam({
-        publisher, memory, render, callGuest, currentThread, scratch,
+        publisher, memory, render, callGuest, currentThread, scratch, divergence,
+        allocate: guestAllocate, allocateCode: guestAllocateCode, traps: new Set(guestTraps),
+        ringBytes,
     }));
     const d3dLegacy = built('DDRAW.dll', ()=>createLegacyDirect3DSeam({
         publisher, memory, d3d7: d3d7.shared, callGuest, currentThread, scratch,
@@ -356,6 +359,7 @@ export function createGraphicsLibraries(
     }));
     const ddraw = built('DDRAW.dll', ()=>createDirectDrawSeam({
         publisher, memory, screen, gdi, present, flipQueued, callGuest, currentThread, scratch,
+        aroundCall: call=>d3d7.aroundDevices(call),
         now, schedule, refresh,
         extraInterfaces: [d3d7.interface, ...d3dLegacy.interfaces],
         extraSurfaceInterfaces: d3dLegacy.surfaceInterfaces,
@@ -820,6 +824,9 @@ export function createGraphicsLibraries(
             openglRingMs: opengl ? opengl.diagnostics().ringMs : 0,
             openglCallMs: opengl ? opengl.diagnostics().callMs : 0,
             vulkan: vulkan?.diagnostics() ?? null,
+            // How the Presents of the version that presented were paced.
+            presentPacing: [d3d9?.presentPacing(), d3d8?.presentPacing()]
+                .find(pacing=>pacing && pacing.presents > 0) ?? null,
         }),
 
         /**

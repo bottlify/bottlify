@@ -23,11 +23,20 @@ import assert from 'node:assert/strict';
 import { createCorkHost } from '../../cpu/internal/cork-host.js';
 import { runToHalt } from '../../cpu/internal/halt.fixture.js';
 import * as cork from '../../../../../cork/src/index.js';
-import { SHADOW, commandCode } from './shadow.js';
+import { SHADOW, SURFACE, TEXTURE, VERTEX_BUFFER7, commandCode } from './shadow.js';
 import { COMMAND_MIRRORS as MIRRORS_9 } from './d3d9.js';
 import { COMMAND_MIRRORS as MIRRORS_8 } from './d3d8.js';
 import * as D3D9 from '../d3d9/commands.js';
 import { D3D8_COMMANDS } from '../d3d8/commands.js';
+import { D3D7_COMMANDS } from '../d3d7/commands.js';
+import { COMMAND_MIRRORS as MIRRORS_7 } from './d3d7.js';
+import { createDirect3D7 } from '../d3d7/device.js';
+import { DEVICE_IDS as DEVICE_IDS_7 } from '../d3d7/constants.js';
+import { createDirectDraw } from '../ddraw/objects.js';
+import {
+    DDSCAPS_3DDEVICE, DDSCAPS_OFFSCREENPLAIN, DDSCAPS_TEXTURE, DDSCAPS_ZBUFFER, DDSCL_NORMAL,
+    DDSD_CAPS, DDSD_HEIGHT, DDSD_WIDTH, DDSD_ZBUFFERBITDEPTH,
+} from '../ddraw/constants.js';
 import { createDirect3D9 } from '../d3d9/device.js';
 import { createDirect3D8 } from '../d3d8/device.js';
 import { D3DDECLTYPE, D3DDECLUSAGE } from '../d3d9/declaration.js';
@@ -40,6 +49,10 @@ const RING = 0xd000;
 const RING_BYTES = 0x4000;
 const DATA = 0x14000;
 const OBJECTS = 0x18000;
+/** Each surface's block (`SURFACE`), the word after its interface pointing there. */
+const SURFACES = 0x19000;
+/** Each texture's block (`TEXTURE`), for a texture's own calls. */
+const TEXTURES = 0x1b000;
 const STACK = 0x300000;
 /** The device's interface: its block one word on. */
 const DEVICE = OBJECTS + 0x800;
@@ -50,7 +63,9 @@ const D3DFMT_A8R8G8B8 = 21;
 const D3DFMT_D24S8 = 75;
 const D3DFMT_D24X8 = 77;
 const D3DFMT_INDEX16 = 101;
+const D3DPOOL_DEFAULT = 0;
 const D3DPOOL_MANAGED = 1;
+const D3DUSAGE_RENDERTARGET = 0x1;
 const D3DSWAPEFFECT_DISCARD = 1;
 const FVF_XYZ_DIFFUSE = 0x042;
 const D3DSBT_ALL = 1;
@@ -117,6 +132,24 @@ const machine = ()=>{
         state.taken.forEach((value, table)=>{
             words[(SHADOW.VALIDATED - SHADOW.DRAWABLE) / 4 + table * SHADOW.VALIDATED_SLOTS] =
                 value;
+        });
+        words[(SHADOW.COOPERATIVE - SHADOW.DRAWABLE) / 4] = state.cooperative ?? 1;
+        words[(SHADOW.ELSEWHERE - SHADOW.DRAWABLE) / 4] = state.elsewhere ?? 0;
+        for (const [token, draws] of state.stateBlocks ?? [])
+        {
+            if (token < SHADOW.STATE_BLOCK_TOKENS)
+            {
+                for (const [map, set] of /** @type {[number, boolean][]} */ ([
+                    [SHADOW.STATE_BLOCKS, true], [SHADOW.STATE_BLOCK_DRAWS, draws]]))
+                {
+                    const at = (map - SHADOW.DRAWABLE) / 4 + (token >>> 5);
+                    words[at] = (words[at] | (set ? 1 << (token & 31) : 0)) >>> 0;
+                }
+            }
+        }
+        (state.strides ?? []).slice(0, SHADOW.FVF_STRIDE_PAIRS).forEach(([fvf, stride], index)=>{
+            words[(SHADOW.FVF_STRIDES - SHADOW.DRAWABLE) / 4 + index * 2] = fvf;
+            words[(SHADOW.FVF_STRIDES - SHADOW.DRAWABLE) / 4 + index * 2 + 1] = stride;
         });
         host.writePhysical(BLOCK + SHADOW.DRAWABLE, new Uint8Array(words.buffer));
         host.writePhysical(BLOCK + SHADOW.RENDER_STATE_VALID, valid);
@@ -189,6 +222,82 @@ const renderStatesOf = device=>{
  */
 
 /**
+ * The objects a case made, each at its interface in guest memory with its
+ * block one word on: a surface's of its own with its description, and a
+ * Direct3D 7 vertex buffer's with its lock and its vertices, as the seams
+ * publish them; any other's is the device's block.
+ *
+ * A texture's own call (`dirty`) finds the texture's block there instead,
+ * with the device's block and the top level's extent, as the seams write it.
+ *
+ * @param {ReturnType<typeof machine>['host']} host @param {Record<string, any>} made
+ * @param {boolean} [textures]
+ * @returns {Map<number, any>} the objects by pointer
+ */
+function placeObjects(host, made, textures = false){
+    /** @type {Map<number, any>} */
+    const pointers = new Map();
+    /** @type {Map<object, number>} */
+    const containers = new Map();
+    Object.keys(made).forEach((key, i)=>{
+        const at = OBJECTS + i * 16;
+        /** @type {{ desc?: any }} */
+        const held = {};
+        const surface = typeof made[key].LockRect === 'function'
+            && typeof made[key].GetDesc === 'function'
+            && made[key].GetDesc(held) === D3D_OK && held.desc;
+        const vertices = !surface && typeof made[key].numVertices === 'number'
+            && typeof made[key].LockInPlace === 'function';
+        const texture = textures && (typeof made[key].AddDirtyRect === 'function'
+            || typeof made[key].AddDirtyBox === 'function');
+        const block = texture ? TEXTURES + i * TEXTURE.SIZE
+            : surface || vertices ? SURFACES + i * SURFACE.SIZE : BLOCK;
+        if (texture)
+        {
+            /** @type {{ surface?: any }} */
+            const level = {};
+            /** @type {{ desc?: any }} */
+            const top = {};
+            const volume = made[key].GetSurfaceLevel === undefined;
+            if (!volume)
+            {
+                assert.equal(made[key].GetSurfaceLevel(0, level), D3D_OK);
+                level.surface.GetDesc(top);
+                level.surface.release();
+            }
+            const words = new Uint32Array(TEXTURE.SIZE / 4);
+            words.set(volume
+                ? [BLOCK, made[key].width, made[key].height, made[key].depth]
+                : [BLOCK, top.desc.Width, top.desc.Height, 1], TEXTURE.DEVICE / 4);
+            host.writePhysical(block, new Uint8Array(words.buffer));
+        }
+        if (vertices)
+        {
+            const words = new Uint32Array(VERTEX_BUFFER7.SIZE / 4);
+            words[VERTEX_BUFFER7.LOCKED / 4] = made[key].locked ? 1 : 0;
+            words[VERTEX_BUFFER7.VERTICES / 4] = made[key].numVertices;
+            host.writePhysical(block, new Uint8Array(words.buffer));
+        }
+        if (surface)
+        {
+            // And the texture it is a level of, numbered as the shadow numbers them.
+            const container = made[key].container;
+            if (container && !containers.has(container))
+            {
+                containers.set(container, containers.size + 1);
+            }
+            const { Format, Type, Usage, Pool, Width, Height } = held.desc;
+            host.writePhysical(block, new Uint8Array(new Uint32Array([0, Format, Type,
+                Usage, Pool, 0, 0, Width, Height,
+                container ? /** @type {number} */ (containers.get(container)) : 0]).buffer));
+        }
+        host.writePhysical(at + 4, new Uint8Array(u32(block)));
+        pointers.set(at, made[key]);
+    });
+    return pointers;
+}
+
+/**
  * Runs every case of every command, and says which the guest took that the
  * device refuses.
  *
@@ -214,15 +323,8 @@ function gate(api, table){
             /** @type {Record<string, any>} */
             const made = {};
             setup?.(device, made);
-            /** @type {Map<number, any>} */
-            const pointers = new Map();
             const names = Object.keys(made);
-            names.forEach((key, i)=>{
-                const at = OBJECTS + i * 16;
-                // An object's interface points at its block one word on.
-                host.writePhysical(at + 4, new Uint8Array(u32(BLOCK)));
-                pointers.set(at, made[key]);
-            });
+            const pointers = placeObjects(host, made, shape.dirty !== undefined);
             /** @param {number | string} arg */
             const value = arg=>(typeof arg === 'number' ? arg >>> 0
                 : arg === 'data' ? DATA : OBJECTS + names.indexOf(arg) * 16);
@@ -285,6 +387,15 @@ const texture = (device, made)=>{
     made.texture = out.texture;
 };
 
+/** @param {any} device @param {Record<string, any>} made */
+const volumeTexture = (device, made)=>{
+    /** @type {{ texture?: any }} */
+    const out = {};
+    assert.equal(device.CreateVolumeTexture(8, 8, 4, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, out),
+        D3D_OK);
+    made.volume = out.texture;
+};
+
 /** A vertex buffer of position-and-colour vertices, bound as stream 0. @param {any} device */
 const vertices9 = (device, /** @type {Record<string, any>} */ made)=>{
     /** @type {{ buffer?: any }} */
@@ -325,6 +436,38 @@ const drawable8 = (/** @type {any} */ device, /** @type {Record<string, any>} */
     assert.equal(device.BeginScene(), D3D_OK);
 };
 
+/** A device that records for one drawing elsewhere, as one in a graphics worker. */
+const ELSEWHERE = { renderedElsewhere: true };
+
+/** A state block of one render state, recorded: its token, the device's first, is 1. */
+const renderStateBlock = (/** @type {any} */ device)=>{
+    assert.equal(device.BeginStateBlock(), D3D_OK);
+    assert.equal(device.SetRenderState(7, 1), D3D_OK);
+    /** @type {{ handle?: number }} */
+    const out = {};
+    assert.equal(device.EndStateBlock(out), D3D_OK);
+    assert.equal(out.handle, 1);
+};
+/** A state block of everything the device holds, a vertex format and streams among it. */
+const wholeBlock = (/** @type {any} */ device)=>{
+    /** @type {{ handle?: number }} */
+    const out = {};
+    assert.equal(device.CreateStateBlock(D3DSBT_ALL, out), D3D_OK);
+    assert.equal(out.handle, 1);
+};
+
+/** Three targets, two of one size, as a pass that shrinks its picture makes. */
+const targets = (/** @type {any} */ device, /** @type {Record<string, any>} */ made)=>{
+    for (const [name, size] of /** @type {[string, number][]} */ ([['big', 32], ['small', 16],
+        ['other', 16]]))
+    {
+        /** @type {{ surface?: any }} */
+        const out = {};
+        assert.equal(device.CreateRenderTarget(size, size, D3DFMT_X8R8G8B8, 0, out), D3D_OK);
+        made[name] = out.surface;
+    }
+};
+
 /** A target of its own and a depth surface with no stencil, as an offscreen pass makes. */
 const offscreen = (/** @type {any} */ device, /** @type {Record<string, any>} */ made)=>{
     /** @type {{ surface?: any }} */
@@ -357,6 +500,37 @@ const CONSTANTS = new Array(64).fill(ONE);
  * @returns {Record<string, Case[]>}
  */
 const shared = drawable=>({
+    // A rectangle of the top level, as the device takes one: within it and not
+    // empty; none, all of it, is the host's.
+    'Texture.AddDirtyRect': [
+        { label: 'a rectangle within', args: ['texture', 'data'], data: [1, 2, 9, 10],
+            setup: texture },
+        { label: 'all of it', args: ['texture', 'data'], data: [0, 0, 16, 16], setup: texture },
+        { label: 'past the right edge', args: ['texture', 'data'], data: [0, 0, 17, 16],
+            setup: texture },
+        { label: 'past the bottom', args: ['texture', 'data'], data: [0, 0, 16, 17],
+            setup: texture },
+        { label: 'empty', args: ['texture', 'data'], data: [4, 4, 4, 8], setup: texture },
+        { label: 'turned round', args: ['texture', 'data'], data: [4, 9, 8, 2], setup: texture },
+        { label: 'a negative edge', args: ['texture', 'data'], data: [-1, 0, 4, 4],
+            setup: texture },
+        { label: 'none', args: ['texture', 0], setup: texture },
+    ],
+    'VolumeTexture.AddDirtyBox': [
+        { label: 'a box within', args: ['volume', 'data'], data: [1, 2, 5, 6, 1, 3],
+            setup: volumeTexture },
+        { label: 'all of it', args: ['volume', 'data'], data: [0, 0, 8, 8, 0, 4],
+            setup: volumeTexture },
+        { label: 'past the back', args: ['volume', 'data'], data: [0, 0, 8, 8, 0, 5],
+            setup: volumeTexture },
+        { label: 'empty in depth', args: ['volume', 'data'], data: [0, 0, 8, 8, 2, 2],
+            setup: volumeTexture },
+        { label: 'past the right edge', args: ['volume', 'data'], data: [0, 0, 9, 8, 0, 4],
+            setup: volumeTexture },
+        { label: 'a negative front', args: ['volume', 'data'], data: [0, 0, 8, 8, -1, 4],
+            setup: volumeTexture },
+        { label: 'none', args: ['volume', 0], setup: volumeTexture },
+    ],
     SetRenderState: [
         { label: 'a state the device has', args: [7, 1] },
         { label: 'a state past the block', args: [300, 1] },
@@ -425,6 +599,21 @@ const shared = drawable=>({
                 assert.equal(device.SetRenderTarget(...renderTarget(device, made)), D3D_OK);
             } },
         { label: 'no flags', args: [0, 0, 0, 0, ONE, 0] },
+        { label: 'target and depth on a depth surface without stencil',
+            args: [0, 0, 3, 0, ONE, 0],
+            setup: (device, made)=>{
+                offscreen(device, made);
+                assert.equal(device.SetRenderTarget(...renderTarget(device, made)), D3D_OK);
+            } },
+        { label: 'depth with no depth surface', args: [0, 0, 2, 0, ONE, 0],
+            setup: (device, made)=>{
+                offscreen(device, made);
+                delete made.depth;
+                assert.equal(device.SetDepthStencilSurface
+                    ? (device.SetDepthStencilSurface(null), device.SetRenderTarget(0, made.target))
+                    : device.SetRenderTarget(made.target, null), D3D_OK);
+            } },
+        { label: 'a flag past stencil', args: [0, 0, 9, 0, ONE, 0] },
     ],
     DrawPrimitiveUP: [
         { label: 'a triangle', args: [4, 1, 'data', 16], data: TRIANGLE, setup: drawable },
@@ -468,6 +657,56 @@ test('Direct3D 9: every call the command ring answers for in the guest is one th
         };
         gate({ ...D3D9, mirrors: MIRRORS_9, device: device9 }, {
             ...shared(drawable9),
+            SetRenderTarget: [
+                { label: 'a target', args: [0, 'target'], setup: offscreen },
+                { label: 'the second target', args: [1, 'target'], setup: offscreen },
+                { label: 'none', args: [0, 0] },
+                { label: 'a depth surface for a target', args: [0, 'depth'], setup: offscreen },
+                { label: 'a texture level that is no target', args: [0, 'level'],
+                    setup: (device, made)=>{
+                        texture(device, made);
+                        /** @type {{ surface?: any }} */
+                        const out = {};
+                        assert.equal(made.texture.GetSurfaceLevel(0, out), D3D_OK);
+                        made.level = out.surface;
+                    } },
+            ],
+            // A copy between two targets, made on the GPU where the device draws elsewhere.
+            StretchRect: [
+                { label: 'two targets, stretched', args: ['big', 0, 'small', 0, 2],
+                    caps: ELSEWHERE, setup: targets },
+                { label: 'two targets of one size', args: ['small', 0, 'other', 0, 0],
+                    caps: ELSEWHERE, setup: targets },
+                { label: 'a device drawing itself', args: ['big', 0, 'small', 0, 2],
+                    setup: targets },
+                { label: 'a rectangle', args: ['big', 'data', 'small', 0, 2], data: [0, 0, 8, 8],
+                    caps: ELSEWHERE, setup: targets },
+                { label: 'a filter past anisotropic', args: ['big', 0, 'small', 0, 4],
+                    caps: ELSEWHERE, setup: targets },
+                { label: 'the same surface', args: ['big', 0, 'big', 0, 2], caps: ELSEWHERE,
+                    setup: targets },
+                { label: 'a depth surface', args: ['depth', 0, 'target', 0, 0], caps: ELSEWHERE,
+                    setup: offscreen },
+                { label: 'two levels of one target texture', args: ['top', 0, 'level', 0, 2],
+                    caps: ELSEWHERE, setup: (device, made)=>{
+                        /** @type {{ texture?: any }} */
+                        const out = {};
+                        assert.equal(device.CreateTexture(16, 16, 2, D3DUSAGE_RENDERTARGET,
+                            D3DFMT_X8R8G8B8, D3DPOOL_DEFAULT, out), D3D_OK);
+                        /** @type {{ surface?: any }} */
+                        const top = {};
+                        const level = {};
+                        assert.equal(out.texture.GetSurfaceLevel(0, top), D3D_OK);
+                        assert.equal(out.texture.GetSurfaceLevel(1, level), D3D_OK);
+                        made.top = top.surface;
+                        made.level = /** @type {any} */ (level).surface;
+                    } },
+            ],
+            SetDepthStencilSurface: [
+                { label: 'a depth surface', args: ['depth'], setup: offscreen },
+                { label: 'none', args: [0] },
+                { label: 'a target for a depth surface', args: ['target'], setup: offscreen },
+            ],
             SetTexture: [
                 { label: 'a texture', args: [0, 'texture'], setup: texture },
                 { label: 'none', args: [0, 0] },
@@ -496,6 +735,16 @@ test('Direct3D 9: every call the command ring answers for in the guest is one th
             SetIndices: [
                 { label: 'indices', args: ['indices'], setup: indices },
                 { label: 'none', args: [0] },
+            ],
+            SetStreamSourceFreq: [
+                { label: 'once each', args: [0, 1] },
+                { label: 'the indexed geometry, drawn four times', args: [0, 0x40000004] },
+                { label: 'the instances, one each', args: [1, 0x80000001] },
+                { label: 'a divider of zero', args: [0, 0x40000000] },
+                { label: 'none at all', args: [1, 0] },
+                { label: 'both kinds at once', args: [1, 0xc0000001] },
+                { label: 'the instances on the first stream', args: [0, 0x80000001] },
+                { label: 'a stream past the last', args: [16, 1] },
             ],
             SetVertexDeclaration: [
                 { label: 'a declaration', args: ['declaration'], setup: declaration },
@@ -573,6 +822,66 @@ test('Direct3D 8: every call the command ring answers for in the guest is one th
     ()=>{
         gate({ ...D3D8_COMMANDS, mirrors: MIRRORS_8, device: device8 }, {
             ...shared(drawable8),
+            // By its token: a block the device holds, and none past the map.
+            ApplyStateBlock: [
+                { label: 'a block of render states', args: [1], setup: renderStateBlock },
+                { label: 'a block of everything', args: [1], setup: wholeBlock },
+                { label: 'no such block', args: [5], setup: renderStateBlock },
+                { label: 'a block deleted', args: [1], setup: device=>{
+                    renderStateBlock(device);
+                    assert.equal(device.DeleteStateBlock(1), D3D_OK);
+                } },
+                { label: 'a token past the map', args: [SHADOW.STATE_BLOCK_TOKENS + 1],
+                    setup: renderStateBlock },
+            ],
+            CaptureStateBlock: [
+                { label: 'a block of render states', args: [1], setup: renderStateBlock },
+                { label: 'no such block', args: [2], setup: renderStateBlock },
+                { label: 'none at all', args: [0] },
+            ],
+            // A whole target onto another of its size, where the device draws elsewhere.
+            CopyRects: [
+                { label: 'two targets of one size', args: ['small', 0, 0, 'other', 0],
+                    caps: ELSEWHERE, setup: targets },
+                { label: 'two sizes', args: ['big', 0, 0, 'small', 0], caps: ELSEWHERE,
+                    setup: targets },
+                { label: 'a device drawing itself', args: ['small', 0, 0, 'other', 0],
+                    setup: targets },
+                { label: 'rectangles', args: ['small', 'data', 1, 'other', 'data'],
+                    data: [0, 0, 8, 8], caps: ELSEWHERE, setup: targets },
+                { label: 'the same surface', args: ['small', 0, 0, 'small', 0],
+                    caps: ELSEWHERE, setup: targets },
+                { label: 'a depth surface', args: ['depth', 0, 0, 'target', 0],
+                    caps: ELSEWHERE, setup: offscreen },
+                { label: 'two formats', args: ['small', 0, 0, 'argb', 0], caps: ELSEWHERE,
+                    setup: (device, made)=>{
+                        targets(device, made);
+                        /** @type {{ surface?: any }} */
+                        const out = {};
+                        assert.equal(device.CreateRenderTarget(16, 16, D3DFMT_A8R8G8B8, 0, out),
+                            D3D_OK);
+                        made.argb = out.surface;
+                    } },
+            ],
+            // Both targets at once: a null target keeps the bound one, the host's.
+            SetRenderTarget: [
+                { label: 'a target and a depth surface', args: ['target', 'depth'],
+                    setup: offscreen },
+                { label: 'a target and none', args: ['target', 0], setup: offscreen },
+                { label: 'no target', args: [0, 'depth'], setup: offscreen },
+                { label: 'a depth surface for a target', args: ['depth', 'depth'],
+                    setup: offscreen },
+                { label: 'a target for a depth surface', args: ['target', 'target'],
+                    setup: offscreen },
+                { label: 'a texture level for a target', args: ['level', 0],
+                    setup: (device, made)=>{
+                        texture(device, made);
+                        /** @type {{ surface?: any }} */
+                        const out = {};
+                        assert.equal(made.texture.GetSurfaceLevel(0, out), D3D_OK);
+                        made.level = out.surface;
+                    } },
+            ],
             SetStreamSource: [
                 { label: 'stream 0', args: [0, 'vertices', 16], setup: (device, made)=>{
                     drawable8(device, made);
@@ -632,12 +941,7 @@ function sequence(api, setup, steps){
     const made = {};
     setup(device, made);
     const names = Object.keys(made);
-    /** @type {Map<number, any>} */
-    const pointers = new Map();
-    names.forEach((key, i)=>{
-        host.writePhysical(OBJECTS + i * 16 + 4, new Uint8Array(u32(BLOCK)));
-        pointers.set(OBJECTS + i * 16, made[key]);
-    });
+    const pointers = placeObjects(host, made);
     start(device.ringState(), renderStatesOf(device));
     /** @type {Uint8Array | null} */
     let ring = null;
@@ -741,4 +1045,264 @@ test('Direct3D 8: the routines keep what a draw needs as the device does, call a
         ['EndScene', [], 'ok'],
         ['EndScene', [], 'trap'],
     ]);
+    // What a target set says of the depth surface, which Clear's checks read,
+    // and of the viewport, which SetViewport's do.
+    /** @param {any} device @param {Record<string, any>} made */
+    const depthTargets = (device, made)=>{
+        offscreen(device, made);
+        /** @type {{ surface?: any }} */
+        const out = {};
+        assert.equal(device.CreateDepthStencilSurface(16, 16, D3DFMT_D24S8, out), D3D_OK);
+        made.stencil = out.surface;
+    };
+    // A block of render states applied leaves the draws in the guest; one
+    // holding a vertex format and streams has them wait for the host.
+    sequence(api, (device, made)=>{
+        buffers(device, made);
+        renderStateBlock(device);
+        /** @type {{ handle?: number }} */
+        const out = {};
+        assert.equal(device.CreateStateBlock(D3DSBT_ALL, out), D3D_OK);
+    }, [
+        ['BeginScene', [], 'ok'],
+        ['SetVertexShader', [FVF_XYZ_DIFFUSE], 'ok'],
+        ['SetStreamSource', [0, 'vertices', 16], 'ok'],
+        ['ApplyStateBlock', [1], 'ok'],
+        ['DrawPrimitive', [4, 0, 1], 'ok'],
+        ['CaptureStateBlock', [2], 'ok'],
+        ['DrawPrimitive', [4, 0, 1], 'ok'],
+        ['ApplyStateBlock', [2], 'ok'],
+        ['DrawPrimitive', [4, 0, 1], 'trap'],
+    ]);
+    sequence(api, depthTargets, [
+        ['SetRenderTarget', ['target', 'depth'], 'ok'],
+        ['Clear', [0, 0, 3, 0, ONE, 0], 'ok'],
+        ['Clear', [0, 0, 7, 0, ONE, 0], 'trap'],
+        ['SetRenderTarget', ['target', 'stencil'], 'ok'],
+        ['Clear', [0, 0, 7, 0, ONE, 0], 'ok'],
+        ['SetViewport', ['data'], 'ok', [0, 0, 16, 16, 0, ONE]],
+        ['SetViewport', ['data'], 'trap', [0, 0, 64, 64, 0, ONE]],
+        ['SetRenderTarget', ['target', 0], 'ok'],
+        ['Clear', [0, 0, 2, 0, ONE, 0], 'trap'],
+    ]);
+});
+
+/** Each Direct3D 7 device's DirectDraw object, for a case that makes surfaces. */
+const roots7 = new WeakMap();
+/** @param {any} device */
+const device7Root = device=>roots7.get(device);
+
+/** Direct3D 7: a HAL device on a target of its own, through a DirectDraw object. */
+const device7 = ()=>{
+    const root = createDirectDraw({ version: 7, screenWidth: 64, screenHeight: 64 });
+    root.setCooperativeLevel(0x00010044, DDSCL_NORMAL);
+    const target = root.createSurface({ flags: DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT,
+        caps: DDSCAPS_3DDEVICE | DDSCAPS_OFFSCREENPLAIN, width: 64, height: 64 });
+    assert.equal(target.hr, D3D_OK);
+    const made = createDirect3D7(root).createDevice(DEVICE_IDS_7.HAL, target.surface);
+    assert.equal(made.hr, D3D_OK);
+    roots7.set(made.device, root);
+    return made.device;
+};
+
+test('Direct3D 7: every call the command ring answers for in the guest is one the device takes',
+    ()=>{
+        const common = shared(()=>{});
+        gate({ ...D3D7_COMMANDS, mirrors: MIRRORS_7, device: device7 }, {
+            SetRenderState: common.SetRenderState,
+            // This version's own numbers: WORLD is 1 and WORLD1..3 4..6, and 256 is none.
+            SetTransform: [
+                { label: 'WORLD', args: [1, 'data'], data: IDENTITY },
+                { label: 'VIEW', args: [2, 'data'], data: IDENTITY },
+                { label: 'WORLD3', args: [6, 'data'], data: IDENTITY },
+                { label: 'TEXTURE7', args: [23, 'data'], data: IDENTITY },
+                { label: 'Direct3D 8\'s WORLD', args: [256, 'data'], data: IDENTITY },
+                { label: 'a type below TEXTURE0', args: [7, 'data'], data: IDENTITY },
+                { label: 'none', args: [0, 'data'], data: IDENTITY },
+            ],
+            SetTextureStageState: [
+                ...common.SetTextureStageState,
+                // Stored in its own numbering, read back in the program's.
+                { label: 'MAGFILTER', args: [0, 16, 3] },
+                { label: 'MIPFILTER', args: [1, 18, 0] },
+                { label: 'past TEXTURETRANSFORMFLAGS', args: [0, 25, 0] },
+            ],
+            SetMaterial: common.SetMaterial,
+            SetViewport: common.SetViewport,
+            SetLight: common.SetLight,
+            LightEnable: common.LightEnable,
+            SetClipPlane: common.SetClipPlane,
+            BeginScene: common.BeginScene,
+            EndScene: common.EndScene,
+            SetTexture: [
+                { label: 'a texture', args: [0, 'texture'], setup: texture7 },
+                { label: 'the last stage', args: [7, 'texture'], setup: texture7 },
+                { label: 'none', args: [0, 0] },
+                { label: 'a stage past the last', args: [8, 'texture'], setup: texture7 },
+            ],
+            // By pointer, so many vertices as whole primitives, of a format the
+            // host has drawn with: its width is the block's.
+            DrawPrimitive: [
+                { label: 'a triangle', args: [4, FVF_TL, 'data', 3, 0], data: TL_TRIANGLE,
+                    setup: drawnWith },
+                { label: 'a strip of three', args: [5, FVF_TL, 'data', 3, 0], data: TL_TRIANGLE,
+                    setup: drawnWith },
+                { label: 'a point', args: [1, FVF_TL, 'data', 1, 0], data: TL_TRIANGLE,
+                    setup: drawnWith },
+                { label: 'a format not drawn with', args: [4, FVF_TL | 0x20, 'data', 3, 0],
+                    data: [...TL_TRIANGLE, 0, 0, 0], setup: drawnWith },
+                { label: 'four vertices of a list', args: [4, FVF_TL, 'data', 4, 0],
+                    data: [...TL_TRIANGLE, ...TL_TRIANGLE.slice(0, 5)], setup: drawnWith },
+                { label: 'three of a line list', args: [2, FVF_TL, 'data', 3, 0],
+                    data: TL_TRIANGLE, setup: drawnWith },
+                { label: 'a type there is not', args: [7, FVF_TL, 'data', 3, 0],
+                    data: TL_TRIANGLE, setup: drawnWith },
+                { label: 'outside a scene', args: [4, FVF_TL, 'data', 3, 0], data: TL_TRIANGLE,
+                    setup: device=>{
+                        drawnWith(device);
+                        assert.equal(device.EndScene(), D3D_OK);
+                    } },
+            ],
+            ApplyStateBlock: [
+                { label: 'a block of render states', args: [1], setup: renderStateBlock },
+                { label: 'a block of everything', args: [1], setup: wholeBlock },
+                { label: 'no such block', args: [5], setup: renderStateBlock },
+                { label: 'a block deleted', args: [1], setup: device=>{
+                    renderStateBlock(device);
+                    assert.equal(device.DeleteStateBlock(1), D3D_OK);
+                } },
+            ],
+            CaptureStateBlock: [
+                { label: 'a block of render states', args: [1], setup: renderStateBlock },
+                { label: 'none at all', args: [0] },
+            ],
+            // A depth clear needs a depth buffer attached to the target.
+            Clear: [
+                { label: 'the target', args: [0, 0, 1, 0, ONE, 0] },
+                { label: 'two rectangles', args: [2, 'data', 1, 0, ONE, 0],
+                    data: [0, 0, 8, 8, 8, 8, 16, 16] },
+                { label: 'depth without a depth buffer', args: [0, 0, 3, 0, ONE, 0] },
+                { label: 'target, depth and stencil', args: [0, 0, 7, 0, ONE, 0],
+                    setup: depth7 },
+                { label: 'nothing to clear', args: [0, 0, 0, 0, ONE, 0] },
+                { label: 'rectangles without a pointer', args: [2, 0, 1, 0, ONE, 0] },
+            ],
+            // From a buffer with a block, unlocked, holding the range drawn.
+            DrawPrimitiveVB: [
+                { label: 'a strip', args: [5, 'vb', 0, 4, 0], setup: buffer7 },
+                { label: 'a list past the first vertex', args: [4, 'vb', 1, 3, 0],
+                    setup: buffer7 },
+                { label: 'without clipping', args: [4, 'vb', 0, 3, 4], setup: buffer7 },
+                { label: 'past the last vertex', args: [4, 'vb', 2, 3, 0], setup: buffer7 },
+                { label: 'a start that wraps', args: [4, 'vb', 0xfffffffe, 3, 0],
+                    setup: buffer7 },
+                { label: 'a locked buffer', args: [4, 'vb', 0, 3, 0], setup: lockedBuffer7 },
+                { label: 'two of a list', args: [4, 'vb', 0, 2, 0], setup: buffer7 },
+                { label: 'a type there is not', args: [7, 'vb', 0, 3, 0], setup: buffer7 },
+                { label: 'no buffer', args: [4, 0, 0, 3, 0], setup: buffer7 },
+                { label: 'outside a scene', args: [4, 'vb', 0, 3, 0],
+                    setup: (device, made)=>{
+                        buffer7(device, made);
+                        assert.equal(device.EndScene(), D3D_OK);
+                    } },
+            ],
+            // The same, and the indices: 16-bit, copied whole.
+            DrawIndexedPrimitiveVB: [
+                { label: 'a quad', args: [4, 'vb', 0, 4, 'data', 6, 0], data: QUAD_INDICES,
+                    setup: buffer7 },
+                { label: 'an odd count', args: [5, 'vb', 0, 4, 'data', 3, 0],
+                    data: QUAD_INDICES, setup: buffer7 },
+                { label: 'past the last vertex', args: [4, 'vb', 1, 4, 'data', 6, 0],
+                    data: QUAD_INDICES, setup: buffer7 },
+                { label: 'a locked buffer', args: [4, 'vb', 0, 4, 'data', 6, 0],
+                    data: QUAD_INDICES, setup: lockedBuffer7 },
+                { label: 'no indices', args: [4, 'vb', 0, 4, 0, 6, 0], setup: buffer7 },
+                { label: 'two indices', args: [4, 'vb', 0, 4, 'data', 2, 0],
+                    data: QUAD_INDICES, setup: buffer7 },
+                { label: 'a type there is not', args: [0, 'vb', 0, 4, 'data', 6, 0],
+                    data: QUAD_INDICES, setup: buffer7 },
+                { label: 'outside a scene', args: [4, 'vb', 0, 4, 'data', 6, 0],
+                    data: QUAD_INDICES, setup: (device, made)=>{
+                        buffer7(device, made);
+                        assert.equal(device.EndScene(), D3D_OK);
+                    } },
+            ],
+        });
+    });
+
+/** A quad's six 16-bit indices, two to a dword. */
+const QUAD_INDICES = [...new Uint32Array(Uint16Array.from([0, 1, 2, 2, 1, 3]).buffer)];
+
+/** A scene, and a buffer of four transformed vertices. */
+const buffer7 = (/** @type {any} */ device, /** @type {Record<string, any>} */ made)=>{
+    const made7 = createDirect3D7(device7Root(device)).createVertexBuffer({ caps: 0,
+        fvf: FVF_TL, numVertices: 4 });
+    assert.equal(made7.hr, D3D_OK);
+    made.vb = made7.buffer;
+    assert.equal(device.BeginScene(), D3D_OK);
+};
+/** The same, locked. */
+const lockedBuffer7 = (/** @type {any} */ device, /** @type {Record<string, any>} */ made)=>{
+    buffer7(device, made);
+    assert.equal(made.vb.Lock(0, {}), D3D_OK);
+};
+/** A depth buffer attached to the device's target. */
+const depth7 = (/** @type {any} */ device)=>{
+    const depth = device7Root(device).createSurface({
+        flags: DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_ZBUFFERBITDEPTH,
+        caps: DDSCAPS_ZBUFFER, width: 64, height: 64, zBufferBitDepth: 16 });
+    assert.equal(depth.hr, D3D_OK);
+    /** @type {{ surface?: any }} */
+    const held = {};
+    assert.equal(device.GetRenderTarget(held), D3D_OK);
+    assert.equal(held.surface.addAttachedSurface(depth.surface), D3D_OK);
+};
+
+/** A texture surface of the device's DirectDraw object. */
+const texture7 = (/** @type {any} */ device, /** @type {Record<string, any>} */ made)=>{
+    const surface = device7Root(device).createSurface({ flags: DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT,
+        caps: DDSCAPS_TEXTURE, width: 8, height: 8 });
+    assert.equal(surface.hr, D3D_OK);
+    made.texture = surface.surface;
+};
+
+/** Transformed, lit vertices: a position with its RHW and a colour, five words. */
+const FVF_TL = 0x044;
+/** Three of them. */
+const TL_TRIANGLE = [...floats([0, 0, 0, 1]), 0xffffffff, ...floats([8, 0, 0, 1]), 0xffffffff,
+    ...floats([0, 8, 0, 1]), 0xffffffff];
+/** A scene, and a draw made on the host with the format, which the block learns the width of. */
+const drawnWith = (/** @type {any} */ device)=>{
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.DrawPrimitive(4, FVF_TL, new Uint8Array(new Uint32Array(TL_TRIANGLE)
+        .buffer), 3), D3D_OK);
+};
+
+test('Direct3D 7: a draw by pointer carries the program\'s vertices, as wide as its format\'s'
+    + ' entry in the block, whole', ()=>{
+    const { host, run } = machine();
+    const routine = commandCode(ROUTINE, TRAP, { ...D3D7_COMMANDS.COMMANDS.DrawPrimitive,
+        slot: D3D7_COMMANDS.commandSlot('DrawPrimitive') });
+    const device = device7();
+    drawnWith(device);
+    // Two formats drawn with, the second wider: each draw copies by its own.
+    const WIDE = FVF_TL | 0x80;
+    assert.equal(device.DrawPrimitive(4, WIDE, new Uint8Array(3 * 24), 3), D3D_OK);
+    const state = device.ringState();
+    assert.deepEqual(state.strides.slice(0, 2), [[WIDE, 24], [FVF_TL, 20]]);
+    for (const [fvf, width] of [[FVF_TL, 20], [WIDE, 24]])
+    {
+        const vertices = Uint8Array.from({ length: 6 * width },
+            (unused, i)=>(i * 7 + width) & 0xff);
+        host.writePhysical(DATA, vertices);
+        const record = run(routine, DEVICE, [4, fvf, DATA, 6, 0], state, renderStatesOf(device));
+        assert.ok(record, `the draw of format 0x${fvf.toString(16)} is taken in the guest`);
+        const words = new Uint32Array(record.buffer, record.byteOffset, record.byteLength >>> 2);
+        assert.equal(words[1], 8 + 5 * 4 + 6 * width,
+            'the record is the arguments and the vertices');
+        // The pointer names the copy, just past the record's five arguments.
+        assert.deepEqual([...words.subarray(2, 7)], [4, fvf, RING + 28, 6, 0]);
+        assert.deepEqual([...record.subarray(28, 28 + 6 * width)], [...vertices],
+            'every byte of every vertex');
+    }
 });

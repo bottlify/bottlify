@@ -16,8 +16,33 @@
  * the surface follows whatever size the program creates its device at.
  */
 
-/** The refresh rate the mode in effect reports. A browser presents at its own pace. */
+/** The refresh rate a display reports when it is told none (`refreshOf`). */
 export const REFRESH_HZ = 60;
+
+/**
+ * The rate the display reports: its own, `screen.refresh` -- what the person
+ * says their display shows at most, the bottle's maxFps -- else REFRESH_HZ.
+ * A program's vertical sync holds it to this rate, as a display of it would.
+ *
+ * @param {{ refresh?: number }} screen
+ */
+export const refreshOf = screen=>(screen.refresh !== undefined && screen.refresh > 0
+    ? Math.round(screen.refresh) : REFRESH_HZ);
+
+/**
+ * The rates every size is listed at: the era's two and the display's own, none
+ * faster than the display shows -- a display of 60 lists 60 alone. Without a
+ * rate of its own, the era's two.
+ *
+ * @param {{ refresh?: number }} screen
+ * @returns {number[]}
+ */
+export const refreshRatesOf = screen=>{
+    const own = screen.refresh !== undefined && screen.refresh > 0 ? refreshOf(screen) : Infinity;
+    return [...new Set([...REFRESH_RATES, ...(own === Infinity ? [] : [own])])]
+        .filter(rate=>rate <= own)
+        .sort((a, b)=>a - b);
+};
 
 /**
  * The rates every size is listed at. A program that saved a rate the display
@@ -66,7 +91,7 @@ const SIZES = Object.freeze([
  * for it in the list expects to find it.
  *
  * @param {{ width: number, height: number, bitsPerPixel: number,
- *           displayWidth?: number, displayHeight?: number }} screen
+ *           displayWidth?: number, displayHeight?: number, refresh?: number }} screen
  *        The mode in effect, carrying the display's own size when that is
  *        larger -- a screen that names no display is its own display.
  * @returns {DisplayMode[]}
@@ -83,7 +108,7 @@ export function displayModes(screen){
         }
     }
     sizes.sort((left, right)=>left.width - right.width || left.height - right.height);
-    return sizes.flatMap(({ width, height })=>REFRESH_RATES.map(refresh=>({
+    return sizes.flatMap(({ width, height })=>refreshRatesOf(screen).map(refresh=>({
         width, height, bitsPerPixel: screen.bitsPerPixel, refresh,
     })));
 }

@@ -13,9 +13,13 @@
  */
 
 import { IDIRECT3DDEVICE9_SLOTS } from './interfaces.js';
-import { SHARED_COMMANDS, commandSet } from '../d3d8/commands.js';
+import { SHARED_COMMANDS, TEXTURE_COMMANDS, TEXTURE_SLOTS, commandSet } from '../d3d8/commands.js';
 import { DRAW } from '../seam/shadow.js';
 import { D3DERR_INVALIDCALL } from './constants.js';
+
+/** D3DUSAGE_RENDERTARGET and D3DUSAGE_DEPTHSTENCIL. */
+const D3DUSAGE_RENDERTARGET = 0x1;
+const D3DUSAGE_DEPTHSTENCIL = 0x2;
 
 /**
  * A constant setter: `count` registers of four floats or integers, or of one
@@ -40,8 +44,9 @@ const STATE_BLOCK_SLOTS = /** @type {[string, number][]} */ ([
     ['StateBlock.Apply', 0],
 ]);
 
-const set = commandSet([...IDIRECT3DDEVICE9_SLOTS, ...STATE_BLOCK_SLOTS], {
+const set = commandSet([...IDIRECT3DDEVICE9_SLOTS, ...STATE_BLOCK_SLOTS, ...TEXTURE_SLOTS], {
     ...SHARED_COMMANDS,
+    ...TEXTURE_COMMANDS,
     // The stages, the displacement map's sampler and the vertex shader's four.
     SetTexture: { args: 2, objects: [1], within: [{ arg: 0, ranges: [[0, 15], [256, 260]] }],
         make: (d, c)=>d.SetTexture(c.arg(0), c.object()) },
@@ -51,6 +56,26 @@ const set = commandSet([...IDIRECT3DDEVICE9_SLOTS, ...STATE_BLOCK_SLOTS], {
     SetStreamSource: { args: 4, objects: [1], within: [{ arg: 0, ranges: [[0, 15]] }],
         make: (d, c)=>d.SetStreamSource(c.arg(0), c.object(), c.arg(2), c.arg(3)) },
     SetIndices: { args: 1, objects: [0], make: (d, c)=>d.SetIndices(c.object()) },
+    // A stream's divider and its kind, as the device takes them by their bits
+    // alone: a divider of one or more, the indexed geometry's flag or the
+    // instances' but not both, and the instances' on any stream but the first.
+    SetStreamSourceFreq: { args: 2, within: [{ arg: 0, ranges: [[0, 15]] },
+        { arg: 1, ranges: [[1, 0x3fffffff], [0x40000001, 0x7fffffff], [0x80000001, 0xbfffffff]] }],
+    refusedWhen: { arg: 0, equals: 0, flagsOf: 1, mask: 0x80000000 },
+    make: (d, c)=>d.SetStreamSourceFreq(c.arg(0), c.arg(1)) },
+    // The one target, of a surface made to be one; it resets the viewport, which the
+    // block mirrors from the surface's (`RENDER_TARGET_MIRROR`), and the scissor.
+    SetRenderTarget: { args: 2, objects: [1], within: [{ arg: 0, ranges: [[0, 0]] }],
+        surfaceUsage: { arg: 1, mask: D3DUSAGE_RENDERTARGET },
+        make: (d, c)=>d.SetRenderTarget(c.arg(0), c.object()) },
+    // A depth surface, or none.
+    SetDepthStencilSurface: { args: 1, objects: [0],
+        surfaceUsage: { arg: 0, mask: D3DUSAGE_DEPTHSTENCIL, nullable: true },
+        make: (d, c)=>d.SetDepthStencilSurface(c.object()) },
+    // Between two render targets of a device that draws elsewhere, with no
+    // rectangles (`STRETCH_GUARD`): a copy or a stretch the GPU makes.
+    StretchRect: { args: 5, objects: [0, 2], within: [{ arg: 4, ranges: [[0, 3]] }],
+        make: (d, c)=>d.StretchRect(c.object(), null, c.object(), null, c.arg(4)) },
     SetVertexDeclaration: { args: 1, objects: [0],
         make: (d, c)=>d.SetVertexDeclaration(c.object()) },
     SetVertexShader: { args: 1, objects: [0], make: (d, c)=>d.SetVertexShader(c.object()) },

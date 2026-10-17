@@ -2278,3 +2278,20 @@ test('a folder lists itself and its parent first, and a drive\'s root does not',
     assert.deepEqual(listing('C:\\GAME\\SAVE\\_*'), ['_ONE'], 'a pattern with a name in it');
     assert.ok(!listing('C:\\*').includes('.'), 'the root has neither');
 });
+
+test('an open CreateFile refuses is told, with its path, its error and what was asked', ()=>{
+    // A program that goes silent where a file of its own would not open says
+    // nothing else: the report names the file.
+    /** @type {any[]} */
+    const refused = [];
+    const { files, fns, at } = setup({ openRefused: (/** @type {any} */ record)=>refused.push(record) });
+    files.put('C:\\GAME\\THERE.DAT', 'here');
+    fns.CreateFileA.handler(
+        [at(NAME, 'C:\\GAME\\THERE.DAT'), GENERIC_READ, 1, 0, OPEN_EXISTING, 0, 0]);
+    assert.equal(fns.CreateFileA.handler(
+        [at(NAME, 'C:\\GAME\\GONE.DAT'), GENERIC_READ, 1, 0, OPEN_EXISTING, 0x80, 0]),
+    INVALID_HANDLE_VALUE);
+    assert.deepEqual(refused, [{ path: 'C:\\GAME\\GONE.DAT', error: ERROR_FILE_NOT_FOUND,
+        access: GENERIC_READ, share: 1, disposition: OPEN_EXISTING, flags: 0x80 }],
+    'only the open that failed');
+});

@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { REFRESH_HZ, displayModes } from './display.js';
+import { REFRESH_HZ, displayModes, refreshOf } from './display.js';
 
 /** Every size of the era, as the table lists them. */
 const ERA = ['640x480', '800x600', '1024x768', '1152x864', '1280x720', '1280x800', '1280x832',
@@ -63,4 +63,23 @@ test('a program in a small mode is still offered the whole display', ()=>{
     assert.ok(sizes.includes('1920x1080'), 'and so is the display itself');
     assert.deepEqual(sizes, ERA,
         'and only the handful anyone would pick between them');
+});
+
+test('a display of a rate of its own reports it, and lists no mode faster than it', ()=>{
+    // The person's display, the bottle's maxFps: the most it shows a second.
+    // A program's vertical sync is held to the mode it asks for, so a mode the
+    // display cannot show is not offered; without a rate, the era's two are.
+    assert.equal(refreshOf({}), REFRESH_HZ, 'none given');
+    assert.equal(refreshOf({ refresh: 120 }), 120);
+    assert.equal(refreshOf({ refresh: 0 }), REFRESH_HZ, 'zero is none');
+    /** @param {number} [refresh] */
+    const rates = refresh=>[...new Set(displayModes({ width: 1024, height: 768, bitsPerPixel: 32,
+        ...(refresh === undefined ? {} : { refresh }) }).map(mode=>mode.refresh))];
+    assert.deepEqual(rates(60), [60], 'sixty, only sixty');
+    assert.deepEqual(rates(120), [60, 120]);
+    assert.deepEqual(rates(144), [60, 120, 144]);
+    assert.deepEqual(rates(75), [60, 75]);
+    assert.deepEqual(rates(), [60, 120], 'none given');
+    assert.deepEqual(names(displayModes({ width: 1024, height: 768, bitsPerPixel: 32,
+        refresh: 120 })), ERA_MODES, 'one of the two, listed once');
 });

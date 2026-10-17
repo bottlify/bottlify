@@ -1672,15 +1672,28 @@ test('the setters in the guest answer, write and date what the host\'s do: rando
         return { data: held, version: g.u32(g.u32(h + HANDLE.VERSION)) };
     });
     const HOST = Symbol('host');
+    // A name given for a handle goes to Resolve, where the block's RESOLVE says: its JavaScript.
+    const resolveAt = g.u32(effectB.guestState() + EFFECT_BLOCK.RESOLVE);
+    assert.notEqual(resolveAt, 0, 'the effect\'s block names Resolve');
     const helpers = { u32: g.u32, setU32: (/** @type {number} */ at, /** @type {number} */ v)=>
-        g.view.setUint32(at, v >>> 0, true), host: ()=>HOST };
+        g.view.setUint32(at, v >>> 0, true), host: ()=>HOST,
+    callStd: (/** @type {number} */ fn, /** @type {number[]} */ ...args)=>{
+        assert.equal(fn, resolveAt, 'a setter calls Resolve alone');
+        return /** @type {any} */ (sources).Resolve({ u8: (/** @type {number} */ at)=>
+            g.memory[at], u32: g.u32 }, ...args);
+    } };
     const SETTERS = ['SetMatrix', 'SetMatrixTranspose', 'SetVector', 'SetVectorArray', 'SetFloat',
-        'SetInt', 'SetBool', 'SetTexture', 'SetValue'];
+        'SetInt', 'SetBool', 'SetTexture', 'SetValue', 'SetIntArray', 'SetFloatArray',
+        'SetBoolArray', 'SetMatrixArray', 'SetMatrixTransposeArray', 'SetMatrixPointerArray',
+        'SetMatrixTransposePointerArray'];
     let next = 0x2545f491;
     const rand = ()=>(next = (Math.imul(next, 1103515245) + 12345) >>> 0);
     const input = g.heap.allocate(256);
+    // Matrices where the pointer-array setters' pointers say, a null among them now and then.
+    const pointers = g.heap.allocate(16);
     let recording = false;
     let handedOver = 0;
+    let namedInGuest = 0;
     for (let round = 0; round < 3000; round++)
     {
         for (let at = input; at < input + 256; at += 4)
@@ -1696,14 +1709,25 @@ test('the setters in the guest answer, write and date what the host\'s do: rando
             recording = !recording;
         }
         const which = rand() % names.length;
-        const byName = rand() % 10 === 0;
+        // The high bits: the generator's low ones repeat with a short period,
+        // and from them a name was never drawn.
+        const byName = (rand() >>> 16) % 10 === 0;
         const hA = byName ? g.put(names[which]) : handlesA[which];
         const hB = byName ? g.put(names[which]) : handlesB[which];
         const setter = SETTERS[rand() % SETTERS.length];
         const pointer = rand() % 10 === 0 ? 0 : input;
+        for (let k = 0; k < 4; k++)
+        {
+            g.view.setUint32(pointers + 4 * k, rand() % 8 === 0 ? 0 : input + 64 * (rand() % 3),
+                true);
+        }
         const args = setter === 'SetVectorArray' ? [pointer, rand() % 7]
             : setter === 'SetValue' ? [pointer, 4 * (rand() % 40)]
-                : /^Set(Matrix|Vector)/.test(setter) ? [pointer] : [rand()];
+                : /^Set(Int|Float|Bool)Array$/.test(setter) ? [pointer, rand() % 20]
+                    : /PointerArray$/.test(setter) ? [rand() % 10 === 0 ? 0 : pointers,
+                        rand() % 4]
+                        : /^SetMatrix\w*Array$/.test(setter) ? [pointer, rand() % 3]
+                            : /^Set(Matrix|Vector)/.test(setter) ? [pointer] : [rand()];
         const before = state(handlesB);
         const beforeA = state(handlesA);
         const answerA = await g.call(fxA, setter, hA, ...args);
@@ -1712,6 +1736,10 @@ test('the setters in the guest answer, write and date what the host\'s do: rando
         {
             handedOver++;
             answerB = await g.call(fxB, setter, hB, ...args);
+        }
+        else if (byName)
+        {
+            namedInGuest++;
         }
         /** @type {string} */
         const label = `round ${round}: ${setter}(${names[which]}${byName ? ' by name' : ''},`
@@ -1726,7 +1754,78 @@ test('the setters in the guest answer, write and date what the host\'s do: rando
         });
     }
     assert.ok(handedOver > 300 && handedOver < 2700, `${handedOver} calls handed to the host`);
+    assert.ok(namedInGuest > 40, `${namedInGuest} calls by name answered in the guest`);
 });
+
+test('a parameter made after nine thousand others still has a record the guest\'s setters read',
+    async()=>{
+        // The Battlefield 2 demo made 1 394 effects and ran past the 8 192
+        // records the arena held: every parameter after them was set on the host.
+        const g = guest();
+        const fx = await g.effect('float big[9000]; float last; technique T { pass P { } }');
+        const effect = /** @type {any} */ (g.published.get(fx)).object;
+        const self = g.heap.allocate(8);
+        g.view.setUint32(self + 4, effect.guestState(), true);
+        const HOST = Symbol('host');
+        const helpers = { u32: g.u32, setU32: (/** @type {number} */ at, /** @type {number} */ v)=>
+            g.view.setUint32(at, v >>> 0, true), host: ()=>HOST, callStd: ()=>0 };
+        const last = await g.handle(fx, 'last');
+        const value = g.heap.allocate(4);
+        g.view.setFloat32(value, 2.5, true);
+        assert.equal(/** @type {any} */ (sources).SetFloat(helpers, self, last,
+            g.u32(value)), 0, 'set in the guest');
+        assert.equal(g.view.getFloat32(g.u32(last + HANDLE.DATA), true), 2.5);
+    });
+
+test('effects past what one arena of records holds each have a record the guest reads, in an'
+    + ' arena their block names', async()=>{
+    const g = guest();
+    const source = 'float big[3000]; float last; technique T { pass P { } }';
+    const effects = [await g.effect(source), await g.effect(source), await g.effect(source)];
+    /** @param {number} fx */
+    const blockOf = fx=>/** @type {any} */ (g.published.get(fx)).object.guestState();
+    const arenas = effects.map(fx=>g.u32(blockOf(fx) + EFFECT_BLOCK.ARENA));
+    assert.notEqual(arenas[2], arenas[0], 'the third in an arena of its own');
+    for (const fx of effects)
+    {
+        const block = blockOf(fx);
+        const last = await g.handle(fx, 'last');
+        const offset = (last - g.u32(block + EFFECT_BLOCK.ARENA)) >>> 0;
+        assert.ok(offset < g.u32(block + EFFECT_BLOCK.ARENA_BYTES) && offset % 32 === 0,
+            'its last parameter\'s record within the bounds its block names');
+    }
+});
+
+test('an arena of records goes back to the heap with the last effect that names it, not before',
+    async()=>{
+        const g = guest();
+        const source = 'float x; technique T { pass P { } }';
+        const one = await g.effect(source);
+        const two = await g.effect(source);
+        /** @param {number} fx */
+        const blockOf = fx=>/** @type {any} */ (g.published.get(fx)).object.guestState();
+        const arena = g.u32(blockOf(one) + EFFECT_BLOCK.ARENA);
+        assert.notEqual(arena, 0);
+        assert.equal(g.u32(blockOf(two) + EFFECT_BLOCK.ARENA), arena, 'two small ones share it');
+        /** Sets x in the guest's code, as the setter in the effect's slot. @param {number} fx */
+        const setInGuest = async fx=>{
+            const self = g.heap.allocate(8);
+            g.view.setUint32(self + 4, blockOf(fx), true);
+            const helpers = { u32: g.u32, setU32: (/** @type {number} */ at,
+                /** @type {number} */ v)=>g.view.setUint32(at, v >>> 0, true),
+            host: ()=>-1, callStd: ()=>0 };
+            return /** @type {any} */ (sources).SetFloat(helpers, self, await g.handle(fx, 'x'),
+                0x40200000);
+        };
+        assert.equal(await g.call(one, 'Release'), 0);
+        assert.ok(!g.freed.includes(arena), 'kept while the other names it');
+        assert.equal(await setInGuest(two), 0, 'and the other sets in the guest still');
+        assert.equal(await g.call(two, 'Release'), 0);
+        assert.ok(g.freed.includes(arena), 'given back with the last');
+        const three = await g.effect(source);
+        assert.notEqual(g.u32(blockOf(three) + EFFECT_BLOCK.ARENA), 0, 'a later effect has one');
+        assert.equal(await setInGuest(three), 0);
+    });
 
 test('SetTechnique and GetTechnique in the guest answer as the host\'s, and Begin and BeginPass'
     + ' follow the technique they set', async()=>{
@@ -1806,6 +1905,56 @@ test('CommitChanges and BeginPass in the guest make the device calls the host\'s
                 : pick === 2 ? ['SetBool', 'b', [rand() % 3]] : null;
     }, { commits: 60, begins: 5 }));
 
+/**
+ * Programs of the operations the guest works out (`EVALUATED` in effect.js),
+ * over one input in the float register `r` -- c[r].x -- with temporaries, the
+ * literals 2.5, -1 and 0.25 (l0, l1, l2) and the output o0.x.
+ *
+ * @type {((r: number) => { code: number[], literals?: number[] })[]}
+ */
+const EVALUATED_PROGRAMS = (()=>{
+    const reg = (/** @type {number} */ table, /** @type {number} */ offset)=>[0, table, offset];
+    const c = (/** @type {number} */ r)=>reg(2, r * 4);
+    const L = (/** @type {number} */ k)=>reg(1, k);
+    const t = (/** @type {number} */ k)=>reg(7, k);
+    const o = reg(4, 0);
+    /** @param {number} op @param {number[][]} ins @param {number[]} out @param {number} [n] */
+    const i = (op, ins, out, n = 1)=>[(op << 20 | n) >>> 0, ins.length, ...ins.flat(), ...out];
+    const literals = [2.5, -1, 0.25];
+    return [
+        // (f * 2.5 + f) < 3 ? ... as fxc writes a comparison: lt, then cmp with -1.
+        r=>({ code: [3, ...i(517, [c(r), L(0)], t(0)), ...i(516, [t(0), c(r)], t(1)),
+            ...i(514, [t(1), L(0)], o)], literals }),
+        r=>({ code: [3, ...i(260, [c(r)], t(0)), ...i(515, [t(0), L(2)], t(1)),
+            ...i(768, [t(1), c(r), L(1)], o)], literals }),
+        r=>({ code: [3, ...i(512, [c(r), L(0)], t(0)), ...i(513, [t(0), L(1)], t(1)),
+            ...i(257, [t(1)], o)], literals }),
+        r=>({ code: [2, ...i(259, [c(r)], t(0)), ...i(517, [t(0), L(2)], o)], literals }),
+        r=>({ code: [3, ...i(263, [c(r)], t(0)), ...i(262, [c(r)], t(1)),
+            ...i(518, [t(0), t(1)], o)], literals }),
+        // A dot product of two components, and an arc tangent.
+        r=>({ code: [3, ...i(516, [c(r), L(2)], t(0)), ...i(268, [t(0)], t(1)),
+            ...i(1280, [[0, 7, 0], [0, 7, 0]].map(x=>x), o, 2)], literals }),
+        // An int array read as two scalar registers, as the Most Wanted demo's
+        // AlphaRef reads BlendState: the first two elements summed and compared.
+        r=>({ code: [2, ...i(516, [c(r), c(r + 1)], t(0)), ...i(514, [t(0), L(0)], o)],
+            literals, scalars: 2 }),
+    ];
+})();
+
+test('CommitChanges and BeginPass in the guest work out states\' expressions as the host'
+    + ' does -- comparisons, cmp, min, max, rcp, rsq, log, atan, a dot product, literals and'
+    + ' temporaries -- with their inputs written between commits', ()=>commitGate(false,
+    String.fromCharCode(...copyingEffect([], EVALUATED_PROGRAMS)), ['f', 'i', 'b', 'a'],
+    (rand, values)=>{
+        const pick = rand() % 5;
+        return pick === 0 ? ['SetFloat', 'f', [new Uint32Array(Float32Array.of([0, 0.75, -2.5,
+            3.99, 1e6, -7, -0, 0.1][rand() % 8]).buffer)[0]]]
+            : pick === 1 ? ['SetInt', 'i', [rand() % 9 - 4]]
+                : pick === 2 ? ['SetBool', 'b', [rand() % 3]]
+                    : pick === 3 ? ['SetIntArray', 'a', [values, 1 + rand() % 5]] : null;
+    }, { commits: 300, begins: 30 }));
+
 test('CommitChanges in the guest makes the device calls the host\'s does for states compiled'
     + ' expressions copy from a float, an int or a bool', ()=>commitGate(false,
     String.fromCharCode(...copyingEffect()), ['f', 'i', 'b'], rand=>{
@@ -1824,9 +1973,14 @@ test('CommitChanges in the guest makes the device calls the host\'s does for sta
  * state's instruction in turn instead of a move: an expression that is no copy.
  *
  * @param {number[]} [ops]
+ * @param {((register: number) => { code: number[], literals?: number[],
+ *     scalars?: number })[]} [programs]
+ *     each state's program instead, in turn: its instructions as FXLC words
+ *     (after their count) over the register its parameter is in, literals, and
+ *     `scalars` for a parameter read as that many scalar registers
  * @returns {Uint8Array}
  */
-function copyingEffect(ops = [0x10000001]){
+function copyingEffect(ops = [0x10000001], programs = []){
     /** @type {number[]} */
     // Offsets count from the body's own first word, before the one the header gives.
     const words = [0];
@@ -1849,12 +2003,19 @@ function copyingEffect(ops = [0x10000001]){
         PC.SCALAR, named, none, 0, 1, 1);
     const params = [[PT.FLOAT, 'f'], [PT.INT, 'i'], [PT.BOOL, 'b']].map(([type, n])=>
         [scalar(Number(type), name(String(n))), put(0)]);
+    // With programs, an int array too, as the Most Wanted demo's BlendState[5].
+    if (programs.length > 0)
+    {
+        params.push([put(PT.INT, PC.SCALAR, name('a'), none, 5, 1, 1), put(0, 0, 0, 0, 0)]);
+    }
     const fType = scalar(PT.FLOAT, none);
     const iType = scalar(PT.INT, none);
     const bType = scalar(PT.BOOL, none);
     // State, its type, the parameter it moves, the register the parameter is in.
     const states = [[14, fType, 'f', 0], [8, iType, 'i', 1], [13, bType, 'b', 2],
-        [10, iType, 'f', 3], [27, fType, 'i', 0], [16, iType, 'i', 5]];
+        [10, iType, 'f', 3], [27, fType, 'i', 0], [16, iType, 'i', 5],
+        // AlphaTestEnable from the array.
+        ...programs.length > 0 ? [[4, iType, 'a', 4]] : []];
     const zero = put(0);
     const technique = name('T');
     const pass = name('P');
@@ -1873,14 +2034,22 @@ function copyingEffect(ops = [0x10000001]){
     states.forEach(([, , param, register], s)=>{
         // The constant table: its header, the one constant (named at 64, in the
         // float registers from its own, its type at 48), a float4's type, the name.
+        // mov oc0.x, c[register].x -- or the state's own instruction of one input,
+        // or its own program.
+        const own = programs.length > 0 ? programs[s % programs.length](Number(register)) : null;
+        const scalars = own?.scalars ?? 0;
         const table = [28, 0, 0, 1, 28, 0, 0,
-            64, 2 | Number(register) << 16, 1, 48, 0,
-            PC.VECTOR | PT.FLOAT << 16, 1 | 4 << 16, 1, 0,
+            64, 2 | Number(register) << 16, scalars || 1, 48, 0,
+            ...scalars ? [PC.SCALAR | PT.FLOAT << 16, 1 | 1 << 16, scalars, 0]
+                : [PC.VECTOR | PT.FLOAT << 16, 1 | 4 << 16, 1, 0],
             String(param).charCodeAt(0)];
-        // mov oc0.x, c[register].x -- or the state's own instruction of one input.
-        const fxlc = [1, ops[s % ops.length], 1, 0, 2, Number(register) * 4, 0, 4, 0];
+        const fxlc = own ? own.code
+            : [1, ops[s % ops.length], 1, 0, 2, Number(register) * 4, 0, 4, 0];
+        const literals = own?.literals ?? [];
+        const clit = literals.length === 0 ? [] : [(2 + literals.length * 2) << 16 | 0xfffe,
+            0x54494c43, literals.length, ...new Uint32Array(Float64Array.from(literals).buffer)];
         const body = [0x46580201, (table.length + 1) << 16 | 0xfffe, 0x42415443, ...table,
-            (fxlc.length + 1) << 16 | 0xfffe, 0x434c5846, ...fxlc];
+            ...clit, (fxlc.length + 1) << 16 | 0xfffe, 0x434c5846, ...fxlc];
         put(0, 0, 0xffffffff, s, 0, body.length * 4, ...body);
     });
     return new Uint8Array(new Uint32Array([FX_2_0, start, ...words]).buffer);
@@ -1954,6 +2123,7 @@ async function commitGate(managed, source, names, setOf, least = { commits: 400,
     assert.notEqual(g.u32(effectB.guestState() + EFFECT_BLOCK.COMMIT), 0,
         'the pass has a table: its commits are the guest\'s');
     const HOST = Symbol('host');
+    let control = 0x7f;
     /** The guest's device calls, made at once as the device's routines would take them. */
     const helpers = {
         u32: g.u32,
@@ -1962,6 +2132,15 @@ async function commitGate(managed, source, names, setOf, least = { commits: 400,
         f32: (/** @type {number} */ at)=>g.view.getFloat32(at, true),
         setF32: (/** @type {number} */ at, /** @type {number} */ v)=>g.view.setFloat32(at, v,
             true),
+        i32: (/** @type {number} */ at)=>g.view.getInt32(at, true),
+        f64: (/** @type {number} */ at)=>g.view.getFloat64(at, true),
+        setF64: (/** @type {number} */ at, /** @type {number} */ v)=>g.view.setFloat64(at, v,
+            true),
+        // The program's x87 control word, which an expression worked out puts back.
+        controlWord: ()=>control,
+        setControlWord: (/** @type {number} */ word)=>{
+            control = word;
+        },
         // Walk, where the block names it, as its JavaScript; any other a device's routine.
         callStd: (/** @type {number} */ fn, /** @type {number[]} */ ...args)=>(fn
             === g.u32(effectB.guestState() + EFFECT_BLOCK.WALK)
@@ -2063,6 +2242,9 @@ async function commitGate(managed, source, names, setOf, least = { commits: 400,
             guestCommits += await both('CommitChanges') ? 1 : 0;
         }
     }
+    // Outside a pass, a commit is nothing to do, answered in the guest as the host answers it.
+    await both('EndPass');
+    assert.equal(await both('CommitChanges'), true, 'a commit with no pass begun is the guest\'s');
     assert.ok(guestCommits > least.commits, `${guestCommits} commits in the guest`);
     assert.ok(guestBegins > least.begins, `${guestBegins} passes begun in the guest`);
     assert.ok(guestTechniques > 80, `${guestTechniques} Begins and Ends in the guest`);

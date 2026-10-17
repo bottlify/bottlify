@@ -71,27 +71,6 @@ const CT_ALPHA_MARK = 0x0100;
 
 
 /**
- * Marks the bytes of a set string in a scan table, every other byte taking the
- * opposite mark: one helper builds both the strspn table (stop at a byte the
- * set does not cover) and the strcspn/strpbrk one (stop at a byte it does).
- * Membership is by byte value rather than by one-character string, because a
- * scan asks once per byte of strings that reach megabytes.
- *
- * @param {string} text    The set string, as the caller passed it: read in the
- *     ANSI page, so its bytes are that page's and not its characters' codes.
- * @param {Uint8Array} table  Scratch, 256 entries; answered with, marked.
- * @param {number} mark   What the set's own bytes get.
- */
-function markBytes(text, table, mark){
-    table.fill(mark === 0 ? 1 : 0);
-    for (const byte of encodeAnsi(text))
-    {
-        table[byte] = mark;
-    }
-    return table;
-}
-
-/**
  * @param {StringHost} host
  */
 export function createStringFunctions(host){
@@ -140,45 +119,14 @@ export function createStringFunctions(host){
         /** char *strrchr(const char *str, int ch) -- in the guest */
         strrchr: guestEntry(inGuest.strrchr, COMPILED.strrchr, host),
 
-        /** char *strpbrk(const char *str, const char *accept) */
-        strpbrk: {
-            convention: 'cdecl',
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([string, accept])=>{
-                const wanted = markBytes(readString(accept), scanTable, 1);
-                // The terminator is a stop like any marked byte, and which of
-                // the two ended the scan is the answer: a marked byte is a
-                // pointer into the caller's string, the terminator is a miss.
-                const found = host.scanCString(string, MAX_STRING, wanted);
-                return found.byte === 0 ? 0 : string + found.index;
-            },
-        },
+        /** char *strpbrk(const char *str, const char *accept) -- in the guest */
+        strpbrk: guestEntry(inGuest.strpbrk, COMPILED.strpbrk, host),
 
-        /** size_t strspn(const char *str, const char *accept) */
-        strspn: {
-            convention: 'cdecl',
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([string, accept])=>{
-                // The span ends at the first byte the set does not cover, so
-                // the set's complement is what the scan stops at; a terminator
-                // is never covered and ends the span as it always did.
-                const wanted = markBytes(readString(accept), scanTable, 0);
-                return host.scanCString(string, MAX_STRING, wanted).index;
-            },
-        },
+        /** size_t strspn(const char *str, const char *accept) -- in the guest */
+        strspn: guestEntry(inGuest.strspn, COMPILED.strspn, host),
 
-        /** size_t strcspn(const char *str, const char *reject) */
-        strcspn: {
-            convention: 'cdecl',
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([string, reject])=>{
-                const wanted = markBytes(readString(reject), scanTable, 1);
-                return host.scanCString(string, MAX_STRING, wanted).index;
-            },
-        },
+        /** size_t strcspn(const char *str, const char *reject) -- in the guest */
+        strcspn: guestEntry(inGuest.strcspn, COMPILED.strcspn, host),
 
         /** char *strncat(char *dest, const char *src, size_t count) */
         strncat: {

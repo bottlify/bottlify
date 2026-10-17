@@ -7,8 +7,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    BUFFER, COMMAND, COMMAND_RING_BYTES, FLAG_SLOW_PATH, FLAG_STALE, HELD_GUEST, HELD_HOST, SHADOW,
-    TEXTURE,
+    BUFFER, COMMAND, COMMAND_RING_BYTES, FLAG_SLOW_PATH, FLAG_STALE, HELD_GUEST, HELD_HOST, LEVEL,
+    SHADOW, SURFACE, TEXTURE,
     createCommandReader, createShadow, getRenderStateCode,
     getSurfaceLevelCode, getTextureStageStateCode, getTransformCode, lockCode, transformSlot,
     transformType, unlockCode,
@@ -105,7 +105,7 @@ function fakeDevice(){
  *     told of each swap first
  */
 function machine(options = {}){
-    const memory = new Uint8Array(0x40000);
+    const memory = new Uint8Array(0x240000);
     /**
      * How often guest memory was copied out, which regions of it relative to
      * the block, and which words were read in place.
@@ -228,12 +228,33 @@ test('the block fits its two pages and its regions follow one another', ()=>{
         SHADOW.LOCK_RING);
     // The lock routine's own, which the host only reads.
     assert.equal(SHADOW.LOCK_RING_CAPACITY & (SHADOW.LOCK_RING_CAPACITY - 1), 0);
-    assert.equal(SHADOW.LOCK_RING + SHADOW.LOCK_RING_CAPACITY * 4, SHADOW.HELD);
+    assert.equal(SHADOW.LOCK_RING + SHADOW.LOCK_RING_CAPACITY * 4, SHADOW.COOPERATIVE);
+    assert.equal(SHADOW.COOPERATIVE + 4, SHADOW.ELSEWHERE);
+    assert.equal(SHADOW.ELSEWHERE + 4, SHADOW.FVF_STRIDES);
+    assert.equal(SHADOW.FVF_STRIDES + SHADOW.FVF_STRIDE_PAIRS * 8, SHADOW.STATE_BLOCKS);
+    // A bit per token, of the blocks held and of those holding what a draw checks.
+    assert.equal(SHADOW.STATE_BLOCKS + SHADOW.STATE_BLOCK_TOKENS / 8, SHADOW.STATE_BLOCK_DRAWS);
+    assert.equal(SHADOW.STATE_BLOCK_DRAWS + SHADOW.STATE_BLOCK_TOKENS / 8, SHADOW.HELD);
     // The device's lock, a word the routines take with xchg: aligned.
     assert.equal(SHADOW.HELD % 4, 0);
-    assert.equal(SHADOW.HELD + 4, SHADOW.SIZE);
-    assert.equal(BUFFER.SIZE, 36);
-    assert.equal(TEXTURE.LEVELS + TEXTURE.LEVEL_SLOTS * 4, TEXTURE.SIZE);
+    assert.equal(SHADOW.HELD + 4, SHADOW.SHADERS);
+    assert.equal(SHADOW.SHADERS + 8, SHADOW.SHADERS_VALID);
+    assert.equal(SHADOW.SHADERS_VALID + 4, SHADOW.TARGETS);
+    // Two pairs of the target getters, a pointer and a count's word each.
+    assert.equal(SHADOW.TARGETS + 16, SHADOW.TARGETS_VALID);
+    assert.equal(SHADOW.TARGETS_VALID + 4, SHADOW.SIZE);
+    assert.equal(BUFFER.QUEUED + 4, BUFFER.SIZE);
+    assert.equal(TEXTURE.LEVELS + TEXTURE.LEVEL_SLOTS * 4, TEXTURE.DEVICE);
+    assert.deepEqual([TEXTURE.WIDTH, TEXTURE.HEIGHT, TEXTURE.DEPTH, TEXTURE.LOCKS],
+        [TEXTURE.DEVICE + 4, TEXTURE.DEVICE + 8, TEXTURE.DEVICE + 12, TEXTURE.DEVICE + 16]);
+    assert.equal(TEXTURE.LOCKS + TEXTURE.LEVEL_SLOTS * 4, TEXTURE.SIZE);
+    // The words a level's routines share with a buffer's, where a buffer's block has them.
+    assert.deepEqual([LEVEL.LOCKED, LEVEL.LOCK_FLAGS, LEVEL.DEVICE, LEVEL.QUEUED],
+        [BUFFER.LOCKED, BUFFER.LOCK_FLAGS, BUFFER.DEVICE, BUFFER.QUEUED]);
+    assert.equal(LEVEL.BOX + 24, LEVEL.SIZE);
+    // A displacement of a byte reaches every word of it.
+    assert.ok(LEVEL.SIZE <= 128 && TEXTURE.DEPTH < 128 && SURFACE.LEVEL < 128);
+    assert.equal(SURFACE.LEVEL + 4, SURFACE.SIZE);
     // Enough for the longest chain a texture of this era can have: a 32768
     // texel side is sixteen levels, and no device of the era reports one.
     assert.ok(TEXTURE.LEVEL_SLOTS >= 14);
@@ -664,6 +685,49 @@ test('the command ring is made with the block, and its whole records are taken i
     assert.equal(m.shadow.diagnostics().refused, 1);
 });
 
+test('a count is settled with the ring taken only when what waits can bind or unbind it', ()=>{
+    // A texture let go of mid-frame played a frame's records for nothing.
+    const m = machine({ commands: true });
+    const at = m.shadow.address();
+    const ring = m.u32(at + SHADOW.COMMANDS);
+    const texture = 0x5000;
+    const other = 0x6000;
+    const free = { counter: { held: 0 } };
+    // A record that binds the other one, written where the routines would.
+    const append = ()=>{
+        const head = m.u32(at + SHADOW.COMMAND_HEAD);
+        record(7, [0, other]).forEach((word, i)=>m.put32(ring + head + i * 4, word));
+        m.put32(at + SHADOW.COMMAND_HEAD, head + 16);
+    };
+    append();
+    m.shadow.syncFor(free, new Set([texture]));
+    assert.equal(m.taken.length, 0, 'no record names it: the ring waits');
+    m.shadow.syncFor(free, undefined);
+    assert.equal(m.taken.length, 1, 'where it was published is not known: taken');
+
+    /** @param {object} object @param {Set<number>} pointers */
+    const takes = (object, pointers)=>{
+        append();
+        const before = m.taken.length;
+        m.shadow.syncFor(object, pointers);
+        const took = m.taken.length > before;
+        m.shadow.sync();
+        return took;
+    };
+    assert.equal(takes(free, new Set([texture])), false);
+    assert.equal(takes(free, new Set([texture, other])), true,
+        'a record names one of its pointers');
+    assert.equal(takes({ counter: { held: 1 } }, new Set([texture])), true, 'bound now');
+    assert.equal(takes({ counter: { held: 0 }, container: {} }, new Set([texture])), true,
+        'a level, counted with its container');
+    assert.equal(takes({ counter: {} }, new Set([texture])), true, 'a count that does not say');
+    m.put32(at + SHADOW.FLAGS, FLAG_STALE);
+    assert.equal(takes(free, new Set([texture])), true, 'a state block applied in the ring');
+    m.put32(at + SHADOW.FLAGS, 0);
+    assert.equal(takes(free, new Set([texture])), false);
+    assert.deepEqual(m.divergences, []);
+});
+
 test('a buffer the guest holds locked is sent only when the ring has calls that may read it', ()=>{
     // Sent at every entry, the held range was read again at each of
     // thousands of host calls a frame.
@@ -929,7 +993,7 @@ test('a Direct3D 9 device\'s render states, stage states and transforms are mirr
     const device = out.device;
     assert.equal(device.SetTextureStageState(1, D3DTSS9.COLOROP, 2), 0);
     assert.equal(device.SetTransform(256, Float32Array.from({ length: 16 }, (unused, i)=>i)), 0);
-    const memory = new Uint8Array(0x20000);
+    const memory = new Uint8Array(0x220000);
     const view = new DataView(memory.buffer);
     let free = 0x1008;
     const shadow = createShadow({

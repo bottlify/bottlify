@@ -20,7 +20,11 @@
  *   let the program see;
  * - every call the renderer made on the GPU between two looks, as the fake
  *   GPU device records them: buffer and texture writes with their bytes, the
- *   pipelines, bind groups and draws.
+ *   pipelines, bind groups and draws -- but for vertex and index buffers,
+ *   whose bytes are compared by what each holds at every submit rather than
+ *   by how the writes and copies that put them there were cut: a twin fed
+ *   only the pages the program wrote uploads those, where a device reading
+ *   the program's memory uploads what differs, and what is drawn is the same.
  *
  * A scenario that writes through a pointer a lock handed out after its unlock
  * is outside the contract a program is given, but some programs do it; the
@@ -70,9 +74,13 @@ const FACE_NEGATIVE_X = 1;
  *   answer or a scenario looks -- as late as the twin may play them;
  * - `port`: batches across a MessageChannel, as they cross to the worker;
  * - `lent`: either of the last two with the bytes an unlock let the program
- *   write lent in place out of shared guest memory (`lending.js`).
+ *   write lent in place out of shared guest memory (`lending.js`);
+ * - `watched`: held, with an engine's write watch (`watchWrites`) that says
+ *   every page of a range was written at every look -- the most it may say --
+ *   so the recording sends pages as they are and compares nothing.
  */
-const WAYS = /** @type {const} */ (['at once', 'held', 'held, lent', 'port', 'port, lent']);
+const WAYS = /** @type {const} */ (['at once', 'held', 'held, lent', 'port', 'port, lent',
+    'held, watched']);
 
 /** Turns of the event loop, for what crosses ports and settles in promises. */
 const turns = async(count = 8)=>{
@@ -113,6 +121,30 @@ function guestMemory(shared){
     };
 }
 
+/** GPUBufferUsage.INDEX and VERTEX: a buffer draws read. */
+const DRAWN_FROM = 0x10 | 0x20;
+
+/**
+ * An engine's write watch that says every page of the range it is asked about
+ * was written: the most a watch may say, and so the most a recording sends.
+ *
+ * @param {number} address @param {number} length
+ */
+const everyPage = (address, length)=>({
+    /** @param {number} from @param {number} bytes */
+    take(from, bytes){
+        const first = Math.max(address, from) >>> 12;
+        const last = (Math.min(address + length, from + bytes) - 1) >>> 12;
+        /** @type {number[]} */
+        const pages = [];
+        for (let page = first; page <= last; page++)
+        {
+            pages.push(page);
+        }
+        return pages;
+    },
+});
+
 /** @param {any} gpu */
 const backendOf = gpu=>createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
     now: ()=>0 });
@@ -133,8 +165,28 @@ function rig(version, way, caps = {}){
     const lend = way.endsWith('lent');
     const memory = guestMemory(lend);
     const gpu = createFakeDevice({ occlusionSamples: index=>17 + index });
+    // What each vertex and index buffer holds once a submit's writes and
+    // copies have landed: the bytes its draws read.
+    /** @type {any[]} */
+    const drawn = [];
+    const createBuffer = gpu.device.createBuffer;
+    gpu.device.createBuffer = (/** @type {any} */ descriptor)=>{
+        const made = createBuffer(descriptor);
+        if (((descriptor.usage ?? 0) & DRAWN_FROM) !== 0)
+        {
+            drawn.push(made);
+        }
+        return made;
+    };
+    const submit = gpu.queue.submit;
+    gpu.queue.submit = (/** @type {any[]} */ buffers)=>{
+        submit(buffers);
+        gpu.calls.push({ op: 'holds',
+            held: drawn.map(buffer=>({ buffer, bytes: buffer.bytes.slice() })) });
+    };
     const services = {
         ...caps,
+        ...(way.endsWith('watched') ? { watchWrites: everyPage } : {}),
         readMemory: memory.readMemory,
         // Direct3D 9's root is given no window; its copies read through readMemory.
         ...(version === 8 ? { windowMemory: memory.windowMemory } : {}),
@@ -226,7 +278,8 @@ function rig(version, way, caps = {}){
                     await turns(2);
                 }
             };
-            shipped = ()=>sender.shippedBytes();
+            shipped = ()=>({ ...sender.shippedBytes(),
+                lent: sender.lender?.diagnostics().lentBytes ?? 0 });
             d3d = recordedDirect3D(factory, services, sender);
         }
         else
@@ -252,7 +305,8 @@ function rig(version, way, caps = {}){
                 port1.close();
                 port2.close();
             };
-            shipped = ()=>sender.shippedBytes();
+            shipped = ()=>({ ...sender.shippedBytes(),
+                lent: sender.lender?.diagnostics().lentBytes ?? 0 });
             d3d = recordedDirect3D(factory, services, sender);
         }
     }
@@ -377,6 +431,12 @@ function asked(calls){
     const stream = [];
     for (const call of calls)
     {
+        const into = call.op === 'writeBuffer' ? call.buffer
+            : call.op === 'copyBufferToBuffer' ? call.destination : null;
+        if (into && ((into.descriptor?.usage ?? 0) & DRAWN_FROM) !== 0)
+        {
+            continue;
+        }
         const flat = plain(call);
         const field = MADE[call.op];
         if (field && call.op !== 'getCompilationInfo')
@@ -955,7 +1015,9 @@ const writtenAfterUnlock = version=>async(/** @type {ReturnType<typeof runner>} 
         await run.call('Present', ()=>device.Present());
         await run.call('idle', ()=>device.idle());
         await run.look(`frame ${frame}`);
-        const bytes = run.on.shipped();
+        // A watch that says every page was written sends every page: what it
+        // carries is the most, which the watch's own gate bounds instead.
+        const bytes = run.on.way.endsWith('watched') ? null : run.on.shipped();
         if (bytes)
         {
             carried.push(bytes.buffers + bytes.dynamic);
@@ -974,6 +1036,125 @@ const writtenAfterUnlock = version=>async(/** @type {ReturnType<typeof runner>} 
     await run.call('Release device', ()=>device.release());
     await run.look('end');
 };
+
+/** D3DLOCK_NO_DIRTY_UPDATE: a lock that marks nothing for UpdateTexture to carry. */
+const NO_DIRTY_UPDATE = 0x8000;
+
+/**
+ * A volume and a texture in system memory, locked every frame without a dirty
+ * update, a few boxes and a rectangle of them marked dirty by hand and carried
+ * into their twins in video memory by UpdateTexture, which are drawn -- the
+ * way a game keeps a volume of lighting current. The played side reads
+ * nothing of a resource in system memory but what a copy out of it moves, and
+ * Direct3D 9's recording device sends the rows its copies write: what its
+ * batches carry after the first frame is what the updates move, not the
+ * resources, and a lock of one sends nothing ahead of it. Direct3D 8's twin
+ * copies from what it was sent of the source, which goes whole.
+ *
+ * @param {8 | 9} version
+ */
+const systemMemoryUpdates = version=>async(/** @type {ReturnType<typeof runner>} */ run)=>{
+    const { device, vertices, indices } = version === 9 ? await device9(run) : await device8(run);
+    if (version === 9)
+    {
+        await run.call('SetFVF', ()=>device.SetFVF(FVF_LIT));
+        await run.call('SetRenderState LIGHTING', ()=>device.SetRenderState(D3DRS.LIGHTING, 0));
+        await run.call('SetStreamSource', ()=>device.SetStreamSource(0, vertices, 0, STRIDE));
+        await run.call('SetIndices', ()=>device.SetIndices(indices));
+    }
+    const draw = version === 9 ? drawQuad9 : drawQuad8;
+    const size = 32;
+    const depth = 16;
+    /** @type {Record<string, any>} */
+    const made = { system: {}, video: {}, systemTexture: {}, videoTexture: {} };
+    await run.call('CreateVolumeTexture system', ()=>device.CreateVolumeTexture(size, size, depth,
+        1, 0, D3DFMT.A8R8G8B8, D3DPOOL.SYSTEMMEM, made.system), [made.system]);
+    await run.call('CreateVolumeTexture video', ()=>device.CreateVolumeTexture(size, size, depth,
+        1, 0, D3DFMT.A8R8G8B8, D3DPOOL.DEFAULT, made.video), [made.video]);
+    await run.call('CreateTexture system', ()=>device.CreateTexture(size, size, 1, 0,
+        D3DFMT.A8R8G8B8, D3DPOOL.SYSTEMMEM, made.systemTexture), [made.systemTexture]);
+    await run.call('CreateTexture video', ()=>device.CreateTexture(size, size, 1, 0,
+        D3DFMT.A8R8G8B8, D3DPOOL.DEFAULT, made.videoTexture), [made.videoTexture]);
+    /** @param {string} label @param {any} source @param {any} destination */
+    const update = async(label, source, destination)=>{
+        if (version === 9)
+        {
+            await run.call(label, ()=>device.UpdateTexture(source, destination));
+            return;
+        }
+        /** @type {{ moves?: any[] }} */
+        const held = {};
+        await run.call(label, ()=>device.UpdateTexture(source, destination, held));
+        applyMoves(run, held);
+    };
+    /** @type {number[]} */
+    const carried = [];
+    for (let frame = 0; frame < 4; frame++)
+    {
+        /** @type {{ pBits?: number, RowPitch?: number, SlicePitch?: number }} */
+        const box = {};
+        await run.call(`LockBox ${frame}`, ()=>made.system.texture.LockBox(0, box, null,
+            NO_DIRTY_UPDATE), [box]);
+        for (const left of [0, 4])
+        {
+            for (let slice = frame; slice < frame + 4; slice++)
+            {
+                fillRows(run, /** @type {number} */ (box.pBits)
+                    + slice * /** @type {number} */ (box.SlicePitch) + left * 4,
+                /** @type {number} */ (box.RowPitch), 4, 16, 9 * frame + slice + left);
+            }
+            await run.call(`AddDirtyBox ${frame} ${left}`, ()=>made.system.texture.AddDirtyBox({
+                left, top: 0, right: left + 4, bottom: 4, front: frame, back: frame + 4 }));
+        }
+        await run.call(`UnlockBox ${frame}`, ()=>made.system.texture.UnlockBox(0));
+        /** @type {{ pBits?: number, Pitch?: number }} */
+        const rect = {};
+        await run.call(`LockRect ${frame}`, ()=>made.systemTexture.texture.LockRect(0, rect, null,
+            NO_DIRTY_UPDATE), [rect]);
+        fillRows(run, /** @type {number} */ (rect.pBits) + frame * /** @type {number} */ (rect.Pitch),
+            /** @type {number} */ (rect.Pitch), 2, 32, 70 + frame);
+        await run.call(`AddDirtyRect ${frame}`, ()=>made.systemTexture.texture.AddDirtyRect({
+            left: 0, top: frame, right: 8, bottom: frame + 2 }));
+        await run.call(`UnlockRect ${frame}`, ()=>made.systemTexture.texture.UnlockRect(0));
+        await update(`UpdateTexture volume ${frame}`, made.system.texture, made.video.texture);
+        await update(`UpdateTexture ${frame}`, made.systemTexture.texture,
+            made.videoTexture.texture);
+        await run.call('BeginScene', ()=>device.BeginScene());
+        await run.call('Clear', ()=>device.Clear(0, null, D3DCLEAR.TARGET | D3DCLEAR.ZBUFFER,
+            0xff000040 + frame, 1, 0));
+        await draw(run, device, `volume ${frame}`, made.video.texture, 0);
+        await draw(run, device, `texture ${frame}`, made.videoTexture.texture, 0.2);
+        await run.call('EndScene', ()=>device.EndScene());
+        await run.call('Present', ()=>device.Present(null, null, 0, null));
+        await run.call('idle', ()=>device.idle());
+        await run.look(`frame ${frame}`);
+        const bytes = run.on.shipped();
+        if (bytes)
+        {
+            carried.push(Object.values(bytes).reduce((sum, value)=>sum + value, 0));
+        }
+    }
+    // A frame moves two boxes of four by four by four and two rows: never a
+    // quarter of the volume, which the batches carried whole before.
+    for (let frame = 1; frame < (version === 9 ? carried.length : 0); frame++)
+    {
+        const sent = carried[frame] - carried[frame - 1];
+        assert.ok(sent < size * size * depth, `frame ${frame} carried ${sent} bytes`);
+    }
+    for (const one of Object.values(made))
+    {
+        await run.call('Release', ()=>one.texture.release());
+    }
+    await run.call('Release device', ()=>device.release());
+    await run.look('end');
+};
+
+test('Direct3D 9 and 8: a volume and a texture in system memory, locked with no dirty update,'
+    + ' marked by hand and carried by UpdateTexture, draw what the device drew and carry what'
+    + ' they move', async()=>{
+    await same(9, systemMemoryUpdates(9));
+    await same(8, systemMemoryUpdates(8));
+});
 
 test('Direct3D 9 and 8: a dynamic buffer written after its unlock draws, through every way,'
     + ' what was written, and carries only that', async()=>{
@@ -1667,6 +1848,49 @@ test('Direct3D 9 and 8: runs of the command ring that bind objects and draw play
             await run.call('idle', ()=>device.idle());
             await run.look(`frame ${frame}`);
         }
+        for (const [name, object] of /** @type {[string, any][]} */ ([['tex', tex],
+            ['vertices', vertices], ['indices', indices], ['device', device]]))
+        {
+            await run.call(`Release ${name}`, ()=>object.release());
+        }
+        await run.look('end');
+    });
+});
+
+test('Direct3D 8: a texture written, then bound by a state block applied by its token in a run of'
+    + ' the command ring and drawn, is drawn as written', async()=>{
+    // The run names neither the block nor the texture it binds: what waits to
+    // be sent goes ahead of the run all the same.
+    await same(8, async run=>{
+        const { device, vertices, indices } = await device8(run);
+        const tex = await makeTexture(run, device, 'tex', { levels: 1, seed: 190 });
+        await run.call('BeginStateBlock', ()=>device.BeginStateBlock());
+        await run.call('SetTexture in block', ()=>device.SetTexture(0, tex));
+        /** @type {{ handle?: number }} */
+        const block = {};
+        await run.call('EndStateBlock', ()=>device.EndStateBlock(block), [block]);
+        await run.call('SetTexture none', ()=>device.SetTexture(0, null));
+        const slot = D3D8_COMMANDS.commandSlot;
+        for (let frame = 0; frame < 2; frame++)
+        {
+            const records = new Uint32Array([
+                ...record(slot('BeginScene'), []),
+                ...record(slot('SetStreamSource'), [0, 0x2000, STRIDE]),
+                ...record(slot('SetIndices'), [0x3000, 0]),
+                ...record(slot('SetVertexShader'), [FVF_LIT]),
+                ...record(slot('ApplyStateBlock'), [Number(block.handle)]),
+                ...record(slot('DrawIndexedPrimitive'), [D3DPT.TRIANGLELIST, 0, 4, 0, 2]),
+                ...record(slot('EndScene'), []),
+            ]);
+            await fillLevel(run, tex, `tex ${frame}`, 0, 191 + frame);
+            await run.call('commands', ()=>device.commands(new Uint8Array(records.buffer),
+                [vertices, indices]));
+            await run.call('Present', ()=>device.Present(null, null, 0, null));
+            await run.call('idle', ()=>device.idle());
+            await run.look(`frame ${frame}`);
+            await run.call('SetTexture none again', ()=>device.SetTexture(0, null));
+        }
+        await run.call('DeleteStateBlock', ()=>device.DeleteStateBlock(block.handle));
         for (const [name, object] of /** @type {[string, any][]} */ ([['tex', tex],
             ['vertices', vertices], ['indices', indices], ['device', device]]))
         {

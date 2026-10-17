@@ -1339,6 +1339,9 @@ export function moduleKeyOf(name){
 // so this module stays what a caller of `debug.hook` imports them from.
 export { jumpBytes, relocatablePrefix };
 
+/** Where the heap's arena begins under an image that ends below it (`spaceAbove`). */
+const HEAP_FLOOR = 0x0c000000;
+
 /**
  * Where the address space above the program begins: the system modules, the
  * pool of thread stacks, and the heap, in that order.
@@ -1349,17 +1352,25 @@ export { jumpBytes, relocatablePrefix };
  * megabytes mapped at 0x400000 reaches well past where a fixed layout put the
  * modules, and a real loader simply maps everything else above it.
  *
+ * An image that asks for a base inside the heap's span leaves the layout where
+ * it is: the heap gives its span up (`claim`), as Windows maps such an image
+ * in free memory and allocates around it. Moving everything above it instead
+ * left what lay below unused -- a program based at 0x39000000 had under half
+ * of its two gigabytes, and ran out of memory with 720 MiB of them idle.
+ *
  * @param {number} imageEnd  One past the last byte of the program's image.
+ * @param {number} [imageBase]  Where it starts.
  * @returns {{ moduleBase: number, stackPoolBase: number, heapBase: number }}
  */
-export function spaceAbove(imageEnd){
+export function spaceAbove(imageEnd, imageBase = 0){
     const granule = 0x00100000;
     const lowest = 0x02000000;
-    const shift = Math.max(0, Math.ceil(imageEnd / granule) * granule - lowest);
+    const shift = imageBase >= HEAP_FLOOR ? 0
+        : Math.max(0, Math.ceil(imageEnd / granule) * granule - lowest);
     return {
         moduleBase: lowest + shift,
         stackPoolBase: 0x08000000 + shift,
-        heapBase: 0x0c000000 + shift,
+        heapBase: HEAP_FLOOR + shift,
     };
 }
 
@@ -3489,7 +3500,9 @@ async function buildApp(options){
     // allocation.
     const mainImage = parsePe(options.executable);
     const { moduleBase: MODULE_BASE, stackPoolBase: STACK_POOL_START, heapBase: HEAP_BASE }
-        = spaceAbove(mainImage.imageBase + mainImage.sizeOfImage);
+        = spaceAbove(mainImage.imageBase + mainImage.sizeOfImage, mainImage.imageBase);
+    /** The program's image lies in the heap's span, which gives that part up (`spaceAbove`). */
+    const imageInHeap = mainImage.imageBase >= HEAP_BASE;
     // Where a thread that is not the first gets its stack. Above the space
     // libraries are mapped into and below the heap, because a stack of the size
     // a program was linked for is a megabyte or more and the megabyte under the
@@ -3652,7 +3665,11 @@ async function buildApp(options){
      * set once from the launch and never moved.
      */
     const launched = options.screen ?? { width: 640, height: 480, bitsPerPixel: 32 };
-    const display = { ...launched, displayWidth: launched.width, displayHeight: launched.height };
+    // And its rate: what the person says their display shows at most (maxFps),
+    // which a program's vertical sync holds it to, as that display would.
+    const shownAtMost = options.maxFps ?? SETTINGS.frame.maxFps;
+    const display = { ...launched, displayWidth: launched.width, displayHeight: launched.height,
+        ...((shownAtMost ?? 0) > 0 ? { refresh: shownAtMost } : {}) };
 
     /**
      * Divergences already reported, so each is said once.
@@ -4904,7 +4921,7 @@ async function buildApp(options){
             /** @param {number} at @param {number} target */
             jump: (at, target)=>void jumps.push({ at, target }),
         });
-        return { code, jumps };
+        return { code, jumps, pointers: fn.pointers };
     };
     // Each system module where the one before it ends, at the granularity
     // every image is placed at: the window they share is the room left for
@@ -5751,7 +5768,7 @@ async function buildApp(options){
     // Where a library may go: above the program's own image, which is not in
     // the map yet, and below the stack pool; and nowhere anything is mapped.
     const librarySpace = {
-        floor: mainImage.imageBase + mainImage.sizeOfImage,
+        floor: imageInHeap ? MODULE_BASE : mainImage.imageBase + mainImage.sizeOfImage,
         limit: STACK_POOL_START,
         /** @param {number} base @param {number} size */
         holder: (base, size)=>memory.list().find((/** @type {any} */ region)=>
@@ -5792,6 +5809,16 @@ async function buildApp(options){
             return base;
         },
     };
+
+    // An image in the heap's span takes its place there before anything else
+    // can: the heap has handed nothing that high out yet, and a library placed
+    // anywhere would otherwise be free to take it.
+    if (imageInHeap
+        && librarySpace.claim(mainImage.imageBase, mainImage.sizeOfImage) !== mainImage.imageBase)
+    {
+        throw new Error(`image: 0x${mainImage.imageBase.toString(16)}+0x`
+            + `${mainImage.sizeOfImage.toString(16)} lies in the heap and is not free there`);
+    }
 
     // The libraries the program brought with it, before the program itself.
     //
@@ -8307,27 +8334,68 @@ function liveDumpOf(worker, control){
     /** @type {{ lines: string[], frame: number } | null} */
     let last = null;
     let listening = false;
+    /** The textures read off the GPU on asking (`snapshot`), by the id a dump gives. @type {Map<string, any>} */
+    const shots = new Map();
+    const listen = ()=>{
+        if (listening || !worker)
+        {
+            return;
+        }
+        listening = true;
+        worker.addEventListener('message', (/** @type {{ data: any }} */ event)=>{
+            if (event.data?.type === 'dumped')
+            {
+                last = { lines: event.data.lines, frame: event.data.frame };
+            }
+            if (event.data?.type === 'frozen')
+            {
+                // The frame a pause holds, as a dump: what `snapshot` then reads from.
+                last = { lines: event.data.lines, frame: -1 };
+            }
+            if (event.data?.type === 'snapped')
+            {
+                const { id, width, height, format, data } = event.data;
+                shots.set(id, { width, height, format, data });
+            }
+        });
+    };
     /** @param {number} [frames] */
     const dumpFrames = (frames = 1)=>{
         if (!worker)
         {
             throw new Error('dumpFrames: this run draws without a graphics worker');
         }
-        if (!listening)
-        {
-            listening = true;
-            worker.addEventListener('message', (/** @type {{ data: any }} */ event)=>{
-                if (event.data?.type === 'dumped')
-                {
-                    last = { lines: event.data.lines, frame: event.data.frame };
-                }
-            });
-        }
+        listen();
         worker.postMessage({ type: 'debug', dumpFrames: frames });
         return frames;
     };
     return {
         dumpFrames,
+        /**
+         * A texture as the GPU holds it at the end of the next frame -- `t4414`
+         * as a frame dump names it, its top level, in its GPU format -- for
+         * `snapped` to hand over: what an intermediate target or a shadow
+         * map holds, which a dump of the draws cannot show.
+         *
+         * @param {string} id
+         */
+        snapshot: id=>{
+            if (!worker)
+            {
+                throw new Error('snapshot: this run draws without a graphics worker');
+            }
+            listen();
+            shots.delete(String(id));
+            worker.postMessage({ type: 'debug', snapshot: String(id) });
+            return String(id);
+        },
+        /**
+         * The texture `snapshot` asked for, once the frame has read it: its size,
+         * GPU format and texels, or null until then.
+         *
+         * @param {string} id
+         */
+        snapped: id=>shots.get(String(id)) ?? null,
         /**
          * How the worker's devices take buffer locks from now on: '' as the
          * program asked, 'rename' renaming at every one.
@@ -8445,6 +8513,7 @@ function liveDumpOf(worker, control){
             {
                 throw new Error('freeze: this run draws without a graphics worker');
             }
+            listen();
             worker.postMessage({ type: 'debug', freeze: on });
             return on;
         },

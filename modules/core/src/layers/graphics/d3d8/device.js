@@ -257,6 +257,10 @@ function isTransformType(type){
  * @property {any} [backend]         The rendering backend.
  * @property {(address: number, length: number)=>Uint8Array} [readMemory]
  * @property {(address: number, length: number)=>Uint8Array} [windowMemory]
+ * @property {(address: number, length: number) => ({ take: (address: number, length: number)
+ *     => number[] } | null)} [watchWrites]
+ *     Which pages of a range were written since a look: what a dynamic buffer
+ *     uploads, compared against nothing. Absent where nothing can say.
  *     The same bytes without the copy, for a reader done with them at once.
  * @property {(address: number, bytes: Uint8Array)=>void} [writeMemory]
  *     How a lock of a render target brings the drawn pixels into the guest's
@@ -313,6 +317,8 @@ function isTransformType(type){
  *     Told the bytes of each dynamic buffer a draw reads (`drawn.js`), by a
  *     device that records for one drawing elsewhere, which has to be sent
  *     what the program wrote there after the unlock.
+ * @property {boolean} [renderedElsewhere]  the device records for one that draws in
+ *     another thread, which makes the GPU's copies there
  * @property {(work: () => any) => any} [whileStill]  Runs `work` as one pause of
  *     the program's (`whileStill`), for a device that records: what it compares of
  *     guest memory in the pause it compares once.
@@ -415,7 +421,7 @@ export function createDirect3D8(options = {}){
         free: giveBack, dumpDraws, dumpEvery, liveDump, maxDraws, divergence, skipTexture,
         probeTexture, fog, mips, nanProbe, driverRules, onDeviceLost, gamma, frameQueued, drawsFrom,
         occlusionCounted,
-        whileStill, rectangleBump, ...caps
+        whileStill, rectangleBump, renderedElsewhere, watchWrites, ...caps
     } = options;
     /** @type {DeviceCaps} */
     const resolved = { ...DEFAULT_CAPS, ...caps, fullscreenGamma: gamma?.applies() === true };
@@ -425,7 +431,7 @@ export function createDirect3D8(options = {}){
         free: giveBack, dumpDraws, dumpEvery, liveDump, maxDraws, divergence, skipTexture,
         probeTexture, fog, mips, nanProbe, driverRules, onDeviceLost, gamma, frameQueued, drawsFrom,
         occlusionCounted,
-        whileStill, rectangleBump,
+        whileStill, rectangleBump, renderedElsewhere, watchWrites,
     };
     if (backend && !readMemory)
     {
@@ -779,6 +785,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             readMemory: /** @type {(address: number, length: number)=>Uint8Array} */ (
                 services.readMemory),
             windowMemory: services.windowMemory,
+            watchWrites: services.watchWrites,
             createSampler: services.createSampler ?? null,
             dumpDraws: services.dumpDraws === true,
             dumpEvery: services.dumpEvery,
@@ -1788,6 +1795,14 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         },
 
         /**
+         * Whether a run of the ring applies a state block by its token, whose
+         * bindings the run does not name (`remote/replay.js`).
+         *
+         * @param {Uint8Array} records
+         */
+        appliesStateBlocks: records=>D3D8_COMMANDS.appliesBlocks(records),
+
+        /**
          * The calls a run of the command ring carried, made in order
          * (`commands.js`). The program was told D3D_OK for each when it made
          * it, so one this device refuses is a divergence, said once.
@@ -1880,14 +1895,24 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             const target = renderTarget ? describe(renderTarget) : null;
             return {
                 drawable: (inScene ? 1 : 0) | (declared ? 2 : 0)
-                    | (streams.get(0)?.buffer ? 4 : 0) | (indices ? 8 : 0),
+                    | (streams.get(0)?.buffer ? 4 : 0) | (indices ? 8 : 0)
+                    | (depthStencil ? 16 : 0)
+                    | (depthStencil && describe(depthStencil).Format === D3DFMT.D24S8 ? 32 : 0),
                 targetWidth: target?.Width ?? 0,
                 targetHeight: target?.Height ?? 0,
                 clipPlanes: CLIP_PLANES,
+                cooperative: device.TestCooperativeLevel() === D3D_OK ? 0 : 1,
+                elsewhere: services.renderedElsewhere === true ? 1 : 0,
+                // Which blocks an apply changes what a draw's checks read with.
+                stateBlocks: [...stateBlocks].map(([handle, block])=>/** @type {[number, boolean]} */ (
+                    [handle, block.vertexShader !== undefined || block.streams.size > 0
+                        || block.indices !== undefined])),
                 taken: [isShaderHandle(boundVertexShader) ? boundVertexShader >>> 0 : 0,
                     boundPixelShader >>> 0],
                 takes: [(/** @type {number} */ handle)=>vertexShaders.has(handle),
                     (/** @type {number} */ handle)=>pixelShaders.has(handle)],
+                shaders: [boundVertexShader >>> 0, boundPixelShader >>> 0],
+                targets: [renderTarget ?? null, depthStencil ?? null],
             };
         },
 
@@ -3112,6 +3137,9 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
          * @param {{ moves?: SurfaceMove[] }} [out]
          */
         CopyRects(source, rects, rectCount, destination, points, out = {}){
+            /** A texture level or a render target: what the GPU draws into or from. */
+            const onGpu = (/** @type {any} */ surface, /** @type {any} */ desc)=>
+                Boolean(surface.container) || (desc.Usage & D3DUSAGE.RENDERTARGET) !== 0;
             if (!source || !destination)
             {
                 return D3DERR_INVALIDCALL;
@@ -3140,6 +3168,18 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             if (renderer?.copySurface && to.Pool !== D3DPOOL.SYSTEMMEM
                 && copies.every(copy=>
                     renderer.copySurface(source, copy.rect, destination, copy.at)))
+            {
+                out.moves = [];
+                return D3D_OK;
+            }
+            // Recording for a device that draws elsewhere, there is no renderer
+            // here to ask: the played one copies between two surfaces its GPU
+            // holds, not one texture, and their guest bytes hold no pixels --
+            // read back and moved here, a target's worth of bytes crossed for
+            // nothing (as Direct3D 9's StretchRect).
+            if (services.renderedElsewhere === true && to.Pool !== D3DPOOL.SYSTEMMEM
+                && onGpu(source, from) && onGpu(destination, to) && source !== destination
+                && !(source.container && source.container === destination.container))
             {
                 out.moves = [];
                 return D3D_OK;

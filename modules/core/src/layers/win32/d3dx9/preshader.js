@@ -95,6 +95,14 @@ function dot(a, n){
  *     computes, a parameter given as it is -- the component it moves; null otherwise.
  * @property {(values: (constant: Constant) => number[] | null) => number[]} run
  *     The output registers' components, given each input's numbers.
+ * @property {readonly Instruction[]} instructions  The program, for whoever runs it elsewhere.
+ * @property {readonly number[]} immediates  Its literals, the IMMED table.
+ */
+
+/**
+ * @typedef {{ opcode: number, arity: number, scalar: boolean, count: number,
+ *     inputs: Operand[], output: Operand }} Instruction  an instruction as read: its
+ *     opcode (bits 20 to 30 of its first word) and how many inputs it takes
  */
 
 class PreshaderError extends Error {}
@@ -142,8 +150,7 @@ export function readPreshader(words){
         table.byteLength), 0).constants : [];
 
     const code = comment(FXLC);
-    /** @type {{ op: { all?: boolean, run: (a: number[], n: number) => number },
-     *     scalar: boolean, count: number, inputs: Operand[], output: Operand }[]} */
+    /** @type {(Instruction & { op: { all?: boolean, run: (a: number[], n: number) => number } })[]} */
     const program = [];
     if (code)
     {
@@ -189,8 +196,8 @@ export function readPreshader(words){
                     + `${inputCount} inputs`);
             }
             const ins = Array.from({ length: inputCount }, operand);
-            program.push({ op, scalar: (raw & 0x80000000) !== 0, count, inputs: ins,
-                output: operand() });
+            program.push({ op, opcode: (raw & 0x7ff00000) >>> 20, arity: inputCount,
+                scalar: (raw & 0x80000000) !== 0, count, inputs: ins, output: operand() });
         }
     }
 
@@ -202,6 +209,8 @@ export function readPreshader(words){
     return {
         inputs,
         copies,
+        instructions: program,
+        immediates,
         run: values=>{
             /** @type {number[][]} */
             const tables = [[], immediates.slice(), [], [], [], [], [], []];
@@ -254,4 +263,4 @@ export function readPreshader(words){
     };
 }
 
-export { PreshaderError };
+export { PreshaderError, TABLE };

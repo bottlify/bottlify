@@ -29,11 +29,13 @@ import { createDirect3D7Seam } from './d3d7.js';
 import {
     IDIRECT3D7_SLOTS, IDIRECT3DDEVICE7_SLOTS, IDIRECT3DVERTEXBUFFER7_SLOTS, IDIRECTDRAW7_SLOTS,
 } from './vtables.js';
-import { IID_IDirect3D7, IID_IDirectDraw7 } from './iids.js';
+import { IID_IDirect3D7, IID_IDirect3DVertexBuffer7, IID_IDirectDraw7 } from './iids.js';
 import {
     D3DDEVICEDESC7, D3DPRIMCAPS, D3DRECT, D3DVERTEXBUFFERDESC, D3DVIEWPORT7,
 } from './structs.js';
 import { guidBytes } from './d3d7.js';
+import { COMMAND, DRAW, FLAG_STALE, SHADOW, VERTEX_BUFFER7 } from './shadow.js';
+import { D3D7_COMMANDS } from '../d3d7/commands.js';
 import { createDirectDraw } from '../ddraw/objects.js';
 import { DDSURFACEDESC2, writeSurfaceDesc } from '../ddraw/structs.js';
 import {
@@ -70,7 +72,7 @@ const slot = (slots, name)=>{
 
 /** A flat address space with the bridge's vtable publisher over it. */
 function machine(){
-    const bytes = new Uint8Array(1 << 20);
+    const bytes = new Uint8Array(4 << 20);
     let next = 0x100;
     const memory = {
         /** @param {number} at @param {number} length */
@@ -136,6 +138,35 @@ function machine(){
             assert.ok(entry, `slot ${index} has an implementation`);
             return entry.fn.handler([pointer, ...args]) >>> 0;
         },
+        /**
+         * Whether a slot holds guest code rather than a trap.
+         *
+         * @param {number} pointer @param {number} index
+         */
+        isGuest: (pointer, index)=>!registered.has(memory.readU32(memory.readU32(pointer)
+            + index * 4)),
+        /**
+         * The host's path of a method whose slot holds guest code: the trap
+         * its routine falls back to, found by its name.
+         *
+         * @param {number} pointer @param {string} name @param {number[]} args
+         */
+        trap(pointer, name, args = []){
+            // A full name (`{IID}::Method`) names one interface's; a bare one the first.
+            const entry = [...registered.values()].find(one=>(name.includes('::')
+                ? one.name === name : one.name.endsWith(`::${name}`)));
+            assert.ok(entry, `${name} has a trap`);
+            return entry.fn.handler([pointer, ...args]) >>> 0;
+        },
+        /** Guest memory for the device's block, its ring and its routines, apart from the rest. */
+        allocateGuest: (()=>{
+            let guestNext = 0x200000;
+            return (/** @type {number} */ size)=>{
+                const at = guestNext;
+                guestNext += size + 0xfff & ~0xfff;
+                return at;
+            };
+        })(),
         /** @param {number} pointer @param {number} index */
         argBytesOf(pointer, index){
             const table = memory.readU32(pointer);
@@ -158,8 +189,12 @@ function machine(){
     };
 }
 
-/** The whole assembly, as a program reaches it: DDRAW.dll and what it leads to. */
-function seamed(){
+/**
+ * The whole assembly, as a program reaches it: DDRAW.dll and what it leads to.
+ *
+ * @param {{ guest?: boolean }} [made]  `guest`: guest memory for a device's block and routines
+ */
+function seamed(made = {}){
     const box = machine();
     /** @type {any[]} */
     const roots = [];
@@ -178,11 +213,12 @@ function seamed(){
             },
             available: ()=>false,
         },
-        memory: box.services,
+        memory: made.guest ? { ...box.services, readU32: box.memory.readU32 } : box.services,
         publishInterface: box.publishInterface,
         screen: ()=>SCREEN,
         publisher,
         present: ()=>{},
+        allocate: made.guest ? box.allocateGuest : undefined,
     });
     const ddrawDll = libraries.libraries['DDRAW.dll'];
 
@@ -235,8 +271,13 @@ function seamed(){
         device: (device, name, args = [])=>
             box.call(device, slot(IDIRECT3DDEVICE7_SLOTS, name), args),
         /** @param {number} buffer @param {string} name @param {number[]} args */
-        buffer: (buffer, name, args = [])=>
-            box.call(buffer, slot(IDIRECT3DVERTEXBUFFER7_SLOTS, name), args),
+        buffer: (buffer, name, args = [])=>{
+            const index = slot(IDIRECT3DVERTEXBUFFER7_SLOTS, name);
+            // Lock and Unlock hold guest code: the host's path is their trap.
+            return box.isGuest(buffer, index)
+                ? box.trap(buffer, `${IID_IDirect3DVertexBuffer7}::${name}`, args)
+                : box.call(buffer, index, args);
+        },
         /** @param {number} pointer */
         release: pointer=>box.call(pointer, 2, []),
         /** Every root the seam made is dead. */
@@ -1019,4 +1060,175 @@ test('EnumZBufferFormats offers depth alone and depth with stencil', async()=>{
         'and the flag is what makes it a depth format rather than a colour one');
     assert.equal(h.d3d('EnumZBufferFormats', [riid, 0, 0]), DDERR_INVALIDPARAMS >>> 0);
     assert.equal(h.root.release('IDirectDraw7'), 0);
+});
+
+test('with guest memory, a device\'s setters and getters run in the guest, and what the host does'
+    + ' is in the block they read', ()=>{
+    // The routines themselves run on the processor in the ring's gates; here
+    // the device is made with its block and its host paths keep it.
+    const h = seamed({ guest: true });
+    const ddraw = h.create7();
+    const d3d = h.direct3D(ddraw);
+    const target = h.surface(ddraw);
+    const { hr, device } = h.createDevice(d3d, target);
+    assert.equal(hr, D3D_OK);
+    for (const name of ['SetRenderState', 'SetTransform', 'SetTextureStageState', 'SetViewport',
+        'ApplyStateBlock', 'CaptureStateBlock',
+        'LightEnable', 'BeginScene', 'EndScene', 'DrawPrimitive', 'SetTexture', 'GetRenderState',
+        'GetTextureStageState', 'GetViewport', 'GetTransform', 'Clear', 'DrawPrimitiveVB',
+        'DrawIndexedPrimitiveVB'])
+    {
+        assert.ok(h.box.isGuest(device, slot(IDIRECT3DDEVICE7_SLOTS, name)),
+            `${name} is guest code`);
+    }
+    // By pointer to both its vertices and its indices: two copies, which a record has not.
+    for (const name of ['DrawIndexedPrimitive'])
+    {
+        assert.ok(!h.box.isGuest(device, slot(IDIRECT3DDEVICE7_SLOTS, name)), `${name} is a trap`);
+    }
+    const block = h.box.memory.readU32(device + 4);
+    assert.notEqual(block, 0, 'the block is one word past the interface');
+    // A surface's count is read or lowered after the rings are made: a texture
+    // bound in one is held by the device by then.
+    assert.equal(typeof h.publisher.objectAt(target).settleGuestRefs, 'function');
+    // D3DRENDERSTATE_ZENABLE (7) set on the host's path is the block's at once.
+    assert.equal(h.box.trap(device, 'SetRenderState', [7, 0]), D3D_OK);
+    assert.equal(h.box.memory.readU32(block + SHADOW.RENDER_STATES + 7 * 4), 0);
+    assert.equal(h.box.trap(device, 'SetRenderState', [7, 1]), D3D_OK);
+    assert.equal(h.box.memory.readU32(block + SHADOW.RENDER_STATES + 7 * 4), 1);
+    // A scene begun on the host is one the guest's EndScene may end.
+    assert.equal(h.box.trap(device, 'BeginScene'), D3D_OK);
+    assert.equal(h.box.memory.readU32(block + SHADOW.DRAWABLE) & DRAW.SCENE, DRAW.SCENE);
+    assert.equal(h.box.trap(device, 'EndScene'), D3D_OK);
+    assert.equal(h.box.memory.readU32(block + SHADOW.DRAWABLE) & DRAW.SCENE, 0);
+    // The target's size, which a viewport in the guest is checked against.
+    assert.deepEqual([h.box.memory.readU32(block + SHADOW.TARGET_WIDTH),
+        h.box.memory.readU32(block + SHADOW.TARGET_HEIGHT)], [8, 8]);
+    assert.equal(h.release(device), 0);
+});
+
+test('with guest memory, a vertex buffer\'s block says its vertices and its lock, and a draw from'
+    + ' it in the ring is made, the buffer readied first, before the buffer is locked again', ()=>{
+    const h = seamed({ guest: true });
+    const ddraw = h.create7();
+    const d3d = h.direct3D(ddraw);
+    const target = h.surface(ddraw);
+    const { device } = h.createDevice(d3d, target);
+    const desc = 0x6400;
+    h.box.memory.writeU32(desc + D3DVERTEXBUFFERDESC.dwSize, D3DVERTEXBUFFERDESC.SIZE);
+    h.box.memory.writeU32(desc + D3DVERTEXBUFFERDESC.dwCaps, 0);
+    h.box.memory.writeU32(desc + D3DVERTEXBUFFERDESC.dwFVF, FVF_TL);
+    h.box.memory.writeU32(desc + D3DVERTEXBUFFERDESC.dwNumVertices, 64);
+    assert.equal(h.box.call(d3d, slot(IDIRECT3D7_SLOTS, 'CreateVertexBuffer'),
+        [desc, 0x6500, 0]), D3D_OK);
+    const buffer = h.box.memory.readU32(0x6500);
+    const own = h.box.memory.readU32(buffer + 4);
+    assert.notEqual(own, 0, 'the buffer\'s block is one word past its interface');
+    assert.equal(h.box.memory.readU32(own + VERTEX_BUFFER7.VERTICES), 64);
+    assert.equal(h.buffer(buffer, 'Lock', [0, 0x6600, 0]), D3D_OK);
+    assert.equal(h.box.memory.readU32(own + VERTEX_BUFFER7.LOCKED), 1, 'a lock says so');
+    assert.equal(h.buffer(buffer, 'Unlock'), D3D_OK);
+    assert.equal(h.box.memory.readU32(own + VERTEX_BUFFER7.LOCKED), 0, 'and its unlock');
+
+    /** @type {string[]} */
+    const calls = [];
+    const vertices = h.publisher.objectAt(buffer);
+    for (const method of ['Lock', 'Unlock', 'LockInPlace'])
+    {
+        const was = vertices[method];
+        vertices[method] = (/** @type {any[]} */ ...args)=>{
+            calls.push(`buffer.${method}`);
+            return was(...args);
+        };
+    }
+    const model = h.publisher.objectAt(device);
+    const draw = model.DrawIndexedPrimitiveVB;
+    model.DrawIndexedPrimitiveVB = (/** @type {any[]} */ ...args)=>{
+        calls.push(`draw ${[...new Uint16Array(args[4].buffer, args[4].byteOffset, args[5])]}`
+            + ` clipped ${args[6]}`);
+        return draw(...args);
+    };
+    // What the guest's routines write: a scene, and an indexed draw of a quad
+    // from the buffer, its six indices copied into the record.
+    const block = h.box.memory.readU32(device + 4);
+    const ring = h.box.memory.readU32(block + SHADOW.COMMANDS);
+    let head = h.box.memory.readU32(block + SHADOW.COMMAND_HEAD);
+    /** @param {string} name @param {number[]} words */
+    const write = (name, words)=>{
+        const at = ring + head;
+        const length = COMMAND.ARGS + 4 * words.length;
+        h.box.memory.writeU32(at + COMMAND.SLOT, D3D7_COMMANDS.commandSlot(name));
+        words.forEach((word, index)=>h.box.memory.writeU32(at + COMMAND.ARGS + 4 * index, word));
+        h.box.memory.writeU32(at + COMMAND.BYTES, length);
+        head += length;
+        h.box.memory.writeU32(block + SHADOW.COMMAND_HEAD, head);
+        return at;
+    };
+    write('BeginScene', []);
+    const indices = [0, 1, 2, 2, 1, 3];
+    const pairs = new Uint32Array(Uint16Array.from(indices).buffer);
+    const at = ring + head;
+    write('DrawIndexedPrimitiveVB', [4, buffer, 0, 4, at + COMMAND.ARGS + 28, 6, 0, ...pairs]);
+    assert.equal(h.buffer(buffer, 'Lock', [0, 0x6600, 0]), D3D_OK);
+    assert.deepEqual(calls, ['buffer.Lock', 'buffer.Unlock', 'draw 0,1,2,2,1,3 clipped 0',
+        'buffer.Lock'], 'written in place, read whole for the draw, drawn, then locked');
+    assert.equal(h.buffer(buffer, 'Unlock'), D3D_OK);
+
+    h.release(buffer);
+    assert.equal(h.release(device), 0);
+    h.release(d3d);
+    h.release(target);
+    h.release(ddraw);
+    h.assertAllReleased();
+});
+
+test('with guest memory, a state block applied in the ring leaves the block what it holds', ()=>{
+    // An apply's routine marks the block stale (FLAG_STALE) and the getters go
+    // to the host; the run brings the block to the states the applied block
+    // holds -- a transform under this version's own number -- and they read it
+    // again in the guest.
+    const h = seamed({ guest: true });
+    const ddraw = h.create7();
+    const d3d = h.direct3D(ddraw);
+    const target = h.surface(ddraw);
+    const { device } = h.createDevice(d3d, target);
+    const world = 0x6800;
+    const scaled = [2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 1];
+    scaled.forEach((value, index)=>h.box.memory.writeU32(world + index * 4,
+        new Uint32Array(new Float32Array([value]).buffer)[0]));
+    assert.equal(h.box.trap(device, 'BeginStateBlock'), D3D_OK);
+    assert.equal(h.box.trap(device, 'SetRenderState', [7, 0]), D3D_OK);
+    assert.equal(h.box.trap(device, 'SetTransform', [1, world]), D3D_OK);
+    assert.equal(h.box.trap(device, 'EndStateBlock', [0x6900]), D3D_OK);
+    const token = h.box.memory.readU32(0x6900);
+    assert.equal(h.box.trap(device, 'SetRenderState', [7, 1]), D3D_OK);
+    const identity = 0x6b00;
+    [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1].forEach((value, index)=>h.box.memory.writeU32(
+        identity + index * 4, new Uint32Array(new Float32Array([value]).buffer)[0]));
+    assert.equal(h.box.trap(device, 'SetTransform', [1, identity]), D3D_OK);
+    const block = h.box.memory.readU32(device + 4);
+    assert.equal(h.box.memory.readU32(block + SHADOW.TRANSFORMS + 1 * 64),
+        new Uint32Array(new Float32Array([1]).buffer)[0],
+        'WORLD the identity before the apply');
+    assert.equal(h.box.memory.readU32(block + SHADOW.RENDER_STATES + 7 * 4), 1);
+    assert.equal((h.box.memory.readU32(block + SHADOW.STATE_BLOCKS) >>> token) & 1, 1,
+        'the token is the block\'s');
+
+    // What the routine writes: the record, and the flag.
+    const ring = h.box.memory.readU32(block + SHADOW.COMMANDS);
+    const head = h.box.memory.readU32(block + SHADOW.COMMAND_HEAD);
+    h.box.memory.writeU32(ring + head + COMMAND.SLOT, D3D7_COMMANDS.commandSlot('ApplyStateBlock'));
+    h.box.memory.writeU32(ring + head + COMMAND.ARGS, token);
+    h.box.memory.writeU32(ring + head + COMMAND.BYTES, COMMAND.ARGS + 4);
+    h.box.memory.writeU32(block + SHADOW.COMMAND_HEAD, head + COMMAND.ARGS + 4);
+    h.box.memory.writeU32(block + SHADOW.FLAGS,
+        h.box.memory.readU32(block + SHADOW.FLAGS) | FLAG_STALE);
+
+    assert.equal(h.box.trap(device, 'GetRenderState', [7, 0x6a00]), D3D_OK, 'the ring played');
+    assert.equal(h.box.memory.readU32(0x6a00), 0, 'the device holds the block\'s state');
+    assert.equal(h.box.memory.readU32(block + SHADOW.RENDER_STATES + 7 * 4), 0, 'and the block');
+    assert.equal(h.box.memory.readU32(block + SHADOW.TRANSFORMS + 1 * 64),
+        new Uint32Array(new Float32Array([2]).buffer)[0], 'WORLD in its own slot, 1');
+    assert.equal(h.box.memory.readU32(block + SHADOW.FLAGS) & FLAG_STALE, 0, 'and is fresh');
+    assert.equal(h.release(device), 0);
 });

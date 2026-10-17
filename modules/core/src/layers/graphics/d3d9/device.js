@@ -443,6 +443,10 @@ const isDepthFormat = format=>FORMAT_INFO[format] !== undefined && FORMAT_INFO[f
  * @property {(address: number, length: number)=>Uint8Array} [readMemory]
  *     Required alongside a backend: the bytes a draw reads are the guest's.
  * @property {(address: number, length: number)=>Uint8Array} [windowMemory]
+ * @property {(address: number, length: number) => ({ take: (address: number, length: number)
+ *     => number[] } | null)} [watchWrites]
+ *     Which pages of a range were written since a look: what a dynamic buffer
+ *     uploads, compared against nothing. Absent where nothing can say.
  * @property {(address: number, bytes: Uint8Array)=>void} [writeMemory]
  *     Where a fill or a copy between surfaces writes. Without it those calls
  *     describe their moves for the caller to make.
@@ -517,7 +521,8 @@ export function createDirect3D9(options = {}){
         free: giveBack, divergence, dumpDraws, dumpEvery, liveDump, maxDraws, skipTexture,
         probeTexture, fog, mips, driverRules, onDeviceLost, gamma, frameQueued, renderedElsewhere,
         occlusionCounted,
-        keepMemory, rereadBuffers, drawsFrom, whileStill, rectangleBump, drawsNothing, ...caps
+        keepMemory, rereadBuffers, drawsFrom, whileStill, rectangleBump, drawsNothing, watchWrites,
+        ...caps
     } = options;
     /** @type {DeviceCaps} */
     const resolved = { ...DEFAULT_CAPS, ...caps, fullscreenGamma: gamma?.applies() === true };
@@ -531,7 +536,7 @@ export function createDirect3D9(options = {}){
         liveDump, maxDraws, skipTexture,
         probeTexture, fog, mips, driverRules, onDeviceLost, gamma, frameQueued, renderedElsewhere,
         occlusionCounted,
-        rereadBuffers, drawsFrom, whileStill, rectangleBump, drawsNothing,
+        rereadBuffers, drawsFrom, whileStill, rectangleBump, drawsNothing, watchWrites,
     };
     if (backend && !readMemory)
     {
@@ -924,6 +929,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             readMemory: /** @type {(address: number, length: number)=>Uint8Array} */ (
                 services.readMemory),
             windowMemory: services.windowMemory,
+            watchWrites: services.watchWrites,
             createSampler: services.createSampler ?? null,
             dumpDraws: services.dumpDraws,
             dumpEvery: services.dumpEvery,
@@ -2402,11 +2408,17 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             const target = renderTargets.get(0);
             return {
                 drawable: (inScene ? 1 : 0) | (declared ? 2 : 0)
-                    | (streamBias() !== null ? 4 : 0) | (indices ? 8 : 0),
+                    | (streamBias() !== null ? 4 : 0) | (indices ? 8 : 0)
+                    | (depthStencil ? 16 : 0)
+                    | (depthStencil && describe(depthStencil).Format === D3DFMT.D24S8 ? 32 : 0),
                 targetWidth: target ? describe(target).Width : 0,
                 targetHeight: target ? describe(target).Height : 0,
                 clipPlanes: caps.maxUserClipPlanes,
                 taken: [vertexDeclaration.fvf >>> 0],
+                cooperative: device.TestCooperativeLevel() === D3D_OK ? 0 : 1,
+                elsewhere: services.renderedElsewhere === true || services.drawsNothing === true
+                    ? 1 : 0,
+                targets: [target ?? null, depthStencil ?? null],
             };
         },
 
@@ -4449,15 +4461,32 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             {
                 return D3DERR_INVALIDCALL;
             }
-            fillBytes(surface, area, colour >>> 0);
+            if ((desc.Usage & D3DUSAGE.RENDERTARGET) !== 0 && !renderer
+                && (services.renderedElsewhere === true || services.drawsNothing === true))
+            {
+                // Recorded for a device that clears it on the GPU, whose lock
+                // reads it back from there: its guest bytes are nobody's, and
+                // filling them was a render target's worth of writes on the
+                // program's thread, 2.7 ms a fill.
+                return D3D_OK;
+            }
             if ((desc.Usage & D3DUSAGE.RENDERTARGET) !== 0 && renderer)
             {
+                // The GPU's, as Clear's: where a lock reads the target back
+                // (`targetPixels`), its guest bytes are not filled as well -- that
+                // cost a game filling its targets ten thousand times a run 2.4 ms
+                // a fill.
+                if (!targetPixels())
+                {
+                    fillBytes(surface, area, colour >>> 0);
+                }
                 renderer.clear(targetModel(surface),
                     [{ x1: area.left, y1: area.top, x2: area.right, y2: area.bottom }],
                     D3DCLEAR.TARGET, colour >>> 0, 1, 0);
             }
             else
             {
+                fillBytes(surface, area, colour >>> 0);
                 renderer?.markDirty?.(surface);
             }
             return D3D_OK;

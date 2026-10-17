@@ -1119,6 +1119,45 @@ test('StretchRect between targets drawn elsewhere, or not at all, moves no guest
     assert.deepEqual(copied({ drawsNothing: true }), { between: 0, intoTarget: 0, intoPlain: 7 });
 });
 
+test('ColorFill of a target drawn elsewhere, or not at all, writes no guest bytes', ()=>{
+    // The played device clears it on the GPU, and a lock reads it back from
+    // there; a plain surface's bytes are its pixels and are still filled.
+    /** @param {{ renderedElsewhere?: boolean, drawsNothing?: boolean }} how */
+    const filled = how=>{
+        const memory = new Uint8Array(1 << 20);
+        let next = 0x1000;
+        const { device } = make({ services: {
+            ...how,
+            allocate: (/** @type {number} */ bytes)=>{
+                const at = next;
+                next += (bytes + 15) & ~15;
+                return at;
+            },
+            readMemory: (/** @type {number} */ address, /** @type {number} */ length)=>
+                memory.slice(address, address + length),
+            writeMemory: (/** @type {number} */ address, /** @type {Uint8Array} */ bytes)=>{
+                memory.set(bytes, address);
+            },
+        } });
+        /** @type {{ surface?: any }} */
+        const target = {};
+        device.CreateRenderTarget(4, 4, D3DFMT.A8R8G8B8, false, target);
+        /** @type {{ surface?: any }} */
+        const plain = {};
+        device.CreateOffscreenPlainSurface(4, 4, D3DFMT.A8R8G8B8, D3DPOOL.DEFAULT, plain);
+        assert.equal(device.ColorFill(target.surface, null, 0xff112233), D3D_OK);
+        assert.equal(device.ColorFill(plain.surface, null, 0xff112233), D3D_OK);
+        const answer = { target: memory[target.surface.base], plain: memory[plain.surface.base] };
+        target.surface.release();
+        plain.surface.release();
+        device.release();
+        return answer;
+    };
+    assert.deepEqual(filled({}), { target: 0x33, plain: 0x33 });
+    assert.deepEqual(filled({ renderedElsewhere: true }), { target: 0, plain: 0x33 });
+    assert.deepEqual(filled({ drawsNothing: true }), { target: 0, plain: 0x33 });
+});
+
 test('GetRenderTargetData wants a system-memory twin of the target', ()=>{
     /** @type {string[]} */
     const reports = [];

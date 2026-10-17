@@ -689,16 +689,21 @@ export function createTextureLoader(host){
             {
                 return packed;
             }
-            let bgra = decodeTexels(from.format, packed, from.width, from.height);
-            if (from.width !== to.width || from.height !== to.height)
+            // One format at one size with no key is a copy of the rows, as D3DX
+            // makes it: a compressed one decoded and encoded again took the
+            // Crysis demo's engine a tenth of its time, and changed its blocks.
+            const copied = from.format === to.format && from.width === to.width
+                && from.height === to.height && colorKey === 0;
+            let bgra = copied ? null : decodeTexels(from.format, packed, from.width, from.height);
+            if (bgra && (from.width !== to.width || from.height !== to.height))
             {
                 bgra = resample(bgra, from.width, from.height, to.width, to.height);
             }
-            if (colorKey !== 0)
+            if (bgra && colorKey !== 0)
             {
                 applyColorKey(bgra, colorKey);
             }
-            const bytes = encodeTexels(to.format, bgra, to.width, to.height);
+            const bytes = bgra ? encodeTexels(to.format, bgra, to.width, to.height) : packed;
             const locked = scratch + SURFACE_DESC_BYTES;
             const answer = await method(dest, SURFACE.LockRect, [locked, destRect, 0]);
             if (answer !== D3D_OK)

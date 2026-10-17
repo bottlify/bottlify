@@ -646,8 +646,13 @@ export function createAudioModule(){
                         .filter((/** @type {any} */ b)=>!b.primary)
                         .map((/** @type {any} */ b)=>{
                             const c = b.cursors();
+                            // Its volume and where its bytes are: a buffer played
+                            // in silence is muted or written with silence, and
+                            // the bytes, read there, say which.
                             return `st=${b.status()} play=${c.play} write=${c.write}`
-                                + ` bytes=${b.bytes} freq=${b.frequency} held=${b.held}`;
+                                + ` bytes=${b.bytes} freq=${b.frequency} held=${b.held}`
+                                + ` vol=${b.volume} pan=${b.pan}`
+                                + ` at=0x${(b.address >>> 0).toString(16)}`;
                         }) : [],
                 },
             };

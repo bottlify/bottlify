@@ -622,3 +622,63 @@ test('a frame that fixes the exception tells the continue handlers too', async()
     assert.deepEqual(m.called.map(call=>call.entry), [0x51000, 0x63000]);
     assert.equal(m.seh.table.RemoveVectoredContinueHandler.handler([handle]), 1);
 });
+
+test('a handler is called with the dispatch\'s own frame at the head, as the C runtime\'s catch'
+    + ' counts on', async()=>{
+    // What a statically linked runtime's frame handler does on finding the
+    // catch in the head frame: saves the head ("the system's frame"), unwinds
+    // to its own frame, links the saved one back on above it, and before the
+    // jump to the continuation takes the head off. Without a frame of the
+    // dispatch's at the head that linked the catching frame to itself and
+    // then left it at the head after its function had returned.
+    const DISPATCHER = 0x5f000;
+    const m = machine();
+    Object.assign(m.host, { dispatcherHandler: ()=>DISPATCHER });
+    const seh = createSeh(m.host);
+    // Above the stack, where a program's frames are: the dispatch's own
+    // frame is below them.
+    const frames = [STACK + 0x100, STACK + 0x200];
+    m.put(frames[0], frames[1]);
+    m.put(frames[0] + 4, 0x51000);
+    m.put(frames[1], END_OF_CHAIN);
+    m.put(frames[1] + 4, 0x52000);
+    m.put(TEB, frames[0]);
+    /** @type {number[]} */
+    let walked = [];
+    const original = m.host.callGuest;
+    m.host.callGuest = async call=>{
+        if (call.entry !== 0x51000)
+        {
+            return original(call);
+        }
+        const saved = m.get(TEB);
+        walked = seh.chain(null).frames.map(({ handler })=>handler);
+        await seh.unwind(frames[0], 0x401000);
+        m.put(saved, m.get(TEB));
+        m.put(TEB, saved);
+        // The catch block ran; the continuation's jump takes the head off and
+        // never returns to the dispatch.
+        m.put(TEB, m.get(m.get(TEB)));
+        return new Promise(()=>{});
+    };
+
+    void seh.dispatch({ code: 0xe06d7363, address: 0x401000 });
+    await new Promise(resolve=>setTimeout(resolve, 0));
+
+    assert.deepEqual(walked, [DISPATCHER, 0x51000, 0x52000], 'the handler finds its frame below');
+    assert.equal(m.get(TEB), frames[0], 'the catching frame is the head again');
+    assert.equal(m.get(frames[0]), frames[1], 'still linked to the frame it was');
+    assert.ok(!m.called.some(call=>call.entry === DISPATCHER),
+        'the unwind takes the dispatch\'s frame off without calling it');
+});
+
+test('a handler that declines leaves the head where it was', async()=>{
+    const m = machine();
+    Object.assign(m.host, { dispatcherHandler: ()=>0x5f000 });
+    const seh = createSeh(m.host);
+    const frames = m.registerFrames([0x51000, 0x52000]);
+
+    await seh.dispatch({ code: 1, address: 0x401000 });
+
+    assert.equal(m.get(TEB), frames[0]);
+});

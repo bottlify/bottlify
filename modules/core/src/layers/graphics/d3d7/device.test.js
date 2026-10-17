@@ -789,6 +789,33 @@ test('recorded: a depth fill of the device\'s depth buffer clears the depth it d
         assert.ok(root.destroyed);
     });
 
+test('recorded: a colour fill of the device\'s target clears it on the GPU, no read-back first',
+    async()=>{
+        // As Direct3D 9's ColorFill: the target's picture is the GPU's, and a
+        // fill read back, filled in memory and taken up again cost a game
+        // clearing its target by Blt a wait for the GPU every frame.
+        const f = recorded({ writable: true });
+        const { device, gpu, root, target } = f;
+        const other = surface(root, { caps: DDSCAPS_TEXTURE, pixelFormat: ARGB32 });
+
+        assert.equal(other.colorFilled(null, 0xff00ff00), false,
+            'a surface the device does not draw into is filled in memory');
+        assert.equal(target.colorFilled(null, 0x00ff0000), true);
+        assert.equal(device.diagnostics().clears, 1);
+        device.present(target.buffer);
+        await device.idle();
+        const pass = gpu.of('beginRenderPass')[0].descriptor.colorAttachments[0];
+        assert.equal(pass.loadOp, 'clear');
+        assert.deepEqual([pass.clearValue.r, pass.clearValue.g, pass.clearValue.b],
+            [1, 0, 0], 'the fill, read in the target\'s own format');
+        assert.equal(gpu.of('copyTextureToBuffer').length, 0, 'nothing read back for it');
+
+        assert.equal(device.release(), 0);
+        assert.equal(other.release(), 0);
+        assert.equal(target.release(), 0);
+        assert.equal(root.release('IDirectDraw7'), 0);
+    });
+
 test('recorded: a texture goes up once, and again only after the program wrote it', async()=>{
     const f = recorded();
     const { device, gpu, root, ram, target } = f;

@@ -458,6 +458,7 @@ const bytesFor = (indices, length, fill)=>(indices
  *     | { kind: 'query', issue: boolean, flush: boolean }
  *     | { kind: 'sampler', state: number, value: number } | { kind: 'stage', op: number }
  *     | { kind: 'scissor', rect: number[], on: boolean }
+ *     | { kind: 'frequency', index: number, value: number }
  *     | { kind: 'light', seed: number, on: boolean }
  *     | { kind: 'clip', index: number, seed: number }
  *     | { kind: 'viewport', rect: number[] }
@@ -678,12 +679,19 @@ function generate(seed, steps, upUnbinds, nine){
         {
             program.push({ kind: 'stage', op: pick(COLOROPS) });
         }
-        else if (roll < 59 && nine)
+        else if (roll < 59 && nine && below(2) === 0)
         {
             const left = below(32);
             const top = below(32);
             program.push({ kind: 'scissor', rect: [left, top, left + 1 + below(32),
                 top + 1 + below(32)], on: below(3) !== 0 });
+        }
+        else if (roll < 59 && nine)
+        {
+            // A stream's divider: the geometry drawn twice, an instance each, once
+            // again, and the ones the device refuses.
+            program.push({ kind: 'frequency', index: pick([0, 1, 0, 1, 16]),
+                value: pick([1, 1, 0x40000002, 0x80000001, 0x40000000, 0xc0000001, 0]) });
         }
         else if (roll < 60)
         {
@@ -1096,6 +1104,10 @@ async function play(version, guestCode, steps, worker = false){
         {
             stage(step.op);
         }
+        else if (step.kind === 'frequency')
+        {
+            run(calls.device('SetStreamSourceFreq', [step.index, step.value]));
+        }
         else if (step.kind === 'scissor')
         {
             run(calls.device('SetScissorRect', [{ words: step.rect }]));
@@ -1171,9 +1183,10 @@ const COVERED = ['Lock', 'Unlock', 'GetSurfaceLevel', 'AddRef', 'Release', 'SetT
     'LightEnable', 'SetClipPlane'];
 /**
  * And those only Direct3D 9's guest code takes: a state block's own Capture
- * and Apply, the sampler states and the scissor.
+ * and Apply, the sampler states, the scissor and a stream's divider.
  */
-const COVERED_9 = ['Apply', 'Capture', 'SetSamplerState', 'GetSamplerState', 'SetScissorRect'];
+const COVERED_9 = ['Apply', 'Capture', 'SetSamplerState', 'GetSamplerState', 'SetScissorRect',
+    'SetStreamSourceFreq'];
 
 /** The calls whose path is the device's own, which each run must have had answered D3D_OK. */
 const DONE = ['SetRenderTarget', 'LockRect'];

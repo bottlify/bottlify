@@ -321,16 +321,16 @@ export function recordedDirect3D7(ddraw, services, transport){
     };
 
     /**
-     * The devices made, each with the target and textures it was last given,
-     * and the addresses it was found to draw into.
+     * The devices made, each with the target it was last given, and the
+     * addresses it was found to draw into.
      *
-     * @type {Set<{ proxy: any, target: any, textures: Map<number, any>, claimed: Set<number> }>}
+     * @type {Set<{ proxy: any, target: any, claimed: Set<number> }>}
      */
     const devices = new Set();
 
     /**
      * @param {any} proxy
-     * @param {{ target: any, textures: Map<number, any>, claimed: Set<number> }} state
+     * @param {{ target: any, claimed: Set<number> }} state
      */
     const syncTarget = (proxy, state)=>{
         ensure(state.target);
@@ -398,12 +398,14 @@ export function recordedDirect3D7(ddraw, services, transport){
      * @param {any} proxy @param {any} target
      */
     const deviceOf = (proxy, target)=>{
-        const state = { proxy, target, textures: new Map(), claimed: new Set() };
+        const state = { proxy, target, claimed: new Set() };
         devices.add(state);
         syncTarget(proxy, state);
+        // The textures the device holds, however they were bound: by a call
+        // of its own, or by a record of the command ring.
         const sync = ()=>{
             syncTarget(proxy, state);
-            for (const surface of state.textures.values())
+            for (const surface of proxy.boundTextures)
             {
                 shipTexture(surface);
             }
@@ -416,19 +418,25 @@ export function recordedDirect3D7(ddraw, services, transport){
                 {
                     ensure(surface);
                 }
-                const hr = proxy.SetTexture(stage, surface);
-                if (hr === D3D_OK)
+                return proxy.SetTexture(stage, surface);
+            },
+            /**
+             * A run of the command ring: what a draw reads brought up to
+             * date first, as before a draw of the device's own, and the
+             * textures the run binds described and their bytes sent.
+             *
+             * @param {Uint8Array} records @param {any[]} objects
+             */
+            commands(records, objects){
+                sync();
+                for (const object of objects)
                 {
-                    if (surface)
+                    if (object && typeof object.getColorKey === 'function')
                     {
-                        state.textures.set(stage, surface);
-                    }
-                    else
-                    {
-                        state.textures.delete(stage);
+                        shipTexture(object);
                     }
                 }
-                return hr;
+                return proxy.commands(records, objects);
             },
             /** @param {any} surface */
             SetRenderTarget(surface){
@@ -538,6 +546,8 @@ export function playedDirect3D7(services){
     const root = direct3D7Root(ddraw, {
         ...services,
         readMemory: mirror.read,
+        watchWrites: (/** @type {number} */ address, /** @type {number} */ length)=>
+            mirror.watch(address, length),
         writeMemory: (address, bytes)=>{
             mirror.write(address, bytes);
             if (!playing)

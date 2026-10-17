@@ -206,3 +206,87 @@ for (const executors of [1, 2, 4])
         assert.equal(code >>> 0, allOf(executors));
     });
 }
+
+/**
+ * A program that pins its whole process to each processor in turn, as an
+ * engine timing each processor does: SetProcessAffinityMask, then a Sleep,
+ * then CPUID's APIC id, with another thread of its own sleeping in a loop
+ * all along; then the whole machine again. It exits with a bit per processor
+ * whose APIC id it read there.
+ *
+ * @param {number} processors @param {number} sleep  the Sleep after each pin
+ */
+function buildProcessPinningExe(processors, sleep){
+    return buildExe({
+        imports: {
+            'KERNEL32.dll': ['SetProcessAffinityMask', 'Sleep', 'CreateThread', 'ExitProcess',
+                'SetPriorityClass', 'SetThreadPriority', 'GetCurrentThread'],
+        },
+        codeSize: WORKER_OFFSET + 0x40,
+        data: { apic: new Array(4 * 32).fill(0) },
+        code: ({ iat, at, code })=>{
+            /** @param {string} name */
+            const call = name=>[0xff, 0x15, ...u32(iat(name))];
+            /** SetProcessAffinityMask(GetCurrentProcess(), eax) */
+            const pinProcess = [0x50, 0x6a, 0xff, ...call('SetProcessAffinityMask')];
+            const pinEach = [
+                0x31, 0xf6, //                                   xor esi, esi
+                // L: cmp esi, processors; jae done
+                0x81, 0xfe, ...u32(processors), 0x73, 0x00, // (patched below)
+                // mov eax, 1; mov ecx, esi; shl eax, cl
+                0xb8, ...u32(1), 0x89, 0xf1, 0xd3, 0xe0,
+                ...pinProcess,
+                // SetPriorityClass(GetCurrentProcess(), REALTIME);
+                // SetThreadPriority(GetCurrentThread(), TIME_CRITICAL)
+                0x68, ...u32(0x100), 0x6a, 0xff, ...call('SetPriorityClass'),
+                0x6a, 0x0f, ...call('GetCurrentThread'), 0x50, ...call('SetThreadPriority'),
+                0x68, ...u32(sleep), ...call('Sleep'),
+                // mov eax, 1; xor ecx, ecx; cpuid; shr ebx, 24 -- the APIC id in ebx
+                0xb8, ...u32(1), 0x31, 0xc9, 0x0f, 0xa2, 0xc1, 0xeb, 0x18,
+                0x89, 0x1c, 0xb5, ...u32(at('apic')), //         mov [apic + esi*4], ebx
+                0x46, //                                         inc esi
+                0xeb, 0x00, //                                   jmp L (patched below)
+            ];
+            const loopAt = 2;
+            pinEach[loopAt + 7] = pinEach.length - (loopAt + 8);
+            pinEach[pinEach.length - 1] = (loopAt - pinEach.length) & 0xff;
+            const main = [
+                // CreateThread(NULL, 0, sleeper, NULL, 0, NULL)
+                0x6a, 0x00, 0x6a, 0x00, 0x6a, 0x00, 0x68, ...u32(code(WORKER_OFFSET)),
+                0x6a, 0x00, 0x6a, 0x00, ...call('CreateThread'),
+                ...pinEach,
+                0xb8, ...u32((2 ** processors - 1) >>> 0), ...pinProcess,
+                0x31, 0xff, //                                   xor edi, edi
+                ...Array.from({ length: processors }, (_, index)=>[
+                    0x81, 0x3d, ...u32(at('apic') + 4 * index), ...u32(index),
+                    0x75, 0x06, 0x81, 0xcf, ...u32(1 << index)]).flat(),
+                0x57, ...call('ExitProcess'), //                 ExitProcess(edi)
+            ];
+            // The sleeper: Sleep(1), for ever.
+            const sleeper = [0x6a, 0x01, ...call('Sleep'), 0xeb, 0xf8];
+            return [...main, ...new Array(WORKER_OFFSET - main.length).fill(0x90), ...sleeper];
+        },
+    });
+}
+
+for (const executors of [2, 4])
+{
+    for (const sleep of [0, 1, 100])
+    {
+        test(`a process pinned to each of ${executors} processors in turn, Sleep(${sleep}) after`
+            + ' each, runs on each and goes on', async()=>{
+            const app = await createApp({ executable: buildProcessPinningExe(executors, sleep),
+                cpu: { cores: executors } });
+            try
+            {
+                const code = await app.run({ timeoutMs: 60_000 });
+                assert.equal(code >>> 0, (2 ** executors - 1) >>> 0,
+                    `exit code 0x${(code >>> 0).toString(16)}`);
+            }
+            finally
+            {
+                await app.dispose();
+            }
+        });
+    }
+}

@@ -101,11 +101,40 @@ export function render(from, functions){
     {
         const quote = (/** @type {readonly string[]} */ list)=>
             `[${list.map(item=>`'${item}'`).join(', ')}]`;
+        /**
+         * A field of names, on its line or wrapped within a hundred columns, as
+         * the lint holds the file to.
+         *
+         * @param {string} label @param {readonly string[]} list
+         */
+        const field = (label, list)=>{
+            const one = `        ${label}: ${quote(list)},`;
+            if (one.length <= 100)
+            {
+                return [one];
+            }
+            const wrapped = [`        ${label}: [`];
+            let line = '           ';
+            for (const item of list)
+            {
+                const next = `${line} '${item}',`;
+                if (next.length > 100)
+                {
+                    wrapped.push(line);
+                    line = `            '${item}',`;
+                }
+                else
+                {
+                    line = next;
+                }
+            }
+            return [...wrapped, line, '        ],'];
+        };
         lines.push(`    ${fn.name}: {`);
         lines.push(`        convention: '${fn.convention}',`);
-        lines.push(`        params: ${quote(fn.params)},`);
+        lines.push(...field('params', fn.params));
         lines.push(`        returns: '${fn.returns}',`);
-        lines.push(`        uses: ${quote(fn.uses)},`);
+        lines.push(...field('uses', fn.uses));
         if (fn.host !== undefined)
         {
             lines.push(`        host: ${fn.host},`);

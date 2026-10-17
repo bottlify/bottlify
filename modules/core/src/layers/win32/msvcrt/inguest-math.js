@@ -73,6 +73,18 @@ const scaled = (/** @type {number} */ x, /** @type {number} */ n)=>
 /** e^x for |x| below EXP_RANGE. */
 const expOf = (/** @type {number} */ x)=>scaled(x, X87.rint(x * X87.L2E));
 
+/** Below it in magnitude 2^t is a normal double. */
+const POW_RANGE = 1022;
+
+/** From it on in magnitude every double is a whole even number. */
+const WHOLE = 2 ** 53;
+
+/** 2^t, n the nearest integer to t: `f2xm1` of the rest, one added, and n applied by `fscale`. */
+const twoTo = (/** @type {number} */ t, /** @type {number} */ n)=>X87.scale(X87.f2xm1(t - n) + 1, n);
+
+/** 2^t for |t| below POW_RANGE. */
+const pow2Of = (/** @type {number} */ t)=>twoTo(t, X87.rint(t));
+
 /** e^a - 1 for a in [0, EXP_RANGE): `f2xm1` where it reaches, e^a less one above it. */
 const expm1Of = (/** @type {number} */ a)=>(a < EXPM1_RANGE ? X87.f2xm1(a * X87.L2E)
     : expOf(a) - 1);
@@ -405,8 +417,9 @@ export function _CIlog10({ host }, x){
 /**
  * double pow(double x, double y) -- the powers exact in any precision: x
  * squared, the square root of a positive, x itself, its reciprocal, and 1
- * for a y of zero; the rest, and an overflow (ERANGE), a negative to a
- * fraction (EDOM) and a NaN, the handler's.
+ * for a y of zero; any other finite power of a finite base but zero by the
+ * x87's logarithm and exponent; a result past the normal doubles (ERANGE),
+ * a negative to a fraction (EDOM), zero, an infinity and a NaN the handler's.
  *
  * @guestCode cdecl
  * @param {Guest} guest @param {f64} x @param {f64} y
@@ -446,6 +459,38 @@ export function pow({ host }, x, y){
     if (y === 0 && !Number.isNaN(x))
     {
         return 1;
+    }
+    // Any other finite power of a finite base but zero, as the runtime takes
+    // it: 2 to y log2|x|, by `fyl2x`, `f2xm1` and `fscale`; a negative base
+    // to a whole power, the sign an odd power gives. A result that leaves the
+    // normal doubles, a negative base to a fraction (EDOM), zero, an infinity
+    // and a NaN are the handler's.
+    if (!(Math.abs(y) <= MAX))
+    {
+        return host();
+    }
+    if (x > 0 && x <= MAX)
+    {
+        const t = X87.yl2x(y, x);
+        if (Math.abs(t) < POW_RANGE)
+        {
+            return pow2Of(t);
+        }
+        return host();
+    }
+    if (x < 0 && x >= -MAX && (Math.abs(y) >= WHOLE || Math.floor(y) === y))
+    {
+        const t = X87.yl2x(y, -x);
+        if (Math.abs(t) < POW_RANGE)
+        {
+            const r = pow2Of(t);
+            if (Math.abs(y) < WHOLE && y % 2 !== 0)
+            {
+                return -r;
+            }
+            return r;
+        }
+        return host();
     }
     return host();
 }
@@ -491,6 +536,38 @@ export function _CIpow({ host }, x, y){
     if (y === 0 && !Number.isNaN(x))
     {
         return 1;
+    }
+    // Any other finite power of a finite base but zero, as the runtime takes
+    // it: 2 to y log2|x|, by `fyl2x`, `f2xm1` and `fscale`; a negative base
+    // to a whole power, the sign an odd power gives. A result that leaves the
+    // normal doubles, a negative base to a fraction (EDOM), zero, an infinity
+    // and a NaN are the handler's.
+    if (!(Math.abs(y) <= MAX))
+    {
+        return host();
+    }
+    if (x > 0 && x <= MAX)
+    {
+        const t = X87.yl2x(y, x);
+        if (Math.abs(t) < POW_RANGE)
+        {
+            return pow2Of(t);
+        }
+        return host();
+    }
+    if (x < 0 && x >= -MAX && (Math.abs(y) >= WHOLE || Math.floor(y) === y))
+    {
+        const t = X87.yl2x(y, -x);
+        if (Math.abs(t) < POW_RANGE)
+        {
+            const r = pow2Of(t);
+            if (Math.abs(y) < WHOLE && y % 2 !== 0)
+            {
+                return -r;
+            }
+            return r;
+        }
+        return host();
     }
     return host();
 }

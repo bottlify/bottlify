@@ -92,10 +92,11 @@ const encoder = new TextEncoder();
  *   the guest address `target`, filled in here, where the code's own address
  *   is known -- a direct jump into a host stub, as a trampoline makes.
  * @property {{ at: number, to: string, offset?: number }[]} [pointers]
- *   In `data`: the four bytes at `at` are the address of the export named
- *   `to`, `offset` bytes into it, filled in here, where every export has its
- *   place -- a vtable's slots, the runtime type information a vtable and a
- *   type point into, a table's pointers to the blocks it holds.
+ *   In `data` or `code`: the four bytes at `at` are the address of the export
+ *   named `to`, `offset` bytes into it, filled in here, where every export has
+ *   its place -- a vtable's slots, the runtime type information a vtable and a
+ *   type point into, a table's pointers to the blocks it holds, and the
+ *   variable a function of the library keeps its state in.
  * @property {number} [entry]
  *   For `data`: the export's address is this many bytes into it. A vtable is
  *   exported at its first slot, with the word before it pointing at its
@@ -219,9 +220,8 @@ export function synthesiseModule({ name, base, exports, entryPoint }){
         const slot = trampolinesRva + index * TRAMPOLINE_STRIDE;
         bytes.fill(INT3, slot, slot + TRAMPOLINE_STRIDE);
         const rva = dataRvas.get(index) ?? codeRvas.get(index) ?? slot;
-        if (entry.data)
-        {
-            bytes.set(entry.data, rva);
+        /** The addresses of other exports the entry's bytes hold. */
+        const point = ()=>{
             for (const { at, to, offset = 0 } of entry.pointers ?? [])
             {
                 const target = indexOf.get(to);
@@ -231,6 +231,11 @@ export function synthesiseModule({ name, base, exports, entryPoint }){
                 }
                 view.setUint32(rva + at, base + exportRva(target) + offset, true);
             }
+        };
+        if (entry.data)
+        {
+            bytes.set(entry.data, rva);
+            point();
         }
         else if (entry.code)
         {
@@ -239,6 +244,7 @@ export function synthesiseModule({ name, base, exports, entryPoint }){
             {
                 view.setUint32(rva + at, (target - (base + rva + at + 4)) >>> 0, true);
             }
+            point();
         }
         else
         {

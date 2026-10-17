@@ -467,6 +467,8 @@ function guest(version, steps, lent = false){
         {
             return { trap: eip - 1 };
         }
+        // A stdcall pops what it was given: the object and every argument.
+        assert.equal(host.readReg32('esp') >>> 0, STACK, 'the routine popped its arguments');
         return { hr: host.readReg32('eax') | 0 };
     };
 

@@ -700,6 +700,15 @@ async function poll(cdp, sessionId, expression, timeoutMs){
 const RESULT_CHUNK = 1 << 19;
 
 /**
+ * How long past the run the page has to answer, at most: the wait counts from
+ * when this asks, before the page has loaded the bundle and begun -- a large
+ * one took over a minute -- and its result is made once the run ends, the last
+ * frame read back after every frame queued before it. A result is read as
+ * soon as there is one, so this bounds only a page that never answers.
+ */
+const RESULT_GRACE_MS = 300000;
+
+/**
  * The page's result, once it has one: its length first, then its text a piece
  * at a time, a piece never ending between the two halves of a character.
  *
@@ -2017,7 +2026,7 @@ export async function game(options){
         let result;
         try
         {
-            result = await readResult(cdp, sessionId, options.waitMs);
+            result = await readResult(cdp, sessionId, options.waitMs + RESULT_GRACE_MS);
             result.answeredAfterMs = Date.now() - startedAt;
         }
         catch (e){

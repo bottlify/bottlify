@@ -57,9 +57,10 @@ import { D3DTSS9, D3DVERTEXTEXTURESAMPLER0 } from '../d3d9/samplerstates.js';
 import { D3DDECLUSAGE, MAX_STREAMS } from '../d3d9/declaration.js';
 import { OPCODE, REGISTER, SHADER_KIND } from '../d3d9/shader.js';
 import { decodeS3tc } from '../webgpu/internal/s3tc.js';
+import { convertTexels } from '../d3d10/blocks.js';
 import { fromHalf, storedToHalves } from '../d3d9/half.js';
 import { passedSamples, reachableArea } from '../webgpu/internal/occlusion.js';
-import { changedSpans, createCompared } from '../webgpu/internal/changed.js';
+import { changedSpans, createCompared, writtenSpans } from '../webgpu/internal/changed.js';
 import {
     CLIP_LOCATION, clipStateOf, fixedFragmentStage, generates, generationOf, readsNormal, tailOf,
     vertexTailOf,
@@ -882,13 +883,18 @@ const DECODE_ROOM_LIMIT = 1024 * 1024 * 4;
  * the same block-rounded count `decodeS3tc` requires.
  *
  * @param {Uint8Array} bytes
- * @param {import('../webgpu/internal/s3tc.js').S3tcKind} kind
+ * @param {number} format  D3DFMT, a DXTn or an ATI one
  * @param {number} width @param {number} height
  * @param {Uint8Array} [into]  bytes to decode into, when they are enough
  * @returns {Uint8Array}
  */
-const decodeCompressed = (bytes, kind, width, height, into)=>{
-    const decoded = /** @type {Uint8Array} */ (decodeS3tc(bytes, kind, width, height, into));
+const decodeCompressed = (bytes, format, width, height, into)=>{
+    if (format === D3DFMT.ATI1 || format === D3DFMT.ATI2)
+    {
+        return decodeAti(bytes, format, width, height);
+    }
+    const decoded = /** @type {Uint8Array} */ (decodeS3tc(bytes, S3TC_OF[format], width, height,
+        into));
     for (let at = 0; at < decoded.length; at += 4)
     {
         const red = decoded[at];
@@ -896,6 +902,39 @@ const decodeCompressed = (bytes, kind, width, height, into)=>{
         decoded[at + 2] = red;
     }
     return decoded;
+};
+
+/**
+ * An ATI1 or ATI2 level in `bgra8unorm` texels: its BC4 blocks decoded, one
+ * channel into all four, or two -- x the first block, y the second -- as red y
+ * and green x, blue and alpha one, which is how a Direct3D 9 driver samples
+ * them (wined3d's fixups for ATI1N and ATI2N). Decoded rather than kept: a
+ * WebGPU BC5 texture samples x as red, and a view cannot exchange them.
+ *
+ * @param {Uint8Array} bytes @param {number} format @param {number} width @param {number} height
+ * @returns {Uint8Array}
+ */
+const decodeAti = (bytes, format, width, height)=>{
+    const two = format === D3DFMT.ATI2;
+    const channels = convertTexels(two ? 'bc5u' : 'bc4u', bytes, width, height)
+        ?? new Uint8Array(width * height * (two ? 2 : 1));
+    const out = new Uint8Array(width * height * 4);
+    for (let texel = 0; texel < width * height; texel++)
+    {
+        const at = texel * 4;
+        if (two)
+        {
+            out[at] = 255;
+            out[at + 1] = channels[texel * 2];
+            out[at + 2] = channels[texel * 2 + 1];
+            out[at + 3] = 255;
+        }
+        else
+        {
+            out.fill(channels[texel], at, at + 4);
+        }
+    }
+    return out;
 };
 
 /**
@@ -2847,6 +2886,10 @@ const CLEAR_STRIDE = 20;
  * @property {any} backend
  * @property {(address: number, length: number)=>Uint8Array} readMemory
  * @property {(address: number, length: number)=>Uint8Array} [windowMemory]
+ * @property {(address: number, length: number) => ({ take: (address: number, length: number)
+ *     => number[] } | null)} [watchWrites]
+ *     Which pages of a range were written since a look: what a dynamic buffer
+ *     uploads, compared against nothing. Absent where nothing can say.
  *     The same bytes without the copy, for a reader that is done with them
  *     before the guest runs again. Absent, a copy is read.
  * @property {((descriptor: any)=>any) | null} [createSampler]
@@ -2865,6 +2908,9 @@ const CLEAR_STRIDE = 20;
  * @property {{ dumpFrames: number, bufferLocks?: string, skipTexture?: string,
  *     skipShader?: string, occlusion?: string, stageLimit?: number, textureStats?: string,
  *     maxDraws?: number, written?: (lines: string[], frame: number) => void,
+ *     snapshot?: string,
+ *     snapped?: (id: string, shot: { width: number, height: number, data: Uint8Array,
+ *         format: string }) => void,
  *     replayLast?: (cut?: number) => boolean,
  *     shownDraws?: () => { lines: string[], sceneDraws: number },
  *     pick?: (x?: number, y?: number, tolerance?: number, depth?: number)
@@ -2930,6 +2976,45 @@ const D3DUSAGE_DYNAMIC = 0x200;
 export function createRenderer(options){
     const { backend, readMemory } = options;
     const windowMemory = options.windowMemory ?? readMemory;
+    /**
+     * Each buffer's write watch and the pages it said were written that are
+     * not uploaded whole yet (`writtenSpans`): what a draw or an unlock
+     * uploads, where the memory read can say what was written, instead of a
+     * comparison of every byte against what the buffer holds. Every page is
+     * written at the first look, and for a copy on the GPU made anew, since
+     * what it holds is not known to match.
+     *
+     * @type {WeakMap<object, { base: number, gpu: any,
+     *     watch: { take: (address: number, length: number) => number[] },
+     *     dirty: Set<number> }>}
+     */
+    const writtenPages = new WeakMap();
+    /** @param {any} buffer @param {any} gpu  the copy the bytes go into */
+    const writtenOf = (buffer, gpu)=>{
+        if (!options.watchWrites || typeof buffer?.base !== 'number' || !(buffer.length > 0))
+        {
+            return null;
+        }
+        const known = writtenPages.get(buffer);
+        if (known && known.base === buffer.base && known.gpu === gpu)
+        {
+            return known;
+        }
+        const watch = options.watchWrites(buffer.base, buffer.length);
+        if (!watch)
+        {
+            return null;
+        }
+        const dirty = new Set();
+        const last = (buffer.base + buffer.length - 1) >>> 12;
+        for (let page = buffer.base >>> 12; page <= last; page++)
+        {
+            dirty.add(page);
+        }
+        const tracked = { base: buffer.base, gpu, watch, dirty };
+        writtenPages.set(buffer, tracked);
+        return tracked;
+    };
     const createSampler = options.createSampler ?? null;
     const dumpDraws = options.dumpDraws === true;
     const nanProbe = options.nanProbe === true;
@@ -4688,6 +4773,22 @@ export function createRenderer(options){
             // written once, before the frame's draws are submitted: a write
             // to the queue at each draw was a trip to the GPU a model, and
             // ordered nothing the one at the end does not.
+            const tracked = writtenOf(source, gpu);
+            if (tracked)
+            {
+                const spans = writtenSpans(tracked, source.base, source.length, from, to);
+                if (spans.length > 0)
+                {
+                    const stale = counters.shapes.staleDraws;
+                    stale[source.length] = (stale[source.length] ?? 0) + 1;
+                }
+                for (let index = 0; index < spans.length; index += 2)
+                {
+                    gpu.rewrite(spans[index], windowMemory(source.base + spans[index],
+                        spans[index + 1] - spans[index]));
+                }
+                return;
+            }
             // In a run of the command ring a range is compared once, however
             // many draws read it: the program does not run in between.
             const open = pausing ? compared.take(source, from, to) : [from, to];
@@ -4865,6 +4966,54 @@ export function createRenderer(options){
     };
 
     /**
+     * The textures a running program's `app.debug.snapshot` names -- `t4414,t754`
+     * as a frame dump names them -- read off the GPU at the end of the next
+     * frame played, a new one or the last one again (`freeze`), all in that one
+     * frame, each top level as the GPU holds it; asked once, then forgotten. A
+     * name no texture has is answered at once, empty.
+     *
+     * @param {{ snapshot?: string, snapped?: (id: string, shot: any) => void }} live
+     * @returns {{ id: string, gpu: any }[] | null}
+     */
+    const snapshotAsked = live=>{
+        const ids = (live.snapshot ?? '').split(',').filter(Boolean);
+        live.snapshot = '';
+        /** @type {{ id: string, gpu: any }[]} */
+        const found = [];
+        for (const id of ids)
+        {
+            const entry = [...roster].find(each=>each.id === id && each.gpu);
+            if (entry)
+            {
+                found.push({ id, gpu: entry.gpu });
+            }
+            else
+            {
+                live.snapped?.(id,
+                    { width: 0, height: 0, format: 'missing', data: new Uint8Array(0) });
+            }
+        }
+        return found.length > 0 ? found : null;
+    };
+    /**
+     * What a played frame's snapshots read handed to the page.
+     *
+     * @param {{ id: string, gpu: any }[] | null} asked @param {any} shots
+     */
+    const handSnapshots = (asked, shots)=>{
+        if (!asked || !Array.isArray(shots))
+        {
+            return;
+        }
+        asked.forEach((one, index)=>{
+            if (shots[index])
+            {
+                liveDump?.snapped?.(one.id, { ...shots[index], format: one.gpu.format });
+            }
+        });
+    };
+
+    /**
      * The one backend texture behind a d3d8 surface, made on first use.
      *
      * A texture's level is a view of the texture's own backend texture: a
@@ -4925,7 +5074,7 @@ export function createRenderer(options){
             const desc = describe(surface);
             const bytes = readMemory(surface.base,
                 surfaceBytes(desc.Format, desc.Width, desc.Height));
-            const keepsBlocks = isCompressed(desc.Format) && compressedTextures
+            const keepsBlocks = COMPRESSED_FORMAT[desc.Format] !== undefined && compressedTextures
                 && blockAligned(desc.Width, desc.Height);
             uploadTexels(made, {
                 format: made.format,
@@ -4935,7 +5084,7 @@ export function createRenderer(options){
                 texels: keepsBlocks
                     ? bytes
                     : isCompressed(desc.Format)
-                        ? decodeCompressed(bytes, S3TC_OF[desc.Format], desc.Width, desc.Height)
+                        ? decodeCompressed(bytes, desc.Format, desc.Width, desc.Height)
                         : expandTexels(desc.Format, bytes, desc.Width * desc.Height, float32),
             }, true);
         }
@@ -5354,8 +5503,8 @@ export function createRenderer(options){
             // texture's path: WebGPU already refused (and gpuFormatOf already
             // fell back) on the base alone, so every level -- mips round down
             // further still -- follows the same choice.
-            const keepsBlocks = isCompressed(record.format) && compressedTextures
-                && blockAligned(record.width, record.height);
+            const keepsBlocks = COMPRESSED_FORMAT[record.format] !== undefined
+                && compressedTextures && blockAligned(record.width, record.height);
             for (const subresource of [...record.dirtyLevels].sort((left, right)=>left - right))
             {
                 const level = subresource % record.levels;
@@ -5395,7 +5544,7 @@ export function createRenderer(options){
                 const texels = keepsBlocks
                     ? bytes
                     : decodes
-                        ? decodeCompressed(bytes, S3TC_OF[record.format], width, height, room)
+                        ? decodeCompressed(bytes, record.format, width, height, room)
                         : expandTexels(record.format, bytes, width * height, float32);
                 uploadTexels(record.gpu,
                     { format: gpuFormat, mipLevel: level, width, height, texels, layer: face },
@@ -5470,7 +5619,7 @@ export function createRenderer(options){
             arena.reset();
             recording = {
                 commands: [], pipelines: [], pass: null, viewport: null, scissor: '', arena,
-                drawsTaken: 0, cut: /** @type {number | undefined} */ (undefined),
+                drawsTaken: 0, cut: /** @type {number | undefined} */ (undefined), parked: false,
             };
         }
         return recording;
@@ -7080,7 +7229,10 @@ export function createRenderer(options){
             return false;
         }
         replayingLast = true;
-        chain = chain.then(()=>replay(shown.recorded, shown.surface, null, { cut }))
+        const shotAsked = liveDump?.snapshot ? snapshotAsked(liveDump) : null;
+        chain = chain.then(()=>replay(shown.recorded, shown.surface,
+            shotAsked ? shotAsked.map(one=>one.gpu) : null, { cut }))
+            .then(shots=>handSnapshots(shotAsked, shots))
             .catch(failure).finally(()=>{
                 replayingLast = false;
             });
@@ -8863,10 +9015,12 @@ export function createRenderer(options){
          * The bytes the program wrote are read from guest memory now, and only
          * the locked range: after a DISCARD the rest of the buffer is
          * undefined by contract, and resending it would be the §14.1 traffic.
+         * Bytes handed over -- a record's copy -- are the buffer's from its
+         * start instead.
          *
-         * @param {any} buffer
+         * @param {any} buffer @param {Uint8Array} [bytes]
          */
-        unlockBuffer(buffer){
+        unlockBuffer(buffer, bytes){
             const unlocks = counters.shapes.unlocks;
             unlocks[buffer.length] = (unlocks[buffer.length] ?? 0) + 1;
             const entry = buffers.get(buffer);
@@ -8879,10 +9033,34 @@ export function createRenderer(options){
             // enough, and the copy a read makes was a measured share of a
             // frame in a match, where a program refills its buffers every
             // draw.
-            const now = windowMemory(buffer.base + held.offset, held.length);
+            const tracked = bytes ? null : writtenOf(buffer, entry.gpu);
+            if (tracked && held.length >= DIFFED_UNLOCK)
+            {
+                // What was written of the lock's range, as it is: nothing else
+                // of it can differ from what the buffer holds.
+                const spans = writtenSpans(tracked, buffer.base, buffer.length, held.offset,
+                    held.offset + held.length);
+                for (let index = 0; index < spans.length; index += 2)
+                {
+                    held.data.set(windowMemory(buffer.base + spans[index],
+                        spans[index + 1] - spans[index]), spans[index] - held.offset);
+                }
+                entry.gpu.unlock(held, spans.length > 0 ? spans[0] - held.offset : 0,
+                    spans.length > 0 ? spans[spans.length - 1] - held.offset : 0);
+                entry.held = null;
+                return;
+            }
+            const now = bytes ? bytes.subarray(held.offset, held.offset + held.length)
+                : windowMemory(buffer.base + held.offset, held.length);
             if (held.length < DIFFED_UNLOCK)
             {
                 held.data.set(now);
+                if (tracked)
+                {
+                    // Taken, so a draw after it does not upload them again.
+                    writtenSpans(tracked, buffer.base, buffer.length, held.offset,
+                        held.offset + held.length);
+                }
                 entry.gpu.unlock(held);
                 entry.held = null;
                 return;
@@ -9860,11 +10038,18 @@ export function createRenderer(options){
             }
             frameStats = blankFrameStats();
             const replayed = ++counters.frames;
-            chain = chain.then(()=>replay(recorded, surface)).then(()=>{
+            const shotAsked = liveDump?.snapshot ? snapshotAsked(liveDump) : null;
+            chain = chain.then(()=>replay(recorded, surface,
+                shotAsked ? shotAsked.map(one=>one.gpu) : null)).then(shots=>{
                 submittedFrames = replayed;
+                handSnapshots(shotAsked, shots);
             }).catch(failure);
             if (liveDump)
             {
+                if (lastShown?.recorded.parked)
+                {
+                    arenas.push(lastShown.recorded.arena);
+                }
                 lastShown = { recorded, surface };
                 liveDump.replayLast = replayLast;
                 liveDump.shownDraws = shownDraws;
@@ -10118,7 +10303,12 @@ export function createRenderer(options){
             }
             if (snapshot)
             {
-                shot = frame.snapshot(snapshot);
+                shot = Array.isArray(snapshot)
+                    ? (()=>{
+                        const readers = snapshot.map(one=>frame.snapshot(one));
+                        return ()=>Promise.all(readers.map(reader=>reader()));
+                    })()
+                    : frame.snapshot(snapshot);
             }
             // After the draws, so the copies see the buffers as the draws did:
             // a flush at the end of the frame lands before the whole command
@@ -10159,7 +10349,16 @@ export function createRenderer(options){
         {
             if (recorded.arena && again === null)
             {
-                arenas.push(recorded.arena);
+                // The frame a paused run plays again keeps its arena -- its
+                // draws and their blocks -- until another frame is shown.
+                if (recorded === lastShown?.recorded)
+                {
+                    recorded.parked = true;
+                }
+                else
+                {
+                    arenas.push(recorded.arena);
+                }
             }
             // Ended whatever happened. One object owns the command encoder and
             // one call releases it, so a throw anywhere above -- a command
@@ -10316,6 +10515,7 @@ export function createRenderer(options){
      * @param {number} [cut]  draws played before the rest are passed over; -1 all
      */
     function replayInto(frame, pipelines, recorded, surface, cut = -1){
+        const droppedShaders = skipShaders();
         /** Draws reached so far, against `cut`. */
         let drawsReached = 0;
         /**
@@ -10482,6 +10682,14 @@ export function createRenderer(options){
                 continue;
             }
             const pipeline = outcome.value;
+            if (command.program && droppedShaders.size > 0
+                && (droppedShaders.has(`vs${command.state?.vertexShader}`)
+                    || droppedShaders.has(`ps${command.state?.pixelShader}`)))
+            {
+                // A frame played again on a paused program (`freeze`) drops what
+                // `skipShader` names too: its draws were recorded before.
+                continue;
+            }
             if (command.program)
             {
                 replayProgram(pass, pipeline, command);

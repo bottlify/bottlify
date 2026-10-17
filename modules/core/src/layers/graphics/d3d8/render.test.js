@@ -2323,6 +2323,45 @@ test('recorded: a block-aligned DXT5 surface decodes with compressedTextures off
         'the level travelled through staging, undecoded');
 });
 
+test('an ATI2 texture decodes to (y, x, 1, 1) and an ATI1 one to its channel in all four,'
+    + ' whatever block compression the device keeps', async()=>{
+    // A BC4 block of one value: both endpoints it, every index 0.
+    const bc4 = (/** @type {number} */ value)=>Uint8Array.of(value, value, 0, 0, 0, 0, 0, 0);
+    for (const compressedTextures of [false, true])
+    {
+        for (const [format, block, texel] of /** @type {[number, Uint8Array, number[]][]} */ ([
+            [D3DFMT.ATI2, Uint8Array.from([...bc4(200), ...bc4(50)]), [255, 200, 50, 255]],
+            [D3DFMT.ATI1, bc4(77), [77, 77, 77, 77]],
+        ]))
+        {
+            const h = harness({ compressedTextures });
+            /** @type {{ texture?: any }} */
+            const out = {};
+            assert.equal(h.device.CreateTexture(4, 4, 1, 0, format, D3DPOOL.MANAGED, out),
+                D3D_OK);
+            /** @type {{ pBits?: number, Pitch?: number }} */
+            const locked = {};
+            assert.equal(out.texture.LockRect(0, locked, null, 0), D3D_OK);
+            assert.equal(locked.Pitch, block.length, 'a row of blocks');
+            h.write(/** @type {number} */ (locked.pBits), block);
+            assert.equal(out.texture.UnlockRect(0), D3D_OK);
+            assert.equal(h.device.SetTexture(0, out.texture), D3D_OK);
+            selectTexture(h.device);
+            assert.equal(h.device.BeginScene(), D3D_OK);
+            assert.equal(h.device.SetVertexShader(FVF_TEXTURED_QUAD), D3D_OK);
+            assert.equal(h.device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 2,
+                quad([0, 0, 2, 2], argb(255, 255, 255), true), 28), D3D_OK);
+            assert.equal(h.device.EndScene(), D3D_OK);
+            await h.present();
+            const made = h.gpu.of('createTexture').find(c=>c.descriptor.label === 'texture');
+            assert.equal(made.descriptor.format, 'bgra8unorm', 'decoded, never kept as blocks');
+            const upload = h.gpu.of('writeTexture').find(w=>w.destination.texture === made.texture);
+            assert.deepEqual([...upload.bytes.subarray(0, 64)],
+                Array.from({ length: 16 }, ()=>texel).flat(), `format ${format.toString(16)}`);
+        }
+    }
+});
+
 /** One DXT1 block of a single 5-6-5 colour: both endpoints it, every index 0. @param {number} rgb565 */
 const solidDxt1 = rgb565=>{
     const block = new Uint8Array(8);

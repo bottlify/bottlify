@@ -1098,6 +1098,41 @@ test('an occlusion count is asked of the renderer without waiting, and taken whe
         assert.equal(made.query.GetData(count, 4, 0), S_FALSE, 'a new measurement is asked anew');
     });
 
+test('a caller is told an occlusion count as it comes, its own and those beside it, so the guest'
+    + ' may answer the polls till then', async t=>{
+    const d3d = acrossAPort({ writeMemory: ()=>{} });
+    t.after(()=>d3d.close());
+    /** @type {{ device?: any }} */
+    const out = {};
+    assert.equal(d3d.CreateDevice({ swapEffect: D3DSWAPEFFECT.DISCARD, backBufferCount: 1,
+        backBufferWidth: 8, backBufferHeight: 8, backBufferFormat: D3DFMT.X8R8G8B8 }, out),
+    D3D_OK);
+    const D3DISSUE_END = 1;
+    const D3DISSUE_BEGIN = 2;
+    const S_FALSE = 1;
+    /** @type {(number | null)[][]} */
+    const told = [[], []];
+    const queries = [0, 1].map(index=>{
+        /** @type {{ query?: any }} */
+        const made = {};
+        assert.equal(out.device.CreateQuery(D3DQUERYTYPE.OCCLUSION, made), D3D_OK);
+        made.query.whenCounted = (/** @type {number | null} */ count)=>told[index].push(count);
+        assert.equal(made.query.Issue(D3DISSUE_BEGIN), D3D_OK);
+        assert.equal(made.query.Issue(D3DISSUE_END), D3D_OK);
+        return made.query;
+    });
+    /** @type {{ value?: number }} */
+    const count = {};
+    assert.equal(queries[0].countsLater, undefined, 'nothing asked yet');
+    assert.equal(queries[0].GetData(count, 4, 0), S_FALSE);
+    assert.equal(queries[0].countsLater, true, 'asked: its count will be told');
+    for (let tries = 0; tries < 50 && told[0].length === 0; tries++)
+    {
+        await new Promise(resolve=>setTimeout(resolve, 5));
+    }
+    assert.deepEqual(told, [[0], [0]], 'the asked one\'s and the one beside it, once each');
+});
+
 test('the counts the renderer holds come beside one query\'s answer, each for its own measurement',
     async t=>{
         // A program that waits on its queries one after another crossed to the

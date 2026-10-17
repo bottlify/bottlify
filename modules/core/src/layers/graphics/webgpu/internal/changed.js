@@ -153,6 +153,63 @@ export function changedSpans(now, was, gap = 64){
 }
 
 /**
+ * The parts of a buffer's `[from, to)` on pages its write watch says were
+ * written since they were last taken: what is sent or uploaded of them as it
+ * is, with no comparison, since a write the watch saw is all a comparison
+ * could have found. A page the range covers only in part is taken from the
+ * watch but kept in `dirty` until a later range covers all of it the buffer
+ * holds.
+ *
+ * @param {{ watch: { take: (address: number, length: number) => number[] },
+ *     dirty: Set<number> }} tracked
+ * @param {number} base @param {number} length  the buffer's
+ * @param {number} from @param {number} to  within it
+ * @returns {number[]}  start and end (exclusive) of each span, flat, in the buffer
+ */
+export function writtenSpans(tracked, base, length, from, to){
+    if (to <= from)
+    {
+        return [];
+    }
+    for (const page of tracked.watch.take(base + from, to - from))
+    {
+        tracked.dirty.add(page);
+    }
+    /** @type {number[]} */
+    const spans = [];
+    if (tracked.dirty.size === 0)
+    {
+        return spans;
+    }
+    const last = (base + to - 1) >>> 12;
+    for (let page = (base + from) >>> 12; page <= last; page++)
+    {
+        if (!tracked.dirty.has(page))
+        {
+            continue;
+        }
+        let end = page;
+        while (end < last && tracked.dirty.has(end + 1))
+        {
+            end++;
+        }
+        const lo = Math.max(from, page * 4096 - base);
+        const hi = Math.min(to, (end + 1) * 4096 - base);
+        spans.push(lo, hi);
+        for (let done = page; done <= end; done++)
+        {
+            if (Math.max(0, done * 4096 - base) >= lo
+                && Math.min(length, (done + 1) * 4096 - base) <= hi)
+            {
+                tracked.dirty.delete(done);
+            }
+        }
+        page = end;
+    }
+    return spans;
+}
+
+/**
  * The ranges of each buffer compared since a pause began, so a range is
  * compared once in it however many draws read it: while the program does not
  * run -- a run of the command ring played, one call made -- its memory cannot

@@ -187,6 +187,22 @@ test('strchr and strrchr: the first and last of a byte, the terminator, and none
     }
 });
 
+test('strspn, strcspn and strpbrk: spans of a set and of its complement, empty sets, high bytes',
+    ()=>{
+        const next = random(19);
+        const text = letters(next);
+        for (let i = 0; i < 200; i++)
+        {
+            const bytes = [...text(next() % 24), 0];
+            const set = [...text(next() % 5), 0];
+            const memory = /** @type {[number, number[]][]} */ ([[DATA, bytes],
+                [DATA + 0x100, set]]);
+            same('strspn', { stack: [DATA, DATA + 0x100], memory });
+            same('strcspn', { stack: [DATA, DATA + 0x100], memory });
+            same('strpbrk', { stack: [DATA, DATA + 0x100], memory });
+        }
+    });
+
 test('strstr: found at the start, inside, at the end, overlapping itself, empty, and not', ()=>{
     const next = random(18);
     const text = letters(next);

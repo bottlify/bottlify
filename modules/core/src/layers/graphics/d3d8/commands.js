@@ -23,7 +23,7 @@
 
 import { IDIRECT3DDEVICE8_SLOTS } from '../seam/vtables.js';
 import { DRAW, SHADOW } from '../seam/shadow.js';
-import { D3DFVF_RESERVED0 } from './constants.js';
+import { D3DERR_INVALIDCALL, D3DFVF_RESERVED0, D3DUSAGE } from './constants.js';
 import { lightFromDwords } from '../seam/structs.js';
 import { vertexCountOf } from './render.js';
 
@@ -101,15 +101,23 @@ const first = (kind, length)=>{
  * @property {{ arg: number, cases: readonly [number, number][], otherwise: number }} [choose]
  *     or a size chosen by an argument's value: the bytes of the case it equals, or `otherwise`
  * @property {{ arg: number, ranges: readonly [number, number][] }[]} [within]
+ * @property {{ arg: number, equals: number, flagsOf: number, mask: number }} [refusedWhen]
  * @property {number} [span] @property {{ arg: number, word: number }} [below]
  * @property {{ arg: number, when: number, table?: number }} [validated]
+ * @property {{ arg: number, pairs: readonly [number, number][] }} [flagNeeds]
+ * @property {{ arg: number, mask: number, nullable?: boolean }
+ *     | readonly { arg: number, mask: number, nullable?: boolean }[]} [surfaceUsage]
+ * @property {{ buffer: number, start: number, count: number }} [vertexRange]
+ * @property {number} [token]
  * @property {number} [needs] @property {number} [refuses] @property {boolean} [fresh]
  *     what the routine checks before it answers for the call, so that the
  *     device takes every call it answered for (`commandChecks`)
+ * @property {{ type: number, fvf: number, count: number, most: number }} [fvfVertices]
  * @property {{ type: number, count: number, stride: number, most: number }} [vertices]
  *     or the vertices a draw's primitives span, `stride` bytes each (`commandCode`)
- * @property {boolean} [kept]  its copy is taken with `copy` alone, not through the scratch
+ * @property {boolean} [kept]  its copy is read in place (`view`, `copy`), not through the scratch
  * @property {boolean} [self]  the first argument is the object the method is of, not the device
+ * @property {'rect' | 'box'} [dirty]  a texture's dirty rectangle or box (`dirtyPrologue`)
  * @property {boolean} [stale]  it may change state the device's block mirrors
  * @property {'empty' | 'any'} [nullable]  its pointer may be null: with a count of zero
  *     alone, or whatever the count
@@ -193,6 +201,44 @@ export function commandSet(slots, table){
     };
 
     /**
+     * The tokens of the state blocks a run applies (`stale` commands that
+     * take one): what the device's block mirrors of them is brought up to date
+     * after the run.
+     *
+     * @param {Uint8Array} records
+     * @returns {number[]}
+     */
+    const tokensApplied = records=>{
+        const all = new Uint32Array(records.buffer, records.byteOffset, records.byteLength >>> 2);
+        /** @type {number[]} */
+        const tokens = [];
+        let at = 0;
+        while (at < all.length)
+        {
+            const entry = bySlot[all[at]];
+            const length = all[at + 1] >>> 2;
+            if (entry === undefined || length === 0)
+            {
+                break;
+            }
+            if (entry.stale && entry.token !== undefined)
+            {
+                tokens.push(all[at + ARGS + entry.token]);
+            }
+            at += length;
+        }
+        return tokens;
+    };
+    /**
+     * Whether a run applies a state block by its token: what it binds the run
+     * does not name, so a recording sends every texture's waiting bytes ahead
+     * of it.
+     *
+     * @param {Uint8Array} records
+     */
+    const appliesBlocks = records=>tokensApplied(records).length > 0;
+
+    /**
      * Makes each call in `records`, in order, on `device`. A record the
      * routines could not have written ends the run, and is reported as one.
      * Nothing is kept of `records`, which may be guest memory the program
@@ -270,7 +316,8 @@ export function commandSet(slots, table){
         return made;
     };
 
-    return { COMMANDS: table, commandSlot, commandObjects, runCommands };
+    return { COMMANDS: table, commandSlot, commandObjects, runCommands, appliesBlocks,
+        tokensApplied };
 }
 
 /**
@@ -307,8 +354,10 @@ const rectsOf = (copy, count)=>Array.from({ length: count }, (unused, i)=>({
  */
 const UP_BYTES = 16 * 1024;
 
-/** D3DCLEAR_TARGET, the same in both versions. */
+/** D3DCLEAR, the same in both versions. */
 const D3DCLEAR_TARGET = 1;
+const D3DCLEAR_ZBUFFER = 2;
+const D3DCLEAR_STENCIL = 4;
 
 /** D3DPT_POINTLIST to D3DPT_TRIANGLEFAN, a primitive type a draw takes. */
 const PRIMITIVE_TYPES = /** @type {[number, number][]} */ ([[1, 6]]);
@@ -353,19 +402,46 @@ export const SHARED_COMMANDS = {
         make: (d, c)=>d.DrawPrimitive(c.arg(0), c.arg(1), c.arg(2)) },
     BeginScene: { args: 0, refuses: DRAW.SCENE, make: d=>d.BeginScene() },
     EndScene: { args: 0, needs: DRAW.SCENE, make: d=>d.EndScene() },
-    // No rectangles is the whole target; Z comes as a float in a dword. Only
-    // the target is cleared here: a depth or stencil clear is refused for a
-    // depth surface without one, and a program that is told so clears again
-    // with less, so the answer must be the device's.
+    // No rectangles is the whole target; Z comes as a float in a dword. A
+    // depth clear needs a depth surface and a stencil clear one with a
+    // stencil (`DRAW.DEPTH`, `DRAW.STENCIL`): a program that is refused one
+    // clears again with less, so the answer must be the device's.
     Clear: { args: 6, pointer: 1, nullable: 'empty', count: { arg: 0, shift: 4, most: 64 },
-        within: [{ arg: 2, ranges: [[D3DCLEAR_TARGET, D3DCLEAR_TARGET]] }],
+        within: [{ arg: 2, ranges: [[D3DCLEAR_TARGET,
+            D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL]] }],
+        flagNeeds: { arg: 2, pairs: [[D3DCLEAR_ZBUFFER, DRAW.DEPTH],
+            [D3DCLEAR_STENCIL, DRAW.DEPTH | DRAW.STENCIL]] },
         make: (d, c)=>d.Clear(c.arg(0), c.arg(1) === 0 ? null : rectsOf(c.ints, c.arg(0)),
             c.arg(2), c.arg(3), floatOf(c.arg(4)), c.arg(5)) },
     DrawPrimitiveUP: { args: 4, pointer: 2, kept: true, draws: true,
         vertices: { type: 0, count: 1, stride: 3, most: UP_BYTES },
         needs: DRAW.SCENE | DRAW.DECLARED, fresh: true,
         make: (d, c)=>d.DrawPrimitiveUP(c.arg(0), c.arg(1),
-            c.copy(vertexCountOf(c.arg(0), c.arg(1)) * c.arg(3)), c.arg(3)) },
+            c.view(vertexCountOf(c.arg(0), c.arg(1)) * c.arg(3)), c.arg(3)) },
+};
+
+/**
+ * A texture's own calls the ring carries, numbered past the device's: the
+ * record names the texture first (`self`), and the rectangle or box it adds
+ * to what UpdateTexture carries, which the guest has checked against the
+ * texture's extent (`dirty`, `TEXTURE.WIDTH`). The same in both versions.
+ */
+export const TEXTURE_SLOTS = /** @type {[string, number][]} */ ([
+    ['Texture.AddDirtyRect', 1],
+    ['VolumeTexture.AddDirtyBox', 1],
+]);
+
+/** @type {Readonly<Record<string, CommandEntry>>} */
+export const TEXTURE_COMMANDS = {
+    'Texture.AddDirtyRect': { args: 2, self: true, objects: [0], pointer: 1, bytes: 16,
+        dirty: 'rect',
+        make: (d, c)=>c.object()?.AddDirtyRect({ left: c.words[0], top: c.words[1],
+            right: c.words[2], bottom: c.words[3] }) ?? D3DERR_INVALIDCALL },
+    'VolumeTexture.AddDirtyBox': { args: 2, self: true, objects: [0], pointer: 1, bytes: 24,
+        dirty: 'box',
+        make: (d, c)=>c.object()?.AddDirtyBox({ left: c.words[0], top: c.words[1],
+            right: c.words[2], bottom: c.words[3], front: c.words[4], back: c.words[5] })
+            ?? D3DERR_INVALIDCALL },
 };
 
 /**
@@ -373,13 +449,32 @@ export const SHARED_COMMANDS = {
  * vertex, its shaders are handles, its indexed draw has no base vertex, and
  * its shader constants are floats alone, up to what a 1.x shader has.
  */
-export const D3D8_COMMANDS = commandSet(IDIRECT3DDEVICE8_SLOTS, {
+export const D3D8_COMMANDS = commandSet([...IDIRECT3DDEVICE8_SLOTS, ...TEXTURE_SLOTS], {
     ...SHARED_COMMANDS,
+    ...TEXTURE_COMMANDS,
     SetTexture: { args: 2, objects: [1], within: [{ arg: 0, ranges: [[0, 7]] }],
         make: (d, c)=>d.SetTexture(c.arg(0), c.object()) },
     SetStreamSource: { args: 3, objects: [1],
         make: (d, c)=>d.SetStreamSource(c.arg(0), c.object(), c.arg(2)) },
     SetIndices: { args: 2, objects: [0], make: (d, c)=>d.SetIndices(c.object(), c.arg(1)) },
+    // A whole target onto another of its size, made on the GPU where the device
+    // draws elsewhere (`COPY_GUARD_8`), as Direct3D 9's StretchRect.
+    CopyRects: { args: 5, objects: [0, 3],
+        make: (d, c)=>d.CopyRects(c.object(), null, 0, c.object(), null) },
+    // A block the device holds, by its token: an apply leaves what the block
+    // mirrors to the host (`stale`), and what a draw checks too when the block
+    // holds it -- a vertex shader, a stream, the indices.
+    ApplyStateBlock: { args: 1, token: 0, stale: true,
+        make: (d, c)=>d.ApplyStateBlock(c.arg(0)) },
+    CaptureStateBlock: { args: 1, token: 0, make: (d, c)=>d.CaptureStateBlock(c.arg(0)) },
+    // Both targets: a surface made to be one, and a depth surface or none. The
+    // block's viewport becomes the target's whole and Clear's checks learn the
+    // depth surface (`renderTargetMirror`, `depthStencilMirror`); keeping the
+    // bound target, a null one, is the host's.
+    SetRenderTarget: { args: 2, objects: [0, 1],
+        surfaceUsage: [{ arg: 0, mask: D3DUSAGE.RENDERTARGET },
+            { arg: 1, mask: D3DUSAGE.DEPTHSTENCIL, nullable: true }],
+        make: (d, c)=>d.SetRenderTarget(c.object(), c.object()) },
     // A format is always taken; a shader's handle only while the shader lives.
     SetVertexShader: { args: 1, validated: { arg: 0, when: D3DFVF_RESERVED0 },
         make: (d, c)=>d.SetVertexShader(c.arg(0)) },

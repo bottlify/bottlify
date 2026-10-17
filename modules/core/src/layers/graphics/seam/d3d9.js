@@ -67,17 +67,20 @@ import { capabilityWords } from '../d3d9/caps.js';
 import { D3DCREATE, D3DDEVTYPE, PALETTE_BYTES } from '../d3d9/device.js';
 import { MAX_DECLARATION_LENGTH } from '../d3d9/declaration.js';
 import { END_TOKEN } from '../d3d9/shader.js';
-import { REFRESH_HZ, REFRESH_RATES, displayModes } from '../../win32/user32/display.js';
-import { createRaster, presentWait, rasterStatus } from './raster.js';
+import { REFRESH_HZ, displayModes, refreshRatesOf } from '../../win32/user32/display.js';
+import { createPresentQueue, createRaster, rasterStatus } from './raster.js';
 import { queryAs, readGuid } from './guid.js';
 import { D3D_PRIVATE_DATA, createPrivateData } from './privatedata.js';
 import {
     DRAWABLE_MIRRORS, RENDER_STATE_MIRROR, SAMPLER_STATE_MIRROR, TRANSFORM_MIRROR,
-    VIEWPORT_GUARD_9, VIEWPORT_MIRROR, commandCode, createShadow, getRenderStateCode,
+    DEPTH_STENCIL_MIRROR, RENDER_TARGET_MIRROR, VIEWPORT_GUARD_9, VIEWPORT_MIRROR, commandCode,
+    STRETCH_GUARD, compiledAt, createShadow, getRenderStateCode, getTargetCode,
     getSamplerStateCode, getSurfaceDescCode, getSurfaceLevelCode, getTextureStageStateCode,
     getTransformCode, getViewportCode, lockCode, settledAfter, stageStateMirror,
-    unlockCode, HOST_MIRRORS, appendCommand, guestWords,
+    unlockCode, HOST_MIRRORS, POLLS_BETWEEN, QUERY, appendCommand, guestWords,
+    createLevelLocks, lockLevelCode, unlockLevelCode,
 } from './shadow.js';
+import { COMPILED as IN_GUEST } from './inguest.x86.js';
 import { D3DTSS9 } from '../d3d9/samplerstates.js';
 import { COMMANDS, commandObjects, commandSlot } from '../d3d9/commands.js';
 import { loudRefusals } from './refusals.js';
@@ -107,6 +110,9 @@ export const COMMAND_MIRRORS = {
     SetStreamSource: [...DRAWABLE_MIRRORS.SetStreamSource9],
     SetIndices: [...DRAWABLE_MIRRORS.SetIndices],
     DrawPrimitiveUP: [...DRAWABLE_MIRRORS.DrawPrimitiveUP],
+    SetRenderTarget: [...RENDER_TARGET_MIRROR],
+    SetDepthStencilSurface: [...DEPTH_STENCIL_MIRROR],
+    StretchRect: [...STRETCH_GUARD],
 };
 
 /**
@@ -126,10 +132,16 @@ export const HOST_COMMAND_MIRRORS = {
     SetVertexDeclaration: HOST_MIRRORS.declaration,
     SetStreamSource: HOST_MIRRORS.streamSource9,
     SetIndices: HOST_MIRRORS.indices,
+    SetRenderTarget: HOST_MIRRORS.renderTarget,
+    SetDepthStencilSurface: HOST_MIRRORS.depthStencil,
+    StretchRect: HOST_MIRRORS.stretch,
 };
 
 const D3D_OK = 0;
+const S_FALSE = 1;
 const D3DERR_INVALIDCALL = 0x8876086c | 0;
+/** D3DQUERYTYPE_OCCLUSION. */
+const D3DQUERYTYPE_OCCLUSION = 9;
 const D3DERR_NOTAVAILABLE = 0x8876086a | 0;
 const D3DSCANLINEORDERING_PROGRESSIVE = 1;
 const D3DSCANLINEORDERING_INTERLACED = 2;
@@ -185,6 +197,7 @@ const MAX_SHADER_DWORDS = 1 << 16;
  *     (`guestsBut`).
  * @param {(bytes: number) => number} [deps.allocate]  Guest memory, for a device's
  *     block of the state its setters write without leaving the guest.
+ * @param {number} [deps.ringBytes]  A device's command ring's size (`shadow.js`).
  * @param {(bytes: number) => number} [deps.allocateCode]  Pages of their own for
  *     those setters' code.
  * @param {import('./shadow.js').ShadowPhases} [deps.phases]  Where a device's entry work is timed.
@@ -192,17 +205,17 @@ const MAX_SHADER_DWORDS = 1 << 16;
 export function createDirect3D9Seam(
     { publisher, memory, screen, divergence, cursor, resolution, identity,
         windowClientSize, gdi, now = ()=>performance.now(), waitUntil, refresh = ()=>REFRESH_HZ,
-        allocate, allocateCode,
+        allocate, allocateCode, ringBytes,
         traps = new Set(), phases },
 )
 {
     /** The getters a device answers in the guest, as against the calls its ring carries. */
     const GUEST_GETTERS = new Set(['GetRenderState', 'GetTransform', 'GetTextureStageState',
-        'GetViewport', 'GetSamplerState']);
+        'GetViewport', 'GetSamplerState', 'GetRenderTarget', 'GetDepthStencilSurface']);
     /**
      * The guest routines a table offers, less those `traps` keeps as traps: by
      * method name, or by the group a routine belongs to -- `getters`, `ring`,
-     * `locks`, `levels`.
+     * `locks`, `levels`, `queries`.
      *
      * @param {string | ((name: string) => string)} group
      * @param {Record<string, (builder: { trap: number }) => number>} guests
@@ -224,17 +237,19 @@ export function createDirect3D9Seam(
     const modeRefresh = ()=>{
         const asked = lastParameters && !lastParameters.windowed
             ? lastParameters.fullScreenRefreshRateInHz >>> 0 : 0;
-        return REFRESH_RATES.includes(asked) ? asked : refresh();
+        return refreshRatesOf(screen()).includes(asked) ? asked : refresh();
     };
     const raster = createRaster({
         now, refresh: modeRefresh, height: ()=>screen().height,
     });
+    const presents = createPresentQueue(raster);
     /**
-     * A Present's answer, once the blank its presentation interval names has
-     * come: Direct3D beat-syncs presentation to the retrace for every interval
-     * but IMMEDIATE, and a program that steps its world once a frame keeps
-     * the display's time only under that wait. An answer still to come -- the
-     * device holding the call while the GPU catches up -- already waited.
+     * A Present's answer, once its frame has room in the queue of frames
+     * waiting for their blanks (`createPresentQueue`): Direct3D beat-syncs
+     * presentation to the retrace for every interval but IMMEDIATE, and a
+     * program that steps its world once a frame keeps the display's time only
+     * under that queue. An answer still to come -- the device holding the call
+     * while the GPU catches up -- already waited.
      *
      * @param {number | Promise<number>} hr
      * @returns {any}
@@ -244,7 +259,7 @@ export function createDirect3D9Seam(
         {
             return hr;
         }
-        const wait = presentWait(raster, lastParameters?.presentationInterval ?? 0, modeRefresh());
+        const wait = presents.present(now(), lastParameters?.presentationInterval ?? 0);
         return wait > 0 ? waitUntil(now() + wait, hr) : hr;
     };
 
@@ -307,7 +322,8 @@ export function createDirect3D9Seam(
             // A record in the device's ring may name it: the ring is played
             // before its count is touched on the host, which the last
             // reference's Release always is.
-            object.settleGuestRefs ??= ()=>shadowOf(owner)?.sync();
+            object.settleGuestRefs ??= (/** @type {Set<number>} */ pointers)=>
+                shadowOf(owner)?.syncFor(object, pointers);
             if (interfaces === surfaceInterfaces)
             {
                 // Its description in a block of its own, for the guest's
@@ -592,6 +608,54 @@ export function createDirect3D9Seam(
         return null;
     };
 
+    /**
+     * The levels the guest locks (`createLevelLocks`): a level in system
+     * memory is never lent, since the recording makes an update's copy out of
+     * it itself (`remote/replay.js`).
+     */
+    const levelLocks = createLevelLocks({ shadowOf, twinCopies: false });
+    /**
+     * A lock or unlock of a level the host made, told to the level's block
+     * when it was answered D3D_OK.
+     *
+     * @param {any} object  a texture or a surface
+     * @param {number | null} index  the texture's level
+     * @param {boolean} locked @param {any} hr
+     */
+    const noteLevel = (object, index, locked, hr)=>{
+        if (hr === D3D_OK)
+        {
+            levelLocks.locked(owners.get(object) ?? owners.get(object.container), object, index,
+                locked);
+        }
+        return hr;
+    };
+    /** @param {string} name */
+    const levelGroup = name=>(name.startsWith('AddDirty') ? 'ring'
+        : name.startsWith('Lock') || name.startsWith('Unlock') ? 'locks' : 'levels');
+    /**
+     * A texture's or a surface's lock and unlock as guest code, and a
+     * texture's dirty region as a record of the device's ring.
+     *
+     * @param {'texture' | 'surface'} find @param {boolean} [box]
+     */
+    const levelGuests = (find, box = false)=>{
+        const lock = box ? 'LockBox' : 'LockRect';
+        const unlock = box ? 'UnlockBox' : 'UnlockRect';
+        const dirty = box ? 'VolumeTexture.AddDirtyBox' : 'Texture.AddDirtyRect';
+        return {
+            [lock]: (/** @type {{ trap: number }} */ { trap })=>
+                placeCode(at=>lockLevelCode(at, trap, { find, box })),
+            [unlock]: (/** @type {{ trap: number }} */ { trap })=>
+                placeCode(at=>unlockLevelCode(at, trap, { find })),
+            ...(find === 'texture'
+                ? { [box ? 'AddDirtyBox' : 'AddDirtyRect']: (/** @type {{ trap: number }} */
+                    { trap })=>placeCode(at=>commandCode(at, trap,
+                    { ...COMMANDS[dirty], slot: commandSlot(dirty) })) }
+                : {}),
+        };
+    };
+
     /** @type {import('./com.js').InterfaceDescriptor[]} */
     const surfaceInterfaces = [describeResource(IID_IDirect3DSurface9, IDIRECT3DSURFACE9_SLOTS, {
         ...resourceMethods(D3DRTYPE.SURFACE),
@@ -608,10 +672,11 @@ export function createDirect3D9Seam(
             return hr;
         },
         /** @param {any} surface @param {number[]} args */
-        LockRect: (surface, [out, rect, flags])=>lockRectInto(fields, out,
-            locked=>surface.LockRect(locked, readRect(rect), flags >>> 0)),
+        LockRect: (surface, [out, rect, flags])=>noteLevel(surface, null, true,
+            lockRectInto(fields, out, locked=>surface.LockRect(locked, readRect(rect),
+                flags >>> 0))),
         /** @param {any} surface */
-        UnlockRect: surface=>surface.UnlockRect(),
+        UnlockRect: surface=>noteLevel(surface, null, false, surface.UnlockRect()),
         /** @param {any} surface @param {number[]} args */
         GetDC: (surface, [out])=>{
             if ((out >>> 0) === 0 || !gdi)
@@ -625,6 +690,9 @@ export function createDirect3D9Seam(
                 if (hr === D3D_OK)
                 {
                     fields.writeU32(out >>> 0, held.dc ?? 0);
+                    // Every level's lock is the host's while it is held.
+                    shadowOf(owners.get(surface) ?? owners.get(surface.container))
+                        ?.familyBusy(surface.container ?? surface, true);
                 }
                 return hr;
             };
@@ -632,7 +700,15 @@ export function createDirect3D9Seam(
             return hr instanceof Promise ? hr.then(answer) : answer(hr);
         },
         /** @param {any} surface @param {number[]} args */
-        ReleaseDC: (surface, [dc])=>(gdi ? surface.ReleaseDC(dc >>> 0, gdi) : D3DERR_INVALIDCALL),
+        ReleaseDC: (surface, [dc])=>{
+            const hr = gdi ? surface.ReleaseDC(dc >>> 0, gdi) : D3DERR_INVALIDCALL;
+            if (hr === D3D_OK)
+            {
+                shadowOf(owners.get(surface) ?? owners.get(surface.container))
+                    ?.familyBusy(surface.container ?? surface, false);
+            }
+            return hr;
+        },
 
         /**
          * QueryInterface on what holds the surface: the texture a level
@@ -667,9 +743,9 @@ export function createDirect3D9Seam(
             }
             return queryAs(publisher, fields, device, deviceInterfacesOf(device), id, out);
         },
-    }, guestsBut('levels', allocate
+    }, guestsBut(levelGroup, allocate
         ? { GetDesc: (/** @type {{ trap: number }} */ { trap })=>
-            placeCode(at=>getSurfaceDescCode(at, trap)) }
+            placeCode(at=>getSurfaceDescCode(at, trap)), ...levelGuests('surface') }
         : {}), privateData.released)];
 
     /**
@@ -758,10 +834,12 @@ export function createDirect3D9Seam(
             return hr;
         },
         /** @param {any} texture @param {number[]} args */
-        LockRect: (texture, [level, out, rect, flags])=>lockRectInto(fields, out,
-            locked=>texture.LockRect(level >>> 0, locked, readRect(rect), flags >>> 0)),
+        LockRect: (texture, [level, out, rect, flags])=>noteLevel(texture, level >>> 0, true,
+            lockRectInto(fields, out, locked=>texture.LockRect(level >>> 0, locked,
+                readRect(rect), flags >>> 0))),
         /** @param {any} texture @param {number[]} args */
-        UnlockRect: (texture, [level])=>texture.UnlockRect(level >>> 0),
+        UnlockRect: (texture, [level])=>noteLevel(texture, level >>> 0, false,
+            texture.UnlockRect(level >>> 0)),
         /** @param {any} texture @param {number[]} args */
         AddDirtyRect: (texture, [rect])=>texture.AddDirtyRect(readRect(rect)),
     };
@@ -810,9 +888,9 @@ export function createDirect3D9Seam(
             sharedWith: id },
     ];
     const textureInterfaces = textureFamily(IID_IDirect3DTexture9, IDIRECT3DTEXTURE9_SLOTS,
-        textureMethods, guestsBut('levels', allocate
+        textureMethods, guestsBut(levelGroup, allocate
             ? { GetSurfaceLevel: (/** @type {{ trap: number }} */ { trap })=>
-                placeCode(at=>getSurfaceLevelCode(at, trap)) }
+                placeCode(at=>getSurfaceLevelCode(at, trap)), ...levelGuests('texture') }
             : {}));
     const cubeTextureInterfaces = textureFamily(IID_IDirect3DCubeTexture9,
         IDIRECT3DCUBETEXTURE9_SLOTS, cubeTextureMethods);
@@ -928,16 +1006,19 @@ export function createDirect3D9Seam(
                 E_OUTOFMEMORY, owners.get(texture));
         },
         /** @param {any} texture @param {number[]} args */
-        LockBox: (texture, [level, out, box, flags])=>lockBox(out,
-            locked=>texture.LockBox(level >>> 0, locked, readBox(box), flags >>> 0)),
+        LockBox: (texture, [level, out, box, flags])=>noteLevel(texture, level >>> 0, true,
+            lockBox(out, locked=>texture.LockBox(level >>> 0, locked, readBox(box),
+                flags >>> 0))),
         /** @param {any} texture @param {number[]} args */
-        UnlockBox: (texture, [level])=>texture.UnlockBox(level >>> 0),
+        UnlockBox: (texture, [level])=>noteLevel(texture, level >>> 0, false,
+            texture.UnlockBox(level >>> 0)),
         /** @param {any} texture @param {number[]} args */
         AddDirtyBox: (texture, [box])=>texture.AddDirtyBox(readBox(box)),
     };
     /** @type {import('./com.js').InterfaceDescriptor[]} */
     const volumeTextureInterfaces = textureFamily(IID_IDirect3DVolumeTexture9,
-        IDIRECT3DVOLUMETEXTURE9_SLOTS, volumeTextureMethods);
+        IDIRECT3DVOLUMETEXTURE9_SLOTS, volumeTextureMethods,
+        guestsBut(levelGroup, allocate ? levelGuests('texture', true) : {}));
 
     /**
      * A buffer hands back an address in the guest's own memory, so locking is
@@ -1172,6 +1253,29 @@ export function createDirect3D9Seam(
             : stateBlockInterfaces, IID_IDirect3DStateBlock9, out, E_OUTOFMEMORY, device);
     };
 
+    /**
+     * The blocks of the queries that have one (`QUERY`), by query.
+     *
+     * @type {WeakMap<object, number>}
+     */
+    const queryBlocks = new WeakMap();
+    /**
+     * An occlusion query's count as its block tells the guest's GetData
+     * (`QUERY.STATE`): 0 the host's, 1 asked for -- so many polls answered
+     * in the guest before one comes here again -- 2 back with `count`.
+     *
+     * @param {any} query @param {number} state @param {number} [count]
+     */
+    const countState = (query, state, count = 0)=>{
+        const block = queryBlocks.get(query);
+        if (block)
+        {
+            fields.writeU32(block + QUERY.COUNT, count >>> 0);
+            fields.writeU32(block + QUERY.BUDGET, state === 1 ? POLLS_BETWEEN : 0);
+            fields.writeU32(block + QUERY.STATE, state);
+        }
+    };
+
     const queryInterfaces = [describeResource(IID_IDirect3DQuery9, IDIRECT3DQUERY9_SLOTS, {
         GetDevice: getDevice,
         /** @param {any} query */
@@ -1179,7 +1283,11 @@ export function createDirect3D9Seam(
         /** @param {any} query */
         GetDataSize: query=>query.GetDataSize(),
         /** @param {any} query @param {number[]} args */
-        Issue: (query, [flags])=>query.Issue(flags >>> 0),
+        Issue: (query, [flags])=>{
+            // A new measurement: its count is the host's to ask for again.
+            countState(query, 0);
+            return query.Issue(flags >>> 0);
+        },
         // A count is written in as many of its four bytes as the caller has
         // room for, and the caller of a flush waits while it comes back.
         /** @param {any} query @param {number[]} args */
@@ -1196,9 +1304,21 @@ export function createDirect3D9Seam(
                 return hr;
             };
             const hr = query.GetData((data >>> 0) === 0 ? null : held, size >>> 0, flags >>> 0);
+            // An occlusion count asked for, whose answer will be told as it
+            // comes (`whenCounted`): the guest answers the polls till then.
+            if (hr === S_FALSE && query.type === D3DQUERYTYPE_OCCLUSION && query.countsLater)
+            {
+                query.whenCounted ??= (/** @type {number | null} */ count)=>(count === null
+                    ? countState(query, 0) : countState(query, 2, count));
+                countState(query, 1);
+            }
             return hr instanceof Promise ? hr.then(write) : write(hr);
         },
-    })];
+    }, guestsBut('queries', allocate
+        ? Object.fromEntries(['GetType', 'GetDataSize', 'Issue', 'GetData'].map(name=>[name,
+            (/** @type {{ trap: number }} */ { trap })=>placeCode(at=>compiledAt(
+                IN_GUEST[/** @type {keyof typeof IN_GUEST} */ (`Query${name}`)], at, trap))]))
+        : {}))];
 
     /** @param {number} address */
     const writeDisplayMode = address=>{
@@ -1698,7 +1818,7 @@ export function createDirect3D9Seam(
                 if (shadow)
                 {
                     texture.guestState = ()=>shadow.attachTexture(texture,
-                        publisher.countCell(texture));
+                        publisher.countCell(texture), [width >>> 0, height >>> 0, 1]);
                 }
                 return handBack(held.texture, textureInterfaces, IID_IDirect3DTexture9,
                     out >>> 0, D3DERR_OUTOFVIDEOMEMORY, device);
@@ -1719,6 +1839,14 @@ export function createDirect3D9Seam(
                 levels >>> 0, usage >>> 0, format >>> 0, pool >>> 0, held);
             if (hr === D3D_OK && held.texture)
             {
+                // Its block, for the guest's locks of its levels and its dirty boxes.
+                const shadow = shadowOf(device);
+                const texture = held.texture;
+                if (shadow)
+                {
+                    texture.guestState = ()=>shadow.attachTexture(texture,
+                        publisher.countCell(texture), [width >>> 0, height >>> 0, depth >>> 0]);
+                }
                 return handBack(held.texture, volumeTextureInterfaces,
                     IID_IDirect3DVolumeTexture9, out >>> 0, D3DERR_OUTOFVIDEOMEMORY, device);
             }
@@ -2622,6 +2750,16 @@ export function createDirect3D9Seam(
             const hr = device.CreateQuery(type >>> 0, (out >>> 0) === 0 ? null : held);
             if (hr === D3D_OK && (out >>> 0) !== 0 && held.query)
             {
+                const shadow = shadowOf(device);
+                if (shadow)
+                {
+                    const query = held.query;
+                    query.guestState = ()=>{
+                        const block = shadow.attachQuery(query);
+                        queryBlocks.set(query, block);
+                        return block;
+                    };
+                }
                 return handBack(held.query, queryInterfaces, IID_IDirect3DQuery9, out >>> 0,
                     E_OUTOFMEMORY, device);
             }
@@ -2663,6 +2801,12 @@ export function createDirect3D9Seam(
                 STAGE_STATE_TYPES_9)),
             GetViewport: ({ trap })=>placeCode(at=>getViewportCode(at, trap)),
             GetSamplerState: ({ trap })=>placeCode(at=>getSamplerStateCode(at, trap)),
+            GetRenderTarget: ({ trap })=>placeCode(at=>getTargetCode(at, trap,
+                { depth: false, indexed: true })),
+            GetDepthStencilSurface: ({ trap })=>placeCode(at=>getTargetCode(at, trap,
+                { depth: true, indexed: false })),
+            TestCooperativeLevel: ({ trap })=>placeCode(at=>compiledAt(
+                IN_GUEST.TestCooperativeLevel, at, trap)),
             ...Object.fromEntries(Object.entries(COMMANDS).map(([name, shape])=>[name,
                 (/** @type {{ trap: number }} */ { trap })=>placeCode(at=>commandCode(at, trap,
                     { ...shape, slot: commandSlot(name), mirror: COMMAND_MIRRORS[name] }))])),
@@ -3142,6 +3286,7 @@ export function createDirect3D9Seam(
             // when the block's address is written one word past `this`.
             /** @type {ReturnType<typeof createShadow>} */
             const shadow = createShadow({
+                ringBytes,
                 allocate,
                 readMemory: memory.windowMemory ?? memory.readMemory,
                 readU32: memory.readU32,
@@ -3150,6 +3295,13 @@ export function createDirect3D9Seam(
                 device: held.device,
                 divergence,
                 phases,
+                // What the guest's GetRenderTarget and GetDepthStencilSurface
+                // hand out: a surface the program was handed already, whose
+                // pointer and count word are there to give.
+                handedOut: surface=>((publisher.adapterFor(surface)?.pointers.size ?? 0) === 0
+                    ? [0, 0]
+                    : [publisher.publish(surface, surfaceInterfaces, IID_IDirect3DSurface9),
+                        publisher.countCell(surface)]),
                 // The buffers settled and the ring played as one pause: a
                 // recording compares a dynamic buffer once in it.
                 still: work=>{
@@ -3404,6 +3556,14 @@ export function createDirect3D9Seam(
 
         /** What the device this program is drawing through has counted. */
         diagnostics: ()=>lastDevice?.diagnostics?.() ?? null,
+
+        /**
+         * How Presents were paced (`createPresentQueue`): the interval and the
+         * rate they were held to, and the mode the device asked for.
+         */
+        presentPacing: ()=>({ ...presents.diagnostics(),
+            windowed: lastParameters ? Boolean(lastParameters.windowed) : null,
+            askedHz: lastParameters ? lastParameters.fullScreenRefreshRateInHz >>> 0 : null }),
 
         /** What that device's program set in the guest, and the calls that never crossed. */
         shadow: ()=>(lastDevice ? shadowOf(lastDevice)?.diagnostics() ?? null : null),

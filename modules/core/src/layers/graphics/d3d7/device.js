@@ -43,6 +43,8 @@ import {
     DDLOCK_NOOVERWRITE, DDLOCK_READONLY, DEVICE_IDS, transformStateOf,
 } from './constants.js';
 import { DEVICE_DESCRIPTIONS } from './caps.js';
+import { D3D7_COMMANDS } from './commands.js';
+import { DRAW } from '../seam/shadow.js';
 import { D3DCLEAR, D3DLOCK, D3DFMT_INDEX, D3DTSS } from '../d3d8/constants.js';
 import { createDefaultRenderStates } from '../d3d8/renderstates.js';
 import { createDefaultStageStates } from '../d3d8/stagestates.js';
@@ -90,6 +92,10 @@ const FILTER_NUMBERING = Object.freeze({
  *     What a device that draws needs; absent, the device is the pure model.
  * @property {any} [backend]
  * @property {(address: number, length: number) => Uint8Array} [readMemory]
+ * @property {(address: number, length: number) => ({ take: (address: number, length: number)
+ *     => number[] } | null)} [watchWrites]
+ *     Which pages of a range were written since a look: what a buffer's unlock
+ *     uploads, compared against nothing. Absent where nothing can say.
  * @property {(address: number, bytes: Uint8Array) => void} [writeMemory]
  *     How a render target's pixels read back off the GPU reach its guest
  *     bytes; without it a lock of a target hands out bytes nobody drew.
@@ -109,6 +115,8 @@ const FILTER_NUMBERING = Object.freeze({
  *     asking (app.debug.dumpFrames), as Direct3D 8 and 9 devices take it
  * @property {'legacy' | 'current'} [driverRules]  The renderer's (`createRenderer`).
  * @property {(ddraw: any, services: RenderServices) => any} [remote]
+ * @property {(api: string, detail: string) => void} [divergence]  told of a call the
+ *     guest made in the command ring that the device refused
  *     Makes the Direct3D 7 object in this one's place, whose devices draw
  *     elsewhere (`remote/d3d7.js`).
  */
@@ -163,6 +171,29 @@ export function d3dFormatOf(format){
         default:
             return null;
     }
+}
+
+/**
+ * A pixel of a surface's format as a D3DCOLOR: each channel its mask's bits
+ * stretched to eight, alpha full where the format has none.
+ *
+ * @param {{ redMask: number, greenMask: number, blueMask: number, alphaMask?: number }} format
+ * @param {number} value
+ */
+function colourOf(format, value){
+    /** @param {number} mask @param {number} absent */
+    const channel = (mask, absent)=>{
+        const bits = mask >>> 0;
+        if (bits === 0)
+        {
+            return absent;
+        }
+        const shift = 31 - Math.clz32(bits & -bits);
+        const most = bits >>> shift;
+        return Math.round((((value >>> 0) & bits) >>> shift) * 255 / most);
+    };
+    return ((channel(format.alphaMask ?? 0, 255) << 24) | (channel(format.redMask, 0) << 16)
+        | (channel(format.greenMask, 0) << 8) | channel(format.blueMask, 0)) >>> 0;
 }
 
 /**
@@ -245,6 +276,7 @@ export function createDirect3D7(ddraw, services = {}){
             backend: services.backend,
             readMemory: /** @type {(address: number, length: number) => Uint8Array} */ (
                 services.readMemory),
+            watchWrites: services.watchWrites,
             createSampler: services.createSampler ?? null,
             dumpDraws: services.dumpDraws === true,
             dumpEvery: services.dumpEvery,
@@ -464,6 +496,19 @@ export function createDirect3D7(ddraw, services = {}){
             /** Optimising is a promise about performance this build keeps by doing nothing. */
             Optimize(){
                 buffer.caps = (buffer.caps | D3DVBCAPS_OPTIMIZED) >>> 0;
+                return D3D_OK;
+            },
+
+            /**
+             * Whether the last ProcessVertices into the buffer kept clip
+             * codes, which its draws clip by unless they say D3DDP_DONOTCLIP
+             * (decisions.md A45): the seam says so, which makes the call, and
+             * a draw the command ring carries reads it here.
+             */
+            clipCodes: false,
+            /** @param {boolean} on */
+            ClipCodes(on){
+                buffer.clipCodes = on;
                 return D3D_OK;
             },
         };
@@ -778,6 +823,28 @@ export function createDirect3D7(ddraw, services = {}){
             return D3D_OK;
         };
 
+        /**
+         * The vertex formats drawn with lately and their widths, the latest
+         * first: what a draw in the guest copies by (`ringState`).
+         *
+         * @type {[number, number][]}
+         */
+        const strides = [];
+        /** @param {number} fvf @param {number} stride */
+        const drawnWith = (fvf, stride)=>{
+            if (strides[0]?.[0] === fvf)
+            {
+                return;
+            }
+            const at = strides.findIndex(([seen])=>seen === fvf);
+            if (at >= 0)
+            {
+                strides.splice(at, 1);
+            }
+            strides.unshift([fvf >>> 0, stride]);
+            strides.length = Math.min(strides.length, 8);
+        };
+
         /** @param {number} type @param {number} vertexCount */
         const primitiveCountOf = (type, vertexCount)=>{
             for (let primitives = vertexCount; primitives > 0; primitives--)
@@ -880,6 +947,34 @@ export function createDirect3D7(ddraw, services = {}){
         };
         const stopWatchingPixels = ddraw.watchPixels?.({ readBack, written }) ?? (()=>{});
 
+        /**
+         * A colour fill of a surface this device renders into is a clear of
+         * its GPU copy over the rectangle, as Direct3D 9's ColorFill is: its
+         * guest bytes are read back when a program reads them, not before
+         * every fill -- a read-back the program waited for, a fill and an
+         * upload again.
+         *
+         * @param {any} surface @param {any} rect @param {number} value
+         * @returns {boolean} whether it was filled here
+         */
+        const colorFilled = (surface, rect, value)=>{
+            const adapter = drawnAt(surface);
+            if (!adapter || !renderer || !write)
+            {
+                return false;
+            }
+            const filling = Object.create(model, {
+                renderTarget: { get: ()=>adapter },
+                depthStencil: { get: ()=>null },
+                viewport: { get: ()=>fullTarget({ width: surface.width, height: surface.height }) },
+            });
+            renderer.clear(filling, rect
+                ? [{ x1: rect.left, y1: rect.top, x2: rect.right, y2: rect.bottom }]
+                : [], D3DCLEAR.TARGET, colourOf(surface.pixelFormat, value), 1, 0);
+            return true;
+        };
+        const stopWatchingColor = ddraw.watchColorFills?.(colorFilled) ?? (()=>{});
+
         const device = {
             description,
             get refCount(){
@@ -909,6 +1004,7 @@ export function createDirect3D7(ddraw, services = {}){
                 textures.clear();
                 stopWatchingDepth();
                 stopWatchingPixels();
+                stopWatchingColor();
                 renderTarget.release();
                 ddraw.release('IDirectDraw7');
                 return 0;
@@ -918,10 +1014,72 @@ export function createDirect3D7(ddraw, services = {}){
                 return inScene;
             },
 
+            /** The state blocks held, by handle, for what a block applied in the ring changed. */
+            get stateBlocks(){
+                return stateBlocks;
+            },
+
+            /**
+             * The textures bound to the stages, without the reference
+             * GetTexture hands out: what a draw made now samples, for a
+             * recording that sends a texture's bytes ahead of the draws.
+             */
+            get boundTextures(){
+                return textures.values();
+            },
+
             /** @param {{ caps?: any }} out */
             GetCaps(out){
                 out.caps = { ...description.caps };
                 return D3D_OK;
+            },
+
+            /**
+             * The calls the guest wrote into the command ring, made in order
+             * (`d3d7/commands.js`). One the device refuses is the guest's
+             * mistake: its routine answered D3D_OK.
+             *
+             * @param {Uint8Array} records @param {readonly any[]} [objects]
+             */
+            commands(records, objects = []){
+                renderer?.pause(true);
+                try
+                {
+                    return D3D7_COMMANDS.runCommands(device, records, objects, (name, hr)=>
+                        services.divergence?.('IDirect3DDevice7::commands', name === 'commands'
+                            ? 'a command ring held a record its routines could not have written'
+                            : `${name} made in the guest was answered D3D_OK; the device answers ${
+                                hr.toString(16)}`));
+                }
+                finally
+                {
+                    renderer?.pause(false);
+                }
+            },
+
+            /**
+             * What the command routines check a call against (`seam/shadow.js`):
+             * a scene, a depth surface -- of which this version's Clear asks
+             * no more, stencil or not -- the target's size and the planes.
+             *
+             * @returns {import('../seam/shadow.js').ShadowRingState}
+             */
+            ringState(){
+                const depth = attachedDepth(renderTarget) !== null;
+                return {
+                    drawable: (inScene ? DRAW.SCENE : 0)
+                        | (depth ? DRAW.DEPTH | DRAW.STENCIL : 0),
+                    targetWidth: renderTarget.width,
+                    targetHeight: renderTarget.height,
+                    clipPlanes: 32,
+                    taken: [],
+                    cooperative: 0,
+                    strides,
+                    // A block holds render and stage states and transforms:
+                    // nothing a draw's checks read.
+                    stateBlocks: [...stateBlocks.keys()].map(handle=>
+                        /** @type {[number, boolean]} */ ([handle, false])),
+                };
             },
 
             BeginScene(){
@@ -1520,6 +1678,7 @@ export function createDirect3D7(ddraw, services = {}){
                     return DDERR_INVALIDPARAMS;
                 }
                 drawFvf = fvf;
+                drawnWith(fvf, stride);
                 renderer?.drawPrimitiveUp(model, type, primitiveCount, vertices, stride);
                 return D3D_OK;
             },
@@ -1585,18 +1744,20 @@ export function createDirect3D7(ddraw, services = {}){
             /**
              * Indices by pointer and vertices in a buffer. The indices are the
              * program's array, read through the scratch record whose address
-             * is set to it for the duration of the lock.
+             * is set to it for the duration of the lock -- or their bytes, as
+             * the command ring copies them.
              *
              * @param {number} type
              * @param {any} buffer
              * @param {number} startVertex
              * @param {number} vertexCount
-             * @param {number} indexAddress  Guest address of the 16-bit indices.
+             * @param {number | Uint8Array} indices  Guest address of the 16-bit indices, or
+             *     the indices.
              * @param {number} indexCount
              * @param {number} [clipped]  As DrawPrimitiveVB takes it.
              */
             DrawIndexedPrimitiveVB(
-                type, buffer, startVertex, vertexCount, indexAddress, indexCount, clipped = 0,
+                type, buffer, startVertex, vertexCount, indices, indexCount, clipped = 0,
             )
             {
                 const primitiveCount = primitiveCountOf(type, indexCount);
@@ -1607,7 +1768,9 @@ export function createDirect3D7(ddraw, services = {}){
                 {
                     return hr;
                 }
-                if (buffer.locked || (indexAddress >>> 0) === 0
+                const bytes = typeof indices === 'number' ? null : indices;
+                if (buffer.locked || (bytes ? bytes.byteLength < indexCount * 2
+                    : (/** @type {number} */ (indices) >>> 0) === 0)
                     || startVertex + vertexCount > buffer.numVertices)
                 {
                     return DDERR_INVALIDPARAMS;
@@ -1622,9 +1785,9 @@ export function createDirect3D7(ddraw, services = {}){
                     {
                         indexScratch.length = indexCount * 2;
                     }
-                    indexScratch.base = indexAddress >>> 0;
+                    indexScratch.base = bytes ? 0 : /** @type {number} */ (indices) >>> 0;
                     renderer.lockBuffer(indexScratch, 0, indexCount * 2, D3DLOCK.DISCARD);
-                    renderer.unlockBuffer(indexScratch);
+                    renderer.unlockBuffer(indexScratch, bytes ?? undefined);
                     clipsTransformed = clipped !== 0
                         && (renderStates.get(D3DRENDERSTATE.CLIPPING) ?? 1) !== 0;
                     renderer.drawIndexedPrimitive(model, type, 0, primitiveCount);

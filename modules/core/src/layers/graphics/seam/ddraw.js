@@ -62,7 +62,8 @@ import {
     readSurfaceDesc, writePixelFormat, writeSurfaceDesc,
 } from '../ddraw/structs.js';
 import {
-    DDBLTFAST_DESTCOLORKEY, DDBLTFAST_SRCCOLORKEY, DDBLT_DEPTHFILL, DDBLT_KEYDESTOVERRIDE,
+    DDBLTFAST_DESTCOLORKEY, DDBLTFAST_SRCCOLORKEY, DDBLT_COLORFILL, DDBLT_DEPTHFILL,
+    DDBLT_KEYDESTOVERRIDE, DDBLT_WAIT,
     DDBLT_KEYSRCOVERRIDE, DDPF_ZBUFFER, DDCAPS2_CANRENDERWINDOWED, DDCAPS2_CERTIFIED,
     DDCAPS2_PRIMARYGAMMA,
     DDCAPS2_WIDESURFACES, DDCAPS_3D, DDCAPS_BLT, DDCAPS_BLTCOLORFILL, DDCAPS_BLTDEPTHFILL,
@@ -99,6 +100,23 @@ const ICLASSFACTORY_SLOTS = /** @type {[string, number][]} */ ([
     ['CreateInstance', 3],
     ['LockServer', 1],
 ]);
+/**
+ * The Blt flags a colour fill may carry and still be only a fill: DDBLT_ASYNC,
+ * DDBLT_WAIT and DDBLT_DONOTWAIT say when, not what.
+ */
+const FILL_ONLY_FLAGS = DDBLT_COLORFILL | 0x00000200 | DDBLT_WAIT | 0x08000000;
+
+/**
+ * Whether a Blt's destination rectangle -- null for the whole -- lies within
+ * the surface, edges the right way round.
+ *
+ * @param {{ left: number, top: number, right: number, bottom: number } | null} rect
+ * @param {{ width: number, height: number }} surface
+ */
+const rectFitsSurface = (rect, surface)=>rect === null || (rect.left >= 0 && rect.top >= 0
+    && rect.right > rect.left && rect.bottom > rect.top && rect.right <= surface.width
+    && rect.bottom <= surface.height);
+
 const E_POINTER = 0x80004003 | 0;
 const E_NOINTERFACE = 0x80004002 | 0;
 const E_OUTOFMEMORY = 0x8007000e | 0;
@@ -302,16 +320,47 @@ const S3TC_OF_FOURCC = Object.freeze({
  * @param {(api: string, detail: string) => void} [deps.divergence]
  *     Told of a copy this build refuses between two formats, with both of them.
  *        The screen is this size now, and a fullscreen window is placed over it.
+ * @param {<T>(call: () => T) => T} [deps.aroundCall]  runs each method of a surface or
+ *     the DirectDraw object: Direct3D 7's command rings made first, and what their
+ *     routines check said again after
  */
 export function createDirectDrawSeam(
     { publisher, memory, screen, gdi, present, flipQueued, callGuest, currentThread, scratch,
         extraInterfaces = [], extraSurfaceInterfaces = [], now = ()=>performance.now(),
         refresh = ()=>REFRESH_HZ, schedule = (ms, run)=>{
             setTimeout(run, ms);
-        }, identity, videoMemory, gamma, deactivated, deactivations, resolution, divergence },
+        }, identity, videoMemory, gamma, deactivated, deactivations, resolution, divergence,
+        aroundCall },
 )
 {
     const fields = createFields(memory);
+    /**
+     * An object whose count is read or lowered meets what Direct3D 7's rings
+     * hold first: a texture the guest bound in a ring is held by the device
+     * once the ring is made, and a Release before that would end it.
+     *
+     * @param {any} object
+     */
+    const settlesDevices = object=>{
+        if (aroundCall && object && typeof object === 'object')
+        {
+            object.settleGuestRefs ??= ()=>aroundCall(()=>undefined);
+        }
+    };
+    /**
+     * A table's methods, each run by `aroundCall`: what Direct3D 7 holds in
+     * its command ring is drawn before a surface is shown or read.
+     *
+     * @template {Record<string, any>} T
+     * @param {T} methods
+     * @returns {T}
+     */
+    const afterDevices = methods=>(aroundCall
+        ? /** @type {T} */ (Object.fromEntries(Object.entries(methods).map(([name, method])=>[
+            name, typeof method === 'function'
+                ? (/** @type {any[]} */ ...args)=>aroundCall(()=>method(...args))
+                : method])))
+        : methods);
     /**
      * The objects that took exclusive mode, for another one's
      * TestCooperativeLevel: the screen is one, whichever object holds it.
@@ -442,6 +491,7 @@ export function createDirectDrawSeam(
      * @param {number} out
      */
     const handBack = (object, interfaces, id, out)=>{
+        settlesDevices(object);
         const pointer = publisher.publish(object, interfaces, id);
         fields.writeU32(out, pointer);
         return pointer;
@@ -867,6 +917,17 @@ export function createDirectDrawSeam(
                     },
                     clipList: clipListOf(surface),
                 };
+                // A plain colour fill of a surface drawn on the GPU is filled
+                // there, no read-back first: a clipped or keyed one reads the
+                // pixels it keeps.
+                if (!from && (flags & ~FILL_ONLY_FLAGS) === DDBLT_COLORFILL
+                    && !request.clipList && !request.fx.destColorKey && !surface.depth
+                    && rectFitsSurface(rect, surface) && surface.colorFilled?.(rect, fill))
+                {
+                    surface.changeUniquenessValue();
+                    surface.present();
+                    return DD_OK;
+                }
                 return whenCurrent(from ? [surface, from] : [surface], ()=>{
                     const outcome = blt({
                         ...request,
@@ -1266,7 +1327,7 @@ export function createDirectDrawSeam(
     /** Every surface generation, so a QueryInterface across them succeeds. */
     const surfaceInterfaces = [
         ...SURFACE_GENERATIONS.map(generation=>
-            describe(generation.id, generation.slots, surfaceMethods(generation), {},
+            describe(generation.id, generation.slots, afterDevices(surfaceMethods(generation)), {},
                 privateData.released)),
         gammaInterface,
         ...extraSurfaceInterfaces,
@@ -1288,6 +1349,7 @@ export function createDirectDrawSeam(
         for (const surface of list)
         {
             surface.addRef();
+            settlesDevices(surface);
             const pointer = publisher.publish(surface, surfaceInterfaces, generation.id);
             const desc = descriptorScratch();
             writeSurfaceDesc(memory, desc, generation.layout, descriptorOf(surface));
@@ -1820,7 +1882,7 @@ export function createDirectDrawSeam(
     const ddrawInterfaces = [
         .../** @type {[1, 2, 4, 7]} */ ([1, 2, 4, 7]).map(version=>
             describe(GENERATIONS[version].id, GENERATIONS[version].slots,
-                ddrawMethods(GENERATIONS[version], version))),
+                afterDevices(ddrawMethods(GENERATIONS[version], version)))),
         ...extraInterfaces,
     ];
 
