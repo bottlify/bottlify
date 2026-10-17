@@ -22,7 +22,8 @@ import assert from 'node:assert/strict';
 import { createVtables } from '../../bridge/internal/vtable.js';
 import { createPublisher } from './com.js';
 import { createDirect3D9Seam } from './d3d9.js';
-import { BUFFER, FLAG_STALE, SHADOW, SURFACE, transformSlot } from './shadow.js';
+import { BUFFER, DRAW, FLAG_STALE, SHADOW, SURFACE, transformSlot } from './shadow.js';
+import * as guestCode from './inguest.js';
 import { FPU_SETUP } from './fpu.js';
 import { commandSlot } from '../d3d9/commands.js';
 import { ADAPTER_GUID, describeAdapter } from './adapter.js';
@@ -1991,6 +1992,33 @@ test('a render target is set in the guest, and on the host it falls back to its 
     assert.deepEqual(h.divergences, []);
 });
 
+test('the block says whether a depth surface is set and whether it holds a stencil, which a'
+    + ' depth or stencil Clear in the guest reads', ()=>{
+    // Clear's routine takes ZBUFFER with `DRAW.DEPTH` and STENCIL with
+    // `DRAW.STENCIL` too (the ring's gates run it); the host writes the bits
+    // after its own calls, and SetDepthStencilSurface's routine keeps them.
+    const h = seamed({ shadow: true });
+    const root = h.create();
+    const { device } = h.createDevice(root);
+    assert.ok(h.box.isGuest(device, slot(IDIRECT3DDEVICE9_SLOTS, 'Clear')));
+    const owner = h.box.memory.readU32(device + 4);
+    const bits = ()=>h.box.memory.readU32(owner + SHADOW.DRAWABLE) & (DRAW.DEPTH | DRAW.STENCIL);
+    const out = 0x3200;
+    for (const [format, expected] of /** @type {[number, number][]} */ ([
+        [D3DFMT.D24X8, DRAW.DEPTH], [D3DFMT.D24S8, DRAW.DEPTH | DRAW.STENCIL]]))
+    {
+        assert.equal(h.device(device, 'CreateDepthStencilSurface',
+            [16, 16, format, 0, 0, 0, out, 0]), D3D_OK);
+        const depth = h.box.memory.readU32(out);
+        assert.equal(h.device(device, 'SetDepthStencilSurface', [depth]), D3D_OK);
+        assert.equal(bits(), expected, `format ${format}`);
+        h.release(depth);
+    }
+    assert.equal(h.device(device, 'SetDepthStencilSurface', [0]), D3D_OK);
+    assert.equal(bits(), 0, 'none');
+    assert.deepEqual(h.divergences, []);
+});
+
 test('a surface\'s description is in its block, which the guest\'s GetDesc answers from', ()=>{
     const h = seamed({ shadow: true });
     const root = h.create();
@@ -2224,4 +2252,82 @@ test('every slot of a texture\'s table, and of its other kinds\', is something t
             assert.deepEqual(zero, [], `${name} ${args[5]}, shadow: ${shadow}`);
         }
     }
+});
+
+test('the guest\'s TestCooperativeLevel and a query\'s methods answer and write as the host\'s,'
+    + ' or leave the call to it', ()=>{
+    // The x86 is its JavaScript's (`inguest.test.js`); here the JavaScript
+    // runs over the seam's own memory beside the host's methods, on random
+    // calls to an event query and an occlusion one, before and after a loss.
+    const h = seamed({ shadow: true });
+    const root = h.create();
+    const { device } = h.createDevice(root);
+    const memory = h.box.memory;
+    const HANDED = -1;
+    // What the functions read and write of it: the rest of the guest's helpers are not theirs.
+    const guest = /** @type {any} */ ({
+        u32: (/** @type {number} */ at)=>memory.readU32(at),
+        setU32: (/** @type {number} */ at, /** @type {number} */ value)=>
+            memory.writeU32(at, value >>> 0),
+        host: ()=>HANDED,
+    });
+    for (const name of ['TestCooperativeLevel'])
+    {
+        assert.ok(h.box.isGuest(device, slot(IDIRECT3DDEVICE9_SLOTS, name)), name);
+    }
+    const out = 0x3200;
+    /** @type {number[]} */
+    const queries = [];
+    for (const type of [D3DQUERYTYPE.EVENT, D3DQUERYTYPE.OCCLUSION])
+    {
+        assert.equal(h.device(device, 'CreateQuery', [type, out]), D3D_OK);
+        const query = memory.readU32(out);
+        for (const name of ['GetType', 'GetDataSize', 'Issue', 'GetData'])
+        {
+            assert.ok(h.box.isGuest(query, slot(IDIRECT3DQUERY9_SLOTS, name)), name);
+        }
+        queries.push(query);
+    }
+    const data = 0x3300;
+    const next = (seed=>()=>(seed = (Math.imul(seed, 1103515245) + 12345) >>> 0) >>> 8)(7);
+    let inGuest = 0;
+    /**
+     * @param {(...args: any[]) => number} js @param {number} pointer @param {string} name
+     * @param {number[]} args
+     */
+    const both = (js, pointer, name, args)=>{
+        memory.writeU32(data, 0xdeadbeef);
+        const answer = js(guest, pointer, ...args) >>> 0;
+        const written = memory.readU32(data);
+        memory.writeU32(data, 0xdeadbeef);
+        const hostAnswer = h.box.trap(pointer, name, args);
+        if (answer === HANDED >>> 0)
+        {
+            return;
+        }
+        inGuest++;
+        assert.equal(answer, hostAnswer >>> 0, `${name}(${args})`);
+        assert.equal(written, memory.readU32(data), `${name}(${args}) writes`);
+    };
+    for (let round = 0; round < 400; round++)
+    {
+        if (round === 300)
+        {
+            // A loss the host is told of at its next entry, the guest after it.
+            h.publisher.objectAt(device).injectDeviceLoss(true);
+            h.device(device, 'Present', [0, 0, 0, 0]);
+        }
+        both(guestCode.TestCooperativeLevel, device, 'TestCooperativeLevel', []);
+        const query = queries[next() % 2];
+        const flags = [0, 1, 2, 3][next() % 4];
+        const size = [0, 1, 4, 8][next() % 4];
+        const pointer = next() % 5 === 0 ? 0 : data;
+        both(guestCode.QueryGetType, query, 'GetType', []);
+        both(guestCode.QueryGetDataSize, query, 'GetDataSize', []);
+        both(guestCode.QueryIssue, query, 'Issue', [flags]);
+        both(guestCode.QueryGetData, query, 'GetData', [pointer, size, next() % 2]);
+    }
+    assert.ok(inGuest > 800, `${inGuest} answered in the guest`);
+    assert.equal(guestCode.TestCooperativeLevel(guest, device), HANDED,
+        'a lost device is the host\'s');
 });

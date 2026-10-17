@@ -73,12 +73,13 @@ import { queryAs, readGuid } from './guid.js';
 import { D3D_PRIVATE_DATA, createPrivateData } from './privatedata.js';
 import {
     DRAWABLE_MIRRORS, RENDER_STATE_MIRROR, SAMPLER_STATE_MIRROR, TRANSFORM_MIRROR,
-    RENDER_TARGET_MIRROR, VIEWPORT_GUARD_9, VIEWPORT_MIRROR, commandCode, createShadow,
-    getRenderStateCode,
+    DEPTH_STENCIL_MIRROR, RENDER_TARGET_MIRROR, VIEWPORT_GUARD_9, VIEWPORT_MIRROR, commandCode,
+    compiledAt, createShadow, getRenderStateCode,
     getSamplerStateCode, getSurfaceDescCode, getSurfaceLevelCode, getTextureStageStateCode,
     getTransformCode, getViewportCode, lockCode, settledAfter, stageStateMirror,
     unlockCode, HOST_MIRRORS, appendCommand, guestWords,
 } from './shadow.js';
+import { COMPILED as IN_GUEST } from './inguest.x86.js';
 import { D3DTSS9 } from '../d3d9/samplerstates.js';
 import { COMMANDS, commandObjects, commandSlot } from '../d3d9/commands.js';
 import { loudRefusals } from './refusals.js';
@@ -109,6 +110,7 @@ export const COMMAND_MIRRORS = {
     SetIndices: [...DRAWABLE_MIRRORS.SetIndices],
     DrawPrimitiveUP: [...DRAWABLE_MIRRORS.DrawPrimitiveUP],
     SetRenderTarget: [...RENDER_TARGET_MIRROR],
+    SetDepthStencilSurface: [...DEPTH_STENCIL_MIRROR],
 };
 
 /**
@@ -129,6 +131,7 @@ export const HOST_COMMAND_MIRRORS = {
     SetStreamSource: HOST_MIRRORS.streamSource9,
     SetIndices: HOST_MIRRORS.indices,
     SetRenderTarget: HOST_MIRRORS.renderTarget,
+    SetDepthStencilSurface: HOST_MIRRORS.depthStencil,
 };
 
 const D3D_OK = 0;
@@ -205,7 +208,7 @@ export function createDirect3D9Seam(
     /**
      * The guest routines a table offers, less those `traps` keeps as traps: by
      * method name, or by the group a routine belongs to -- `getters`, `ring`,
-     * `locks`, `levels`.
+     * `locks`, `levels`, `queries`.
      *
      * @param {string | ((name: string) => string)} group
      * @param {Record<string, (builder: { trap: number }) => number>} guests
@@ -1199,7 +1202,11 @@ export function createDirect3D9Seam(
             const hr = query.GetData((data >>> 0) === 0 ? null : held, size >>> 0, flags >>> 0);
             return hr instanceof Promise ? hr.then(write) : write(hr);
         },
-    })];
+    }, guestsBut('queries', allocate
+        ? Object.fromEntries(['GetType', 'GetDataSize', 'Issue', 'GetData'].map(name=>[name,
+            (/** @type {{ trap: number }} */ { trap })=>placeCode(at=>compiledAt(
+                IN_GUEST[/** @type {keyof typeof IN_GUEST} */ (`Query${name}`)], at, trap))]))
+        : {}))];
 
     /** @param {number} address */
     const writeDisplayMode = address=>{
@@ -2623,6 +2630,11 @@ export function createDirect3D9Seam(
             const hr = device.CreateQuery(type >>> 0, (out >>> 0) === 0 ? null : held);
             if (hr === D3D_OK && (out >>> 0) !== 0 && held.query)
             {
+                const shadow = shadowOf(device);
+                if (shadow)
+                {
+                    held.query.guestState = ()=>shadow.attachQuery(held.query);
+                }
                 return handBack(held.query, queryInterfaces, IID_IDirect3DQuery9, out >>> 0,
                     E_OUTOFMEMORY, device);
             }
@@ -2664,6 +2676,8 @@ export function createDirect3D9Seam(
                 STAGE_STATE_TYPES_9)),
             GetViewport: ({ trap })=>placeCode(at=>getViewportCode(at, trap)),
             GetSamplerState: ({ trap })=>placeCode(at=>getSamplerStateCode(at, trap)),
+            TestCooperativeLevel: ({ trap })=>placeCode(at=>compiledAt(
+                IN_GUEST.TestCooperativeLevel, at, trap)),
             ...Object.fromEntries(Object.entries(COMMANDS).map(([name, shape])=>[name,
                 (/** @type {{ trap: number }} */ { trap })=>placeCode(at=>commandCode(at, trap,
                     { ...shape, slot: commandSlot(name), mirror: COMMAND_MIRRORS[name] }))])),

@@ -1880,10 +1880,13 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             const target = renderTarget ? describe(renderTarget) : null;
             return {
                 drawable: (inScene ? 1 : 0) | (declared ? 2 : 0)
-                    | (streams.get(0)?.buffer ? 4 : 0) | (indices ? 8 : 0),
+                    | (streams.get(0)?.buffer ? 4 : 0) | (indices ? 8 : 0)
+                    | (depthStencil ? 16 : 0)
+                    | (depthStencil && describe(depthStencil).Format === D3DFMT.D24S8 ? 32 : 0),
                 targetWidth: target?.Width ?? 0,
                 targetHeight: target?.Height ?? 0,
                 clipPlanes: CLIP_PLANES,
+                cooperative: device.TestCooperativeLevel() === D3D_OK ? 0 : 1,
                 taken: [isShaderHandle(boundVertexShader) ? boundVertexShader >>> 0 : 0,
                     boundPixelShader >>> 0],
                 takes: [(/** @type {number} */ handle)=>vertexShaders.has(handle),

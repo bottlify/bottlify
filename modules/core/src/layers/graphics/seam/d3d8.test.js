@@ -27,6 +27,7 @@ import { createCountCells, createPublisher } from './com.js';
 import { createGraphicsLibraries } from './exports.js';
 import { ADAPTER_GUID, describeAdapter } from './adapter.js';
 import { BUFFER, SHADOW, TEXTURE } from './shadow.js';
+import * as inGuest from './inguest.js';
 import { FPU_SETUP } from './fpu.js';
 import {
     IDIRECT3D8_SLOTS, IDIRECT3DCUBETEXTURE8_SLOTS, IDIRECT3DDEVICE8_SLOTS,
@@ -2466,4 +2467,25 @@ test('without guest code every call of the device is a trap, and it has no block
     assert.equal(h.device(device, 'SetRenderState', [22, 1]), D3D_OK, 'D3DRS_CULLMODE, trapped');
     assert.equal(h.release(device), 0);
     h.release(root);
+});
+
+test('the guest\'s TestCooperativeLevel answers as the host\'s, a lost device left to it', ()=>{
+    // The x86 is its JavaScript's (`inguest.test.js`); here the JavaScript
+    // reads the seam's own block beside the host's answer.
+    const h = seamed({ shadow: true });
+    const root = h.create();
+    const device = h.createDevice(root);
+    assert.ok(h.box.isGuest(device, slot(IDIRECT3DDEVICE8_SLOTS, 'TestCooperativeLevel')));
+    const HANDED = 0xffffffff;
+    // What the functions read of it: the rest of the guest's helpers are not theirs.
+    const guest = /** @type {any} */ ({
+        u32: (/** @type {number} */ at)=>h.box.memory.readU32(at), host: ()=>HANDED });
+    // The block is placed at the device's first entry.
+    assert.equal(h.box.trap(device, 'TestCooperativeLevel', []), 0);
+    assert.equal(inGuest.TestCooperativeLevel(guest, device) >>> 0, 0);
+    // A loss the host is told of at its next entry, the guest after it.
+    h.publisher.objectAt(device).injectDeviceLoss(true);
+    h.device(device, 'Present', [0, 0, 0, 0]);
+    assert.equal(inGuest.TestCooperativeLevel(guest, device) >>> 0, HANDED);
+    assert.notEqual(h.box.trap(device, 'TestCooperativeLevel', []), 0);
 });

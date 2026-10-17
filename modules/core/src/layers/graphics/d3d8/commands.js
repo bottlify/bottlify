@@ -103,6 +103,7 @@ const first = (kind, length)=>{
  * @property {{ arg: number, ranges: readonly [number, number][] }[]} [within]
  * @property {number} [span] @property {{ arg: number, word: number }} [below]
  * @property {{ arg: number, when: number, table?: number }} [validated]
+ * @property {{ arg: number, pairs: readonly [number, number][] }} [flagNeeds]
  * @property {{ arg: number, mask: number, nullable?: boolean }} [surfaceUsage]
  * @property {number} [needs] @property {number} [refuses] @property {boolean} [fresh]
  *     what the routine checks before it answers for the call, so that the
@@ -308,8 +309,10 @@ const rectsOf = (copy, count)=>Array.from({ length: count }, (unused, i)=>({
  */
 const UP_BYTES = 16 * 1024;
 
-/** D3DCLEAR_TARGET, the same in both versions. */
+/** D3DCLEAR, the same in both versions. */
 const D3DCLEAR_TARGET = 1;
+const D3DCLEAR_ZBUFFER = 2;
+const D3DCLEAR_STENCIL = 4;
 
 /** D3DPT_POINTLIST to D3DPT_TRIANGLEFAN, a primitive type a draw takes. */
 const PRIMITIVE_TYPES = /** @type {[number, number][]} */ ([[1, 6]]);
@@ -354,12 +357,15 @@ export const SHARED_COMMANDS = {
         make: (d, c)=>d.DrawPrimitive(c.arg(0), c.arg(1), c.arg(2)) },
     BeginScene: { args: 0, refuses: DRAW.SCENE, make: d=>d.BeginScene() },
     EndScene: { args: 0, needs: DRAW.SCENE, make: d=>d.EndScene() },
-    // No rectangles is the whole target; Z comes as a float in a dword. Only
-    // the target is cleared here: a depth or stencil clear is refused for a
-    // depth surface without one, and a program that is told so clears again
-    // with less, so the answer must be the device's.
+    // No rectangles is the whole target; Z comes as a float in a dword. A
+    // depth clear needs a depth surface and a stencil clear one with a
+    // stencil (`DRAW.DEPTH`, `DRAW.STENCIL`): a program that is refused one
+    // clears again with less, so the answer must be the device's.
     Clear: { args: 6, pointer: 1, nullable: 'empty', count: { arg: 0, shift: 4, most: 64 },
-        within: [{ arg: 2, ranges: [[D3DCLEAR_TARGET, D3DCLEAR_TARGET]] }],
+        within: [{ arg: 2, ranges: [[D3DCLEAR_TARGET,
+            D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL]] }],
+        flagNeeds: { arg: 2, pairs: [[D3DCLEAR_ZBUFFER, DRAW.DEPTH],
+            [D3DCLEAR_STENCIL, DRAW.DEPTH | DRAW.STENCIL]] },
         make: (d, c)=>d.Clear(c.arg(0), c.arg(1) === 0 ? null : rectsOf(c.ints, c.arg(0)),
             c.arg(2), c.arg(3), floatOf(c.arg(4)), c.arg(5)) },
     DrawPrimitiveUP: { args: 4, pointer: 2, kept: true, draws: true,

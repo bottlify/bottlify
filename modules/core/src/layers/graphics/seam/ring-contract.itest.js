@@ -440,6 +440,21 @@ const shared = drawable=>({
                 assert.equal(device.SetRenderTarget(...renderTarget(device, made)), D3D_OK);
             } },
         { label: 'no flags', args: [0, 0, 0, 0, ONE, 0] },
+        { label: 'target and depth on a depth surface without stencil',
+            args: [0, 0, 3, 0, ONE, 0],
+            setup: (device, made)=>{
+                offscreen(device, made);
+                assert.equal(device.SetRenderTarget(...renderTarget(device, made)), D3D_OK);
+            } },
+        { label: 'depth with no depth surface', args: [0, 0, 2, 0, ONE, 0],
+            setup: (device, made)=>{
+                offscreen(device, made);
+                delete made.depth;
+                assert.equal(device.SetDepthStencilSurface
+                    ? (device.SetDepthStencilSurface(null), device.SetRenderTarget(0, made.target))
+                    : device.SetRenderTarget(made.target, null), D3D_OK);
+            } },
+        { label: 'a flag past stencil', args: [0, 0, 9, 0, ONE, 0] },
     ],
     DrawPrimitiveUP: [
         { label: 'a triangle', args: [4, 1, 'data', 16], data: TRIANGLE, setup: drawable },

@@ -62,11 +62,12 @@ import { declarationLength } from '../d3d8/declaration.js';
 import { END_TOKEN } from '../d3d9/shader.js';
 import {
     DRAWABLE_MIRRORS, RENDER_STATE_MIRROR, TRANSFORM_MIRROR, VIEWPORT_GUARD_8, VIEWPORT_MIRROR,
-    commandCode, createShadow, settledAfter,
+    commandCode, compiledAt, createShadow, settledAfter,
     getRenderStateCode, getSurfaceLevelCode, getTextureStageStateCode, getTransformCode,
     getViewportCode, lockCode, stageStateMirror, unlockCode, HOST_MIRRORS, appendCommand,
     guestWords,
 } from './shadow.js';
+import { COMPILED as IN_GUEST } from './inguest.x86.js';
 import { D3D8_COMMANDS, materialOf } from '../d3d8/commands.js';
 import { D3DTSS } from '../d3d8/constants.js';
 import { loudRefusals } from './refusals.js';
@@ -2307,6 +2308,8 @@ export function createDirect3D8Seam(
             GetTextureStageState: ({ trap })=>placeCode(at=>getTextureStageStateCode(at, trap,
                 STAGE_STATE_TYPES_8)),
             GetViewport: ({ trap })=>placeCode(at=>getViewportCode(at, trap)),
+            TestCooperativeLevel: ({ trap })=>placeCode(at=>compiledAt(
+                IN_GUEST.TestCooperativeLevel, at, trap)),
             ...Object.fromEntries(Object.entries(D3D8_COMMANDS.COMMANDS).map(([name, shape])=>[
                 name, (/** @type {{ trap: number }} */ { trap })=>placeCode(at=>commandCode(at,
                     trap, { ...shape, slot: D3D8_COMMANDS.commandSlot(name),

@@ -51,7 +51,10 @@
  * flag every routine checks first, and leaves to the trap.
  */
 
-import { D3DERR_INVALIDCALL, D3DFVF_RESERVED0 } from '../d3d8/constants.js';
+import { D3DERR_INVALIDCALL, D3DFVF_RESERVED0, D3DFMT } from '../d3d8/constants.js';
+
+/** The one depth format with a stencil the devices take a stencil clear on. */
+const D3DFMT_D24S8 = D3DFMT.D24S8;
 
 /**
  * The block takes pages of its own. The routines that write it are guest
@@ -137,8 +140,41 @@ export const SHADOW = {
      */
     LOCK_RING: 5224 + 2 * 8 * 4,
     LOCK_RING_CAPACITY: 16,
-    SIZE: 5288 + 16 * 4,
+    /**
+     * Zero while the device's TestCooperativeLevel answers D3D_OK, written
+     * by the host after each of its entries: the guest's answers that, and a
+     * lost device is the host's.
+     */
+    COOPERATIVE: 5288 + 16 * 4,
+    SIZE: 5352 + 4,
 };
+
+/** Byte offsets within a query's block. */
+export const QUERY = {
+    /** Bit 0 set by the host: take the slow path. */
+    FLAGS: 0,
+    /** Its D3DQUERYTYPE. */
+    TYPE: 4,
+    SIZE: 8,
+};
+
+/**
+ * A function `scripts/guest-code` compiled, as bytes placed at `at`: its
+ * `return host()` goes to `trap`, the method's own.
+ *
+ * @param {{ code: Uint8Array, host?: number }} compiled @param {number} at @param {number} trap
+ * @returns {Uint8Array}
+ */
+export function compiledAt(compiled, at, trap){
+    const bytes = compiled.code.slice();
+    if (compiled.host !== undefined)
+    {
+        // An address after `mov eax`, else a displacement from the end of the jump.
+        new DataView(bytes.buffer).setUint32(compiled.host, bytes[compiled.host - 1] === 0xb8
+            ? trap >>> 0 : (trap - (at + compiled.host + 4)) >>> 0, true);
+    }
+    return bytes;
+}
 
 /** The bits of `SHADOW.DRAWABLE`. */
 export const DRAW = Object.freeze({
@@ -150,6 +186,10 @@ export const DRAW = Object.freeze({
     STREAM: 4,
     /** An index buffer is set. */
     INDEXED: 8,
+    /** A depth surface is set. */
+    DEPTH: 16,
+    /** And it holds a stencil. */
+    STENCIL: 32,
 });
 
 /** A command's head: the method's slot, and the record's length in bytes, its own included. */
@@ -1178,6 +1218,21 @@ function commandChecks(shape, at){
             { jcc: 0x74, to: 'out', near: true },                // jz out
             { label: 'usable' });
     }
+    if (shape.flagNeeds)
+    {
+        const { arg, pairs } = shape.flagNeeds;
+        parts.push([0x8b, 0x44, 0x24, at(arg)]);                 // mov eax, [esp+arg]
+        pairs.forEach(([flag, bits], index)=>{
+            parts.push(
+                [0xa9, ...dword(flag)],                          // test eax, flag
+                { jcc: 0x74, to: `unflagged${index}`, near: true }, // jz unflagged
+                [0x8b, 0x91, ...dword(SHADOW.DRAWABLE)],         // mov edx, [ecx+DRAWABLE]
+                [0x81, 0xe2, ...dword(bits)],                    // and edx, bits
+                [0x81, 0xfa, ...dword(bits)],                    // cmp edx, bits
+                { jcc: 0x75, to: 'out', near: true },            // jne out
+                { label: `unflagged${index}` });
+        });
+    }
     if (shape.validated)
     {
         parts.push(
@@ -1243,6 +1298,9 @@ function commandChecks(shape, at){
  *     argument the device takes only as a surface whose usage has a bit of `mask`, read
  *     from the surface's block (`SURFACE`, the word after its interface): a surface
  *     with no block is the host's, and so is a null one unless `nullable`
+ * @property {{ arg: number, pairs: readonly [number, number][] }} [flagNeeds]  flags of
+ *     an argument the device takes only with `DRAW` bits: for each pair, an argument
+ *     with a bit of the first needs every bit of the second
  * @property {number} [needs]  the `DRAW` bits the device must have for the call
  * @property {number} [refuses]  and those it must not
  * @property {boolean} [fresh]  the call reads what a state block applied in the
@@ -1586,6 +1644,29 @@ export const RENDER_TARGET_MIRROR = Object.freeze([
     [0xc7, 0x81, ...dword(SHADOW.VIEWPORT + 20), ...dword(0x3f800000)], // MaxZ 1
 ]);
 
+/** `or dword [ecx+DRAWABLE], bits`. @param {number} bits */
+const markDrawable = bits=>[0x83, 0x89, ...dword(SHADOW.DRAWABLE), bits];
+/** `and dword [ecx+DRAWABLE], ~bits`. @param {number} bits */
+const unmarkDrawable = bits=>[0x83, 0xa1, ...dword(SHADOW.DRAWABLE), ~bits & 0xff];
+
+/**
+ * The same for Direct3D 9's SetDepthStencilSurface, after its checks have
+ * found the surface a depth surface with a block, or none: whether a depth
+ * surface is set and whether it holds a stencil, which Clear's checks read.
+ */
+export const DEPTH_STENCIL_MIRROR = Object.freeze([
+    unmarkDrawable(DRAW.DEPTH | DRAW.STENCIL),
+    [0x8b, 0x44, 0x24, 0x08],                                    // mov eax, [esp+8]: the surface
+    [0x85, 0xc0],                                                // test eax, eax
+    { jcc: 0x74, to: 'depth' },                                  // jz depth
+    markDrawable(DRAW.DEPTH),
+    [0x8b, 0x40, 0x04],                                          // mov eax, [eax+4]: its block
+    [0x81, 0xb8, ...dword(SURFACE.DESC), ...dword(D3DFMT_D24S8)], // cmp [eax+Format], D24S8
+    { jcc: 0x75, to: 'depth' },                                  // jne depth
+    markDrawable(DRAW.STENCIL),
+    { label: 'depth' },
+]);
+
 /**
  * The same for SetSamplerState: the value into its sampler's slot. A sampler
  * or a type past the block is the host's.
@@ -1635,11 +1716,6 @@ export const VIEWPORT_GUARD_8 = Object.freeze([
     [0x3b, 0x81, ...dword(SHADOW.TARGET_HEIGHT)],                // cmp eax, [ecx+disp]
     { jcc: 0x77, to: 'out', near: true },                        // ja out
 ]);
-
-/** `or dword [ecx+DRAWABLE], bits`. @param {number} bits */
-const markDrawable = bits=>[0x83, 0x89, ...dword(SHADOW.DRAWABLE), bits];
-/** `and dword [ecx+DRAWABLE], ~bits`. @param {number} bits */
-const unmarkDrawable = bits=>[0x83, 0xa1, ...dword(SHADOW.DRAWABLE), ~bits & 0xff];
 
 /**
  * What the routines that change the state a draw needs keep in the block for
@@ -1820,6 +1896,7 @@ export function settledAfter(shadow, call){
  *     device holds that it takes for its value alone, zero for none
  * @property {readonly ((value: number) => boolean)[]} [takes]  per table, whether it
  *     still takes one
+ * @property {number} [cooperative]  zero while TestCooperativeLevel answers D3D_OK
  */
 
 /**
@@ -1899,6 +1976,8 @@ export function createShadow(deps){
     const textureBlocks = new WeakMap();
     /** The surfaces with a block. @type {WeakMap<object, number>} */
     const surfaceBlocks = new WeakMap();
+    /** @type {WeakMap<object, number>} */
+    const queryBlocks = new WeakMap();
     /** Resource blocks are carved from pages of their own, for the same reason as the device's. */
     const pool = { at: 0, left: 0 };
     /** The command ring's bytes in guest memory, 0 for none, and how far the host has read it. */
@@ -2135,6 +2214,7 @@ export function createShadow(deps){
                 + table * SHADOW.VALIDATED_SLOTS);
         });
         deps.writeMemory(address + SHADOW.DRAWABLE, new Uint8Array(words.buffer));
+        deps.writeMemory(address + SHADOW.COOPERATIVE, dwordBytes(state.cooperative ?? 1));
     };
 
     const mirror = ()=>{
@@ -2709,6 +2789,29 @@ export function createShadow(deps){
         },
 
         /**
+         * A query's block, made on first use: its type, for the guest's
+         * methods of an event query.
+         *
+         * @param {{ type: number }} query
+         * @returns {number} the block, or 0 when there is no memory for one
+         */
+        attachQuery(query){
+            const existing = queryBlocks.get(query);
+            if (existing !== undefined)
+            {
+                return existing;
+            }
+            const block = carve(QUERY.SIZE);
+            if (block === 0)
+            {
+                return 0;
+            }
+            deps.writeMemory(block, dwordsBytes([0, query.type]));
+            queryBlocks.set(query, block);
+            return block;
+        },
+
+        /**
          * The host published a level's surface: the guest may hand that
          * pointer out itself from now on.
          *
@@ -2925,6 +3028,14 @@ export const HOST_MIRRORS = Object.freeze({
         return true;
     },
     /** @type {HostMirror} */
+    depthStencil: (m, block, [surface])=>{
+        const depth = surface === 0 ? 0
+            : DRAW.DEPTH | (m.u32(m.u32(surface + 4) + SURFACE.DESC) === D3DFMT_D24S8
+                ? DRAW.STENCIL : 0);
+        drawable(m, block, DRAW.DEPTH | DRAW.STENCIL, depth);
+        return true;
+    },
+    /** @type {HostMirror} */
     samplerState: (m, block, [sampler, type, value])=>{
         if (sampler >= SHADOW.SAMPLER_COUNT || type >= SHADOW.SAMPLER_STATE_STRIDE)
         {
@@ -3062,6 +3173,13 @@ export function appendCommand(m, shape, mirror, call){
             seen = m.u32(table + 4 * index) === a[validated.arg];
         }
         if (!seen)
+        {
+            return undefined;
+        }
+    }
+    for (const [flag, bits] of shape.flagNeeds?.pairs ?? [])
+    {
+        if ((a[shape.flagNeeds?.arg ?? 0] & flag) !== 0 && (able & bits) !== bits)
         {
             return undefined;
         }

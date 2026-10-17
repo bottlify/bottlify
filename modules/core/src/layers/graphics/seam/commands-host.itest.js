@@ -114,7 +114,7 @@ function gate(version, list){
         put(BLOCK + SHADOW.COMMAND_BYTES, RING_BYTES);
         put(BLOCK + SHADOW.COMMAND_HEAD, next() % 6 === 0 ? RING_BYTES - next() % 300
             : 4 * (next() % 256));
-        put(BLOCK + SHADOW.DRAWABLE, next() % 16);
+        put(BLOCK + SHADOW.DRAWABLE, next() % 64);
         for (let at = BLOCK + SHADOW.RENDER_STATE_VALID; at < BLOCK + SHADOW.RENDER_STATE_VALID
             + 32; at += 4)
         {
@@ -137,10 +137,11 @@ function gate(version, list){
         if (usage)
         {
             // A surface: its interface in the data, the word after it its block
-            // (`SURFACE`) of a usage and a size at random -- or a surface with no
+            // (`SURFACE`) of a format, a usage and a size at random -- or a surface with no
             // block, or none.
             const pick = next() % 6;
             put(SURFACE_OBJECT + 4, pick === 0 ? 0 : SURFACE_BLOCK);
+            put(SURFACE_BLOCK + SURFACE.DESC, [75, 77, 22][next() % 3]);
             put(SURFACE_BLOCK + SURFACE.DESC + 8, [0, 1, 2, 3, 0x200][next() % 5]);
             put(SURFACE_BLOCK + SURFACE.DESC + 24, 1 + next() % 2048);
             put(SURFACE_BLOCK + SURFACE.DESC + 28, 1 + next() % 2048);

@@ -2402,11 +2402,14 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             const target = renderTargets.get(0);
             return {
                 drawable: (inScene ? 1 : 0) | (declared ? 2 : 0)
-                    | (streamBias() !== null ? 4 : 0) | (indices ? 8 : 0),
+                    | (streamBias() !== null ? 4 : 0) | (indices ? 8 : 0)
+                    | (depthStencil ? 16 : 0)
+                    | (depthStencil && describe(depthStencil).Format === D3DFMT.D24S8 ? 32 : 0),
                 targetWidth: target ? describe(target).Width : 0,
                 targetHeight: target ? describe(target).Height : 0,
                 clipPlanes: caps.maxUserClipPlanes,
                 taken: [vertexDeclaration.fvf >>> 0],
+                cooperative: device.TestCooperativeLevel() === D3D_OK ? 0 : 1,
             };
         },
 
