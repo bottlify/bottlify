@@ -139,6 +139,7 @@ workers answer nothing to a direct attach.
 | `record-output.mjs` | what the person hears, uncompressed off the output node, the last two minutes (`arm` keeps a tap across reloads; `save` writes a WAV) | `node tools/cdp_test/live/record-output.mjs arm` then `… save [seconds] [file]` |
 | `snapshot.mjs` | textures of the running program as the GPU holds them, as PNGs: the targets and shadow maps a frame dump names; a float format stretched between its smallest and largest values | `node tools/cdp_test/live/snapshot.mjs t4414 t754 [--out DIR]` |
 | `console.mjs` | the page's console as it happens, each line timed: WebGPU validation errors the page never shows, which Chrome stops printing after a few hundred per device -- start it with the session | `node tools/cdp_test/live/console.mjs > dbg/console.log` |
+| `shader.mjs` | a shader of the running game read whole: the Direct3D bytecode disassembled, then every WGSL translation of it -- take the id from a dump (`dumpFrames(2)`: the second frame is whole), the draw whose picture is wrong | `node tools/cdp_test/live/shader.mjs ps585 vs586 > dbg/ps585.txt` |
 
 `tools/wav-scan.mjs <file.wav>` reads such a recording for what is wrong in it: gaps of
 silence inside sound, clicks (a step far beyond the signal's own), and exact repeats.
@@ -153,6 +154,7 @@ ones need the graphics worker.
 |---|---|
 | `dumpFrames(n)`, then `dumped()` | the next n frames written down, every draw with its shaders, stages and state; `dumped()` is the last |
 | `snapshot('t4414')`, then `snapped('t4414')` | a texture as the GPU holds it at the end of the next frame: an intermediate target or a shadow map a dump names |
+| `shader('ps585')` | a shader the program drew with, by the id a dump names it: its bytecode and every WGSL translation made of it, each under its variant (fog, sampling, alpha test); `shader.mjs` prints the bytecode disassembled beside them |
 | `pick(x, y)` | which draw painted that pixel: the program paused while the frame is taken apart |
 | `freeze(on)` | shows the last frame over and over, the program paused, so a cut is seen on a still picture |
 | `maxDraws(n)` | keeps the first n draws of every frame (-1 all): bisects which draw paints a region |
@@ -169,6 +171,23 @@ ones need the graphics worker.
 | `ringTrace(n)`, `callRingSkip('A,B')` | the bridge's recent calls; names kept out of that ring |
 | `processes()`, `diagnosticsOf(id)` | every process standing; one process's diagnostics |
 | `registry`, `exported(lib, name)` | the program's registry; whether a system library exports a name |
+
+#### A wrong picture in a running game, step by step
+
+The person at the game holds the pause; nothing here presses resume or reloads the tab.
+
+1. Start `console.mjs > dbg/console.log` before anything else and read it grouped by kind: a
+   WebGPU validation error drops a whole frame, and Chrome stops printing them after a few
+   hundred per device, so a log started late shows nothing.
+2. `dumpFrames(2)`, then `dumped()`: the first frame may be caught half-way, the second is whole
+   (a frame submitted in parts is joined with `-- submitted (N draws)` lines). Find the draw by
+   its target, its textures and its state; ids (`ps585`, `t698`) last until the tab reloads.
+3. `snapshot.mjs` on the textures that draw reads and the target it writes: an input already
+   wrong points before the draw, inputs right and output wrong point at the draw.
+4. `shader.mjs ps585`: the bytecode disassembled beside its WGSL, read for the instruction that
+   came out wrong (a component, a register, a coordinate).
+5. To prove which draw it is: `skipShader('ps585')` (or `skipTexture`) and look; on a paused
+   game `freeze(true)` first, which plays the shown frame again with the switch applied.
 
 `app.diagnostics()` is the whole engine's account (what a report holds), and two reports of
 one run diffed (`report-diff.mjs`) are a scene's window.

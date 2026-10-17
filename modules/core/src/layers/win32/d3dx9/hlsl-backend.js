@@ -1471,11 +1471,12 @@ export function assemble(ir, options = {}){
         {
             decls.push({ usage: input.usage, usageIndex: input.index,
                 dest: { type: home.type, index: home.index,
-                    mask: profile.kind === 'vs' ? 0xf : used || 0xf } });
+                    mask: profile.kind === 'vs' ? 0xf : used || 0xf, centroid: input.centroid } });
         }
         else
         {
-            decls.push({ dest: { type: home.type, index: home.index, mask: used || 0xf } });
+            decls.push({ dest: { type: home.type, index: home.index, mask: used || 0xf,
+                centroid: input.centroid } });
         }
     });
     if (vposUsed !== 0)

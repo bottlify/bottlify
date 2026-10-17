@@ -87,11 +87,19 @@ const SEMANTICS = {
 };
 
 /**
+ * A semantic, with fxc's `_centroid` suffix (TEXCOORD0_centroid): a pixel shader input
+ * sampled at the centroid of the covered samples. A structure that is both a vertex
+ * shader's output and a pixel shader's input carries it on both sides, and fxc takes
+ * it on an output and leaves it there.
+ *
  * @param {string} semantic
- * @returns {{ usage: number, index: number } | { special: 'vpos' | 'vface' } | null}
+ * @returns {{ usage: number, index: number, centroid: boolean }
+ *     | { special: 'vpos' | 'vface' } | null}
  */
 export function parseSemantic(semantic){
-    const upper = semantic.toUpperCase();
+    const named = semantic.toUpperCase();
+    const centroid = named.endsWith('_CENTROID');
+    const upper = centroid ? named.slice(0, -'_CENTROID'.length) : named;
     if (upper === 'VPOS')
     {
         return { special: 'vpos' };
@@ -106,7 +114,7 @@ export function parseSemantic(semantic){
     {
         return null;
     }
-    return { usage, index: match[2] === '' ? 0 : Number(match[2]) };
+    return { usage, index: match[2] === '' ? 0 : Number(match[2]), centroid };
 }
 
 /**
@@ -1333,7 +1341,10 @@ export function lower(module, entry, profile, options = {}){
                 case 'decl':
                     for (const v of s.vars)
                     {
-                        st.env.set(v.sym, v.init ? ev(v.init, st) : unset(zero(v.sym.type)));
+                        // The value first: a call it makes may merge its branches into a new
+                        // `st.env`, and `st.env.set(...)` would have taken the old one.
+                        const value = v.init ? ev(v.init, st) : unset(zero(v.sym.type));
+                        st.env.set(v.sym, value);
                     }
                     break;
                 case 'expr':
@@ -1783,7 +1794,8 @@ export function lower(module, entry, profile, options = {}){
                 swz: Array.from({ length: parsed.special === 'vpos' ? Math.min(width, 2) : 1 },
                     (_, i)=>i) }));
         }
-        const input = b.input(parsed.usage, parsed.index, width);
+        const input = b.input(parsed.usage, parsed.index, width,
+            parsed.centroid && profile.kind === 'ps');
         return vec(b.vec({ kind: 'input', input, swz: Array.from({ length: width }, (_, i)=>i) }));
     };
 
@@ -1850,7 +1862,8 @@ export function lower(module, entry, profile, options = {}){
     for (const g of module.reachableGlobals(entry).filter(one=>one.isStatic)
         .sort((x, y)=>x.order - y.order))
     {
-        st.env.set(g, g.init ? ev(g.init, st) : zero(g.type));
+        const value = g.init ? ev(g.init, st) : zero(g.type);
+        st.env.set(g, value);
     }
     for (const p of entry.params)
     {

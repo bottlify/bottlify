@@ -8518,6 +8518,31 @@ function liveDumpOf(worker, control){
             return on;
         },
         /**
+         * A shader the program drew with, by the id a dump names it ('ps585',
+         * 'vs31'): its bytecode and every WGSL translation made of it, or null
+         * when nothing drew with it yet.
+         *
+         * @param {string} id
+         * @returns {Promise<{ tokens: number[], translations: { tag: string, wgsl: string,
+         *     error: string | null }[] } | null>}
+         */
+        shader: id=>new Promise((resolve, reject)=>{
+            if (!worker)
+            {
+                reject(new Error('shader: this run draws without a graphics worker'));
+                return;
+            }
+            const hear = (/** @type {{ data: any }} */ event)=>{
+                if (event.data?.type === 'shaderText' && event.data.id === id)
+                {
+                    worker.removeEventListener('message', hear);
+                    resolve(event.data.result);
+                }
+            };
+            worker.addEventListener('message', hear);
+            worker.postMessage({ type: 'debug', shader: id });
+        }),
+        /**
          * Which draw painted a pixel of the picture: the program is paused and
          * the graphics worker plays its last frame again cut after fewer and
          * fewer draws, reading the pixel back each time, halving to the first

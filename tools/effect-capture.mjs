@@ -27,20 +27,33 @@
  *       compiles every saved .hlsl again with our compiler, as an effect when
  *       its profile is fx, and prints what still fails -- seconds, not a run
  *
- * The tab is reached through the live driver (`tools/cdp_test/live/drive.mjs`,
- * DRIVE_PORT, default 9401).
+ * The tab is the shared browser's play tab when one is up (`browser.mjs`,
+ * CDP_PORT), else the live driver's (`tools/cdp_test/live/drive.mjs`,
+ * DRIVE_PORT, default 9401) -- never start the driver beside the shared one.
  */
 
 import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { buildEffect } from '../modules/core/src/layers/win32/d3dx9/effect-model.js';
 import { compileShader } from '../modules/core/src/layers/win32/d3dx9/hlsl-compile.js';
+import { PORT as CDP_PORT, connect } from './cdp_test/live/connect.mjs';
 
 const PORT = Number(process.env.DRIVE_PORT ?? 9401);
 const [command, target, ...flags] = process.argv.slice(2);
 
+// The shared browser a person plays in (`browser.mjs`, CDP_PORT) is used as it
+// is: starting the driver beside it opens a second Chrome on the same profile,
+// and the first one -- with the game in it -- exits.
+const shared = command !== 'build'
+    && await fetch(`http://127.0.0.1:${CDP_PORT}/json/version`).then(()=>true, ()=>false);
+const page = shared ? await connect() : null;
+
 /** @param {string} js */
 const evaluate = async js=>{
+    if (page)
+    {
+        return page.evaluate(js);
+    }
     const text = await (await fetch(`http://127.0.0.1:${PORT}/eval?js=${encodeURIComponent(js)}`))
         .text();
     return JSON.parse(text);
@@ -108,4 +121,9 @@ else
 {
     console.log('usage: node tools/effect-capture.mjs hook [--all] | save DIR | build DIR');
     process.exitCode = 1;
+}
+// The shared browser's connection would hold the process open.
+if (page)
+{
+    process.exit();
 }
