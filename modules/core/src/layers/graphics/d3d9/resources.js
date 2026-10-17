@@ -74,6 +74,7 @@ export const D3DLOCK_NO_DIRTY_UPDATE = 0x00008000;
  * @property {() => void} [hold]   The device's own reference, kept while the
  *           resource is bound and never counted in `value` (see below).
  * @property {() => void} [letGo]
+ * @property {number} [held]  How many of those the device keeps now.
  * @property {(cell: CountCell | null) => void} place  Keeps the count in the
  *           cell from now on, or, given null, back on the host.
  * @property {number} placed  The address of the cell it is kept in, or 0.
@@ -197,6 +198,10 @@ export function createReferenceCount(options = {}){
         get placed(){
             return cell?.address ?? 0;
         },
+        /** How many bindings of the device keep it: a ring that may unbind it is played first. */
+        get held(){
+            return held;
+        },
         // An implicit resource is the device's own for as long as the device
         // lives, so a binding has nothing to keep alive.
         hold(){
@@ -232,6 +237,9 @@ function sharedCount(count, retire){
     return {
         get value(){
             return count.value;
+        },
+        get held(){
+            return count.held;
         },
         get destroyed(){
             return count.destroyed;

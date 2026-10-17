@@ -541,7 +541,8 @@ export function createDirect3D8Seam(
         const device = ownerOf(object);
         if (device)
         {
-            object.settleGuestRefs ??= ()=>shadowOf(device)?.sync();
+            object.settleGuestRefs ??= (/** @type {Set<number>} */ pointers)=>
+                shadowOf(device)?.syncFor(object, pointers);
             if (interfaces === surfaceInterfaces)
             {
                 describedSurface(device, object);

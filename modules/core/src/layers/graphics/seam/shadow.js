@@ -511,6 +511,28 @@ export function createCommandReader(deps){
         /** How many calls the ring has carried. */
         taken: ()=>taken,
         /**
+         * Whether a word of the records waiting passes `test`: an object's
+         * pointer among them, which a record that binds it holds.
+         *
+         * @param {(word: number) => boolean} test
+         */
+        holds(test){
+            const head = readWord(block + SHADOW.COMMAND_HEAD);
+            if (head <= tail || head > bytes)
+            {
+                return false;
+            }
+            const words = readWords(ring + tail, (head - tail) >>> 2);
+            for (let at = 0; at < words.length; at++)
+            {
+                if (test(words[at]))
+                {
+                    return true;
+                }
+            }
+            return false;
+        },
+        /**
          * How many finished records wait in the ring for the host's next
          * entry: a program that writes a ring's worth and ends without one
          * leaves them there.
@@ -3688,6 +3710,33 @@ export function createShadow(deps){
          */
         sync(){
             if (address !== 0)
+            {
+                holding(syncAll);
+            }
+        },
+
+        /**
+         * `sync` before an object's count is read or lowered on the host, when
+         * what waits in the ring can bind or unbind it: it is bound now (a
+         * record may let it go), a record names one of its pointers, a state
+         * block applied in the ring may hold it, or it shares a container's
+         * count, which a record names by the container. Otherwise the ring
+         * waits for the next entry: a texture let go of mid-frame played a
+         * frame's records for nothing.
+         *
+         * @param {{ container?: any, counter?: { held?: number } }} object
+         * @param {Set<number>} [pointers]  where it was published
+         */
+        syncFor(object, pointers){
+            if (address === 0)
+            {
+                return;
+            }
+            const free = pointers !== undefined && pointers.size > 0
+                && object.container === undefined && object.counter?.held === 0
+                && (readWord(address + SHADOW.FLAGS) & FLAG_STALE) === 0
+                && !(commandReader?.holds(word=>pointers.has(word)) ?? false);
+            if (!free)
             {
                 holding(syncAll);
             }

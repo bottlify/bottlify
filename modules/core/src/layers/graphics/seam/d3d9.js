@@ -321,7 +321,8 @@ export function createDirect3D9Seam(
             // A record in the device's ring may name it: the ring is played
             // before its count is touched on the host, which the last
             // reference's Release always is.
-            object.settleGuestRefs ??= ()=>shadowOf(owner)?.sync();
+            object.settleGuestRefs ??= (/** @type {Set<number>} */ pointers)=>
+                shadowOf(owner)?.syncFor(object, pointers);
             if (interfaces === surfaceInterfaces)
             {
                 // Its description in a block of its own, for the guest's
