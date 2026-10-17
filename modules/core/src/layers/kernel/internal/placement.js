@@ -23,7 +23,11 @@
  * retires instructions that are no progress), instructions retired on every
  * executor where it does not. Spreading must win by `margin` to be kept:
  * concentrated is the safer of the two. A trial's windows begin `settleMs`
- * after the switch, which moves the threads. A program that begins or stops
+ * after the switch, which moves the threads; one way ahead of the other by
+ * `clear` after a window of each ends the trial there, the second round's
+ * windows of the slower way spared: in the Crysis demo's timedemo a spread
+ * window ran 400 to 580 ms a frame against 80 to 130 concentrated, and two
+ * trials in its half minute cost it a third. A program that begins or stops
  * presenting frames -- a game's load decided by what it retired, then its
  * play -- is tried again once it has done so for `changeMs`, not after the
  * winner's hold, which by then may be minutes.
@@ -43,7 +47,8 @@ export const Placement = Object.freeze({ SPREAD: 'spread', CONCENTRATE: 'concent
  * @property {number} [holdMs]  how long the winner is kept before the next trial
  * @property {number} [maxHoldMs]  the longest a winner the trials keep choosing is kept
  * @property {number} [margin]  by how much spreading must win
- * @property {number} [minFrames]  frames a window needs for frames to be its measure
+ * @property {number} [clear]  by how much one way ahead after a window of each ends the trial
+ * @property {number} [minFrames]  frames a window waits for, up to `maxWindowMs`
  * @property {number} [changeMs]  how long a program must have begun or stopped presenting
  *     frames, against the last trial's measure, for the next trial to begin
  */
@@ -52,7 +57,8 @@ export const Placement = Object.freeze({ SPREAD: 'spread', CONCENTRATE: 'concent
  * @typedef {Object} Window
  * @property {'spread' | 'concentrate'} mode
  * @property {number} ms
- * @property {number} frames  intervals between the frames presented in it
+ * @property {number} presented  frames presented in it
+ * @property {number} frames  intervals between them
  * @property {number} framesMs  the time those intervals span
  * @property {number} retired
  */
@@ -62,16 +68,22 @@ export function createPlacement(options){
     const { now, fixed = null } = options;
     const firstTrialMs = options.firstTrialMs ?? 2000;
     const windowMs = options.windowMs ?? 800;
-    const maxWindowMs = options.maxWindowMs ?? 3000;
+    const maxWindowMs = options.maxWindowMs ?? 2500;
     const settleMs = options.settleMs ?? 200;
     const rounds = options.rounds ?? 2;
     const holdMs = options.holdMs ?? 30_000;
     const maxHoldMs = options.maxHoldMs ?? 240_000;
     const margin = options.margin ?? 0.05;
-    const minFrames = options.minFrames ?? 6;
+    const clear = options.clear ?? 0.25;
+    const minFrames = options.minFrames ?? 3;
     const changeMs = options.changeMs ?? 3000;
 
-    /** @type {'spread' | 'concentrate'} */
+    /**
+     * Spread until the first trial: a program that computes on all its threads
+     * from the start has them at once, and a game's first seconds are its load.
+     *
+     * @type {'spread' | 'concentrate'}
+     */
     let mode = fixed ?? Placement.SPREAD;
     /** The trial's ways, in the order their windows run: in turn, concentrated first. */
     const order = Array.from({ length: 2 * rounds },
@@ -88,14 +100,17 @@ export function createPlacement(options){
     let hold = holdMs;
     /** @type {'spread' | 'concentrate' | null} */
     let lastWinner = null;
-    let lastFrameAt = -1;
-    /** The last `minFrames` frames' times, oldest first once full. @type {number[]} */
+    /** The last three frames' times, oldest first: presenting while they lie within a
+     * window's longest, a window then measured by frames. @type {number[]} */
     const recent = [];
     /** Whether the last trial measured by frames; null before the first. @type {boolean | null} */
     let lastByFrames = null;
     /** Since when the program has presented otherwise than the last trial measured, or -1. */
     let changedSince = -1;
     const counted = { trials: 0, spread: 0, concentrate: 0, byFrames: 0, last: '' };
+    /** Whether the program presents now: its last three frames within a window's longest. */
+    const presenting = (/** @type {number} */ at)=>recent.length === 3
+        && at - recent[0] <= maxWindowMs;
 
     /** @param {'spread' | 'concentrate'} next @param {number} at */
     const switchTo = (next, at)=>{
@@ -106,19 +121,36 @@ export function createPlacement(options){
         }
     };
 
-    /** @param {Window[]} done @returns {'spread' | 'concentrate'} */
-    const decide = done=>{
-        const byFrames = done.every(one=>one.frames >= minFrames - 1 && one.framesMs > 0);
+    /**
+     * Each way's rate over the windows done: by frames where the program
+     * presented in any of them -- a way whose window drew next to none is
+     * rated by the frames its windows' whole time held -- else by what was
+     * retired.
+     *
+     * @param {Window[]} done
+     */
+    const rates = done=>{
+        const byFrames = done.some(one=>one.frames >= 2);
         /** @param {'spread' | 'concentrate'} way */
         const rate = way=>{
             const of = done.filter(one=>one.mode === way);
             /** @param {(one: Window) => number} field */
             const total = field=>of.reduce((sum, one)=>sum + field(one), 0);
-            return byFrames ? total(one=>one.frames) / total(one=>one.framesMs)
-                : total(one=>one.retired) / total(one=>one.ms);
+            if (!byFrames)
+            {
+                return total(one=>one.retired) / total(one=>one.ms);
+            }
+            return of.every(one=>one.frames >= 1 && one.framesMs > 0)
+                ? total(one=>one.frames) / total(one=>one.framesMs)
+                : total(one=>one.presented) / total(one=>one.ms);
         };
-        const spread = rate(Placement.SPREAD);
-        const concentrated = rate(Placement.CONCENTRATE);
+        return { byFrames, spread: rate(Placement.SPREAD),
+            concentrated: rate(Placement.CONCENTRATE) };
+    };
+
+    /** @param {Window[]} done @returns {'spread' | 'concentrate'} */
+    const decide = done=>{
+        const { byFrames, spread, concentrated } = rates(done);
         const winner = spread > concentrated * (1 + margin)
             ? Placement.SPREAD : Placement.CONCENTRATE;
         counted.trials++;
@@ -145,9 +177,8 @@ export function createPlacement(options){
                 open.lastFrame = at;
                 open.frames++;
             }
-            lastFrameAt = at;
             recent.push(at);
-            if (recent.length > minFrames)
+            if (recent.length > 3)
             {
                 recent.shift();
             }
@@ -168,9 +199,7 @@ export function createPlacement(options){
             const at = now();
             if (trialAt < 0)
             {
-                // Presenting: `minFrames` frames within a window's longest.
-                const presenting = recent.length === minFrames && at - recent[0] <= maxWindowMs;
-                changedSince = lastByFrames === null || presenting === lastByFrames ? -1
+                changedSince = lastByFrames === null || presenting(at) === lastByFrames ? -1
                     : changedSince < 0 ? at : changedSince;
                 if (at < nextTrial && (changedSince < 0 || at - changedSince < changeMs))
                 {
@@ -193,14 +222,17 @@ export function createPlacement(options){
                 return;
             }
             const ms = at - open.from;
-            if (ms < windowMs || ms < maxWindowMs && open.frames < minFrames && lastFrameAt >= 0)
+            if (ms < windowMs || ms < maxWindowMs && open.frames < minFrames && presenting(at))
             {
                 return;
             }
-            windows.push({ mode, ms, retired: retired - open.retired,
+            windows.push({ mode, ms, retired: retired - open.retired, presented: open.frames,
                 frames: Math.max(0, open.frames - 1), framesMs: open.lastFrame - open.firstFrame });
             open = null;
-            if (windows.length < order.length)
+            const sofar = windows.length === 2 ? rates(windows) : null;
+            const settled = sofar !== null && (sofar.spread > sofar.concentrated * (1 + clear)
+                || sofar.concentrated > sofar.spread * (1 + clear));
+            if (windows.length < order.length && !settled)
             {
                 switchTo(order[windows.length], at);
                 return;

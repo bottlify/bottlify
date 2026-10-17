@@ -116,3 +116,16 @@ test('a program that begins presenting after a load decided by what it retired i
     assert.equal(placement.mode(), Placement.CONCENTRATE);
     assert.equal(said.holdMs, 30_000, 'the hold starts over with the new measure');
 });
+
+test('a game far slower spread is tried a few times, its slow windows ended early, and runs'
+    + ' concentrated', ()=>{
+    // The Crysis demo's timedemo on four cores: a frame every 110 ms concentrated,
+    // 450 spread, where its threads spinning on their jobs retire more.
+    const { placement, time } = run({ frameMs: { spread: 450, concentrate: 110 },
+        retiredPerMs: { spread: 900_000, concentrate: 600_000 }, ms: 300_000 });
+    const said = placement.diagnostics();
+    assert.equal(placement.mode(), Placement.CONCENTRATE);
+    assert.ok(said.trials <= 4 && said.byFrames === said.trials, JSON.stringify(said));
+    assert.ok(time.spread < 0.03 * (time.spread + time.concentrate),
+        `spread ${time.spread} ms of ${time.spread + time.concentrate}`);
+});
