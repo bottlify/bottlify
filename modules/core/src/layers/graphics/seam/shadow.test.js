@@ -237,7 +237,9 @@ test('the block fits its two pages and its regions follow one another', ()=>{
     assert.equal(SHADOW.STATE_BLOCK_DRAWS + SHADOW.STATE_BLOCK_TOKENS / 8, SHADOW.HELD);
     // The device's lock, a word the routines take with xchg: aligned.
     assert.equal(SHADOW.HELD % 4, 0);
-    assert.equal(SHADOW.HELD + 4, SHADOW.SIZE);
+    assert.equal(SHADOW.HELD + 4, SHADOW.SHADERS);
+    assert.equal(SHADOW.SHADERS + 8, SHADOW.SHADERS_VALID);
+    assert.equal(SHADOW.SHADERS_VALID + 4, SHADOW.SIZE);
     assert.equal(BUFFER.SIZE, 36);
     assert.equal(TEXTURE.LEVELS + TEXTURE.LEVEL_SLOTS * 4, TEXTURE.SIZE);
     // Enough for the longest chain a texture of this era can have: a 32768

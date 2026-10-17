@@ -184,7 +184,15 @@ export const SHADOW = {
      * writes through a pointer of the program's.
      */
     HELD: 5424 + 64,
-    SIZE: 5424 + 68,
+    /**
+     * Direct3D 8's vertex shader -- a handle or a vertex format -- and pixel
+     * shader, as GetVertexShader and GetPixelShader answer them: kept by the
+     * setters' command routines and written by the host after each of its
+     * entries, which sets `SHADERS_VALID` when the device says what they are.
+     */
+    SHADERS: 5424 + 68,
+    SHADERS_VALID: 5424 + 76,
+    SIZE: 5424 + 80,
 };
 
 /** Byte offsets within a query's block. */
@@ -1160,6 +1168,54 @@ export function getViewportCode(at, trap){
         [0xb9, ...dword(6)],                                     // mov ecx, 6
         [0xf3, 0xa5],                                            // rep movsd
         [0x5f, 0x5e],                                            // pop edi; pop esi
+        [0x31, 0xc0],                                            // xor eax, eax
+        [0xc2, 0x08, 0x00],                                      // ret 8
+    ]);
+}
+
+/**
+ * Direct3D 8's SetVertexShader or SetPixelShader as its command routine keeps
+ * it: the argument, as the getter answers it (`SHADOW.SHADERS`).
+ *
+ *     mov eax, [esp+8]
+ *     mov [ecx + SHADERS + 4*which], eax
+ *
+ * @param {0 | 1} which  vertex, pixel
+ */
+export const shaderMirror = which=>Object.freeze([
+    [0x8b, 0x44, 0x24, 0x08],                                    // mov eax, [esp+8]
+    [0x89, 0x81, ...dword(SHADOW.SHADERS + 4 * which)],          // mov [ecx+disp], eax
+]);
+
+/**
+ * HRESULT GetVertexShader(this, DWORD *handle) or GetPixelShader of Direct3D
+ * 8, as guest code: the shader out of the device's block, once the host has
+ * written it there. A null pointer goes to the host, which refuses it.
+ *
+ *     (prologue)
+ *     cmp dword [ecx + SHADERS_VALID], 0
+ *     je slow
+ *     mov edx, [esp+8]            ; handle
+ *     test edx, edx
+ *     jz slow
+ *     mov eax, [ecx + SHADERS + 4*which]
+ *     mov [edx], eax
+ *     xor eax, eax                ; D3D_OK
+ *     ret 8
+ *
+ * @param {number} at @param {number} trap @param {0 | 1} which  vertex, pixel
+ * @returns {Uint8Array}
+ */
+export function getShaderCode(at, trap, which){
+    return routine(at, trap, [
+        ...getterPrologue(),
+        [0x83, 0xb9, ...dword(SHADOW.SHADERS_VALID), 0x00],      // cmp dword [ecx+disp], 0
+        { jcc: 0x74, to: 'slow' },                               // je slow
+        [0x8b, 0x54, 0x24, 0x08],                                // mov edx, [esp+8]
+        [0x85, 0xd2],                                            // test edx, edx
+        { jcc: 0x74, to: 'slow' },                               // jz slow
+        [0x8b, 0x81, ...dword(SHADOW.SHADERS + 4 * which)],      // mov eax, [ecx+disp]
+        [0x89, 0x02],                                            // mov [edx], eax
         [0x31, 0xc0],                                            // xor eax, eax
         [0xc2, 0x08, 0x00],                                      // ret 8
     ]);
@@ -2326,6 +2382,8 @@ export function settledAfter(shadow, call){
  * @property {readonly [number, boolean][]} [stateBlocks]  the state blocks held by
  *     token, each with whether it holds what a draw's checks read
  *     (`SHADOW.STATE_BLOCKS`)
+ * @property {readonly [number, number]} [shaders]  the vertex and pixel shader as
+ *     Direct3D 8's getters answer them (`SHADOW.SHADERS`)
  */
 
 /**
@@ -2730,6 +2788,11 @@ export function createShadow(deps){
                 }
             }
             deps.writeMemory(address + SHADOW.STATE_BLOCKS, bits);
+        }
+        if (state.shaders)
+        {
+            deps.writeMemory(address + SHADOW.SHADERS,
+                dwordsBytes([state.shaders[0] >>> 0, state.shaders[1] >>> 0, 1]));
         }
     };
 

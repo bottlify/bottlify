@@ -67,6 +67,7 @@ import {
     getRenderStateCode, getSurfaceDescCode, getSurfaceLevelCode, getTextureStageStateCode,
     getTransformCode,
     getViewportCode, lockCode, stageStateMirror, unlockCode, HOST_MIRRORS, appendCommand,
+    getShaderCode, shaderMirror,
     guestWords,
 } from './shadow.js';
 import { COMPILED as IN_GUEST } from './inguest.x86.js';
@@ -92,7 +93,8 @@ export const COMMAND_MIRRORS = {
     SetViewport: [...VIEWPORT_GUARD_8, ...VIEWPORT_MIRROR],
     BeginScene: [...DRAWABLE_MIRRORS.BeginScene],
     EndScene: [...DRAWABLE_MIRRORS.EndScene],
-    SetVertexShader: [...DRAWABLE_MIRRORS.SetVertexShader8],
+    SetVertexShader: [...DRAWABLE_MIRRORS.SetVertexShader8, ...shaderMirror(0)],
+    SetPixelShader: [...shaderMirror(1)],
     SetStreamSource: [...DRAWABLE_MIRRORS.SetStreamSource8],
     SetIndices: [...DRAWABLE_MIRRORS.SetIndices],
     DrawPrimitiveUP: [...DRAWABLE_MIRRORS.DrawPrimitiveUP],
@@ -320,7 +322,7 @@ export function createDirect3D8Seam(
 {
     /** The getters a device answers in the guest, as against the calls its ring carries. */
     const GUEST_GETTERS = new Set(['GetRenderState', 'GetTransform', 'GetTextureStageState',
-        'GetViewport', 'GetSamplerState']);
+        'GetViewport', 'GetSamplerState', 'GetVertexShader', 'GetPixelShader']);
     /**
      * The guest routines a table offers, less those `traps` keeps as traps: by
      * method name, or by the group a routine belongs to -- `getters`, `ring`,
@@ -2349,6 +2351,8 @@ export function createDirect3D8Seam(
             GetTextureStageState: ({ trap })=>placeCode(at=>getTextureStageStateCode(at, trap,
                 STAGE_STATE_TYPES_8)),
             GetViewport: ({ trap })=>placeCode(at=>getViewportCode(at, trap)),
+            GetVertexShader: ({ trap })=>placeCode(at=>getShaderCode(at, trap, 0)),
+            GetPixelShader: ({ trap })=>placeCode(at=>getShaderCode(at, trap, 1)),
             TestCooperativeLevel: ({ trap })=>placeCode(at=>compiledAt(
                 IN_GUEST.TestCooperativeLevel, at, trap)),
             ...Object.fromEntries(Object.entries(D3D8_COMMANDS.COMMANDS).map(([name, shape])=>[

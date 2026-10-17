@@ -1906,6 +1906,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                     boundPixelShader >>> 0],
                 takes: [(/** @type {number} */ handle)=>vertexShaders.has(handle),
                     (/** @type {number} */ handle)=>pixelShaders.has(handle)],
+                shaders: [boundVertexShader >>> 0, boundPixelShader >>> 0],
             };
         },
 
