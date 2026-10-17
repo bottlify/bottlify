@@ -6,12 +6,12 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createRaster, presentWait } from './raster.js';
+import { createPresentQueue, createRaster } from './raster.js';
 
-/** A raster at 60 Hz over 480 lines, on a clock the test sets. */
-function clocked(){
+/** A raster at 60 Hz, or `rate`, over 480 lines, on a clock the test sets. */
+function clocked(rate = 60){
     let time = 0;
-    const raster = createRaster({ now: ()=>time, refresh: ()=>60, height: ()=>480 });
+    const raster = createRaster({ now: ()=>time, refresh: ()=>rate, height: ()=>480 });
     return {
         raster,
         /** @param {number} ms */
@@ -54,17 +54,53 @@ test('a wait for the blank lands inside it, and a wait for its end on the next f
         assert.ok(Math.abs(c.now() % period) < 0.01);
     });
 
-test('a Present waits for the blank its interval names, and IMMEDIATE for none', ()=>{
+/**
+ * A program presenting a frame every `frameMs` for `seconds` under an
+ * interval, its thread stopped as each Present says: how many frames a
+ * second it made.
+ *
+ * @param {number} rate @param {number} frameMs @param {number} interval
+ * @param {number} [seconds]
+ */
+function framesPerSecond(rate, frameMs, interval, seconds = 10){
+    const c = clocked(rate);
+    const presents = createPresentQueue(c.raster);
+    c.at(0.3);
+    let frames = 0;
+    while (c.now() < seconds * 1000)
+    {
+        c.advance(frameMs);
+        c.advance(presents.present(c.now(), interval));
+        frames++;
+    }
+    return frames / seconds;
+}
+
+test('a Present queues its frame for a blank and stops the thread only with three waiting', ()=>{
     // D3DPRESENT_INTERVAL_DEFAULT and ONE beat-sync presentation to the
-    // display's retrace; a frame loop stepping its world once a frame keeps
-    // the display's time only under that wait.
+    // display's retrace, as a flip chain does: the frame is shown at the
+    // first blank after the one before it, and the thread goes on until the
+    // frames waiting fill the queue.
     const c = clocked();
+    const presents = createPresentQueue(c.raster);
     c.at(1);
-    const toBlank = c.raster.untilBlank('begin');
-    assert.ok(toBlank > 0 && toBlank <= 1000 / 60);
-    assert.equal(presentWait(c.raster, 0, 60), toBlank, 'DEFAULT');
-    assert.equal(presentWait(c.raster, 1, 60), toBlank, 'ONE');
-    assert.equal(presentWait(c.raster, 2, 60), toBlank + 1000 / 60, 'TWO');
-    assert.equal(presentWait(c.raster, 8, 60), toBlank + 3000 / 60, 'FOUR');
-    assert.equal(presentWait(c.raster, 0x80000000, 60), 0, 'IMMEDIATE');
+    const period = 1000 / 60;
+    const first = c.raster.blankAt(1);
+    assert.ok(first > 1 && first <= 1 + period);
+    assert.deepEqual([0, 1, 2].map(()=>presents.present(1, 0)), [0, 0, 0],
+        'three frames wait at once');
+    const wait = presents.present(1, 1);
+    assert.ok(Math.abs(wait - (first - 1)) < 0.01, 'a fourth waits for the first to be shown');
+    assert.equal(presents.present(1, 0x80000000), 0, 'IMMEDIATE waits for none');
 });
+
+test('under the queue a program faster than the display keeps its rate, and a slower one its own',
+    ()=>{
+        // A frame of 12.5 ms on a 120 Hz display: stopped until the next blank at
+        // every Present, it missed one blank in two and ran at 60.
+        assert.ok(Math.abs(framesPerSecond(120, 12.5, 0) - 80) < 1, 'its own 80');
+        assert.ok(Math.abs(framesPerSecond(120, 2, 0) - 120) < 1, 'the display\'s 120');
+        assert.ok(Math.abs(framesPerSecond(120, 2, 2) - 60) < 1, 'TWO, every second blank');
+        assert.ok(Math.abs(framesPerSecond(60, 2, 8) - 15) < 1, 'FOUR, every fourth');
+        assert.ok(framesPerSecond(120, 2, 0x80000000) > 400, 'IMMEDIATE, unpaced');
+    });

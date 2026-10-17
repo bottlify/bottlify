@@ -85,6 +85,22 @@ export function createRaster({ now, refresh, height }){
             }
             return wait + LANDING;
         },
+
+        /**
+         * When the first blank at or after `at` begins, on the same clock: a
+         * moment on the edge is that blank.
+         *
+         * @param {number} at
+         * @returns {number} milliseconds
+         */
+        blankAt(at){
+            const { period, visible, total } = frame();
+            const begins = visible / total * period;
+            return begins + Math.ceil((at - begins) / period - 1e-9) * period;
+        },
+
+        /** @returns {number} a frame, in milliseconds */
+        period: ()=>frame().period,
     };
 }
 
@@ -104,23 +120,59 @@ export function rasterStatus(raster){
 const PRESENT_INTERVAL_IMMEDIATE = 0x80000000;
 
 /**
- * How long a Present waits for the blank its presentation interval names:
- * DEFAULT (0) and ONE the next blank, TWO, THREE and FOUR (2, 4, 8) that many
- * blanks on, IMMEDIATE none. A program that steps its world once a frame was
- * written against this wait and runs as many times too fast as the frames
- * outrun the display without it.
- *
- * @param {{ untilBlank: (edge: 'begin' | 'end') => number }} raster
- * @param {number} interval  The device's D3DPRESENT_INTERVAL_ value.
- * @param {number} refresh  The display's rate, in hertz.
- * @returns {number} milliseconds; zero for no wait
+ * How many frames presented and not yet shown a Present lets wait for their
+ * blanks before it stops the program's thread: Direct3D 9's frame latency,
+ * three unless an Ex device is told otherwise (Wine's d3d9ex.c
+ * test_frame_latency).
+ * ponytail: an Ex device's SetMaximumFrameLatency is not followed here; follow it
+ * when a program that sets one is measured.
  */
-export function presentWait(raster, interval, refresh){
-    const value = interval >>> 0;
-    if (value === PRESENT_INTERVAL_IMMEDIATE)
-    {
-        return 0;
-    }
-    const blanks = value === 0 ? 1 : value === 2 ? 2 : value === 4 ? 3 : value === 8 ? 4 : 1;
-    return raster.untilBlank('begin') + (blanks - 1) * 1000 / Math.max(1, refresh);
+export const FRAMES_AHEAD = 3;
+
+/**
+ * The frames a device presented, each shown at a blank its presentation
+ * interval names -- DEFAULT (0) and ONE the first after the frame before it,
+ * TWO, THREE and FOUR (2, 4, 8) that many blanks on, IMMEDIATE at once -- as
+ * a flip chain shows them: a Present queues its frame and answers, and stops
+ * the thread only while `FRAMES_AHEAD` frames already wait to be shown,
+ * until the oldest of them is. A program that steps its world once a frame
+ * is held to the display's rate and no faster; one slower than the display
+ * runs at its own rate. Stopped until the next blank at every Present, the
+ * second was held to half the display's rate whenever a frame took longer
+ * than one.
+ *
+ * @param {{ blankAt: (at: number) => number, period: () => number }} raster
+ */
+export function createPresentQueue(raster){
+    /** The blanks the frames not yet shown are shown at, the oldest first. @type {number[]} */
+    const waiting = [];
+    /** The blank the last frame is shown at. */
+    let last = -Infinity;
+    return {
+        /**
+         * A frame presented now: how long the Present stops its thread.
+         *
+         * @param {number} at  the clock, in milliseconds
+         * @param {number} interval  the device's D3DPRESENT_INTERVAL_ value
+         * @returns {number} milliseconds; zero for no wait
+         */
+        present(at, interval){
+            const value = interval >>> 0;
+            if (value === PRESENT_INTERVAL_IMMEDIATE)
+            {
+                waiting.length = 0;
+                last = -Infinity;
+                return 0;
+            }
+            while (waiting.length > 0 && waiting[0] <= at)
+            {
+                waiting.shift();
+            }
+            const blanks = value === 2 ? 2 : value === 4 ? 3 : value === 8 ? 4 : 1;
+            last = raster.blankAt(Math.max(at, last + blanks * raster.period()));
+            waiting.push(last);
+            return waiting.length > FRAMES_AHEAD
+                ? waiting[waiting.length - 1 - FRAMES_AHEAD] - at + LANDING : 0;
+        },
+    };
 }

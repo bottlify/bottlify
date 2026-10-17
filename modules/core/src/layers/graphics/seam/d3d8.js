@@ -55,7 +55,7 @@ import { PALETTE_BYTES } from '../d3d9/device.js';
 import { createCursorTeller } from './cursor.js';
 import { fpuSetupCode } from './fpu.js';
 import { ADAPTER_GUID, describeAdapter } from './adapter.js';
-import { createRaster, presentWait, rasterStatus } from './raster.js';
+import { createPresentQueue, createRaster, rasterStatus } from './raster.js';
 import { TEXTURE_OP_CAPS } from '../d3d8/validity.js';
 import { D3D_PRIVATE_DATA, createPrivateData } from './privatedata.js';
 import { declarationLength } from '../d3d8/declaration.js';
@@ -347,6 +347,7 @@ export function createDirect3D8Seam(
     const raster = createRaster({
         now, refresh: modeRefresh, height: ()=>screen().height,
     });
+    const presents = createPresentQueue(raster);
     /**
      * How the device presents, as its creation or last reset asked.
      *
@@ -359,10 +360,11 @@ export function createDirect3D8Seam(
         interval: parameters.fullScreenPresentationInterval >>> 0,
         rate: parameters.fullScreenRefreshRateInHz >>> 0 });
     /**
-     * A Present's answer, once the blank it waits for has come. Full screen
-     * Direct3D 8 beat-syncs presentation to the retrace for every interval but
-     * IMMEDIATE; windowed, only D3DSWAPEFFECT_COPY_VSYNC does, the others
-     * copying at once. An answer still to come already waited.
+     * A Present's answer, once its frame has room in the queue of frames
+     * waiting for their blanks (`createPresentQueue`). Full screen Direct3D 8
+     * beat-syncs presentation to the retrace for every interval but IMMEDIATE;
+     * windowed, only D3DSWAPEFFECT_COPY_VSYNC does, the others copying at once.
+     * An answer still to come already waited.
      *
      * @param {number | Promise<number>} hr
      * @returns {any}
@@ -375,7 +377,7 @@ export function createDirect3D8Seam(
         const interval = pacing.windowed
             ? (pacing.swapEffect === D3DSWAPEFFECT_COPY_VSYNC ? 1 : D3DPRESENT_INTERVAL_IMMEDIATE)
             : pacing.interval;
-        const wait = presentWait(raster, interval, modeRefresh());
+        const wait = presents.present(now(), interval);
         return wait > 0 ? waitUntil(now() + wait, hr) : hr;
     };
     const privateData = createPrivateData({ memory, publisher, rules: D3D_PRIVATE_DATA });

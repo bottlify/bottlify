@@ -68,7 +68,7 @@ import { D3DCREATE, D3DDEVTYPE, PALETTE_BYTES } from '../d3d9/device.js';
 import { MAX_DECLARATION_LENGTH } from '../d3d9/declaration.js';
 import { END_TOKEN } from '../d3d9/shader.js';
 import { REFRESH_HZ, REFRESH_RATES, displayModes } from '../../win32/user32/display.js';
-import { createRaster, presentWait, rasterStatus } from './raster.js';
+import { createPresentQueue, createRaster, rasterStatus } from './raster.js';
 import { queryAs, readGuid } from './guid.js';
 import { D3D_PRIVATE_DATA, createPrivateData } from './privatedata.js';
 import {
@@ -238,12 +238,14 @@ export function createDirect3D9Seam(
     const raster = createRaster({
         now, refresh: modeRefresh, height: ()=>screen().height,
     });
+    const presents = createPresentQueue(raster);
     /**
-     * A Present's answer, once the blank its presentation interval names has
-     * come: Direct3D beat-syncs presentation to the retrace for every interval
-     * but IMMEDIATE, and a program that steps its world once a frame keeps
-     * the display's time only under that wait. An answer still to come -- the
-     * device holding the call while the GPU catches up -- already waited.
+     * A Present's answer, once its frame has room in the queue of frames
+     * waiting for their blanks (`createPresentQueue`): Direct3D beat-syncs
+     * presentation to the retrace for every interval but IMMEDIATE, and a
+     * program that steps its world once a frame keeps the display's time only
+     * under that queue. An answer still to come -- the device holding the call
+     * while the GPU catches up -- already waited.
      *
      * @param {number | Promise<number>} hr
      * @returns {any}
@@ -253,7 +255,7 @@ export function createDirect3D9Seam(
         {
             return hr;
         }
-        const wait = presentWait(raster, lastParameters?.presentationInterval ?? 0, modeRefresh());
+        const wait = presents.present(now(), lastParameters?.presentationInterval ?? 0);
         return wait > 0 ? waitUntil(now() + wait, hr) : hr;
     };
 
