@@ -40,6 +40,27 @@ const HALF_CHANNELS = { r16float: 1, rg16float: 2, rgba16float: 4 };
 const FLOAT_CHANNELS = { r32float: 1, rg32float: 2, rgba32float: 4 };
 
 /**
+ * `bytes` filled with `pixel` over and over: the first pixel set, then what is
+ * filled copied onto the rest, doubling. A pixel a call, a frame of a game
+ * clearing its shadow maps and its HDR targets kept the fake's worker busy
+ * for longer than the engine ran, and the engine waited on it.
+ *
+ * @param {Uint8Array} bytes @param {ArrayLike<number>} pixel
+ */
+export function fillWith(bytes, pixel){
+    const length = bytes.length - bytes.length % pixel.length;
+    if (length === 0)
+    {
+        return;
+    }
+    bytes.set(pixel, 0);
+    for (let filled = pixel.length; filled < length; filled *= 2)
+    {
+        bytes.copyWithin(filled, 0, Math.min(filled, length - filled));
+    }
+}
+
+/**
  * @param {{ compilationMessages?: Record<string, any[]>,
  *           refusePipeline?: (descriptor: any) => string | null | undefined,
  *           occlusionSamples?: (index: number) => number,
@@ -229,12 +250,7 @@ export function createFakeDevice(options = {}){
                         : texture.format === 'bgra8unorm'
                             ? [byte(value.b), byte(value.g), byte(value.r), byte(value.a)]
                             : [byte(value.r), byte(value.g), byte(value.b), byte(value.a)];
-                deferred.push(()=>{
-                    for (let at = 0; at < texture.bytes.length; at += pixel.length)
-                    {
-                        texture.bytes.set(pixel, at);
-                    }
-                });
+                deferred.push(()=>fillWith(texture.bytes, pixel));
             }
         }
         /** @param {string} op @param {any} args */
