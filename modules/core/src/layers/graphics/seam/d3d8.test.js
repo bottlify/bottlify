@@ -26,7 +26,7 @@ import { createVtables } from '../../bridge/internal/vtable.js';
 import { createCountCells, createPublisher } from './com.js';
 import { createGraphicsLibraries } from './exports.js';
 import { ADAPTER_GUID, describeAdapter } from './adapter.js';
-import { BUFFER, SHADOW, TEXTURE } from './shadow.js';
+import { BUFFER, SHADOW, SURFACE, TEXTURE } from './shadow.js';
 import * as inGuest from './inguest.js';
 import { FPU_SETUP } from './fpu.js';
 import {
@@ -2488,4 +2488,25 @@ test('the guest\'s TestCooperativeLevel answers as the host\'s, a lost device le
     h.device(device, 'Present', [0, 0, 0, 0]);
     assert.equal(inGuest.TestCooperativeLevel(guest, device) >>> 0, HANDED);
     assert.notEqual(h.box.trap(device, 'TestCooperativeLevel', []), 0);
+});
+
+test('a surface\'s description is in its block, which the guest\'s GetDesc answers from', ()=>{
+    const h = seamed({ shadow: true });
+    const root = h.create();
+    const device = h.createDevice(root);
+    const out = 0x3200;
+    assert.equal(h.device(device, 'CreateRenderTarget',
+        [32, 16, D3DFMT.A8R8G8B8, 0, 1, out]), D3D_OK);
+    const surface = h.box.memory.readU32(out);
+    assert.ok(h.box.isGuest(surface, slot(IDIRECT3DSURFACE8_SLOTS, 'GetDesc')));
+    const block = h.box.memory.readU32(surface + 4);
+    assert.notEqual(block, 0);
+    const desc = 0x3300;
+    assert.equal(h.box.trap(surface, 'GetDesc', [desc]), D3D_OK, 'the host\'s answer');
+    assert.deepEqual(Array.from({ length: 8 },
+        (unused, i)=>h.box.memory.readU32(block + SURFACE.DESC + i * 4)),
+    Array.from({ length: 8 }, (unused, i)=>h.box.memory.readU32(desc + i * 4)), 'is the block\'s');
+    assert.equal(h.box.memory.readU32(block + SURFACE.DESC + D3DSURFACE_DESC8.Size), 32 * 16 * 4,
+        'this version\'s Size among them');
+    assert.equal(h.box.memory.readU32(block + SURFACE.DESC + D3DSURFACE_DESC8.Width), 32);
 });

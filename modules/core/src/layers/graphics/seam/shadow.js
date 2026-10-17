@@ -1224,6 +1224,17 @@ export function getSurfaceLevelCode(at, trap){
 }
 
 /**
+ * A shape's surface arguments and the usage each must have (`surfaceUsage`).
+ *
+ * @param {CommandShape} shape
+ * @returns {readonly { arg: number, mask: number, nullable?: boolean }[]}
+ */
+export const usagesOf = shape=>{
+    const usage = shape.surfaceUsage;
+    return usage === undefined ? [] : 'arg' in usage ? [usage] : usage;
+};
+
+/**
  * What a command routine checks before it takes a call, so that a call it
  * answers D3D_OK for is one the device takes: the arguments the device
  * refuses by their value, and the state it refuses a call in that the block
@@ -1281,21 +1292,19 @@ function commandChecks(shape, at){
             [0x3b, 0x81, ...dword(shape.below.word)],            // cmp eax, [ecx+word]
             { jcc: 0x73, to: 'out', near: true });               // jae out
     }
-    if (shape.surfaceUsage)
-    {
-        const { arg, mask, nullable = false } = shape.surfaceUsage;
+    usagesOf(shape).forEach(({ arg, mask, nullable = false }, index)=>{
         parts.push(
             [0x8b, 0x44, 0x24, at(arg)],                         // mov eax, [esp+arg]
             [0x85, 0xc0],                                        // test eax, eax
-            { jcc: 0x74, to: nullable ? 'usable' : 'out', near: true }, // jz usable / out
+            { jcc: 0x74, to: nullable ? `usable${index}` : 'out', near: true }, // jz usable / out
             [0x8b, 0x40, 0x04],                                  // mov eax, [eax+4]: its block
             [0x85, 0xc0],                                        // test eax, eax
             { jcc: 0x74, to: 'out', near: true },                // jz out
             // test dword [eax + DESC + Usage], mask
             [0xf7, 0x80, ...dword(SURFACE.DESC + 8), ...dword(mask)],
             { jcc: 0x74, to: 'out', near: true },                // jz out
-            { label: 'usable' });
-    }
+            { label: `usable${index}` });
+    });
     if (shape.vertexRange)
     {
         const { buffer, start, count } = shape.vertexRange;
@@ -1394,10 +1403,11 @@ function commandChecks(shape, at){
  *     the device takes or not by its value alone: one with a bit of `when` is
  *     taken here only if the host has seen the device take it, in that table
  *     of `SHADOW.VALIDATED`
- * @property {{ arg: number, mask: number, nullable?: boolean }} [surfaceUsage]  an
+ * @property {{ arg: number, mask: number, nullable?: boolean }
+ *     | readonly { arg: number, mask: number, nullable?: boolean }[]} [surfaceUsage]  an
  *     argument the device takes only as a surface whose usage has a bit of `mask`, read
  *     from the surface's block (`SURFACE`, the word after its interface): a surface
- *     with no block is the host's, and so is a null one unless `nullable`
+ *     with no block is the host's, and so is a null one unless `nullable`; or several
  * @property {{ buffer: number, start: number, count: number }} [vertexRange]  a Direct3D 7
  *     vertex buffer argument and the range of its vertices a draw reads: taken only for a
  *     buffer with a block (`VERTEX_BUFFER7`), not locked, holding the range whole
@@ -1808,12 +1818,15 @@ export const VIEWPORT_MIRROR = Object.freeze([
 ]);
 
 /**
- * The same for Direct3D 9's SetRenderTarget, after its checks have found the
- * surface a target with a block: the viewport a new target brings -- all of it,
- * depths 0 and 1 -- and the target's size, from the surface's description.
+ * The same for a SetRenderTarget, after its checks have found the surface a
+ * target with a block: the viewport a new target brings -- all of it, depths
+ * 0 and 1 -- and the target's size, from the surface's description. The
+ * surface is the argument at `[esp+at]`: Direct3D 9's second, 8's first.
+ *
+ * @param {number} at
  */
-export const RENDER_TARGET_MIRROR = Object.freeze([
-    [0x8b, 0x44, 0x24, 0x0c],                                    // mov eax, [esp+12]: the surface
+export const renderTargetMirror = at=>Object.freeze([
+    [0x8b, 0x44, 0x24, at],                                      // mov eax, [esp+at]: the surface
     [0x8b, 0x40, 0x04],                                          // mov eax, [eax+4]: its block
     [0x8b, 0x90, ...dword(SURFACE.DESC + 24)],                   // mov edx, [eax+Width]
     [0x89, 0x91, ...dword(SHADOW.VIEWPORT + 8)],                 // mov [ecx+viewport W], edx
@@ -1826,6 +1839,7 @@ export const RENDER_TARGET_MIRROR = Object.freeze([
     [0xc7, 0x81, ...dword(SHADOW.VIEWPORT + 16), ...dword(0)],   // MinZ 0
     [0xc7, 0x81, ...dword(SHADOW.VIEWPORT + 20), ...dword(0x3f800000)], // MaxZ 1
 ]);
+export const RENDER_TARGET_MIRROR = renderTargetMirror(0x0c);
 
 /** `or dword [ecx+DRAWABLE], bits`. @param {number} bits */
 const markDrawable = bits=>[0x83, 0x89, ...dword(SHADOW.DRAWABLE), bits];
@@ -1877,14 +1891,56 @@ export const STRETCH_GUARD = Object.freeze([
     { label: 'stretchApart' },
 ]);
 
+/** Where `STRETCH_GUARD` loads the target, and where it reads the source's texture. */
+const STRETCH_TARGET = STRETCH_GUARD.findIndex(part=>Array.isArray(part) && part[0] === 0x8b
+    && part[1] === 0x54);
+const STRETCH_CONTAINER = STRETCH_GUARD.findIndex(part=>Array.isArray(part) && part[0] === 0x8b
+    && part[1] === 0x40 && part[2] === SURFACE.CONTAINER);
+
 /**
- * The same for Direct3D 9's SetDepthStencilSurface, after its checks have
- * found the surface a depth surface with a block, or none: whether a depth
- * surface is set and whether it holds a stencil, which Clear's checks read.
+ * What Direct3D 8's CopyRects has to be for the guest to take it, as Direct3D
+ * 9's StretchRect (`STRETCH_GUARD`): no rectangles, so the source travels
+ * whole; two render targets in the default pool with blocks, not the same one
+ * and not levels of one texture, of one format and one size -- a copy cannot
+ * stretch -- and a device that records for one drawing elsewhere, which
+ * copies between them on the GPU.
  */
-export const DEPTH_STENCIL_MIRROR = Object.freeze([
+export const COPY_GUARD_8 = Object.freeze([
+    [0x83, 0x7c, 0x24, 0x0c, 0x00],                              // cmp dword [esp+12], 0
+    { jcc: 0x75, to: 'out', near: true },                        // jne out: rectangles
+    ...STRETCH_GUARD.slice(4, STRETCH_TARGET),                    // ELSEWHERE, the source
+    [0x8b, 0x54, 0x24, 0x14],                                    // mov edx, [esp+20]: the target
+    ...STRETCH_GUARD.slice(STRETCH_TARGET + 1, STRETCH_CONTAINER), // its block, pools, usages
+    // One format and one size, a word at a time: the source's block again in EAX.
+    ...[0, 24, 28].flatMap(offset=>[
+        [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
+        [0x8b, 0x40, 0x04],                                      // mov eax, [eax+4]
+        [0x8b, 0x40, SURFACE.DESC + offset],                     // mov eax, [eax+DESC+o]
+        [0x3b, 0x42, SURFACE.DESC + offset],                     // cmp eax, [edx+DESC+o]
+        { jcc: 0x75, to: 'out', near: true },                    // jne out
+    ]),
+    [0x8b, 0x44, 0x24, 0x08],                                    // mov eax, [esp+8]
+    [0x8b, 0x40, 0x04],                                          // mov eax, [eax+4]
+    [0x8b, 0x40, SURFACE.CONTAINER],                             // mov eax, [eax+CONTAINER]
+    [0x85, 0xc0],                                                // test eax, eax
+    { jcc: 0x74, to: 'copyApart' },                              // jz apart
+    [0x3b, 0x42, SURFACE.CONTAINER],                             // cmp eax, [edx+CONTAINER]
+    { jcc: 0x74, to: 'out', near: true },                        // je out: one texture
+    { label: 'copyApart' },
+]);
+
+/**
+ * The same for a depth surface set -- Direct3D 9's SetDepthStencilSurface,
+ * 8's SetRenderTarget -- after its checks have found the surface a depth
+ * surface with a block, or none: whether a depth surface is set and whether
+ * it holds a stencil, which Clear's checks read. The surface is the argument
+ * at `[esp+at]`.
+ *
+ * @param {number} at
+ */
+export const depthStencilMirror = at=>Object.freeze([
     unmarkDrawable(DRAW.DEPTH | DRAW.STENCIL),
-    [0x8b, 0x44, 0x24, 0x08],                                    // mov eax, [esp+8]: the surface
+    [0x8b, 0x44, 0x24, at],                                      // mov eax, [esp+at]: the surface
     [0x85, 0xc0],                                                // test eax, eax
     { jcc: 0x74, to: 'depth' },                                  // jz depth
     markDrawable(DRAW.DEPTH),
@@ -1894,6 +1950,7 @@ export const DEPTH_STENCIL_MIRROR = Object.freeze([
     markDrawable(DRAW.STENCIL),
     { label: 'depth' },
 ]);
+export const DEPTH_STENCIL_MIRROR = depthStencilMirror(0x08);
 
 /**
  * The same for SetSamplerState: the value into its sampler's slot. A sampler
@@ -3315,6 +3372,19 @@ export const HOST_MIRRORS = Object.freeze({
         drawable(m, block, DRAW.DEPTH | DRAW.STENCIL, depth);
         return true;
     },
+    /** Direct3D 8's CopyRects, as `COPY_GUARD_8` takes it. @type {HostMirror} */
+    copy8: (m, block, [source, rects, , target])=>{
+        if (rects !== 0 || !HOST_MIRRORS.stretch(m, block, [source, 0, target, 0]))
+        {
+            return false;
+        }
+        const from = m.u32(source + 4) + SURFACE.DESC;
+        const to = m.u32(target + 4) + SURFACE.DESC;
+        return [0, 24, 28].every(offset=>m.u32(from + offset) === m.u32(to + offset));
+    },
+    /** Direct3D 8's SetRenderTarget: the target, then its depth surface or none. @type {HostMirror} */
+    renderTarget8: (m, block, [target, depth])=>HOST_MIRRORS.renderTarget(m, block, [0, target])
+        && HOST_MIRRORS.depthStencil(m, block, [depth]),
     /** @type {HostMirror} */
     samplerState: (m, block, [sampler, type, value])=>{
         if (sampler >= SHADOW.SAMPLER_COUNT || type >= SHADOW.SAMPLER_STATE_STRIDE)
@@ -3464,8 +3534,7 @@ export function appendCommand(m, shape, mirror, call){
             return undefined;
         }
     }
-    const usage = shape.surfaceUsage;
-    if (usage)
+    for (const usage of usagesOf(shape))
     {
         const surface = a[usage.arg];
         const owner = surface === 0 ? 0 : m.u32(surface + 4);

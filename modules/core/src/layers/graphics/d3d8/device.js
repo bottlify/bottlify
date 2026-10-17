@@ -313,6 +313,8 @@ function isTransformType(type){
  *     Told the bytes of each dynamic buffer a draw reads (`drawn.js`), by a
  *     device that records for one drawing elsewhere, which has to be sent
  *     what the program wrote there after the unlock.
+ * @property {boolean} [renderedElsewhere]  the device records for one that draws in
+ *     another thread, which makes the GPU's copies there
  * @property {(work: () => any) => any} [whileStill]  Runs `work` as one pause of
  *     the program's (`whileStill`), for a device that records: what it compares of
  *     guest memory in the pause it compares once.
@@ -415,7 +417,7 @@ export function createDirect3D8(options = {}){
         free: giveBack, dumpDraws, dumpEvery, liveDump, maxDraws, divergence, skipTexture,
         probeTexture, fog, mips, nanProbe, driverRules, onDeviceLost, gamma, frameQueued, drawsFrom,
         occlusionCounted,
-        whileStill, rectangleBump, ...caps
+        whileStill, rectangleBump, renderedElsewhere, ...caps
     } = options;
     /** @type {DeviceCaps} */
     const resolved = { ...DEFAULT_CAPS, ...caps, fullscreenGamma: gamma?.applies() === true };
@@ -425,7 +427,7 @@ export function createDirect3D8(options = {}){
         free: giveBack, dumpDraws, dumpEvery, liveDump, maxDraws, divergence, skipTexture,
         probeTexture, fog, mips, nanProbe, driverRules, onDeviceLost, gamma, frameQueued, drawsFrom,
         occlusionCounted,
-        whileStill, rectangleBump,
+        whileStill, rectangleBump, renderedElsewhere,
     };
     if (backend && !readMemory)
     {
@@ -1887,6 +1889,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 targetHeight: target?.Height ?? 0,
                 clipPlanes: CLIP_PLANES,
                 cooperative: device.TestCooperativeLevel() === D3D_OK ? 0 : 1,
+                elsewhere: services.renderedElsewhere === true ? 1 : 0,
                 taken: [isShaderHandle(boundVertexShader) ? boundVertexShader >>> 0 : 0,
                     boundPixelShader >>> 0],
                 takes: [(/** @type {number} */ handle)=>vertexShaders.has(handle),
@@ -3115,6 +3118,9 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
          * @param {{ moves?: SurfaceMove[] }} [out]
          */
         CopyRects(source, rects, rectCount, destination, points, out = {}){
+            /** A texture level or a render target: what the GPU draws into or from. */
+            const onGpu = (/** @type {any} */ surface, /** @type {any} */ desc)=>
+                Boolean(surface.container) || (desc.Usage & D3DUSAGE.RENDERTARGET) !== 0;
             if (!source || !destination)
             {
                 return D3DERR_INVALIDCALL;
@@ -3143,6 +3149,18 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             if (renderer?.copySurface && to.Pool !== D3DPOOL.SYSTEMMEM
                 && copies.every(copy=>
                     renderer.copySurface(source, copy.rect, destination, copy.at)))
+            {
+                out.moves = [];
+                return D3D_OK;
+            }
+            // Recording for a device that draws elsewhere, there is no renderer
+            // here to ask: the played one copies between two surfaces its GPU
+            // holds, not one texture, and their guest bytes hold no pixels --
+            // read back and moved here, a target's worth of bytes crossed for
+            // nothing (as Direct3D 9's StretchRect).
+            if (services.renderedElsewhere === true && to.Pool !== D3DPOOL.SYSTEMMEM
+                && onGpu(source, from) && onGpu(destination, to) && source !== destination
+                && !(source.container && source.container === destination.container))
             {
                 out.moves = [];
                 return D3D_OK;

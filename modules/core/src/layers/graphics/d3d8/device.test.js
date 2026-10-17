@@ -1519,6 +1519,34 @@ test('CopyRects refuses a format it would have to convert', ()=>{
     assertFullyReleased(device);
 });
 
+test('recording for a device that draws elsewhere, a copy between two targets moves no bytes',
+    ()=>{
+        // The played device copies them on its GPU, where their pixels are: their
+        // guest bytes hold none, and reading them back here crossed a target's worth.
+        for (const elsewhere of [false, true])
+        {
+            const device = createDevice({ caps: { renderedElsewhere: elsewhere } });
+            /** @type {{ surface?: any }} */
+            const source = {};
+            /** @type {{ surface?: any }} */
+            const destination = {};
+            assert.equal(device.CreateRenderTarget(64, 64, D3DFMT.A8R8G8B8, false, source), D3D_OK);
+            assert.equal(device.CreateRenderTarget(64, 64, D3DFMT.A8R8G8B8, false, destination),
+                D3D_OK);
+            /** @type {{ moves?: any[] }} */
+            const out = {};
+            assert.equal(device.CopyRects(source.surface, null, 0, destination.surface, null, out),
+                D3D_OK);
+            assert.equal(out.moves?.length, elsewhere ? 0 : 1,
+                elsewhere ? 'nothing moved' : 'drawing itself without a GPU, the bytes move');
+            assert.equal(device.ringState().elsewhere, elsewhere ? 1 : 0,
+                'and the guest\'s routines know which');
+            source.surface.release();
+            destination.surface.release();
+            assertFullyReleased(device);
+        }
+    });
+
 // --- image surfaces, where D3D9 has offscreen plain ones ---
 
 test('an image surface is always system memory with no usage', ()=>{

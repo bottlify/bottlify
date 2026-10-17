@@ -207,6 +207,56 @@ const renderStatesOf = device=>{
  */
 
 /**
+ * The objects a case made, each at its interface in guest memory with its
+ * block one word on: a surface's of its own with its description, and a
+ * Direct3D 7 vertex buffer's with its lock and its vertices, as the seams
+ * publish them; any other's is the device's block.
+ *
+ * @param {ReturnType<typeof machine>['host']} host @param {Record<string, any>} made
+ * @returns {Map<number, any>} the objects by pointer
+ */
+function placeObjects(host, made){
+    /** @type {Map<number, any>} */
+    const pointers = new Map();
+    /** @type {Map<object, number>} */
+    const containers = new Map();
+    Object.keys(made).forEach((key, i)=>{
+        const at = OBJECTS + i * 16;
+        /** @type {{ desc?: any }} */
+        const held = {};
+        const surface = typeof made[key].LockRect === 'function'
+            && typeof made[key].GetDesc === 'function'
+            && made[key].GetDesc(held) === D3D_OK && held.desc;
+        const vertices = !surface && typeof made[key].numVertices === 'number'
+            && typeof made[key].LockInPlace === 'function';
+        const block = surface || vertices ? SURFACES + i * SURFACE.SIZE : BLOCK;
+        if (vertices)
+        {
+            const words = new Uint32Array(VERTEX_BUFFER7.SIZE / 4);
+            words[VERTEX_BUFFER7.LOCKED / 4] = made[key].locked ? 1 : 0;
+            words[VERTEX_BUFFER7.VERTICES / 4] = made[key].numVertices;
+            host.writePhysical(block, new Uint8Array(words.buffer));
+        }
+        if (surface)
+        {
+            // And the texture it is a level of, numbered as the shadow numbers them.
+            const container = made[key].container;
+            if (container && !containers.has(container))
+            {
+                containers.set(container, containers.size + 1);
+            }
+            const { Format, Type, Usage, Pool, Width, Height } = held.desc;
+            host.writePhysical(block, new Uint8Array(new Uint32Array([0, Format, Type,
+                Usage, Pool, 0, 0, Width, Height,
+                container ? /** @type {number} */ (containers.get(container)) : 0]).buffer));
+        }
+        host.writePhysical(at + 4, new Uint8Array(u32(block)));
+        pointers.set(at, made[key]);
+    });
+    return pointers;
+}
+
+/**
  * Runs every case of every command, and says which the guest took that the
  * device refuses.
  *
@@ -232,48 +282,8 @@ function gate(api, table){
             /** @type {Record<string, any>} */
             const made = {};
             setup?.(device, made);
-            /** @type {Map<number, any>} */
-            const pointers = new Map();
             const names = Object.keys(made);
-            /** @type {Map<object, number>} */
-            const containers = new Map();
-            names.forEach((key, i)=>{
-                const at = OBJECTS + i * 16;
-                // An object's interface points at its block one word on; a
-                // surface's at a block of its own with its description, as the
-                // seam publishes one.
-                /** @type {{ desc?: any }} */
-                const held = {};
-                const surface = typeof made[key].LockRect === 'function'
-                    && typeof made[key].GetDesc === 'function'
-                    && made[key].GetDesc(held) === D3D_OK && held.desc;
-                // A Direct3D 7 vertex buffer's: whether it is locked, and its vertices.
-                const vertices = !surface && typeof made[key].numVertices === 'number'
-                    && typeof made[key].LockInPlace === 'function';
-                const block = surface || vertices ? SURFACES + i * SURFACE.SIZE : BLOCK;
-                if (vertices)
-                {
-                    const words = new Uint32Array(VERTEX_BUFFER7.SIZE / 4);
-                    words[VERTEX_BUFFER7.LOCKED / 4] = made[key].locked ? 1 : 0;
-                    words[VERTEX_BUFFER7.VERTICES / 4] = made[key].numVertices;
-                    host.writePhysical(block, new Uint8Array(words.buffer));
-                }
-                if (surface)
-                {
-                    // And the texture it is a level of, numbered as the shadow numbers them.
-                    const container = made[key].container;
-                    if (container && !containers.has(container))
-                    {
-                        containers.set(container, containers.size + 1);
-                    }
-                    const { Format, Type, Usage, Pool, Width, Height } = held.desc;
-                    host.writePhysical(block, new Uint8Array(new Uint32Array([0, Format, Type,
-                        Usage, Pool, 0, 0, Width, Height,
-                        container ? /** @type {number} */ (containers.get(container)) : 0]).buffer));
-                }
-                host.writePhysical(at + 4, new Uint8Array(u32(block)));
-                pointers.set(at, made[key]);
-            });
+            const pointers = placeObjects(host, made);
             /** @param {number | string} arg */
             const value = arg=>(typeof arg === 'number' ? arg >>> 0
                 : arg === 'data' ? DATA : OBJECTS + names.indexOf(arg) * 16);
@@ -704,6 +714,49 @@ test('Direct3D 8: every call the command ring answers for in the guest is one th
     ()=>{
         gate({ ...D3D8_COMMANDS, mirrors: MIRRORS_8, device: device8 }, {
             ...shared(drawable8),
+            // A whole target onto another of its size, where the device draws elsewhere.
+            CopyRects: [
+                { label: 'two targets of one size', args: ['small', 0, 0, 'other', 0],
+                    caps: ELSEWHERE, setup: targets },
+                { label: 'two sizes', args: ['big', 0, 0, 'small', 0], caps: ELSEWHERE,
+                    setup: targets },
+                { label: 'a device drawing itself', args: ['small', 0, 0, 'other', 0],
+                    setup: targets },
+                { label: 'rectangles', args: ['small', 'data', 1, 'other', 'data'],
+                    data: [0, 0, 8, 8], caps: ELSEWHERE, setup: targets },
+                { label: 'the same surface', args: ['small', 0, 0, 'small', 0],
+                    caps: ELSEWHERE, setup: targets },
+                { label: 'a depth surface', args: ['depth', 0, 0, 'target', 0],
+                    caps: ELSEWHERE, setup: offscreen },
+                { label: 'two formats', args: ['small', 0, 0, 'argb', 0], caps: ELSEWHERE,
+                    setup: (device, made)=>{
+                        targets(device, made);
+                        /** @type {{ surface?: any }} */
+                        const out = {};
+                        assert.equal(device.CreateRenderTarget(16, 16, D3DFMT_A8R8G8B8, 0, out),
+                            D3D_OK);
+                        made.argb = out.surface;
+                    } },
+            ],
+            // Both targets at once: a null target keeps the bound one, the host's.
+            SetRenderTarget: [
+                { label: 'a target and a depth surface', args: ['target', 'depth'],
+                    setup: offscreen },
+                { label: 'a target and none', args: ['target', 0], setup: offscreen },
+                { label: 'no target', args: [0, 'depth'], setup: offscreen },
+                { label: 'a depth surface for a target', args: ['depth', 'depth'],
+                    setup: offscreen },
+                { label: 'a target for a depth surface', args: ['target', 'target'],
+                    setup: offscreen },
+                { label: 'a texture level for a target', args: ['level', 0],
+                    setup: (device, made)=>{
+                        texture(device, made);
+                        /** @type {{ surface?: any }} */
+                        const out = {};
+                        assert.equal(made.texture.GetSurfaceLevel(0, out), D3D_OK);
+                        made.level = out.surface;
+                    } },
+            ],
             SetStreamSource: [
                 { label: 'stream 0', args: [0, 'vertices', 16], setup: (device, made)=>{
                     drawable8(device, made);
@@ -763,12 +816,7 @@ function sequence(api, setup, steps){
     const made = {};
     setup(device, made);
     const names = Object.keys(made);
-    /** @type {Map<number, any>} */
-    const pointers = new Map();
-    names.forEach((key, i)=>{
-        host.writePhysical(OBJECTS + i * 16 + 4, new Uint8Array(u32(BLOCK)));
-        pointers.set(OBJECTS + i * 16, made[key]);
-    });
+    const pointers = placeObjects(host, made);
     start(device.ringState(), renderStatesOf(device));
     /** @type {Uint8Array | null} */
     let ring = null;
@@ -871,6 +919,27 @@ test('Direct3D 8: the routines keep what a draw needs as the device does, call a
         ['BeginScene', [], 'ok'],
         ['EndScene', [], 'ok'],
         ['EndScene', [], 'trap'],
+    ]);
+    // What a target set says of the depth surface, which Clear's checks read,
+    // and of the viewport, which SetViewport's do.
+    /** @param {any} device @param {Record<string, any>} made */
+    const depthTargets = (device, made)=>{
+        offscreen(device, made);
+        /** @type {{ surface?: any }} */
+        const out = {};
+        assert.equal(device.CreateDepthStencilSurface(16, 16, D3DFMT_D24S8, out), D3D_OK);
+        made.stencil = out.surface;
+    };
+    sequence(api, depthTargets, [
+        ['SetRenderTarget', ['target', 'depth'], 'ok'],
+        ['Clear', [0, 0, 3, 0, ONE, 0], 'ok'],
+        ['Clear', [0, 0, 7, 0, ONE, 0], 'trap'],
+        ['SetRenderTarget', ['target', 'stencil'], 'ok'],
+        ['Clear', [0, 0, 7, 0, ONE, 0], 'ok'],
+        ['SetViewport', ['data'], 'ok', [0, 0, 16, 16, 0, ONE]],
+        ['SetViewport', ['data'], 'trap', [0, 0, 64, 64, 0, ONE]],
+        ['SetRenderTarget', ['target', 0], 'ok'],
+        ['Clear', [0, 0, 2, 0, ONE, 0], 'trap'],
     ]);
 });
 

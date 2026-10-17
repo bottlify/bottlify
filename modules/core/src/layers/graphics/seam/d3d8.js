@@ -62,8 +62,10 @@ import { declarationLength } from '../d3d8/declaration.js';
 import { END_TOKEN } from '../d3d9/shader.js';
 import {
     DRAWABLE_MIRRORS, RENDER_STATE_MIRROR, TRANSFORM_MIRROR, VIEWPORT_GUARD_8, VIEWPORT_MIRROR,
-    commandCode, compiledAt, createShadow, settledAfter,
-    getRenderStateCode, getSurfaceLevelCode, getTextureStageStateCode, getTransformCode,
+    commandCode, compiledAt, createShadow, settledAfter, depthStencilMirror, renderTargetMirror,
+    COPY_GUARD_8,
+    getRenderStateCode, getSurfaceDescCode, getSurfaceLevelCode, getTextureStageStateCode,
+    getTransformCode,
     getViewportCode, lockCode, stageStateMirror, unlockCode, HOST_MIRRORS, appendCommand,
     guestWords,
 } from './shadow.js';
@@ -94,6 +96,9 @@ export const COMMAND_MIRRORS = {
     SetStreamSource: [...DRAWABLE_MIRRORS.SetStreamSource8],
     SetIndices: [...DRAWABLE_MIRRORS.SetIndices],
     DrawPrimitiveUP: [...DRAWABLE_MIRRORS.DrawPrimitiveUP],
+    // The target is the first argument, the depth surface the second.
+    SetRenderTarget: [...renderTargetMirror(0x08), ...depthStencilMirror(0x0c)],
+    CopyRects: [...COPY_GUARD_8],
 };
 
 /**
@@ -110,6 +115,8 @@ export const HOST_COMMAND_MIRRORS = {
     EndScene: HOST_MIRRORS.endScene,
     SetStreamSource: HOST_MIRRORS.streamSource8,
     SetIndices: HOST_MIRRORS.indices,
+    SetRenderTarget: HOST_MIRRORS.renderTarget8,
+    CopyRects: HOST_MIRRORS.copy8,
 };
 
 /**
@@ -432,6 +439,25 @@ export function createDirect3D8Seam(
         return at;
     };
 
+    /**
+     * A surface's description in a block of its own, for the guest's GetDesc
+     * and the command routines that check what a surface is: nothing changes
+     * it while the surface lives. Made when the surface is first published,
+     * which writes the block's address one word past the interface.
+     *
+     * @param {any} device @param {any} surface
+     */
+    const describedSurface = (device, surface)=>{
+        surface.guestState ??= ()=>shadowOf(device)?.attachSurface(surface, at=>{
+            /** @type {{ desc?: any }} */
+            const held = {};
+            if (surface.GetDesc(held) === D3D_OK && held.desc)
+            {
+                fields.writeStruct(at, D3DSURFACE_DESC8, held.desc);
+            }
+        }) ?? 0;
+    };
+
     /** @type {Record<string, (builder: { trap: number }) => number>} */
     const textureGuests = guestsBut('levels', allocate
         ? { GetSurfaceLevel: ({ trap })=>placeCode(at=>getSurfaceLevelCode(at, trap)) }
@@ -465,6 +491,11 @@ export function createDirect3D8Seam(
         if (!shadow)
         {
             return;
+        }
+        const device = ownerOf(texture);
+        if (device)
+        {
+            describedSurface(device, surface);
         }
         // Publishing is memoised, so this is the pointer the program now holds.
         shadow.noteLevel(texture, level,
@@ -506,6 +537,10 @@ export function createDirect3D8Seam(
         if (device)
         {
             object.settleGuestRefs ??= ()=>shadowOf(device)?.sync();
+            if (interfaces === surfaceInterfaces)
+            {
+                describedSurface(device, object);
+            }
         }
         const pointer = publisher.publish(object, interfaces, id);
         fields.writeU32(out, pointer);
@@ -688,7 +723,10 @@ export function createDirect3D8Seam(
             locked=>surface.LockRect(locked, readRect(rect), flags >>> 0)),
         /** @param {any} surface */
         UnlockRect: surface=>surface.UnlockRect(),
-    }, {}, retire)];
+    }, guestsBut('levels', allocate
+        ? { GetDesc: (/** @type {{ trap: number }} */ { trap })=>
+            placeCode(at=>getSurfaceDescCode(at, trap)) }
+        : {}), retire)];
 
     const textureMethods = {
         ...resourceMethods(D3DRTYPE.TEXTURE),

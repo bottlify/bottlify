@@ -19,7 +19,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createCorkHost } from '../../cpu/internal/cork-host.js';
 import * as cork from '../../../../../cork/src/index.js';
-import { SHADOW, SURFACE, appendCommand, commandCode } from './shadow.js';
+import { SHADOW, SURFACE, appendCommand, usagesOf, commandCode } from './shadow.js';
 import { COMMANDS, commandSlot } from '../d3d9/commands.js';
 import { D3D8_COMMANDS } from '../d3d8/commands.js';
 import { COMMAND_MIRRORS as MIRRORS_9, HOST_COMMAND_MIRRORS as HOST_9 } from './d3d9.js';
@@ -140,7 +140,7 @@ function gate(version, list){
         // usage, a pool, a size and a texture at random -- or one with no
         // block, or none, or the other's.
         const surfaceArgs = [...entry.shape.objects ?? [],
-            ...entry.shape.surfaceUsage ? [entry.shape.surfaceUsage.arg] : []];
+            ...usagesOf(entry.shape).map(usage=>usage.arg)];
         [[SURFACE_OBJECT, SURFACE_BLOCK], [OTHER_OBJECT, OTHER_BLOCK]].forEach(([object, block])=>{
             put(object + 4, next() % 6 === 0 ? 0 : block);
             put(block + SURFACE.DESC, [75, 77, 22][next() % 3]);
