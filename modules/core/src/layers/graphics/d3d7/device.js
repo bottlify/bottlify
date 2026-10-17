@@ -170,6 +170,29 @@ export function d3dFormatOf(format){
 }
 
 /**
+ * A pixel of a surface's format as a D3DCOLOR: each channel its mask's bits
+ * stretched to eight, alpha full where the format has none.
+ *
+ * @param {{ redMask: number, greenMask: number, blueMask: number, alphaMask?: number }} format
+ * @param {number} value
+ */
+function colourOf(format, value){
+    /** @param {number} mask @param {number} absent */
+    const channel = (mask, absent)=>{
+        const bits = mask >>> 0;
+        if (bits === 0)
+        {
+            return absent;
+        }
+        const shift = 31 - Math.clz32(bits & -bits);
+        const most = bits >>> shift;
+        return Math.round((((value >>> 0) & bits) >>> shift) * 255 / most);
+    };
+    return ((channel(format.alphaMask ?? 0, 255) << 24) | (channel(format.redMask, 0) << 16)
+        | (channel(format.greenMask, 0) << 8) | channel(format.blueMask, 0)) >>> 0;
+}
+
+/**
  * The material a fresh device has: white diffuse and ambient, no highlight and
  * no glow.
  *
@@ -919,6 +942,34 @@ export function createDirect3D7(ddraw, services = {}){
         };
         const stopWatchingPixels = ddraw.watchPixels?.({ readBack, written }) ?? (()=>{});
 
+        /**
+         * A colour fill of a surface this device renders into is a clear of
+         * its GPU copy over the rectangle, as Direct3D 9's ColorFill is: its
+         * guest bytes are read back when a program reads them, not before
+         * every fill -- a read-back the program waited for, a fill and an
+         * upload again.
+         *
+         * @param {any} surface @param {any} rect @param {number} value
+         * @returns {boolean} whether it was filled here
+         */
+        const colorFilled = (surface, rect, value)=>{
+            const adapter = drawnAt(surface);
+            if (!adapter || !renderer || !write)
+            {
+                return false;
+            }
+            const filling = Object.create(model, {
+                renderTarget: { get: ()=>adapter },
+                depthStencil: { get: ()=>null },
+                viewport: { get: ()=>fullTarget({ width: surface.width, height: surface.height }) },
+            });
+            renderer.clear(filling, rect
+                ? [{ x1: rect.left, y1: rect.top, x2: rect.right, y2: rect.bottom }]
+                : [], D3DCLEAR.TARGET, colourOf(surface.pixelFormat, value), 1, 0);
+            return true;
+        };
+        const stopWatchingColor = ddraw.watchColorFills?.(colorFilled) ?? (()=>{});
+
         const device = {
             description,
             get refCount(){
@@ -948,6 +999,7 @@ export function createDirect3D7(ddraw, services = {}){
                 textures.clear();
                 stopWatchingDepth();
                 stopWatchingPixels();
+                stopWatchingColor();
                 renderTarget.release();
                 ddraw.release('IDirectDraw7');
                 return 0;

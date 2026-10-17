@@ -62,7 +62,8 @@ import {
     readSurfaceDesc, writePixelFormat, writeSurfaceDesc,
 } from '../ddraw/structs.js';
 import {
-    DDBLTFAST_DESTCOLORKEY, DDBLTFAST_SRCCOLORKEY, DDBLT_DEPTHFILL, DDBLT_KEYDESTOVERRIDE,
+    DDBLTFAST_DESTCOLORKEY, DDBLTFAST_SRCCOLORKEY, DDBLT_COLORFILL, DDBLT_DEPTHFILL,
+    DDBLT_KEYDESTOVERRIDE, DDBLT_WAIT,
     DDBLT_KEYSRCOVERRIDE, DDPF_ZBUFFER, DDCAPS2_CANRENDERWINDOWED, DDCAPS2_CERTIFIED,
     DDCAPS2_PRIMARYGAMMA,
     DDCAPS2_WIDESURFACES, DDCAPS_3D, DDCAPS_BLT, DDCAPS_BLTCOLORFILL, DDCAPS_BLTDEPTHFILL,
@@ -99,6 +100,23 @@ const ICLASSFACTORY_SLOTS = /** @type {[string, number][]} */ ([
     ['CreateInstance', 3],
     ['LockServer', 1],
 ]);
+/**
+ * The Blt flags a colour fill may carry and still be only a fill: DDBLT_ASYNC,
+ * DDBLT_WAIT and DDBLT_DONOTWAIT say when, not what.
+ */
+const FILL_ONLY_FLAGS = DDBLT_COLORFILL | 0x00000200 | DDBLT_WAIT | 0x08000000;
+
+/**
+ * Whether a Blt's destination rectangle -- null for the whole -- lies within
+ * the surface, edges the right way round.
+ *
+ * @param {{ left: number, top: number, right: number, bottom: number } | null} rect
+ * @param {{ width: number, height: number }} surface
+ */
+const rectFitsSurface = (rect, surface)=>rect === null || (rect.left >= 0 && rect.top >= 0
+    && rect.right > rect.left && rect.bottom > rect.top && rect.right <= surface.width
+    && rect.bottom <= surface.height);
+
 const E_POINTER = 0x80004003 | 0;
 const E_NOINTERFACE = 0x80004002 | 0;
 const E_OUTOFMEMORY = 0x8007000e | 0;
@@ -899,6 +917,17 @@ export function createDirectDrawSeam(
                     },
                     clipList: clipListOf(surface),
                 };
+                // A plain colour fill of a surface drawn on the GPU is filled
+                // there, no read-back first: a clipped or keyed one reads the
+                // pixels it keeps.
+                if (!from && (flags & ~FILL_ONLY_FLAGS) === DDBLT_COLORFILL
+                    && !request.clipList && !request.fx.destColorKey && !surface.depth
+                    && rectFitsSurface(rect, surface) && surface.colorFilled?.(rect, fill))
+                {
+                    surface.changeUniquenessValue();
+                    surface.present();
+                    return DD_OK;
+                }
                 return whenCurrent(from ? [surface, from] : [surface], ()=>{
                     const outcome = blt({
                         ...request,

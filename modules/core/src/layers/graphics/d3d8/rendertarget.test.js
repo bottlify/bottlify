@@ -722,14 +722,21 @@ test('bounds (D3D9): every write the device makes into guest memory stays inside
     assert.equal(h.read(into.base + 60, 1)[0], 0x5a);
     h.assertSentinels('StretchRect');
 
-    // ColorFill: a whole plain surface, and the last row of a render target.
+    // ColorFill: a whole plain surface, and a render target -- whose fill is
+    // the GPU's, as a Clear's is, and a lock reads it back. (A part of one is a
+    // quad drawn, which this fake GPU does not rasterize.)
     assert.equal(device.ColorFill(into, null, argb(1, 2, 3)), D3D_OK);
     /** @type {{ surface?: any }} */
     const target = {};
     assert.equal(device.CreateRenderTarget(4, 4, D3DFMT.X8R8G8B8, true, target), D3D_OK);
-    assert.equal(device.ColorFill(target.surface, { left: 0, top: 3, right: 4, bottom: 4 },
-        argb(1, 2, 3)), D3D_OK);
-    assert.deepEqual([...h.read(target.surface.base + 60, 4)], [3, 2, 1, 0xff]);
+    assert.equal(device.ColorFill(target.surface, null, argb(1, 2, 3)), D3D_OK);
+    assert.deepEqual([...h.read(target.surface.base, 64)], new Array(64).fill(0),
+        'nothing filled in guest memory until a lock reads the target back');
+    /** @type {{ pBits?: number }} */
+    const filled = {};
+    assert.equal(await target.surface.LockRect(filled, null, 0), D3D_OK);
+    assert.deepEqual([...h.read(/** @type {number} */ (filled.pBits) + 60, 4)], [3, 2, 1, 0xff]);
+    assert.equal(target.surface.UnlockRect(), D3D_OK);
     h.assertSentinels('ColorFill');
 
     // GetRenderTargetData and the lock read-back: a snapshot of the whole

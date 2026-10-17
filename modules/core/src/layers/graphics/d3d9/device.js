@@ -4454,15 +4454,23 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             {
                 return D3DERR_INVALIDCALL;
             }
-            fillBytes(surface, area, colour >>> 0);
             if ((desc.Usage & D3DUSAGE.RENDERTARGET) !== 0 && renderer)
             {
+                // The GPU's, as Clear's: where a lock reads the target back
+                // (`targetPixels`), its guest bytes are not filled as well -- that
+                // cost a game filling its targets ten thousand times a run 2.4 ms
+                // a fill.
+                if (!targetPixels())
+                {
+                    fillBytes(surface, area, colour >>> 0);
+                }
                 renderer.clear(targetModel(surface),
                     [{ x1: area.left, y1: area.top, x2: area.right, y2: area.bottom }],
                     D3DCLEAR.TARGET, colour >>> 0, 1, 0);
             }
             else
             {
+                fillBytes(surface, area, colour >>> 0);
                 renderer?.markDirty?.(surface);
             }
             return D3D_OK;
