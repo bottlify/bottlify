@@ -4454,6 +4454,15 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             {
                 return D3DERR_INVALIDCALL;
             }
+            if ((desc.Usage & D3DUSAGE.RENDERTARGET) !== 0 && !renderer
+                && (services.renderedElsewhere === true || services.drawsNothing === true))
+            {
+                // Recorded for a device that clears it on the GPU, whose lock
+                // reads it back from there: its guest bytes are nobody's, and
+                // filling them was a render target's worth of writes on the
+                // program's thread, 2.7 ms a fill.
+                return D3D_OK;
+            }
             if ((desc.Usage & D3DUSAGE.RENDERTARGET) !== 0 && renderer)
             {
                 // The GPU's, as Clear's: where a lock reads the target back
