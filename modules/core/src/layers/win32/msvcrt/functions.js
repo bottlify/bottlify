@@ -32,7 +32,7 @@ import {
 } from './mbstring.js';
 import { createCxxFunctions } from './cxx.js';
 import { createClassFunctions } from './classes.js';
-import { guestEntry, guestExport } from './guest-code.js';
+import { guestEntry, guestExport, variadicEntry } from './guest-code.js';
 import * as inGuest from './inguest.js';
 import { COMPILED } from './inguest.x86.js';
 import * as inGuestFloat from './inguest-float.js';
@@ -428,6 +428,35 @@ export function createMsvcrtFunctions(host){
      */
     let currentLocale = 0;
 
+    /**
+     * int vsprintf(char *buffer, const char *format, va_list args) -- in the
+     * guest (`inguest-print.js`), a format with a double, a 64-bit integer or
+     * a wide or counted string the handler's; sprintf is this code after the
+     * instructions that make its arguments a list (`variadicEntry`).
+     */
+    const vsprintf = guestEntry(inGuestPrint.vsprintf, PRINT_CODE.vsprintf, host, {
+        argBytes: 12,
+        /** @param {number[]} args */
+        handler: ([buffer, format, list])=>{
+            const text = narrowText(format, varargsAt(list));
+            writeString(buffer, text);
+            return text.length;
+        },
+    });
+
+    /**
+     * int _vsnprintf(char *buffer, size_t count, const char *format, va_list args)
+     *
+     * _snprintf with its arguments in memory: the same negative answer
+     * and unterminated buffer when the text does not fit.
+     */
+    const _vsnprintf = guestEntry(inGuestPrint._vsnprintf, PRINT_CODE._vsnprintf, host, {
+        argBytes: 16,
+        /** @param {number[]} args */
+        handler: ([buffer, count, format, list])=>
+            countedPrint(buffer, count, narrowText(format, varargsAt(list))),
+    });
+
     const table = {
         /**
          * int _set_error_mode(int mode)
@@ -632,8 +661,7 @@ export function createMsvcrtFunctions(host){
          *
          * The count returned excludes the terminator, which is written anyway.
          */
-        sprintf: {
-            convention: 'cdecl',
+        sprintf: variadicEntry(2, vsprintf, {
             argBytes: 8 + VARIADIC_SLOTS * 4,
             /** @param {number[]} args */
             handler: args=>{
@@ -641,7 +669,7 @@ export function createMsvcrtFunctions(host){
                 writeString(args[0], text);
                 return text.length;
             },
-        },
+        }),
 
         /**
          * int _snprintf(char *buffer, size_t count, const char *format, ...)
@@ -650,40 +678,14 @@ export function createMsvcrtFunctions(host){
          * unterminated -- the msvcrt behaviour, not C99's, and the difference
          * is why code written against this one terminates the buffer itself.
          */
-        _snprintf: {
-            convention: 'cdecl',
+        _snprintf: variadicEntry(3, _vsnprintf, {
             argBytes: 12 + VARIADIC_SLOTS * 4,
             /** @param {number[]} args */
             handler: args=>countedPrint(args[0], args[1], render(args, 3)),
-        },
-
-        /**
-         * int vsprintf(char *buffer, const char *format, va_list args) -- in the
-         * guest (`inguest-print.js`), a format with a double, a 64-bit integer or
-         * a wide or counted string the handler's
-         */
-        vsprintf: guestEntry(inGuestPrint.vsprintf, PRINT_CODE.vsprintf, host, {
-            argBytes: 12,
-            /** @param {number[]} args */
-            handler: ([buffer, format, list])=>{
-                const text = narrowText(format, varargsAt(list));
-                writeString(buffer, text);
-                return text.length;
-            },
         }),
 
-        /**
-         * int _vsnprintf(char *buffer, size_t count, const char *format, va_list args)
-         *
-         * _snprintf with its arguments in memory: the same negative answer
-         * and unterminated buffer when the text does not fit.
-         */
-        _vsnprintf: guestEntry(inGuestPrint._vsnprintf, PRINT_CODE._vsnprintf, host, {
-            argBytes: 16,
-            /** @param {number[]} args */
-            handler: ([buffer, count, format, list])=>
-                countedPrint(buffer, count, narrowText(format, varargsAt(list))),
-        }),
+        vsprintf,
+        _vsnprintf,
 
         /**
          * int _vscprintf(const char *format, va_list args)

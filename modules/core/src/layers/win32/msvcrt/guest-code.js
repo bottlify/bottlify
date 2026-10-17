@@ -412,6 +412,51 @@ export function guestEntry(source, compiled, host, fallback){
     return { ...guestExport(compiled, fallback), handler };
 }
 
+/**
+ * A cdecl function whose arguments end in `...`, as code in the guest: its
+ * `v` form's code, called with the address of the first variadic slot as the
+ * `va_list` after the fixed arguments, by a few instructions before it.
+ *
+ *     lea eax, [esp + 4 + 4 * fixed]      ; the first slot past them
+ *     push eax
+ *     push dword [esp + 4 + 4 * fixed]    ; `fixed` times: the last one first
+ *     call form
+ *     add esp, 4 + 4 * fixed
+ *     ret
+ *   form:                                 ; the v form's code
+ *
+ * A call the form hands to the host reaches the form's handler with a frame
+ * of its own, whose return is to the `add` above. `own` is the function's
+ * handler as it was, the reference the code is held to.
+ *
+ * @param {number} fixed  the arguments before `...`
+ * @param {{ code: Uint8Array | ((builder?: CodeBuilder) => Uint8Array) }} form
+ * @param {{ argBytes: number, handler: (args: number[]) => number }} own
+ */
+export function variadicEntry(fixed, form, own){
+    const reach = 4 + 4 * fixed;
+    const head = [0x8d, 0x44, 0x24, reach, 0x50];
+    for (let i = 0; i < fixed; i++)
+    {
+        head.push(0xff, 0x74, 0x24, reach);
+    }
+    // The form follows the `add` and the `ret`: four bytes past the call.
+    head.push(0xe8, 4, 0, 0, 0, 0x83, 0xc4, reach, 0xc3);
+    /** @param {CodeBuilder} [builder] */
+    const code = builder=>{
+        // The form's jumps to its trap are counted from where it lies here.
+        const shifted = builder && { register: builder.register,
+            jump: (/** @type {number} */ at, /** @type {number} */ target)=>
+                builder.jump(at + head.length, target) };
+        const body = typeof form.code === 'function' ? form.code(shifted) : form.code;
+        const bytes = new Uint8Array(head.length + body.length);
+        bytes.set(head);
+        bytes.set(body, head.length);
+        return bytes;
+    };
+    return { convention: 'cdecl', argBytes: own.argBytes, handler: own.handler, code };
+}
+
 /** `mov eax, imm32`: a hand-over that jumps through EAX to the trap's address. */
 const MOV_EAX = 0xb8;
 
