@@ -553,6 +553,32 @@ export function createRuntime(host){
         },
     ]);
 
+    /**
+     * IRpcStubBuffer's methods as rpcrt4 has them, in vtable order. MIDL
+     * leaves a stub vtable's entries zero where rpcrt4 is to put its own --
+     * every one but Release for an interface that delegates to its base's
+     * (CStdStubBuffer_DELEGATING_METHODS) -- and they are filled in from
+     * these as the DLL's factory is made (cpsf.c init_psfactory).
+     */
+    const STUB_METHODS = /** @type {const} */ (['CStdStubBuffer_QueryInterface',
+        'CStdStubBuffer_AddRef', 'CStdStubBuffer_Release', 'CStdStubBuffer_Connect',
+        'CStdStubBuffer_Disconnect', 'CStdStubBuffer_Invoke', 'CStdStubBuffer_IsIIDSupported',
+        'CStdStubBuffer_CountRefs', 'CStdStubBuffer_DebugServerQueryInterface',
+        'CStdStubBuffer_DebugServerRelease']);
+    /** @type {number[] | null} */
+    let stubMethods = null;
+
+    /** @param {number} vtable  A DLL's IRpcStubBuffer vtable, its zero entries filled in. */
+    const fillStubVtable = vtable=>{
+        stubMethods ??= STUB_METHODS.map(name=>host.register(name, exported[name]));
+        stubMethods.forEach((address, slot)=>{
+            if (u32(vtable + slot * 4) === 0)
+            {
+                w32(vtable + slot * 4, address);
+            }
+        });
+    };
+
     /** @param {number} stub  The IID of the interface a stub is for, where the DLL keeps it. */
     const stubIid = stub=>u32(u32(stub + STUB.VTABLE) - STUB_VTBL.VTABLE + STUB_VTBL.IID);
 
@@ -630,7 +656,7 @@ export function createRuntime(host){
         buffered.delete(message);
     };
 
-    return {
+    const exported = {
         /**
          * void NdrProxyInitialize(void *This, PRPC_MESSAGE pRpcMsg,
          *     PMIDL_STUB_MESSAGE pStubMsg, PMIDL_STUB_DESC pStubDescriptor,
@@ -1173,6 +1199,10 @@ export function createRuntime(host){
                     w32(factory + FACTORY.VTABLE, vtable);
                     w32(factory + FACTORY.REFS, 0);
                     w32(factory + FACTORY.FILES, list);
+                    for (const entry of interfaces)
+                    {
+                        fillStubVtable(entry.stubVtbl + STUB_VTBL.VTABLE);
+                    }
                 }
                 holdFactory(factory);
                 w32(out, factory);
@@ -1222,6 +1252,7 @@ export function createRuntime(host){
             },
         },
     };
+    return exported;
 
     /**
      * @param {'marshall' | 'unmarshall'} direction

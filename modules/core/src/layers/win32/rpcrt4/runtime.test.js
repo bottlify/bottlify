@@ -104,9 +104,11 @@ function guest(){
  * and the ProxyFileInfo list.
  *
  * @param {ReturnType<typeof guest>} g
- * @param {{ tableVersion?: number, stubless?: boolean }} [options]
+ * @param {{ tableVersion?: number, stubless?: boolean, delegating?: boolean }} [options]
+ *     `delegating`: the stub vtable as MIDL leaves it for an interface that
+ *     delegates to its base's, zero but for Release.
  */
-function proxyDll(g, { tableVersion = 1, stubless = false } = {}){
+function proxyDll(g, { tableVersion = 1, stubless = false, delegating = false } = {}){
     const { runtime } = g;
     const iid = g.place(IID_PROBE);
     /** @type {number[][]} */
@@ -115,6 +117,7 @@ function proxyDll(g, { tableVersion = 1, stubless = false } = {}){
         stubCalls.push(args);
         return 0;
     });
+    const factory = g.allocate(16);
     const methods = [0, 1, 2, 3].map(()=>stubless ? 0xffffffff : g.define(()=>0));
     const header = tableVersion > 1 ? 8 : 4;
     const proxyVtbl = g.allocate(header + 7 * 4);
@@ -130,13 +133,22 @@ function proxyDll(g, { tableVersion = 1, stubless = false } = {}){
         g.w32(table + index * 4, stubRoutine);
     }
     const stubVtbl = g.allocate(16 + 10 * 4);
+    g.memory.fill(0, stubVtbl, stubVtbl + 16 + 10 * 4);
     g.w32(stubVtbl, iid);
     g.w32(stubVtbl + 8, 7);
     g.w32(stubVtbl + 12, table - 3 * 4);
-    [runtime.CStdStubBuffer_QueryInterface, runtime.CStdStubBuffer_AddRef,
-        runtime.CStdStubBuffer_Release, runtime.CStdStubBuffer_Connect,
-        runtime.CStdStubBuffer_Disconnect, runtime.CStdStubBuffer_Invoke]
-        .forEach((fn, index)=>g.w32(stubVtbl + 16 + index * 4, g.define(fn.handler)));
+    if (delegating)
+    {
+        g.w32(stubVtbl + 16 + 2 * 4, g.define(([stub])=>
+            runtime.NdrCStdStubBuffer2_Release.handler([stub, factory])));
+    }
+    else
+    {
+        [runtime.CStdStubBuffer_QueryInterface, runtime.CStdStubBuffer_AddRef,
+            runtime.CStdStubBuffer_Release, runtime.CStdStubBuffer_Connect,
+            runtime.CStdStubBuffer_Disconnect, runtime.CStdStubBuffer_Invoke]
+            .forEach((fn, index)=>g.w32(stubVtbl + 16 + index * 4, g.define(fn.handler)));
+    }
 
     const name = g.place('', Uint8Array.from([...'IProbe\0'].map(c=>c.charCodeAt(0))));
     const lists = g.allocate(12);
@@ -153,7 +165,6 @@ function proxyDll(g, { tableVersion = 1, stubless = false } = {}){
     const list = g.allocate(8);
     g.w32(list, file);
     g.w32(list + 4, 0);
-    const factory = g.allocate(16);
     g.memory.fill(0, factory, factory + 16);
     return { iid, list, factory, proxyVtbl: proxyVtbl + header, stubVtbl, stubCalls };
 }
@@ -357,6 +368,40 @@ test('a stub holds the server object and dispatches by method number', async()=>
     assert.equal(serverRefs, 1);
     assert.ok(g.freed.includes(second));
     assert.equal(g.runtime.NdrCStdStubBuffer2_Release.argBytes, 8);
+});
+
+test('a delegating interface\'s stub vtable, zero but for Release, is filled in from rpcrt4\'s'
+    + ' own as the factory is made, and its stub dispatches like any other', async()=>{
+    // cpsf.c init_psfactory; MIDL's CStdStubBuffer_DELEGATING_METHODS.
+    const g = guest();
+    const dll = proxyDll(g, { delegating: true });
+    const release = g.u32(dll.stubVtbl + 16 + 2 * 4);
+    const out = g.allocate(4);
+    assert.equal(g.runtime.NdrDllGetClassObject.handler([dll.iid, g.place(IID_IPSFACTORYBUFFER),
+        out, dll.list, 0, dll.factory]), 0);
+    for (let slot = 0; slot < 10; slot++)
+    {
+        assert.ok(g.functions.has(g.u32(dll.stubVtbl + 16 + slot * 4)), `slot ${slot} filled`);
+    }
+    assert.equal(g.u32(dll.stubVtbl + 16 + 2 * 4), release, 'the DLL\'s own Release kept');
+
+    const server = g.allocate(4);
+    const serverVtbl = g.allocate(12);
+    g.w32(server, serverVtbl);
+    g.w32(serverVtbl, g.define(([self, , ppv])=>{
+        g.w32(ppv, self);
+        return 0;
+    }));
+    g.w32(serverVtbl + 8, g.define(()=>0));
+    const slot = g.allocate(4);
+    assert.equal(await callSlot(g, g.u32(out), 4, [dll.iid, server, slot]), 0);
+    const stub = g.u32(slot);
+    const rpc = g.allocate(RPC_MESSAGE.SIZE);
+    g.w32(rpc + RPC_MESSAGE.PROC_NUM, 4);
+    assert.equal(await callSlot(g, stub, 5, [rpc, g.allocate(4)]), 0, 'Invoke');
+    assert.equal(dll.stubCalls.length, 1, 'the method\'s stub routine ran');
+    assert.equal(await callSlot(g, stub, 2, []), 0, 'and the DLL\'s Release lets it go');
+    assert.ok(g.freed.includes(stub));
 });
 
 test('a proxy call takes its buffer from the channel, sends it, and gives it back', async()=>{

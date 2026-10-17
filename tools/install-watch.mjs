@@ -272,9 +272,16 @@ const app = await createApp({
     // Every pointer argument peeked for a string, so a journal line names
     // the path or the text a call was given: costly, and off unless asked.
     ...argv.includes('--strings') ? { traceStrings: true } : {},
-    ...journalAt > 0 ? { log: { capacity: 100000, categories: {
-        'call.cpu': 'trace', 'call.com': 'trace', 'call.gpu': 'trace', 'call.input': 'trace',
-    } } } : {},
+    // The ring holds as many lines as `--trace-lines` asks for: by bytes, a
+    // default ring holds a few thousand of them, a fraction of a second of a
+    // setup's calls, and the call an error comes of is often seconds before it.
+    ...journalAt > 0 ? { log: {
+        capacity: Math.max(100000, number('--trace-lines', 0)),
+        bytes: Math.max(1 << 20, number('--trace-lines', 0) * 512),
+        categories: {
+            'call.cpu': 'trace', 'call.com': 'trace', 'call.gpu': 'trace', 'call.input': 'trace',
+        },
+    } } : {},
 });
 for (const name of ['process-create', 'process-started', 'process-resumed', 'process-server',
     'process-server-exit', 'error', 'exit', 'divergence', 'message-box', 'unimplemented'])

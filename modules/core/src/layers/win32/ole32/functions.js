@@ -37,6 +37,7 @@ import { createUserMarshalFunctions } from './usrmarshal.js';
 import { createPropVariantFunctions } from './propvariant.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { createClassTable, createRemoting } from './remote.js';
+import { createProxyStubs } from './proxy-stubs.js';
 import { createMonikerFunctions } from './monikers.js';
 import { createOle2Functions } from './ole2.js';
 import { createAdviseFunctions } from './advise.js';
@@ -193,8 +194,6 @@ const IID_IPSFACTORYBUFFER = '{D5F569D0-593B-101A-B569-08002B2DBF7A}';
  * The proxy/stub classes of the universal marshaler, whose interfaces a type
  * library describes rather than a proxy/stub DLL.
  */
-const PSOAINTERFACE = '{00020424-0000-0000-C000-000000000046}';
-const PSDISPATCH = '{00020420-0000-0000-C000-000000000046}';
 
 /** How a marshaled packet may be used: once, the only way crossing here goes. */
 const MSHLFLAGS_TABLESTRONG = 1;
@@ -810,42 +809,22 @@ export function createOleFunctions(host){
             apartmentOf: (/** @type {any} */ thread)=>(
                 thread?.ole32?.model === COINIT_APARTMENTTHREADED ? thread : MTA),
             catalog: { hive: host.hive, readFile: wholeFile },
-            proxyStub: { factory: (iid, thread)=>proxyStubFactory(iid, thread) },
+            proxyStub: { factory: (iid, thread)=>proxyStubs.factory(iid, thread) },
             divergence: host.divergence,
             errors: host.errors,
         });
         return remoting;
     };
 
-    /**
-     * The IPSFactoryBuffers of the proxy/stub DLLs this process has loaded,
-     * by the class the registry names: loaded once and held, as COM holds
-     * the ones it loads.
-     *
-     * @type {Map<string, Promise<number>>}
-     */
-    const proxyFactories = new Map();
-
-    /**
-     * The class object of the proxy/stub DLL an interface's ProxyStubClsid32
-     * names, as an IPSFactoryBuffer; 0 when none is registered or it does not
-     * load. The universal marshaler's classes are not DLLs of this kind.
-     *
-     * @param {string} iid @param {unknown} thread
-     * @returns {Promise<number>}
-     */
-    const proxyStubFactory = (iid, thread)=>{
-        const clsid = canonicalGuid(interfaceKeyValue(iid, 'ProxyStubClsid32') ?? '');
-        if (clsid === null || clsid === PSOAINTERFACE || clsid === PSDISPATCH)
-        {
-            return Promise.resolve(0);
-        }
-        const known = proxyFactories.get(clsid);
-        if (known)
-        {
-            return known;
-        }
-        const loading = (async()=>{
+    /** Which proxy/stub class marshals an interface, and its class object. */
+    const proxyStubs = createProxyStubs({
+        registryClass: iid=>interfaceKeyValue(iid, 'ProxyStubClsid32'),
+        registeredFactory: (clsid, thread)=>{
+            const registered = registeredObject(clsid);
+            return registered ? queryPointer(registered.object, IID_IPSFACTORYBUFFER, thread) : 0;
+        },
+        release: (factory, thread)=>callMethod(factory, SLOT_RELEASE, [], thread),
+        loadFactory: async(clsid, thread)=>{
             const block = host.heap.allocate(GUID_SIZE * 2 + 4);
             if (block === 0)
             {
@@ -858,18 +837,10 @@ export function createOleFunctions(host){
                 thread) ?? REGDB_E_CLASSNOTREG)) | 0;
             const factory = readU32(block + GUID_SIZE * 2);
             host.heap.free(block);
-            if (hr < 0 || factory === 0)
-            {
-                host.divergence?.('COM', `the proxy/stub class ${clsid} of ${iid} gave no`
-                    + ` IPSFactoryBuffer: 0x${(hr >>> 0).toString(16)}`);
-                proxyFactories.delete(clsid);
-                return 0;
-            }
-            return factory;
-        })();
-        proxyFactories.set(clsid, loading);
-        return loading;
-    };
+            return hr < 0 ? 0 : factory;
+        },
+        divergence: detail=>host.divergence?.('COM', detail),
+    });
 
     /**
      * Where the OBJREFs an interface pointer crosses as are made and read:
@@ -1572,9 +1543,6 @@ export function createOleFunctions(host){
         writeU32(out, pointer);
         return S_OK;
     };
-
-    /** The proxy/stub classes this process registered for itself, by interface. */
-    const ownProxyStubs = new Map();
 
     const stringFromGuid = {
         argBytes: 8,
@@ -4354,19 +4322,25 @@ export function createOleFunctions(host){
          * HRESULT CoRegisterPSClsid(REFIID riid, REFCLSID rclsid)
          *
          * The proxy/stub class for an interface, for this process alone:
-         * what CoGetPSClsid answers ahead of the registry.
+         * what CoGetPSClsid answers, and marshaling uses, ahead of the
+         * registry. Any apartment's registration is the process's, and stays
+         * when that apartment goes (compobj.c test_CoRegisterPSClsid).
          */
         CoRegisterPSClsid: {
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([riid, rclsid])=>{
+                if (!inApartment(host.currentThread()))
+                {
+                    return CO_E_NOTINITIALIZED;
+                }
                 const iid = guidAt(riid);
                 const clsid = guidAt(rclsid);
                 if (iid === null || clsid === null)
                 {
                     return E_INVALIDARG;
                 }
-                ownProxyStubs.set(canonicalGuid(iid), canonicalGuid(clsid));
+                proxyStubs.register(iid, clsid);
                 return S_OK;
             },
         },
@@ -4382,9 +4356,7 @@ export function createOleFunctions(host){
             /** @param {number[]} args */
             handler: ([riid, pclsid])=>{
                 const iid = guidAt(riid);
-                const clsid = iid === null ? null
-                    : ownProxyStubs.get(canonicalGuid(iid))
-                        ?? canonicalGuid(interfaceKeyValue(iid, 'ProxyStubClsid32') ?? '');
+                const clsid = iid === null ? null : proxyStubs.classOf(iid);
                 if ((pclsid >>> 0) === 0)
                 {
                     return E_INVALIDARG;
