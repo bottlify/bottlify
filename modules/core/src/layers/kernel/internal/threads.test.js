@@ -325,6 +325,44 @@ test('a thread parked on a host call is not a candidate for a turn', ()=>{
     assert.equal(clock, 50, 'to exactly the deadline it was waiting for');
 });
 
+test('a thread a timed wait wakes, pinned to an executor still opening, is waited for -- not an'
+    + ' idle machine', ()=>{
+    // A process that narrows itself to processor 1 (SetProcessAffinityMask, as
+    // Crysis's CPU detection does for each processor in turn) and sleeps: the
+    // clock moved to its deadline, it woke wanting an executor that had not
+    // opened yet, and the turn read as a machine with nothing left -- "every
+    // thread ended without the process exiting".
+    const opening = new Set();
+    const cpu = { ...fakeCpu(), executors: ()=>[], wantExecutors: ()=>0,
+        /** @param {number} index */
+        wantExecutor: index=>{
+            opening.add(index);
+            return index === 1;
+        } };
+    let clock = 0;
+    const sched = createScheduler({
+        cpu,
+        switcher: createSwitcher({ cpu }),
+        now: ()=>clock,
+        /** @param {number} deadline */
+        skipTo: deadline=>{
+            const jump = Math.max(0, deadline - clock);
+            clock = deadline;
+            return jump;
+        },
+    });
+    const main = sched.create({ entry: 0x1000, stackTop: 0x2000, tebAddress: 0, name: 'main' });
+    main.affinityMask = 0b10;
+    sched.block(main, 'Sleep', { deadline: 100 });
+
+    const turn = sched.runOnce();
+    assert.equal(clock, 100, 'the clock moved to the deadline');
+    assert.equal(main.state, ThreadState.READY, 'and the sleeper woke');
+    assert.equal(turn.ran, null, 'it does not run here');
+    assert.equal(turn.elsewhere, true, 'the turn waits for its executor');
+    assert.deepEqual([...opening], [1], 'which is opening');
+});
+
 test('a slice the emulator ran past is counted, not assumed away', ()=>{
     // The quantum is how long one thread may hold the machine before anything
     // else -- another thread, a message, a frame -- gets a look, and nothing

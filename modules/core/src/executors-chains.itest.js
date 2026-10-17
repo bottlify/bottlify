@@ -653,3 +653,29 @@ for (const cores of [1, 2])
             assert.equal(code, 0, `${code} increments after the thread was suspended`);
         });
 }
+
+test('a process that pins itself to the second processor and sleeps runs on there once its'
+    + ' executor opens', async()=>{
+    // A program measuring each processor in turn (Crysis's CPU detection)
+    // narrows the process to one and sleeps. With executors opened as they
+    // are wanted, the sleeper woke before the second had opened and the turn
+    // read as a machine with nothing left to run.
+    const executable = buildProgram(['SetProcessAffinityMask', 'Sleep', 'ExitProcess'], {},
+        ({ call })=>({
+            main: [
+                0x6a, 0x02, 0x6a, 0xff, ...call('SetProcessAffinityMask'), // (-1, 2)
+                0x6a, 0x64, ...call('Sleep'), //                             Sleep(100)
+                0x6a, 0x07, ...call('ExitProcess'),
+            ],
+            worker: [0xc3],
+        }));
+    const app = await createApp({ executable, cpu: { cores: 2, eager: false } });
+    try
+    {
+        assert.equal(await app.run({ timeoutMs: 30_000 }), 7);
+    }
+    finally
+    {
+        await app.dispose();
+    }
+});

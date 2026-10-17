@@ -2023,7 +2023,11 @@ export function createScheduler(options){
                 candidates = hereNow();
                 if (candidates.length === 0)
                 {
-                    return { ran: null, instructions: 0, switched: false };
+                    // One the deadline woke may want an executor that is
+                    // still opening: a machine waiting for it, not one idle.
+                    return awaitingExecutor
+                        ? { ran: null, instructions: 0, switched: false, elsewhere: true }
+                        : { ran: null, instructions: 0, switched: false };
                 }
             }
 
