@@ -2,9 +2,9 @@
 
 [English](README.md)
 
-Bottlify запускает программы и игры для Windows x86 во вкладке браузера. Windows, плагины и
-установка не нужны. Проект состоит из четырёх пакетов: первые два запускают программу, остальные
-два подключаются по желанию.
+Bottlify состоит из четырёх JavaScript-пакетов. Веб-страница, которая их встраивает, запускает
+программы и игры для Windows x86 прямо во вкладке браузера, без Windows, плагинов и установки.
+Программе нужны core и cork, networking и installer подключаются по желанию:
 
 - **[core](modules/core/README.md)** (`@bottlify/core`): окружение Windows, написанное с нуля на
   JavaScript. `kernel32`, `user32`, `gdi32`, DirectX, OpenGL, DirectSound, Winsock и остальные

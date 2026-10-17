@@ -213,8 +213,8 @@ To be fair, v86 does a lot more work for the same program. It emulates a whole c
 benchmark runs on top of a Linux kernel and every memory access goes through v86's emulated page
 tables. Its x87 is the real 80-bit arithmetic, done in software, where cork computes in 64-bit
 doubles: that is most of the x87 `math` row, which is why the chart shows the SSE build. In return
-v86 boots whole operating systems. cork does not try to: Bottlify runs Windows programs on its own
-Windows, and all it needs from cork is to run their code fast.
+v86 boots whole operating systems. cork does not try to: in Bottlify, Windows programs run on its own
+Windows layer, and all it needs from cork is to run their code fast.
 
 <details>
 <summary>How it was measured</summary>

@@ -1,6 +1,6 @@
 # Bottlify
 
-Bottlify runs Win32 x86 programs in the browser: **cork**, our x86 → wasm translator
+Bottlify is a set of packages for running Win32 x86 programs in the browser: **cork**, our x86 → wasm translator
 (`modules/cork`), in a Web Worker, under a from-scratch Win32/DirectX layer (`modules/core`) on
 WebGPU, WebAudio and OPFS. Where this file and the tree disagree, the tree is right and this file
 is the bug.

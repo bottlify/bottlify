@@ -2,8 +2,9 @@
 
 [По-русски](README.ru.md)
 
-Bottlify runs Windows x86 programs and games in a browser tab, with no Windows, no plugin and
-nothing to install. It is four packages; the first two run a program, the other two are optional:
+Bottlify is four JavaScript packages. A web page that embeds them runs Windows x86 programs and
+games right in a browser tab, with no Windows, no plugin and nothing to install. A program needs
+core and cork; networking and the installer are optional:
 
 - **[core](modules/core/README.md)** (`@bottlify/core`): a Windows environment written from scratch
   in JavaScript: `kernel32`, `user32`, `gdi32`, DirectX, OpenGL, DirectSound, Winsock and the rest

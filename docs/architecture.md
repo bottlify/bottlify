@@ -18,8 +18,9 @@ relative to the root of bottlify-ui. Where a diagram and the code disagree, the 
 
 ## 1. What it is
 
-Bottlify runs 32-bit Windows applications right in a browser tab, with no Windows and nothing to
-install. It has two halves; together they do what Rosetta 2 and Wine do, rebuilt for the browser:
+Bottlify is a set of packages a web page uses to run 32-bit Windows applications right in a
+browser tab, with no Windows and nothing to install. Its two main packages together do what
+Rosetta 2 and Wine do, rebuilt for the browser:
 
 - **cork, the translator.** A browser has no x86 processor, so cork translates the program's
   machine code into WebAssembly, and the browser then compiles that for the device's own processor.
@@ -66,8 +67,8 @@ platforms went away, and the games written for them stopped running. By the earl
 left.
 
 Bottlify works the other way round. It needs no plugin: it uses only standards every modern browser
-already has: WebAssembly, WebGPU, Web Audio, OPFS. And it needs no programs written for it: it runs
-the ones that already exist, ordinary Windows `.exe` files, unchanged.
+already has: WebAssembly, WebGPU, Web Audio, OPFS. And it needs no programs written for it: with it,
+the ones that already exist, ordinary Windows `.exe` files, run unchanged.
 
 There is a practical reason as well: a game is the best test for a system like this.
 
