@@ -217,7 +217,7 @@ export function createCpuModule(){
              *          opening: Map<number, Promise<void>>, unopened: Set<number>,
              *          bell: ReturnType<typeof createBell> | null,
              *          unbroken: ReturnType<typeof unbrokenTable>,
-             *          beforeTrap: (() => void) | null,
+             *          beforeTrap: (() => void) | null, awaited: (() => boolean) | null,
              *          remoteFigures: Map<number, any>, executorsRefused: string | null,
              *          writes: { host: any, clock: ReturnType<typeof createWriteClock> } | null,
              *          learned: { store: any, opened: number } | null }}
@@ -238,6 +238,8 @@ export function createCpuModule(){
                 // The routines no slice ends inside, as every executor reads them.
                 unbroken: unbrokenTable(),
                 beforeTrap: null,
+                // Whether another executor waits for this one's answer (`awaitedBy`).
+                awaited: null,
                 // The other executors' translator figures, as each last answered.
                 remoteFigures: new Map(),
                 // Why fewer executors run than were asked, if they do.
@@ -610,7 +612,10 @@ export function createCpuModule(){
                             // Several executors share one arena, as they share one layout
                             // for their translations (`sharedLayout`): what any of them
                             // emitted, every other takes rather than emitting again.
+                            // The translator stops forming while another executor
+                            // waits for this one's answer (`awaitedBy`).
                             cork: several ? { ...settings.cork, atomic: true,
+                                awaited: ()=>state.awaited?.() === true,
                                 ...(typeof engineModule.createArena === 'function'
                                     && typeof SharedArrayBuffer === 'function'
                                     && settings.cork?.arenaBytes !== 0
@@ -1070,6 +1075,17 @@ export function createCpuModule(){
                             + ' executor\'s alone');
                     }
                 },
+                /**
+                 * Tells this executor's translator when another executor waits
+                 * for this one's answer: it stops forming at the next region and
+                 * goes on once the answer is given.
+                 *
+                 * @param {(() => boolean) | null} check
+                 */
+                awaitedBy(check){
+                    state.awaited = check;
+                },
+
                 /**
                  * Who is told of every crossing into the host before it is
                  * answered: the scheduler, which answers the other executors'

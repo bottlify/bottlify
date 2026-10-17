@@ -1219,6 +1219,8 @@ export function createScheduler(options){
             return { ran: null, instructions: 0 };
         }
         answering = true;
+        // What is said from here on is owed an answer (`awaitedBy`).
+        answeredAt = cpu.executorBell().rung();
         const inTurn = inSlice;
         readiedInAnswer = false;
         let ran = null;
@@ -1738,6 +1740,10 @@ export function createScheduler(options){
             }
         }
     };
+
+    // Something the other executors said since they were last answered: the
+    // translator forming regions here stops at the next one to let it be.
+    cpu.awaitedBy?.(()=>placed.size > 0 && cpu.executorBell().rung() !== answeredAt);
 
     /** The other executors' traps, answered at a crossing of this executor's thread. */
     cpu.beforeTrap?.(()=>{

@@ -1019,7 +1019,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         // Calls that formed part of a batch and left the rest to a later one
         // (`holdMs`), that published part of a batch's store hits, and asks
         // the spent credit put off; the hits' modules compiled off this thread.
-        formedInPart: 0, publishedInPart: 0, heldBack: 0, compiledApart: 0,
+        formedInPart: 0, publishedInPart: 0, heldBack: 0, compiledApart: 0, answeredFirst: 0,
         // Calls that found a batch whole and every translator busy (`holdMs`).
         formedWaiting: 0,
         shapeMisses: 0, shapeChecked: 0, x87RelaxedReads: 0, floatMisses: 0, floatsRounded: 0,
@@ -3750,6 +3750,21 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
     };
 
     /**
+     * Whether another executor waits for this thread's answer (`awaited`):
+     * forming and looking up stop at the next region, as when the credit runs
+     * out. Every region formed here is an answer that thread waited out --
+     * thousands a second from a render thread, a third of a millisecond each.
+     */
+    const waitedFor = ()=>{
+        if (settings.awaited?.() !== true)
+        {
+            return false;
+        }
+        counts.answeredFirst++;
+        return true;
+    };
+
+    /**
      * A batch's lookups answered at once, where the store can answer without
      * a turn of the event loop (`getNow`: a directory store in a worker reads
      * its records file through a synchronous handle). The batch is then
@@ -3799,7 +3814,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
             }
             while (lookup.cached.length < formed.length)
             {
-                if (any && performance.now() >= until)
+                if (any && (performance.now() >= until || waitedFor()))
                 {
                     return 'part';
                 }
@@ -3819,7 +3834,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
                     && !batchInstances.has(key)))];
             while (lookup.modules.size < lookup.wanted.length)
             {
-                if (any && performance.now() >= until)
+                if (any && (performance.now() >= until || waitedFor()))
                 {
                     return 'part';
                 }
@@ -4334,7 +4349,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         const shared = formShared();
         for (; step.next < batch.length; step.next++)
         {
-            if (step.next > first && performance.now() >= until)
+            if (step.next > first && (performance.now() >= until || waitedFor()))
             {
                 break;
             }
@@ -5104,6 +5119,8 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
                 lookedUpLater: counts.lookedUpLater,
                 lookedUpInPart: counts.lookedUpInPart,
                 formedInPart: counts.formedInPart,
+                // Forming or a lookup cut short for another executor's ask (`awaited`).
+                answeredFirst: counts.answeredFirst,
                 publishedInPart: counts.publishedInPart,
                 heldBack: counts.heldBack,
                 compiledApart: counts.compiledApart,
