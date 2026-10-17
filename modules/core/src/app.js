@@ -3571,7 +3571,11 @@ async function buildApp(options){
      * set once from the launch and never moved.
      */
     const launched = options.screen ?? { width: 640, height: 480, bitsPerPixel: 32 };
-    const display = { ...launched, displayWidth: launched.width, displayHeight: launched.height };
+    // And its rate: what the person says their display shows at most (maxFps),
+    // which a program's vertical sync holds it to, as that display would.
+    const shownAtMost = options.maxFps ?? SETTINGS.frame.maxFps;
+    const display = { ...launched, displayWidth: launched.width, displayHeight: launched.height,
+        ...((shownAtMost ?? 0) > 0 ? { refresh: shownAtMost } : {}) };
 
     /**
      * Divergences already reported, so each is said once.

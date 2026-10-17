@@ -46,7 +46,7 @@ import { D3DPRESENT_PARAMETERS8, D3DDISPLAYMODE, D3DVIEWPORT8, D3DCAPS8,
     D3DBOX, D3DLOCKED_BOX, D3DVOLUME_DESC8, createLightReader, dwordsOf, floatsOf, putLight,
     putMaterial } from './structs.js';
 import { D3DDEVTYPE, D3DFMT_INDEX, D3DRTYPE, PRIMARY_MONITOR } from '../d3d8/constants.js';
-import { REFRESH_HZ, REFRESH_RATES, displayModes } from '../../win32/user32/display.js';
+import { REFRESH_HZ, displayModes, refreshRatesOf } from '../../win32/user32/display.js';
 import { ADAPTER_STRING_LENGTH, D3DADAPTER_IDENTIFIER8, D3DCLIPSTATUS8,
     D3DDEVICE_CREATION_PARAMETERS, D3DGAMMARAMP, D3DRASTER_STATUS,
     GAMMA_RAMP_ENTRIES } from '../d3d8/structs.js';
@@ -343,7 +343,7 @@ export function createDirect3D8Seam(
      * often the page shows a frame.
      */
     const modeRefresh = ()=>(pacing !== null && !pacing.windowed
-        && REFRESH_RATES.includes(pacing.rate) ? pacing.rate : refresh());
+        && refreshRatesOf(screen()).includes(pacing.rate) ? pacing.rate : refresh());
     const raster = createRaster({
         now, refresh: modeRefresh, height: ()=>screen().height,
     });
@@ -2897,6 +2897,10 @@ export function createDirect3D8Seam(
 
         /** What the device this program is drawing through has counted. */
         diagnostics: ()=>lastDevice?.diagnostics?.() ?? null,
+
+        /** How Presents were paced, as Direct3D 9's seam says it. */
+        presentPacing: ()=>({ ...presents.diagnostics(),
+            windowed: pacing ? pacing.windowed : null, askedHz: pacing ? pacing.rate : null }),
 
         /** What the guest set without crossing, for the most recent device. */
         shadow: ()=>(lastDevice ? shadowOf(lastDevice)?.diagnostics() ?? null : null),

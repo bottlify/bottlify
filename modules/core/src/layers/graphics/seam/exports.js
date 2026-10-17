@@ -32,7 +32,7 @@ import { createDirect3D9Seam } from './d3d9.js';
 import { createDirect3D10Seam } from './d3d10.js';
 import { createVulkanSeam } from './vulkan.js';
 import { createDirectDrawSeam, readGuid } from './ddraw.js';
-import { REFRESH_HZ } from '../../win32/user32/display.js';
+import { refreshOf } from '../../win32/user32/display.js';
 import { createDirect3D7Seam } from './d3d7.js';
 import { createLegacyDirect3DSeam } from './d3dlegacy.js';
 import { IID_IDirectDraw7, IID_IDirectDrawClipper } from './iids.js';
@@ -183,7 +183,7 @@ export function createGraphicsLibraries(
         currentThread,
         scratch, render, allocate, allocateCode, divergence, cursor, resolution, windowClientSize,
         gamma, deactivated, deactivations, now = ()=>performance.now(), waitUntil,
-        refresh = ()=>REFRESH_HZ, guestCode = true, phases, ringBytes,
+        refresh = ()=>refreshOf(screen()), guestCode = true, phases, ringBytes,
         guestTraps = [],
         schedule = (ms, run)=>{
             setTimeout(run, ms);
@@ -824,6 +824,9 @@ export function createGraphicsLibraries(
             openglRingMs: opengl ? opengl.diagnostics().ringMs : 0,
             openglCallMs: opengl ? opengl.diagnostics().callMs : 0,
             vulkan: vulkan?.diagnostics() ?? null,
+            // How the Presents of the version that presented were paced.
+            presentPacing: [d3d9?.presentPacing(), d3d8?.presentPacing()]
+                .find(pacing=>pacing && pacing.presents > 0) ?? null,
         }),
 
         /**

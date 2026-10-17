@@ -67,7 +67,7 @@ import { capabilityWords } from '../d3d9/caps.js';
 import { D3DCREATE, D3DDEVTYPE, PALETTE_BYTES } from '../d3d9/device.js';
 import { MAX_DECLARATION_LENGTH } from '../d3d9/declaration.js';
 import { END_TOKEN } from '../d3d9/shader.js';
-import { REFRESH_HZ, REFRESH_RATES, displayModes } from '../../win32/user32/display.js';
+import { REFRESH_HZ, displayModes, refreshRatesOf } from '../../win32/user32/display.js';
 import { createPresentQueue, createRaster, rasterStatus } from './raster.js';
 import { queryAs, readGuid } from './guid.js';
 import { D3D_PRIVATE_DATA, createPrivateData } from './privatedata.js';
@@ -233,7 +233,7 @@ export function createDirect3D9Seam(
     const modeRefresh = ()=>{
         const asked = lastParameters && !lastParameters.windowed
             ? lastParameters.fullScreenRefreshRateInHz >>> 0 : 0;
-        return REFRESH_RATES.includes(asked) ? asked : refresh();
+        return refreshRatesOf(screen()).includes(asked) ? asked : refresh();
     };
     const raster = createRaster({
         now, refresh: modeRefresh, height: ()=>screen().height,
@@ -3424,6 +3424,14 @@ export function createDirect3D9Seam(
 
         /** What the device this program is drawing through has counted. */
         diagnostics: ()=>lastDevice?.diagnostics?.() ?? null,
+
+        /**
+         * How Presents were paced (`createPresentQueue`): the interval and the
+         * rate they were held to, and the mode the device asked for.
+         */
+        presentPacing: ()=>({ ...presents.diagnostics(),
+            windowed: lastParameters ? Boolean(lastParameters.windowed) : null,
+            askedHz: lastParameters ? lastParameters.fullScreenRefreshRateInHz >>> 0 : null }),
 
         /** What that device's program set in the guest, and the calls that never crossed. */
         shadow: ()=>(lastDevice ? shadowOf(lastDevice)?.diagnostics() ?? null : null),

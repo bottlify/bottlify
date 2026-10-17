@@ -48,7 +48,7 @@ import {
 import {
     DISPLAY_FORMATS, backBufferUsage, highestAccessibleBuffer, swapChainDescResult,
 } from './validity.js';
-import { REFRESH_HZ, displayModes } from '../../win32/user32/display.js';
+import { displayModes, refreshOf } from '../../win32/user32/display.js';
 import { VIDEO_ADAPTER_NAME } from '../../win32/devices.js';
 
 /**
@@ -68,7 +68,8 @@ import { VIDEO_ADAPTER_NAME } from '../../win32/devices.js';
  * presents at, progressive, ordered by width, then height.
  *
  * @param {{ width: number, height: number, displayWidth?: number,
- *           displayHeight?: number }} size  The mode in effect, and the display's own size.
+ *           displayHeight?: number, refresh?: number }} size  The mode in effect, and
+ *     the display's own size and rate.
  * @param {number} format
  * @returns {ModeFields[]}
  */
@@ -79,12 +80,13 @@ export function outputModes(size, format){
     }
     return displayModes({ width: size.width, height: size.height, bitsPerPixel: 32,
         ...(size.displayWidth ? { displayWidth: size.displayWidth } : {}),
-        ...(size.displayHeight ? { displayHeight: size.displayHeight } : {}) })
-        .filter(mode=>mode.refresh === REFRESH_HZ)
+        ...(size.displayHeight ? { displayHeight: size.displayHeight } : {}),
+        ...(size.refresh ? { refresh: size.refresh } : {}) })
+        .filter(mode=>mode.refresh === refreshOf(size))
         .map(mode=>({
             width: mode.width,
             height: mode.height,
-            refreshNumerator: REFRESH_HZ,
+            refreshNumerator: refreshOf(size),
             refreshDenominator: 1,
             format,
             scanlineOrdering: DXGI_MODE_SCANLINE_ORDER.PROGRESSIVE,
@@ -103,7 +105,7 @@ const DXGI_PRESENT_TEST = 0x1;
  * @property {string} deviceName
  * @property {{ left: number, top: number, right: number, bottom: number }} [desktopCoordinates]
  * @property {() => { width: number, height: number, displayWidth?: number,
- *                     displayHeight?: number }} [desktop]
+ *                     displayHeight?: number, refresh?: number }} [desktop]
  *     The desktop's size, read when asked, in place of fixed coordinates, and
  *     the display's own when that is larger.
  * @property {number} [monitor]  The HMONITOR the output's description names.
@@ -122,7 +124,7 @@ const DXGI_PRESENT_TEST = 0x1;
  * @property {AdapterConfig[]} [adapters]  Every adapter, outright; the machine's one otherwise.
  * @property {(window: number) => { width: number, height: number }} [windowClientSize]
  * @property {() => { width: number, height: number, displayWidth?: number,
- *                     displayHeight?: number }} [display]
+ *                     displayHeight?: number, refresh?: number }} [display]
  *     The desktop the machine's one output shows, as user32 reports it.
  * @property {() => number} [vendorId]
  *     The PCI vendor of the machine's one adapter, as Direct3D 9 reports it.
@@ -403,7 +405,7 @@ function createOutput(config, adapter){
     };
     /**
      * @returns {{ width: number, height: number, displayWidth?: number,
-     *             displayHeight?: number }}
+     *             displayHeight?: number, refresh?: number }}
      */
     const sizeOf = ()=>{
         const desktop = coordinates();
@@ -413,6 +415,7 @@ function createOutput(config, adapter){
             height: desktop.bottom - desktop.top || 480,
             ...(display?.displayWidth ? { displayWidth: display.displayWidth } : {}),
             ...(display?.displayHeight ? { displayHeight: display.displayHeight } : {}),
+            ...(display?.refresh ? { refresh: display.refresh } : {}),
         };
     };
     return attachCom({
@@ -455,7 +458,7 @@ function createOutput(config, adapter){
             }
             const target = wanted.width === 0 ? size : wanted;
             const rate = wanted.refreshDenominator === 0
-                ? REFRESH_HZ
+                ? refreshOf(size)
                 : wanted.refreshNumerator / wanted.refreshDenominator;
             /** @param {ModeFields} mode */
             const distance = mode=>Math.abs(mode.width - target.width)

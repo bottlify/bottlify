@@ -148,7 +148,14 @@ export function createPresentQueue(raster){
     const waiting = [];
     /** The blank the last frame is shown at. */
     let last = -Infinity;
+    /** What a report says of the queue: Presents, those that stopped, and for how long. */
+    const counted = { presents: 0, waits: 0, waitedMs: 0, worstMs: 0, interval: 0 };
     return {
+        /** What the queue did, and the rate and interval it did it at. */
+        diagnostics: ()=>({ ...counted, waitedMs: Math.round(counted.waitedMs),
+            worstMs: Math.round(counted.worstMs * 10) / 10,
+            interval: `0x${counted.interval.toString(16)}`,
+            hz: Math.round(1000 / raster.period()) }),
         /**
          * A frame presented now: how long the Present stops its thread.
          *
@@ -158,6 +165,8 @@ export function createPresentQueue(raster){
          */
         present(at, interval){
             const value = interval >>> 0;
+            counted.presents++;
+            counted.interval = value;
             if (value === PRESENT_INTERVAL_IMMEDIATE)
             {
                 waiting.length = 0;
@@ -171,8 +180,15 @@ export function createPresentQueue(raster){
             const blanks = value === 2 ? 2 : value === 4 ? 3 : value === 8 ? 4 : 1;
             last = raster.blankAt(Math.max(at, last + blanks * raster.period()));
             waiting.push(last);
-            return waiting.length > FRAMES_AHEAD
+            const wait = waiting.length > FRAMES_AHEAD
                 ? waiting[waiting.length - 1 - FRAMES_AHEAD] - at + LANDING : 0;
+            if (wait > 0)
+            {
+                counted.waits++;
+                counted.waitedMs += wait;
+                counted.worstMs = Math.max(counted.worstMs, wait);
+            }
+            return wait;
         },
     };
 }

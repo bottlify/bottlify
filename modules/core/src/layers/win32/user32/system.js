@@ -27,7 +27,7 @@ import {
 import { RT_GROUP_CURSOR, RT_GROUP_ICON, loadResourceObject } from './objects.js';
 import { cursorFilePicture, dibToBgra, groupImageId } from './cursors.js';
 import { characterOf, codeForScan, codeForVk, keyFor, keyForCharacter } from './keys.js';
-import { REFRESH_HZ, displayModes } from './display.js';
+import { displayModes, refreshOf } from './display.js';
 import {
     BORDER, CAPTION_HEIGHT, DIALOG_FRAME, MENU_HEIGHT, SCROLLBAR, SIZE_FRAME, TOOL_CAPTION_HEIGHT,
     WS_CAPTION, WS_CHILD, WS_THICKFRAME, WS_VISIBLE, frameOf,
@@ -1726,7 +1726,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         {
             return 0;
         }
-        const answer = listed ?? { ...screen, refresh: REFRESH_HZ };
+        const answer = listed ?? { ...screen, refresh: refreshOf(screen) };
         writeU16(host, devMode + layout.dmSize, layout.SIZE);
         writeU16(host, devMode + layout.dmDriverExtra, 0);
         writeU32s(host, devMode + layout.dmFields,

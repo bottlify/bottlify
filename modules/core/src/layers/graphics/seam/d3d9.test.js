@@ -50,7 +50,7 @@ import { D3DFMT, D3DPOOL, D3DRS } from '../d3d9/constants.js';
 import { D3DTSS } from '../d3d8/constants.js';
 import { D3DDECLTYPE, D3DDECLUSAGE } from '../d3d9/declaration.js';
 import { END_TOKEN, SHADER_KIND, versionToken } from '../d3d9/shader.js';
-import { displayModes } from '../../win32/user32/display.js';
+import { displayModes, refreshOf } from '../../win32/user32/display.js';
 import { createSystemFunctions } from '../../win32/user32/system.js';
 
 const D3D_OK = 0;
@@ -208,7 +208,9 @@ function machine(){
  *
  * @param {{ caps?: object, shadow?: boolean,
  *           windowClientSize?: ((window: number) => { width: number,
- *               height: number } | null) | null }} [options]
+ *               height: number } | null) | null,
+ *           screen?: typeof SCREEN & { refresh?: number }, paced?: boolean }} [options]
+ *     `screen` the display, its rate among it; `paced` a Present's wait counted
  */
 function seamed(options = {}){
     const box = machine();
@@ -243,8 +245,13 @@ function seamed(options = {}){
                 dcs.delete(handle);
             },
         },
-        screen: ()=>SCREEN,
+        screen: ()=>options.screen ?? SCREEN,
         now: ()=>clock.time,
+        // The display's rate as the assembled seams take it, and a Present's
+        // wait answered at once, counted by the queue.
+        refresh: ()=>refreshOf(options.screen ?? { refresh: undefined }),
+        waitUntil: options.paced ? (/** @type {number} */ deadline,
+            /** @type {number} */ hr)=>hr : undefined,
         windowClientSize,
         /** @param {string} api @param {string} detail */
         divergence: (api, detail)=>divergences.push(`${api}: ${detail}`),
@@ -2330,4 +2337,24 @@ test('the guest\'s TestCooperativeLevel and a query\'s methods answer and write 
     assert.ok(inGuest > 800, `${inGuest} answered in the guest`);
     assert.equal(guestCode.TestCooperativeLevel(guest, device), HANDED,
         'a lost device is the host\'s');
+});
+
+test('a Present under vertical sync is held to the display\'s rate, and to a mode it shows', ()=>{
+    // The display's rate is the person's (the bottle's maxFps): 120 there holds
+    // a windowed device's frames to 120; a full-screen device asking for 120 on
+    // a display of 60 is in a mode of 60, the most that display shows.
+    for (const [refresh, windowed, asked, held] of [[120, 1, 0, 120], [120, 0, 120, 120],
+        [60, 0, 120, 60], [60, 1, 0, 60], [120, 0, 60, 60]])
+    {
+        const h = seamed({ screen: { ...SCREEN, refresh }, paced: true });
+        const root = h.create();
+        const { device } = h.createDevice(root, { BackBufferWidth: 640, BackBufferHeight: 480,
+            Windowed: windowed, hDeviceWindow: windowed ? HWND : 0x777,
+            FullScreen_RefreshRateInHz: asked });
+        assert.equal(h.device(device, 'Present', [0, 0, 0, 0]), D3D_OK);
+        const pacing = h.seam.presentPacing();
+        assert.equal(pacing.presents, 1);
+        assert.equal(pacing.hz, held, `a display of ${refresh}, ${windowed ? 'windowed'
+            : `asking ${asked}`}`);
+    }
 });
