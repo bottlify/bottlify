@@ -1181,6 +1181,34 @@ test('a turn with nothing to run here leaves at once while a host call is still 
     assert.deepEqual(waits, [4], 'and took no wait of its own');
 });
 
+test('a thread ended while it runs on another executor runs there until its slice ends, and the'
+    + ' executor is told to end it', ()=>{
+    // TerminateThread of a thread on another processor: until that one's
+    // slice ends it still runs, on the stack and the blocks it was given, so
+    // neither may go to another thread before.
+    const { cpu, told } = twoExecutors();
+    const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 5000 });
+    const main = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
+    const worker = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'worker' });
+    assert.equal(sched.runOnce().ran, main);
+    assert.equal(sched.processorOf(worker), 1, 'the worker runs on the other executor');
+    assert.deepEqual([sched.running(main), sched.running(worker)], [true, true]);
+
+    told.goOn = null;
+    sched.terminate(worker, 3);
+    assert.equal(told.goOn, false, 'not kept past its slice');
+    assert.equal(sched.running(worker), true, 'ended, still running there');
+    const [remote] = cpu.executors();
+    remote.step = ()=>({ instructions: 100, fault: null });
+    sched.runOnce();
+    assert.equal(sched.running(worker), false, 'given back at its slice\'s end');
+
+    // One ending itself here is on no executor once it has: what still runs
+    // is the call that ended it.
+    sched.terminate(main, 0);
+    assert.equal(sched.running(main), false);
+});
+
 test('a thread calling into the host often runs on the process\'s executor and no other', ()=>{
     // A game's sound thread, woken at priority 15, took the turn, and its
     // renderer -- a call into the host every hundred instructions -- went to

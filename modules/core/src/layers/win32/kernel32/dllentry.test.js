@@ -47,18 +47,31 @@ function setup(){
     return { call, words, registered, log, answer: (/** @type {number} */ value)=>answer(value) };
 }
 
-test('an entry point runs inside a loader frame at fs:[0], taken off when it returns', async()=>{
-    const { call, words, log, answer } = setup();
-    const done = call({ entry: 0x5000, base: 0x4000000, reason: 0, reserved: 0, thread: 'main' });
+/** Lets every promise already settled run its callbacks. */
+const settle = ()=>new Promise(resolve=>setImmediate(resolve));
 
+test('an image\'s routines run in turn, each inside a loader frame at fs:[0], taken off when it'
+    + ' returns', async()=>{
+    const { call, words, log, answer } = setup();
+    const done = call({ routines: [0x5000, 0x6000], base: 0x4000000, reason: 0, reserved: 1,
+        thread: 'main' });
+    assert.equal(log.length, 0, 'not before the call that asked has suspended');
+
+    await settle();
     const record = words.get(TEB) ?? 0;
     assert.ok(record < ESP && record >= ESP - 128,
         'the record is just below the caller\'s stack');
     assert.equal(words.get(record), OUTER, 'linked to the frame that was the head');
     assert.equal(words.get(record + 4), 0x100, 'with the loader\'s handler');
-    assert.deepEqual(log[0].call.args, [0x4000000, 0, 0]);
-    assert.equal(log[0].call.stackAtRest, record, 'the entry point\'s frame goes below it');
+    assert.deepEqual(log.map(each=>[each.call.entry, each.call.args]),
+        [[0x5000, [0x4000000, 0, 1]]], 'the TLS callback first, alone');
+    assert.equal(log[0].call.stackAtRest, record, 'its frame goes below it');
 
+    answer(1);
+    await settle();
+    assert.deepEqual(log.map(each=>each.call.entry), [0x5000, 0x6000],
+        'then the entry point, once the callback has returned');
+    assert.equal(words.get(TEB), record, 'in a frame of its own');
     answer(1);
     assert.equal(await done, 1);
     assert.equal(words.get(TEB), OUTER, 'and fs:[0] is what it was');
@@ -66,7 +79,8 @@ test('an entry point runs inside a loader frame at fs:[0], taken off when it ret
 
 test('an exception out of the entry point is taken, unwound, and answered with 0', async()=>{
     const { call, words, registered, log } = setup();
-    void call({ entry: 0x5000, base: 0x4000000, reason: 0, reserved: 0, thread: 'main' });
+    void call({ routines: [0x5000], base: 0x4000000, reason: 0, reserved: 0, thread: 'main' });
+    await settle();
     const record = words.get(TEB) ?? 0;
     const exception = 0x2fe000;
     words.set(exception, 0xc0000005);

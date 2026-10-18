@@ -101,7 +101,7 @@ written from the documented token format.
 What is not taken: no code, no test structure, no helper, no assertion text, no ordering. Every
 test in this repository is written independently, against this project's own conventions.
 
-## mulberry32 -- a seeded pseudo-random generator for tests
+## mulberry32: a seeded pseudo-random generator for tests
 
 - Source: mulberry32, by Tommy Ettinger (2017), released into the public domain.
 - Location in this repository: the seeded test generators of
@@ -115,11 +115,11 @@ test in this repository is written independently, against this project's own con
 - Source: Wine, `dlls/msi/tests/db.c` (`test_try_transform`, `generate_transform`), LGPL-2.1-or-later.
 - Location in this repository: `modules/core/src/layers/win32/msi/transform.fixture.js`, test data
   only; nothing from it is in the product.
-- What is used: the stream names and the words of the hand-made transform those tests apply --
+- What is used: the stream names and the words of the hand-made transform those tests apply:
   a transform's bytes as Windows reads them, used to check that ours reads and writes the same.
   The transform reader and writer themselves are written from the format, not from Wine's code.
 
-## The Windows CD-ROM file system's behaviour -- used as a specification
+## The Windows CD-ROM file system's behaviour: used as a specification
 
 What a disc mounted as a drive answers (`modules/core/src/layers/filesystem/internal/iso/`,
 `modules/core/src/layers/win32/kernel32/drives.js` and `filetime.js`) is taken from how
@@ -131,7 +131,7 @@ License); it is used as knowledge of the observable behaviour only, and no code 
 into this repository. The disc format itself is read from its public standards, ECMA-119 and the
 Joliet specification.
 
-## The PKWARE DCL implode format -- used as a specification
+## The PKWARE DCL implode format: used as a specification
 
 - Source: the format as Mark Adler's `blast.c` (zlib's `contrib/blast`, zlib license,
   https://github.com/madler/zlib/tree/develop/contrib/blast) documents it: the header bytes,
@@ -141,7 +141,7 @@ Joliet specification.
 - No code is copied; the decoder is original work under the MPL
 - License: zlib (the tables are data of the format, reproduced with acknowledgement)
 
-## wabt -- the WebAssembly text format, for a development tool
+## wabt: the WebAssembly text format, for a development tool
 
 - Source: the npm package `wabt` 1.0.39 (https://github.com/WebAssembly/wabt), a WebAssembly
   build of the WebAssembly Binary Toolkit
@@ -149,7 +149,7 @@ Joliet specification.
   dependency of the repository root, not part of any module and not distributed with the product
 - License: Apache-2.0
 
-## Lua 5.1.5 -- a script interpreter, for a benchmark's workload
+## Lua 5.1.5: a script interpreter, for a benchmark's workload
 
 - Source: Lua 5.1.5 by Lua.org, PUC-Rio, https://www.lua.org/ftp/lua-5.1.5.tar.gz (SHA-256
   `2640fc56a795f29d28ef15e13c34a47e223960b0240e8cb0a82d9b0738695333`), unmodified; fetched by

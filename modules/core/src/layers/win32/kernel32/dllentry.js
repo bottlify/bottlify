@@ -137,17 +137,29 @@ export function createGuardedCaller(host){
 }
 
 /**
+ * What the loader tells an image: each of its routines -- its TLS callbacks,
+ * then its entry point -- called with DllMain's three arguments, one after
+ * another, every one guarded. The first waits until the call that asked has
+ * suspended, and each later one until the one before has returned: the frame
+ * goes below where the thread's own call left its stack, and by then the
+ * processor may be running another thread, whose stack pointer is not this
+ * one's.
+ *
  * @param {GuardHost} host
  */
 export function createEntryPointCaller(host){
     const call = createGuardedCaller(host);
     /**
-     * @param {{ entry: number, base: number, reason: number, reserved: number, thread: any }} entry
-     * @returns {Promise<number>} what the entry point answered, 0 when it raised
+     * @param {{ routines: number[], base: number, reason: number, reserved: number,
+     *     thread: any }} image
+     * @returns {Promise<number>} what the last routine answered, 0 when it raised
      */
-    return ({ entry, base, reason, reserved, thread })=>call({
-        entry, args: [base, reason, reserved], thread, failed: 0,
-        report: code=>host.divergence?.(`exception 0x${code} in the entry point of the library`
-            + ` at 0x${(base >>> 0).toString(16)}, taken by the loader`),
-    });
+    return ({ routines, base, reason, reserved, thread })=>routines.reduce(
+        (told, entry)=>told.then(()=>call({
+            entry, args: [base, reason, reserved], thread, failed: 0,
+            report: code=>host.divergence?.(`exception 0x${code} in the routine at 0x${
+                (entry >>> 0).toString(16)} of the image at 0x${(base >>> 0).toString(16)}`
+                + ` (reason ${reason}), taken by the loader`),
+        })),
+        Promise.resolve(0));
 }

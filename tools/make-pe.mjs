@@ -155,9 +155,10 @@ export function assemble(parts){
  *        library needs a base of its own: it has no relocations, so one that
  *        asks for the program's base cannot be loaded beside it.
  * @param {boolean} [options.dll]  A library: its entry point is DllMain.
- * @param {{ template: string, index: string }} [options.tls]  A thread-local
- *        directory: the data blob each thread's block is a copy of, and the
- *        one the loader writes the block's slot number into.
+ * @param {{ template: string, index: string, callbacks?: number[] }} [options.tls]
+ *        A thread-local directory: the data blob each thread's block is a copy
+ *        of, the one the loader writes the block's slot number into, and the
+ *        TLS callbacks, as offsets into the code, in the order they are called.
  * @param {(ctx: {
  *   iat: (name: string) => number,
  *   at: (name: string) => number,
@@ -194,9 +195,10 @@ export function buildExe(options){
         cursor += bytes.length;
     }
     // The thread-local directory, when asked for: its template is one of the
-    // data blobs and its index another, and its callback list the zero dword
-    // after it, so it names none.
+    // data blobs and its index another, and its callback list follows it,
+    // ended by a zero dword.
     const tls = options.tls ?? null;
+    const callbacks = tls?.callbacks ?? [];
     const tlsOffset = tls === null ? 0 : (cursor + 3) & ~3;
     if (tls !== null)
     {
@@ -207,7 +209,7 @@ export function buildExe(options){
                 throw new Error(`no data named "${name}" for the thread-local directory`);
             }
         }
-        cursor = tlsOffset + TLS_DIRECTORY_SIZE + 4;
+        cursor = tlsOffset + TLS_DIRECTORY_SIZE + 4 * (callbacks.length + 1);
     }
 
     // Import name blocks: WORD hint + zero-terminated name, WORD-aligned.
@@ -309,9 +311,13 @@ export function buildExe(options){
         text.pad(tlsOffset)
             .u32(start).u32(start + data[tls.template].length) // the template's bounds
             .u32(va(dataOffsets[tls.index])) // where the loader writes the slot
-            .u32(va(tlsOffset + TLS_DIRECTORY_SIZE)) // the callbacks: none
-            .u32(0).u32(0) // zero fill, characteristics
-            .u32(0);
+            .u32(va(tlsOffset + TLS_DIRECTORY_SIZE)) // the callbacks
+            .u32(0).u32(0); // zero fill, characteristics
+        for (const offset of callbacks)
+        {
+            text.u32(va(offset));
+        }
+        text.u32(0);
     }
     for (const module of modules)
     {

@@ -360,6 +360,22 @@ test('CreateThread makes a thread and does not switch to it', ()=>{
     assert.deepEqual(parked, [], 'the creating thread keeps running');
 });
 
+test('CreateThread begins the thread where the libraries are told of it, its routine above', ()=>{
+    const { kernel, fns, host } = setup();
+    host.threadStart = ()=>0x9000;
+
+    fns.CreateThread.handler([0, 0x10000, 0x401000, 0xdead, 0, 0]);
+
+    assert.equal(kernel.state.created[0].entry, 0x9000);
+    assert.equal(kernel.state.created[0].start, 0x401000, 'entered once they have been');
+    assert.equal(kernel.state.created[0].parameter, 0xdead);
+
+    host.threadStart = ()=>0;
+    fns.CreateThread.handler([0, 0x10000, 0x402000, 0, 0, 0]);
+    assert.equal(kernel.state.created[1].entry, 0x402000, 'nowhere to tell them: the routine');
+    assert.equal(kernel.state.created[1].start, undefined);
+});
+
 test('CreateRemoteThread into this process is CreateThread, and into another is refused', ()=>{
     // kernel32's process and thread tests: the stack of a remote thread of
     // our own process; a child, which runs only after this process, cannot
@@ -564,6 +580,21 @@ test('ExitThread ends the thread and parks it', ()=>{
     assert.deepEqual(kernel.state.exited, [{ thread: current, code: 7 }]);
     assert.deepEqual(parked, [current], 'it must not run on after ending');
     assert.equal(result, PARKED, 'a call that does not return has no value to return');
+});
+
+test('ExitThread answers with the libraries\' detach when there is one to wait for', async()=>{
+    const { fns, host, parked, current } = setup();
+    /** @type {any[]} */
+    const ended = [];
+    host.endThread = (thread, code)=>{
+        ended.push([thread, code]);
+        return code === 7 ? Promise.resolve(0) : null;
+    };
+
+    assert.equal(await fns.ExitThread.handler([7]), 0, 'the detach\'s promise');
+    assert.deepEqual(parked, [], 'not parked under a call still answering');
+    assert.equal(fns.ExitThread.handler([8]), PARKED, 'ended at once: parked');
+    assert.deepEqual(ended, [[current, 7], [current, 8]]);
 });
 
 test('a second create of a live name hands back the same object', ()=>{

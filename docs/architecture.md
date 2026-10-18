@@ -313,7 +313,11 @@ The order matters in three places.
   and registry from the very start.
 - **The program starts only on `run`,** once the page has attached the log, input and sound.
   Libraries' `DllMain` and TLS callbacks are the program's code too: a stub at the start of the main
-  thread calls them, not the host.
+  thread calls them, not the host. Every thread made later begins in a stub of its own that calls
+  them with `DLL_THREAD_ATTACH` before its start routine, and with `DLL_THREAD_DETACH` when it
+  ends, under the same loader lock (`kernel32/thread-calls.js`). The process's end and the last
+  `FreeLibrary` tell each image's TLS callbacks `DLL_PROCESS_DETACH` before its `DllMain`
+  (`kernel32/dllentry.js`).
 
 With processes at once (`concurrency` 2 or 4), the engine thread builds the run's system instead
 (the journal, the sound output, the volume and bundle, the registry: `buildSystemHost`), and
@@ -688,7 +692,10 @@ flowchart TD
   there would be a second library of the name in the process beside the engine's.
 - **A real DLL** is parsed and relocated by the loader, its dependencies are loaded first, its
   imports (delayed ones included) are bound, and its `DllMain` is called through the bridge as
-  program code. TLS is supported for the main image and for statically loaded libraries.
+  program code. Every image's TLS is supported, a library's loaded at run time too: a slot, a
+  copy of its block in every thread (those already running when it is loaded included), and TLS
+  callbacks for every reason its `DllMain` hears, before it. `FreeLibrary` gives the slot and the
+  copies back.
 - **DirectX's redistributables** (`d3dx9_*` and the rest) are not part of the engine: a game brings
   them, through its installer's DirectX setup, which puts them in `C:\WINDOWS\system32\`, or as DLLs
   beside its `.exe`. A copy beside the `.exe` is loaded as the real DLL; for every other the

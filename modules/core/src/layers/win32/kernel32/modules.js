@@ -101,7 +101,18 @@ export function searchesBesideProgram(knownDll, mappedFromFile){
  *           A library LoadLibraryEx mapped as data, by the handle it gave out:
  *           no module, so not among the ones `byBase` knows.
  * @property {(code: number) => any} [exitThread]
- *           Ends the calling thread as ExitThread does.
+ *           Ends the calling thread as ExitThread does, parking it: for a call
+ *           still in flight.
+ * @property {() => any} [currentThread]
+ * @property {(thread: any, code: number) => Promise<number> | null} [endThread]
+ *           Ends a thread that ended itself, without parking it: for a call
+ *           that has already been suspended, whose thread is no longer the one
+ *           on the processor. Null once it has ended, or the promise of
+ *           telling the libraries of its detach on it first and then ending it.
+ * @property {(base: number) => void} [disableThreadCalls]
+ *           Stops telling a library of the threads that start and end. A
+ *           library with static thread-local storage goes on being told: its
+ *           TLS callbacks build each thread's thread-local objects.
  * @property {() => { base: number, path: string }[]} [list]
  *           Every module of the process, the image first: what psapi's
  *           EnumProcessModules hands out.
@@ -115,16 +126,6 @@ export function searchesBesideProgram(knownDll, mappedFromFile){
  * @param {ModulesHost} host
  */
 export function createModuleFunctions(host){
-    /**
-     * Libraries that asked not to hear about threads. Kept because the answer
-     * to asking twice is still yes and because a diagnostic should be able to
-     * say which libraries opted out; nothing else reads it, since honouring the
-     * request is indistinguishable from not honouring it.
-     *
-     * @type {Set<number>}
-     */
-    const withoutThreadCalls = new Set();
-
     /**
      * Where a module's file is, as a program asking about it expects.
      *
@@ -419,24 +420,37 @@ export function createModuleFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([handle, code])=>{
+                // Held before anything can wait: once the library's DllMain
+                // has to hear the detach, this call is suspended and the loop
+                // turns, and whichever thread is on the processor by the time
+                // it is done -- if any, and on this executor at all -- is not
+                // the one to end.
+                const thread = host.currentThread?.();
                 const freed = freeLibrary(handle);
-                const exit = ()=>host.exitThread?.(code >>> 0) ?? 0;
-                return freed instanceof Promise ? freed.then(exit) : exit();
+                if (!(freed instanceof Promise))
+                {
+                    return host.exitThread?.(code >>> 0) ?? 0;
+                }
+                // Its call is no longer in flight to be parked; the answer it
+                // is suspended on only has to arrive, and a thread that has
+                // ended never returns to read it. Not before the libraries
+                // still loaded are told of its end on it, as ExitThread tells
+                // them: answered sooner, the call would resume the thread
+                // under its own detach.
+                return freed.then(()=>host.endThread?.(thread, code >>> 0) ?? 0);
             },
         },
 
         /**
          * BOOL DisableThreadLibraryCalls(HMODULE hLibModule)
          *
-         * A library saying it does not want its entry point called for every
-         * thread that comes and goes. Accepted and recorded rather than acted
-         * on: the caller's intent is an optimisation, and the observable
-         * behaviour of honouring it is a DllMain that is not called -- which is
-         * indistinguishable from one that is called and does nothing.
-         *
-         * It is answered at all because a library calls this from inside its own
-         * attach and checks the result, and because refusing a call that cannot
-         * fail is worse than agreeing to something harmless.
+         * A library saying it does not want DLL_THREAD_ATTACH and
+         * DLL_THREAD_DETACH for every thread that comes and goes: from now on
+         * neither its entry point nor its TLS callbacks hear of a thread. Asked
+         * from inside its own attach, as the documentation advises, and a
+         * library that checks the answer is told yes -- also when it has static
+         * thread-local storage, which goes on being told, the call making "no
+         * optimisation" for it (decisions.md).
          */
         DisableThreadLibraryCalls: {
             argBytes: 4,
@@ -448,7 +462,7 @@ export function createModuleFunctions(host){
                     host.setLastError(ERROR_MOD_NOT_FOUND);
                     return 0;
                 }
-                withoutThreadCalls.add(handle >>> 0);
+                host.disableThreadCalls?.(handle >>> 0);
                 return 1;
             },
         },

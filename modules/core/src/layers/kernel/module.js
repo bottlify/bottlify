@@ -252,6 +252,9 @@ export function createKernelModule(){
              * rather than dereferencing what disposal took away.
              */
             const live = ()=>!state.disposed;
+            /** The kernel's `threadGone`. @param {any} thread */
+            const threadGone = thread=>thread.state === ThreadState.TERMINATED
+                && !state.scheduler.running(thread);
 
             current = state;
             return {
@@ -292,6 +295,12 @@ export function createKernelModule(){
                  *   instructions, and keeps whatever it was holding. The default is
                  *   that loop, for a caller with nothing better -- but a caller
                  *   that can end the thread should pass somewhere that does.
+                 * @param {number} [options.start]
+                 *   The start routine, when `entry` is a routine that runs on the
+                 *   new thread before it -- the loader telling the libraries of
+                 *   the thread -- and then enters it: placed in the word above the
+                 *   parameter for that routine to find, so the start routine is
+                 *   entered with the stack it would have had as `entry`.
                  * @returns {any} null once this instance is disposed -- there is
                  *     no scheduler left to give a thread to -- or when the pool has
                  *     no room for its stack, which is a thread that cannot be made
@@ -299,7 +308,7 @@ export function createKernelModule(){
                  */
                 createThread({
                     entry, parameter = 0, stackTop, stackLimit, stackSize, stackReserve,
-                    tebAddress, name, returnTo, id,
+                    tebAddress, name, returnTo, id, start,
                 })
                 {
                     if (!live())
@@ -317,8 +326,7 @@ export function createKernelModule(){
                     {
                         slot = stacks.allocate({ commit: stackSize, reserve: stackReserve },
                             (/** @type {any} */ owner)=>owner.releasesStack === true
-                                && owner.state === ThreadState.TERMINATED
-                                && owner !== state.scheduler.current());
+                                && threadGone(owner));
                         if (!slot)
                         {
                             log.warn?.('kernel', 'no room in the stack pool for a thread'
@@ -340,6 +348,10 @@ export function createKernelModule(){
                     // the top of the region is outside it. The headroom keeps every
                     // pointer the thread can reach inside the memory it was given.
                     top -= 16;
+                    if (start !== undefined)
+                    {
+                        memory.writeU32(top + 8, start);
+                    }
                     memory.writeU32(top + 4, parameter);
                     memory.writeU32(top, returnTo ?? cpu.parkAddress());
 
@@ -352,6 +364,12 @@ export function createKernelModule(){
                         id,
                     });
                     thread.handle = state.handles.open('thread', thread);
+                    if (start !== undefined)
+                    {
+                        // What a report names the thread by: its own routine,
+                        // not the one every thread begins in.
+                        thread.entry = start;
+                    }
                     if (slot)
                     {
                         slot.owner = thread;
@@ -529,8 +547,14 @@ export function createKernelModule(){
                  */
                 nextDeadline: ()=>live() ? state.scheduler.nextDeadline() : null,
 
-                /** @param {any} thread @param {number} exitCode */
-                exitThread(thread, exitCode){
+                /**
+                 * @param {any} thread @param {number} exitCode
+                 * @param {boolean} [itself]  Whether the thread ended itself. By
+                 *        default whether it is the one on the processor, which a
+                 *        thread its own call ends only after that call was
+                 *        suspended no longer is.
+                 */
+                exitThread(thread, exitCode, itself){
                     if (!live())
                     {
                         return;
@@ -538,7 +562,7 @@ export function createKernelModule(){
                     // A thread that ends itself gives its stack back; one ended
                     // by another thread does not, as Microsoft documents for
                     // TerminateThread -- whatever it left there stays readable.
-                    thread.releasesStack = thread === state.scheduler.current();
+                    thread.releasesStack = itself ?? thread === state.scheduler.current();
                     // A thread that dies holding a mutex leaves whatever it protected
                     // half-written; the next owner has to be told (§ abandoned mutex).
                     state.sync.abandonMutexesOwnedBy(thread);
@@ -552,6 +576,21 @@ export function createKernelModule(){
                     // signalled by having ended, not by handing anything over.
                     state.sync.releaseAll(thread);
                 },
+
+                /**
+                 * Whether a thread has ended and runs on no executor: nothing
+                 * of it runs again, so what it was given -- its stack, its
+                 * environment block -- may go to another. One ended by another
+                 * goes on running on another executor until that one's slice
+                 * ends. Asked when the next thread is made, as the stack pool
+                 * asks, and not from the call that ends one: that still runs
+                 * on the thread on its way out. A handle still open to it
+                 * needs none of what it was given.
+                 *
+                 * @param {any} thread
+                 * @returns {boolean}
+                 */
+                threadGone: thread=>!live() || threadGone(thread),
 
                 /**
                  * Suspends a thread: it keeps its state -- a wait stays a wait,

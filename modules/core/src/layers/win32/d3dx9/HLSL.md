@@ -105,7 +105,7 @@ texture ops after arithmetic in ps_1_x) is not checked.
 
 `D3DXCreateEffect` and its kin read an effect file with the same front end
 (`effect-model.js`): the preprocessor with the program's macros and includes, the
-parser and the checker over every declaration -- a function's body is checked by
+parser and the checker over every declaration. A function's body is checked by
 the compile of the entry point a pass names, so a function no pass compiles does
 not refuse the effect. Each `compile vs_2_0 f(...)` is a compile of one entry point
 over the same source and the same included files, its arguments bound to the
@@ -114,9 +114,9 @@ semantic), which then fold into the code instead of taking registers.
 
 `effect.js` builds ID3DXEffect, ID3DXEffectPool and ID3DXEffectCompiler over that
 description. A pass's states go to the device (or the program's state manager) in
-the order written; each shader is followed by its constants -- the parameters of the
+the order written; each shader is followed by its constants (the parameters of the
 same names, laid out by the shader's constant table with the routine D3DX's setters
-use -- and the sampler states of the samplers it reads. `effect.test.js` holds the
+use) and the sampler states of the samplers it reads. `effect.test.js` holds the
 contract (vtable order and widths for d3dx9_24/25, 26 and 27 on; Wine's conformance
 expectations for descriptions, names, conversions and pools) and runs a pass's pixel
 shader on the reference machine with the registers the effect set.

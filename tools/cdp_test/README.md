@@ -31,7 +31,7 @@ the guest, its files directly in that directory.
 | [`server.mjs`](server.mjs) | a static server for the sandbox pages, the sources and a bundle | library |
 | [`../disasm.mjs`](../disasm.mjs) | a program's own code at an address a profile names hot (`hw.dll+0x35840`), disassembled out of the bottle by module and offset (capstone) | `node tools/disasm.mjs <bundle-id> hw.dll 35840:80` |
 | [`cpuprofile-callers.mjs`](cpuprofile-callers.mjs) | who calls a function in a `.cpuprofile` (`live/worker-profile.mjs` writes `dbg/worker.cpuprofile`): the callers above every matching frame, by samples | `node tools/cdp_test/cpuprofile-callers.mjs dbg/worker.cpuprofile "^now "` |
-| [`trace-summary.mjs`](trace-summary.mjs) | a Performance trace a person saved (`Trace-*.json.gz`): each thread's busy share, and every sampled thread's functions by self time -- which thread a slow scene went to, and what in it | `node tools/cdp_test/trace-summary.mjs <trace.json.gz>` |
+| [`trace-summary.mjs`](trace-summary.mjs) | a Performance trace a person saved (`Trace-*.json.gz`): each thread's busy share, and every sampled thread's functions by self time: which thread a slow scene went to, and what in it | `node tools/cdp_test/trace-summary.mjs <trace.json.gz>` |
 | [`device-lag.mjs`](device-lag.mjs) | counts the engine's GPU submits and those the device finished, for a run that waits on the device | library |
 
 Reports land in `tools/cdp_test/reports/` (gitignored).
@@ -144,8 +144,8 @@ workers answer nothing to a direct attach.
 | `record-output.mjs` | what the person hears, uncompressed off the output node, the last two minutes (`arm` keeps a tap across reloads; `save` writes a WAV) | `node tools/cdp_test/live/record-output.mjs arm` then `… save [seconds] [file]` |
 | `snapshot.mjs` | textures of the running program as the GPU holds them, as PNGs: the targets and shadow maps a frame dump names; a float format stretched between its smallest and largest values | `node tools/cdp_test/live/snapshot.mjs t4414 t754 [--out DIR]` |
 | `watch.mjs` | left running in the background beside a person playing: every second the frames, every two each process's host calls, the guest code that grew and GDI's blits by path, to `dbg/watch.jsonl`; `--last N` folds the last N seconds when they say "there" | `node tools/cdp_test/live/watch.mjs` (background), then `… --last 30` |
-| `console.mjs` | the page's console as it happens, each line timed: WebGPU validation errors the page never shows, which Chrome stops printing after a few hundred per device -- start it with the session | `node tools/cdp_test/live/console.mjs > dbg/console.log` |
-| `shader.mjs` | a shader of the running game read whole: the Direct3D bytecode disassembled, then every WGSL translation of it -- take the id from a dump (`dumpFrames(2)`: the second frame is whole), the draw whose picture is wrong | `node tools/cdp_test/live/shader.mjs ps585 vs586 > dbg/ps585.txt` |
+| `console.mjs` | the page's console as it happens, each line timed: WebGPU validation errors the page never shows, which Chrome stops printing after a few hundred per device; start it with the session | `node tools/cdp_test/live/console.mjs > dbg/console.log` |
+| `shader.mjs` | a shader of the running game read whole: the Direct3D bytecode disassembled, then every WGSL translation of it. Take the id from a dump (`dumpFrames(2)`: the second frame is whole), the draw whose picture is wrong | `node tools/cdp_test/live/shader.mjs ps585 vs586 > dbg/ps585.txt` |
 
 `tools/wav-scan.mjs <file.wav>` reads such a recording for what is wrong in it: gaps of
 silence inside sound, clicks (a step far beyond the signal's own), and exact repeats.

@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    createProcessBlocks, TEB, PEB, PARAMS, LDR_DATA, LDR_ENTRY, END_OF_EXCEPTION_LIST,
+    createProcessBlocks, TEB, PEB, PARAMS, LDR_DATA, LDR_ENTRY, END_OF_EXCEPTION_LIST, TLS_SLOTS,
 } from './teb.js';
 import { WINDOWS_VERSIONS } from './versions.js';
 
@@ -85,6 +85,171 @@ test('two threads get two blocks and two arrays', ()=>{
     assert.equal(memory.view.getUint32(first.teb + TEB.PEB, true),
         memory.view.getUint32(second.teb + TEB.PEB, true), 'and both name one process');
 });
+
+/**
+ * Memory a thread's blocks come from and go back to, over `memory`'s array: a
+ * free list per size, the last given back the first handed out again, and
+ * room for `room` blocks out at once.
+ *
+ * @param {any} memory @param {number} [room]
+ */
+function threadMemory(memory, room = Infinity){
+    /** @type {Map<number, number>} */
+    const out = new Map();
+    /** @type {Map<number, number[]>} */
+    const free = new Map();
+    return {
+        out,
+        /** @param {number} size */
+        allocate(size){
+            if (out.size >= room)
+            {
+                return 0;
+            }
+            const at = free.get(size)?.pop() ?? memory.allocate(size);
+            out.set(at, size);
+            return at;
+        },
+        /** @param {number} at */
+        free(at){
+            const size = /** @type {number} */ (out.get(at));
+            out.delete(at);
+            free.set(size, [...free.get(size) ?? [], at]);
+        },
+    };
+}
+
+const TEMPLATE = Uint8Array.of(0x34, 0x12, 0xed, 0x5e, 1, 2, 3, 4);
+
+test('a thread\'s blocks, its copies of the images\' thread-local blocks among them, all go back'
+    + ' to the memory they came from', ()=>{
+    const memory = guest();
+    const held = threadMemory(memory);
+    const blocks = build(memory, { threadMemory: held });
+    const { teb, tls } = blocks.createThreadBlock({ id: 1, stackBase: 0x300000,
+        stackLimit: 0x2f0000, locals: [{ slot: 3, template: TEMPLATE, size: 12 },
+            { slot: 0, template: TEMPLATE.subarray(0, 4), size: 4 }] });
+
+    const local = memory.view.getUint32(tls + 3 * 4, true);
+    assert.deepEqual([...memory.bytes.subarray(local, local + 12)], [...TEMPLATE, 0, 0, 0, 0],
+        'the template, then its zeroes, in the slot the image was given');
+    assert.equal(memory.view.getUint32(memory.view.getUint32(tls, true), true), 0x5eed1234);
+    assert.equal(held.out.size, 4, 'the block, the array and the two copies');
+
+    assert.equal(blocks.releaseThreadBlock(teb), true);
+    assert.equal(held.out.size, 0);
+    assert.equal(blocks.releaseThreadBlock(teb), false, 'and only once');
+});
+
+test('a block made over what an ended thread was given is the new thread\'s, written in full', ()=>{
+    // The memory comes back holding whatever the last thread left: its id,
+    // its exception frames, its thread-local values.
+    const memory = guest();
+    const held = threadMemory(memory);
+    const blocks = build(memory, { threadMemory: held });
+    const locals = [{ slot: 5, template: TEMPLATE, size: 16 }];
+    const first = blocks.createThreadBlock({ id: 1, stackBase: 0x300000, stackLimit: 0x2f0000,
+        locals });
+    const local = memory.view.getUint32(first.tls + 5 * 4, true);
+    for (const [at, size] of held.out)
+    {
+        memory.bytes.fill(0xcc, at, at + size);
+    }
+    blocks.releaseThreadBlock(first.teb);
+
+    const second = blocks.createThreadBlock({ id: 2, stackBase: 0x400000, stackLimit: 0x3f0000,
+        locals });
+    assert.equal(second.teb, first.teb, 'the same memory, handed out again');
+    assert.equal(memory.view.getUint32(second.teb + TEB.SELF, true), second.teb);
+    assert.equal(memory.view.getUint32(second.teb + TEB.THREAD_ID, true), 2);
+    assert.equal(memory.view.getUint32(second.teb + TEB.STACK_BASE, true), 0x400000);
+    assert.equal(memory.view.getUint32(second.teb + TEB.EXCEPTION_LIST, true),
+        END_OF_EXCEPTION_LIST);
+    assert.equal(memory.view.getUint32(second.teb + TEB.LAST_ERROR, true), 0);
+    assert.equal(memory.view.getUint32(second.teb + TEB.TLS_POINTER, true), second.tls);
+    const slots = Array.from({ length: TLS_SLOTS }, (_, slot)=>
+        memory.view.getUint32(second.tls + slot * 4, true));
+    assert.deepEqual(slots.filter((value, slot)=>slot !== 5 && value !== 0), [],
+        'no slot of the last thread\'s values');
+    assert.equal(slots[5], local);
+    assert.deepEqual([...memory.bytes.subarray(local, local + 16)],
+        [...TEMPLATE, ...new Array(8).fill(0)], 'the template again, and its zeroes');
+});
+
+test('a thread-local block whose slot is past the array is left out, not written beyond it', ()=>{
+    const memory = guest();
+    const held = threadMemory(memory);
+    const { tls } = build(memory, { threadMemory: held }).createThreadBlock({ id: 1,
+        stackBase: 0x300000, stackLimit: 0x2f0000,
+        locals: [{ slot: TLS_SLOTS, template: TEMPLATE, size: 8 },
+            { slot: 0xffffffff, template: TEMPLATE, size: 8 }] });
+    assert.equal(held.out.size, 2, 'the block and its array only');
+    assert.equal(memory.view.getUint32(tls + TLS_SLOTS * 4, true), 0);
+});
+
+test('a thread there is no room for gets no block, and none of what was taken for it is kept', ()=>{
+    for (const room of [0, 1, 2])
+    {
+        const memory = guest();
+        const held = threadMemory(memory, room);
+        const block = build(memory, { threadMemory: held }).createThreadBlock({ id: 1,
+            stackBase: 0x300000, stackLimit: 0x2f0000,
+            locals: [{ slot: 0, template: TEMPLATE, size: 8 }] });
+        assert.equal(block, null, `room for ${room} of the three`);
+        assert.equal(held.out.size, 0, `room for ${room}: given back`);
+    }
+});
+
+test('a library loaded after the threads were made gives each its own copy, at its slot, and'
+    + ' takes them back when it goes', ()=>{
+    const memory = guest();
+    const held = threadMemory(memory);
+    const blocks = build(memory, { threadMemory: held });
+    const first = blocks.createThreadBlock({ id: 1, stackBase: 0x300000, stackLimit: 0x2f0000 });
+    const second = blocks.createThreadBlock({ id: 2, stackBase: 0x400000, stackLimit: 0x3f0000,
+        locals: [{ slot: 1, template: TEMPLATE, size: 8 }] });
+    const before = held.out.size;
+
+    assert.equal(blocks.addThreadLocal({ slot: 6, template: TEMPLATE, size: 12 }), true);
+    const copies = [first, second].map(({ tls })=>memory.view.getUint32(tls + 6 * 4, true));
+    assert.notEqual(copies[0], copies[1], 'one each');
+    for (const copy of copies)
+    {
+        assert.deepEqual([...memory.bytes.subarray(copy, copy + 12)], [...TEMPLATE, 0, 0, 0, 0]);
+    }
+    assert.equal(held.out.size, before + 2);
+
+    blocks.removeThreadLocal(6);
+    assert.equal(held.out.size, before, 'both given back');
+    assert.deepEqual([first, second].map(({ tls })=>memory.view.getUint32(tls + 6 * 4, true)),
+        [0, 0], 'and the slot reads zero');
+    assert.notEqual(memory.view.getUint32(second.tls + 4, true), 0, 'another image\'s left alone');
+
+    assert.equal(blocks.addThreadLocal({ slot: 6, template: TEMPLATE, size: 12 }), true);
+    blocks.releaseThreadBlock(first.teb);
+    blocks.releaseThreadBlock(second.teb);
+    assert.equal(held.out.size, 0, 'a copy given later goes with its thread');
+});
+
+test('a library\'s copies with no room for every thread are none, and a slot past the array none',
+    ()=>{
+        // Room for both threads' blocks and one copy: the second thread's
+        // copy fails, and the first thread's is taken back.
+        const memory = guest();
+        const held = threadMemory(memory, 5);
+        const blocks = build(memory, { threadMemory: held });
+        const threads = [1, 2].map(id=>blocks.createThreadBlock({ id,
+            stackBase: 0x300000 * id, stackLimit: 0x2f0000 * id }));
+        assert.equal(held.out.size, 4);
+
+        assert.equal(blocks.addThreadLocal({ slot: 2, template: TEMPLATE, size: 8 }), false);
+        assert.equal(held.out.size, 4, 'nothing kept');
+        assert.deepEqual(threads.map(({ tls })=>memory.view.getUint32(tls + 2 * 4, true)), [0, 0]);
+
+        assert.equal(blocks.addThreadLocal({ slot: TLS_SLOTS, template: TEMPLATE, size: 8 }),
+            false);
+        assert.equal(held.out.size, 4);
+    });
 
 test('the process block points at its parameters, and they say they are normalised', ()=>{
     // Not a missing feature when absent: a runtime reads the flag on its first

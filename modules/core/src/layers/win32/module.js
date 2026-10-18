@@ -32,6 +32,7 @@ import { createSpawner, createSpawnFunctions, writeThroughProtection } from './k
 import { createAtomFunctions } from './kernel32/atoms.js';
 import { createSeh } from './kernel32/seh.js';
 import { createEntryPointCaller, createGuardedCaller } from './kernel32/dllentry.js';
+import { createThreadCalls, DLL_THREAD_DETACH } from './kernel32/thread-calls.js';
 import { createCrtSeh } from './msvcrt/seh.js';
 import { createCxxExceptions } from './msvcrt/eh.js';
 import { createApcs } from './kernel32/apc.js';
@@ -584,13 +585,78 @@ export function createWin32Module(){
              */
             let threadReturnStub = null;
             /**
-             * A thread ending itself, by ExitThread or by returning. The last
-             * one ends the process with its code, as it does on Windows.
+             * What the libraries are told of a thread's start and end, on the
+             * thread: every thread made after the first begins in its routine.
+             */
+            const threadCalls = createThreadCalls({
+                register: (name, fn)=>bridge.register(name, fn),
+                allocate: bytes=>heap.allocate(bytes),
+                allocateCode: bytes=>heap.allocateCode(bytes),
+                writeMemory: (address, bytes)=>memory.writeBytes(address, bytes),
+                images: ()=>modules.threadCalls?.() ?? [],
+                loaderLock: ()=>{
+                    const address = modules.loaderLock?.() ?? 0;
+                    const enter = kernel32Export('EnterCriticalSection');
+                    const leave = kernel32Export('LeaveCriticalSection');
+                    return address === 0 || enter === 0 || leave === 0
+                        ? null
+                        : { address, enter, leave };
+                },
+            });
+            /**
+             * A thread ending itself, by ExitThread, by FreeLibraryAndExitThread
+             * or by returning: each library is told DLL_THREAD_DETACH on it
+             * first. The last one's end
+             * is the process's, with its code, as on Windows -- the libraries
+             * are told DLL_PROCESS_DETACH instead, as ExitProcess tells them.
+             *
+             * @param {any} thread @param {number} code
+             * @returns {Promise<number> | null} null once it has ended, else the
+             *     promise of telling the libraries and then ending it
+             */
+            const endThread = (thread, code)=>{
+                const others = kernel.threads().some((/** @type {any} */ other)=>
+                    other !== thread && other.state !== 'terminated');
+                if (!others && exitCode === null)
+                {
+                    // On this thread, which goes on standing while they are told.
+                    const told = detachAndEnd(code);
+                    if (told === null)
+                    {
+                        kernel.exitThread(thread, code, true);
+                    }
+                    return told;
+                }
+                const walk = others && threadCalls.pending() ? threadCalls.walk() : 0;
+                if (walk === 0)
+                {
+                    threadEnded(thread, code);
+                    return null;
+                }
+                // Once its call is suspended, so that the loader's frame goes
+                // below where the call left the stack.
+                return Promise.resolve().then(()=>callGuarded({
+                    entry: walk, args: [DLL_THREAD_DETACH], thread, failed: 0,
+                    report: exception=>config?.divergence?.('DllMain', `exception 0x${exception}`
+                        + ' telling the libraries of a thread\'s end, taken by the loader'),
+                })).then(()=>{
+                    threadEnded(thread, code);
+                    return 0;
+                });
+            };
+            /**
+             * The thread gone. Two ending at once each saw the other standing
+             * and told the libraries of their own end, so the second gone
+             * ends the process: no thread is left to tell them of it.
              *
              * @param {any} thread @param {number} code
              */
-            const endThread = (thread, code)=>{
-                kernel.exitThread(thread, code);
+            const threadEnded = (thread, code)=>{
+                // Said outright rather than read off the processor: ended once
+                // its detach has run, or FreeLibraryAndExitThread's library's,
+                // when any thread may be there, a thread that ended itself
+                // gives its stack back whoever is running.
+                kernel.exitThread(thread, code, true);
                 if (exitCode === null && kernel.threads().every(
                     (/** @type {any} */ other)=>other.state === 'terminated'))
                 {
@@ -606,8 +672,8 @@ export function createWin32Module(){
                     preserveResult: true,
                     handler: ()=>{
                         const thread = kernel.currentThread();
-                        endThread(thread, cpuRegisters.read('ecx') >>> 0);
-                        return bridge.park(thread);
+                        return endThread(thread, cpuRegisters.read('ecx') >>> 0)
+                            ?? bridge.park(thread);
                     },
                 });
                 return threadReturnStub ?? 0;
@@ -1370,9 +1436,21 @@ export function createWin32Module(){
                 },
             });
 
-            // Every DllMain this layer or the loader calls goes through the
-            // loader's own frame, so an exception out of one ends it rather
-            // than reaching the program's handlers.
+            /**
+             * Where a thread whose call has suspended left its stack: the
+             * guarded callers' frames go below it.
+             *
+             * @param {any} thread
+             */
+            const restingStack = thread=>Math.min(
+                thread?.callbackFrames?.at(-1)?.frameBase ?? Infinity,
+                thread?.hostCalls?.at(-1)?.restingStack ?? Infinity,
+                Infinity) >>> 0 || cpuRegisters.read('esp') >>> 0;
+
+            // Every DllMain and TLS callback this layer or the loader calls
+            // with DLL_PROCESS_DETACH goes through the loader's own frame, so
+            // an exception out of one ends it rather than reaching the
+            // program's handlers.
             const callEntryPoint = createEntryPointCaller({
                 register: (name, fn)=>bridge.register(name, fn),
                 callGuest: call=>bridge.callGuest(call),
@@ -1380,7 +1458,7 @@ export function createWin32Module(){
                 unwind: (frame, address, options)=>seh.unwind(frame, address, options),
                 readU32: address=>memory.readU32(address),
                 writeU32: (address, value)=>memory.writeU32(address, value),
-                stackPointer: ()=>cpuRegisters.read('esp') >>> 0,
+                stackPointer: restingStack,
                 teb: thread=>(thread?.tebAddress ?? kernel.currentThread()?.tebAddress ?? 0) >>> 0,
                 divergence: detail=>config?.divergence?.('DllMain', detail),
             });
@@ -1396,10 +1474,7 @@ export function createWin32Module(){
                 unwind: (frame, address, options)=>seh.unwind(frame, address, options),
                 readU32: address=>memory.readU32(address),
                 writeU32: (address, value)=>memory.writeU32(address, value),
-                stackPointer: thread=>Math.min(
-                    thread?.callbackFrames?.at(-1)?.frameBase ?? Infinity,
-                    thread?.hostCalls?.at(-1)?.restingStack ?? Infinity,
-                    Infinity) >>> 0 || cpuRegisters.read('esp') >>> 0,
+                stackPointer: restingStack,
                 teb: thread=>(thread?.tebAddress ?? kernel.currentThread()?.tebAddress ?? 0) >>> 0,
             });
 
@@ -1407,12 +1482,13 @@ export function createWin32Module(){
             let ending = false;
             /**
              * ExitProcess, and the C runtime's exits that end in it: every other
-             * thread ends, each library still attached is called with
-             * DLL_PROCESS_DETACH on this thread -- the last attached first, and
-             * lpvReserved non-NULL because the process is ending -- and only then
-             * is the code recorded, which is what stops the machine. With nothing
-             * to tell, nothing else would run, so the code is recorded at once.
-             * An ExitProcess from inside one of those DllMains ends it there.
+             * thread ends, each image still attached is told DLL_PROCESS_DETACH
+             * on this thread -- the last attached first, its TLS callbacks before
+             * its entry point, and lpvReserved non-NULL because the process is
+             * ending -- and only then is the code recorded, which is what stops
+             * the machine. With nothing to tell, nothing else would run, so the
+             * code is recorded at once. An ExitProcess from inside one of those
+             * calls ends it there.
              *
              * @param {number} code
              */
@@ -1432,7 +1508,8 @@ export function createWin32Module(){
              * @returns {Promise<number> | null}
              */
             const detachAndEnd = code=>{
-                const attached = ending ? [] : (modules.attachedLibraries?.() ?? []);
+                /** @type {{ base: number, routines: number[] }[]} */
+                const attached = ending ? [] : (modules.processDetach?.() ?? []);
                 ending = true;
                 if (attached.length === 0)
                 {
@@ -1450,14 +1527,11 @@ export function createWin32Module(){
                 }
                 /** @type {Promise<any>} */
                 let told = Promise.resolve(0);
-                for (const library of attached)
+                for (const image of attached)
                 {
                     told = told.then(()=>callEntryPoint({
-                        entry: library.entryPoint,
-                        base: library.base,
-                        reason: DLL_PROCESS_DETACH,
-                        reserved: 1,
-                        thread: self,
+                        routines: image.routines, base: image.base,
+                        reason: DLL_PROCESS_DETACH, reserved: 1, thread: self,
                     }));
                 }
                 return told.then(()=>{
@@ -1514,6 +1588,7 @@ export function createWin32Module(){
                         // first time a thread is made, because registering it costs
                         // a stub and a build that never makes a thread needs none.
                         threadReturn: ()=>threadReturnAddress(),
+                        threadStart: ()=>threadCalls.start(),
                         endThread,
                         processId,
                         imagePath: ()=>modules.imagePath(),
@@ -1548,6 +1623,7 @@ export function createWin32Module(){
                         waitFor: (handle, milliseconds)=>libraries['KERNEL32.dll']
                             .WaitForSingleObject.handler([handle, milliseconds]),
                         threadReturn: ()=>threadReturnAddress(),
+                        threadStart: ()=>threadCalls.start(),
                     }).table,
                     ...createDebugFunctions({
                         readCString,
@@ -1880,6 +1956,10 @@ export function createWin32Module(){
                         /** @param {any} asked */
                         resolved: asked=>modules.resolved?.(asked),
                         exitThread: code=>libraries['KERNEL32.dll'].ExitThread.handler([code]),
+                        currentThread: ()=>kernel.currentThread(),
+                        endThread,
+                        /** @param {number} base */
+                        disableThreadCalls: base=>modules.disableThreadCalls?.(base),
                     }),
                     // Last, deliberately: writing and closing a handle are the same
                     // entry points for a file as for a console or an event, and the
@@ -3405,15 +3485,17 @@ export function createWin32Module(){
                 libraryConvention: library=>CDECL_LIBRARIES.test(library) ? 'cdecl' : 'stdcall',
 
                 /**
-                 * Calls a library's entry point as the loader does: inside a
-                 * frame of the loader's that takes whatever it raises, which
-                 * then ends the call with 0.
+                 * Tells an image as the loader does: each routine -- its TLS
+                 * callbacks, then its entry point -- in turn on `thread`, once
+                 * the call that asked has suspended, each inside a frame of the
+                 * loader's that takes whatever it raises and ends that routine
+                 * with 0.
                  *
-                 * @param {{ entry: number, base: number, reason: number,
-                 *     reserved: number, thread: any }} call
+                 * @param {{ routines: number[], base: number, reason: number,
+                 *     reserved: number, thread: any }} image
                  * @returns {Promise<number>}
                  */
-                callEntryPoint: call=>callEntryPoint(call),
+                callEntryPoint: image=>callEntryPoint(image),
 
                 /**
                  * Device contexts over pixels this layer did not allocate.

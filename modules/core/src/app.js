@@ -31,7 +31,7 @@ import { readTls } from './layers/loader/internal/tls.js';
 import { jumpBytes, relocatablePrefix } from './layers/loader/internal/hooks.js';
 import { mangledCall } from './layers/loader/internal/mangling.js';
 import { mapImage } from './layers/loader/internal/image.js';
-import { createProcessBlocks, TEB, TLS_SLOTS } from './layers/win32/kernel32/teb.js';
+import { createProcessBlocks, TEB } from './layers/win32/kernel32/teb.js';
 import { supportedOsOf, windowsVersion } from './layers/win32/kernel32/versions.js';
 import { GRAPHICS_CHOICES, graphicsChoice } from './layers/graphics/choice.js';
 import { searchesBesideProgram } from './layers/win32/kernel32/modules.js';
@@ -3718,11 +3718,65 @@ async function buildApp(options){
     const dataFiles = new Map();
     /**
      * Every library whose DllMain has been told DLL_PROCESS_ATTACH, in the
-     * order it was: ExitProcess tells them of the detach the other way round.
+     * order it was, and every one loaded at run time with TLS callbacks but
+     * no DllMain, once they were told: ExitProcess tells them of the detach
+     * the other way round.
      *
      * @type {any[]}
      */
     const attachOrder = [];
+    /**
+     * The images the process started with, in the order they were attached:
+     * the program first, then its libraries. Set once they are known.
+     *
+     * @type {any[]}
+     */
+    let startupImages = [];
+    /**
+     * Every image with a thread-local directory, by base, those loaded at
+     * run time among them: the dword its slot is written in, the block each
+     * thread is given a copy of, and its TLS callbacks.
+     *
+     * @type {Map<number, { indexAddress: number, template: Uint8Array, size: number,
+     *     callbacks: number[] }>}
+     */
+    const threadLocalImages = new Map();
+    /**
+     * Libraries that asked not to be told of threads (DisableThreadLibraryCalls), by base.
+     *
+     * @type {Set<number>}
+     */
+    const withoutThreadCalls = new Set();
+    /**
+     * An image's routines, as the loader calls them for any reason: its TLS
+     * callbacks, then its entry point once DLL_PROCESS_ATTACH has reached it.
+     *
+     * @param {any} held
+     * @returns {number[]}
+     */
+    const routinesOf = held=>[
+        ...threadLocalImages.get(held.base)?.callbacks ?? [],
+        ...attachOrder.includes(held) && held.entryPoint && held.entryPoint !== held.base
+            ? [held.entryPoint] : [],
+    ];
+    /**
+     * Every image still attached that has routines to tell, in load order --
+     * those the process started with, then each library loaded since as it
+     * was attached -- with its routines.
+     *
+     * @returns {{ base: number, routines: number[] }[]}
+     */
+    const imagesTold = ()=>[
+        ...startupImages, ...attachOrder.filter(held=>!startupImages.includes(held)),
+    ]
+        .filter(held=>held.loaded !== false && held.attached !== false)
+        .map(held=>({ base: held.base, routines: routinesOf(held) }))
+        .filter(each=>each.routines.length > 0);
+    /**
+     * The loader lock: the CRITICAL_SECTION the startup's attaches and every
+     * thread's are made under. Zero until it is made.
+     */
+    let loaderLock = 0;
     /** @type {any} */
     let mainModule = null;
 
@@ -3792,20 +3846,64 @@ async function buildApp(options){
      *
      * @type {{
      *     createThreadBlock: (thread: { id: number, stackBase: number,
-     *         stackLimit: number }) => { teb: number, tls: number },
+     *         stackLimit: number,
+     *         locals?: import('./layers/win32/kernel32/teb.js').ThreadLocal[] })
+     *         => { teb: number, tls: number } | null,
+     *     releaseThreadBlock: (teb: number) => boolean,
+     *     addThreadLocal: (local: import('./layers/win32/kernel32/teb.js').ThreadLocal)
+     *         => boolean,
+     *     removeThreadLocal: (slot: number) => void,
      *     addModule: (module: import('./layers/win32/kernel32/teb.js').LoadedModule) => number,
      *     removeModule: (base: number) => void,
      * } | null}
      */
     let threadBlocks = null;
     /**
-     * Gives a thread made after the process's first its own copy of every
+     * What a thread made after the process's first is given a copy of: every
      * image's thread-local block, in the slot the image was given, as the
-     * loader does for each thread; set once the blocks are known.
+     * loader does for each thread. The slot is read as each thread is made:
+     * a startup image's is the startup stub's TlsAlloc's, which has not run
+     * when the image is mapped.
      *
-     * @type {(tls: number) => void}
+     * @returns {import('./layers/win32/kernel32/teb.js').ThreadLocal[]}
      */
-    let threadLocalBlocks = ()=>{};
+    const threadLocals = ()=>[...threadLocalImages.values()]
+        .map(({ indexAddress, template, size })=>({
+            slot: core.api('memory').readU32(indexAddress), template, size,
+        }));
+    /**
+     * Every thread holding blocks, and its environment block. Each is given
+     * back at the next thread's making once its thread is gone, as a stack is:
+     * the call that ends a thread still runs on it on its way out.
+     *
+     * @type {Map<any, number>}
+     */
+    const blockHolders = new Map();
+    /** @param {any} thread @param {{ teb: number } | null} block */
+    const holdBlock = (thread, block)=>{
+        if (block === null)
+        {
+            // Never a thread on no block: FS at zero, it reads its id, its
+            // stack and its thread-local slots from linear address zero up.
+            throw new Error(`no memory for thread ${thread.id}'s environment block`);
+        }
+        thread.tebAddress = block.teb;
+        blockHolders.set(thread, block.teb);
+    };
+    const giveBackBlocks = ()=>{
+        const gone = core.api('kernel').threadGone;
+        for (const [holder, teb] of blockHolders)
+        {
+            if (gone(holder))
+            {
+                blockHolders.delete(holder);
+                threadBlocks?.releaseThreadBlock(teb);
+                // Asked for through a handle still open, it has none, rather
+                // than the block of whichever thread is given it next.
+                holder.tebAddress = 0;
+            }
+        }
+    };
 
     /** Range requests outstanding: what a parked guest thread is really on. */
     let fetching = 0;
@@ -4779,11 +4877,34 @@ async function buildApp(options){
                 load: (name, flags)=>loadLibraryAtRuntime(name, flags),
                 /** @param {number} handle */
                 dataFile: handle=>dataFiles.get(handle >>> 0) ?? null,
-                /** The libraries still attached, the last attached first. */
-                attachedLibraries: ()=>attachOrder
-                    .filter(held=>held.loaded !== false && held.attached !== false)
-                    .reverse()
-                    .map(held=>({ name: held.name, base: held.base, entryPoint: held.entryPoint })),
+                /**
+                 * What a thread's start and end are told of, image by image in
+                 * load order (`imagesTold`); none for one that asked not to be.
+                 */
+                threadCalls: ()=>imagesTold()
+                    .filter(each=>!withoutThreadCalls.has(each.base)),
+                /**
+                 * What the process's end is told of, the other way round: the
+                 * last image attached first, each one's TLS callbacks still
+                 * before its entry point, and the program's own last (decisions
+                 * A50).
+                 */
+                processDetach: ()=>imagesTold().reverse(),
+                /**
+                 * DisableThreadLibraryCalls. An image with static thread-local
+                 * storage goes on being told: its callbacks build each thread's
+                 * thread-local objects, and the call is documented to make no
+                 * optimisation for it.
+                 *
+                 * @param {number} base
+                 */
+                disableThreadCalls: base=>{
+                    if (!threadLocalImages.has(base >>> 0))
+                    {
+                        withoutThreadCalls.add(base >>> 0);
+                    }
+                },
+                loaderLock: ()=>loaderLock,
                 /** @param {any} asked */
                 resolved: asked=>events.emit('resolved', asked),
                 ...resourceLookup(()=>mainModule, byBase, dataFiles,
@@ -4847,14 +4968,15 @@ async function buildApp(options){
                 options.terminate?.(request, code) ?? false,
             /** @param {any} thread */
             threadBlock: thread=>{
-                const block = threadBlocks?.createThreadBlock({
-                    id: thread.id, stackBase: thread.stackTop, stackLimit: thread.stackLimit,
-                });
-                if (block)
+                if (!threadBlocks)
                 {
-                    thread.tebAddress = block.teb;
-                    threadLocalBlocks(block.tls);
+                    return;
                 }
+                giveBackBlocks();
+                holdBlock(thread, threadBlocks.createThreadBlock({
+                    id: thread.id, stackBase: thread.stackTop, stackLimit: thread.stackLimit,
+                    locals: threadLocals(),
+                }));
             },
             idle: ()=>new Promise(resolve=>idlers.push(()=>resolve(undefined))),
             /** @param {any[]} needed */
@@ -5424,9 +5546,11 @@ async function buildApp(options){
 
     /**
      * Libraries that could not be given room. Remembered, because asking
-     * again cannot change the answer; a library that was merely not there
-     * is not, since a program puts one in place and asks again -- an
-     * installer does exactly that with a library it brought.
+     * again cannot change the answer until something mapped is unmapped and
+     * its room is free -- forgotten then, as the room may be what one of them
+     * wanted; a library that was merely not there is not remembered, since a
+     * program puts one in place and asks again -- an installer does exactly
+     * that with a library it brought.
      *
      * @type {Set<string>}
      */
@@ -5435,9 +5559,49 @@ async function buildApp(options){
     let nextLibraryBase = 0;
 
     /**
+     * A library loaded at run time is given what the startup stub gives one
+     * the program imports: a slot from the pool TlsAlloc draws on, written
+     * into the dword its directory names, and a copy of its block in that
+     * slot of every thread -- those there are now, the one loading it among
+     * them, and every one made after (`threadLocals`).
+     *
+     * @param {number} base
+     * @param {import('./layers/loader/internal/tls.js').TlsDirectory} directory
+     * @returns {boolean} false, with nothing kept, when the slot is past the
+     *     thread-local array or there is no room for every thread's copy
+     */
+    const giveThreadLocals = (base, directory)=>{
+        const kernel32 = allLibraries['KERNEL32.dll'];
+        const slot = kernel32.TlsAlloc.handler([]) >>> 0;
+        const local = {
+            slot, template: directory.template,
+            size: directory.templateSize + directory.zeroFillSize,
+        };
+        // Threads that are gone take no copy.
+        giveBackBlocks();
+        if (!threadBlocks?.addThreadLocal(local))
+        {
+            // All ones is TLS_OUT_OF_INDEXES: no slot was taken.
+            if (slot !== 0xffffffff)
+            {
+                kernel32.TlsFree.handler([slot]);
+            }
+            return false;
+        }
+        memory.writeU32(base + directory.indexRva, slot);
+        threadLocalImages.set(base, {
+            indexAddress: base + directory.indexRva, template: local.template, size: local.size,
+            callbacks: directory.callbackRvas.map(rva=>base + rva),
+        });
+        return true;
+    };
+
+    /**
      * FreeLibrary: gives back one of the references LoadLibrary took on a
-     * library the program loaded by name. The last one tells its DllMain,
-     * on the thread that asked, and unloads it -- a library read off the
+     * library the program loaded by name. The last one tells its TLS
+     * callbacks and then its DllMain of the detach, on the thread that asked
+     * and with lpvReserved NULL, and unloads it -- its thread-local slot and
+     * every thread's copy of its block are given back, a library read off the
      * volume is unmapped and forgotten, one of ours stops being loaded. A
      * library something imports is pinned and never unloaded.
      *
@@ -5455,6 +5619,15 @@ async function buildApp(options){
             return 1;
         }
         const unload = ()=>{
+            const local = threadLocalImages.get(held.base);
+            if (local)
+            {
+                // Read before the image goes, which it is a dword of.
+                const slot = memory.readU32(local.indexAddress);
+                threadLocalImages.delete(held.base);
+                threadBlocks?.removeThreadLocal(slot);
+                allLibraries['KERNEL32.dll'].TlsFree.handler([slot]);
+            }
             threadBlocks?.removeModule(held.base);
             const at = attachOrder.indexOf(held);
             if (at >= 0)
@@ -5466,6 +5639,9 @@ async function buildApp(options){
                 byName.delete(moduleKeyOf(held.name));
                 byBase.delete(held.base);
                 memory.unregister(held.name);
+                librarySpace.giveBack(held.base);
+                // Room given back: a library refused for want of it may fit now.
+                absentLibraries.clear();
             }
             else
             {
@@ -5475,10 +5651,14 @@ async function buildApp(options){
             events.emit('library-unloaded', { name: held.name, base: held.base });
             return 1;
         };
-        if (held.entryPoint && held.entryPoint !== held.base && held.attached !== false)
+        const routines = held.attached === false ? [] : [
+            ...threadLocalImages.get(held.base)?.callbacks ?? [],
+            ...held.entryPoint && held.entryPoint !== held.base ? [held.entryPoint] : [],
+        ];
+        if (routines.length > 0)
         {
             return win32.callEntryPoint({
-                entry: held.entryPoint, base: held.base, reason: DLL_PROCESS_DETACH, reserved: 0,
+                routines, base: held.base, reason: DLL_PROCESS_DETACH, reserved: 0,
                 thread: kernel.currentThread(),
             }).then(unload);
         }
@@ -5758,12 +5938,13 @@ async function buildApp(options){
                                 }
                             }
                         }
-                        if (absent.length > 0)
-                        {
+                        /** @param {string} reason */
+                        const refuse = async reason=>{
                             threadBlocks?.removeModule(base);
                             byName.delete(moduleKeyOf(name));
                             byBase.delete(base);
                             memory.unregister(name);
+                            librarySpace.giveBack(base);
                             for (const other of brought)
                             {
                                 if (other)
@@ -5771,10 +5952,12 @@ async function buildApp(options){
                                     await releaseLibrary(other);
                                 }
                             }
-                            events.emit('libraries-missing', {
-                                names: [name], reason: `it imports ${absent.join(', ')}`,
-                            });
+                            events.emit('libraries-missing', { names: [name], reason });
                             return 0;
+                        };
+                        if (absent.length > 0)
+                        {
+                            return refuse(`it imports ${absent.join(', ')}`);
                         }
 
                         loader.bind(mapped, resolveImport, missingImport);
@@ -5782,6 +5965,19 @@ async function buildApp(options){
                         // adds to what the first one recorded rather than
                         // replacing it.
                         loader.bindDelayed(mapped, resolveImport, missingImport);
+
+                        // Its thread-local storage, before any of it runs, as
+                        // Windows gives a library loaded at run time since
+                        // Vista: Wine's loader test reads the slot and the
+                        // calling thread's copy of the block as soon as
+                        // LoadLibrary returns, and a thread made afterwards
+                        // finds its own.
+                        const directory = readTls(file, image);
+                        if (directory && !giveThreadLocals(base, directory))
+                        {
+                            return refuse('no thread-local slot, or no room for every'
+                                + ' thread\'s copy of its block');
+                        }
                     }
                     // Before DllMain: a sidecar entry for this library patches
                     // its code, which must happen before any of it has run
@@ -5795,19 +5991,28 @@ async function buildApp(options){
                         timeDateStamp: image.timeDateStamp,
                     });
 
-                    if (!inert && held.entryPoint && held.entryPoint !== base)
+                    // Its TLS callbacks, then its DllMain, lpvReserved NULL as
+                    // for any library loaded by name. On the thread that asked
+                    // for the library, which by now is not the one on the
+                    // processor: mapping it awaited a file and a range
+                    // request, and the loop gave every other thread its turns
+                    // while that was outstanding. Running a DllMain on whoever
+                    // happens to be current builds its frame on a stranger's
+                    // stack.
+                    const routines = inert ? [] : [
+                        ...threadLocalImages.get(base)?.callbacks ?? [],
+                        ...held.entryPoint && held.entryPoint !== base ? [held.entryPoint] : [],
+                    ];
+                    for (const routine of routines)
                     {
-                        // On the thread that asked for the library, which by
-                        // now is not the one on the processor: mapping it
-                        // awaited a file and a range request, and the loop gave
-                        // every other thread its turns while that was
-                        // outstanding. Running a DllMain on whoever happens to
-                        // be current builds its frame on a stranger's stack.
                         await bridge.callGuest({
-                            entry: held.entryPoint,
+                            entry: routine,
                             args: [base, DLL_PROCESS_ATTACH, 0],
                             thread: asked,
                         });
+                    }
+                    if (routines.length > 0)
+                    {
                         attachOrder.push(held);
                     }
                     events.emit('library-loaded', { name, base });
@@ -5869,6 +6074,8 @@ async function buildApp(options){
             if (held.region)
             {
                 memory.unregister(held.region);
+                librarySpace.giveBack(held.base);
+                absentLibraries.clear();
             }
         }
         return 1;
@@ -5969,6 +6176,13 @@ async function buildApp(options){
         })();
     };
 
+    /**
+     * The spans `claim` took from the heap's arena, by base, with the region
+     * each was cut from: what `giveBack` puts back.
+     *
+     * @type {Map<number, { size: number, kind: string, access: string }>}
+     */
+    const claimedSpans = new Map();
     // Where a library may go: above the program's own image, which is not in
     // the map yet, and below the stack pool; and nowhere anything is mapped.
     const librarySpace = {
@@ -6010,7 +6224,45 @@ async function buildApp(options){
                 memory.register({ name: `heap@${end.toString(16)}`, base: end,
                     size: regionEnd - end, kind, access });
             }
+            claimedSpans.set(base, { size, kind, access });
             return base;
+        },
+        /**
+         * Puts back a span `claim` took, once what was mapped on it is gone,
+         * and nothing for one it did not take: the heap has it to hand out
+         * again -- a library that can only live there is loaded there again --
+         * and its region is the heap's once more, joined with the parts on
+         * either side, since a block the heap later hands out across where a
+         * cut was is one buffer and an access spanning two regions is refused.
+         *
+         * @param {number} base
+         */
+        giveBack: base=>{
+            const span = claimedSpans.get(base);
+            if (!span)
+            {
+                return;
+            }
+            claimedSpans.delete(base);
+            core.api('win32').heap().free(base);
+            const end = base + span.size;
+            const heapPart = (/** @type {any} */ region)=>
+                (region?.name.startsWith('heap') ? region : null);
+            const below = heapPart(memory.find(base - 1));
+            const above = heapPart(memory.find(end));
+            for (const part of [below, above])
+            {
+                if (part)
+                {
+                    memory.unregister(part.name);
+                }
+            }
+            const from = below?.base ?? base;
+            memory.register({
+                name: below?.name ?? `heap@${base.toString(16)}`, base: from,
+                size: (above ? above.base + above.size : end) - from,
+                kind: span.kind, access: span.access,
+            });
         },
     };
 
@@ -6374,26 +6626,19 @@ async function buildApp(options){
         };
     });
     // Every later thread's blocks are copies of the same templates, in the
-    // slots the first thread's were given. Without them a thread's
-    // thread-local variables were at linear address zero and up, the same
-    // bytes for every thread but the first: Call of Duty 4's renderer and its
-    // two workers kept their scratch buffers' pointers there, and a worker
+    // slots the first thread's were given (`threadLocals`). Without them a
+    // thread's thread-local variables were at linear address zero and up, the
+    // same bytes for every thread but the first: Call of Duty 4's renderer and
+    // its two workers kept their scratch buffers' pointers there, and a worker
     // culled shadow casters into lists another was filling.
-    const templates = withTls.flatMap(held=>(held.tls ? [held.tls] : []));
-    threadLocalBlocks = tls=>{
-        for (const { indexAddress, template, size } of templates)
+    for (const held of withTls)
+    {
+        if (held.tls)
         {
-            const slot = memory.readU32(indexAddress);
-            if (slot >= TLS_SLOTS)
-            {
-                continue;
-            }
-            const at = allocateFromHeap(size);
-            memory.writeBytes(at, new Uint8Array(size));
-            memory.writeBytes(at, template);
-            memory.writeU32(tls + slot * 4, at);
+            const { indexAddress, template, size, callbacks } = held.tls;
+            threadLocalImages.set(held.base, { indexAddress, template, size, callbacks });
         }
-    };
+    }
 
     // Every library the program brought with it is attached before the program
     // runs, on the process's first thread, in dependency order -- which is what
@@ -6401,6 +6646,12 @@ async function buildApp(options){
     // exports assume. It is guest code because the calls belong on a guest
     // stack; the stub's last instruction enters the program.
     const kernel32 = findModule('kernel32');
+    // RTL_CRITICAL_SECTION, free: LockCount -1 and nothing else.
+    loaderLock = allocateFromHeap(24);
+    memory.writeBytes(loaderLock, new Uint8Array(24));
+    memory.writeU32(loaderLock + 4, 0xffffffff);
+    const enter = kernel32?.addressOf('EnterCriticalSection') ?? 0;
+    const leave = kernel32?.addressOf('LeaveCriticalSection') ?? 0;
     const startup = synthesiseProcessInit({
         libraries: withTls.filter(held=>held !== mainModule || held.tls),
         entryPoint: image.entryPoint,
@@ -6408,7 +6659,9 @@ async function buildApp(options){
             alloc: kernel32.addressOf('TlsAlloc') ?? 0,
             set: kernel32.addressOf('TlsSetValue') ?? 0,
         },
+        ...enter !== 0 && leave !== 0 ? { loaderLock: { address: loaderLock, enter, leave } } : {},
     });
+    startupImages = [mainModule, ...shipped];
     for (const name of startup.attached)
     {
         const held = shipped.find(library=>library.name === name);
@@ -6441,6 +6694,14 @@ async function buildApp(options){
     // on with a null.
     const process = createProcessBlocks({
         allocate: allocateFromHeap,
+        // A thread's blocks from the allocator everything the host hands the
+        // guest comes from, which takes them back when the thread is gone;
+        // the startup span never does. Aligned for the thread-local blocks
+        // among them, as the startup span aligns them.
+        threadMemory: {
+            allocate: bytes=>win32.heap().allocate(bytes, { alignment: 16 }),
+            free: address=>win32.heap().free(address),
+        },
         writeMemory: (address, bytes)=>memory.writeBytes(address, bytes),
         processId: options.processId ?? FIRST_PROCESS_ID,
         version: windowsVersion(options.windows),
@@ -6482,11 +6743,12 @@ async function buildApp(options){
         // ExitThread with its answer, as Windows' process start routine sees to.
         returnTo: win32.threadReturn(),
     });
-    mainThread.tebAddress = process.createThreadBlock({
+    // Its thread-local blocks are the ones the startup stub hands TlsSetValue.
+    holdBlock(mainThread, process.createThreadBlock({
         id: mainThread.id,
         stackBase: initialStack,
         stackLimit: initialStack - stackSize,
-    }).teb;
+    }));
 
     /** The mixer, when this build has one. Read once; it does not change. */
     const sound = core.api('audio')?.output?.() ?? null;
@@ -9588,39 +9850,61 @@ export async function createApp(options){
      *
      * @param {any} machineInput  the input of the process the facade speaks for
      */
-    const routedInput = machineInput=>({
-        ...machineInput,
-        /** @param {any} event */
-        send: event=>{
-            const { target, dropped } = inputRecipient(system.windows?.manager, event,
-                machineInput.cursor?.() ?? null);
-            if (dropped)
+    const routedInput = machineInput=>{
+        /**
+         * The input the pointer's last motion went to: a press that names no
+         * place is placed where that input's cursor is. The facade's own
+         * cursor stood where it was while another program's window took the
+         * motion, and the press went to nobody. Null for a process across a
+         * link, whose cursor is there: the manager places the press itself.
+         *
+         * @type {any}
+         */
+        let pointed = machineInput;
+        /** @param {any} event @param {any} input */
+        const moved = (event, input)=>{
+            if (event.kind === 'pointerMove')
             {
-                return false;
+                pointed = input;
             }
-            for (const built of target === null ? [] : processes.values())
-            {
-                if (processIds.get(built) === target)
+        };
+        return {
+            ...machineInput,
+            /** @param {any} event */
+            send: event=>{
+                const { target, dropped } = inputRecipient(system.windows?.manager, event,
+                    pointed?.cursor?.() ?? null);
+                if (dropped)
                 {
-                    return built.input.send(event);
+                    return false;
                 }
-            }
-            const inWorkers = [...standingAcross];
-            const process = inWorkers.find(each=>each.id === target) ?? inWorkers.at(-1);
-            if (process)
-            {
-                process.link.call('input', 'send', [event, null]).catch(()=>{});
-                return true;
-            }
-            return machineInput.send(event);
-        },
-        // A route a tool queues clicks and keys on goes the same way: built
-        // on the machine's own send, it took every press to the process the
-        // facade speaks for, whichever program's window was under it.
-        route(){
-            return createInputRoute(event=>this.send(event));
-        },
-    });
+                for (const built of target === null ? [] : processes.values())
+                {
+                    if (processIds.get(built) === target)
+                    {
+                        moved(event, built.input);
+                        return built.input.send(event);
+                    }
+                }
+                const inWorkers = [...standingAcross];
+                const process = inWorkers.find(each=>each.id === target) ?? inWorkers.at(-1);
+                if (process)
+                {
+                    moved(event, null);
+                    process.link.call('input', 'send', [event, null]).catch(()=>{});
+                    return true;
+                }
+                moved(event, machineInput);
+                return machineInput.send(event);
+            },
+            // A route a tool queues clicks and keys on goes the same way: built
+            // on the machine's own send, it took every press to the process the
+            // facade speaks for, whichever program's window was under it.
+            route(){
+                return createInputRoute(event=>this.send(event));
+            },
+        };
+    };
 
     /**
      * The run's windows as a tool reads them (`debug.windows`): every

@@ -547,7 +547,9 @@ test('three threads share a section with recursion and the count comes out exact
         const { code, sections } = await run(buildSectionRaceExe(), 97);
         assert.equal(code, 0, '1: a thread found the section wrong inside it; 2: an update'
             + ' was lost; 3-5: the section was not left free');
-        const passes = WORKERS * SECTION_TURNS * 2;
+        // And each worker took the loader lock once, through the same routine,
+        // to be told to the libraries as it started.
+        const passes = WORKERS * SECTION_TURNS * 2 + WORKERS;
         assert.equal(sections.entered, passes, 'every entry ran the guest\'s fast path');
         assert.equal(sections.left, passes);
         assert.ok(sections.waits > 0, 'some entries found it held and waited in the host');
@@ -578,7 +580,8 @@ test(`a thread waiting for a section waits in the host and is handed it`,
         assert.equal(sections.wakes, 1, 'the main thread\'s leave woke it');
         assert.equal(sections.handoffs, 1);
         assert.equal(sections.queued, 0);
-        assert.equal(sections.entered, 3,
-            'two entries and the owner\'s try, and not the refused one');
-        assert.equal(sections.left, 3);
+        // The worker's loader lock as it started is the fourth.
+        assert.equal(sections.entered, 4,
+            'two entries, the owner\'s try and the loader\'s, and not the refused one');
+        assert.equal(sections.left, 4);
     });
