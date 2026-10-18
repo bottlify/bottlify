@@ -167,18 +167,29 @@ test('translators on threads of their own keep and take through one arena with n
         // not match its key.
         const buffer = createArena(256 << 10, { segments: 4 });
         const gate = new SharedArrayBuffer(4);
+        /** How many entries each thread has kept, for the others to look up. */
+        const progress = new SharedArrayBuffer(3 * 4);
         const arenaUrl = JSON.stringify(new URL('./arena.js', import.meta.url).href);
         const source = `
             const { parentPort, workerData } = require('node:worker_threads');
             import(${arenaUrl}).then(({ openArena })=>{
                 const arena = openArena(workerData.buffer);
-                // All three start together, so each finds the others' entries.
+                // All three start together, so each finds the others' entries:
+                // the last to arrive wakes the others. A wait with a timeout
+                // slept the timer's grain on Windows, some ten milliseconds of
+                // a twenty-millisecond run, and the thread looking up the one
+                // that went first found its entries long since taken over.
                 const gate = new Int32Array(workerData.gate);
-                Atomics.add(gate, 0, 1);
-                while (Atomics.load(gate, 0) < 3)
+                if (Atomics.add(gate, 0, 1) === 2)
                 {
-                    Atomics.wait(gate, 0, Atomics.load(gate, 0), 1);
+                    Atomics.notify(gate, 0);
                 }
+                for (let seen = Atomics.load(gate, 0); seen < 3; seen = Atomics.load(gate, 0))
+                {
+                    Atomics.wait(gate, 0, seen);
+                }
+                const progress = new Int32Array(workerData.progress);
+                const next = (workerData.id + 1) % 3;
                 let torn = 0, found = 0;
                 for (let n = 0; n < 4000; n++)
                 {
@@ -186,8 +197,18 @@ test('translators on threads of their own keep and take through one arena with n
                     const fill = own & 0xff;
                     arena.set('k' + own, [own], { typeIndex: own, locals: [], hints: [],
                         body: new Uint8Array(200 + (own % 300)).fill(fill), region: { own } });
-                    const other = ((workerData.id + 1) % 3) * 100000
-                        + Math.floor(Math.random() * n);
+                    Atomics.store(progress, workerData.id, n + 1);
+                    // One of the last the next thread kept: the arena holds some
+                    // five hundred entries of the twelve thousand, so a key drawn
+                    // from all it ever kept was long gone the moment it ran a
+                    // millisecond ahead -- one thread woken late found nothing.
+                    const kept = Atomics.load(progress, next);
+                    if (kept === 0)
+                    {
+                        continue;
+                    }
+                    const other = next * 100000 + kept - 1
+                        - Math.floor(Math.random() * Math.min(kept, 64));
                     const got = arena.get('k' + other, [other]);
                     if (got !== undefined)
                     {
@@ -203,7 +224,8 @@ test('translators on threads of their own keep and take through one arena with n
                 parentPort.postMessage({ torn, found });
             });`;
         const results = await Promise.all([0, 1, 2].map(id=>new Promise((resolve, reject)=>{
-            const worker = new Worker(source, { eval: true, workerData: { buffer, gate, id } });
+            const worker = new Worker(source, { eval: true,
+                workerData: { buffer, gate, progress, id } });
             worker.once('message', resolve);
             worker.once('error', reject);
         })));
