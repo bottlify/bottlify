@@ -224,6 +224,7 @@ const DIPROPRANGE_NOMIN = 0x80000000 | 0;
 const DIPROPRANGE_NOMAX = 0x7fffffff;
 const DIPROPAXISMODE_ABS = 0;
 const DIPROPAXISMODE_REL = 1;
+const DIDF_ABSAXIS = 0x00000001;
 const DIDF_RELAXIS = 0x00000002;
 /**
  * The scan code DIPROP_SCANCODE reports for a key, as the bytes the keyboard
@@ -775,10 +776,12 @@ export function createPublisher({ publishInterface }){
  * @param {(held: boolean) => void} [deps.mouseHeld]
  *        Told whenever the system mouse becomes or stops being held
  *        exclusively: Windows hides the cursor while a program holds it so.
+ * @param {() => { x: number, y: number } | null} [deps.cursor]
+ *        Where the cursor is: a mouse in absolute mode starts there when taken.
  */
 export function createDirectInput(
     { memory, now, publishInterface, signal, allocate, callGuest, callerThread, windowKind,
-        foreground, mouseHeld,
+        foreground, mouseHeld, cursor,
         divergence },
 )
 {
@@ -1030,10 +1033,13 @@ export function createDirectInput(
             {
                 return DIERR_INVALIDPARAM;
             }
+            const flags = readU32((format >>> 0) + 8);
             formats.set(device, {
                 ...read,
-                relative: (readU32((format >>> 0) + 8) & DIDF_RELAXIS) !== 0,
+                relative: (flags & DIDF_RELAXIS) !== 0,
             });
+            // The format's own axis mode, which DIPROP_AXISMODE may change after.
+            device.setAbsolute(device.kind === MOUSE && (flags & DIDF_ABSAXIS) !== 0);
             device.setDataSize(read.dataSize);
             return DI_OK;
         },
@@ -1111,6 +1117,12 @@ export function createDirectInput(
                 device.setBufferSize(readU32((header >>> 0) + DIPROPDWORD_DATA));
                 return DI_OK;
             }
+            if (property === DIPROP_AXISMODE && device.kind === MOUSE)
+            {
+                device.setAbsolute(
+                    readU32((header >>> 0) + DIPROPDWORD_DATA) === DIPROPAXISMODE_ABS);
+                return DI_OK;
+            }
             if (property === DIPROP.FFGAIN)
             {
                 const gain = readU32((header >>> 0) + DIPROPDWORD_DATA);
@@ -1121,9 +1133,8 @@ export function createDirectInput(
                 gains.set(device, gain);
                 return DI_OK;
             }
-            // Axis mode, ranges, dead zones: accepted and ignored. The device
-            // is already relative and already unscaled, which is what every
-            // one of them would be asking for.
+            // Ranges and dead zones: accepted and ignored. The device is
+            // already unscaled, which is what every one of them would ask for.
             return DI_OK;
         },
 
@@ -1166,8 +1177,10 @@ export function createDirectInput(
                         writeU32(at + DIPROPDWORD_DATA, device.bufferSize);
                         return DI_OK;
                     case DIPROP_AXISMODE:
-                        writeU32(at + DIPROPDWORD_DATA, formats.get(device)?.relative === true
-                            ? DIPROPAXISMODE_REL : DIPROPAXISMODE_ABS);
+                        writeU32(at + DIPROPDWORD_DATA, device.kind === MOUSE
+                            ? (device.absolute ? DIPROPAXISMODE_ABS : DIPROPAXISMODE_REL)
+                            : formats.get(device)?.relative === true
+                                ? DIPROPAXISMODE_REL : DIPROPAXISMODE_ABS);
                         return DI_OK;
                     case DIPROP.FFGAIN:
                         writeU32(at + DIPROPDWORD_DATA, gains.get(device) ?? 10000);
@@ -1720,6 +1733,7 @@ export function createDirectInput(
         device = createInputDevice({
             kind: KEYBOARD_GUIDS.has(guid) ? KEYBOARD : MOUSE,
             now,
+            cursor,
         });
         device.offers = generationOf(device);
         instanceGuids.set(device, guid);

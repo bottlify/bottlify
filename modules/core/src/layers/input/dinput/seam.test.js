@@ -623,6 +623,29 @@ test('the axis mode is settled before the device is acquired', ()=>{
         DI_OK);
 });
 
+test('a mouse set to absolute axes reports where it is, and says so', ()=>{
+    // SetProperty(DIPROP_AXISMODE, DIPROPAXISMODE_ABS) on the whole device:
+    // the state's axes are the position, which reading does not clear.
+    const f = mouse();
+    assert.equal(f.bridge.call(f.device, 'Unacquire', []), DI_OK);
+    propertyHeader(f.memory, 20);
+    f.memory.setU32(AT.property + DIPROPDWORD_DATA, 0); // DIPROPAXISMODE_ABS
+    assert.equal(f.bridge.call(f.device, 'SetProperty', [DIPROP_AXISMODE, AT.property]), DI_OK);
+    f.memory.setU32(AT.property + DIPROPDWORD_DATA, 7);
+    assert.equal(f.bridge.call(f.device, 'GetProperty', [DIPROP_AXISMODE, AT.property]), DI_OK);
+    assert.equal(f.memory.u32(AT.property + DIPROPDWORD_DATA), 0, 'absolute, as asked');
+    assert.equal(f.bridge.call(f.device, 'Acquire', []), DI_OK);
+    f.dinput.post({ kind: 'mouseMove', x: 3, y: -2 });
+    f.dinput.post({ kind: 'mouseMove', x: 4, y: 0 });
+    const view = new DataView(f.memory.bytes.buffer);
+    for (const read of ['first', 'second'])
+    {
+        assert.equal(f.bridge.call(f.device, 'GetDeviceState', [16, AT.state]), DI_OK);
+        assert.equal(view.getInt32(AT.state, true), 7, `X at the ${read} read`);
+        assert.equal(view.getInt32(AT.state + 4, true), -2);
+    }
+});
+
 test('GetDeviceData writes DIDEVICEOBJECTDATA and reports how many it wrote', ()=>{
     const f = keyboard();
     setBufferSize(f, f.device, 32);

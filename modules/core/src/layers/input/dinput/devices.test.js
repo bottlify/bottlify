@@ -235,3 +235,21 @@ test('references are counted and never go below zero', ()=>{
     assert.equal(it.release(), 0);
     assert.equal(it.release(), 0);
 });
+
+test('a mouse in absolute mode reports where it is, from the cursor it was taken at', ()=>{
+    // DIPROPAXISMODE_ABS: a program that asked for positions and was handed the
+    // motion read a mouse that never left where it started.
+    const time = clock();
+    const it = createInputDevice({ kind: MOUSE, now: time.now, cursor: ()=>({ x: 320, y: 240 }) });
+    it.setAbsolute(true);
+    it.setBufferSize(8);
+    it.acquire();
+    it.post({ kind: 'mouseMove', x: 10, y: -5 });
+    const where = (/** @type {{ x: number, y: number }} */ { x, y })=>({ x, y });
+    assert.deepEqual(where(it.mouseState()), { x: 330, y: 235 });
+    assert.deepEqual(where(it.mouseState()), { x: 330, y: 235 }, 'reading leaves it where it is');
+    it.post({ kind: 'mouseMove', x: 1, y: 0 });
+    assert.deepEqual(where(it.mouseState()), { x: 331, y: 235 });
+    assert.deepEqual(it.drain(8).events.map(event=>event.data), [330, 235, 331],
+        'a buffered event carries the position too');
+});

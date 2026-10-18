@@ -184,13 +184,25 @@ export function objectsOf(kind){
  * @param {Object} options
  * @param {'keyboard' | 'mouse'} options.kind
  * @param {() => number} options.now  The guest's clock, for event timestamps.
+ * @param {() => { x: number, y: number } | null} [options.cursor]  Where the
+ *     cursor is, which a mouse in absolute mode starts from when it is taken.
  */
-export function createInputDevice({ kind, now }){
+export function createInputDevice({ kind, now, cursor }){
     const keys = new Uint8Array(KEYBOARD_KEYS);
     const buttons = new Uint8Array(8);
     let deltaX = 0;
     let deltaY = 0;
     let deltaWheel = 0;
+    /**
+     * DIPROPAXISMODE_ABS: the mouse's axes say where it is -- where the cursor
+     * was when it was taken, moved by everything since -- rather than how far
+     * it moved since the last read. A program that asked for that and was
+     * handed the motion read a mouse that never left where it started.
+     */
+    let absolute = false;
+    let positionX = 0;
+    let positionY = 0;
+    let positionWheel = 0;
 
     let acquired = false;
     let bufferSize = UNBUFFERED;
@@ -246,18 +258,22 @@ export function createInputDevice({ kind, now }){
             case 'mouseMove':
                 deltaX += event.x ?? 0;
                 deltaY += event.y ?? 0;
+                positionX += event.x ?? 0;
+                positionY += event.y ?? 0;
+                // A buffered event of an absolute axis carries the position.
                 if ((event.x ?? 0) !== 0)
                 {
-                    record(DIMOUSE_OFS.X, event.x ?? 0);
+                    record(DIMOUSE_OFS.X, absolute ? positionX : event.x ?? 0);
                 }
                 if ((event.y ?? 0) !== 0)
                 {
-                    record(DIMOUSE_OFS.Y, event.y ?? 0);
+                    record(DIMOUSE_OFS.Y, absolute ? positionY : event.y ?? 0);
                 }
                 break;
             case 'mouseWheel':
                 deltaWheel += event.wheel ?? 0;
-                record(DIMOUSE_OFS.Z, event.wheel ?? 0);
+                positionWheel += event.wheel ?? 0;
+                record(DIMOUSE_OFS.Z, absolute ? positionWheel : event.wheel ?? 0);
                 break;
             case 'mouseButton': {
                 const index = (event.code ?? 0) & 7;
@@ -319,7 +335,22 @@ export function createInputDevice({ kind, now }){
         },
 
         acquire(){
+            if (absolute && !acquired)
+            {
+                const at = cursor?.() ?? null;
+                positionX = at?.x ?? positionX;
+                positionY = at?.y ?? positionY;
+            }
             acquired = true;
+        },
+
+        /** Whether the axes are absolute (DIPROPAXISMODE_ABS). */
+        get absolute(){
+            return absolute;
+        },
+        /** @param {boolean} on */
+        setAbsolute(on){
+            absolute = on;
         },
         unacquire(){
             acquired = false;
@@ -377,14 +408,15 @@ export function createInputDevice({ kind, now }){
          *
          * Reading clears the axes, which is the part that is easy to leave out
          * -- they are what has happened since the last read, not where anything
-         * is. The buttons are levels and stay.
+         * is; in absolute mode they are where the mouse is, and stay. The
+         * buttons are levels and stay.
          *
          * @returns {{ x: number, y: number, wheel: number, buttons: Uint8Array }}
          */
         mouseState(){
-            const state = {
-                x: deltaX, y: deltaY, wheel: deltaWheel, buttons: buttons.slice(),
-            };
+            const state = absolute
+                ? { x: positionX, y: positionY, wheel: positionWheel, buttons: buttons.slice() }
+                : { x: deltaX, y: deltaY, wheel: deltaWheel, buttons: buttons.slice() };
             deltaX = 0;
             deltaY = 0;
             deltaWheel = 0;
