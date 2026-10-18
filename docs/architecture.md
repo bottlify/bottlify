@@ -462,11 +462,16 @@ writes (section 7).
   run on: the program is told it has one processor for each executor (by GetSystemInfo, the
   process block, `cpuid` and the rest), and `cpuid` answers each executor's number as its APIC
   id, so a thread pinned to a processor reads that processor's. A thread pinned to one processor
-  that calls into the host often (a game's render thread, pinned to the last processor while its
+  whose calls into the host take the process's executor the most time (a game's render thread,
+  its Present and Lock a few hundred microseconds each, pinned to the last processor while its
   main thread is pinned to the first) has that processor played by the process's own executor,
   where its calls are answered, and the executor that played it takes the process's
-  (`cpu.playPinned`): GetCurrentProcessorNumber answers the processor played, so no thread is told
-  of one its mask does not name, and the trade is kept five seconds at least. The process's own thread runs its threads
+  (`cpu.playPinned`). The time is the executor's own, measured on every answer, for a share of it
+  and twice what the calls of the thread pinned to the processor it plays take: a count of calls
+  does not say it, as a main thread's are many and cheap. GetCurrentProcessorNumber answers the
+  processor played, so no thread is told of one its mask does not name. A trade is kept five
+  seconds at least, and undone, not tried again for a minute, when the program draws fewer frames
+  after it (or retires fewer instructions, where it draws none). The process's own thread runs its threads
   too, and answers the calls the others' threads make: at each of its own crossings into the host,
   between its turns, and inside them: an executor that needs its answer (a call, a fault, a slice's
   end) stores a word the process's translated code reads at every back edge as the floor of its

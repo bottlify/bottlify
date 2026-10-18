@@ -1205,6 +1205,53 @@ test('a thread\'s calls into the host are counted over its instructions, not its
         `a call every hundred (${renderer.crossRate})`);
 });
 
+test('a call of another executor\'s thread is counted once, and its ask inside a slice here is no'
+    + ' call of the thread here', ()=>{
+    // The cpu layer tells of a trap the other executor raised as of one of
+    // this one's, and of its ask inside a slice here too: counted at each,
+    // a thread there read as calling twice as often as it did, and a thread
+    // computing here as calling whenever the other asked.
+    const { cpu } = twoExecutors();
+    /** @type {(crossing?: boolean) => void} */
+    let told = ()=>{};
+    const sched = createScheduler({
+        cpu: { ...cpu, beforeTrap: (/** @type {(crossing?: boolean) => void} */ hook)=>{
+            told = hook;
+        } },
+        switcher: createSwitcher({ cpu }), quantum: 5000,
+    });
+    const main = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
+    const worker = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'worker' });
+    const [remote] = cpu.executors();
+    let calls = 0;
+    remote.step = /** @type {any} */ ((/** @type {(reply: () => void) => void} */ around)=>{
+        if (calls === 10)
+        {
+            return null;
+        }
+        calls++;
+        around(()=>told(true));
+        return null;
+    });
+    cpu.runSlice = ()=>{
+        for (let ask = 0; ask < 5; ask++)
+        {
+            told(false);
+        }
+        return 1000;
+    };
+    for (let turn = 0; turn < 20; turn++)
+    {
+        sched.runOnce();
+    }
+    assert.equal(sched.processorOf(worker), 1, 'the worker ran on the other executor');
+    assert.equal(calls, 10);
+    assert.equal(worker.crossings, 10, 'each of its calls once');
+    assert.equal(main.crossings, 0, 'and none of the other\'s asks as the main thread\'s');
+    told(true);
+    assert.equal(main.crossings, 1, 'a call of its own is one');
+});
+
 test('a thread this executor keeps calling back from the other one stays here a while', ()=>{
     // A game's sound thread, placed on the other executor whenever it was ready
     // beside the renderer, was called back 1 312 times of 1 319 as the renderer

@@ -217,7 +217,9 @@ export function createCpuModule(){
              *          opening: Map<number, Promise<void>>, unopened: Set<number>,
              *          bell: ReturnType<typeof createBell> | null,
              *          unbroken: ReturnType<typeof unbrokenTable>,
-             *          beforeTrap: (() => void) | null, awaited: (() => boolean) | null,
+             *          beforeTrap: ((crossing: boolean) => void) | null,
+             *          awaited: (() => boolean) | null,
+             *          trapTimed: ((ms: number) => void) | null,
              *          remoteFigures: Map<number, any>, executorsRefused: string | null,
              *          writes: { host: any, clock: ReturnType<typeof createWriteClock> } | null,
              *          learned: { store: any, opened: number } | null }}
@@ -238,6 +240,8 @@ export function createCpuModule(){
                 // The routines no slice ends inside, as every executor reads them.
                 unbroken: unbrokenTable(),
                 beforeTrap: null,
+                // Told how long each crossing of this executor's thread took (`trapTimed`).
+                trapTimed: null,
                 // Whether another executor waits for this one's answer (`awaitedBy`).
                 awaited: null,
                 // The other executors' translator figures, as each last answered.
@@ -724,10 +728,11 @@ export function createCpuModule(){
                         capacity: settings.thunkCapacity,
                     });
                     // Another executor's ask, at a back edge of this one's
-                    // slice (`interruptProcess`): answered as at a crossing.
-                    state.host.onInterrupt?.(()=>state.beforeTrap?.());
+                    // slice (`interruptProcess`): answered as at a crossing,
+                    // and no crossing of this one's thread.
+                    state.host.onInterrupt?.(()=>state.beforeTrap?.(false));
                     state.host.onTrap((/** @type {number} */ id)=>{
-                        state.beforeTrap?.();
+                        state.beforeTrap?.(true);
                         // A processor exception arrives as a trap like any other,
                         // from a stub the ROM put behind its vector. Answered here
                         // rather than passed on, because the layer that owns the
@@ -766,7 +771,14 @@ export function createCpuModule(){
                             state.host.stop();
                             return 0;
                         }
-                        return dispatch(id);
+                        if (state.trapTimed === null)
+                        {
+                            return dispatch(id);
+                        }
+                        const began = performance.now();
+                        const answer = dispatch(id);
+                        state.trapTimed(performance.now() - began);
+                        return answer;
                     });
                     // Cork has no interrupt table and no ROM to trap from: its
                     // tiers build the fault record themselves, and offer it here
@@ -1089,12 +1101,25 @@ export function createCpuModule(){
                 /**
                  * Who is told of every crossing into the host before it is
                  * answered: the scheduler, which answers the other executors'
-                 * traps there while this one's thread runs.
+                 * traps there while this one's thread runs. Told too at
+                 * another executor's ask inside a slice (`onInterrupt`),
+                 * `crossing` false: the thread here made no call.
                  *
-                 * @param {(() => void) | null} handler
+                 * @param {((crossing: boolean) => void) | null} handler
                  */
                 beforeTrap(handler){
                     state.beforeTrap = handler;
+                },
+
+                /**
+                 * Who is told how long each crossing of this executor's thread
+                 * took to answer, its synchronous part: the scheduler, which
+                 * weighs which thread's calls this executor spends itself on.
+                 *
+                 * @param {((ms: number) => void) | null} handler
+                 */
+                trapTimed(handler){
+                    state.trapTimed = handler;
                 },
 
                 /**
