@@ -1,0 +1,58 @@
+# Copyright © 2026 Bottlify Project
+# Licensed under the Mozilla Public License, version 2.0
+# See LICENSE for details
+name: publish
+
+# By hand only, from main once its ci run is green: every package packed, the
+# tarballs kept as the run's artifacts, and the packages named published to npm
+# under the token in the NPM_TOKEN secret. A package already on npm at its
+# version is refused there, so a version is raised in its package.json first.
+on:
+  workflow_dispatch:
+    inputs:
+      packages:
+        description: 'Packages to publish, by short name: core, cork, installer, networking'
+        required: true
+        default: 'core,cork'
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: pack every package, publish the ones named
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - run: npm ci
+      # The core package carries the video decoder where it can be had; the
+      # package check holds it to its size when it is there.
+      - run: npm run fetch:video-decoder
+      # Packing runs no prepublishOnly: the core package's dist is built here,
+      # and its check run, before anything is packed or published.
+      - run: npm run build -w @bottlify/core
+      - run: npm run check:package -w @bottlify/core
+      - name: pack
+        run: |
+          mkdir -p packs
+          npm pack -w @bottlify/core -w @bottlify/cork -w @bottlify/installer -w @bottlify/networking --pack-destination packs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: packs/*.tgz
+      - name: publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          PACKAGES: ${{ inputs.packages }}
+        run: |
+          for name in $(echo "$PACKAGES" | tr ',' ' '); do
+            npm publish -w "@bottlify/$name" --access public
+          done

@@ -1,10 +1,26 @@
 {
   "name": "@bottlify/cork",
   "version": "1.0.0",
-  "private": true,
   "type": "module",
   "license": "MPL-2.0",
   "description": "Cork: a user-mode x86-32 to WebAssembly translator, an execution engine @bottlify/core's cpu layer loads by URL when a launch selects it",
+  "homepage": "https://github.com/bottlify/bottlify/tree/main/modules/cork#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bottlify/bottlify.git",
+    "directory": "modules/cork"
+  },
+  "bugs": {
+    "url": "https://github.com/bottlify/bottlify/issues"
+  },
+  "keywords": [
+    "x86",
+    "webassembly",
+    "wasm",
+    "translator",
+    "emulator",
+    "jit"
+  ],
   "engines": {
     "node": ">=22"
   },
@@ -19,12 +35,19 @@
   },
   "files": [
     "src",
-    "bin"
+    "!src/**/*.test.js",
+    "!src/**/*.itest.js",
+    "bin",
+    "LICENSE"
   ],
   "scripts": {
     "test": "node --test --test-timeout=60000 \"src/**/*.test.js\"",
     "test:integration": "node --test --test-timeout=180000 \"src/**/*.itest.js\"",
     "typecheck": "tsc -p jsconfig.json",
-    "fetch:corpus": "node scripts/fetch-corpus.mjs"
+    "fetch:corpus": "node scripts/fetch-corpus.mjs",
+    "prepack": "node -e \"require('node:fs').copyFileSync('../../LICENSE', 'LICENSE')\""
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

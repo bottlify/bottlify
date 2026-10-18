@@ -12,7 +12,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { packageProblems } from './check-package.mjs';
+import { closureProblems, packageProblems, sourceClosure } from './check-package.mjs';
 
 const manifest = {
     exports: {
@@ -65,4 +65,27 @@ test('a package without its translator fails', ()=>{
     const problems = packageProblems(files, manifest);
     assert.ok(problems.some(problem=>problem.includes('dist/cork/index.js')),
         JSON.stringify(problems));
+});
+
+test('a source entry needs every module it imports packed, and no type a comment names', ()=>{
+    const sources = {
+        'src/entry.js': [
+            '/** @param {import(\'./types.js\').T} t */',
+            "import { a } from './a.js';",
+            "export { b } from './dir/b.js';",
+            "const later = ()=>import('./lazy.js');",
+        ].join('\n'),
+        'src/a.js': "import './side.js';",
+        'src/dir/b.js': "import { c } from '../c.js';",
+        'src/side.js': '', 'src/c.js': '', 'src/lazy.js': '',
+    };
+    /** @param {string} path */
+    const read = path=>/** @type {Record<string, string>} */ (sources)[path];
+    assert.deepEqual(sourceClosure(['src/entry.js'], read), ['src/a.js', 'src/c.js', 'src/dir/b.js',
+        'src/entry.js', 'src/lazy.js', 'src/side.js']);
+    const entry = { exports: { '.': './dist/core.js', './entry': './src/entry.js' } };
+    const files = ['src/entry.js', 'src/a.js', 'src/side.js', 'src/dir/b.js', 'src/lazy.js']
+        .map(path=>({ path }));
+    assert.deepEqual(closureProblems(files, entry, read),
+        ['src/c.js: imported by a source entry, not in the tarball']);
 });

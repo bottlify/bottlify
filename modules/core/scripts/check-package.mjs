@@ -6,7 +6,7 @@
 
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { dirname, join, posix, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 /**
@@ -88,10 +88,64 @@ function packedFiles(){
     return tarball.files;
 }
 
+/**
+ * Every module of the package's source an entry reaches by its imports -- a
+ * static one, an `export ... from`, a dynamic `import('./...')` -- itself
+ * included. Not a type named in a comment (`{import('./x.js').T}`), which
+ * loads nothing. What a source entry needs in the tarball: the list of files
+ * was kept by hand, and three entries came to import modules it did not name.
+ *
+ * @param {string[]} entries  paths below the package's root, `src/...`
+ * @param {(path: string) => string} [read]
+ * @returns {string[]} sorted
+ */
+export function sourceClosure(entries, read = path=>readFileSync(join(ROOT, path), 'utf8')){
+    const seen = new Set();
+    const pending = [...entries];
+    while (pending.length > 0)
+    {
+        const path = /** @type {string} */ (pending.pop());
+        if (seen.has(path))
+        {
+            continue;
+        }
+        seen.add(path);
+        const code = read(path).replace(/\/\*[\s\S]*?\*\//g, '');
+        const specifiers = [
+            ...code.matchAll(/(?:^|[\s;])(?:import|export)\s[^'"`;]*?from\s*['"](\.{1,2}\/[^'"]+)['"]/g),
+            ...code.matchAll(/(?:^|[\s;])import\s*['"](\.{1,2}\/[^'"]+)['"]/g),
+            ...code.matchAll(/import\(\s*['"](\.{1,2}\/[^'"]+)['"]\s*\)/g),
+        ].map(match=>match[1]);
+        for (const specifier of specifiers)
+        {
+            const from = dirname(path).replaceAll('\\', '/');
+            pending.push(posix.normalize(posix.join(from, specifier)));
+        }
+    }
+    return [...seen].sort();
+}
+
+/**
+ * The modules a source entry reaches that the tarball leaves out.
+ *
+ * @param {{ path: string }[]} files  what `npm pack` would include
+ * @param {{ exports: Record<string, string> }} manifest
+ * @param {(path: string) => string} [read]
+ * @returns {string[]}
+ */
+export function closureProblems(files, manifest, read){
+    const packed = new Set(files.map(file=>file.path.replaceAll('\\', '/')));
+    const entries = Object.values(manifest.exports)
+        .map(target=>target.replace(/^\.\//, ''))
+        .filter(path=>path.startsWith('src/'));
+    return sourceClosure(entries, read).filter(path=>!packed.has(path))
+        .map(path=>`${path}: imported by a source entry, not in the tarball`);
+}
+
 function main(){
     const manifest = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
     const files = packedFiles();
-    const problems = packageProblems(files, manifest);
+    const problems = [...packageProblems(files, manifest), ...closureProblems(files, manifest)];
     if (problems.length > 0)
     {
         console.error(`@bottlify/core is not publishable:\n  ${problems.join('\n  ')}\n`
