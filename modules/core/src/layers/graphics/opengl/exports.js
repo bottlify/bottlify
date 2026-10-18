@@ -819,16 +819,18 @@ export function createOpengl(services){
             return null;
         }
         // The frame is the picture of the window it was drawn for, and a window
-        // the size of the screen -- a full-screen program's -- has the screen to itself,
-        // as an exclusive Direct3D device has: a paint of a window under it
-        // shows its frame again rather than the windows over it, which put the
-        // program's own black main window on the screen between two frames.
+        // that covers the screen -- a full-screen program's, of the screen's
+        // size or larger, as one is while its display mode is still to be set --
+        // has the screen to itself, as an exclusive Direct3D device has: a paint
+        // of a window under it shows its frame again rather than the windows over
+        // it, which put the program's own black main window, or the desktop, on
+        // the screen between two frames.
         // ponytail: the size alone, not the place; a window of the screen's
         // size moved off it is still taken for one that covers it.
         const drawable = describeDrawable(hdc >>> 0);
         const window = drawable?.window ?? 0;
         const exclusive = window !== 0 && drawable !== null
-            && drawable.width === screen().width && drawable.height === screen().height;
+            && drawable.width >= screen().width && drawable.height >= screen().height;
         if (onDevice)
         {
             const shown = root.Swap(context);
