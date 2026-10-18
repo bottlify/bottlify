@@ -305,9 +305,10 @@ const LIST_TYPES = new Map([
  * @property {{ allocate: (bytes: number) => number }} [scratch]
  *           Guest memory, for what must live there: the strings glGetString
  *           answers with, the frame SwapBuffers presents, a mapped buffer.
- * @property {(surface: any) => void} [present]
+ * @property {(surface: any, window?: number, exclusive?: boolean) => void} [present]
  *           Told when a frame has been swapped, with the colour buffer copied
- *           into guest memory for it to read.
+ *           into guest memory for it to read, the window it was drawn for, and
+ *           whether that window has the screen to itself.
  * @property {(name: string) => number} [exportAddress]
  *           The guest address of one of this library's own exports. It is
  *           what wglGetProcAddress answers with, and without it no extension
@@ -369,7 +370,7 @@ export function createOpengl(services){
     }
     const screen = services.screen ?? (()=>({ width: 640, height: 480 }));
     const describeDrawable = services.describeDrawable ?? (
-        /** @param {number} hdc */
+        /** @param {number} hdc @returns {import('./wgl.js').DrawableInfo | null} */
         hdc=>((hdc >>> 0) === 0
             ? null
             : { key: `hdc:${hdc >>> 0}`, width: screen().width, height: screen().height }));
@@ -810,13 +811,24 @@ export function createOpengl(services){
      * @returns {Promise<void> | null} what a swap on the device waits on
      *     before it answers, or null
      */
-    const presentCurrentFrame = ()=>{
+    const presentCurrentFrame = (/** @type {number} */ hdc)=>{
         services.presented?.();
         const context = current();
         if (!context || !services.present)
         {
             return null;
         }
+        // The frame is the picture of the window it was drawn for, and a window
+        // the size of the screen -- a full-screen program's -- has the screen to itself,
+        // as an exclusive Direct3D device has: a paint of a window under it
+        // shows its frame again rather than the windows over it, which put the
+        // program's own black main window on the screen between two frames.
+        // ponytail: the size alone, not the place; a window of the screen's
+        // size moved off it is still taken for one that covers it.
+        const drawable = describeDrawable(hdc >>> 0);
+        const window = drawable?.window ?? 0;
+        const exclusive = window !== 0 && drawable !== null
+            && drawable.width === screen().width && drawable.height === screen().height;
         if (onDevice)
         {
             const shown = root.Swap(context);
@@ -844,7 +856,7 @@ export function createOpengl(services){
                 pitch: shown.width * 4,
                 bitCount: 32,
                 palette: null,
-            });
+            }, window, exclusive);
             return held;
         }
         if (!services.scratch)
@@ -873,7 +885,7 @@ export function createOpengl(services){
             pitch: frame.width * 4,
             bitCount: 32,
             palette: null,
-        });
+        }, window, exclusive);
         return null;
     };
 
@@ -1954,7 +1966,7 @@ export function createOpengl(services){
             {
                 return 0;
             }
-            const held = presentCurrentFrame();
+            const held = presentCurrentFrame(hdc);
             return held ? held.then(()=>1) : 1;
         },
 
@@ -1964,7 +1976,7 @@ export function createOpengl(services){
             {
                 return 0;
             }
-            const held = presentCurrentFrame();
+            const held = presentCurrentFrame(hdc);
             return held ? held.then(()=>1) : 1;
         },
     };
@@ -2096,7 +2108,7 @@ export function createOpengl(services){
             {
                 return false;
             }
-            const held = presentCurrentFrame();
+            const held = presentCurrentFrame(hdc);
             return held ? held.then(()=>true) : true;
         },
 

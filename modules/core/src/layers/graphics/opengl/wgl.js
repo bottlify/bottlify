@@ -59,6 +59,8 @@ import { PIXEL_FORMATS, choosePixelFormat, writePixelFormatDescriptor } from './
  *           What the pixel format belongs to. A window DC names its window, so
  *           that every DC for that window shares one format; a memory DC names
  *           itself, so that its format outlives the bitmap it was set with.
+ * @property {number} [window]  The window a window DC draws on; zero or absent for
+ *           any other.
  * @property {number} width
  * @property {number} height
  */
