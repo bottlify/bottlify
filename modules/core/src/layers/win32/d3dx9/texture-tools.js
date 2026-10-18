@@ -128,6 +128,28 @@ const CAPS_TEXTURE = 60;
 const CAPS_MAX_WIDTH = 88;
 const CAPS_MAX_HEIGHT = 92;
 const CAPS_MAX_VOLUME_EXTENT = 96;
+/** And where its shader versions are. */
+const CAPS_VERTEX_SHADER_VERSION = 196;
+const CAPS_PIXEL_SHADER_VERSION = 204;
+
+/**
+ * The profile a shader version names, as D3DXGet*ShaderProfile answer: the
+ * highest one the device runs, or null for none.
+ * ponytail: 2.x is "_2_0" whatever its extended caps; the 2_a and 2_b
+ * profiles a 2.x card's extra caps would earn are not told apart.
+ *
+ * @param {'vs' | 'ps'} kind @param {number} version  D3DVS_VERSION / D3DPS_VERSION
+ * @returns {string | null}
+ */
+export function shaderProfile(kind, version){
+    const major = version >>> 8 & 0xff;
+    const minor = version & 0xff;
+    const known = kind === 'vs'
+        ? ['1_1', '2_0', '3_0']
+        : ['1_1', '1_2', '1_3', '1_4', '2_0', '3_0'];
+    const name = major === 2 ? '2_0' : `${major}_${minor}`;
+    return known.includes(name) ? `${kind}_${name}` : null;
+}
 
 /**
  * @typedef {Object} TextureToolsHost
@@ -212,7 +234,7 @@ export function createTextureTools(host){
      *
      * @param {number} device @param {any} thread
      * @returns {Promise<{ textureCaps: number, maxWidth: number, maxHeight: number,
-     *     maxVolume: number } | number>}
+     *     maxVolume: number, vertexShader: number, pixelShader: number } | number>}
      */
     const capsOf = async(device, thread)=>{
         const heap = /** @type {NonNullable<TextureToolsHost['heap']>} */ (host.heap);
@@ -230,7 +252,9 @@ export function createTextureTools(host){
                 return answer;
             }
             return { textureCaps: u32(at + CAPS_TEXTURE), maxWidth: u32(at + CAPS_MAX_WIDTH),
-                maxHeight: u32(at + CAPS_MAX_HEIGHT), maxVolume: u32(at + CAPS_MAX_VOLUME_EXTENT) };
+                maxHeight: u32(at + CAPS_MAX_HEIGHT), maxVolume: u32(at + CAPS_MAX_VOLUME_EXTENT),
+                vertexShader: u32(at + CAPS_VERTEX_SHADER_VERSION),
+                pixelShader: u32(at + CAPS_PIXEL_SHADER_VERSION) };
         }
         finally
         {
@@ -588,7 +612,64 @@ export function createTextureTools(host){
         }
     };
 
+    /**
+     * Each profile name, written once into guest memory: what the profile
+     * functions hand back is a constant string the program keeps.
+     *
+     * @type {Map<string, number>}
+     */
+    const profileNames = new Map();
+    /** @param {string} name */
+    const profileName = name=>{
+        let at = profileNames.get(name) ?? 0;
+        if (at === 0)
+        {
+            at = host.heap?.allocate(name.length + 1) ?? 0;
+            if (at !== 0)
+            {
+                host.writeMemory(at, Uint8Array.from([...name, '\0'], c=>c.charCodeAt(0)));
+                profileNames.set(name, at);
+            }
+        }
+        return at;
+    };
+
+    /**
+     * LPCSTR D3DXGetVertexShaderProfile / D3DXGetPixelShaderProfile(LPDIRECT3DDEVICE9)
+     *
+     * The highest profile of that kind the device's caps say it runs, or NULL
+     * for a NULL device or none.
+     *
+     * @param {'vs' | 'ps'} kind
+     */
+    const profileOf = kind=>({
+        argBytes: 4,
+        /** @param {number[]} args */
+        handler: ([device])=>{
+            if ((device >>> 0) === 0 || !host.callGuest || !host.heap)
+            {
+                return 0;
+            }
+            const thread = host.currentThread?.();
+            return (async()=>{
+                // Into the guest only once the handler has returned.
+                await null;
+                const caps = await capsOf(device >>> 0, thread);
+                if (typeof caps === 'number')
+                {
+                    return 0;
+                }
+                const name = shaderProfile(kind,
+                    kind === 'vs' ? caps.vertexShader : caps.pixelShader);
+                return name === null ? 0 : profileName(name);
+            })();
+        },
+    });
+
     return {
+        D3DXGetVertexShaderProfile: profileOf('vs'),
+        D3DXGetPixelShaderProfile: profileOf('ps'),
+
         /**
          * HRESULT D3DXCheckTextureRequirements(LPDIRECT3DDEVICE9 pDevice, UINT *pWidth,
          *     UINT *pHeight, UINT *pNumMipLevels, DWORD Usage, D3DFORMAT *pFormat,

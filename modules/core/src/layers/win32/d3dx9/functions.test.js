@@ -239,6 +239,7 @@ const BUILT = {
     D3DXPreprocessShader: 6, D3DXPreprocessShaderFromFileA: 5, D3DXPreprocessShaderFromFileW: 5,
     D3DXPreprocessShaderFromResourceA: 6, D3DXPreprocessShaderFromResourceW: 6,
     D3DXGetShaderVersion: 1, D3DXSaveTextureToFileA: 4, D3DXSaveTextureToFileW: 4,
+    D3DXGetPixelShaderProfile: 1, D3DXGetVertexShaderProfile: 1,
     D3DXSaveTextureToFileInMemory: 4,
     D3DXCreateTextureFromFileA: 3, D3DXCreateTextureFromFileW: 3,
     D3DXCreateTextureFromFileExA: 14, D3DXCreateTextureFromFileExW: 14,

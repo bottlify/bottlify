@@ -713,6 +713,24 @@ const characterType = code=>{
  */
 
 /**
+ * CompareString's three-valued answer -- CSTR_LESS_THAN, CSTR_EQUAL or
+ * CSTR_GREATER_THAN, 1 to 3 -- for an ordinal comparison, case-insensitive
+ * under NORM_IGNORECASE: the order every comparison of text in this build
+ * agrees on (see CompareStringA).
+ *
+ * @param {string} first @param {string} second @param {number} flags
+ */
+export function compareStrings(first, second, flags){
+    const left = (flags & NORM_IGNORECASE) !== 0 ? first.toLowerCase() : first;
+    const right = (flags & NORM_IGNORECASE) !== 0 ? second.toLowerCase() : second;
+    if (left < right)
+    {
+        return CSTR_LESS_THAN;
+    }
+    return left > right ? CSTR_GREATER_THAN : CSTR_EQUAL;
+}
+
+/**
  * @param {LocaleHost} host
  */
 export function createLocaleFunctions(host){
@@ -787,20 +805,7 @@ export function createLocaleFunctions(host){
         return readWide(address, wanted);
     };
 
-    /**
-     * CompareString's three-valued answer.
-     *
-     * @param {string} first @param {string} second @param {number} flags
-     */
-    const compare = (first, second, flags)=>{
-        const left = (flags & NORM_IGNORECASE) !== 0 ? first.toLowerCase() : first;
-        const right = (flags & NORM_IGNORECASE) !== 0 ? second.toLowerCase() : second;
-        if (left < right)
-        {
-            return CSTR_LESS_THAN;
-        }
-        return left > right ? CSTR_GREATER_THAN : CSTR_EQUAL;
-    };
+    const compare = compareStrings;
 
     /**
      * What EnumSystemLocales hands out for its flags: the locale's LCID as

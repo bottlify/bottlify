@@ -53,10 +53,14 @@ import { readDelayImports } from './delayload.js';
  *        the loaded-module list before it looks on disk, and a second copy
  *        planned as a library would have the program's own startup run as its
  *        DllMain.
- * @param {(name: string) => Promise<Uint8Array | null>} options.readLibrary
+ * @param {(name: string, wanted: import('./pe.js').ImportEntry[]) =>
+ *     Promise<Uint8Array | null>} options.readLibrary
  *        Finds a library beside the program and reads it, or answers null when
  *        there is no such file. Asynchronous because the volume may have to
  *        fetch it; this runs before the first guest instruction, so it may wait.
+ *        Told what the image that names it imports from it: a table of ours
+ *        that lacks some of that is not the answer while a file of the name
+ *        is on the volume.
  * @param {(name: string) => boolean} options.isSystem
  *        Whether this engine provides the library itself. Only a fallback:
  *        a name the program brought is planned from its file even when this
@@ -86,17 +90,16 @@ export async function planDependencies({ entry, entryName, readLibrary, isSystem
      * its slots are bound to nothing while the file sits beside the program.
      *
      * @param {Uint8Array} file
-     * @returns {string[]}
+     * @returns {{ dll: string, entries: import('./pe.js').ImportEntry[] }[]}
      */
     const importsOf = file=>{
         const image = parsePe(file);
-        return [...readImports(file, image), ...readDelayImports(file, image)]
-            .map(entry_=>entry_.dll);
+        return [...readImports(file, image), ...readDelayImports(file, image)];
     };
 
     /** @param {Uint8Array} file */
     const visit = async file=>{
-        for (const name of importsOf(file))
+        for (const { dll: name, entries } of importsOf(file))
         {
             const key = name.toLowerCase();
             if (seen.has(key) || isKnownDll(name))
@@ -108,7 +111,7 @@ export async function planDependencies({ entry, entryName, readLibrary, isSystem
             // twice.
             seen.add(key);
 
-            const bytes = await readLibrary(name);
+            const bytes = await readLibrary(name, entries);
             if (!bytes)
             {
                 // Ours only when no such file exists: the table is the

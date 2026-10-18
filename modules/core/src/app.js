@@ -1494,6 +1494,41 @@ export function feedFilmSound(track, blocks, channels, rate, deviceRate){
 }
 
 /**
+ * Which process a page event goes to, by the run's window manager: the
+ * process of the window under the pointer or holding the mouse, the keyboard
+ * to the process of the window with the focus -- and `dropped` where no window
+ * has it while some window shows, as on Windows: the desktop under the
+ * pointer, no window in the foreground.
+ *
+ * Motion is never dropped: the cursor is the system's and goes wherever the
+ * mouse takes it, and a cursor that reached the desktop under a locked
+ * pointer, its motion dropped there, never left it. And a locked pointer
+ * sends motion alone, so where it points is where the cursor is -- `cursor`,
+ * which a process keeps -- or the manager went on choosing by the last place
+ * the page named, the desktop after a click there, and every press went to
+ * nobody.
+ *
+ * @param {{ inputTarget: (event: any) => number | null,
+ *     topLevel: () => { visible: boolean }[] } | undefined} manager
+ * @param {import('./layers/input/router.js').HostInputEvent} event
+ * @param {{ x: number, y: number } | null} [cursor]  where the cursor is, for an
+ *     event of a locked pointer
+ * @returns {{ target: number | null, dropped: boolean }}
+ */
+export function inputRecipient(manager, event, cursor = null){
+    const pointed = event.kind === 'pointerMove' || event.kind === 'pointerButton'
+        || event.kind === 'wheel';
+    const located = pointed && typeof event.x !== 'number' && cursor
+        ? { ...event, x: cursor.x, y: cursor.y } : event;
+    const target = manager?.inputTarget(located) ?? null;
+    return {
+        target,
+        dropped: target === null && event.kind !== 'pointerMove'
+            && (manager?.topLevel().some(state=>state.visible) ?? false),
+    };
+}
+
+/**
  * Credits the guest's clock with the wall time that has passed, all of it.
  *
  * Between two slices of the guest the loop yields to the browser, mixes sound,
@@ -1865,13 +1900,15 @@ export function libraryCandidates(name, imagePath, currentDirectory, how = {}){
  * @param {any} filesystem
  * @param {any} blocks       The bundle fetcher, or null when there is no bundle.
  * @param {string} imagePath The running program, whose directory is searched first.
- * @param {(name: string) => boolean} [ours]  Whether the engine answers the name.
- * @returns {(name: string) => Promise<Uint8Array | null>}
+ * @param {(name: string, wanted: any[]) => boolean} [ours]  Whether the engine
+ *     answers the name -- told what the importer takes from it, which a table
+ *     lacking some of it does not answer.
+ * @returns {(name: string, wanted?: any[]) => Promise<Uint8Array | null>}
  */
 export function shippedLibraryReader(filesystem, blocks, imagePath, ours = ()=>false){
-    return async name=>{
+    return async(/** @type {string} */ name, /** @type {any[]} */ wanted = [])=>{
         for (const candidate of libraryCandidates(name, imagePath, undefined,
-            { ours: ours(name) }))
+            { ours: ours(name, wanted) }))
         {
             const file = await readWholeFile(filesystem, blocks, candidate);
             if (file)
@@ -2479,7 +2516,8 @@ export async function mapShippedLibraries(options){
         // bring is looked for in the system directories the engine fills, which
         // is where the runtime a title links against actually lives. Only when
         // neither has it does the engine's own table answer.
-        readLibrary: shippedLibraryReader(filesystem, blocks, imagePath, isSystem),
+        readLibrary: shippedLibraryReader(filesystem, blocks, imagePath,
+            (name, wanted)=>isSystem(name) && (options.covers?.(name, wanted) ?? true)),
     });
 
     if (missing.length > 0)
@@ -5877,6 +5915,16 @@ async function buildApp(options){
         imagePath: options.imagePath ?? 'C:\\app.exe',
         filesystem, loader, blocks, events,
         isSystem: (/** @type {string} */ name)=>findModule(name) !== null,
+        // A table of ours stands in for a copy in the system directories only
+        // when it has everything the importer takes from it. One that lacks
+        // some -- a C++ runtime's wide strings -- gives way to the copy an
+        // installation put in the Windows directory, which is where Windows
+        // would have found it.
+        covers: (/** @type {string} */ name, /** @type {any[]} */ wanted)=>{
+            const table = findModule(name);
+            return table !== null && wanted.every(entry=>(entry.name !== null
+                ? table.addressOf(entry.name) : table.addressOfOrdinal(entry.ordinal)) !== null);
+        },
         isKnownDll,
         byName, byBase,
         // Straight after the system modules, which is the first address nothing
@@ -7376,6 +7424,9 @@ async function buildApp(options){
             send: event=>input.send(event),
             poll: ()=>input.poll(),
             route: ()=>createInputRoute(event=>input.send(event)),
+            // Where the cursor is: where a locked pointer points
+            // (`inputRecipient`), which no event of the page says.
+            cursor: ()=>input.cursor?.() ?? null,
         },
 
         /**
@@ -8211,9 +8262,8 @@ async function buildSystemHost(deps){
                 // To the process of the window the run's manager says should
                 // have it (`inputTarget`, where `routedInput` explains the rest).
                 const standing = across();
-                const manager = system.windows?.manager;
-                const target = manager?.inputTarget(event) ?? null;
-                if (target === null && manager?.topLevel().some((/** @type {any} */ state)=>state.visible))
+                const { target, dropped } = inputRecipient(system.windows?.manager, event);
+                if (dropped)
                 {
                     return false;
                 }
@@ -9411,13 +9461,10 @@ export async function createApp(options){
     const standingAcross = new Set();
 
     /**
-     * The page's input, where the run's window manager says it goes: a
-     * pointer to the process of the window under it or holding the mouse,
-     * the keyboard to the process of the window with the focus. Where no
-     * window has it -- the desktop under the pointer, no window in the
-     * foreground -- no program is sent it, as on Windows. Only a run with no
-     * window showing has the page for its console: the newest process in a
-     * worker of its own has it, else the process the facade speaks for.
+     * The page's input, where the run's window manager says it goes
+     * (`inputRecipient`). Only a run with no window showing has the page for
+     * its console: the newest process in a worker of its own has it, else the
+     * process the facade speaks for.
      *
      * @param {any} machineInput  the input of the process the facade speaks for
      */
@@ -9425,9 +9472,9 @@ export async function createApp(options){
         ...machineInput,
         /** @param {any} event */
         send: event=>{
-            const manager = system.windows?.manager;
-            const target = manager?.inputTarget(event) ?? null;
-            if (target === null && manager?.topLevel().some((/** @type {any} */ state)=>state.visible))
+            const { target, dropped } = inputRecipient(system.windows?.manager, event,
+                machineInput.cursor?.() ?? null);
+            if (dropped)
             {
                 return false;
             }
