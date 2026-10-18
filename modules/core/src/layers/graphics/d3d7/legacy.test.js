@@ -281,13 +281,16 @@ test('the current viewport sets the rectangle and carries its clip volume on the
     assert.equal(f.device.setCurrentViewport(viewport), D3D_OK);
 
     const [, rect] = f.since('SetViewport', mark).at(-1) ?? [];
-    assert.deepEqual(rect, { X: 8, Y: 4, Width: 56, Height: 20, MinZ: 0.25, MaxZ: 0.75 },
-        'a rectangle past the target, which the first generation keeps, is cut to it');
+    assert.deepEqual(rect, { X: 8, Y: 4, Width: 56, Height: 20, MinZ: 0, MaxZ: 1 },
+        'a rectangle past the target, which the first generation keeps, is cut to it, and '
+        + 'the depth the whole of the buffer');
     const [, type, projection] = f.since('SetTransform', mark).at(-1) ?? [];
     assert.equal(type, D3DTRANSFORMSTATE_PROJECTION);
     assert.deepEqual([...projection], [...clipVolumeMatrix(/** @type {any} */ (viewport.data))]);
     // The right half of the unit square, (0..1, -1..1), fills the viewport.
     assert.deepEqual([projection[0], projection[12]], [2, -1]);
+    // And the volume's depth, 0.25 to 0.75, fills the buffer's 0 to 1.
+    assert.deepEqual([projection[10], projection[14]], [2, -0.5]);
 
     const scale = [2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
     assert.equal(f.device.setTransform(D3DTRANSFORMSTATE_PROJECTION, scale), D3D_OK);
