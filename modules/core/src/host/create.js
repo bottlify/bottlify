@@ -20,6 +20,9 @@
  * A canvas transfers its control once. So the host a canvas was handed to is
  * kept for as long as the canvas is, and a second program in the same canvas
  * starts in the same worker; disposing the program leaves the worker ready.
+ * Once its program is disposed, a canvas out of the page for `DETACHED_MS`
+ * takes its worker with it: a player closed and its canvas dropped kept a
+ * whole engine's memory alive. Nothing watches while a program runs.
  */
 
 import { createApp as createEngine } from '../app.js';
@@ -45,16 +48,87 @@ import { serveEngine } from './serve.js';
  */
 
 /**
+ * Where a program runs: its worker, or a port to the engine on this thread.
+ * `closed` once its canvas left the page and took it; `unwatch` stops the
+ * watch on that canvas, which runs only while no program does.
+ *
+ * @typedef {{ worker: any, close: () => void, closed?: boolean,
+ *     unwatch?: () => void }} Host
+ */
+
+/**
  * The hosts canvases have been handed to, by canvas.
  *
- * @type {WeakMap<object, { worker: any, close: () => void }>}
+ * @type {WeakMap<object, Host>}
  */
 const hosts = new WeakMap();
+
+/** How long a canvas may be out of the page before its host is closed. */
+export const DETACHED_MS = 10_000;
+
+/**
+ * Calls `gone` once a canvas has been out of the page for `wait` ms on end;
+ * back in the page in between starts the wait again. Looked at lazily: every
+ * `every` ms at most, and then only when the page's thread is idle
+ * (`requestIdleCallback`), so a page busy drawing pays nothing for it. Nothing
+ * is watched for a canvas that cannot say (an OffscreenCanvas, a test's
+ * stand-in).
+ *
+ * @param {any} canvas @param {() => void} gone
+ * @param {{ wait?: number, every?: number, now?: () => number,
+ *     later?: (then: () => void, ms: number) => any, cancel?: (timer: any) => void,
+ *     idle?: (then: () => void) => void }} [using]
+ * @returns {() => void} stops watching
+ */
+export function whenDetached(canvas, gone, using = {}){
+    if (typeof canvas?.isConnected !== 'boolean')
+    {
+        return ()=>{};
+    }
+    const wait = using.wait ?? DETACHED_MS;
+    const every = using.every ?? 5000;
+    const now = using.now ?? (()=>Date.now());
+    const later = using.later ?? ((then, ms)=>setTimeout(then, ms));
+    const cancel = using.cancel ?? (timer=>clearTimeout(timer));
+    const idle = using.idle ?? (typeof requestIdleCallback === 'function'
+        ? (/** @type {() => void} */ then)=>void requestIdleCallback(then, { timeout: every })
+        : (/** @type {() => void} */ then)=>then());
+    let since = -1;
+    let stopped = false;
+    /** @type {any} */
+    let timer = null;
+    const look = ()=>{
+        if (stopped)
+        {
+            return;
+        }
+        if (canvas.isConnected)
+        {
+            since = -1;
+        }
+        else
+        {
+            since = since < 0 ? now() : since;
+            if (now() - since >= wait)
+            {
+                stopped = true;
+                gone();
+                return;
+            }
+        }
+        timer = later(()=>idle(look), every);
+    };
+    timer = later(()=>idle(look), every);
+    return ()=>{
+        stopped = true;
+        cancel(timer);
+    };
+}
 
 /**
  * @param {'worker' | 'thread'} mode
  * @param {string | URL | undefined} workerUrl
- * @returns {{ worker: any, close: () => void }}
+ * @returns {Host}
  */
 function openHost(mode, workerUrl){
     if (mode === 'worker')
@@ -92,6 +166,9 @@ export async function createApp(options){
     {
         hosts.set(viewport, opened);
     }
+    // A program starting on a kept host: its canvas is in use again.
+    opened.unwatch?.();
+    opened.unwatch = undefined;
 
     /** @type {any} */
     let app;
@@ -120,6 +197,11 @@ export async function createApp(options){
     const disposeApp = app.dispose;
     /** A host with no canvas has nothing to keep it for once the program is gone. */
     app.dispose = async()=>{
+        // A host closed with its canvas answers nothing more.
+        if (opened.closed)
+        {
+            return;
+        }
         try
         {
             await disposeApp();
@@ -129,6 +211,14 @@ export async function createApp(options){
             if (!viewport)
             {
                 opened.close();
+            }
+            else
+            {
+                opened.unwatch = whenDetached(viewport, ()=>{
+                    hosts.delete(viewport);
+                    opened.closed = true;
+                    opened.close();
+                });
             }
         }
     };
