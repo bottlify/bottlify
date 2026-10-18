@@ -2989,11 +2989,16 @@ export function createRenderer(options){
      * uploads, where the memory read can say what was written, instead of a
      * comparison of every byte against what the buffer holds. Every page is
      * written at the first look, and for a copy on the GPU made anew, since
-     * what it holds is not known to match.
+     * what it holds is not known to match -- a dynamic buffer's only stale
+     * (`stale`), and its watch counts from then: every draw from it uploads
+     * what it reaches of those, and an unlock only what was written. A
+     * dynamic buffer moves between storages with one copy on the GPU, which
+     * after a move holds the storage left; all of a 4.5 MB buffer counted
+     * written at each move, and its unlock uploaded all of it every frame.
      *
      * @type {WeakMap<object, { base: number, gpu: any,
      *     watch: { take: (address: number, length: number) => number[] },
-     *     dirty: Set<number> }>}
+     *     dirty: Set<number>, stale: Set<number> }>}
      */
     const writtenPages = new WeakMap();
     /** @param {any} buffer @param {any} gpu  the copy the bytes go into */
@@ -3012,13 +3017,19 @@ export function createRenderer(options){
         {
             return null;
         }
-        const dirty = new Set();
+        const pages = new Set();
         const last = (buffer.base + buffer.length - 1) >>> 12;
         for (let page = buffer.base >>> 12; page <= last; page++)
         {
-            dirty.add(page);
+            pages.add(page);
         }
-        const tracked = { base: buffer.base, gpu, watch, dirty };
+        const dynamic = ((buffer.usage ?? 0) & D3DUSAGE_DYNAMIC) !== 0;
+        if (dynamic)
+        {
+            watch.take(buffer.base, buffer.length);
+        }
+        const tracked = { base: buffer.base, gpu, watch, dirty: dynamic ? new Set() : pages,
+            stale: dynamic ? pages : new Set() };
         writtenPages.set(buffer, tracked);
         return tracked;
     };
@@ -4783,6 +4794,17 @@ export function createRenderer(options){
             const tracked = writtenOf(source, gpu);
             if (tracked)
             {
+                if (tracked.stale.size > 0)
+                {
+                    const last = (source.base + to - 1) >>> 12;
+                    for (let page = (source.base + from) >>> 12; page <= last; page++)
+                    {
+                        if (tracked.stale.delete(page))
+                        {
+                            tracked.dirty.add(page);
+                        }
+                    }
+                }
                 const spans = writtenSpans(tracked, source.base, source.length, from, to);
                 if (spans.length > 0)
                 {

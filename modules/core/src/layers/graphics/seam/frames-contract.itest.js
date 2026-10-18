@@ -1786,6 +1786,25 @@ export function frameGate(version, which){
         assert.deepEqual(wrong, []);
     });
 
+    test(`${nine ? 'Direct3D 9' : 'Direct3D 8'}: a buffer moved back onto a storage and written`
+        + ` with the bytes it held there before draws them, ${gate.subject}`, async()=>{
+        // Moved off its first storage, back, and off again onto the second,
+        // written each time it is moved with what that storage held the time
+        // before: nothing of the storage changes, while the buffer's copy on
+        // the GPU holds what the storage it left was written with.
+        const STREAM = STREAMS[0];
+        const lock = (/** @type {number} */ fill)=>/** @type {Step} */ ({ kind: 'lock',
+            on: STREAM, offset: 0, size: 0, flags: D3DLOCK_DISCARD, fill, twice: false,
+            between: null });
+        const draw = /** @type {Step} */ ({ kind: 'draw', type: D3DPT_TRIANGLELIST, start: 0,
+            triangles: 2 });
+        const present = /** @type {Step} */ ({ kind: 'present' });
+        const steps = [draw, lock(11), draw, lock(22), draw, present, draw, lock(33), draw,
+            present, draw, lock(22), draw, present, draw, lock(33), draw];
+        const wrong = await partings(version, gate, steps);
+        assert.deepEqual(wrong, []);
+    });
+
     test(`${nine ? 'Direct3D 9' : 'Direct3D 8'}: the GPU is given what it would be ${gate.subject},`
         + ' whatever a frame streamed through its dynamic buffers', async()=>{
         /** @type {string[]} */

@@ -762,7 +762,10 @@ flowchart TB
   frees the storage left. Each storage is sent whole once, then by the pages written since. A draw
   from a dynamic buffer reads its indices, as its vertices, out of guest memory at the draw. No
   move while a lock taken in place (with no draw in the ring) waits for the host to replay it
-  before the ring's next run, nor for a lock the host would refuse.
+  before the ring's next run, nor for a lock the host would refuse. A dynamic buffer held locked
+  under NOOVERWRITE is not replayed at the host's entries: its draws read it. The buffer's one
+  copy on the GPU holds the storage left after a move, so the pages of the storage moved onto
+  count stale: a draw uploads what it reaches of them, an unlock only what was written.
 - **Who waits for whom.** `Present` waits for the graphics thread only when it is more than two frames
   behind. It does wait for the display, as a driver does: under every presentation interval but
   `IMMEDIATE` (windowed Direct3D 8 only under `COPY_VSYNC`) the calling thread stops until the next

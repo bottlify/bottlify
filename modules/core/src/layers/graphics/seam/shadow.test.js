@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     BUFFER, COMMAND, COMMAND_RING_BYTES, FLAG_SLOW_PATH, FLAG_STALE, HELD_GUEST, HELD_HOST, LEVEL,
-    SHADOW, SURFACE, TEXTURE,
+    LOCK_IN_PLACE, SHADOW, SURFACE, TEXTURE,
     createCommandReader, createShadow, getRenderStateCode,
     getSurfaceLevelCode, getTextureStageStateCode, getTransformCode, lockCode, transformSlot,
     transformType, unlockCode,
@@ -738,11 +738,12 @@ test('a buffer the guest holds locked is sent only when the ring has calls that 
     const vb = Object.assign(fakeBuffer(0x8000, 0x100), { usage: 0x200 });
     const block = m.shadow.attachBuffer(vb);
     const at = m.shadow.address();
-    // As the lock routine leaves it: the range, the flag, the block in its
-    // ring and its count.
+    // As the lock routine leaves a lock with neither flag: the range, the
+    // flags, the block in its ring and its count.
     m.put32(block + BUFFER.LOCKED, 1);
     m.put32(block + BUFFER.FROM, 0);
     m.put32(block + BUFFER.TO, 16);
+    m.put32(block + BUFFER.LOCK_FLAGS, LOCK_IN_PLACE);
     m.put32(at + SHADOW.LOCK_RING, block);
     m.put32(at + SHADOW.LOCK_CALLS, 1);
     m.shadow.sync();
@@ -780,6 +781,7 @@ test('a held lock is found through the lock routine\'s ring, and past its capaci
     m.put32(block + BUFFER.LOCKED, 1);
     m.put32(block + BUFFER.FROM, 0);
     m.put32(block + BUFFER.TO, 16);
+    m.put32(block + BUFFER.LOCK_FLAGS, LOCK_IN_PLACE);
     // More locks than the ring holds since the host last looked: its slots
     // name other blocks now, and only a look at every buffer finds this one.
     const locks = SHADOW.LOCK_RING_CAPACITY + 3;
@@ -792,11 +794,14 @@ test('a held lock is found through the lock routine\'s ring, and past its capaci
     draw();
     m.shadow.sync();
     assert.deepEqual(vb.calls, ['lock 0+16 0x0', 'unlock']);
-    // No lock since: still held, still sent before the ring's calls.
+    assert.equal(m.u32(block + BUFFER.LOCK_FLAGS), 0, 'replayed in place, and said so');
+    // No lock since, and the buffer dynamic: what it was written with since
+    // is the draws' to read at the draw, and the unlock's.
     m.put32(block + BUFFER.TO, 32);
     draw();
     m.shadow.sync();
-    assert.deepEqual(vb.calls.slice(2), ['lock 0+32 0x0', 'unlock']);
+    assert.deepEqual(vb.calls.slice(2), []);
+    assert.deepEqual(m.shadow.diagnostics().held, { replayed: 1, left: 1 });
 });
 
 test('a buffer released while it may be held locked is never locked by the host again', ()=>{
@@ -898,6 +903,7 @@ function entryWithEverything(phases){
     m.put32(second + BUFFER.LOCKED, 1);
     m.put32(second + BUFFER.FROM, 0);
     m.put32(second + BUFFER.TO, 16);
+    m.put32(second + BUFFER.LOCK_FLAGS, LOCK_IN_PLACE);
     // Two locks taken by the routines, one let go of: one is held.
     m.put32(at + SHADOW.LOCK_RING, first);
     m.put32(at + SHADOW.LOCK_RING + 4, second);

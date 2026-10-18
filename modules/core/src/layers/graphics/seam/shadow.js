@@ -3392,6 +3392,11 @@ export function createShadow(deps){
      */
     const moved = { made: 0, storages: 0, deferred: 0 };
     /**
+     * Locks the guest held across a host entry with a draw in the ring: those
+     * replayed, and a dynamic buffer's left to its draws (`flushHeld`).
+     */
+    const heldReplays = { replayed: 0, left: 0 };
+    /**
      * The host's level locks, as `hostLocks` the buffers': a level with no
      * block yet (the first two of each, and a cube's face), one the guest
      * never locks (`slow`), one a device context is held on (`busy`), one
@@ -4136,20 +4141,34 @@ export function createShadow(deps){
         {
             return true;
         }
+        const words = readWords(block, BUFFER.SIZE / 4);
+        const flags = words[BUFFER.LOCK_FLAGS / 4];
+        if (((entry.buffer.usage ?? 0) & D3DUSAGE_DYNAMIC) !== 0
+            && (flags & (D3DLOCK_DISCARD | LOCK_IN_PLACE)) === 0)
+        {
+            // A dynamic buffer's draws read what they reach out of guest
+            // memory at the draw, so what is written under NOOVERWRITE needs
+            // no replay until the unlock; only a lock in place, whose rename
+            // has to come before the draws after it, is replayed here. Call
+            // of Duty 4 holds a 4.5 MB skinning buffer all frame: replayed at
+            // each of a frame's calls into the host, each replay over draws
+            // not yet submitted renamed and carried all of it.
+            heldReplays.left++;
+            return true;
+        }
         if (movedAhead(block, entry))
         {
             moved.deferred++;
             renamedPending.add(block);
             return true;
         }
-        const words = readWords(block, BUFFER.SIZE / 4);
         const from = words[BUFFER.FROM / 4];
         const to = words[BUFFER.TO / 4];
-        const flags = words[BUFFER.LOCK_FLAGS / 4];
         if (words[BUFFER.LOCKED / 4] === 0 || to <= from)
         {
             return true;
         }
+        heldReplays.replayed++;
         if (entry.buffer.Lock(from, to - from, {}, flags & ~LOCK_IN_PLACE) === 0)
         {
             entry.buffer.Unlock();
@@ -4958,6 +4977,7 @@ export function createShadow(deps){
             heldBroken: heldWaits.broken,
             hostLocks: { ...hostLocks },
             moved: { ...moved },
+            held: { ...heldReplays },
             hostLevelLocks: { ...hostLevelLocks },
             hostLevelKinds: Object.fromEntries([...hostLevelKinds].sort((a, b)=>b[1] - a[1])
                 .slice(0, 12)),
