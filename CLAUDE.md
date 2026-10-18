@@ -98,11 +98,6 @@ owners — leaves a small script in `tools/` that fails when that rule is broken
 gates; `check:boundaries` is the first of them. **An instrument that cannot answer says so** — an
 error, "not measured" — and never returns zero.
 
-**Debugging live with the user** (only then) runs in this order: build both dists, the user tries
-the build; if the defect is gone, run the tests and push after they pass; if it is not, revert the
-change or fix further and build again. Not push first, and not tests before the user has seen the
-build.
-
 **Run what the change touches; the full suite before main.**
 
 | Changed | Run |
