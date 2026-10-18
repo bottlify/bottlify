@@ -82,16 +82,16 @@ test('a report lists what was said as a divergence, which nothing else keeps',
 
 test('a polling loop is written twice and counted, so the journal still holds what came before',
     { timeout: 60000 }, async t=>{
-        // GetACP (a call the host answers; the thread's and the process's ids are
-        // answered in the guest); mov ecx, 50000; L: push ecx; push 0; call [Sleep]; pop ecx;
-        // dec ecx; jnz L; GetACP; push 0; call [ExitProcess]
+        // GetACP; mov ecx, 50000; L: push ecx; call [GetOEMCP]; pop ecx; dec ecx; jnz L;
+        // GetACP; push 0; call [ExitProcess] -- calls the host answers: the thread's and the
+        // process's ids are answered in the guest, and so is Sleep(0) with no thread waiting
         const executable = buildExe({
-            imports: { 'KERNEL32.dll': ['GetACP', 'Sleep', 'ExitProcess'] },
+            imports: { 'KERNEL32.dll': ['GetACP', 'GetOEMCP', 'ExitProcess'] },
             codeSize: 0x40,
             code: ({ iat })=>[
                 0xff, 0x15, ...u32(iat('GetACP')),
                 0xb9, ...u32(50000),
-                0x51, 0x6a, 0x00, 0xff, 0x15, ...u32(iat('Sleep')), 0x59, 0x49, 0x75, 0xf3,
+                0x51, 0xff, 0x15, ...u32(iat('GetOEMCP')), 0x59, 0x49, 0x75, 0xf5,
                 0xff, 0x15, ...u32(iat('GetACP')),
                 0x6a, 0x00, 0xff, 0x15, ...u32(iat('ExitProcess')),
             ],
@@ -102,8 +102,8 @@ test('a polling loop is written twice and counted, so the journal still holds wh
         assert.equal(await app.run(), 0);
         const lines = app.log.recent(4096).map((/** @type {any} */ record)=>record.text ?? '')
             .filter((/** @type {string} */ text)=>/\[main\]/.test(text));
-        const sleeps = lines.filter((/** @type {string} */ text)=>/Sleep\(0x0\)/.test(text));
-        assert.equal(sleeps.length, 8, 'the loop, written until it has gone round in full twice');
+        const polls = lines.filter((/** @type {string} */ text)=>/GetOEMCP/.test(text));
+        assert.equal(polls.length, 8, 'the loop, written until it has gone round in full twice');
         const said = lines.find((/** @type {string} */ text)=>/went round again/.test(text));
         assert.ok(said, lines.slice(-12).join('\n'));
         assert.match(said, /the 1 calls before went round again: 49992 calls not written/);
