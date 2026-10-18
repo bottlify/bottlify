@@ -36,6 +36,7 @@ import { createModelRenderer } from './gpu-model.js';
  * @property {number} [maxDraws]
  * @property {string | null} [skipTexture]
  * @property {string | null} [probeTexture]
+ * @property {import('./gpu.js').GpuServices['liveDump']} [liveDump]
  */
 
 /**
@@ -77,6 +78,7 @@ export function createOpenglRoot(services){
                     skipTexture: services.skipTexture,
                     probeTexture: services.probeTexture,
                     compressedTextures: services.compressedTextures,
+                    liveDump: services.liveDump,
                 });
             }
             else
