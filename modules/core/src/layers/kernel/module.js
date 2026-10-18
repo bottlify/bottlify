@@ -292,6 +292,12 @@ export function createKernelModule(){
                  *   instructions, and keeps whatever it was holding. The default is
                  *   that loop, for a caller with nothing better -- but a caller
                  *   that can end the thread should pass somewhere that does.
+                 * @param {number} [options.start]
+                 *   The start routine, when `entry` is a routine that runs on the
+                 *   new thread before it -- the loader telling the libraries of
+                 *   the thread -- and then enters it: placed in the word above the
+                 *   parameter for that routine to find, so the start routine is
+                 *   entered with the stack it would have had as `entry`.
                  * @returns {any} null once this instance is disposed -- there is
                  *     no scheduler left to give a thread to -- or when the pool has
                  *     no room for its stack, which is a thread that cannot be made
@@ -299,7 +305,7 @@ export function createKernelModule(){
                  */
                 createThread({
                     entry, parameter = 0, stackTop, stackLimit, stackSize, stackReserve,
-                    tebAddress, name, returnTo, id,
+                    tebAddress, name, returnTo, id, start,
                 })
                 {
                     if (!live())
@@ -340,6 +346,10 @@ export function createKernelModule(){
                     // the top of the region is outside it. The headroom keeps every
                     // pointer the thread can reach inside the memory it was given.
                     top -= 16;
+                    if (start !== undefined)
+                    {
+                        memory.writeU32(top + 8, start);
+                    }
                     memory.writeU32(top + 4, parameter);
                     memory.writeU32(top, returnTo ?? cpu.parkAddress());
 
@@ -352,6 +362,12 @@ export function createKernelModule(){
                         id,
                     });
                     thread.handle = state.handles.open('thread', thread);
+                    if (start !== undefined)
+                    {
+                        // What a report names the thread by: its own routine,
+                        // not the one every thread begins in.
+                        thread.entry = start;
+                    }
                     if (slot)
                     {
                         slot.owner = thread;

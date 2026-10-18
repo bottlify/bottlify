@@ -3603,6 +3603,27 @@ async function buildApp(options){
      * @type {any[]}
      */
     const attachOrder = [];
+    /**
+     * What a thread's start and end are told of before the libraries loaded
+     * since: the images the process started with, the program first and
+     * then its libraries in the order they were attached, the TLS callbacks
+     * of each that has any, and which have static thread-local storage. Set
+     * once they are known.
+     *
+     * @type {{ images: any[], callbacks: Map<number, number[]>, staticTls: Set<number> }}
+     */
+    let startupImages = { images: [], callbacks: new Map(), staticTls: new Set() };
+    /**
+     * Libraries that asked not to be told of threads (DisableThreadLibraryCalls), by base.
+     *
+     * @type {Set<number>}
+     */
+    const withoutThreadCalls = new Set();
+    /**
+     * The loader lock: the CRITICAL_SECTION the startup's attaches and every
+     * thread's are made under. Zero until it is made.
+     */
+    let loaderLock = 0;
     /** @type {any} */
     let mainModule = null;
 
@@ -4664,6 +4685,42 @@ async function buildApp(options){
                     .filter(held=>held.loaded !== false && held.attached !== false)
                     .reverse()
                     .map(held=>({ name: held.name, base: held.base, entryPoint: held.entryPoint })),
+                /**
+                 * What a thread's start and end are told of, image by image in
+                 * load order -- those the process started with, then each
+                 * library loaded since as it was attached: an image's TLS
+                 * callbacks, then its entry point once DLL_PROCESS_ATTACH has
+                 * reached it. None for one gone, or that asked not to be.
+                 */
+                threadCalls: ()=>{
+                    const { images, callbacks } = startupImages;
+                    return [...images, ...attachOrder.filter(held=>!images.includes(held))]
+                        .filter(held=>held.loaded !== false && held.attached !== false
+                            && !withoutThreadCalls.has(held.base))
+                        .map(held=>({
+                            base: held.base,
+                            routines: [
+                                ...callbacks.get(held.base) ?? [],
+                                ...attachOrder.includes(held) ? [held.entryPoint] : [],
+                            ],
+                        }))
+                        .filter(each=>each.routines.length > 0);
+                },
+                /**
+                 * DisableThreadLibraryCalls. An image with static thread-local
+                 * storage goes on being told: its callbacks build each thread's
+                 * thread-local objects, and the call is documented to make no
+                 * optimisation for it.
+                 *
+                 * @param {number} base
+                 */
+                disableThreadCalls: base=>{
+                    if (!startupImages.staticTls.has(base >>> 0))
+                    {
+                        withoutThreadCalls.add(base >>> 0);
+                    }
+                },
+                loaderLock: ()=>loaderLock,
                 /** @param {any} asked */
                 resolved: asked=>events.emit('resolved', asked),
                 ...resourceLookup(()=>mainModule, byBase, dataFiles,
@@ -6281,6 +6338,12 @@ async function buildApp(options){
     // exports assume. It is guest code because the calls belong on a guest
     // stack; the stub's last instruction enters the program.
     const kernel32 = findModule('kernel32');
+    // RTL_CRITICAL_SECTION, free: LockCount -1 and nothing else.
+    loaderLock = allocateFromHeap(24);
+    memory.writeBytes(loaderLock, new Uint8Array(24));
+    memory.writeU32(loaderLock + 4, 0xffffffff);
+    const enter = kernel32?.addressOf('EnterCriticalSection') ?? 0;
+    const leave = kernel32?.addressOf('LeaveCriticalSection') ?? 0;
     const startup = synthesiseProcessInit({
         libraries: withTls.filter(held=>held !== mainModule || held.tls),
         entryPoint: image.entryPoint,
@@ -6288,7 +6351,14 @@ async function buildApp(options){
             alloc: kernel32.addressOf('TlsAlloc') ?? 0,
             set: kernel32.addressOf('TlsSetValue') ?? 0,
         },
+        ...enter !== 0 && leave !== 0 ? { loaderLock: { address: loaderLock, enter, leave } } : {},
     });
+    startupImages = {
+        images: [mainModule, ...shipped],
+        callbacks: new Map(withTls.flatMap(held=>(held.tls?.callbacks.length
+            ? [[held.base, held.tls.callbacks]] : []))),
+        staticTls: new Set(withTls.flatMap(held=>(held.tls ? [held.base] : []))),
+    };
     for (const name of startup.attached)
     {
         const held = shipped.find(library=>library.name === name);

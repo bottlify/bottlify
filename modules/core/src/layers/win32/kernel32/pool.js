@@ -165,6 +165,9 @@ export function waitLoopCode(wait, after, at){
  *           WaitForSingleObject, from inside a trap: its answer, or the park
  *           that answers it later. Absent, no wait can be registered.
  * @property {() => number} [threadReturn]  Where a thread that returns ends.
+ * @property {() => number} [threadStart]
+ *           Where a pool thread begins, as CreateThread's do: the libraries
+ *           told of it, then its loop. Zero, or absent, and it begins in its loop.
  */
 
 /**
@@ -230,6 +233,19 @@ export function createThreadPool(host){
     /** Threads made and not yet at their first question. */
     let starting = 0;
     let loop = 0;
+
+    /**
+     * A thread of the pool's, begun as every thread is: the libraries are
+     * told of it before its loop runs.
+     *
+     * @param {{ entry: number, parameter?: number, name: string, returnTo?: number }} options
+     */
+    const makeThread = options=>{
+        const begin = host.threadStart?.() ?? 0;
+        return kernel.createThread(begin === 0
+            ? options
+            : { ...options, entry: begin, start: options.entry });
+    };
     let ran = 0;
 
     /** @param {number} value */
@@ -322,7 +338,7 @@ export function createThreadPool(host){
             host.writeMemory(at, poolLoopCode(trap, at));
             loop = at;
         }
-        const thread = kernel.createThread({ entry: loop, name: 'thread pool' });
+        const thread = makeThread({ entry: loop, name: 'thread pool' });
         if (!thread)
         {
             return;
@@ -677,7 +693,7 @@ export function createThreadPool(host){
                 forget(wait);
             }
         };
-        const thread = kernel.createThread({ entry: waitLoop, parameter: handle,
+        const thread = makeThread({ entry: waitLoop, parameter: handle,
             name: 'registered wait', returnTo: host.threadReturn?.() });
         if (!thread)
         {
