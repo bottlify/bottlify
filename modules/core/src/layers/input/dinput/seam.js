@@ -38,6 +38,8 @@ export const DI_BUFFEROVERFLOW = 1;
 export const DI_NOEFFECT = 1;
 const DIERR_INVALIDPARAM = 0x80070057 | 0;
 const DIERR_NOTACQUIRED = 0x8007000c | 0;
+/** A read of a device taken back from the program: another window came to the front. */
+const DIERR_INPUTLOST = 0x8007001e | 0;
 const DIERR_ACQUIRED = 0x800700aa | 0;
 /** Another window is in the foreground of a device that reads only there. */
 const DIERR_OTHERAPPHASPRIO = 0x80070005 | 0;
@@ -811,6 +813,47 @@ export function createDirectInput(
     const cooperation = new WeakMap();
     /** Each device's last Acquire answer, for the diagnostics. @type {WeakMap<object, number>} */
     const acquireAnswers = new WeakMap();
+    /**
+     * Devices taken back from the program because another of its windows came
+     * to the front, which the next read is told with DIERR_INPUTLOST until the
+     * program acquires them again.
+     *
+     * @type {WeakSet<any>}
+     */
+    const lost = new WeakSet();
+
+    /**
+     * Whether a device is still the program's: one acquired at a foreground
+     * level is only while its window is the foreground one, and once another
+     * is -- a dialog the program raised -- Windows takes it back, which shows
+     * an exclusively held mouse's cursor again and gives that window its mouse
+     * messages. Looked at where the device is read and where input is routed,
+     * which is where the difference shows.
+     *
+     * @param {any} device
+     */
+    const stillHeld = device=>{
+        if (!device.acquired)
+        {
+            return false;
+        }
+        const level = cooperation.get(device);
+        const front = foreground?.();
+        if (!level || level.background || level.window === 0 || front === undefined
+            || front === level.window)
+        {
+            return true;
+        }
+        device.unacquire();
+        if (device.kind === MOUSE && device.exclusive)
+        {
+            mouseHeld?.(false);
+        }
+        lost.add(device);
+        return false;
+    };
+    /** What a read of a device nobody holds is told. @param {any} device */
+    const notHeld = device=>(lost.has(device) ? DIERR_INPUTLOST : DIERR_NOTACQUIRED);
 
     /**
      * A user name a program passes, in its width; no name and an empty one
@@ -990,6 +1033,7 @@ export function createDirectInput(
                 return DIERR_OTHERAPPHASPRIO;
             }
             acquireAnswers.set(device, DI_OK);
+            lost.delete(device);
             device.acquire();
             if (device.kind === MOUSE && device.exclusive)
             {
@@ -1270,9 +1314,9 @@ export function createDirectInput(
             {
                 return DIERR_INVALIDPARAM;
             }
-            if (!device.acquired)
+            if (!stillHeld(device))
             {
-                return DIERR_NOTACQUIRED;
+                return notHeld(device);
             }
             const wanted = size >>> 0;
             if (device.dataSize !== 0 && wanted !== device.dataSize)
@@ -1338,9 +1382,9 @@ export function createDirectInput(
             // Before DirectInput 8 the buffer stays readable once the device
             // is let go of; from 8 it waits, kept, for the next Acquire
             // (Wine's device8.c, test_sys_mouse).
-            if (!device.acquired && device.version >= 0x0800)
+            if (!stillHeld(device) && (device.version >= 0x0800 || lost.has(device)))
             {
-                return DIERR_NOTACQUIRED;
+                return notHeld(device);
             }
             const entrySize = size >>> 0;
             if (entrySize !== DIDEVICEOBJECTDATA.SIZE
@@ -1669,9 +1713,9 @@ export function createDirectInput(
          * nobody holds with DIERR_NOTACQUIRED (Wine's joystick8.c).
          */
         Poll(device){
-            if (!device.acquired)
+            if (!stillHeld(device))
             {
-                return DIERR_NOTACQUIRED;
+                return notHeld(device);
             }
             return device.version >= 0x0700 ? DI_NOEFFECT : DI_OK;
         },
@@ -2197,7 +2241,7 @@ export function createDirectInput(
          */
         exclusive(kind){
             const device = devices.get(kind === KEYBOARD ? GUID_SysKeyboard : GUID_SysMouse);
-            return device !== undefined && device.acquired && device.exclusive;
+            return device !== undefined && device.exclusive && stillHeld(device);
         },
 
         libraries: {

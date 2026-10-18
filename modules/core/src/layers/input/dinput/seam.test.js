@@ -792,6 +792,33 @@ test('a foreground device is acquired only while its window is the foreground on
     assert.equal(f.bridge.call(device, 'Acquire', []), DI_OK);
 });
 
+test('a foreground device is taken back when another window comes to the front', ()=>{
+    // A dialog the program raised over the window that holds the mouse: Windows
+    // takes the device back, the cursor shows and the dialog has the mouse; a
+    // read is told DIERR_INPUTLOST until the program acquires it again, which
+    // it can once its window is in front.
+    let front = 0x100;
+    /** @type {boolean[]} */
+    const held = [];
+    const f = fixture({ windows: { 0x100: 'top', 0x200: 'top' }, foreground: ()=>front,
+        mouseHeld: value=>held.push(value) });
+    const device = device8(f, GUID_SysMouse, false);
+    assert.equal(f.bridge.call(device, 'SetDataFormat', [dataFormat(f.memory, 16)]), DI_OK);
+    assert.equal(f.bridge.call(device, 'SetCooperativeLevel', [0x100, 0x4 | 0x1]), DI_OK);
+    assert.equal(f.bridge.call(device, 'Acquire', []), DI_OK);
+    assert.equal(f.dinput.exclusive('mouse'), true);
+    front = 0x200;
+    assert.equal(f.dinput.exclusive('mouse'), false, 'the dialog has the mouse');
+    assert.deepEqual(held, [true, false], 'and the cursor is shown again');
+    assert.equal(f.bridge.call(device, 'GetDeviceState', [16, AT.state]), 0x8007001e | 0,
+        'DIERR_INPUTLOST');
+    assert.equal(f.bridge.call(device, 'Acquire', []), 0x80070005 | 0, 'not while it is behind');
+    front = 0x100;
+    assert.equal(f.bridge.call(device, 'Acquire', []), DI_OK);
+    assert.equal(f.bridge.call(device, 'GetDeviceState', [16, AT.state]), DI_OK);
+    assert.deepEqual(held, [true, false, true]);
+});
+
 test('the mouse held exclusively is reported; a nonexclusive one and the keyboard are not',
     ()=>{
         // Windows hides the cursor while a program holds the mouse exclusively.
