@@ -34,7 +34,7 @@ import { TKIND_DISPATCH, TKIND_INTERFACE } from './typelib.js';
 import { parseTypeLibrary } from './sltg.js';
 import { parsePe, rvaToFileOffset } from '../../loader/internal/pe.js';
 import { findResource } from '../../loader/internal/resources.js';
-import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
+import { compareStrings, decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { dateOf, fieldsOf, rollYear } from './dates.js';
 import {
     compareExact, decimalBytes, exactOf, readDecimal, round, roundNumber, toNumber,
@@ -142,7 +142,10 @@ const NUMPRS_INEXACT = 0x20000;
 const NUMPRS_UNPARSED = NUMPRS_TRAILING_PLUS | NUMPRS_TRAILING_MINUS | NUMPRS_HEX_OCT
     | NUMPRS_PARENS | NUMPRS_CURRENCY;
 
-/** VarCmp's answer when either side is null. */
+/** VarCmp's and VarBstrCmp's answers: less, equal, greater -- and null. */
+const VARCMP_LT = 0;
+const VARCMP_EQ = 1;
+const VARCMP_GT = 2;
 const VARCMP_NULL = 3;
 /** VarCmp's flag for a comparison of text without case. */
 const NORM_IGNORECASE = 1;
@@ -1759,6 +1762,48 @@ export function createAutomationFunctions(host){
                 }
                 writeU32(result >>> 0, bstr);
                 return S_OK;
+            },
+        },
+
+        /**
+         * HRESULT VarBstrCmp(BSTR bstrLeft, BSTR bstrRight, LCID lcid, ULONG dwFlags)
+         *
+         * VARCMP_LT, VARCMP_EQ or VARCMP_GT. A NULL or empty string is less
+         * than any other and equal to another such. With no locale the strings
+         * are compared as bytes, a shorter one before a longer one it begins;
+         * with one, as CompareString compares text under the flags.
+         */
+        VarBstrCmp: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([left, right, lcid, flags])=>{
+                const leftBytes = byteLengthOf(left >>> 0);
+                const rightBytes = byteLengthOf(right >>> 0);
+                const leftEmpty = leftBytes < 2 || readU16(left >>> 0) === 0;
+                const rightEmpty = rightBytes < 2 || readU16(right >>> 0) === 0;
+                if (leftEmpty || rightEmpty)
+                {
+                    return leftEmpty === rightEmpty ? VARCMP_EQ
+                        : leftEmpty ? VARCMP_LT : VARCMP_GT;
+                }
+                const a = host.readMemory(left >>> 0, leftBytes);
+                const b = host.readMemory(right >>> 0, rightBytes);
+                if ((lcid >>> 0) !== 0)
+                {
+                    /** @param {Uint8Array} bytes */
+                    const text = bytes=>String.fromCharCode(
+                        ...new Uint16Array(bytes.buffer, bytes.byteOffset, bytes.length >>> 1));
+                    return compareStrings(text(a.slice()), text(b.slice()), flags >>> 0) - 1;
+                }
+                for (let at = 0; at < Math.min(a.length, b.length); at++)
+                {
+                    if (a[at] !== b[at])
+                    {
+                        return a[at] < b[at] ? VARCMP_LT : VARCMP_GT;
+                    }
+                }
+                return a.length === b.length ? VARCMP_EQ
+                    : a.length < b.length ? VARCMP_LT : VARCMP_GT;
             },
         },
 
@@ -3677,6 +3722,7 @@ export const OLEAUT32_ORDINALS = Object.freeze({
     293: 'LPSAFEARRAY_UserUnmarshal',
     294: 'LPSAFEARRAY_UserFree',
     313: 'VarBstrCat',
+    314: 'VarBstrCmp',
     318: 'VarCat',
     330: 'VarDateFromUdate',
     331: 'VarUdateFromDate',

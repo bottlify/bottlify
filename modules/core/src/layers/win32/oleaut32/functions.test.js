@@ -238,6 +238,30 @@ test('VarBstrCat joins by byte length, a NULL side counting as empty', ()=>{
     assert.equal(call('VarBstrCat', [left, right, 0]), 0x80070057);
 });
 
+test('VarBstrCmp orders as bytes without a locale and as text with one', ()=>{
+    // VARCMP_LT 0, EQ 1, GT 2; a NULL or empty string comes before any other.
+    setUp();
+    /** @param {string} text */
+    const bstr = text=>{
+        host.putWide(TEXT, text);
+        return call('SysAllocString', [TEXT]);
+    };
+    const abc = bstr('abc');
+    const abd = bstr('abd');
+    const ab = bstr('ab');
+    const upper = bstr('ABC');
+    const empty = bstr('');
+    assert.equal(call('VarBstrCmp', [abc, abd, 0, 0]), 0);
+    assert.equal(call('VarBstrCmp', [abd, abc, 0, 0]), 2);
+    assert.equal(call('VarBstrCmp', [abc, abc, 0, 0]), 1);
+    assert.equal(call('VarBstrCmp', [ab, abc, 0, 0]), 0, 'a prefix before what it begins');
+    assert.equal(call('VarBstrCmp', [0, empty, 0, 0]), 1, 'NULL and empty are equal');
+    assert.equal(call('VarBstrCmp', [0, abc, 0, 0]), 0);
+    assert.equal(call('VarBstrCmp', [abc, empty, 0, 0]), 2);
+    assert.equal(call('VarBstrCmp', [upper, abc, 0x409, 0]), 0, 'with a locale, case counts');
+    assert.equal(call('VarBstrCmp', [upper, abc, 0x409, 1]), 1, 'unless NORM_IGNORECASE');
+});
+
 test('an embedded NUL is kept, because the length is the prefix and not a scan', ()=>{
     setUp();
     const bstr = call('SysAllocStringLen', [TEXT, 3]);
