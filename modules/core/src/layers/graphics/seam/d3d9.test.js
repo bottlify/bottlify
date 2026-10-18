@@ -1804,7 +1804,9 @@ test('a buffer lock that reaches the host is counted by what sent it past the gu
         // A draw the ring holds, which the host plays before it answers.
         h.box.memory.writeU32(owner + SHADOW.DRAWS_PENDING, 1);
         h.box.trap(pointer, 'Lock', [0, 0, 0x3200, D3DLOCK_DISCARD]);
+        // A second lock while it is held: they nest, each with its unlock.
         h.box.trap(pointer, 'Lock', [0, 0, 0x3200, 0]);
+        assert.equal(h.box.trap(pointer, 'Unlock'), D3D_OK);
         assert.equal(h.box.trap(pointer, 'Unlock'), D3D_OK);
         h.box.trap(pointer, 'Lock', [0, 0, 0x3200, D3DLOCK_READONLY]);
         assert.equal(h.box.trap(pointer, 'Unlock'), D3D_OK);
