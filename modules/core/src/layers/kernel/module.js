@@ -890,6 +890,8 @@ export function createKernelModule(){
                      * @param {any} record
                      */
                     started: record=>live() ? state.processes.started(record) : undefined,
+                    /** @param {boolean} on */
+                    runBeside: on=>(live() ? state.processes.runBeside(on) : undefined),
                 },
 
                 clock: state.clock,

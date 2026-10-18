@@ -802,9 +802,12 @@ export function createSyncFunctions(host){
                         child.handsOver = true;
                     }
                     // Timed only for a child running beside this process: one
-                    // run in its place has the parent's time stand still.
+                    // run in its place has the parent's time stand still. One
+                    // to run beside is timed before it has started too -- it
+                    // starts at the parent's next turn, and a wait made before
+                    // then waited for ever on a child that never ends.
                     kernel.block(thread, `child process ${child.imagePath}`,
-                        child.started && (timeout >>> 0) !== INFINITE
+                        (child.started || child.beside) && (timeout >>> 0) !== INFINITE
                             ? { deadline: kernel.clock.virtualTime() + (timeout >>> 0),
                                 result: WAIT_TIMEOUT }
                             : undefined);

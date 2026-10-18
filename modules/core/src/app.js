@@ -5072,6 +5072,9 @@ async function buildApp(options){
     const lentTranslators = new Map();
     const memory = core.api('memory');
     const kernel = core.api('kernel');
+    // Children run beside this process where the run runs processes at once:
+    // a wait on one is timed from the moment it is made.
+    kernel.processes?.runBeside?.(typeof options.beside === 'function');
     const loader = core.api('loader');
     const win32 = core.api('win32');
     const bridge = core.api('bridge');

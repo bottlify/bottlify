@@ -977,7 +977,8 @@ export function createThreadingFunctions(host){
                     const reason = `child process ${target.imagePath}`;
                     (target.waiters ??= []).push({ thread, result: WAIT_OBJECT_0,
                         live: childWaitMark(thread, reason) });
-                    kernel.block(thread, reason, target.started && wait !== INFINITE
+                    const timed = (target.started || target.beside) && wait !== INFINITE;
+                    kernel.block(thread, reason, timed
                         ? { deadline: kernel.clock.virtualTime() + wait, result: WAIT_TIMEOUT }
                         : undefined);
                     return host.park(thread);

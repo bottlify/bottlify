@@ -98,8 +98,22 @@ export function takeId(ids, name, step){
 export function createProcessTable(ids = { process: FIRST_ID }){
     /** @type {ProcessRecord[]} */
     const records = [];
+    /** Whether this process's children run beside it (`runBeside`). */
+    let beside = false;
 
     return {
+        /**
+         * This process's children run beside it rather than in its place: a
+         * child is started at the parent's next turn, and a timed wait on it
+         * made before then is timed all the same -- the parent's clock goes on
+         * while the child runs.
+         *
+         * @param {boolean} on
+         */
+        runBeside(on){
+            beside = on;
+        },
+
         /**
          * @param {Object} options
          * @param {string} options.imagePath
@@ -125,6 +139,7 @@ export function createProcessTable(ids = { process: FIRST_ID }){
                 patches: [],
                 exitCode: completed ? 0 : STILL_ACTIVE,
                 started: false,
+                beside,
                 handle: 0,
                 threadHandle: 0,
             };
