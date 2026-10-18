@@ -1082,8 +1082,23 @@ export function createScheduler(options){
             cpu.stop?.();
             return;
         }
-        if (soloShared && (cpu.executors?.() ?? []).some((/** @type {any} */ remote)=>!remote.busy()
-            && allowedOn(thread, remote.index)))
+        /** @type {any[]} */
+        const free = (cpu.executors?.() ?? []).filter((/** @type {any} */ remote)=>!remote.busy());
+        if (soloShared && free.some(remote=>allowedOn(thread, remote.index)))
+        {
+            soloShared = false;
+            cpu.stop?.();
+            return;
+        }
+        // One that may run only here, readied in the slice of one that may run
+        // on an executor left free: the slice ends, and the turn's choice puts
+        // the two each where it may run (`choose`). A game's main thread,
+        // pinned to the first processor, woke a worker and waited for it; the
+        // worker, running here, woke it in turn and went on, and the main
+        // thread waited out the worker's turn with the other executor idle.
+        if (current !== null && allowedOn(thread, 0) && !keptHere(current)
+            && !free.some(remote=>allowedOn(thread, remote.index))
+            && free.some(remote=>allowedOn(current, remote.index)))
         {
             soloShared = false;
             cpu.stop?.();

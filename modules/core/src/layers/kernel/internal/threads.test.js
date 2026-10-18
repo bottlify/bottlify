@@ -1427,6 +1427,40 @@ test('a thread that may run only here takes this executor\'s turn from one that 
         'and the one that may run anywhere, on the other executor');
 });
 
+test('a thread that may run only here, readied in the slice of one that may run on another'
+    + ' executor left free, ends that slice, and the two run at once', ()=>{
+    // The same game's main thread woke thread-3 and waited for it; thread-3,
+    // alone and running here, woke the main thread in turn and went on, and the
+    // main thread waited out its turn, the other executor idle.
+    const { cpu } = twoExecutors();
+    const [remote] = cpu.executors();
+    let stops = 0;
+    const sched = createScheduler({
+        cpu: { ...cpu,
+            stop: ()=>{
+                stops++;
+            },
+            // The worker, running here, wakes the main thread.
+            runSlice: (/** @type {number} */ max)=>{
+                if (sched.current() === worker && main.state === ThreadState.BLOCKED)
+                {
+                    sched.wake(main);
+                }
+                return max;
+            } },
+        switcher: createSwitcher({ cpu }), quantum: 5000, placement: 'spread' });
+    const main = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
+    const worker = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'worker' });
+    main.affinityMask = 0b01;
+    worker.home = 0;
+    sched.block(main, 'the worker');
+    assert.equal(sched.runOnce().ran, worker, 'the worker alone runs here');
+    assert.equal(stops, 1, 'and its slice ends as it wakes the main thread');
+    assert.equal(sched.runOnce().ran, main, 'the main thread takes this executor');
+    assert.deepEqual([remote.started, sched.processorOf(worker)], [1, 1],
+        'and the worker goes on on the other');
+});
+
 test('a thread whose mask names only processors whose executors cannot open runs where any may',
     ()=>{
         // An engine timing each processor pins its process to each in turn;

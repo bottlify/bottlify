@@ -28,10 +28,14 @@ const u32 = value=>[
 
 const WORKER_AT = 0x200;
 const ROUNDS = 3_000_000;
-const OUTER = 1_500;
+const OUTER = 100;
 const INNER = 400_000;
 
-/** Main pinned to processor 0 computing; a worker pinned to processor 1 calling the host. */
+/**
+ * Main pinned to processor 0 computing a little, then waiting; a worker pinned
+ * to processor 1 calling the host. Main computes briefly so the trial weighs
+ * the worker: its instructions retired are what the trial measures.
+ */
 function buildProgram(){
     return buildExe({
         imports: { 'KERNEL32.dll': ['CreateThread', 'WaitForSingleObject', 'ExitProcess',
