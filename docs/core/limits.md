@@ -33,6 +33,11 @@ differently raises a `divergence` event naming the API.
 - HeapLock and HeapUnlock check the handle and exclude nothing: another thread's heap calls go
   on meanwhile, each one whole, so a HeapWalk between them can meet a block another thread
   allocated or freed.
+- A thread's environment block, its thread-local array and its copies of the images'
+  thread-local blocks come out of the arena the heap is carved from, and go back to it once the
+  thread has ended and runs on no executor (looked at when the next thread is made). With no room
+  left there for them, CreateThread stops the run with an error where Windows answers
+  ERROR_NOT_ENOUGH_MEMORY.
 - A program is told it has one processor for each of its executors (`cpu.cores`: in a browser whose page can share memory one fewer than the host's processors, at most eight, by default; one elsewhere). A thread's affinity mask keeps it to those executors. Not done: a child process does not inherit its parent's narrowed process mask, a process handle other than the caller's own reads and sets the caller's mask, `NtSetInformationProcess(ProcessAffinityMask)` is accepted and ignored, and `NtQueryInformationThread`/`NtSetInformationThread` know no affinity; GetActiveProcessorCount, GetLogicalProcessorInformationEx and the processor-group calls are not exported.
 - The instructions a thread retired (the kernel's `byThread`) are the same on any number of
   executors for the same way through the program, and the cpu's `instructions` are every

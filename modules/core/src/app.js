@@ -31,7 +31,7 @@ import { readTls } from './layers/loader/internal/tls.js';
 import { jumpBytes, relocatablePrefix } from './layers/loader/internal/hooks.js';
 import { mangledCall } from './layers/loader/internal/mangling.js';
 import { mapImage } from './layers/loader/internal/image.js';
-import { createProcessBlocks, TEB, TLS_SLOTS } from './layers/win32/kernel32/teb.js';
+import { createProcessBlocks, TEB } from './layers/win32/kernel32/teb.js';
 import { supportedOsOf, windowsVersion } from './layers/win32/kernel32/versions.js';
 import { GRAPHICS_CHOICES, graphicsChoice } from './layers/graphics/choice.js';
 import { searchesBesideProgram } from './layers/win32/kernel32/modules.js';
@@ -3693,20 +3693,56 @@ async function buildApp(options){
      *
      * @type {{
      *     createThreadBlock: (thread: { id: number, stackBase: number,
-     *         stackLimit: number }) => { teb: number, tls: number },
+     *         stackLimit: number,
+     *         locals?: import('./layers/win32/kernel32/teb.js').ThreadLocal[] })
+     *         => { teb: number, tls: number } | null,
+     *     releaseThreadBlock: (teb: number) => boolean,
      *     addModule: (module: import('./layers/win32/kernel32/teb.js').LoadedModule) => number,
      *     removeModule: (base: number) => void,
      * } | null}
      */
     let threadBlocks = null;
     /**
-     * Gives a thread made after the process's first its own copy of every
+     * What a thread made after the process's first is given a copy of: every
      * image's thread-local block, in the slot the image was given, as the
      * loader does for each thread; set once the blocks are known.
      *
-     * @type {(tls: number) => void}
+     * @type {() => import('./layers/win32/kernel32/teb.js').ThreadLocal[]}
      */
-    let threadLocalBlocks = ()=>{};
+    let threadLocals = ()=>[];
+    /**
+     * Every thread holding blocks, and its environment block. Each is given
+     * back at the next thread's making once its thread is gone, as a stack is:
+     * the call that ends a thread still runs on it on its way out.
+     *
+     * @type {Map<any, number>}
+     */
+    const blockHolders = new Map();
+    /** @param {any} thread @param {{ teb: number } | null} block */
+    const holdBlock = (thread, block)=>{
+        if (block === null)
+        {
+            // Never a thread on no block: FS at zero, it reads its id, its
+            // stack and its thread-local slots from linear address zero up.
+            throw new Error(`no memory for thread ${thread.id}'s environment block`);
+        }
+        thread.tebAddress = block.teb;
+        blockHolders.set(thread, block.teb);
+    };
+    const giveBackBlocks = ()=>{
+        const gone = core.api('kernel').threadGone;
+        for (const [holder, teb] of blockHolders)
+        {
+            if (gone(holder))
+            {
+                blockHolders.delete(holder);
+                threadBlocks?.releaseThreadBlock(teb);
+                // Asked for through a handle still open, it has none, rather
+                // than the block of whichever thread is given it next.
+                holder.tebAddress = 0;
+            }
+        }
+    };
 
     /** Range requests outstanding: what a parked guest thread is really on. */
     let fetching = 0;
@@ -4784,14 +4820,15 @@ async function buildApp(options){
                 options.terminate?.(request, code) ?? false,
             /** @param {any} thread */
             threadBlock: thread=>{
-                const block = threadBlocks?.createThreadBlock({
-                    id: thread.id, stackBase: thread.stackTop, stackLimit: thread.stackLimit,
-                });
-                if (block)
+                if (!threadBlocks)
                 {
-                    thread.tebAddress = block.teb;
-                    threadLocalBlocks(block.tls);
+                    return;
                 }
+                giveBackBlocks();
+                holdBlock(thread, threadBlocks.createThreadBlock({
+                    id: thread.id, stackBase: thread.stackTop, stackLimit: thread.stackLimit,
+                    locals: threadLocals(),
+                }));
             },
             idle: ()=>new Promise(resolve=>idlers.push(()=>resolve(undefined))),
             /** @param {any[]} needed */
@@ -6316,21 +6353,12 @@ async function buildApp(options){
     // bytes for every thread but the first: Call of Duty 4's renderer and its
     // two workers kept their scratch buffers' pointers there, and a worker
     // culled shadow casters into lists another was filling.
+    // The slot is read as each thread is made, not here: the TlsAlloc that
+    // gives it is the startup stub's, which has not run yet.
     const templates = withTls.flatMap(held=>(held.tls ? [held.tls] : []));
-    threadLocalBlocks = tls=>{
-        for (const { indexAddress, template, size } of templates)
-        {
-            const slot = memory.readU32(indexAddress);
-            if (slot >= TLS_SLOTS)
-            {
-                continue;
-            }
-            const at = allocateFromHeap(size);
-            memory.writeBytes(at, new Uint8Array(size));
-            memory.writeBytes(at, template);
-            memory.writeU32(tls + slot * 4, at);
-        }
-    };
+    threadLocals = ()=>templates.map(({ indexAddress, template, size })=>({
+        slot: memory.readU32(indexAddress), template, size,
+    }));
 
     // Every library the program brought with it is attached before the program
     // runs, on the process's first thread, in dependency order -- which is what
@@ -6391,6 +6419,14 @@ async function buildApp(options){
     // on with a null.
     const process = createProcessBlocks({
         allocate: allocateFromHeap,
+        // A thread's blocks from the allocator everything the host hands the
+        // guest comes from, which takes them back when the thread is gone;
+        // the startup span never does. Aligned for the thread-local blocks
+        // among them, as the startup span aligns them.
+        threadMemory: {
+            allocate: bytes=>win32.heap().allocate(bytes, { alignment: 16 }),
+            free: address=>win32.heap().free(address),
+        },
         writeMemory: (address, bytes)=>memory.writeBytes(address, bytes),
         processId: options.processId ?? FIRST_PROCESS_ID,
         version: windowsVersion(options.windows),
@@ -6432,11 +6468,12 @@ async function buildApp(options){
         // ExitThread with its answer, as Windows' process start routine sees to.
         returnTo: win32.threadReturn(),
     });
-    mainThread.tebAddress = process.createThreadBlock({
+    // Its thread-local blocks are the ones the startup stub hands TlsSetValue.
+    holdBlock(mainThread, process.createThreadBlock({
         id: mainThread.id,
         stackBase: initialStack,
         stackLimit: initialStack - stackSize,
-    }).teb;
+    }));
 
     /** The mixer, when this build has one. Read once; it does not change. */
     const sound = core.api('audio')?.output?.() ?? null;

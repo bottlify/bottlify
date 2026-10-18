@@ -220,6 +220,24 @@ test('a thread ended by another keeps its stack', async()=>{
     assert.equal(kernel.createThread({ entry: 0x00402000, name: 'third' }), null);
 });
 
+test('a thread is gone once it has ended and runs nowhere, a handle to it open or not', async()=>{
+    // What it was given -- its stack, its environment block -- goes to the
+    // next thread then; a handle kept open to read its exit code needs none.
+    const { kernel } = await makeRunningKernel(4);
+    const first = kernel.createThread({ entry: 0x00402000, name: 'first' });
+    const second = kernel.createThread({ entry: 0x00402000, name: 'second' });
+    assert.equal(kernel.threadGone(first), false, 'not before it has run');
+    kernel.runOnce();
+    assert.equal(kernel.currentThread(), first);
+    assert.equal(kernel.threadGone(first), false, 'nor while it runs');
+
+    kernel.exitThread(first, 0);
+    assert.equal(kernel.threadGone(first), true);
+    assert.equal(kernel.handles.resolve(first.handle, 'thread'), first, 'its handle still open');
+    kernel.exitThread(second, 1);
+    assert.equal(kernel.threadGone(second), true, 'ended by another before it ran');
+});
+
 test('a stack size asked for is honoured the way CreateThread honours it', async()=>{
     const MEGABYTE = 0x100000;
     const { kernel } = await makeRunningKernel(64, MEGABYTE);

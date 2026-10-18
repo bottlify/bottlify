@@ -1011,6 +1011,8 @@ export function createScheduler(options){
      *     recalled?: boolean }>}
      */
     const placed = new Map();
+    /** Whether `thread` runs on one of the other executors now. @param {any} thread */
+    const placedElsewhere = thread=>[...placed.values()].some(on=>on.thread === thread);
     /** The processor time every slice of the process has taken, in milliseconds. */
     let cpuMs = 0;
     /** Slices run on the other executors, and the most threads running at once, this one's included. */
@@ -1848,7 +1850,7 @@ export function createScheduler(options){
         const unplaced = candidates.filter(thread=>!keptHere(thread)).length
             + waiting.filter(thread=>thread !== here && !keptHere(thread)
                 && thread.state === ThreadState.READY
-                && ![...placed.values()].some(on=>on.thread === thread)).length;
+                && !placedElsewhere(thread)).length;
         if (unplaced > 0)
         {
             cpu.wantExecutors?.(remotes.length + unplaced);
@@ -2539,7 +2541,7 @@ export function createScheduler(options){
             publishReady();
             // Running on another executor, the thread stops at that one's next
             // slice end rather than at whatever turn of this one comes next.
-            if ([...placed.values()].some(on=>on.thread === thread))
+            if (placedElsewhere(thread))
             {
                 cpu.executorBell?.()?.goOn?.(false);
             }
@@ -2559,7 +2561,7 @@ export function createScheduler(options){
          * @returns {boolean} whether the thread runs nowhere now
          */
         settle(thread){
-            const runs = ()=>[...placed.values()].some(on=>on.thread === thread);
+            const runs = ()=>placedElsewhere(thread);
             if (!runs())
             {
                 return true;
@@ -2611,7 +2613,23 @@ export function createScheduler(options){
             {
                 current = null;
             }
+            // Ended by another while it runs on another executor, it stops at
+            // that one's next slice end, as a suspended one does: until then it
+            // still runs, on the stack and the blocks it was given.
+            if (placedElsewhere(thread))
+            {
+                cpu.executorBell?.()?.goOn?.(false);
+            }
         },
+
+        /**
+         * Whether `thread` is on an executor now: this one's, or another it
+         * was placed on. A thread that has ended is done with what it was
+         * given only once it is on none.
+         *
+         * @param {any} thread
+         */
+        running: thread=>thread === current || placedElsewhere(thread),
 
         /**
          * How far down its own stack a thread has been, and whether it left it.
