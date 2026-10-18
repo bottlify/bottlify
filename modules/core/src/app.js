@@ -4122,6 +4122,8 @@ async function buildApp(options){
                 showCursor();
             },
             divergence: reportDivergence,
+            cursorMoved: (/** @type {number} */ x, /** @type {number} */ y)=>
+                events.emit('cursor-moved', { x, y }),
             // The event SetEventNotification names, set when the device takes
             // input -- the kernel's, handed down as the sound layer's is.
             signal: (/** @type {number} */ handle)=>{
