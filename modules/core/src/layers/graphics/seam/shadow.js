@@ -287,7 +287,7 @@ export const BUFFER = {
     /** The range locked since the host last looked, as a union; empty when equal. */
     FROM: 16,
     TO: 20,
-    /** The D3DLOCK flags of those locks, or-ed. */
+    /** The D3DLOCK flags of those locks, or-ed, and `LOCK_IN_PLACE`. */
     LOCK_FLAGS: 24,
     /** The device's block, for the counters and the ring. */
     DEVICE: 28,
@@ -640,6 +640,17 @@ const D3DLOCK_READONLY = 0x10;
  */
 const D3DLOCK_NOOVERWRITE = 0x1000;
 const D3DLOCK_DISCARD = 0x2000;
+/**
+ * Or-ed into a buffer block's LOCK_FLAGS by the lock routine for a lock that
+ * is not NOOVERWRITE alone (`lockCode`), and taken off by the host that
+ * replays it: a DISCARD or a lock with neither flag, taken in the guest only
+ * while the ring holds no draw, renames what draws read -- those made before
+ * it from the old bytes, those after from the new -- so its replay comes
+ * before the ring's next run, and the buffer may not move onto another
+ * storage until then, which holds the replay back until after the run. Not a
+ * D3DLOCK flag; the replay leaves it off.
+ */
+export const LOCK_IN_PLACE = 0x80000000;
 
 /** D3DTS_WORLD is 256 and WORLD1..3 follow it; they take the slots after TEXTURE7. */
 const WORLD_TYPE = 256;
@@ -951,7 +962,11 @@ export function getRenderStateCode(at, trap){
  * onto it here, the move goes into the device's command ring (`Buffer.Rename`,
  * the buffer's pointer and the storage) for the host to make after the draws
  * before it, the storage left takes the spare's place, and the lock goes on as
- * a NOOVERWRITE of the new storage -- the flags the host replays it with.
+ * a NOOVERWRITE of the new storage -- the flags the host replays it with. Not
+ * while a lock the host replays before the ring's run is in the block
+ * (`LOCK_IN_PLACE`, which the lock sets for anything but NOOVERWRITE alone),
+ * nor for a lock the host refuses: the move would hold that replay back past
+ * the draws after it, or move a buffer whose lock failed.
  *
  *     mov edx, [ecx+DEVICE]
  *     (take the device's lock through EDX, or slow)
@@ -970,6 +985,22 @@ export function getRenderStateCode(at, trap){
  *     je free
  *     cmp eax, DISCARD            ; with renameSlot, else jmp held
  *     jne held
+ *     test dword [ecx+LOCK_FLAGS], LOCK_IN_PLACE
+ *     jnz held
+ *     mov eax, [esp+12]           ; the checks at `free`, before the move
+ *     test eax, eax
+ *     jnz sizedMove
+ *     mov eax, [ecx+LENGTH]
+ *     sub eax, [esp+8]
+ *   sizedMove:
+ *     test eax, eax
+ *     jz held
+ *     add eax, [esp+8]
+ *     jc held
+ *     cmp eax, [ecx+LENGTH]
+ *     ja held
+ *     cmp dword [esp+16], 0
+ *     je held
  *     cmp dword [ecx+SPARE_FREE], 0
  *     jne first
  *     cmp dword [ecx+SPARE_FREE+4], 0
@@ -1049,6 +1080,12 @@ export function getRenderStateCode(at, trap){
  *     mov [ecx+TO], edx
  *   merged:
  *     mov ebx, [esp+24]           ; flags, one word further for the push
+ *     mov edx, ebx
+ *     and edx, NOOVERWRITE | DISCARD
+ *     cmp edx, NOOVERWRITE
+ *     je alone
+ *     or ebx, LOCK_IN_PLACE
+ *   alone:
  *     or [ecx+LOCK_FLAGS], ebx
  *     add eax, [ecx+BASE]
  *     mov dword [ecx+LOCKED], 1
@@ -1074,6 +1111,22 @@ export function lockCode(at, trap, renameSlot){
     const move = renameSlot === undefined ? [{ jcc: 0xeb, to: 'held' }] : [
         [0x3d, ...dword(D3DLOCK_DISCARD)],                       // cmp eax, 0x2000
         { jcc: 0x75, to: 'held' },                               // jne held
+        [0xf7, 0x41, BUFFER.LOCK_FLAGS, ...dword(LOCK_IN_PLACE)], // test dword [ecx+24], imm
+        { jcc: 0x75, to: 'held' },                               // jnz held
+        [0x8b, 0x44, 0x24, 0x0c],                                // mov eax, [esp+12]
+        [0x85, 0xc0],                                            // test eax, eax
+        { jcc: 0x75, to: 'sizedMove' },                          // jnz sizedMove
+        [0x8b, 0x41, BUFFER.LENGTH],                             // mov eax, [ecx+8]
+        [0x2b, 0x44, 0x24, 0x08],                                // sub eax, [esp+8]
+        { label: 'sizedMove' },
+        [0x85, 0xc0],                                            // test eax, eax
+        { jcc: 0x74, to: 'held' },                               // jz held
+        [0x03, 0x44, 0x24, 0x08],                                // add eax, [esp+8]
+        { jcc: 0x72, to: 'held' },                               // jc held
+        [0x3b, 0x41, BUFFER.LENGTH],                             // cmp eax, [ecx+8]
+        { jcc: 0x77, to: 'held' },                               // ja held
+        [0x83, 0x7c, 0x24, 0x10, 0x00],                          // cmp dword [esp+16], 0
+        { jcc: 0x74, to: 'held' },                               // je held
         [0x83, 0x79, BUFFER.SPARE_FREE, 0x00],                   // cmp dword [ecx+48], 0
         { jcc: 0x75, to: 'first' },                              // jne first
         [0x83, 0x79, BUFFER.SPARE_FREE + 4, 0x00],               // cmp dword [ecx+52], 0
@@ -1173,6 +1226,12 @@ export function lockCode(at, trap, renameSlot){
         [0x89, 0x51, BUFFER.TO],                                 // mov [ecx+20], edx
         { label: 'merged' },
         [0x8b, 0x5c, 0x24, 0x18],                                // mov ebx, [esp+24]
+        [0x89, 0xda],                                            // mov edx, ebx
+        [0x81, 0xe2, ...dword(D3DLOCK_NOOVERWRITE | D3DLOCK_DISCARD)], // and edx, 0x3000
+        [0x81, 0xfa, ...dword(D3DLOCK_NOOVERWRITE)],             // cmp edx, 0x1000
+        { jcc: 0x74, to: 'alone' },                              // je alone
+        [0x81, 0xcb, ...dword(LOCK_IN_PLACE)],                   // or ebx, imm
+        { label: 'alone' },
         [0x09, 0x59, BUFFER.LOCK_FLAGS],                         // or [ecx+24], ebx
         [0x03, 0x41, BUFFER.BASE],                               // add eax, [ecx+4]
         [0xc7, 0x41, BUFFER.LOCKED, ...dword(1)],                // mov dword [ecx+12], 1
@@ -3919,7 +3978,8 @@ export function createShadow(deps){
                 entry.buffer.Unlock();
                 entry.hostLocked = false;
             }
-            if (entry.buffer.Lock(from, to - from, {}, words[BUFFER.LOCK_FLAGS / 4]) === 0)
+            if (entry.buffer.Lock(from, to - from, {},
+                words[BUFFER.LOCK_FLAGS / 4] & ~LOCK_IN_PLACE) === 0)
             {
                 entry.hostLocked = true;
                 if (locked)
@@ -4067,14 +4127,15 @@ export function createShadow(deps){
         {
             return true;
         }
-        if (entry.buffer.Lock(from, to - from, {}, flags) === 0)
+        if (entry.buffer.Lock(from, to - from, {}, flags & ~LOCK_IN_PLACE) === 0)
         {
             entry.buffer.Unlock();
             markLent(block);
         }
-        if ((flags & D3DLOCK_DISCARD) !== 0)
+        // Replayed before the run, as the lock in place has to be.
+        if ((flags & (D3DLOCK_DISCARD | LOCK_IN_PLACE)) !== 0)
         {
-            flagWord[0] = flags & ~D3DLOCK_DISCARD;
+            flagWord[0] = flags & ~(D3DLOCK_DISCARD | LOCK_IN_PLACE);
             deps.writeMemory(block + BUFFER.LOCK_FLAGS, flagBytes);
         }
         return true;

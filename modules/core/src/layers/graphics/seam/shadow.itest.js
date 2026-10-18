@@ -22,8 +22,9 @@ import { createCorkHost } from '../../cpu/internal/cork-host.js';
 import { runToHalt } from '../../cpu/internal/halt.fixture.js';
 import * as cork from '../../../../../cork/src/index.js';
 import {
-    BUFFER, FLAG_SLOW_PATH, HELD_GUEST, SHADOW, TEXTURE, getRenderStateCode, getSurfaceLevelCode,
-    getTargetCode, getTextureStageStateCode, getTransformCode, lockCode, unlockCode,
+    BUFFER, FLAG_SLOW_PATH, HELD_GUEST, LOCK_IN_PLACE, SHADOW, TEXTURE, getRenderStateCode,
+    getSurfaceLevelCode, getTargetCode, getTextureStageStateCode, getTransformCode, lockCode,
+    unlockCode,
 } from './shadow.js';
 import { D3DERR_INVALIDCALL, D3DTSS } from '../d3d8/constants.js';
 
@@ -248,7 +249,8 @@ async function routines(){
     assert.equal(read(VBLOCK + BUFFER.LOCKED), 1);
     assert.equal(read(VBLOCK + BUFFER.FROM), 16);
     assert.equal(read(VBLOCK + BUFFER.TO), 48);
-    assert.equal(read(VBLOCK + BUFFER.LOCK_FLAGS), 0x2000);
+    assert.equal(read(VBLOCK + BUFFER.LOCK_FLAGS), (0x2000 | LOCK_IN_PLACE) >>> 0,
+        'the flags, and that the host replays the lock before the ring\'s draws');
     assert.equal(read(BLOCK + SHADOW.LOCK_CALLS), 1);
 
     assert.equal(run(1), 'trap', 'a second lock is the host\'s to refuse');
@@ -271,7 +273,8 @@ async function routines(){
     assert.equal(read(OUT), VBASE);
     assert.equal(read(VBLOCK + BUFFER.FROM), 0, 'the range widened to take the new lock');
     assert.equal(read(VBLOCK + BUFFER.TO), VLENGTH);
-    assert.equal(read(VBLOCK + BUFFER.LOCK_FLAGS), 0x2000, 'and kept the earlier flags');
+    assert.equal(read(VBLOCK + BUFFER.LOCK_FLAGS), (0x2000 | LOCK_IN_PLACE) >>> 0,
+        'and kept the earlier flags');
     assert.equal(read(BLOCK + SHADOW.LOCK_CALLS), 2);
 
     write(BLOCK + SHADOW.RING_HEAD, SHADOW.RING_CAPACITY);

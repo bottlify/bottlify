@@ -9819,6 +9819,14 @@ export function createRenderer(options){
             const count = vertexCountOf(type, primitiveCount);
             const fill = fillOf(model, type);
             const byteOffset = startIndex * format.bytes;
+            // A dynamic index buffer's indices are read at the draw, as a
+            // dynamic vertex buffer's vertices are: what the program wrote
+            // there may reach this side only with the draw (`drawsFrom`) -- a
+            // move onto another storage of the buffer's (`storages.js`) is
+            // made in the ring before the unlock of what was written into it
+            // is replayed after the ring's run.
+            readHeld(model.indices, bufferFor(model.indices).gpu, byteOffset,
+                Math.min(byteOffset + count * format.bytes, model.indices.length));
             // A list drawn solid binds the program's own indices, and so does
             // a strip WebGPU draws as Direct3D does; anything else is rewritten
             // from them.

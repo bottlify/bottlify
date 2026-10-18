@@ -759,7 +759,10 @@ flowchart TB
   length (`d3d8/storages.js`, two at most). From then on the guest's `Lock` moves the buffer onto
   a free one, writes the move into the ring (`Buffer.Rename`) and goes on writing there; the host
   makes the move in order with the draws, so each draw reads the storage it was made with, and
-  frees the storage left. Each storage is sent whole once, then by the pages written since.
+  frees the storage left. Each storage is sent whole once, then by the pages written since. A draw
+  from a dynamic buffer reads its indices, as its vertices, out of guest memory at the draw. No
+  move while a lock taken in place (with no draw in the ring) waits for the host to replay it
+  before the ring's next run, nor for a lock the host would refuse.
 - **Who waits for whom.** `Present` waits for the graphics thread only when it is more than two frames
   behind. It does wait for the display, as a driver does: under every presentation interval but
   `IMMEDIATE` (windowed Direct3D 8 only under `COPY_VSYNC`) the calling thread stops until the next
