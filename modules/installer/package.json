@@ -1,6 +1,6 @@
 {
   "name": "@bottlify/installer",
-  "version": "0.5.1",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "license": "MPL-2.0",
@@ -27,6 +27,6 @@
     "bottles": "node src/server/cli.js"
   },
   "dependencies": {
-    "@bottlify/core": "^2.0.0a"
+    "@bottlify/core": "^1.0.0"
   }
 }
