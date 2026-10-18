@@ -149,6 +149,7 @@ export function recordedDirect3D(factory, services, transport){
             /** @type {number} */ length)=>new Uint8Array(length)),
         windowMemory: services.windowMemory,
         watchWrites: services.watchWrites,
+        checkDraws: services.checkDraws === true,
         transport,
         answered: targets.answered,
         answers: CANDIDATES,

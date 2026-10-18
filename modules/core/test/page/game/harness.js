@@ -1976,6 +1976,8 @@ export function createHarness(canvas, how = {}){
             // the calls whose records the batches hold, heaviest first.
             shippedToWorker: graphics.worker?.shipped ?? null,
             callsToWorker: graphics.worker?.calls ?? null,
+            // A diagnostic's (`checkDraws`): draws whose bytes the worker had otherwise.
+            drawChecks: graphics.worker?.drawChecks ?? null,
             imageDigests: graphics.seam?.imageDigests ?? [],
             keptImages: graphics.seam?.keptImages ?? [],
             imageTimes: graphics.seam?.imageTimes ?? [],

@@ -1180,6 +1180,15 @@ function describe(result, context, calls, symbols){
                 const heaviest = graphics.callsToWorker.split(' | ').slice(0, 8);
                 say(`      by call: ${heaviest.join(' | ')}`);
             }
+            for (const check of graphics.drawChecks ?? [])
+            {
+                say(`      draws checked (checkDraws): ${check.draws}, stale ${check.stale}`
+                    + ` (${check.staleBytes} bytes), never sent ${check.unknownBytes} bytes`);
+                for (const sample of check.samples)
+                {
+                    say(`        ${JSON.stringify(sample)}`);
+                }
+            }
         }
         if (graphics.compressedTextures)
         {

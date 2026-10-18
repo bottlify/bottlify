@@ -453,6 +453,12 @@ export function createGraphicsModule(){
                  * @param {number} address @param {number} length
                  */
                 watchWrites: (address, length)=>memory.watchWrites?.(address, length) ?? null,
+                /**
+                 * A diagnostic: each draw from a buffer recorded for the
+                 * graphics worker compares what it reads with what the worker
+                 * was sent of it (`remote/draw-check.js`).
+                 */
+                checkDraws: config?.checkDraws === true,
                 /** A dword, read in place. @param {number} address */
                 readU32: address=>memory.readU32(address),
                 /**
@@ -549,6 +555,7 @@ export function createGraphicsModule(){
                     // What a buffer's unlock uploads, and a recording sends, is
                     // the pages written since: without it every byte is compared.
                     watchWrites: services.watchWrites,
+                    checkDraws: services.checkDraws,
                     // A lock of a render target brings its pixels back into the
                     // guest's bytes before the pointer is handed out.
                     writeMemory: services.writeMemory,
@@ -613,6 +620,7 @@ export function createGraphicsModule(){
                     windowMemory: services.windowMemory,
                     // The pages written since, as Direct3D 8 is given them.
                     watchWrites: services.watchWrites,
+                    checkDraws: services.checkDraws,
                     // The copies between surfaces (UpdateSurface, StretchRect,
                     // GetRenderTargetData) move bytes only through this; the
                     // seam makes none of them itself.

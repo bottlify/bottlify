@@ -25,6 +25,7 @@
 
 import { OP, SECTION, SERVICE_REF, WAIT, createReader, createSite } from './wire.js';
 import { changedSpans, createCompared, writtenSpans } from '../webgpu/internal/changed.js';
+import { createDrawCheck } from './draw-check.js';
 
 /**
  * The calls whose answer the played device holds back while it has too many
@@ -366,6 +367,8 @@ function visit(value, bind){
  * @property {import('./lending.js').Lender | null} [lender]
  *     where the played side reads guest memory in place: what an unlock let
  *     the program write is lent rather than copied
+ * @property {(figures: () => import('./draw-check.js').DrawCheckFigures) => void} [checking]
+ *     with `checkDraws`, where the recording's draw check is read for a report
  */
 
 /**
@@ -417,6 +420,8 @@ const sharedNow = ()=>performance.timeOrigin + performance.now();
  *     knows, which the recorded device has no say in. It is given the
  *     device's own objects, so what it asks of them is not recorded.
  * @param {ReadonlySet<string>} [options.answers]  the only methods `answered` is asked about
+ * @param {boolean} [options.checkDraws]  a diagnostic: each draw from a buffer compares what it
+ *     reads in guest memory with what the played side was sent of it (`draw-check.js`)
  * @param {(target: any, name: string, args: any[]) => void} [options.observe]
  *     told every call the recorded device has made, with its own objects, before
  *     `answered` is asked: what the call changed, for a question asked later
@@ -449,6 +454,11 @@ export function createRecording(options){
     const { root, readMemory, transport, answered = ()=>false, answers = new Set(),
         observe = null, applyMoves = null, watchWrites = null } = options;
     const windowMemory = options.windowMemory ?? readMemory;
+    const check = options.checkDraws === true ? createDrawCheck(readMemory) : null;
+    if (check)
+    {
+        transport.checking?.(check.figures);
+    }
     const { writer } = transport;
     const lender = transport.lender ?? null;
     /**
@@ -866,6 +876,7 @@ export function createRecording(options){
             if (slot >= 0)
             {
                 lent.push({ address, length: extent, slot });
+                check?.sent(address, readMemory(address, extent));
             }
             else
             {
@@ -1230,6 +1241,7 @@ export function createRecording(options){
         for (let index = 0; index < list.length; index++)
         {
             writer.memory(list[index].address, list[index].bytes);
+            check?.sent(list[index].address, list[index].bytes);
         }
     };
 
@@ -1968,6 +1980,7 @@ export function createRecording(options){
             writer.u8(OP.WROTE);
             writer.u32(1);
             writer.memory(address, bytes);
+            check?.sent(address, bytes);
             shippedAs('writes', [{ bytes }]);
             transport.recorded();
         },
@@ -1995,10 +2008,14 @@ export function createRecording(options){
                     watch, dirty: new Set() });
                 compared.take(key, 0, buffer.length);
                 (drawn ??= []).push({ address: base, bytes });
+                check?.sent(base, bytes);
+                check?.drew(base + from, to - from, { buffer: buffer.length, from, to,
+                    first: true });
                 return;
             }
             const open = compared.take(key, from, to);
             let length = 0;
+            const before = drawn?.length ?? 0;
             for (let part = 0; part < open.length; part += 2)
             {
                 length += changedIn(sent, open[part], open[part + 1], drawn ??= []);
@@ -2006,6 +2023,20 @@ export function createRecording(options){
             if (length > 0)
             {
                 transport.shipped?.('compared', length);
+            }
+            if (check)
+            {
+                // The draw's own sends go with the call: the played side has
+                // them when it makes the draw.
+                for (let index = before; index < (drawn?.length ?? 0); index++)
+                {
+                    const one = /** @type {{ address: number, bytes: Uint8Array }[]} */ (drawn)[index];
+                    check.sent(one.address, one.bytes);
+                }
+                check.drew(base + from, to - from, { buffer: buffer.length, from, to,
+                    compared: open.length === 0 ? 'before' : open.length === 2
+                        && open[0] === from && open[1] === to ? 'now' : 'part',
+                    watched: sent.watch !== null, still, dirty: sent.dirty.size });
             }
         },
         read(address, bytes){
@@ -2020,6 +2051,7 @@ export function createRecording(options){
             writer.u8(OP.WROTE);
             writer.u32(1);
             writer.memory(address, bytes);
+            check?.sent(address, bytes);
             shippedAs('reads', [{ bytes }]);
             transport.recorded();
         },
