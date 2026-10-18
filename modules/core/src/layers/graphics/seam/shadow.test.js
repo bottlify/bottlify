@@ -243,7 +243,10 @@ test('the block fits its two pages and its regions follow one another', ()=>{
     // Two pairs of the target getters, a pointer and a count's word each.
     assert.equal(SHADOW.TARGETS + 16, SHADOW.TARGETS_VALID);
     assert.equal(SHADOW.TARGETS_VALID + 4, SHADOW.SIZE);
-    assert.equal(BUFFER.QUEUED + 4, BUFFER.SIZE);
+    assert.equal(BUFFER.QUEUED + 4, BUFFER.SPARES);
+    // A dynamic buffer's other storages, then whether each is the guest's to move onto.
+    assert.equal(BUFFER.SPARES + BUFFER.SPARE_COUNT * 4, BUFFER.SPARE_FREE);
+    assert.equal(BUFFER.SPARE_FREE + BUFFER.SPARE_COUNT * 4, BUFFER.SIZE);
     assert.equal(TEXTURE.LEVELS + TEXTURE.LEVEL_SLOTS * 4, TEXTURE.DEVICE);
     assert.deepEqual([TEXTURE.WIDTH, TEXTURE.HEIGHT, TEXTURE.DEPTH, TEXTURE.LOCKS],
         [TEXTURE.DEVICE + 4, TEXTURE.DEVICE + 8, TEXTURE.DEVICE + 12, TEXTURE.DEVICE + 16]);

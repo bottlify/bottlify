@@ -427,6 +427,7 @@ const sharedNow = ()=>performance.timeOrigin + performance.now();
  *     wrote: (address: number, bytes: Uint8Array) => void,
  *     read: (address: number, bytes: Uint8Array) => void, outward: (value: any) => any,
  *     drawsFrom: (buffer: any, from: number, to: number) => void,
+ *     claim: (address: number, length: number) => void,
  *     still: <T>(work: () => T) => T,
  *     adopt: (object: object) => void }}
  *     `allocated` and `freed` are told every allocation the recorded device
@@ -534,6 +535,36 @@ export function createRecording(options){
      * @type {WeakMap<object, Sent>}
      */
     const sentOf = new WeakMap();
+    /**
+     * Each storage of a buffer that has more than one (`d3d8/storages.js`)
+     * as a key of its own for `sentOf` and `compared`: what was sent and
+     * compared of one is not what the played side holds of another. A buffer
+     * on the storage it was made with is its own key.
+     *
+     * @type {WeakMap<object, Map<number, object>>}
+     */
+    const storageKeys = new WeakMap();
+    /** @param {any} buffer @returns {object} */
+    const storageOf = buffer=>{
+        const base = buffer.base;
+        if (!Array.isArray(buffer.storages) || base === buffer.storages[0])
+        {
+            return buffer;
+        }
+        let keys = storageKeys.get(buffer);
+        if (!keys)
+        {
+            keys = new Map();
+            storageKeys.set(buffer, keys);
+        }
+        let key = keys.get(base);
+        if (!key)
+        {
+            key = {};
+            keys.set(base, key);
+        }
+        return key;
+    };
     /** What the current call's draws read of dynamic buffers that had changed. @type {{ address: number, bytes: Uint8Array }[] | null} */
     let drawn = null;
     /**
@@ -981,7 +1012,8 @@ export function createRecording(options){
             const watch = watchWrites(base, length);
             if (watch)
             {
-                sentOf.set(target, { base, length, bytes: null, watch, dirty: new Set() });
+                sentOf.set(storageOf(target), { base, length, bytes: null, watch,
+                    dirty: new Set() });
             }
         }
         return ranges.flatMap(range=>rangeFrom(range));
@@ -1424,7 +1456,8 @@ export function createRecording(options){
                     // side, so its unlock sends only what differs: a program
                     // that unlocks all of a large one every frame sends what
                     // it wrote, not the buffer.
-                    const sent = sentOf.get(target);
+                    const key = storageOf(target);
+                    const sent = sentOf.get(key);
                     const unlocked = sent && sent.base === /** @type {any} */ (target).base
                         ? ranges.flatMap(range=>{
                             const from = range.address - sent.base;
@@ -1436,7 +1469,7 @@ export function createRecording(options){
                             // In a pause (`still`) counted compared, so that the
                             // draws after the unlock find it done. Outside one, what
                             // the last call compared is not what the program left.
-                            const open = still > 0 ? compared.take(target, from, to)
+                            const open = still > 0 ? compared.take(key, from, to)
                                 : [from, to];
                             /** @type {{ address: number, bytes: Uint8Array }[]} */
                             const into = [];
@@ -1898,6 +1931,7 @@ export function createRecording(options){
                 blocks.ends.splice(found, 1);
             }
         },
+        claim: (address, length)=>claim(address, length),
         writing: (address, length)=>{
             // What the device writes is no longer what was compared.
             if (still > 0)
@@ -1947,7 +1981,8 @@ export function createRecording(options){
             {
                 return;
             }
-            const sent = sentOf.get(buffer);
+            const key = storageOf(buffer);
+            const sent = sentOf.get(key);
             if (!sent || sent.base !== base)
             {
                 // What the played side holds of the buffer is not known until
@@ -1956,13 +1991,13 @@ export function createRecording(options){
                 const watch = watchWrites?.(base, buffer.length) ?? null;
                 const bytes = readMemory(base, buffer.length);
                 // Kept only to compare against where there is no watch to say.
-                sentOf.set(buffer, { base, length: buffer.length, bytes: watch ? null : bytes,
+                sentOf.set(key, { base, length: buffer.length, bytes: watch ? null : bytes,
                     watch, dirty: new Set() });
-                compared.take(buffer, 0, buffer.length);
+                compared.take(key, 0, buffer.length);
                 (drawn ??= []).push({ address: base, bytes });
                 return;
             }
-            const open = compared.take(buffer, from, to);
+            const open = compared.take(key, from, to);
             let length = 0;
             for (let part = 0; part < open.length; part += 2)
             {

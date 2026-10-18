@@ -217,9 +217,10 @@ export function writtenSpans(tracked, base, length, from, to){
  * compared the whole of it once a draw.
  *
  * @returns {{ take: (key: object, from: number, to: number) => number[],
- *     clear: () => void }}
+ *     forget: (key: object) => void, clear: () => void }}
  *     `take` answers the parts of `[from, to)` not compared yet in this pause,
- *     flat as `changedSpans` answers, and counts them compared from now
+ *     flat as `changedSpans` answers, and counts them compared from now;
+ *     `forget` drops what was compared of one key, whose bytes are now others
  */
 export function createCompared(){
     /** By buffer, its compared ranges: sorted, apart, flat. @type {Map<object, number[]>} */
@@ -290,6 +291,9 @@ export function createCompared(){
                 compared.set(key, merged);
             }
             return open;
+        },
+        forget(key){
+            compared.delete(key);
         },
         clear(){
             if (compared.size > 0)

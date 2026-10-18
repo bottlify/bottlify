@@ -736,6 +736,12 @@ async function play(version, guestCode, steps, worker = false){
     /** How many times each call was answered D3D_OK, so the gate knows it took the path. */
     /** @type {Map<string, number>} */
     const done = new Map();
+    /**
+     * The guest's DISCARDs that moved a buffer onto another storage of its own
+     * (`d3d8/storages.js`): the lock handed back an address off the storage
+     * the device still holds, whose move waits in the ring.
+     */
+    let moves;
     /** @param {Call} call @param {number} [readBack]  bytes of an answer to keep */
     const run = (call, readBack = 0)=>{
         const answer = m.run(call);
@@ -947,6 +953,7 @@ async function play(version, guestCode, steps, worker = false){
     gpu.length = 0;
     inGuest.clear();
     done.clear();
+    moves = 0;
 
     run(calls.device('BeginScene'));
     let stream = 0;
@@ -956,6 +963,11 @@ async function play(version, guestCode, steps, worker = false){
         {
             const answer = run(calls.lock(step.on, step.offset, step.size, step.flags));
             const at = m.memory.readU32(OUT);
+            if (answer.eax === 0 && answer.traps.length === 0
+                && at - step.offset !== m.countOf(step.on)?.base)
+            {
+                moves++;
+            }
             const length = step.size === 0 ? bytesOfBuffer(step.on) - step.offset : step.size;
             const bytes = bytesFor(step.on === IB, length, step.fill);
             const writing = answer.eax === 0 && step.flags !== D3DLOCK_READONLY;
@@ -1152,7 +1164,7 @@ async function play(version, guestCode, steps, worker = false){
     run(calls.device('EndScene'));
     run(calls.present);
     await idle(m.gpu);
-    return { answers, gpu, inGuest, done };
+    return { answers, gpu, inGuest, done, moves };
 }
 
 /** @typedef {Awaited<ReturnType<typeof play>>} Played */
@@ -1239,6 +1251,7 @@ export function frameGate(version, which){
         const taken = new Map();
         /** @type {Map<string, number>} */
         const answered = new Map();
+        let moves = 0;
         for (let seed = 1; seed <= 40 && wrong.length === 0; seed++)
         {
             const steps = generate(seed, 200, callsOf(version).upUnbinds, nine);
@@ -1248,6 +1261,7 @@ export function frameGate(version, which){
             {
                 const run = await play(version, guestCode, steps, worker);
                 played.set(name, run);
+                moves += run.moves;
                 for (const [method, times] of run.inGuest)
                 {
                     taken.set(method, (taken.get(method) ?? 0) + times);
@@ -1282,5 +1296,7 @@ export function frameGate(version, which){
         const done = [...DONE, ...nine ? DONE_9 : DONE_8];
         assert.deepEqual(done.filter(method=>!((answered.get(method) ?? 0) > 20)), [],
             `each copy, target and query was made: ${JSON.stringify([...answered])}`);
+        assert.ok(moves > 10, `DISCARDs under draws moved buffers onto storages of their own (${
+            moves})`);
     });
 }

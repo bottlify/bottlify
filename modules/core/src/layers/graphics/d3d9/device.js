@@ -76,6 +76,7 @@ import { runCommands } from './commands.js';
 import { validateStages } from '../d3d8/validity.js';
 import { processStreams } from '../d3d8/process.js';
 import { reportDynamicReads } from '../d3d8/drawn.js';
+import { storageCalls } from '../d3d8/storages.js';
 import { decodeFvf } from '../webgpu/internal/vertexformat.js';
 import { fullTarget, viewportState } from '../webgpu/internal/viewport.js';
 import { formatTraits } from '../webgpu/internal/textures.js';
@@ -495,6 +496,10 @@ const isDepthFormat = format=>FORMAT_INFO[format] !== undefined && FORMAT_INFO[f
  *     Told the bytes of each dynamic buffer a draw reads (`drawn.js`), by a
  *     device that records for one drawing elsewhere, which has to be sent
  *     what the program wrote there after the unlock.
+ * @property {(address: number, length: number) => void} [leftStorage]
+ *     Told of a storage a buffer moved off (`storages.js`), by a device that
+ *     records for one drawing elsewhere: what was lent of it is claimed before
+ *     the program may write there again.
  * @property {(work: () => any) => any} [whileStill]  Runs `work` as one pause of
  *     the program's (`whileStill`), for a device that records: what it compares of
  *     guest memory in the pause it compares once.
@@ -521,7 +526,8 @@ export function createDirect3D9(options = {}){
         free: giveBack, divergence, dumpDraws, dumpEvery, liveDump, maxDraws, skipTexture,
         probeTexture, fog, mips, driverRules, onDeviceLost, gamma, frameQueued, renderedElsewhere,
         occlusionCounted,
-        keepMemory, rereadBuffers, drawsFrom, whileStill, rectangleBump, drawsNothing, watchWrites,
+        keepMemory, rereadBuffers, drawsFrom, leftStorage, whileStill, rectangleBump, drawsNothing,
+        watchWrites,
         ...caps
     } = options;
     /** @type {DeviceCaps} */
@@ -536,7 +542,8 @@ export function createDirect3D9(options = {}){
         liveDump, maxDraws, skipTexture,
         probeTexture, fog, mips, driverRules, onDeviceLost, gamma, frameQueued, renderedElsewhere,
         occlusionCounted,
-        rereadBuffers, drawsFrom, whileStill, rectangleBump, drawsNothing, watchWrites,
+        rereadBuffers, drawsFrom, leftStorage, whileStill, rectangleBump, drawsNothing,
+        watchWrites,
     };
     if (backend && !readMemory)
     {
@@ -1313,14 +1320,15 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
      *           format?: number }} options
      */
     const createBuffer = options=>{
-        // Its storage goes back when the last reference does, the program's or
+        // Its storages go back when the last reference does, the program's or
         // the device's binding, whichever is later.
-        const bufferCount = explicitCount(options.pool, ()=>free(base), options.length);
-        const base = allocate(options.length);
+        const bufferCount = explicitCount(options.pool, ()=>storages.forEach(free),
+            options.length);
+        const storages = [allocate(options.length)];
         let locked = false;
         const buffer = {
             ...options,
-            base,
+            base: storages[0],
             ...createPriority(options.pool),
             get refCount(){
                 return bufferCount.value;
@@ -1356,7 +1364,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                     return D3DERR_INVALIDCALL;
                 }
                 locked = true;
-                out.pBits = base + offset;
+                out.pBits = buffer.base + offset;
                 renderer?.lockBuffer(buffer, offset, length, flags);
                 return D3D_OK;
             },
@@ -1371,6 +1379,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 return D3D_OK;
             },
 
+
             /** @param {{ desc?: any }} out */
             GetDesc(out){
                 out.desc = {
@@ -1384,6 +1393,8 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 return D3D_OK;
             },
         };
+        Object.assign(buffer, storageCalls(buffer, storages,
+            { allocate, renderer, left: services.leftStorage }));
         return buffer;
     };
 

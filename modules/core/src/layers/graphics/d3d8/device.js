@@ -52,6 +52,7 @@ import { DEFAULT_RENDER_STATES, createDefaultRenderStates } from './renderstates
 import { createDefaultStageStates } from './stagestates.js';
 import { IDENTITY, STAGE_COUNT, createRenderer, sameLight, vertexCountOf } from './render.js';
 import { reportDynamicReads } from './drawn.js';
+import { storageCalls } from './storages.js';
 import { applyBlock, captureBlock, emptyBlock, fillBlock } from './stateblock.js';
 import { processStreams } from './process.js';
 import { POSITION_MASK, decodeFvf } from '../webgpu/internal/vertexformat.js';
@@ -317,6 +318,10 @@ function isTransformType(type){
  *     Told the bytes of each dynamic buffer a draw reads (`drawn.js`), by a
  *     device that records for one drawing elsewhere, which has to be sent
  *     what the program wrote there after the unlock.
+ * @property {(address: number, length: number) => void} [leftStorage]
+ *     Told of a storage a buffer moved off (`storages.js`), by a device that
+ *     records for one drawing elsewhere: what was lent of it is claimed before
+ *     the program may write there again.
  * @property {boolean} [renderedElsewhere]  the device records for one that draws in
  *     another thread, which makes the GPU's copies there
  * @property {(work: () => any) => any} [whileStill]  Runs `work` as one pause of
@@ -420,7 +425,7 @@ export function createDirect3D8(options = {}){
         backend, readMemory, windowMemory, writeMemory, createSampler, allocate: guestMemory,
         free: giveBack, dumpDraws, dumpEvery, liveDump, maxDraws, divergence, skipTexture,
         probeTexture, fog, mips, nanProbe, driverRules, onDeviceLost, gamma, frameQueued, drawsFrom,
-        occlusionCounted,
+        occlusionCounted, leftStorage,
         whileStill, rectangleBump, renderedElsewhere, watchWrites, ...caps
     } = options;
     /** @type {DeviceCaps} */
@@ -430,7 +435,7 @@ export function createDirect3D8(options = {}){
         backend, readMemory, windowMemory, writeMemory, createSampler, allocate: guestMemory,
         free: giveBack, dumpDraws, dumpEvery, liveDump, maxDraws, divergence, skipTexture,
         probeTexture, fog, mips, nanProbe, driverRules, onDeviceLost, gamma, frameQueued, drawsFrom,
-        occlusionCounted,
+        occlusionCounted, leftStorage,
         whileStill, rectangleBump, renderedElsewhere, watchWrites,
     };
     if (backend && !readMemory)
@@ -1227,14 +1232,14 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
      *           format?: number }} spec
      */
     const createBuffer = spec=>{
-        const base = allocate(spec.length);
-        // Its storage goes back with its last reference, as a Direct3D 9
-        // buffer's does.
-        const bufferCount = explicitCount(spec.pool, ()=>free(base), spec.length);
+        const storages = [allocate(spec.length)];
+        // Its storages go back with its last reference, as a Direct3D 9
+        // buffer's do.
+        const bufferCount = explicitCount(spec.pool, ()=>storages.forEach(free), spec.length);
         let locked = false;
         const buffer = {
             ...spec,
-            base,
+            base: storages[0],
             ...createPriority(spec.pool),
             get refCount(){
                 return bufferCount.value;
@@ -1285,7 +1290,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                     return D3DERR_INVALIDCALL;
                 }
                 locked = true;
-                out.pBits = base + offset;
+                out.pBits = buffer.base + offset;
                 if (renderer)
                 {
                     renderer.lockBuffer(buffer, offset, length, flags);
@@ -1306,6 +1311,8 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 return D3D_OK;
             },
         };
+        Object.assign(buffer, storageCalls(buffer, storages,
+            { allocate, renderer, left: services.leftStorage }));
         return buffer;
     };
 

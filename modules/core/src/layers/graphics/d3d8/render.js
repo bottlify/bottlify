@@ -9068,6 +9068,28 @@ export function createRenderer(options){
         },
 
         /**
+         * A buffer moved onto another of its storages (`storages.js`): its
+         * copy on the GPU is renamed as for a DISCARD, so a draw recorded
+         * before reads what it was made with, and the draws after take what
+         * they read of the new storage out of guest memory (`readHeld`), its
+         * pages all unseen. A buffer the device holds locked keeps its copy:
+         * the recording lets go of its lock before it moves it.
+         *
+         * @param {any} buffer
+         */
+        renameBuffer(buffer){
+            // What a pause compared of the storage left is not what the
+            // draws after the move read.
+            compared.forget(buffer);
+            const entry = buffers.get(buffer);
+            if (!entry || entry.held)
+            {
+                return;
+            }
+            entry.gpu.unlock(entry.gpu.lock(0, buffer.length, LockFlags.DISCARD), 0, 0);
+        },
+
+        /**
          * The bytes the program wrote are read from guest memory now, and only
          * the locked range: after a DISCARD the rest of the buffer is
          * undefined by contract, and resending it would be the §14.1 traffic.

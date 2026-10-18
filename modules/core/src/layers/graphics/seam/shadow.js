@@ -304,7 +304,18 @@ export const BUFFER = {
      * number of unlocks named it.
      */
     QUEUED: 36,
-    SIZE: 40,
+    /**
+     * A dynamic buffer's other storages (`d3d8/storages.js`), zero for none,
+     * and whether the guest may move the buffer onto each: set by the host
+     * when it adds one, and again once the device has moved off it and
+     * nothing it plays or lent reads it; cleared by the lock routine that
+     * moves the buffer onto it for a DISCARD under draws the ring holds
+     * (`lockCode`), which leaves the storage it moved off in its place.
+     */
+    SPARES: 40,
+    SPARE_FREE: 48,
+    SPARE_COUNT: 2,
+    SIZE: 56,
 };
 
 /**
@@ -935,6 +946,13 @@ export function getRenderStateCode(at, trap){
  * writes over it. The device's lock is let go before the program's pointer is
  * written, which may fault.
  *
+ * Unless, for a DISCARD alone, the buffer has another storage the host has let
+ * go of (`SPARES`, `SPARE_FREE`; `renameSlot` given): then the buffer moves
+ * onto it here, the move goes into the device's command ring (`Buffer.Rename`,
+ * the buffer's pointer and the storage) for the host to make after the draws
+ * before it, the storage left takes the spare's place, and the lock goes on as
+ * a NOOVERWRITE of the new storage -- the flags the host replays it with.
+ *
  *     mov edx, [ecx+DEVICE]
  *     (take the device's lock through EDX, or slow)
  *     cmp dword [ecx+LOCKED], 0
@@ -949,7 +967,49 @@ export function getRenderStateCode(at, trap){
  *     mov eax, [esp+20]
  *     and eax, NOOVERWRITE | DISCARD
  *     cmp eax, NOOVERWRITE
+ *     je free
+ *     cmp eax, DISCARD            ; with renameSlot, else jmp held
  *     jne held
+ *     cmp dword [ecx+SPARE_FREE], 0
+ *     jne first
+ *     cmp dword [ecx+SPARE_FREE+4], 0
+ *     je held
+ *     mov eax, 4
+ *     jmp move
+ *   first:
+ *     xor eax, eax
+ *   move:
+ *     push ebx
+ *     push esi
+ *     mov ebx, eax                ; which spare, as a byte offset
+ *     cmp dword [edx+COMMANDS], 0
+ *     je full
+ *   reserve:                      ; the record: slot, 16, this, storage
+ *     mov eax, [edx+COMMAND_HEAD]
+ *     lea esi, [eax+16]
+ *     cmp esi, [edx+COMMAND_BYTES]
+ *     ja full
+ *     lock cmpxchg [edx+COMMAND_HEAD], esi
+ *     jne reserve
+ *     add eax, [edx+COMMANDS]
+ *     mov dword [eax+SLOT], renameSlot
+ *     mov esi, [esp+12]           ; this, two words further for the pushes
+ *     mov [eax+ARGS], esi
+ *     mov esi, [ecx+ebx+SPARES]
+ *     mov [eax+ARGS+4], esi
+ *     xchg esi, [ecx+BASE]        ; the move: the storage left in the spare's place
+ *     mov [ecx+ebx+SPARES], esi
+ *     mov dword [ecx+ebx+SPARE_FREE], 0
+ *     mov dword [ecx+LENT], 0     ; the new storage was never lent
+ *     mov dword [eax+BYTES], 16   ; the record counts from here
+ *     mov dword [esp+28], NOOVERWRITE
+ *     pop esi
+ *     pop ebx
+ *     jmp free
+ *   full:
+ *     pop esi
+ *     pop ebx
+ *     jmp held
  *   free:
  *     mov eax, [esp+8]            ; offset
  *     mov edx, [esp+12]           ; size
@@ -1005,10 +1065,54 @@ export function getRenderStateCode(at, trap){
  *     ret 20
  *
  * @param {number} at @param {number} trap
+ * @param {number} [renameSlot]  `Buffer.Rename`'s slot in the device's ring; without it a
+ *     DISCARD under draws or over lent bytes is always the host's
  * @returns {Uint8Array}
  */
-export function lockCode(at, trap){
-    return routine(at, trap, [
+export function lockCode(at, trap, renameSlot){
+    /** The move onto a spare storage, for a DISCARD alone: the comment's, from `guarded`. */
+    const move = renameSlot === undefined ? [{ jcc: 0xeb, to: 'held' }] : [
+        [0x3d, ...dword(D3DLOCK_DISCARD)],                       // cmp eax, 0x2000
+        { jcc: 0x75, to: 'held' },                               // jne held
+        [0x83, 0x79, BUFFER.SPARE_FREE, 0x00],                   // cmp dword [ecx+48], 0
+        { jcc: 0x75, to: 'first' },                              // jne first
+        [0x83, 0x79, BUFFER.SPARE_FREE + 4, 0x00],               // cmp dword [ecx+52], 0
+        { jcc: 0x74, to: 'held' },                               // je held
+        [0xb8, ...dword(4)],                                     // mov eax, 4
+        { jcc: 0xeb, to: 'move' },                               // jmp move
+        { label: 'first' },
+        [0x31, 0xc0],                                            // xor eax, eax
+        { label: 'move' },
+        [0x53, 0x56],                                            // push ebx; push esi
+        [0x89, 0xc3],                                            // mov ebx, eax
+        [0x83, 0xba, ...dword(SHADOW.COMMANDS), 0x00],           // cmp dword [edx+disp], 0
+        { jcc: 0x74, to: 'full' },                               // je full
+        { label: 'reserve' },
+        [0x8b, 0x82, ...dword(SHADOW.COMMAND_HEAD)],             // mov eax, [edx+disp]
+        [0x8d, 0x70, COMMAND.ARGS + 8],                          // lea esi, [eax+16]
+        [0x3b, 0xb2, ...dword(SHADOW.COMMAND_BYTES)],            // cmp esi, [edx+disp]
+        { jcc: 0x77, to: 'full' },                               // ja full
+        [0xf0, 0x0f, 0xb1, 0xb2, ...dword(SHADOW.COMMAND_HEAD)], // lock cmpxchg [edx+disp], esi
+        { jcc: 0x75, to: 'reserve' },                            // jne reserve
+        [0x03, 0x82, ...dword(SHADOW.COMMANDS)],                 // add eax, [edx+disp]
+        [0xc7, 0x40, COMMAND.SLOT, ...dword(renameSlot)],        // mov dword [eax], slot
+        [0x8b, 0x74, 0x24, 0x0c],                                // mov esi, [esp+12]
+        [0x89, 0x70, COMMAND.ARGS],                              // mov [eax+8], esi
+        [0x8b, 0x74, 0x19, BUFFER.SPARES],                       // mov esi, [ecx+ebx+40]
+        [0x89, 0x70, COMMAND.ARGS + 4],                          // mov [eax+12], esi
+        [0x87, 0x71, BUFFER.BASE],                               // xchg esi, [ecx+4]
+        [0x89, 0x74, 0x19, BUFFER.SPARES],                       // mov [ecx+ebx+40], esi
+        [0xc7, 0x44, 0x19, BUFFER.SPARE_FREE, ...dword(0)],      // mov dword [ecx+ebx+48], 0
+        [0xc7, 0x41, BUFFER.LENT, ...dword(0)],                  // mov dword [ecx+32], 0
+        [0xc7, 0x40, COMMAND.BYTES, ...dword(COMMAND.ARGS + 8)], // mov dword [eax+4], 16
+        [0xc7, 0x44, 0x24, 0x1c, ...dword(D3DLOCK_NOOVERWRITE)], // mov dword [esp+28], 0x1000
+        [0x5e, 0x5b],                                            // pop esi; pop ebx
+        { jcc: 0xeb, to: 'free' },                               // jmp free
+        { label: 'full' },
+        [0x5e, 0x5b],                                            // pop esi; pop ebx
+        { jcc: 0xeb, to: 'held' },                               // jmp held
+    ];
+    const parts = [
         ...prologue('early'),
         { jcc: 0xeb, to: 'body' },                               // jmp body
         { label: 'early' },
@@ -1028,7 +1132,8 @@ export function lockCode(at, trap){
         [0x8b, 0x44, 0x24, 0x14],                                // mov eax, [esp+20]
         [0x25, ...dword(D3DLOCK_NOOVERWRITE | D3DLOCK_DISCARD)], // and eax, 0x3000
         [0x3d, ...dword(D3DLOCK_NOOVERWRITE)],                   // cmp eax, 0x1000
-        { jcc: 0x75, to: 'held' },                               // jne held
+        { jcc: 0x74, to: 'free' },                               // je free
+        ...move,
         { label: 'free' },
         [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
         [0x8b, 0x54, 0x24, 0x0c],                                // mov edx, [esp+12]
@@ -1082,7 +1187,10 @@ export function lockCode(at, trap){
         [0x5b],                                                  // pop ebx
         [0x31, 0xc0],                                            // xor eax, eax
         [0xc2, 0x14, 0x00],                                      // ret 20
-    ]);
+    ];
+    // The move puts the checks further from their targets than a byte reaches.
+    return routine(at, trap, renameSlot === undefined ? parts : parts.map(part=>(
+        'jcc' in part && part.jcc !== 0xeb ? { ...part, near: true } : part)));
 }
 
 /**
@@ -3041,6 +3149,10 @@ export const stageStateMirror = types=>[
  * @property {(offset: number, size: number, out: { pBits?: number }, flags?: number) => number
  *     } Lock
  * @property {() => number} Unlock
+ * @property {number[]} [storages]  a dynamic one's, the first the one it was made with
+ * @property {() => number} [AddStorage]  one more of its length (`d3d8/storages.js`)
+ * @property {(left: number) => void} [renamed]  told by the device that it moved off a
+ *     storage, the ring's `Buffer.Rename` made
  */
 
 /**
@@ -3214,6 +3326,12 @@ export function createShadow(deps){
      * busy, a bad range, no block).
      */
     const hostLocks = { locked: 0, readonly: 0, pending: 0, lent: 0, other: 0 };
+    /**
+     * The guest's moves of a buffer onto another storage the device has made
+     * (`leftBehind`), the storages the host gave buffers for them, and the
+     * buffers whose replay waited for the ring's move (`renamedPending`).
+     */
+    const moved = { made: 0, storages: 0, deferred: 0 };
     /**
      * The host's level locks, as `hostLocks` the buffers': a level with no
      * block yet (the first two of each, and a cube's face), one the guest
@@ -3677,6 +3795,87 @@ export function createShadow(deps){
     };
 
     /**
+     * The device made a move the guest wrote into the ring (`lockCode`): the
+     * storage left sits in the spare's place in the block, and the guest may
+     * move onto it again -- every draw before the move has been made, its
+     * bytes sent, and the recording has claimed what was lent of it.
+     *
+     * @param {number} block @param {number} left
+     */
+    const leftBehind = (block, left)=>{
+        moved.made++;
+        const slot = readWords(block + BUFFER.SPARES, BUFFER.SPARE_COUNT).indexOf(left);
+        if (slot >= 0)
+        {
+            deps.writeMemory(block + BUFFER.SPARE_FREE + slot * 4, dwordBytes(1));
+        }
+    };
+
+    /**
+     * A DISCARD of a dynamic buffer came to the host under draws the ring
+     * held, or over lent bytes: the buffer gets another storage, which the
+     * guest's next such lock moves it onto instead (`d3d8/storages.js`).
+     * Memory only for a buffer a program discards that way.
+     *
+     * @param {number} block @param {ShadowBuffer} buffer
+     */
+    const addSpare = (block, buffer)=>{
+        if (typeof buffer.AddStorage !== 'function'
+            || ((buffer.usage ?? 0) & D3DUSAGE_DYNAMIC) === 0)
+        {
+            return;
+        }
+        const slot = readWords(block + BUFFER.SPARES, BUFFER.SPARE_COUNT).indexOf(0);
+        if (slot < 0)
+        {
+            return;
+        }
+        const storage = buffer.AddStorage();
+        if (storage === 0)
+        {
+            return;
+        }
+        moved.storages++;
+        holding(()=>{
+            deps.writeMemory(block + BUFFER.SPARES + slot * 4, dwordBytes(storage));
+            deps.writeMemory(block + BUFFER.SPARE_FREE + slot * 4, dwordBytes(1));
+        });
+    };
+
+    /**
+     * Buffers the guest moved onto another storage whose move the ring has
+     * not had made yet: what the block says the guest locked is the new
+     * storage's, which the device does not hold until the move, so it is
+     * replayed after the ring's run (`settleMoved`); the draws in the run
+     * have sent what they read of either storage (`drawsFrom`).
+     *
+     * @type {Set<number>}
+     */
+    const renamedPending = new Set();
+    /** @param {number} block @param {{ buffer: ShadowBuffer }} entry */
+    const movedAhead = (block, entry)=>readWord(block + BUFFER.BASE) !== entry.buffer.base;
+    /** After a run of the ring: the replays the moves held back. */
+    const settleMoved = ()=>{
+        for (const block of renamedPending)
+        {
+            const entry = blocks.get(block);
+            if (entry && movedAhead(block, entry))
+            {
+                continue;
+            }
+            renamedPending.delete(block);
+            if (readWord(block + BUFFER.LOCKED) !== 0)
+            {
+                flushHeld(block);
+            }
+            else
+            {
+                settle(block);
+            }
+        }
+    };
+
+    /**
      * Replays what the guest did to one buffer against the real one. The
      * block says whether a lock is held and what range was locked since the
      * host last looked; the host's own lock mirrors the guest's, so that the
@@ -3694,6 +3893,19 @@ export function createShadow(deps){
         {
             // Released by the program with an unlock still on the ring.
             blocks.delete(block);
+            return;
+        }
+        if (movedAhead(block, entry))
+        {
+            // A lock of the host's the guest let go of before it moved: its
+            // bytes are the storage the device still holds.
+            if (entry.hostLocked)
+            {
+                entry.buffer.Unlock();
+                entry.hostLocked = false;
+            }
+            moved.deferred++;
+            renamedPending.add(block);
             return;
         }
         const words = readWords(block, BUFFER.SIZE / 4);
@@ -3841,6 +4053,12 @@ export function createShadow(deps){
         {
             return true;
         }
+        if (movedAhead(block, entry))
+        {
+            moved.deferred++;
+            renamedPending.add(block);
+            return true;
+        }
         const words = readWords(block, BUFFER.SIZE / 4);
         const from = words[BUFFER.FROM / 4];
         const to = words[BUFFER.TO / 4];
@@ -3937,6 +4155,10 @@ export function createShadow(deps){
                         held.end('ring-held', inner);
                     }
                 });
+                if (renamedPending.size > 0)
+                {
+                    settleMoved();
+                }
             }
             finally
             {
@@ -3978,6 +4200,10 @@ export function createShadow(deps){
             try
             {
                 commandReader?.take(settleHeld);
+                if (renamedPending.size > 0)
+                {
+                    settleMoved();
+                }
             }
             finally
             {
@@ -4281,9 +4507,13 @@ export function createShadow(deps){
             {
                 return 0;
             }
-            deps.writeMemory(block,
-                dwordsBytes([0, buffer.base, buffer.length, 0, 0, 0, 0, owner, 0, 0]));
+            const spares = (buffer.storages ?? []).filter(storage=>storage !== buffer.base)
+                .slice(0, BUFFER.SPARE_COUNT);
+            deps.writeMemory(block, dwordsBytes([0, buffer.base, buffer.length, 0, 0, 0, 0, owner,
+                0, 0, spares[0] ?? 0, spares[1] ?? 0, spares.length > 0 ? 1 : 0,
+                spares.length > 1 ? 1 : 0]));
             blocks.set(block, { buffer, hostLocked: false });
+            buffer.renamed = left=>leftBehind(block, left);
             // A dynamic buffer is the kind a program holds locked while it
             // draws from it, from its very first lock.
             if (((buffer.usage ?? 0) & D3DUSAGE_DYNAMIC) !== 0)
@@ -4586,6 +4816,11 @@ export function createShadow(deps){
                             : readWord(address + SHADOW.DRAWS_PENDING) !== 0 ? 'pending'
                                 : readWord(block + BUFFER.LENT) !== 0 ? 'lent' : 'other';
             hostLocks[why]++;
+            if ((why === 'pending' || why === 'lent') && block !== undefined
+                && (flags & (D3DLOCK_NOOVERWRITE | D3DLOCK_DISCARD)) === D3DLOCK_DISCARD)
+            {
+                addSpare(block, buffer);
+            }
         },
 
         /**
@@ -4637,6 +4872,7 @@ export function createShadow(deps){
             heldWaitMs: Math.round(heldWaits.ms),
             heldBroken: heldWaits.broken,
             hostLocks: { ...hostLocks },
+            moved: { ...moved },
             hostLevelLocks: { ...hostLevelLocks },
             hostLevelKinds: Object.fromEntries([...hostLevelKinds].sort((a, b)=>b[1] - a[1])
                 .slice(0, 12)),

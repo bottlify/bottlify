@@ -723,9 +723,10 @@ flowchart TB
   turns left behind, and a long turn sends its own), and at once when a call waits for an
   answer. Resource bytes ride in the same batch. For a Direct3D buffer that is what the program
   wrote between `Lock` and `Unlock`; for a texture, everything written up to the next call that
-  may read it. Where the program's memory is shared, what a Direct3D 8 or 9 unlock let the
-  program write is lent rather than copied: the batch says where the bytes lie, and the graphics
-  thread copies them out of guest memory when it plays the record (`remote/lending.js`).
+  may read it. Where the program's memory is shared, what a Direct3D 8 or 9 texture's or
+  surface's unlock let the program write is lent rather than copied: the batch says where the
+  bytes lie, and the graphics thread copies them out of guest memory when it plays the record
+  (`remote/lending.js`). A buffer's bytes are copied.
 - **The Direct3D 8 and 9 command ring.** A program sets states, transforms and textures hundreds
   of times a frame and locks a buffer around every draw. Those setters and draws, a buffer's
   `Lock` and `Unlock`, and the getters of render states, transforms, texture stage states and
@@ -752,6 +753,13 @@ flowchart TB
   and its next unlock sends only the pages written since. A loop that streams stores into
   watched pages marks the pages its next turns may reach once, before them, and runs its
   stores untested as on pages already written.
+- **A DISCARD in the guest.** A `DISCARD` of a dynamic buffer while the ring still holds draws
+  the host has not made would write over what those draws read, so it went to the host, which
+  makes the draws first. The first such `DISCARD` of a buffer now gives it another storage of its
+  length (`d3d8/storages.js`, two at most). From then on the guest's `Lock` moves the buffer onto
+  a free one, writes the move into the ring (`Buffer.Rename`) and goes on writing there; the host
+  makes the move in order with the draws, so each draw reads the storage it was made with, and
+  frees the storage left. Each storage is sent whole once, then by the pages written since.
 - **Who waits for whom.** `Present` waits for the graphics thread only when it is more than two frames
   behind. It does wait for the display, as a driver does: under every presentation interval but
   `IMMEDIATE` (windowed Direct3D 8 only under `COPY_VSYNC`) the calling thread stops until the next

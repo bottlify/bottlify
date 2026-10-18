@@ -124,6 +124,10 @@ export function recordedDirect3D(factory, services, transport){
         // what was sent.
         drawsFrom: (/** @type {any} */ buffer, /** @type {number} */ from, /** @type {number} */ to)=>
             recording?.drawsFrom(buffer, from, to),
+        // A buffer moved off a storage (`d3d8/storages.js`): the program may
+        // write there again once what was lent of it is claimed.
+        leftStorage: (/** @type {number} */ address, /** @type {number} */ length)=>
+            recording?.claim(address, length),
         whileStill: (/** @type {() => any} */ work)=>(recording ? recording.still(work) : work()),
         writeMemory: write && ((/** @type {number} */ address, /** @type {Uint8Array} */ bytes)=>{
             recording?.writing(address, bytes.length);

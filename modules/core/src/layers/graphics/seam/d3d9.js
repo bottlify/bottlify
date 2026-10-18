@@ -1083,7 +1083,7 @@ export function createDirect3D9Seam(
     /** @type {Record<string, (builder: { trap: number }) => number>} */
     const bufferGuests = guestsBut('locks', allocate
         ? {
-            Lock: ({ trap })=>placeCode(at=>lockCode(at, trap)),
+            Lock: ({ trap })=>placeCode(at=>lockCode(at, trap, commandSlot('Buffer.Rename'))),
             Unlock: ({ trap })=>placeCode(at=>unlockCode(at, trap)),
         }
         : {});

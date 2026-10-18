@@ -66,6 +66,7 @@ const D3DFMT_INDEX16 = 101;
 const D3DPOOL_DEFAULT = 0;
 const D3DPOOL_MANAGED = 1;
 const D3DUSAGE_RENDERTARGET = 0x1;
+const D3DUSAGE_DYNAMIC = 0x200;
 const D3DSWAPEFFECT_DISCARD = 1;
 const FVF_XYZ_DIFFUSE = 0x042;
 const D3DSBT_ALL = 1;
@@ -84,8 +85,10 @@ const floats = values=>[...new Uint32Array(new Float32Array(values).buffer)];
  * the address of `data` -- the dwords the pointer argument points at, and the
  * device state it is made in.
  *
- * @typedef {{ label: string, args: (number | string)[], data?: number[],
+ * @typedef {{ label: string,
+ *     args: (number | string | ((made: Record<string, any>) => number))[], data?: number[],
  *     caps?: object, setup?: (device: any, made: Record<string, any>) => void }} Case
+ *     an argument a function of what `setup` made: a value known only once it is made
  */
 
 /**
@@ -325,9 +328,10 @@ function gate(api, table){
             setup?.(device, made);
             const names = Object.keys(made);
             const pointers = placeObjects(host, made, shape.dirty !== undefined);
-            /** @param {number | string} arg */
+            /** @param {number | string | ((made: Record<string, any>) => number)} arg */
             const value = arg=>(typeof arg === 'number' ? arg >>> 0
-                : arg === 'data' ? DATA : OBJECTS + names.indexOf(arg) * 16);
+                : typeof arg === 'function' ? arg(made) >>> 0
+                    : arg === 'data' ? DATA : OBJECTS + names.indexOf(arg) * 16);
             host.writePhysical(DATA, new Uint8Array(new Uint32Array(data).buffer));
             const values = args.map(value);
             const state = device.ringState();
@@ -402,6 +406,21 @@ const vertices9 = (device, /** @type {Record<string, any>} */ made)=>{
     const out = {};
     assert.equal(device.CreateVertexBuffer(1024, 0, FVF_XYZ_DIFFUSE, D3DPOOL_MANAGED, out),
         D3D_OK);
+    made.vertices = out.buffer;
+};
+
+/**
+ * A dynamic vertex buffer with a second storage of its own, as the host gives
+ * one a DISCARD of which came to it under draws (`d3d8/storages.js`).
+ *
+ * @param {any} device @param {Record<string, any>} made
+ */
+const dynamicVertices = (device, made)=>{
+    /** @type {{ buffer?: any }} */
+    const out = {};
+    assert.equal(device.CreateVertexBuffer(1024, D3DUSAGE_DYNAMIC, FVF_XYZ_DIFFUSE,
+        D3DPOOL_DEFAULT, out), D3D_OK);
+    assert.notEqual(out.buffer.AddStorage(), 0);
     made.vertices = out.buffer;
 };
 
@@ -515,6 +534,14 @@ const shared = drawable=>({
         { label: 'a negative edge', args: ['texture', 'data'], data: [-1, 0, 4, 4],
             setup: texture },
         { label: 'none', args: ['texture', 0], setup: texture },
+    ],
+    // Written by the lock routine (`lockCode`) only for a storage of the
+    // buffer's own; the locks contract follows the moves themselves.
+    'Buffer.Rename': [
+        { label: 'onto its other storage', args: ['vertices', made=>made.vertices.storages[1]],
+            setup: dynamicVertices },
+        { label: 'onto the one it is on', args: ['vertices', made=>made.vertices.base],
+            setup: dynamicVertices },
     ],
     'VolumeTexture.AddDirtyBox': [
         { label: 'a box within', args: ['volume', 'data'], data: [1, 2, 5, 6, 1, 3],
