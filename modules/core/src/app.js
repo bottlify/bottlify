@@ -632,6 +632,32 @@ export function groupBlocks(blocks){
 export const READ_AHEAD_BYTES = 2 << 20;
 
 /**
+ * The round trip below which a bundle is near: a disk, or a server on the
+ * network beside the browser. A window is `READ_AHEAD_BYTES` there; each
+ * multiple of this a request takes widens it by as much again, up to
+ * `MAX_WINDOW_SCALE` of them.
+ *
+ * A miss costs one round trip whatever it brings, and a bucket a continent's
+ * edge away answers in a third of a second: a game loading a level waited that
+ * long for every two mebibytes, though the line carries twenty-five of them in
+ * that time.
+ */
+export const NEAR_ROUND_TRIP_MS = 50;
+const MAX_WINDOW_SCALE = 8;
+
+/**
+ * How much a miss brings in, by how far away the bundle is.
+ *
+ * @param {number} roundTripMs  The shortest of the bundle's recent requests;
+ *     0 before there is one.
+ * @returns {number} bytes
+ */
+export function windowFor(roundTripMs){
+    return READ_AHEAD_BYTES
+        * Math.min(MAX_WINDOW_SCALE, Math.max(1, Math.floor(roundTripMs / NEAR_ROUND_TRIP_MS)));
+}
+
+/**
  * Widens every miss to the aligned window of the container that holds it.
  *
  * Whatever the read wanted, the request is the window: the blocks around a
@@ -2706,11 +2732,32 @@ async function mountBundle({ options, cpu, events, translationStore }){
     }
     // Everything below fetches through this, the index included: the first
     // range of the run is as exposed to a dropped connection as the last.
-    const fetchRange = retryingFetch({
+    const retrying = retryingFetch({
         fetch: options.bundle.fetch,
         events,
         retry: options.bundle.retry,
     });
+    /**
+     * How long the bundle's last requests took. The shortest of them is the
+     * round trip with the least transfer in it: what a miss costs whatever it
+     * brings (`windowFor`).
+     *
+     * @type {number[]}
+     */
+    const recentMs = [];
+    const ROUND_TRIPS_KEPT = 8;
+    /** @type {typeof retrying} */
+    const fetchRange = async(offset, length, verify)=>{
+        const began = performance.now();
+        const bytes = await retrying(offset, length, verify);
+        recentMs.push(performance.now() - began);
+        if (recentMs.length > ROUND_TRIPS_KEPT)
+        {
+            recentMs.shift();
+        }
+        return bytes;
+    };
+    const roundTrip = ()=>(recentMs.length === 0 ? 0 : Math.min(...recentMs));
 
     const zstdForEngine = chooseZstdDecoder(options.engine ?? DEFAULT_ENGINE, cpu,
         await zstdWasmFor(options));
@@ -2975,7 +3022,9 @@ async function mountBundle({ options, cpu, events, translationStore }){
             .map(block=>[block.index, block])).values()]
             .sort((left, right)=>left.offset - right.offset);
 
-        const reaching = withWindow(withReadAhead(absent, bundle, has, expected), bundle, has);
+        const window = windowFor(roundTrip());
+        const reaching = withWindow(withReadAhead(absent, bundle, has, expected, window),
+            bundle, has, window);
         ahead += reaching.length - absent.length;
         if (reaching.length > 0)
         {
@@ -3021,6 +3070,13 @@ async function mountBundle({ options, cpu, events, translationStore }){
      * moment the time stops being idle it has to give the connections back to
      * the read that a player is actually waiting on.
      *
+     * Except where the bundle is far (`NEAR_ROUND_TRIP_MS`): there a parked
+     * read is a round trip's wait however wide the line, and a level loading is
+     * a read parked nearly all the time, so a filler that stood aside never ran
+     * while it mattered. It goes on beside the read, one request against the
+     * read's six, and a read that wants a block of its request waits for it
+     * rather than asking again.
+     *
      * @param {{ start: number, end: number, blocks: any[] }[]} groups
      * @returns {Promise<boolean>} whether to go on
      */
@@ -3033,7 +3089,7 @@ async function mountBundle({ options, cpu, events, translationStore }){
                 {
                     return false;
                 }
-                if (waiting === 0)
+                if (waiting === 0 || roundTrip() >= NEAR_ROUND_TRIP_MS)
                 {
                     break;
                 }
@@ -3052,7 +3108,25 @@ async function mountBundle({ options, cpu, events, translationStore }){
             {
                 for (const part of groupBlocks(missing))
                 {
-                    await fetchGroup(part);
+                    const request = fetchGroup(part);
+                    for (const block of part.blocks)
+                    {
+                        inFlight.set(block.index, request);
+                    }
+                    try
+                    {
+                        await request;
+                    }
+                    finally
+                    {
+                        for (const block of part.blocks)
+                        {
+                            if (inFlight.get(block.index) === request)
+                            {
+                                inFlight.delete(block.index);
+                            }
+                        }
+                    }
                 }
                 await cache.persist();
             }

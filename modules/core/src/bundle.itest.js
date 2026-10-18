@@ -25,7 +25,7 @@ import { randomBytes } from 'node:crypto';
 import { BOTTLE_REGISTRY_PATH, BOTTLE_SYSTEM_PATH, createApp, READ_AHEAD_BYTES } from './app.js';
 import { writeBundle } from './bundle-node.js';
 import { createHive, HKEY_LOCAL_MACHINE, REG_SZ } from './layers/win32/advapi32/registry.js';
-import { buildExe } from '../../../tools/make-pe.mjs';
+import { assemble, buildExe } from '../../../tools/make-pe.mjs';
 
 /** The fixture's blocks, small so a read of a few bytes still misses one. */
 const BLOCK_SIZE = 64 * 1024;
@@ -474,4 +474,74 @@ test('a process started from a bundle mounts the run\'s bundle rather than openi
         t.after(()=>app.dispose());
         assert.equal(await app.run({ timeoutMs: 30000 }), 7, 'the child ran, from the bundle');
         assert.equal(heads, 1, 'and the bundle\'s head was read once for both processes');
+    });
+
+/**
+ * A program that reads a file from its start to its end, 16 KiB a ReadFile, as
+ * a game loading a level reads an archive, and exits.
+ *
+ * @param {string} path
+ */
+function buildReaderExe(path){
+    // Placed in the image as data, whose builder spreads it into arguments: more
+    // than this and the spread overflows the stack.
+    const CHUNK = 0x4000;
+    return buildExe({
+        imports: { 'KERNEL32.dll': ['CreateFileA', 'ReadFile', 'ExitProcess'] },
+        codeSize: 0x80,
+        data: {
+            path: [...path].map(c=>c.charCodeAt(0)).concat(0),
+            counted: [0, 0, 0, 0],
+            buffer: new Array(CHUNK).fill(0),
+        },
+        code: ({ iat, at })=>assemble([
+            // CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL)
+            0x6a, 0x00, 0x6a, 0x00, 0x6a, 0x03, 0x6a, 0x00, 0x6a, 0x01,
+            0x68, ...u32(0x80000000), 0x68, ...u32(at('path')),
+            0xff, 0x15, ...u32(iat('CreateFileA')),
+            0x89, 0xc3, //                                      mov ebx, eax
+            { label: 'read' },
+            0x6a, 0x00, 0x68, ...u32(at('counted')), 0x68, ...u32(CHUNK),
+            0x68, ...u32(at('buffer')), 0x53,
+            0xff, 0x15, ...u32(iat('ReadFile')),
+            0xa1, ...u32(at('counted')), //                     mov eax, [counted]
+            0x85, 0xc0, //                                      test eax, eax
+            { jump: 'jnz', to: 'read' },
+            0x6a, 0x00,
+            0xff, 0x15, ...u32(iat('ExitProcess')),
+        ]),
+    });
+}
+
+test('a far bundle is read in wide windows: a forward reader waits for a round trip or two',
+    { timeout: 60000 }, async t=>{
+        // A bucket this far away: each request waits this long before its bytes,
+        // as R2 behind its domain answered a third of a second for any range.
+        const LINK_MS = 400;
+        const FILE_BYTES = 12 << 20;
+        const source = await bundleWith(PLANTED, FILE_BYTES);
+        t.after(()=>source.cleanup());
+        /** @param {number} offset @param {number} length */
+        const far = async(offset, length)=>{
+            await new Promise(resolve=>setTimeout(resolve, LINK_MS));
+            return source.fetch(offset, length);
+        };
+        const app = await createApp({
+            executable: buildReaderExe('C:\\Data\\big.bin'),
+            // The filler kept out: what is counted is the requests the program's
+            // own reads waited for.
+            bundle: { fetch: far, prefix: '', prefetch: false },
+        });
+        t.after(()=>app.dispose());
+        const opened = source.fetched.calls;
+
+        assert.equal(await app.run({ maxTurns: 200000, timeoutMs: 40000 }), 0);
+
+        // Two mebibytes a window, and two more ahead of a forward reader, were
+        // four round trips and more for this file; sized by the round trip the
+        // opening measured, one window holds all of it.
+        const reads = source.fetched.calls - opened;
+        assert.ok(reads <= 2, `the file came in ${reads} requests`);
+        assert.ok(source.fetched.bytes <= source.summary.bytes + BLOCK_SIZE,
+            'nothing was fetched twice');
     });
