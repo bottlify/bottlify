@@ -81,6 +81,7 @@ import { isDriven } from './drive.js';
  * @property {number} target
  * @property {Map<number, number>} [callers]  Sampled crossings by return address.
  * @property {Map<string, number>} [chains]  The same, by the two callers above it.
+ * @property {Map<string, number>} [threads]  The same, by the thread that made them.
  * @property {boolean} site
  * @property {number} trampoline
  * @property {number} resume
@@ -1118,7 +1119,8 @@ class Dispatcher {
         // The sampled crossings also say where they came from: a function
         // called millions of times is a loop somewhere, and the loop's
         // address is what names it.
-        if (this.sampleCaller)
+        const sampled = this.sampleCaller;
+        if (sampled)
         {
             this.sampleCaller = false;
             const callers = entry.callers ??= new Map();
@@ -1165,6 +1167,18 @@ class Dispatcher {
         const hookTraced = entry.hook && this.traceHookEntry(entry, esp, hostReturn, args);
 
         this.parking.beginCall(frame);
+        // And which thread made them: a call another executor makes waits for
+        // the process's to answer it, so where a thread's crossings go is
+        // where it waits.
+        if (sampled)
+        {
+            const name = frame.thread?.name ?? '-';
+            const threads = entry.threads ??= new Map();
+            if (threads.has(name) || threads.size < CALLERS_KEPT)
+            {
+                threads.set(name, (threads.get(name) ?? 0) + 1);
+            }
+        }
         this.depth = depth + 1;
         const slot = this.chargeSlot;
         const charging = this.charging;
@@ -1634,7 +1648,9 @@ class Dispatcher {
                         .map(([from, count])=>`0x${(from >>> 0).toString(16)}x${count}`)
                         .join(',')}` : ''}${entry.chains
                     ? ` via ${[...entry.chains].sort((a, b)=>b[1] - a[1]).slice(0, 3)
-                        .map(([chain, count])=>`${chain}x${count}`).join(',')}` : ''}`),
+                        .map(([chain, count])=>`${chain}x${count}`).join(',')}` : ''}${entry.threads
+                    ? ` by ${[...entry.threads].sort((a, b)=>b[1] - a[1]).slice(0, 3)
+                        .map(([name, count])=>`${name}x${count}`).join(',')}` : ''}`),
         };
     }
 

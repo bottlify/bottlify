@@ -99,6 +99,12 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
     const created = {
         [SyncKind.EVENT]: 0, [SyncKind.MUTEX]: 0, [SyncKind.SEMAPHORE]: 0, [SyncKind.TIMER]: 0,
     };
+    /**
+     * Sets of an event already set and resets of one already clear: calls
+     * that change nothing, which the guest could answer by itself from the
+     * event's word -- counted before anyone moves them there.
+     */
+    const unchanged = { sets: 0, setsOfSet: 0, resets: 0, resetsOfClear: 0 };
 
     // A thread whose wait ran out of time has stopped waiting, and a queue that
     // still holds it would hand it the object later -- signalling something
@@ -750,6 +756,8 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
                 remote.set(object.remote);
                 return [];
             }
+            unchanged.sets++;
+            unchanged.setsOfSet += object.signalled ? 1 : 0;
             object.signalled = true;
             const woken = [];
             if (object.manualReset)
@@ -777,6 +785,8 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
                 remote.reset(object.remote);
                 return;
             }
+            unchanged.resets++;
+            unchanged.resetsOfClear += object.signalled ? 0 : 1;
             object.signalled = false;
         },
 
@@ -851,7 +861,7 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
 
         /** The counts alone: what a snapshot taken often can afford. */
         summary(){
-            return { objects: objects.length, ...created };
+            return { objects: objects.length, ...created, ...unchanged };
         },
 
         /**
