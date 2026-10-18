@@ -1897,13 +1897,15 @@ export function libraryCandidates(name, imagePath, currentDirectory, how = {}){
  * @param {any} filesystem
  * @param {any} blocks       The bundle fetcher, or null when there is no bundle.
  * @param {string} imagePath The running program, whose directory is searched first.
- * @param {(name: string) => boolean} [ours]  Whether the engine answers the name.
- * @returns {(name: string) => Promise<Uint8Array | null>}
+ * @param {(name: string, wanted: any[]) => boolean} [ours]  Whether the engine
+ *     answers the name -- told what the importer takes from it, which a table
+ *     lacking some of it does not answer.
+ * @returns {(name: string, wanted?: any[]) => Promise<Uint8Array | null>}
  */
 export function shippedLibraryReader(filesystem, blocks, imagePath, ours = ()=>false){
-    return async name=>{
+    return async(/** @type {string} */ name, /** @type {any[]} */ wanted = [])=>{
         for (const candidate of libraryCandidates(name, imagePath, undefined,
-            { ours: ours(name) }))
+            { ours: ours(name, wanted) }))
         {
             const file = await readWholeFile(filesystem, blocks, candidate);
             if (file)
@@ -2511,7 +2513,8 @@ export async function mapShippedLibraries(options){
         // bring is looked for in the system directories the engine fills, which
         // is where the runtime a title links against actually lives. Only when
         // neither has it does the engine's own table answer.
-        readLibrary: shippedLibraryReader(filesystem, blocks, imagePath, isSystem),
+        readLibrary: shippedLibraryReader(filesystem, blocks, imagePath,
+            (name, wanted)=>isSystem(name) && (options.covers?.(name, wanted) ?? true)),
     });
 
     if (missing.length > 0)
@@ -5897,6 +5900,16 @@ async function buildApp(options){
         imagePath: options.imagePath ?? 'C:\\app.exe',
         filesystem, loader, blocks, events,
         isSystem: (/** @type {string} */ name)=>findModule(name) !== null,
+        // A table of ours stands in for a copy in the system directories only
+        // when it has everything the importer takes from it. One that lacks
+        // some -- a C++ runtime's wide strings -- gives way to the copy an
+        // installation put in the Windows directory, which is where Windows
+        // would have found it.
+        covers: (/** @type {string} */ name, /** @type {any[]} */ wanted)=>{
+            const table = findModule(name);
+            return table !== null && wanted.every(entry=>(entry.name !== null
+                ? table.addressOf(entry.name) : table.addressOfOrdinal(entry.ordinal)) !== null);
+        },
         isKnownDll,
         byName, byBase,
         // Straight after the system modules, which is the first address nothing

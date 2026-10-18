@@ -192,3 +192,20 @@ test('a library importing from the program is bound to the program, not given a 
         assert.deepEqual(missing, []);
         assert.deepEqual(asked, ['game.dll'], 'the program is not looked for on the volume');
     });
+
+test('a library is looked for knowing what the image naming it takes from it', async()=>{
+    // A table of ours that lacks some of it gives way to the file of the name
+    // wherever it lies on the search path; the reader is told what is wanted.
+    /** @type {[string, (string | null)[]][]} */
+    const asked = [];
+    await planDependencies({
+        entry: importing(['MSVCP71.dll']),
+        readLibrary: async(name, wanted)=>{
+            asked.push([name, wanted.map(entry=>entry.name)]);
+            return null;
+        },
+        isSystem: ()=>true,
+        isKnownDll: noKnownDlls,
+    });
+    assert.deepEqual(asked, [['MSVCP71.dll', ['Anything']]]);
+});
