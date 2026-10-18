@@ -183,6 +183,7 @@ export function createKernelModule(){
                 placement: config?.placement === 'spread' || config?.placement === 'concentrate'
                     ? config.placement : null,
                 placementTiming: config?.placementTiming,
+                playPinned: config?.playPinned,
                 // The guest's Sleep reads it (`mirrorReady`).
                 readyChanged: (/** @type {number} */ count)=>{
                     if (state.readyWord !== 0)

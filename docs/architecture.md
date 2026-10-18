@@ -461,7 +461,12 @@ writes (section 7).
   scheduler refuses the second start. Only the executors in a thread's affinity mask are its to
   run on: the program is told it has one processor for each executor (by GetSystemInfo, the
   process block, `cpuid` and the rest), and `cpuid` answers each executor's number as its APIC
-  id, so a thread pinned to a processor reads that processor's. The process's own thread runs its threads
+  id, so a thread pinned to a processor reads that processor's. A thread pinned to one processor
+  that calls into the host often (a game's render thread, pinned to the last processor while its
+  main thread is pinned to the first) has that processor played by the process's own executor,
+  where its calls are answered, and the executor that played it takes the process's
+  (`cpu.playPinned`): GetCurrentProcessorNumber answers the processor played, so no thread is told
+  of one its mask does not name, and the trade is kept five seconds at least. The process's own thread runs its threads
   too, and answers the calls the others' threads make: at each of its own crossings into the host,
   between its turns, and inside them: an executor that needs its answer (a call, a fault, a slice's
   end) stores a word the process's translated code reads at every back edge as the floor of its

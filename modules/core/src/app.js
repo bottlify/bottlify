@@ -272,7 +272,8 @@ const hashText = (hash, text)=>{
  *           ready beside, in a process with one executor, while no timed wait or timer is
  *           due within 16 ms. Default ten quanta.
  * @property {{ cores?: number, eager?: boolean, placement?: 'auto' | 'spread' | 'concentrate',
- *           placementTiming?: Partial<import('./layers/kernel/internal/placement.js').PlacementOptions> }} [cpu]
+ *           placementTiming?: Partial<import('./layers/kernel/internal/placement.js').PlacementOptions>,
+ *           playPinned?: boolean }} [cpu]
  *           The machine's processor. `cores`: how many
  *           processors the program is told it has -- by every road Windows has to say
  *           it -- and the executors that run its threads at once, each a worker past
@@ -289,6 +290,10 @@ const hashText = (hash, text)=>{
  *           them on the process's own and keeps what draws more frames (or retires
  *           more, for a program that draws none); `spread` or `concentrate` one way.
  *           `placementTiming`: the trials' lengths, for a test that wants them short.
+ *           `playPinned`: false keeps every processor on its own core; by default a
+ *           thread the program pinned to one processor and that calls into the host
+ *           often has its processor played by the process's own core, where those
+ *           calls are answered.
  * @property {number} [executors]  `cpu.cores` by its older name: executors of the
  *           program's process under cork, past the process's own thread each a worker
  *           running one of its threads at once with the others, the locked
@@ -3853,6 +3858,9 @@ async function buildApp(options){
             // what the program gets done each way (the kernel's `placement`).
             placement: options.cpu?.placement,
             placementTiming: options.cpu?.placementTiming,
+            // A host-bound thread pinned to one processor has it played by the
+            // process's own executor (the kernel's `playPinned`) unless false.
+            playPinned: options.cpu?.playPinned,
             // Off unless asked for: see the kernel's `preemption`.
             preemption: options.preemption,
             // Every thread gets the stack the image was linked to expect, the
