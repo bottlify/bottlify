@@ -10,9 +10,10 @@
  * processor computes, a worker pinned to the second calls into the host every
  * hundred instructions, and both ask which processor they are on throughout.
  * With the trade the worker runs on the process's executor and its calls are
- * answered there; without it each crosses from the other executor. Either way
- * no thread is told of a processor its mask does not name, and the program
- * ends alike.
+ * answered there, and the trial that weighs the trade keeps it, the worker
+ * going faster so; without it each call crosses from the other executor.
+ * Either way no thread is told of a processor its mask does not name, through
+ * the trial's trades back and forth too, and the program ends alike.
  */
 
 import { test } from 'node:test';
@@ -26,7 +27,7 @@ const u32 = value=>[
 ];
 
 const WORKER_AT = 0x200;
-const ROUNDS = 600_000;
+const ROUNDS = 3_000_000;
 const OUTER = 1_500;
 const INNER = 400_000;
 
@@ -109,6 +110,7 @@ async function run(executable, playPinned){
         const kernel = (Array.isArray(tables) ? tables : []).find(table=>table.name === 'kernel');
         const scheduler = kernel?.metrics?.scheduler ?? kernel?.metrics ?? null;
         return { code: code >>> 0, played: scheduler?.played ?? null,
+            trading: JSON.parse(scheduler?.trading ?? '{}'),
             crossings: JSON.parse(scheduler?.sharedTime ?? '{}').crossings ?? -1 };
     }
     finally
@@ -124,11 +126,14 @@ test('a worker pinned to the second processor and bound to the host has it playe
     const fixed = await run(executable, false);
     assert.equal(fixed.code, 0, `fixed: ${fixed.code & 0xffff} wrong answers to main, `
         + `${fixed.code >>> 16} to the worker`);
-    assert.equal(fixed.played, '', 'no trade where none is asked for');
+    assert.deepEqual([fixed.played, fixed.trading.trials], ['', 0],
+        'no trade nor trial where none is asked for');
     const played = await run(executable, true);
     assert.equal(played.code, 0, `played: ${played.code & 0xffff} wrong answers to main, `
         + `${played.code >>> 16} to the worker`);
-    assert.match(String(played.played), /^1,0 after 1$/, 'processor 1 played here, 0 there');
+    assert.match(String(played.played), /^1,0 after \d+$/, 'processor 1 played here, 0 there, at'
+        + ` the end: ${JSON.stringify(played.trading)}`);
+    assert.ok(played.trading.played >= 1, `a trial chose it: ${JSON.stringify(played.trading)}`);
     assert.ok(fixed.crossings > ROUNDS && played.crossings < fixed.crossings / 2,
         `the worker's calls crossed ${fixed.crossings} times fixed, ${played.crossings} played`);
 });

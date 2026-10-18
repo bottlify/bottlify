@@ -464,15 +464,16 @@ writes (section 7).
   id, so a thread pinned to a processor reads that processor's. A thread pinned to one processor
   whose calls into the host take the process's executor the most time (a game's render thread,
   its Present and Lock a few hundred microseconds each, pinned to the last processor while its
-  main thread is pinned to the first) has that processor played by the process's own executor,
-  where its calls are answered, and the executor that played it takes the process's
+  main thread is pinned to the first) may have that processor played by the process's own
+  executor, where its calls are answered, the executor that played it taking the process's
   (`cpu.playPinned`). The time is that of the calls themselves, wherever the thread runs, halved
-  every second; the trade is made at 5% of the executor's time and twice what the calls of the
-  thread pinned to the processor it plays take. A count of calls does not say it: a main
-  thread's are many and cheap. GetCurrentProcessorNumber answers the
-  processor played, so no thread is told of one its mask does not name. A trade is kept five
-  seconds at least, and undone, not tried again for a minute, when the program draws fewer frames
-  after it (or retires fewer instructions, where it draws none). The process's own thread runs its threads
+  every second; a trade is weighed once it is 2% of the executor's time and twice what the calls
+  of the thread pinned to the process's own processor take. A count of calls does not say it: a
+  main thread's are many and cheap. Whether the program gains by it only its frames say, so the
+  trade is weighed by the same trial as spreading, never at once with it: windows of each way
+  in turn, the trade kept where it wins by the margin, tried again after the hold.
+  GetCurrentProcessorNumber answers the processor played, so no thread is told of one its mask
+  does not name. The process's own thread runs its threads
   too, and answers the calls the others' threads make: at each of its own crossings into the host,
   between its turns, and inside them: an executor that needs its answer (a call, a fault, a slice's
   end) stores a word the process's translated code reads at every back edge as the floor of its

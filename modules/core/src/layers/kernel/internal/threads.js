@@ -129,15 +129,6 @@ const COUPLED_WORK = 0.5;
 const TURN_CLEAR = 4;
 
 /**
- * How often, in host ms, the processor this executor plays is looked at again
- * (`playPinned`), and how long one it took is kept at least before another
- * may take it: processors traded back and forth move every thread pinned to
- * either at each trade.
- */
-const PLAY_LOOK_MS = 250;
-const PLAY_HOLD_MS = 5000;
-
-/**
  * The half-life, in host ms, of the time this executor spends in each
  * thread's calls into the host (`hostTime`): a second, so tens of a game's
  * frames are in it and a load's long past ones are not.
@@ -145,25 +136,16 @@ const PLAY_HOLD_MS = 5000;
 const HOST_HALF_MS = 1000;
 
 /**
- * A pinned thread's processor is played here once this executor spends at
- * least this share of its time on the thread's calls, and `PLAY_MARGIN`
- * times what it spends on the calls of the thread pinned to the processor it
- * plays now: that one's calls then cross from the other executor instead.
+ * A pinned thread's processor is tried played here (`playPinned`) once this
+ * executor spends at least this share of its time in the thread's calls, and
+ * `PLAY_MARGIN` times what it spends in those of the thread pinned to its
+ * own processor: that one's calls would cross from the other executor instead.
  */
-const PLAY_FLOOR = 0.05;
+const PLAY_FLOOR = 0.02;
 const PLAY_MARGIN = 2;
 
-/**
- * After a trade the program's frames a millisecond (instructions retired,
- * where it presents none) over `PLAY_CHECK_MS` past `PLAY_SETTLE_MS` are
- * set against those over the same span before it; a trade that lost more
- * than `PLAY_LOSS` is undone, and none is tried for `PLAY_BACKOFF_MS`,
- * twice as long after each undone.
- */
-const PLAY_SETTLE_MS = 500;
-const PLAY_CHECK_MS = 3000;
-const PLAY_LOSS = 0.03;
-const PLAY_BACKOFF_MS = 60_000;
+/** The ways of the trial that weighs a trade (`playPinned`), the safer first. */
+const PLAY_WAYS = /** @type {[string, string]} */ (['own', 'played']);
 
 /** Turns kept to say what held the processor through a late thread's gap. */
 const RECENT_TURNS = 256;
@@ -293,9 +275,9 @@ const readyNow = thread=>{
  *        The trials' windows, holds and margin, where a test shortens them.
  * @param {(count: number) => void} [options.readyChanged]  Told how many threads are
  *        ready to run with no executor running them, as that changes (`readyCount`).
- * @param {boolean} [options.playPinned]  Whether a thread pinned to one processor and
- *        bound to the host has that processor played by this executor (`playPinned`);
- *        on unless false.
+ * @param {boolean} [options.playPinned]  Whether this executor may play the processor
+ *        of a pinned thread whose calls into the host cost it most, where a trial finds
+ *        the program faster so (`playPinned`); on unless false.
  */
 export function createScheduler(options){
     const { cpu, switcher, quantum = 100_000, now = ()=>0, skipTo = ()=>0 } = options;
@@ -429,7 +411,17 @@ export function createScheduler(options){
      * turns on its own, by what the program gets done each way (`placement.js`).
      */
     const placement = createPlacement({ now: wall, fixed: options.placement ?? null,
-        ...options.placementTiming });
+        mayBegin: ()=>!trading.trialing(), ...options.placementTiming });
+    /**
+     * Whether this executor plays the processor a pinned thread whose calls
+     * cost it most is pinned to (`playPinned`), by the same trial: windows of
+     * each way in turn, the trade kept where the program went faster by the
+     * margin. A trial begins only with such a thread (`proposed`), and never
+     * while the placement's runs.
+     */
+    const trading = createPlacement({ now: wall, ways: PLAY_WAYS, initial: PLAY_WAYS[0],
+        fixed: options.playPinned === false ? PLAY_WAYS[0] : null,
+        mayBegin: ()=>!placement.trialing() && proposed() >= 0, ...options.placementTiming });
     /**
      * Told what a parked thread is about to be resumed with: which wait it
      * was in and the value the call answers. The only record of that answer
@@ -1109,53 +1101,34 @@ export function createScheduler(options){
     let awaitingExecutor = false;
 
     /**
-     * The processor each executor plays, by its index: its own number until a
-     * thread pinned to one processor has that one played here (`playPinned`),
-     * and the executor that played it takes this one's.
+     * The processor each executor plays, by its index: its own number, or,
+     * while a trade is played (`playPinned`), this executor and the one whose
+     * processor it plays have each other's.
      *
      * @type {number[]}
      */
     const played = [];
     /** @param {number} index */
     const playedBy = index=>played[index] ?? index;
-    /** Processors traded, undone, and when last. */
+    /** Trades made, either way. */
     let trades = 0;
-    let undone = 0;
-    let tradedAt = -Infinity;
-    let playLookedAt = -Infinity;
-    /** No trade is tried before this (`PLAY_BACKOFF_MS`). */
-    let playAfter = -Infinity;
+    /** The processor the trade trial weighs: chosen as a trial begins, kept to the next. */
+    let target = -1;
+    /** Whether the trade trial ran at the last turn, to see one begin. */
+    let wasTrialing = false;
     /**
-     * The executor whose processor this one is to play, running a thread
-     * still: it gives the thread up at its slice's end (`choose`), and the
-     * trade is made at the next look, before a thread pinned to either
-     * processor runs where its mask does not name.
+     * The executor this one is to trade with, running a thread still: it
+     * gives the thread up at its slice's end (`choose`), and the trade is made
+     * at the next turn, before a thread pinned to either processor runs where
+     * its mask does not name.
      */
     let tradeWanted = -1;
-    /** Frames the program presented (`noteFrame`), for a trade's check. */
-    let framesSeen = 0;
-    /**
-     * What the program had done at each look, the last few seconds of them:
-     * a trade's check sets the span after it against one before it.
-     *
-     * @type {{ at: number, frames: number, retired: number }[]}
-     */
-    const playMarks = [];
-    /**
-     * The last trade, while its check is due: the processor and executor it
-     * moved, and the program's rate before it.
-     *
-     * @type {{ processor: number, index: number, before: { frames: number, retired: number,
-     *     ms: number } } | null}
-     */
-    let playCheck = null;
 
     /**
      * The time, in host ms halved every `HOST_HALF_MS`, this executor spent
      * in a thread's calls into the host (`trapTimed`), wherever the thread
      * ran: the call alone, not the switch to another executor's state and
-     * back, so a thread weighs the same played here or there and two
-     * threads' trade is not undone by the measure of it.
+     * back, so a thread weighs the same played here or there.
      *
      * @param {any} thread @param {number} at
      */
@@ -1195,20 +1168,19 @@ export function createScheduler(options){
      * plays; false while that one still runs a thread, which then gives it
      * up at its slice's end and takes nothing new (`tradeWanted`).
      *
-     * @param {any[]} remotes @param {number} index @param {number} at
+     * @param {any[]} remotes @param {number} index
      */
-    const trade = (remotes, index, at)=>{
+    const trade = (remotes, index)=>{
         if (remotes.some(remote=>remote.index === index && remote.busy()))
         {
             tradeWanted = index;
-            playLookedAt = -Infinity;
             return false;
         }
         const here = playedBy(0);
         played[0] = playedBy(index);
         played[index] = here;
         tradeWanted = -1;
-        tradedAt = at;
+        trades++;
         recentPlacements.push(`processor ${played[0]} here, ${here} on e${index}`);
         if (recentPlacements.length > 16)
         {
@@ -1218,85 +1190,16 @@ export function createScheduler(options){
     };
 
     /**
-     * The program's frames and instructions a millisecond between two marks,
-     * by frames where both spans drew a few.
-     *
-     * @param {{ at: number, frames: number, retired: number }} from
-     * @param {{ at: number, frames: number, retired: number }} to
+     * The processor of the thread pinned to one processor whose calls into the
+     * host this executor spends most in (`hostTime`), when that is a share of
+     * its time (`PLAY_FLOOR`) and `PLAY_MARGIN` times what it spends in those
+     * of the thread pinned to its own processor; -1 where there is none.
      */
-    const rateBetween = (from, to)=>({ frames: to.frames - from.frames,
-        retired: to.retired - from.retired, ms: Math.max(1, to.at - from.at) });
-
-    /**
-     * This executor plays the processor of the thread pinned to one processor
-     * whose calls into the host it spends most on (`hostTime`), when that is a
-     * share of its time (`PLAY_FLOOR`) and `PLAY_MARGIN` times what it spends
-     * on the calls of the thread pinned to the processor it plays; the
-     * executor that played it takes this one's. A game pins its render thread
-     * to its last processor and its main thread to its first: the renderer's
-     * every Present and Lock, each a few hundred microseconds of this
-     * executor's, crossed to it from the other while the main thread ran
-     * here, and Call of Duty 4's render thread waited on answers 112 s of its
-     * 119 in slices on eight executors. A count of calls does not say it: the
-     * main thread's are many and cheap, the renderer's few and dear. Played
-     * here, the renderer's calls are answered between its own slices, and
-     * the main thread computes beside it. A program asking which processor it
-     * is on is told the one played (`processorOf`), within its mask as
-     * before; `cpuid`'s APIC id stays the executor's own. Looked at every
-     * `PLAY_LOOK_MS`, a trade kept `PLAY_HOLD_MS` at least; one after which the
-     * program drew fewer frames (or retired fewer instructions) is undone.
-     *
-     * @param {any[]} remotes @param {number} retired  what every executor has retired
-     */
-    const playPinned = (remotes, retired)=>{
+    const proposed = ()=>{
         const at = wall();
-        if (options.playPinned === false || at - playLookedAt < PLAY_LOOK_MS)
-        {
-            return;
-        }
-        playLookedAt = at;
-        const mark = { at, frames: framesSeen, retired };
-        playMarks.push(mark);
-        while (playMarks.length > 2 && at - playMarks[1].at > PLAY_CHECK_MS + PLAY_SETTLE_MS)
-        {
-            playMarks.shift();
-        }
-        if (playCheck !== null)
-        {
-            if (at - tradedAt < PLAY_SETTLE_MS + PLAY_CHECK_MS)
-            {
-                return;
-            }
-            const from = playMarks.find(one=>one.at >= tradedAt + PLAY_SETTLE_MS) ?? mark;
-            const after = rateBetween(from, mark);
-            const { before } = playCheck;
-            const byFrames = before.frames >= 3 && after.frames >= 3;
-            const lost = byFrames ? after.frames / after.ms < before.frames / before.ms
-                * (1 - PLAY_LOSS) : after.retired / after.ms < before.retired / before.ms
-                * (1 - PLAY_LOSS);
-            if (!lost)
-            {
-                playCheck = null;
-                tradeWanted = -1;
-                return;
-            }
-            if (trade(remotes, playCheck.index, at))
-            {
-                undone++;
-                playAfter = at + PLAY_BACKOFF_MS * 2 ** (undone - 1);
-                playCheck = null;
-            }
-            return;
-        }
-        tradeWanted = -1;
-        if (at - tradedAt < PLAY_HOLD_MS || at < playAfter)
-        {
-            return;
-        }
-        /** @type {any} */
-        let best = null;
+        let best = -1;
         let bestTime = 0;
-        let incumbent = 0;
+        let own = 0;
         for (const thread of threads)
         {
             const processor = pinnedTo(thread);
@@ -1305,36 +1208,58 @@ export function createScheduler(options){
                 continue;
             }
             const spent = hostTime(thread, at);
-            if (processor === playedBy(0))
+            if (processor === 0)
             {
-                incumbent = Math.max(incumbent, spent);
+                own = Math.max(own, spent);
             }
             else if (spent > bestTime)
             {
-                best = thread;
+                best = processor;
                 bestTime = spent;
             }
         }
         // The halved sum of a steady share is that share of HOST_HALF_MS / ln 2.
-        if (best === null || bestTime < PLAY_FLOOR * HOST_HALF_MS / Math.LN2
-            || bestTime < PLAY_MARGIN * incumbent)
+        return bestTime >= PLAY_FLOOR * HOST_HALF_MS / Math.LN2 && bestTime >= PLAY_MARGIN * own
+            ? best : -1;
+    };
+
+    /**
+     * This executor plays the processor of the pinned thread whose calls cost
+     * it most (`proposed`), the executor that played it taking this one's,
+     * where the trade trial (`trading`) finds the program faster so. A game
+     * pins its render thread to its last processor and its main thread to its
+     * first: the renderer's every Present and Lock, each a few hundred
+     * microseconds of this executor's, crossed to it from the other while the
+     * main thread ran here, and Call of Duty 4's render thread waited on
+     * answers 112 s of its 119 in slices on eight executors. A count of calls
+     * does not say it: the main thread's are many and cheap, the renderer's
+     * few and dear. Played here, the renderer's calls are answered between its
+     * own slices and the main thread computes on the other; whether the
+     * program gains by it, only the program's frames say, measured in turn
+     * against the processors each on its own executor, as `placement` weighs
+     * spreading. A program asking which processor it is on is told the one
+     * played (`processorOf`), within its mask as before; `cpuid`'s APIC id
+     * stays the executor's own.
+     *
+     * @param {any[]} remotes @param {number} retired  what every executor has retired
+     */
+    const playPinned = (remotes, retired)=>{
+        trading.tick(retired);
+        const trialing = trading.trialing();
+        if (trialing && !wasTrialing)
         {
+            target = proposed();
+        }
+        wasTrialing = trialing;
+        const want = trading.mode() === PLAY_WAYS[1] && target > 0 ? target : 0;
+        const here = playedBy(0);
+        if (here === want)
+        {
+            tradeWanted = -1;
             return;
         }
-        const processor = pinnedTo(best);
-        let index = played.indexOf(processor);
-        index = index >= 0 ? index : processor;
-        if (playedBy(index) !== processor || index === 0)
-        {
-            return;
-        }
-        const first = playMarks.find(one=>one.at >= at - PLAY_CHECK_MS) ?? mark;
-        const before = rateBetween(first, mark);
-        if (trade(remotes, index, at))
-        {
-            trades++;
-            playCheck = { processor, index, before };
-        }
+        // One pair traded at a time: back to its own first, then to the one wanted.
+        trade(remotes, here !== 0 ? here : want);
     };
 
     /**
@@ -2263,8 +2188,8 @@ export function createScheduler(options){
 
         /** A frame the program presented: what its threads' placement is measured by. */
         noteFrame(){
-            framesSeen++;
             placement.frame();
+            trading.frame();
         },
 
         /** How many threads are ready to run with no executor running them. */
@@ -2735,10 +2660,10 @@ export function createScheduler(options){
                 sharedTime: JSON.stringify(sharedTime),
                 placement: JSON.stringify(placement.diagnostics()),
                 // The processor each executor plays, where a trade moved one
-                // (`playPinned`), how many trades, and how many were undone.
+                // (`playPinned`), and how many trades; the trade trial's account.
                 played: trades === 0 ? '' : `${Array.from({ length: Math.max(played.length, 1) },
-                    (_, index)=>playedBy(index)).join(',')} after ${trades}`
-                    + (undone === 0 ? '' : `, ${undone} undone`),
+                    (_, index)=>playedBy(index)).join(',')} after ${trades}`,
+                trading: JSON.stringify(trading.diagnostics()),
                 recentWakes: recentWakes.slice(),
                 recentByThread: threads.filter(thread=>thread.state !== ThreadState.TERMINATED)
                     .map(thread=>`${thread.name}: ${(thread.recent ?? []).join(' > ')}`),

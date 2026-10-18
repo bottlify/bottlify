@@ -36,9 +36,17 @@
 export const Placement = Object.freeze({ SPREAD: 'spread', CONCENTRATE: 'concentrate' });
 
 /**
+ * The same trial weighs other pairs of ways: whether the process's executor
+ * plays a pinned thread's processor (`playPinned` in the scheduler), with
+ * `ways`, `initial` and `mayBegin`, the one trial at a time.
+ *
  * @typedef {Object} PlacementOptions
  * @property {() => number} now  wall milliseconds
- * @property {'spread' | 'concentrate' | null} [fixed]  one way only, never tried
+ * @property {[string, string]} [ways]  the two ways, the safer first: concentrate, spread
+ * @property {string} [initial]  the way before the first trial: the riskier one
+ * @property {() => boolean} [mayBegin]  whether a trial due may begin now: not while
+ *     another trial measures the same program
+ * @property {string | null} [fixed]  one way only, never tried
  * @property {number} [firstTrialMs]  how long after the start the first trial begins
  * @property {number} [windowMs]  a window's least length after its settling
  * @property {number} [maxWindowMs]  a window's most, frames or not
@@ -55,7 +63,7 @@ export const Placement = Object.freeze({ SPREAD: 'spread', CONCENTRATE: 'concent
 
 /**
  * @typedef {Object} Window
- * @property {'spread' | 'concentrate'} mode
+ * @property {string} mode
  * @property {number} ms
  * @property {number} presented  frames presented in it
  * @property {number} frames  intervals between them
@@ -65,7 +73,8 @@ export const Placement = Object.freeze({ SPREAD: 'spread', CONCENTRATE: 'concent
 
 /** @param {PlacementOptions} options */
 export function createPlacement(options){
-    const { now, fixed = null } = options;
+    const { now, fixed = null, mayBegin = ()=>true } = options;
+    const [safe, risky] = options.ways ?? [Placement.CONCENTRATE, Placement.SPREAD];
     const firstTrialMs = options.firstTrialMs ?? 2000;
     const windowMs = options.windowMs ?? 800;
     const maxWindowMs = options.maxWindowMs ?? 2500;
@@ -81,13 +90,10 @@ export function createPlacement(options){
     /**
      * Spread until the first trial: a program that computes on all its threads
      * from the start has them at once, and a game's first seconds are its load.
-     *
-     * @type {'spread' | 'concentrate'}
      */
-    let mode = fixed ?? Placement.SPREAD;
-    /** The trial's ways, in the order their windows run: in turn, concentrated first. */
-    const order = Array.from({ length: 2 * rounds },
-        (_, i)=>(i % 2 === 0 ? Placement.CONCENTRATE : Placement.SPREAD));
+    let mode = fixed ?? options.initial ?? risky;
+    /** The trial's ways, in the order their windows run: in turn, the safer first. */
+    const order = Array.from({ length: 2 * rounds }, (_, i)=>(i % 2 === 0 ? safe : risky));
     /** @type {Window[]} */
     let windows = [];
     /** The window being measured, once its settling is over; null while it settles. */
@@ -98,7 +104,7 @@ export function createPlacement(options){
     let nextTrial = switchedAt + firstTrialMs;
     let trialAt = -1;
     let hold = holdMs;
-    /** @type {'spread' | 'concentrate' | null} */
+    /** @type {string | null} */
     let lastWinner = null;
     /** The last three frames' times, oldest first: presenting while they lie within a
      * window's longest, a window then measured by frames. @type {number[]} */
@@ -107,12 +113,17 @@ export function createPlacement(options){
     let lastByFrames = null;
     /** Since when the program has presented otherwise than the last trial measured, or -1. */
     let changedSince = -1;
-    const counted = { trials: 0, spread: 0, concentrate: 0, byFrames: 0, last: '' };
+    /**
+     * Trials, each way's wins by its name, those decided by frames, the last.
+     *
+     * @type {Record<string, any>}
+     */
+    const counted = { trials: 0, [safe]: 0, [risky]: 0, byFrames: 0, last: '' };
     /** Whether the program presents now: its last three frames within a window's longest. */
     const presenting = (/** @type {number} */ at)=>recent.length === 3
         && at - recent[0] <= maxWindowMs;
 
-    /** @param {'spread' | 'concentrate'} next @param {number} at */
+    /** @param {string} next @param {number} at */
     const switchTo = (next, at)=>{
         if (next !== mode)
         {
@@ -131,7 +142,7 @@ export function createPlacement(options){
      */
     const rates = done=>{
         const byFrames = done.some(one=>one.frames >= 2);
-        /** @param {'spread' | 'concentrate'} way */
+        /** @param {string} way */
         const rate = way=>{
             const of = done.filter(one=>one.mode === way);
             /** @param {(one: Window) => number} field */
@@ -144,27 +155,28 @@ export function createPlacement(options){
                 ? total(one=>one.frames) / total(one=>one.framesMs)
                 : total(one=>one.presented) / total(one=>one.ms);
         };
-        return { byFrames, spread: rate(Placement.SPREAD),
-            concentrated: rate(Placement.CONCENTRATE) };
+        return { byFrames, risky: rate(risky), safe: rate(safe) };
     };
 
-    /** @param {Window[]} done @returns {'spread' | 'concentrate'} */
+    /** @param {Window[]} done @returns {string} */
     const decide = done=>{
-        const { byFrames, spread, concentrated } = rates(done);
-        const winner = spread > concentrated * (1 + margin)
-            ? Placement.SPREAD : Placement.CONCENTRATE;
+        const rated = rates(done);
+        const winner = rated.risky > rated.safe * (1 + margin) ? risky : safe;
         counted.trials++;
         counted[winner]++;
-        counted.byFrames += byFrames ? 1 : 0;
-        lastByFrames = byFrames;
-        counted.last = `${winner} ${byFrames ? 'frames' : 'retired'}`
-            + ` spread ${spread.toPrecision(3)} concentrated ${concentrated.toPrecision(3)}`;
+        counted.byFrames += rated.byFrames ? 1 : 0;
+        lastByFrames = rated.byFrames;
+        counted.last = `${winner} ${rated.byFrames ? 'frames' : 'retired'}`
+            + ` ${risky} ${rated.risky.toPrecision(3)} ${safe} ${rated.safe.toPrecision(3)}`;
         return winner;
     };
 
     return {
-        /** The way threads go now. @returns {'spread' | 'concentrate'} */
+        /** The way threads go now. @returns {string} */
         mode: ()=>mode,
+
+        /** Whether a trial is measuring the program now. */
+        trialing: ()=>trialAt >= 0,
 
         /**
          * A frame the program presented, now.
@@ -201,7 +213,8 @@ export function createPlacement(options){
             {
                 changedSince = lastByFrames === null || presenting(at) === lastByFrames ? -1
                     : changedSince < 0 ? at : changedSince;
-                if (at < nextTrial && (changedSince < 0 || at - changedSince < changeMs))
+                if (at < nextTrial && (changedSince < 0 || at - changedSince < changeMs)
+                    || !mayBegin())
                 {
                     return;
                 }
@@ -230,8 +243,8 @@ export function createPlacement(options){
                 frames: Math.max(0, open.frames - 1), framesMs: open.lastFrame - open.firstFrame });
             open = null;
             const sofar = windows.length === 2 ? rates(windows) : null;
-            const settled = sofar !== null && (sofar.spread > sofar.concentrated * (1 + clear)
-                || sofar.concentrated > sofar.spread * (1 + clear));
+            const settled = sofar !== null && (sofar.risky > sofar.safe * (1 + clear)
+                || sofar.safe > sofar.risky * (1 + clear));
             if (windows.length < order.length && !settled)
             {
                 switchTo(order[windows.length], at);
@@ -248,6 +261,7 @@ export function createPlacement(options){
             nextTrial = at + hold;
         },
 
+        /** The way now, the trials' account and the hold. @returns {Record<string, any>} */
         diagnostics: ()=>({ mode, fixed, ...counted, holdMs: hold }),
     };
 }

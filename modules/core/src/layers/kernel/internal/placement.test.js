@@ -129,3 +129,31 @@ test('a game far slower spread is tried a few times, its slow windows ended earl
     assert.ok(time.spread < 0.03 * (time.spread + time.concentrate),
         `spread ${time.spread} ms of ${time.spread + time.concentrate}`);
 });
+
+test('another pair of ways is weighed alike: the safer one first, no trial while another runs',
+    ()=>{
+        // The scheduler weighs a trade of processors with the same trial, and
+        // two trials at once would each measure the other's switches.
+        let clock = 0;
+        let other = true;
+        const trial = createPlacement({ now: ()=>clock, ways: ['own', 'played'], initial: 'own',
+            mayBegin: ()=>!other });
+        let retired = 0;
+        /** @type {Record<string, number>} */
+        const perMs = { own: 100, played: 300 };
+        /** @param {number} ms */
+        const go = ms=>{
+            for (const until = clock + ms; clock < until; clock += 2)
+            {
+                retired += 2 * perMs[trial.mode()];
+                trial.tick(retired);
+            }
+        };
+        go(10_000);
+        assert.deepEqual([trial.mode(), trial.trialing(), trial.diagnostics().trials],
+            ['own', false, 0], 'the first way kept while another trial runs');
+        other = false;
+        go(10_000);
+        assert.deepEqual([trial.mode(), trial.diagnostics().trials, trial.diagnostics().played],
+            ['played', 1, 1], JSON.stringify(trial.diagnostics()));
+    });
