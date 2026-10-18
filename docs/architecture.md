@@ -466,9 +466,10 @@ writes (section 7).
   its Present and Lock a few hundred microseconds each, pinned to the last processor while its
   main thread is pinned to the first) has that processor played by the process's own executor,
   where its calls are answered, and the executor that played it takes the process's
-  (`cpu.playPinned`). The time is the executor's own, measured on every answer, for a share of it
-  and twice what the calls of the thread pinned to the processor it plays take: a count of calls
-  does not say it, as a main thread's are many and cheap. GetCurrentProcessorNumber answers the
+  (`cpu.playPinned`). The time is that of the calls themselves, wherever the thread runs, halved
+  every second; the trade is made at 5% of the executor's time and twice what the calls of the
+  thread pinned to the processor it plays take. A count of calls does not say it: a main
+  thread's are many and cheap. GetCurrentProcessorNumber answers the
   processor played, so no thread is told of one its mask does not name. A trade is kept five
   seconds at least, and undone, not tried again for a minute, when the program draws fewer frames
   after it (or retires fewer instructions, where it draws none). The process's own thread runs its threads
