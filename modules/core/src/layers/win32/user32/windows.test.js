@@ -6315,3 +6315,31 @@ test('a window painted while hidden is erased when it is shown, before ShowWindo
     assert.deepEqual(dispatched.filter(entry=>[WM_NCPAINT, WM_ERASEBKGND].includes(entry.message))
         .map(entry=>entry.message), [WM_NCPAINT, WM_ERASEBKGND]);
 });
+
+test('a window made the foreground one and destroyed hands the run\'s foreground and focus back',
+    async()=>{
+        // A game's loader: its window takes the focus, then a maximised popup is
+        // made, brought to the foreground and destroyed at once. Windows makes
+        // the window before it active again, and the run's keyboard goes there;
+        // a run whose foreground and focus went with the popup sent no key to
+        // anybody.
+        const directory = createWindowDirectory();
+        const { memory, fns } = setup({ directory });
+        putClass(memory);
+        fns.RegisterClassA.handler([CLASS_STRUCT]);
+        const WS_POPUP = 0x80000000 | 0;
+        const WS_MAXIMIZE = 0x01000000;
+        const main = createWindow(fns, memory, { style: WS_POPUP });
+        await fns.ShowWindow.handler([main, 1]);
+        await fns.SetFocus.handler([main]);
+        assert.equal(directory.focus(), main);
+        const flash = createWindow(fns, memory, { style: WS_POPUP | WS_VISIBLE | WS_MAXIMIZE });
+        await fns.ShowWindow.handler([flash, 3]);
+        assert.equal(await fns.SetForegroundWindow.handler([flash]), 1);
+        await fns.SetActiveWindow.handler([flash]);
+        assert.equal(directory.foreground(), flash, 'the popup came to the foreground');
+        await fns.DestroyWindow.handler([flash]);
+        assert.equal(fns.GetActiveWindow.handler([]), main, 'the window before it is active');
+        assert.equal(directory.foreground(), main, 'and the run\'s foreground');
+        assert.equal(directory.focus(), main, 'and has the focus');
+    });

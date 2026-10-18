@@ -2458,7 +2458,14 @@ export function createWindowFunctions(host){
         const tell = message=>(told === 'all' || (told === 'ncdestroy' && message === WM_NCDESTROY)
             ? send(record.hwnd, message, 0, 0, on)
             : 0);
-        return andThen(tell(WM_DESTROY), ()=>{
+        // The active window hands the activation on before WM_DESTROY, as
+        // Windows hides it first (Wine's WINPOS_ActivateOtherWindow): the
+        // window before it is active again, the run's foreground and focus
+        // with it. A run whose foreground and focus went with the window sent
+        // the keyboard to nobody -- a game's loader brought a popup forward
+        // and destroyed it at once, and no key reached the game after.
+        const handing = record.hwnd === active ? activateOther(record, on) : 0;
+        return andThen(handing, ()=>andThen(tell(WM_DESTROY), ()=>{
             // Its children and the windows it owns go with it.
             const children = [...windows.values()].filter(child=>child !== record
                 && !child.destroyed
@@ -2481,7 +2488,7 @@ export function createWindowFunctions(host){
                     afterChange(watched);
                     return andThen(eraseShown(on), ()=>1);
                 }));
-        });
+        }));
     };
 
     /**
