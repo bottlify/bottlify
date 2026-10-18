@@ -315,3 +315,147 @@ test(`three preempted threads allocate, fill, check and free`,
             Object.fromEntries(Object.entries(crossed).filter(([name])=>name.startsWith('<')
                 && /heap|malloc|free|size/.test(name))))}`);
     });
+
+/**
+ * Seeded programs over eight slots of GlobalAlloc's blocks, built twice: with
+ * GlobalAlloc and GlobalFree, which the guest answers over the process heap's
+ * own routines, and with LocalAlloc and LocalFree, the same calls only the
+ * host answers. A block's address differs between the two, so what folds into
+ * the exit code is what a program can rely on: whether an allocation came
+ * back, GlobalSize of it, a pattern written through it read back, a zeroed
+ * block's first bytes, and what a free answers -- of a live block, of NULL,
+ * and of a pointer that was never a block.
+ *
+ * @param {number} seed @param {number} count @param {boolean} global
+ */
+function globalProgram(seed, count, global){
+    let state = seed >>> 0;
+    const pick = (/** @type {number} */ n)=>{
+        state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+        return state % n;
+    };
+    const SIZES = [1, 7, 8, 24, 100, 256, 1000, 1024, 1025, 4000, 70000, 0];
+    /** @type {boolean[]} */
+    const live = new Array(8).fill(false);
+    /** @type {{ op: string, slot: number, size: number, zero: boolean, byte: number }[]} */
+    const ops = [];
+    for (let i = 0; i < count; i++)
+    {
+        const slot = pick(8);
+        const roll = pick(10);
+        if (!live[slot] || roll < 3)
+        {
+            if (live[slot])
+            {
+                ops.push({ op: 'free', slot, size: 0, zero: false, byte: 0 });
+            }
+            ops.push({ op: 'alloc', slot, size: SIZES[pick(SIZES.length)], zero: pick(2) === 1,
+                byte: pick(256) });
+            live[slot] = true;
+        }
+        else
+        {
+            ops.push({ op: ['size', 'check', 'free', 'null', 'stray'][roll % 5], slot, size: 0,
+                zero: false, byte: 0 });
+            if (roll % 5 === 2)
+            {
+                live[slot] = false;
+            }
+        }
+    }
+    const alloc = global ? 'GlobalAlloc' : 'LocalAlloc';
+    const free = global ? 'GlobalFree' : 'LocalFree';
+    return buildExe({
+        imports: { 'KERNEL32.dll': [alloc, free, 'GlobalSize', 'ExitProcess'] },
+        codeSize: 0x20000,
+        data: { slots: new Array(32).fill(0), sizes: new Array(32).fill(0),
+            stray: new Array(16).fill(0) },
+        code: (/** @type {any} */ context)=>{
+            const { iat, at } = context;
+            const call = (/** @type {string} */ name)=>[0xff, 0x15, ...u32(iat(name))];
+            const slotAt = (/** @type {number} */ slot)=>at('slots') + slot * 4;
+            // imul edi, edi, 31; add edi, eax
+            const fold = [0x6b, 0xff, 0x1f, 0x01, 0xc7];
+            /** @type {any[]} */
+            const code = [[0x31, 0xff]];
+            let label = 0;
+            for (const { op, slot, size, zero, byte } of ops)
+            {
+                if (op === 'alloc')
+                {
+                    // slots[slot] = alloc(flags, size); sizes[slot] = size
+                    code.push([0x68, ...u32(size), 0x6a, zero ? 0x40 : 0x00, ...call(alloc),
+                        0xa3, ...u32(slotAt(slot)),
+                        0xc7, 0x05, ...u32(at('sizes') + slot * 4), ...u32(size)]);
+                    // whether it came back
+                    code.push([0x85, 0xc0, 0x0f, 0x95, 0xc0, 0x0f, 0xb6, 0xc0, ...fold]);
+                    const skip = `skip${label++}`;
+                    // a zeroed block: its first (up to) four bytes, folded; then fill it
+                    code.push([0x8b, 0x15, ...u32(slotAt(slot)), 0x85, 0xd2],
+                        { jump: JE, to: skip });
+                    if (zero && size >= 4)
+                    {
+                        code.push([0x8b, 0x02, ...fold]);
+                    }
+                    if (size > 0)
+                    {
+                        // push edi; mov edi, edx; mov ecx, size; mov al, byte; rep stosb; pop edi
+                        code.push([0x57, 0x89, 0xd7, 0xb9, ...u32(size), 0xb0, byte,
+                            0xf3, 0xaa, 0x5f]);
+                    }
+                    code.push(skip);
+                }
+                else if (op === 'size')
+                {
+                    code.push([0xff, 0x35, ...u32(slotAt(slot)), ...call('GlobalSize'), ...fold]);
+                }
+                else if (op === 'check')
+                {
+                    // the block's last byte is its fill
+                    const skip = `skip${label++}`;
+                    code.push([0x8b, 0x15, ...u32(slotAt(slot)), 0x85, 0xd2],
+                        { jump: JE, to: skip },
+                        [0x8b, 0x0d, ...u32(at('sizes') + slot * 4), 0x85, 0xc9],
+                        { jump: JE, to: skip },
+                        [0x0f, 0xb6, 0x44, 0x0a, 0xff, ...fold], skip);
+                }
+                else if (op === 'free')
+                {
+                    // the answer: 0, or 1 for the handle back
+                    code.push([0xff, 0x35, ...u32(slotAt(slot)), ...call(free),
+                        0x85, 0xc0, 0x0f, 0x95, 0xc0, 0x0f, 0xb6, 0xc0, ...fold,
+                        0xc7, 0x05, ...u32(slotAt(slot)), ...u32(0)]);
+                }
+                else if (op === 'null')
+                {
+                    code.push([0x6a, 0x00, ...call(free), ...fold]);
+                }
+                else
+                {
+                    // a pointer into the program's data, never a block: the handle back
+                    code.push([0x68, ...u32(at('stray') + 8), ...call(free),
+                        0x2d, ...u32(at('stray') + 8), ...fold]);
+                }
+            }
+            code.push([0x57, ...call('ExitProcess')]);
+            return [...assemble(code)];
+        },
+    });
+}
+
+test('seeded programs over GlobalAlloc and GlobalFree, answered in the guest, end as the same'
+    + ' programs over LocalAlloc and LocalFree, which the host answers', { timeout: 120000 },
+async()=>{
+    for (const seed of [1, 2, 3, 4, 5])
+    {
+        const inGuest = await run(globalProgram(seed, 400, true));
+        const inHost = await run(globalProgram(seed, 400, false));
+        assert.equal(inGuest.code >>> 0, inHost.code >>> 0, `seed ${seed}: the answers differ`);
+        const crossed = (inGuest.crossed['KERNEL32.dll!GlobalAlloc'] ?? 0)
+            + (inGuest.crossed['KERNEL32.dll!GlobalFree'] ?? 0);
+        const hostCalls = (inHost.crossed['KERNEL32.dll!LocalAlloc'] ?? 0)
+            + (inHost.crossed['KERNEL32.dll!LocalFree'] ?? 0);
+        assert.ok(crossed < hostCalls / 2, `seed ${seed}: ${crossed} GlobalAlloc and GlobalFree`
+            + ` calls crossed, ${hostCalls} LocalAlloc and LocalFree`);
+    }
+});

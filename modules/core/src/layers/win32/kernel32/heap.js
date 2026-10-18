@@ -20,7 +20,7 @@
  */
 
 import {
-    heapAllocCode, heapFreeCode, heapReAllocCode, heapSizeCode,
+    globalAllocCode, globalFreeCode, heapAllocCode, heapFreeCode, heapReAllocCode, heapSizeCode,
 } from './guest-heap.js';
 
 /** Flags the guest passes; the rest of HeapAlloc's flags do not change behaviour here. */
@@ -1240,7 +1240,8 @@ export function createHeapFunctions(host){
      * The guest's routines, placed once on the first bind of any of them: each
      * falls back to its export's handler through a trap of its own.
      *
-     * @type {Record<'alloc' | 'free' | 'size' | 'reAlloc', number> | null}
+     * @type {Record<'alloc' | 'free' | 'size' | 'reAlloc' | 'globalAlloc' | 'globalFree', number>
+     *     | null}
      */
     let routines = null;
     /** @param {import('./sync.js').GuestBuilder} builder */
@@ -1252,7 +1253,9 @@ export function createHeapFunctions(host){
         const guest = /** @type {NonNullable<typeof guestHeap>} */ (guestHeap);
         const placement = guest.placement();
         /**
-         * @param {string} label @param {'HeapAlloc' | 'HeapFree' | 'HeapSize' | 'HeapReAlloc'} name
+         * @param {string} label
+         * @param {'HeapAlloc' | 'HeapFree' | 'HeapSize' | 'HeapReAlloc' | 'GlobalAlloc'
+         *     | 'GlobalFree'} name
          * @param {(p: import('./guest-heap.js').Placement, at: number, trap: number)
          *     => Uint8Array} code
          */
@@ -1272,18 +1275,25 @@ export function createHeapFunctions(host){
             host.writeMemory(at, code(placement, at, trap));
             return at;
         };
+        const alloc = place('<heap-alloc>', 'HeapAlloc', heapAllocCode);
+        const free = place('<heap-free>', 'HeapFree', heapFreeCode);
         routines = {
-            alloc: place('<heap-alloc>', 'HeapAlloc', heapAllocCode),
-            free: place('<heap-free>', 'HeapFree', heapFreeCode),
+            alloc,
+            free,
             size: place('<heap-size>', 'HeapSize', heapSizeCode),
             reAlloc: place('<heap-realloc>', 'HeapReAlloc', heapReAllocCode),
+            // The global family over the same routines, on the process heap.
+            globalAlloc: place('KERNEL32.dll!GlobalAlloc', 'GlobalAlloc',
+                (_, at, trap)=>globalAllocCode(at, trap, processHeap, alloc)),
+            globalFree: place('KERNEL32.dll!GlobalFree', 'GlobalFree',
+                (_, at, trap)=>globalFreeCode(at, trap, processHeap, free)),
         };
         return routines;
     };
     /**
      * An export's guest routine where the small blocks are the guest's.
      *
-     * @param {'alloc' | 'free' | 'size' | 'reAlloc'} which
+     * @param {'alloc' | 'free' | 'size' | 'reAlloc' | 'globalAlloc' | 'globalFree'} which
      */
     const routine = which=>(guestHeap && host.allocateCode
         ? {
@@ -1876,7 +1886,10 @@ export function createHeapFunctions(host){
             /** @param {number[]} args */
             handler: ([flags, bytes])=>{
                 const size = bytes >>> 0;
-                const address = allocator.allocate(size === 0 ? 1 : size);
+                // The process heap's, as on Windows NT and as the guest's
+                // routine allocates it: HeapFree and HeapSize of the process
+                // heap take the block too.
+                const address = allocator.allocate(size === 0 ? 1 : size, { owner: processHeap });
                 if (address === 0)
                 {
                     return 0;
@@ -1887,6 +1900,7 @@ export function createHeapFunctions(host){
                 }
                 return address;
             },
+            ...routine('globalAlloc'),
         },
 
         /**
@@ -1939,6 +1953,7 @@ export function createHeapFunctions(host){
                 // which is the opposite of almost everything else in this file.
                 return allocator.free(address) ? 0 : address;
             },
+            ...routine('globalFree'),
         },
 
         /** LPVOID GlobalLock(HGLOBAL hMem) */
@@ -2006,7 +2021,7 @@ export function createHeapFunctions(host){
             /** @param {number[]} args */
             handler: ([flags, bytes])=>{
                 const size = bytes >>> 0;
-                const address = allocator.allocate(size === 0 ? 1 : size);
+                const address = allocator.allocate(size === 0 ? 1 : size, { owner: processHeap });
                 if (address !== 0 && (flags & GMEM_ZEROINIT))
                 {
                     zeroHandedOver(address, size);
