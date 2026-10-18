@@ -9468,39 +9468,61 @@ export async function createApp(options){
      *
      * @param {any} machineInput  the input of the process the facade speaks for
      */
-    const routedInput = machineInput=>({
-        ...machineInput,
-        /** @param {any} event */
-        send: event=>{
-            const { target, dropped } = inputRecipient(system.windows?.manager, event,
-                machineInput.cursor?.() ?? null);
-            if (dropped)
+    const routedInput = machineInput=>{
+        /**
+         * The input the pointer's last motion went to: a press that names no
+         * place is placed where that input's cursor is. The facade's own
+         * cursor stood where it was while another program's window took the
+         * motion, and the press went to nobody. Null for a process across a
+         * link, whose cursor is there: the manager places the press itself.
+         *
+         * @type {any}
+         */
+        let pointed = machineInput;
+        /** @param {any} event @param {any} input */
+        const moved = (event, input)=>{
+            if (event.kind === 'pointerMove')
             {
-                return false;
+                pointed = input;
             }
-            for (const built of target === null ? [] : processes.values())
-            {
-                if (processIds.get(built) === target)
+        };
+        return {
+            ...machineInput,
+            /** @param {any} event */
+            send: event=>{
+                const { target, dropped } = inputRecipient(system.windows?.manager, event,
+                    pointed?.cursor?.() ?? null);
+                if (dropped)
                 {
-                    return built.input.send(event);
+                    return false;
                 }
-            }
-            const inWorkers = [...standingAcross];
-            const process = inWorkers.find(each=>each.id === target) ?? inWorkers.at(-1);
-            if (process)
-            {
-                process.link.call('input', 'send', [event, null]).catch(()=>{});
-                return true;
-            }
-            return machineInput.send(event);
-        },
-        // A route a tool queues clicks and keys on goes the same way: built
-        // on the machine's own send, it took every press to the process the
-        // facade speaks for, whichever program's window was under it.
-        route(){
-            return createInputRoute(event=>this.send(event));
-        },
-    });
+                for (const built of target === null ? [] : processes.values())
+                {
+                    if (processIds.get(built) === target)
+                    {
+                        moved(event, built.input);
+                        return built.input.send(event);
+                    }
+                }
+                const inWorkers = [...standingAcross];
+                const process = inWorkers.find(each=>each.id === target) ?? inWorkers.at(-1);
+                if (process)
+                {
+                    moved(event, null);
+                    process.link.call('input', 'send', [event, null]).catch(()=>{});
+                    return true;
+                }
+                moved(event, machineInput);
+                return machineInput.send(event);
+            },
+            // A route a tool queues clicks and keys on goes the same way: built
+            // on the machine's own send, it took every press to the process the
+            // facade speaks for, whichever program's window was under it.
+            route(){
+                return createInputRoute(event=>this.send(event));
+            },
+        };
+    };
 
     /**
      * The run's windows as a tool reads them (`debug.windows`): every
