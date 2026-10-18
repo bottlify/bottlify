@@ -161,8 +161,22 @@ export const TLS_SLOTS = 64;
  */
 
 /**
+ * @typedef {Object} ThreadLocal
+ * An image's thread-local block, as each thread gets a copy of it.
+ * @property {number} slot          The slot the loader gave the image.
+ * @property {Uint8Array} template  What every copy starts as.
+ * @property {number} size          The template and the zeroes after it.
+ */
+
+/**
  * @param {Object} options
- * @param {(bytes: number) => number} options.allocate  Guest memory, zeroed.
+ * @param {(bytes: number) => number} options.allocate
+ *        Guest memory, zeroed, for what lives as long as the process.
+ * @param {{ allocate: (bytes: number) => number, free: (address: number) => void }}
+ *     [options.threadMemory]
+ *        Guest memory a thread's blocks are taken from and given back to,
+ *        `allocate` answering zero when it has no room. Without it they come
+ *        from `options.allocate` and are never given back.
  * @param {(address: number, bytes: Uint8Array) => void} options.writeMemory
  * @param {number} options.processId
  * @param {{ major: number, minor: number, build: number, servicePackMajor?: number,
@@ -418,6 +432,13 @@ export function createProcessBlocks(options){
         addModule(module);
     }
 
+    // A thread's blocks go when it does: a program that makes a thread per
+    // task and lets each one end has only ever had a few alive, however many
+    // it has made.
+    const threadMemory = options.threadMemory ?? { allocate, free: ()=>{} };
+    /** Every block a thread was given, by its environment block. @type {Map<number, number[]>} */
+    const threadHeld = new Map();
+
     return {
         peb,
         params,
@@ -426,7 +447,8 @@ export function createProcessBlocks(options){
         removeModule,
 
         /**
-         * A block for one thread, with its own thread-local array.
+         * A block for one thread, with its own thread-local array and its own
+         * copy of each image's thread-local block.
          *
          * The array is separate from the block because a program indexes it by
          * a slot number the loader chose, and the block has no room reserved
@@ -434,17 +456,62 @@ export function createProcessBlocks(options){
          * program that reads the pointer and indexes it must find the same
          * values TlsGetValue reports.
          *
+         * Each is written in full, because the memory may be what an ended
+         * thread was given: its block naming that thread, its locals as that
+         * thread left them.
+         *
          * @param {Object} thread
          * @param {number} thread.id
          * @param {number} thread.stackBase   The highest address of its stack.
          * @param {number} thread.stackLimit  The lowest.
-         * @returns {{ teb: number, tls: number }}
+         * @param {ThreadLocal[]} [thread.locals]
+         *        Copied into the array at their slots; a slot past it has
+         *        nowhere to go and is left out.
+         * @returns {{ teb: number, tls: number } | null} null, and nothing
+         *     taken, when the thread memory has no room for all of them
          */
-        createThreadBlock({ id, stackBase, stackLimit }){
-            const teb = allocate(TEB.SIZE);
-            const tls = allocate(TLS_SLOTS * 4);
+        createThreadBlock({ id, stackBase, stackLimit, locals = [] }){
+            /** @type {number[]} */
+            const taken = [];
+            /** @param {number} bytes */
+            const take = bytes=>{
+                const at = threadMemory.allocate(bytes);
+                if (at !== 0)
+                {
+                    taken.push(at);
+                }
+                return at;
+            };
+            const refused = ()=>{
+                for (const at of taken)
+                {
+                    threadMemory.free(at);
+                }
+                return null;
+            };
+            const teb = take(TEB.SIZE);
+            const tls = teb === 0 ? 0 : take(TLS_SLOTS * 4);
+            if (tls === 0)
+            {
+                return refused();
+            }
             writeMemory(teb, new Uint8Array(TEB.SIZE));
             writeMemory(tls, new Uint8Array(TLS_SLOTS * 4));
+            for (const { slot, template, size } of locals)
+            {
+                if (slot >>> 0 >= TLS_SLOTS)
+                {
+                    continue;
+                }
+                const at = take(size);
+                if (at === 0)
+                {
+                    return refused();
+                }
+                writeMemory(at, new Uint8Array(size));
+                writeMemory(at, template);
+                write(tls + slot * 4, at);
+            }
 
             // No handler registered yet. Zero would be an address, and a
             // dispatcher walking the chain would follow it.
@@ -459,7 +526,30 @@ export function createProcessBlocks(options){
             write(teb + TEB.TLS_POINTER, tls);
             write(teb + TEB.PEB, peb);
 
+            threadHeld.set(teb, taken);
             return { teb, tls };
+        },
+
+        /**
+         * Gives back everything `createThreadBlock` gave a thread: for once
+         * the thread has ended and runs nowhere, since until then it still
+         * reads and writes them.
+         *
+         * @param {number} teb
+         * @returns {boolean} false for a block this did not make, or gave back already
+         */
+        releaseThreadBlock(teb){
+            const taken = threadHeld.get(teb);
+            if (taken === undefined)
+            {
+                return false;
+            }
+            threadHeld.delete(teb);
+            for (const at of taken)
+            {
+                threadMemory.free(at);
+            }
+            return true;
         },
     };
 }

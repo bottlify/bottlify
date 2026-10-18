@@ -252,6 +252,9 @@ export function createKernelModule(){
              * rather than dereferencing what disposal took away.
              */
             const live = ()=>!state.disposed;
+            /** The kernel's `threadGone`. @param {any} thread */
+            const threadGone = thread=>thread.state === ThreadState.TERMINATED
+                && !state.scheduler.running(thread);
 
             current = state;
             return {
@@ -317,8 +320,7 @@ export function createKernelModule(){
                     {
                         slot = stacks.allocate({ commit: stackSize, reserve: stackReserve },
                             (/** @type {any} */ owner)=>owner.releasesStack === true
-                                && owner.state === ThreadState.TERMINATED
-                                && owner !== state.scheduler.current());
+                                && threadGone(owner));
                         if (!slot)
                         {
                             log.warn?.('kernel', 'no room in the stack pool for a thread'
@@ -552,6 +554,21 @@ export function createKernelModule(){
                     // signalled by having ended, not by handing anything over.
                     state.sync.releaseAll(thread);
                 },
+
+                /**
+                 * Whether a thread has ended and runs on no executor: nothing
+                 * of it runs again, so what it was given -- its stack, its
+                 * environment block -- may go to another. One ended by another
+                 * goes on running on another executor until that one's slice
+                 * ends. Asked when the next thread is made, as the stack pool
+                 * asks, and not from the call that ends one: that still runs
+                 * on the thread on its way out. A handle still open to it
+                 * needs none of what it was given.
+                 *
+                 * @param {any} thread
+                 * @returns {boolean}
+                 */
+                threadGone: thread=>!live() || threadGone(thread),
 
                 /**
                  * Suspends a thread: it keeps its state -- a wait stays a wait,
