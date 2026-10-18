@@ -31,7 +31,7 @@ import { readTls } from './layers/loader/internal/tls.js';
 import { jumpBytes, relocatablePrefix } from './layers/loader/internal/hooks.js';
 import { mangledCall } from './layers/loader/internal/mangling.js';
 import { mapImage } from './layers/loader/internal/image.js';
-import { createProcessBlocks, TEB } from './layers/win32/kernel32/teb.js';
+import { createProcessBlocks, TEB, TLS_SLOTS } from './layers/win32/kernel32/teb.js';
 import { supportedOsOf, windowsVersion } from './layers/win32/kernel32/versions.js';
 import { GRAPHICS_CHOICES, graphicsChoice } from './layers/graphics/choice.js';
 import { searchesBesideProgram } from './layers/win32/kernel32/modules.js';
@@ -3640,6 +3640,14 @@ async function buildApp(options){
      * } | null}
      */
     let threadBlocks = null;
+    /**
+     * Gives a thread made after the process's first its own copy of every
+     * image's thread-local block, in the slot the image was given, as the
+     * loader does for each thread; set once the blocks are known.
+     *
+     * @type {(tls: number) => void}
+     */
+    let threadLocalBlocks = ()=>{};
 
     /** Range requests outstanding: what a parked guest thread is really on. */
     let fetching = 0;
@@ -4687,6 +4695,7 @@ async function buildApp(options){
                 if (block)
                 {
                     thread.tebAddress = block.teb;
+                    threadLocalBlocks(block.tls);
                 }
             },
             idle: ()=>new Promise(resolve=>idlers.push(()=>resolve(undefined))),
@@ -6191,9 +6200,32 @@ async function buildApp(options){
                 indexAddress: held.base + directory.indexRva,
                 blockAddress,
                 callbacks: directory.callbackRvas.map(rva=>held.base + rva),
+                template: directory.template,
+                size,
             },
         };
     });
+    // Every later thread's blocks are copies of the same templates, in the
+    // slots the first thread's were given. Without them a thread's
+    // thread-local variables were at linear address zero and up, the same
+    // bytes for every thread but the first: Call of Duty 4's renderer and its
+    // two workers kept their scratch buffers' pointers there, and a worker
+    // culled shadow casters into lists another was filling.
+    const templates = withTls.flatMap(held=>(held.tls ? [held.tls] : []));
+    threadLocalBlocks = tls=>{
+        for (const { indexAddress, template, size } of templates)
+        {
+            const slot = memory.readU32(indexAddress);
+            if (slot >= TLS_SLOTS)
+            {
+                continue;
+            }
+            const at = allocateFromHeap(size);
+            memory.writeBytes(at, new Uint8Array(size));
+            memory.writeBytes(at, template);
+            memory.writeU32(tls + slot * 4, at);
+        }
+    };
 
     // Every library the program brought with it is attached before the program
     // runs, on the process's first thread, in dependency order -- which is what
