@@ -361,6 +361,7 @@ test('a thread a timed wait wakes, pinned to an executor still opening, is waite
     assert.equal(turn.ran, null, 'it does not run here');
     assert.equal(turn.elsewhere, true, 'the turn waits for its executor');
     assert.deepEqual([...opening], [1], 'which is opening');
+    assert.match(sched.diagnostics().byThread, /^main 0 .* a2$/, 'the report names its processors');
 });
 
 test('a slice the emulator ran past is counted, not assumed away', ()=>{

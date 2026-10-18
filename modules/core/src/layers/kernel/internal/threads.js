@@ -2484,14 +2484,18 @@ export function createScheduler(options){
                 // Instructions retired, because that is what a quantum is
                 // measured in here and so it is the only currency the scheduler
                 // and the thread agree on. Then the absolute priority it runs
-                // at and how often it had to be boosted to run at all, and its
-                // calls into the host a hundred thousand instructions (`crossRate`).
+                // at and how often it had to be boosted to run at all, its calls
+                // into the host a hundred thousand instructions (`crossRate`),
+                // and the processors its affinity mask allows, where it has one:
+                // a thread pinned elsewhere is never kept on this executor.
                 byThread: threads
                     .map(thread=>`${thread.name} ${thread.instructions} ${thread.state} p${
                         absolutePriority(thread.priority)} b${thread.boosts}${
                         thread.boosted ? '+' : ''}${thread.worstGap === undefined ? ''
                         : ` g${Math.round(thread.worstGap)}/${thread.lateGaps ?? 0}`}`
-                        + ` x${(thread.crossRate * 100_000).toFixed(1)}`)
+                        + ` x${(thread.crossRate * 100_000).toFixed(1)}`
+                        + (thread.affinityMask === undefined ? ''
+                            : ` a${(thread.affinityMask >>> 0).toString(16)}`))
                     .join(' | '),
                 current: current ? current.name : null,
                 // A thread that has been waiting on the same thing for a long
