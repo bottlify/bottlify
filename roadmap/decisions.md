@@ -4,7 +4,7 @@ Behaviour this project chose rather than derived from a specification, plus the 
 standing rules that came out of measuring a real title rather than reading code. Bottlify is under
 no obligation to match any particular reimplementation of Windows: what a program observes is the
 contract, and where no published expectation exists, or a different answer serves this engine
-better, that is a choice — defended here on its merits, revisited when something argues against
+better, that is a choice, defended here on its merits, revisited when something argues against
 it. A bug is not a decision; a bug goes in the code and gets fixed, and an open one is tracked in
 `roadmap/00-TODO-list.md`.
 
@@ -14,173 +14,173 @@ later reconsidered is recorded as reconsidered.
 
 ## A. Win32, COM and the loader
 
-**A1 — DirectDraw refuses a 15- or 24-bit display mode.** `SetDisplayMode` answers
+**A1. DirectDraw refuses a 15- or 24-bit display mode.** `SetDisplayMode` answers
 `DDERR_INVALIDMODE` for 15 and 24 bpp; there is no conformance expectation either way, and this
 layer has no three-byte pixel path to create such a surface with. Revisit if a title is found that
 treats the refusal as fatal. *2026-09-07, `94e7f597`.*
 
-**A2 — This build announces itself as hardware, with transform and lighting.** `GetCaps` reports a
+**A2. This build announces itself as hardware, with transform and lighting.** `GetCaps` reports a
 real 3D hardware device (plus a software rasteriser and a T&L device, in that enumeration order)
-because there is a real GPU underneath and programs of this era branch on the claim — an
+because there is a real GPU underneath and programs of this era branch on the claim: an
 emulation-only enumeration reads as "no accelerator" and sends them into software rendering or a
 refusal. A capability bit claimed here is a promise the renderer has to honour, so this grows only
 as the renderer does. *2026-09-07, `94e7f597`.*
 
-**A3 — `_allmul`/`_alldiv`/`_allrem`/`_aulldiv`/`_aullrem` pop their own 16 argument bytes
+**A3. `_allmul`/`_alldiv`/`_allrem`/`_aulldiv`/`_aullrem` pop their own 16 argument bytes
 (stdcall), against a published spec that calls them cdecl.** The spec's own C implementation is
-declared `WINAPI`, and real compiled call sites emit four pushes with no cleanup after — two
+declared `WINAPI`, and real compiled call sites emit four pushes with no cleanup after: two
 sources against one, so the spec is the one not believed. If this is ever wrong the symptom is a
 stack skewed by 16 bytes with nothing pointing at the cause; remove all five rather than adjust
 them if it is ever suspected. *2026-09-07, `94e7f597`.*
 
-**A4 — `_allshl`/`_allshr`/`_aullshr` are not exported at all**, rather than shipped as a wrong
+**A4. `_allshl`/`_allshr`/`_aullshr` are not exported at all**, rather than shipped as a wrong
 shift: the trap stub already overwrites the operand before any handler runs, so a shift of "the
 stub left behind" is worse than an unresolved import. A save-before-trap variant is the known fix,
 worth building the day a program actually imports them. *2026-09-07, `94e7f597`.*
 
-**A5 — `SYSTEM_BASIC_INFORMATION`'s timer resolution is a plausible 15.625 ms, not a measured
-one** — there is no periodic interrupt here to measure with. Revisit once there is one.
+**A5. `SYSTEM_BASIC_INFORMATION`'s timer resolution is a plausible 15.625 ms, not a measured
+one**: there is no periodic interrupt here to measure with. Revisit once there is one.
 *2026-09-07, `94e7f597`.*
 
-**A6 — ANSI→Unicode widening in ntdll ignores the code page** (byte-for-byte, correct only below
+**A6. ANSI→Unicode widening in ntdll ignores the code page** (byte-for-byte, correct only below
 0x80). `kernel32/locale.js` already has a real single-byte decoder that isn't threaded through yet.
 *2026-09-07, `94e7f597`.*
 
-**A7 — Only `SystemBasicInformation` and `ProcessBasicInformation`/`ProcessDebugPort` are
+**A7. Only `SystemBasicInformation` and `ProcessBasicInformation`/`ProcessDebugPort` are
 answered**; every other information class is refused with a status rather than filled with
 invented numbers. A refusal is a message; a fabricated structure is a wrong answer that propagates.
 *2026-09-07, `94e7f597`.*
 
-**A8 — There is one user, called "User".** `GetUserNameA` answers a constant because there is one
+**A8. There is one user, called "User".** `GetUserNameA` answers a constant because there is one
 account and no way to become another; it exists at all because some programs refuse to start
 without a name. *2026-09-07, `94e7f597`.*
 
-**A9 — The boot ROM installs thirty-two interrupt vectors, not two hundred and fifty-six.** A full
+**A9. The boot ROM installs thirty-two interrupt vectors, not two hundred and fifty-six.** A full
 table was tried and reverted: a vector fired during protected-mode entry and landed in a halting
-stub, which reads as a hang — worse than a loud refusal. *2026-09-07, `94e7f597`.*
+stub, which reads as a hang, worse than a loud refusal. *2026-09-07, `94e7f597`.*
 
-**A10 — Direct3D 7's format and capability lists are narrower than the era's hardware, on
+**A10. Direct3D 7's format and capability lists are narrower than the era's hardware, on
 purpose.** `EnumTextureFormats`/`EnumZBufferFormats` name only what the renderer implements, and
 `d3d7/caps.js` claims only the cull modes, compares, blends, stage ops, filters and address modes
-the pipeline actually has — no fog, stencil, lighting, bump mapping, cube maps or W-buffer. A
+the pipeline actually has: no fog, stencil, lighting, bump mapping, cube maps or W-buffer. A
 capability bit is a promise; claiming one the renderer can't honour sends a program down a fast
 path to a wrong picture instead of a slow path to a right one. Grows only when the renderer grows.
 *2026-09-07, `765d7866`.*
 
-**A11 — Direct3D 8 refuses shaders, cube maps, volume textures, palettes, extra swap chains, the
-hardware cursor, `GetFrontBuffer` and `ProcessVertices`, rather than pretending to support them**
-— the same A10 rule. The sharpest case is shaders: the renderer skips any draw with one bound, so
+**A11. Direct3D 8 refuses shaders, cube maps, volume textures, palettes, extra swap chains, the
+hardware cursor, `GetFrontBuffer` and `ProcessVertices`, rather than pretending to support them**:
+the same A10 rule. The sharpest case is shaders: the renderer skips any draw with one bound, so
 accepting `CreateVertexShader` would put a program on a path where every draw silently vanishes.
 Multisampling is accepted and silently dropped everywhere (aesthetic, not structural); the gamma
 ramp and clip planes are stored state with no effect and report zero capability so a checking
-program is told the truth. `GetDeviceCaps` still writes an almost entirely zero `D3DCAPS8` —
+program is told the truth. `GetDeviceCaps` still writes an almost entirely zero `D3DCAPS8`:
 known and unfixed, contradicts A2 for a program that branches on it. *2026-09-07, `ea288f16`.*
 
-**A12 — Every COM interface method in this engine is stdcall, with the interface pointer first on
-the stack — not thiscall.** Established against real compiled binaries: twelve call sites read
+**A12. Every COM interface method in this engine is stdcall, with the interface pointer first on
+the stack, not thiscall.** Established against real compiled binaries: twelve call sites read
 instruction-by-instruction across five images, plus a census where two COM-only libraries show 24
 and 30 stack-passed call sites and zero register-passed ones, against the same binaries emitting
 thousands of register-form calls for their own C++ virtual calls. This corrected an earlier wrong
-assumption that no test caught, because the harness's own vtables agreed with the mistake — a
+assumption that no test caught, because the harness's own vtables agreed with the mistake: a
 convention is not verified by a test written against the same assumption. `Convention.THISCALL`
 is kept, unused, only because a `msvcp` C++ runtime on the porting list genuinely needs it one day.
 *2026-09-07, `ea288f16`.*
 
-**A13 — A loaded image's whole file stays in host memory, for its resources.** Without it a
+**A13. A loaded image's whole file stays in host memory, for its resources.** Without it a
 library's strings, icons, dialogs, menus and version info answer nothing, since a resource is read
 from the file rather than the mapping. Known cost: a large title's twenty libraries hold tens of
-megabytes host-side for the process's life. The alternative — re-reading from the volume per
-resource call — costs a guest-thread wait, which this project ranks above memory. Revisit only
+megabytes host-side for the process's life. The alternative (re-reading from the volume per
+resource call) costs a guest-thread wait, which this project ranks above memory. Revisit only
 with a measurement that says memory matters more. *2026-09-07, `ea288f16`.*
 
-**A15 — `DllMain`'s third argument is 1 (only its non-nullness is contractual) for a program-import
+**A15. `DllMain`'s third argument is 1 (only its non-nullness is contractual) for a program-import
 load, and would be NULL for `LoadLibrary`.** A real library's archive code built its hash table
-twice — once for itself, once (wrongly) for the dynamic-load path — when told the wrong thing,
+twice, once for itself and once (wrongly) for the dynamic-load path, when told the wrong thing,
 silently corrupting every later lookup. `DLL_PROCESS_DETACH` carries the same distinction and will
 matter once detach is implemented. *2026-09-08, `43aad592`.*
 
-**A16 — A named Win32 object (event, mutex) is destroyed, and its name released, when its last
-handle closes** — checked on every named create, not cached. Needed for the create-check-close-
+**A16. A named Win32 object (event, mutex) is destroyed, and its name released, when its last
+handle closes**, checked on every named create, not cached. Needed for the create-check-close-
 create-again single-instance idiom to work at all. *2026-09-08, `43aad592`.*
 
-**A17 — `VirtualAlloc` places a reservation on a 64 KiB boundary**, matching the granularity
+**A17. `VirtualAlloc` places a reservation on a 64 KiB boundary**, matching the granularity
 `GetSystemInfo` reports, because an allocator that recovers its segment from the top bits of a
 page-aligned base corrupts silently if handed a merely page-aligned one. Costs address space, the
 resource this engine has most of. *2026-09-08, `43aad592`.*
 
-**A18 — A device's cursor advances on the run loop's own clock, not only when the guest calls
+**A18. A device's cursor advances on the run loop's own clock, not only when the guest calls
 in.** A program is entitled to hand a buffer to a wave device and spin on its `WHDR_DONE` flag
-without ever polling an API — measured at 80% of one real title's instructions sitting on that
-spin. Generalised: anything a guest can wait on without making a call has to be driven from the
+without ever polling an API (measured at 80% of one real title's instructions sitting on that
+spin). Generalised: anything a guest can wait on without making a call has to be driven from the
 scheduler. *2026-09-08, `33c69c47`.*
 
-**A19 — A COM method receives its arguments with the `this` pointer already stripped** —
+**A19. A COM method receives its arguments with the `this` pointer already stripped**:
 `bridge/internal/vtable.js`'s own contract. Two seams (DirectSound, DirectInput) were written as
 though it hadn't been, reading every argument one slot late, and their own test fixtures agreed
 with the bug instead of the bridge. Both now drive the real vtable publisher by slot number rather
 than a stand-in. *2026-09-08, `33c69c47`.*
 
-**A20 — DirectShow answers, and answers that it cannot render** (`RenderFile` →
+**A20. DirectShow answers, and answers that it cannot render** (`RenderFile` →
 `VFW_E_CANNOT_RENDER`, `Run` queues `EC_ERRORABORT`) rather than hiding the file so the program
 never asks. A program that plays a cinematic sits in a modal loop until the graph reports an
 outcome; with no graph and no error, that loop never exits. *2026-09-08, `33c69c47`.*
 
-**A21 — The guest's clock is credited with the wall time a slice actually took, not just the
-slices the guest ran.** Everything between two slices — the yield, the mix, the polls — used to
+**A21. The guest's clock is credited with the wall time a slice actually took, not just the
+slices the guest ran.** Everything between two slices (the yield, the mix, the polls) used to
 pass on the wall clock without moving virtual time, so a device paced by that clock (a
 `DirectSound` cursor) never finished a buffer for a title that spins on it instead of waiting.
 Capped at a quarter second so a genuine stall (a fetch, a hidden tab) isn't handed to the program
 as time it spent. *2026-09-08, `33f251d6`.*
 
-**A22 — `WM_NCCREATE` and then `WM_CREATE` are sent when a window is made.** A window procedure
+**A22. `WM_NCCREATE` and then `WM_CREATE` are sent when a window is made.** A window procedure
 does its real setup in `WM_CREATE`; without it a window looks real and does nothing. `WM_NCCREATE`
 was at first left out, because it meant running guest code twice from one host call with the
 second starting while the first unwound; creation has since come to chain the CBT hook,
 `WM_CREATE`, `WM_SIZE` and `WM_MOVE` each after the previous one's answer, so that no longer held,
-and a procedure that keeps `lpCreateParams` from `WM_NCCREATE` -- a common way to bind a window to
-its object -- never got it. It is sent first now, and `FALSE` from it refuses the window, as user32's
+and a procedure that keeps `lpCreateParams` from `WM_NCCREATE` (a common way to bind a window to
+its object) never got it. It is sent first now, and `FALSE` from it refuses the window, as user32's
 message tests pin. *2026-09-08, `33f251d6`; revised 2026-09-26, `54c1d1f`.*
 
-**A23 — `DefWindowProc` does nothing with `WM_DESTROY`**, rather than posting a quit. Windows
+**A23. `DefWindowProc` does nothing with `WM_DESTROY`**, rather than posting a quit. Windows
 programs destroy windows constantly (dialogs, tooltips, splash screens) and pass `WM_DESTROY` to
 the default handler with nothing to add; posting a quit there ended the whole process on every one
 of those. Ending the message loop is the main window's own `PostQuitMessage` call. *2026-09-08,
 `33f251d6`.*
 
-**A24 — `SetTimer` makes a real timer, due against the guest's own clock, and `WM_TIMER` is
-synthesised when a program asks for a message and finds nothing else** — the way Windows does it,
+**A24. `SetTimer` makes a real timer, due against the guest's own clock, and `WM_TIMER` is
+synthesised when a program asks for a message and finds nothing else**, the way Windows does it,
 so a long handler doesn't leave a backlog. Refusing outright, tried first, is indefensible once
 there is a clock to be due against. *2026-09-08, `33f251d6`.*
 
-**A25 — A DirectShow graph with nothing to play finishes at once (`EC_COMPLETE`), rather than
+**A25. A DirectShow graph with nothing to play finishes at once (`EC_COMPLETE`), rather than
 `RenderFile` refusing outright.** A program checking `RenderFile`, releasing the graph it can't use
-and arming its own caption timer unconditionally then dereferences a pointer it already freed —
+and arming its own caption timer unconditionally then dereferences a pointer it already freed:
 refusing correctly still crashes it. An empty graph takes the same "finished" path a real film
 does. *2026-09-08, `33f251d6`.*
 
-**A26 — A thread handle is waitable: `WaitForSingleObject` treats a thread as an object that
+**A26. A thread handle is waitable: `WaitForSingleObject` treats a thread as an object that
 signals once and stays signalled on ending**, nothing taken from it so a second join doesn't hang
 forever. *2026-09-08, `33f251d6`.*
 
-**A27 — Every field a structure declares gets written, never a partial table of "the fields anyone
-fills in."** `D3DCAPS8` was tabulated as a handful of fields and every one was in the wrong offset
-— the real maximum texture size landed on the repeat-limit field and read as zero, so a program
+**A27. Every field a structure declares gets written, never a partial table of "the fields anyone
+fills in."** `D3DCAPS8` was tabulated as a handful of fields and every one was in the wrong offset:
+the real maximum texture size landed on the repeat-limit field and read as zero, so a program
 halving a texture until it fit halved it forever (97% of one measured profile on that one
 instruction). A partial table is not a partial implementation; it's a wrong one. *2026-09-08,
 `33f251d6`.*
 
-**A28 — A Direct3D device's per-draw state (render state, transforms, stream/index sources, the
+**A28. A Direct3D device's per-draw state (render state, transforms, stream/index sources, the
 vertex shader handle, buffer lock/unlock) lives in a guest-memory block the guest writes directly,
 and the host trusts none of it.** The block is one-way (guest writes it; host only mirrors its own
 state into it), untrusted (every device-method entry diffs the whole block against the host's copy
 and replays each difference through the real setter, so validation stays centralised), and counted
 (the block tallies what it absorbed so the saving is a measured number, not a belief). What the
-fast path can't do — an unknown state, a shader handle, a held lock, a full ring — still falls to
+fast path can't do (an unknown state, a shader handle, a held lock, a full ring) still falls to
 the method's own trap. Measured on one title's menu; the block takes a dedicated memory page so
 writing it never evicts compiled guest code sitting next to the routines that write it. *2026-09-10,
 `109d90f6`.*
 
-**A29 — Video memory is a constant 256 MiB that creating a surface or texture never reduces.**
+**A29. Video memory is a constant 256 MiB that creating a surface or texture never reduces.**
 `GetAvailableTextureMem` (Direct3D 8 and 9) and `GetAvailableVidMem` (DirectDraw) answer the same
 number however much has been created, and WMI's `Win32_VideoController.AdapterRAM` gives the
 same figure, where Wine's tests (`d3d9/tests/device.c`, `ddraw/tests/ddraw7.c` and its older
@@ -192,7 +192,7 @@ The figure sits well below a signed 32-bit boundary so a caller treating it as s
 negative. Revisit if a program is found that checks the figure falls, or that refuses to run when
 it doesn't. *Recorded 2026-09-26; the choice predates this repository's history (`7a469c3`).*
 
-**A30 — `Present` never waits for the display, whatever presentation interval was asked for.**
+**A30. `Present` never waits for the display, whatever presentation interval was asked for.**
 The caps advertise `D3DPRESENT_INTERVAL_ONE` and `IMMEDIATE`, and the interval a program asks for
 is parsed and handed back, but no path reads it: two presents in a row both return at once, where
 the documented contract is at most one per refresh period. The pacer
@@ -204,7 +204,7 @@ relies on `Present` to throttle its loop runs that loop faster than the display,
 time on frames nobody sees. *Recorded 2026-09-26; the choice predates this repository's history
 (`7a469c3`).*
 
-**A31 — The Windows a machine reports is a bottle's setting, one of four, and XP SP3 by default.**
+**A31. The Windows a machine reports is a bottle's setting, one of four, and XP SP3 by default.**
 Some programs refuse a Windows older than they were written for and some one newer, so no single
 answer serves every title: `createApp`'s `windows` option (and a bottle manifest's `windows` field)
 picks one of `win2000`, `winxp`, `win7` and `win10`, each at the last service pack its release
@@ -238,13 +238,13 @@ value a program wrote is kept.
 
 XP SP3 is the default because the installers a title of the era carries accept it and the engine
 already is it: the DirectX June 2010 redistributable's setup refuses anything below XP SP2, and
-kernel32 already exports SP2's additions, such as `EncodePointer` and `IsWow64Process` -- a
+kernel32 already exports SP2's additions, such as `EncodePointer` and `IsWow64Process`; a
 machine exporting SP2's interface while claiming no service pack contradicts itself. It is also
 old enough that a program written for 2000 or 98 still recognises it, where a version check
 written before 7 existed may not recognise 7 or 10. *2026-09-26, the commit adding
 `kernel32/versions.js`.*
 
-**A32 — `CoGetDefaultContext` answers only for an apartment the caller can name.** For
+**A32. `CoGetDefaultContext` answers only for an apartment the caller can name.** For
 `APTTYPE_CURRENT`, or the type of the apartment the calling thread is in, it hands out that
 apartment's context; for `APTTYPE_MTA` it hands out the multithreaded apartment's context while
 that apartment exists. Otherwise it answers `CO_E_NOTINITIALIZED`. That includes a
@@ -252,9 +252,9 @@ single-threaded apartment the caller is not in: several threads may each have on
 alone does not say which is meant. An unknown type answers `E_INVALIDARG`. Wine leaves the call
 a stub, and no conformance test pins down any of these answers. *2026-10-05.*
 
-**A33 — An installation's progress bar counts a file as its size in bytes, a registry value as
+**A33. An installation's progress bar counts a file as its size in bytes, a registry value as
 13200 ticks and a component as 24000, and its total is what this installation will do.** Windows
-documents `INSTALLMESSAGE_PROGRESS` -- a reset to a total, reports of ticks, the direction -- but
+documents `INSTALLMESSAGE_PROGRESS` (a reset to a total, reports of ticks, the direction) but
 not what anything is worth; the two fixed amounts are Wine's, and no published source gives
 others. `InstallValidate` resets the bar to the files, values and components the
 installation puts down, rather than the package's whole as Wine does, so a setup's own page
@@ -262,7 +262,7 @@ reaches its end when the installation does. A page shows the ratio of what is do
 which these amounts set; revisit them if a program is found reading the ticks themselves.
 *2026-10-07.*
 
-**A34 — A file's security is the descriptor Windows XP answers for a volume that keeps none.**
+**A34. A file's security is the descriptor Windows XP answers for a volume that keeps none.**
 The volume has no ACLs, as FAT32 has none, and reports no `FILE_PERSISTENT_ACLS`: so
 `GetNamedSecurityInfo` of a file answers a made-up descriptor whose owner and group are Everyone
 and whose DACL is present and null, and `SetNamedSecurityInfo` succeeds and keeps nothing, so the
@@ -270,7 +270,7 @@ next read answers the same. A setup that reads a folder's DACL, merges an entry 
 `SetEntriesInAcl` and writes it back goes through and changes nothing it could see. Not measured
 against XP; revisit if a program is found that checks the DACL it wrote. *2026-10-07.*
 
-**A35 — kernel32 exports the Windows 95 family's own calls, and each fails as it does when what it
+**A35. kernel32 exports the Windows 95 family's own calls, and each fails as it does when what it
 reaches for is absent.** XP's kernel32 is believed (not checked against an XP export table) not to
 export the flat-thunk helpers (`ThunkConnect32`, `FT_Thunk`, `FT_Exit*`, `MapLS`, `MapSL`,
 `SMapLS*`, `SUnMapLS*`, `UnMapLS`), `RegisterServiceProcess`, `OpenVxDHandle`,
@@ -283,7 +283,7 @@ made. A program that probes `GetProcAddress` for one of them to tell the familie
 here and is told the failure when it calls; revisit if such a program is found to take a 9x path it
 cannot finish. *2026-10-07.*
 
-**A36 — A removal that takes the last key out of an INI section takes the section too, and a
+**A36. A removal that takes the last key out of an INI section takes the section too, and a
 file it leaves empty goes.** The IniFile and RemoveIniFile tables say which line or tag to take
 out, not what becomes of a heading left with nothing under it. Leaving it would keep the file,
 and with it the folder the product made, after a removal that otherwise leaves nothing; so the
@@ -291,7 +291,7 @@ empty heading goes with its last key, and a file with nothing left in it is dele
 against Windows; revisit if a program is found reading an empty section its setup left.
 *2026-10-08.*
 
-**A37 — An imported archive replaces a table whole; a merge leaves out only the tables that
+**A37. An imported archive replaces a table whole; a merge leaves out only the tables that
 conflict.** `MsiDatabaseImport` of a table the database already has replaces it, its columns
 included, as the archive describes them; Wine keeps the old columns and replaces only the rows,
 and no published source settles which Windows does. `MsiDatabaseMerge` checks every table's
@@ -300,7 +300,7 @@ conflicts of the others in the error table; the two databases' code pages are no
 though the SDK says they should match. The summary's dates in an archive are read and written as
 UTC. A session's read-only database refuses both. Not measured against Windows. *2026-10-08.*
 
-**A38 — The system folder's programs (msiexec, rundll32, regsvr32) are processes whose images
+**A38. The system folder's programs (msiexec, rundll32, regsvr32) are processes whose images
 the engine makes, and the volume does not show them as files.** Installers, bootstrappers and
 uninstall strings start them by name, and a bottle has no Microsoft binaries. A request for one in
 `C:\WINDOWS\system32` (by full path, or by bare name through CreateProcess's documented search)
@@ -311,14 +311,14 @@ LoadLibrary/GetProcAddress, MessageBox), so what it does is what those exports d
 starts in the directory its parent asked for, or else in the parent's current directory, as
 Windows starts every child, since the paths on its command line are the parent's to mean; other
 children keep starting in their own image's directory. The volume reports no file at those paths
--- `GetFileAttributes`, `FindFirstFile`, `SearchPath`, `GetFileVersionInfo` and `CreateFile` on
-`system32\msiexec.exe` fail -- because an entry would need bytes to read and a version resource
+(`GetFileAttributes`, `FindFirstFile`, `SearchPath`, `GetFileVersionInfo` and `CreateFile` on
+`system32\msiexec.exe` fail) because an entry would need bytes to read and a version resource
 to answer, and no measured program has needed either. Revisit if a bootstrapper is found that
 checks for msiexec.exe, or reads its version, before starting it; the answer then is a read-only
 entry served from the synthesised image, not a file written to the volume. A file a bundle does
 carry at that path always wins. *2026-10-08.*
 
-**A39 -- Windows XP's Internet Explorer and Media Player are there, at Service Pack 3's versions,
+**A39. Windows XP's Internet Explorer and Media Player are there, at Service Pack 3's versions,
 without files.** Setups check them before installing what needs either: an IExpress package's
 version check reads `shdocvw.dll` or `msdxm.ocx` in the system folder, others read the registry.
 The XP description carries the browser's and the player's versions and the files that carry them
@@ -330,7 +330,7 @@ are Service Pack 3's as published (IE 6.0.2900.5512, WMP 9.0.0.4503, msdxm.ocx 6
 were not read off a machine; the other Windows releases describe no components and answer as
 before. *2026-10-08.*
 
-**A40 -- Notepad is a system program, and the shell opens text files in it and hands addresses
+**A40. Notepad is a system program, and the shell opens text files in it and hands addresses
 to the page.** Setups show a readme by starting `C:\WINDOWS\Notepad.exe readme.txt` or by
 asking ShellExecute to open the `.txt`, and a "visit our site" button by opening an address. On
 the model of A38, `notepad.exe` in the Windows directory and the system folder is a synthesised
@@ -338,26 +338,26 @@ image whose routine reads the file through CreateFile/ReadFile (a UTF-16 or UTF-
 mark decides the encoding, the ANSI code page otherwise), shows it in a frame filled by a
 multi-line edit control, and runs a message loop until the frame is closed; editing, saving and
 printing (`/p`) are not offered. ShellExecute's open verb opens `.txt`, `.log`, `.ini`, `.inf`,
-`.nfo` and `.diz` as XP's registry has them -- `%SystemRoot%\system32\NOTEPAD.EXE %1`, the
-file unquoted -- and an `http`, `https`, `ftp` or `mailto` address, or the address a `.url`
+`.nfo` and `.diz` as XP's registry has them (`%SystemRoot%\system32\NOTEPAD.EXE %1`, the
+file unquoted), and an `http`, `https`, `ftp` or `mailto` address, or the address a `.url`
 shortcut holds, is handed to the page as an `open-url` event and answered with success, since
 the machine reports a browser installed (A39). The frame is a class of the program's own, named
-`Notepad` as the real one's is, whose procedure is DefWindowProcW's own address -- so it is
-moved, activated and closed as any window is -- because the routine drives only exports a program
+`Notepad` as the real one's is, whose procedure is DefWindowProcW's own address (so it is
+moved, activated and closed as any window is), because the routine drives only exports a program
 could call and writes no window procedure in guest code. *2026-10-08.*
 
-**A41 -- The libraries the engine implements stand in the system folder as files, for the
+**A41. The libraries the engine implements stand in the system folder as files, for the
 questions asked before loading one.** A38 left the system folder empty of what the engine
 supplies, to be revisited when a setup checked first; InstallShield 9's `UseDLL` does, with
 FindFirstFile on `system32\Shell32.dll`, and stopped at "UseDLL failed". In the system folder a
 name that is one of the engine's libraries, and is not a file on the volume, now answers
 GetFileAttributes(Ex) and a FindFirstFile for that exact name as a file: archive, 64 KiB, dated
 as Windows XP SP3's build (2008-04-14). A search with a wildcard lists the folder as it is, and
-the name cannot be opened -- what it holds is the engine's, not bytes; GetFileVersionInfo answers
+the name cannot be opened: what it holds is the engine's, not bytes; GetFileVersionInfo answers
 such a library already (A39). The system programs stay as A38 has them. Revisit if a program
 reads a system library's bytes or enumerates the folder to find one. *2026-10-08.*
 
-**A42 -- A thread's stack is at least a megabyte, whatever SizeOfStackReserve says.** The first
+**A42. A thread's stack is at least a megabyte, whatever SizeOfStackReserve says.** The first
 thread and every thread created with the image's default get `max(SizeOfStackReserve, 1 MiB)`.
 A program linked for 64 KiB (the Call of Duty 2 demo) was measured reaching 70 KiB down its first
 thread, inside a window procedure, and faulting below the mapped stack; the title is released to
@@ -366,7 +366,7 @@ linker's default and what Wine gives every thread as a floor. Not derived from a
 Windows' own rounding of a small reserve was not measured. Revisit if a program is found that
 depends on a small stack ending where it was linked to end. *2026-10-10.*
 
-**A43 -- Table fog through a vertex shader that writes oFog runs its curve over that oFog.**
+**A43. Table fog through a vertex shader that writes oFog runs its curve over that oFog.**
 With FOGTABLEMODE set, a draw through a vertex shader below model 3 is fogged per pixel by the
 table curve over the shader's oFog when the shader wrote one, and over the depth (z) when it did
 not. Wine's `fog_with_shader_test` rows for a shader with fog output under table fog expect the
@@ -386,25 +386,25 @@ drivers, which take the curve over z whatever the shader wrote and whatever the 
 programs that leave fog to this stage at all are of the earlier generations. *2026-10-10,
 the case without oFog 2026-10-12.*
 
-**A44 -- Under a vertex shader, a 1.0 to 1.3 pixel shader's projective read divides by w.**
+**A44. Under a vertex shader, a 1.0 to 1.3 pixel shader's projective read divides by w.**
 D3DTTFF_PROJECTED on a stage a `ps_1_1` to `ps_1_3` reads divides that stage's coordinates
 before the read. Without a vertex shader the divisor is the last coordinate the count names,
 which is what the fixed function produced; under a vertex shader the shader writes all four,
 and the drivers of the shader-model-1 era divided by w whatever count the flags named. Wine
 divides by the count's last component in either case. Prince of Persia: Warrior Within's water
-writes (u w, v w, w, w) from its vertex shader -- z equal to w, so that a driver dividing by
-either reads the same place -- and sets D3DTTFF_COUNT2 | D3DTTFF_PROJECTED: divided by y, the
+writes (u w, v w, w, w) from its vertex shader (z equal to w, so that a driver dividing by
+either reads the same place) and sets D3DTTFF_COUNT2 | D3DTTFF_PROJECTED: divided by y, the
 screen copy it refracts was read far outside itself and the water drawn in stripes; divided by
 w, as by the default here, it is water (the person's run, 2026-10-13, browser, graphics worker,
 Parallels GPU). `driverRules: 'current'` divides by the count, as later drivers and Wine do.
 *2026-10-13.*
 
-**A45 -- A pre-transformed vertex with a negative RHW is clipped behind the eye only where the
+**A45. A pre-transformed vertex with a negative RHW is clipped behind the eye only where the
 runtime clipped it.** A Direct3D 7 or 6 vertex buffer that ProcessVertices transformed with
 D3DVOP_CLIP, made without D3DVBCAPS_DONOTCLIP, keeps its vertices' clip codes, and a draw from it
 without D3DDP_DONOTCLIP, under D3DRENDERSTATE_CLIPPING, is clipped by the runtime against the
 view volume. Such a draw here takes each RHW back as its clip w, a negative one included, so
-the rasteriser clips the triangle at the eye -- the same volume, in homogeneous space. Every
+the rasteriser clips the triangle at the eye: the same volume, in homogeneous space. Every
 other pre-transformed draw takes an RHW of zero or less as w one: the rasterisers of that
 generation took the screen position as given, and only the runtime's clipping kept a vertex
 behind the eye off the screen. Wine divides the position by every non-zero RHW, so clips such
@@ -414,13 +414,13 @@ camera was drawn as spikes across the screen (the person's run, 2026-10-13, brow
 worker, Parallels GPU). `driverRules: 'current'` clips behind the eye in every pre-transformed
 draw, as Wine does. *2026-10-13.*
 
-**A46 -- Under Direct3D 8 a vertex format draws through the fixed function's pixel stage, whatever
+**A46. Under Direct3D 8 a vertex format draws through the fixed function's pixel stage, whatever
 1.0 to 1.3 pixel shader is bound.** A draw whose vertex shader is a vertex format (no vertex shader
 handle) is drawn by the texture stage states, a bound `ps_1_1` to `ps_1_3` left aside (a
 `ps_1_4`, the generation Wine's `cnd_test` runs over a vertex format, is run); the binding itself stays, and
 GetPixelShader answers it. Wine runs the bound shader over the fixed vertex stage. Need for Speed:
-Hot Pursuit 2 keeps the pixel shader its car's last pass set -- its own state cache is cleared
-each frame without SetPixelShader(0), and its menus are drawn through vertex formats -- and that
+Hot Pursuit 2 keeps the pixel shader its car's last pass set (its own state cache is cleared
+each frame without SetPixelShader(0), and its menus are drawn through vertex formats), and that
 shader adds the specular colour and takes its alpha from the diffuse: run over the menus, the
 screen came out white, then, with the specular default corrected, its text as solid boxes; with
 the pixel stage the texture stages set, the menus, the car select and the race HUD are what the
@@ -428,7 +428,7 @@ game draws (the person's run, 2026-10-16, browser, graphics worker, Parallels GP
 game is listed with severe graphics issues under Wine. `driverRules: 'current'` runs the bound
 shader, as Wine does. *2026-10-16.*
 
-**A47 -- A thread is told of the images in load order, the program first, each image's TLS
+**A47. A thread is told of the images in load order, the program first, each image's TLS
 callbacks before its entry point; its end, of the images the other way round, each still callbacks
 first.** The documentation says every attached library's entry point is called with
 `DLL_THREAD_ATTACH` on the new thread and with `DLL_THREAD_DETACH` on the one ending, and Wine's
@@ -439,7 +439,7 @@ thread starts from what the first thread started from. On the way out an image's
 still go first: a static runtime's are its `thread_local` destructors, and its entry point's
 detach frees the per-thread data they may still use. *2026-10-18.*
 
-**A48 -- `DisableThreadLibraryCalls` on a library with static thread-local storage answers TRUE,
+**A48. `DisableThreadLibraryCalls` on a library with static thread-local storage answers TRUE,
 and the library goes on being told of threads.** The documentation says both that the call fails
 for such a library and that it "does not perform any optimizations" for it; the notifications go on
 either way, since its TLS callbacks build each thread's `thread_local` objects. Of the two answers
@@ -447,29 +447,29 @@ TRUE is the one no library is broken by: one that fails its attach on FALSE woul
 other loaded module is honoured, its entry point and TLS callbacks told of no thread from then on.
 *2026-10-18.*
 
-**A49 -- The last thread to end by `ExitThread` or by returning is not told its own detach: the
+**A49. The last thread to end by `ExitThread` or by returning is not told its own detach: the
 libraries hear `DLL_PROCESS_DETACH`, lpvReserved non-NULL, on that thread, as `ExitProcess` tells
 them.** The documentation says the last thread's exit ends the process and that a library hears
 `DLL_PROCESS_DETACH` with lpvReserved non-NULL when the process ends; it does not say whether the
 last thread's own detach comes first. Two threads that end at once each find the other still
 standing and are both told their own detach; the process then ends with no thread left, and the
-libraries hear nothing more -- the end of a process whose threads are gone, not one that called
+libraries hear nothing more: the end of a process whose threads are gone, not one that called
 `ExitProcess`. *2026-10-18.*
 
-**A50 -- The process's end tells the images the other way round from their attach, each image's
+**A50. The process's end tells the images the other way round from their attach, each image's
 TLS callbacks before its entry point, the program's own callbacks last.** The PE format says a TLS
 callback is called with `DLL_PROCESS_DETACH` when the process ends and with the same arguments as
 `DllMain`; Microsoft documents that `ExitProcess` calls each attached library's entry point, with
 lpvReserved non-NULL, and Wine's loader test that a library's callback hears `DLL_PROCESS_DETACH`
 from `FreeLibrary`. Nothing published says where a callback falls among the entry points on the
 way out, nor where the program's, which has no entry point after it. This loader attaches the
-program's callbacks first (A47), so they are told last: whatever they tear down -- a static
-runtime's `thread_local` objects of the first thread -- outlives every library that might still use
+program's callbacks first (A47), so they are told last: whatever they tear down (a static
+runtime's `thread_local` objects of the first thread) outlives every library that might still use
 it, and the process's end is the exact mirror of its start, as a thread's end is of its start.
 Within an image the callbacks still go first, as in A47. lpvReserved is 1 at the process's end and
 NULL at `FreeLibrary`, as for the entry point. *2026-10-18.*
 
-**A51 -- A library loaded at run time gets its TLS whether or not it has an entry point, and is
+**A51. A library loaded at run time gets its TLS whether or not it has an entry point, and is
 refused when it cannot.** Since Vista Windows gives such a library a slot, every thread's block
 and its callbacks, which Wine's loader test checks (`test_import_resolution`, cases 0 and 3); the
 test also notes that Windows "doesn't consistently call tls init functions on dlls without entry
@@ -498,7 +498,7 @@ Design, scope and milestones were `roadmap/cork-x86-translator.md`, now in git h
 wasm bounds check alone.** The design's §5.1 named the browser's bounds check as the only
 check; a wasm trap, though, unwinds the region function and the registers held in its locals
 with it, so a precise fault after a trap would need every dirty local written back before
-every access — more stores than the test costs. The test is a shift, a byte load and a branch
+every access: more stores than the test costs. The test is a shift, a byte load and a branch
 per access (a second load when the access may span a page); it is also what delivers
 self-modifying-code detection (a store into a page holding translated code leaves `stale`
 after the instruction), the null page and, later, the memory layer's protections, none of
@@ -513,7 +513,7 @@ reload machinery, no re-entrancy question), and the synthetic measurement showed
 design wanted the call: the exit and re-entry through the host's slice loop cost about
 0.6 µs per call on top of the bridge's own dispatch, and the import-calling loop ran slower
 under hybrid than on the emulator. The call writes the state block back and reads it again
-around the handler -- the prologue and epilogue halves the region already has -- so a
+around the handler (the prologue and epilogue halves the region already has), so a
 callback's nested slices see a complete block and the region's locals are refreshed after;
 the x87 locals live in a per-block permutation those halves do not know, so a region with
 x87 in it keeps the exit, which the hybrid host answers through the same handler. *2026-09-20,
@@ -529,23 +529,23 @@ hit saves; the module count is bounded by the regions live, which the invalidati
 bounds. *2026-09-20, cork 2.8.*
 
 
-**B12 — The audio pump, the DirectSound/waveOut/MSS buffer reads and the hosted MPEG provider's
+**B12. The audio pump, the DirectSound/waveOut/MSS buffer reads and the hosted MPEG provider's
 decoder callbacks stay on the engine's own thread rather than moving to a second worker, for
 now.** A split needs the buffer *writes* copied into a block an audio worker owns (the emulator's
-wasm memory isn't shared) and cursors travelling back through an `Atomics`-readable control block —
+wasm memory isn't shared) and cursors travelling back through an `Atomics`-readable control block:
 real work, not a refactor. Measured over 60 000 scheduler turns on a real title's menu: the pump's
-self time was 921 ms of a 186 s run, 0.5% of wall, 11 µs a turn — under one percent of the thread
+self time was 921 ms of a 186 s run, 0.5% of wall, 11 µs a turn; under one percent of the thread
 is not what to move first. Build the seam when a measurement says the pump has become material
 (many tracks, a resampler on each), not before. *2026-09-12, `30f81135`.*
 
 **A redistributable runtime is ours to reimplement, regardless of who shipped the copy.** The
-project's original rule — only Windows system libraries are reimplemented, everything a game ships
-is run as real x86 — is exactly right for a program's own code, but a profile of one title at its
+project's original rule (only Windows system libraries are reimplemented, everything a game ships
+is run as real x86) is exactly right for a program's own code, but a profile of one title at its
 menu found 27.3% of the machine in a bundled MP3 decoder and 10.1% in its archive library, against
 0.2% in this engine's own thunks: a third of the machine decoding audio that then arrives at 60% of
 real time, heard as a broken stream, unfixable anywhere in the sound path because the path measured
 clean at every stage. **The decision:** a library is ours to reimplement when it is a
-redistributable runtime with a stable published API, whoever's copy it is — a middleware sound
+redistributable runtime with a stable published API, whoever's copy it is: a middleware sound
 engine, a video codec, an archive library shipped in hundreds of titles is the same class of act as
 reimplementing DirectSound, and helps every title on that path (rule 4's own test). Safe because a
 decoder is a pure function (bytes in, samples/frames out, no state of the program's own) and the
@@ -556,7 +556,7 @@ like any other, and is picked for what the target titles actually need. *2026-09
 **Uniform blocks live in one ring buffer, bound at a dynamic offset, rather than one buffer per
 draw.** Measured before: ~140 bind groups created per frame on a title's menu, none reused over
 100,000 draws, because a bind group is keyed on the buffers it names and every draw had its own.
-After: 71 groups created in total against 890,000 reuses — the cache now lives for the backend's
+After: 71 groups created in total against 890,000 reuses: the cache now lives for the backend's
 life, not one pass. The ring wraps rather than growing; a write is ordered after every prior
 submit, so a wrap can only overwrite a finished frame's blocks. *2026-09-11, `dae4d203`.*
 
@@ -565,7 +565,7 @@ modes, filtering, mip mode) is carried in the uniform block and applied in the s
 this project's own development adapter (Parallels' WDDM device through Dawn's D3D12 backend): a
 title's main-menu sky alternated between its cloud texture and a flat wash of its corner texel for
 seconds, and across dozens of controlled probes the sampler a draw *binds* on this device was
-provably not the sampler it *samples with* — switching every 51 frames regardless of frame rate, in
+provably not the sampler it *samples with*, switching every 51 frames regardless of frame rate, in
 no arrangement of bind groups. Address modes fold/hold the coordinate inside the outermost texel
 centres so the one repeating sampler can't blend across an edge; point filtering snaps to texel
 centres; mip level is chosen explicitly from derivatives taken beforehand. Costs a few operations
@@ -591,11 +591,11 @@ buffer's play cursor fall behind the real device by the loop's own uncredited sh
 to the play cursor meant a turn longer than one device block was a click. After both: no starved
 block once music started, ring holding 50–100 ms throughout. *2026-09-11, `0d2ad55b`.*
 
-**A zero-timeout wait is its own primitive — it takes what is ready and never queues the thread —
+**A zero-timeout wait is its own primitive (it takes what is ready and never queues the thread),
 rather than a wait with no time in it.** A stale queue entry from treating a poll as a real wait
 handed a later signal to a thread that had moved on to waiting on something else entirely; measured
 on a title whose sound-loader thread polled a completion event every loop pass and then waited on
-its own quit/data pair — the stale entry woke it with the wrong index, it read that as quit and
+its own quit/data pair: the stale entry woke it with the wrong index, it read that as quit and
 exited, and every sound effect after that was requested and never loaded. *2026-09-11, `f54a8136`.*
 
 **A program's registry writes and its own file-based profile travel inside the session (packed
@@ -612,15 +612,15 @@ is named to override it; the audio worklet ships as its own export since an audi
 by URL rather than importing it. *2026-09-11, `603384a1`.*
 
 **Every COM interface gets one shared table of stubs, keyed by the method list's identity, with
-the object found from the interface pointer the call arrived on — not a table of stub slots per
+the object found from the interface pointer the call arrived on, not a table of stub slots per
 published object.** A title in a match published 1,216 objects into a table of 16,384 slots and
 exhausted it; every later publish was refused as "out of video memory," and the program's own
 retry-without-picture behaviour (white textures, remade every frame) ran the guest heap out too.
 After: 5,079 objects on 210 stubs, 1,606 slots in use, textures stable near 1,600, heap steady at
 168 MB. An object now costs two words (table pointer, state word). *2026-09-11, `17ef05ad`.*
 
-**A picture codec (JPEG) a program ships (`ijl15.dll`) is hosted by its export contract — six
-functions over one structure — the same rule as the MPEG provider.** The title's own inner loops
+**A picture codec (JPEG) a program ships (`ijl15.dll`) is hosted by its export contract (six
+functions over one structure), the same rule as the MPEG provider.** The title's own inner loops
 (Huffman, inverse transform, colour planes) cost 5.7% of the guest's time in a match on top of the
 title's own code, with each texture arriving mid-fight on the frame's critical path. Two facts
 learned from the program's own memory rather than a header: the DIB pointer is the structure's
@@ -637,11 +637,11 @@ guest time unserved outranks everything for one turn) and no wake boost.** `SetT
 been accepted and silently ignored. Measured: a title's own streaming thread raises itself to
 `TIME_CRITICAL` when its sound library comes up; with priority honoured, the burst of stale
 (re-played) audio bytes right at the menu's first draws fell from 158–168 KB to 8.5–24 KB per cold
-start. No wake boost because the measurement never asked for one — a scheduling rule nobody can
+start. No wake boost because the measurement never asked for one: a scheduling rule nobody can
 read back from a run is not worth having. *2026-09-12, `06603a5d`.*
 
-**A downloaded bundle block is never fetched again — cached under a bare filename the origin's
-file system actually accepts — and a demand miss brings in its whole 2 MiB-aligned window, not
+**A downloaded bundle block is never fetched again (cached under a bare filename the origin's
+file system actually accepts), and a demand miss brings in its whole 2 MiB-aligned window, not
 just the missed block.** The cache had been naming its files with a path separator, which the
 origin private file system refuses; the refusal was swallowed and it silently fell back to an
 in-memory store that nothing survives between starts, and the field reporting this (`backed:
@@ -652,8 +652,8 @@ because misses stopped being served one block at a time. A block-fetch order rec
 demanded last time, first. *2026-09-12, `9683fc51`.*
 
 **The emulator is an optional layer, and `cork` is the default engine.** What was a hard
-dependency of the package -- the emulator's artifacts in `dist/vendor/`, fetched and packed
-whether or not a launch used them -- is now selectable: a build with `vendor/prebuilt/` empty and
+dependency of the package (the emulator's artifacts in `dist/vendor/`, fetched and packed
+whether or not a launch used them) is now selectable: a build with `vendor/prebuilt/` empty and
 the `vendor/v86` submodule absent builds, tests and runs the library's demos under `cork`, which
 loads none of it; the package still exports `./libv86.mjs` and `./v86.wasm` for a build that
 carries them, `check-package` accepts either and holds a present binary to a size floor, and a
@@ -661,7 +661,7 @@ launch that selects `emulator` or `hybrid` without the layer is refused with
 `cpu: the emulator is not available in this build (engine "…" needs it)` rather than a fetch's
 error. `cpu.decompressZstd` left the api: the project's own decoder (step 5.0) replaced its one
 caller, and the emulator's decoder is reached directly by the differential test alone. The `jit`
-option and the `jit.*` counters stay -- the schema is the same on every engine -- and report `-1`
+option and the `jit.*` counters stay (the schema is the same on every engine) and report `-1`
 under `cork`, which has no emulator compiler; the launcher's per-bundle engine selector is the
 owner's. The paired browser table (`--engine emulator` as the control) that would confirm the
 target ns per instruction is the owner's to run. *2026-09-22, cork 5.5.*
@@ -673,20 +673,20 @@ constants, the viewport, lights, clip planes, the scissor rectangle, software ve
 `DrawPrimitive` and `DrawIndexedPrimitive` each have a guest routine that writes the call, and a
 copy of what it points at, into a command ring in the device's guest memory
 (`seam/shadow.js`, `commandCode`); the host hands the run of records to the device in one call
-(`d3d9/commands.js`) -- with the graphics worker, one recorded call the played device makes in
+(`d3d9/commands.js`): with the graphics worker, one recorded call the played device makes in
 full. One ordered ring, rather than the shadow block's latest values, is what lets a draw wait:
 each draw meets the state set just before it. Measured on a node harness of the real engine
 path (cork, bridge, seam, recording, a worker thread), a loop of ten calls per draw: the engine
 thread's host time fell from 730–825 ms to 450–470 ms per 100 000 draws, its crossings from
 500 000 to 100 000. A call the device refuses was answered D3D_OK in the guest, so the refusal
-is a divergence once per method -- the terms on which the shadow block already took render
+is a divergence once per method, the terms on which the shadow block already took render
 states. A null pointer, a count past the most a device of this version has, a recording state
 block or a full ring take the host's path, which answers as the device does; while a draw waits
 in the ring, a buffer lock other than NOOVERWRITE does too, since the bytes that draw reads are
 the buffer's until it is made. Space in the ring is taken with `lock cmpxchg` and a record counts
 once its length, written last, is there; and no scheduler slice ends inside a routine the seams
 placed (`kernel.atomicCode`), so a thread switched away mid-record never leaves another thread's
-entry stopped short of its own calls -- a device shared between threads keeps the ring. Direct3D
+entry stopped short of its own calls: a device shared between threads keeps the ring. Direct3D
 8's ring carries the same calls in its own shapes (`d3d8/commands.js`). *2026-10-03, 1.8.*
 Later in 1.8 the ring took Clear, BeginScene, EndScene, SetRenderTarget, SetDepthStencilSurface,
 DrawPrimitiveUP (its vertices copied) and a Direct3D 9 state block's Capture and Apply, on the
@@ -705,9 +705,9 @@ Measured on a node harness of the real engine path: 400 000 AddRef and Release c
 engine thread's host time from 293-311 ms to 38-48 ms. *2026-10-04, 1.8.*
 
 **OpenGL's state calls go through a command ring in the guest too, and every other entry plays
-it first.** The calls that answer nothing -- states, bindings, array pointers, matrices, program
-parameters, texture environment and generation, immediate-mode vertices (`opengl/commands.js`)
--- are routines in OPENGL32 that write the call and what it points at into the ring of the
+it first.** The calls that answer nothing (states, bindings, array pointers, matrices, program
+parameters, texture environment and generation, immediate-mode vertices, in `opengl/commands.js`)
+are routines in OPENGL32 that write the call and what it points at into the ring of the
 calling thread's current context, found through a slot of its TEB the way the system's
 `opengl32` keeps its own context there; wglMakeCurrent writes the slot and deleting the context
 clears it. With no current context or no room, the routine falls through to the same handler.
@@ -720,14 +720,14 @@ engine thread's host time fell from 1091–1144 ms to 627–650 ms per 80 000 dr
 **Where guest memory is shared, what a Direct3D 8 or 9 program unlocks is lent to the graphics
 worker, not copied to it.** The record says only where the bytes lie (`remote/lending.js`), and
 the worker copies them out of guest memory when it plays the record. Until then the bytes must
-stay as they were, so everything on the engine's side that lets the range be written -- a lock,
-a `GetDC`, a copy the device or its caller makes, the block given back -- claims it first: a lend
+stay as they were, so everything on the engine's side that lets the range be written (a lock,
+a `GetDC`, a copy the device or its caller makes, the block given back) claims it first: a lend
 the worker has not begun is copied into a stash both threads see and pointed there, one it is
 reading waits out the copy, one it has read costs nothing. Each lend's room in the stash is taken
 when it is lent, so a claim never waits for room or for a record still unsent; a range with no
 slot or room left is copied into the batch as before. What the program writes through a pointer
 it kept past the unlock now reaches the played device up to when the worker reads the bytes,
-not up to the next call that reads them -- the same kind of latitude a driver's own deferred
+not up to the next call that reads them: the same kind of latitude a driver's own deferred
 upload takes, and still nothing after a lock that claimed them. A batch holding a lend is sent at
 the end of the record that follows it rather than at the end of the turn, at most every quarter
 of a millisecond, and any batch goes once a turn has kept it past the batch gap, so a long turn
@@ -750,15 +750,15 @@ cross-machine channel to model a launcher that often exits within milliseconds o
 Replacement gets the common case right at near-zero cost and, crucially, makes the classic
 `0x400000`-collision impossible rather than solving it, because there is only ever one image at
 that address. What it gives up: a parent that must run genuinely alongside its child (Battlefield
-2's installer is the concrete case — tracked as work, not solved by this design).
+2's installer is the concrete case, tracked as work, not solved by this design).
 `CREATE_SUSPENDED`+`WriteProcessMemory`+`ResumeThread` is handled as deferral: writes into a
 suspended child are recorded as patches against an image that doesn't exist yet, and replayed once
-it is mapped — no cross-process memory needed. *2026-09-07, `c3e8db9b`; built `2026-09-08`,
+it is mapped: no cross-process memory needed. *2026-09-07, `c3e8db9b`; built `2026-09-08`,
 `6bb72c18`.*
 A parent that waits on its child now goes on after it: the child runs on a second machine built
 beside the parent's, which stays paused where it blocked, and the parent's wait is answered with
 the child's exit code once it exits, the files and registry the child wrote copied back. Only one
-of the two machines runs at a time, so this is still not two processes executing at once -- the
+of the two machines runs at a time, so this is still not two processes executing at once; the
 Battlefield 2 installer's shape (run a stage, wait, go on) is what it covers. *2026-09-24.*
 `roadmap/v2/` plans processes side by side, each in a worker with its own memory (stage 2); until
 that lands, this decision stands. On the `cork2` branch the copying is gone: the run's processes
@@ -773,7 +773,7 @@ therefore read only for knowledge, never implemented. `d3dx9` is the one case wi
 the engine ships the June 2010 DirectX End-User Runtime as a read-only system volume and the
 loader runs the real `d3dx9_24…43.dll` from it whenever a program doesn't bring its own; the
 engine's own `d3dx9_25`/`26`/`27` stub tables (`layers/win32/d3dx9/`) still answer a program that
-ships neither — the fallback now, not the primary path. *2026-09-07, `42e8e9bc`.*
+ships neither: the fallback now, not the primary path. *2026-09-07, `42e8e9bc`.*
 Reconsidered: the engine no longer carries the DirectX End-User Runtime. It was Microsoft's binary
 fetched into every build to stand in for a setup the engine answered as already run, so a title's
 installer never ran the `DXSETUP` it brought, and whatever that setup could not do here stayed
@@ -793,7 +793,7 @@ so the loop counts what the program set rather than what the integer register ha
 
 **FindActCtxSectionStringA/W are not exported until activation contexts are built from
 manifests.** No context exists here, so the only answer the lookup can give is "not found",
-and the Visual C++ 2005 runtime (msvcr80, vcomp -- reached through GetProcAddress) takes that
+and the Visual C++ 2005 runtime (msvcr80, vcomp, reached through GetProcAddress) takes that
 answer for a load without its manifest and stops the program with R6034 before the program's
 first instruction. Absent, the runtime treats the system as one without side-by-side support
 and runs. Removed on 2026-09-09 (16110a45), added back by an export audit on 2026-10-08
@@ -811,7 +811,7 @@ callback missed was not measured. *2026-10-11.*
 **A run-time LoadLibrary of a name the engine's table answers does not load the system
 directory's copy beside it.** Static imports and a loaded library's own dependencies already
 took the table's module, which is mapped from the start; only LoadLibrary searched the system
-directory first, so a process could hold an installer's d3dx9_24.dll beside ours -- the
+directory first, so a process could hold an installer's d3dx9_24.dll beside ours: the
 installed effect compiler then made fx_2_0 bytecode our D3DXCreateEffect was asked to read
 (Battlefield 2). A copy beside the program still wins. This narrows the 2026-09-26 entry above
 (the installed runtime in `system32` is what loads): for a name the table answers, it is not,
@@ -833,8 +833,8 @@ none was measured against hardware. *2026-10-12.*
 part of Windows XP, and its files there are at the system's build: Service Pack 3's 5.3.2600.5512
 for `ddraw`, `dsound`, `dinput`, `dinput8`, `d3d8`, `d3d9`, `dplayx`, `dpnet`, `dpnhpast`,
 `dpnhupnp`, `dmusic` and `dmime` (`kernel32/versions.js`, `components.files`, beside A39's).
-GetFileVersionInfo answered them with the registry's DirectX, 4.9.0.904 -- what the files are where
-a redistributable put DirectX 9.0c on Windows 2000 or 98 -- and a DirectX 9 setup comparing its own
+GetFileVersionInfo answered them with the registry's DirectX, 4.9.0.904 (what the files are where
+a redistributable put DirectX 9.0c on Windows 2000 or 98), and a DirectX 9 setup comparing its own
 5.3.1.904 found the system's older, failed to back it up and asked for a restart. The registry still
 says 4.09.00.0904; a library XP does not ship (the D3DX DLLs, XInput) and every DirectX library under
 Windows 2000 still name the bottle's DirectX. The numbers are Service Pack 3's as published and were
@@ -851,15 +851,15 @@ which is no library the loader takes. *2026-10-15.*
 **DirectX's setup is the engine's: a title's `dsetup.dll` and `DXSETUP.exe` answer that DirectX is
 in place.** DirectX 9.0c is part of XP, and on XP SP3 its redistributable finds every file of it in
 the system folder at a newer build and installs only the D3DX helpers. Here the system folder holds
-only the libraries the engine implements, so a redistributable copied XP's DirectX over it -- 305
-files into system32, `DLLCache`, `drivers`, `inf` -- and, as it does for any file it copies on XP
+only the libraries the engine implements, so a redistributable copied XP's DirectX over it (305
+files into system32, `DLLCache`, `drivers`, `inf`) and, as it does for any file it copies on XP
 outside `RegisteredPackages`, answered "succeeded, restart needed"; a game's installer then stopped
 at a restart nothing here makes. Now `DSETUP.dll` is answered from the engine's table whoever's copy
 a program loads (a runtime, as the sound layer's MPEG provider is): `DirectXSetup` installs nothing
 and succeeds without a restart, `DirectXSetupGetVersion` names the bottle's DirectX, and
 `DirectXSetupGetEULA` reads the licence the program's own redistributable carries (`dsetup32.dll`,
-`DATA/SETUP_AGREEMENT_<language>`, beside the copy it asked for). A `DXSETUP.exe` a title brings --
-known by its version block, Microsoft's `dxsetup.exe`, not by its file name -- is run as a program
+`DATA/SETUP_AGREEMENT_<language>`, beside the copy it asked for). A `DXSETUP.exe` a title brings
+(known by its version block, Microsoft's `dxsetup.exe`, not by its file name) is run as a program
 of the engine's that exits with 0 and shows nothing. The D3DX helpers are not put in the system
 folder; the engine answers them whether or not a file is there. Revisit if a title is found that
 reads a D3DX helper's bytes from system32 rather than loading it. *2026-10-15.*
@@ -867,8 +867,8 @@ reads a D3DX helper's bytes from system32 rather than loading it. *2026-10-15.*
 **The screen is composed as Windows 7's desktop window manager composes it, not drawn into as XP's
 is.** On XP every window draws straight onto one screen, clipped by the windows over it, and a
 window that goes, moves or is raised leaves the windows and the desktop beneath to repaint what it
-uncovered; a program that does not -- a wizard busy copying files, a skin that paints in a
-different window than the one uncovered -- leaves a dead dialog's pixels on the screen. Here each
+uncovered; a program that does not (a wizard busy copying files, a skin that paints in a
+different window than the one uncovered) leaves a dead dialog's pixels on the screen. Here each
 top-level window has a surface of its own, its whole rectangle; its contexts draw on it unclipped by
 other top-level windows; and the screen is the desktop's background with the shown windows copied
 over it, bottom to top, where their regions keep them (`graphics/gdi/screen.js`). A top-level window
@@ -885,8 +885,8 @@ or per pointer run as guest code, and one runtime serves every module instead of
 translator to carry. MSVCP71/80 are not: their exports are counted in thousands, the iostreams and
 locales among them are objects whose layout and virtual tables a program's own inlined header code
 reads, and a partial table in front of a program's copy left F.E.A.R.'s imports unbound. The
-engine's `std::string` (MSVCP80/71) answers only a program that brought no copy -- PhysX in
-Mafia II -- and grows by what the bundles import. MSVCR71 likewise, until its exports are
+engine's `std::string` (MSVCP80/71) answers only a program that brought no copy (PhysX in
+Mafia II) and grows by what the bundles import. MSVCR71 likewise, until its exports are
 checked against the real list. *2026-10-15.*
 
 **The machine has a page file, as large as its memory.** `GlobalMemoryStatus(Ex)` answers a
@@ -895,7 +895,7 @@ by default; a program refuses a machine whose limit is no more than its memory (
 off). Physical memory stays the arena, as WMI reports it. *2026-10-15.*
 
 **A full-screen Direct3D 9 device is one of the display's modes.** `CreateDevice` and `Reset` with
-`Windowed = FALSE` and a back buffer of no display mode's size -- 0x0 among them -- answer
+`Windowed = FALSE` and a back buffer of no display mode's size (0x0 among them) answer
 `D3DERR_INVALIDCALL`, as Wine's test_reset sees Windows do; only a windowed device measures its
 window for a size of zero. Making such a device at the display's size instead left a program
 laying out a screen of 0x0. *2026-10-15.*
