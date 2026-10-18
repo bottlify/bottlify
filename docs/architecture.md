@@ -636,7 +636,8 @@ sequenceDiagram
   initialisation, SLists, the heap's small blocks (up to 1 KiB), WaitForSingleObject's poll of
   an event that is not signalled, read from a word the kernel keeps for each handle onto an
   event, so a thread on another executor polling for work never waits for the process's
-  executor to answer; a mutex nobody else wants, taken and given back with `lock cmpxchg` on a
+  executor to answer; SetEvent of an event already signalled and ResetEvent of one already
+  clear, from the same word, which change nothing; a mutex nobody else wants, taken and given back with `lock cmpxchg` on a
   word of the mutex's own that the host takes over (one flag) as soon as anyone waits, the
   mutex is abandoned or the host otherwise touches it; and Sleep(0) while no thread waits to
   run, read from a count the scheduler keeps. Others are written once in

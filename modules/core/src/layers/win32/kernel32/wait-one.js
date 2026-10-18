@@ -5,8 +5,9 @@
  */
 
 /**
- * WaitForSingleObject and ReleaseMutex, answered in the guest where the
- * answer changes nothing the host keeps, or only a mutex nobody waits for.
+ * WaitForSingleObject, ReleaseMutex, SetEvent and ResetEvent, answered in the
+ * guest where the answer changes nothing the host keeps, or only a mutex
+ * nobody waits for.
  *
  * Each handle below EVENT_SLOTS has a word in the kernel's table:
  * an event's says whether it is signalled (`kernel/internal/event-mirror.js`),
@@ -14,9 +15,11 @@
  * is the address of the mutex's own word with MUTEX_TAG set
  * (`kernel/internal/mutex-words.js`), and a free mutex, or one the caller owns
  * already, is taken here with `lock cmpxchg`, and one the caller owns given
- * back the same way. Everything else goes to the host as the call was made: a
- * timeout to wait, a signalled event to take, a mutex another thread holds or
- * the host keeps, an exchange lost to another thread, a handle with no word.
+ * back the same way. SetEvent of a signalled event and ResetEvent of one that
+ * is not change nothing, and are answered here too. Everything else goes to
+ * the host as the call was made: a timeout to wait, a signalled event to take,
+ * an event to change, a mutex another thread holds or the host keeps, an
+ * exchange lost to another thread, a handle with no word.
  *
  *   WaitForSingleObject(handle, milliseconds):
  *     mov eax, [esp+4]            ; handle, its low two bits the program's
@@ -219,5 +222,48 @@ export function releaseMutexCode(at, trap, table, tag){
         0xc2, 0x04, 0x00,                                            // 109: ret 4
         // slow: (112)
         0xe9, ...dword(trap - (at + slow + 5)),                      // 112: jmp trap
+    ]);
+}
+
+/**
+ * SetEvent or ResetEvent as guest code: a call that asks for the state the
+ * event's word already says it is in changes nothing and answers TRUE here --
+ * a signalled event has no waiter to release, its waiters having been released
+ * as it was set. Call of Duty 4 set events already set 16.9 million times in a
+ * nine-minute session, 95% of its SetEvent calls and two thirds of all its
+ * crossings, each from another executor a wait for the process's executor to
+ * answer. Every other call is the host's: an event
+ * to change, a handle with no word or past the table, a mutex's word.
+ *
+ *     mov eax, [esp+4]
+ *     shr eax, 2
+ *     cmp eax, EVENT_SLOTS
+ *     jae slow
+ *     cmp dword [table+eax*4], state  ; the state the call asks for
+ *     jne slow
+ *     mov eax, 1
+ *     ret 4
+ *   slow:
+ *     jmp trap
+ *
+ * @param {number} at       Where the code lands, for the jump to the trap.
+ * @param {number} trap     The host's SetEvent or ResetEvent.
+ * @param {number} table    The kernel's words, one a handle.
+ * @param {number} already  The word of an event the call leaves as it is.
+ * @returns {Uint8Array}
+ */
+export function eventStateCode(at, trap, table, already){
+    const slow = 40;
+    return new Uint8Array([
+        0x8b, 0x44, 0x24, 0x04,                                      // 0: mov eax, [esp+4]
+        0xc1, 0xe8, 0x02,                                            // 4: shr eax, 2
+        0x3d, ...dword(EVENT_SLOTS),                                 // 7: cmp eax, EVENT_SLOTS
+        ...jcc(JAE, 12, slow),                                       // 12: jae slow
+        0x83, 0x3c, 0x85, ...dword(table), already,                  // 18: cmp [table+eax*4], state
+        ...jcc(JNE, 26, slow),                                       // 26: jne slow
+        0xb8, ...dword(1),                                           // 32: mov eax, 1
+        0xc2, 0x04, 0x00,                                            // 37: ret 4
+        // slow: (40)
+        0xe9, ...dword(trap - (at + slow + 5)),                      // 40: jmp trap
     ]);
 }

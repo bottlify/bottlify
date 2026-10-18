@@ -82,6 +82,7 @@ publishing). The tables list only the settings that are data. `memory` and `load
 | `unattended` | `false` | Answer every modal dialog with its default button. |
 | `network` | loopback | The transport under Winsock (a relay client). |
 | `trustedRoots` | Microsoft Root Authority | Roots `WinVerifyTrust` accepts, as DER bytes or base64. |
+| `handleWords` | `true` | `false` leaves every WaitForSingleObject, ReleaseMutex, SetEvent and ResetEvent to the host, with no answers in the guest: the second path their tests compare against. |
 | `http` | `null` | The request function behind WinINet; without it WinINet says there is no network. |
 | `directx` | `'9'` | `'7'`, `'8'` or `'9'`: the DirectX release the registry, `DirectXSetupGetVersion` and DxDiag report. `createApp` sets it from `graphicsApi`. |
 

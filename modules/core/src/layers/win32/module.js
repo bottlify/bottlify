@@ -1512,6 +1512,7 @@ export function createWin32Module(){
                         imagePath: ()=>modules.imagePath(),
                         modules: ()=>modules.list?.() ?? [],
                         divergence: config?.divergence,
+                        handleWords: config?.handleWords,
                         threadBlock: threadMade,
                         /** @param {number} handle */
                         handleType: handle=>kernel.handles.typeOf(handle),

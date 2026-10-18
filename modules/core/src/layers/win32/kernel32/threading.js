@@ -8,7 +8,8 @@ import { encodeAnsi } from './locale.js';
 import { isStandardHandle, untagged } from './handle-tags.js';
 import { TAKEN } from './named-objects.js';
 import { STATUS, toDosError } from '../ntdll/status.js';
-import { EVENT_SLOTS, MUTEX_SLOTS, releaseMutexCode, waitOneCode } from './wait-one.js';
+import { EVENT_SLOTS, MUTEX_SLOTS, eventStateCode, releaseMutexCode, waitOneCode }
+    from './wait-one.js';
 
 /**
  * The kernel32 surface a threaded program calls.
@@ -141,6 +142,9 @@ const DUPLICATE_CLOSE_SOURCE = 0x00000001;
  * @property {(bytes: number) => number} [allocateCode]
  *           Guest memory for the table of event words and for code: without
  *           them every wait is the host's.
+ * @property {boolean} [handleWords]  false: no table of handle words, so every
+ *           wait, mutex release and event set or reset is the host's -- the
+ *           second path the guest's answers are gated against.
  * @property {(thread: any, routine: number, args: number[]) => void} [queueApc]
  *           Queues a routine to a thread, to run when it next waits alertably:
  *           what a waitable timer's completion routine becomes at each expiry.
@@ -692,7 +696,8 @@ export function createThreadingFunctions(host){
         {
             return handleWords;
         }
-        if (!host.allocate || typeof kernel.mirrorEvents !== 'function')
+        if (host.handleWords === false || !host.allocate
+            || typeof kernel.mirrorEvents !== 'function')
         {
             handleWords = null;
             return null;
@@ -711,7 +716,8 @@ export function createThreadingFunctions(host){
     /**
      * A routine reading the table, or the trap alone where there is no table.
      *
-     * @param {PollBuilder} builder @param {'WaitForSingleObject' | 'ReleaseMutex'} name
+     * @param {PollBuilder} builder
+     * @param {'WaitForSingleObject' | 'ReleaseMutex' | 'SetEvent' | 'ResetEvent'} name
      * @param {(at: number, trap: number, words: number) => Uint8Array} code
      */
     const placedRoutine = (builder, name, code)=>{
@@ -1204,9 +1210,17 @@ export function createThreadingFunctions(host){
         CreateEventExA: createEventEx.ansi,
         CreateEventExW: createEventEx.wide,
 
-        /** BOOL SetEvent(HANDLE) */
+        /**
+         * BOOL SetEvent(HANDLE)
+         *
+         * Guest code first: an event signalled already is left so there
+         * (`wait-one.js`); everything else comes here.
+         */
         SetEvent: {
             argBytes: 4,
+            /** @param {PollBuilder} builder */
+            guest: builder=>placedRoutine(builder, 'SetEvent',
+                (at, trap, words)=>eventStateCode(at, trap, words, kernel.EventMirror.SET)),
             /** @param {number[]} args */
             handler: ([handle])=>{
                 const event = object(handle >>> 0, 'event');
@@ -1242,9 +1256,17 @@ export function createThreadingFunctions(host){
             },
         },
 
-        /** BOOL ResetEvent(HANDLE) */
+        /**
+         * BOOL ResetEvent(HANDLE)
+         *
+         * Guest code first: an event not signalled is left so there
+         * (`wait-one.js`); everything else comes here.
+         */
         ResetEvent: {
             argBytes: 4,
+            /** @param {PollBuilder} builder */
+            guest: builder=>placedRoutine(builder, 'ResetEvent',
+                (at, trap, words)=>eventStateCode(at, trap, words, kernel.EventMirror.CLEAR)),
             /** @param {number[]} args */
             handler: ([handle])=>{
                 const event = object(handle >>> 0, 'event');

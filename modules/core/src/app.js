@@ -242,7 +242,8 @@ const hashText = (hash, text)=>{
  *     registry, the setup library, DxDiag and the DirectX libraries' file
  *     versions name its DirectX -- 7.0, 8.1, or 9.0c for 9 and 10. Absent,
  *     every library and DirectX 9.0c; any other name is refused.
- * @property {{ network?: any, trustedRoots?: (Uint8Array | string)[] }} [win32]
+ * @property {{ network?: any, trustedRoots?: (Uint8Array | string)[],
+ *     handleWords?: boolean }} [win32]
  *     `network` is the transport under Winsock, in the shape the win32 layer's
  *     `wsock32/transport.js` names: what a relay client hands back, or an
  *     embedder's own. Absent, Winsock runs over the loopback adapter and
@@ -250,7 +251,9 @@ const hashText = (hash, text)=>{
  *     `trustedRoots` is the root store WinVerifyTrust judges Authenticode
  *     chains against, each root as DER bytes or base64; absent, it holds
  *     Microsoft's "Microsoft Root Authority" alone, and an empty list trusts
- *     nothing.
+ *     nothing. `handleWords: false` leaves out the table of handle words that
+ *     WaitForSingleObject, ReleaseMutex, SetEvent and ResetEvent answer from in
+ *     the guest, so every such call is the host's: the second path of their gates.
  * @property {(record: any) => void} [onCall]
  *           Every host call as it returns. The ring kept for a failure holds
  *           the end of a run; this holds all of it, for a tool willing to
@@ -4384,6 +4387,8 @@ async function buildApp(options){
             // The roots WinVerifyTrust judges a signature's chain against;
             // absent, the win32 layer's default store.
             trustedRoots: options.win32?.trustedRoots,
+            // Off only for a gate's second path (`handleWords`).
+            handleWords: options.win32?.handleWords,
             // What the program is told its display is, handed to the libraries
             // that answer for one as well as to the layer that draws on it.
             screen: display,

@@ -17,7 +17,7 @@ import { runToHalt } from '../../cpu/internal/halt.fixture.js';
 import * as cork from '../../../../../cork/src/index.js';
 import { MIRROR, MUTEX_TAG } from '../../kernel/internal/event-mirror.js';
 import { MUTEX_WORD } from '../../kernel/internal/mutex-words.js';
-import { EVENT_SLOTS, releaseMutexCode, waitOneCode } from './wait-one.js';
+import { EVENT_SLOTS, eventStateCode, releaseMutexCode, waitOneCode } from './wait-one.js';
 
 const PROGRAM = 0x8000;
 const POLL = 0x8200;
@@ -193,6 +193,71 @@ test('the guest takes a free mutex or its own again, gives back its own, and lea
     host.stop();
 });
 
+test('the guest answers SetEvent of a signalled event and ResetEvent of a clear one, and leaves'
+    + ' every change to the host', async()=>{
+    const SET = 0x8600;
+    const RESET = 0x8700;
+    const host = createCorkHost({
+        engine: cork,
+        memorySize: 64 * 1024 * 1024,
+        trapPort: 0xb077,
+        entryVector: 0x7000,
+        initialStack: STACK,
+        cork: {},
+    });
+    host.writePhysical(SET, eventStateCode(SET, TRAP, TABLE, MIRROR.SET));
+    host.writePhysical(RESET, eventStateCode(RESET, TRAP, TABLE, MIRROR.CLEAR));
+    host.writePhysical(TRAP, new Uint8Array([0xf4]));
+    host.writePhysical(PROGRAM, new Uint8Array([0xf4]));
+    host.writePhysical(0x7000, new Uint8Array(u32(PROGRAM)));
+    runToHalt(host, 1000);
+    /** @param {number} handle @param {number} value */
+    const word = (handle, value)=>host.writePhysical(TABLE + (handle >>> 2) * 4,
+        new Uint8Array(u32(value)));
+    /**
+     * Calls a routine with its handle, from a fresh stack: its answer, or
+     * 'host' where it left for the host with the call as it was made.
+     *
+     * @param {number} routine @param {number} handle
+     */
+    const call = (routine, handle)=>{
+        const code = [0x68, ...u32(handle), 0xe8, ...u32((routine - (PROGRAM + 10)) | 0), 0xf4];
+        host.writePhysical(PROGRAM, new Uint8Array(code));
+        host.writeReg32('eip', PROGRAM);
+        host.writeReg32('esp', STACK);
+        host.writeReg32('eax', 0x5a5a5a5a);
+        host.wake();
+        runToHalt(host, 1000);
+        if (host.readReg32('eip') === TRAP + 1)
+        {
+            assert.equal(host.readReg32('esp'), STACK - 8,
+                'the host is reached with the call as it was made');
+            return 'host';
+        }
+        assert.equal(host.readReg32('eip'), PROGRAM + code.length);
+        assert.equal(host.readReg32('esp'), STACK, 'its argument popped');
+        return host.readReg32('eax');
+    };
+
+    word(0x154, MIRROR.SET);
+    word(0x158, MIRROR.CLEAR);
+    word(0x15c, MIRROR.NONE);
+    word(0x160, (0x110000 | MUTEX_TAG) >>> 0);
+    assert.equal(call(SET, 0x154), 1, 'a signalled event set again: TRUE, nothing to change');
+    assert.equal(call(SET, 0x157), 1, 'whatever the program keeps in the low two bits');
+    assert.equal(call(SET, 0x158), 'host', 'an event to signal is the host\'s');
+    assert.equal(call(RESET, 0x158), 1, 'a clear event reset: TRUE, nothing to change');
+    assert.equal(call(RESET, 0x154), 'host', 'an event to clear is the host\'s');
+    for (const routine of [SET, RESET])
+    {
+        assert.equal(call(routine, 0x15c), 'host', 'a handle with no word is the host\'s');
+        assert.equal(call(routine, 0x160), 'host', 'a mutex\'s word: the host refuses it');
+        assert.equal(call(routine, EVENT_SLOTS * 4), 'host', 'past the table');
+        assert.equal(call(routine, 0xffffffff), 'host', 'a pseudo-handle');
+    }
+    host.stop();
+});
+
 /**
  * Seeded random programs over four event slots, built twice: polling and
  * waiting through WaitForSingleObject, whose polls of an unsignalled event the
@@ -273,31 +338,56 @@ function eventProgram(seed, count, guest, buildExe){
     });
 }
 
+/**
+ * The exit code of a run, and how many of its calls to functions `crossed`
+ * names reached the host.
+ *
+ * @param {Uint8Array} executable @param {RegExp} crossed @param {Record<string, any>} [options]
+ */
+const runEvents = async(executable, crossed, options = {})=>{
+    const { createApp } = await import('../../../app.js');
+    const app = await createApp({ executable, ...options });
+    try
+    {
+        const code = (await app.run({ timeoutMs: 60_000 })) >>> 0;
+        const tables = await app.diagnostics();
+        const bridge = (Array.isArray(tables) ? tables : [])
+            .find(table=>table.name === 'bridge');
+        const calls = (bridge?.metrics?.byFunction ?? [])
+            .map((/** @type {string} */ line)=>line.split(' '))
+            .filter((/** @type {string[]} */ parts)=>crossed.test(parts[0]))
+            .reduce((/** @type {number} */ sum, /** @type {string[]} */ parts)=>
+                sum + Number(parts[1]), 0);
+        return { code, calls };
+    }
+    finally
+    {
+        await app.dispose();
+    }
+};
+
+const SET_OR_RESET = /!(Set|Reset)Event$/;
+
+test('seeded event programs answer alike with sets and resets in the guest and with every call'
+    + ' in the host', async()=>{
+    const { buildExe } = await import('../../../../../../tools/make-pe.mjs');
+    for (const seed of [11, 12, 13, 14, 15, 16])
+    {
+        const executable = eventProgram(seed, 300, true, buildExe);
+        const inGuest = await runEvents(executable, SET_OR_RESET);
+        const inHost = await runEvents(executable, SET_OR_RESET,
+            { win32: { handleWords: false } });
+        assert.equal(inGuest.code, inHost.code, `seed ${seed}: the answers differ`);
+        assert.ok(inGuest.calls < inHost.calls, `seed ${seed}: ${inGuest.calls} sets and resets`
+            + ` crossed with the guest's answers, ${inHost.calls} without`);
+    }
+});
+
 test('seeded event programs answer alike with polls in the guest and with every wait in the'
     + ' host', async()=>{
-    const { createApp } = await import('../../../app.js');
     const { buildExe } = await import('../../../../../../tools/make-pe.mjs');
     /** @param {Uint8Array} executable */
-    const run = async executable=>{
-        const app = await createApp({ executable });
-        try
-        {
-            const code = (await app.run({ timeoutMs: 60_000 })) >>> 0;
-            const tables = await app.diagnostics();
-            const bridge = (Array.isArray(tables) ? tables : [])
-                .find(table=>table.name === 'bridge');
-            const calls = (bridge?.metrics?.byFunction ?? [])
-                .map((/** @type {string} */ line)=>line.split(' '))
-                .filter((/** @type {string[]} */ parts)=>parts[0].includes('WaitForSingleObject'))
-                .reduce((/** @type {number} */ sum, /** @type {string[]} */ parts)=>
-                    sum + Number(parts[1]), 0);
-            return { code, calls };
-        }
-        finally
-        {
-            await app.dispose();
-        }
-    };
+    const run = executable=>runEvents(executable, /WaitForSingleObject/);
     for (const seed of [1, 2, 3, 4, 5, 6])
     {
         const inGuest = await run(eventProgram(seed, 300, true, buildExe));
