@@ -586,3 +586,81 @@ test('a second button pressed while one is held reaches the program, as a browse
             { kind: 'pointerButton', button: 'right', down: false },
         ]);
     });
+
+test('the Escape a browser spends on leaving pointer lock still reaches the program', ()=>{
+    // Windowed, Chrome keeps that press: its keydown never arrives, and a
+    // program skipping its intro on Escape needed a second one.
+    /** @type {Map<string, (() => void)[]>} */
+    const listening = new Map();
+    const page = {
+        /** @type {any} */
+        pointerLockElement: null,
+        focus: true,
+        hasFocus: ()=>page.focus,
+        /** @param {string} type @param {() => void} handler */
+        addEventListener(type, handler){
+            listening.set(type, [...listening.get(type) ?? [], handler]);
+        },
+        /** @param {string} type @param {() => void} handler */
+        removeEventListener(type, handler){
+            listening.set(type, (listening.get(type) ?? []).filter(entry=>entry !== handler));
+        },
+    };
+    const saved = Object.getOwnPropertyDescriptor(globalThis, 'document');
+    Object.defineProperty(globalThis, 'document', { value: page, configurable: true });
+    try
+    {
+        const h = harness({ pointerLock: true });
+        /** @param {boolean} on */
+        const lock = on=>{
+            page.pointerLockElement = on ? h.canvas : null;
+            for (const handler of listening.get('pointerlockchange') ?? [])
+            {
+                handler();
+            }
+        };
+        h.canvas.fire('focus', {});
+        lock(true);
+        h.drain();
+        lock(false);
+        assert.deepEqual(h.drain(), [
+            { kind: 'key', code: 'Escape', down: true },
+            { kind: 'text', text: '\x1b' },
+            { kind: 'key', code: 'Escape', down: false },
+        ], 'a lock lost with the focus kept was Escape');
+
+        lock(true);
+        h.canvas.fire('keydown', { code: 'AltRight', key: 'Alt', location: 2 });
+        h.drain();
+        lock(false);
+        assert.deepEqual(h.drain(), [], 'the page\'s own pointer key let go of it');
+        h.canvas.fire('keyup', { code: 'AltRight', key: 'Alt', location: 2 });
+
+        lock(true);
+        h.canvas.fire('keydown', { code: 'Escape', key: 'Escape', timeStamp: performance.now() });
+        h.drain();
+        lock(false);
+        assert.deepEqual(h.drain(), [], 'a browser that delivered the press is not echoed');
+
+        lock(true);
+        page.focus = false;
+        lock(false);
+        assert.deepEqual(h.drain(), [], 'leaving the page is not Escape');
+        page.focus = true;
+
+        h.adapter.detach();
+        assert.equal(listening.get('pointerlockchange')?.length, 0,
+            'detach stops watching the lock');
+    }
+    finally
+    {
+        if (saved)
+        {
+            Object.defineProperty(globalThis, 'document', saved);
+        }
+        else
+        {
+            delete (/** @type {any} */ (globalThis)).document;
+        }
+    }
+});
