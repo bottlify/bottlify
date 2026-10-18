@@ -9573,6 +9573,29 @@ export function createRenderer(options){
             recording = null;
             recorded.cut = backend.markPresent();
             recorded.dump = dump;
+            // A device that never presents -- Direct3D 7's, whose target the
+            // program brings into its memory and blits -- ends its frames here,
+            // so a dump a page asked for is counted and handed over here, and
+            // what it wrote starts again. One that presents ends them there,
+            // and a read in the middle of its frame is part of that frame.
+            let handOver = null;
+            if (counters.frames === 0)
+            {
+                const parts = dump.length > 0 ? [...submittedDump, dump] : submittedDump;
+                submittedDump = [];
+                dump = [];
+                kept = 0;
+                const written = parts.some(part=>part.length > 0);
+                if (written)
+                {
+                    lastDump = parts;
+                }
+                if (liveDump !== null && liveDump.dumpFrames > 0 && written)
+                {
+                    liveDump.dumpFrames--;
+                    handOver = liveDump.dumpFrames === 0 ? parts : null;
+                }
+            }
             const asked = clock();
             const read = chain.then(()=>replay(recorded, null, gpu));
             read.then(()=>{
@@ -9582,6 +9605,11 @@ export function createRenderer(options){
                 timing.worstReadBackMs = Math.max(timing.worstReadBackMs, took);
             }, ()=>{});
             chain = read.then(()=>undefined, failure);
+            if (handOver !== null)
+            {
+                const lines = handOver;
+                chain = chain.then(()=>liveDump?.written?.(joinDump(lines), timing.readBacks));
+            }
             return /** @type {Promise<any>} */ (read);
         },
 
