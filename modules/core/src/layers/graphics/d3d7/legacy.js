@@ -277,9 +277,13 @@ function primitivesOf(type, count){
 }
 
 /**
- * The map from the unit cube to a viewport's clip volume, appended to the
- * projection: a volume of (-1, 1, 2, 2) is the identity, which is what
- * Direct3D 7 always draws with.
+ * The map from a viewport's clip volume to the unit cube, appended to the
+ * projection: a volume of (-1, 1, 2, 2) and depth 0 to 1 is the identity,
+ * which is what Direct3D 7 always draws with. The depth bounds are the
+ * volume's too, in the projection's space like the rest of it, and are mapped
+ * onto the depth buffer's 0 to 1 -- not a depth range the screen is drawn
+ * into: a program that projects as OpenGL does names -1 to 1 there, and taken
+ * as the screen's range everything nearer than the middle of the depth was cut.
  *
  * @param {ViewportData} data
  * @returns {Float32Array}
@@ -287,11 +291,13 @@ function primitivesOf(type, count){
 export function clipVolumeMatrix(data){
     const sx = data.clipWidth !== 0 ? 2 / data.clipWidth : 1;
     const sy = data.clipHeight !== 0 ? 2 / data.clipHeight : 1;
+    const depth = data.maxZ - data.minZ;
+    const sz = depth !== 0 ? 1 / depth : 1;
     return Float32Array.from([
         sx, 0, 0, 0,
         0, sy, 0, 0,
-        0, 0, 1, 0,
-        -data.clipX * sx - 1, 1 - data.clipY * sy, 0, 1,
+        0, 0, sz, 0,
+        -data.clipX * sx - 1, 1 - data.clipY * sy, depth !== 0 ? -data.minZ * sz : 0, 1,
     ]);
 }
 
@@ -878,7 +884,9 @@ function createLegacyDevice(inner, version, legacy){
             X: x, Y: y,
             Width: Math.max(1, Math.min(data.width, target.width - x)),
             Height: Math.max(1, Math.min(data.height, target.height - y)),
-            MinZ: data.minZ, MaxZ: data.maxZ,
+            // The whole depth buffer: the viewport's depth bounds are its clip
+            // volume's, carried on the projection (`clipVolumeMatrix`).
+            MinZ: 0, MaxZ: 1,
         });
     };
 

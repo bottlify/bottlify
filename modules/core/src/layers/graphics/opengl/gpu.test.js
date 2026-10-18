@@ -422,6 +422,40 @@ test('a texture is uploaded once per version, a cube map face by face', async()=
     assert.equal(layout.descriptor.entries[1].texture.viewDimension, 'cube');
 });
 
+test('the surface of a texture has the mip chain its base defines, not every level the program set',
+    async()=>{
+        // Three 1x1 levels on a 1x1 texture: a surface of three levels is refused,
+        // and every frame that sampled it was thrown away whole.
+        const r = rig();
+        const { context } = r;
+        /** @param {number} name @param {[number, number][]} sizes */
+        const define = (name, sizes)=>{
+            context.glBindTexture(GL.TEXTURE_2D, name);
+            // Sampled from its base alone, so even a broken chain is drawn with.
+            context.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.LINEAR);
+            sizes.forEach(([width, height], level)=>context.glTexImage2D(GL.TEXTURE_2D, level,
+                GL.RGBA, width, height, 0, GL.RGBA, GL.UNSIGNED_BYTE,
+                new Uint8Array(width * height * 4)));
+            context.glBegin(GL.TRIANGLES);
+            context.glVertex2f(0, 0);
+            context.glVertex2f(8, 0);
+            context.glVertex2f(8, 8);
+            context.glEnd();
+        };
+        context.glGenTextures(3);
+        context.glEnable(GL.TEXTURE_2D);
+        define(1, [[1, 1], [1, 1], [1, 1]]);
+        define(2, [[4, 2], [2, 1], [1, 1]]);
+        define(3, [[4, 4], [4, 4], [1, 1]]);
+        await r.swap();
+        const levels = (/** @type {number} */ name)=>r.gpu.of('createTexture')
+            .find(t=>t.descriptor.label === `gl-texture:${name}`).descriptor.mipLevelCount;
+        assert.equal(levels(1), 1, 'a 1x1 texture has one level, whatever else was set');
+        assert.equal(levels(2), 3, 'a whole chain is kept, to 1x1');
+        assert.equal(levels(3), 1, 'a level of the wrong size ends the chain');
+        assert.ok(r.gpu.of('writeTexture').every(w=>w.destination.mipLevel < 3));
+    });
+
 test('a sampler is read off the texture, not rebuilt from a descriptor every draw', async()=>{
     const r = rig();
     const { context } = r;
@@ -1610,8 +1644,8 @@ test('a dumped draw carries its state, its textures and its uniform blocks', asy
     assert.match(line, /triangle-list count=3 first=0 base=0/);
     assert.match(line, new RegExp(`blend=0x1,0x1`), 'the additive blend, as the enums say');
     assert.match(line, /depth=0x202(?!\+write)/, 'GL_EQUAL, and the depth mask is off');
-    assert.match(line, /tex=\[1:t1:4x4\/1\]/,
-        'the fragment program samples t1, 4x4 with one level, at binding 1');
+    assert.match(line, /tex=\[1:t1:4x4\/1:if0x1908\/0x1908:min0x2601\]/,
+        'the fragment program samples t1, 4x4 with one level, at binding 1, RGBA, linear');
     assert.match(line, /vp=p1\.1 fp=p2\.1/, 'both programs, by name and version');
     assert.match(line, /attrs=\[position@0\+0:float32x3 color@0\+12:float32x4/);
     assert.match(line, /vuni=\[[^\]]*0\.25[^\]]*\]/, 'the vertex block: the MVP, then env[2]');

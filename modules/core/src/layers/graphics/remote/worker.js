@@ -452,6 +452,7 @@ export function serveGraphics(scope, deps){
         {
             played = playedOpengl(createOpenglRoot, {
                 ...options,
+                liveDump,
                 backend: ()=>backend,
                 createSampler: (/** @type {any} */ descriptor)=>device.createSampler(descriptor),
                 // Blocks are uploaded as blocks only where this device takes them.

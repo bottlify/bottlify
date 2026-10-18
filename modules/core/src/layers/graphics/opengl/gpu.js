@@ -47,7 +47,7 @@ import { GL } from './constants.js';
 import { createBufferReads } from './buffer-reads.js';
 import { identity, invert, multiply, transpose } from './matrix.js';
 import { normalMatrix } from './lighting.js';
-import { FACE_STRIDE, createTextureObject, levelKey } from './objects.js';
+import { FACE_STRIDE, createTextureObject, isTextureComplete, levelKey } from './objects.js';
 import {
     CANONICAL_LAYOUT, clientReads, expandIndices, isList, lockedFor, packVertices, planLayout,
     scanIndices, topologyOf,
@@ -130,6 +130,11 @@ const BC_FORMATS = Object.freeze({
  * @property {boolean} [dumpDraws]  describe every draw of the last frame
  * @property {number} [maxDraws]    stop a frame after this many draws
  * @property {string | null} [skipTexture]  drop draws sampling these ids
+ * @property {{ dumpFrames: number, skipTexture?: string,
+ *     written?: (lines: string[], frame: number) => void } | null} [liveDump]
+ *           the graphics worker's switches a running program's page sets
+ *           (`app.debug.dumpFrames`, `app.debug.skipTexture`), read at each
+ *           frame's end for the next
  * @property {string | null} [probeTexture]  read the target around its draws
  * @property {boolean} [compressedTextures]  the device has `texture-compression-bc`:
  *           an S3TC texture whose every level kept its blocks travels as
@@ -315,10 +320,20 @@ export function createGpuRenderer(services){
     const { backend, createSampler } = services;
     const BufferUsage = backend.BufferUsage;
     const TextureUsage = backend.TextureUsage;
-    const dumpDraws = services.dumpDraws === true;
-    const maxDraws = services.maxDraws === undefined ? -1 : services.maxDraws;
+    const liveDump = services.liveDump ?? null;
+    // Whether this frame is written down, and which textures' draws it drops:
+    // what the run asked at its start, or what a page asked of the running
+    // program since -- changed at a frame's end, never in the middle of one.
+    const fixedDump = services.dumpDraws === true;
     /** @type {Set<string>} */
-    const skipTextures = new Set((services.skipTexture ?? '').split(',').filter(Boolean));
+    const fixedSkips = new Set((services.skipTexture ?? '').split(',').filter(Boolean));
+    const liveSwitches = ()=>({
+        dumping: fixedDump || (liveDump?.dumpFrames ?? 0) > 0,
+        skips: liveDump?.skipTexture
+            ? new Set(liveDump.skipTexture.split(',').filter(Boolean)) : fixedSkips,
+    });
+    let { dumping: dumpDraws, skips: skipTextures } = liveSwitches();
+    const maxDraws = services.maxDraws === undefined ? -1 : services.maxDraws;
     /**
      * Which draws a probe reads around: a texture id, optionally followed by
      * `@N` or `@A-B` naming the draw numbers of the frame to read -- a light's
@@ -851,9 +866,21 @@ export function createGpuRenderer(services){
         const cube = texture.target === GL.TEXTURE_CUBE_MAP;
         const base = /** @type {import('./objects.js').TextureLevel} */ (
             texture.levels.get(levelKey(0)));
+        // The mip chain the base level defines, as GL's completeness reads it:
+        // each level half the one above, down to 1x1 and no further. A level
+        // past that, or one of another size, is not in the chain -- three 1x1
+        // levels on a 1x1 texture are one level -- and a surface given it is
+        // refused, and with it every frame that samples the texture.
+        const chain = Math.floor(Math.log2(Math.max(1, base.width, base.height))) + 1;
         let levels = 0;
-        while (texture.levels.has(levelKey(levels)))
+        while (levels < chain)
         {
+            const level = texture.levels.get(levelKey(levels));
+            if (!level || level.width !== Math.max(1, base.width >> levels)
+                || level.height !== Math.max(1, base.height >> levels))
+            {
+                break;
+            }
             levels++;
         }
         const bcFormat = bcFormatOf(texture, levels, cube);
@@ -1093,9 +1120,12 @@ export function createGpuRenderer(services){
      *
      * @param {import('./pipeline.js').Scene} scene
      */
+    // A bound texture GL leaves out of the draw -- incomplete, so the unit is
+    // off -- marked `!`: what a surface meant to be textured is drawn without.
     const dumpBound = scene=>scene.boundTextures.length === 0 ? '' : ` bound=[${
         scene.boundTextures.map((bound, unit)=>
-            `${unit}:${bound?.twoD ? `t${bound.twoD.name}` : '-'}`
+            `${unit}:${bound?.twoD
+                ? `t${bound.twoD.name}${isTextureComplete(bound.twoD) ? '' : '!'}` : '-'}`
             + `${bound?.cube ? `c t${bound.cube.name}` : ''}`).join(' ')}]`;
 
     /**
@@ -1972,8 +2002,11 @@ export function createGpuRenderer(services){
                         .map(g=>(g === null ? '-' : hex(g))).join('.')}]`).join(' ')}]`
                 + ` tex=[${sampled.map(({ entry, texture }, i)=>{
                     const copy = textures.get(texture);
+                    const base = texture.levels.get(levelKey(0));
                     return `${entry.binding}:${dumpIds[i]}`
-                        + (copy ? `:${copy.width}x${copy.height}/${copy.levels}` : '');
+                        + (copy ? `:${copy.width}x${copy.height}/${copy.levels}` : '')
+                        + (base ? `:if${hex(base.internalFormat)}/${hex(base.baseFormat)}` : '')
+                        + `:min${hex(texture.parameters.get(GL.TEXTURE_MIN_FILTER) ?? 0)}`;
                 }).join(' ')}]`
                 + dumpPrograms(recording, state)
                 + dumpBound(scene)
@@ -2657,7 +2690,16 @@ export function createGpuRenderer(services){
                     + ` skipped=${c.skipped} cut=${c.cut}`
                     + (maxDraws >= 0 ? ` (max-draws ${maxDraws})` : ''));
                 lastDump = recording.dump;
+                if (liveDump !== null && liveDump.dumpFrames > 0)
+                {
+                    liveDump.dumpFrames--;
+                    if (liveDump.dumpFrames === 0)
+                    {
+                        liveDump.written?.(recording.dump, stats.frames - 1);
+                    }
+                }
             }
+            ({ dumping: dumpDraws, skips: skipTextures } = liveSwitches());
             const shown = target.shown[target.current];
             target.current ^= 1;
             const cut = backend.markPresent();

@@ -2047,7 +2047,7 @@ test('every DC of a window is one drawable, and any other DC is its own', ()=>{
 
     const bounded = gdi.windowContext(HWND, { left: 10, top: 20, right: 650, bottom: 500 });
     assert.deepEqual(gdi.describeDrawable(bounded),
-        { key: keyOf(first), width: 640, height: 480 },
+        { key: keyOf(first), window: HWND, width: 640, height: 480 },
         'a window context is the size of the area it was given');
 });
 

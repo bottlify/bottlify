@@ -2285,6 +2285,26 @@ test('exclusive full screen places its window over the mode; a windowed one keep
     assert.equal(h.release(ddraw), 0);
 });
 
+test('a mode set or put back from normal mode is the screen\'s, and moves no window', ()=>{
+    // A game that set its mode exclusively went back to its menu by setting
+    // the desktop's mode again from normal mode; the screen stayed the game's
+    // and the menu sat in a corner of it.
+    /** @type {any[]} */
+    const placed = [];
+    const h = seamed({ resolution: (/** @type {any[]} */ ...args)=>placed.push(args) });
+    const ddraw = h.create7();
+    assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, 'SetCooperativeLevel'),
+        [HWND, DDSCL_NORMAL]), DD_OK);
+    assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, 'SetDisplayMode'),
+        [800, 600, 16, 0, 0]), DD_OK);
+    assert.deepEqual(placed.at(-1), [800, 600]);
+    assert.equal(h.box.call(ddraw, slot(IDIRECTDRAW7_SLOTS, 'RestoreDisplayMode'), []), DD_OK);
+    const native = placed.at(-1);
+    assert.equal(native.length, 2, 'put back, and no window moved');
+    assert.notDeepEqual(native, [800, 600], 'the mode the screen was built as');
+    assert.equal(h.release(ddraw), 0);
+});
+
 test('CoCreateInstance reaches DirectDraw through its class object, and it waits for Initialize',
     ()=>{
         const h = seamed();

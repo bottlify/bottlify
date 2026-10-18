@@ -62,23 +62,32 @@ function machine(){
  */
 
 /**
- * A library over a 4x4 screen, with whatever it presented recorded.
+ * A library over a 4x4 screen, with whatever it presented recorded, and the
+ * window and screen each frame was presented for.
  *
- * @param {{ present?: boolean, raster?: boolean }} [options]
+ * @param {{ present?: boolean, raster?: boolean,
+ *     describeDrawable?: (hdc: number) => any }} [options]
  */
 function library(options = {}){
     const box = machine();
     /** @type {any[]} */
     const presented = [];
+    /** @type {[number | undefined, boolean | undefined][]} */
+    const presentedFor = [];
     const opengl = createOpengl({
         readMemory: box.readMemory,
         writeMemory: box.writeMemory,
         screen: ()=>({ width: 4, height: 4 }),
         scratch: box.scratch,
-        present: options.present === false ? undefined : (/** @type {any} */ s)=>presented.push(s),
+        present: options.present === false ? undefined
+            : (/** @type {any} */ s, /** @type {number} */ window = 0, exclusive = false)=>{
+                presented.push(s);
+                presentedFor.push([window, exclusive]);
+            },
         raster: options.raster,
+        describeDrawable: options.describeDrawable,
     });
-    return { box, opengl, presented, table: /** @type {Table} */ (opengl.table) };
+    return { box, opengl, presented, presentedFor, table: /** @type {Table} */ (opengl.table) };
 }
 
 test('no export is declared twice, and every one takes a whole number of words', ()=>{
@@ -318,6 +327,24 @@ function startDrawing(table){
     assert.equal(table.wglMakeCurrent.handler([hdc, context]), 1);
     return context;
 }
+
+test('a frame is presented for its window, which holds the screen when it is the screen size',
+    ()=>{
+        // A full-screen program's window drawn on by GL: a paint of a window
+        // under it put the program's black main window on the screen between
+        // two frames, because the frame did not say whose it was.
+        for (const [drawable, expected] of /** @type {[any, [number, boolean]][]} */ ([
+            [{ key: 'window:7', window: 7, width: 4, height: 4 }, [7, true]],
+            [{ key: 'window:7', window: 7, width: 4, height: 2 }, [7, false]],
+            [{ key: 'dc:36877', width: 4, height: 4 }, [0, false]],
+        ]))
+        {
+            const { table, presentedFor } = library({ describeDrawable: ()=>drawable });
+            startDrawing(table);
+            assert.equal(table.wglSwapBuffers.handler([0x900d]), 1);
+            assert.deepEqual(presentedFor, [expected], drawable.key);
+        }
+    });
 
 // --- the typed variants and the memory paths ---
 

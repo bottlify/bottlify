@@ -782,6 +782,27 @@ export function createDirectDrawSeam(
     };
 
     /**
+     * A mode set, or put back, is the screen's at any cooperative level:
+     * SetDisplayMode needs none, and the display changes whoever asked. A
+     * program that sets its game's mode exclusively and goes back to its
+     * menu by setting the desktop's mode from normal mode was left with the
+     * menu in a corner of the game's screen. Exclusive full screen takes its
+     * window over the mode as well (`coverScreen`).
+     *
+     * @param {any} root
+     */
+    const showMode = root=>{
+        const both = DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN;
+        if ((root.cooperativeLevel & both) === both && root.cooperativeWindow)
+        {
+            coverScreen(root);
+            return;
+        }
+        const mode = root.displayMode;
+        resolution?.(mode.width, mode.height);
+    };
+
+    /**
      * What every blit refuses before a pixel moves: a lost surface, a locked
      * one, and one with no depth at all. Three bytes a pixel is the copy's
      * own question: it reads them where it converts the format.
@@ -1732,7 +1753,14 @@ export function createDirectDrawSeam(
             ? DD_OK : DDERR_ALREADYINITIALIZED),
 
         /** @param {any} root */
-        RestoreDisplayMode: (/** @type {any} */ root)=>root.restoreDisplayMode(),
+        RestoreDisplayMode: (/** @type {any} */ root)=>{
+            const hr = root.restoreDisplayMode();
+            if (hr === DD_OK)
+            {
+                showMode(root);
+            }
+            return hr;
+        },
 
         /** @param {any} root @param {number[]} args */
         SetCooperativeLevel: (root, [window, flags])=>{
@@ -1760,7 +1788,7 @@ export function createDirectDrawSeam(
                 width >>> 0, height >>> 0, depth >>> 0, version === 1 ? 0 : (rate >>> 0));
             if (hr === DD_OK)
             {
-                coverScreen(root);
+                showMode(root);
             }
             return hr;
         },

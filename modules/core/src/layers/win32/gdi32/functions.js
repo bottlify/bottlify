@@ -5508,7 +5508,7 @@ export function createGdiFunctions(host){
          * its own drawable.
          *
          * @param {number} hdc
-         * @returns {{ key: string, width: number, height: number } | null}
+         * @returns {{ key: string, window: number, width: number, height: number } | null}
          */
         describeDrawable(hdc){
             const dc = contexts.get(hdc >>> 0);
@@ -5523,6 +5523,7 @@ export function createGdiFunctions(host){
             const own = dc.kind === 'window' && dc.window !== 0;
             return {
                 key: own ? `window:${dc.window}` : `dc:${dc.hdc}`,
+                window: own ? dc.window : 0,
                 width: size.width,
                 height: size.height,
             };
