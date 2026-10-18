@@ -3800,6 +3800,27 @@ export function createShadow(deps){
     };
 
     /**
+     * Whether the host holds a lock of the buffer the guest may let go of:
+     * the host's unlock reads the bytes only when it next looks, so until
+     * then a lock that may write over them -- a DISCARD or one with neither
+     * flag, in place -- comes to the host, which lets its own go first, or
+     * moves the buffer off them. Said as what was lent is (`LENT`), which the
+     * routine already treats so; a device that lends keeps it set.
+     *
+     * @param {number} block @param {boolean} held
+     */
+    const noteHostHolds = (block, held)=>{
+        if (held)
+        {
+            deps.writeMemory(block + BUFFER.LENT, dwordBytes(1));
+        }
+        else if (device.lendsMemory !== true)
+        {
+            deps.writeMemory(block + BUFFER.LENT, ZERO_WORD);
+        }
+    };
+
+    /**
      * Whether a level's locks are the host's: a level the guest cannot lock,
      * one a device context is held on, and one whose bytes a recording may
      * lend to the graphics worker (`ShadowLevel.lends`), which only the
@@ -3962,6 +3983,7 @@ export function createShadow(deps){
             {
                 entry.buffer.Unlock();
                 entry.hostLocked = false;
+                noteHostHolds(block, false);
             }
             moved.deferred++;
             renamedPending.add(block);
@@ -4009,6 +4031,7 @@ export function createShadow(deps){
             entry.buffer.Unlock();
             entry.hostLocked = false;
         }
+        noteHostHolds(block, entry.hostLocked);
     };
 
 
@@ -4360,6 +4383,7 @@ export function createShadow(deps){
         {
             markLent(block);
         }
+        noteHostHolds(block, locked);
     };
 
     /**
