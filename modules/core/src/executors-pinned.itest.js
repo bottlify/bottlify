@@ -26,7 +26,7 @@ const u32 = value=>[
 ];
 
 const WORKER_AT = 0x200;
-const ROUNDS = 200_000;
+const ROUNDS = 600_000;
 const OUTER = 1_500;
 const INNER = 400_000;
 

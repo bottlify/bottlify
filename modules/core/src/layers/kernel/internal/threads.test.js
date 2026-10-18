@@ -1301,6 +1301,114 @@ test('a thread this executor keeps calling back from the other one stays here a 
     assert.equal(round(), 1, 'three seconds on, it tries the other executor again');
 });
 
+/**
+ * A main thread pinned to the first processor beside a render thread pinned
+ * to the second, each making a call a round wherever it runs: the renderer's
+ * 2 ms of this executor's, the main thread's 0.2. A frame every round until
+ * the first trade, every `after`th round from it.
+ *
+ * @param {number} after
+ */
+function pinnedRenderer(after){
+    const { cpu, told } = twoExecutors();
+    const [remote] = cpu.executors();
+    let clock = 0;
+    /** @type {(ms: number) => void} */
+    let timed = ()=>{};
+    /** A call of the thread current, timed as the cpu layer times it. */
+    const call = ()=>{
+        const ms = sched.current()?.name === 'render' ? 2 : 0.2;
+        clock += ms;
+        timed(ms);
+    };
+    remote.step = /** @type {any} */ ((/** @type {(reply: () => void) => void} */ around)=>{
+        if (remote.started === 0)
+        {
+            return null;
+        }
+        if (told.goOn === false)
+        {
+            remote.started = 0;
+            told.goOn = null;
+            return { instructions: 1000, fault: null };
+        }
+        around(call);
+        return null;
+    });
+    const sched = createScheduler({
+        cpu: { ...cpu,
+            runSlice: (/** @type {number} */ max)=>{
+                clock += 5;
+                call();
+                return max;
+            },
+            trapTimed: (/** @type {(ms: number) => void} */ hook)=>{
+                timed = hook;
+            } },
+        switcher: createSwitcher({ cpu }), quantum: 5000, wall: ()=>clock, placement: 'spread' });
+    const main = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
+    const render = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'render' });
+    main.affinityMask = 0b01;
+    render.affinityMask = 0b10;
+    let round = 0;
+    let tradedRound = -1;
+    /** Runs the clock `ms` on. */
+    const run = (/** @type {number} */ ms)=>{
+        const until = clock + ms;
+        for (;;)
+        {
+            if (clock >= until)
+            {
+                return;
+            }
+            const { ran } = sched.runOnce();
+            if (tradedRound < 0 && sched.diagnostics().played !== '')
+            {
+                tradedRound = round;
+            }
+            if (ran !== null)
+            {
+                assert.equal(sched.processorOf(ran), ran === main ? 0 : 1,
+                    `${ran.name} told of another processor at round ${round}`);
+            }
+            if (tradedRound < 0 || (round - tradedRound) % after === 0)
+            {
+                sched.noteFrame();
+            }
+            round++;
+        }
+    };
+    return { sched, run };
+}
+
+test('a pinned thread whose calls take this executor the most time has its processor played'
+    + ' here; a trade the program draws fewer frames after is undone and not tried for a minute',
+()=>{
+    // Call of Duty 4 pins its main thread to the first processor and its render
+    // thread to the last, every Present and Lock of the renderer a few hundred
+    // microseconds of this executor's while the main thread computed here.
+    const kept = pinnedRenderer(1);
+    kept.run(2000);
+    assert.equal(kept.sched.diagnostics().played, '1,0 after 1',
+        'the renderer\'s processor is played here inside two seconds');
+    kept.run(10_000);
+    assert.equal(kept.sched.diagnostics().played, '1,0 after 1',
+        'and kept while the program draws as many frames');
+
+    const lost = pinnedRenderer(2);
+    lost.run(2000);
+    assert.equal(lost.sched.diagnostics().played, '1,0 after 1');
+    lost.run(5000);
+    assert.equal(lost.sched.diagnostics().played, '0,1 after 1, 1 undone',
+        'half the frames after it: undone once its check is in');
+    lost.run(50_000);
+    assert.equal(lost.sched.diagnostics().played, '0,1 after 1, 1 undone',
+        'and not tried again inside a minute, though the renderer\'s calls still dominate');
+    lost.run(15_000);
+    assert.match(lost.sched.diagnostics().played, /^1,0 after 2, 1 undone$/,
+        'a minute on, it is tried again');
+});
+
 test('a thread whose mask names only processors whose executors cannot open runs where any may',
     ()=>{
         // An engine timing each processor pins its process to each in turn;

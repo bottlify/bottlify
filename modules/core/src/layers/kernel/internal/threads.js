@@ -138,11 +138,11 @@ const PLAY_LOOK_MS = 250;
 const PLAY_HOLD_MS = 5000;
 
 /**
- * The half-life, in host ms, of the time this executor spends answering each
- * thread's calls into the host (`hostTime`): seconds, so a frame's calls are
- * all in it and a load's long past ones are not.
+ * The half-life, in host ms, of the time this executor spends in each
+ * thread's calls into the host (`hostTime`): a second, so tens of a game's
+ * frames are in it and a load's long past ones are not.
  */
-const HOST_HALF_MS = 2000;
+const HOST_HALF_MS = 1000;
 
 /**
  * A pinned thread's processor is played here once this executor spends at
@@ -1152,9 +1152,10 @@ export function createScheduler(options){
 
     /**
      * The time, in host ms halved every `HOST_HALF_MS`, this executor spent
-     * answering a thread's calls into the host: the call, on a crossing of
-     * its own (`trapTimed`); the call and the switch to the other executor's
-     * state and back, on one of the others' (`answerExecutors`).
+     * in a thread's calls into the host (`trapTimed`), wherever the thread
+     * ran: the call alone, not the switch to another executor's state and
+     * back, so a thread weighs the same played here or there and two
+     * threads' trade is not undone by the measure of it.
      *
      * @param {any} thread @param {number} at
      */
@@ -1276,6 +1277,7 @@ export function createScheduler(options){
             if (!lost)
             {
                 playCheck = null;
+                tradeWanted = -1;
                 return;
             }
             if (trade(remotes, playCheck.index, at))
@@ -1536,14 +1538,12 @@ export function createScheduler(options){
                     }
                     current = on.thread;
                     inSlice = true;
-                    const began = wall();
                     try
                     {
                         reply();
                     }
                     finally
                     {
-                        addHostTime(on.thread, wall() - began);
                         inSlice = wasInSlice;
                         current = was;
                     }
@@ -2052,10 +2052,10 @@ export function createScheduler(options){
     // translator forming regions here stops at the next one to let it be.
     cpu.awaitedBy?.(()=>placed.size > 0 && cpu.executorBell().rung() !== answeredAt);
 
-    // A remote executor's crossing is timed whole where it is answered
-    // (`answerExecutors`), the switch to its state and back with the call.
+    // Another executor's crossing is answered here with its thread made
+    // current (`answerExecutors`): its call is timed as one of this one's.
     cpu.trapTimed?.((/** @type {number} */ ms)=>{
-        if (current !== null && !answering)
+        if (current !== null)
         {
             addHostTime(current, ms);
         }
