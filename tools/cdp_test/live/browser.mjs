@@ -33,6 +33,10 @@ const browser = spawn(findBrowser(), [
     // Covered or on a screen that is off, the page would run at idle priority.
     ...BACKGROUND_OFF,
     `--user-data-dir=${profile}`, `--remote-debugging-port=${PORT}`,
+    // Flags after the url, for a run that needs them: the software adapter
+    // (`--use-webgpu-adapter=swiftshader`) is the one that tells a defect of
+    // ours from the machine's GPU driver.
+    ...process.argv.slice(3),
     url,
 ], { stdio: ['ignore', 'ignore', 'inherit'] });
 browser.on('exit', code=>{
