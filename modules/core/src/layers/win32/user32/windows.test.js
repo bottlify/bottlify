@@ -30,6 +30,7 @@ const THREAD = { name: 'main' };
 const WH_CBT = 5;
 const WH_KEYBOARD = 2;
 const WH_MOUSE = 7;
+const WH_GETMESSAGE = 3;
 const HCBT_CREATEWND = 3;
 const HCBT_DESTROYWND = 4;
 const HCBT_ACTIVATE = 5;
@@ -3793,6 +3794,34 @@ test('a keyboard hook is shown every key message taken, and can discard it', ()=
         'a hook that answers nonzero takes the message away');
 });
 
+test('a GetMessage hook is shown every message retrieved, through the MSG it may change',
+    ()=>{
+        // A game that keeps its key state in a WH_GETMESSAGE hook saw its
+        // menus answer keys through its window procedure and its player never
+        // move while the hook was installed and never called.
+        /** @type {number[][]} */
+        const shown = [];
+        /** @type {any} */
+        let read = null;
+        const { fns, queue, memory } = setup({ hookReply: (entry, args)=>{
+            shown.push([...args, read(args[2] + MSG.message), read(args[2] + MSG.wParam)]);
+            // A hook may rewrite the message before the caller sees it.
+            memory.putU32s(args[2] + MSG.wParam, [0x42]);
+            return 0;
+        } });
+        read = (/** @type {number} */ at)=>memory.u32(at);
+        fns.SetWindowsHookExA.handler([WH_GETMESSAGE, HOOK_PROC, 0, 1]);
+        queue.post({ hwnd: 0, message: WM_KEYDOWN, wParam: 0x41, lParam: 0x001e0001 });
+        assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_NOREMOVE]), 1);
+        assert.deepEqual(shown.at(-1), [0, PM_NOREMOVE, MSG_BUFFER, WM_KEYDOWN, 0x41],
+            'HC_ACTION and PM_NOREMOVE on a look, the MSG already written');
+        assert.equal(fns.GetMessageA.handler([MSG_BUFFER, 0, 0, 0]), 1);
+        assert.deepEqual(shown.at(-1)?.slice(0, 3), [0, PM_REMOVE, MSG_BUFFER],
+            'PM_REMOVE on the take');
+        assert.equal(memory.u32(MSG_BUFFER + MSG.wParam), 0x42,
+            'the caller sees what the hook left');
+    });
+
 test('a mouse hook is shown every mouse message taken, with where it is, and can discard it',
     ()=>{
         // A game that reads its buttons in a WH_MOUSE hook saw its pointer
@@ -3987,10 +4016,10 @@ test('a hook of a type that is never called says so once, and is still installed
     const { memory, fns, called, divergences } = setup({ heap: true });
     putClass(memory);
     fns.RegisterClassA.handler([CLASS_STRUCT]);
-    // WH_GETMESSAGE: keyboard and mouse hooks are called now.
-    assert.notEqual(fns.SetWindowsHookExA.handler([3, HOOK_PROC, HINSTANCE, 1]), 0);
+    // WH_CALLWNDPROC: keyboard, mouse and GetMessage hooks are called now.
+    assert.notEqual(fns.SetWindowsHookExA.handler([4, HOOK_PROC, HINSTANCE, 1]), 0);
     assert.equal(divergences.length, 1);
-    assert.match(divergences[0], /SetWindowsHookExA: hook type 3/);
+    assert.match(divergences[0], /SetWindowsHookExA: hook type 4/);
     createWindow(fns, memory);
     assert.deepEqual(called, []);
     assert.equal(fns.SetWindowsHookExA.handler([WH_CBT, 0, HINSTANCE, 1]), 0,
