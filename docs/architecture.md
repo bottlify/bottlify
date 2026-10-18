@@ -517,6 +517,19 @@ writes (section 7).
   slice ends inside (a command record reserved and not yet finished) goes on to the routine's
   end first, on every executor (`unbroken.js`): taken off there, the thread would hold back every
   record after it until it ran again.
+- **Memory order between executors.** x86 shows one thread's stores to another in the order they
+  were made, and a program relies on it with plain `mov`s: data, then a flag another thread waits
+  on. An arm64 host does not: another core may see the flag first, or read the data before the
+  flag. On such a host (`reordersPlainAccesses` in the cpu layer: node's `process.arch`, a
+  Chromium page's `userAgentData`, otherwise the user agent string, a Mac taken to be arm64) a
+  process on several executors runs cork's ordered variant: an integer operand's load and store
+  are wasm atomics, ordered with every other access around them, except one through esp (a
+  thread's own stack), one at an address not a multiple of its width (a wasm atomic traps there),
+  and the x87's, MMX's, SSE's and the string instructions' operands: the data around a flag,
+  which the flag's access orders. Code the interpreters run is not ordered. On an x86 host, and
+  on one executor, nothing changes. `cork.config.ordered` overrides the choice; the cpu layer's
+  diagnostics say which was made (`ordered`). The engine's own routines lock and let go with
+  locked instructions in either variant (`tools/check-lock-release.mjs`).
 - **Exact exceptions.** A region exits right before the faulting instruction, with its EIP and
   registers. Division by zero gives #DE, an unknown instruction #UD, an access to a page the program cannot
   reach #PF with its address (translated code leaves, and the JavaScript interpreter runs the

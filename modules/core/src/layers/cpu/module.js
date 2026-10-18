@@ -9,6 +9,7 @@ import { createCorkHost, createTsc } from './internal/cork-host.js';
 import { createBell, createRemoteExecutor } from './internal/executor.js';
 import { unbrokenTable } from './internal/unbroken.js';
 import { createWriteClock } from './internal/write-clock.js';
+import { reordersPlainAccesses } from './internal/memory-order.js';
 import { createFpu } from './internal/fpu.js';
 import { createThunkTable, FORWARD_SAVE } from './internal/thunks.js';
 import {
@@ -237,6 +238,7 @@ export function createCpuModule(){
              *          awaited: (() => boolean) | null,
              *          trapTimed: ((ms: number) => void) | null,
              *          remoteFigures: Map<number, any>, executorsRefused: string | null,
+             *          ordered: boolean | null,
              *          writes: { host: any, clock: ReturnType<typeof createWriteClock> } | null,
              *          learned: { store: any, opened: number } | null }}
              */
@@ -264,6 +266,9 @@ export function createCpuModule(){
                 remoteFigures: new Map(),
                 // Why fewer executors run than were asked, if they do.
                 executorsRefused: null,
+                // Whether several executors' translations keep the program's plain
+                // accesses in order (cork's `ordered`); null on one executor.
+                ordered: null,
                 // The store the executors this bundle's threads opened are kept in,
                 // and the most it holds, once read: none in a run that opens them all.
                 learned: null,
@@ -623,6 +628,12 @@ export function createCpuModule(){
                         }
                         const engineModule = await import(settings.engineUrl);
                         const several = settings.executors > 1;
+                        // A program's plain stores reach its other threads in their
+                        // order on an x86 host; elsewhere the ordered variant keeps it,
+                        // unless the run says otherwise.
+                        const ordered = several && (typeof settings.cork?.ordered === 'boolean'
+                            ? settings.cork.ordered : await reordersPlainAccesses());
+                        state.ordered = several ? ordered : null;
                         const hostConfig = {
                             memorySize: settings.memorySize,
                             trapPort: settings.trapPort,
@@ -634,7 +645,7 @@ export function createCpuModule(){
                             // emitted, every other takes rather than emitting again.
                             // The translator stops forming while another executor
                             // waits for this one's answer (`awaitedBy`).
-                            cork: several ? { ...settings.cork, atomic: true,
+                            cork: several ? { ...settings.cork, atomic: true, ordered,
                                 awaited: ()=>state.awaited?.() === true,
                                 ...(typeof engineModule.createArena === 'function'
                                     && typeof SharedArrayBuffer === 'function'
@@ -1526,6 +1537,9 @@ export function createCpuModule(){
                     sharedMemory: typeof SharedArrayBuffer === 'function'
                         && instance.host.wasmMemory?.()?.buffer instanceof SharedArrayBuffer,
                     executorsRefused: instance.executorsRefused,
+                    // Whether the executors keep the program's plain accesses in
+                    // order (`reordersPlainAccesses`); null on one executor.
+                    ordered: instance.ordered,
                     running: instance.running,
                     instructions: retiredEverywhere(instance),
                     protectedMode: instance.host.inProtectedMode(),

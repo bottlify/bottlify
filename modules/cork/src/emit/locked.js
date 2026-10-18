@@ -23,10 +23,10 @@
  * split lock, which hardware too makes the slow exception) is a plain
  * read-modify-write, not indivisible against another executor.
  *
- * Plain loads and stores stay plain. On an x86 host the engine's ordinary
- * loads and stores are the processor's, in its order; elsewhere what a
- * program's plain stores promise another thread is the open question of the
- * atomic tax.
+ * Plain loads and stores stay plain here. On an x86 host the engine's
+ * ordinary loads and stores are the processor's, in its order; on one that
+ * reorders them the ordered variant makes an integer operand's access an
+ * atomic too (`readOp` in `integer.js`).
  */
 
 import { CF, ZF } from '../decode/table.js';

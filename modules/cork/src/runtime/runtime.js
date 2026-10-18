@@ -309,6 +309,10 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         // memory: for a process whose threads run on more than one executor.
         // Off, a process on one executor pays nothing.
         atomic: false,
+        // With atomic: the integer loads and stores not through esp as wasm atomics
+        // too, so a program's plain stores reach another thread in their order --
+        // what x86 keeps and a host that reorders plain accesses (arm64) does not.
+        ordered: false,
         // Where the process's record of shared code lies and which executor this
         // runtime is (`shared-code.js`), when other executors share its page flags;
         // null for a process on one.
@@ -1963,6 +1967,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         precise: settings.precise === true,
         checkReads: readsChecked,
         atomic: settings.atomic === true,
+        ordered: settings.atomic === true && settings.ordered === true,
         looseStacks: loose,
         leaveOut,
         timings: import.meta.BOTTLIFY_DIAGNOSTICS !== false && settings.timings === true,
@@ -2536,6 +2541,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         + (settings.callReturn === true ? 'R' : '') + (sharedMemory ? 'M' : '')
         + (settings.emptySites === true && settings.emptyCalls !== false ? 'E' : '')
         + (settings.atomic === true ? 'A' : '')
+        + (settings.atomic === true && settings.ordered === true ? 'O' : '')
         + `p${(settings.trapPort ?? 0).toString(16)}`;
     /**
      * The store key of one formed region: its entry, its top, and the run's modes its
