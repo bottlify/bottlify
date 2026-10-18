@@ -369,6 +369,32 @@ test('parking a thread keeps where its stub leaves the stack, for the resume', a
     assert.equal(thread.resumeStack, 0x2ffedc);
     assert.equal(memory.words.get(0x2ffed0), PARK);
 });
+test('a thread parked or held in its call ends its turn there', async()=>{
+    // Run on, it took its stub's `ret` into the park loop and the loop's `hlt`;
+    // ended there by something else, the resume took the `ret` and neither
+    // ran -- so what the thread retired depended on what else happened.
+    const memory = fakeMemory();
+    let stops = 0;
+    const cpu = { ...fakeCpu(0x2ffed0), stop: ()=>{
+        stops++;
+    } };
+    const kernel = await kernelModule.create(
+        { stacks: { base: STACK_BASE, size: STACK_SIZE } },
+        /** @type {any} */ ({
+            /** @param {string} name */
+            requireApi: name=>(name === 'cpu' ? cpu : memory),
+            provide: ()=>{},
+        }),
+    );
+    const thread = kernel.createThread({ entry: 0x00402000, name: 'main' });
+    memory.words.set(0x2ffed0, 0x007e8166);
+    kernel.parkThread(thread, 0x2ffedc);
+    assert.equal(stops, 1, 'parked');
+    memory.words.set(0x2ffed0, 0x007e8166);
+    assert.equal(kernel.holdThread(), 0x007e8166);
+    assert.equal(stops, 2, 'held');
+});
+
 test('a parked thread resumes on the stack it was told, however far the stub got', async()=>{
     // The slice can end on the trap itself, before the stub's `ret` has popped
     // the return slot and the arguments. The context saved then has ESP on the

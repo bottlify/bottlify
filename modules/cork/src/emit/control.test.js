@@ -247,6 +247,7 @@ test('out dx, eax to the trap port calls the host from inside the region; others
         assert.deepEqual(ended.translate(CODE, { hash: true }).run(CODE), { kind: 0, vector: 0 });
         assert.equal(ended.eip(), CODE + 15, 'stopped past the out');
         assert.equal(ended.reg('ebx'), 1, 'the instruction after the out is left to the next turn');
+        assert.equal(ended.counter(), 4, 'the four that ran retired, not the budget given up');
         // With x87 registers live in the region the call is made from it too,
         // the stack written back first, and the region then leaves for wherever
         // EIP is: the handler may have moved the top the code after the out was
@@ -266,6 +267,13 @@ test('out dx, eax to the trap port calls the host from inside the region; others
         assert.deepEqual(fpSeen, [7, 7, 1, CODE + 17], 'the value, the pushed 1 in ST0, EIP');
         assert.equal(fp.eip(), CODE + 17, 'past the out');
         assert.equal(fp.reg('ebx'), 1, 'the instruction after it is the next region\'s');
+        // And a turn ended there: the fld1 and the four before the call retired.
+        const fpEnded = createTestMachine({ trapPort: PORT, trap: ()=>2 });
+        fpEnded.write(CODE, [0xd9, 0xe8, ...program]);
+        fpEnded.setReg('esp', STACK);
+        assert.deepEqual(fpEnded.translate(CODE, { hash: true }).run(CODE), { kind: 0, vector: 0 });
+        assert.equal(fpEnded.eip(), CODE + 17, 'stopped past the out');
+        assert.equal(fpEnded.counter(), 5, 'what ran, with x87 live, not the budget given up');
         // Where the x87 and MMX views meet, the exit past the out, for the host.
         const mixed = createTestMachine({ trapPort: PORT, trap: ()=>0 });
         mixed.write(CODE, [0x0f, 0x6f, 0xc1, 0x0f, 0x77, 0xd9, 0xe8, ...program]);

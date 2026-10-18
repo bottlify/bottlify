@@ -94,6 +94,22 @@ export const EXECUTORS_OPENED_KEY = 'cpu/executors-opened';
  * talks about running, stopping, registers, physical memory and traps.
  */
 
+/**
+ * Instructions a process has retired on every executor: its own executor's
+ * count and what the others' slices retired, so a total is every thread's
+ * together however many executors ran them.
+ *
+ * @param {{ host: any, remotes: any[] }} instance
+ */
+const retiredEverywhere = instance=>{
+    let total = instance.host.instructionCount();
+    for (const remote of instance.remotes)
+    {
+        total += remote.retired?.() ?? 0;
+    }
+    return total;
+};
+
 /** Where each general register sits in a saved context, in the processor's own order. */
 const REGISTER_INDEX = Object.freeze({
     eax: 0, ecx: 1, edx: 2, ebx: 3, esp: 4, ebp: 5, esi: 6, edi: 7,
@@ -308,7 +324,7 @@ export function createCpuModule(){
                         return;
                     }
                     counters[0] = state.running ? 1 : 0;
-                    counters[1] = state.host.instructionCount();
+                    counters[1] = retiredEverywhere(state);
                     counters[2] = state.host.inProtectedMode() ? 1 : 0;
                     counters[3] = state.thunks ? state.thunks.size : 0;
                     counters[4] = state.thunks ? state.thunks.capacity : 0;
@@ -1436,7 +1452,10 @@ export function createCpuModule(){
                 pageAccess: (address, length, open)=>
                     state.host?.pageAccess?.(address, length, open) ?? false,
 
-                instructionCount: ()=>started().instructionCount(),
+                instructionCount: ()=>{
+                    started();
+                    return retiredEverywhere(state);
+                },
                 compiledModules: ()=>started().compiledModules(),
                 interpretedSteps: ()=>started().interpretedSteps(),
                 hostWrittenBytes: ()=>started().hostWrittenBytes(),
@@ -1508,7 +1527,7 @@ export function createCpuModule(){
                         && instance.host.wasmMemory?.()?.buffer instanceof SharedArrayBuffer,
                     executorsRefused: instance.executorsRefused,
                     running: instance.running,
-                    instructions: instance.host.instructionCount(),
+                    instructions: retiredEverywhere(instance),
                     protectedMode: instance.host.inProtectedMode(),
                     traps: instance.thunks ? instance.thunks.size : 0,
                     trapCapacity: instance.thunks ? instance.thunks.capacity : 0,
@@ -1567,8 +1586,11 @@ export function createCpuModule(){
                             instance.remoteFigures.set(remote.index, value);
                         }).catch(()=>{});
                         const figures = instance.remoteFigures.get(remote.index);
+                        // What its slices retired is the process's to say, now.
+                        const instructions = remote.retired?.() ?? null;
                         return figures ? {
                             index: remote.index,
+                            instructions,
                             retired: figures.retired,
                             translatedShare: figures.translatedShare,
                             regions: figures.regions,
@@ -1577,7 +1599,7 @@ export function createCpuModule(){
                             translateMs: figures.translateMs,
                             workerBusyMs: figures.workerBusyMs,
                             spent: figures.spent,
-                        } : { index: remote.index, answer: 'not answered yet' };
+                        } : { index: remote.index, instructions, answer: 'not answered yet' };
                     }),
                 },
             };

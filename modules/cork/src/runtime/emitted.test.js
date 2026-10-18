@@ -79,6 +79,7 @@ const EMITTED = {
     90: '92cab94d459b71f1',
     91: '45c665fef42076be',
     92: '18c624d5b1dedc26',
+    93: 'c20886250a565df9',
 };
 
 /** Features fixed rather than probed, so every host emits the same bytes. */
@@ -134,6 +135,23 @@ function digest(){
     finishModule(sitesContext, [atSites.functionIndex]);
     sites.exportFunction('region', atSites.functionIndex);
     hash.update('empty sites:').update(sites.toBytes());
+    // A call into the host from inside a region (`out dx, eax` to the trap port), the integer
+    // registers alone and with x87 ones live: what the handler's answer does to the run --
+    // EIP moved, the turn ended -- is emitted after the call. mov ebx, 1; mov dx, 0xb077;
+    // mov eax, 7; out dx, eax; inc ebx; hlt, then the same after an fld1.
+    const trapped = [0xbb, 1, 0, 0, 0, 0x66, 0xba, 0x77, 0xb0, 0xb8, 7, 0, 0, 0, 0xef, 0x43, 0xf4];
+    for (const [name, bytes] of /** @type {const} */ ([['trap', trapped],
+        ['trap x87', [0xd9, 0xe8, ...trapped]]]))
+    {
+        const call = formRegion(address=>bytes[address - 0x1000] ?? 0, 0x1000, {});
+        const calls = new ModuleBuilder();
+        const callsContext = prepareModule(calls, layout, FEATURES, {}, { hash: true,
+            trapPort: 0xb077, resume: true, callReturn: true });
+        const atCall = emitRegion(callsContext, call, { entryTop: 0, checked: false });
+        finishModule(callsContext, [atCall.functionIndex]);
+        calls.exportFunction('region', atCall.functionIndex);
+        hash.update(`${name}:`).update(calls.toBytes());
+    }
     // Single precision computed on floats (`floatSingles`): fmath's loop of sums of products,
     // and game's loop of distances entered with two floats held, whose code after an
     // indirect call tests the stack it needs.

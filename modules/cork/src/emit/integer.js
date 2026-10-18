@@ -65,7 +65,8 @@ const SELECTORS = [0x10, 0x08, 0x10, 0x10, 0x18, 0x10];
  * higher priority made ready, the machine halted -- and only the loop can
  * give the processor to anyone else; with budget left, an untranslated exit
  * tail-calls the next region and the thread runs out its quantum instead.
- * The answer is in `t1`.
+ * The budget given up is not charged as retired (`endBudget`). The answer is
+ * in `t1`.
  *
  * @param {any} e
  */
@@ -73,7 +74,7 @@ function endTurnIfAsked(e){
     const { b } = e;
     b.localGet(Local.t1).i32const(TRAP_END_TURN).op(I32.eq);
     e.openIf('endTurn');
-    b.i32const(0).localSet(Local.budget);
+    e.endBudget();
     e.close();
 }
 

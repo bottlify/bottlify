@@ -1466,6 +1466,29 @@ export class RegionEmitter {
         b.store('i32', { offset: layout.counter });
     }
 
+    /**
+     * Ends the run here: no budget left, so no transfer goes on and the next
+     * back edge or call leaves. The budget is the count too -- what the run
+     * took off it since `origin` -- so the origin goes down by what is left,
+     * and the exit charges what ran: zeroing the budget alone charged the
+     * rest of the quantum as retired, at every call that ended a turn.
+     */
+    endBudget(){
+        const { b, context } = this;
+        if (this.flagRecord >= 0)
+        {
+            atState(context, b);
+            this.pushOrigin();
+            b.localGet(Local.budget).op(I32.sub)
+                .store('i32', { offset: /** @type {number} */ (this.layout.origin) });
+        }
+        else
+        {
+            b.localGet(Local.origin).localGet(Local.budget).op(I32.sub).localSet(Local.origin);
+        }
+        b.i32const(0).localSet(Local.budget);
+    }
+
     /** The budget the run started with: in the state block under cork's layout. */
     pushOrigin(){
         if (this.flagRecord >= 0)
