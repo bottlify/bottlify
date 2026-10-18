@@ -733,6 +733,10 @@ flowchart TB
   arms a page again for everyone, and takes a page armed while another executor was running
   guest code as written at every look until that run has ended: a store tested before the
   arming lands after it unmarked. Under the emulator every byte of the range is compared.
+  Any buffer an unlock has sent whole, dynamic or not, is watched the same way from then on,
+  and its next unlock sends only the pages written since. A loop that streams stores into
+  watched pages marks the pages its next turns may reach once, before them, and runs its
+  stores untested as on pages already written.
 - **Who waits for whom.** `Present` waits for the graphics thread only when it is more than two frames
   behind. It does wait for the display, as a driver does: under every presentation interval but
   `IMMEDIATE` (windowed Direct3D 8 only under `COPY_VSYNC`) the calling thread stops until the next
