@@ -13,7 +13,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     createMacrotask, groupBlocks, idleWait, inParallel, pacedYield, pageIsHidden, placePatches,
-    withReadAhead, withWindow, refetchedIn,
+    withReadAhead, withWindow, refetchedIn, windowFor, NEAR_ROUND_TRIP_MS, READ_AHEAD_BYTES,
     resolveLibraryPath, startDirectoryOf, libraryCandidates, withLibraryExtension, timedWait,
     pagePacing,
     PAGE_YIELD_MS,
@@ -1861,4 +1861,15 @@ test('the pool lends a process the host\'s cores its own leave, less two, and ne
     assert.equal(translatorsBeside(4, 4), 1, 'the program takes them all: still one');
     assert.equal(translatorsBeside(1, 8), 5);
     assert.equal(translatorsBeside(4, 16), 10);
+});
+
+test('a miss brings in more the farther the bundle is, and no more than eight windows', ()=>{
+    // A near bundle keeps the window the transport was tuned on; a bucket a
+    // third of a second away has each round trip carry what the line delivers
+    // in it, and the cap keeps one request under the request ceiling.
+    assert.equal(windowFor(0), READ_AHEAD_BYTES, 'before any request');
+    assert.equal(windowFor(NEAR_ROUND_TRIP_MS - 1), READ_AHEAD_BYTES, 'a near bundle');
+    assert.equal(windowFor(2 * NEAR_ROUND_TRIP_MS), 2 * READ_AHEAD_BYTES);
+    assert.equal(windowFor(350), 7 * READ_AHEAD_BYTES, 'a bucket at 350 ms');
+    assert.equal(windowFor(60000), 8 * READ_AHEAD_BYTES, 'capped');
 });

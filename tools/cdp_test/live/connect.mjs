@@ -16,8 +16,11 @@ import { CdpEndpoint } from '../cdp.mjs';
 
 export const PORT = Number(process.env.CDP_PORT ?? 9333);
 
-/** @param {string} [match]  Text the launcher tab's URL contains. */
-export async function connect(match = '5180'){
+/**
+ * @param {string} [match]  Text the launcher tab's URL contains: the local launcher's
+ *     port unless CDP_TAB names another, the published site's host for one.
+ */
+export async function connect(match = process.env.CDP_TAB ?? '5180'){
     const version = await (await fetch(`http://127.0.0.1:${PORT}/json/version`)).json();
     const cdp = new CdpEndpoint(version.webSocketDebuggerUrl);
     await cdp.open();

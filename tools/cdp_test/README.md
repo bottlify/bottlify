@@ -130,7 +130,7 @@ workers answer nothing to a direct attach.
 
 | script | what it answers | run it as |
 |---|---|---|
-| [`browser.mjs`](browser.mjs) | opens the headed browser on the launcher, profile kept in `dbg/chrome-profile` | `node tools/cdp_test/live/browser.mjs [url]` |
+| [`browser.mjs`](browser.mjs) | opens the headed browser on the launcher, profile kept in `dbg/chrome-profile` | `node tools/cdp_test/live/browser.mjs [url] [chrome flags]` (`--use-webgpu-adapter=swiftshader` for the software adapter) |
 | `eval.mjs` | the value of an expression in the launcher tab (`window.__bottlify__` is the engine) | `node tools/cdp_test/live/eval.mjs "<expression>"` |
 | `audio-watch.mjs` | four times a second, with the clock: laps replayed, silence held, blocks starved, writer skips, late guest threads: what a crackle was | `node tools/cdp_test/live/audio-watch.mjs` |
 | `memory-watch.mjs` | every five seconds: the tab's private memory and each worker's JS heap | `node tools/cdp_test/live/memory-watch.mjs` |

@@ -73,6 +73,63 @@ export async function resolveBlockStore(spec){
 const bitmapBytes = blockCount=>Math.ceil(blockCount / 8);
 
 /**
+ * The name a bundle's blocks are kept under: its id and the fingerprint of its
+ * index, so a bundle packed again starts a cache of its own.
+ *
+ * @param {string} id  @param {string} fingerprint
+ */
+export const blockCacheName = (id, fingerprint)=>`${id}-${fingerprint}`;
+
+/**
+ * How much of a bundle this machine already holds, read from the cache's
+ * bitmap without opening it for writing: what a page asks before a start, to
+ * say whether the game is here whole. The blocks of the translation seed are
+ * not counted, being the translator's store's and read once.
+ *
+ * @param {Object} options
+ * @param {any} options.root  The origin's file system (`navigator.storage.getDirectory()`).
+ * @param {string} options.id  The bundle's id, as the engine is given it.
+ * @param {{ fingerprint: string, blockCount: number, block: (index: number) => { packed: number },
+ *     translations: { firstBlock: number, blocks: number } | null }} options.bundle  Opened.
+ * @returns {Promise<{ blocks: number, resident: number, bytes: number, residentBytes: number }>}
+ */
+export async function bundleResidency({ root, id, bundle }){
+    const name = blockCacheName(id, bundle.fingerprint).replace(/[^A-Za-z0-9._-]/g, '_');
+    /** @type {Uint8Array | null} */
+    let bitmap = null;
+    try
+    {
+        const file = await (await root.getFileHandle(`${name}.present`)).getFile();
+        bitmap = new Uint8Array(await file.arrayBuffer());
+    }
+    catch {
+        // No cache yet: nothing of it is here.
+    }
+    if (bitmap && bitmap.length !== bitmapBytes(bundle.blockCount))
+    {
+        bitmap = null;
+    }
+    const seed = bundle.translations;
+    const out = { blocks: 0, resident: 0, bytes: 0, residentBytes: 0 };
+    for (let index = 0; index < bundle.blockCount; index++)
+    {
+        if (seed && index >= seed.firstBlock && index < seed.firstBlock + seed.blocks)
+        {
+            continue;
+        }
+        const { packed } = bundle.block(index);
+        out.blocks++;
+        out.bytes += packed;
+        if (bitmap && isSet(bitmap, index))
+        {
+            out.resident++;
+            out.residentBytes += packed;
+        }
+    }
+    return out;
+}
+
+/**
  * @param {Uint8Array} bitmap
  * @param {number} index
  */

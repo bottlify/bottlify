@@ -41,7 +41,7 @@ import { createBundleSource } from './layers/filesystem/internal/bundle/source.j
 import { crc32 } from './layers/filesystem/internal/bundle/crc32.js';
 import { createSharingMemory, openSharedSharing } from './layers/filesystem/internal/shared-sharing.js';
 import { resolveTranslationStore } from './layers/cpu/internal/translation-store.js';
-import { createBlockCache, resolveBlockStore }
+import { blockCacheName, createBlockCache, resolveBlockStore }
     from './layers/filesystem/internal/bundle/cache.js';
 import { decompressZstd } from './zstd.js';
 import { mountDiscs } from './discs.js';
@@ -416,6 +416,14 @@ const hashText = (hash, text)=>{
  * @property {boolean} [bundle.prefetch]  Whether to fill the cache in the gaps
  *           when nothing is being read. On by default, and inert when there is
  *           nowhere durable to keep the blocks.
+ * @property {boolean} [bundle.preload]  Whether to bring the whole bundle in
+ *           before the program starts, so that nothing it reads waits on the
+ *           network: every block not kept yet, before `createApp` resolves.
+ *           Inert, and said through `progress`, where there is nowhere durable
+ *           to keep the blocks.
+ * @property {(state: { bytes: number, total: number } | { unbacked: string }) => void}
+ *           [bundle.progress]  Told how far a preload is: packed bytes here of
+ *           the bundle's, after every request that lands.
  * @property {string} [bundle.indexSha256]  From the manifest. Checked against
  *           the index this bundle actually carries, which is what makes the
  *           per-block checksums inside it worth trusting.
@@ -633,6 +641,32 @@ export function groupBlocks(blocks){
  * much extra at most.
  */
 export const READ_AHEAD_BYTES = 2 << 20;
+
+/**
+ * The round trip below which a bundle is near: a disk, or a server on the
+ * network beside the browser. A window is `READ_AHEAD_BYTES` there; each
+ * multiple of this a request takes widens it by as much again, up to
+ * `MAX_WINDOW_SCALE` of them.
+ *
+ * A miss costs one round trip whatever it brings, and a bucket a continent's
+ * edge away answers in a third of a second: a game loading a level waited that
+ * long for every two mebibytes, though the line carries twenty-five of them in
+ * that time.
+ */
+export const NEAR_ROUND_TRIP_MS = 50;
+const MAX_WINDOW_SCALE = 8;
+
+/**
+ * How much a miss brings in, by how far away the bundle is.
+ *
+ * @param {number} roundTripMs  The shortest of the bundle's recent requests;
+ *     0 before there is one.
+ * @returns {number} bytes
+ */
+export function windowFor(roundTripMs){
+    return READ_AHEAD_BYTES
+        * Math.min(MAX_WINDOW_SCALE, Math.max(1, Math.floor(roundTripMs / NEAR_ROUND_TRIP_MS)));
+}
 
 /**
  * Widens every miss to the aligned window of the container that holds it.
@@ -2709,11 +2743,32 @@ async function mountBundle({ options, cpu, events, translationStore }){
     }
     // Everything below fetches through this, the index included: the first
     // range of the run is as exposed to a dropped connection as the last.
-    const fetchRange = retryingFetch({
+    const retrying = retryingFetch({
         fetch: options.bundle.fetch,
         events,
         retry: options.bundle.retry,
     });
+    /**
+     * How long the bundle's last requests took. The shortest of them is the
+     * round trip with the least transfer in it: what a miss costs whatever it
+     * brings (`windowFor`).
+     *
+     * @type {number[]}
+     */
+    const recentMs = [];
+    const ROUND_TRIPS_KEPT = 8;
+    /** @type {typeof retrying} */
+    const fetchRange = async(offset, length, verify)=>{
+        const began = performance.now();
+        const bytes = await retrying(offset, length, verify);
+        recentMs.push(performance.now() - began);
+        if (recentMs.length > ROUND_TRIPS_KEPT)
+        {
+            recentMs.shift();
+        }
+        return bytes;
+    };
+    const roundTrip = ()=>(recentMs.length === 0 ? 0 : Math.min(...recentMs));
 
     const zstdForEngine = chooseZstdDecoder(options.engine ?? DEFAULT_ENGINE, cpu,
         await zstdWasmFor(options));
@@ -2769,7 +2824,7 @@ async function mountBundle({ options, cpu, events, translationStore }){
         // ponytail: the cache of a bundle packed again is left behind on the
         // store; drop names of this bundle with another fingerprint when the
         // space matters.
-        name: `${options.bundle.id ?? options.id ?? 'bundle'}-${bundle.fingerprint}`,
+        name: blockCacheName(options.bundle.id ?? options.id ?? 'bundle', bundle.fingerprint),
         blockSize: bundle.blockSize,
         blockCount: bundle.blockCount,
     });
@@ -2978,7 +3033,13 @@ async function mountBundle({ options, cpu, events, translationStore }){
             .map(block=>[block.index, block])).values()]
             .sort((left, right)=>left.offset - right.offset);
 
-        const reaching = withWindow(withReadAhead(absent, bundle, has, expected), bundle, has);
+        // Wide only where the blocks are kept: a cache in the heap is a few
+        // windows, and windows of 16 MiB evicted each other's blocks before
+        // the read that wanted them came back for them -- a start fetched
+        // four times its bundle and never got going.
+        const window = cache.backed ? windowFor(roundTrip()) : READ_AHEAD_BYTES;
+        const reaching = withWindow(withReadAhead(absent, bundle, has, expected, window),
+            bundle, has, window);
         ahead += reaching.length - absent.length;
         if (reaching.length > 0)
         {
@@ -3024,6 +3085,13 @@ async function mountBundle({ options, cpu, events, translationStore }){
      * moment the time stops being idle it has to give the connections back to
      * the read that a player is actually waiting on.
      *
+     * Except where the bundle is far (`NEAR_ROUND_TRIP_MS`): there a parked
+     * read is a round trip's wait however wide the line, and a level loading is
+     * a read parked nearly all the time, so a filler that stood aside never ran
+     * while it mattered. It goes on beside the read, one request against the
+     * read's six, and a read that wants a block of its request waits for it
+     * rather than asking again.
+     *
      * @param {{ start: number, end: number, blocks: any[] }[]} groups
      * @returns {Promise<boolean>} whether to go on
      */
@@ -3036,7 +3104,7 @@ async function mountBundle({ options, cpu, events, translationStore }){
                 {
                     return false;
                 }
-                if (waiting === 0)
+                if (waiting === 0 || roundTrip() >= NEAR_ROUND_TRIP_MS)
                 {
                     break;
                 }
@@ -3055,7 +3123,25 @@ async function mountBundle({ options, cpu, events, translationStore }){
             {
                 for (const part of groupBlocks(missing))
                 {
-                    await fetchGroup(part);
+                    const request = fetchGroup(part);
+                    for (const block of part.blocks)
+                    {
+                        inFlight.set(block.index, request);
+                    }
+                    try
+                    {
+                        await request;
+                    }
+                    finally
+                    {
+                        for (const block of part.blocks)
+                        {
+                            if (inFlight.get(block.index) === request)
+                            {
+                                inFlight.delete(block.index);
+                            }
+                        }
+                    }
                 }
                 await cache.persist();
             }
@@ -3113,9 +3199,43 @@ async function mountBundle({ options, cpu, events, translationStore }){
         await fillGroups(groupBlocks(all));
     };
 
-    // Deliberately not awaited: it runs for as long as the bundle has blocks
-    // left, which is the whole session.
-    fill();
+    /**
+     * The whole bundle before the program starts (`bundle.preload`): every
+     * block not kept yet, as many requests at once as a read may have, each
+     * kept and recorded as it lands, so a preload cut short is resumed where it
+     * stopped. Not the translation seed, which the translator's store reads.
+     */
+    const preload = async()=>{
+        const progress = options.bundle.progress ?? (()=>{});
+        if (!cache.backed)
+        {
+            progress({ unbacked: cache.reason ?? 'nowhere to keep the blocks' });
+            return;
+        }
+        const all = Array.from({ length: bundle.blockCount }, (unused, index)=>bundle.block(index))
+            .filter(block=>member === null || block.index < member.firstBlock
+                || block.index >= member.firstBlock + member.blocks);
+        const total = all.reduce((sum, block)=>sum + block.packed, 0);
+        const missing = all.filter(block=>!has(block.index));
+        let bytes = total - missing.reduce((sum, block)=>sum + block.packed, 0);
+        progress({ bytes, total });
+        await inParallel(groupBlocks(missing), MAX_CONCURRENT_REQUESTS, async group=>{
+            await fetchGroup(group);
+            await cache.persist();
+            bytes += group.blocks.reduce((sum, block)=>sum + block.packed, 0);
+            progress({ bytes, total });
+        });
+    };
+    if (options.bundle.preload === true)
+    {
+        await preload();
+    }
+    else
+    {
+        // Deliberately not awaited: it runs for as long as the bundle has
+        // blocks left, which is the whole session.
+        fill();
+    }
     return {
         /** The bundle's files as a drive's read-only layer, for each machine to mount. */
         source,

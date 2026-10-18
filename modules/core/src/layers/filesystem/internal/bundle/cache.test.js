@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createBlockCache, resolveBlockStore } from './cache.js';
+import { blockCacheName, bundleResidency, createBlockCache, resolveBlockStore } from './cache.js';
 
 /**
  * The store contract the cache uses, over ordinary buffers. Synchronous, like
@@ -231,4 +231,34 @@ test('the order is bounded', async()=>{
     const again = await createBlockCache({ store, ...OPTIONS, blockCount: 10000 });
     assert.equal(again.order().length, 4096);
     assert.equal(again.order()[0], 0, 'the earliest demands are the ones kept');
+});
+
+test('what of a bundle is here is read off its bitmap, the translation seed aside', async()=>{
+    // Ten blocks of 100 bytes, the last two the translation seed; the bitmap
+    // says blocks 0, 1, 2 and 9 are here.
+    const bundle = {
+        fingerprint: 'abc',
+        blockCount: 10,
+        block: ()=>({ packed: 100 }),
+        translations: { firstBlock: 8, blocks: 2 },
+    };
+    /** @param {Uint8Array | null} bitmap */
+    const rootWith = bitmap=>({
+        /** @param {string} name */
+        getFileHandle: async name=>{
+            if (bitmap === null || name !== `${blockCacheName('game', 'abc')}.present`)
+            {
+                throw new Error('NotFoundError');
+            }
+            return { getFile: async()=>new Blob([new Uint8Array(bitmap)]) };
+        },
+    });
+    /** @param {Uint8Array | null} bitmap */
+    const residency = bitmap=>bundleResidency({ root: rootWith(bitmap), id: 'game', bundle });
+    assert.deepEqual(await residency(Uint8Array.of(0b111, 0b10)),
+        { blocks: 8, resident: 3, bytes: 800, residentBytes: 300 });
+    assert.deepEqual(await residency(null),
+        { blocks: 8, resident: 0, bytes: 800, residentBytes: 0 }, 'no cache yet');
+    assert.equal((await residency(Uint8Array.of(0xff))).resident, 0,
+        'a bitmap of another size is another bundle\'s');
 });

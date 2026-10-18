@@ -1,9 +1,9 @@
-# Third-party notices — Bottlify
+# Third-party notices: Bottlify
 
 This lists components not authored in this repository that are distributed with the product.
 Full license texts are kept alongside the corresponding component.
 
-## FFmpeg — video and audio decoding
+## FFmpeg: video and audio decoding
 
 - Source: upstream https://github.com/FFmpeg/FFmpeg at release tag `n6.1`, commit
   `d4ff0020b40b524a490cf62eccbd3a318f4c0e58`, unmodified
@@ -32,7 +32,7 @@ rebuilding it needs only Docker.
 
 FFmpeg's full license text is in that tree (`COPYING.LGPLv2.1`).
 
-## minimp3 — MPEG Layer 3 audio decoding
+## minimp3: MPEG Layer 3 audio decoding
 
 - Source: minimp3 by lieff, https://github.com/lieff/minimp3, compiled to WebAssembly by the
   npm package `minimp3-wasm` 0.1.0 (https://github.com/bashi/minimp3-wasm)
@@ -43,7 +43,7 @@ FFmpeg's full license text is in that tree (`COPYING.LGPLv2.1`).
 - License: minimp3 is CC0-1.0 (public domain dedication); the WebAssembly build is Apache-2.0,
   whose full text is `modules/core/src/layers/audio/asi/minimp3.LICENSE`
 
-## Microsoft Root Authority certificate — the default Authenticode trust anchor
+## Microsoft Root Authority certificate: the default Authenticode trust anchor
 
 - What it is: the root certificate "Microsoft Root Authority" (issued 1997-01-10, expired
   2020-12-31, serial number C1008B3C3C8811D13EF663ECDF40, SHA-1 thumbprint
@@ -64,7 +64,7 @@ FFmpeg's full license text is in that tree (`COPYING.LGPLv2.1`).
   Windows installation carries; it is included so that a signature Windows would accept is
   accepted here, and it grants nothing beyond that.
 
-## Thawte Timestamping CA certificate — a default Authenticode trust anchor
+## Thawte Timestamping CA certificate: a default Authenticode trust anchor
 
 - What it is: the root certificate "Thawte Timestamping CA" (issued 1997-01-01, expired
   2020-12-31, SHA-1 thumbprint BE36A4562FB2EE05DBB3D32323ADF445084ED656), Thawte's (now
@@ -77,7 +77,7 @@ FFmpeg's full license text is in that tree (`COPYING.LGPLv2.1`).
 - What is used: its names and public key, as data, the same way as the Microsoft root above:
   default content of the root store, so that a timestamp Windows XP accepts is accepted here.
 
-## Wine conformance expectations — used as a specification
+## Wine conformance expectations: used as a specification
 
 Wine and the Win32 specifications are used only as a source of knowledge about API behavior;
 no code from them is carried into this repository.
@@ -88,7 +88,7 @@ establish what these APIs do: which argument combinations fail and with which re
 state a freshly created device holds, which calls are legal in which order. Those behaviours are
 facts about a Microsoft product, established by measurement, and belong to nobody.
 
-What is derived from them here: the boundary-case sets and the validity tables — which lock
+What is derived from them here: the boundary-case sets and the validity tables: which lock
 rectangles are malformed, which pool and usage combinations are accepted, which capability bits a
 surface may be created with. The selection of cases to cover is Wine's editorial work over
 twenty-five years, and this entry records that debt.

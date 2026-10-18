@@ -700,6 +700,9 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
                     ...bundle,
                     fetch: bundle.file ? blobFetcher(bundle.file)
                         : rangeFetcher(/** @type {string} */ (bundle.url)),
+                    // A preload happens inside the start, before the page has
+                    // an app to subscribe through: told as an event at once.
+                    progress: (/** @type {unknown} */ state)=>emit('bundle-preload', state),
                 } : undefined,
                 storage: storage && typeof storage === 'object'
                     ? { load: async()=>storage.files }

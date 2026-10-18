@@ -36,6 +36,7 @@ import { serveEngine } from './serve.js';
  *     container?: any,
  *     transfer?: any[],
  *     workerUrl?: string | URL,
+ *     on?: Record<string, (payload: any) => void>,
  * }} CreateAppOptions
  *
  * `host` is where the engine runs: `worker` (the default wherever `Worker`
@@ -154,7 +155,8 @@ function openHost(mode, workerUrl){
  * @returns {Promise<any>} the controller
  */
 export async function createApp(options){
-    const { host, canvas, container, transfer, workerUrl, ...start } = options;
+    // `on`: events the engine tells while it starts, subscribed before it does.
+    const { host, canvas, container, transfer, workerUrl, on, ...start } = options;
     const mode = host ?? (typeof Worker === 'function' ? 'worker' : 'thread');
     const viewport = canvas ?? (container
         ? container.appendChild(container.ownerDocument.createElement('canvas'))
@@ -180,6 +182,7 @@ export async function createApp(options){
             canvas: kept ? null : viewport,
             options: start,
             transfer,
+            on,
         });
     }
     catch (e){
