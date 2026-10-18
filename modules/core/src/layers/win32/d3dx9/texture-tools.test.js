@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createTextureTools, textureRequirements } from './texture-tools.js';
+import { createTextureTools, shaderProfile, textureRequirements } from './texture-tools.js';
 import { deviceRig } from './device.fixture.js';
 import { D3DX_DEFAULT } from './texture.js';
 import { FMT } from './pixels.js';
@@ -70,6 +70,33 @@ test('D3DXCheckTextureRequirements writes the corrections through the pointers i
         assert.equal(r.call(tools.D3DXCheckTextureRequirements, [0, at, at + 4, 0, 0, 0, 1]),
             D3DERR_INVALIDCALL);
     });
+
+test('the shader profile functions name the highest profile the device\'s caps run', async()=>{
+    const r = deviceRig({ caps: { vertexShader: 0xfffe0200, pixelShader: 0xffff0104 } });
+    const tools = /** @type {any} */ (createTextureTools(r.host));
+    const bytes = new Uint8Array(r.memory.buffer);
+    /** @param {number} at */
+    const text = at=>{
+        let end = at;
+        while (bytes[end] !== 0)
+        {
+            end++;
+        }
+        return String.fromCharCode(...bytes.subarray(at, end));
+    };
+    const vs = await r.call(tools.D3DXGetVertexShaderProfile, [r.device]);
+    assert.equal(text(vs), 'vs_2_0');
+    assert.equal(text(await r.call(tools.D3DXGetPixelShaderProfile, [r.device])), 'ps_1_4');
+    assert.equal(await r.call(tools.D3DXGetVertexShaderProfile, [r.device]), vs,
+        'the same constant string each time');
+    assert.equal(r.call(tools.D3DXGetPixelShaderProfile, [0]), 0, 'NULL for no device');
+    const bare = deviceRig();
+    assert.equal(await bare.call(/** @type {any} */ (createTextureTools(bare.host))
+        .D3DXGetPixelShaderProfile, [bare.device]), 0, 'and for no shaders');
+    assert.equal(shaderProfile('ps', 0xffff0300), 'ps_3_0');
+    assert.equal(shaderProfile('vs', 0xfffe0101), 'vs_1_1');
+    assert.equal(shaderProfile('ps', 0xffff0201), 'ps_2_0', 'a 2.x card is told ps_2_0');
+});
 
 test('D3DXCreateTexture makes the corrected texture with the device\'s CreateTexture', async()=>{
     const r = deviceRig({ caps: { textureCaps: POW2 } });

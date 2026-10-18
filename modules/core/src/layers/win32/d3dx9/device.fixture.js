@@ -59,7 +59,8 @@ const BYTES = new Map([[20, 3], [21, 4], [22, 4], [23, 2], [24, 2], [25, 2], [26
     [32, 4], [50, 1], [51, 2], [113, 8], [114, 4], [116, 16]]);
 
 /**
- * @param {{ caps?: Partial<Record<'textureCaps' | 'maxWidth' | 'maxHeight' | 'maxVolume',
+ * @param {{ caps?: Partial<Record<'textureCaps' | 'maxWidth' | 'maxHeight' | 'maxVolume'
+ *     | 'vertexShader' | 'pixelShader',
  *     number>>,
  *     viewport?: number[] }} [options]
  */
@@ -162,7 +163,7 @@ export function deviceRig(options = {}){
     };
 
     const caps = { textureCaps: 0, maxWidth: 4096, maxHeight: 4096, maxVolume: 256,
-        ...options.caps };
+        vertexShader: 0, pixelShader: 0, ...options.caps };
     let viewport = options.viewport ?? [0, 0, 640, 480, 0, 1];
     const backBuffer = surface({ width: viewport[2], height: viewport[3], format: 22,
         usage: D3DUSAGE_RENDERTARGET, pool: D3DPOOL_DEFAULT });
@@ -247,6 +248,8 @@ export function deviceRig(options = {}){
                     put(at + 88, caps.maxWidth);
                     put(at + 92, caps.maxHeight);
                     put(at + 96, caps.maxVolume);
+                    put(at + 196, caps.vertexShader);
+                    put(at + 204, caps.pixelShader);
                     return 0;
                 }
                 case 24: {
