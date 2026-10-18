@@ -50,3 +50,23 @@ test('a locked pointer is placed where the cursor is, not where the page last na
     assert.deepEqual(inputRecipient(manager, { kind: 'key', code: 'Enter', down: true }, cursor),
         { target: 0x100, dropped: false }, 'the keyboard still goes by the focus');
 });
+
+test('the routed input reads the cursor a locked pointer points with', async t=>{
+    // The routing placed a locked pointer's press at `cursor()`, which the
+    // machine's input did not have: every such press went by the last place
+    // the page named.
+    const { createApp } = await import('./app.js');
+    const { buildExe } = await import('../../../tools/make-pe.mjs');
+    const executable = buildExe({
+        imports: { 'KERNEL32.dll': ['ExitProcess'] },
+        codeSize: 0x10,
+        code: ({ iat })=>[0x6a, 0x00, 0xff, 0x15,
+            ...[0, 8, 16, 24].map(shift=>(iat('ExitProcess') >>> shift) & 0xff)],
+    });
+    const app = await createApp({ executable, imagePath: 'C:\\App\\Still.exe' });
+    t.after(()=>app.dispose());
+    assert.equal(typeof app.input.cursor, 'function');
+    const from = /** @type {{ x: number, y: number }} */ (app.input.cursor());
+    app.input.send({ kind: 'pointerMove', dx: 7, dy: 3 });
+    assert.deepEqual(app.input.cursor(), { x: from.x + 7, y: from.y + 3 });
+});

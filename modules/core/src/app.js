@@ -7386,6 +7386,9 @@ async function buildApp(options){
             send: event=>input.send(event),
             poll: ()=>input.poll(),
             route: ()=>createInputRoute(event=>input.send(event)),
+            // Where the cursor is: where a locked pointer points
+            // (`inputRecipient`), which no event of the page says.
+            cursor: ()=>input.cursor?.() ?? null,
         },
 
         /**
