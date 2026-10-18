@@ -108,11 +108,13 @@ function serveControl(port, page){
     /** @type {Record<string, (query: URLSearchParams) => Promise<any>>} */
     const orders = {
         shot: ()=>page.shot(),
+        // No dx or dy: the router takes the motion from the last position, as
+        // from a mouse, so a program reading DirectInput's mouse sees it move.
         move: async query=>send({ kind: 'pointerMove', x: Number(query.get('x')),
-            y: Number(query.get('y')), dx: 0, dy: 0 }),
+            y: Number(query.get('y')) }),
         click: async query=>{
             await send({ kind: 'pointerMove', x: Number(query.get('x')),
-                y: Number(query.get('y')), dx: 0, dy: 0 });
+                y: Number(query.get('y')) });
             // A game that reads where the pointer is a frame after its button
             // clicks where it was before the move: the move is let settle.
             await hold(Number(query.get('settle') ?? 300));
