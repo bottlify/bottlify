@@ -44,7 +44,7 @@ import { D3DTSS_MAX } from '../d3d7/constants.js';
 import { D3DTSS } from '../d3d8/constants.js';
 import { createDefaultStageStates } from '../d3d8/stagestates.js';
 import {
-    BUFFER, DRAWABLE_MIRRORS, RENDER_STATE_MIRROR, TRANSFORM_MIRROR_7, VERTEX_BUFFER7,
+    BUFFER, COMMAND, DRAWABLE_MIRRORS, RENDER_STATE_MIRROR, TRANSFORM_MIRROR_7, VERTEX_BUFFER7,
     VIEWPORT_GUARD_8,
     VIEWPORT_MIRROR, commandCode, createShadow, getRenderStateCode, getTextureStageStateCode,
     getTransformCode, getViewportCode, lock7Code, settledAfter, stageStateMirror, unlockCode,
@@ -70,6 +70,78 @@ export const COMMAND_MIRRORS = {
     BeginScene: [...DRAWABLE_MIRRORS.BeginScene],
     EndScene: [...DRAWABLE_MIRRORS.EndScene],
 };
+
+/**
+ * Direct3D 3's device setters a frame makes thousands of, as routines that
+ * write Direct3D 7's records into the ring of the Direct3D 7 device under a
+ * legacy one (`shadeLegacy`): what these calls do to that device is what
+ * Direct3D 7's do, but for the projection, which the legacy device multiplies
+ * by its viewport's clip volume -- the host's, by its type -- and the render
+ * states it answers for itself, which its block does not hold as valid, so
+ * that the routine leaves them to the host as well.
+ *
+ * @type {Readonly<Record<string, any>>}
+ */
+export const LEGACY_DEVICE_COMMANDS = Object.freeze(Object.fromEntries(Object.entries({
+    SetRenderState: {},
+    SetTextureStageState: {},
+    SetTransform: { within: [{ arg: 0, ranges: [[0, 2], [4, 0xffffffff]] }] },
+    SetTexture: {},
+}).map(([name, own])=>[name, { ...D3D7_COMMANDS.COMMANDS[name], ...own,
+    slot: D3D7_COMMANDS.commandSlot(name),
+    mirror: /** @type {Record<string, any>} */ (COMMAND_MIRRORS)[name] }])));
+
+/** The records whose calls a legacy device keeps something of besides (`ringTaken`). */
+const LEGACY_TAKEN = new Map(['SetTextureStageState', 'SetTexture']
+    .map(name=>[D3D7_COMMANDS.commandSlot(name), name]));
+
+/**
+ * Tells a legacy device, in order, each call of a run of records it keeps
+ * something of besides what the Direct3D 7 device under it makes of it.
+ *
+ * @param {Uint8Array} records
+ * @param {(name: string, args: number[]) => void} taken
+ */
+export function tellTaken(records, taken){
+    const all = new Uint32Array(records.buffer, records.byteOffset, records.byteLength >>> 2);
+    const header = COMMAND.ARGS >>> 2;
+    for (let at = 0; at < all.length;)
+    {
+        const length = all[at + 1] >>> 2;
+        if (length === 0)
+        {
+            break;
+        }
+        const name = LEGACY_TAKEN.get(all[at]);
+        if (name)
+        {
+            const args = D3D7_COMMANDS.COMMANDS[name].args;
+            taken(name, [...all.subarray(at + header, at + header + args)]);
+        }
+        at += length;
+    }
+}
+
+/**
+ * A device whose GetRenderState refuses the states `refused` names: as its
+ * block's valid render states are made from it (`RENDER_STATE_VALID`), so a
+ * routine leaves those states to the host. Everything else is the device's.
+ *
+ * @param {any} device @param {(state: number) => boolean} refused
+ */
+export function withoutStates(device, refused){
+    return new Proxy(device, {
+        get(target, key){
+            if (key === 'GetRenderState')
+            {
+                return (/** @type {number} */ state, /** @type {any} */ out)=>(
+                    refused(state >>> 0) ? DDERR_INVALIDPARAMS : target.GetRenderState(state, out));
+            }
+            const value = Reflect.get(target, key);
+            return typeof value === 'function' ? value.bind(target) : value;
+        },
+    });
+}
 import { loadTexture } from '../d3d7/load.js';
 import { D3DVOP, processVertices } from '../d3d7/process.js';
 import { decodeFvf } from '../webgpu/internal/vertexformat.js';
@@ -347,6 +419,18 @@ export function createDirect3D7Seam(
             && !traps.has(name.startsWith('Get') ? 'getters' : 'ring')))
         : {};
     /**
+     * Direct3D 3's setters as guest routines (`LEGACY_DEVICE_COMMANDS`), less
+     * those `traps` keeps as traps, as the device's own are.
+     *
+     * @type {Record<string, (builder: { trap: number }) => number>}
+     */
+    const legacyDeviceGuests = allocate
+        ? Object.fromEntries(Object.entries(LEGACY_DEVICE_COMMANDS)
+            .filter(([name])=>!traps.has(name) && !traps.has('ring'))
+            .map(([name, shape])=>[name, (/** @type {{ trap: number }} */ { trap })=>
+                placeCode(at=>commandCode(at, trap, shape))]))
+        : {};
+    /**
      * What a call the host made changed of what the block mirrors, brought
      * to the block after it: a set the host makes -- its routine kept as a
      * trap, the slow path up -- is one the guest's getters read too. A state
@@ -391,6 +475,82 @@ export function createDirect3D7Seam(
             }
             return hr;
         }]));
+
+    /**
+     * A device's block and command ring (`createShadow`), its records made on
+     * the device at its next host entry. A legacy device's (`legacy`) is the
+     * Direct3D 7 device's under it, whose ring the legacy one's routines write
+     * as well: the render states the legacy device answers for itself are not
+     * valid in the block, so its routine leaves them to the host, and what the
+     * legacy device keeps of a call besides is told it as the ring is made.
+     *
+     * @param {any} device
+     * @param {{ answersFor: (state: number) => boolean,
+     *     taken: (name: string, args: number[]) => void } | null} [legacy]
+     */
+    const shade = (device, legacy = null)=>{
+        const shadow = createShadow({
+            ringBytes,
+            allocate: /** @type {(bytes: number) => number} */ (allocate),
+            readMemory: memory.windowMemory ?? memory.readMemory,
+            readU32: memory.readU32,
+            writeMemory: memory.writeMemory,
+            device: legacy ? withoutStates(device, legacy.answersFor) : device,
+            divergence,
+            name: legacy ? 'IDirect3DDevice3' : 'IDirect3DDevice7',
+            still: work=>{
+                if (typeof device.whileStill === 'function')
+                {
+                    device.whileStill(work);
+                    return;
+                }
+                work();
+            },
+            commands: { take: records=>{
+                const named = D3D7_COMMANDS.commandObjects(records, publisher.objectAt);
+                // A buffer a draw in the run reads is readied as the draw
+                // made on the host readies it: nothing it reads changes
+                // between the draw and here, every call that may is the
+                // host's and makes the ring first.
+                for (const object of named)
+                {
+                    if (vertexBlocks.has(object))
+                    {
+                        drawingFrom(object, shadow);
+                    }
+                }
+                if (legacy)
+                {
+                    tellTaken(records, legacy.taken);
+                }
+                const count = device.commands(records, named);
+                // A state block applied in the ring: the block is
+                // brought to what the blocks applied hold, and the
+                // getters may read it again.
+                if (shadow.stale())
+                {
+                    for (const token of D3D7_COMMANDS.tokensApplied(records))
+                    {
+                        const applied = device.stateBlocks?.get(token);
+                        if (applied)
+                        {
+                            shadow.remirror({ renderStates: applied.renderStates.keys(),
+                                transforms: [...applied.transforms.keys()].map(typeOf7),
+                                stageStates: applied.stageStates.keys() });
+                        }
+                    }
+                    shadow.settled();
+                    shadow.fresh();
+                }
+                return count;
+            } },
+        });
+        shadows.set(device, shadow);
+        madeShadows.add(shadow);
+        device.guestState = ()=>shadow.address();
+        device.settleGuestRefs = ()=>shadow.sync();
+        return shadow;
+    };
 
     /** One D3D7 object per DirectDraw object, made when first asked for. */
     /** @type {WeakMap<object, any>} */
@@ -1454,64 +1614,7 @@ export function createDirect3D7Seam(
                 // The block, which the guest methods find one word past the
                 // interface pointer: made before the interface is published,
                 // which is when that word is written.
-                const device = made.device;
-                const shadow = createShadow({
-                    ringBytes,
-                    allocate,
-                    readMemory: memory.windowMemory ?? memory.readMemory,
-                    readU32: memory.readU32,
-                    writeMemory: memory.writeMemory,
-                    device,
-                    divergence,
-                    name: 'IDirect3DDevice7',
-                    still: work=>{
-                        if (typeof device.whileStill === 'function')
-                        {
-                            device.whileStill(work);
-                            return;
-                        }
-                        work();
-                    },
-                    commands: { take: records=>{
-                        const named = D3D7_COMMANDS.commandObjects(records,
-                            publisher.objectAt);
-                        // A buffer a draw in the run reads is readied as the draw
-                        // made on the host readies it: nothing it reads changes
-                        // between the draw and here, every call that may is the
-                        // host's and makes the ring first.
-                        for (const object of named)
-                        {
-                            if (vertexBlocks.has(object))
-                            {
-                                drawingFrom(object, shadow);
-                            }
-                        }
-                        const count = device.commands(records, named);
-                        // A state block applied in the ring: the block is
-                        // brought to what the blocks applied hold, and the
-                        // getters may read it again.
-                        if (shadow.stale())
-                        {
-                            for (const token of D3D7_COMMANDS.tokensApplied(records))
-                            {
-                                const applied = device.stateBlocks?.get(token);
-                                if (applied)
-                                {
-                                    shadow.remirror({ renderStates: applied.renderStates.keys(),
-                                        transforms: [...applied.transforms.keys()].map(typeOf7),
-                                        stageStates: applied.stageStates.keys() });
-                                }
-                            }
-                            shadow.settled();
-                            shadow.fresh();
-                        }
-                        return count;
-                    } },
-                });
-                shadows.set(device, shadow);
-                madeShadows.add(shadow);
-                device.guestState = ()=>shadow.address();
-                device.settleGuestRefs = ()=>shadow.sync();
+                shade(made.device);
             }
             fields.writeU32(out >>> 0,
                 publisher.publish(made.device, deviceInterfaces, IID_IDirect3DDevice7));
@@ -1616,6 +1719,27 @@ export function createDirect3D7Seam(
         shared: {
             d3dFor, deviceMethods, bufferMethods, d3dMethods, gatherStrided, readArray, readFloats,
             strideOf, writeString, textureFormats: TEXTURE_FORMATS, clippedDraw,
+            /**
+             * The block and ring of the Direct3D 7 device under a legacy one
+             * (`shade`), where there is guest memory for them; null where not.
+             *
+             * @param {any} inner
+             * @param {{ answersFor: (state: number) => boolean,
+             *     taken: (name: string, args: number[]) => void }} legacy
+             */
+            shadeLegacy: (/** @type {any} */ inner, /** @type {any} */ legacy)=>
+                (allocate ? shade(inner, legacy) : null),
+            /**
+             * `call`, after what the device's routines wrote into its ring is
+             * made, with what they check against brought up to date after it.
+             *
+             * @template T
+             * @param {any} device @param {() => T} call
+             * @returns {T}
+             */
+            settledOn: (/** @type {any} */ device, /** @type {() => any} */ call)=>
+                settledAfter(shadowOf(device), call),
+            legacyDeviceGuests,
         },
     };
 }

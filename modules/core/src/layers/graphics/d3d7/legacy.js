@@ -848,6 +848,20 @@ function createLegacyDevice(inner, version, legacy){
      */
     let textureByHandle = false;
 
+    /**
+     * A stage state stage zero took: one written with another value than
+     * TEXTUREMAPBLEND set turns the legacy blend off. Whoever made the call --
+     * this device, or the Direct3D 7 device's ring a routine wrote it into.
+     *
+     * @param {number} stage @param {number} type @param {number} value
+     */
+    const stageStateTaken = (stage, type, value)=>{
+        if (stage === 0 && legacyBlend && blendSet.has(type) && blendSet.get(type) !== value >>> 0)
+        {
+            legacyBlend = false;
+        }
+    };
+
     /** Draws, by kind, for GetStats. */
     const stats = { triangles: 0, lines: 0, points: 0, vertices: 0 };
 
@@ -1367,12 +1381,38 @@ function createLegacyDevice(inner, version, legacy){
         /** @param {number} stage @param {number} type @param {number} value */
         setTextureStageState(stage, type, value){
             const hr = inner.SetTextureStageState(stage, type, value);
-            if (hr === D3D_OK && stage === 0 && legacyBlend && blendSet.has(type)
-                && blendSet.get(type) !== value >>> 0)
+            if (hr === D3D_OK)
             {
-                legacyBlend = false;
+                stageStateTaken(stage, type, value);
             }
             return hr;
+        },
+
+        /**
+         * Whether a render state is this device's own rather than the
+         * Direct3D 7 device's: what a routine writing into that device's ring
+         * leaves to the host (`seam/d3d7.js` shadeLegacy).
+         *
+         * @param {number} state
+         */
+        answersFor: (/** @type {number} */ state)=>ownStates.has(state >>> 0),
+
+        /**
+         * A call a routine wrote into the Direct3D 7 device's ring, told as the
+         * ring is made there: what this device keeps of it besides, as its own
+         * call keeps it.
+         *
+         * @param {string} name @param {number[]} args
+         */
+        ringTaken(name, args){
+            if (name === 'SetTextureStageState')
+            {
+                stageStateTaken(args[0], args[1], args[2]);
+            }
+            else if (name === 'SetTexture' && args[0] === 0)
+            {
+                textureByHandle = false;
+            }
         },
 
         /** @param {number} stage @param {any} surface */

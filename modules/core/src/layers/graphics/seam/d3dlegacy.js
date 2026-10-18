@@ -166,6 +166,20 @@ export function createLegacyDirect3DSeam(
      */
     const pointerTo = (object, id)=>publisher.publish(object, [], id);
 
+    /**
+     * A device's methods, each first making what the routines of its third
+     * generation wrote into the ring of the Direct3D 7 device under it
+     * (`shadeLegacy`): the host answers after every call the program made
+     * before, and what the routines check against is brought up to date after.
+     *
+     * @param {Record<string, any>} methods
+     * @returns {Record<string, any>}
+     */
+    const settledOnInner = methods=>Object.fromEntries(Object.entries(methods).map(
+        ([name, method])=>[name, (/** @type {any} */ device, /** @type {number[]} */ args)=>
+            (device?.inner ? d3d7.settledOn(device.inner, ()=>method(device, args))
+                : method(device, args))]));
+
     /** @param {number} count @param {number} pointer @returns {any[] | null} D3DRECTs, signed */
     const readRects = (count, pointer)=>((pointer >>> 0) === 0
         ? null
@@ -1164,8 +1178,12 @@ export function createLegacyDirect3DSeam(
             enumerateTextureDescs(callback, context),
     };
 
-    const device3 = describe(IID_IDirect3DDevice3, IDIRECT3DDEVICE3_SLOTS, device3Methods);
-    const device2 = describe(IID_IDirect3DDevice2, IDIRECT3DDEVICE2_SLOTS, device2Methods);
+    // The third generation's setters a frame makes thousands of run in the
+    // guest, into the ring of the Direct3D 7 device underneath.
+    const device3 = describe(IID_IDirect3DDevice3, IDIRECT3DDEVICE3_SLOTS,
+        settledOnInner(device3Methods), d3d7.legacyDeviceGuests ?? {});
+    const device2 = describe(IID_IDirect3DDevice2, IDIRECT3DDEVICE2_SLOTS,
+        settledOnInner(device2Methods));
     deviceInterfaces[3] = [device3, device2];
     deviceInterfaces[2] = [device2];
 
@@ -1400,7 +1418,8 @@ export function createLegacyDirect3DSeam(
         return methods;
     };
 
-    const device1 = describe(IID_IDirect3DDevice, IDIRECT3DDEVICE_SLOTS, device1Methods(null));
+    const device1 = describe(IID_IDirect3DDevice, IDIRECT3DDEVICE_SLOTS,
+        settledOnInner(device1Methods(null)));
     deviceInterfaces[3].push(device1);
     deviceInterfaces[2].push(device1);
     deviceInterfaces[1] = [device1];
@@ -1453,6 +1472,21 @@ export function createLegacyDirect3DSeam(
             return made.hr;
         }
         made.device.root = root;
+        if (version === 3)
+        {
+            // The block the third generation's routines find one word past the
+            // interface pointer: the Direct3D 7 device's, whose ring they write.
+            const legacyDevice = made.device;
+            const shadow = d3d7.shadeLegacy?.(legacyDevice.inner, {
+                answersFor: (/** @type {number} */ state)=>legacyDevice.answersFor(state),
+                taken: (/** @type {string} */ name, /** @type {number[]} */ args)=>
+                    legacyDevice.ringTaken(name, args),
+            });
+            if (shadow)
+            {
+                legacyDevice.guestState = ()=>shadow.address();
+            }
+        }
         handBack(out, made.device, deviceInterfaces[version], id);
         return D3D_OK;
     };

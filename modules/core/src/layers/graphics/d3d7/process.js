@@ -54,7 +54,8 @@ const DEGENERATE_DEPTH = 0.001;
  * @typedef {Object} VertexSource
  * @property {number} fvf
  * @property {(attribute: string, vertex: number) => number | null} addressOf
- *           Where one vertex's attribute is, or null for one it does not have.
+ *           Where one vertex's attribute is, or null for one it does not have; an
+ *           attribute's addresses step evenly from one vertex to the next.
  *
  * @typedef {{ r: number, g: number, b: number, a: number }} Colour
  * @typedef {[number, number, number]} Vector
@@ -183,6 +184,47 @@ function reach(light, position){
 }
 
 /**
+ * One attribute of the source for every vertex processed: its bytes read in
+ * one piece, and how far apart two vertices' are -- a source's addresses step
+ * evenly from one vertex to the next (`VertexSource`). Null where the source
+ * has no such attribute.
+ *
+ * @param {ProcessMemory} memory @param {VertexSource} source @param {string} name
+ * @param {number} count @param {number} bytes  what is read of each vertex's
+ * @returns {{ view: DataView, step: number } | null}
+ */
+function streamOf(memory, source, name, count, bytes){
+    const first = count > 0 ? source.addressOf(name, 0) : null;
+    if (first === null)
+    {
+        return null;
+    }
+    const step = count > 1 ? /** @type {number} */ (source.addressOf(name, 1)) - first : 0;
+    const span = memory.readMemory(first, (count - 1) * step + bytes);
+    return { view: new DataView(span.buffer, span.byteOffset, span.byteLength), step };
+}
+
+/**
+ * Whether the fields a vertex has written cover it whole, so the vertices can
+ * go to memory in one piece rather than field by field.
+ *
+ * @param {[number, number][]} fields  each as [offset, bytes]
+ * @param {number} stride
+ */
+function coversVertex(fields, stride){
+    let next = 0;
+    for (const [offset, bytes] of [...fields].sort((a, b)=>a[0] - b[0]))
+    {
+        if (offset !== next)
+        {
+            return false;
+        }
+        next = offset + bytes;
+    }
+    return next === stride;
+}
+
+/**
  * @param {Object} request
  * @param {ProcessMemory} request.memory
  * @param {number} request.vertexOp   D3DVOP
@@ -212,30 +254,6 @@ export function processVertices(request){
         /** @type {string} */ name)=>layout.attributes.find(attribute=>attribute.name === name);
     const copying = (request.flags & D3DPV_DONOTCOPYDATA) === 0;
 
-    /** @param {number} address @param {number} floats */
-    const readFloats = (address, floats)=>{
-        const bytes = memory.readMemory(address, floats * 4);
-        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-        return Array.from({ length: floats }, (_, k)=>view.getFloat32(k * 4, true));
-    };
-    /** @param {number} address */
-    const readDword = address=>{
-        const bytes = memory.readMemory(address, 4);
-        return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
-    };
-    /** @param {number} address @param {number[]} values */
-    const writeFloats = (address, values)=>{
-        const bytes = new Uint8Array(values.length * 4);
-        const view = new DataView(bytes.buffer);
-        values.forEach((value, k)=>view.setFloat32(k * 4, value, true));
-        memory.writeMemory(address, bytes);
-    };
-    /** @param {number} address @param {number} value */
-    const writeDword = (address, value)=>{
-        memory.writeMemory(address, Uint8Array.of(value & 0xff, (value >>> 8) & 0xff,
-            (value >>> 16) & 0xff, (value >>> 24) & 0xff));
-    };
-
     const view = state.transform(D3DTS.VIEW);
     const projection = state.transform(D3DTS.PROJECTION);
     const blend = state.renderState(D3DRS.VERTEXBLEND);
@@ -244,20 +262,23 @@ export function processVertices(request){
     const weights = blend >= 1 && blend <= 3 ? Math.min(blend, from.blendWeights) : 0;
     const worldViews = Array.from({ length: weights + 1 },
         (_, index)=>multiply(state.transform(D3DTS.WORLD + index), view));
-    const normalMatrices = worldViews.map(matrix=>invert(matrix));
 
     const vp = state.viewport;
     const depthRange = vp.maxDepth > vp.minDepth ? vp.maxDepth - vp.minDepth : DEGENERATE_DEPTH;
 
     const lighting = (request.vertexOp & D3DVOP.LIGHT) !== 0
         && state.renderState(D3DRS.LIGHTING) !== 0;
-    const lights = state.lights.map(light=>({
+    // What only lighting reads, made only for a lit draw: inverting matrices
+    // and carrying lights into camera space for an unlit one was work nothing
+    // saw, every call.
+    const normalMatrices = lighting ? worldViews.map(matrix=>invert(matrix)) : [];
+    const lights = lighting ? state.lights.map(light=>({
         ...light,
         cameraDirection: transform([light.Direction.x, light.Direction.y, light.Direction.z, 0],
             view).slice(0, 3),
         cameraPosition: transform([light.Position.x, light.Position.y, light.Position.z, 1],
             view).slice(0, 3),
-    }));
+    })) : [];
     const specularOn = state.renderState(D3DRS.SPECULARENABLE) !== 0;
     const normalize = state.renderState(D3DRS.NORMALIZENORMALS) !== 0;
     const localViewer = state.renderState(D3DRS.LOCALVIEWER) !== 0;
@@ -265,42 +286,121 @@ export function processVertices(request){
     const sceneAmbient = colourOf(state.renderState(D3DRS.AMBIENT));
     const material = state.material;
 
+    const destDiffuse = has(to, 'diffuse');
+    const destSpecular = has(to, 'specular');
+    const destNormal = has(to, 'normal');
+
+    // The source read once a call, an attribute a piece, rather than a few
+    // bytes a vertex at a time.
+    const positions = /** @type {{ view: DataView, step: number }} */ (
+        streamOf(memory, source, 'position', count, 12));
+    const weighting = weights > 0
+        ? streamOf(memory, source, 'blendWeight', count, weights * 4) : null;
+    const diffuses = streamOf(memory, source, 'diffuse', count, 4);
+    const speculars = streamOf(memory, source, 'specular', count, 4);
+    const normals = lighting || (copying && destNormal)
+        ? streamOf(memory, source, 'normal', count, 12) : null;
+    /** @type {{ offset: number, floats: number, stream: { view: DataView, step: number } }[]} */
+    const coordinates = [];
+    for (let set = 0; set < (copying ? to.texCoordSets : 0); set++)
+    {
+        const target = /** @type {any} */ (has(to, `texCoord${set}`));
+        const origin = has(from, `texCoord${set}`);
+        const floats = origin ? Math.min(floatsOf(target.format), floatsOf(origin.format)) : 0;
+        const stream = origin
+            ? streamOf(memory, source, `texCoord${set}`, count, floats * 4) : null;
+        if (stream)
+        {
+            coordinates.push({ offset: target.offset, floats, stream });
+        }
+    }
+
+    // The vertices written into one piece, and what of each is written: the
+    // whole run goes to memory at once when that covers every vertex.
+    const stride = to.stride;
+    const out = new Uint8Array(count * stride);
+    const written = new DataView(out.buffer);
+    /** @type {[number, number][]} */
+    const fields = [[0, to.preTransformed ? 16 : 12]];
+    if (destDiffuse && (lighting || copying))
+    {
+        fields.push([destDiffuse.offset, 4]);
+    }
+    if (destSpecular && (lighting || copying))
+    {
+        fields.push([destSpecular.offset, 4]);
+    }
+    if (copying && destNormal && normals)
+    {
+        fields.push([destNormal.offset, 12]);
+    }
+    for (const coordinate of coordinates)
+    {
+        fields.push([coordinate.offset, coordinate.floats * 4]);
+    }
+
+    // Each vertex's share of each world matrix: its weights and what they
+    // leave; a vertex that carries none has the first matrix whole. With
+    // weights asked of a source that has none, the matrices past the first
+    // get no number at all, as an array read past its end gives.
+    const shares = new Float64Array(weights + 1).fill(Number.NaN);
+    shares[0] = 1;
     let lastRhw = 0;
     for (let k = 0; k < count; k++)
     {
-        /** @param {string} name */
-        const at = name=>source.addressOf(name, k);
-        const positionAt = /** @type {number} */ (at('position'));
-        const position = [...readFloats(positionAt, 3), 1];
-        const weightAt = at('blendWeight');
-        const given = weights > 0 && weightAt !== null ? readFloats(weightAt, weights) : [];
-        const shares = [...given, 1 - given.reduce((sum, weight)=>sum + weight, 0)];
+        const at = k * stride;
+        const position = k * positions.step;
+        const px = positions.view.getFloat32(position, true);
+        const py = positions.view.getFloat32(position + 4, true);
+        const pz = positions.view.getFloat32(position + 8, true);
+        if (weighting)
+        {
+            let sum = 0;
+            for (let index = 0; index < weights; index++)
+            {
+                const weight = weighting.view.getFloat32(k * weighting.step + index * 4, true);
+                shares[index] = weight;
+                sum += weight;
+            }
+            shares[weights] = 1 - sum;
+        }
 
-        const camera = [0, 0, 0, 0];
-        worldViews.forEach((matrix, index)=>{
-            transform(position, matrix).forEach((value, axis)=>{
-                camera[axis] += shares[index] * value;
-            });
-        });
-        const clip = transform(camera, projection);
-        const rhw = 1 / clip[3];
+        // The arithmetic in the order it always had, so a vertex comes out
+        // the same to the last bit: each matrix's row-vector product, summed
+        // into camera space by share, then the projection.
+        let c0 = 0;
+        let c1 = 0;
+        let c2 = 0;
+        let c3 = 0;
+        for (let index = 0; index <= weights; index++)
+        {
+            const m = worldViews[index];
+            const share = shares[index];
+            c0 += share * (px * m[0] + py * m[4] + pz * m[8] + m[12]);
+            c1 += share * (px * m[1] + py * m[5] + pz * m[9] + m[13]);
+            c2 += share * (px * m[2] + py * m[6] + pz * m[10] + m[14]);
+            c3 += share * (px * m[3] + py * m[7] + pz * m[11] + m[15]);
+        }
+        const p = projection;
+        const clip0 = c0 * p[0] + c1 * p[4] + c2 * p[8] + c3 * p[12];
+        const clip1 = c0 * p[1] + c1 * p[5] + c2 * p[9] + c3 * p[13];
+        const clip2 = c0 * p[2] + c1 * p[6] + c2 * p[10] + c3 * p[14];
+        const clip3 = c0 * p[3] + c1 * p[7] + c2 * p[11] + c3 * p[15];
+        const rhw = 1 / clip3;
         lastRhw = rhw;
-        const vertexAt = dest.base + (destIndex + k) * to.stride;
-        const screen = [
-            vp.x + (1 + clip[0] * rhw) * vp.width / 2,
-            vp.y + (1 - clip[1] * rhw) * vp.height / 2,
-            vp.minDepth + clip[2] * rhw * depthRange,
-        ];
-        writeFloats(vertexAt, to.preTransformed ? [...screen, rhw] : screen);
+        written.setFloat32(at, vp.x + (1 + clip0 * rhw) * vp.width / 2, true);
+        written.setFloat32(at + 4, vp.y + (1 - clip1 * rhw) * vp.height / 2, true);
+        written.setFloat32(at + 8, vp.minDepth + clip2 * rhw * depthRange, true);
+        if (to.preTransformed)
+        {
+            written.setFloat32(at + 12, rhw, true);
+        }
 
-        const diffuseAt = at('diffuse');
-        const specularAt = at('specular');
-        const destDiffuse = has(to, 'diffuse');
-        const destSpecular = has(to, 'specular');
         if (lighting)
         {
-            const normalAt = at('normal');
-            const normal = normalAt === null ? [0, 0, 0] : readFloats(normalAt, 3);
+            const camera = [c0, c1, c2, c3];
+            const normal = normals === null ? [0, 0, 0]
+                : [0, 4, 8].map(axis=>normals.view.getFloat32(k * normals.step + axis, true));
             /** @type {Vector} */
             let n = [0, 0, 0];
             normalMatrices.forEach((inverse, index)=>{
@@ -343,13 +443,13 @@ export function processVertices(request){
             }
             /** @param {number} which D3DMCS @param {Colour} own @returns {Colour} */
             const sourceOf = (which, own)=>{
-                if (colorVertex && which === D3DMCS.COLOR1 && diffuseAt !== null)
+                if (colorVertex && which === D3DMCS.COLOR1 && diffuses !== null)
                 {
-                    return colourOf(readDword(diffuseAt));
+                    return colourOf(diffuses.view.getUint32(k * diffuses.step, true));
                 }
-                if (colorVertex && which === D3DMCS.COLOR2 && specularAt !== null)
+                if (colorVertex && which === D3DMCS.COLOR2 && speculars !== null)
                 {
-                    return colourOf(readDword(specularAt));
+                    return colourOf(speculars.view.getUint32(k * speculars.step, true));
                 }
                 return own;
             };
@@ -365,58 +465,75 @@ export function processVertices(request){
                 const lit = channels.map((channel, index)=>ce[channel]
                     + ca[channel] * (sceneAmbient[channel] + ambient[index])
                     + cd[channel] * diffuse[index]);
-                writeDword(vertexAt + destDiffuse.offset,
-                    argbOf({ r: lit[0], g: lit[1], b: lit[2], a: cd.a }));
+                written.setUint32(at + destDiffuse.offset,
+                    argbOf({ r: lit[0], g: lit[1], b: lit[2], a: cd.a }), true);
             }
             if (destSpecular)
             {
                 const high = channels.map((channel, index)=>cs[channel] * specular[index]);
-                writeDword(vertexAt + destSpecular.offset,
-                    specularOn ? argbOf({ r: high[0], g: high[1], b: high[2], a: 0 }) : 0);
+                written.setUint32(at + destSpecular.offset,
+                    specularOn ? argbOf({ r: high[0], g: high[1], b: high[2], a: 0 }) : 0, true);
             }
         }
         else if (copying)
         {
             if (destDiffuse)
             {
-                writeDword(vertexAt + destDiffuse.offset,
-                    diffuseAt === null ? 0xffffffff : readDword(diffuseAt));
+                written.setUint32(at + destDiffuse.offset, diffuses === null ? 0xffffffff
+                    : diffuses.view.getUint32(k * diffuses.step, true), true);
             }
             if (destSpecular)
             {
-                writeDword(vertexAt + destSpecular.offset,
-                    specularAt === null ? 0 : readDword(specularAt));
+                written.setUint32(at + destSpecular.offset, speculars === null ? 0
+                    : speculars.view.getUint32(k * speculars.step, true), true);
             }
         }
 
-        if (copying)
+        if (copying && destNormal && normals)
         {
-            const destNormal = has(to, 'normal');
-            const normalAt = at('normal');
-            if (destNormal && normalAt !== null)
+            for (let axis = 0; axis < 12; axis += 4)
             {
-                writeFloats(vertexAt + destNormal.offset, readFloats(normalAt, 3));
+                written.setFloat32(at + destNormal.offset + axis,
+                    normals.view.getFloat32(k * normals.step + axis, true), true);
             }
-            for (let set = 0; set < to.texCoordSets; set++)
+        }
+        for (const { offset, floats, stream } of coordinates)
+        {
+            for (let index = 0; index < floats; index++)
             {
-                const target = /** @type {any} */ (has(to, `texCoord${set}`));
-                const origin = has(from, `texCoord${set}`);
-                const coordinateAt = at(`texCoord${set}`);
-                if (origin && coordinateAt !== null)
-                {
-                    const floats = Math.min(floatsOf(target.format), floatsOf(origin.format));
-                    writeFloats(vertexAt + target.offset, readFloats(coordinateAt, floats));
-                }
+                written.setFloat32(at + offset + index * 4,
+                    stream.view.getFloat32(k * stream.step + index * 4, true), true);
             }
         }
     }
 
+    if (count > 0)
+    {
+        const base = dest.base + destIndex * stride;
+        if (coversVertex(fields, stride))
+        {
+            memory.writeMemory(base, out);
+        }
+        else
+        {
+            for (let k = 0; k < count; k++)
+            {
+                for (const [offset, bytes] of fields)
+                {
+                    const at = k * stride + offset;
+                    memory.writeMemory(base + at, out.subarray(at, at + bytes));
+                }
+            }
+        }
+    }
     // A position with no reciprocal w of its own still has one written after
     // it, where the next vertex begins (Wine's ddraw7 test_process_vertices);
     // every vertex but the last has that overwritten by its successor.
     if (!to.preTransformed && count > 0 && destIndex + count < dest.numVertices)
     {
-        writeFloats(dest.base + (destIndex + count) * to.stride, [lastRhw]);
+        const rhw = new Uint8Array(4);
+        new DataView(rhw.buffer).setFloat32(0, lastRhw, true);
+        memory.writeMemory(dest.base + (destIndex + count) * stride, rhw);
     }
     return D3D_OK;
 }
