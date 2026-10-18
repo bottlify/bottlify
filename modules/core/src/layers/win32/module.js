@@ -994,6 +994,13 @@ export function createWin32Module(){
                 timers: mmTimers,
                 readMemory,
                 writeMemory,
+                // A film MCI opens is played as a filter graph plays one: the
+                // same decoder, clock, window and presenter.
+                film: ()=>quartz.film(),
+                // The key a film's `break ... on` names, held now or pressed
+                // since the last look, read as MCI reads it: GetAsyncKeyState,
+                // whose low bit a tap between two looks leaves set.
+                keyDown: key=>((config?.asyncKeyState?.(key) ?? 0) & 0x8001) !== 0,
                 // The guest's clock, never the host's. A frame loop that timed an
                 // interval with one and read it with another would disagree with
                 // itself about how long its own frame took.

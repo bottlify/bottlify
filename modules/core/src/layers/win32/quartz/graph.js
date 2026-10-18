@@ -203,6 +203,40 @@ const AUDIO_PROPERTIES = ['Volume', 'Balance'];
  * @property {import('./stream.js').Source | null} source
  *           What AddSourceFilter opened, which feeds those filters rather than
  *           a window of the graph's own.
+ * @property {(() => void) | null} [ended]
+ *           Told once the film reached its end or was stopped by `stopWhen`:
+ *           a film played without COM (`film`) has no event queue to read.
+ * @property {(() => boolean) | null} [stopWhen]
+ *           Asked at every tick of a film played without COM; true stops it
+ *           there, as a break key stops a film MCI plays.
+ */
+
+/**
+ * A film played without COM, by winmm's MCI video devices: the same clip, the
+ * same clock and the same window a filter graph plays, driven by calls rather
+ * than by interfaces.
+ *
+ * @typedef {Object} Film
+ * @property {(name: string) => Promise<boolean>} open
+ *           Opens the file through the decoder; false when it cannot be read
+ *           or decoded.
+ * @property {() => { width: number, height: number }} size
+ * @property {(place: { owner?: number, left?: number, top?: number, width?: number,
+ *     height?: number, visible?: boolean, fullScreen?: boolean }) => void} place
+ *           Where the picture goes: the window it belongs to, the rectangle in
+ *           that window's client area, whether it shows, whether it covers the
+ *           screen.
+ * @property {() => { owner: number, left: number, top: number, width: number,
+ *     height: number, visible: boolean }} placement
+ * @property {() => void} play   Runs from where it is; shows the picture.
+ * @property {() => void} stop
+ * @property {() => void} close  Stops it and lets the clip go.
+ * @property {() => 'playing' | 'stopped'} mode
+ * @property {() => { frames: number, shown: number }} position
+ * @property {(listener: (() => void) | null) => void} whenEnded
+ *           Told once the film reached its end or `stopWhen` stopped it.
+ * @property {(check: (() => boolean) | null) => void} stopWhen
+ *           Asked at every tick while it plays; true stops it.
  */
 
 /**
@@ -421,6 +455,7 @@ export function createQuartz(host){
         graph.finished = true;
         playing.delete(graph);
         raise(graph, EC_COMPLETE, S_OK, 0);
+        graph.ended?.();
     };
 
     /**
@@ -634,6 +669,12 @@ export function createQuartz(host){
             if (!clip)
             {
                 playing.delete(graph);
+                continue;
+            }
+            if (graph.stopWhen?.() === true)
+            {
+                stopGraph(graph);
+                graph.ended?.();
                 continue;
             }
             if (graph.startedAt === null)
@@ -1466,7 +1507,90 @@ export function createQuartz(host){
         interfaces: [describe(IID_IFILTER_MAPPER2, IFILTER_MAPPER2_SLOTS, filterMapper)],
     });
 
-    return { filterGraph, filterMapper2, tick };
+    /**
+     * A film without COM (`Film`), or null in a build with no decoder, where
+     * a device that plays one has nothing to play it with.
+     *
+     * @returns {Film | null}
+     */
+    const film = ()=>{
+        if (!host.video)
+        {
+            return null;
+        }
+        const graph = newGraphState();
+        const video = host.video;
+        return {
+            open: async name=>{
+                const took = present(graph);
+                const clip = await Promise.resolve(video.open(name)).catch(()=>null);
+                took(clip);
+                return clip !== null;
+            },
+            size: ()=>({ ...graph.video }),
+            place: place=>{
+                const window = graph.window;
+                window.Owner = place.owner ?? window.Owner;
+                window.Left = place.left ?? window.Left;
+                window.Top = place.top ?? window.Top;
+                window.Width = place.width ?? window.Width;
+                window.Height = place.height ?? window.Height;
+                if (place.visible !== undefined)
+                {
+                    window.Visible = place.visible ? OATRUE : OAFALSE;
+                    window.WindowState = place.visible ? SW_SHOWNORMAL : SW_HIDE;
+                }
+                if (place.fullScreen !== undefined)
+                {
+                    window.FullScreenMode = place.fullScreen ? OATRUE : OAFALSE;
+                }
+            },
+            placement: ()=>({
+                owner: graph.window.Owner >>> 0,
+                left: graph.window.Left | 0,
+                top: graph.window.Top | 0,
+                width: graph.window.Width | 0,
+                height: graph.window.Height | 0,
+                visible: graph.window.Visible !== OAFALSE,
+            }),
+            // A film already at its end has nothing to play, and says so at
+            // once: its end was told the first time, and a wait for it would
+            // otherwise never return.
+            play: ()=>{
+                if (graph.finished)
+                {
+                    graph.ended?.();
+                    return;
+                }
+                run(graph);
+            },
+            // Stopping or closing it ends a wait for it too, as stopping a film
+            // from another thread ends MCI's wait for it.
+            stop: ()=>{
+                stopGraph(graph);
+                graph.ended?.();
+            },
+            close: ()=>{
+                const ended = graph.ended;
+                stopGraph(graph);
+                graph.clip?.close();
+                graph.clip = null;
+                graph.ended = null;
+                graph.stopWhen = null;
+                ended?.();
+            },
+            mode: ()=>(playing.has(graph) ? 'playing' : 'stopped'),
+            position: ()=>({ frames: graph.clip?.frameCount ?? 0, shown: graph.shown }),
+            whenEnded: listener=>{
+                graph.ended = listener;
+            },
+            stopWhen: check=>{
+                graph.stopWhen = check;
+            },
+        };
+    };
+
+    return { filterGraph, filterMapper2, tick, film };
 }
 
 /**
@@ -1478,17 +1602,20 @@ export function createQuartz(host){
  *
  * `tick` comes back because a filter graph has no thread of its own here and
  * nothing inside win32 may reach the layer that would show a frame. Whoever
- * assembles the process drives it and decides where the picture goes.
+ * assembles the process drives it and decides where the picture goes. `film`
+ * is the same playing without COM, for winmm's MCI video devices: one clock,
+ * one window placement and one presenter for both ways a program plays a film.
  *
  * @param {import('../ole32/objects.js').ComRegistry} registry
  * @param {QuartzHost} host
  * @returns {{ tick: (nowMs: number, soundOwedMs?: number | null) =>
- *             ReturnType<ReturnType<typeof createQuartz>['tick']> }}
+ *             ReturnType<ReturnType<typeof createQuartz>['tick']>,
+ *             film: () => Film | null }}
  */
 export function registerQuartzClasses(registry, host){
     const quartz = createQuartz(host);
     registry.registerClass(CLSID_FILTER_GRAPH, quartz.filterGraph);
     registry.registerClass(CLSID_FILTER_GRAPH_NO_THREAD, quartz.filterGraph);
     registry.registerClass(CLSID_FILTER_MAPPER2, quartz.filterMapper2);
-    return { tick: quartz.tick };
+    return { tick: quartz.tick, film: quartz.film };
 }
