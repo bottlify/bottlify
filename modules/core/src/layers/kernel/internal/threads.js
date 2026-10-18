@@ -1753,6 +1753,18 @@ export function createScheduler(options){
             if (at >= 0)
             {
                 place(free.splice(at, 1)[0], next);
+                continue;
+            }
+            // One that may run only here takes this executor's turn from one
+            // that may run on an executor left free, which runs there: a game's
+            // main thread, pinned to the first processor, waited for a thread
+            // at priority 15 to end its turn here while the other executor idled.
+            const there = here === null || keptHere(here) || !allowedOn(next, 0) ? -1
+                : free.findIndex(one=>allowedOn(here, one.index));
+            if (there >= 0)
+            {
+                place(free.splice(there, 1)[0], here);
+                here = next;
             }
             else if (here !== null && free.length === 0)
             {

@@ -1406,6 +1406,27 @@ test('a pinned thread whose calls take this executor the most time has its proce
         ['0,1', 2, 2], `tried again after the hold, not kept: ${JSON.stringify(slower.said())}`);
 });
 
+test('a thread that may run only here takes this executor\'s turn from one that may run on'
+    + ' another left free, which runs there', ()=>{
+    // Call of Duty 4 pins its main thread to the first processor; a thread of
+    // its own at priority 15, pinned nowhere and made at home here, took this
+    // executor each time both were ready, and the main thread waited for it
+    // while the other executor idled 280 s of a 400 s run.
+    const { cpu } = twoExecutors();
+    const [remote] = cpu.executors();
+    const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 5000,
+        placement: 'spread' });
+    const main = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
+    const mixer = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'mixer' });
+    main.affinityMask = 0b01;
+    // THREAD_PRIORITY_TIME_CRITICAL, at home here as one made before the other executor opened.
+    mixer.priority = 15;
+    mixer.home = 0;
+    assert.equal(sched.runOnce().ran, main, 'the main thread runs here');
+    assert.deepEqual([remote.started, sched.processorOf(mixer)], [1, 1],
+        'and the one that may run anywhere, on the other executor');
+});
+
 test('a thread whose mask names only processors whose executors cannot open runs where any may',
     ()=>{
         // An engine timing each processor pins its process to each in turn;
