@@ -536,6 +536,9 @@ export function createGraphicsModule(){
                     backend: device && !remote ? api.backend() : undefined,
                     readMemory: services.readMemory,
                     windowMemory: services.windowMemory,
+                    // What a buffer's unlock uploads, and a recording sends, is
+                    // the pages written since: without it every byte is compared.
+                    watchWrites: services.watchWrites,
                     // A lock of a render target brings its pixels back into the
                     // guest's bytes before the pointer is handed out.
                     writeMemory: services.writeMemory,
@@ -598,6 +601,8 @@ export function createGraphicsModule(){
                     // What a draw from a dynamic buffer compares, in place: as a
                     // copy, it was most of a frame in a game that skins into one.
                     windowMemory: services.windowMemory,
+                    // The pages written since, as Direct3D 8 is given them.
+                    watchWrites: services.watchWrites,
                     // The copies between surfaces (UpdateSurface, StretchRect,
                     // GetRenderTargetData) move bytes only through this; the
                     // seam makes none of them itself.

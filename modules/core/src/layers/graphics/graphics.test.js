@@ -462,6 +462,56 @@ test('the display\'s raster runs on the guest\'s clock when the caller hands one
     await graphicsModule.dispose();
 });
 
+test('a Direct3D 8 and 9 device made by the module watches its buffers\' writes through the memory'
+    + ' layer', async()=>{
+    // A buffer's unlock uploads, and a recording sends, the pages the memory
+    // layer says were written since (`watchWrites`); a factory that forgets to
+    // hand the watch over leaves every device comparing each byte instead,
+    // and nothing fails but the time.
+    const gpu = createFakeDevice();
+    const gpuDevice = /** @type {any} */ (gpu.device);
+    gpuDevice.features = new Set();
+    gpuDevice.createSampler = (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor });
+    /** @type {number[][]} */
+    const watched = [];
+    const memory = {
+        ...ramMemory(),
+        watchWrites: (/** @type {number} */ address, /** @type {number} */ length)=>{
+            watched.push([address, length]);
+            return { take: ()=>[] };
+        },
+    };
+    let free = RAM_BASE;
+    const api = await graphicsModule.create({
+        device: { device: gpu.device, queue: gpu.queue, presentTo: ()=>{} },
+        allocate: (/** @type {number} */ bytes)=>{
+            const at = free;
+            free += (bytes + 0xfff) & ~0xfff;
+            return at;
+        },
+    }, hostWith(memory));
+    for (const name of ['d3d8', 'd3d9'])
+    {
+        /** @type {{ device?: any }} */
+        const out = {};
+        assert.equal(api.create(name).CreateDevice({
+            swapEffect: 1, backBufferCount: 1, backBufferWidth: 4, backBufferHeight: 4,
+            backBufferFormat: D3DFMT.X8R8G8B8,
+        }, out), D3D_OK);
+        /** @type {{ buffer?: any }} */
+        const made = {};
+        assert.equal(out.device.CreateVertexBuffer(0x1000, 0, 0, D3DPOOL.MANAGED, made), D3D_OK);
+        /** @type {{ pBits?: number }} */
+        const locked = {};
+        assert.equal(made.buffer.Lock(0, 0, locked, 0), D3D_OK);
+        assert.equal(made.buffer.Unlock(), D3D_OK);
+        assert.ok(watched.some(([address, length])=>address === locked.pBits && length === 0x1000),
+            `${name}: the unlocked buffer is watched (${JSON.stringify(watched)})`);
+        watched.length = 0;
+    }
+    await graphicsModule.dispose();
+});
+
 test('a lost GPU loses every Direct3D 8 and 9 device made on it', async()=>{
     // WebGPU says its device is gone by settling device.lost; the devices a
     // program made on it then answer D3DERR_DEVICELOST from
