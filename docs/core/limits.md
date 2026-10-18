@@ -19,12 +19,12 @@ differently raises a `divergence` event naming the API.
 - With several executors (`cpu.cores`), what one thread does is seen by the others as the host
   orders it. The locked instructions, `xchg` and the kernel's own objects are atomic and ordered
   everywhere; a plain store is ordered after the stores before it only on a host that keeps that
-  order itself (x86 does). On a host that does not -- an ARM machine -- a program passing a
+  order itself (x86 does). On a host that does not (an ARM machine) a program passing a
   message through plain stores alone (a flag after its payload, a spinlock released with `mov`)
   may see the flag before the payload. Not measured on such a host yet.
 - With several executors, a store into bytes another executor is translating at that instant can
   be missed when the store's page check came before the other set the page's code flag and the
-  store landed after it read the bytes back -- a window of a few instructions, longer (at most a
+  store landed after it read the bytes back: a window of a few instructions, longer (at most a
   loop's checked turns) for a loop's stores checked once for several turns. The translation then
   keeps the old bytes. Windows makes no promise either until the thread running the code
   synchronises with the one writing it; here the old translation stays after that too. A store
@@ -60,18 +60,18 @@ differently raises a `divergence` event naming the API.
   child ends. With `concurrency` 2 or 4 every process runs in a worker of its own, the program the
   page started too, and a child starts at `CreateProcess` and runs beside its parent; one past
   that many at once runs beside its parent taking turns with it in its parent's worker.
-- With `concurrency` 2 or 4 a process's own journal -- its calls, its phase profile, its frames --
+- With `concurrency` 2 or 4 a process's own journal (its calls, its phase profile, its frames)
   stays in its worker: the run's log holds the events every process reports and what the engine's
   thread writes. A process in a worker takes its translations from the run's one store, which
   the engine's thread keeps open, and puts what it makes there; a batch's lookups cross the link
   together, one wait for the batch. It places no hooks (`hooks`, `watchImport`), and reaches no
   network transport the page handed in (`win32.network`).
-  The run's diagnostics are the program's tables as it last answered -- its `log` (phases, frames)
-  and `audio` among them, as with one process -- with the engine's thread's own journal and sound
+  The run's diagnostics are the program's tables as it last answered (its `log` with phases and
+  frames, and `audio` among them, as with one process), with the engine's thread's own journal and sound
   output beside them as `system-log` and `system-audio`.
 - The run's translation workers are a pool (`cork.pool`): each process is lent one, and more only
   while its translation lags and a trial shows they make it go faster. On a machine whose cores a
-  loading game already keeps busy -- four cores, measured -- a second worker makes loading slower,
+  loading game already keeps busy (four cores, measured), a second worker makes loading slower,
   and the pool gives it back after its trial; the gain is for machines with cores to spare, and
   has not been measured on one yet. Only translation runs in the pool so far: bundle blocks are
   still decoded on the thread that mounted the bundle.
@@ -81,12 +81,12 @@ differently raises a `divergence` event naming the API.
   run has room for one, and beside the process that asked, in its worker, otherwise; a call from
   one worker to another goes through the engine thread and back.
 - A child in a worker of its own shares the run's registry, files, window
-  directory -- its windows found, read, posted and sent to by every other process, and theirs by
-  it -- ids, the run's bundle (a block it misses is fetched for it), named events, semaphores
+  directory (its windows found, read, posted and sent to by every other process, and theirs by
+  it), ids, the run's bundle (a block it misses is fetched for it), named events, semaphores
   and mutexes, and the position of a file its parent handed it as its output; a named file
   mapping or waitable timer is its own. A set of objects one of which another process across a
-  worker named is answered when polled -- with a zero timeout, or by a message wait
-  (`MsgWaitForMultipleObjects`, COM's `CoWaitForMultipleHandles`), which polls -- and a wait
+  worker named is answered when polled, with a zero timeout or by a message wait
+  (`MsgWaitForMultipleObjects`, COM's `CoWaitForMultipleHandles`, which polls), and a wait
   that would block on such a set is refused. Its Direct3D 8 and 9 devices draw on the run's
   graphics worker and what they present is shown as the run's frames; its sound goes onto the
   run's track table in a span its parent lends it, where that table is shared memory (none
@@ -189,7 +189,7 @@ differently raises a `divergence` event naming the API.
   `Unescape` or encoded scripts, and names a program's own objects `Object` in `TypeName`.
   Deep recursion fails sooner than on Windows, at a few hundred levels.
 - A patch's deltas are applied (the Patch API, `mspatcha.dll`), except a delta made against a
-  32-bit executable with the executable transforms -- that layout is not public -- or against an
+  32-bit executable with the executable transforms (that layout is not public) or against an
   old file only Windows' PE normalisation would match; such a patch fails with
   `ERROR_PATCH_DECODE_FAILURE`.
 - No service runs: a service a package installs is registered with the service manager and
