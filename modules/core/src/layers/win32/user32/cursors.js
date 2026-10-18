@@ -9,10 +9,12 @@
  * four bytes a pixel, blue, green, red and alpha, top row first.
  *
  * A cursor is two masks: AND says where the screen shows through, XOR what is
- * drawn there. Where AND keeps the screen and XOR is not zero the screen is
- * inverted under the cursor -- a page cannot invert what lies beneath a
- * picture, so such a pixel is drawn opaque black. A 32-bit image with any
- * alpha in it is drawn by its alpha, and its AND mask is not read.
+ * drawn there. Where AND keeps the screen the screen is XORed with the colour
+ * -- a page cannot XOR what lies beneath a picture, so such a pixel is drawn
+ * black, as opaque as the colour changes the screen: XOR white, the inversion
+ * an I-beam is drawn with, opaque; the near-black a colour cursor leaves
+ * under its mask, clear. A 32-bit image with any alpha in it is drawn by its
+ * alpha, and its AND mask is not read.
  */
 
 /**
@@ -44,8 +46,10 @@ function putMasked(out, at, screen, b, g, r){
         out.set([b, g, r, 255], at);
         return;
     }
-    const inverts = (b | g | r) !== 0;
-    out.set([0, 0, 0, inverts ? 255 : 0], at);
+    // Opaque black for every non-zero colour put a box around a colour
+    // cursor whose masked pixels hold a dark grey rather than black: Windows
+    // draws those as the screen XOR (4, 4, 4), which is the screen.
+    out.set([0, 0, 0, Math.max(b, g, r)], at);
 }
 
 /**
