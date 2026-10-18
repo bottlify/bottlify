@@ -371,6 +371,46 @@ export function createSurface(options){
             return channels ? unpackPixel(value, channels) : value >>> 0;
         },
 
+        /**
+         * A run of a row's pixels, each as `read` answers it, into `into` from
+         * `at`: what a blit from a source of any depth reads a row by, one loop
+         * where `read` was a call a pixel -- a menu's eight-bit pictures copied
+         * a pixel at a time took a millisecond a blit.
+         *
+         * @param {number} y @param {number} x @param {number} count
+         * @param {Uint32Array} into @param {number} at
+         */
+        readRow(y, x, count, into, at){
+            const row = rowOffset(y);
+            if (bitCount === 8)
+            {
+                const entries = /** @type {number[]} */ (palette);
+                for (let i = 0; i < count; i++)
+                {
+                    into[at + i] = (entries[bytes[row + x + i]] ?? 0) >>> 0;
+                }
+                return;
+            }
+            if (bitCount === 24)
+            {
+                for (let i = 0, p = row + x * 3; i < count; i++, p += 3)
+                {
+                    into[at + i] = (bytes[p] | (bytes[p + 1] << 8) | (bytes[p + 2] << 16)) >>> 0;
+                }
+                return;
+            }
+            if (words && !channels)
+            {
+                const from = ((row - offset) >>> 2) + x;
+                into.set(words.subarray(from, from + count), at);
+                return;
+            }
+            for (let i = 0; i < count; i++)
+            {
+                into[at + i] = this.read(x + i, y);
+            }
+        },
+
         /** @param {number} x @param {number} y @param {number} pixel */
         write(x, y, pixel){
             if (bitCount === 1)
@@ -673,6 +713,17 @@ export function viewOf(parent, rect){
         const py = y + top;
         return px >= 0 && py >= 0 && px < parent.width && py < parent.height;
     };
+    // Wholly inside a top-down parent whose words are its pixels, the view's
+    // rows are the parent's from its corner on, `pitch` apart as the parent's
+    // are: the row paths of a blit take it as they take the parent -- a child
+    // window's every blit went a pixel at a time, a menu's background a
+    // millisecond each. A view past the parent's edge keeps the pixel path,
+    // whose reads and writes stop at it.
+    const within = left >= 0 && top >= 0 && left + width <= parent.width
+        && top + height <= parent.height;
+    const parentWords = within && parent.topDown ? parent.words ?? null : null;
+    const words = parentWords ? parentWords.subarray(top * (parent.pitch >>> 2) + left) : null;
+    const parentRow = within ? parent.readRow : undefined;
     return {
         width,
         height,
@@ -680,6 +731,12 @@ export function viewOf(parent, rect){
         topDown: parent.topDown,
         bytes: parent.bytes,
         offset: parent.offset + (top * parent.pitch) + (left * 4),
+        words,
+        readRow: parentRow
+            ? (/** @type {number} */ y, /** @type {number} */ x, /** @type {number} */ count,
+                /** @type {Uint32Array} */ into, /** @type {number} */ at)=>
+                parentRow.call(parent, y + top, x + left, count, into, at)
+            : undefined,
         /** @param {number} x @param {number} y */
         read: (x, y)=>(inside(x, y) ? parent.read(x + left, y + top) : 0),
         /** @param {number} x @param {number} y @param {number} pixel */

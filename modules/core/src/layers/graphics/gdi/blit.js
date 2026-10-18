@@ -36,6 +36,39 @@ import {
 /** SRCCOPY's table: the source, whatever the destination and the pattern. */
 const SRCCOPY_TABLE = 0xcc;
 
+/**
+ * How the copies went: by rows, or a pixel at a time and why. A copy whose
+ * row path declined is the one that freezes a menu for most of a second, and
+ * only this says which of its conditions it missed.
+ */
+export const blitPaths = {
+    rows: 0,
+    pixels: 0,
+    /** @type {Record<string, number>} */
+    why: {},
+};
+
+/** @param {string} reason */
+const tookPixels = reason=>{
+    blitPaths.pixels++;
+    // Bounded, as a run draws thousands of shapes: past 64 reasons, a count.
+    const key = reason in blitPaths.why || Object.keys(blitPaths.why).length < 64
+        ? reason : 'other';
+    blitPaths.why[key] = (blitPaths.why[key] ?? 0) + 1;
+};
+
+/**
+ * A surface as a declined copy names it: its depth (a view has none), size,
+ * row order, and whether it has words and reads rows.
+ *
+ * @param {any} surface
+ */
+const shapeOf = surface=>(surface
+    ? `${surface.bitCount ?? 'view'} ${surface.width}x${surface.height}`
+        + ` ${surface.topDown ? 'down' : 'up'} ${surface.words ? 'words' : 'no-words'}`
+        + ` ${surface.readRow ? 'rows' : 'no-rows'}`
+    : 'none');
+
 /** SetStretchBltMode's modes. */
 export const BLACKONWHITE = 1;
 export const WHITEONBLACK = 2;
@@ -172,6 +205,7 @@ export function bitBlt(options){
     if (table === SRCCOPY_TABLE && !mask && !convert && !usesPattern && src && srcWords
         && destWords)
     {
+        blitPaths.rows++;
         const run = area.right - area.left;
         /** @param {any} surface @param {number} y */
         const rowAt = (surface, y)=>(surface.topDown ? y : surface.height - 1 - y)
@@ -193,7 +227,37 @@ export function bitBlt(options){
         }
         return true;
     }
+    // The same copy from a source of another depth: each row read out of it
+    // whole, straight into the destination's words; and any operation that
+    // takes no pattern -- a transparent picture's AND of its mask and OR of
+    // its colours -- the source's row against the destination's word by word.
+    if (!mask && !convert && !usesPattern && src && destWords && src.readRow && !overlapping)
+    {
+        blitPaths.rows++;
+        const run = area.right - area.left;
+        const pitchWords = dest.pitch >>> 2;
+        const row = table === SRCCOPY_TABLE ? null : new Uint32Array(run);
+        for (let y = area.top; y < area.bottom; y++)
+        {
+            const to = (dest.topDown ? y : dest.height - 1 - y) * pitchWords + area.left;
+            if (!row)
+            {
+                src.readRow(y + shiftY, area.left + shiftX, run, destWords, to);
+                continue;
+            }
+            src.readRow(y + shiftY, area.left + shiftX, run, row, 0);
+            for (let i = 0; i < run; i++)
+            {
+                destWords[to + i] = applyRop(table, 0, row[i], destWords[to + i]);
+            }
+        }
+        return true;
+    }
 
+    tookPixels(`copy rop ${table.toString(16)}: ${mask ? 'mask' : convert ? 'conversion'
+        : usesPattern ? 'pattern' : !src ? 'no source' : !destWords ? 'destination has no words'
+            : !src.readRow ? 'source reads no rows' : 'one memory'}`
+        + `; to ${shapeOf(dest)}, from ${shapeOf(src)}`);
     for (let step = 0; step < area.bottom - area.top; step++)
     {
         const y = backwardY ? area.bottom - 1 - step : area.top + step;
@@ -434,6 +498,157 @@ function stretchEach(options, visit){
 }
 
 /**
+ * A stretch copied a row at a time: the geometry `stretchEach` walks, each
+ * destination pixel folding the box of source pixels it was stretched from as
+ * the mode folds it (`combine`), the box's rows read once for the row of the
+ * destination they make. Enlarging, every box is one pixel.
+ *
+ * @param {StretchGeometry} options
+ * @param {number} mode  the stretch mode
+ * @param {number} [table]  the operation's table, one that takes no pattern
+ * @returns {boolean}
+ */
+function stretchRows(options, mode, table = SRCCOPY_TABLE){
+    const mirrorX = ((options.width | 0) < 0) !== ((options.srcWidth | 0) < 0);
+    const mirrorY = ((options.height | 0) < 0) !== ((options.srcHeight | 0) < 0);
+    const destWidth = Math.abs(options.width | 0);
+    const destHeight = Math.abs(options.height | 0);
+    const srcWidth = Math.abs(options.srcWidth | 0);
+    const srcHeight = Math.abs(options.srcHeight | 0);
+    if (destWidth === 0 || destHeight === 0 || srcWidth === 0 || srcHeight === 0)
+    {
+        return true;
+    }
+    const destLeft = Math.min(options.x | 0, (options.x | 0) + (options.width | 0));
+    const destTop = Math.min(options.y | 0, (options.y | 0) + (options.height | 0));
+    const srcLeft = Math.min(options.srcX | 0, (options.srcX | 0) + (options.srcWidth | 0));
+    const srcTop = Math.min(options.srcY | 0, (options.srcY | 0) + (options.srcHeight | 0));
+    const dest = options.dest;
+    const src = /** @type {any} */ (options.src);
+    const target = stretchTarget(dest, options.clip, options.x, options.y,
+        options.width, options.height);
+    if (isEmptyRect(target))
+    {
+        return true;
+    }
+    const visible = intersectRect(
+        { left: srcLeft, top: srcTop, right: srcLeft + srcWidth, bottom: srcTop + srcHeight },
+        surfaceBounds(src));
+    if (isEmptyRect(visible))
+    {
+        return false;
+    }
+    // Each destination column's box within the visible row, [from, to); from
+    // -1 where the box misses the source.
+    const span = target.right - target.left;
+    const fromX = new Int32Array(span);
+    const toX = new Int32Array(span);
+    for (let x = target.left; x < target.right; x++)
+    {
+        const column = mirrorX ? destWidth - 1 - (x - destLeft) : x - destLeft;
+        const left = srcLeft + Math.floor((column * srcWidth) / destWidth);
+        const right = Math.max(left + 1,
+            srcLeft + Math.floor(((column + 1) * srcWidth) / destWidth));
+        const from = Math.max(left, visible.left);
+        const to = Math.min(right, visible.right);
+        fromX[x - target.left] = from < to ? from - visible.left : -1;
+        toX[x - target.left] = to - visible.left;
+    }
+    const width = visible.right - visible.left;
+    /** @type {Uint32Array[]} */
+    const rows = [];
+    /** The source rows `rows` holds, from `loadedTop`. */
+    let loadedTop = -1;
+    let loadedCount = 0;
+    const words = /** @type {Uint32Array} */ (dest.words);
+    const pitchWords = dest.pitch >>> 2;
+    for (let y = target.top; y < target.bottom; y++)
+    {
+        const line = mirrorY ? destHeight - 1 - (y - destTop) : y - destTop;
+        const top = srcTop + Math.floor((line * srcHeight) / destHeight);
+        const bottom = Math.max(top + 1,
+            srcTop + Math.floor(((line + 1) * srcHeight) / destHeight));
+        const fromY = Math.max(top, visible.top);
+        const toY = Math.min(bottom, visible.bottom);
+        if (fromY >= toY)
+        {
+            continue;
+        }
+        const count = toY - fromY;
+        if (fromY !== loadedTop || count !== loadedCount)
+        {
+            for (let k = 0; k < count; k++)
+            {
+                rows[k] ??= new Uint32Array(width);
+                src.readRow(fromY + k, visible.left, width, rows[k], 0);
+            }
+            loadedTop = fromY;
+            loadedCount = count;
+        }
+        const base = (dest.topDown ? y : dest.height - 1 - y) * pitchWords + target.left;
+        for (let i = 0; i < span; i++)
+        {
+            const from = fromX[i];
+            if (from < 0)
+            {
+                continue;
+            }
+            const folded = foldBox(rows, count, from, toX[i], mode);
+            words[base + i] = table === SRCCOPY_TABLE ? folded
+                : applyRop(table, 0, folded, words[base + i]);
+        }
+    }
+    return true;
+}
+
+/**
+ * The pixels of a box of rows folded as `combine` folds them, from rows
+ * already read: the first for COLORONCOLOR, the average for HALFTONE, AND
+ * for BLACKONWHITE and OR for WHITEONBLACK.
+ *
+ * @param {Uint32Array[]} rows @param {number} count  the box's rows
+ * @param {number} from @param {number} to  the box's columns in each row
+ * @param {number} mode
+ * @returns {number}
+ */
+function foldBox(rows, count, from, to, mode){
+    if (mode === COLORONCOLOR || (count === 1 && to - from === 1 && mode !== HALFTONE))
+    {
+        return rows[0][from];
+    }
+    if (mode === HALFTONE)
+    {
+        let red = 0;
+        let green = 0;
+        let blue = 0;
+        for (let k = 0; k < count; k++)
+        {
+            const row = rows[k];
+            for (let x = from; x < to; x++)
+            {
+                const pixel = row[x];
+                red += (pixel >>> 16) & 0xff;
+                green += (pixel >>> 8) & 0xff;
+                blue += pixel & 0xff;
+            }
+        }
+        const pixels = count * (to - from);
+        return ((Math.round(red / pixels) << 16) | (Math.round(green / pixels) << 8)
+            | Math.round(blue / pixels)) >>> 0;
+    }
+    let value = mode === BLACKONWHITE ? 0xffffffff : 0;
+    for (let k = 0; k < count; k++)
+    {
+        const row = rows[k];
+        for (let x = from; x < to; x++)
+        {
+            value = mode === BLACKONWHITE ? (value & row[x]) : (value | row[x]);
+        }
+    }
+    return value >>> 0;
+}
+
+/**
  * @param {StretchOptions} options
  * @returns {boolean} what StretchBlt reports
  */
@@ -444,6 +659,20 @@ export function stretchBlt(options){
     const pattern = options.pattern;
     const convert = options.convert ?? null;
     const dest = options.dest;
+    // A copy of any scale, a row at a time: the source's rows into the
+    // destination's words, each box folded from rows read once, not a box
+    // read a pixel at a time -- a menu's background shrunk to its window took
+    // a frame to itself.
+    const declined = usesPattern ? 'pattern' : convert ? 'conversion'
+        : !dest.words ? 'destination has no words'
+            : !options.src?.readRow ? 'source reads no rows'
+                : options.src.bytes === dest.bytes ? 'one memory' : null;
+    if (declined === null)
+    {
+        blitPaths.rows++;
+        return stretchRows(options, mode, table);
+    }
+    tookPixels(`stretch: ${declined}; to ${shapeOf(dest)}, from ${shapeOf(options.src)}`);
     return stretchEach(options, (x, y, src, left, top, right, bottom)=>{
         const p = usesPattern && pattern ? pattern(x, y) : 0;
         if (p === TRANSPARENT_PIXEL)
