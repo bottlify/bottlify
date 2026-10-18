@@ -3433,13 +3433,15 @@ const SEVERITY = /** @type {Record<string, string>} */ ({
 });
 
 /**
- * An event whose own source writes the journal keeps a record per call while
- * the event itself fires once, so the bus must not write the first of those
- * calls a second time. `unimplemented` is the one: a program that calls a
- * missing import in a loop would otherwise fill the page's queue with a clone
- * and a wake-up per call.
+ * Events the bus does not write down. An event whose own source writes the
+ * journal keeps a record per call while the event itself fires once, so the
+ * bus must not write the first of those calls a second time: `unimplemented`,
+ * whose program may call a missing import in a loop and would fill the page's
+ * queue with a clone and a wake-up per call. And a position rather than a
+ * happening: `cursor-moved` fires at every move of the mouse, and written down
+ * it laps everything else out of the ring.
  */
-const SELF_JOURNALLED = new Set(['unimplemented']);
+const UNJOURNALLED = new Set(['unimplemented', 'cursor-moved']);
 
 /**
  * Every event the run reports also goes to its journal, so that one ordered
@@ -3453,7 +3455,7 @@ const SELF_JOURNALLED = new Set(['unimplemented']);
  */
 function journalEvents(events, into){
     events.onAny((/** @type {string} */ name, /** @type {any} */ payload)=>{
-        if (SELF_JOURNALLED.has(name))
+        if (UNJOURNALLED.has(name))
         {
             return;
         }
