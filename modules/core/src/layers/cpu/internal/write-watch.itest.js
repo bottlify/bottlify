@@ -13,9 +13,10 @@
  * interpreted at first and translated once hot, on the process's own executor
  * and on another one over the same memory, and the host writes too. Every page
  * whose bytes changed is among the pages taken, and no page a store could not
- * reach is. And a copy kept by what the watch takes while another executor
- * stores is the memory's own once its program has ended: no store tested
- * before a look and made after it is lost.
+ * reach is -- a loop's stream reaches what its window marks, the pages its
+ * next turns may store to. And a copy kept by what the watch takes while
+ * another executor stores is the memory's own once its program has ended: no
+ * store tested before a look and made after it is lost.
  */
 
 import { test } from 'node:test';
@@ -97,7 +98,9 @@ function program(next){
                 // add edi, 4; dec ecx; jnz L
                 const n = 1 + next(700);
                 const disp = next(PAGES * 4096 - 4 * n + 1) & ~3;
-                run(disp, 4 * n);
+                // Its window marks the pages its next turns may reach, up to
+                // a page past its last store, before it stores untested.
+                run(disp, Math.min(PAGES * 4096 - disp, 4 * n + 4096));
                 body.push(0xbf, ...u32(DATA + disp), 0xb9, ...u32(n),
                     0x89, 0x07, 0x83, 0xc7, 0x04, 0x49, 0x75, 0xf8);
                 break;

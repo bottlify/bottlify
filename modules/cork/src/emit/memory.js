@@ -1619,7 +1619,8 @@ function loopAccessesOf(ins, forward){
  * Leaves 1 on the stack when every page the streams reach in the next
  * `turns` turns is accessible, and holds no code where a stream stores; 0
  * otherwise. Each stream's reach is at most 8192 bytes, so its first page,
- * the one 4096 bytes on and its last cover it.
+ * the one 4096 bytes on and its last cover it. A watched page a stream
+ * stores to is marked written then (`codeHit`), before any of its stores.
  *
  * @param {E} e @param {Stream[]} streams @param {number} turns
  * @param {boolean} [forward]  the streams move as they do with DF clear: 0
@@ -1654,8 +1655,9 @@ export function emitStreamWindow(e, streams, turns, forward = false){
             b.localGet(Local.reg + stream.index).i32const(stream.scale).op(I32.mul).op(I32.add);
         }
         b.i32const(from | 0).op(I32.add).localSet(Local.addr);
-        const bits = PageFlag.INACCESSIBLE | (stream.store ? STORE_FLAGS : 0);
-        [0, Math.min(4096, width - 1), width - 1].forEach((at, k)=>{
+        const bits = PageFlag.INACCESSIBLE | (stream.store ? PageFlag.HAS_CODE : 0);
+        const reach = [0, Math.min(4096, width - 1), width - 1];
+        reach.forEach((at, k)=>{
             b.localGet(Local.addr);
             if (at !== 0)
             {
@@ -1667,6 +1669,26 @@ export function emitStreamWindow(e, streams, turns, forward = false){
                 b.op(I32.or);
             }
         });
+        if (stream.store)
+        {
+            // A watched page is marked written here, every page the turns may
+            // reach, and the turns run untested as on pages written already:
+            // left to the checked copy, a loop filling a watched buffer ran
+            // every store tested to its end, three times as slow.
+            b.localTee(Local.pflags).i32const(PageFlag.WATCH).op(I32.and);
+            b.if(EMPTY);
+            for (const at of reach)
+            {
+                b.localGet(Local.addr);
+                if (at !== 0)
+                {
+                    b.i32const(at).op(I32.add);
+                }
+                b.call(e.context.codeHit).drop();
+            }
+            b.end();
+            b.localGet(Local.pflags);
+        }
         // This stream's flagged pages, into the word under it.
         b.i32const(bits).op(I32.and).op(I32.or);
     }
