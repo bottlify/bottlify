@@ -29,12 +29,14 @@ function random(seed){
 
 /**
  * A root with buffers and a draw that reads a range of one: the recorded side
- * tells the recording what it draws from (`drawsFrom`), the played side reads
- * its memory, which has only what the recording sent.
+ * tells the recording what it draws from (`drawsFrom`) where the buffers are
+ * dynamic, the played side reads its memory, which has only what the
+ * recording sent.
  *
  * @param {Uint8Array[][]} seen  the played draws' bytes, pushed to the last list
+ * @param {boolean} [dynamic]
  */
-const toy = seen=>(/** @type {any} */ services)=>{
+const toy = (seen, dynamic = true)=>(/** @type {any} */ services)=>{
     const played = services.backend !== undefined;
     return {
         /** @param {number} length @param {{ buffer?: any }} out */
@@ -59,7 +61,7 @@ const toy = seen=>(/** @type {any} */ services)=>{
                 seen[seen.length - 1].push(services.readMemory(buffer.base + from, to - from)
                     .slice());
             }
-            else
+            else if (dynamic)
             {
                 services.drawsFrom?.(buffer, from, to);
             }
@@ -115,11 +117,13 @@ function watches(){
 
 /**
  * One seeded run through a recorder, watched or not: what its played draws
- * read and what the program's memory held for each, and the bytes compared.
+ * read and what the program's memory held for each, the bytes compared and
+ * the bytes unlocks sent. A program writes buffers that are not dynamic only
+ * under a lock, a few stores at a time.
  *
- * @param {number} seed @param {boolean} watched
+ * @param {number} seed @param {boolean} watched @param {boolean} [dynamic]
  */
-function run(seed, watched){
+function run(seed, watched, dynamic = true){
     const next = random(seed);
     const ram = new Uint8Array(1 << 20);
     let free = 0x1000;
@@ -137,7 +141,8 @@ function run(seed, watched){
     };
     /** @type {Uint8Array[][]} */
     const seen = [];
-    const played = playedDirect3D(toy(seen), { ...services, backend: {}, readMemory: true });
+    const played = playedDirect3D(toy(seen, dynamic),
+        { ...services, backend: {}, readMemory: true });
     const sender = createSender({
         post: message=>{
             played.read(message.buffer, call=>{
@@ -146,7 +151,7 @@ function run(seed, watched){
         },
         later: flush=>flush(),
     });
-    const root = recordedDirect3D(toy(seen), services, sender);
+    const root = recordedDirect3D(toy(seen, dynamic), services, sender);
     const buffers = [0x1800, 0x1800, 0x900, 0x5000].map(length=>{
         /** @type {{ buffer?: any }} */
         const out = {};
@@ -169,7 +174,7 @@ function run(seed, watched){
     {
         const buffer = buffers[next(buffers.length)];
         const what = next(10);
-        if (what < 5)
+        if (what < 5 && dynamic)
         {
             store(buffer);
         }
@@ -178,7 +183,10 @@ function run(seed, watched){
             /** @type {{ pBits?: number }} */
             const locked = {};
             assert.equal(buffer.Lock(locked), D3D_OK);
-            store(buffer);
+            for (let stores = dynamic ? 1 : 1 + next(3); stores > 0; stores--)
+            {
+                store(buffer);
+            }
             assert.equal(buffer.Unlock(), D3D_OK);
         }
         else
@@ -192,7 +200,8 @@ function run(seed, watched){
             draws.push({ read: read[0], held: ram.slice(buffer.base + from, buffer.base + to) });
         }
     }
-    return { draws, compared: sender.shippedBytes().compared };
+    const shipped = sender.shippedBytes();
+    return { draws, compared: shipped.compared, unlocked: shipped.buffers };
 }
 
 test('a draw from buffers compared through the write watch reads what the program wrote, as one '
@@ -210,4 +219,28 @@ test('a draw from buffers compared through the write watch reads what the progra
         assert.ok(watched.compared <= full.compared,
             `seed ${seed}: ${watched.compared} bytes compared watched, ${full.compared} in full`);
     }
+});
+
+test('an unlock of a buffer sent whole before sends what was written since, watched, and a draw '
+    + 'reads what the program wrote, as one sending every unlock whole does', ()=>{
+    let sent = 0;
+    let whole = 0;
+    for (let seed = 1; seed <= 12; seed++)
+    {
+        const full = run(seed, false, false);
+        const watched = run(seed, true, false);
+        assert.equal(watched.draws.length, full.draws.length);
+        watched.draws.forEach((draw, index)=>{
+            assert.deepEqual(draw.read, draw.held, `seed ${seed}, draw ${index}: watched`);
+            assert.deepEqual(full.draws[index].read, full.draws[index].held,
+                `seed ${seed}, draw ${index}: sent whole`);
+        });
+        assert.ok(watched.unlocked <= full.unlocked,
+            `seed ${seed}: ${watched.unlocked} bytes unlocked watched, ${full.unlocked} whole`);
+        sent += watched.unlocked;
+        whole += full.unlocked;
+    }
+    // A store touches a page or two of buffers of two to six pages, three at
+    // most an unlock: watched, a little over half of what whole unlocks send.
+    assert.ok(sent < whole * 0.75, `${sent} bytes sent watched, ${whole} whole`);
 });

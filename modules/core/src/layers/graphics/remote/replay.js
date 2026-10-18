@@ -115,10 +115,11 @@ function partOf(args){
  */
 
 /**
- * What was last sent of a dynamic buffer a draw read: its address then and
- * its length, the watch over its writes since, null where the engine has
- * none, the pages written that have not been sent whole since, and -- only
- * without a watch, to compare against -- its bytes as sent.
+ * What was last sent of a dynamic buffer a draw read, or of a buffer an
+ * unlock sent whole: its address then and its length, the watch over its
+ * writes since, null where the engine has none, the pages written that have
+ * not been sent whole since, and -- only without a watch, to compare against
+ * -- its bytes as sent.
  *
  * @typedef {{ base: number, length: number, bytes: Uint8Array | null,
  *     watch: { take: (address: number, length: number) => number[] } | null,
@@ -524,8 +525,9 @@ export function createRecording(options){
     const sentParts = new WeakMap();
     /**
      * What the played side's memory holds of each dynamic buffer a draw has
-     * read, by the buffer: it is what was last sent of it, by its unlocks
-     * and by draws (`drawsFrom`), and a draw sends only what differs from it.
+     * read, and of each buffer an unlock sent whole (`sentWhole`), by the
+     * buffer: it is what was last sent of it, by its unlocks and by draws
+     * (`drawsFrom`), and a draw or an unlock sends only what differs from it.
      *
      * `watch`: the writes to it since (`changedIn`), where the engine says.
      *
@@ -955,6 +957,34 @@ export function createRecording(options){
     const rangeFrom = ({ address, length }, read = readMemory)=>{
         const extent = extentOf(address, length);
         return extent > 0 ? [{ address, bytes: read(address, extent) }] : [];
+    };
+
+    /**
+     * An unlock's ranges, read and sent as they are; one that sends all of a
+     * buffer the played side knows none of yet leaves it known (`sentOf`),
+     * watched from before the read, so the next unlock of it sends only the
+     * pages written since -- dynamic or not, drawn from or not. Call of Duty
+     * 4 locks a buffer of 4.5 MB whole twice a frame, and its unlocks sent
+     * all of it each time: 62 GB in four minutes of its menu, a sixth of the
+     * process's executor spent posting it. Only with the engine's watch: a
+     * buffer's copy to compare against is not kept for this.
+     *
+     * @param {any} target @param {Locked[]} ranges
+     */
+    const sentWhole = (target, ranges)=>{
+        const base = target.base;
+        const length = target.length;
+        if (watchWrites && typeof base === 'number' && typeof length === 'number' && length > 0
+            && ranges.some(range=>range.address === base
+                && extentOf(base, range.length) >= length))
+        {
+            const watch = watchWrites(base, length);
+            if (watch)
+            {
+                sentOf.set(target, { base, length, bytes: null, watch, dirty: new Set() });
+            }
+        }
+        return ranges.flatMap(range=>rangeFrom(range));
     };
 
     /**
@@ -1416,7 +1446,7 @@ export function createRecording(options){
                             }
                             return into;
                         })
-                        : ranges.flatMap(range=>rangeFrom(range));
+                        : sentWhole(target, ranges);
                     shippedAs('buffers', unlocked);
                     shipped = [...shipped ?? [], ...unlocked];
                 }
