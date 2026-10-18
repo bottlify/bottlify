@@ -59,10 +59,14 @@ export async function connect(match = '5180'){
         await new Promise(resolve=>setTimeout(resolve, 1500));
         return found;
     };
-    /** The engine's own worker, or the first worker when none is named so. */
+    /**
+     * The engine's own worker, or the first worker when none is named so. Of
+     * several -- a run restarted on the page can leave the last one's alive and
+     * idle -- the newest, the last the page attaches.
+     */
     const engineWorker = async()=>{
         const all = await workers();
-        return all.find(worker=>/engine\.worker/.test(worker.url)) ?? all[0] ?? null;
+        return all.filter(worker=>/engine\.worker/.test(worker.url)).at(-1) ?? all[0] ?? null;
     };
     return { cdp, sessionId, evaluate, workers, engineWorker };
 }
