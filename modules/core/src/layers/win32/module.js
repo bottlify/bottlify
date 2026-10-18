@@ -1436,9 +1436,21 @@ export function createWin32Module(){
                 },
             });
 
-            // Every DllMain this layer or the loader calls goes through the
-            // loader's own frame, so an exception out of one ends it rather
-            // than reaching the program's handlers.
+            /**
+             * Where a thread whose call has suspended left its stack: the
+             * guarded callers' frames go below it.
+             *
+             * @param {any} thread
+             */
+            const restingStack = thread=>Math.min(
+                thread?.callbackFrames?.at(-1)?.frameBase ?? Infinity,
+                thread?.hostCalls?.at(-1)?.restingStack ?? Infinity,
+                Infinity) >>> 0 || cpuRegisters.read('esp') >>> 0;
+
+            // Every DllMain and TLS callback this layer or the loader calls
+            // with DLL_PROCESS_DETACH goes through the loader's own frame, so
+            // an exception out of one ends it rather than reaching the
+            // program's handlers.
             const callEntryPoint = createEntryPointCaller({
                 register: (name, fn)=>bridge.register(name, fn),
                 callGuest: call=>bridge.callGuest(call),
@@ -1446,7 +1458,7 @@ export function createWin32Module(){
                 unwind: (frame, address, options)=>seh.unwind(frame, address, options),
                 readU32: address=>memory.readU32(address),
                 writeU32: (address, value)=>memory.writeU32(address, value),
-                stackPointer: ()=>cpuRegisters.read('esp') >>> 0,
+                stackPointer: restingStack,
                 teb: thread=>(thread?.tebAddress ?? kernel.currentThread()?.tebAddress ?? 0) >>> 0,
                 divergence: detail=>config?.divergence?.('DllMain', detail),
             });
@@ -1462,10 +1474,7 @@ export function createWin32Module(){
                 unwind: (frame, address, options)=>seh.unwind(frame, address, options),
                 readU32: address=>memory.readU32(address),
                 writeU32: (address, value)=>memory.writeU32(address, value),
-                stackPointer: thread=>Math.min(
-                    thread?.callbackFrames?.at(-1)?.frameBase ?? Infinity,
-                    thread?.hostCalls?.at(-1)?.restingStack ?? Infinity,
-                    Infinity) >>> 0 || cpuRegisters.read('esp') >>> 0,
+                stackPointer: restingStack,
                 teb: thread=>(thread?.tebAddress ?? kernel.currentThread()?.tebAddress ?? 0) >>> 0,
             });
 
@@ -1473,12 +1482,13 @@ export function createWin32Module(){
             let ending = false;
             /**
              * ExitProcess, and the C runtime's exits that end in it: every other
-             * thread ends, each library still attached is called with
-             * DLL_PROCESS_DETACH on this thread -- the last attached first, and
-             * lpvReserved non-NULL because the process is ending -- and only then
-             * is the code recorded, which is what stops the machine. With nothing
-             * to tell, nothing else would run, so the code is recorded at once.
-             * An ExitProcess from inside one of those DllMains ends it there.
+             * thread ends, each image still attached is told DLL_PROCESS_DETACH
+             * on this thread -- the last attached first, its TLS callbacks before
+             * its entry point, and lpvReserved non-NULL because the process is
+             * ending -- and only then is the code recorded, which is what stops
+             * the machine. With nothing to tell, nothing else would run, so the
+             * code is recorded at once. An ExitProcess from inside one of those
+             * calls ends it there.
              *
              * @param {number} code
              */
@@ -1498,7 +1508,8 @@ export function createWin32Module(){
              * @returns {Promise<number> | null}
              */
             const detachAndEnd = code=>{
-                const attached = ending ? [] : (modules.attachedLibraries?.() ?? []);
+                /** @type {{ base: number, routines: number[] }[]} */
+                const attached = ending ? [] : (modules.processDetach?.() ?? []);
                 ending = true;
                 if (attached.length === 0)
                 {
@@ -1516,20 +1527,11 @@ export function createWin32Module(){
                 }
                 /** @type {Promise<any>} */
                 let told = Promise.resolve(0);
-                for (const library of attached)
+                for (const image of attached)
                 {
-                    // Once the call that ends the process is suspended, and on
-                    // the stack it left: by then the processor may be running
-                    // another thread, on several executors, whose stack
-                    // pointer is not this one's.
-                    told = told.then(()=>callGuarded({
-                        entry: library.entryPoint,
-                        args: [library.base, DLL_PROCESS_DETACH, 1],
-                        thread: self,
-                        failed: 0,
-                        report: exception=>config?.divergence?.('DllMain', `exception 0x${
-                            exception} in the entry point of the library at 0x${
-                            (library.base >>> 0).toString(16)}, taken by the loader`),
+                    told = told.then(()=>callEntryPoint({
+                        routines: image.routines, base: image.base,
+                        reason: DLL_PROCESS_DETACH, reserved: 1, thread: self,
                     }));
                 }
                 return told.then(()=>{
@@ -3483,15 +3485,17 @@ export function createWin32Module(){
                 libraryConvention: library=>CDECL_LIBRARIES.test(library) ? 'cdecl' : 'stdcall',
 
                 /**
-                 * Calls a library's entry point as the loader does: inside a
-                 * frame of the loader's that takes whatever it raises, which
-                 * then ends the call with 0.
+                 * Tells an image as the loader does: each routine -- its TLS
+                 * callbacks, then its entry point -- in turn on `thread`, once
+                 * the call that asked has suspended, each inside a frame of the
+                 * loader's that takes whatever it raises and ends that routine
+                 * with 0.
                  *
-                 * @param {{ entry: number, base: number, reason: number,
-                 *     reserved: number, thread: any }} call
+                 * @param {{ routines: number[], base: number, reason: number,
+                 *     reserved: number, thread: any }} image
                  * @returns {Promise<number>}
                  */
-                callEntryPoint: call=>callEntryPoint(call),
+                callEntryPoint: image=>callEntryPoint(image),
 
                 /**
                  * Device contexts over pixels this layer did not allocate.

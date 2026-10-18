@@ -456,6 +456,31 @@ standing and are both told their own detach; the process then ends with no threa
 libraries hear nothing more -- the end of a process whose threads are gone, not one that called
 `ExitProcess`. *2026-10-18.*
 
+**A50 -- The process's end tells the images the other way round from their attach, each image's
+TLS callbacks before its entry point, the program's own callbacks last.** The PE format says a TLS
+callback is called with `DLL_PROCESS_DETACH` when the process ends and with the same arguments as
+`DllMain`; Microsoft documents that `ExitProcess` calls each attached library's entry point, with
+lpvReserved non-NULL, and Wine's loader test that a library's callback hears `DLL_PROCESS_DETACH`
+from `FreeLibrary`. Nothing published says where a callback falls among the entry points on the
+way out, nor where the program's, which has no entry point after it. This loader attaches the
+program's callbacks first (A47), so they are told last: whatever they tear down -- a static
+runtime's `thread_local` objects of the first thread -- outlives every library that might still use
+it, and the process's end is the exact mirror of its start, as a thread's end is of its start.
+Within an image the callbacks still go first, as in A47. lpvReserved is 1 at the process's end and
+NULL at `FreeLibrary`, as for the entry point. *2026-10-18.*
+
+**A51 -- A library loaded at run time gets its TLS whether or not it has an entry point, and is
+refused when it cannot.** Since Vista Windows gives such a library a slot, every thread's block
+and its callbacks, which Wine's loader test checks (`test_import_resolution`, cases 0 and 3); the
+test also notes that Windows "doesn't consistently call tls init functions on dlls without entry
+points". Here the callbacks are called for such a library, as the startup stub calls them for one
+the program imports: the image asked for them, and a callback that runs is the case no runtime is
+broken by. A library loaded with `DONT_RESOLVE_DLL_REFERENCES`, or a program loaded by name, gets no
+TLS, as the test expects. The slot comes from the pool `TlsAlloc` draws on, as for a startup image,
+and must be within the 64 the thread-local array holds; a library given none, or for whose block
+not every thread has room, is refused as one whose import is missing is (`LoadLibrary` answers
+NULL), as Windows fails a load it cannot give TLS to. *2026-10-18.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this

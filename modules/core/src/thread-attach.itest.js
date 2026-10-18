@@ -336,6 +336,11 @@ for (const cores of [1, 2])
         // but has static thread-local storage and is still told.
         const told = loadOrder.filter(tag=>tag !== TAG.QUIET);
         const threads = [...new Set(entries.map(each=>each.thread))].filter(id=>id !== main);
+        // Where each call the loader made falls among the loader's calls
+        // alone: a start routine runs outside the loader lock, so another
+        // thread's may report in the middle of one thread's attach or detach.
+        const lockedAt = new Map(entries.filter(each=>each.reason !== RAN)
+            .map((each, position)=>[each.index, position]));
         assert.equal(threads.length, RETURNERS + 1, text);
         threads.forEach((thread, number)=>{
             const own = entries.filter(each=>each.thread === thread);
@@ -348,11 +353,12 @@ for (const cores of [1, 2])
             ];
             assert.deepEqual(own.map(each=>`${each.tag}/${each.reason}/${each.reserved}`), expected,
                 `thread ${thread}: ${text}`);
-            // Made together: no other thread's call among one thread's attach
-            // or detach.
+            // Made together, under the loader lock: no other thread's call to
+            // a library among one thread's attach or detach.
             for (const reason of [DLL_THREAD_ATTACH, DLL_THREAD_DETACH])
             {
-                const at = own.filter(each=>each.reason === reason).map(each=>each.index);
+                const at = own.filter(each=>each.reason === reason)
+                    .map(each=>/** @type {number} */ (lockedAt.get(each.index)));
                 assert.equal((at.at(-1) ?? 0) - at[0], at.length - 1,
                     `thread ${thread}'s ${reason === DLL_THREAD_ATTACH ? 'attach' : 'detach'}`
                     + ` interleaved with another's: ${text}`);

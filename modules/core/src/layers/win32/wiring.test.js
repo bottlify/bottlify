@@ -340,7 +340,7 @@ test('a file msvcrt opened to be deleted on close is gone once the process ends'
         const filesystem = await filesystemModule.create({});
         const { bytes, libraries, exitCode } = await build({
             filesystem, kernel: { currentThread: ()=>({ id: 1 }) },
-            modules: { attachedLibraries: ()=>[] },
+            modules: { processDetach: ()=>[] },
         });
         bytes.set([...'C:\\scratch.tmp\0'].map(ch=>ch.charCodeAt(0)), 0x1000);
         assert.ok(libraries['msvcrt.dll']._open.handler([0x1000, O_CREAT_RDWR_TEMPORARY, 0]) > 2);
@@ -404,11 +404,13 @@ test('LoadLibraryEx\'s flags reach whoever assembled the process', async()=>{
     await win32Module.dispose();
 });
 
-test('ExitProcess ends the other threads and tells each attached library, last first', async()=>{
+test('ExitProcess ends the other threads and tells each attached image, last first', async()=>{
     // What Microsoft documents for ExitProcess: every other thread ends, then
     // each attached DLL's entry point is called with DLL_PROCESS_DETACH on the
     // calling thread -- lpvReserved non-NULL, since the process is ending --
-    // and only then does the process end with the code.
+    // and only then does the process end with the code. An image's TLS
+    // callbacks are called for every reason its entry point is, before it;
+    // the program's own have no entry point after them.
     const DLL_PROCESS_DETACH = 0;
     const self = { id: 1, state: 'running' };
     const other = { id: 2, state: 'blocked' };
@@ -433,9 +435,10 @@ test('ExitProcess ends the other threads and tells each attached library, last f
             },
         },
         modules: {
-            attachedLibraries: ()=>[
-                { name: 'late.dll', base: 0x10100000, entryPoint: 0x10101000 },
-                { name: 'early.dll', base: 0x10000000, entryPoint: 0x10001000 },
+            processDetach: ()=>[
+                { base: 0x10100000, routines: [0x10101000] },
+                { base: 0x10000000, routines: [0x10000800, 0x10001000] },
+                { base: 0x400000, routines: [0x401800] },
             ],
         },
     });
@@ -446,7 +449,9 @@ test('ExitProcess ends the other threads and tells each attached library, last f
     await answer;
     assert.deepEqual(called.map(call=>[call.entry, call.args, call.thread, call.exitCode]), [
         [0x10101000, [0x10100000, DLL_PROCESS_DETACH, 1], self, null],
+        [0x10000800, [0x10000000, DLL_PROCESS_DETACH, 1], self, null],
         [0x10001000, [0x10000000, DLL_PROCESS_DETACH, 1], self, null],
+        [0x401800, [0x400000, DLL_PROCESS_DETACH, 1], self, null],
     ]);
     assert.equal(exitCode(), 7);
     await win32Module.dispose();
@@ -475,7 +480,7 @@ test('the runtime\'s exit tells the attached libraries too, after the atexit han
             },
         },
         modules: {
-            attachedLibraries: ()=>[{ name: 'lib.dll', base: 0x10000000, entryPoint: 0x10001000 }],
+            processDetach: ()=>[{ base: 0x10000000, routines: [0x10001000] }],
         },
     });
     const crt = libraries['msvcrt.dll'];
@@ -498,7 +503,7 @@ test('ExitProcess with no library to tell ends the process at once', async()=>{
             threads: ()=>[{ id: 2 }],
             exitThread: (/** @type {any} */ thread)=>ended.push(thread),
         },
-        modules: { attachedLibraries: ()=>[] },
+        modules: { processDetach: ()=>[] },
     });
 
     libraries['KERNEL32.dll'].ExitProcess.handler([3]);
