@@ -56,6 +56,9 @@
  * @property {(left: number, top: number, right: number, bottom: number, pixel: number) => void
  *     } [fill]  Every pixel of the half-open rectangle written as `write` writes one, in
  *     runs rather than a call a pixel.
+ * @property {(y: number, x: number, count: number, into: Uint32Array, at: number) => void
+ *     } [readRow]  A run of a row's pixels, each as `read` answers it, into `into` from `at`:
+ *     what a blit from a source of any depth reads a row by.
  * @property {Uint32Array | null} [words]
  *           Its pixels as words, a row `pitch / 4` words apart from the first
  *           stored one, when each word is the pixel itself; null or absent

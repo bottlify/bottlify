@@ -102,6 +102,13 @@ const WHEEL_GAP_MS = 120;
 const RELEASE_WINDOW_MS = 600;
 
 /**
+ * How close to the pointer lock's end a real Escape keydown must be to be the
+ * press that ended it, in ms: a browser that hands the page that keydown as
+ * well as spending it on the lock has delivered the key already.
+ */
+const ESCAPE_ECHO_MS = 100;
+
+/**
  * What focus looks like. Set on the element rather than left to the browser's
  * own ring, because a page is free to have reset that away and an element that
  * takes every keystroke has to look like it is taking them.
@@ -611,6 +618,34 @@ export function createDomInput({ canvas, send, pointerLock = false, resolution }
     listen('focus', onFocus);
     listen('blur', onBlur);
 
+    /**
+     * Escape that the browser spends on leaving pointer lock. Windowed, Chrome
+     * keeps that press for itself and the page never sees its keydown, so a
+     * program that skips its intro or opens its menu on Escape needed two
+     * presses. A lock lost while the canvas and the page keep the focus, with
+     * the page's own pointer key not held and no real Escape just delivered,
+     * was ended by Escape, and the program is given the press. Every release
+     * a host makes on purpose is one of those cases or comes after `detach`.
+     */
+    let locked = false;
+    const onPointerLockChange = ()=>{
+        const now = document.pointerLockElement === canvas;
+        const lost = locked && !now;
+        locked = now;
+        if (lost && focused && !releaseHeld && document.hasFocus?.() !== false
+            && performance.now() - lastEscape > ESCAPE_ECHO_MS)
+        {
+            send({ kind: 'key', code: 'Escape', down: true });
+            send({ kind: 'text', text: CONTROL_TEXT.Escape });
+            send({ kind: 'key', code: 'Escape', down: false });
+        }
+    };
+    const watchesLock = pointerLock && typeof document !== 'undefined';
+    if (watchesLock)
+    {
+        document.addEventListener('pointerlockchange', onPointerLockChange);
+    }
+
     return {
         /** Puts the keyboard on the game, for a host with its own play button. */
         focus: ()=>canvas.focus(),
@@ -661,6 +696,10 @@ export function createDomInput({ canvas, send, pointerLock = false, resolution }
                 canvas.removeEventListener(type, handler);
             }
             listeners.length = 0;
+            if (watchesLock)
+            {
+                document.removeEventListener('pointerlockchange', onPointerLockChange);
+            }
             heldPaste = null;
             if (heldTimer !== null)
             {

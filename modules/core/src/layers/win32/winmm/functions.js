@@ -37,6 +37,7 @@
 import { parseWave } from './wave.js';
 import { MAX_PERIOD } from './timers.js';
 import { SOUND_ADAPTER_NAME } from '../devices.js';
+import { createMciVideo } from './mci-video.js';
 
 /** Success, and the errors a caller distinguishes. */
 const MMSYSERR_NOERROR = 0;
@@ -118,8 +119,8 @@ const MCIERR_NULL_PARAMETER_BLOCK = 297;
 const MCI_ALL_DEVICE_ID = 0xffffffff;
 
 /**
- * mciGetDeviceID's answer for a name. No device is ever open here, so only
- * `all` names one.
+ * mciGetDeviceID's answer for a name no device of the video driver
+ * (`mci-video.js`) has: only `all` names one.
  *
  * @param {string} name
  */
@@ -267,18 +268,25 @@ const openFailure = name=>{
 };
 
 /**
- * mciSendString's answer and the text it returns. Nothing is ever open here,
- * so every command that needs a device opens one first, as the string
- * interface does for a device named by type or file -- and that open is where
- * it fails. Closing everything and counting devices are the two things that
- * succeed.
+ * A command string's words, quotes taken off.
+ *
+ * @param {string} command
+ */
+const mciWords = command=>(command.trim().match(/"[^"]*"|\S+/g) ?? [])
+    .map(word=>word.replace(/^"(.*)"$/, '$1'));
+
+/**
+ * mciSendString's answer and the text it returns, for a command no device of
+ * the video driver (`mci-video.js`) takes: there is no other driver here, so
+ * every command that needs a device opens one first, as the string interface
+ * does for a device named by type or file -- and that open is where it fails.
+ * Closing everything and counting devices are the two things that succeed.
  *
  * @param {string} command
  * @returns {{ error: number, text: string }}
  */
 const mciString = command=>{
-    const words = (command.trim().match(/"[^"]*"|\S+/g) ?? [])
-        .map(word=>word.replace(/^"(.*)"$/, '$1'));
+    const words = mciWords(command);
     if (words.length === 0)
     {
         return { error: MCIERR_MISSING_COMMAND_STRING, text: '' };
@@ -485,6 +493,12 @@ const MMTIME_SIZE = 12;
  * @property {ReturnType<typeof import('./timers.js').createTimerService>} [timers]
  *           The multimedia timer service (`timers.js`). Absent in a build
  *           that cannot run a thread: `timeSetEvent` then answers no timer.
+ * @property {() => import('../quartz/graph.js').Film | null} [film]
+ *           A film the filter graph's machinery plays, for MCI's video
+ *           devices (`mci-video.js`). Absent, every film MCI is asked to open
+ *           fails to load its driver, as on a machine without one.
+ * @property {(key: number) => boolean} [keyDown]
+ *           Whether a virtual key is held now: a film's break key.
  */
 
 
@@ -682,7 +696,19 @@ export function createWinmmFunctions(host){
     });
 
     /**
-     * mciSendString, for either width.
+     * The video driver: films opened by MCI, played by the filter graph's
+     * machinery. Absent where nothing can play one, and then every open of a
+     * film fails to load its driver as before.
+     */
+    const video = host.film
+        ? createMciVideo({ film: host.film, keyDown: host.keyDown ?? (()=>false),
+            divergence: host.divergence })
+        : null;
+
+    /**
+     * mciSendString, for either width. A command the video driver takes may
+     * answer later -- an open reads the file, a `play ... wait` lasts the film
+     * -- and the calling thread waits for it, as it does on Windows.
      *
      * @param {boolean} wide
      */
@@ -690,11 +716,22 @@ export function createWinmmFunctions(host){
         argBytes: 16,
         /** @param {number[]} args */
         handler: ([command, buffer, room])=>{
-            const answer = (command >>> 0) === 0
-                ? { error: MCIERR_MISSING_COMMAND_STRING, text: '' }
-                : mciString(wide ? wideAt(command, 1024) : ansiAt(command, 1024));
-            writeText(buffer, room, answer.text, wide);
-            return answer.error;
+            if ((command >>> 0) === 0)
+            {
+                return MCIERR_MISSING_COMMAND_STRING;
+            }
+            const text = wide ? wideAt(command, 1024) : ansiAt(command, 1024);
+            /** @param {{ error: number, text?: string }} answer */
+            const answered = answer=>{
+                writeText(buffer, room, answer.text ?? '', wide);
+                return answer.error;
+            };
+            const ours = video?.command(mciWords(text)) ?? null;
+            if (ours === null)
+            {
+                return answered(mciString(text));
+            }
+            return 'then' in ours ? ours.then(answered) : answered(ours);
         },
     });
 
@@ -1759,12 +1796,14 @@ export function createWinmmFunctions(host){
         mciGetDeviceIDA: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([name])=>((name >>> 0) === 0 ? 0 : deviceIdOf(ansiAt(name, 128))),
+            handler: ([name])=>((name >>> 0) === 0 ? 0 : deviceIdOf(ansiAt(name, 128))
+                || (video?.deviceId(ansiAt(name, 128)) ?? 0)),
         },
         mciGetDeviceIDW: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([name])=>((name >>> 0) === 0 ? 0 : deviceIdOf(wideAt(name, 128))),
+            handler: ([name])=>((name >>> 0) === 0 ? 0 : deviceIdOf(wideAt(name, 128))
+                || (video?.deviceId(wideAt(name, 128)) ?? 0)),
         },
         /**
          * MCIDEVICEID mciGetDeviceIDFromElementIDA(DWORD dwElementID, LPCSTR lpstrType)

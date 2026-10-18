@@ -123,6 +123,15 @@ Performance is part of correctness: a slow implementation does not reproduce how
 Bugs and costs are found by measurement — the harness, ring buffers, phase profiler and guest CPU
 attribution are first-class.
 
+- **Look in the tools before debugging or searching.** `tools/cdp_test/README.md` lists every
+  instrument and live switch (the live ones attach to a running game without pausing it); read it
+  first and use what is there. An instrument made for a hunt that a later one could use goes into
+  `tools/` and onto that list in the same change, not into a scratch folder.
+- **One restart carries the whole hunt.** Before asking a person to restart a game, put every
+  switch, counter and dump the hunt could need into that one build, and check on the running
+  game that each one answers (a live switch returns data, a counter moves). A restart per readout
+  is the person's time spent on our missing instrument.
+
 - **An optimisation works on a test before it touches the engine**: a node test that reproduces a
   real scenario (a block profile, the bytes from the bundle), then the solution, then the engine,
   then the game run to confirm. A browser A/B of a guess is not a diagnosis — a frame varies by a

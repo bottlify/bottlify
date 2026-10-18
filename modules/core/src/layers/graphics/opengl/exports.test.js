@@ -328,14 +328,19 @@ function startDrawing(table){
     return context;
 }
 
-test('a frame is presented for its window, which holds the screen when it is the screen size',
+test('a frame is presented for its window, which holds the screen when it covers it',
     ()=>{
         // A full-screen program's window drawn on by GL: a paint of a window
         // under it put the program's black main window on the screen between
-        // two frames, because the frame did not say whose it was.
+        // two frames, because the frame did not say whose it was. One larger
+        // than the screen -- drawn on while the display mode is still the
+        // desktop's -- covers it as well, and a paint on a dialog put the
+        // desktop between its frames.
         for (const [drawable, expected] of /** @type {[any, [number, boolean]][]} */ ([
             [{ key: 'window:7', window: 7, width: 4, height: 4 }, [7, true]],
+            [{ key: 'window:7', window: 7, width: 8, height: 6 }, [7, true]],
             [{ key: 'window:7', window: 7, width: 4, height: 2 }, [7, false]],
+            [{ key: 'window:7', window: 7, width: 8, height: 2 }, [7, false]],
             [{ key: 'dc:36877', width: 4, height: 4 }, [0, false]],
         ]))
         {

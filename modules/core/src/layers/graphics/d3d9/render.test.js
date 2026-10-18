@@ -885,7 +885,7 @@ test('a draw needs a position in its format and a bound stream, and no scene', (
         'and nothing is bound to read vertices from');
 });
 
-test('a lock reports guest memory, and a second lock of the same buffer is refused', ()=>{
+test('a lock reports guest memory, and a second lock of the same buffer nests', ()=>{
     const h = harness();
     /** @type {{ buffer?: any }} */
     const created = {};
@@ -898,11 +898,13 @@ test('a lock reports guest memory, and a second lock of the same buffer is refus
 
     assert.equal(created.buffer.Lock(64, 0, first, 0), D3D_OK);
     assert.ok(h.isGuestMemory(/** @type {number} */ (first.pBits)));
-    assert.equal(created.buffer.Lock(0, 16, second, 0), 0x8876086c);
-    assert.equal(second.pBits, undefined, 'a failed lock leaves the caller its own pointer');
-
+    // Locks of a buffer are counted, as the runtime counts them: a program
+    // filling a dynamic buffer a piece at a time locks the next piece before
+    // it unlocks the last.
+    assert.equal(created.buffer.Lock(0, 16, second, 0), D3D_OK);
     assert.equal(created.buffer.Unlock(), D3D_OK);
-    assert.equal(created.buffer.Unlock(), 0x8876086c, 'and a second unlock owes nothing');
+    assert.equal(created.buffer.Unlock(), D3D_OK);
+    assert.equal(created.buffer.Unlock(), 0x8876086c, 'and an unlock past the locks owes nothing');
     assert.equal(created.buffer.Lock(0, 16, second, 0), D3D_OK);
     assert.equal(second.pBits, /** @type {number} */ (first.pBits) - 64,
         'the range a lock reports is measured from the buffer, not from the last lock');

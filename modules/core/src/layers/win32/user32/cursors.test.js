@@ -50,8 +50,8 @@ test('CreateIcon\'s colour bitmap is device-dependent, its rows padded to a word
     // Two pixels a row: the first shows its colour, the second is masked away.
     const and = Uint8Array.of(0b01000000, 0);
     const deep = Uint8Array.of(10, 20, 30, 0, 40, 50, 60, 0);
-    assert.deepEqual([...ddbToBgra(2, 1, 32, and, deep)], [10, 20, 30, 255, 0, 0, 0, 255],
-        'blue, green, red, and the masked pixel inverts where its colour is not black');
+    assert.deepEqual([...ddbToBgra(2, 1, 32, and, deep)], [10, 20, 30, 255, 0, 0, 0, 60],
+        'blue, green, red, and the masked pixel as black as its colour changes the screen');
     // 5-5-5: red 31, green 0, blue 0 is 0x7c00; the row is four bytes already.
     const high = Uint8Array.of(0x00, 0x7c, 0, 0);
     assert.deepEqual([...ddbToBgra(2, 1, 16, and, high)].slice(0, 4), [0, 0, 248, 255]);
@@ -93,6 +93,20 @@ test('a 32-bit image with alpha is drawn by its alpha, and a 4-bit one by its ta
     ]);
     assert.deepEqual(pixels(dibToBgra(nibbles)?.bgra ?? new Uint8Array()),
         [[3, 6, 9, 255], CLEAR]);
+});
+
+test('a masked pixel is as opaque as its colour changes the screen it is XORed with', ()=>{
+    // An 8-bit cursor whose transparent pixels hold a dark grey: Windows draws
+    // the screen XOR (4, 4, 4) there, which is the screen -- opaque black was a
+    // box around the arrow.
+    const table = [...new Array(256)].flatMap((_, index)=>[index, index, index, 0]);
+    const bytes = Uint8Array.from([
+        ...header(2, 1, 8), ...table,
+        4, 255, 0, 0,                     // XOR: dark grey, white
+        0b11000000, 0, 0, 0,              // AND: both are the screen
+    ]);
+    assert.deepEqual(pixels(dibToBgra(bytes)?.bgra ?? new Uint8Array()),
+        [[0, 0, 0, 4], INVERTED], 'the grey all but clear, the white an inversion');
 });
 
 test('an image it cannot read is no picture, not a wrong one', ()=>{

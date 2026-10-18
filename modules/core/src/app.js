@@ -5925,6 +5925,10 @@ async function buildApp(options){
     mainModule = {
         name: 'app.exe',
         base: image.base,
+        // What GetModuleHandleEx finds an address of the program's own in
+        // (`modules.containing`): without it every such address was nobody's,
+        // and a loader stub that asks after its own module gave up there.
+        size: ownImage.sizeOfImage,
         /** @param {string} exported */
         addressOf: exported=>ownExports()?.byName.get(exported) ?? null,
         /** @param {number} ordinal */

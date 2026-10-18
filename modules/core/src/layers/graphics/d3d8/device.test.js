@@ -2005,7 +2005,7 @@ test('a user-pointer draw unbinds stream zero and the indices', ()=>{
     assertFullyReleased(device);
 });
 
-test('a buffer lock hands out its storage and refuses what does not fit', ()=>{
+test('a buffer lock hands out its storage, nests, and refuses what does not fit', ()=>{
     const device = createDevice();
     /** @type {{ buffer?: any }} */
     const out = {};
@@ -2017,9 +2017,11 @@ test('a buffer lock hands out its storage and refuses what does not fit', ()=>{
     assert.equal(out.buffer.Lock(90, 20, locked, 0), D3DERR_INVALIDCALL, 'past the end');
     assert.equal(out.buffer.Lock(16, 0, locked, 0), D3D_OK, 'zero means to the end');
     assert.equal(locked.pBits, out.buffer.base + 16);
-    assert.equal(out.buffer.Lock(0, 4, locked, 0), D3DERR_INVALIDCALL, 'already locked');
+    assert.equal(out.buffer.Lock(0, 4, locked, 0), D3D_OK, 'a lock inside a lock is counted');
+    assert.equal(locked.pBits, out.buffer.base);
     assert.equal(out.buffer.Unlock(), D3D_OK);
-    assert.equal(out.buffer.Unlock(), D3DERR_INVALIDCALL);
+    assert.equal(out.buffer.Unlock(), D3D_OK, 'each lock has its unlock');
+    assert.equal(out.buffer.Unlock(), D3DERR_INVALIDCALL, 'and one more owes nothing');
 
     out.buffer.release();
     assertFullyReleased(device);

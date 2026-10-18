@@ -47,6 +47,7 @@ import {
 } from './structs-legacy.js';
 import { D3DPRIMCAPS, D3DVERTEXBUFFERDESC } from './structs.js';
 import { guidBytes } from './d3d7.js';
+import { SHADOW } from './shadow.js';
 import { createDirectDraw } from '../ddraw/objects.js';
 import { DDSURFACEDESC, DDSURFACEDESC2, readSurfaceDesc, writeSurfaceDesc }
     from '../ddraw/structs.js';
@@ -86,7 +87,7 @@ const slot = (slots, name)=>{
 
 /** A flat address space with the bridge's vtable publisher over it. */
 function machine(){
-    const bytes = new Uint8Array(1 << 20);
+    const bytes = new Uint8Array(4 << 20);
     const view = new DataView(bytes.buffer);
     let next = 0x100;
     const memory = {
@@ -151,6 +152,8 @@ function machine(){
             assert.ok(entry, `slot ${index} has an implementation`);
             return entry.fn.handler([pointer, ...args]);
         },
+        /** Whether a table's entry is a trap rather than guest code. @param {number} entry */
+        isTrap: (/** @type {number} */ entry)=>registered.has(entry),
         /** @param {number} pointer @param {number} index @param {number[]} args */
         call(pointer, index, args = []){
             return this.callRaw(pointer, index, args) >>> 0;
@@ -184,9 +187,17 @@ function machine(){
  * way DirectX 6 programs make one: DirectDrawCreate, then a query.
  *
  * @param {(box: any, args: number[]) => any} [observe]  What a callback saw.
+ * @param {{ guest?: boolean }} [assembly]  `guest`: guest memory for a device's block and routines
  */
-function seamed(observe = ()=>null){
+function seamed(observe = ()=>null, assembly = {}){
     const box = machine();
+    /** Guest memory for the blocks, the rings and the routines, apart from the rest. */
+    let guestNext = 0x200000;
+    const allocateGuest = (/** @type {number} */ size)=>{
+        const at = guestNext;
+        guestNext += size + 0xfff & ~0xfff;
+        return at;
+    };
     /** @type {any[]} */
     const roots = [];
     /** @type {{ entry: number, args: number[], seen: any }[]} */
@@ -206,11 +217,12 @@ function seamed(observe = ()=>null){
             },
             available: ()=>false,
         },
-        memory: box.services,
+        memory: assembly.guest ? { ...box.services, readU32: box.memory.readU32 } : box.services,
         publishInterface: box.publishInterface,
         screen: ()=>SCREEN,
         publisher,
         present: ()=>{},
+        allocate: assembly.guest ? allocateGuest : undefined,
         /** @param {{ entry: number, args: number[] }} call */
         callGuest: async({ entry, args })=>{
             callbacks.push({ entry, args: [...args], seen: observe(box, args) });
@@ -401,6 +413,40 @@ function seamed(observe = ()=>null){
 }
 
 // --- the object ---
+
+test('with guest memory, a third-generation device\'s setters run in the guest, into the block of'
+    + ' the Direct3D 7 device under it, and what the legacy device keeps stays the host\'s', ()=>{
+    // The routines run on the processor in d3dlegacy-ring.itest.js; here the
+    // device is made with its block, its table and its host paths.
+    const h = seamed(undefined, { guest: true });
+    const ddraw = h.create4();
+    const { device, target } = h.createDevice(ddraw);
+    const table = h.box.memory.readU32(device);
+    /** @param {string} name */
+    const guest = name=>!h.box.isTrap(h.box.memory.readU32(table
+        + slot(IDIRECT3DDEVICE3_SLOTS, name) * 4));
+    for (const name of ['SetRenderState', 'SetTransform', 'SetTextureStageState', 'SetTexture'])
+    {
+        assert.ok(guest(name), `${name} is guest code`);
+    }
+    for (const name of ['MultiplyTransform', 'DrawIndexedPrimitiveVB', 'GetRenderState',
+        'SetLightState', 'DrawPrimitive'])
+    {
+        assert.ok(!guest(name), `${name} is a trap`);
+    }
+    const block = h.box.memory.readU32(device + 4);
+    assert.notEqual(block, 0, 'the block is one word past the interface');
+    /** @param {number} state */
+    const valid = state=>(h.box.bytes[block + SHADOW.RENDER_STATE_VALID + (state >>> 3)]
+        >>> (state & 7) & 1) === 1;
+    assert.ok(valid(7), 'ZENABLE is the Direct3D 7 device\'s, which the routine may set');
+    for (const state of [1, 17, 21, 137])
+    {
+        assert.ok(!valid(state), `render state ${state} is the legacy device's, left to the host`);
+    }
+    assert.equal(h.release(device), 0);
+    assert.equal(h.release(target), 0);
+});
 
 test('IDirect3D3 is a query away from IDirectDraw4, and keeps the object alive with its count',
     ()=>{

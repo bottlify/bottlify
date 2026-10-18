@@ -16,6 +16,7 @@ import { createOpengl } from './opengl/exports.js';
 import { createVulkan } from './vulkan/runtime.js';
 import { createPresenter, expandRow } from './webgpu/internal/presenter.js';
 import { createGdiDrawing } from './gdi/context.js';
+import { blitPaths } from './gdi/blit.js';
 import { createFontEngine } from './gdi/fonts.js';
 import {
     dibPitch, intersectRect, isEmptyRect, surfaceForDdb, surfaceForDibSection,
@@ -1398,6 +1399,8 @@ export function createGraphicsModule(){
                     // Kept flat, where a report drops the structure above.
                     workerAnswers: instance.remote ? instance.remote.diagnostics().answers : null,
                     seam: instance.seam.diagnostics(),
+                    // GDI's copies by path, and why one went a pixel at a time.
+                    blits: { ...blitPaths, why: { ...blitPaths.why } },
                     // State the program set in the guest, and the calls that never
                     // crossed: the saving is a number here, not a belief.
                     shadow: instance.seam.shadow(),

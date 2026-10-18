@@ -55,6 +55,7 @@ import { reportDynamicReads } from './drawn.js';
 import { storageCalls } from './storages.js';
 import { applyBlock, captureBlock, emptyBlock, fillBlock } from './stateblock.js';
 import { processStreams } from './process.js';
+import { createBufferLocks } from './buffer-locks.js';
 import { POSITION_MASK, decodeFvf } from '../webgpu/internal/vertexformat.js';
 import {
     SURFACE_TYPE, copyRectsResult, createResult, imageSurfaceCreateResult,
@@ -1236,7 +1237,11 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         // Its storages go back with its last reference, as a Direct3D 9
         // buffer's do.
         const bufferCount = explicitCount(spec.pool, ()=>storages.forEach(free), spec.length);
-        let locked = false;
+        const locks = createBufferLocks({
+            length: spec.length,
+            lock: (offset, length, flags)=>renderer?.lockBuffer(buffer, offset, length, flags),
+            unlock: ()=>renderer?.unlockBuffer(buffer),
+        });
         const buffer = {
             ...spec,
             base: storages[0],
@@ -1284,31 +1289,22 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
              * @param {number} [flags]
              */
             Lock(offset, size, out, flags = 0){
-                const length = size === 0 ? spec.length - offset : size;
-                if (locked || offset < 0 || !(length > 0) || offset + length > spec.length)
+                if (locks.take(offset, size, flags) === null)
                 {
                     return D3DERR_INVALIDCALL;
                 }
-                locked = true;
+                // The storage it is on now: a move in the guest changes it.
                 out.pBits = buffer.base + offset;
-                if (renderer)
-                {
-                    renderer.lockBuffer(buffer, offset, length, flags);
-                }
                 return D3D_OK;
             },
 
             Unlock(){
-                if (!locked)
-                {
-                    return D3DERR_INVALIDCALL;
-                }
-                locked = false;
-                if (renderer)
-                {
-                    renderer.unlockBuffer(buffer);
-                }
-                return D3D_OK;
+                return locks.release() ? D3D_OK : D3DERR_INVALIDCALL;
+            },
+
+            /** How many locks are held: they nest (`createBufferLocks`). */
+            get lockCount(){
+                return locks.count;
             },
         };
         Object.assign(buffer, storageCalls(buffer, storages,

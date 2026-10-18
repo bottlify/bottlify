@@ -177,6 +177,9 @@ export function createKernelModule(){
                 // to sit through must never carry the guest past real time.
                 /** @param {number} deadline */
                 skipTo: deadline=>state.clock.skipTo(deadline),
+                // A slice that calls the host in a loop moves the clock as it
+                // goes, as between slices (`refreshClockWith`).
+                refreshClock: ()=>state.refreshClock?.(),
                 // The answer a parked call woke with, which the trace has no other
                 // record of: a program that quits a loop on a wait's answer cannot
                 // be read back without it.

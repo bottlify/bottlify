@@ -1976,14 +1976,18 @@ test('a device is handed out with its block already in place, and reads what the
     assert.equal(h.box.memory.readU32(vblock + BUFFER.DEVICE), block);
     assert.equal(h.box.memory.readU32(vblock + BUFFER.LENGTH), 256);
 
-    // A lock taken in the guest is a lock the host's path refuses; once the
-    // guest lets go, the host's path locks, and the block says so.
+    // A lock taken in the guest and one the host's path takes inside it nest,
+    // as Direct3D's locks do: the block stays locked until the outer one goes;
+    // once the guest lets go, the host's path locks, and the block says so.
     h.box.memory.writeU32(vblock + BUFFER.LOCKED, 1);
     h.box.memory.writeU32(vblock + BUFFER.FROM, 0);
     h.box.memory.writeU32(vblock + BUFFER.TO, 64);
     h.box.memory.writeU32(block + SHADOW.LOCK_CALLS, 1);
     const bits = 0xe300;
-    assert.equal(h.buffer(vb, 'Lock', [0, 0, bits, 0]), D3DERR_INVALIDCALL);
+    assert.equal(h.buffer(vb, 'Lock', [0, 0, bits, 0]), D3D_OK);
+    assert.equal(h.buffer(vb, 'Unlock'), D3D_OK);
+    assert.equal(h.box.memory.readU32(vblock + BUFFER.LOCKED), 1,
+        'the lock the guest took is still held');
     h.box.memory.writeU32(vblock + BUFFER.LOCKED, 0);
     h.box.memory.writeU32(block + SHADOW.RING, vblock);
     h.box.memory.writeU32(block + SHADOW.RING_HEAD, 1);

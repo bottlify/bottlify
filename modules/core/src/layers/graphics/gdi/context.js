@@ -168,6 +168,8 @@ export function createGdiDrawing(options = {}){
             } : { left, top, right, bottom };
         };
         const bounded = Object.create(surface);
+        // No words: a blit's row path writes them directly and would widen nothing.
+        bounded.words = null;
         /** @param {number} x @param {number} y @param {number} pixel */
         bounded.write = (x, y, pixel)=>{
             widen(x, y, x + 1, y + 1);

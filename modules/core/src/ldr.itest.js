@@ -126,6 +126,29 @@ function buildHandlesExe(){
     });
 }
 
+test('GetModuleHandleEx finds the program itself from an address in it', async t=>{
+    // FROM_ADDRESS | UNCHANGED_REFCOUNT on an address of the program's own: a
+    // loader stub's way of finding its module, which Windows answers with the
+    // image base. The handle is the exit code.
+    const executable = buildExe({
+        imports: { 'KERNEL32.dll': ['GetModuleHandleExA', 'ExitProcess'] },
+        data: { handle: [0, 0, 0, 0], mine: [0] },
+        codeSize: 0x40,
+        code: ({ iat, at })=>[
+            0x68, ...u32(at('handle')), //                 push &handle
+            0x68, ...u32(at('mine')), //                   push an address in the image
+            0x6a, 0x06, //                                 push FROM_ADDRESS | UNCHANGED_REFCOUNT
+            0xff, 0x15, ...u32(iat('GetModuleHandleExA')),
+            0xff, 0x35, ...u32(at('handle')), //           push [handle]
+            0xff, 0x15, ...u32(iat('ExitProcess')),
+        ],
+    });
+    const app = await createApp({ executable, imagePath: 'C:\\App\\Own.exe' });
+    t.after(()=>app.dispose());
+
+    assert.equal(await app.run({ timeoutMs: 8000 }), 0x400000);
+});
+
 test('a module is there for GetModuleHandle once it is loaded, and not before', async t=>{
     // Wine's own tests find comctl32 absent from a program that imports only
     // user32 and friends; a system library the program imports brings in

@@ -376,6 +376,22 @@ test('diagnostics answers for the live instance', async()=>{
     await bridgeModule.dispose();
 });
 
+test('the diagnostics table carries the last 256 calls in detail, not the whole ring', async()=>{
+    // A launcher's overlay reads the table every second; the whole ring, every
+    // argument peeked for a string, cost the engine a frame each time.
+    const machine = await bridge();
+    machine.api.register('TEST.dll!Often', { argBytes: 0, handler: ()=>0 });
+    for (let call = 0; call < 300; call++)
+    {
+        machine.trap(machine.lastTrap(), machine.main, MAIN.top - 0x100);
+    }
+    await settle();
+    const detailed = /** @type {any} */ (bridgeModule.diagnostics()).metrics.recentDetailed;
+    assert.equal(detailed.length, 256);
+    assert.equal(detailed.at(-1).name, 'TEST.dll!Often');
+    await bridgeModule.dispose();
+});
+
 test('a handler that answers with a continuation sends the thread there, not back', async()=>{
     // An exception handler that found its block: the call it is answering, and
     // the throw that led to it, never return.

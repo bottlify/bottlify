@@ -158,6 +158,15 @@ const RECENT_TURNS = 256;
 const EXECUTORS_WAIT_MS = 4;
 
 /**
+ * Crossings into the host inside one slice between two moves of the guest's
+ * clock (`refreshClock`). The clock is otherwise moved between slices, and a
+ * slice of a program that calls the host in a loop lasts many milliseconds:
+ * one waiting for its next frame by reading the clock between calls saw it
+ * stand still for the whole slice, and drew its frames only at slice ends.
+ */
+const CROSSINGS_PER_CLOCK = 64;
+
+/**
  * The longest a turn waits, in host ms, for an executor whose thread an answer
  * parked to give its slice back: it ends at its next instruction, a park loop's.
  */
@@ -254,6 +263,8 @@ const readyNow = thread=>{
  * @param {(thread: any, reason: string | null, value: number) => void} [options.onResume]
  *        Told what a parked thread is resumed with, and from which wait.
  * @param {() => number} [options.wall]  The host's clock, for how long a slice held the machine.
+ * @param {() => void} [options.refreshClock]  Brings the guest's clock up to the host's: called
+ *        every `CROSSINGS_PER_CLOCK` crossings of a slice, as between slices.
  * @param {() => boolean} [options.hostAnswering]  Whether a host call is still to answer
  *        through the event loop: then a turn with nothing to run here leaves at once rather
  *        than wait for the other executors, its caller waiting for both.
@@ -2051,12 +2062,26 @@ export function createScheduler(options){
 
     // Another executor's crossing is answered here with its thread made
     // current (`answerExecutors`): its call is timed as one of this one's.
-    cpu.trapTimed?.((/** @type {number} */ ms)=>{
+    /** @param {number} ms */
+    const timeCall = ms=>{
         if (current !== null)
         {
             addHostTime(current, ms);
         }
-    });
+    };
+    // Calls are timed only while the process has other executors: the time is
+    // what a processor trade weighs (`proposed`), and with one executor there
+    // is nothing to trade -- the three clock reads a call cost were a sixth of
+    // a single executor's time in a program that calls the host in a loop.
+    let callsTimed = false;
+    /** @param {boolean} on */
+    const timeCalls = on=>{
+        if (on !== callsTimed)
+        {
+            callsTimed = on;
+            cpu.trapTimed?.(on ? timeCall : null);
+        }
+    };
 
     /**
      * The other executors' traps, answered at a crossing of this executor's
@@ -2067,10 +2092,16 @@ export function createScheduler(options){
      * device's, which the host waits 200 ms for and then breaks, every time a
      * renderer here met another thread's call there.
      */
+    let crossingsUnclocked = 0;
     cpu.beforeTrap?.((/** @type {boolean | undefined} */ crossing)=>{
         if (current !== null && crossing !== false && !answering)
         {
             current.crossings++;
+            if (++crossingsUnclocked >= CROSSINGS_PER_CLOCK)
+            {
+                crossingsUnclocked = 0;
+                options.refreshClock?.();
+            }
         }
         if (placed.size === 0)
         {
@@ -2325,6 +2356,7 @@ export function createScheduler(options){
          */
         runOnce(){
             const remotes = cpu.executors?.() ?? [];
+            timeCalls(remotes.length > 0);
             if (remotes.length > 0)
             {
                 return runShared(remotes);

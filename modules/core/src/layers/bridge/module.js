@@ -22,6 +22,15 @@ import { createVtables } from './internal/vtable.js';
  */
 
 /** Marks an answer that is not a value but a place to continue. */
+/**
+ * The last calls the diagnostics table carries with their arguments read as
+ * strings. A launcher's overlay reads the table every second, and the whole
+ * ring of 4096, every argument of each peeked for a string, was 11 ms of the
+ * engine's thread each time -- a frame dropped a second -- for the 200 a
+ * report keeps.
+ */
+const DETAILED_IN_TABLE = 256;
+
 const CONTINUATION = Symbol('continuation');
 
 /**
@@ -1053,7 +1062,7 @@ export function createBridgeModule(){
                 status: 'ready',
                 metrics: {
                     ...instance.dispatcher.diagnostics(),
-                    recentDetailed: instance.dispatcher.detailed(),
+                    recentDetailed: instance.dispatcher.detailed(DETAILED_IN_TABLE),
                     // The order calls arrived in, not just how many of each.
                     // A program stuck between two functions, or one that took
                     // a branch nobody expected, is legible here and nowhere
