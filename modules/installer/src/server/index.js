@@ -19,7 +19,8 @@
  * this side can.
  *
  * A bottle already here can have what describes it changed -- its title, the
- * labels and kind the library shows, the Windows, graphics and shader profile it starts with --
+ * labels and kind the library shows, the Windows, graphics and shader profile it starts with,
+ * whether its threads run on several cores at once --
  * without its bytes being sent again: those fields of its manifest, and no
  * others.
  *
@@ -120,6 +121,12 @@ export function manifestChanges(asked){
             && /^[a-z0-9]{1,32}$/.test(text))
         {
             fields[key] = text;
+        }
+        // Said in so many words or not at all: a bottle that does not say runs
+        // on one core.
+        else if (key === 'multithreading' && typeof value === 'boolean')
+        {
+            fields.multithreading = value;
         }
         else
         {

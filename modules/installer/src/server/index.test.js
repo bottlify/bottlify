@@ -274,6 +274,11 @@ test('only the settings of a bottle are taken, each checked', ()=>{
     assert.ok('refused' in manifestChanges({ rightsHolder: 'x'.repeat(201) }));
     assert.ok('refused' in manifestChanges({ kind: 'movie' }));
     assert.ok('refused' in manifestChanges({ windows: '../etc' }));
+    assert.deepEqual(manifestChanges({ multithreading: true }),
+        { fields: { multithreading: true } });
+    assert.deepEqual(manifestChanges({ multithreading: false }),
+        { fields: { multithreading: false } });
+    assert.ok('refused' in manifestChanges({ multithreading: 'yes' }), 'a boolean, nothing else');
     assert.ok('refused' in manifestChanges(['title']));
 });
 
