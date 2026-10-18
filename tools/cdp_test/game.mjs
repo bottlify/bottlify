@@ -21,7 +21,7 @@
  *                                  [--keep-images N,M] [--watch-import LIB.dll[#ord+ord]]
  *                                  [--click x,y[,after]] [--key Code[,after]] [--coi]
  *                                  [--mode NAME] [--executors N] [--cork-config JSON]
- *                                  [--placement auto|spread|concentrate]
+ *                                  [--win32-config JSON] [--placement auto|spread|concentrate]
  *                                  [--graphics-worker] [--fake-gpu] [--journal-calls]
  *                                  [--command-line STRING] [--args STRING] [--windows NAME]
  *                                  [--gpu sm1|sm2|sm3|sm4|host]
@@ -380,6 +380,10 @@ function parse(argv){
         corkConfig: argv.includes('--cork-config')
             ? { ...mode.cork, ...JSON.parse(argv[argv.indexOf('--cork-config') + 1]) }
             : mode.cork,
+        // createApp's `win32` as JSON ('{"handleWords":false}'): a run beside
+        // an ordinary one that differs by a Win32 path and nothing else.
+        win32Config: argv.includes('--win32-config')
+            ? JSON.parse(argv[argv.indexOf('--win32-config') + 1]) : undefined,
         // The display the program is told it has, as `WxH`. The launcher
         // names the person's own screen, which is rarely a size a program of
         // this era lists, so what a title does on one is a different path.
@@ -1751,6 +1755,7 @@ export async function game(options){
             // A harness run is a diagnostic one: the translator's timings and its
             // record of long holds are on unless the run turns them off.
             cork: { config: { timings: true, ...options.corkConfig } },
+            win32: options.win32Config,
             screen: options.screen,
             quantum: options.quantum,
             executors: options.executors,

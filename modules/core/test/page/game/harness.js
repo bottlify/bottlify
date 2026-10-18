@@ -1605,7 +1605,8 @@ export function createHarness(canvas, how = {}){
         const logMatch = request.logMatch ? new RegExp(request.logMatch) : null;
         const app = await createApp({
             pacing: how.pacing,
-            win32: network ? { network } : undefined,
+            win32: network || request.win32 ? { ...request.win32, ...network ? { network } : {} }
+                : undefined,
             executable: request.exe ? fromBase64(request.exe)
                 : new Uint8Array(await (await fetch(request.exeUrl)).arrayBuffer()),
             // What the program believes it was started with, so a run can set
