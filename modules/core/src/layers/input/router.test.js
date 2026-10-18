@@ -50,6 +50,8 @@ function harness({ bounds = null, window = ()=>HWND, exclusive } = {}){
     const presses = [];
     /** What went out for raw input, as the device reported it. @type {any[]} */
     const reports = [];
+    /** @type {number[][]} */
+    const at = [];
     const router = createInputRouter({
         post: message=>messages.push(message),
         /** @param {number} character @param {number} lParam */
@@ -64,10 +66,13 @@ function harness({ bounds = null, window = ()=>HWND, exclusive } = {}){
         trace: press=>presses.push(press),
         exclusive,
         rawInput: report=>reports.push(report),
+        moved: (x, y)=>at.push([x, y]),
     });
 
     return {
         router,
+        /** Where the cursor was said to be, as viewport fractions. @type {number[][]} */
+        at,
         messages,
         raw,
         keyboard,
@@ -431,6 +436,28 @@ test('a cursor the program places is where it said, and motion goes on from ther
     // A placement outside the space the cursor is confined to lands on its edge.
     h.router.place(-50, 900);
     assert.deepEqual(h.router.cursor(), { x: 0, y: 479 });
+});
+
+test('the page is told where the cursor is on the viewport, wherever it was moved from', ()=>{
+    const h = harness({ bounds: ()=>({ width: 640, height: 480 }) });
+    h.send({ kind: 'pointerMove', x: 320, y: 120 });
+    assert.deepEqual(h.at.pop(), [0.5, 0.25]);
+
+    // A locked pointer: motion alone, and the cursor stops at the edge
+    // however far the mouse goes.
+    h.send({ kind: 'pointerMove', dx: 5000, dy: 0 });
+    assert.deepEqual(h.at.pop(), [639 / 640, 0.25]);
+    h.send({ kind: 'pointerMove', dx: 10, dy: 0 });
+    assert.equal(h.at.length, 0, 'a cursor that did not move is not news');
+
+    // The program's own placement, which the page cannot know of otherwise.
+    h.router.place(160, 240);
+    assert.deepEqual(h.at.pop(), [0.25, 0.5]);
+
+    // A declared space: the cursor reckoned in it, told in the viewport.
+    h.router.clip({ left: 100, top: 100, right: 420, bottom: 340 });
+    h.router.place(260, 220);
+    assert.deepEqual(h.at.pop(), [0.5, 0.5]);
 });
 
 test('a placement outlives the pointer only while the program holds the cursor', ()=>{

@@ -173,13 +173,19 @@ const BUTTONS = Object.freeze({
  *     Where each event goes as the device reported it, for the WM_INPUT of a
  *     program that registered for raw input: user32 decides who is told.
  *     Absent in a build with no windows.
+ * @property {(x: number, y: number) => void} [moved]
+ *     Where the cursor is told, as a fraction of the viewport each way, each
+ *     time it moves -- by the pointer or by the program placing it. A locked
+ *     pointer leaves the page no cursor of its own, so the page draws the
+ *     program's here; the program's placements are the reason it cannot keep
+ *     the position itself.
  */
 
 /**
  * @param {RouterDeps} deps
  */
 export function createInputRouter(
-    { post, device, now, target, bounds, compose, trace, paste, exclusive, rawInput },
+    { post, device, now, target, bounds, compose, trace, paste, exclusive, rawInput, moved },
 )
 {
     /** The configured screen, or nothing: what the cursor falls back to. */
@@ -425,21 +431,43 @@ export function createInputRouter(
     /** @param {number} value @param {number} low @param {number} high */
     const confineRange = (value, low, high)=>Math.max(low, Math.min(high - 1, value));
 
+    /**
+     * How a pointer's travel across the real viewport (the canvas) maps onto
+     * the space the program reckons the cursor in (what it declared with
+     * ClipCursor). Declared smaller than the viewport, the same sweep must
+     * cover the same fraction of each; undeclared, the two spaces are one. A
+     * clip a few pixels across declares no space: it pins the cursor so the
+     * program can keep its own from DirectInput's motion, which on hardware no
+     * clip ever scales.
+     *
+     * @param {{ left: number, top: number, right: number, bottom: number } | null} clip
+     * @param {{ width: number, height: number } | null} box
+     */
+    const scaleOf = (clip, box)=>[
+        clip && box && box.width > 0 && clip.right - clip.left >= PIN_EXTENT
+            ? (clip.right - clip.left) / box.width : 1,
+        clip && box && box.height > 0 && clip.bottom - clip.top >= PIN_EXTENT
+            ? (clip.bottom - clip.top) / box.height : 1,
+    ];
+
+    /** Says where the cursor is on the viewport, undoing what `move` maps. */
+    const tellMoved = ()=>{
+        const box = confinedTo?.() ?? null;
+        if (!moved || !box || box.width <= 0 || box.height <= 0)
+        {
+            return;
+        }
+        const clip = clipRect;
+        const [scaleX, scaleY] = scaleOf(clip, box);
+        moved((cursor.x - (clip ? clip.left : 0)) / scaleX / box.width,
+            (cursor.y - (clip ? clip.top : 0)) / scaleY / box.height);
+    };
+
     /** @param {HostInputEvent} event */
     const move = event=>{
         const box = confinedTo?.() ?? null;
         const clip = clipRect;
-        // How a pointer's travel across the real viewport (the canvas) maps onto
-        // the space the program reckons the cursor in (what it declared with
-        // ClipCursor). Declared smaller than the viewport, the same sweep must
-        // cover the same fraction of each; undeclared, the two spaces are one.
-        // A clip a few pixels across declares no space: it pins the cursor so
-        // the program can keep its own from DirectInput's motion, which on
-        // hardware no clip ever scales.
-        const scaleX = clip && box && box.width > 0 && clip.right - clip.left >= PIN_EXTENT
-            ? (clip.right - clip.left) / box.width : 1;
-        const scaleY = clip && box && box.height > 0 && clip.bottom - clip.top >= PIN_EXTENT
-            ? (clip.bottom - clip.top) / box.height : 1;
+        const [scaleX, scaleY] = scaleOf(clip, box);
 
         // Relative motion in real-viewport pixels is what DirectInput reports
         // and absolute is what a message carries, and a host knows one, the
@@ -496,9 +524,13 @@ export function createInputRouter(
         cursor.x = nx;
         cursor.y = ny;
 
-        if ((cursor.x !== px || cursor.y !== py) && windowHears('mouse'))
+        if (cursor.x !== px || cursor.y !== py)
         {
-            emit(WM.MOUSEMOVE, mask(), point());
+            tellMoved();
+            if (windowHears('mouse'))
+            {
+                emit(WM.MOUSEMOVE, mask(), point());
+            }
         }
         if (stepX !== 0 || stepY !== 0)
         {
@@ -690,6 +722,7 @@ export function createInputRouter(
             residualY = 0;
             if (cursor.x !== px || cursor.y !== py)
             {
+                tellMoved();
                 emit(WM.MOUSEMOVE, mask(), point());
             }
         },

@@ -136,6 +136,7 @@ or in a build that times nothing.
 | `message-box` | `{ id, text, caption, type, buttons, defaultButton, icon }` | The program shows a message box; answer it with `answerMessageBox`. |
 | `output` | `{ handle, text }` | The program wrote to a standard handle. |
 | `cursor` | `{ width, height, hotSpot, bgra, shown }` | The program's cursor changed. |
+| `cursor-moved` | `{ x, y }` | The cursor moved, by the pointer or by the program placing it: where it is, as a fraction of the viewport each way. A locked pointer has no cursor of the browser's; a page draws the program's here. |
 | `clipboard` | `{ text }` | The program put text on the clipboard. |
 | `open-url` | `{ url }` | The program asked the shell to open an address (a link, a `.url` shortcut); the page decides whether to open it. |
 | `divergence` | `{ api, detail }` | A call answered differently from Windows. |

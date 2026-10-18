@@ -143,6 +143,9 @@ export function createInputModule(){
                 // assembled the process has a journal, and because a build that
                 // wants no record should pay for none.
                 trace: config?.trace,
+                // Where the cursor is on the viewport, for a page drawing it
+                // over a locked pointer.
+                moved: config?.cursorMoved,
                 // A device a program holds exclusively is read through
                 // DirectInput alone, and the window hears nothing of it.
                 exclusive: kind=>dinput.exclusive(kind),
