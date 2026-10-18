@@ -436,8 +436,25 @@ export function createProcessBlocks(options){
     // task and lets each one end has only ever had a few alive, however many
     // it has made.
     const threadMemory = options.threadMemory ?? { allocate, free: ()=>{} };
-    /** Every block a thread was given, by its environment block. @type {Map<number, number[]>} */
+    /**
+     * Every block a thread was given, by its environment block: the block and
+     * its thread-local array, and its copy of each image's thread-local block
+     * by the slot it is in.
+     *
+     * @type {Map<number, { tls: number, blocks: number[], locals: Map<number, number> }>}
+     */
     const threadHeld = new Map();
+    /**
+     * A thread's copy of an image's block, written in full at `at` -- the
+     * memory may be what an ended thread left -- and named in its array.
+     *
+     * @param {number} tls @param {ThreadLocal} local @param {number} at
+     */
+    const copyLocal = (tls, { slot, template, size }, at)=>{
+        writeMemory(at, new Uint8Array(size));
+        writeMemory(at, template);
+        write(tls + (slot >>> 0) * 4, at);
+    };
 
     return {
         peb,
@@ -497,20 +514,21 @@ export function createProcessBlocks(options){
             }
             writeMemory(teb, new Uint8Array(TEB.SIZE));
             writeMemory(tls, new Uint8Array(TLS_SLOTS * 4));
-            for (const { slot, template, size } of locals)
+            /** @type {Map<number, number>} */
+            const copies = new Map();
+            for (const local of locals)
             {
-                if (slot >>> 0 >= TLS_SLOTS)
+                if (local.slot >>> 0 >= TLS_SLOTS)
                 {
                     continue;
                 }
-                const at = take(size);
+                const at = take(local.size);
                 if (at === 0)
                 {
                     return refused();
                 }
-                writeMemory(at, new Uint8Array(size));
-                writeMemory(at, template);
-                write(tls + slot * 4, at);
+                copyLocal(tls, local, at);
+                copies.set(local.slot >>> 0, at);
             }
 
             // No handler registered yet. Zero would be an address, and a
@@ -526,30 +544,90 @@ export function createProcessBlocks(options){
             write(teb + TEB.TLS_POINTER, tls);
             write(teb + TEB.PEB, peb);
 
-            threadHeld.set(teb, taken);
+            threadHeld.set(teb, { tls, blocks: [teb, tls], locals: copies });
             return { teb, tls };
         },
 
         /**
-         * Gives back everything `createThreadBlock` gave a thread: for once
-         * the thread has ended and runs nowhere, since until then it still
-         * reads and writes them.
+         * Gives back everything `createThreadBlock` and `addThreadLocal` gave
+         * a thread: for once the thread has ended and runs nowhere, since
+         * until then it still reads and writes them.
          *
          * @param {number} teb
          * @returns {boolean} false for a block this did not make, or gave back already
          */
         releaseThreadBlock(teb){
-            const taken = threadHeld.get(teb);
-            if (taken === undefined)
+            const held = threadHeld.get(teb);
+            if (held === undefined)
             {
                 return false;
             }
             threadHeld.delete(teb);
-            for (const at of taken)
+            for (const at of [...held.blocks, ...held.locals.values()])
             {
                 threadMemory.free(at);
             }
             return true;
+        },
+
+        /**
+         * A copy of an image loaded after the threads were made in each of
+         * their arrays, at the image's slot: every thread holding a block has
+         * one from now on, as the loader gives each existing thread one when a
+         * library with thread-local storage is loaded at run time. A thread
+         * made later is given its copy by `createThreadBlock`.
+         *
+         * @param {ThreadLocal} local
+         * @returns {boolean} false, and nothing taken or written, when the
+         *     slot is past the array or the thread memory has no room for
+         *     every thread's copy
+         */
+        addThreadLocal(local){
+            const slot = local.slot >>> 0;
+            if (slot >= TLS_SLOTS)
+            {
+                return false;
+            }
+            /** @type {[{ tls: number, locals: Map<number, number> }, number][]} */
+            const given = [];
+            for (const held of threadHeld.values())
+            {
+                const at = threadMemory.allocate(local.size);
+                if (at === 0)
+                {
+                    for (const [each, copy] of given)
+                    {
+                        threadMemory.free(copy);
+                        each.locals.delete(slot);
+                        write(each.tls + slot * 4, 0);
+                    }
+                    return false;
+                }
+                copyLocal(held.tls, local, at);
+                held.locals.set(slot, at);
+                given.push([held, at]);
+            }
+            return true;
+        },
+
+        /**
+         * Takes every thread's copy at a slot back out of its array, as the
+         * loader does when the library that slot was given to is unloaded:
+         * the copy is given back and the slot reads zero.
+         *
+         * @param {number} slot
+         */
+        removeThreadLocal(slot){
+            for (const held of threadHeld.values())
+            {
+                const at = held.locals.get(slot >>> 0);
+                if (at !== undefined)
+                {
+                    held.locals.delete(slot >>> 0);
+                    threadMemory.free(at);
+                    write(held.tls + (slot >>> 0) * 4, 0);
+                }
+            }
         },
     };
 }

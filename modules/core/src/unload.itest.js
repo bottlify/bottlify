@@ -101,9 +101,12 @@ function buildProgram(){
  * puts this one below them, and answers TRUE.
  *
  * @param {number} reasons  Where the program keeps them.
+ * @param {number} [imageBase]  A base of its own, with no relocations; without
+ *     one the probe can be mapped anywhere.
  */
-function buildProbe(reasons){
-    return library(movable(buildExe({
+function buildProbe(reasons, imageBase){
+    const file = buildExe({
+        imageBase,
         imports: { 'KERNEL32.dll': ['GetModuleHandleA'] },
         code: ()=>[
             0x8b, 0x44, 0x24, 0x08, //                     mov eax, [esp+8]    reason
@@ -114,7 +117,8 @@ function buildProbe(reasons){
             0xb8, ...u32(1), //                            mov eax, 1
             0xc2, 0x0c, 0x00, //                           ret 12
         ],
-    })));
+    });
+    return library(imageBase === undefined ? movable(file) : file);
 }
 
 test('the last FreeLibrary tells DllMain and unloads the library', { timeout: 30000 }, async t=>{
@@ -128,6 +132,50 @@ test('the last FreeLibrary tells DllMain and unloads the library', { timeout: 30
 
     assert.equal(await app.run({ timeoutMs: 20000 }), 127);
 });
+
+test('a library with no relocations is loaded again at its base after its last FreeLibrary',
+    { timeout: 30000 }, async t=>{
+        // Its base lies in the heap's span, which gives the library that span
+        // and takes it back when the library goes. It stayed given to nobody,
+        // so the second load was refused for want of room, and the refusal
+        // was remembered. Exit code bits: loaded again (1), at the same base
+        // (2), and its DllMain told attach, detach, attach (4).
+        let reasons = 0;
+        const executable = buildExe({
+            imports: { 'KERNEL32.dll': ['LoadLibraryA', 'FreeLibrary', 'ExitProcess'] },
+            data: {
+                name: [...'probe.dll'].map(c=>c.charCodeAt(0)).concat(0),
+                reasons: [0, 0, 0, 0],
+            },
+            codeSize: 0x60,
+            code: ({ iat, at })=>{
+                reasons = at('reasons');
+                /** @param {string} fn */
+                const call = fn=>[0xff, 0x15, ...u32(iat(fn))];
+                const name = [0x68, ...u32(at('name'))];
+                return [
+                    0x31, 0xdb, //                                  xor ebx, ebx
+                    ...name, ...call('LoadLibraryA'),
+                    0x89, 0xc6, //                                  mov esi, eax
+                    0x50, ...call('FreeLibrary'),
+                    ...name, ...call('LoadLibraryA'),
+                    0x85, 0xc0, 0x74, 0x03, 0x80, 0xcb, 1, //       test eax, eax; jz; or bl, 1
+                    0x39, 0xf0, 0x75, 0x03, 0x80, 0xcb, 2, //       cmp eax, esi; jne; or bl, 2
+                    0x81, 0x3d, ...u32(reasons), ...u32(0x101), //  cmp dword [reasons], 0x101
+                    0x75, 0x03, 0x80, 0xcb, 4,
+                    0x53, ...call('ExitProcess'),
+                ];
+            },
+        });
+        const app = await createApp({
+            executable,
+            imagePath: 'C:\\App\\Reload.exe',
+            files: [{ path: 'C:\\App\\probe.dll', bytes: buildProbe(reasons, 0x13000000) }],
+        });
+        t.after(()=>app.dispose());
+
+        assert.equal(await app.run({ timeoutMs: 20000 }), 7);
+    });
 
 test('an exception out of DllMain is taken by the loader, not by the program that freed it',
     { timeout: 30000 }, async t=>{
