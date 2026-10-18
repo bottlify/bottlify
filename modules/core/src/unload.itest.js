@@ -129,6 +129,73 @@ test('the last FreeLibrary tells DllMain and unloads the library', { timeout: 30
     assert.equal(await app.run({ timeoutMs: 20000 }), 127);
 });
 
+test('a library that cannot move has its base again once it is unloaded, in the heap\'s arena too',
+    { timeout: 30000 }, async t=>{
+        // Two libraries with no relocations, both linked at 0x10000000, which
+        // is in the heap's arena: the second cannot load beside the first, and
+        // loads there once the first is gone; the first loads there again once
+        // the second is. Where the first was is readable across both its edges
+        // once it is gone: the heap's again, one region with the heap either
+        // side rather than a gap, or a region of its own. Exit code bits: the
+        // first loaded (1), the second refused beside it (2), readable across
+        // the lower edge (4) and the upper (8), the second loaded at the base
+        // (16), the first loaded there again (32).
+        const BASE = 0x10000000;
+        const fixed = ()=>buildExe({
+            dll: true,
+            imageBase: BASE,
+            imports: { 'KERNEL32.dll': ['GetModuleHandleA'] },
+            code: ()=>[0xb8, ...u32(1), 0xc2, 0x0c, 0x00], // mov eax, TRUE; ret 12
+        });
+        const first = fixed();
+        const header = new DataView(first.buffer, first.byteOffset, first.byteLength);
+        const end = BASE + header.getUint32(header.getUint32(0x3c, true) + 24 + 56, true);
+        /** @param {string} text */
+        const cString = text=>[...text].map(c=>c.charCodeAt(0)).concat(0);
+        const executable = buildExe({
+            imports: { 'KERNEL32.dll': ['LoadLibraryA', 'FreeLibrary', 'IsBadReadPtr',
+                'ExitProcess'] },
+            data: { first: cString('first.dll'), second: cString('second.dll') },
+            codeSize: 0x100,
+            code: ({ iat, at })=>{
+                /** @param {string} fn */
+                const call = fn=>[0xff, 0x15, ...u32(iat(fn))];
+                /** @param {string} name */
+                const load = name=>[0x68, ...u32(at(name)), ...call('LoadLibraryA')];
+                /** IsBadReadPtr(edge - 16, 32); test eax, eax @param {number} edge */
+                const across = edge=>[0x6a, 0x20, 0x68, ...u32(edge - 0x10),
+                    ...call('IsBadReadPtr'), 0x85, 0xc0];
+                /** @param {number} bit */
+                const unlessNotEqual = bit=>[0x75, 0x03, 0x80, 0xcb, bit];
+                return [
+                    0x31, 0xdb, //                                  xor ebx, ebx
+                    ...load('first'), 0x89, 0xc6, //                mov esi, eax
+                    0x85, 0xc0, 0x74, 0x03, 0x80, 0xcb, 1, //       test eax, eax; jz; or bl, 1
+                    ...load('second'), 0x85, 0xc0, ...unlessNotEqual(2),
+                    0x56, ...call('FreeLibrary'), //                push esi
+                    ...across(BASE), ...unlessNotEqual(4),
+                    ...across(end), ...unlessNotEqual(8),
+                    ...load('second'), 0x89, 0xc6,
+                    0x3d, ...u32(BASE), ...unlessNotEqual(16), //   cmp eax, BASE
+                    0x56, ...call('FreeLibrary'),
+                    ...load('first'), 0x3d, ...u32(BASE), ...unlessNotEqual(32),
+                    0x53, ...call('ExitProcess'), //                push ebx
+                ];
+            },
+        });
+        const app = await createApp({
+            executable,
+            imagePath: 'C:\\App\\Fixed.exe',
+            files: [
+                { path: 'C:\\App\\first.dll', bytes: first },
+                { path: 'C:\\App\\second.dll', bytes: fixed() },
+            ],
+        });
+        t.after(()=>app.dispose());
+
+        assert.equal(await app.run({ timeoutMs: 20000 }), 63);
+    });
+
 test('an exception out of DllMain is taken by the loader, not by the program that freed it',
     { timeout: 30000 }, async t=>{
         // The program stands inside its own frame, whose handler exits with 99;
