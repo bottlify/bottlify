@@ -1252,6 +1252,54 @@ test('a call of another executor\'s thread is counted once, and its ask inside a
     assert.equal(main.crossings, 1, 'a call of its own is one');
 });
 
+test('another executor\'s ask inside an unbroken routine here is put off until the thread here is'
+    + ' past it', ()=>{
+    // A renderer played here was asked at a back edge inside a device routine
+    // that held the device's lock; the answer, a call of the main thread on the
+    // other executor, waited 200 ms for that lock and then broke it.
+    const { cpu } = twoExecutors();
+    /** @type {(crossing?: boolean) => boolean | void} */
+    let told = ()=>true;
+    let eip = 0x6000;
+    /** @type {{ eip: number, put: boolean | void, answers: number }[]} */
+    const asks = [];
+    const machine = {
+        ...cpu,
+        eip: ()=>eip,
+        beforeTrap: (/** @type {(crossing?: boolean) => boolean | void} */ hook)=>{
+            told = hook;
+        },
+        runSlice: ()=>{
+            for (eip of [0x5010, 0x5030, 0x6000])
+            {
+                const before = answered;
+                const put = told(false);
+                asks.push({ eip, put, answers: answered - before });
+            }
+            return 1000;
+        },
+    };
+    let answered = 0;
+    const [remote] = cpu.executors();
+    remote.step = ()=>{
+        answered++;
+        return null;
+    };
+    const sched = createScheduler({ cpu: machine, switcher: createSwitcher({ cpu: machine }),
+        quantum: 5000 });
+    sched.atomicCode(0x5000, 0x40);
+    const main = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
+    const worker = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'worker' });
+    assert.equal(sched.runOnce().ran, main);
+    assert.equal(sched.processorOf(worker), 1, 'the worker runs on the other executor');
+    assert.deepEqual(asks, [
+        { eip: 0x5010, put: false, answers: 0 },
+        { eip: 0x5030, put: false, answers: 0 },
+        { eip: 0x6000, put: true, answers: 1 },
+    ], 'put off inside the routine, answered past it');
+    assert.equal(JSON.parse(JSON.stringify(sched.diagnostics())).asksPutOff, 2);
+});
+
 test('a thread this executor keeps calling back from the other one stays here a while', ()=>{
     // A game's sound thread, placed on the other executor whenever it was ready
     // beside the renderer, was called back 1 312 times of 1 319 as the renderer

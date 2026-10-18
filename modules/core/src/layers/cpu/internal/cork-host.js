@@ -279,9 +279,10 @@ export function createCorkHost(config){
     const interruptWord = own.interrupt === undefined ? -1 : own.interrupt >>> 2;
     const interruptible = executor === 0 && interruptWord >= 0;
     /**
-     * Answers what the other executors stored the word for (`onInterrupt`).
+     * Answers what the other executors stored the word for (`onInterrupt`);
+     * false puts the answer off to the next back edge.
      *
-     * @type {(() => void) | null}
+     * @type {(() => boolean | void) | null}
      */
     let interruptHandler = null;
     let interrupts = 0;
@@ -1181,17 +1182,27 @@ export function createCorkHost(config){
         let formMs = 0;
         // The last region left through an untranslated exit: `eip` is a jump's target.
         let jumpedIn = false;
+        // An ask the handler put off: the guest runs on to its next back edge first.
+        let putOff = false;
         while (remaining > 0 && !isHalted() && !isStopped() && !isFeedDue())
         {
-            if (interrupted())
+            if (!putOff && interrupted())
             {
                 // Cleared before it is answered: a store after the answer
                 // looked is the next one's.
                 Atomics.store(wholeWords, interruptWord, 0);
                 interrupts++;
-                interruptHandler?.();
+                if (interruptHandler?.() === false)
+                {
+                    // Not answered here (the thread is inside a routine whose
+                    // lock the answer may wait for): stored again, so the
+                    // guest leaves at its next back edge and is asked again.
+                    Atomics.store(wholeWords, interruptWord, 0x7fffffff);
+                    putOff = true;
+                }
                 continue;
             }
+            putOff = false;
             if (yieldCheck !== null && ran > 0 && yieldCheck())
             {
                 break;
@@ -1452,9 +1463,10 @@ export function createCorkHost(config){
         interruptible,
         /**
          * What this executor runs, inside a slice, when another stored the word
-         * (`interruptProcess`); the slice goes on after.
+         * (`interruptProcess`); the slice goes on after. A handler that answers
+         * false has it asked again at the guest's next back edge.
          *
-         * @param {(() => void) | null} handler
+         * @param {(() => boolean | void) | null} handler
          */
         onInterrupt(handler){
             interruptHandler = handler;

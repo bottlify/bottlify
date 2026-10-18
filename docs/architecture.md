@@ -478,7 +478,9 @@ writes (section 7).
   between its turns, and inside them: an executor that needs its answer (a call, a fault, a slice's
   end) stores a word the process's translated code reads at every back edge as the floor of its
   budget, so its slice leaves there, the calls are answered and the slice goes on, each caller the
-  current thread while it is answered. An executor keeps its
+  current thread while it is answered. A back edge inside one of the host's unbroken routines
+  puts the answer off to the next one past it: such a routine may hold a Direct3D device's lock,
+  which the answer to another thread's call on that device takes. An executor keeps its
   thread slice after slice while no ready thread waits for one and the process wants none back
   (suspended, ended by another): its event loop turns in between, and the process hears of the
   thread at most every 250 ms. While ready threads wait for an executor, it keeps its thread for a

@@ -285,6 +285,37 @@ test('guest memory is shared where the host can share it, and regions translate 
             'unless it is told not');
     });
 
+test('an ask of another executor the handler puts off is asked again at the guest\'s next back'
+    + ' edge, the guest running on between', async()=>{
+    // The process's executor answering inside a routine that holds a lock the
+    // answer takes waited for itself (the Direct3D device's, 200 ms a time):
+    // put off, the ask comes back once the guest has gone on a step.
+    const h = host({ executors: 2 });
+    assert.equal(h.interruptible, true);
+    // mov ecx, 100; L: inc edx; dec ecx; jnz L; hlt
+    load(h, 0x1000, [0xb9, 100, 0, 0, 0, 0x42, 0x49, 0x75, 0xfc, 0xf4]);
+    h.cork().noteHot(0x1000, 0);
+    assert.ok(await h.cork().translatePending() >= 1);
+    /** @type {number[]} */
+    const asked = [];
+    h.onInterrupt(()=>{
+        asked.push(h.readReg32('edx'));
+        return asked.length > 3;
+    });
+    h.writeReg32('eip', 0x1000);
+    h.writeReg32('edx', 0);
+    h.interruptProcess();
+    for (let slice = 0; slice < 10 && !h.halted(); slice++)
+    {
+        h.runSlice(10_000);
+    }
+    assert.equal(h.halted(), true, 'the loop ran to its end');
+    assert.equal(h.readReg32('edx'), 100);
+    assert.equal(asked.length, 4, `asked until answered, and no more: ${asked}`);
+    assert.ok(asked.every((edx, at)=>at === 0 || edx > asked[at - 1]),
+        `the guest went on between asks: ${asked}`);
+});
+
 test('the interpreter stops only at an entry for the top the machine has', async()=>{
     const h = host();
     // fld1; hlt -- translated at top 0 alone.

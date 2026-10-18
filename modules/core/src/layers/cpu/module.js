@@ -217,7 +217,7 @@ export function createCpuModule(){
              *          opening: Map<number, Promise<void>>, unopened: Set<number>,
              *          bell: ReturnType<typeof createBell> | null,
              *          unbroken: ReturnType<typeof unbrokenTable>,
-             *          beforeTrap: ((crossing: boolean) => void) | null,
+             *          beforeTrap: ((crossing: boolean) => boolean | void) | null,
              *          awaited: (() => boolean) | null,
              *          trapTimed: ((ms: number) => void) | null,
              *          remoteFigures: Map<number, any>, executorsRefused: string | null,
@@ -729,7 +729,8 @@ export function createCpuModule(){
                     });
                     // Another executor's ask, at a back edge of this one's
                     // slice (`interruptProcess`): answered as at a crossing,
-                    // and no crossing of this one's thread.
+                    // and no crossing of this one's thread -- or put off to
+                    // the next back edge where the scheduler says so.
                     state.host.onInterrupt?.(()=>state.beforeTrap?.(false));
                     state.host.onTrap((/** @type {number} */ id)=>{
                         state.beforeTrap?.(true);
@@ -1103,9 +1104,11 @@ export function createCpuModule(){
                  * answered: the scheduler, which answers the other executors'
                  * traps there while this one's thread runs. Told too at
                  * another executor's ask inside a slice (`onInterrupt`),
-                 * `crossing` false: the thread here made no call.
+                 * `crossing` false: the thread here made no call, and an
+                 * answer of false there puts the ask off to the guest's next
+                 * back edge.
                  *
-                 * @param {((crossing: boolean) => void) | null} handler
+                 * @param {((crossing: boolean) => boolean | void) | null} handler
                  */
                 beforeTrap(handler){
                     state.beforeTrap = handler;

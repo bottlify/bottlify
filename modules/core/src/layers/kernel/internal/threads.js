@@ -1106,6 +1106,8 @@ export function createScheduler(options){
     };
     /** The bell's count when they were last answered. */
     let answeredAt = -1;
+    /** Their asks inside a slice here put off to the next back edge (`beforeTrap`). */
+    let putOff = 0;
     /** Since when this executor has had nothing of its own while another ran a thread it could run (`RECALL_MS`). */
     let idleSince = -1;
     /**
@@ -2017,6 +2019,10 @@ export function createScheduler(options){
      * The other executors' traps, answered at a crossing of this executor's
      * thread or at their ask inside its slice (`crossing` false). A trap of
      * theirs answered here comes through too, counted where it is answered.
+     * An ask inside an unbroken routine is put off (false) to the guest's next
+     * back edge: the routine may hold a lock the answer takes -- a Direct3D
+     * device's, which the host waits 200 ms for and then breaks, every time a
+     * renderer here met another thread's call there.
      */
     cpu.beforeTrap?.((/** @type {boolean | undefined} */ crossing)=>{
         if (current !== null && crossing !== false && !answering)
@@ -2025,7 +2031,12 @@ export function createScheduler(options){
         }
         if (placed.size === 0)
         {
-            return;
+            return true;
+        }
+        if (crossing === false && atomic.starts.length !== 0 && insideAtomic(cpu.eip?.() ?? 0))
+        {
+            putOff++;
+            return false;
         }
         const rung = cpu.executorBell().rung();
         if (rung !== answeredAt)
@@ -2033,6 +2044,7 @@ export function createScheduler(options){
             answeredAt = rung;
             answerExecutors();
         }
+        return true;
     });
 
     const api = {
@@ -2691,6 +2703,8 @@ export function createScheduler(options){
                 played: trades === 0 ? '' : `${Array.from({ length: Math.max(played.length, 1) },
                     (_, index)=>playedBy(index)).join(',')} after ${trades}`,
                 trading: JSON.stringify(trading.diagnostics()),
+                // The other executors' asks met inside an unbroken routine here.
+                asksPutOff: putOff,
                 recentWakes: recentWakes.slice(),
                 recentByThread: threads.filter(thread=>thread.state !== ThreadState.TERMINATED)
                     .map(thread=>`${thread.name}: ${(thread.recent ?? []).join(' > ')}`),

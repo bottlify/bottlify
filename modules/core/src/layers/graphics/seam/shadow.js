@@ -3242,6 +3242,8 @@ export function createShadow(deps){
      * is one thread, and its operations call one another.
      */
     let holds = 0;
+    /** Takes of the lock that found a routine holding it, the time they waited, and those that broke it. */
+    const heldWaits = { count: 0, ms: 0, broken: 0 };
     /** Whether the ring is being taken: a mirror written from inside does not take it again. */
     let taking = false;
 
@@ -3313,17 +3315,24 @@ export function createShadow(deps){
             return;
         }
         const at = address + SHADOW.HELD;
+        if (deps.compareExchangeU32(at, 0, HELD_HOST) === 0)
+        {
+            return;
+        }
         const from = performance.now();
         while (deps.compareExchangeU32(at, 0, HELD_HOST) !== 0)
         {
             if (performance.now() - from > HELD_WAIT_MS)
             {
                 deps.writeMemory(at, dwordBytes(HELD_HOST));
+                heldWaits.broken++;
                 refuse(`${name}::lock`, `a routine held the device past ${HELD_WAIT_MS} ms`
                     + ' -- a thread that faulted inside one: taken from it');
                 break;
             }
         }
+        heldWaits.count++;
+        heldWaits.ms += performance.now() - from;
     };
     const letGo = ()=>{
         if (--holds !== 0 || address === 0 || deps.compareExchangeU32 === undefined)
@@ -4549,6 +4558,11 @@ export function createShadow(deps){
             unlockCalls,
             buffers: blocks.size,
             refused,
+            // The host's takes of the device's lock that waited for a routine,
+            // how long in all, and how many it broke at HELD_WAIT_MS.
+            heldWaits: heldWaits.count,
+            heldWaitMs: Math.round(heldWaits.ms),
+            heldBroken: heldWaits.broken,
             // Calls the command ring carried past the bridge, and those it holds yet.
             commandCalls: commandReader?.taken() ?? 0,
             commandsQueued: commandReader?.queued() ?? 0,
