@@ -101,7 +101,14 @@ export function searchesBesideProgram(knownDll, mappedFromFile){
  *           A library LoadLibraryEx mapped as data, by the handle it gave out:
  *           no module, so not among the ones `byBase` knows.
  * @property {(code: number) => any} [exitThread]
- *           Ends the calling thread as ExitThread does.
+ *           Ends the calling thread as ExitThread does, parking it: for a call
+ *           still in flight.
+ * @property {() => any} [currentThread]
+ * @property {(thread: any, code: number) => Promise<number> | null} [endThread]
+ *           Ends a thread that ended itself, without parking it: for a call
+ *           that has already been suspended, whose thread is no longer the one
+ *           on the processor. Null once it has ended, or the promise of
+ *           telling the libraries of its detach on it first and then ending it.
  * @property {(base: number) => void} [disableThreadCalls]
  *           Stops telling a library of the threads that start and end. A
  *           library with static thread-local storage goes on being told: its
@@ -413,9 +420,24 @@ export function createModuleFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([handle, code])=>{
+                // Held before anything can wait: once the library's DllMain
+                // has to hear the detach, this call is suspended and the loop
+                // turns, and whichever thread is on the processor by the time
+                // it is done -- if any, and on this executor at all -- is not
+                // the one to end.
+                const thread = host.currentThread?.();
                 const freed = freeLibrary(handle);
-                const exit = ()=>host.exitThread?.(code >>> 0) ?? 0;
-                return freed instanceof Promise ? freed.then(exit) : exit();
+                if (!(freed instanceof Promise))
+                {
+                    return host.exitThread?.(code >>> 0) ?? 0;
+                }
+                // Its call is no longer in flight to be parked; the answer it
+                // is suspended on only has to arrive, and a thread that has
+                // ended never returns to read it. Not before the libraries
+                // still loaded are told of its end on it, as ExitThread tells
+                // them: answered sooner, the call would resume the thread
+                // under its own detach.
+                return freed.then(()=>host.endThread?.(thread, code >>> 0) ?? 0);
             },
         },
 

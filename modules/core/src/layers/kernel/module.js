@@ -547,8 +547,14 @@ export function createKernelModule(){
                  */
                 nextDeadline: ()=>live() ? state.scheduler.nextDeadline() : null,
 
-                /** @param {any} thread @param {number} exitCode */
-                exitThread(thread, exitCode){
+                /**
+                 * @param {any} thread @param {number} exitCode
+                 * @param {boolean} [itself]  Whether the thread ended itself. By
+                 *        default whether it is the one on the processor, which a
+                 *        thread its own call ends only after that call was
+                 *        suspended no longer is.
+                 */
+                exitThread(thread, exitCode, itself){
                     if (!live())
                     {
                         return;
@@ -556,7 +562,7 @@ export function createKernelModule(){
                     // A thread that ends itself gives its stack back; one ended
                     // by another thread does not, as Microsoft documents for
                     // TerminateThread -- whatever it left there stays readable.
-                    thread.releasesStack = thread === state.scheduler.current();
+                    thread.releasesStack = itself ?? thread === state.scheduler.current();
                     // A thread that dies holding a mutex leaves whatever it protected
                     // half-written; the next owner has to be told (§ abandoned mutex).
                     state.sync.abandonMutexesOwnedBy(thread);

@@ -5398,9 +5398,11 @@ async function buildApp(options){
 
     /**
      * Libraries that could not be given room. Remembered, because asking
-     * again cannot change the answer; a library that was merely not there
-     * is not, since a program puts one in place and asks again -- an
-     * installer does exactly that with a library it brought.
+     * again cannot change the answer until something mapped is unmapped and
+     * its room is free -- forgotten then, as the room may be what one of them
+     * wanted; a library that was merely not there is not remembered, since a
+     * program puts one in place and asks again -- an installer does exactly
+     * that with a library it brought.
      *
      * @type {Set<string>}
      */
@@ -5440,6 +5442,8 @@ async function buildApp(options){
                 byName.delete(moduleKeyOf(held.name));
                 byBase.delete(held.base);
                 memory.unregister(held.name);
+                librarySpace.giveBack(held.base);
+                absentLibraries.clear();
             }
             else
             {
@@ -5843,6 +5847,8 @@ async function buildApp(options){
             if (held.region)
             {
                 memory.unregister(held.region);
+                librarySpace.giveBack(held.base);
+                absentLibraries.clear();
             }
         }
         return 1;
@@ -5943,6 +5949,13 @@ async function buildApp(options){
         })();
     };
 
+    /**
+     * The spans `claim` took from the heap's arena, by base, with the region
+     * each was cut from: what `giveBack` puts back.
+     *
+     * @type {Map<number, { size: number, kind: string, access: string }>}
+     */
+    const claimedSpans = new Map();
     // Where a library may go: above the program's own image, which is not in
     // the map yet, and below the stack pool; and nowhere anything is mapped.
     const librarySpace = {
@@ -5984,7 +5997,45 @@ async function buildApp(options){
                 memory.register({ name: `heap@${end.toString(16)}`, base: end,
                     size: regionEnd - end, kind, access });
             }
+            claimedSpans.set(base, { size, kind, access });
             return base;
+        },
+        /**
+         * Puts back a span `claim` took, once what was mapped on it is gone,
+         * and nothing for one it did not take: the heap has it to hand out
+         * again -- a library that can only live there is loaded there again --
+         * and its region is the heap's once more, joined with the parts on
+         * either side, since a block the heap later hands out across where a
+         * cut was is one buffer and an access spanning two regions is refused.
+         *
+         * @param {number} base
+         */
+        giveBack: base=>{
+            const span = claimedSpans.get(base);
+            if (!span)
+            {
+                return;
+            }
+            claimedSpans.delete(base);
+            core.api('win32').heap().free(base);
+            const end = base + span.size;
+            const heapPart = (/** @type {any} */ region)=>
+                (region?.name.startsWith('heap') ? region : null);
+            const below = heapPart(memory.find(base - 1));
+            const above = heapPart(memory.find(end));
+            for (const part of [below, above])
+            {
+                if (part)
+                {
+                    memory.unregister(part.name);
+                }
+            }
+            const from = below?.base ?? base;
+            memory.register({
+                name: below?.name ?? `heap@${base.toString(16)}`, base: from,
+                size: (above ? above.base + above.size : end) - from,
+                kind: span.kind, access: span.access,
+            });
         },
     };
 

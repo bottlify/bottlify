@@ -604,8 +604,9 @@ export function createWin32Module(){
                 },
             });
             /**
-             * A thread ending itself, by ExitThread or by returning: each
-             * library is told DLL_THREAD_DETACH on it first. The last one's end
+             * A thread ending itself, by ExitThread, by FreeLibraryAndExitThread
+             * or by returning: each library is told DLL_THREAD_DETACH on it
+             * first. The last one's end
              * is the process's, with its code, as on Windows -- the libraries
              * are told DLL_PROCESS_DETACH instead, as ExitProcess tells them.
              *
@@ -622,7 +623,7 @@ export function createWin32Module(){
                     const told = detachAndEnd(code);
                     if (told === null)
                     {
-                        kernel.exitThread(thread, code);
+                        kernel.exitThread(thread, code, true);
                     }
                     return told;
                 }
@@ -651,7 +652,11 @@ export function createWin32Module(){
              * @param {any} thread @param {number} code
              */
             const threadEnded = (thread, code)=>{
-                kernel.exitThread(thread, code);
+                // Said outright rather than read off the processor: ended once
+                // its detach has run, or FreeLibraryAndExitThread's library's,
+                // when any thread may be there, a thread that ended itself
+                // gives its stack back whoever is running.
+                kernel.exitThread(thread, code, true);
                 if (exitCode === null && kernel.threads().every(
                     (/** @type {any} */ other)=>other.state === 'terminated'))
                 {
@@ -1949,6 +1954,8 @@ export function createWin32Module(){
                         /** @param {any} asked */
                         resolved: asked=>modules.resolved?.(asked),
                         exitThread: code=>libraries['KERNEL32.dll'].ExitThread.handler([code]),
+                        currentThread: ()=>kernel.currentThread(),
+                        endThread,
                         /** @param {number} base */
                         disableThreadCalls: base=>modules.disableThreadCalls?.(base),
                     }),

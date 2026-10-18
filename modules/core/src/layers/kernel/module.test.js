@@ -238,6 +238,24 @@ test('a thread is gone once it has ended and runs nowhere, a handle to it open o
     assert.equal(kernel.threadGone(second), true, 'ended by another before it ran');
 });
 
+test('a thread said to have ended itself gives its stack back whoever is running', async()=>{
+    // FreeLibraryAndExitThread ends its caller once the library's detach has
+    // run, and by then another thread may be on the processor. The caller
+    // still ended itself, and its stack is the next thread's.
+    const { kernel } = await makeRunningKernel(2);
+    const first = kernel.createThread({ entry: 0x00402000, name: 'first' });
+    kernel.createThread({ entry: 0x00402000, name: 'second' });
+
+    kernel.runOnce();
+    kernel.runOnce();
+    assert.notEqual(kernel.currentThread(), first);
+    kernel.exitThread(first, 1, true);
+
+    const third = kernel.createThread({ entry: 0x00402000, name: 'third' });
+    assert.notEqual(third, null);
+    assert.equal(third.stackLimit, first.stackLimit, 'on the stack the first one left');
+});
+
 test('a stack size asked for is honoured the way CreateThread honours it', async()=>{
     const MEGABYTE = 0x100000;
     const { kernel } = await makeRunningKernel(64, MEGABYTE);

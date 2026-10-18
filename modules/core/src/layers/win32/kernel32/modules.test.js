@@ -142,9 +142,51 @@ test('FreeLibrary gives one reference back to the module, which decides when it 
         assert.equal(f.lastError(), 126, 'ERROR_MOD_NOT_FOUND');
     });
 
-test('FreeLibraryAndExitThread gives the reference back, then ends the thread', async()=>{
-    // The thread ends only once the library's detach has run, and it ends
-    // whether or not there was a library to give back.
+test('FreeLibraryAndExitThread gives the reference back, then ends the thread that called it',
+    async()=>{
+        // The thread ends only once the library's detach has run, and it ends
+        // whether or not there was a library to give back. A detach to wait for
+        // suspends the call, and by the time it is done another thread is on
+        // the processor and the call is no longer in flight to be parked: the
+        // caller, held from the start, is ended outright and the call only
+        // answers. With nothing to wait for it ends as ExitThread ends it.
+        const f = hostFor({ lookup: { 'probe.dll': 0x10000000 } });
+        /** @type {string[]} */
+        const steps = [];
+        let running = 'worker';
+        const probe = /** @type {any} */ (f.host.byBase(0x10000000));
+        probe.release = ()=>Promise.resolve().then(()=>{
+            steps.push('released');
+            running = 'main';
+            return 1;
+        });
+        const fns = createModuleFunctions({
+            ...f.host,
+            currentThread: ()=>running,
+            endThread: (thread, code)=>{
+                steps.push(`end ${thread} ${code}`);
+                return null;
+            },
+            exitThread: code=>{
+                steps.push(`exit ${running} ${code}`);
+                return 'parked';
+            },
+        });
+
+        assert.equal(fns.FreeLibraryAndExitThread.argBytes, 8);
+        assert.equal(await fns.FreeLibraryAndExitThread.handler([0x10000000, 3]), 0);
+        assert.deepEqual(steps, ['released', 'end worker 3'],
+            'the caller, not main, and not parked');
+        assert.equal(fns.FreeLibraryAndExitThread.handler([0x12345678, 4]), 'parked');
+        assert.equal(f.lastError(), 126, 'ERROR_MOD_NOT_FOUND');
+        assert.deepEqual(steps.at(-1), 'exit main 4');
+    });
+
+test('FreeLibraryAndExitThread answers only once the libraries still loaded are told of the'
+    + ' thread\'s end', async()=>{
+    // Ending the thread runs their DLL_THREAD_DETACH on it, as ExitThread
+    // does; answered before that, the suspended call would resume the thread
+    // under its own detach.
     const f = hostFor({ lookup: { 'probe.dll': 0x10000000 } });
     /** @type {string[]} */
     const steps = [];
@@ -153,17 +195,19 @@ test('FreeLibraryAndExitThread gives the reference back, then ends the thread', 
         steps.push('released');
         return 1;
     });
-    const fns = createModuleFunctions({ ...f.host, exitThread: code=>{
-        steps.push(`exit ${code}`);
-        return 'parked';
-    } });
+    const fns = createModuleFunctions({
+        ...f.host,
+        currentThread: ()=>'worker',
+        // Told on a later turn of the loop, as a detach that runs guest code is.
+        endThread: thread=>new Promise(resolve=>setTimeout(()=>{
+            steps.push(`told of ${thread}'s end`);
+            resolve(0);
+        }, 0)),
+    });
 
-    assert.equal(fns.FreeLibraryAndExitThread.argBytes, 8);
-    assert.equal(await fns.FreeLibraryAndExitThread.handler([0x10000000, 3]), 'parked');
-    assert.deepEqual(steps, ['released', 'exit 3']);
-    assert.equal(fns.FreeLibraryAndExitThread.handler([0x12345678, 4]), 'parked');
-    assert.equal(f.lastError(), 126, 'ERROR_MOD_NOT_FOUND');
-    assert.deepEqual(steps.at(-1), 'exit 4');
+    const answer = fns.FreeLibraryAndExitThread.handler([0x10000000, 3]);
+    assert.equal(await answer, 0);
+    assert.deepEqual(steps, ['released', 'told of worker\'s end'], 'the answer after the detach');
 });
 
 test('DisableThreadLibraryCalls hands a loaded library to the loader, and nothing else', ()=>{
