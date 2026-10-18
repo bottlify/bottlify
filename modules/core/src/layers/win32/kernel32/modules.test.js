@@ -166,6 +166,22 @@ test('FreeLibraryAndExitThread gives the reference back, then ends the thread', 
     assert.deepEqual(steps.at(-1), 'exit 4');
 });
 
+test('DisableThreadLibraryCalls hands a loaded library to the loader, and nothing else', ()=>{
+    const f = hostFor({ lookup: { 'probe.dll': 0x10000000 } });
+    /** @type {number[]} */
+    const disabled = [];
+    const fns = createModuleFunctions({ ...f.host, disableThreadCalls: base=>{
+        disabled.push(base);
+    } });
+
+    assert.equal(fns.DisableThreadLibraryCalls.argBytes, 4);
+    assert.equal(fns.DisableThreadLibraryCalls.handler([0x10000000]), 1);
+    assert.deepEqual(disabled, [0x10000000]);
+    assert.equal(fns.DisableThreadLibraryCalls.handler([0x12345678]), 0);
+    assert.equal(f.lastError(), 126, 'ERROR_MOD_NOT_FOUND');
+    assert.deepEqual(disabled, [0x10000000], 'nothing handed on for no module');
+});
+
 test('the wide entry point reaches the same loader', ()=>{
     /** @type {string[]} */
     const asked = [];

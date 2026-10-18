@@ -76,14 +76,31 @@ const u32 = value=>[
  *        Guest addresses of TlsAlloc and TlsSetValue. Required if any image
  *        carries thread-local storage; the slot has to come from the same pool
  *        the program's own calls draw on, and only the guest can ask for one.
+ * @param {{ address: number, enter: number, leave: number }} [options.loaderLock]
+ *        The loader lock -- a CRITICAL_SECTION, and the guest addresses of
+ *        EnterCriticalSection and LeaveCriticalSection -- held from the first
+ *        call to the last. A thread a DllMain makes is told of the libraries
+ *        under the same lock, so it waits until every one is attached rather
+ *        than being told of one whose DLL_PROCESS_ATTACH has not run: "new
+ *        threads can be created, but they do not begin execution until DLL
+ *        initialization is done for the process".
  * @returns {{ bytes: Uint8Array, attached: string[], tlsImages: number }}
  */
-export function synthesiseProcessInit({ libraries, entryPoint, tlsApi }){
+export function synthesiseProcessInit({ libraries, entryPoint, tlsApi, loaderLock }){
     /** @type {number[]} */
     const code = [];
     /** @type {string[]} */
     const attached = [];
     let tlsImages = 0;
+    /** @param {number} routine EnterCriticalSection or LeaveCriticalSection */
+    const locked = routine=>(loaderLock
+        ? [
+            0x68, ...u32(loaderLock.address), // push lock
+            0xb8, ...u32(routine), //            mov eax, routine
+            0xff, 0xd0, //                       call eax
+        ]
+        : []);
+    code.push(...locked(loaderLock?.enter ?? 0));
 
     for (const library of libraries)
     {
@@ -136,6 +153,7 @@ export function synthesiseProcessInit({ libraries, entryPoint, tlsApi }){
     }
 
     code.push(
+        ...locked(loaderLock?.leave ?? 0),
         0xb8, ...u32(entryPoint), // mov eax, entry
         0xff, 0xe0, //               jmp eax
     );

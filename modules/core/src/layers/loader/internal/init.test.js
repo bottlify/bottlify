@@ -78,3 +78,26 @@ test('the arguments are the ones DllMain is declared to take', ()=>{
     assert.equal(bytes[3], DLL_PROCESS_ATTACH, 'then the reason');
     assert.equal(u32At(bytes, 5), 0x03000000, 'then the handle, which is the base');
 });
+
+test('the loader lock is held from before the first DllMain to the jump into the program', ()=>{
+    const lock = { address: 0x00500000, enter: 0x00600000, leave: 0x00600100 };
+    const { bytes } = synthesiseProcessInit({
+        libraries: [library('one.dll', 0x03000000)],
+        entryPoint: 0x00401000,
+        loaderLock: lock,
+    });
+
+    // push lock / mov eax, EnterCriticalSection / call eax, first.
+    assert.equal(bytes[0], 0x68);
+    assert.equal(u32At(bytes, 1), lock.address);
+    assert.equal(bytes[5], 0xb8);
+    assert.equal(u32At(bytes, 6), lock.enter);
+    assert.deepEqual([...bytes.subarray(10, 12)], [0xff, 0xd0]);
+    assert.equal(u32At(bytes, 12 + 5), 0x03000000, 'then the library, as without one');
+
+    // And the same with LeaveCriticalSection just before the program's entry.
+    const tail = bytes.length - 7 - 12;
+    assert.equal(u32At(bytes, tail + 1), lock.address);
+    assert.equal(u32At(bytes, tail + 6), lock.leave);
+    assert.equal(u32At(bytes, bytes.length - 6), 0x00401000);
+});

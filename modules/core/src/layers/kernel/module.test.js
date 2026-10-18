@@ -87,6 +87,21 @@ test('a new thread returns to where the caller said, not into nothing', async()=
         'the parameter sits above the return address, as a call would leave it');
 });
 
+test('a thread begun in a routine of the loader finds its start routine above it', async()=>{
+    const { kernel, memory } = await makeKernel();
+
+    const thread = kernel.createThread({
+        entry: 0x00403000, parameter: 7, returnTo: 0x00401234, start: 0x00402000,
+    });
+
+    assert.equal(memory.words.get(thread.stackTop), 0x00401234);
+    assert.equal(memory.words.get(thread.stackTop + 4), 7);
+    assert.equal(memory.words.get(thread.stackTop + 8), 0x00402000);
+    assert.equal(thread.entry, 0x00402000, 'named by its own routine');
+    assert.equal(memory.words.get(kernel.createThread({ entry: 0x00402000 }).stackTop + 8),
+        undefined, 'nothing written there for a thread without one');
+});
+
 test('a caller with nowhere better sends the thread to the park loop', async()=>{
     // The default is a thread that stops rather than one that returns into
     // whatever the stack happened to hold.

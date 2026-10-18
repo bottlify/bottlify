@@ -110,9 +110,13 @@ const DUPLICATE_CLOSE_SOURCE = 0x00000001;
  * @property {(address: number, maxLength: number) => string} readWideString
  * @property {() => any} currentThread
  * @property {(thread?: any) => any} park       Stops a thread; returns the parked token.
- * @property {(thread: any, code: number) => void} [endThread]
+ * @property {(thread: any, code: number) => Promise<number> | null} [endThread]
  *           Ends a thread that ended itself, and the process with it when it
- *           was the last. Absent, the kernel's exitThread alone.
+ *           was the last: null once it has, or the promise of telling the
+ *           libraries of its detach first. Absent, the kernel's exitThread alone.
+ * @property {() => number} [threadStart]
+ *           Where a new thread begins: the libraries told of it, then its start
+ *           routine. Zero, or absent, and it begins in its start routine.
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(code: number) => void} setLastError
  * @property {ReturnType<typeof import('./named-objects.js').createNamedObjects>} namedObjects
@@ -753,8 +757,12 @@ export function createThreadingFunctions(host){
                 // the reserve; the kernel turns either into the reserve by the
                 // rules CreateThread documents.
                 const reservation = ((flags >>> 0) & STACK_SIZE_PARAM_IS_A_RESERVATION) !== 0;
+                // Every library is told of the thread on the thread, before
+                // its start routine runs.
+                const begin = host.threadStart?.() ?? 0;
                 const thread = kernel.createThread({
-                    entry: start >>> 0,
+                    entry: begin || start >>> 0,
+                    ...begin === 0 ? {} : { start: start >>> 0 },
                     ...reservation
                         ? { stackReserve: stackSize >>> 0 }
                         : { stackSize: stackSize >>> 0 },
@@ -1368,8 +1376,12 @@ export function createThreadingFunctions(host){
                 // kernel's notion of a current thread, and the parking that
                 // follows still has to happen to the thread that called.
                 const thread = host.currentThread();
-                (host.endThread ?? kernel.exitThread)(thread, code >>> 0);
-                return host.park(thread);
+                if (!host.endThread)
+                {
+                    kernel.exitThread(thread, code >>> 0);
+                    return host.park(thread);
+                }
+                return host.endThread(thread, code >>> 0) ?? host.park(thread);
             },
         },
 

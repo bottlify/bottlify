@@ -428,6 +428,34 @@ game draws (the person's run, 2026-10-16, browser, graphics worker, Parallels GP
 game is listed with severe graphics issues under Wine. `driverRules: 'current'` runs the bound
 shader, as Wine does. *2026-10-16.*
 
+**A47 -- A thread is told of the images in load order, the program first, each image's TLS
+callbacks before its entry point; its end, of the images the other way round, each still callbacks
+first.** The documentation says every attached library's entry point is called with
+`DLL_THREAD_ATTACH` on the new thread and with `DLL_THREAD_DETACH` on the one ending, and Wine's
+loader test that a library's TLS callback hears both; neither says where the program's own TLS
+callbacks fall among the libraries, nor the order within one image on the way out. The attach is
+the order this loader already makes the process's attach in (`synthesiseProcessInit`), so a
+thread starts from what the first thread started from. On the way out an image's TLS callbacks
+still go first: a static runtime's are its `thread_local` destructors, and its entry point's
+detach frees the per-thread data they may still use. *2026-10-18.*
+
+**A48 -- `DisableThreadLibraryCalls` on a library with static thread-local storage answers TRUE,
+and the library goes on being told of threads.** The documentation says both that the call fails
+for such a library and that it "does not perform any optimizations" for it; the notifications go on
+either way, since its TLS callbacks build each thread's `thread_local` objects. Of the two answers
+TRUE is the one no library is broken by: one that fails its attach on FALSE would not load. Any
+other loaded module is honoured, its entry point and TLS callbacks told of no thread from then on.
+*2026-10-18.*
+
+**A49 -- The last thread to end by `ExitThread` or by returning is not told its own detach: the
+libraries hear `DLL_PROCESS_DETACH`, lpvReserved non-NULL, on that thread, as `ExitProcess` tells
+them.** The documentation says the last thread's exit ends the process and that a library hears
+`DLL_PROCESS_DETACH` with lpvReserved non-NULL when the process ends; it does not say whether the
+last thread's own detach comes first. Two threads that end at once each find the other still
+standing and are both told their own detach; the process then ends with no thread left, and the
+libraries hear nothing more -- the end of a process whose threads are gone, not one that called
+`ExitProcess`. *2026-10-18.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this

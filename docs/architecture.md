@@ -313,7 +313,9 @@ The order matters in three places.
   and registry from the very start.
 - **The program starts only on `run`,** once the page has attached the log, input and sound.
   Libraries' `DllMain` and TLS callbacks are the program's code too: a stub at the start of the main
-  thread calls them, not the host.
+  thread calls them, not the host. Every thread made later begins in a stub of its own that calls
+  them with `DLL_THREAD_ATTACH` before its start routine, and with `DLL_THREAD_DETACH` when it
+  ends, under the same loader lock (`kernel32/thread-calls.js`).
 
 With processes at once (`concurrency` 2 or 4), the engine thread builds the run's system instead
 (the journal, the sound output, the volume and bundle, the registry: `buildSystemHost`), and
