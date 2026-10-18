@@ -21,7 +21,8 @@
  *                                  [--keep-images N,M] [--watch-import LIB.dll[#ord+ord]]
  *                                  [--click x,y[,after]] [--key Code[,after]] [--coi]
  *                                  [--mode NAME] [--executors N] [--cork-config JSON]
- *                                  [--win32-config JSON] [--placement auto|spread|concentrate]
+ *                                  [--win32-config JSON] [--cpu-config JSON]
+ *                                  [--placement auto|spread|concentrate]
  *                                  [--graphics-worker] [--fake-gpu] [--journal-calls]
  *                                  [--command-line STRING] [--args STRING] [--windows NAME]
  *                                  [--gpu sm1|sm2|sm3|sm4|host]
@@ -384,6 +385,10 @@ function parse(argv){
         // an ordinary one that differs by a Win32 path and nothing else.
         win32Config: argv.includes('--win32-config')
             ? JSON.parse(argv[argv.indexOf('--win32-config') + 1]) : undefined,
+        // createApp's `cpu` as JSON ('{"playPinned":false}'): a run whose threads
+        // are placed one fixed way, beside another placed the same way.
+        cpuConfig: argv.includes('--cpu-config')
+            ? JSON.parse(argv[argv.indexOf('--cpu-config') + 1]) : undefined,
         // The display the program is told it has, as `WxH`. The launcher
         // names the person's own screen, which is rarely a size a program of
         // this era lists, so what a title does on one is a different path.
@@ -1760,6 +1765,7 @@ export async function game(options){
             quantum: options.quantum,
             executors: options.executors,
             placement: options.placement,
+            cpu: options.cpuConfig,
             graphicsWorker: options.graphicsWorker,
             fakeGpu: options.fakeGpu,
             ...options.journalCalls ? { logCapacity: 100000, logCategories: {

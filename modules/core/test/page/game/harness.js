@@ -1686,8 +1686,12 @@ export function createHarness(canvas, how = {}){
             quantum: request.quantum || undefined,
             // Executors of the program's process: past one, its threads run at once.
             executors: request.executors || undefined,
-            // Where they run, when a run names it (the kernel's `placement`).
-            ...request.placement ? { cpu: { placement: request.placement } } : {},
+            // Where they run, when a run names it (the kernel's `placement`), and
+            // the rest of createApp's `cpu` a run passes (`playPinned`, `freeHost`).
+            ...request.placement || request.cpu
+                ? { cpu: { ...request.placement ? { placement: request.placement } : {},
+                    ...request.cpu } }
+                : {},
             sample: request.profile || request.quantum ? recordSample : undefined,
             device: {
                 device: handle.device,
