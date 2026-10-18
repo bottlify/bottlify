@@ -288,6 +288,8 @@ const LIST_TYPES = new Map([
  * @property {(address: number, expected: number, value: number) => number} [compareExchangeU32]
  *     A dword swapped only if it holds `expected`, indivisible against the guest's
  *     threads on the process's other executors.
+ * @property {(address: number) => number} [loadU32]  A dword read atomically, in
+ *     order after the store it finds: a command record's length.
  * @property {() => { width: number, height: number }} [screen]
  *           How big a drawable is, when nothing better can be asked.
  * @property {(hdc: number) => import('./wgl.js').DrawableInfo | null} [describeDrawable]
@@ -499,6 +501,7 @@ export function createOpengl(services){
             readWord: address=>readWords(address, 1)[0],
             writeMemory: services.writeMemory,
             compareExchangeU32: services.compareExchangeU32,
+            loadU32: services.loadU32,
             take: records=>{
                 const calls = context.commands(records);
                 ringCalls += calls;

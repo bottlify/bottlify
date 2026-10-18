@@ -316,17 +316,19 @@ test('the routines end in a jump to their own trap, and check the flag first', (
     // before the lock writes the program's pointer, which may fault.
     const counted = find(lock, [0xff, 0x83, ...le(SHADOW.LOCK_CALLS)]);
     assert.notEqual(counted, -1, 'the lock counts the call');
-    assert.deepEqual([...lock.slice(counted + 6, counted + 16)],
-        [0xc7, 0x83, ...le(SHADOW.HELD), ...le(0)], 'then lets the device go');
-    assert.deepEqual([...lock.slice(counted + 16, counted + 23)],
+    // With a locked store: on several executors an atomic one, which orders
+    // what the routine wrote under the lock before it for whoever takes it next.
+    assert.deepEqual([...lock.slice(counted + 6, counted + 14)],
+        [0xf0, 0x83, 0xa3, ...le(SHADOW.HELD), 0x00], 'then lets the device go');
+    assert.deepEqual([...lock.slice(counted + 14, counted + 21)],
         [0x8b, 0x5c, 0x24, 0x14, 0x89, 0x03, 0x5b], 'then answers the pointer and pops');
     const uncounted = find(unlock, [0xff, 0x82, ...le(SHADOW.UNLOCK_CALLS)]);
     assert.notEqual(uncounted, -1, 'the unlock counts the call');
-    assert.deepEqual([...unlock.slice(uncounted + 6, uncounted + 16)],
-        [0xc7, 0x82, ...le(SHADOW.HELD), ...le(0)], 'then lets the device go');
+    assert.deepEqual([...unlock.slice(uncounted + 6, uncounted + 14)],
+        [0xf0, 0x83, 0xa2, ...le(SHADOW.HELD), 0x00], 'then lets the device go');
     // A refused unlock lets it go too, on its way to the host.
-    assert.deepEqual([...unlock.slice(unlock.length - 15, unlock.length - 5)],
-        [0xc7, 0x82, ...le(SHADOW.HELD), ...le(0)], 'and so does the way to the host');
+    assert.deepEqual([...unlock.slice(unlock.length - 13, unlock.length - 5)],
+        [0xf0, 0x83, 0xa2, ...le(SHADOW.HELD), 0x00], 'and so does the way to the host');
 
     // The level getter refuses a level the texture has not got, and reads
     // the count out of the block rather than assuming the table's length is it.

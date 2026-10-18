@@ -501,10 +501,14 @@ export function placeCommandRing(block, ring, writeMemory, bytes = COMMAND_RING_
  * @param {number} [deps.bytes]  the ring's size, `COMMAND_RING_BYTES` unless given
  * @param {(address: number, expected: number, value: number) => number} [deps.compareExchangeU32]
  *     the memory's, indivisible against the guest's threads on other executors
+ * @param {(address: number) => number} [deps.loadU32]  the memory's atomic read: a
+ *     record's length, which the routines publish with `xchg`, read so the record's
+ *     words and what the program wrote before the call are seen after it
  */
 export function createCommandReader(deps){
     const { block, ring, readWord, readWords, writeMemory, take, refuse,
         bytes = COMMAND_RING_BYTES, compareExchangeU32 } = deps;
+    const lengthAt = deps.loadU32 ?? readWord;
     let tail = 0;
     let taken = 0;
     const zero = new Uint8Array(4);
@@ -531,25 +535,30 @@ export function createCommandReader(deps){
                 tail = head;
                 return;
             }
-            const words = readWords(ring + tail, (head - tail) >>> 2);
+            // Each record's length first, each an atomic read of the routine's
+            // `xchg`, and its words after: on a host that reorders stores
+            // (arm64) a plain read could find a length whose record, or the
+            // vertices the program wrote before the call, were not there yet.
+            const available = (head - tail) >>> 2;
             let whole = 0;
-            while (whole < words.length)
+            while (whole < available)
             {
-                const length = words[whole + (COMMAND.BYTES >>> 2)] >>> 2;
+                const length = lengthAt(ring + tail + whole * 4 + COMMAND.BYTES) >>> 2;
                 if (length === 0)
                 {
                     break;
                 }
-                if (length < (COMMAND.ARGS >>> 2) || whole + length > words.length)
+                if (length < (COMMAND.ARGS >>> 2) || whole + length > available)
                 {
                     refuse('a command record the routines could not have written');
-                    whole = words.length;
+                    whole = available;
                     break;
                 }
                 whole += length;
             }
             if (whole > 0)
             {
+                const words = readWords(ring + tail, whole);
                 before?.();
                 taken += take(new Uint8Array(words.buffer, words.byteOffset, whole * 4));
             }
@@ -791,13 +800,19 @@ const takeHeld = (base, busy)=>[
 ];
 
 /**
- * Lets the device's lock go, the device's block in `base`.
+ * Lets the device's lock go, the device's block in `base`, with a locked
+ * instruction rather than a `mov`: on several executors it is an atomic store,
+ * whose order the host's taking of the lock reads everything the routine wrote
+ * under it after. A plain store gives no such order where the host reorders
+ * stores (arm64): the host found the lock free and the record, the buffer's
+ * block or the vertices the program wrote before the call not yet there.
+ * Every site's next instructions read no flags.
  *
- *     mov dword [base+HELD], 0
+ *     lock and dword [base+HELD], 0
  *
  * @param {number} base
  */
-const letHeldGo = base=>[0xc7, 0x80 | base, ...dword(SHADOW.HELD), ...dword(0)];
+const letHeldGo = base=>[0xf0, 0x83, 0xa0 | base, ...dword(SHADOW.HELD), 0x00];
 
 /** ModR/M register numbers. */
 const ECX = 1;
@@ -1157,7 +1172,9 @@ export function lockCode(at, trap, renameSlot){
         [0x89, 0x74, 0x19, BUFFER.SPARES],                       // mov [ecx+ebx+40], esi
         [0xc7, 0x44, 0x19, BUFFER.SPARE_FREE, ...dword(0)],      // mov dword [ecx+ebx+48], 0
         [0xc7, 0x41, BUFFER.LENT, ...dword(0)],                  // mov dword [ecx+32], 0
-        [0xc7, 0x40, COMMAND.BYTES, ...dword(COMMAND.ARGS + 8)], // mov dword [eax+4], 16
+        // The record whole, published with `xchg` as every record's length is.
+        [0xbe, ...dword(COMMAND.ARGS + 8)],                      // mov esi, 16
+        [0x87, 0x70, COMMAND.BYTES],                             // xchg [eax+4], esi
         [0xc7, 0x44, 0x24, 0x1c, ...dword(D3DLOCK_NOOVERWRITE)], // mov dword [esp+28], 0x1000
         [0x5e, 0x5b],                                            // pop esi; pop ebx
         { jcc: 0xeb, to: 'free' },                               // jmp free
@@ -2781,7 +2798,10 @@ export function commandCode(at, trap, shape){
             [0x89, 0xc7],                                        // mov edi, eax
             ...recordLength);
     }
-    parts.push([0x89, 0x77, COMMAND.BYTES]);                     // mov [edi+4], esi
+    // The length last, with `xchg`: an atomic store on several executors, so a
+    // host that reads it with an atomic load finds the record's words, and the
+    // bytes the program wrote before the call, there with it.
+    parts.push([0x87, 0x77, COMMAND.BYTES]);                     // xchg [edi+4], esi
     if (draws)
     {
         parts.push([0xc7, 0x83, ...dword(SHADOW.DRAWS_PENDING), ...dword(1)]); // mov [ebx+disp], 1
@@ -3313,6 +3333,8 @@ export function settledAfter(shadow, call){
  * @property {(address: number, expected: number, value: number) => number} [compareExchangeU32]
  *     A dword swapped only if it holds `expected`, indivisible against the
  *     guest's threads on the process's other executors; answers what it held.
+ * @property {(address: number) => number} [loadU32]  A dword read atomically,
+ *     in order after the store it finds: a command record's length.
  * @property {ShadowDevice} device
  * @property {(surface: any) => number[]} [handedOut]  the pointer the program was
  *     handed for a surface and the word its count is kept in, zeros for one it
@@ -3543,7 +3565,21 @@ export function createShadow(deps){
         {
             return;
         }
-        deps.writeMemory(address + SHADOW.HELD, dwordBytes(0));
+        // An atomic store, as a routine's own letting go is: what the host
+        // wrote under the lock -- a buffer's block settled, a storage freed --
+        // is there for the routine on another executor that takes it next. A
+        // routine that found the lock taken has written its own mark over the
+        // host's, so the word is cleared whatever it holds.
+        const at = address + SHADOW.HELD;
+        for (let was = readWord(at); ;)
+        {
+            const seen = deps.compareExchangeU32(at, was, 0);
+            if (seen === was)
+            {
+                break;
+            }
+            was = seen;
+        }
     };
     /**
      * `work` with the device's lock held.
@@ -4360,7 +4396,7 @@ export function createShadow(deps){
                     placeCommandRing(address, commands, deps.writeMemory, ringBytes);
                     commandReader = createCommandReader({ block: address, ring: commands,
                         readWord, readWords, writeMemory: deps.writeMemory,
-                        compareExchangeU32: deps.compareExchangeU32,
+                        compareExchangeU32: deps.compareExchangeU32, loadU32: deps.loadU32,
                         take: /** @type {ShadowCommands} */ (deps.commands).take,
                         refuse: detail=>refuse(`${name}::commands`, detail),
                         bytes: ringBytes });

@@ -734,6 +734,12 @@ flowchart TB
   record into a ring in the device's block in guest memory, a getter reads the value its setter
   wrote there. The host makes the ring's calls, in order, through the device's own methods on
   its way into any method of its own (`graphics/seam/shadow.js`, `d3d8/commands.js`).
+  With several executors the routine and the host may run on different cores, and a host that
+  reorders stores (arm64) may show one core's stores to another out of order. So a routine
+  lets the device's lock go with a locked instruction and publishes a record's length, its last
+  word, with `xchg`: the engine makes both atomic there. The host reads each length with an
+  atomic load before the record, and lets the lock go with an atomic swap. What the routine
+  wrote before, the vertices the program wrote before the call included, is then there too.
   OpenGL reads the program's memory at the call itself, so whatever a call read goes ahead of it.
   The DirectDraw surfaces Direct3D 7 draws into cross by number and are described again when they
   change. A renderer on the engine thread reads the bytes at those same moments, so the picture comes out the

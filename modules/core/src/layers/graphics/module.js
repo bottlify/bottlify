@@ -484,6 +484,15 @@ export function createGraphicsModule(){
                         /** @type {number} */ value)=>memory.compareExchangeU32(address, expected, value)
                     : undefined,
                 /**
+                 * A dword read in order after the store it finds, against the
+                 * guest's threads on the process's other executors: a ring
+                 * record's length, which a routine publishes with `xchg` once
+                 * the record is written.
+                 */
+                loadU32: typeof memory.loadU32 === 'function'
+                    ? (/** @type {number} */ address)=>memory.loadU32(address)
+                    : undefined,
+                /**
                  * Whether the guest may write `length` bytes at an address: an
                  * out-parameter the system probes before it writes through it,
                  * answering E_INVALIDARG where Windows could not write.
