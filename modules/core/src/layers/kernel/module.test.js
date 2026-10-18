@@ -270,7 +270,8 @@ test('the kernel publishes its figures as tables and keeps the object tables col
 
     const metrics = /** @type {any} */ (kernelModule.diagnostics().metrics);
     assert.deepEqual(metrics.sync,
-        { objects: 2, event: 1, mutex: 1, semaphore: 0, timer: 0 },
+        { objects: 2, event: 1, mutex: 1, semaphore: 0, timer: 0, sets: 0, setsOfSet: 0,
+            resets: 0, resetsOfClear: 0 },
         'counts in the snapshot; the rows only by name');
     assert.equal(kernel.syncObjects().length, 2);
     await kernelModule.dispose();
@@ -350,7 +351,8 @@ test('diagnostics answers for the live instance', async()=>{
     const diag = /** @type {any} */ (kernelModule.diagnostics());
     assert.equal(diag.status, 'ready');
     assert.deepEqual(diag.metrics.sync,
-        { objects: 3, event: 2, mutex: 1, semaphore: 0, timer: 0 },
+        { objects: 3, event: 2, mutex: 1, semaphore: 0, timer: 0, sets: 0, setsOfSet: 0,
+            resets: 0, resetsOfClear: 0 },
         'diagnostics reports the second (most recent) instance');
 
     await kernelModule.dispose();
