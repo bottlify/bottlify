@@ -29,7 +29,12 @@
  * boundary) holds a lock word and, for each class, a stack of free cells --
  * the cache the guest takes from and gives back to, the cell and the address
  * of its word in each entry. The lock is taken with `xchg`, one instruction,
- * and the scheduler switches threads only between instructions, so a thread
+ * and given back with `lock and`: on several executors both are atomics,
+ * and what a thread wrote under the lock -- a cache's count, its entries --
+ * is there for the thread on another executor that takes it next, where a
+ * plain store of the free lock could reach that thread first on a host that
+ * reorders stores (arm64), and two threads take one cell. The scheduler
+ * switches threads only between instructions, so a thread
  * that finds it taken is one preempted inside a few instructions of its own;
  * it does not wait but hands its call to the host. The host touches a heap's
  * cache only while it holds the same lock, taken with one compare-and-swap:
@@ -390,8 +395,22 @@ export function createGuestHeap({ allocator, arena, memory }){
         memory.writeU32(at, 1);
         return true;
     };
-    /** @param {HeapState} heap */
-    const unlock = heap=>memory.writeU32(heap.handle + CONTROL.LOCK, 0);
+    /**
+     * Gives the heap's lock back, as an atomic where the memory is shared: what
+     * the host wrote under it is there before another executor finds it free.
+     * The host holds it, so it holds 1 -- a routine finding it taken writes 1 too.
+     *
+     * @param {HeapState} heap
+     */
+    const unlock = heap=>{
+        const at = heap.handle + CONTROL.LOCK;
+        if (memory.compareExchangeU32)
+        {
+            memory.compareExchangeU32(at, 1, 0);
+            return;
+        }
+        memory.writeU32(at, 0);
+    };
 
     /**
      * The oldest half of a full cache back to the host.
@@ -802,7 +821,7 @@ function allocBody(p, zero, pop){
         [0x8b, 0x5b, 0x04],                                  // mov ebx, [ebx + 4]: its word's
         [0x66, 0x89, 0x0b],                                  // mov [ebx], cx
         [0x5b],                                              // pop ebx
-        [0xc7, 0x02, ...dword(0)],                           // mov dword [edx], 0: unlocked
+        [0xf0, 0x83, 0x22, 0x00],                            // lock and dword [edx], 0: unlocked
         ...zero === 'flag' ? [
             [0xf6, 0x44, 0x24, 0x0c, 0x08],                  // test byte [esp + 12], 8
             { jump: JNZ, to: 'zero' },
@@ -824,7 +843,7 @@ function allocBody(p, zero, pop){
             ret,
         ],
         'empty',
-        [0xc7, 0x02, ...dword(0)],                           // mov dword [edx], 0
+        [0xf0, 0x83, 0x22, 0x00],                            // lock and dword [edx], 0
         'busy',
         [0x5e],                                              // pop esi
     ];
@@ -943,14 +962,14 @@ function freeBody(pop, answer){
         [0x89, 0x54, 0xc8, CONTROL.ENTRIES + 4],             // mov [eax + ecx*8 + 12], edx
         [0x41],                                              // inc ecx
         [0x89, 0x08],                                        // mov [eax], ecx
-        [0xc7, 0x03, ...dword(0)],                           // mov dword [ebx], 0: unlocked
+        [0xf0, 0x83, 0x23, 0x00],                            // lock and dword [ebx], 0: unlocked
         [0x5b],                                              // pop ebx
         [0x5e],                                              // pop esi
         'done',
         ...answer ? [[0xb8, ...dword(1)]] : [],              // mov eax, 1
         ret,
         'unlock',
-        [0xc7, 0x03, ...dword(0)],                           // mov dword [ebx], 0
+        [0xf0, 0x83, 0x23, 0x00],                            // lock and dword [ebx], 0
         'held',
         [0x5b],                                              // pop ebx
         'bad',

@@ -760,12 +760,14 @@ export function createProcessFunctions(host){
         if (clockWords !== null)
         {
             const counter = ticksOf(milliseconds);
-            // The sequence by Atomics: odd before the words move, even after,
-            // in that order for a reader on another executor.
+            // The sequence odd before the words move and even after, every
+            // word by Atomics: a plain store may reach a reader on another
+            // executor ahead of the odd sequence on a host that reorders
+            // stores (arm64), and the reader would take half a counter.
             Atomics.store(clockWords, CLOCK.SEQUENCE >> 2, ++sequence);
-            clockWords[CLOCK.TICKS >> 2] = Math.floor(milliseconds);
-            clockWords[CLOCK.COUNTER >> 2] = Number(counter & 0xffffffffn) | 0;
-            clockWords[(CLOCK.COUNTER >> 2) + 1] = Number(counter >> 32n) | 0;
+            Atomics.store(clockWords, CLOCK.TICKS >> 2, Math.floor(milliseconds));
+            Atomics.store(clockWords, CLOCK.COUNTER >> 2, Number(counter & 0xffffffffn) | 0);
+            Atomics.store(clockWords, (CLOCK.COUNTER >> 2) + 1, Number(counter >> 32n) | 0);
             Atomics.store(clockWords, CLOCK.SEQUENCE >> 2, ++sequence);
             return;
         }
