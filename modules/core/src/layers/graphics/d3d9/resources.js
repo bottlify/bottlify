@@ -81,6 +81,42 @@ export const D3DLOCK_NO_DIRTY_UPDATE = 0x00008000;
  */
 
 /**
+ * A device's bindings of resources, each held (`hold`) while bound and let go
+ * when it is replaced or unbound, as Windows keeps a bound resource alive past
+ * the program's last Release: the last Release of a texture still bound, or
+ * bound by a draw still waiting in the ring, used to destroy it under that
+ * draw. A state block applied into the same map holds what it binds too.
+ *
+ * @extends {Map<number, any>}
+ */
+export class HeldBindings extends Map {
+    /** @param {number} key @param {any} value */
+    set(key, value){
+        const was = super.get(key);
+        if (was !== value)
+        {
+            value?.hold?.();
+            was?.letGo?.();
+        }
+        return super.set(key, value);
+    }
+
+    /** @param {number} key */
+    delete(key){
+        super.get(key)?.letGo?.();
+        return super.delete(key);
+    }
+
+    clear(){
+        for (const value of super.values())
+        {
+            value?.letGo?.();
+        }
+        super.clear();
+    }
+}
+
+/**
  * @param {{ implicit?: boolean, onFirstRef?: () => void, onLastRef?: () => void,
  *           onZero?: () => void }} [options]
  *        `onZero`: the program's count reached zero, whether or not the device
@@ -240,6 +276,16 @@ function sharedCount(count, retire){
         },
         get held(){
             return count.held;
+        },
+        hold: ()=>count.hold?.(),
+        // The binding was the last thing keeping it: its storage goes now.
+        letGo(){
+            const was = count.destroyed;
+            count.letGo?.();
+            if (!was && count.destroyed)
+            {
+                retire();
+            }
         },
         get destroyed(){
             return count.destroyed;
@@ -1176,6 +1222,9 @@ export function createTexture(options){
          * and loads it again, for ever.
          */
         release: ()=>count.release(),
+        // Kept while a stage binds it (`HeldBindings`).
+        hold: ()=>count.hold(),
+        letGo: ()=>count.letGo(),
 
         /**
          * @param {number} level
@@ -1603,6 +1652,9 @@ export function createVolumeTexture(options){
 
         /** Gives the levels' storage back when the last reference goes, here or through one. */
         release: ()=>count.release(),
+        // Kept while a stage binds it (`HeldBindings`).
+        hold: ()=>count.hold(),
+        letGo: ()=>count.letGo(),
 
         /**
          * @param {number} level

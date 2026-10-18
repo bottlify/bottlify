@@ -212,6 +212,7 @@ const DT_NOPREFIX = 0x0800;
 const WH_CBT = 5;
 const WH_KEYBOARD = 2;
 const WH_MOUSE = 7;
+const WH_GETMESSAGE = 3;
 /** MOUSEHOOKSTRUCT: pt.x, pt.y, hwnd, wHitTestCode, dwExtraInfo. */
 const MOUSEHOOKSTRUCT_SIZE = 20;
 /** A keyboard hook's codes: the message is being taken, or only looked at. */
@@ -4962,6 +4963,22 @@ export function createWindowFunctions(host){
         ? askKeyboardHooks(entry, code, thread) : askMouseHooks(entry, code, thread));
 
     /**
+     * A message GetMessage or PeekMessage has written for its caller, shown to
+     * the thread's WH_GETMESSAGE hooks before the call returns: HC_ACTION,
+     * whether it was removed, and the caller's MSG, which a hook may change.
+     * A program that keeps its key state in such a hook -- reading keys as
+     * they leave the queue rather than in its window procedure -- heard no
+     * key at all while the hook was installed and never called.
+     *
+     * @param {number} out  The caller's MSG.
+     * @param {boolean} remove @param {unknown} thread
+     * @returns {number | Promise<number>}
+     */
+    const showGotMessage = (out, remove, thread)=>(chainOf(WH_GETMESSAGE, thread).length === 0
+        ? 0 : callHook(WH_GETMESSAGE, null, [HC_ACTION, remove ? PM_REMOVE : 0, out >>> 0],
+            thread));
+
+    /**
      * The default window procedure, as every window procedure falls back on
      * it. The frame, the background, the hit test, the text, activation and
      * the close box live here; what a program's procedure does not handle,
@@ -6459,7 +6476,7 @@ export function createWindowFunctions(host){
                 return 0;
             }
             writeMessage(host, out, retrieved(taken, unicode));
-            return 1;
+            return andThen(showGotMessage(out, remove, thread), ()=>1);
         });
     };
 
@@ -6489,7 +6506,8 @@ export function createWindowFunctions(host){
         /** @param {any} entry */
         const answer = entry=>{
             writeMessage(host, out, retrieved(entry, unicode));
-            return entry.message === WM_QUIT ? 0 : 1;
+            return andThen(showGotMessage(out, true, thread),
+                ()=>(entry.message === WM_QUIT ? 0 : 1));
         };
         return andThen(next(), (/** @type {any} */ first)=>{
             if (first)
@@ -7350,9 +7368,9 @@ export function createWindowFunctions(host){
          *                         DWORD dwThreadId)
          *
          * Every type is accepted, because a program installs its hooks at
-         * start-up and treats a refusal as fatal; a CBT, a keyboard and a
-         * mouse hook are called, and the others say so once rather than
-         * failing silently.
+         * start-up and treats a refusal as fatal; a CBT, a keyboard, a mouse
+         * and a GetMessage hook are called, and the others say so once
+         * rather than failing silently.
          */
         SetWindowsHookExA: {
             argBytes: 16,
@@ -7365,7 +7383,8 @@ export function createWindowFunctions(host){
                 const hook = { handle: 0, type: type | 0, proc: proc >>> 0, thread: thread >>> 0 };
                 hook.handle = host.handles.open('hook', hook);
                 hooks.push(hook);
-                if (hook.type !== WH_CBT && hook.type !== WH_KEYBOARD && hook.type !== WH_MOUSE)
+                if (hook.type !== WH_CBT && hook.type !== WH_KEYBOARD && hook.type !== WH_MOUSE
+                    && hook.type !== WH_GETMESSAGE)
                 {
                     host.divergence?.('SetWindowsHookExA',
                         `hook type ${hook.type} is installed but never called`);

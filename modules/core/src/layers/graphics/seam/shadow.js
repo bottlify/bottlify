@@ -3190,8 +3190,8 @@ export const DRAWABLE_MIRRORS = Object.freeze({
         markDrawable(DRAW.INDEXED),
         { label: 'drawn' },
     ]),
-    /** A draw from the program's memory leaves stream zero and the indices unset. */
-    DrawPrimitiveUP: Object.freeze([unmarkDrawable(DRAW.STREAM | DRAW.INDEXED)]),
+    /** A draw from the program's memory leaves stream zero unset; the indices stay. */
+    DrawPrimitiveUP: Object.freeze([unmarkDrawable(DRAW.STREAM)]),
 });
 
 /**

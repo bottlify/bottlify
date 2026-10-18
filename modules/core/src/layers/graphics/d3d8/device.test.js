@@ -1974,7 +1974,10 @@ test('a draw outside a scene, of nothing, or without a stream is refused', ()=>{
     assertFullyReleased(device);
 });
 
-test('a user-pointer draw unbinds stream zero and the indices', ()=>{
+test('a user-pointer draw unbinds stream zero; only the indexed one the indices too', ()=>{
+    // DrawPrimitiveUP drew no indices and keeps them (Wine d3d8
+    // test_draw_primitive): a program that set its index buffer once and drew
+    // its text by user pointer drew nothing indexed after the first line.
     const device = createDevice();
     /** @type {{ buffer?: any }} */
     const vertices = {};
@@ -1997,11 +2000,43 @@ test('a user-pointer draw unbinds stream zero and the indices', ()=>{
     assert.equal(out.buffer, null);
     assert.equal(out.stride, 0, 'the stride goes with it (Wine d3d8 test_draw_primitive)');
     assert.equal(device.GetIndices(out), D3D_OK);
-    assert.equal(out.buffer, null);
+    assert.equal(out.buffer, indices.buffer, 'DrawPrimitiveUP keeps the indices');
+    assert.equal(out.baseVertexIndex, 5);
+    /** @type {any} */ (out.buffer).release();
+
+    assert.equal(device.BeginScene(), D3D_OK);
+    const triangle = new Uint8Array(Uint16Array.of(0, 1, 2).buffer);
+    assert.equal(device.DrawIndexedPrimitiveUP(D3DPT.TRIANGLELIST, 0, 3, 1, triangle,
+        D3DFMT_INDEX.INDEX16, new Uint8Array(48), 16), D3D_OK);
+    assert.equal(device.EndScene(), D3D_OK);
+    assert.equal(device.GetIndices(out), D3D_OK);
+    assert.equal(out.buffer, null, 'DrawIndexedPrimitiveUP empties them');
     assert.equal(out.baseVertexIndex, 0);
 
     vertices.buffer.release();
     indices.buffer.release();
+    assertFullyReleased(device);
+});
+
+test('a texture bound to a stage outlives the program\'s last Release until it is unbound', ()=>{
+    // Windows keeps a bound resource alive with a count of zero: a program
+    // that released a texture still bound, while a draw waiting in the ring
+    // still sampled it, had it destroyed under that draw.
+    const device = createDevice();
+    /** @type {{ texture?: any }} */
+    const made = {};
+    assert.equal(device.CreateTexture(16, 16, 1, 0, D3DFMT.R5G6B5, D3DPOOL.MANAGED, made), D3D_OK);
+    const texture = made.texture;
+    assert.equal(device.SetTexture(0, texture), D3D_OK);
+    assert.equal(texture.release(), 0);
+    assert.equal(texture.destroyed, false, 'bound, it is kept');
+    /** @type {{ texture?: any }} */
+    const out = {};
+    assert.equal(device.GetTexture(0, out), D3D_OK);
+    assert.equal(out.texture, texture, 'and handed back as what is bound');
+    out.texture.release();
+    assert.equal(device.SetTexture(0, null), D3D_OK);
+    assert.equal(texture.destroyed, true, 'unbound, it goes');
     assertFullyReleased(device);
 });
 

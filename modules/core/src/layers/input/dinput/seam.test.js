@@ -623,6 +623,29 @@ test('the axis mode is settled before the device is acquired', ()=>{
         DI_OK);
 });
 
+test('a mouse set to absolute axes reports where it is, and says so', ()=>{
+    // SetProperty(DIPROP_AXISMODE, DIPROPAXISMODE_ABS) on the whole device:
+    // the state's axes are the position, which reading does not clear.
+    const f = mouse();
+    assert.equal(f.bridge.call(f.device, 'Unacquire', []), DI_OK);
+    propertyHeader(f.memory, 20);
+    f.memory.setU32(AT.property + DIPROPDWORD_DATA, 0); // DIPROPAXISMODE_ABS
+    assert.equal(f.bridge.call(f.device, 'SetProperty', [DIPROP_AXISMODE, AT.property]), DI_OK);
+    f.memory.setU32(AT.property + DIPROPDWORD_DATA, 7);
+    assert.equal(f.bridge.call(f.device, 'GetProperty', [DIPROP_AXISMODE, AT.property]), DI_OK);
+    assert.equal(f.memory.u32(AT.property + DIPROPDWORD_DATA), 0, 'absolute, as asked');
+    assert.equal(f.bridge.call(f.device, 'Acquire', []), DI_OK);
+    f.dinput.post({ kind: 'mouseMove', x: 3, y: -2 });
+    f.dinput.post({ kind: 'mouseMove', x: 4, y: 0 });
+    const view = new DataView(f.memory.bytes.buffer);
+    for (const read of ['first', 'second'])
+    {
+        assert.equal(f.bridge.call(f.device, 'GetDeviceState', [16, AT.state]), DI_OK);
+        assert.equal(view.getInt32(AT.state, true), 7, `X at the ${read} read`);
+        assert.equal(view.getInt32(AT.state + 4, true), -2);
+    }
+});
+
 test('GetDeviceData writes DIDEVICEOBJECTDATA and reports how many it wrote', ()=>{
     const f = keyboard();
     setBufferSize(f, f.device, 32);
@@ -767,6 +790,33 @@ test('a foreground device is acquired only while its window is the foreground on
     assert.equal(f.bridge.call(device, 'SetCooperativeLevel', [0x100, 0x8 | 0x2]), DI_OK);
     front = 0x200;
     assert.equal(f.bridge.call(device, 'Acquire', []), DI_OK);
+});
+
+test('a foreground device is taken back when another window comes to the front', ()=>{
+    // A dialog the program raised over the window that holds the mouse: Windows
+    // takes the device back, the cursor shows and the dialog has the mouse; a
+    // read is told DIERR_INPUTLOST until the program acquires it again, which
+    // it can once its window is in front.
+    let front = 0x100;
+    /** @type {boolean[]} */
+    const held = [];
+    const f = fixture({ windows: { 0x100: 'top', 0x200: 'top' }, foreground: ()=>front,
+        mouseHeld: value=>held.push(value) });
+    const device = device8(f, GUID_SysMouse, false);
+    assert.equal(f.bridge.call(device, 'SetDataFormat', [dataFormat(f.memory, 16)]), DI_OK);
+    assert.equal(f.bridge.call(device, 'SetCooperativeLevel', [0x100, 0x4 | 0x1]), DI_OK);
+    assert.equal(f.bridge.call(device, 'Acquire', []), DI_OK);
+    assert.equal(f.dinput.exclusive('mouse'), true);
+    front = 0x200;
+    assert.equal(f.dinput.exclusive('mouse'), false, 'the dialog has the mouse');
+    assert.deepEqual(held, [true, false], 'and the cursor is shown again');
+    assert.equal(f.bridge.call(device, 'GetDeviceState', [16, AT.state]), 0x8007001e | 0,
+        'DIERR_INPUTLOST');
+    assert.equal(f.bridge.call(device, 'Acquire', []), 0x80070005 | 0, 'not while it is behind');
+    front = 0x100;
+    assert.equal(f.bridge.call(device, 'Acquire', []), DI_OK);
+    assert.equal(f.bridge.call(device, 'GetDeviceState', [16, AT.state]), DI_OK);
+    assert.deepEqual(held, [true, false, true]);
 });
 
 test('the mouse held exclusively is reported; a nonexclusive one and the keyboard are not',

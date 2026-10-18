@@ -62,7 +62,7 @@ import {
     reportedBackBufferCount, targetPairResult, validatePresentParameters, validateStages,
 } from './validity.js';
 import {
-    chainBytes, createPriority, createReferenceCount, createSurface, createTexture,
+    HeldBindings, chainBytes, createPriority, createReferenceCount, createSurface, createTexture,
     createVideoMemory, createVolumeTexture, rectMoveOf, regionAtLevel, volumeUpdate,
     writeFrontBuffer, writePixels,
 } from '../d3d9/resources.js';
@@ -684,8 +684,8 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
 
     /** @type {Map<number, { buffer: any, stride: number }>} */
     const streams = new Map();
-    /** @type {Map<number, any>} */
-    const textures = new Map();
+    /** Each held while a stage binds it (`HeldBindings`). @type {Map<number, any>} */
+    const textures = new HeldBindings();
     /** @type {any} */
     let indices = null;
     let baseVertexIndex = 0;
@@ -1495,14 +1495,19 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
     };
 
     /**
-     * The user-pointer draws leave stream zero and the index binding empty,
-     * the stride with them: the data they drew came from neither, and a
-     * program that draws from a buffer afterwards has to bind it again.
+     * A user-pointer draw leaves stream zero empty, the stride with it: the
+     * data it drew came from no buffer, and a program that draws from one
+     * afterwards binds it again. Only DrawIndexedPrimitiveUP empties the
+     * indices as well (`unbindIndices`) -- DrawPrimitiveUP drew none, and a
+     * program that set its index buffer once and drew its text by user
+     * pointer lost every indexed draw after the first line of text.
      */
     const unbindStreamZero = ()=>{
         stream(0).buffer?.letGo?.();
         stream(0).buffer = null;
         stream(0).stride = 0;
+    };
+    const unbindIndices = ()=>{
         indices?.letGo?.();
         indices = null;
         baseVertexIndex = 0;
@@ -2325,6 +2330,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                     indexData, indexFormat, vertexData, stride);
             }
             unbindStreamZero();
+            unbindIndices();
             return D3D_OK;
         },
 
