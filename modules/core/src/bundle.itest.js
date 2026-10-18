@@ -528,9 +528,9 @@ test('a far bundle is read in wide windows: a forward reader waits for a round t
         };
         const app = await createApp({
             executable: buildReaderExe('C:\\Data\\big.bin'),
-            // The filler kept out: what is counted is the requests the program's
-            // own reads waited for.
-            bundle: { fetch: far, prefix: '', prefetch: false },
+            // Kept on a store, as a browser keeps them; the filler kept out: what
+            // is counted is the requests the program's own reads waited for.
+            bundle: { fetch: far, prefix: '', prefetch: false, store: fakeStore(), id: 'far' },
         });
         t.after(()=>app.dispose());
         const opened = source.fetched.calls;
@@ -544,4 +544,76 @@ test('a far bundle is read in wide windows: a forward reader waits for a round t
         assert.ok(reads <= 2, `the file came in ${reads} requests`);
         assert.ok(source.fetched.bytes <= source.summary.bytes + BLOCK_SIZE,
             'nothing was fetched twice');
+    });
+
+test('a far bundle with nowhere to keep its blocks is read in near windows, never twice over',
+    { timeout: 60000 }, async t=>{
+        const LINK_MS = 400;
+        const source = await bundleWith(PLANTED, 12 << 20);
+        t.after(()=>source.cleanup());
+        let widest = 0;
+        /** @param {number} offset @param {number} length */
+        const far = async(offset, length)=>{
+            widest = Math.max(widest, length);
+            await new Promise(resolve=>setTimeout(resolve, LINK_MS));
+            return source.fetch(offset, length);
+        };
+        const app = await createApp({
+            executable: buildReaderExe('C:\\Data\\big.bin'),
+            // No store: the blocks live in a heap cache of a few windows.
+            bundle: { fetch: far, prefix: '', store: null, prefetch: false },
+        });
+        t.after(()=>app.dispose());
+
+        assert.equal(await app.run({ maxTurns: 200000, timeoutMs: 40000 }), 0);
+
+        // A window and what is read ahead of it, as on a near bundle: wider ones
+        // would evict each other out of a cache this size.
+        assert.ok(widest <= 2 * READ_AHEAD_BYTES + BLOCK_SIZE, `a request of ${widest} bytes`);
+        assert.ok(source.fetched.bytes <= source.summary.bytes + BLOCK_SIZE,
+            `${source.fetched.bytes} bytes fetched for a bundle of ${source.summary.bytes}`);
+    });
+
+test('a preloaded bundle is here whole before the program starts, and nothing it reads waits',
+    { timeout: 60000 }, async t=>{
+        const source = await bundleWith(PLANTED, 6 << 20);
+        t.after(()=>source.cleanup());
+        /** @type {any[]} */
+        const told = [];
+        const app = await createApp({
+            executable: buildReaderExe('C:\\Data\\big.bin'),
+            bundle: {
+                fetch: source.fetch, prefix: '', prefetch: false, store: fakeStore(), id: 'whole',
+                preload: true, progress: (/** @type {any} */ state)=>told.push(state),
+            },
+        });
+        t.after(()=>app.dispose());
+        const opened = { calls: source.fetched.calls, bytes: source.fetched.bytes };
+
+        const last = told.at(-1);
+        assert.ok(last && last.total > 0 && last.bytes === last.total,
+            `the preload said it ended whole (${JSON.stringify(last)})`);
+        assert.ok(told.length >= 2, 'and said where it began and where it ended');
+        assert.ok(opened.bytes >= source.summary.bytes - (1 << 20),
+            'the bundle came in before the start');
+
+        assert.equal(await app.run({ maxTurns: 200000, timeoutMs: 40000 }), 0);
+        assert.equal(source.fetched.calls, opened.calls, 'the program read it without a request');
+    });
+
+test('a preload with nowhere to keep the blocks says so and the program reads as it goes',
+    { timeout: 60000 }, async t=>{
+        const source = await bundleWith(PLANTED);
+        t.after(()=>source.cleanup());
+        /** @type {any[]} */
+        const told = [];
+        const app = await createApp({
+            executable: buildReaderExe('C:\\Data\\big.bin'),
+            bundle: { fetch: source.fetch, prefix: '', store: null, preload: true,
+                progress: (/** @type {any} */ state)=>told.push(state) },
+        });
+        t.after(()=>app.dispose());
+        assert.equal(told.length, 1);
+        assert.equal(typeof told[0].unbacked, 'string');
+        assert.equal(await app.run({ maxTurns: 200000, timeoutMs: 40000 }), 0);
     });

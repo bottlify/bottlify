@@ -41,7 +41,7 @@ import { createBundleSource } from './layers/filesystem/internal/bundle/source.j
 import { crc32 } from './layers/filesystem/internal/bundle/crc32.js';
 import { createSharingMemory, openSharedSharing } from './layers/filesystem/internal/shared-sharing.js';
 import { resolveTranslationStore } from './layers/cpu/internal/translation-store.js';
-import { createBlockCache, resolveBlockStore }
+import { blockCacheName, createBlockCache, resolveBlockStore }
     from './layers/filesystem/internal/bundle/cache.js';
 import { decompressZstd } from './zstd.js';
 import { mountDiscs } from './discs.js';
@@ -416,6 +416,14 @@ const hashText = (hash, text)=>{
  * @property {boolean} [bundle.prefetch]  Whether to fill the cache in the gaps
  *           when nothing is being read. On by default, and inert when there is
  *           nowhere durable to keep the blocks.
+ * @property {boolean} [bundle.preload]  Whether to bring the whole bundle in
+ *           before the program starts, so that nothing it reads waits on the
+ *           network: every block not kept yet, before `createApp` resolves.
+ *           Inert, and said through `progress`, where there is nowhere durable
+ *           to keep the blocks.
+ * @property {(state: { bytes: number, total: number } | { unbacked: string }) => void}
+ *           [bundle.progress]  Told how far a preload is: packed bytes here of
+ *           the bundle's, after every request that lands.
  * @property {string} [bundle.indexSha256]  From the manifest. Checked against
  *           the index this bundle actually carries, which is what makes the
  *           per-block checksums inside it worth trusting.
@@ -2816,7 +2824,7 @@ async function mountBundle({ options, cpu, events, translationStore }){
         // ponytail: the cache of a bundle packed again is left behind on the
         // store; drop names of this bundle with another fingerprint when the
         // space matters.
-        name: `${options.bundle.id ?? options.id ?? 'bundle'}-${bundle.fingerprint}`,
+        name: blockCacheName(options.bundle.id ?? options.id ?? 'bundle', bundle.fingerprint),
         blockSize: bundle.blockSize,
         blockCount: bundle.blockCount,
     });
@@ -3025,7 +3033,11 @@ async function mountBundle({ options, cpu, events, translationStore }){
             .map(block=>[block.index, block])).values()]
             .sort((left, right)=>left.offset - right.offset);
 
-        const window = windowFor(roundTrip());
+        // Wide only where the blocks are kept: a cache in the heap is a few
+        // windows, and windows of 16 MiB evicted each other's blocks before
+        // the read that wanted them came back for them -- a start fetched
+        // four times its bundle and never got going.
+        const window = cache.backed ? windowFor(roundTrip()) : READ_AHEAD_BYTES;
         const reaching = withWindow(withReadAhead(absent, bundle, has, expected, window),
             bundle, has, window);
         ahead += reaching.length - absent.length;
@@ -3187,9 +3199,43 @@ async function mountBundle({ options, cpu, events, translationStore }){
         await fillGroups(groupBlocks(all));
     };
 
-    // Deliberately not awaited: it runs for as long as the bundle has blocks
-    // left, which is the whole session.
-    fill();
+    /**
+     * The whole bundle before the program starts (`bundle.preload`): every
+     * block not kept yet, as many requests at once as a read may have, each
+     * kept and recorded as it lands, so a preload cut short is resumed where it
+     * stopped. Not the translation seed, which the translator's store reads.
+     */
+    const preload = async()=>{
+        const progress = options.bundle.progress ?? (()=>{});
+        if (!cache.backed)
+        {
+            progress({ unbacked: cache.reason ?? 'nowhere to keep the blocks' });
+            return;
+        }
+        const all = Array.from({ length: bundle.blockCount }, (unused, index)=>bundle.block(index))
+            .filter(block=>member === null || block.index < member.firstBlock
+                || block.index >= member.firstBlock + member.blocks);
+        const total = all.reduce((sum, block)=>sum + block.packed, 0);
+        const missing = all.filter(block=>!has(block.index));
+        let bytes = total - missing.reduce((sum, block)=>sum + block.packed, 0);
+        progress({ bytes, total });
+        await inParallel(groupBlocks(missing), MAX_CONCURRENT_REQUESTS, async group=>{
+            await fetchGroup(group);
+            await cache.persist();
+            bytes += group.blocks.reduce((sum, block)=>sum + block.packed, 0);
+            progress({ bytes, total });
+        });
+    };
+    if (options.bundle.preload === true)
+    {
+        await preload();
+    }
+    else
+    {
+        // Deliberately not awaited: it runs for as long as the bundle has
+        // blocks left, which is the whole session.
+        fill();
+    }
     return {
         /** The bundle's files as a drive's read-only layer, for each machine to mount. */
         source,

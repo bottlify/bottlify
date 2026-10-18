@@ -18,4 +18,5 @@
 export { MAGIC, HEADER_SIZE, FORMAT_VERSION, READABLE_VERSIONS, Codec, openBundle }
     from './layers/filesystem/internal/bundle/format.js';
 export { crc32 } from './layers/filesystem/internal/bundle/crc32.js';
+export { blockCacheName, bundleResidency } from './layers/filesystem/internal/bundle/cache.js';
 export { decompressZstd } from './zstd.js';

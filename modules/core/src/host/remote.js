@@ -116,6 +116,9 @@ function openKeeper(given){
  * @property {any} [keeper]
  *     The log keeper's port, when a test supplies one. Absent, a worker is
  *     created the way the engine's is.
+ * @property {Record<string, (payload: any) => void>} [on]
+ *     Events subscribed before the start: what the engine tells while it
+ *     starts (`bundle-preload`).
  */
 
 /**
@@ -164,8 +167,15 @@ export async function createRemoteApp(wiring){
             post();
         }
     };
-    /** @type {Map<string, Set<(payload: any) => void>>} */
-    const handlers = new Map();
+    /**
+     * Subscribed before the start, for what the engine tells while it starts
+     * (`bundle-preload`), which a subscription made on the app it answers with
+     * would come too late for.
+     *
+     * @type {Map<string, Set<(payload: any) => void>>}
+     */
+    const handlers = new Map(Object.entries(wiring.on ?? {})
+        .map(([name, handler])=>[name, new Set([handler])]));
     /** The frame's own pixels, which is the space a pointer position lives in. */
     let frame = { width: canvas?.width ?? 0, height: canvas?.height ?? 0 };
     let frames = 0;
