@@ -6339,7 +6339,7 @@ test('a window made the foreground one and destroyed hands the run\'s foreground
         await fns.SetActiveWindow.handler([flash]);
         assert.equal(directory.foreground(), flash, 'the popup came to the foreground');
         await fns.DestroyWindow.handler([flash]);
-        assert.equal(fns.GetActiveWindow.handler([]), main, 'the window before it is active');
+        assert.equal(fns.GetActiveWindow.handler(), main, 'the window before it is active');
         assert.equal(directory.foreground(), main, 'and the run\'s foreground');
         assert.equal(directory.focus(), main, 'and has the focus');
     });
