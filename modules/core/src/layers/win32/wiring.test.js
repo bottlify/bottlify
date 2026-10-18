@@ -507,6 +507,72 @@ test('ExitProcess with no library to tell ends the process at once', async()=>{
     await win32Module.dispose();
 });
 
+test('FreeLibraryAndExitThread ends its caller once the detach has run, whoever runs by then',
+    async()=>{
+        // The detach is guest code, so the call is suspended while it runs and
+        // the main thread is on the processor when it is done: the worker is
+        // the one ended, as having ended itself, and nothing is parked -- the
+        // bridge refuses that outside a call. With no detach to wait for, the
+        // caller is parked as ExitThread parks it, and the last thread to end
+        // ends the process with its code.
+        const worker = { id: 1, state: 'running' };
+        const main = { id: 2, state: 'running' };
+        let running = worker;
+        let inFlight = true;
+        /** @type {any[][]} */
+        const ended = [];
+        /** @type {any[]} */
+        const parked = [];
+        const { libraries, exitCode } = await build({
+            kernel: {
+                currentThread: ()=>running,
+                threads: ()=>[worker, main],
+                /** @param {any} thread @param {number} code @param {boolean} [itself] */
+                exitThread: (thread, code, itself)=>{
+                    ended.push([thread.id, code, itself]);
+                    thread.state = 'terminated';
+                },
+            },
+            bridge: {
+                /** @param {any} thread */
+                park: thread=>{
+                    if (!inFlight)
+                    {
+                        throw new Error('park() outside a call');
+                    }
+                    parked.push(thread.id);
+                    return 'parked';
+                },
+            },
+            modules: {
+                /** @param {number} base */
+                byBase: base=>(base === 0x10000000 ? {
+                    name: 'probe.dll', base,
+                    release: ()=>Promise.resolve().then(()=>{
+                        inFlight = false;
+                        running = main;
+                        return 1;
+                    }),
+                } : null),
+            },
+        });
+        const kernel32 = libraries['KERNEL32.dll'];
+
+        const answer = kernel32.FreeLibraryAndExitThread.handler([0x10000000, 42]);
+        assert.ok(answer instanceof Promise, 'the detach runs before the thread ends');
+        assert.equal(await answer, 0);
+        assert.deepEqual(ended, [[1, 42, true]]);
+        assert.deepEqual(parked, []);
+        assert.equal(exitCode(), null, 'the main thread runs on');
+
+        inFlight = true;
+        assert.equal(kernel32.FreeLibraryAndExitThread.handler([0x12345678, 3]), 'parked');
+        assert.deepEqual(ended.at(-1), [2, 3, true]);
+        assert.deepEqual(parked, [2]);
+        assert.equal(exitCode(), 3);
+        await win32Module.dispose();
+    });
+
 test('MsgWaitForMultipleObjectsEx with MWMO_INPUTAVAILABLE wakes for a message seen already',
     async()=>{
         // user32's message tests: a message a PeekMessage has looked at and left

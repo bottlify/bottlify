@@ -584,13 +584,18 @@ export function createWin32Module(){
              */
             let threadReturnStub = null;
             /**
-             * A thread ending itself, by ExitThread or by returning. The last
-             * one ends the process with its code, as it does on Windows.
+             * A thread ending itself, by ExitThread, by FreeLibraryAndExitThread
+             * or by returning. The last one ends the process with its code, as
+             * it does on Windows.
              *
              * @param {any} thread @param {number} code
              */
             const endThread = (thread, code)=>{
-                kernel.exitThread(thread, code);
+                // Said outright rather than read off the processor:
+                // FreeLibraryAndExitThread ends its thread once the library's
+                // detach has run, when any thread may be there, and a thread
+                // that ended itself gives its stack back whoever is running.
+                kernel.exitThread(thread, code, true);
                 if (exitCode === null && kernel.threads().every(
                     (/** @type {any} */ other)=>other.state === 'terminated'))
                 {
@@ -1880,6 +1885,8 @@ export function createWin32Module(){
                         /** @param {any} asked */
                         resolved: asked=>modules.resolved?.(asked),
                         exitThread: code=>libraries['KERNEL32.dll'].ExitThread.handler([code]),
+                        currentThread: ()=>kernel.currentThread(),
+                        endThread,
                     }),
                     // Last, deliberately: writing and closing a handle are the same
                     // entry points for a file as for a console or an event, and the

@@ -101,7 +101,13 @@ export function searchesBesideProgram(knownDll, mappedFromFile){
  *           A library LoadLibraryEx mapped as data, by the handle it gave out:
  *           no module, so not among the ones `byBase` knows.
  * @property {(code: number) => any} [exitThread]
- *           Ends the calling thread as ExitThread does.
+ *           Ends the calling thread as ExitThread does, parking it: for a call
+ *           still in flight.
+ * @property {() => any} [currentThread]
+ * @property {(thread: any, code: number) => void} [endThread]
+ *           Ends a thread that ended itself, without parking it: for a call
+ *           that has already been suspended, whose thread is no longer the one
+ *           on the processor.
  * @property {() => { base: number, path: string }[]} [list]
  *           Every module of the process, the image first: what psapi's
  *           EnumProcessModules hands out.
@@ -419,9 +425,24 @@ export function createModuleFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([handle, code])=>{
+                // Held before anything can wait: once the library's DllMain
+                // has to hear the detach, this call is suspended and the loop
+                // turns, and whichever thread is on the processor by the time
+                // it is done -- if any, and on this executor at all -- is not
+                // the one to end.
+                const thread = host.currentThread?.();
                 const freed = freeLibrary(handle);
-                const exit = ()=>host.exitThread?.(code >>> 0) ?? 0;
-                return freed instanceof Promise ? freed.then(exit) : exit();
+                if (!(freed instanceof Promise))
+                {
+                    return host.exitThread?.(code >>> 0) ?? 0;
+                }
+                // Its call is no longer in flight to be parked; the answer it
+                // is suspended on only has to arrive, and a thread that has
+                // ended never returns to read it.
+                return freed.then(()=>{
+                    host.endThread?.(thread, code >>> 0);
+                    return 0;
+                });
             },
         },
 
