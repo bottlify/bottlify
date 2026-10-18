@@ -63,7 +63,7 @@ import {
 import { createDefaultStageStates } from '../d3d8/stagestates.js';
 import { createDefaultRenderStates } from './renderstates.js';
 import {
-    chainBytes, createPriority, createReferenceCount, createSurface, createTexture,
+    HeldBindings, chainBytes, createPriority, createReferenceCount, createSurface, createTexture,
     createVideoMemory, createVolumeTexture, packColour, rectMoveOf, regionAtLevel, volumeUpdate,
     writeFrontBuffer, writePixels,
 } from './resources.js';
@@ -911,8 +911,8 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
     const streams = new BindingMap();
     /** @type {Map<number, number>} */
     const streamFrequencies = new Map();
-    /** @type {Map<number, any>} */
-    const textures = new Map();
+    /** Each held while a sampler binds it (`HeldBindings`). @type {Map<number, any>} */
+    const textures = new HeldBindings();
     /** @type {Map<number, any>} */
     const renderTargets = new Map();
     /** @type {any} */
@@ -1809,12 +1809,15 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
     };
 
     /**
-     * The user-pointer draws leave stream zero and the index binding empty: the
-     * data they drew came from neither, and a program that draws from a buffer
-     * afterwards has to bind it again.
+     * A user-pointer draw leaves stream zero empty: the data it drew came from
+     * no buffer, and a program that draws from one afterwards binds it again.
+     * Only DrawIndexedPrimitiveUP empties the indices as well
+     * (`unbindIndices`); DrawPrimitiveUP drew none and keeps them.
      */
     const unbindStreamZero = ()=>{
         stream(0).buffer = rebound(stream(0).buffer, null);
+    };
+    const unbindIndices = ()=>{
         indices = rebound(indices, null);
         baseVertexIndex = 0;
     };
@@ -3436,6 +3439,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             renderer?.drawIndexedPrimitiveUp(model, type, reach, primitiveCount, indexData,
                 indexFormat, vertexData, stride);
             unbindStreamZero();
+            unbindIndices();
             return D3D_OK;
         },
 
