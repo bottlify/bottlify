@@ -1491,6 +1491,41 @@ export function feedFilmSound(track, blocks, channels, rate, deviceRate){
 }
 
 /**
+ * Which process a page event goes to, by the run's window manager: the
+ * process of the window under the pointer or holding the mouse, the keyboard
+ * to the process of the window with the focus -- and `dropped` where no window
+ * has it while some window shows, as on Windows: the desktop under the
+ * pointer, no window in the foreground.
+ *
+ * Motion is never dropped: the cursor is the system's and goes wherever the
+ * mouse takes it, and a cursor that reached the desktop under a locked
+ * pointer, its motion dropped there, never left it. And a locked pointer
+ * sends motion alone, so where it points is where the cursor is -- `cursor`,
+ * which a process keeps -- or the manager went on choosing by the last place
+ * the page named, the desktop after a click there, and every press went to
+ * nobody.
+ *
+ * @param {{ inputTarget: (event: any) => number | null,
+ *     topLevel: () => { visible: boolean }[] } | undefined} manager
+ * @param {import('./layers/input/router.js').HostInputEvent} event
+ * @param {{ x: number, y: number } | null} [cursor]  where the cursor is, for an
+ *     event of a locked pointer
+ * @returns {{ target: number | null, dropped: boolean }}
+ */
+export function inputRecipient(manager, event, cursor = null){
+    const pointed = event.kind === 'pointerMove' || event.kind === 'pointerButton'
+        || event.kind === 'wheel';
+    const located = pointed && typeof event.x !== 'number' && cursor
+        ? { ...event, x: cursor.x, y: cursor.y } : event;
+    const target = manager?.inputTarget(located) ?? null;
+    return {
+        target,
+        dropped: target === null && event.kind !== 'pointerMove'
+            && (manager?.topLevel().some(state=>state.visible) ?? false),
+    };
+}
+
+/**
  * Credits the guest's clock with the wall time that has passed, all of it.
  *
  * Between two slices of the guest the loop yields to the browser, mixes sound,
@@ -8173,9 +8208,8 @@ async function buildSystemHost(deps){
                 // To the process of the window the run's manager says should
                 // have it (`inputTarget`, where `routedInput` explains the rest).
                 const standing = across();
-                const manager = system.windows?.manager;
-                const target = manager?.inputTarget(event) ?? null;
-                if (target === null && manager?.topLevel().some((/** @type {any} */ state)=>state.visible))
+                const { target, dropped } = inputRecipient(system.windows?.manager, event);
+                if (dropped)
                 {
                     return false;
                 }
@@ -9373,13 +9407,10 @@ export async function createApp(options){
     const standingAcross = new Set();
 
     /**
-     * The page's input, where the run's window manager says it goes: a
-     * pointer to the process of the window under it or holding the mouse,
-     * the keyboard to the process of the window with the focus. Where no
-     * window has it -- the desktop under the pointer, no window in the
-     * foreground -- no program is sent it, as on Windows. Only a run with no
-     * window showing has the page for its console: the newest process in a
-     * worker of its own has it, else the process the facade speaks for.
+     * The page's input, where the run's window manager says it goes
+     * (`inputRecipient`). Only a run with no window showing has the page for
+     * its console: the newest process in a worker of its own has it, else the
+     * process the facade speaks for.
      *
      * @param {any} machineInput  the input of the process the facade speaks for
      */
@@ -9387,9 +9418,9 @@ export async function createApp(options){
         ...machineInput,
         /** @param {any} event */
         send: event=>{
-            const manager = system.windows?.manager;
-            const target = manager?.inputTarget(event) ?? null;
-            if (target === null && manager?.topLevel().some((/** @type {any} */ state)=>state.visible))
+            const { target, dropped } = inputRecipient(system.windows?.manager, event,
+                machineInput.cursor?.() ?? null);
+            if (dropped)
             {
                 return false;
             }
