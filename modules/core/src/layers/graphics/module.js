@@ -453,6 +453,12 @@ export function createGraphicsModule(){
                  * @param {number} address @param {number} length
                  */
                 watchWrites: (address, length)=>memory.watchWrites?.(address, length) ?? null,
+                /**
+                 * A diagnostic: each draw from a buffer recorded for the
+                 * graphics worker compares what it reads with what the worker
+                 * was sent of it (`remote/draw-check.js`).
+                 */
+                checkDraws: config?.checkDraws === true,
                 /** A dword, read in place. @param {number} address */
                 readU32: address=>memory.readU32(address),
                 /**
@@ -483,6 +489,15 @@ export function createGraphicsModule(){
                 compareExchangeU32: typeof memory.compareExchangeU32 === 'function'
                     ? (/** @type {number} */ address, /** @type {number} */ expected,
                         /** @type {number} */ value)=>memory.compareExchangeU32(address, expected, value)
+                    : undefined,
+                /**
+                 * A dword read in order after the store it finds, against the
+                 * guest's threads on the process's other executors: a ring
+                 * record's length, which a routine publishes with `xchg` once
+                 * the record is written.
+                 */
+                loadU32: typeof memory.loadU32 === 'function'
+                    ? (/** @type {number} */ address)=>memory.loadU32(address)
                     : undefined,
                 /**
                  * Whether the guest may write `length` bytes at an address: an
@@ -540,6 +555,7 @@ export function createGraphicsModule(){
                     // What a buffer's unlock uploads, and a recording sends, is
                     // the pages written since: without it every byte is compared.
                     watchWrites: services.watchWrites,
+                    checkDraws: services.checkDraws,
                     // A lock of a render target brings its pixels back into the
                     // guest's bytes before the pointer is handed out.
                     writeMemory: services.writeMemory,
@@ -604,6 +620,7 @@ export function createGraphicsModule(){
                     windowMemory: services.windowMemory,
                     // The pages written since, as Direct3D 8 is given them.
                     watchWrites: services.watchWrites,
+                    checkDraws: services.checkDraws,
                     // The copies between surfaces (UpdateSurface, StretchRect,
                     // GetRenderTargetData) move bytes only through this; the
                     // seam makes none of them itself.

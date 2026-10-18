@@ -10,7 +10,7 @@
  * handler reads and writes registers and memory and sometimes ends the turn, faults
  * a handler claims and steps over -- run on another executor in a worker of its
  * own leave the registers, the flags and the memory they leave on the
- * process's own.
+ * process's own, and retire as many instructions.
  */
 
 import { test } from 'node:test';
@@ -134,37 +134,45 @@ test('programs run on another executor in a worker leave what they leave on the 
         try
         {
             const next = random(0xe8ec);
+            let remoteRetired = 0;
             for (let index = 0; index < 60; index++)
             {
                 const code = program(next);
                 const seed = next(1 << 30);
                 begin(local, code, random(seed));
+                let localRetired = 0;
                 for (let turn = 0; turn < 10_000 && (turn === 0 || !local.halted()); turn++)
                 {
-                    local.runSlice(1 + next(500));
+                    localRetired += local.runSlice(1 + next(500));
                     await local.cork().translatePending();
                 }
-                const expected = outcome(local, name=>local.readReg32(name));
+                const expected = { ...outcome(local, name=>local.readReg32(name)),
+                    retired: localRetired };
 
                 // The process's block set up, then carried to the executor's.
                 begin(process, code, random(seed));
                 remote.block().set(process.block());
                 let slice = remote.runSlice(1 + next(500));
+                let retired = slice.instructions;
                 for (let turn = 1; turn < 10_000 && !slice.halted; turn++)
                 {
                     // A turn of the event loop between slices, as a scheduler's, in
                     // which the executor's translations land.
                     await settle();
                     slice = remote.runSlice(1 + next(500));
+                    retired += slice.instructions;
                 }
+                remoteRetired += retired;
                 const view = new DataView(remote.block().buffer, remote.block().byteOffset);
                 const layout = process.blockLayout();
-                const actual = outcome(process,
-                    name=>view.getUint32(layout.regs + REGISTERS.indexOf(name) * 4, true));
+                const actual = { ...outcome(process,
+                    name=>view.getUint32(layout.regs + REGISTERS.indexOf(name) * 4, true)),
+                retired };
                 assert.equal(slice.fault, null);
                 assert.deepEqual(actual, expected, `program ${index}: ${code.map(b=>b
                     .toString(16).padStart(2, '0')).join(' ')}`);
             }
+            assert.equal(remote.retired(), remoteRetired, 'what its slices retired, together');
             assert.ok(local.cork().diagnostics().modules > 0, 'translated on the process\'s');
             assert.ok((await remote.diagnostics())?.modules > 0, 'and on the other');
         }
@@ -173,6 +181,60 @@ test('programs run on another executor in a worker leave what they leave on the 
             remote.close();
         }
     });
+
+test('an answer to another executor leaves the process\'s own count where it is', async()=>{
+    // The retired-instruction word is each executor's own: a handler that reads
+    // the process's count -- a frame presented inside another executor's call --
+    // reads what the process's executor retired, not the other's.
+    const process = createCorkHost({ ...CONFIG, engine, executors: 2 });
+    const remote = await createRemoteExecutor({ host: process, index: 1, engineUrl: ENGINE_URL,
+        config: { ...CONFIG, executors: 2 } });
+    try
+    {
+        // mov ecx, 5000; L: add eax, ecx; dec ecx; jnz L; hlt -- on the process's own.
+        process.writePhysical(CODE, new Uint8Array([0xb9, ...u32(5000), 0x01, 0xc8, 0x49,
+            0x75, 0xfb, 0xf4]));
+        process.writeReg32('esp', 0x300000);
+        process.writeReg32('eip', CODE);
+        let own = 0;
+        for (let turn = 0; turn < 100 && (turn === 0 || !process.halted()); turn++)
+        {
+            own += process.runSlice(1000);
+        }
+        assert.equal(process.instructionCount(), own);
+        // mov edx, TRAP_PORT; mov ecx, 300; L: out dx, eax; dec ecx; jnz L; hlt -- on the other.
+        const OTHER = CODE + 0x100;
+        process.writePhysical(OTHER, new Uint8Array([0xba, ...u32(TRAP_PORT), 0xb9, ...u32(300),
+            0xef, 0x49, 0x75, 0xfc, 0xf4]));
+        /** @type {number[]} */
+        const read = [];
+        process.onTrap(()=>{
+            read.push(process.instructionCount());
+        });
+        remote.onBlock(()=>{
+            process.writeReg32('esp', 0x300000);
+            process.writeReg32('eip', OTHER);
+        });
+        let retired = 0;
+        let slice = remote.runSlice(10_000);
+        retired += slice.instructions;
+        for (let turn = 1; turn < 100 && !slice.halted; turn++)
+        {
+            await settle();
+            slice = remote.runSlice(10_000);
+            retired += slice.instructions;
+        }
+        assert.equal(read.length, 300, 'every trap answered on the process');
+        assert.deepEqual([...new Set(read)], [own], 'read inside each answer');
+        assert.equal(process.instructionCount(), own, 'and after them');
+        assert.equal(retired, 2 + 300 * 3 + 1, 'the other retired its own');
+        assert.equal(remote.retired(), retired);
+    }
+    finally
+    {
+        await remote.close();
+    }
+});
 
 test('another executor\'s translator keeps its regions in the run\'s store through the process, '
     + 'and the next run there takes them and translates nothing', async()=>{

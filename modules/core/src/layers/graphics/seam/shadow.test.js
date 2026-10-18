@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     BUFFER, COMMAND, COMMAND_RING_BYTES, FLAG_SLOW_PATH, FLAG_STALE, HELD_GUEST, HELD_HOST, LEVEL,
-    SHADOW, SURFACE, TEXTURE,
+    LOCK_IN_PLACE, SHADOW, SURFACE, TEXTURE,
     createCommandReader, createShadow, getRenderStateCode,
     getSurfaceLevelCode, getTextureStageStateCode, getTransformCode, lockCode, transformSlot,
     transformType, unlockCode,
@@ -243,7 +243,10 @@ test('the block fits its two pages and its regions follow one another', ()=>{
     // Two pairs of the target getters, a pointer and a count's word each.
     assert.equal(SHADOW.TARGETS + 16, SHADOW.TARGETS_VALID);
     assert.equal(SHADOW.TARGETS_VALID + 4, SHADOW.SIZE);
-    assert.equal(BUFFER.QUEUED + 4, BUFFER.SIZE);
+    assert.equal(BUFFER.QUEUED + 4, BUFFER.SPARES);
+    // A dynamic buffer's other storages, then whether each is the guest's to move onto.
+    assert.equal(BUFFER.SPARES + BUFFER.SPARE_COUNT * 4, BUFFER.SPARE_FREE);
+    assert.equal(BUFFER.SPARE_FREE + BUFFER.SPARE_COUNT * 4, BUFFER.SIZE);
     assert.equal(TEXTURE.LEVELS + TEXTURE.LEVEL_SLOTS * 4, TEXTURE.DEVICE);
     assert.deepEqual([TEXTURE.WIDTH, TEXTURE.HEIGHT, TEXTURE.DEPTH, TEXTURE.LOCKS],
         [TEXTURE.DEVICE + 4, TEXTURE.DEVICE + 8, TEXTURE.DEVICE + 12, TEXTURE.DEVICE + 16]);
@@ -313,17 +316,19 @@ test('the routines end in a jump to their own trap, and check the flag first', (
     // before the lock writes the program's pointer, which may fault.
     const counted = find(lock, [0xff, 0x83, ...le(SHADOW.LOCK_CALLS)]);
     assert.notEqual(counted, -1, 'the lock counts the call');
-    assert.deepEqual([...lock.slice(counted + 6, counted + 16)],
-        [0xc7, 0x83, ...le(SHADOW.HELD), ...le(0)], 'then lets the device go');
-    assert.deepEqual([...lock.slice(counted + 16, counted + 23)],
+    // With a locked store: on several executors an atomic one, which orders
+    // what the routine wrote under the lock before it for whoever takes it next.
+    assert.deepEqual([...lock.slice(counted + 6, counted + 14)],
+        [0xf0, 0x83, 0xa3, ...le(SHADOW.HELD), 0x00], 'then lets the device go');
+    assert.deepEqual([...lock.slice(counted + 14, counted + 21)],
         [0x8b, 0x5c, 0x24, 0x14, 0x89, 0x03, 0x5b], 'then answers the pointer and pops');
     const uncounted = find(unlock, [0xff, 0x82, ...le(SHADOW.UNLOCK_CALLS)]);
     assert.notEqual(uncounted, -1, 'the unlock counts the call');
-    assert.deepEqual([...unlock.slice(uncounted + 6, uncounted + 16)],
-        [0xc7, 0x82, ...le(SHADOW.HELD), ...le(0)], 'then lets the device go');
+    assert.deepEqual([...unlock.slice(uncounted + 6, uncounted + 14)],
+        [0xf0, 0x83, 0xa2, ...le(SHADOW.HELD), 0x00], 'then lets the device go');
     // A refused unlock lets it go too, on its way to the host.
-    assert.deepEqual([...unlock.slice(unlock.length - 15, unlock.length - 5)],
-        [0xc7, 0x82, ...le(SHADOW.HELD), ...le(0)], 'and so does the way to the host');
+    assert.deepEqual([...unlock.slice(unlock.length - 13, unlock.length - 5)],
+        [0xf0, 0x83, 0xa2, ...le(SHADOW.HELD), 0x00], 'and so does the way to the host');
 
     // The level getter refuses a level the texture has not got, and reads
     // the count out of the block rather than assuming the table's length is it.
@@ -735,11 +740,12 @@ test('a buffer the guest holds locked is sent only when the ring has calls that 
     const vb = Object.assign(fakeBuffer(0x8000, 0x100), { usage: 0x200 });
     const block = m.shadow.attachBuffer(vb);
     const at = m.shadow.address();
-    // As the lock routine leaves it: the range, the flag, the block in its
-    // ring and its count.
+    // As the lock routine leaves a lock with neither flag: the range, the
+    // flags, the block in its ring and its count.
     m.put32(block + BUFFER.LOCKED, 1);
     m.put32(block + BUFFER.FROM, 0);
     m.put32(block + BUFFER.TO, 16);
+    m.put32(block + BUFFER.LOCK_FLAGS, LOCK_IN_PLACE);
     m.put32(at + SHADOW.LOCK_RING, block);
     m.put32(at + SHADOW.LOCK_CALLS, 1);
     m.shadow.sync();
@@ -777,6 +783,7 @@ test('a held lock is found through the lock routine\'s ring, and past its capaci
     m.put32(block + BUFFER.LOCKED, 1);
     m.put32(block + BUFFER.FROM, 0);
     m.put32(block + BUFFER.TO, 16);
+    m.put32(block + BUFFER.LOCK_FLAGS, LOCK_IN_PLACE);
     // More locks than the ring holds since the host last looked: its slots
     // name other blocks now, and only a look at every buffer finds this one.
     const locks = SHADOW.LOCK_RING_CAPACITY + 3;
@@ -789,11 +796,14 @@ test('a held lock is found through the lock routine\'s ring, and past its capaci
     draw();
     m.shadow.sync();
     assert.deepEqual(vb.calls, ['lock 0+16 0x0', 'unlock']);
-    // No lock since: still held, still sent before the ring's calls.
+    assert.equal(m.u32(block + BUFFER.LOCK_FLAGS), 0, 'replayed in place, and said so');
+    // No lock since, and the buffer dynamic: what it was written with since
+    // is the draws' to read at the draw, and the unlock's.
     m.put32(block + BUFFER.TO, 32);
     draw();
     m.shadow.sync();
-    assert.deepEqual(vb.calls.slice(2), ['lock 0+32 0x0', 'unlock']);
+    assert.deepEqual(vb.calls.slice(2), []);
+    assert.deepEqual(m.shadow.diagnostics().held, { replayed: 1, left: 1 });
 });
 
 test('a buffer released while it may be held locked is never locked by the host again', ()=>{
@@ -895,6 +905,7 @@ function entryWithEverything(phases){
     m.put32(second + BUFFER.LOCKED, 1);
     m.put32(second + BUFFER.FROM, 0);
     m.put32(second + BUFFER.TO, 16);
+    m.put32(second + BUFFER.LOCK_FLAGS, LOCK_IN_PLACE);
     // Two locks taken by the routines, one let go of: one is held.
     m.put32(at + SHADOW.LOCK_RING, first);
     m.put32(at + SHADOW.LOCK_RING + 4, second);

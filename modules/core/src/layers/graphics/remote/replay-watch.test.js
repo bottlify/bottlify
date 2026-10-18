@@ -244,3 +244,87 @@ test('an unlock of a buffer sent whole before sends what was written since, watc
     // most an unlock: watched, a little over half of what whole unlocks send.
     assert.ok(sent < whole * 0.75, `${sent} bytes sent watched, ${whole} whole`);
 });
+
+test('a buffer moved between storages of its own is sent whole once a storage, then what was '
+    + 'written since, and a draw reads the storage it was made after', ()=>{
+    const LENGTH = 0x4000;
+    const ram = new Uint8Array(1 << 20);
+    let free = 0x1000;
+    const engine = watches();
+    const services = {
+        allocate: (/** @type {number} */ bytes)=>{
+            const at = free;
+            free += bytes;
+            return at;
+        },
+        readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
+            ram.slice(at, at + length),
+        watchWrites: engine.watchWrites,
+    };
+    /** @type {Uint8Array[][]} */
+    const seen = [];
+    // A buffer with two storages, as `d3d8/storages.js` makes one: a draw
+    // reads the one it is on, and Rename moves it.
+    const twoStorages = (/** @type {any} */ use)=>({
+        /** @param {{ buffer?: any }} out */
+        CreateBuffer(out){
+            const storages = [use.allocate(LENGTH), use.allocate(LENGTH)];
+            out.buffer = { base: storages[0], length: LENGTH, usage: 0x200, storages,
+                /** @param {number} address */
+                Rename(address){
+                    this.base = address;
+                    return D3D_OK;
+                } };
+            return D3D_OK;
+        },
+        /** @param {any} buffer */
+        Draw(buffer){
+            if (use.backend !== undefined)
+            {
+                seen[seen.length - 1].push(use.readMemory(buffer.base, LENGTH).slice());
+            }
+            else
+            {
+                use.drawsFrom?.(buffer, 0, LENGTH);
+            }
+            return D3D_OK;
+        },
+    });
+    const played = playedDirect3D(twoStorages, { ...services, backend: {}, readMemory: true });
+    const sender = createSender({
+        post: message=>played.read(message.buffer, call=>{
+            played.play(call);
+        }),
+        later: flush=>flush(),
+    });
+    const root = recordedDirect3D(twoStorages, services, sender);
+    /** @type {{ buffer?: any }} */
+    const out = {};
+    assert.equal(root.CreateBuffer(out), D3D_OK);
+    const buffer = out.buffer;
+    const [first, second] = buffer.storages;
+    /** @param {number} at @param {number} value */
+    const store = (at, value)=>{
+        ram.fill(value, at, at + 16);
+        engine.stored(at, 16);
+    };
+    /** What a draw sends and reads. */
+    const draw = ()=>{
+        const before = sender.shippedBytes().dynamic ?? 0;
+        seen.push([]);
+        assert.equal(root.Draw(buffer), D3D_OK);
+        assert.deepEqual(seen[seen.length - 1][0], ram.slice(buffer.base, buffer.base + LENGTH),
+            'the draw reads the storage the buffer is on, as the program left it');
+        return (sender.shippedBytes().dynamic ?? 0) - before;
+    };
+    store(first + 0x100, 1);
+    assert.equal(draw(), LENGTH, 'the first storage, whole at its first draw');
+    assert.equal(buffer.Rename(second), D3D_OK);
+    store(second + 0x2100, 2);
+    assert.equal(draw(), LENGTH, 'the second, whole at its first');
+    assert.equal(buffer.Rename(first), D3D_OK);
+    store(first + 0x3100, 3);
+    assert.equal(draw(), 0x1000, 'back on the first: the page written since');
+    assert.equal(buffer.Rename(second), D3D_OK);
+    assert.equal(draw(), 0, 'and on the second: nothing written since');
+});

@@ -413,6 +413,28 @@ export function createMemoryModule(){
                     return shared.subarray(address >>> 2, (address >>> 2) + Math.ceil(length / 4));
                 },
                 /**
+                 * The dword at `address`, read as one indivisible step that also
+                 * orders this read after the store it finds: a word a guest routine
+                 * on another executor publishes with `xchg` or a `lock` prefix, so
+                 * what that routine wrote before it is seen too. A plain read gives
+                 * no such order on a host that reorders stores (arm64).
+                 *
+                 * @param {number} address  4-aligned
+                 * @returns {number}
+                 */
+                loadU32: address=>{
+                    if (!live())
+                    {
+                        return 0;
+                    }
+                    const shared = sharedWords();
+                    if (shared !== null && (address & 3) === 0)
+                    {
+                        return Atomics.load(shared, address >>> 2) >>> 0;
+                    }
+                    return state.accessors.readU32(address);
+                },
+                /**
                  * The dword at `address` replaced by `value` if it is `expected`, as
                  * one indivisible step against the threads running on other
                  * executors where the RAM is shared; answers what it was. How the

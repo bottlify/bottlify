@@ -34,6 +34,14 @@ differently raises a `divergence` event naming the API.
   on meanwhile, each one whole, so a HeapWalk between them can meet a block another thread
   allocated or freed.
 - A program is told it has one processor for each of its executors (`cpu.cores`: in a browser whose page can share memory one fewer than the host's processors, at most eight, by default; one elsewhere). A thread's affinity mask keeps it to those executors. Not done: a child process does not inherit its parent's narrowed process mask, a process handle other than the caller's own reads and sets the caller's mask, `NtSetInformationProcess(ProcessAffinityMask)` is accepted and ignored, and `NtQueryInformationThread`/`NtSetInformationThread` know no affinity; GetActiveProcessorCount, GetLogicalProcessorInformationEx and the processor-group calls are not exported.
+- The instructions a thread retired (the kernel's `byThread`) are the same on any number of
+  executors for the same way through the program, and the cpu's `instructions` are every
+  executor's together. A call that blocks retires its stub up to the call into the host: its
+  return is the resume's and is not counted, so it counts one instruction fewer than the same
+  call answered at once. A wait that finds its object signalled already takes a shorter way
+  through WaitForSingleObject's guest code than one that blocks, as on Windows, so a thread
+  whose waits find their objects otherwise on several executors retires a few instructions more
+  or fewer.
 - With several executors the translations of the process's own executor and of the others are
   kept apart in the translation store (the others translate for the layout they share), and so
   are those of one executor and of several (the locked instructions are atomic on several):

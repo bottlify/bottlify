@@ -517,6 +517,19 @@ writes (section 7).
   slice ends inside (a command record reserved and not yet finished) goes on to the routine's
   end first, on every executor (`unbroken.js`): taken off there, the thread would hold back every
   record after it until it ran again.
+- **Memory order between executors.** x86 shows one thread's stores to another in the order they
+  were made, and a program relies on it with plain `mov`s: data, then a flag another thread waits
+  on. An arm64 host does not: another core may see the flag first, or read the data before the
+  flag. On such a host (`reordersPlainAccesses` in the cpu layer: node's `process.arch`, a
+  Chromium page's `userAgentData`, otherwise the user agent string, a Mac taken to be arm64) a
+  process on several executors runs cork's ordered variant: an integer operand's load and store
+  are wasm atomics, ordered with every other access around them, except one through esp (a
+  thread's own stack), one at an address not a multiple of its width (a wasm atomic traps there),
+  and the x87's, MMX's, SSE's and the string instructions' operands: the data around a flag,
+  which the flag's access orders. Code the interpreters run is not ordered. On an x86 host, and
+  on one executor, nothing changes. `cork.config.ordered` overrides the choice; the cpu layer's
+  diagnostics say which was made (`ordered`). The engine's own routines lock and let go with
+  locked instructions in either variant (`tools/check-lock-release.mjs`).
 - **Exact exceptions.** A region exits right before the faulting instruction, with its EIP and
   registers. Division by zero gives #DE, an unknown instruction #UD, an access to a page the program cannot
   reach #PF with its address (translated code leaves, and the JavaScript interpreter runs the
@@ -723,9 +736,10 @@ flowchart TB
   turns left behind, and a long turn sends its own), and at once when a call waits for an
   answer. Resource bytes ride in the same batch. For a Direct3D buffer that is what the program
   wrote between `Lock` and `Unlock`; for a texture, everything written up to the next call that
-  may read it. Where the program's memory is shared, what a Direct3D 8 or 9 unlock let the
-  program write is lent rather than copied: the batch says where the bytes lie, and the graphics
-  thread copies them out of guest memory when it plays the record (`remote/lending.js`).
+  may read it. Where the program's memory is shared, what a Direct3D 8 or 9 texture's or
+  surface's unlock let the program write is lent rather than copied: the batch says where the
+  bytes lie, and the graphics thread copies them out of guest memory when it plays the record
+  (`remote/lending.js`). A buffer's bytes are copied.
 - **The Direct3D 8 and 9 command ring.** A program sets states, transforms and textures hundreds
   of times a frame and locks a buffer around every draw. Those setters and draws, a buffer's
   `Lock` and `Unlock`, and the getters of render states, transforms, texture stage states and
@@ -733,6 +747,12 @@ flowchart TB
   record into a ring in the device's block in guest memory, a getter reads the value its setter
   wrote there. The host makes the ring's calls, in order, through the device's own methods on
   its way into any method of its own (`graphics/seam/shadow.js`, `d3d8/commands.js`).
+  With several executors the routine and the host may run on different cores, and a host that
+  reorders stores (arm64) may show one core's stores to another out of order. So a routine
+  lets the device's lock go with a locked instruction and publishes a record's length, its last
+  word, with `xchg`: the engine makes both atomic there. The host reads each length with an
+  atomic load before the record, and lets the lock go with an atomic swap. What the routine
+  wrote before, the vertices the program wrote before the call included, is then there too.
   OpenGL reads the program's memory at the call itself, so whatever a call read goes ahead of it.
   The DirectDraw surfaces Direct3D 7 draws into cross by number and are described again when they
   change. A renderer on the engine thread reads the bytes at those same moments, so the picture comes out the
@@ -752,6 +772,19 @@ flowchart TB
   and its next unlock sends only the pages written since. A loop that streams stores into
   watched pages marks the pages its next turns may reach once, before them, and runs its
   stores untested as on pages already written.
+- **A DISCARD in the guest.** A `DISCARD` of a dynamic buffer while the ring still holds draws
+  the host has not made would write over what those draws read, so it went to the host, which
+  makes the draws first. The first such `DISCARD` of a buffer now gives it another storage of its
+  length (`d3d8/storages.js`, two at most). From then on the guest's `Lock` moves the buffer onto
+  a free one, writes the move into the ring (`Buffer.Rename`) and goes on writing there; the host
+  makes the move in order with the draws, so each draw reads the storage it was made with, and
+  frees the storage left. Each storage is sent whole once, then by the pages written since. A draw
+  from a dynamic buffer reads its indices, as its vertices, out of guest memory at the draw. No
+  move while a lock taken in place (with no draw in the ring) waits for the host to replay it
+  before the ring's next run, nor for a lock the host would refuse. A dynamic buffer held locked
+  under NOOVERWRITE is not replayed at the host's entries: its draws read it. The buffer's one
+  copy on the GPU holds the storage left after a move, so the pages of the storage moved onto
+  count stale: a draw uploads what it reaches of them, an unlock only what was written.
 - **Who waits for whom.** `Present` waits for the graphics thread only when it is more than two frames
   behind. It does wait for the display, as a driver does: under every presentation interval but
   `IMMEDIATE` (windowed Direct3D 8 only under `COPY_VSYNC`) the calling thread stops until the next

@@ -204,6 +204,27 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
     const own = /** @type {Uint8Array} */ (host.block());
     const theirs = new Uint8Array(memory.buffer, host.executorBase(index), own.length);
     const aside = new Uint8Array(own.length);
+    // The retired-instruction word in a block is the executor's, not the
+    // thread's (`restoreBlockContext` leaves it where it is for the same
+    // reason): carried across with the rest, the process's own count, folded
+    // in a handler -- a frame presented inside another executor's call --
+    // read the other executor's word and jumped by its difference.
+    const { counter, regs } = host.blockLayout();
+    const counterAt = counter - regs;
+    /**
+     * Every byte of a block into another but the retired-instruction word.
+     *
+     * @param {Uint8Array} to @param {Uint8Array} from
+     */
+    const carry = (to, from)=>{
+        if (counterAt < 0)
+        {
+            to.set(from);
+            return;
+        }
+        to.set(from.subarray(0, counterAt));
+        to.set(from.subarray(counterAt + 4), counterAt + 4);
+    };
 
     /**
      * Runs `handler` as if on this host, over the executor's block; answers the
@@ -213,7 +234,7 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
      */
     const answer = handler=>{
         aside.set(own);
-        own.set(theirs);
+        carry(own, theirs);
         const halted = host.halted();
         const stopped = host.stopRequested();
         host.setHaltedFlag(0);
@@ -226,8 +247,8 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
         finally
         {
             flags |= (host.halted() ? Said.HALTED : 0) | (host.stopRequested() ? Said.STOPPED : 0);
-            theirs.set(own);
-            own.set(aside);
+            carry(theirs, own);
+            carry(own, aside);
             host.setHaltedFlag(halted ? 1 : 0);
             host.setStopRequested(stopped);
         }
@@ -241,6 +262,8 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
     /** What the process's side said last, which the executor's next turn ends.
      * @type {number} */
     let mine = Turn.IDLE;
+    /** What the slices taken so far retired, together. */
+    let retiredTaken = 0;
 
     const executor = {
         index,
@@ -328,8 +351,10 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
             ending = false;
             mine = Turn.IDLE;
             const flags = channel.flags();
+            const instructions = channel.value() >>> 0;
+            retiredTaken += instructions;
             return {
-                instructions: channel.value() >>> 0,
+                instructions,
                 halted: (flags & Said.HALTED) !== 0,
                 fault: (flags & Said.FAULTED) !== 0 ? channel.read() : null,
             };
@@ -371,6 +396,8 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
         epoch: ()=>Atomics.load(channel.words, Word.EPOCH),
         /** What the slice out has retired so far; 0 with none out (`Word.RETIRED`). */
         retiredSoFar: ()=>(running ? Atomics.load(channel.words, Word.RETIRED) >>> 0 : 0),
+        /** What it has retired since it opened: the slices taken, and the one out so far. */
+        retired: ()=>retiredTaken + executor.retiredSoFar(),
         /**
          * Its translator's diagnostics, answered between slices.
          * @returns {Promise<Record<string, any> | null>}

@@ -16,8 +16,8 @@ import { graphicsModule, uncoveredRegion } from './module.js';
 import { createPresenter } from './webgpu/internal/presenter.js';
 import { createFakeDevice } from './webgpu/internal/fake-device.js';
 import { FVF } from './webgpu/internal/vertexformat.js';
-import { D3DERR_DEVICELOST, D3DFMT, D3DPOOL, D3DRTYPE, D3D_OK } from './d3d9/constants.js';
-import { D3DPT, D3DTA, D3DTOP, D3DTSS } from './d3d8/constants.js';
+import { D3DERR_DEVICELOST, D3DFMT, D3DPOOL, D3DRTYPE, D3DUSAGE, D3D_OK } from './d3d9/constants.js';
+import { D3DLOCK, D3DPT, D3DTA, D3DTOP, D3DTSS } from './d3d8/constants.js';
 import { IID_IDirectDraw } from './seam/iids.js';
 
 /** A host that hands over only what the module declares it requires. */
@@ -509,6 +509,93 @@ test('a Direct3D 8 and 9 device made by the module watches its buffers\' writes 
             `${name}: the unlocked buffer is watched (${JSON.stringify(watched)})`);
         watched.length = 0;
     }
+    await graphicsModule.dispose();
+});
+
+test('a dynamic buffer moved onto another of its storages uploads what is written there, not all'
+    + ' of it', async()=>{
+    // One copy on the GPU serves all of a buffer's storages and holds the
+    // storage left after a move: what the storage moved onto holds is stale
+    // there, and a draw uploads what it reaches of it. Counted written at
+    // every move instead, a 4.5 MB buffer held all frame uploaded all of
+    // itself at each unlock.
+    const gpu = createFakeDevice();
+    const gpuDevice = /** @type {any} */ (gpu.device);
+    gpuDevice.features = new Set();
+    gpuDevice.createSampler = (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor });
+    /** Each page's writes, counted. @type {Map<number, number>} */
+    const writes = new Map();
+    const memory = {
+        ...ramMemory(),
+        watchWrites: ()=>{
+            /** @type {Map<number, number>} */
+            const seen = new Map();
+            return {
+                take: (/** @type {number} */ from, /** @type {number} */ bytes)=>{
+                    /** @type {number[]} */
+                    const taken = [];
+                    for (let page = from >>> 12; page <= (from + bytes - 1) >>> 12; page++)
+                    {
+                        const count = writes.get(page) ?? 0;
+                        if (count !== (seen.get(page) ?? 0))
+                        {
+                            seen.set(page, count);
+                            taken.push(page);
+                        }
+                    }
+                    return taken;
+                },
+            };
+        },
+    };
+    /** @param {number} address @param {number} length @param {number} value */
+    const write = (address, length, value)=>{
+        memory.ram.fill(value, address - RAM_BASE, address - RAM_BASE + length);
+        for (let page = address >>> 12; page <= (address + length - 1) >>> 12; page++)
+        {
+            writes.set(page, (writes.get(page) ?? 0) + 1);
+        }
+    };
+    let free = RAM_BASE;
+    const api = await graphicsModule.create({
+        device: { device: gpu.device, queue: gpu.queue, presentTo: ()=>{} },
+        allocate: (/** @type {number} */ bytes)=>{
+            const at = free;
+            free += (bytes + 0xfff) & ~0xfff;
+            return at;
+        },
+    }, hostWith(memory));
+    /** @type {{ device?: any }} */
+    const out = {};
+    assert.equal(api.create('d3d9').CreateDevice({
+        swapEffect: 1, backBufferCount: 1, backBufferWidth: 4, backBufferHeight: 4,
+        backBufferFormat: D3DFMT.X8R8G8B8,
+    }, out), D3D_OK);
+    const LENGTH = 0x10000;
+    /** @type {{ buffer?: any }} */
+    const made = {};
+    assert.equal(out.device.CreateVertexBuffer(LENGTH, D3DUSAGE.DYNAMIC | D3DUSAGE.WRITEONLY, 0,
+        D3DPOOL.DEFAULT, made), D3D_OK);
+    const buffer = made.buffer;
+    /** @type {{ pBits?: number }} */
+    const locked = {};
+    assert.equal(buffer.Lock(0, 0, locked, D3DLOCK.DISCARD), D3D_OK);
+    write(/** @type {number} */ (locked.pBits), LENGTH, 1);
+    assert.equal(buffer.Unlock(), D3D_OK);
+    const storage = buffer.AddStorage();
+    assert.notEqual(storage, 0);
+    assert.equal(buffer.Rename(storage), D3D_OK);
+    const from = gpu.calls.length;
+    assert.equal(buffer.Lock(0, 0, locked, D3DLOCK.NOOVERWRITE), D3D_OK);
+    assert.equal(locked.pBits, storage);
+    write(storage, 0x1000, 2);
+    assert.equal(buffer.Unlock(), D3D_OK);
+    assert.equal(out.device.Present(), D3D_OK);
+    await out.device.idle();
+    const uploaded = gpu.calls.slice(from).filter((/** @type {any} */ call)=>
+        call.op === 'writeBuffer' && call.buffer.descriptor?.label?.startsWith('vertices'))
+        .reduce((/** @type {number} */ sum, /** @type {any} */ call)=>sum + call.size, 0);
+    assert.ok(uploaded <= 0x1000, `a page written, not the buffer (${uploaded} bytes uploaded)`);
     await graphicsModule.dispose();
 });
 

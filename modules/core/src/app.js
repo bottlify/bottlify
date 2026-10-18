@@ -31,7 +31,7 @@ import { readTls } from './layers/loader/internal/tls.js';
 import { jumpBytes, relocatablePrefix } from './layers/loader/internal/hooks.js';
 import { mangledCall } from './layers/loader/internal/mangling.js';
 import { mapImage } from './layers/loader/internal/image.js';
-import { createProcessBlocks, TEB } from './layers/win32/kernel32/teb.js';
+import { createProcessBlocks, TEB, TLS_SLOTS } from './layers/win32/kernel32/teb.js';
 import { supportedOsOf, windowsVersion } from './layers/win32/kernel32/versions.js';
 import { GRAPHICS_CHOICES, graphicsChoice } from './layers/graphics/choice.js';
 import { searchesBesideProgram } from './layers/win32/kernel32/modules.js';
@@ -276,7 +276,7 @@ const hashText = (hash, text)=>{
  *           due within 16 ms. Default ten quanta.
  * @property {{ cores?: number, eager?: boolean, placement?: 'auto' | 'spread' | 'concentrate',
  *           placementTiming?: Partial<import('./layers/kernel/internal/placement.js').PlacementOptions>,
- *           playPinned?: boolean }} [cpu]
+ *           playPinned?: boolean, freeHost?: boolean }} [cpu]
  *           The machine's processor. `cores`: how many
  *           processors the program is told it has -- by every road Windows has to say
  *           it -- and the executors that run its threads at once, each a worker past
@@ -296,7 +296,10 @@ const hashText = (hash, text)=>{
  *           `playPinned`: false keeps every processor on its own core; by default a
  *           thread the program pinned to one processor and that calls into the host
  *           often has its processor played by the process's own core, where those
- *           calls are answered.
+ *           calls are answered. `freeHost`: true keeps the process's own core for
+ *           the host's answers while a thread is pinned to its processor (a game's
+ *           main thread, pinned to the first), the processor played by another core;
+ *           off by default, and with it on the threads spread with no trial.
  * @property {number} [executors]  `cpu.cores` by its older name: executors of the
  *           program's process under cork, past the process's own thread each a worker
  *           running one of its threads at once with the others, the locked
@@ -3749,6 +3752,14 @@ async function buildApp(options){
      * } | null}
      */
     let threadBlocks = null;
+    /**
+     * Gives a thread made after the process's first its own copy of every
+     * image's thread-local block, in the slot the image was given, as the
+     * loader does for each thread; set once the blocks are known.
+     *
+     * @type {(tls: number) => void}
+     */
+    let threadLocalBlocks = ()=>{};
 
     /** Range requests outstanding: what a parked guest thread is really on. */
     let fetching = 0;
@@ -3978,6 +3989,9 @@ async function buildApp(options){
             // A host-bound thread pinned to one processor has it played by the
             // process's own executor (the kernel's `playPinned`) unless false.
             playPinned: options.cpu?.playPinned,
+            // The process's own executor kept for the host's answers while a
+            // thread is pinned to its processor (the kernel's `freeHost`).
+            freeHost: options.cpu?.freeHost,
             // Off unless asked for: see the kernel's `preemption`.
             preemption: options.preemption,
             // Every thread gets the stack the image was linked to expect, the
@@ -4793,6 +4807,7 @@ async function buildApp(options){
                 if (block)
                 {
                     thread.tebAddress = block.teb;
+                    threadLocalBlocks(block.tls);
                 }
             },
             idle: ()=>new Promise(resolve=>idlers.push(()=>resolve(undefined))),
@@ -6307,9 +6322,32 @@ async function buildApp(options){
                 indexAddress: held.base + directory.indexRva,
                 blockAddress,
                 callbacks: directory.callbackRvas.map(rva=>held.base + rva),
+                template: directory.template,
+                size,
             },
         };
     });
+    // Every later thread's blocks are copies of the same templates, in the
+    // slots the first thread's were given. Without them a thread's
+    // thread-local variables were at linear address zero and up, the same
+    // bytes for every thread but the first: Call of Duty 4's renderer and its
+    // two workers kept their scratch buffers' pointers there, and a worker
+    // culled shadow casters into lists another was filling.
+    const templates = withTls.flatMap(held=>(held.tls ? [held.tls] : []));
+    threadLocalBlocks = tls=>{
+        for (const { indexAddress, template, size } of templates)
+        {
+            const slot = memory.readU32(indexAddress);
+            if (slot >= TLS_SLOTS)
+            {
+                continue;
+            }
+            const at = allocateFromHeap(size);
+            memory.writeBytes(at, new Uint8Array(size));
+            memory.writeBytes(at, template);
+            memory.writeU32(tls + slot * 4, at);
+        }
+    };
 
     // Every library the program brought with it is attached before the program
     // runs, on the process's first thread, in dependency order -- which is what

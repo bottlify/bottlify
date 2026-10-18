@@ -258,6 +258,30 @@ function gpuReads(gpu){
         return key;
     };
     let from = 0;
+    /**
+     * Calls recorded into command buffers not submitted yet, and the encoder
+     * of each pass: a submit's buffers run in the order it names them, which
+     * is not the order their calls were recorded in -- the copies a rename
+     * carries are encoded at a frame's end and run before its draws.
+     *
+     * @type {any[]}
+     */
+    let pending = [];
+    /** @type {Map<any, any>} */
+    const passEncoders = new Map();
+    const createEncoder = gpu.device.createCommandEncoder.bind(gpu.device);
+    gpu.device.createCommandEncoder = (/** @type {any} */ descriptor)=>{
+        const encoder = createEncoder(descriptor);
+        const beginRenderPass = encoder.beginRenderPass;
+        encoder.beginRenderPass = (/** @type {any} */ passDescriptor)=>{
+            const pass = beginRenderPass(passDescriptor);
+            passEncoders.set(pass, encoder);
+            return pass;
+        };
+        return encoder;
+    };
+    /** @param {any} call */
+    const encoderOf = call=>call.encoder ?? (call.pass ? passEncoders.get(call.pass) : undefined);
     const submit = gpu.queue.submit.bind(gpu.queue);
     gpu.queue.submit = (/** @type {any[]} */ buffers)=>{
         /** @type {Map<any, Uint8Array>} */
@@ -313,10 +337,8 @@ function gpuReads(gpu){
                 textures: bound.flatMap(([, group])=>group.textures),
             });
         };
-        const calls = gpu.calls;
-        for (let i = from; i < calls.length; i++)
-        {
-            const call = calls[i];
+        /** @param {any} call */
+        const apply = call=>{
             if (call.op === 'beginRenderPass')
             {
                 viewport = 'whole';
@@ -392,8 +414,33 @@ function gpuReads(gpu){
                 draw(`drawIndexed ${order.map(index=>`${index}:${vertexAt(base + index)}`)
                     .join(' ')}`);
             }
+        };
+        const calls = gpu.calls;
+        for (let i = from; i < calls.length; i++)
+        {
+            const call = calls[i];
+            if (encoderOf(call) === undefined)
+            {
+                apply(call);
+            }
+            else
+            {
+                pending.push(call);
+            }
         }
         from = calls.length;
+        for (const buffer of buffers)
+        {
+            for (const call of pending)
+            {
+                if (encoderOf(call) === buffer.encoder)
+                {
+                    apply(call);
+                }
+            }
+        }
+        const submitted = new Set(buffers.map(buffer=>buffer.encoder));
+        pending = pending.filter(call=>!submitted.has(encoderOf(call)));
         const made = submit(buffers);
         for (const { line, textures } of drawn)
         {
@@ -462,7 +509,16 @@ const bytesFor = (indices, length, fill)=>(indices
  *     | { kind: 'light', seed: number, on: boolean }
  *     | { kind: 'clip', index: number, seed: number }
  *     | { kind: 'viewport', rect: number[] }
- *     | { kind: 'present' }} Step
+ *     | { kind: 'present' }
+ *     | { kind: 'hold', on: string, offset: number, size: number, flags: number }
+ *     | { kind: 'write', on: string, offset: number, size: number, fill: number }
+ *     | { kind: 'release', on: string }
+ *     | { kind: 'refused', on: string, offset: number, size: number, flags: number }} Step
+ *
+ * A hold is a lock left held, written through by the writes after it; a write
+ * goes through what the buffer's last lock handed back, held or let go of; a
+ * refused lock is one past the buffer's end, which the program does not
+ * unlock.
  */
 
 /**
@@ -716,6 +772,266 @@ function generate(seed, steps, upUnbinds, nine){
 }
 
 /**
+ * A program that streams its geometry through the dynamic buffers as a
+ * game's renderer does, and keeps the promises `generate` keeps: each draw's
+ * vertices or indices written under NOOVERWRITE after the last ones, a
+ * DISCARD at the buffer's end or now and then before it, the vertex buffer an
+ * indexed draw reaches refilled whole. Now and then a buffer is held locked
+ * across draws from it and calls into the host, as a skinning cache is, a
+ * buffer is written through the pointer its last lock handed back after the
+ * unlock, and a lock past a buffer's end is refused. What `generate` makes
+ * only now and then is here in every frame: a DISCARD under draws the ring
+ * holds, which the guest's lock answers by moving the buffer onto another
+ * storage of its own (`d3d8/storages.js`), and locks, writes and draws of a
+ * storage the device has not moved onto yet.
+ *
+ * @param {number} seed @param {number} steps  how many
+ * @param {boolean} nine  whether the device is Direct3D 9's, which has event queries
+ * @returns {Step[]}
+ */
+export function streaming(seed, steps, nine){
+    const { below, pick } = random(seed);
+    const buffers = [...STREAMS, IB];
+    /** @type {Record<string, { read: Uint8Array, defined: Uint8Array, unit: number }>} */
+    const book = Object.fromEntries(buffers.map(on=>[on, {
+        read: new Uint8Array(bytesOfBuffer(on)), defined: new Uint8Array(bytesOfBuffer(on)),
+        unit: on === IB ? 2 : FORMATS[STREAMS.indexOf(on)].stride }]));
+    /** Where each buffer's next units go, in units. @type {Record<string, number>} */
+    const cursor = Object.fromEntries(buffers.map(on=>[on, 0]));
+    /** The bytes each buffer's last lock handed out, written through after it. */
+    /** @type {Record<string, [number, number] | null>} */
+    const handed = Object.fromEntries(buffers.map(on=>[on, null]));
+    /** The buffer held locked, and its lock's end in units. */
+    /** @type {{ now: { on: string, end: number } | null }} */
+    const held = { now: null };
+    /** @type {Step[]} */
+    const program = [];
+    let stream = 0;
+    let base = 0;
+    // Half the programs call into the host a quarter as often, so that a
+    // buffer is discarded again and again before the host looks and moves
+    // round all its storages.
+    const calm = below(2) === 0;
+    /** @param {string} on @param {number} from @param {number} to  bytes */
+    const unread = (on, from, to)=>!book[on].read.subarray(from, to).includes(1);
+    /**
+     * Locks a buffer for `units` more, held or not: after the last ones under
+     * NOOVERWRITE where they fit and nothing drawn since the last lock without
+     * it read them, from the start under a DISCARD otherwise; sometimes a
+     * DISCARD for no reason, sometimes a plain lock, which keeps the bytes and
+     * waits for the draws. The lock reaches `units` or further, to the end.
+     *
+     * @param {string} on @param {number} units @param {boolean} hold
+     * @returns {number} the first unit
+     */
+    const lock = (on, units, hold)=>{
+        const entry = book[on];
+        const total = entry.read.length / entry.unit;
+        let first = cursor[on];
+        let flags = D3DLOCK_NOOVERWRITE;
+        if (first + units > total || below(10) === 0
+            || !unread(on, first * entry.unit, (first + units) * entry.unit))
+        {
+            first = 0;
+            flags = pick([D3DLOCK_DISCARD, D3DLOCK_DISCARD, D3DLOCK_DISCARD, D3DLOCK_DISCARD,
+                D3DLOCK_DISCARD | D3DLOCK_NOOVERWRITE, 0]);
+        }
+        const toEnd = hold || below(5) === 0;
+        const end = toEnd ? total : first + units;
+        if (flags === D3DLOCK_NOOVERWRITE && !unread(on, first * entry.unit, end * entry.unit))
+        {
+            return lock(on, units, false);
+        }
+        const offset = first * entry.unit;
+        const bytes = (end - first) * entry.unit;
+        if ((flags & D3DLOCK_NOOVERWRITE) === 0)
+        {
+            entry.read = new Uint8Array(entry.read.length);
+        }
+        if ((flags & D3DLOCK_DISCARD) !== 0)
+        {
+            entry.defined = new Uint8Array(entry.defined.length);
+        }
+        const size = toEnd && below(2) === 0 ? 0 : bytes;
+        handed[on] = [offset, offset + bytes];
+        if (hold)
+        {
+            program.push({ kind: 'hold', on, offset, size, flags });
+            program.push({ kind: 'write', on, offset, size: units * entry.unit,
+                fill: 1 + below(250) });
+            entry.defined.fill(1, offset, offset + units * entry.unit);
+            held.now = { on, end };
+        }
+        else
+        {
+            program.push({ kind: 'lock', on, offset, size, flags, fill: 1 + below(250),
+                twice: below(16) === 0, between: below(6) === 0 ? pick(TEXTURES) : null });
+            entry.defined.fill(1, offset, offset + bytes);
+        }
+        cursor[on] = first + units;
+        return first;
+    };
+    /**
+     * Room for `units` more in a buffer: in the held lock where it has room
+     * left, written there; otherwise let go of and locked again.
+     *
+     * @param {string} on @param {number} units
+     * @returns {number} the first unit
+     */
+    const place = (on, units)=>{
+        const entry = book[on];
+        if (held.now?.on === on)
+        {
+            const first = cursor[on];
+            if (first + units <= held.now.end
+                && unread(on, first * entry.unit, (first + units) * entry.unit))
+            {
+                program.push({ kind: 'write', on, offset: first * entry.unit,
+                    size: units * entry.unit, fill: 1 + below(250) });
+                entry.defined.fill(1, first * entry.unit, (first + units) * entry.unit);
+                cursor[on] = first + units;
+                return first;
+            }
+            program.push({ kind: 'release', on });
+            held.now = null;
+        }
+        return lock(on, units, false);
+    };
+    while (program.length < steps)
+    {
+        const roll = below(100);
+        if (roll < 30)
+        {
+            const on = STREAMS[stream];
+            const type = pick([D3DPT_TRIANGLELIST, D3DPT_TRIANGLESTRIP, D3DPT_TRIANGLEFAN]);
+            const triangles = 1 + below(4);
+            const count = VERTICES_FOR[type](triangles);
+            const start = place(on, count);
+            const unit = book[on].unit;
+            book[on].read.fill(1, start * unit, (start + count) * unit);
+            program.push({ kind: 'draw', type, start, triangles });
+        }
+        else if (roll < 58)
+        {
+            const on = STREAMS[stream];
+            const unit = book[on].unit;
+            if (book[on].defined.subarray(base * unit, (base + REACH) * unit).includes(0))
+            {
+                // The vertices the indices name, written whole.
+                if (held.now?.on === on)
+                {
+                    program.push({ kind: 'release', on });
+                    held.now = null;
+                }
+                program.push({ kind: 'lock', on, offset: 0, size: 0, flags: D3DLOCK_DISCARD,
+                    fill: 1 + below(250), twice: false, between: null });
+                book[on].read = new Uint8Array(book[on].read.length);
+                book[on].defined = new Uint8Array(book[on].defined.length).fill(1);
+                handed[on] = [0, book[on].read.length];
+                cursor[on] = VERTICES;
+            }
+            const type = pick([D3DPT_TRIANGLELIST, D3DPT_TRIANGLESTRIP, D3DPT_TRIANGLEFAN]);
+            const triangles = 1 + below(4);
+            const count = VERTICES_FOR[type](triangles);
+            const start = place(IB, count);
+            book[IB].read.fill(1, start * 2, (start + count) * 2);
+            book[on].read.fill(1, base * unit, (base + REACH) * unit);
+            program.push({ kind: 'indexed', type, start, triangles, base });
+        }
+        else if (roll < 62 && held.now === null)
+        {
+            const on = pick([...STREAMS, ...STREAMS, IB]);
+            const entry = book[on];
+            lock(on, 1 + below(Math.min(24, entry.read.length / entry.unit)), true);
+        }
+        else if (roll < 64 && held.now !== null)
+        {
+            program.push({ kind: 'release', on: held.now.on });
+            held.now = null;
+        }
+        else if (roll < 67)
+        {
+            // Through the pointer the last lock handed back, over what no
+            // draw since has read.
+            const on = pick(buffers);
+            const range = handed[on];
+            const unit = book[on].unit;
+            if (range === null)
+            {
+                continue;
+            }
+            const units = (range[1] - range[0]) / unit;
+            const first = range[0] / unit + below(units);
+            const span = 1 + below(Math.min(8, range[1] / unit - first));
+            if (!unread(on, first * unit, (first + span) * unit))
+            {
+                continue;
+            }
+            program.push({ kind: 'write', on, offset: first * unit, size: span * unit,
+                fill: 1 + below(250) });
+            book[on].defined.fill(1, first * unit, (first + span) * unit);
+        }
+        else if (roll < 69)
+        {
+            const on = pick(buffers.filter(each=>each !== held.now?.on));
+            const length = bytesOfBuffer(on);
+            const unit = book[on].unit;
+            const offset = below(2) === 0 ? length : unit * (1 + below(length / unit - 1));
+            program.push({ kind: 'refused', on, offset, size: offset === length ? 0
+                : length - offset + unit, flags: pick([D3DLOCK_DISCARD, D3DLOCK_NOOVERWRITE, 0]) });
+        }
+        else if (roll < 72)
+        {
+            stream = below(STREAMS.length);
+            base = 0;
+            program.push({ kind: 'stream', which: stream });
+        }
+        else if (roll < 75)
+        {
+            base = below(BASES + 1);
+            program.push({ kind: 'indices', base });
+        }
+        else if (roll < 81)
+        {
+            program.push(pick([{ kind: 'world', seed: below(1000) },
+                { kind: 'factor', value: below(0x1000000) },
+                { kind: 'reference', on: pick(buffers) }]));
+        }
+        else if (roll >= 81 && calm && below(4) !== 0)
+        {
+            continue;
+        }
+        else if (roll < 84)
+        {
+            program.push({ kind: 'texels', on: pick(TEXTURES), through: pick(['texture', 'level']),
+                fill: below(256) });
+        }
+        else if (roll < 86)
+        {
+            program.push({ kind: 'texels', on: SOURCE, through: 'texture', fill: below(256) });
+            program.push({ kind: 'copy', through: pick(['texture', 'surface']) });
+        }
+        else if (roll < 88 && nine)
+        {
+            program.push({ kind: 'query', issue: below(4) !== 0, flush: below(2) === 0 });
+        }
+        else if (roll < 90)
+        {
+            program.push({ kind: 'texture', on: pick([...TEXTURES, null]) });
+        }
+        else
+        {
+            program.push({ kind: 'present' });
+        }
+    }
+    if (held.now !== null)
+    {
+        program.push({ kind: 'release', on: held.now.on });
+    }
+    return program;
+}
+
+/**
  * The program run on one machine: its answers, what it read back, what the
  * GPU was given, and which calls the guest code took.
  *
@@ -723,7 +1039,7 @@ function generate(seed, steps, upUnbinds, nine){
  * @param {boolean} [worker]  whether the device records for a twin that draws, as in a
  *     graphics worker
  */
-async function play(version, guestCode, steps, worker = false){
+export async function play(version, guestCode, steps, worker = false){
     const calls = callsOf(version);
     // Clip planes, which a Direct3D 9 device has none of until it is told it
     // has: its guest code takes a plane only below the count.
@@ -736,6 +1052,12 @@ async function play(version, guestCode, steps, worker = false){
     /** How many times each call was answered D3D_OK, so the gate knows it took the path. */
     /** @type {Map<string, number>} */
     const done = new Map();
+    /**
+     * The guest's DISCARDs that moved a buffer onto another storage of its own
+     * (`d3d8/storages.js`): the lock handed back an address off the storage
+     * the device still holds, whose move waits in the ring.
+     */
+    let moves = 0;
     /** @param {Call} call @param {number} [readBack]  bytes of an answer to keep */
     const run = (call, readBack = 0)=>{
         const answer = m.run(call);
@@ -947,15 +1269,77 @@ async function play(version, guestCode, steps, worker = false){
     gpu.length = 0;
     inGuest.clear();
     done.clear();
+    moves = 0;
+
+    /** Where each buffer's last lock put its first byte, for the writes after it. */
+    /** @type {Map<string, number>} */
+    const lockedAt = new Map();
+    /** The storages each buffer's locks handed out, by where each begins. */
+    /** @type {Map<string, Set<number>>} */
+    const storages = new Map();
+    /**
+     * The held locks whose storage the device had not moved onto when the
+     * program took them, and the calls into the host made while one was held.
+     */
+    /** @type {Set<string>} */
+    const heldAhead = new Set();
+    let heldAcross = 0;
+    /**
+     * A lock as the program takes it, and whether it was handed a storage the
+     * device still holds.
+     *
+     * @param {string} on @param {number} offset @param {number} size @param {number} flags
+     */
+    const lockOf = (on, offset, size, flags)=>{
+        const answer = run(calls.lock(on, offset, size, flags));
+        const at = m.memory.readU32(OUT);
+        if (answer.eax !== 0)
+        {
+            return { answer, at, ahead: false };
+        }
+        const ahead = at - offset !== m.countOf(on)?.base;
+        if (ahead && answer.traps.length === 0)
+        {
+            moves++;
+        }
+        lockedAt.set(on, at - offset);
+        storages.set(on, (storages.get(on) ?? new Set()).add(at - offset));
+        return { answer, at, ahead };
+    };
 
     run(calls.device('BeginScene'));
     let stream = 0;
     for (const step of steps)
     {
-        if (step.kind === 'lock')
+        if (heldAhead.size > 0 && ['texels', 'copy', 'query', 'stretch', 'target', 'present']
+            .includes(step.kind))
         {
-            const answer = run(calls.lock(step.on, step.offset, step.size, step.flags));
-            const at = m.memory.readU32(OUT);
+            heldAcross++;
+        }
+        if (step.kind === 'hold')
+        {
+            if (lockOf(step.on, step.offset, step.size, step.flags).ahead)
+            {
+                heldAhead.add(step.on);
+            }
+        }
+        else if (step.kind === 'write')
+        {
+            write(/** @type {number} */ (lockedAt.get(step.on)) + step.offset,
+                bytesFor(step.on === IB, step.size, step.fill));
+        }
+        else if (step.kind === 'release')
+        {
+            run(calls.unlock(step.on));
+            heldAhead.delete(step.on);
+        }
+        else if (step.kind === 'refused')
+        {
+            run(calls.lock(step.on, step.offset, step.size, step.flags));
+        }
+        else if (step.kind === 'lock')
+        {
+            const { answer, at } = lockOf(step.on, step.offset, step.size, step.flags);
             const length = step.size === 0 ? bytesOfBuffer(step.on) - step.offset : step.size;
             const bytes = bytesFor(step.on === IB, length, step.fill);
             const writing = answer.eax === 0 && step.flags !== D3DLOCK_READONLY;
@@ -1152,7 +1536,8 @@ async function play(version, guestCode, steps, worker = false){
     run(calls.device('EndScene'));
     run(calls.present);
     await idle(m.gpu);
-    return { answers, gpu, inGuest, done };
+    return { answers, gpu, inGuest, done, moves, heldAcross,
+        storages: Object.fromEntries([...storages].map(([on, set])=>[on, set.size])) };
 }
 
 /** @typedef {Awaited<ReturnType<typeof play>>} Played */
@@ -1222,6 +1607,33 @@ const GATES = {
 };
 
 /**
+ * Where the GPU draws of one program part, down each pair of a gate's arms.
+ *
+ * @param {Version} version @param {typeof GATES[keyof typeof GATES]} gate
+ * @param {Step[]} steps @param {Map<string, Played>} [played]  each arm's run, filled
+ * @returns {Promise<string[]>}
+ */
+async function partings(version, gate, steps, played = new Map()){
+    for (const [name, guestCode, worker] of gate.arms)
+    {
+        played.set(name, await play(version, guestCode, steps, worker));
+    }
+    /** @type {string[]} */
+    const wrong = [];
+    for (const [one, other] of gate.pairs)
+    {
+        const a = /** @type {Played} */ (played.get(one));
+        const b = /** @type {Played} */ (played.get(other));
+        const found = parting([one, a.gpu], [other, b.gpu], 'GPU draw');
+        if (found)
+        {
+            wrong.push(found);
+        }
+    }
+    return wrong;
+}
+
+/**
  * One gate for one version, each a file of its own
  * (`frames-contract-<version>-<gate>.itest.js`): all four in one file ran
  * past the minute a file is given.
@@ -1239,6 +1651,7 @@ export function frameGate(version, which){
         const taken = new Map();
         /** @type {Map<string, number>} */
         const answered = new Map();
+        let moves = 0;
         for (let seed = 1; seed <= 40 && wrong.length === 0; seed++)
         {
             const steps = generate(seed, 200, callsOf(version).upUnbinds, nine);
@@ -1248,6 +1661,7 @@ export function frameGate(version, which){
             {
                 const run = await play(version, guestCode, steps, worker);
                 played.set(name, run);
+                moves += run.moves;
                 for (const [method, times] of run.inGuest)
                 {
                     taken.set(method, (taken.get(method) ?? 0) + times);
@@ -1282,5 +1696,166 @@ export function frameGate(version, which){
         const done = [...DONE, ...nine ? DONE_9 : DONE_8];
         assert.deepEqual(done.filter(method=>!((answered.get(method) ?? 0) > 20)), [],
             `each copy, target and query was made: ${JSON.stringify([...answered])}`);
+        assert.ok(moves > 10, `DISCARDs under draws moved buffers onto storages of their own (${
+            moves})`);
+    });
+
+    test(`${nine ? 'Direct3D 9' : 'Direct3D 8'}: an index buffer moved off a storage the guest`
+        + ` wrote since the host last looked draws what was written there, ${gate.subject}`,
+    async()=>{
+        // Indices read at each draw, a DISCARD under them that comes to the
+        // host and gives the buffer another storage, one the guest's lock
+        // moves the buffer onto, a present that makes the move; then a
+        // NOOVERWRITE write of the storage moved onto, a draw of it, and a
+        // DISCARD that moves the buffer back before the host has looked: the
+        // draw reads what that write left on the storage it was made with.
+        const lock = (/** @type {number} */ flags, /** @type {number} */ fill,
+            offset = 0, size = 0)=>/** @type {Step} */ ({ kind: 'lock', on: IB, offset, size,
+            flags, fill, twice: false, between: null });
+        const draw = (/** @type {number} */ start, /** @type {number} */ triangles)=>
+            /** @type {Step} */ ({ kind: 'indexed', type: D3DPT_TRIANGLELIST, start, triangles,
+                base: 0 });
+        const steps = [draw(0, 2), lock(D3DLOCK_DISCARD, 11), draw(0, 2),
+            lock(D3DLOCK_DISCARD, 22), draw(0, 2), /** @type {Step} */ ({ kind: 'present' }),
+            lock(D3DLOCK_NOOVERWRITE, 33, 96, 24), draw(48, 4), lock(D3DLOCK_DISCARD, 44),
+            draw(0, 2), draw(24, 2)];
+        /** @type {Map<string, Played>} */
+        const played = new Map();
+        assert.deepEqual(await partings(version, gate, steps, played), []);
+        const guestArms = gate.arms.filter(([, guestCode])=>guestCode);
+        assert.ok(guestArms.every(([name])=>(played.get(name)?.moves ?? 0) === 2),
+            `the guest moved the buffer twice: ${guestArms.map(([name])=>
+                played.get(name)?.moves).join(', ')}`);
+    });
+
+    test(`${nine ? 'Direct3D 9' : 'Direct3D 8'}: a buffer discarded in place and then moved under`
+        + ` draws has the discard made before the draws after it, ${gate.subject}`, async()=>{
+        // A DISCARD under a draw comes to the host and gives the buffer
+        // another storage; a call into the host makes the draws; a DISCARD
+        // in place, with no draw in the ring, which the host replays before
+        // the ring's next run; a draw; and a DISCARD under it, which the
+        // guest's lock may not answer with a move: that would hold the
+        // replay of the one in place back past the draw, and the draw before
+        // it would read what was written after.
+        const STREAM = STREAMS[0];
+        const lock = (/** @type {number} */ fill)=>/** @type {Step} */ ({ kind: 'lock',
+            on: STREAM, offset: 0, size: 0, flags: D3DLOCK_DISCARD, fill, twice: false,
+            between: null });
+        const draw = /** @type {Step} */ ({ kind: 'draw', type: D3DPT_TRIANGLELIST, start: 0,
+            triangles: 2 });
+        const steps = [draw, lock(11), draw, /** @type {Step} */ ({ kind: 'refused', on: STREAM,
+            offset: bytesOfBuffer(STREAM), size: 0, flags: 0 }), lock(22), draw, lock(33), draw];
+        const wrong = await partings(version, gate, steps);
+        assert.deepEqual(wrong, []);
+    });
+
+    test(`${nine ? 'Direct3D 9' : 'Direct3D 8'}: a DISCARD the buffer refuses leaves it where it`
+        + ` was, under draws, ${gate.subject}`, async()=>{
+        // The buffer has another storage the guest could move it onto, a draw
+        // is in the ring, and a DISCARD past the buffer's end fails: what the
+        // buffer held is what the draw after reads.
+        const STREAM = STREAMS[0];
+        const draw = /** @type {Step} */ ({ kind: 'draw', type: D3DPT_TRIANGLELIST, start: 0,
+            triangles: 2 });
+        const steps = [draw, /** @type {Step} */ ({ kind: 'lock', on: STREAM, offset: 0, size: 0,
+            flags: D3DLOCK_DISCARD, fill: 11, twice: false, between: null }), draw,
+        /** @type {Step} */ ({ kind: 'refused', on: STREAM, offset: 16,
+            size: bytesOfBuffer(STREAM), flags: D3DLOCK_DISCARD }), draw];
+        const wrong = await partings(version, gate, steps);
+        assert.deepEqual(wrong, []);
+    });
+
+    test(`${nine ? 'Direct3D 9' : 'Direct3D 8'}: a lock the host took and the guest let go of`
+        + ` keeps what it was drawn with when the guest locks again, ${gate.subject}`, async()=>{
+        // A lock with neither flag under a draw is the host's; the program
+        // writes, draws and presents with it held, lets go of it in the guest,
+        // and discards the buffer, with no draw in the ring, before the host
+        // looks again: the host's unlock must not take what the DISCARD wrote
+        // for the bytes the draw before it read.
+        const STREAM = STREAMS[0];
+        const length = bytesOfBuffer(STREAM);
+        const draw = /** @type {Step} */ ({ kind: 'draw', type: D3DPT_TRIANGLELIST, start: 0,
+            triangles: 2 });
+        const steps = /** @type {Step[]} */ ([draw,
+            { kind: 'hold', on: STREAM, offset: 0, size: 0, flags: 0 },
+            { kind: 'write', on: STREAM, offset: 0, size: length, fill: 41 }, draw,
+            { kind: 'present' }, { kind: 'release', on: STREAM },
+            { kind: 'lock', on: STREAM, offset: 0, size: 0, flags: D3DLOCK_DISCARD, fill: 118,
+                twice: false, between: null }, draw]);
+        const wrong = await partings(version, gate, steps);
+        assert.deepEqual(wrong, []);
+    });
+
+    test(`${nine ? 'Direct3D 9' : 'Direct3D 8'}: a buffer moved back onto a storage and written`
+        + ` with the bytes it held there before draws them, ${gate.subject}`, async()=>{
+        // Moved off its first storage, back, and off again onto the second,
+        // written each time it is moved with what that storage held the time
+        // before: nothing of the storage changes, while the buffer's copy on
+        // the GPU holds what the storage it left was written with.
+        const STREAM = STREAMS[0];
+        const lock = (/** @type {number} */ fill)=>/** @type {Step} */ ({ kind: 'lock',
+            on: STREAM, offset: 0, size: 0, flags: D3DLOCK_DISCARD, fill, twice: false,
+            between: null });
+        const draw = /** @type {Step} */ ({ kind: 'draw', type: D3DPT_TRIANGLELIST, start: 0,
+            triangles: 2 });
+        const present = /** @type {Step} */ ({ kind: 'present' });
+        const steps = [draw, lock(11), draw, lock(22), draw, present, draw, lock(33), draw,
+            present, draw, lock(22), draw, present, draw, lock(33), draw];
+        const wrong = await partings(version, gate, steps);
+        assert.deepEqual(wrong, []);
+    });
+
+    test(`${nine ? 'Direct3D 9' : 'Direct3D 8'}: the GPU is given what it would be ${gate.subject},`
+        + ' whatever a frame streamed through its dynamic buffers', async()=>{
+        /** @type {string[]} */
+        const wrong = [];
+        let moves = 0;
+        let heldAcross = 0;
+        /** The most storages the guest code handed out of each buffer in one program. */
+        /** @type {Record<string, number>} */
+        const storages = {};
+        for (let seed = 1; seed <= 60 && wrong.length === 0; seed++)
+        {
+            const steps = streaming(seed, 300, nine);
+            /** @type {Map<string, Played>} */
+            const played = new Map();
+            for (const [name, guestCode, worker] of gate.arms)
+            {
+                const run = await play(version, guestCode, steps, worker);
+                played.set(name, run);
+                if (guestCode)
+                {
+                    moves += run.moves;
+                    heldAcross += run.heldAcross;
+                    for (const [on, count] of Object.entries(run.storages))
+                    {
+                        storages[on] = Math.max(storages[on] ?? 0, count);
+                    }
+                }
+            }
+            for (const [one, other] of gate.pairs)
+            {
+                const a = /** @type {Played} */ (played.get(one));
+                const b = /** @type {Played} */ (played.get(other));
+                for (const found of [
+                    parting([one, a.answers], [other, b.answers], 'answer'),
+                    parting([one, a.gpu], [other, b.gpu], 'GPU draw')])
+                {
+                    if (found)
+                    {
+                        wrong.push(`seed ${seed}: ${found}`);
+                    }
+                }
+            }
+        }
+        assert.deepEqual(wrong, []);
+        // Every buffer moved round all its storages, and calls into the host
+        // came while a lock of a storage the device had not moved onto was held.
+        assert.ok(moves > 1500, `locks handed out storages the device had not moved onto (${
+            moves})`);
+        assert.deepEqual([...STREAMS, IB].filter(on=>!(storages[on] >= 3)), [],
+            `each buffer moved round its storages: ${JSON.stringify(storages)}`);
+        assert.ok(heldAcross > 30, `calls into the host under a held lock of a storage the`
+            + ` device had not moved onto (${heldAcross})`);
     });
 }

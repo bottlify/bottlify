@@ -445,13 +445,30 @@ export const TEXTURE_COMMANDS = {
 };
 
 /**
+ * A dynamic buffer's own call the ring carries, numbered past the textures':
+ * the move onto another of its storages (`storages.js`) that the guest's lock
+ * makes for a DISCARD under draws the ring holds (`seam/shadow.js`,
+ * `lockCode`), made after those draws and before any later one. The record
+ * names the buffer first (`self`), then the storage. The same in both versions.
+ */
+export const BUFFER_SLOTS = /** @type {[string, number][]} */ ([['Buffer.Rename', 1]]);
+
+/** @type {Readonly<Record<string, CommandEntry>>} */
+export const BUFFER_COMMANDS = {
+    'Buffer.Rename': { args: 2, self: true, objects: [0],
+        make: (d, c)=>c.object()?.Rename(c.arg(1)) ?? D3DERR_INVALIDCALL },
+};
+
+/**
  * Direct3D 8's: its streams take a stride and no offset, its indices a base
  * vertex, its shaders are handles, its indexed draw has no base vertex, and
  * its shader constants are floats alone, up to what a 1.x shader has.
  */
-export const D3D8_COMMANDS = commandSet([...IDIRECT3DDEVICE8_SLOTS, ...TEXTURE_SLOTS], {
+export const D3D8_COMMANDS = commandSet([...IDIRECT3DDEVICE8_SLOTS, ...TEXTURE_SLOTS,
+    ...BUFFER_SLOTS], {
     ...SHARED_COMMANDS,
     ...TEXTURE_COMMANDS,
+    ...BUFFER_COMMANDS,
     SetTexture: { args: 2, objects: [1], within: [{ arg: 0, ranges: [[0, 7]] }],
         make: (d, c)=>d.SetTexture(c.arg(0), c.object()) },
     SetStreamSource: { args: 3, objects: [1],

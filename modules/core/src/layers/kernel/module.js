@@ -147,6 +147,17 @@ export function createKernelModule(){
                     state.resumeLog.shift();
                 }
             };
+            /**
+             * A thread held or parked in its call goes nowhere from it: its turn
+             * ends at the call. Run on, it took its stub's `ret` into the park
+             * loop and the loop's `hlt`; ended there by anything else -- a thread
+             * it readied, another executor's answer -- the resume took the `ret`
+             * and neither ran. Which one came first depends on the other
+             * executors' timing, and a thread's retired count with it.
+             */
+            const endTurnAtCall = ()=>{
+                cpu.stop?.();
+            };
 
             state.switcher = createSwitcher({ cpu });
             state.clock = createClock(config?.clock);
@@ -187,6 +198,7 @@ export function createKernelModule(){
                     ? config.placement : null,
                 placementTiming: config?.placementTiming,
                 playPinned: config?.playPinned,
+                freeHost: config?.freeHost,
                 // The guest's Sleep reads it (`mirrorReady`).
                 readyChanged: (/** @type {number} */ count)=>{
                     if (state.readyWord !== 0)
@@ -364,6 +376,7 @@ export function createKernelModule(){
                     memory.writeU32(esp, cpu.parkAddress());
                     noteResume(`hold ${state.scheduler.current()?.name}`
                         + `@0x${(returnAddress >>> 0).toString(16)}`);
+                    endTurnAtCall();
                     return returnAddress;
                 },
 
@@ -384,6 +397,7 @@ export function createKernelModule(){
                     noteResume(`park ${thread.name}@0x${(thread.parkedReturn >>> 0).toString(16)}`);
                     thread.resumeStack = restingStack;
                     memory.writeU32(esp, cpu.parkAddress());
+                    endTurnAtCall();
                 },
 
                 /**

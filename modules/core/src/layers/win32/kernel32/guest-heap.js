@@ -29,7 +29,12 @@
  * boundary) holds a lock word and, for each class, a stack of free cells --
  * the cache the guest takes from and gives back to, the cell and the address
  * of its word in each entry. The lock is taken with `xchg`, one instruction,
- * and the scheduler switches threads only between instructions, so a thread
+ * and given back with `lock and`: on several executors both are atomics,
+ * and what a thread wrote under the lock -- a cache's count, its entries --
+ * is there for the thread on another executor that takes it next, where a
+ * plain store of the free lock could reach that thread first on a host that
+ * reorders stores (arm64), and two threads take one cell. The scheduler
+ * switches threads only between instructions, so a thread
  * that finds it taken is one preempted inside a few instructions of its own;
  * it does not wait but hands its call to the host. The host touches a heap's
  * cache only while it holds the same lock, taken with one compare-and-swap:
@@ -390,8 +395,22 @@ export function createGuestHeap({ allocator, arena, memory }){
         memory.writeU32(at, 1);
         return true;
     };
-    /** @param {HeapState} heap */
-    const unlock = heap=>memory.writeU32(heap.handle + CONTROL.LOCK, 0);
+    /**
+     * Gives the heap's lock back, as an atomic where the memory is shared: what
+     * the host wrote under it is there before another executor finds it free.
+     * The host holds it, so it holds 1 -- a routine finding it taken writes 1 too.
+     *
+     * @param {HeapState} heap
+     */
+    const unlock = heap=>{
+        const at = heap.handle + CONTROL.LOCK;
+        if (memory.compareExchangeU32)
+        {
+            memory.compareExchangeU32(at, 1, 0);
+            return;
+        }
+        memory.writeU32(at, 0);
+    };
 
     /**
      * The oldest half of a full cache back to the host.
@@ -802,7 +821,7 @@ function allocBody(p, zero, pop){
         [0x8b, 0x5b, 0x04],                                  // mov ebx, [ebx + 4]: its word's
         [0x66, 0x89, 0x0b],                                  // mov [ebx], cx
         [0x5b],                                              // pop ebx
-        [0xc7, 0x02, ...dword(0)],                           // mov dword [edx], 0: unlocked
+        [0xf0, 0x83, 0x22, 0x00],                            // lock and dword [edx], 0: unlocked
         ...zero === 'flag' ? [
             [0xf6, 0x44, 0x24, 0x0c, 0x08],                  // test byte [esp + 12], 8
             { jump: JNZ, to: 'zero' },
@@ -824,7 +843,7 @@ function allocBody(p, zero, pop){
             ret,
         ],
         'empty',
-        [0xc7, 0x02, ...dword(0)],                           // mov dword [edx], 0
+        [0xf0, 0x83, 0x22, 0x00],                            // lock and dword [edx], 0
         'busy',
         [0x5e],                                              // pop esi
     ];
@@ -943,14 +962,14 @@ function freeBody(pop, answer){
         [0x89, 0x54, 0xc8, CONTROL.ENTRIES + 4],             // mov [eax + ecx*8 + 12], edx
         [0x41],                                              // inc ecx
         [0x89, 0x08],                                        // mov [eax], ecx
-        [0xc7, 0x03, ...dword(0)],                           // mov dword [ebx], 0: unlocked
+        [0xf0, 0x83, 0x23, 0x00],                            // lock and dword [ebx], 0: unlocked
         [0x5b],                                              // pop ebx
         [0x5e],                                              // pop esi
         'done',
         ...answer ? [[0xb8, ...dword(1)]] : [],              // mov eax, 1
         ret,
         'unlock',
-        [0xc7, 0x03, ...dword(0)],                           // mov dword [ebx], 0
+        [0xf0, 0x83, 0x23, 0x00],                            // lock and dword [ebx], 0
         'held',
         [0x5b],                                              // pop ebx
         'bad',
@@ -1132,4 +1151,91 @@ export function reallocCode(p, at, trap){
         [0x8b, 0x44, 0x24, 0x0c],                            // mov eax, [esp + 12]: the size
         ...resizeBody(0, null),
     ], at, trap);
+}
+
+/**
+ * GlobalAlloc as guest code: the process heap's HeapAlloc, as on Windows NT,
+ * with GMEM_ZEROINIT turned into HEAP_ZERO_MEMORY; a request for no bytes,
+ * which the host answers with a block of one, is the host's. A main thread
+ * that allocates and frees a few thousand times a second, on another
+ * executor, waited each time for the process's executor to answer.
+ *
+ *     mov eax, [esp+8]            ; bytes
+ *     test eax, eax
+ *     jz slow
+ *     mov ecx, [esp+4]
+ *     and ecx, GMEM_ZEROINIT
+ *     shr ecx, 3                  ; HEAP_ZERO_MEMORY
+ *     push eax
+ *     push ecx
+ *     push heap
+ *     call alloc                  ; the guest's HeapAlloc
+ *     ret 8
+ *   slow:
+ *     jmp trap
+ *
+ * @param {number} at  where the code lands @param {number} trap  the host's GlobalAlloc
+ * @param {number} heap  the process heap @param {number} alloc  the guest's HeapAlloc
+ * @returns {Uint8Array}
+ */
+export function globalAllocCode(at, trap, heap, alloc){
+    const slow = 33;
+    return new Uint8Array([
+        0x8b, 0x44, 0x24, 0x08,                              // 0: mov eax, [esp+8]
+        0x85, 0xc0,                                          // 4: test eax, eax
+        0x74, slow - 8,                                      // 6: jz slow
+        0x8b, 0x4c, 0x24, 0x04,                              // 8: mov ecx, [esp+4]
+        0x83, 0xe1, 0x40,                                    // 12: and ecx, GMEM_ZEROINIT
+        0xc1, 0xe9, 0x03,                                    // 15: shr ecx, 3
+        0x50,                                                // 18: push eax
+        0x51,                                                // 19: push ecx
+        0x68, ...dword(heap),                                // 20: push heap
+        0xe8, ...dword(alloc - (at + 30)),                   // 25: call alloc
+        0xc2, 0x08, 0x00,                                    // 30: ret 8
+        0xe9, ...dword(trap - (at + slow + 5)),              // 33: jmp trap
+    ]);
+}
+
+/**
+ * GlobalFree as guest code: the process heap's HeapFree, answered NULL when it
+ * took the block back; a block it does not -- another heap's, or not a block --
+ * goes to the host's GlobalFree as the call was made, which frees any block
+ * and answers a failure with the handle back.
+ *
+ *     mov eax, [esp+4]
+ *     test eax, eax
+ *     jz none                     ; NULL: NULL
+ *     push eax
+ *     push 0
+ *     push heap
+ *     call free                   ; the guest's HeapFree
+ *     test eax, eax
+ *     jz slow
+ *   none:
+ *     xor eax, eax
+ *     ret 4
+ *   slow:
+ *     jmp trap
+ *
+ * @param {number} at  where the code lands @param {number} trap  the host's GlobalFree
+ * @param {number} heap  the process heap @param {number} free  the guest's HeapFree
+ * @returns {Uint8Array}
+ */
+export function globalFreeCode(at, trap, heap, free){
+    const none = 25;
+    const slow = 30;
+    return new Uint8Array([
+        0x8b, 0x44, 0x24, 0x04,                              // 0: mov eax, [esp+4]
+        0x85, 0xc0,                                          // 4: test eax, eax
+        0x74, none - 8,                                      // 6: jz none
+        0x50,                                                // 8: push eax
+        0x6a, 0x00,                                          // 9: push 0
+        0x68, ...dword(heap),                                // 11: push heap
+        0xe8, ...dword(free - (at + 21)),                    // 16: call free
+        0x85, 0xc0,                                          // 21: test eax, eax
+        0x74, slow - 25,                                     // 23: jz slow
+        0x31, 0xc0,                                          // 25: xor eax, eax
+        0xc2, 0x04, 0x00,                                    // 27: ret 4
+        0xe9, ...dword(trap - (at + slow + 5)),              // 30: jmp trap
+    ]);
 }

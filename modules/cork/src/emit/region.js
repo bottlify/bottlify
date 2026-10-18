@@ -250,6 +250,8 @@ const LOCAL_TYPES = [
  *     rounds to single with no test of its own, and a block leaves with `PRECISION` if it
  *     finds another precision set
  * @property {boolean} [atomic]  locked instructions as wasm atomics (`locked.js`)
+ * @property {boolean} [ordered]  with atomic, a load or store of an integer operand not
+ *     through esp as a wasm atomic where its address allows (`readOp`, `writeOp`)
  * @property {boolean} [checkReads]  an instruction that only reads tests its pages too
  * @property {boolean} [precise]  every relaxation off (the runtime's `precise`): the x87
  *     exception flags, the signalling-NaN tests, the underflow test and C1 kept as the processor
@@ -302,13 +304,16 @@ const LOCAL_TYPES = [
  *     countTransfers?: boolean, wide?: boolean, narrow?: boolean, blockProfile?: boolean,
  *     structure?: boolean, precise?: boolean, place?: number, profileCalls?: boolean,
  *     resume?: boolean, callReturn?: boolean, emptySites?: boolean, looseStacks?: boolean,
- *     atomic?: boolean, checkReads?: boolean, expansion?: ExpansionNote | null }}
+ *     atomic?: boolean, ordered?: boolean, checkReads?: boolean,
+ *     expansion?: ExpansionNote | null }}
  *     [options]  expansion: told every instruction's wasm bytes as it is emitted
  *     (`tools/cork-expansion.mjs`), in a diagnostic build only; checkReads: an
  *     instruction that only reads tests its pages too, so a page the program cannot read
  *     faults (a reservation not committed, PAGE_NOACCESS) rather than reading RAM;
  *     atomic: locked instructions as wasm atomics (`locked.js`), for a process
- *     whose threads run on more than one executor; looseStacks: a store through esp alone
+ *     whose threads run on more than one executor; ordered: with atomic, the integer
+ *     loads and stores not through esp as wasm atomics too, for such a process on a
+ *     host that reorders plain accesses (`readOp`); looseStacks: a store through esp alone
  *     tests no page (`emitGroupChecks`), which holds while no translated code lies on a
  *     thread's stack (the runtime's
  *     `noteStack`); undoLog:
@@ -328,7 +333,8 @@ export function prepareModule(m, layout, features, memory = {},
     { undoLog = false, hash = false, trapPort, leaveOut = new Set(), countTransfers = false,
         wide = false, narrow = false, blockProfile = false, structure = true, precise = false,
         place = 0, profileCalls = false, resume = false, callReturn = false, emptySites = false,
-        looseStacks = false, atomic = false, checkReads = false, expansion = null } = {})
+        looseStacks = false, atomic = false, ordered = false, checkReads = false,
+        expansion = null } = {})
 {
     m.importMemory('env', 'memory', {
         min: 1, ...(memory.maxPages === undefined ? {} : { max: memory.maxPages }),
@@ -432,6 +438,10 @@ export function prepareModule(m, layout, features, memory = {},
     if (atomic)
     {
         context.atomic = true;
+        if (ordered)
+        {
+            context.ordered = true;
+        }
     }
     if (profileCalls && (layout.callProfile ?? -1) >= 0)
     {
@@ -1072,6 +1082,8 @@ export class RegionEmitter {
         this.blockDepth = 0;
         /** @type {number[]} */
         this.localTypes = [...LOCAL_TYPES];
+        /** The ordered variant's store value (`orderedLocal`), -1 until made. */
+        this.orderedValue = -1;
         this.entryTop = entryTop;
         // A region that translates both classes keeps the eight registers as one
         // set with two views, so every register needs an mm local (the mantissa)
@@ -1153,6 +1165,19 @@ export class RegionEmitter {
             this.mmWritten.add(index);
         }
         return /** @type {number} */ (this.mmLocals.get(index));
+    }
+
+    /**
+     * The local the ordered variant holds a store's value in (`writeOp`), made
+     * at its first store: a region of the other variants has none.
+     */
+    orderedLocal(){
+        if (this.orderedValue < 0)
+        {
+            this.orderedValue = this.localTypes.length + STATE_PARAMS;
+            this.localTypes.push(ValType.i32);
+        }
+        return this.orderedValue;
     }
 
     mmxTouchedLocal(){
@@ -1464,6 +1489,29 @@ export class RegionEmitter {
         this.pushOrigin();
         b.op(I32.add).localGet(Local.budget).op(I32.sub);
         b.store('i32', { offset: layout.counter });
+    }
+
+    /**
+     * Ends the run here: no budget left, so no transfer goes on and the next
+     * back edge or call leaves. The budget is the count too -- what the run
+     * took off it since `origin` -- so the origin goes down by what is left,
+     * and the exit charges what ran: zeroing the budget alone charged the
+     * rest of the quantum as retired, at every call that ended a turn.
+     */
+    endBudget(){
+        const { b, context } = this;
+        if (this.flagRecord >= 0)
+        {
+            atState(context, b);
+            this.pushOrigin();
+            b.localGet(Local.budget).op(I32.sub)
+                .store('i32', { offset: /** @type {number} */ (this.layout.origin) });
+        }
+        else
+        {
+            b.localGet(Local.origin).localGet(Local.budget).op(I32.sub).localSet(Local.origin);
+        }
+        b.i32const(0).localSet(Local.budget);
     }
 
     /** The budget the run started with: in the state block under cork's layout. */

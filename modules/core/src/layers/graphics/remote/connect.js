@@ -453,6 +453,11 @@ export function connectGraphicsWorker(options){
                 }, { batches: 0, bytes: 0, ms: 0 }),
                 // The guest bytes copied into those batches, by what copied
                 // them: what lending buffers would have left in place.
+                // A diagnostic's (`checkDraws`): draws whose bytes the played
+                // side had otherwise, with the first of them.
+                ...(senders.some(sender=>(sender.drawChecks?.() ?? []).length > 0)
+                    ? { drawChecks: senders.flatMap(sender=>sender.drawChecks?.() ?? []) }
+                    : {}),
                 shipped: senders.reduce((sum, sender)=>{
                     for (const [kind, bytes] of Object.entries(sender.shippedBytes()))
                     {

@@ -24,6 +24,8 @@ const SECTION_RVA = 0x1000;
 const FILE_ALIGNMENT = 0x200;
 const SECTION_ALIGNMENT = 0x1000;
 const HEADERS_SIZE = 0x200;
+/** IMAGE_TLS_DIRECTORY32: four addresses, the zero fill and the characteristics. */
+const TLS_DIRECTORY_SIZE = 24;
 
 class Buf {
     constructor(){
@@ -153,6 +155,9 @@ export function assemble(parts){
  *        library needs a base of its own: it has no relocations, so one that
  *        asks for the program's base cannot be loaded beside it.
  * @param {boolean} [options.dll]  A library: its entry point is DllMain.
+ * @param {{ template: string, index: string }} [options.tls]  A thread-local
+ *        directory: the data blob each thread's block is a copy of, and the
+ *        one the loader writes the block's slot number into.
  * @param {(ctx: {
  *   iat: (name: string) => number,
  *   at: (name: string) => number,
@@ -187,6 +192,22 @@ export function buildExe(options){
         cursor = (cursor + 3) & ~3; // dword-aligned: several of these are counters
         dataOffsets[name] = cursor;
         cursor += bytes.length;
+    }
+    // The thread-local directory, when asked for: its template is one of the
+    // data blobs and its index another, and its callback list the zero dword
+    // after it, so it names none.
+    const tls = options.tls ?? null;
+    const tlsOffset = tls === null ? 0 : (cursor + 3) & ~3;
+    if (tls !== null)
+    {
+        for (const name of [tls.template, tls.index])
+        {
+            if (!(name in dataOffsets))
+            {
+                throw new Error(`no data named "${name}" for the thread-local directory`);
+            }
+        }
+        cursor = tlsOffset + TLS_DIRECTORY_SIZE + 4;
     }
 
     // Import name blocks: WORD hint + zero-terminated name, WORD-aligned.
@@ -281,6 +302,16 @@ export function buildExe(options){
     for (const [name, bytes] of Object.entries(data))
     {
         text.pad(dataOffsets[name]).push(...bytes);
+    }
+    if (tls !== null)
+    {
+        const start = va(dataOffsets[tls.template]);
+        text.pad(tlsOffset)
+            .u32(start).u32(start + data[tls.template].length) // the template's bounds
+            .u32(va(dataOffsets[tls.index])) // where the loader writes the slot
+            .u32(va(tlsOffset + TLS_DIRECTORY_SIZE)) // the callbacks: none
+            .u32(0).u32(0) // zero fill, characteristics
+            .u32(0);
     }
     for (const module of modules)
     {
@@ -386,6 +417,7 @@ export function buildExe(options){
     const directories = new Array(16).fill(null).map(()=>[0, 0]);
     directories[0] = exports.length > 0 ? [rva(exportOffset), exportSize] : [0, 0];
     directories[1] = [rva(descriptorOffset), (modules.length + 1) * 20]; // import table
+    directories[9] = tls === null ? [0, 0] : [rva(tlsOffset), TLS_DIRECTORY_SIZE];
     // The IAT directory spans every module's address table; they were laid out
     // consecutively, so the first one's start and the last one's end bound it.
     const last = modules[modules.length - 1];

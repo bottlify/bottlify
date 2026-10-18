@@ -2989,11 +2989,16 @@ export function createRenderer(options){
      * uploads, where the memory read can say what was written, instead of a
      * comparison of every byte against what the buffer holds. Every page is
      * written at the first look, and for a copy on the GPU made anew, since
-     * what it holds is not known to match.
+     * what it holds is not known to match -- a dynamic buffer's only stale
+     * (`stale`), and its watch counts from then: every draw from it uploads
+     * what it reaches of those, and an unlock only what was written. A
+     * dynamic buffer moves between storages with one copy on the GPU, which
+     * after a move holds the storage left; all of a 4.5 MB buffer counted
+     * written at each move, and its unlock uploaded all of it every frame.
      *
      * @type {WeakMap<object, { base: number, gpu: any,
      *     watch: { take: (address: number, length: number) => number[] },
-     *     dirty: Set<number> }>}
+     *     dirty: Set<number>, stale: Set<number> }>}
      */
     const writtenPages = new WeakMap();
     /** @param {any} buffer @param {any} gpu  the copy the bytes go into */
@@ -3012,13 +3017,19 @@ export function createRenderer(options){
         {
             return null;
         }
-        const dirty = new Set();
+        const pages = new Set();
         const last = (buffer.base + buffer.length - 1) >>> 12;
         for (let page = buffer.base >>> 12; page <= last; page++)
         {
-            dirty.add(page);
+            pages.add(page);
         }
-        const tracked = { base: buffer.base, gpu, watch, dirty };
+        const dynamic = ((buffer.usage ?? 0) & D3DUSAGE_DYNAMIC) !== 0;
+        if (dynamic)
+        {
+            watch.take(buffer.base, buffer.length);
+        }
+        const tracked = { base: buffer.base, gpu, watch, dirty: dynamic ? new Set() : pages,
+            stale: dynamic ? pages : new Set() };
         writtenPages.set(buffer, tracked);
         return tracked;
     };
@@ -4783,6 +4794,17 @@ export function createRenderer(options){
             const tracked = writtenOf(source, gpu);
             if (tracked)
             {
+                if (tracked.stale.size > 0)
+                {
+                    const last = (source.base + to - 1) >>> 12;
+                    for (let page = (source.base + from) >>> 12; page <= last; page++)
+                    {
+                        if (tracked.stale.delete(page))
+                        {
+                            tracked.dirty.add(page);
+                        }
+                    }
+                }
                 const spans = writtenSpans(tracked, source.base, source.length, from, to);
                 if (spans.length > 0)
                 {
@@ -9068,6 +9090,28 @@ export function createRenderer(options){
         },
 
         /**
+         * A buffer moved onto another of its storages (`storages.js`): its
+         * copy on the GPU is renamed as for a DISCARD, so a draw recorded
+         * before reads what it was made with, and the draws after take what
+         * they read of the new storage out of guest memory (`readHeld`), its
+         * pages all unseen. A buffer the device holds locked keeps its copy:
+         * the recording lets go of its lock before it moves it.
+         *
+         * @param {any} buffer
+         */
+        renameBuffer(buffer){
+            // What a pause compared of the storage left is not what the
+            // draws after the move read.
+            compared.forget(buffer);
+            const entry = buffers.get(buffer);
+            if (!entry || entry.held)
+            {
+                return;
+            }
+            entry.gpu.unlock(entry.gpu.lock(0, buffer.length, LockFlags.DISCARD), 0, 0);
+        },
+
+        /**
          * The bytes the program wrote are read from guest memory now, and only
          * the locked range: after a DISCARD the rest of the buffer is
          * undefined by contract, and resending it would be the §14.1 traffic.
@@ -9825,6 +9869,14 @@ export function createRenderer(options){
             const count = vertexCountOf(type, primitiveCount);
             const fill = fillOf(model, type);
             const byteOffset = startIndex * format.bytes;
+            // A dynamic index buffer's indices are read at the draw, as a
+            // dynamic vertex buffer's vertices are: what the program wrote
+            // there may reach this side only with the draw (`drawsFrom`) -- a
+            // move onto another storage of the buffer's (`storages.js`) is
+            // made in the ring before the unlock of what was written into it
+            // is replayed after the ring's run.
+            readHeld(model.indices, bufferFor(model.indices).gpu, byteOffset,
+                Math.min(byteOffset + count * format.bytes, model.indices.length));
             // A list drawn solid binds the program's own indices, and so does
             // a strip WebGPU draws as Direct3D does; anything else is rewritten
             // from them.

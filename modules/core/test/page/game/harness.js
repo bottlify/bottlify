@@ -1605,7 +1605,8 @@ export function createHarness(canvas, how = {}){
         const logMatch = request.logMatch ? new RegExp(request.logMatch) : null;
         const app = await createApp({
             pacing: how.pacing,
-            win32: network ? { network } : undefined,
+            win32: network || request.win32 ? { ...request.win32, ...network ? { network } : {} }
+                : undefined,
             executable: request.exe ? fromBase64(request.exe)
                 : new Uint8Array(await (await fetch(request.exeUrl)).arrayBuffer()),
             // What the program believes it was started with, so a run can set
@@ -1976,6 +1977,8 @@ export function createHarness(canvas, how = {}){
             // the calls whose records the batches hold, heaviest first.
             shippedToWorker: graphics.worker?.shipped ?? null,
             callsToWorker: graphics.worker?.calls ?? null,
+            // A diagnostic's (`checkDraws`): draws whose bytes the worker had otherwise.
+            drawChecks: graphics.worker?.drawChecks ?? null,
             imageDigests: graphics.seam?.imageDigests ?? [],
             keptImages: graphics.seam?.keptImages ?? [],
             imageTimes: graphics.seam?.imageTimes ?? [],

@@ -1356,6 +1356,60 @@ test('another executor\'s ask inside an unbroken routine here is put off until t
     assert.equal(JSON.parse(JSON.stringify(sched.diagnostics())).asksPutOff, 2);
 });
 
+test('with freeHost a thread pinned to the first processor has it played by another executor,'
+    + ' this one keeping to the host\'s answers, and is told it is on the first still', ()=>{
+    // A game's main thread, pinned to the first processor, took four tenths of
+    // this executor while its render thread, on another, waited half its time
+    // for the answers this executor gives.
+    const { cpu, told } = twoExecutors();
+    const [remote] = cpu.executors();
+    remote.step = ()=>{
+        if (remote.started === 0 || told.goOn !== false)
+        {
+            return null;
+        }
+        remote.started = 0;
+        told.goOn = null;
+        return { instructions: 1000, fault: null };
+    };
+    /** @type {string[]} */
+    const here = [];
+    const machine = {
+        ...cpu,
+        runSlice: (/** @type {number} */ max)=>{
+            here.push(sched.current()?.name ?? '-');
+            return max;
+        },
+    };
+    const sched = createScheduler({ cpu: machine, switcher: createSwitcher({ cpu: machine }),
+        quantum: 5000, freeHost: true });
+    const main = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
+    sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'sound' });
+    main.affinityMask = 0b01;
+    for (let turn = 0; turn < 6; turn++)
+    {
+        sched.runOnce();
+    }
+    assert.match(String(sched.diagnostics().played), /^1,0 after 1$/,
+        'the first processor played by the other executor, this one the second');
+    assert.equal(sched.processorOf(main), 0, 'main is told of its own processor');
+    const after = here.slice(here.lastIndexOf('main') + 1);
+    assert.ok(!after.includes('main') && here.slice(-3).every(name=>name !== 'main'),
+        `main no longer runs here: ${here.join(' ')}`);
+    assert.ok(here.includes('sound'), 'a thread with no mask still may');
+
+    // With no thread pinned to the first processor, every executor plays its own.
+    const plain = createScheduler({ cpu: machine, switcher: createSwitcher({ cpu: machine }),
+        quantum: 5000, freeHost: true });
+    plain.create({ entry: 1, stackTop: 2, tebAddress: 0xc000, name: 'free' });
+    plain.create({ entry: 1, stackTop: 2, tebAddress: 0xd000, name: 'other' });
+    for (let turn = 0; turn < 4; turn++)
+    {
+        plain.runOnce();
+    }
+    assert.equal(plain.diagnostics().played, '', 'no trade');
+});
+
 test('a thread this executor keeps calling back from the other one stays here a while', ()=>{
     // A game's sound thread, placed on the other executor whenever it was ready
     // beside the renderer, was called back 1 312 times of 1 319 as the renderer

@@ -196,7 +196,7 @@ function contextKey(layout, features, options, leaveOut){
         options.trapPort ?? null, options.countTransfers === true, options.blockProfile === true,
         options.wide === true, options.narrow === true, options.structure !== false,
         options.precise === true, options.place === true, options.profileCalls === true,
-        options.atomic === true,
+        options.atomic === true, options.ordered === true,
         options.resume === true, options.callReturn === true, options.emptySites === true,
         options.looseStacks === true,
         options.checkReads === true, options.expansion != null, [...leaveOut].sort()]);
@@ -301,7 +301,7 @@ function sameShape(kept, shape){
  *     blockProfile?: boolean, timings?: boolean, place?: boolean,
  *     leaveOut?: Set<string> | string[], wide?: boolean, narrow?: boolean,
  *     structure?: boolean, precise?: boolean, profileCalls?: boolean, resume?: boolean,
- *     atomic?: boolean,
+ *     atomic?: boolean, ordered?: boolean,
  *     callReturn?: boolean, emptySites?: boolean, looseStacks?: boolean, checkReads?: boolean,
  *     memory?: { shared?: boolean, maxPages?: number },
  *     expansion?: import('../emit/region.js').ExpansionNote | null }}
@@ -332,6 +332,7 @@ export function emitBatch(jobs, layout, features, options = {}, cache = undefine
         structure: options.structure !== false,
         precise: options.precise === true,
         atomic: options.atomic === true,
+        ordered: options.ordered === true,
         place: options.place === true ? jobs.length : 0,
         profileCalls: options.profileCalls === true,
         resume: options.resume === true,

@@ -213,6 +213,8 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
      * to copy, which cost this thread a read of each whether or not it sent any.
      */
     const shipped = { buffers: 0, surfaces: 0, reads: 0, writes: 0, dynamic: 0, compared: 0 };
+    /** The draw checks of the recordings over this channel (`checkDraws`). @type {(() => import('./draw-check.js').DrawCheckFigures)[]} */
+    const drawChecks = [];
     /**
      * The occlusion counts the program was told, with how long after its END
      * each took, the polls and asks it made meanwhile, those that came beside
@@ -455,6 +457,18 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
 
         /** The guest bytes copied into the batches so far, by what copied them. */
         shippedBytes: ()=>({ ...shipped }),
+
+        /**
+         * A recording's draw check (`checkDraws`), read for a report.
+         *
+         * @param {() => import('./draw-check.js').DrawCheckFigures} figures
+         */
+        checking(figures){
+            drawChecks.push(figures);
+        },
+
+        /** What the draw checks of the recordings over this channel found. */
+        drawChecks: ()=>drawChecks.map(figures=>figures()),
 
         /**
          * The program was told an occlusion count.
