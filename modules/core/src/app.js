@@ -276,7 +276,7 @@ const hashText = (hash, text)=>{
  *           due within 16 ms. Default ten quanta.
  * @property {{ cores?: number, eager?: boolean, placement?: 'auto' | 'spread' | 'concentrate',
  *           placementTiming?: Partial<import('./layers/kernel/internal/placement.js').PlacementOptions>,
- *           playPinned?: boolean }} [cpu]
+ *           playPinned?: boolean, freeHost?: boolean }} [cpu]
  *           The machine's processor. `cores`: how many
  *           processors the program is told it has -- by every road Windows has to say
  *           it -- and the executors that run its threads at once, each a worker past
@@ -296,7 +296,10 @@ const hashText = (hash, text)=>{
  *           `playPinned`: false keeps every processor on its own core; by default a
  *           thread the program pinned to one processor and that calls into the host
  *           often has its processor played by the process's own core, where those
- *           calls are answered.
+ *           calls are answered. `freeHost`: true keeps the process's own core for
+ *           the host's answers while a thread is pinned to its processor (a game's
+ *           main thread, pinned to the first), the processor played by another core;
+ *           off by default, and with it on the threads spread with no trial.
  * @property {number} [executors]  `cpu.cores` by its older name: executors of the
  *           program's process under cork, past the process's own thread each a worker
  *           running one of its threads at once with the others, the locked
@@ -3864,6 +3867,9 @@ async function buildApp(options){
             // A host-bound thread pinned to one processor has it played by the
             // process's own executor (the kernel's `playPinned`) unless false.
             playPinned: options.cpu?.playPinned,
+            // The process's own executor kept for the host's answers while a
+            // thread is pinned to its processor (the kernel's `freeHost`).
+            freeHost: options.cpu?.freeHost,
             // Off unless asked for: see the kernel's `preemption`.
             preemption: options.preemption,
             // Every thread gets the stack the image was linked to expect, the

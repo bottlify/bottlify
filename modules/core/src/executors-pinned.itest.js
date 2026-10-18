@@ -36,7 +36,7 @@ const INNER = 400_000;
  * to processor 1 calling the host. Main computes briefly so the trial weighs
  * the worker: its instructions retired are what the trial measures.
  */
-function buildProgram(){
+function buildProgram(workerProcessor = 1){
     return buildExe({
         imports: { 'KERNEL32.dll': ['CreateThread', 'WaitForSingleObject', 'ExitProcess',
             'SetThreadAffinityMask', 'GetCurrentThread', 'GetCurrentProcessorNumber', 'GetACP'] },
@@ -79,11 +79,11 @@ function buildProgram(){
                 0x50, ...call('ExitProcess'),
             ]);
             const worker = assemble([
-                ...pin(2),
+                ...pin(1 << workerProcessor),
                 0xbe, ...u32(ROUNDS), //                                mov esi, ROUNDS
                 { label: 'round' },
                 ...call('GetACP'),
-                ...check(1, 'workerWrong'),
+                ...check(workerProcessor, 'workerWrong'),
                 0xb9, ...u32(30), //                                    mov ecx, 30
                 { label: 'spin' },
                 0x49, { jump: 'jnz', to: 'spin' }, //                   dec ecx; jnz spin
@@ -104,9 +104,9 @@ function buildProgram(){
  *
  * @param {Uint8Array} executable @param {boolean} playPinned
  */
-async function run(executable, playPinned){
+async function run(executable, playPinned, cpu = {}){
     const app = await createApp({ executable,
-        cpu: { cores: 2, eager: true, placement: 'spread', playPinned } });
+        cpu: { cores: 2, eager: true, placement: 'spread', playPinned, ...cpu } });
     try
     {
         const code = await app.run({ timeoutMs: 120_000 });
@@ -140,4 +140,18 @@ test('a worker pinned to the second processor and bound to the host has it playe
     assert.ok(played.trading.played >= 1, `a trial chose it: ${JSON.stringify(played.trading)}`);
     assert.ok(fixed.crossings > ROUNDS && played.crossings < fixed.crossings / 2,
         `the worker's calls crossed ${fixed.crossings} times fixed, ${played.crossings} played`);
+});
+
+test('with freeHost the main thread pinned to the first processor runs on another executor, the'
+    + ' process\'s own playing a processor nothing is pinned to, and no thread is told of a'
+    + ' processor its mask does not name', { timeout: 300_000 }, async()=>{
+    const freed = await run(buildProgram(2), true, { cores: 3, freeHost: true });
+    assert.equal(freed.code, 0, `${freed.code & 0xffff} wrong answers to main, `
+        + `${freed.code >>> 16} to the worker`);
+    // Main asks which processor it is on throughout: told 0 every time, with
+    // the first processor played by executor 1, it ran there and never here.
+    assert.match(String(freed.played), /^1,0 after \d+$/,
+        'the first processor played by executor 1, the second by this one');
+    assert.deepEqual([freed.trading.trials, freed.trading.fixed], [0, 'own'],
+        'and no trade trial beside it');
 });

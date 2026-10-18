@@ -278,6 +278,9 @@ const readyNow = thread=>{
  * @param {boolean} [options.playPinned]  Whether this executor may play the processor
  *        of a pinned thread whose calls into the host cost it most, where a trial finds
  *        the program faster so (`playPinned`); on unless false.
+ * @param {boolean} [options.freeHost]  Whether this executor keeps itself for the host's
+ *        answers while a thread is pinned to its processor, playing one nothing is pinned
+ *        to (`freeHost`); off unless true, and then the threads spread with no trial.
  */
 export function createScheduler(options){
     const { cpu, switcher, quantum = 100_000, now = ()=>0, skipTo = ()=>0 } = options;
@@ -410,7 +413,8 @@ export function createScheduler(options){
      * Whether the ready threads spread over the process's executors or take
      * turns on its own, by what the program gets done each way (`placement.js`).
      */
-    const placement = createPlacement({ now: wall, fixed: options.placement ?? null,
+    const placement = createPlacement({ now: wall,
+        fixed: options.placement ?? (options.freeHost === true ? 'spread' : null),
         mayBegin: ()=>!trading.trialing(), ...options.placementTiming });
     /**
      * Whether this executor plays the processor a pinned thread whose calls
@@ -420,7 +424,7 @@ export function createScheduler(options){
      * while the placement's runs.
      */
     const trading = createPlacement({ now: wall, ways: PLAY_WAYS, initial: PLAY_WAYS[0],
-        fixed: options.playPinned === false ? PLAY_WAYS[0] : null,
+        fixed: options.playPinned === false || options.freeHost === true ? PLAY_WAYS[0] : null,
         mayBegin: ()=>!placement.trialing() && proposed() >= 0, ...options.placementTiming });
     /**
      * Told what a parked thread is about to be resumed with: which wait it
@@ -1268,7 +1272,8 @@ export function createScheduler(options){
             target = proposed();
         }
         wasTrialing = trialing;
-        const want = trading.mode() === PLAY_WAYS[1] && target > 0 ? target : 0;
+        const want = options.freeHost === true ? freeTarget(remotes)
+            : trading.mode() === PLAY_WAYS[1] && target > 0 ? target : 0;
         const here = playedBy(0);
         if (here === want)
         {
@@ -1277,6 +1282,44 @@ export function createScheduler(options){
         }
         // One pair traded at a time: back to its own first, then to the one wanted.
         trade(remotes, here !== 0 ? here : want);
+    };
+
+    /**
+     * The processor this executor plays to keep itself for the host's answers
+     * (`freeHost`), while a live thread is pinned to its own -- a game's main
+     * thread, pinned to the first processor, whose guest code took four tenths
+     * of this executor while the render thread on another waited for its
+     * answers half of its time: the one of an open executor that the fewest
+     * live threads' masks name, kept while no thread is pinned to it. 0 where
+     * no thread is pinned to the first processor, or none is open.
+     *
+     * @param {any[]} remotes
+     */
+    const freeTarget = remotes=>{
+        const live = threads.filter(thread=>thread.state !== ThreadState.TERMINATED);
+        if (!live.some(thread=>pinnedTo(thread) === 0))
+        {
+            return 0;
+        }
+        const here = playedBy(0);
+        if (here !== 0 && remotes.some(remote=>remote.index === here)
+            && !live.some(thread=>pinnedTo(thread) === here))
+        {
+            return here;
+        }
+        let best = 0;
+        let named = Infinity;
+        for (const remote of remotes)
+        {
+            const count = live.filter(thread=>thread.affinityMask !== undefined
+                && (thread.affinityMask >>> remote.index & 1) === 1).length;
+            if (count < named)
+            {
+                best = remote.index;
+                named = count;
+            }
+        }
+        return best;
     };
 
     /**
