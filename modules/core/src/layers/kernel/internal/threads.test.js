@@ -41,6 +41,62 @@ function scheduler(perSlice){
     return { cpu, sched: createScheduler({ cpu, switcher, quantum: 5000 }) };
 }
 
+test('a call into the host is timed only while the process has other executors', ()=>{
+    // The time is what a processor trade weighs; with one executor there is
+    // nothing to trade, and its three clock reads a call were a sixth of the
+    // run of a program that calls the host in a loop.
+    /** @type {any[]} */
+    const executors = [];
+    /** @type {(((ms: number) => void) | null)[]} */
+    const hooks = [];
+    const cpu = { ...fakeCpu(), executors: ()=>executors,
+        trapTimed: (/** @type {((ms: number) => void) | null} */ hook)=>hooks.push(hook) };
+    const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 5000 });
+    sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
+    sched.runOnce();
+    sched.runOnce();
+    assert.deepEqual(hooks, [], 'one executor: no call is timed');
+    executors.push({ index: 1, busy: ()=>true, step: ()=>null, retiredSoFar: ()=>0 });
+    try
+    {
+        sched.runOnce();
+    }
+    catch {
+        // A stand-in executor runs nothing; the turn only has to have looked.
+    }
+    assert.equal(typeof hooks.at(-1), 'function', 'another executor: calls are timed');
+    executors.length = 0;
+    sched.runOnce();
+    assert.equal(hooks.at(-1), null, 'and alone again, no longer');
+});
+
+test('a slice that calls the host in a loop moves the guest clock as it goes', ()=>{
+    // A program waiting for its next frame reads the clock between calls into
+    // the host; moved only between slices, the clock stood still for a whole
+    // slice of them and the frame waited for the slice to end.
+    /** @type {{ hook: ((crossing?: boolean) => boolean | void) | null }} */
+    const trap = { hook: null };
+    let refreshed = 0;
+    const cpu = { ...fakeCpu(),
+        beforeTrap: (/** @type {any} */ hook)=>{
+            trap.hook = hook;
+        },
+        runSlice: (/** @type {number} */ max)=>{
+            for (let call = 0; call < 640; call++)
+            {
+                trap.hook?.(true);
+            }
+            return max;
+        } };
+    const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 5000,
+        refreshClock: ()=>refreshed++ });
+    sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
+    sched.runOnce();
+    assert.equal(refreshed, 10, 'once every 64 crossings, inside the slice');
+    trap.hook?.(false);
+    assert.equal(refreshed, 10, 'an ask from another executor is no crossing of this thread');
+});
+
 test('a created thread is ready but does not take the CPU', ()=>{
     const { cpu, sched } = scheduler();
     const thread = sched.create({ entry: 0x1000, stackTop: 0x2000, tebAddress: 0x7000 });
