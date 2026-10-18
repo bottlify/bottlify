@@ -1078,7 +1078,8 @@ export function createDirect3D8Seam(
             const hr = buffer.Unlock();
             if (hr === D3D_OK)
             {
-                shadow?.noteLocked(buffer, false);
+                // Still locked while an outer lock is held: they nest.
+                shadow?.noteLocked(buffer, buffer.lockCount > 0);
             }
             return hr;
         },

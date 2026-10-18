@@ -75,6 +75,7 @@ import { createAdditionalChain } from './swapchain.js';
 import { runCommands } from './commands.js';
 import { validateStages } from '../d3d8/validity.js';
 import { processStreams } from '../d3d8/process.js';
+import { createBufferLocks } from '../d3d8/buffer-locks.js';
 import { reportDynamicReads } from '../d3d8/drawn.js';
 import { decodeFvf } from '../webgpu/internal/vertexformat.js';
 import { fullTarget, viewportState } from '../webgpu/internal/viewport.js';
@@ -1317,7 +1318,11 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         // the device's binding, whichever is later.
         const bufferCount = explicitCount(options.pool, ()=>free(base), options.length);
         const base = allocate(options.length);
-        let locked = false;
+        const locks = createBufferLocks({
+            length: options.length,
+            lock: (offset, length, flags)=>renderer?.lockBuffer(buffer, offset, length, flags),
+            unlock: ()=>renderer?.unlockBuffer(buffer),
+        });
         const buffer = {
             ...options,
             base,
@@ -1350,25 +1355,21 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
              * @param {number} [flags] D3DLOCK
              */
             Lock(offset, size, out, flags = 0){
-                const length = size === 0 ? options.length - offset : size;
-                if (locked || offset < 0 || !(length > 0) || offset + length > options.length)
+                if (locks.take(offset, size, flags) === null)
                 {
                     return D3DERR_INVALIDCALL;
                 }
-                locked = true;
                 out.pBits = base + offset;
-                renderer?.lockBuffer(buffer, offset, length, flags);
                 return D3D_OK;
             },
 
             Unlock(){
-                if (!locked)
-                {
-                    return D3DERR_INVALIDCALL;
-                }
-                locked = false;
-                renderer?.unlockBuffer(buffer);
-                return D3D_OK;
+                return locks.release() ? D3D_OK : D3DERR_INVALIDCALL;
+            },
+
+            /** How many locks are held: they nest (`createBufferLocks`). */
+            get lockCount(){
+                return locks.count;
             },
 
             /** @param {{ desc?: any }} out */
