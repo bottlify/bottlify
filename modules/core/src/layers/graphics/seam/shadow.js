@@ -3206,6 +3206,28 @@ export function createShadow(deps){
     /** Locks the host took and let go of in a block (`noteLocked`), beside the routines' counts. */
     let hostTaken = 0;
     let hostReleased = 0;
+    /**
+     * The host's buffer locks by what sent them past the routine: the buffer
+     * already locked, a lock for reading, a lock but NOOVERWRITE alone under
+     * a draw the ring held (`pending`) or, with none, over what was unlocked
+     * on a lending device (`lent`), and any other case (the device's lock
+     * busy, a bad range, no block).
+     */
+    const hostLocks = { locked: 0, readonly: 0, pending: 0, lent: 0, other: 0 };
+    /**
+     * The host's level locks, as `hostLocks` the buffers': a level with no
+     * block yet (the first two of each, and a cube's face), one the guest
+     * never locks (`slow`), one a device context is held on (`busy`), one
+     * locked already (`held`), one whose bytes may be lent (`lent`, and of
+     * those `lentPending`, under a draw the ring held too), one a draw the
+     * ring held may sample (`pending`), and any other case. By kind too
+     * (`hostLevelKinds`: width x height, format, usage, pool), for the most
+     * frequent few.
+     */
+    const hostLevelLocks = { unplaced: 0, slow: 0, busy: 0, held: 0, lent: 0, lentPending: 0,
+        pending: 0, other: 0 };
+    /** @type {Map<string, number>} */
+    const hostLevelKinds = new Map();
     /** The textures with a block. @type {WeakMap<object, { block: number }>} */
     const textureBlocks = new WeakMap();
     /**
@@ -4547,6 +4569,57 @@ export function createShadow(deps){
             holding(()=>noteLockedNow(block, entry, locked));
         },
 
+        /**
+         * A buffer's Lock reached the host: which of the routine's reasons
+         * sent it here (`hostLocks`), read from the words the routine read,
+         * before the ring is played and clears them.
+         *
+         * @param {ShadowBuffer} buffer @param {number} flags
+         */
+        noteHostLock(buffer, flags){
+            const block = blockOf.get(buffer);
+            const why = block === undefined || address === 0 ? 'other'
+                : readWord(block + BUFFER.LOCKED) !== 0 ? 'locked'
+                    : (flags & D3DLOCK_READONLY) !== 0 ? 'readonly'
+                        : (flags & (D3DLOCK_NOOVERWRITE | D3DLOCK_DISCARD)) === D3DLOCK_NOOVERWRITE
+                            ? 'other'
+                            : readWord(address + SHADOW.DRAWS_PENDING) !== 0 ? 'pending'
+                                : readWord(block + BUFFER.LENT) !== 0 ? 'lent' : 'other';
+            hostLocks[why]++;
+        },
+
+        /**
+         * A level's LockRect or LockBox reached the host: counted as
+         * `noteHostLock` counts a buffer's, before the ring is played.
+         *
+         * @param {object | null} level  null for one with no block to look at
+         * @param {string} kind
+         */
+        noteHostLevelLock(level, kind){
+            const block = level === null ? undefined : levelBlocks.get(level);
+            const entry = block === undefined ? undefined : levels.get(block);
+            const placed = block !== undefined && entry !== undefined && address !== 0;
+            const pending = placed && readWord(block + LEVEL.SAMPLED) !== 0
+                && readWord(address + SHADOW.DRAWS_PENDING) !== 0;
+            const held = placed
+                && (readWord(block + LEVEL.LOCKED) !== 0 || readWord(block + LEVEL.TAKEN) !== 0);
+            const why = !placed ? 'unplaced'
+                : entry.slow ? 'slow'
+                    : busyFamilies.has(entry.family) ? 'busy'
+                        : held ? 'held'
+                            : device.lendsMemory === true && entry.lends ? 'lent'
+                                : pending ? 'pending' : 'other';
+            hostLevelLocks[why]++;
+            if (why === 'lent' && pending)
+            {
+                hostLevelLocks.lentPending++;
+            }
+            if (hostLevelKinds.size < 64 || hostLevelKinds.has(kind))
+            {
+                hostLevelKinds.set(kind, (hostLevelKinds.get(kind) ?? 0) + 1);
+            }
+        },
+
         diagnostics: ()=>({
             // Numbers rather than booleans: a report keeps a flat structure of
             // numbers and drops anything else.
@@ -4563,6 +4636,10 @@ export function createShadow(deps){
             heldWaits: heldWaits.count,
             heldWaitMs: Math.round(heldWaits.ms),
             heldBroken: heldWaits.broken,
+            hostLocks: { ...hostLocks },
+            hostLevelLocks: { ...hostLevelLocks },
+            hostLevelKinds: Object.fromEntries([...hostLevelKinds].sort((a, b)=>b[1] - a[1])
+                .slice(0, 12)),
             // Calls the command ring carried past the bridge, and those it holds yet.
             commandCalls: commandReader?.taken() ?? 0,
             commandsQueued: commandReader?.queued() ?? 0,
@@ -4814,6 +4891,18 @@ export const HOST_MIRRORS = Object.freeze({
 });
 
 /**
+ * Which level a LockRect or LockBox names, told by how many arguments the
+ * method takes: a surface's or a volume's (out, rectangle or box, flags) is
+ * its own, null; a texture's takes the level first; a cube's the face and the
+ * level, undefined, a face the guest never locks.
+ *
+ * @param {number[]} args
+ * @returns {number | null | undefined}
+ */
+export const levelIndex = args=>(args.length === 3 ? null : args.length === 4 ? args[0] >>> 0
+    : undefined);
+
+/**
  * The host's side of the levels the guest locks, as both versions' seams
  * keep it: after each lock or unlock the host made itself, the level's block
  * is told (`noteLevelLocked`), and the second time the host locks a level it
@@ -4893,6 +4982,37 @@ export function createLevelLocks({ shadowOf, twinCopies }){
     };
 
     return {
+        /**
+         * A level's lock reached the host, before the ring is played: told to
+         * the device's shadow with the level's kind. A level the host has not
+         * reached yet is not reached here -- getting one is a call the
+         * recording sends -- and has no block to look at anyway.
+         *
+         * @param {any} owner  the device
+         * @param {any} object  the texture, or the surface or volume
+         * @param {number | null | undefined} index  the texture's level, null for a surface or
+         *     a volume, undefined for a cube's face
+         */
+        hostLock(owner, object, index){
+            const shadow = shadowOf(owner);
+            if (!shadow)
+            {
+                return;
+            }
+            if (index === undefined)
+            {
+                shadow.noteHostLevelLock(null, 'cube');
+                return;
+            }
+            const level = index === null ? object : reached.get(object)?.[index] ?? null;
+            /** @type {{ desc?: any }} */
+            const held = {};
+            const desc = level !== null && level.GetDesc(held) === 0 ? held.desc : undefined;
+            shadow.noteHostLevelLock(level, desc
+                ? `${desc.Width}x${desc.Height} ${desc.Format} u${desc.Usage} p${desc.Pool}`
+                : 'unreached');
+        },
+
         /**
          * After the host's own lock or unlock of a level that answered D3D_OK.
          *

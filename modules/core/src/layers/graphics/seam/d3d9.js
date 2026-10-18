@@ -78,7 +78,7 @@ import {
     getSamplerStateCode, getSurfaceDescCode, getSurfaceLevelCode, getTextureStageStateCode,
     getTransformCode, getViewportCode, lockCode, settledAfter, stageStateMirror,
     unlockCode, HOST_MIRRORS, POLLS_BETWEEN, QUERY, appendCommand, guestWords,
-    createLevelLocks, lockLevelCode, unlockLevelCode,
+    createLevelLocks, levelIndex, lockLevelCode, unlockLevelCode,
 } from './shadow.js';
 import { COMPILED as IN_GUEST } from './inguest.x86.js';
 import { D3DTSS9 } from '../d3d9/samplerstates.js';
@@ -289,8 +289,19 @@ export function createDirect3D9Seam(
     const describeResource = (id, slots, methods, ...rest)=>describe(id, slots,
         Object.fromEntries(Object.entries(methods ?? {}).map(([name, method])=>[name,
             (/** @type {any} */ object, /** @type {number[]} */ args)=>{
-                shadowOf(owners.get(object)
-                    ?? (object.container ? owners.get(object.container) : undefined))?.sync();
+                const shadow = shadowOf(owners.get(object)
+                    ?? (object.container ? owners.get(object.container) : undefined));
+                // Before the ring is played, which clears what sent it here.
+                if (name === 'Lock')
+                {
+                    shadow?.noteHostLock(object, args[3] >>> 0);
+                }
+                else if (name === 'LockRect' || name === 'LockBox')
+                {
+                    levelLocks.hostLock(owners.get(object) ?? owners.get(object.container), object,
+                        levelIndex(args));
+                }
+                shadow?.sync();
                 return method(object, args);
             }])), ...rest);
 

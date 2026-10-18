@@ -68,7 +68,7 @@ import {
     getTransformCode,
     getViewportCode, lockCode, stageStateMirror, unlockCode, HOST_MIRRORS, appendCommand,
     getShaderCode, getTargetCode, shaderMirror,
-    guestWords, createLevelLocks, lockLevelCode, unlockLevelCode,
+    guestWords, createLevelLocks, levelIndex, lockLevelCode, unlockLevelCode,
 } from './shadow.js';
 import { COMPILED as IN_GUEST } from './inguest.x86.js';
 import { D3D8_COMMANDS, materialOf } from '../d3d8/commands.js';
@@ -423,7 +423,17 @@ export function createDirect3D8Seam(
     const describeResource = (id, slots, methods, ...rest)=>describe(id, slots,
         Object.fromEntries(Object.entries(methods ?? {}).map(([name, method])=>[name,
             (/** @type {any} */ object, /** @type {number[]} */ args)=>{
-                (resourceShadows.get(object) ?? shadowOf(ownerOf(object)))?.sync();
+                const shadow = resourceShadows.get(object) ?? shadowOf(ownerOf(object));
+                // Before the ring is played, which clears what sent it here.
+                if (name === 'Lock')
+                {
+                    shadow?.noteHostLock(object, args[3] >>> 0);
+                }
+                else if (name === 'LockRect' || name === 'LockBox')
+                {
+                    levelLocks.hostLock(ownerOf(object), object, levelIndex(args));
+                }
+                shadow?.sync();
                 return method(object, args);
             }])), ...rest);
     /**

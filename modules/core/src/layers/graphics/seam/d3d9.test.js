@@ -1788,6 +1788,65 @@ test('with guest memory, a buffer locks and unlocks in the guest, and the host s
     assert.equal(h.release(pointer), 0);
 });
 
+test('a buffer lock that reaches the host is counted by what sent it past the guest routine',
+    ()=>{
+        const D3DLOCK_READONLY = 0x10;
+        const D3DLOCK_DISCARD = 0x2000;
+        const D3DUSAGE_DYNAMIC = 0x200;
+        const h = seamed({ shadow: true });
+        const root = h.create();
+        const { device } = h.createDevice(root);
+        const out = 0x3000;
+        assert.equal(h.device(device, 'CreateVertexBuffer', [64, D3DUSAGE_DYNAMIC, 0,
+            D3DPOOL.DEFAULT, out, 0]), D3D_OK);
+        const pointer = h.box.memory.readU32(out);
+        const owner = h.box.memory.readU32(device + 4);
+        // A draw the ring holds, which the host plays before it answers.
+        h.box.memory.writeU32(owner + SHADOW.DRAWS_PENDING, 1);
+        h.box.trap(pointer, 'Lock', [0, 0, 0x3200, D3DLOCK_DISCARD]);
+        h.box.trap(pointer, 'Lock', [0, 0, 0x3200, 0]);
+        assert.equal(h.box.trap(pointer, 'Unlock'), D3D_OK);
+        h.box.trap(pointer, 'Lock', [0, 0, 0x3200, D3DLOCK_READONLY]);
+        assert.equal(h.box.trap(pointer, 'Unlock'), D3D_OK);
+        h.box.trap(pointer, 'Lock', [0, 0, 0x3200, 0]);
+        assert.deepEqual(h.seam.shadow()?.hostLocks,
+            { locked: 1, readonly: 1, pending: 1, lent: 0, other: 1 });
+        assert.equal(h.release(pointer), 0);
+    });
+
+test('a texture level lock that reaches the host is counted by what sent it there, with its kind',
+    ()=>{
+        const h = seamed({ shadow: true });
+        const root = h.create();
+        const { device } = h.createDevice(root);
+        const out = 0x3000;
+        assert.equal(h.device(device, 'CreateTexture',
+            [8, 4, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, out, 0]), D3D_OK);
+        const texture = h.box.memory.readU32(out);
+        const owner = h.box.memory.readU32(device + 4);
+        const locked = 0x3200;
+        const lock = ()=>h.box.trap(texture, 'LockRect', [0, locked, 0, 0]);
+        const unlock = ()=>assert.equal(h.box.trap(texture, 'UnlockRect', [0]), D3D_OK);
+        // The level gets its block at the host's second lock: the first two have none.
+        assert.equal(lock(), D3D_OK);
+        unlock();
+        assert.equal(lock(), D3D_OK);
+        unlock();
+        // A draw the ring holds may sample it.
+        h.box.memory.writeU32(owner + SHADOW.DRAWS_PENDING, 1);
+        assert.equal(lock(), D3D_OK);
+        unlock();
+        assert.equal(lock(), D3D_OK);
+        lock();
+        unlock();
+        assert.deepEqual(h.seam.shadow()?.hostLevelLocks, { unplaced: 2, slow: 0, busy: 0,
+            held: 1, lent: 0, lentPending: 0, pending: 1, other: 1 });
+        assert.deepEqual(h.seam.shadow()?.hostLevelKinds,
+            { [`8x4 ${D3DFMT.A8R8G8B8} u0 p${D3DPOOL.MANAGED}`]: 4, unreached: 1 },
+            'a level the host has not reached yet is not reached for the count');
+        assert.equal(h.release(texture), 0);
+    });
+
 test('with guest memory, a device\'s setters and draws run in the guest, and its getters answer'
     + ' from the block', ()=>{
     // The setters and the draws a program makes most write the command ring
