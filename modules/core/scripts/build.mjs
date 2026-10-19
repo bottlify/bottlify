@@ -7,7 +7,7 @@
 import { build } from 'esbuild';
 import { createHash } from 'node:crypto';
 import { copyFile, mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
-import { join, relative, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildGuestCode } from './build-guest-code.mjs';
 
@@ -16,7 +16,10 @@ const REPO = resolve(ROOT, '..', '..');
 const SRC = join(ROOT, 'src');
 const DIST = join(ROOT, 'dist');
 const PREBUILT = join(ROOT, 'vendor', 'prebuilt');
-const CORK_SRC = join(REPO, 'modules', 'cork', 'src');
+// The translator the package depends on, as installed: in this workspace the
+// sibling module, elsewhere the version package.json pins. Its build lands in
+// dist/cork, beside core.js, where a page loads it by URL.
+const CORK_SRC = dirname(fileURLToPath(import.meta.resolve('@bottlify/cork')));
 const VENDOR_OUT = join(DIST, 'vendor');
 
 /**

@@ -24,6 +24,9 @@
  */
 
 import { createCorkRuntime, translatorWorkerUrl } from './runtime/runtime.js';
+
+/** The version of the core's engine contract (`ENGINE_CONTRACT` in its `engine.js`) this implements. */
+export const contract = 1;
 import { replaySlice } from './testing/differential.js';
 
 export {

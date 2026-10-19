@@ -16,6 +16,7 @@ import {
     DEFAULT_THUNK_BASE, DEFAULT_THUNK_CAPACITY, MAX_EXECUTORS, processorsFor,
 } from './layers/cpu/module.js';
 import { CORK_TSC_MHZ } from './layers/cpu/internal/cork-host.js';
+import { engineContractProblem } from './layers/cpu/engine.js';
 import { SETTINGS, processorName } from './settings.js';
 import { createPresenter } from './layers/graphics/webgpu/internal/presenter.js';
 import { baseOf, compositionPlan, needsComposing } from './layers/graphics/webgpu/internal/compose.js';
@@ -1651,6 +1652,11 @@ async function openTranslationPool(options){
         return null;
     }
     const engine = await import(corkArtifacts(cork).moduleUrl);
+    if (engineContractProblem(engine, corkArtifacts(cork).moduleUrl))
+    {
+        // The machine's own load of the same module says why; no pool for it.
+        return null;
+    }
     const url = config.workerUrl ?? engine.translatorWorkerUrl?.() ?? null;
     if (url === null)
     {

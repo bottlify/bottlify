@@ -97,7 +97,9 @@ import { createApp } from '@bottlify/core';
 ```
 
 `createApp` finds its workers, `cork/` and `vendor/` beside `core.js`; for a bundler that moves
-files, pass `workerUrl` and `cork: { moduleUrl }`. The FFmpeg video decoder is a subpath,
+files, pass `workerUrl` and `cork: { moduleUrl }`. `cork/` is the build of the `@bottlify/cork`
+version the package depends on, installed with it. Another cork named by `moduleUrl` must implement
+the same engine contract (its `contract` export); one that does not is refused at start. The FFmpeg video decoder is a subpath,
 `@bottlify/core/video-decoder.wasm`, passed as `media: { wasmBytes }`; without it a program is told
 no clip can be played. Every option, the controller and the events:
 [`docs/core/api.md`](api.md).

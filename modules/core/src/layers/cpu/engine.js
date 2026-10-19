@@ -13,12 +13,37 @@
  * `internal/v86-host.js`. This file is the whole of what the layer and a
  * translator package agree on: the package implements these names, and the
  * layer's host (`internal/cork-host.js`) composes a runtime with the layer's
- * own contexts, traps and faults. Typedefs only; nothing here runs, and the
+ * own contexts, traps and faults. Typedefs, and the contract's version; the
  * layer never imports an engine package.
  *
  * Every field is sized for 32-bit code today and named so that a 64-bit engine
  * implements the same contract with `bits: 64` rather than a second one.
  */
+
+/**
+ * The version of this contract. An engine package exports the version it
+ * implements as `contract`; the layer refuses one that implements another,
+ * rather than running a translator built for a different core and failing
+ * somewhere inside it. Raised whenever a name here changes its meaning.
+ */
+export const ENGINE_CONTRACT = 1;
+
+/**
+ * Why an engine module cannot run here, or null when it can.
+ *
+ * @param {{ contract?: unknown }} engineModule
+ * @param {string} url  Where it was loaded from, for the message.
+ * @returns {string | null}
+ */
+export function engineContractProblem(engineModule, url){
+    if (engineModule.contract === ENGINE_CONTRACT)
+    {
+        return null;
+    }
+    const theirs = String(engineModule.contract ?? 'none');
+    return `cpu: the engine at ${url} implements contract ${theirs}, this core needs`
+        + ` ${ENGINE_CONTRACT}: install the @bottlify/cork version core depends on`;
+}
 
 /**
  * Where each register lives in the memory a runtime executes over, as byte

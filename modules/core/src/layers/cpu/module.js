@@ -10,6 +10,7 @@ import { createBell, createRemoteExecutor } from './internal/executor.js';
 import { unbrokenTable } from './internal/unbroken.js';
 import { createWriteClock } from './internal/write-clock.js';
 import { reordersPlainAccesses } from './internal/memory-order.js';
+import { engineContractProblem } from './engine.js';
 import { createFpu } from './internal/fpu.js';
 import { createThunkTable, FORWARD_SAVE } from './internal/thunks.js';
 import {
@@ -627,6 +628,11 @@ export function createCpuModule(){
                             throw new Error('cpu: engine "cork" needs an engineUrl');
                         }
                         const engineModule = await import(settings.engineUrl);
+                        const problem = engineContractProblem(engineModule, settings.engineUrl);
+                        if (problem)
+                        {
+                            throw new Error(problem);
+                        }
                         const several = settings.executors > 1;
                         // A program's plain stores reach its other threads in their
                         // order on an x86 host; elsewhere the ordered variant keeps it,
