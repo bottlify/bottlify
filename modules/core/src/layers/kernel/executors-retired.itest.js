@@ -15,16 +15,16 @@
  * thread's instructions -- and hands the frame back. What a thread retires
  * depends on what it finds: a wait on an event already set takes a shorter way
  * through WaitForSingleObject's guest code than one that blocks, as on Windows.
- * So nothing here is left to the executors' timing: every hand-over signals
- * and waits in one call (SignalObjectAndWait), whose wait always blocks, since
- * the other thread is waiting for that very signal; the render thread calls
- * the host three times before each of its signals, which the main thread's
- * executor answers no faster than one at its first wait; and the last frame
- * ends in ExitThread, which the main thread waits for.
+ * So every hand-over signals and waits in one call (SignalObjectAndWait),
+ * which has no guest code of its own, and the last frame ends in ExitThread,
+ * which the main thread waits for. Whether such a wait blocks is still the
+ * executors' timing, and what a thread retires must not depend on it.
  *
  * A call that ended the turn of the thread making it once charged the rest of
  * the quantum as retired; with the render thread on another executor every
- * hand-over did, a third more instructions than the main thread ran.
+ * hand-over did, a third more instructions than the main thread ran. A call
+ * that blocked once resumed past its stub's `ret`, one instruction fewer than
+ * the same call answered at once.
  */
 
 import { test } from 'node:test';
@@ -55,11 +55,12 @@ function checksum(){
 
 function program(){
     return buildExe({
-        imports: { 'KERNEL32.dll': ['CreateEventA', 'SignalObjectAndWait', 'WaitForSingleObject',
-            'CreateThread', 'ResumeThread', 'GetCurrentThread', 'SetThreadAffinityMask', 'GetACP',
+        imports: { 'KERNEL32.dll': ['CreateEventA', 'SignalObjectAndWait', 'CreateThread',
+            'ResumeThread', 'GetCurrentThread', 'SetThreadAffinityMask', 'GetACP',
             'ExitThread', 'ExitProcess'] },
         codeSize: 0x400,
-        data: { go: u32(0), done: u32(0), thread: u32(0), frames: u32(FRAMES), result: u32(0) },
+        data: { go: u32(0), done: u32(0), spare: u32(0), thread: u32(0), frames: u32(FRAMES),
+            result: u32(0) },
         code: ({ iat, at, code })=>{
             const call = (/** @type {string} */ name)=>[0xff, 0x15, ...u32(iat(name))];
             /** push [name] @param {string} name */
@@ -70,14 +71,20 @@ function program(){
             const main = [
                 ...event('go'),
                 ...event('done'),
+                ...event('spare'),
                 ...call('GetCurrentThread'), 0x6a, 0x01, 0x50, // the first processor alone
                 ...call('SetThreadAffinityMask'),
                 0x6a, 0, 0x6a, 0x04, 0x6a, 0, 0x68, ...u32(code(RENDER)), 0x6a, 0, 0x6a, 0,
                 ...call('CreateThread'), 0xa3, ...u32(at('thread')), // CREATE_SUSPENDED
                 0x6a, 0x02, ...pushWord('thread'), ...call('SetThreadAffinityMask'),
                 ...pushWord('thread'), ...call('ResumeThread'),
-                // Its first calls answered, it says it is ready.
-                0x6a, 0xff, ...pushWord('done'), ...call('WaitForSingleObject'),
+                // Its first calls answered, it says it is ready. Waited for in
+                // SignalObjectAndWait, of an event nobody waits for, like every
+                // other hand-over: the process's executor may answer those calls
+                // before this thread gets here, and WaitForSingleObject's guest
+                // code takes a shorter way to an event already set.
+                0x6a, 0x00, 0x6a, 0xff, ...pushWord('done'), ...pushWord('spare'),
+                ...call('SignalObjectAndWait'),
                 0xb8, ...u32(1), //                         mov eax, 1
             ];
             const round = [

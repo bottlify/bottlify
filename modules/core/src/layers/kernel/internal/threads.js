@@ -822,12 +822,14 @@ export function createScheduler(options){
                 eip: next.parkedReturn,
                 esp: next.resumeStack ?? null,
                 returnValue: next.waitResult ?? 0,
+                ...next.parkedInStub === true ? { inStub: true } : {},
                 // Only a thread sent into code that reads more than its
                 // stack carries these: an exception handler's block.
                 ...next.resumeRegisters ? { registers: next.resumeRegisters } : {},
             };
             onResume?.(next, next.lastWaitingOn ?? null, resume.returnValue >>> 0);
             next.parkedReturn = null;
+            next.parkedInStub = false;
             next.resumeStack = null;
             next.waitResult = null;
             next.resumeRegisters = null;

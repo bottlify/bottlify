@@ -159,7 +159,7 @@ export function createKernelModule(){
                 cpu.stop?.();
             };
 
-            state.switcher = createSwitcher({ cpu });
+            state.switcher = createSwitcher({ cpu, memory });
             state.clock = createClock(config?.clock);
             // The time-stamp counter counts the same time QueryPerformanceCounter
             // reads, so a program calibrating one against the other measures the
@@ -414,6 +414,7 @@ export function createKernelModule(){
                     thread.parkedReturn = memory.readU32(esp);
                     noteResume(`park ${thread.name}@0x${(thread.parkedReturn >>> 0).toString(16)}`);
                     thread.resumeStack = restingStack;
+                    thread.parkedInStub = true;
                     memory.writeU32(esp, cpu.parkAddress());
                     endTurnAtCall();
                 },
@@ -437,6 +438,7 @@ export function createKernelModule(){
                 scheduleResume(thread, { eip, esp, returnValue = 0, registers }){
                     noteResume(`schedule ${thread.name}@0x${(eip >>> 0).toString(16)}`);
                     thread.parkedReturn = eip;
+                    thread.parkedInStub = false;
                     thread.resumeStack = esp ?? null;
                     thread.waitResult = registers?.eax ?? returnValue;
                     thread.resumeRegisters = registers ?? null;
