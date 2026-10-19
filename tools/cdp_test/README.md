@@ -32,7 +32,7 @@ the guest, its files directly in that directory.
 | [`server.mjs`](server.mjs) | a static server for the sandbox pages, the sources and a bundle | library |
 | [`../disasm.mjs`](../disasm.mjs) | a program's own code at an address a profile names hot (`hw.dll+0x35840`), disassembled out of the bottle by module and offset (capstone) | `node tools/disasm.mjs <bundle-id> hw.dll 35840:80` |
 | [`cpuprofile-callers.mjs`](cpuprofile-callers.mjs) | who calls a function in a `.cpuprofile` (`live/worker-profile.mjs` writes `dbg/worker.cpuprofile`): the callers above every matching frame, by samples | `node tools/cdp_test/cpuprofile-callers.mjs dbg/worker.cpuprofile "^now "` |
-| [`trace-summary.mjs`](trace-summary.mjs) | a Performance trace a person saved (`Trace-*.json.gz`): each thread's busy share, and every sampled thread's functions by self time: which thread a slow scene went to, and what in it | `node tools/cdp_test/trace-summary.mjs <trace.json.gz>` |
+| [`trace-summary.mjs`](trace-summary.mjs) | a Performance trace a person saved (`Trace-*.json.gz`): each thread's busy share and garbage collection, the longest tasks with what ran and was sampled inside each (a frame rate falling to nothing for a moment), and every sampled thread's functions by self time: which thread a slow scene went to, and what in it; read an event at a time, so a trace past half a gigabyte opens | `node tools/cdp_test/trace-summary.mjs <trace.json.gz>` |
 | [`device-lag.mjs`](device-lag.mjs) | counts the engine's GPU submits and those the device finished, for a run that waits on the device | library |
 
 Reports land in `tools/cdp_test/reports/` (gitignored).
