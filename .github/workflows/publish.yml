@@ -4,9 +4,11 @@
 name: publish
 
 # By hand only, from main once its ci run is green: every package packed, the
-# tarballs kept as the run's artifacts, and the packages named published to npm
-# under the token in the NPM_TOKEN secret. A package already on npm at its
-# version is refused there, so a version is raised in its package.json first.
+# tarballs kept as the run's artifacts, and the packages named staged on npm
+# under the token in the NPM_TOKEN secret, a token that may only stage. A staged
+# version goes live once a maintainer approves it with 2FA (npmjs.com, or
+# `npm stage approve <id> --otp <code>`). npm refuses a version already
+# published, so a version is raised in its package.json first.
 on:
   workflow_dispatch:
     inputs:
@@ -30,8 +32,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          # npm 12, whose `npm stage` this needs, runs on Node 24.15 and later.
+          node-version: 24
           registry-url: https://registry.npmjs.org
+      - run: npm install -g npm@12.2.0
       - run: npm ci
       # The core package carries the video decoder where it can be had; the
       # package check holds it to its size when it is there.
@@ -48,11 +52,12 @@ jobs:
         with:
           name: packages
           path: packs/*.tgz
-      - name: publish
+      - name: stage
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           PACKAGES: ${{ inputs.packages }}
         run: |
           for name in $(echo "$PACKAGES" | tr ',' ' '); do
-            npm publish -w "@bottlify/$name" --access public
+            npm stage publish -w "@bottlify/$name" --access public
           done
+          npm stage list
