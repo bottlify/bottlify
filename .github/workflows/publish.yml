@@ -48,6 +48,9 @@ jobs:
       # and its check run, before anything is packed or published.
       - run: npm run build -w @bottlify/core
       - run: npm run check:package -w @bottlify/core
+      # npmjs.com resolves a README's relative links against the repository's
+      # root; each package's README is given links to this commit instead.
+      - run: node tools/readme-links.mjs "$GITHUB_SHA" modules/core modules/cork modules/installer modules/networking
       - name: pack
         run: |
           mkdir -p packs

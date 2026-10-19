@@ -1,5 +1,7 @@
 # `@bottlify/core`
 
+[По-русски](README.ru.md)
+
 Run a 32-bit Windows program in a browser tab: the original `.exe`, unchanged.
 
 This package is the Windows the program sees. It answers the program's calls into Windows

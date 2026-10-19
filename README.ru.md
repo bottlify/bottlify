@@ -22,7 +22,7 @@ DirectSound, DirectMusic, видео через DirectShow и сеть чере�
 
 ## Из чего состоит
 
-- **[core](modules/core/README.md)** (`@bottlify/core`): окружение Windows, написанное с нуля на
+- **[core](modules/core/README.ru.md)** (`@bottlify/core`): окружение Windows, написанное с нуля на
   JavaScript. `kernel32`, `user32`, `gdi32`, DirectX, OpenGL, DirectSound, Winsock и остальные
   системные библиотеки работают поверх WebGPU, WebAudio и OPFS. Страница запускает его одним
   вызовом `createApp()`.
