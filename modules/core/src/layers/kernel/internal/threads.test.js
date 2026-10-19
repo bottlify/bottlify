@@ -1569,8 +1569,8 @@ function pinnedRenderer(traded){
 }
 
 test('a pinned thread whose calls take this executor the most time has its processor played'
-    + ' here where the program draws faster so, by a trial of each way in turn, tried again'
-    + ' after a hold', ()=>{
+    + ' here where the program draws faster so, by a trial of each way in turn, kept while the'
+    + ' program does not change', ()=>{
     // Call of Duty 4 pins its main thread to the first processor and its render
     // thread to the last, every Present and Lock of the renderer a few hundred
     // microseconds of this executor's while the main thread computed here.
@@ -1578,9 +1578,11 @@ test('a pinned thread whose calls take this executor the most time has its proce
     faster.run(8000);
     assert.deepEqual([faster.said().processors, faster.said().trials, faster.said().played],
         ['1,0', 1, 1], `traded, the frames twice as many: ${JSON.stringify(faster.said())}`);
+    // A trial runs the program the slower way for its windows: with its
+    // threads' work as it was, it is not tried again.
     faster.run(40_000);
-    assert.deepEqual([faster.said().processors, faster.said().trials], ['1,0', 2],
-        `tried again after the hold, and kept: ${JSON.stringify(faster.said())}`);
+    assert.deepEqual([faster.said().processors, faster.said().trials], ['1,0', 1],
+        `not tried again, and kept: ${JSON.stringify(faster.said())}`);
 
     // A trade the frames lose by is not kept.
     const slower = pinnedRenderer(0.5);
@@ -1589,7 +1591,7 @@ test('a pinned thread whose calls take this executor the most time has its proce
         ['0,1', 1, 1], `half the frames traded: ${JSON.stringify(slower.said())}`);
     slower.run(40_000);
     assert.deepEqual([slower.said().processors, slower.said().trials, slower.said().own],
-        ['0,1', 2, 2], `tried again after the hold, not kept: ${JSON.stringify(slower.said())}`);
+        ['0,1', 1, 1], `not tried again, not traded: ${JSON.stringify(slower.said())}`);
 });
 
 test('a thread that may run only here takes this executor\'s turn from one that may run on'

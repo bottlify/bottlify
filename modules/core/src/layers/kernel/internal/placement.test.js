@@ -8,36 +8,58 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Placement, createPlacement } from './placement.js';
 
+/** One thread doing all of a program's work, as the share each thread does. */
+const ONE_THREAD = ()=>({ main: 1 });
+
 /**
  * A program whose frames come every `frameMs[mode]` milliseconds (none where
  * absent) and whose executors retire `retiredPerMs[mode]` instructions a
- * millisecond, run for `ms` in steps of a turn.
+ * millisecond, shared between its threads as `shares` says at the time, run
+ * for `ms` in steps of a turn. Either may change with the time (`frameMsAt`).
  *
  * @param {{ frameMs?: Record<string, number>, retiredPerMs: Record<string, number>, ms: number,
- *     fixed?: 'spread' | 'concentrate' | null, busyShare?: Record<string, number> | null }} program
+ *     fixed?: 'spread' | 'concentrate' | null, busyShare?: Record<string, number> | null,
+ *     shares?: (clock: number) => Record<string, number>,
+ *     frameMsAt?: (clock: number) => Record<string, number> | undefined }} program
  */
-function run({ frameMs, retiredPerMs, ms, fixed = null, busyShare = null }){
+function run({ frameMs, retiredPerMs, ms, fixed = null, busyShare = null, shares = ONE_THREAD,
+    frameMsAt = ()=>frameMs })
+{
     let clock = 0;
-    const placement = createPlacement({ now: ()=>clock, fixed });
+    /** @type {Map<string, number>} */
+    const work = new Map();
+    const placement = createPlacement({ now: ()=>clock, fixed, work: ()=>new Map(work) });
     let retired = 0;
     let busy = 0;
     let nextFrame = 0;
     /** @type {Record<string, number>} */
     const time = { spread: 0, concentrate: 0 };
+    /** When each trial began. @type {number[]} */
+    const began = [];
     for (; clock < ms; clock += 2)
     {
         const mode = placement.mode();
         time[mode] += 2;
         retired += 2 * retiredPerMs[mode];
+        for (const [name, share] of Object.entries(shares(clock)))
+        {
+            work.set(name, (work.get(name) ?? 0) + 2 * retiredPerMs[mode] * share);
+        }
         busy += 2 * (busyShare?.[mode] ?? 0);
-        if (frameMs && clock >= nextFrame)
+        const frames = frameMsAt(clock);
+        if (frames && clock >= nextFrame)
         {
             placement.frame();
-            nextFrame = clock + frameMs[mode];
+            nextFrame = clock + frames[mode];
         }
+        const trialing = placement.trialing();
         placement.tick(retired, busyShare ? busy : null);
+        if (!trialing && placement.trialing())
+        {
+            began.push(clock);
+        }
     }
-    return { placement, time };
+    return { placement, time, began };
 }
 
 test('a program whose frames come faster concentrated is run concentrated, '
@@ -47,21 +69,21 @@ test('a program whose frames come faster concentrated is run concentrated, '
         retiredPerMs: { spread: 900_000, concentrate: 600_000 }, ms: 120_000 });
     assert.equal(placement.mode(), Placement.CONCENTRATE);
     const said = placement.diagnostics();
-    assert.ok(said.trials >= 2 && said.concentrate === said.trials, JSON.stringify(said));
-    assert.equal(said.byFrames, said.trials, 'measured by frames');
+    assert.ok(said.trials === 1 && said.concentrate === 1, JSON.stringify(said));
+    assert.equal(said.byFrames, 1, 'measured by frames');
     assert.ok(time.concentrate > 4 * time.spread, `mostly concentrated: ${JSON.stringify(time)}`);
 });
 
 test('a program with no frames that retires twice as much spread is run spread, '
-    + 'and tried less often while it stays so', ()=>{
+    + 'and not tried again while it stays so', ()=>{
     const { placement, time } = run({ retiredPerMs: { spread: 2_000_000, concentrate: 1_000_000 },
-        ms: 300_000 });
+        ms: 300_000, shares: ()=>({ main: 0.5, worker: 0.5 }) });
     assert.equal(placement.mode(), Placement.SPREAD);
     const said = placement.diagnostics();
-    assert.ok(said.trials >= 3 && said.spread === said.trials, JSON.stringify(said));
+    assert.ok(said.trials === 1 && said.spread === 1, JSON.stringify(said));
     assert.equal(said.byFrames, 0);
-    assert.ok(said.holdMs > 30_000, 'the hold grows while the same way wins');
-    assert.ok(time.spread > 15 * time.concentrate, `mostly spread: ${JSON.stringify(time)}`);
+    assert.equal(said.moved, 0, 'the threads\' shares as they were after the trial');
+    assert.ok(time.concentrate < 2000, `concentrated only in the trial: ${JSON.stringify(time)}`);
 });
 
 test('spreading must win by the margin: a few percent stays concentrated', ()=>{
@@ -128,14 +150,14 @@ test('a program that begins presenting after a load decided by what it retired i
         }
     }
     const said = placement.diagnostics();
-    assert.ok(said.spread >= 2, `the load ran spread: ${JSON.stringify(said)}`);
+    assert.ok(said.spread === 1 && said.trials === 2, `the load ran spread, the play tried once: ${
+        JSON.stringify(said)}`);
     assert.ok(concentratedAt > 0 && concentratedAt - PLAY_AT < 12_000,
         `the play concentrated ${concentratedAt - PLAY_AT} ms in: ${JSON.stringify(said)}`);
     assert.equal(placement.mode(), Placement.CONCENTRATE);
-    assert.equal(said.holdMs, 30_000, 'the hold starts over with the new measure');
 });
 
-test('a game far slower spread is tried a few times, its slow windows ended early, and runs'
+test('a game far slower spread is tried once, its slow window ended early, and runs'
     + ' concentrated', ()=>{
     // The Crysis demo's timedemo on four cores: a frame every 110 ms concentrated,
     // 450 spread, where its threads spinning on their jobs retire more.
@@ -143,9 +165,36 @@ test('a game far slower spread is tried a few times, its slow windows ended earl
         retiredPerMs: { spread: 900_000, concentrate: 600_000 }, ms: 300_000 });
     const said = placement.diagnostics();
     assert.equal(placement.mode(), Placement.CONCENTRATE);
-    assert.ok(said.trials <= 4 && said.byFrames === said.trials, JSON.stringify(said));
+    assert.ok(said.trials === 1 && said.byFrames === 1, JSON.stringify(said));
     assert.ok(time.spread < 0.03 * (time.spread + time.concentrate),
         `spread ${time.spread} ms of ${time.spread + time.concentrate}`);
+});
+
+test('a program whose work moves between its threads for long enough is tried again, and one'
+    + ' whose work moves for a few seconds is not', ()=>{
+    // Spread draws a frame every 30 ms and concentrated every 60 while the main
+    // thread does most of the work; from SHIFT_AT a worker does most of it, and
+    // the two ways change places.
+    const SHIFT_AT = 100_000;
+    const retiredPerMs = { spread: 1000, concentrate: 1000 };
+    /** @param {boolean} after */
+    const sharesOf = after=>(after ? { main: 0.3, worker: 0.7 } : { main: 0.9, worker: 0.1 });
+    const moved = run({ retiredPerMs, ms: 160_000,
+        frameMsAt: clock=>(clock < SHIFT_AT ? { spread: 30, concentrate: 60 }
+            : { spread: 60, concentrate: 30 }),
+        shares: clock=>sharesOf(clock >= SHIFT_AT) });
+    const said = moved.placement.diagnostics();
+    assert.equal(moved.placement.mode(), Placement.CONCENTRATE);
+    assert.ok(said.trials === 2 && said.byWork === 1, JSON.stringify(said));
+    assert.ok(moved.began[1] > SHIFT_AT && moved.began[1] - SHIFT_AT <= 16_000,
+        `tried again ${moved.began[1] - SHIFT_AT} ms after the work moved`);
+
+    // The same move for three seconds -- a load's burst -- leaves the winner as it is.
+    const burst = run({ retiredPerMs, ms: 160_000, frameMs: { spread: 30, concentrate: 60 },
+        shares: clock=>sharesOf(clock >= SHIFT_AT && clock < SHIFT_AT + 3000) });
+    assert.equal(burst.placement.mode(), Placement.SPREAD);
+    const once = burst.placement.diagnostics();
+    assert.equal(once.trials, 1, JSON.stringify(once));
 });
 
 test('another pair of ways is weighed alike: the safer one first, no trial while another runs',

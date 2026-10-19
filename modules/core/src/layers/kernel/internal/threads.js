@@ -421,10 +421,17 @@ export function createScheduler(options){
     // thread the machine was spent on.
     const wall = options.wall ?? (()=>performance.now());
     /**
+     * What each thread has retired so far, wherever it ran: the trials' sign
+     * that the program's work has moved between its threads since they last
+     * measured it, and so that their winner may no longer be.
+     */
+    const workByThread = ()=>new Map(threads.map(thread=>[thread.name ?? '?',
+        thread.instructions]));
+    /**
      * Whether the ready threads spread over the process's executors or take
      * turns on its own, by what the program gets done each way (`placement.js`).
      */
-    const placement = createPlacement({ now: wall,
+    const placement = createPlacement({ now: wall, work: workByThread,
         fixed: options.placement ?? (options.freeHost === true ? 'spread' : null),
         mayBegin: ()=>!trading.trialing(), ...options.placementTiming });
     /**
@@ -434,7 +441,8 @@ export function createScheduler(options){
      * margin. A trial begins only with such a thread (`proposed`), and never
      * while the placement's runs.
      */
-    const trading = createPlacement({ now: wall, ways: PLAY_WAYS, initial: PLAY_WAYS[0],
+    const trading = createPlacement({ now: wall, work: workByThread, ways: PLAY_WAYS,
+        initial: PLAY_WAYS[0],
         fixed: options.playPinned === false || options.freeHost === true ? PLAY_WAYS[0] : null,
         mayBegin: ()=>!placement.trialing() && proposed() >= 0, ...options.placementTiming });
     /**
@@ -1932,7 +1940,9 @@ export function createScheduler(options){
         // while nothing else wants its executor, longer than a window.
         const retired = remotes.reduce((sum, remote)=>sum + (remote.retiredSoFar?.() ?? 0),
             sharedTime.hereRetired + sharedTime.elsewhereRetired);
-        placement.tick(retired, sharedTime.hereMs);
+        // The process's executor's work: its own slices and its answers to the
+        // others between them, which spreading adds and its slices do not hold.
+        placement.tick(retired, sharedTime.hereMs + sharedTime.answerMs);
         playPinned(remotes, retired);
         try
         {

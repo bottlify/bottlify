@@ -1025,7 +1025,8 @@ function describe(result, context, calls, symbols){
             say(`    placement: ${placement.mode}${placement.fixed ? ' (fixed)' : ''},`
                 + ` ${placement.trials} trials (spread ${placement.spread},`
                 + ` concentrate ${placement.concentrate},`
-                + ` ${placement.byFrames} by frames), hold ${seconds(placement.holdMs)};`
+                + ` ${placement.byFrames} by frames, ${placement.byWork ?? 0} on moved work),`
+                + ` work moved ${placement.moved ?? 'not measured'} since;`
                 + ` last: ${placement.last || 'none'}`);
         }
         const own = executors.own;

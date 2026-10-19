@@ -17,8 +17,8 @@
  * by the process's executor, and on a four-core machine the Crysis demo's
  * timedemo ran 172-188 ms a frame spread and 129 concentrated (116-124 on
  * one executor). Which one a program is, and on which machine, only the
- * program says: so the scheduler tries both now and then in short windows, in
- * turn, and keeps the one that went faster -- frames presented a millisecond
+ * program says: so the scheduler tries both in short windows, in turn, and
+ * keeps the one that went faster -- frames presented a millisecond
  * where the program presents them (a game's thread spinning on its jobs
  * retires instructions that are no progress), instructions retired on every
  * executor where it does not. Spreading must win by `margin` to be kept:
@@ -27,10 +27,20 @@
  * `clear` after a window of each ends the trial there, the second round's
  * windows of the slower way spared: in the Crysis demo's timedemo a spread
  * window ran 400 to 580 ms a frame against 80 to 130 concentrated, and two
- * trials in its half minute cost it a third. A program that begins or stops
- * presenting frames -- a game's load decided by what it retired, then its
- * play -- is tried again once it has done so for `changeMs`, not after the
- * winner's hold, which by then may be minutes.
+ * trials in its half minute cost it a third.
+ *
+ * A trial runs the program the slower way for its windows, which a player sees:
+ * Call of Duty 4 drew a frame every 64 ms in a concentrated window and every
+ * 131 in a traded one, against 28 and 30, and a trial again every half minute
+ * to four minutes, while nothing in the game changed, was a second of that
+ * each time.
+ * So a winner is kept for as long as what it was measured on lasts, and tried
+ * again only once the program changes: it begins or stops presenting frames
+ * (a game's load decided by what it retired, then its play) for `changeMs`, or
+ * the share each of its threads retires moves from the one it had after the
+ * trial -- half the summed difference of the shares at least `shift`, over
+ * `lasting` windows of `profileMs` in a row, so that a load's burst of a few
+ * seconds is not one -- and never sooner than `holdMs` after the last trial.
  *
  * Frames that come as fast either way -- a program held to the display's rate
  * -- say nothing of what each way costs, and such a tie went to the safer way:
@@ -60,8 +70,13 @@ export const Placement = Object.freeze({ SPREAD: 'spread', CONCENTRATE: 'concent
  * @property {number} [maxWindowMs]  a window's most, frames or not
  * @property {number} [settleMs]  how long after a switch a window starts counting
  * @property {number} [rounds]  windows of each way in a trial
- * @property {number} [holdMs]  how long the winner is kept before the next trial
- * @property {number} [maxHoldMs]  the longest a winner the trials keep choosing is kept
+ * @property {number} [holdMs]  the least time from a trial's end to the next one's begin
+ * @property {() => Map<string, number>} [work]  what each thread has retired so far, by
+ *     name: whether the program's work has moved between its threads since the last trial
+ * @property {number} [profileMs]  how long a window of the threads' work is
+ * @property {number} [shift]  how far a window's shares must lie from those after the trial,
+ *     half their summed difference, to count as moved: 0 every window, 1 none
+ * @property {number} [lasting]  windows in a row the work must have moved for a trial
  * @property {number} [margin]  by how much spreading must win
  * @property {number} [clear]  by how much one way ahead after a window of each ends the trial
  * @property {number} [minFrames]  frames a window waits for, up to `maxWindowMs`
@@ -90,7 +105,10 @@ export function createPlacement(options){
     const settleMs = options.settleMs ?? 200;
     const rounds = options.rounds ?? 2;
     const holdMs = options.holdMs ?? 30_000;
-    const maxHoldMs = options.maxHoldMs ?? 240_000;
+    const work = options.work ?? null;
+    const profileMs = options.profileMs ?? 5000;
+    const shift = options.shift ?? 0.25;
+    const lasting = options.lasting ?? 2;
     const margin = options.margin ?? 0.05;
     const clear = options.clear ?? 0.25;
     const minFrames = options.minFrames ?? 3;
@@ -109,12 +127,23 @@ export function createPlacement(options){
     let open = /** @type {{ from: number, retired: number, frames: number, firstFrame: number,
         lastFrame: number, busy: number | null } | null} */ (null);
     let switchedAt = now();
-    /** When the next trial begins; Infinity while one runs. */
+    /** When the first trial begins, then the soonest the next one may. */
     let nextTrial = switchedAt + firstTrialMs;
     let trialAt = -1;
-    let hold = holdMs;
-    /** @type {string | null} */
-    let lastWinner = null;
+    /**
+     * What each thread retired in the first window of the threads' work after
+     * the last trial, as shares of the whole: what the trial was measured on.
+     * Null until that window has passed.
+     * @type {Map<string, number> | null}
+     */
+    let measuredOn = null;
+    /** The window of the threads' work under way: since when, and what each had retired then. */
+    let profile = /** @type {{ from: number, work: Map<string, number> } | null} */ (null);
+    /** When the first window after a trial begins: once the threads have moved to the winner. */
+    let profileFrom = Infinity;
+    /** The last window's distance from `measuredOn`, and how many in a row reached `shift`. */
+    let moved = 0;
+    let movedWindows = 0;
     /** The last three frames' times, oldest first: presenting while they lie within a
      * window's longest, a window then measured by frames. @type {number[]} */
     const recent = [];
@@ -123,11 +152,12 @@ export function createPlacement(options){
     /** Since when the program has presented otherwise than the last trial measured, or -1. */
     let changedSince = -1;
     /**
-     * Trials, each way's wins by its name, those decided by frames, the last.
+     * Trials, each way's wins by its name, those decided by frames, those begun
+     * because the threads' work moved, the last.
      *
      * @type {Record<string, any>}
      */
-    const counted = { trials: 0, [safe]: 0, [risky]: 0, byFrames: 0, last: '' };
+    const counted = { trials: 0, [safe]: 0, [risky]: 0, byFrames: 0, byWork: 0, last: '' };
     /** Whether the program presents now: its last three frames within a window's longest. */
     const presenting = (/** @type {number} */ at)=>recent.length === 3
         && at - recent[0] <= maxWindowMs;
@@ -195,6 +225,92 @@ export function createPlacement(options){
         return winner;
     };
 
+    /**
+     * Each thread's share of what all of them retired between two readings;
+     * null where none retired anything.
+     *
+     * @param {Map<string, number>} from @param {Map<string, number>} to
+     */
+    const sharesOf = (from, to)=>{
+        /** @type {Map<string, number>} */
+        const shares = new Map();
+        let total = 0;
+        for (const [name, retired] of to)
+        {
+            const did = retired - (from.get(name) ?? 0);
+            if (did > 0)
+            {
+                shares.set(name, did);
+                total += did;
+            }
+        }
+        if (total === 0)
+        {
+            return null;
+        }
+        for (const [name, did] of shares)
+        {
+            shares.set(name, did / total);
+        }
+        return shares;
+    };
+
+    /**
+     * Half the summed difference of two sets of shares: 0 where each thread
+     * did the same part of the work, 1 where no thread did any of both.
+     *
+     * @param {Map<string, number>} a @param {Map<string, number>} b
+     */
+    const distance = (a, b)=>{
+        let sum = 0;
+        for (const [name, share] of a)
+        {
+            sum += Math.abs(share - (b.get(name) ?? 0));
+        }
+        for (const [name, share] of b)
+        {
+            sum += a.has(name) ? 0 : share;
+        }
+        return sum / 2;
+    };
+
+    /**
+     * Closes a window of the threads' work once it has run `profileMs`: the
+     * first after a trial is what the trial was measured on, each later one
+     * weighed against it.
+     *
+     * @param {number} at
+     */
+    const watchWork = at=>{
+        if (work === null || at < profileFrom)
+        {
+            return;
+        }
+        if (profile === null)
+        {
+            profile = { from: at, work: work() };
+            return;
+        }
+        if (at - profile.from < profileMs)
+        {
+            return;
+        }
+        const done = work();
+        const shares = sharesOf(profile.work, done);
+        profile = { from: at, work: done };
+        if (shares === null)
+        {
+            return;
+        }
+        if (measuredOn === null)
+        {
+            measuredOn = shares;
+            return;
+        }
+        moved = distance(measuredOn, shares);
+        movedWindows = moved >= shift ? movedWindows + 1 : 0;
+    };
+
     return {
         /** The way threads go now. @returns {string} */
         mode: ()=>mode,
@@ -238,12 +354,20 @@ export function createPlacement(options){
             {
                 changedSince = lastByFrames === null || presenting(at) === lastByFrames ? -1
                     : changedSince < 0 ? at : changedSince;
-                if (at < nextTrial && (changedSince < 0 || at - changedSince < changeMs)
-                    || !mayBegin())
+                watchWork(at);
+                const first = lastByFrames === null && at >= nextTrial;
+                const presentsOtherwise = changedSince >= 0 && at - changedSince >= changeMs;
+                const workMoved = movedWindows >= lasting && at >= nextTrial;
+                if (!(first || presentsOtherwise || workMoved) || !mayBegin())
                 {
                     return;
                 }
+                counted.byWork += workMoved && !presentsOtherwise ? 1 : 0;
                 changedSince = -1;
+                measuredOn = null;
+                profile = null;
+                profileFrom = Infinity;
+                movedWindows = 0;
                 trialAt = at;
                 windows = [];
                 open = null;
@@ -277,18 +401,19 @@ export function createPlacement(options){
                 switchTo(order[windows.length], at);
                 return;
             }
-            const byFramesBefore = lastByFrames;
             const winner = decide(windows);
-            // A winner the trials keep choosing, by the same measure, is tried less often.
-            hold = winner === lastWinner && lastByFrames === byFramesBefore
-                ? Math.min(maxHoldMs, hold * 2) : holdMs;
-            lastWinner = winner;
             switchTo(winner, at);
             trialAt = -1;
-            nextTrial = at + hold;
+            nextTrial = at + holdMs;
+            // The work the winner is kept for is read once the threads are its way.
+            profileFrom = at + settleMs;
         },
 
-        /** The way now, the trials' account and the hold. @returns {Record<string, any>} */
-        diagnostics: ()=>({ mode, fixed, ...counted, holdMs: hold }),
+        /**
+         * The way now, the trials' account, and how far the threads' last window
+         * of work lay from the one after the last trial.
+         * @returns {Record<string, any>}
+         */
+        diagnostics: ()=>({ mode, fixed, ...counted, moved: Number(moved.toFixed(2)) }),
     };
 }

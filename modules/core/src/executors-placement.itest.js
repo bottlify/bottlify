@@ -111,8 +111,9 @@ test('two threads computing apart are run spread: the trials find them faster so
         0x49, { jump: 'jnz', to: 'loop' }, // dec ecx; jnz loop
         0x31, 0xc0, 0xc2, 0x04, 0x00, //      xor eax, eax; ret 4
     ], ()=>[]);
+    // Tried again every tenth of a second: every window of the threads' work counts as moved.
     const timing = { firstTrialMs: 20, windowMs: 40, maxWindowMs: 40, settleMs: 10, holdMs: 100,
-        maxHoldMs: 100 };
+        shift: 0, profileMs: 20, lasting: 1 };
     // A machine busy with other runs gives the other executor less of a
     // processor, and a trial or two goes the other way: what is asked is that
     // spread wins most of its trials, in the best of three runs.
@@ -155,9 +156,10 @@ test('a locked count kept by three threads comes out whole spread, concentrated 
     assert.ok(fixed.spread > 0, 'spread, slices ran on the other executors');
     assert.equal(fixed.concentrate, 0, 'concentrated, none did');
 
-    // A trial's every window five milliseconds long, and the winner held as long.
+    // A trial's every window five milliseconds long, and every window of the
+    // threads' work counted as moved, so the next trial follows at once.
     const moving = await run(executable, 3, { placementTiming: { firstTrialMs: 1, windowMs: 5,
-        maxWindowMs: 5, settleMs: 1, rounds: 1, holdMs: 5, maxHoldMs: 5 } });
+        maxWindowMs: 5, settleMs: 1, rounds: 1, holdMs: 5, shift: 0, profileMs: 2, lasting: 1 } });
     assert.equal(moving.code, 3 * ADDS, 'moved between the two ways');
     assert.ok(moving.placement.trials >= 5, JSON.stringify(moving.placement));
     assert.ok(moving.scheduler?.executorSlices > 0, 'some of it spread');

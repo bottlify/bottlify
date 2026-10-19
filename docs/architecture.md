@@ -423,15 +423,17 @@ everyone's. The page flags are `INACCESSIBLE`, `HAS_CODE`, `VOLATILE`, `CLOSED`,
   - **Spread or concentrated.** All of the above is one way of placing threads, spread. The other,
     concentrated, keeps every thread on the process's own executor where its mask allows, taking
     turns there as on one processor (`cpu.placement`). Unless the run names one, the scheduler
-    tries both now and then: two windows of each in turn, concentrated first, each some hundreds of
+    tries both: two windows of each in turn, concentrated first, each some hundreds of
     milliseconds after a short settling, and keeps the faster. Where the program presents frames,
     speed is frames presented a millisecond, since a game's thread spinning on its jobs retires
     instructions that are no progress; elsewhere it is instructions retired on every executor.
-    Spreading must win by 5%. The winner is kept 30 seconds, twice as long each time the same way
-    wins again, up to four minutes; a program that begins or stops presenting frames (a game's
-    load, then its play) is tried again three seconds after. A game whose threads hand work to each
-    other every frame runs concentrated, near its speed on one core (the locked instructions stay
-    atomic); a compressor's workers run spread.
+    Spreading must win by 5%. A trial runs the program the slower way for its windows, which a
+    player sees as a second of slow frames, so the winner is kept until the program changes: it is
+    tried again three seconds after the program begins or stops presenting frames (a game's load,
+    then its play), or once the share of the work each thread does has moved by a quarter for ten
+    seconds, and never sooner than 30 seconds after the last trial. A game whose threads hand work
+    to each other every frame runs concentrated, near its speed on one core (the locked
+    instructions stay atomic); a compressor's workers run spread.
   - **A pinned thread** (`cpu.playPinned`). A thread pinned to one processor whose calls into the
     host take the process's executor the most time may have that processor played by the
     process's own executor, where its calls are answered, the executor that played it taking the
@@ -442,7 +444,7 @@ everyone's. The page flags are `INACCESSIBLE`, `HAS_CODE`, `VOLATILE`, `CLOSED`,
     the thread pinned to the process's own processor take. A count of calls does not say it: a
     main thread's are many and cheap. Whether the program gains by it only its frames say, so the
     trade is weighed by the same trial as placement, never at once with it: windows of each way in
-    turn, the trade kept where it wins by the margin, tried again after the hold.
+    turn, the trade kept where it wins by the margin, tried again when the program changes.
     GetCurrentProcessorNumber answers the processor played, so no thread is told of one its mask
     does not name.
   - **Answering calls.** The process's own thread runs its threads too, and answers the calls the
