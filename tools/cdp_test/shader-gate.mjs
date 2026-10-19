@@ -11,7 +11,7 @@
  * component the program wrote compared.
  *
  *   node tools/cdp_test/shader-gate.mjs [--count 40] [--seed 1] [--length 10]
- *       [--profiles vs_1_1,ps_2_0,...] [--headed]
+ *       [--profiles vs_1_1,ps_2_0,...] [--headed] [--chrome-flag FLAG]...
  *
  * A vertex shader runs as a compute dispatch (its entry is a plain function
  * once the stage attribute is taken off), so every output is read back,
@@ -544,7 +544,11 @@ async function main(){
     const length = Number(flag('--length', '10'));
     const profiles = flag('--profiles', Object.keys(PROFILES).join(',')).split(',');
     const server = await serveStatic({ sandboxDir: TOOL_ROOT, srcDir: TOOL_ROOT });
-    const browser = await launchWithGpu({ headed: process.argv.includes('--headed') });
+    // `--chrome-flag X`, repeatable: `--use-webgpu-adapter=swiftshader` runs the
+    // gate on the software adapter a CI runner without a GPU has.
+    const extraFlags = process.argv.flatMap((arg, at)=>(arg === '--chrome-flag'
+        ? [process.argv[at + 1]] : []));
+    const browser = await launchWithGpu({ headed: process.argv.includes('--headed'), extraFlags });
     /** @type {CdpEndpoint | null} */
     let cdp = null;
     /** @type {any[]} */
