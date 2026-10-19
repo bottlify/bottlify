@@ -420,8 +420,10 @@ const sharedNow = ()=>performance.timeOrigin + performance.now();
  *     knows, which the recorded device has no say in. It is given the
  *     device's own objects, so what it asks of them is not recorded.
  * @param {ReadonlySet<string>} [options.answers]  the only methods `answered` is asked about
- * @param {boolean} [options.checkDraws]  a diagnostic: each draw from a buffer compares what it
- *     reads in guest memory with what the played side was sent of it (`draw-check.js`)
+ * @param {boolean | (() => number)} [options.checkDraws]  a diagnostic: each draw from a buffer
+ *     compares what it reads in guest memory with what the played side was sent of it
+ *     (`draw-check.js`); a function is a switch, read at every send and draw: how many
+ *     times it was turned on, 0 while it is off
  * @param {(target: any, name: string, args: any[]) => void} [options.observe]
  *     told every call the recorded device has made, with its own objects, before
  *     `answered` is asked: what the call changed, for a question asked later
@@ -454,11 +456,27 @@ export function createRecording(options){
     const { root, readMemory, transport, answered = ()=>false, answers = new Set(),
         observe = null, applyMoves = null, watchWrites = null } = options;
     const windowMemory = options.windowMemory ?? readMemory;
-    const check = options.checkDraws === true ? createDrawCheck(readMemory) : null;
-    if (check)
-    {
-        transport.checking?.(check.figures);
-    }
+    // On from the start, or switched on and off as the program runs: the
+    // switch says how many times it was turned on (0 while off), and a check
+    // turned on again starts afresh, since it saw nothing sent while off.
+    const checkSwitch = typeof options.checkDraws === 'function' ? options.checkDraws
+        : ()=>(options.checkDraws === true ? 1 : 0);
+    /** @type {import('./draw-check.js').DrawCheck | null} */
+    let check = null;
+    let checkTurn = 0;
+    const checking = ()=>{
+        const turn = checkSwitch();
+        if (turn !== checkTurn)
+        {
+            checkTurn = turn;
+            check = turn === 0 ? null : createDrawCheck(readMemory);
+            if (check)
+            {
+                transport.checking?.(check.figures);
+            }
+        }
+        return check;
+    };
     const { writer } = transport;
     const lender = transport.lender ?? null;
     /**
@@ -876,7 +894,7 @@ export function createRecording(options){
             if (slot >= 0)
             {
                 lent.push({ address, length: extent, slot });
-                check?.sent(address, readMemory(address, extent));
+                checking()?.sent(address, readMemory(address, extent));
             }
             else
             {
@@ -1241,7 +1259,7 @@ export function createRecording(options){
         for (let index = 0; index < list.length; index++)
         {
             writer.memory(list[index].address, list[index].bytes);
-            check?.sent(list[index].address, list[index].bytes);
+            checking()?.sent(list[index].address, list[index].bytes);
         }
     };
 
@@ -1980,7 +1998,7 @@ export function createRecording(options){
             writer.u8(OP.WROTE);
             writer.u32(1);
             writer.memory(address, bytes);
-            check?.sent(address, bytes);
+            checking()?.sent(address, bytes);
             shippedAs('writes', [{ bytes }]);
             transport.recorded();
         },
@@ -2008,8 +2026,9 @@ export function createRecording(options){
                     watch, dirty: new Set() });
                 compared.take(key, 0, buffer.length);
                 (drawn ??= []).push({ address: base, bytes });
-                check?.sent(base, bytes);
-                check?.drew(base + from, to - from, { buffer: buffer.length, from, to,
+                const now = checking();
+                now?.sent(base, bytes);
+                now?.drew(base + from, to - from, { buffer: buffer.length, from, to,
                     first: true });
                 return;
             }
@@ -2024,16 +2043,17 @@ export function createRecording(options){
             {
                 transport.shipped?.('compared', length);
             }
-            if (check)
+            const now = checking();
+            if (now)
             {
                 // The draw's own sends go with the call: the played side has
                 // them when it makes the draw.
                 for (let index = before; index < (drawn?.length ?? 0); index++)
                 {
                     const one = /** @type {{ address: number, bytes: Uint8Array }[]} */ (drawn)[index];
-                    check.sent(one.address, one.bytes);
+                    now.sent(one.address, one.bytes);
                 }
-                check.drew(base + from, to - from, { buffer: buffer.length, from, to,
+                now.drew(base + from, to - from, { buffer: buffer.length, from, to,
                     compared: open.length === 0 ? 'before' : open.length === 2
                         && open[0] === from && open[1] === to ? 'now' : 'part',
                     watched: sent.watch !== null, still, dirty: sent.dirty.size });
@@ -2051,7 +2071,7 @@ export function createRecording(options){
             writer.u8(OP.WROTE);
             writer.u32(1);
             writer.memory(address, bytes);
-            check?.sent(address, bytes);
+            checking()?.sent(address, bytes);
             shippedAs('reads', [{ bytes }]);
             transport.recorded();
         },

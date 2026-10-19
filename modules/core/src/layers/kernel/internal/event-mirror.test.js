@@ -68,3 +68,28 @@ test('a handle past the table has no word, and nothing is written before the tab
     const past = handles.open('event', sync.createEvent());
     assert.equal(wordOf(past), MIRROR.NONE);
 });
+
+test('a table detached says nothing for any handle until it is attached again', ()=>{
+    // Switched off as a program runs (`app.debug.handleWords(false)`): every
+    // guest wait and SetEvent crosses from then on, as with no table.
+    const { mirror, sync, handles, wordOf } = machine();
+    const event = sync.createEvent({ signalled: true });
+    const open = handles.open('event', event);
+    mirror.attach(TABLE, 1024, handles.list());
+    assert.equal(mirror.attached(), true);
+    mirror.detach();
+    assert.equal(mirror.attached(), false);
+    assert.equal(wordOf(open), MIRROR.NONE, 'an open handle says nothing');
+    sync.resetEvent(event);
+    sync.setEvent(event);
+    const later = handles.open('event', sync.createEvent());
+    assert.deepEqual([wordOf(open), wordOf(later)], [MIRROR.NONE, MIRROR.NONE],
+        'nor a change, nor a handle opened since');
+    sync.resetEvent(event);
+    mirror.reattach(handles.list());
+    assert.equal(mirror.attached(), true);
+    assert.deepEqual([wordOf(open), wordOf(later)], [MIRROR.CLEAR, MIRROR.CLEAR],
+        'attached again: every open handle as its event stands now');
+    sync.setEvent(event);
+    assert.equal(wordOf(open), MIRROR.SET, 'and every change after');
+});

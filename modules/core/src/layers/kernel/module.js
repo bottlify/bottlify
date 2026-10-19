@@ -821,6 +821,37 @@ export function createKernelModule(){
                 },
 
                 /**
+                 * Whether the guest answers its events and mutexes by itself
+                 * (`mirrorEvents`), switched as the program runs: off, every
+                 * word of the table says nothing and the host keeps every
+                 * mutex's word, so each wait, SetEvent, ResetEvent and
+                 * ReleaseMutex crosses into the host, as with
+                 * `win32.handleWords: false`; on again, the words are written
+                 * afresh from the handles open. A diagnostic: a fault that
+                 * goes with the guest's own answers goes while they are off.
+                 * Answers whether they are on.
+                 *
+                 * @param {boolean} on
+                 */
+                handleWords: (/** @type {boolean} */ on)=>{
+                    if (!live())
+                    {
+                        return false;
+                    }
+                    if (on)
+                    {
+                        mutexWords.reattach();
+                        mirror.reattach(state.handles.list());
+                    }
+                    else
+                    {
+                        mirror.detach();
+                        mutexWords.detach();
+                    }
+                    return mirror.attached();
+                },
+
+                /**
                  * Keeps the word at `address` in guest memory saying how many
                  * threads are ready to run with no executor running them
                  * (the scheduler's `readyCount`): the guest's Sleep(0) returns

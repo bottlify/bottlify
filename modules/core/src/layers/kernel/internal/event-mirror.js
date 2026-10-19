@@ -49,10 +49,12 @@ const HANDLE_SHIFT = 2;
 export function createEventMirror(write){
     let table = 0;
     let slots = 0;
+    /** The table's handles while it is detached (`detach`), 0 while attached. */
+    let detachedSlots = 0;
     /** The word of each handle given one, and its event. @type {Map<number, any>} */
     const byHandle = new Map();
     /** The words of each event's handles. @type {WeakMap<any, number[]>} */
-    const words = new WeakMap();
+    let words = new WeakMap();
 
     /** @param {any} event */
     const state = event=>(event.signalled ? MIRROR.SET : MIRROR.CLEAR);
@@ -128,6 +130,44 @@ export function createEventMirror(write){
             }
             write(address, MIRROR.NONE);
         },
+
+        /**
+         * Every word says nothing from now on, and none is written until
+         * `reattach`: each wait, SetEvent, ResetEvent and ReleaseMutex the
+         * guest makes crosses, as where there is no table.
+         */
+        detach(){
+            if (slots === 0)
+            {
+                return;
+            }
+            for (const handle of byHandle.keys())
+            {
+                write(table + (handle >>> HANDLE_SHIFT) * 4, MIRROR.NONE);
+            }
+            byHandle.clear();
+            words = new WeakMap();
+            detachedSlots = slots;
+            slots = 0;
+        },
+
+        /**
+         * The words written again from the handles open now.
+         *
+         * @param {{ handle: number, type: string, object: any }[]} open
+         */
+        reattach(open){
+            if (detachedSlots === 0)
+            {
+                return;
+            }
+            const count = detachedSlots;
+            detachedSlots = 0;
+            mirror.attach(table, count, open);
+        },
+
+        /** Whether the guest reads the table now. */
+        attached: ()=>slots > 0,
 
         /** @param {any} event  its signalled state just changed */
         changed(event){

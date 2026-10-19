@@ -437,6 +437,13 @@ export function createGraphicsModule(){
                 ? remote.root(name, factory, services)
                 : factory(services));
 
+            /**
+             * The draw check's switch (`checkDraws`): how many times it was
+             * turned on, 0 while it is off.
+             */
+            const drawCheck = { turn: config?.checkDraws === true ? 1 : 0, turns: 0 };
+            drawCheck.turns = drawCheck.turn;
+
             /** Everything an API needs from outside itself, in one place. */
             const services = {
                 /** @param {number} address @param {number} length */
@@ -460,9 +467,9 @@ export function createGraphicsModule(){
                 /**
                  * A diagnostic: each draw from a buffer recorded for the
                  * graphics worker compares what it reads with what the worker
-                 * was sent of it (`remote/draw-check.js`).
+                 * was sent of it (`remote/draw-check.js`), while switched on.
                  */
-                checkDraws: config?.checkDraws === true,
+                checkDraws: ()=>drawCheck.turn,
                 /** A dword, read in place. @param {number} address */
                 readU32: address=>memory.readU32(address),
                 /**
@@ -1359,6 +1366,21 @@ export function createGraphicsModule(){
                  * @param {number} [count]
                  */
                 ringTrace: (/** @type {number | undefined} */ count)=>ringTrace(count),
+
+                /**
+                 * Turns the draw check on or off as the program runs: each draw
+                 * recorded for the graphics worker from a buffer compares the
+                 * bytes it reads with what the worker was sent of them, from
+                 * the moment it is on, the figures in the report's
+                 * `drawChecks` (one entry each time it is turned on). Answers
+                 * whether it is on.
+                 *
+                 * @param {boolean} on
+                 */
+                checkDraws: (/** @type {boolean} */ on)=>{
+                    drawCheck.turn = on ? ++drawCheck.turns : 0;
+                    return drawCheck.turn !== 0;
+                },
 
                 /**
                  * The pixel-format negotiation and frame presentation whose entry

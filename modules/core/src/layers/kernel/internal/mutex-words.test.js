@@ -94,7 +94,7 @@ test('a count the word cannot carry, or a mutex another process holds, stays the
     assert.ok(hostKeeps(words, deep.word));
     const shared = make({ remote: 7 });
     assert.equal(shared.word, undefined, 'no word at all');
-    assert.deepEqual(mutexes.diagnostics(), { words: 1, slots: 4, hostKeeps: 1 });
+    assert.deepEqual(mutexes.diagnostics(), { words: 1, slots: 4, hostKeeps: 1, detached: false });
 });
 
 test('past the room, a mutex has no word and the host keeps it as before', ()=>{
@@ -106,4 +106,26 @@ test('past the room, a mutex has no word and the host keeps it as before', ()=>{
     assert.equal(second.word, undefined);
     second.owner = null;
     assert.equal(second.owner, null);
+});
+
+test('detached, the host takes every word the guest has and gives none back until reattached', ()=>{
+    // Switched off as a program runs (`app.debug.handleWords(false)`): a mutex
+    // the guest holds at that moment keeps its owner and count, now the host's.
+    const { words, threads, mutexes, make } = machine();
+    mutexes.attach(BASE, 4);
+    const held = make();
+    const free = make();
+    words.set(BASE, (0x30 << MUTEX_WORD.OWNER_SHIFT) | 3);
+    mutexes.detach();
+    assert.ok(hostKeeps(words, BASE) && hostKeeps(words, BASE + 4), 'both words the host\'s');
+    assert.deepEqual([held.owner, held.recursion, free.owner], [threads[1], 3, null]);
+    held.owner = null;
+    held.recursion = 0;
+    mutexes.settle();
+    assert.ok(hostKeeps(words, BASE), 'nobody waits, and still the host keeps it');
+    const made = make();
+    assert.ok(hostKeeps(words, made.word), 'as one made since');
+    mutexes.reattach();
+    assert.deepEqual([words.get(BASE), words.get(BASE + 4), words.get(made.word)], [0, 0, 0],
+        'reattached: each back to the guest, free');
 });

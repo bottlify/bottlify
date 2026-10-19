@@ -172,6 +172,8 @@ ones need the graphics worker.
 | `textureStats('t642')` | adds to each dump what that texture's top level holds in guest memory |
 | `occlusion(mode)` | how occlusion counts are answered from now on ('' as measured) |
 | `bufferLocks(mode)` | how buffer locks are taken ('' as asked, 'rename' renaming at each) |
+| `checkDraws(on)` | every draw from a buffer compares what it reads with what the graphics worker was sent, from now on; the report's `drawChecks` gains an entry each time it is turned on (`stale` draws, the first ones as samples) |
+| `handleWords(on)` | `false`: every wait on an event or mutex, SetEvent, ResetEvent and ReleaseMutex crosses into the host, as with `win32.handleWords: false`; `true` gives the guest its answers back |
 | `windows()`, `desktop()` | every live window as the window manager lists it; the desktop picture |
 | `modules()`, `moduleAt(address)` | every image mapped and where; which image an address is in |
 | `read(address, length)` | guest memory |

@@ -276,24 +276,35 @@ const random = seed=>{
 };
 
 const OPS = ['create', 'set', 'reset', 'pulse', 'poll', 'poll', 'poll', 'wait', 'close', 'dup'];
+/** With a mutex beside the events: taken and given back, by its owner or past its count. */
+const MUTEX_OPS = [...OPS, 'take', 'take', 'give', 'give', 'give'];
+/** The slot of the events' array the mutex is kept in, past the events'. */
+const MUTEX_SLOT = 15;
 
 /**
  * @param {number} seed @param {number} count @param {boolean} guest
  * @param {typeof import('../../../../../../tools/make-pe.mjs').buildExe} buildExe
+ * @param {boolean} [mutex]  a mutex taken and given back among the events' calls
+ * @param {number} [rounds]  how many times the calls are made, one after the other
  */
-function eventProgram(seed, count, guest, buildExe){
+function eventProgram(seed, count, guest, buildExe, mutex = false, rounds = 1){
     const pick = random(seed);
+    const kinds = mutex ? MUTEX_OPS : OPS;
     /** @type {{ op: string, slot: number, other: number, manual: number, initial: number }[]} */
     const ops = [{ op: 'create', slot: 0, other: 0, manual: 0, initial: 0 }];
+    if (mutex)
+    {
+        ops.push({ op: 'mutex', slot: MUTEX_SLOT, other: 0, manual: 0, initial: 0 });
+    }
     for (let i = 0; i < count; i++)
     {
-        ops.push({ op: OPS[pick(OPS.length)], slot: pick(4), other: pick(4), manual: pick(2),
+        ops.push({ op: kinds[pick(kinds.length)], slot: pick(4), other: pick(4), manual: pick(2),
             initial: pick(2) });
     }
     return buildExe({
         imports: { 'KERNEL32.dll': ['CreateEventA', 'SetEvent', 'ResetEvent', 'PulseEvent',
             'WaitForSingleObject', 'WaitForSingleObjectEx', 'CloseHandle', 'DuplicateHandle',
-            'GetLastError', 'ExitProcess'] },
+            'CreateMutexA', 'ReleaseMutex', 'GetLastError', 'ExitProcess'] },
         codeSize: 0x10000,
         data: { events: new Array(16).fill(0) },
         code: ({ iat, at })=>{
@@ -310,12 +321,27 @@ function eventProgram(seed, count, guest, buildExe){
             const fold = [0x6b, 0xff, 0x1f, 0x01, 0xc7];
             /** @type {number[]} */
             const code = [0x31, 0xff]; // xor edi, edi
+            code.push(0xbe, ...u32(rounds)); // mov esi, rounds
+            const top = code.length;
             for (const { op, slot, other, manual, initial } of ops)
             {
                 if (op === 'create')
                 {
                     code.push(0x6a, 0x00, 0x6a, initial, 0x6a, manual, 0x6a, 0x00,
                         ...call('CreateEventA'), 0xa3, ...u32(at('events') + slot * 4));
+                    continue;
+                }
+                if (op === 'mutex')
+                {
+                    code.push(0x6a, 0x00, 0x6a, 0x00, 0x6a, 0x00, ...call('CreateMutexA'),
+                        0xa3, ...u32(at('events') + slot * 4));
+                    continue;
+                }
+                if (op === 'take' || op === 'give')
+                {
+                    code.push(...op === 'take' ? wait(MUTEX_SLOT, 0)
+                        : [...handle(MUTEX_SLOT), ...call('ReleaseMutex')],
+                    ...fold, ...call('GetLastError'), ...fold);
                     continue;
                 }
                 code.push(...op === 'set' ? [...handle(slot), ...call('SetEvent')]
@@ -332,6 +358,8 @@ function eventProgram(seed, count, guest, buildExe){
                                             ...call('DuplicateHandle')],
                 ...fold, ...call('GetLastError'), ...fold);
             }
+            // dec esi; jnz top
+            code.push(0x4e, 0x0f, 0x85, ...u32(top - (code.length + 7)));
             code.push(0x57, ...call('ExitProcess')); // push edi
             return code;
         },
@@ -343,13 +371,17 @@ function eventProgram(seed, count, guest, buildExe){
  * names reached the host.
  *
  * @param {Uint8Array} executable @param {RegExp} crossed @param {Record<string, any>} [options]
+ * @param {((app: any, running: Promise<number>) => Promise<void>) | null} [during]
+ *     what is done to the machine while the program runs
  */
-const runEvents = async(executable, crossed, options = {})=>{
+const runEvents = async(executable, crossed, options = {}, during = null)=>{
     const { createApp } = await import('../../../app.js');
     const app = await createApp({ executable, ...options });
     try
     {
-        const code = (await app.run({ timeoutMs: 60_000 })) >>> 0;
+        const running = app.run({ timeoutMs: 60_000 });
+        await during?.(app, running);
+        const code = (await running) >>> 0;
         const tables = await app.diagnostics();
         const bridge = (Array.isArray(tables) ? tables : [])
             .find(table=>table.name === 'bridge');
@@ -395,5 +427,34 @@ test('seeded event programs answer alike with polls in the guest and with every 
         assert.equal(inGuest.code, inHost.code, `seed ${seed}: the answers differ`);
         assert.ok(inGuest.calls < inHost.calls, `seed ${seed}: ${inGuest.calls} waits crossed`
             + ` with polls in the guest, ${inHost.calls} without`);
+    }
+});
+
+test('seeded event and mutex programs answer alike with the guest\'s answers switched off and on as'
+    + ' they run and with every call in the host', async()=>{
+    // `app.debug.handleWords`, switched while a program runs to see whether a
+    // fault goes with the guest's own answers: a mutex the guest holds at the
+    // switch keeps its owner and count in the host's hands, and back.
+    const { buildExe } = await import('../../../../../../tools/make-pe.mjs');
+    for (const seed of [21, 22, 23, 24])
+    {
+        const executable = eventProgram(seed, 600, true, buildExe, true, 40);
+        const inHost = await runEvents(executable, /./, { win32: { handleWords: false } });
+        let switches = 0;
+        const switched = await runEvents(executable, /./, {}, async(app, running)=>{
+            const ran = { done: false };
+            running.finally(()=>{
+                ran.done = true;
+            });
+            while (!ran.done)
+            {
+                const on = await app.debug.handleWords(switches % 2 === 1);
+                assert.equal(on, switches % 2 === 1, 'the switch answers where it stands');
+                switches++;
+                await new Promise(resolve=>setImmediate(resolve));
+            }
+        });
+        assert.equal(switched.code, inHost.code, `seed ${seed}: the answers differ`);
+        assert.ok(switches >= 4, `seed ${seed}: switched ${switches} times while it ran`);
     }
 });

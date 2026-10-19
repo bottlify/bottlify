@@ -7855,6 +7855,26 @@ async function buildApp(options){
              */
             ringTrace: count=>core.api('graphics').ringTrace?.(count) ?? [],
             /**
+             * The draw check (`graphics.checkDraws`) switched on or off as the
+             * program runs: from the moment it is on, each draw recorded for
+             * the graphics worker from a buffer compares the bytes it reads
+             * with what the worker was sent of them; the report's
+             * `drawChecks` has an entry for each time it was turned on.
+             * Answers whether it is on.
+             *
+             * @param {boolean} on
+             */
+            checkDraws: on=>core.api('graphics').checkDraws?.(on === true) ?? false,
+            /**
+             * Whether the guest answers waits on events and mutexes, SetEvent,
+             * ResetEvent and ReleaseMutex by itself (`win32.handleWords`),
+             * switched as the program runs: off, every one crosses into the
+             * host. Answers whether the guest answers them.
+             *
+             * @param {boolean} on
+             */
+            handleWords: on=>core.api('kernel').handleWords?.(on !== false) ?? false,
+            /**
              * Keeps the functions named -- `'ShowWindow,PeekMessage'`, '' none --
              * out of the bridge's ring of recent calls from now on, so that what
              * a program did around one moment is still there to read when an
@@ -8717,6 +8737,10 @@ async function buildSystemHost(deps){
             read: (address, length)=>ask('debug.read', [address, length]),
             /** @param {number} [count] */
             ringTrace: count=>ask('debug.ringTrace', count === undefined ? [] : [count]),
+            /** @param {boolean} on */
+            checkDraws: on=>ask('debug.checkDraws', [on === true]),
+            /** @param {boolean} on */
+            handleWords: on=>ask('debug.handleWords', [on !== false]),
             modules: ()=>ask('debug.modules'),
             /** @param {number} address */
             moduleAt: address=>ask('debug.moduleAt', [address]),

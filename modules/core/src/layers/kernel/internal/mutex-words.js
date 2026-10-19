@@ -62,6 +62,10 @@ export function createMutexWords(memory, threadById){
     const waiting = [];
     /** Mutexes whose word the host keeps now. @type {Set<any>} */
     const kept = new Set();
+    /** Mutexes whose word the guest has now. @type {Set<any>} */
+    const given = new Set();
+    /** Set while the host keeps every word (`detach`). */
+    let detached = false;
 
     /**
      * The host takes the word: HOST set, owner and count read into the object.
@@ -85,6 +89,7 @@ export function createMutexWords(memory, threadById){
         }
         mutex.hostKeeps = true;
         kept.add(mutex);
+        given.delete(mutex);
         const id = was >>> MUTEX_WORD.OWNER_SHIFT;
         const owner = id === 0 ? null : threadById(id) ?? null;
         mutex.heldOwner = owner;
@@ -102,7 +107,8 @@ export function createMutexWords(memory, threadById){
      * @param {any} mutex
      */
     const giveBack = mutex=>{
-        if (!mutex.hostKeeps || mutex.abandoned || mutex.waiters.length > 0 || mutex.remote)
+        if (detached || !mutex.hostKeeps || mutex.abandoned || mutex.waiters.length > 0
+            || mutex.remote)
         {
             return;
         }
@@ -118,6 +124,7 @@ export function createMutexWords(memory, threadById){
         memory.compareExchangeU32(mutex.word, was, word);
         mutex.hostKeeps = false;
         kept.delete(mutex);
+        given.add(mutex);
     };
 
     /**
@@ -138,6 +145,11 @@ export function createMutexWords(memory, threadById){
         mutex.heldOwner = owner;
         mutex.heldRecursion = recursion;
         kept.add(mutex);
+        if (detached)
+        {
+            // No handle names it to the guest while detached; the word says so too.
+            memory.compareExchangeU32(mutex.word, memory.readU32(mutex.word), MUTEX_WORD.HOST);
+        }
         Object.defineProperty(mutex, 'owner', {
             get(){
                 take(mutex);
@@ -199,7 +211,28 @@ export function createMutexWords(memory, threadById){
             }
         },
 
+        /**
+         * The host takes every word and keeps it until `reattach`: each wait
+         * and release of a mutex crosses, as where there are no words.
+         */
+        detach(){
+            detached = true;
+            for (const mutex of [...given])
+            {
+                take(mutex);
+            }
+        },
+
+        /** The words back to the guest, where nobody waits. */
+        reattach(){
+            detached = false;
+            for (const mutex of [...kept])
+            {
+                giveBack(mutex);
+            }
+        },
+
         /** How many words are given out, and how many the host keeps now. */
-        diagnostics: ()=>({ words: used, slots, hostKeeps: kept.size }),
+        diagnostics: ()=>({ words: used, slots, hostKeeps: kept.size, detached }),
     };
 }

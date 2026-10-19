@@ -122,9 +122,12 @@ function watches(){
  * under a lock, a few stores at a time.
  *
  * @param {number} seed @param {boolean} watched @param {boolean} [dynamic]
+ * @param {((step: number) => number) | null} [checking]  the draw check's switch at each step
+ *     (`checkDraws`): how many times it was turned on, 0 while off
  */
-function run(seed, watched, dynamic = true){
+function run(seed, watched, dynamic = true, checking = null){
     const next = random(seed);
+    let turn = 0;
     const ram = new Uint8Array(1 << 20);
     let free = 0x1000;
     const engine = watches();
@@ -138,6 +141,7 @@ function run(seed, watched, dynamic = true){
         readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>
             ram.slice(at, at + length),
         ...(watched ? { watchWrites: engine.watchWrites } : {}),
+        ...(checking ? { checkDraws: ()=>turn } : {}),
     };
     /** @type {Uint8Array[][]} */
     const seen = [];
@@ -172,6 +176,7 @@ function run(seed, watched, dynamic = true){
     const draws = [];
     for (let step = 0; step < 600; step++)
     {
+        turn = checking?.(step) ?? 0;
         const buffer = buffers[next(buffers.length)];
         const what = next(10);
         if (what < 5 && dynamic)
@@ -201,7 +206,8 @@ function run(seed, watched, dynamic = true){
         }
     }
     const shipped = sender.shippedBytes();
-    return { draws, compared: shipped.compared, unlocked: shipped.buffers };
+    return { draws, compared: shipped.compared, unlocked: shipped.buffers,
+        checks: sender.drawChecks() };
 }
 
 test('a draw from buffers compared through the write watch reads what the program wrote, as one '
@@ -243,6 +249,29 @@ test('an unlock of a buffer sent whole before sends what was written since, watc
     // A store touches a page or two of buffers of two to six pages, three at
     // most an unlock: watched, a little over half of what whole unlocks send.
     assert.ok(sent < whole * 0.75, `${sent} bytes sent watched, ${whole} whole`);
+});
+
+test('a draw check switched on as the program runs compares from then on, finds nothing stale in '
+    + 'a recording that sends what it should, and starts afresh each time it is turned on', ()=>{
+    // `app.debug.checkDraws`, turned on once a fault shows: what was sent
+    // before is unknown to it, never stale, and what was sent while it was
+    // off is unknown to the next one, which a check kept across would read
+    // as stale.
+    for (let seed = 1; seed <= 6; seed++)
+    {
+        for (const watched of [false, true])
+        {
+            const { checks } = run(seed, watched, true,
+                step=>(step < 150 ? 0 : step < 300 ? 1 : step < 450 ? 0 : 2));
+            assert.equal(checks.length, 2, `seed ${seed}: one check each time it was turned on`);
+            for (const check of checks)
+            {
+                assert.ok(check.draws > 0, `seed ${seed}: the check compared draws`);
+                assert.equal(check.stale, 0, `seed ${seed}: ${check.stale} stale (watched `
+                    + `${watched}): ${JSON.stringify(check.samples[0])}`);
+            }
+        }
+    }
 });
 
 test('a buffer moved between storages of its own is sent whole once a storage, then what was '
