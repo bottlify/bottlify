@@ -24,6 +24,8 @@ import test from 'node:test';
  */
 
 const PACKAGE = resolve(fileURLToPath(new URL('..', import.meta.url)));
+/** The translator core depends on, packed beside it: the version core names may not be published yet. */
+const CORK = resolve(PACKAGE, '..', 'cork');
 
 /** Smallest a real wasm artifact can be; a stub or a truncated copy is not. */
 const MIN_BYTES = 256 * 1024;
@@ -65,15 +67,20 @@ test('the packed tarball installs and hands a consumer its artifacts',
         const consumer = await mkdtemp(join(tmpdir(), 'bottlify-pack-'));
         t.after(()=>rm(consumer, { recursive: true, force: true }));
 
-        const packed = npm(PACKAGE, ['pack', '--pack-destination', JSON.stringify(consumer)]);
-        const lines = packed.trim().split('\n');
-        const tarball = join(consumer, lines[lines.length - 1].trim());
+        /** @param {string} dir */
+        const pack = dir=>{
+            const lines = npm(dir, ['pack', '--pack-destination', JSON.stringify(consumer)])
+                .trim().split('\n');
+            return join(consumer, lines[lines.length - 1].trim());
+        };
+        const tarball = pack(PACKAGE);
+        const corkTarball = pack(CORK);
 
         await writeFile(join(consumer, 'package.json'),
             JSON.stringify({ name: 'consumer', private: true, type: 'module' }));
         await writeFile(join(consumer, 'probe.mjs'), PROBE);
-        npm(consumer, ['install', JSON.stringify(tarball), '--no-audit', '--no-fund',
-            '--no-package-lock']);
+        npm(consumer, ['install', JSON.stringify(tarball), JSON.stringify(corkTarball),
+            '--no-audit', '--no-fund', '--no-package-lock']);
 
         const probe = spawnSync(process.execPath, ['probe.mjs'], {
             cwd: consumer, encoding: 'utf8',
