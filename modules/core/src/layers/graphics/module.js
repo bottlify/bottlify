@@ -273,10 +273,11 @@ export function createGraphicsModule(){
              *
              * @type {{ backend: any, factories: any, created: string[], seam: any,
              *     presenter: any, presenterGiven: boolean, shown: any, disposed: boolean,
-             *     gammaOwners: Set<any>, remote: any }}
+             *     gammaOwners: Set<any>, remote: any, blockCompression: any }}
              */
             const state = {
                 remote: null,
+                blockCompression: null,
                 backend: null,
                 factories: null,
                 created: [],
@@ -334,6 +335,9 @@ export function createGraphicsModule(){
             // has the final say either way: a device without it never samples BC.
             const hasBcFeature = device?.device?.features?.has('texture-compression-bc') === true;
             const compressedTextures = config?.compressedTextures === true && hasBcFeature;
+            // What a report says of it: asked, offered, and so taken or not.
+            state.blockCompression = { asked: config?.compressedTextures === true,
+                deviceHasBc: device ? hasBcFeature : 'no device', on: compressedTextures };
             /** A factory's own override still cannot ask for BC on a device that cannot sample it. */
             const gatedCompressedTextures = (/** @type {any} */ caps)=>
                 (caps?.compressedTextures ?? compressedTextures) && hasBcFeature;
@@ -1406,6 +1410,8 @@ export function createGraphicsModule(){
                     worker: instance.remote ? instance.remote.diagnostics() : null,
                     // Kept flat, where a report drops the structure above.
                     workerAnswers: instance.remote ? instance.remote.diagnostics().answers : null,
+                    // DXT textures kept as BC blocks on the GPU, or decoded first.
+                    blockCompression: instance.blockCompression,
                     seam: instance.seam.diagnostics(),
                     // GDI's copies by path, and why one went a pixel at a time.
                     blits: { ...blitPaths, why: { ...blitPaths.why } },
