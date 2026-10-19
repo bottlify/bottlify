@@ -3172,9 +3172,13 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             const copies = chosen && targets
                 ? chosen.map((rect, index)=>({ rect, at: targets[index] }))
                 : [{ rect: whole, at: { x: 0, y: 0 } }];
-            // A system-memory surface lives in memory, whatever copy of it the
-            // renderer keeps: copied into on the GPU, a lock of it read nothing.
-            if (renderer?.copySurface && to.Pool !== D3DPOOL.SYSTEMMEM
+            // A destination whose bytes the program can lock keeps them in
+            // memory -- system memory, a managed texture's copy there, a
+            // dynamic one: copied into on the GPU alone, a lock of it read what
+            // was there before, and its unlock sent that up over the copy.
+            const lockable = to.Pool === D3DPOOL.SYSTEMMEM || to.Pool === D3DPOOL.MANAGED
+                || (to.Usage & D3DUSAGE.DYNAMIC) !== 0;
+            if (renderer?.copySurface && !lockable
                 && copies.every(copy=>
                     renderer.copySurface(source, copy.rect, destination, copy.at)))
             {
@@ -3186,7 +3190,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             // holds, not one texture, and their guest bytes hold no pixels --
             // read back and moved here, a target's worth of bytes crossed for
             // nothing (as Direct3D 9's StretchRect).
-            if (services.renderedElsewhere === true && to.Pool !== D3DPOOL.SYSTEMMEM
+            if (services.renderedElsewhere === true && !lockable
                 && onGpu(source, from) && onGpu(destination, to) && source !== destination
                 && !(source.container && source.container === destination.container))
             {

@@ -1156,6 +1156,76 @@ test('Direct3D 9 and 8: a volume and a texture in system memory, locked with no 
     await same(8, systemMemoryUpdates(8));
 });
 
+test('Direct3D 8: a managed texture written every frame and copied by CopyRects out of its level'
+    + ' into another managed texture, locked after the copy and drawn, draws, through every way,'
+    + ' each frame\'s picture', async()=>{
+    // A film played into a texture: one thread writes each frame into a managed
+    // texture, the device copies its level into the managed texture it draws,
+    // and the program locks that one after the copy. A managed texture keeps its
+    // bytes in memory: a copy made only on the GPU left them as they were, and
+    // the lock after it sent them up over the copied picture.
+    await same(8, async run=>{
+        const { device } = await device8(run);
+        const size = 32;
+        /** @type {Record<string, any>} */
+        const made = { system: {}, video: {}, systemLevel: {}, videoLevel: {} };
+        await run.call('CreateTexture system', ()=>device.CreateTexture(size, size, 1, 0,
+            D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, made.system), [made.system]);
+        await run.call('CreateTexture video', ()=>device.CreateTexture(size, size, 1, 0,
+            D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, made.video), [made.video]);
+        await run.call('GetSurfaceLevel system', ()=>made.system.texture.GetSurfaceLevel(0,
+            made.systemLevel), [made.systemLevel]);
+        await run.call('GetSurfaceLevel video', ()=>made.video.texture.GetSurfaceLevel(0,
+            made.videoLevel), [made.videoLevel]);
+        for (let frame = 0; frame < 3; frame++)
+        {
+            /** @type {{ pBits?: number, Pitch?: number }} */
+            const rect = {};
+            await run.call(`LockRect ${frame}`, ()=>made.system.texture.LockRect(0, rect, null, 0),
+                [rect]);
+            fillRows(run, /** @type {number} */ (rect.pBits), /** @type {number} */ (rect.Pitch),
+                size, size * 4, 40 + frame);
+            await run.call(`UnlockRect ${frame}`, ()=>made.system.texture.UnlockRect(0));
+            /** @type {{ moves?: any[] }} */
+            const held = {};
+            await run.call(`CopyRects ${frame}`, ()=>device.CopyRects(made.systemLevel.surface,
+                null, 0, made.videoLevel.surface, null, held));
+            applyMoves(run, held);
+            /** @type {{ pBits?: number, Pitch?: number }} */
+            const after = {};
+            await run.call(`LockRect video ${frame}`,
+                ()=>made.video.texture.LockRect(0, after, null, 0), [after]);
+            // What the lock hands the program is the copied picture, as a
+            // managed texture's own memory is on Windows after the copy.
+            const source = run.on.memory.readMemory(/** @type {number} */ (rect.pBits),
+                size * size * 4);
+            const copied = run.on.memory.readMemory(/** @type {number} */ (after.pBits),
+                size * size * 4);
+            assert.deepEqual([...copied.slice(0, 64)], [...source.slice(0, 64)],
+                `frame ${frame}: the lock after the copy reads the copied picture`);
+            await run.call(`UnlockRect video ${frame}`, ()=>made.video.texture.UnlockRect(0));
+            await run.call('BeginScene', ()=>device.BeginScene());
+            await run.call('Clear', ()=>device.Clear(0, null, D3DCLEAR.TARGET | D3DCLEAR.ZBUFFER,
+                0xff000000, 1, 0));
+            await drawQuad8(run, device, `film ${frame}`, made.video.texture, 0);
+            await run.call('EndScene', ()=>device.EndScene());
+            await run.call('Present', ()=>device.Present(null, null, 0, null));
+            await run.call('idle', ()=>device.idle());
+            await run.look(`frame ${frame}`);
+        }
+        for (const name of ['systemLevel', 'videoLevel'])
+        {
+            await run.call(`Release ${name}`, ()=>made[name].surface.release());
+        }
+        for (const name of ['system', 'video'])
+        {
+            await run.call(`Release ${name}`, ()=>made[name].texture.release());
+        }
+        await run.call('Release device', ()=>device.release());
+        await run.look('end');
+    });
+});
+
 test('Direct3D 9 and 8: a dynamic buffer written after its unlock draws, through every way,'
     + ' what was written, and carries only that', async()=>{
     await same(9, writtenAfterUnlock(9));
