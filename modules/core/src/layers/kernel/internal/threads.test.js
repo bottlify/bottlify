@@ -1336,6 +1336,64 @@ test('a call of another executor\'s thread is counted once, and its ask inside a
     assert.equal(main.crossings, 1, 'a call of its own is one');
 });
 
+test('another executor\'s call the host answers later, answered inside a turn here, ends the'
+    + ' turn', ()=>{
+    // The answer's promise settles only once this executor is back in its event
+    // loop: a thread loading a library on the other executor waited for the
+    // whole solo turn of a main thread spinning on its exit code, a million
+    // instructions per call (590 ms a round where 2 do).
+    /** @param {boolean} held @returns {number} the stops asked of this executor's turn */
+    const turn = held=>{
+        const { cpu } = twoExecutors();
+        /** @type {(crossing?: boolean) => boolean | void} */
+        let told = ()=>true;
+        let stops = 0;
+        // The other executor's word, rung once its call is said.
+        let rings = 0;
+        const bell = cpu.executorBell();
+        /** @type {(max: number) => number} */
+        let slice = max=>max;
+        const sched = createScheduler({
+            cpu: { ...cpu, stop: ()=>stops++, executorBell: ()=>({ ...bell, rung: ()=>rings }),
+                runSlice: (/** @type {number} */ max)=>slice(max),
+                beforeTrap: (/** @type {any} */ hook)=>{
+                    told = hook;
+                } },
+            switcher: createSwitcher({ cpu }), quantum: 5000,
+        });
+        const main = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
+        const worker = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'worker' });
+        assert.equal(sched.runOnce().ran, main);
+        assert.equal(sched.processorOf(worker), 1, 'the worker runs on the other executor');
+        // Its call is said while the main thread's slice runs here, and
+        // answered at that slice's next back edge.
+        const [remote] = cpu.executors();
+        let said = false;
+        remote.step = /** @type {any} */ ((/** @type {(reply: () => void) => void} */ around)=>{
+            if (!said)
+            {
+                return null;
+            }
+            said = false;
+            around(()=>{
+                worker.awaitingHost = held;
+            });
+            return { instructions: 100, fault: null };
+        });
+        slice = ()=>{
+            said = true;
+            rings++;
+            told(false);
+            return 1000;
+        };
+        stops = 0;
+        assert.equal(sched.runOnce().ran, main);
+        return stops;
+    };
+    assert.equal(turn(false), 0, 'a call answered at once leaves the turn as it was');
+    assert.equal(turn(true), 1, 'one the host answers later ends it');
+});
+
 test('another executor\'s ask inside an unbroken routine here is put off until the thread here is'
     + ' past it', ()=>{
     // A renderer played here was asked at a back edge inside a device routine

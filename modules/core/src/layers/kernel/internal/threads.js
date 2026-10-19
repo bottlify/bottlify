@@ -1710,6 +1710,7 @@ export function createScheduler(options){
         answeredAt = cpu.executorBell().rung();
         const inTurn = inSlice;
         readiedInAnswer = false;
+        let heldInAnswer = false;
         let ran = null;
         let instructions = 0;
         const from = wall();
@@ -1771,6 +1772,10 @@ export function createScheduler(options){
                 sharedTime.elsewhereRetired += ended.instructions;
                 ran = on.thread;
                 instructions += ended.instructions;
+                if (on.thread.awaitingHost === true)
+                {
+                    heldInAnswer = true;
+                }
             }
         }
         finally
@@ -1783,7 +1788,16 @@ export function createScheduler(options){
         // word at a back edge): a thread an answer made ready, or one whose
         // slice there was taken, is weighed as a wake during the turn -- a
         // long one ends, so the next choice places it (`noteReady`).
-        if (inTurn && (readiedInAnswer || ran !== null))
+        // A thread whose call the host answers later goes on only once the
+        // answer's promise settles, and that waits for this executor's event
+        // loop: run to the turn's end, a solo turn of a thread spinning on the
+        // other's exit code held it a million instructions per call (a thread
+        // that loads a library and leaves: 590 ms a round, 2 ms between turns).
+        if (inTurn && heldInAnswer)
+        {
+            cpu.stop?.();
+        }
+        else if (inTurn && (readiedInAnswer || ran !== null))
         {
             for (const thread of runnable())
             {
