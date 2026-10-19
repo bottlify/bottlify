@@ -114,7 +114,7 @@ async function run(executable, playPinned, cpu = {}){
         const kernel = (Array.isArray(tables) ? tables : []).find(table=>table.name === 'kernel');
         const scheduler = kernel?.metrics?.scheduler ?? kernel?.metrics ?? null;
         return { code: code >>> 0, played: scheduler?.played ?? null,
-            trading: JSON.parse(scheduler?.trading ?? '{}'),
+            placement: JSON.parse(scheduler?.placement ?? '{}'),
             crossings: JSON.parse(scheduler?.sharedTime ?? '{}').crossings ?? -1 };
     }
     finally
@@ -130,14 +130,15 @@ test('a worker pinned to the second processor and bound to the host has it playe
     const fixed = await run(executable, false);
     assert.equal(fixed.code, 0, `fixed: ${fixed.code & 0xffff} wrong answers to main, `
         + `${fixed.code >>> 16} to the worker`);
-    assert.deepEqual([fixed.played, fixed.trading.trials], ['', 0],
-        'no trade nor trial where none is asked for');
+    assert.deepEqual([fixed.played, fixed.placement.moves], ['', 0],
+        'no trade nor move where none is asked for');
     const played = await run(executable, true);
     assert.equal(played.code, 0, `played: ${played.code & 0xffff} wrong answers to main, `
         + `${played.code >>> 16} to the worker`);
     assert.match(String(played.played), /^1,0 after \d+$/, 'processor 1 played here, 0 there, at'
-        + ` the end: ${JSON.stringify(played.trading)}`);
-    assert.ok(played.trading.played >= 1, `a trial chose it: ${JSON.stringify(played.trading)}`);
+        + ` the end: ${JSON.stringify(played.placement)}`);
+    assert.ok(played.placement.moves >= 1,
+        `its gains made it: ${JSON.stringify(played.placement)}`);
     assert.ok(fixed.crossings > ROUNDS && played.crossings < fixed.crossings / 2,
         `the worker's calls crossed ${fixed.crossings} times fixed, ${played.crossings} played`);
 });
@@ -152,6 +153,5 @@ test('with freeHost the main thread pinned to the first processor runs on anothe
     // the first processor played by executor 1, it ran there and never here.
     assert.match(String(freed.played), /^1,0 after \d+$/,
         'the first processor played by executor 1, the second by this one');
-    assert.deepEqual([freed.trading.trials, freed.trading.fixed], [0, 'own'],
-        'and no trade trial beside it');
+    assert.deepEqual([freed.placement.moves], [0], 'and no move beside it');
 });

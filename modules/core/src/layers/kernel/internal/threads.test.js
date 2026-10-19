@@ -1508,6 +1508,9 @@ function pinnedRenderer(traded){
         clock += ms;
         timed(ms);
     };
+    // A thread on the other executor waits on its call as long as the call takes here.
+    let waitedUs = 0;
+    /** @type {any} */ (remote).waitedUs = ()=>waitedUs;
     remote.step = /** @type {any} */ ((/** @type {(reply: () => void) => void} */ around)=>{
         if (remote.started === 0)
         {
@@ -1519,7 +1522,9 @@ function pinnedRenderer(traded){
             told.goOn = null;
             return { instructions: 1000, fault: null };
         }
+        const asked = clock;
         around(call);
+        waitedUs += (clock - asked) * 1000;
         return null;
     });
     const sched = createScheduler({
@@ -1563,35 +1568,32 @@ function pinnedRenderer(traded){
         }
     };
     /** The processors played, and the trials' account. */
-    const said = ()=>({ ...JSON.parse(sched.diagnostics().trading),
+    const said = ()=>({ ...JSON.parse(sched.diagnostics().placement),
         processors: sched.diagnostics().played.split(' ')[0] || '0,1' });
     return { run, said };
 }
 
 test('a pinned thread whose calls take this executor the most time has its processor played'
-    + ' here where the program draws faster so, by a trial of each way in turn, kept while the'
-    + ' program does not change', ()=>{
+    + ' here once its waits for them say it gains, kept where the program draws faster so, and'
+    + ' given back where it does not', ()=>{
     // Call of Duty 4 pins its main thread to the first processor and its render
     // thread to the last, every Present and Lock of the renderer a few hundred
     // microseconds of this executor's while the main thread computed here.
     const faster = pinnedRenderer(2);
     faster.run(8000);
-    assert.deepEqual([faster.said().processors, faster.said().trials, faster.said().played],
-        ['1,0', 1, 1], `traded, the frames twice as many: ${JSON.stringify(faster.said())}`);
-    // A trial runs the program the slower way for its windows: with its
-    // threads' work as it was, it is not tried again.
+    assert.deepEqual([faster.said().processors, faster.said().moves, faster.said().undone],
+        ['1,0', 1, 0], `traded, the frames twice as many: ${JSON.stringify(faster.said())}`);
     faster.run(40_000);
-    assert.deepEqual([faster.said().processors, faster.said().trials], ['1,0', 1],
-        `not tried again, and kept: ${JSON.stringify(faster.said())}`);
+    assert.deepEqual([faster.said().processors, faster.said().moves], ['1,0', 1],
+        `and kept, no move since: ${JSON.stringify(faster.said())}`);
 
-    // A trade the frames lose by is not kept.
+    // The same waits, but the program draws half the frames traded: given back.
     const slower = pinnedRenderer(0.5);
     slower.run(8000);
-    assert.deepEqual([slower.said().processors, slower.said().trials, slower.said().own],
-        ['0,1', 1, 1], `half the frames traded: ${JSON.stringify(slower.said())}`);
+    assert.deepEqual([slower.said().processors, slower.said().undone >= 1],
+        ['0,1', true], `half the frames traded, given back: ${JSON.stringify(slower.said())}`);
     slower.run(40_000);
-    assert.deepEqual([slower.said().processors, slower.said().trials, slower.said().own],
-        ['0,1', 1, 1], `not tried again, not traded: ${JSON.stringify(slower.said())}`);
+    assert.ok(slower.said().moves <= 3, `tried again seldom: ${JSON.stringify(slower.said())}`);
 });
 
 test('a thread that may run only here takes this executor\'s turn from one that may run on'

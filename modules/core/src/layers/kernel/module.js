@@ -193,8 +193,9 @@ export function createKernelModule(){
                 turnMs: config?.quantum === undefined ? TURN_MS : undefined,
                 soloQuantum: config?.soloQuantum,
                 // Where a process of several executors runs its ready threads: one
-                // way when the caller names it, else tried and chosen (`placement.js`).
-                placement: config?.placement === 'spread' || config?.placement === 'concentrate'
+                // way when the caller names it, else each thread moved on its gains
+                // (`placement.js`).
+                placement: ['spread', 'concentrate', 'auto'].includes(config?.placement)
                     ? config.placement : null,
                 placementTiming: config?.placementTiming,
                 playPinned: config?.playPinned,

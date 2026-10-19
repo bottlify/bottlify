@@ -290,10 +290,10 @@ const hashText = (hash, text)=>{
  *           when a thread wants it, some tens of milliseconds before it runs one, so
  *           a program of one thread pays for none. `eager` says which outright.
  *           `placement`: where a process of several cores runs its ready threads --
- *           `auto` (the default) tries spreading them over the cores and keeping
- *           them on the process's own and keeps what draws more frames (or retires
- *           more, for a program that draws none); `spread` or `concentrate` one way.
- *           `placementTiming`: the trials' lengths, for a test that wants them short.
+ *           `auto` (the default) moves each thread onto the process's own core or
+ *           off it, one at a time, where what it did says it gains, and undoes a
+ *           move the frames say lost; `spread` or `concentrate` one way.
+ *           `placementTiming`: the moves' windows, threshold and check, for a test.
  *           `playPinned`: false keeps every processor on its own core; by default a
  *           thread the program pinned to one processor and that calls into the host
  *           often has its processor played by the process's own core, where those

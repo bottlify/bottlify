@@ -159,6 +159,11 @@ async function serve({ engineUrl, config, memory, channel: buffer, bell, unbroke
         }
         return retired;
     };
+    /** A wait for the process's answer, in its own account and the channel's (`Word.WAITED`). */
+    const noteWaited = (/** @type {number} */ ms)=>{
+        spent.answerWaitMs += ms;
+        Atomics.add(words, Word.WAITED, Math.round(ms * 1000));
+    };
     host.onTrap((/** @type {number} */ value)=>{
         const asked = performance.now();
         Atomics.add(words, Word.EPOCH, 1);
@@ -168,7 +173,7 @@ async function serve({ engineUrl, config, memory, channel: buffer, bell, unbroke
         host.interruptProcess();
         channel.await(Turn.TRAP);
         Atomics.add(words, Word.EPOCH, 1);
-        spent.answerWaitMs += performance.now() - asked;
+        noteWaited(performance.now() - asked);
         spent.traps++;
         const flags = channel.flags();
         if ((flags & Said.HALTED) !== 0)
@@ -186,7 +191,7 @@ async function serve({ engineUrl, config, memory, channel: buffer, bell, unbroke
         channel.say(Turn.FAULT);
         host.interruptProcess();
         channel.await(Turn.FAULT);
-        spent.answerWaitMs += performance.now() - asked;
+        noteWaited(performance.now() - asked);
         spent.faults++;
         return (channel.flags() & Said.CLAIMED) !== 0;
     });

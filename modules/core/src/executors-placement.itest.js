@@ -6,19 +6,18 @@
 
 /**
  * The gate of where a process of several executors runs its threads
- * (`placement.js`): spread over them or concentrated on the process's own,
- * tried in turn and kept by what the program gets done each way.
+ * (`placement.js`): spread over them, concentrated on the process's own, or
+ * each moved on what its gains say.
  *
- * Threads computing apart are run spread, the trials finding them faster so;
- * and what a program sees is the same spread, concentrated and moved from one
- * to the other every few milliseconds -- its threads given up by the other
- * executors at their slices' ends and taken here mid-loop, a locked count
- * kept by all of them at once.
+ * Threads computing apart stay spread, nothing they do saying either would
+ * gain by taking turns here; and what a program sees is the same spread,
+ * concentrated and with a thread moved in or out every few milliseconds --
+ * its threads given up by the other executors at their slices' ends and taken
+ * here mid-loop, a locked count kept by all of them at once.
  */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { availableParallelism } from 'node:os';
 import { createApp } from './app.js';
 import { assemble, buildExe } from '../../../tools/make-pe.mjs';
 
@@ -70,9 +69,9 @@ function buildProgram(worker, own){
  *
  * @param {Uint8Array} executable @param {number} cores
  * @param {{ placement?: 'auto' | 'spread' | 'concentrate',
- *     placementTiming?: Partial<import('./layers/kernel/internal/placement.js').PlacementOptions> }} cpu
+ *     placementTiming?: Partial<import('./layers/kernel/internal/placement.js').PlacementOptions> }} [cpu]
  */
-async function run(executable, cores, cpu){
+async function run(executable, cores, cpu = {}){
     const app = await createApp({ executable, cpu: { cores, eager: true, ...cpu } });
     try
     {
@@ -89,49 +88,21 @@ async function run(executable, cores, cpu){
     }
 }
 
-/**
- * Processors a spread placement of the run below needs to be faster at all:
- * its three executors, and this process's own thread beside them. On fewer --
- * a CI runner of two -- concentrating is as fast or faster, and the trials are
- * right to find so.
- */
-const SPREAD_NEEDS = 4;
-
-test('two threads computing apart are run spread: the trials find them faster so', {
-    timeout: 300_000,
-    skip: availableParallelism() < SPREAD_NEEDS
-        ? `${availableParallelism()} processors: a spread placement cannot be faster here` : false,
-}, async()=>{
-    // Two billion times round a loop of two instructions each, a second or more
-    // of every executor: a trial's four windows several times over.
-    const LOOPS = 2_000_000_000;
+test('two threads computing apart are run spread: nothing they do says either gains by'
+    + ' taking turns on the process\'s executor', { timeout: 300_000 }, async()=>{
+    // A billion times round a loop of two instructions each, no call into the host.
+    const LOOPS = 1_000_000_000;
     const executable = buildProgram(()=>[
         0xb9, ...u32(LOOPS), //               mov ecx, LOOPS
         { label: 'loop' },
         0x49, { jump: 'jnz', to: 'loop' }, // dec ecx; jnz loop
         0x31, 0xc0, 0xc2, 0x04, 0x00, //      xor eax, eax; ret 4
     ], ()=>[]);
-    // Tried again every tenth of a second: every window of the threads' work counts as moved.
-    const timing = { firstTrialMs: 20, windowMs: 40, maxWindowMs: 40, settleMs: 10, holdMs: 100,
-        shift: 0, profileMs: 20, lasting: 1 };
-    // A machine busy with other runs gives the other executor less of a
-    // processor, and a trial or two goes the other way: what is asked is that
-    // spread wins most of its trials, in the best of three runs.
-    /** @type {string[]} */
-    const seen = [];
-    for (let attempt = 0; attempt < 3; attempt++)
-    {
-        const { code, placement } = await run(executable, 3, { placementTiming: timing });
-        assert.equal(code, 0);
-        assert.ok(placement !== null && placement.trials >= 1, JSON.stringify(placement));
-        assert.equal(placement.byFrames, 0, 'no frames: measured by what they retired');
-        seen.push(JSON.stringify(placement));
-        if (placement.spread > placement.trials / 2)
-        {
-            return;
-        }
-    }
-    assert.fail(`trials: ${seen.join('; ')}`);
+    const { code, placement, scheduler } = await run(executable, 3);
+    assert.equal(code, 0);
+    assert.deepEqual([placement?.way, placement?.moves, placement?.here], ['auto', 0, ''],
+        JSON.stringify(placement));
+    assert.ok(scheduler?.executorSlices > 0, 'the worker ran on another executor');
 });
 
 test('a locked count kept by three threads comes out whole spread, concentrated and moved'
@@ -150,17 +121,16 @@ test('a locked count kept by three threads comes out whole spread, concentrated 
     {
         const said = await run(executable, 3, { placement });
         assert.equal(said.code, 3 * ADDS, placement);
-        assert.equal(said.placement.trials, 0, `${placement}: never tried against the other`);
+        assert.equal(said.placement.moves, 0, `${placement}: no thread moved`);
         fixed[placement] = said.scheduler?.executorSlices ?? -1;
     }
     assert.ok(fixed.spread > 0, 'spread, slices ran on the other executors');
     assert.equal(fixed.concentrate, 0, 'concentrated, none did');
 
-    // A trial's every window five milliseconds long, and every window of the
-    // threads' work counted as moved, so the next trial follows at once.
-    const moving = await run(executable, 3, { placementTiming: { firstTrialMs: 1, windowMs: 5,
-        maxWindowMs: 5, settleMs: 1, rounds: 1, holdMs: 5, shift: 0, profileMs: 2, lasting: 1 } });
-    assert.equal(moving.code, 3 * ADDS, 'moved between the two ways');
-    assert.ok(moving.placement.trials >= 5, JSON.stringify(moving.placement));
+    // A thread moved in or out every few milliseconds, gains or not (`churnMs`).
+    const moving = await run(executable, 3, { placementTiming: { churnMs: 5, windowMs: 2,
+        verifyMs: 4 } });
+    assert.equal(moving.code, 3 * ADDS, 'moved between executors');
+    assert.ok(moving.placement.moves >= 5, JSON.stringify(moving.placement));
     assert.ok(moving.scheduler?.executorSlices > 0, 'some of it spread');
 });

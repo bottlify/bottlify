@@ -1022,12 +1022,9 @@ function describe(result, context, calls, symbols){
         const placement = executors.placement;
         if (placement)
         {
-            say(`    placement: ${placement.mode}${placement.fixed ? ' (fixed)' : ''},`
-                + ` ${placement.trials} trials (spread ${placement.spread},`
-                + ` concentrate ${placement.concentrate},`
-                + ` ${placement.byFrames} by frames, ${placement.byWork ?? 0} on moved work),`
-                + ` work moved ${placement.moved ?? 'not measured'} since;`
-                + ` last: ${placement.last || 'none'}`);
+            say(`    placement: ${placement.way}, ${placement.moves} moves (${placement.undone}`
+                + ` undone), here by gains: ${placement.here || 'none'}; last:`
+                + ` ${placement.last || 'none'}; building: ${placement.building || 'nothing'}`);
         }
         const own = executors.own;
         if (own)

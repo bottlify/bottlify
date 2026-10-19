@@ -420,20 +420,19 @@ everyone's. The page flags are `INACCESSIBLE`, `HAS_CODE`, `VOLATILE`, `CLOSED`,
     with them, as a render thread its main thread waits on each frame, and stays on its own
     executor. A thread of either kind waiting for the process's executor takes it from one that
     computes, which goes to another executor in its place.
-  - **Spread or concentrated.** All of the above is one way of placing threads, spread. The other,
-    concentrated, keeps every thread on the process's own executor where its mask allows, taking
-    turns there as on one processor (`cpu.placement`). Unless the run names one, the scheduler
-    tries both: two windows of each in turn, concentrated first, each some hundreds of
-    milliseconds after a short settling, and keeps the faster. Where the program presents frames,
-    speed is frames presented a millisecond, since a game's thread spinning on its jobs retires
-    instructions that are no progress; elsewhere it is instructions retired on every executor.
-    Spreading must win by 5%. A trial runs the program the slower way for its windows, which a
-    player sees as a second of slow frames, so the winner is kept until the program changes: it is
-    tried again three seconds after the program begins or stops presenting frames (a game's load,
-    then its play), or once the share of the work each thread does has moved by a quarter for ten
-    seconds, and never sooner than 30 seconds after the last trial. A game whose threads hand work
-    to each other every frame runs concentrated, near its speed on one core (the locked
-    instructions stay atomic); a compressor's workers run spread.
+  - **Spread, concentrated or moved on gains.** All of the above is one way of placing threads,
+    spread. Concentrated keeps every thread on the process's own executor where its mask allows,
+    taking turns there as on one processor (`cpu.placement`). Unless the run names one (`auto`), no
+    way is tried on the running program: every quarter second the scheduler reckons, from what
+    each thread did (its own work at the process's executor's speed, its waits for that executor's
+    answers on another, its waits for a turn, its calls into the host), what moving it would gain:
+    in, where the process's executor has room for its work and it would stop waiting for answers;
+    out, where it waited for a turn here that another executor could give it. The gains build up,
+    leaking with a half-life of two seconds, and a move is made once its sum reaches 300 ms: one
+    thread at a time, checked over the next 1.5 seconds by the frames presented (or instructions
+    retired where none are), and undone where the program went 10% slower, its threshold then
+    raised fourfold and lowered again over a minute. A game whose threads hand work to each other
+    every frame comes to take turns here thread by thread; a compressor's workers stay spread.
   - **A pinned thread** (`cpu.playPinned`). A thread pinned to one processor whose calls into the
     host take the process's executor the most time may have that processor played by the
     process's own executor, where its calls are answered, the executor that played it taking the
@@ -442,9 +441,9 @@ everyone's. The page flags are `INACCESSIBLE`, `HAS_CODE`, `VOLATILE`, `CLOSED`,
     first. The time is that of the calls themselves, wherever the thread runs, halved every
     second; a trade is weighed once it is 2% of the executor's time and twice what the calls of
     the thread pinned to the process's own processor take. A count of calls does not say it: a
-    main thread's are many and cheap. Whether the program gains by it only its frames say, so the
-    trade is weighed by the same trial as placement, never at once with it: windows of each way in
-    turn, the trade kept where it wins by the margin, tried again when the program changes.
+    main thread's are many and cheap. The trade is reckoned as any move is: the waits the pinned thread's calls no longer make against
+    those the thread pinned to the process's processor will make, where the process's executor has
+    the room, and checked and undone the same way.
     GetCurrentProcessorNumber answers the processor played, so no thread is told of one its mask
     does not name.
   - **Answering calls.** The process's own thread runs its threads too, and answers the calls the

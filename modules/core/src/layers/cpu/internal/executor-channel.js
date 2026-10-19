@@ -26,10 +26,13 @@
  * is what the slice out has retired so far, zeroed by the process as it starts
  * one: a slice runs on for a quarter of a second while nothing else wants the
  * executor, and the scheduler measures what the program gets done by the
- * millisecond (the kernel's `placement.js`).
+ * millisecond (the kernel's `placement.js`). `WAITED` is the microseconds the
+ * executor has waited for the process's answers since it opened, never reset:
+ * what a thread placed there loses to calls into the host, which the scheduler
+ * weighs against the thread's own work when it places it.
  */
 export const Word = Object.freeze({ STATE: 0, VALUE: 1, FLAGS: 2, LENGTH: 3, EPOCH: 4,
-    RETIRED: 5 });
+    RETIRED: 5, WAITED: 6 });
 
 /** The states, each set by the side whose turn it ends. */
 export const Turn = Object.freeze({
