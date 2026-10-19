@@ -11,6 +11,8 @@ dist/
 # Copied from the repository root by the build so the package carries its own.
 modules/core/LICENSE
 modules/cork/LICENSE
+modules/installer/LICENSE
+modules/networking/LICENSE
 modules/core/THIRD-PARTY-NOTICES.md
 tools/cdp_test/reports/
 *.log

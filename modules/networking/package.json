@@ -1,10 +1,26 @@
 {
   "name": "@bottlify/networking",
   "version": "1.0.0",
-  "private": true,
   "type": "module",
   "license": "MPL-2.0",
   "description": "Winsock relay for Bottlify: a browser transport and the server that does its socket work",
+  "homepage": "https://github.com/bottlify/bottlify/tree/main/modules/networking#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bottlify/bottlify.git",
+    "directory": "modules/networking"
+  },
+  "bugs": {
+    "url": "https://github.com/bottlify/bottlify/issues"
+  },
+  "keywords": [
+    "winsock",
+    "websocket",
+    "relay",
+    "tcp",
+    "udp",
+    "browser"
+  ],
   "engines": {
     "node": ">=22"
   },
@@ -14,11 +30,19 @@
     "./server": "./src/server/index.js"
   },
   "files": [
-    "src"
+    "src",
+    "!src/**/*.test.js",
+    "!src/**/*.itest.js",
+    "!src/**/*.fixture.js",
+    "LICENSE"
   ],
   "scripts": {
     "test": "node --test --test-timeout=60000 \"src/**/*.test.js\"",
     "typecheck": "tsc -p jsconfig.json",
-    "relay": "node src/server/cli.js"
+    "relay": "node src/server/cli.js",
+    "prepack": "node -e \"require('node:fs').copyFileSync('../../LICENSE', 'LICENSE')\""
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

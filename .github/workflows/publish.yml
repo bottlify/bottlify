@@ -15,7 +15,7 @@ on:
       packages:
         description: 'Packages to publish, by short name: core, cork, installer, networking'
         required: true
-        default: 'core,cork'
+        default: 'core,cork,installer,networking'
 
 concurrency:
   group: publish
@@ -39,7 +39,11 @@ jobs:
       - run: npm ci
       # The core package carries the video decoder where it can be had; the
       # package check holds it to its size when it is there.
+      # A release of this repository, which is private: fetched through the API
+      # with the job's token, as in ci.
       - run: npm run fetch:video-decoder
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
       # Packing runs no prepublishOnly: the core package's dist is built here,
       # and its check run, before anything is packed or published.
       - run: npm run build -w @bottlify/core
