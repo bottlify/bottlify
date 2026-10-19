@@ -83,8 +83,10 @@ function packedFiles(){
     {
         throw new Error(`npm pack --dry-run failed:\n${packed.stderr}`);
     }
-    // npm prints its own progress on stderr; the JSON array is the whole of stdout.
-    const [tarball] = JSON.parse(packed.stdout);
+    // npm prints its own progress on stderr; the JSON is the whole of stdout:
+    // an array of tarballs up to npm 11, an object keyed by package name from 12.
+    const json = JSON.parse(packed.stdout);
+    const [tarball] = Array.isArray(json) ? json : Object.values(json);
     return tarball.files;
 }
 
