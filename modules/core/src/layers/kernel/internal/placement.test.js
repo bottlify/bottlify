@@ -14,12 +14,13 @@ import { Placement, createPlacement } from './placement.js';
  * millisecond, run for `ms` in steps of a turn.
  *
  * @param {{ frameMs?: Record<string, number>, retiredPerMs: Record<string, number>, ms: number,
- *     fixed?: 'spread' | 'concentrate' | null }} program
+ *     fixed?: 'spread' | 'concentrate' | null, busyShare?: Record<string, number> | null }} program
  */
-function run({ frameMs, retiredPerMs, ms, fixed = null }){
+function run({ frameMs, retiredPerMs, ms, fixed = null, busyShare = null }){
     let clock = 0;
     const placement = createPlacement({ now: ()=>clock, fixed });
     let retired = 0;
+    let busy = 0;
     let nextFrame = 0;
     /** @type {Record<string, number>} */
     const time = { spread: 0, concentrate: 0 };
@@ -28,12 +29,13 @@ function run({ frameMs, retiredPerMs, ms, fixed = null }){
         const mode = placement.mode();
         time[mode] += 2;
         retired += 2 * retiredPerMs[mode];
+        busy += 2 * (busyShare?.[mode] ?? 0);
         if (frameMs && clock >= nextFrame)
         {
             placement.frame();
             nextFrame = clock + frameMs[mode];
         }
-        placement.tick(retired);
+        placement.tick(retired, busyShare ? busy : null);
     }
     return { placement, time };
 }
@@ -66,6 +68,22 @@ test('spreading must win by the margin: a few percent stays concentrated', ()=>{
     const { placement } = run({ frameMs: { spread: 97, concentrate: 100 },
         retiredPerMs: { spread: 1, concentrate: 1 }, ms: 60_000 });
     assert.equal(placement.mode(), Placement.CONCENTRATE);
+});
+
+test('frames as fast either way are weighed by how busy each kept the process\'s executor', ()=>{
+    // Held to the display's rate both ways: concentrated, every thread on the
+    // process's executor, which the main thread then waits behind.
+    const frameMs = { spread: 16, concentrate: 16 };
+    const retiredPerMs = { spread: 1, concentrate: 1 };
+    const roomier = run({ frameMs, retiredPerMs, ms: 60_000,
+        busyShare: { spread: 0.55, concentrate: 0.95 } });
+    assert.equal(roomier.placement.mode(), Placement.SPREAD);
+    assert.match(roomier.placement.diagnostics().last, /a tie: busy 0\.55 and 0\.95/);
+    // As busy either way, or not measured: the safer way, as before.
+    assert.equal(run({ frameMs, retiredPerMs, ms: 60_000,
+        busyShare: { spread: 0.9, concentrate: 0.92 } }).placement.mode(), Placement.CONCENTRATE);
+    assert.equal(run({ frameMs, retiredPerMs, ms: 60_000 }).placement.mode(),
+        Placement.CONCENTRATE);
 });
 
 test('a fixed way is kept and never tried against the other', ()=>{

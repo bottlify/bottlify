@@ -31,6 +31,14 @@
  * presenting frames -- a game's load decided by what it retired, then its
  * play -- is tried again once it has done so for `changeMs`, not after the
  * winner's hold, which by then may be minutes.
+ *
+ * Frames that come as fast either way -- a program held to the display's rate
+ * -- say nothing of what each way costs, and such a tie went to the safer way:
+ * a game at 62.5 frames a second both ways was concentrated, its threads taking
+ * turns on the process's executor, and its next load there held the main
+ * thread three seconds behind a thread of higher priority while six executors
+ * idled. A tie is weighed by how busy each way kept the process's executor
+ * instead: the way that leaves it room by `margin` is kept.
  */
 
 export const Placement = Object.freeze({ SPREAD: 'spread', CONCENTRATE: 'concentrate' });
@@ -69,6 +77,7 @@ export const Placement = Object.freeze({ SPREAD: 'spread', CONCENTRATE: 'concent
  * @property {number} frames  intervals between them
  * @property {number} framesMs  the time those intervals span
  * @property {number} retired
+ * @property {number | null} busy  how long the process's executor ran in it; null unknown
  */
 
 /** @param {PlacementOptions} options */
@@ -98,7 +107,7 @@ export function createPlacement(options){
     let windows = [];
     /** The window being measured, once its settling is over; null while it settles. */
     let open = /** @type {{ from: number, retired: number, frames: number, firstFrame: number,
-        lastFrame: number } | null} */ (null);
+        lastFrame: number, busy: number | null } | null} */ (null);
     let switchedAt = now();
     /** When the next trial begins; Infinity while one runs. */
     let nextTrial = switchedAt + firstTrialMs;
@@ -155,19 +164,34 @@ export function createPlacement(options){
                 ? total(one=>one.frames) / total(one=>one.framesMs)
                 : total(one=>one.presented) / total(one=>one.ms);
         };
-        return { byFrames, risky: rate(risky), safe: rate(safe) };
+        /** The process's executor's busy share in a way's windows; null where unknown. @param {string} way */
+        const busy = way=>{
+            const of = done.filter(one=>one.mode === way);
+            return of.length > 0 && of.every(one=>one.busy !== null)
+                ? of.reduce((sum, one)=>sum + /** @type {number} */ (one.busy), 0)
+                    / of.reduce((sum, one)=>sum + one.ms, 0)
+                : null;
+        };
+        return { byFrames, risky: rate(risky), safe: rate(safe), riskyBusy: busy(risky),
+            safeBusy: busy(safe) };
     };
 
     /** @param {Window[]} done @returns {string} */
     const decide = done=>{
         const rated = rates(done);
-        const winner = rated.risky > rated.safe * (1 + margin) ? risky : safe;
+        const tie = rated.byFrames && Math.abs(rated.risky - rated.safe) <= margin * rated.safe;
+        const roomier = tie && rated.riskyBusy !== null && rated.safeBusy !== null
+            && rated.riskyBusy < rated.safeBusy * (1 - margin);
+        const winner = rated.risky > rated.safe * (1 + margin) || roomier ? risky : safe;
         counted.trials++;
         counted[winner]++;
         counted.byFrames += rated.byFrames ? 1 : 0;
         lastByFrames = rated.byFrames;
         counted.last = `${winner} ${rated.byFrames ? 'frames' : 'retired'}`
-            + ` ${risky} ${rated.risky.toPrecision(3)} ${safe} ${rated.safe.toPrecision(3)}`;
+            + ` ${risky} ${rated.risky.toPrecision(3)} ${safe} ${rated.safe.toPrecision(3)}`
+            + (tie && rated.riskyBusy !== null && rated.safeBusy !== null
+                ? `, a tie: busy ${rated.riskyBusy.toFixed(2)} and ${rated.safeBusy.toFixed(2)}`
+                : '');
         return winner;
     };
 
@@ -202,8 +226,9 @@ export function createPlacement(options){
          * way of the trial or to the trial's winner.
          *
          * @param {number} retired
+         * @param {number | null} [busyMs]  how long the process's executor has run so far
          */
-        tick(retired){
+        tick(retired, busyMs = null){
             if (fixed !== null)
             {
                 return;
@@ -230,7 +255,8 @@ export function createPlacement(options){
             {
                 if (at - switchedAt >= settleMs)
                 {
-                    open = { from: at, retired, frames: 0, firstFrame: -1, lastFrame: -1 };
+                    open = { from: at, retired, frames: 0, firstFrame: -1, lastFrame: -1,
+                        busy: busyMs };
                 }
                 return;
             }
@@ -240,7 +266,8 @@ export function createPlacement(options){
                 return;
             }
             windows.push({ mode, ms, retired: retired - open.retired, presented: open.frames,
-                frames: Math.max(0, open.frames - 1), framesMs: open.lastFrame - open.firstFrame });
+                frames: Math.max(0, open.frames - 1), framesMs: open.lastFrame - open.firstFrame,
+                busy: busyMs !== null && open.busy !== null ? busyMs - open.busy : null });
             open = null;
             const sofar = windows.length === 2 ? rates(windows) : null;
             const settled = sofar !== null && (sofar.risky > sofar.safe * (1 + clear)

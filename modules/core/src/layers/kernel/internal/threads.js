@@ -1932,7 +1932,7 @@ export function createScheduler(options){
         // while nothing else wants its executor, longer than a window.
         const retired = remotes.reduce((sum, remote)=>sum + (remote.retiredSoFar?.() ?? 0),
             sharedTime.hereRetired + sharedTime.elsewhereRetired);
-        placement.tick(retired);
+        placement.tick(retired, sharedTime.hereMs);
         playPinned(remotes, retired);
         try
         {
