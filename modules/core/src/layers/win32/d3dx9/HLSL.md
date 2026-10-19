@@ -1,8 +1,8 @@
 # The HLSL compiler of d3dx9
 
-`D3DXCompileShader` compiles HLSL source, as a program that builds its shaders
-at run time expects: the source, an entry point and a profile in; the bytecode
-of that entry point, its constant table and the compiler's messages out.
+`D3DXCompileShader` compiles HLSL source for a program that builds its shaders
+at run time: the source, an entry point and a profile in; that entry point's
+bytecode, its constant table and the compiler's messages out.
 
 ## Pipeline
 
@@ -15,13 +15,13 @@ of that entry point, its constant table and the compiler's messages out.
 | Back end | `hlsl-backend.js`, `hlsl-encode.js`, `hlsl-ctab.js` | Registers, literals, peepholes, limits, tokens, the CTAB comment. |
 | Driver | `hlsl-compile.js` | The whole pipeline; `functions.js` is the export. |
 
-The reference interpreter of the checked tree is `hlsl-eval.js`. It is the
-semantics the differential gate holds the compiled code to.
+`hlsl-eval.js` interprets the checked tree: it is the reference the differential
+gate holds the compiled code to.
 
 ## What the lowering does
 
-There is no control flow in the output. The entry point is run with every value
-a handle on an operand:
+The output has no control flow. The entry point is run with every value a handle
+on an operand:
 
 - functions are inlined; `out` and `inout` copy back;
 - loops are unrolled, so their tests have to be known at compile time (at most
@@ -34,9 +34,9 @@ a handle on an operand:
   address register (vertex shaders);
 - literals are folded; an identical instruction is built once.
 
-Uniforms (including `bool` and `int`, which live in float registers, as the
-register sets of ps_2_0 and vs_1_1 have no others) take registers in the order
-they were declared, a `register(cN)` first. Matrices are packed by column unless
+Uniforms take registers in the order they were declared, a `register(cN)` first;
+`bool` and `int` live in float registers too, as the register sets of ps_2_0 and
+vs_1_1 have no others. Matrices are packed by column unless
 the `row_major` modifier, `#pragma pack_matrix(row_major)` or
 `D3DXSHADER_PACKMATRIX_ROWMAJOR` says otherwise. Only the constants a shader
 reads are in its table.
@@ -57,11 +57,11 @@ numbers: arithmetic and texture slots, temporaries, constants.
   on a temporary component read before it is written.
 - `hlsl-build.test.js`: each operation, on six targets, through the machine.
 - `hlsl-gate.test.js`: about eighty shaders through the gate
-  (`hlsl-gate.fixture.js`): the tree interpreter and the machine, given the same
+  (`hlsl-gate.fixture.js`). The tree interpreter and the machine get the same
   inputs, uniforms (laid out through the constant table the compiler wrote, by the
-  routine D3DX's setters use), texture stand-in and derivative stand-in; every
-  component compared in units in the last place. Each compiled shader is also
-  taken by the bytecode-to-WGSL translator.
+  routine D3DX's setters use), texture stand-in and derivative stand-in, and every
+  component is compared in units in the last place. The bytecode-to-WGSL
+  translator also takes each compiled shader.
 - `hlsl-fuzz.test.js`: random shaders through the same gate, a family that must
   agree bit for bit and one with a tolerance. `HLSL_FUZZ=12 npm test ...` makes
   twelve times as many.
@@ -98,8 +98,8 @@ the preprocessor first. `shader-asm.test.js` holds the token layouts by hand, a 
 trip over random programs of thirteen versions, and a gate against the reference
 assembler of the machine fixture. Not known without a real D3DX: the wording of its
 errors, the rounding of a float literal, the order of `_sat` and `_pp` in a listing, and
-which versions accept which modifiers; the structure of a program (unbalanced `if`,
-texture ops after arithmetic in ps_1_x) is not checked.
+which versions accept which modifiers. Not checked: the structure of a program
+(unbalanced `if`, texture ops after arithmetic in ps_1_x).
 
 ## Effects
 
@@ -121,9 +121,12 @@ contract (vtable order and widths for d3dx9_24/25, 26 and 27 on; Wine's conforma
 expectations for descriptions, names, conversions and pools) and runs a pass's pixel
 shader on the reference machine with the registers the effect set.
 
-Not done: a compiled fx_2_0 effect is not read (E_NOTIMPL), and the effect compiler's
-CompileEffect hands back this layer's own container of the source, which
-D3DXCreateEffect takes back; a state value that is an expression of parameters
-(fxc's preshader) is left out with a warning; a pass whose shader does not compile,
-or is written in an `asm { }` block, makes its technique invalid rather than refusing
-the effect.
+Not done:
+
+- a compiled fx_2_0 effect is not read (E_NOTIMPL), and the effect compiler's
+  CompileEffect hands back this layer's own container of the source, which
+  D3DXCreateEffect takes back;
+- a state value that is an expression of parameters (fxc's preshader) is left out
+  with a warning;
+- a pass whose shader does not compile, or is written in an `asm { }` block, makes
+  its technique invalid rather than refusing the effect.

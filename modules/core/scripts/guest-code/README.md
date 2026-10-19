@@ -1,7 +1,7 @@
 # The guest-code compiler
 
 Every call a program makes into the host is a crossing: the guest stops, the host runs the
-handler, the guest resumes, and that costs microseconds. A runtime function or a COM method a
+handler, the guest resumes, at a cost of microseconds. A runtime function or a COM method a
 program calls thousands of times a frame is cheaper as code the guest runs itself. This compiler
 writes that code from the same JavaScript that is the function's host handler, so there is one
 source and one meaning.
@@ -56,7 +56,7 @@ its place in the source rather than approximated. The full rules are in the head
 | [`compile.test.js`](compile.test.js) | the compiler's own tests |
 | `../build-guest-code.mjs` | compiles every `@guestCode` module under `src/` |
 
-Binding at run time is `guestEntry` in `src/layers/win32/msvcrt/guest-code.js`: an export
+At run time `guestEntry` in `src/layers/win32/msvcrt/guest-code.js` binds the two: an export
 whose code is the compiled bytes and whose handler is the JavaScript.
 
 ## Workflow

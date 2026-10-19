@@ -2,16 +2,23 @@
 
 [По-русски](README.ru.md)
 
-cork is a module for running x86 code (mostly 32-bit) right in the browser. It translates the
-program's machine code into WebAssembly, and the browser compiles that into native instructions.
-So one build of Bottlify runs on ordinary x86 machines and on ARM alike.
+Cork is a module that runs x86 programs, mostly 32-bit, in the browser. A browser cannot run x86
+machine code, so cork translates it into WebAssembly, and the browser compiles that for its own
+processor. That is why one build of Bottlify runs on x86 and on ARM alike. Translated code runs
+over twenty times faster than decoding every instruction again, and on average only three times
+slower than the real processor.
 
-cork is the processor of [Bottlify](../../README.md), and only the processor. It knows nothing
-about Windows: when the program makes a system call, writes to a port or hits a fault, cork stops
-and hands control back to whoever started it. In Bottlify that is
-[`@bottlify/core`](../core/README.md), home of the Windows API, DirectX, sound and the rest.
+Cork translates hot loops and whole functions at once and keeps the finished translations, so a
+program's second run is fast from the start. A program's threads can run in parallel, on separate
+cores, over shared memory. The details are in [Why it is fast](#why-it-is-fast) and
+[How it works](#how-it-works).
 
-Plain JavaScript and WebAssembly, with no dependencies. It runs in a browser and in Node.
+In [Bottlify](../../README.md) cork is the processor. It knows nothing about Windows: a system
+call, a port write or a fault stops it and hands control back to
+[`@bottlify/core`](../core/README.md), home of the Windows API, DirectX and sound.
+
+Cork is written in plain JavaScript and WebAssembly, with no dependencies, and runs in a browser
+and in Node.
 
 ## What it runs
 
@@ -41,15 +48,15 @@ Plain JavaScript and WebAssembly, with no dependencies. It runs in a browser and
 ## Why it is fast
 
 cork runs a program at about a third of the real processor's speed on average, and at half of it on
-tight loops. On the same bytes it is 5 to 8 times faster than v86, the best-known x86 in a browser
-(numbers below). This is where the speed comes from:
+tight loops. On the same programs it is 5 to 8 times faster than v86, the best-known x86 emulator in
+a browser (numbers below). This is where the speed comes from:
 
 - **It translates whole loops and functions, not single instructions.** A loop or a function,
   together with the small functions it calls, becomes one WebAssembly function. We call such a
   piece a region. The browser's compiler sees an ordinary loop in it and optimizes it like any
   other code.
-- **Registers live in local variables.** Inside a region the x86 registers are locals of the
-  function, and the browser puts them in the processor's own registers. The program's memory is one
+- **Registers are local variables.** Inside a region the x86 registers are locals of the function,
+  and the browser puts them in the processor's own registers. The program's memory is one
   `WebAssembly.Memory`, so `mov eax, [esi+8]` is a single load with no page tables in between.
 - **Flags are worked out only where they are read.** Nearly every x86 instruction sets flags and
   hardly anything reads them. A `cmp` followed by a `jl` becomes one comparison.
@@ -89,14 +96,13 @@ flowchart LR
 ```
 
 1. **Interpreter.** New code runs in the interpreter, which also counts how many times the program
-   jumps to each address. An address reached often enough (twice in Bottlify, 50 times on cork's
+   jumps to each address. An address jumped to often enough (twice in Bottlify, 50 times on cork's
    own machine) becomes a candidate for translation.
 2. **Region.** From the candidate cork gathers every block reachable by ordinary jumps (up to 128
    blocks or 8 KiB of code) and builds in the small functions they call.
 3. **Translation.** Regions go to the translation thread in batches of 32 or more, each batch one
    WebAssembly module. When the queue is deep, as while a game loads, a batch takes a quarter of
-   what waits, up to 256. While the thread translates and compiles, the program keeps running in
-   the interpreter.
+   what waits, up to 256.
 4. **Running.** Translated regions call each other directly. They leave only when there is no
    other way:
 
@@ -130,10 +136,10 @@ All of the program's memory is one `WebAssembly.Memory`. The program's address `
 
 ## Speed
 
-[`bench/`](bench/README.md) is the yardstick: a 32-bit Windows program in C++ with eight workloads
-shaped like what games do. The very same `.exe` also runs directly on the processor through a
-small Linux loader (`bench/bin/peload`). So cork and the processor run the same bytes, and every
-run checks that both got the same checksum.
+Speed is measured with [`bench/`](bench/README.md): a 32-bit Windows program in C++ with eight
+workloads shaped like what games do. The same `.exe` also runs directly on the processor through a
+small Linux loader (`bench/bin/peload`). So cork and the processor run the same machine code, and
+every run checks that both got the same checksum.
 
 Each workload ran ten times its own length, so that translation and the cold start are a few per
 cent of the run and the numbers are the speed of the translated code itself. Best of three. 100%
@@ -212,12 +218,11 @@ xychart-beta
 Bars: cork. Line: v86. Node tells the same story: on average cork is 7.1 times faster than v86 on
 the x87 build and 4.6 times on the SSE build.
 
-To be fair, v86 does a lot more work for the same program. It emulates a whole computer, so the
+v86 does a lot more work for the same program, though. It emulates a whole computer, so the
 benchmark runs on top of a Linux kernel and every memory access goes through v86's emulated page
 tables. Its x87 is the real 80-bit arithmetic, done in software, where cork computes in 64-bit
-doubles: that is most of the x87 `math` row, which is why the chart shows the SSE build. In return
-v86 boots whole operating systems. cork does not try to: in Bottlify, Windows programs run on its own
-Windows layer, and all it needs from cork is to run their code fast.
+doubles: that explains most of the x87 `math` row, which is why the chart shows the SSE build. In
+return v86 boots whole operating systems, where cork only runs a program's code.
 
 <details>
 <summary>How it was measured</summary>
@@ -297,8 +302,8 @@ void _start(void){
 ```
 
 `cork translate <file> --entry addr -o out.wasm` saves the region cork forms from that address as a
-WebAssembly module of its own, to look at with `wasm2wat` or `wasm-objdump` (`--at` places flat
-code as for `run`; `--precise` translates as the `precise` setting does). It does not run on its
+WebAssembly module of its own, to study with `wasm2wat` or `wasm-objdump` (`--at` places flat code
+as for `run`; `--precise` translates as the `precise` setting does). The module does not run on its
 own: it takes its memory and helpers from cork.
 
 From JavaScript:
@@ -347,12 +352,10 @@ The machine also has `load`, `read`, `reg` and `setReg` (the eight general regis
 does what `cork translate` does, from code.
 
 Every threshold and size cork works with can be set: the list is in [`SETTINGS.md`](SETTINGS.md).
-The defaults are the ones games were measured with.
 
-Bottlify does not import cork; it loads it by URL. `createEngine` implements the contract in
-[`engine.js`](../core/src/layers/cpu/engine.js), and the core adds Win32, threads and the scheduler
-on top. `@bottlify/core` ships a built copy of cork, so this package is needed directly only to use
-cork on its own, or to load another build with `createApp({ cork: { moduleUrl } })`.
+`@bottlify/core` ships a built copy of cork, so this package is needed directly only to use cork on
+its own, or to load another build with `createApp({ cork: { moduleUrl } })`
+([API](../../docs/core/api.md)).
 
 ## Source
 
@@ -366,8 +369,9 @@ cork on its own, or to load another build with `createApp({ cork: { moduleUrl } 
 | Interpreters | [`src/interp.js`](src/interp.js), [`src/fast.js`](src/fast.js), [`src/interp-wasm.c`](src/interp-wasm.c) | An interpreter in JavaScript for the very first steps, then one built from C into WebAssembly (in Bottlify; cork's own machine keeps to the JavaScript one). |
 | Instruction model | [`src/ir.js`](src/ir.js), [`src/ir-x87.js`](src/ir-x87.js), [`src/ir-simd.js`](src/ir-simd.js) | A slow, simple account of what each instruction does. The JavaScript interpreter runs on it, and translated code is checked against it. |
 
-How cork sits in Bottlify (threads, the translation pool, several executors of one process):
-[`docs/architecture.md`](../../docs/architecture.md), section 5.
+How cork sits in Bottlify (loading by URL, the executor contract in
+[`engine.js`](../core/src/layers/cpu/engine.js), threads, the translation pool, several executors
+of one process) is in [`docs/architecture.md`](../../docs/architecture.md), section 5.
 
 ## Testing
 
@@ -378,11 +382,12 @@ npm run test:integration -w @bottlify/cork  # the suites over the corpus
 node modules/cork/bench/run.mjs             # the benchmark (bench/README.md)
 ```
 
-- **Instruction corpus** (`npm run fetch:corpus`, its version pinned in [`corpus-lock.json`](corpus-lock.json)): cases
-  recorded on real processors. Each goes through the decoder, both interpreters and translated code,
-  and the result has to match the hardware.
-- **Sequence corpus** ([`src/testing/sequences-judge.js`](src/testing/sequences-judge.js)): generated chains of instructions run on
-  the model and in translated code and are compared bit for bit.
+- **Instruction corpus** (`npm run fetch:corpus`, its version pinned in
+  [`corpus-lock.json`](corpus-lock.json)): cases recorded on real processors. Each goes through the
+  decoder, both interpreters and translated code, and the result has to match the hardware.
+- **Sequence corpus** ([`src/testing/sequences-judge.js`](src/testing/sequences-judge.js)):
+  generated chains of instructions run on the model and in translated code and are compared bit for
+  bit.
 - **Gates**: every fast path has a slow twin, and the two are compared on generated programs.
   Translated against interpreted (`machine.test.js`), a worker's translation against one on the
   same thread (`runtime/translators.test.js`), the shared arena (`runtime/arena.test.js`), a batch

@@ -2,10 +2,10 @@
 
 [По-русски](SETTINGS.ru.md) · [README](README.md)
 
-Every number cork works with is a setting. Pass them as `config` to `createMachine`,
+Nearly every number cork works with is a setting. Pass them as `config` to `createMachine`,
 `--config '<json>'` to `cork run`, or `createApp({ cork: { config } })` in `@bottlify/core`. What is
-left out keeps its default. The defaults are what games were measured with, so a change means
-something only with a measurement beside it.
+left out keeps its default. The defaults are what games were measured with, so change one only
+with a measurement beside it.
 
 **Correctness and variants**
 
@@ -52,12 +52,12 @@ something only with a measurement beside it.
 | `leafBlocks`, `leafBytes` | 16, 512 | How large such a callee may be. | Larger inlines more and grows regions. |
 | `formDepth` | 1 | How many levels of callees formed in may keep direct calls of their own, their small callees formed in as well (0: leaves alone). | Deeper forms more of a call chain into one region and grows it; the region's limits bound it. |
 | `switchEntries` | 1024 | Entries of a switch's jump table followed when forming. | Larger for giant switches (interpreters); regions grow. |
-| `regionStops` | `false` | A region stops at a block another region has an entry for, or one on its way to being published, and leaves to that region there: a function's code translated once. | A third less stored in Far Cry, and the hot code it cuts crosses between regions: 74% more transfers in xz, 36% in Stockfish ([`roadmap/negative-results.md`](../../roadmap/negative-results.md), 2026-10-17). |
+| `regionStops` | `false` | A region stops at a block another region has an entry for, or one on its way to being published, and leaves to that region there: a function's code translated once. | A third less stored in one game, and the hot code it cuts crosses between regions: 74% more transfers in xz, 36% in Stockfish ([`roadmap/negative-results.md`](../../roadmap/negative-results.md), 2026-10-17). |
 | `runtimeHelpers` | `true` | Compiler helpers such as MSVC's `_ftol2` formed as what they do. | Off to rule it out. |
 | `callReturn` | `true` | A call out of a region is a wasm call, and the region goes on after the `ret`. | Off makes every return go through the entry hash. |
 | `emptyCalls` | `true` | A call to a function that does nothing (a `ret` or `ret imm16`, after at most three direct jumps, such as an incremental linker's thunk to an empty virtual method) returns at the transfer, without entering a region. | Off to rule it out. |
 | `emptySites` | `false` | With `emptyCalls`, a call out of a region (outside x87 code) reads its target's slot in the entry hash first and returns from such a function in place, without calling the transfer. | A call to an empty method costs about a third of what the transfer leaves it; every other call out of a region reads one more slot, about a nanosecond. |
-| `callTargets` | `true` | Indirect calls sampled and their few small callees formed in; a call found to have none worth forming in is sampled no more. | Off to rule it out. Far Cry ran 2-6% faster with it in Chromium; regions formed again for it are formed under `holdMs`. |
+| `callTargets` | `true` | Indirect calls sampled and their few small callees formed in; a call found to have none worth forming in is sampled no more. | Off to rule it out. A game ran 2–6% faster with it in Chromium; regions formed again for it are formed under `holdMs`. |
 | `predictAfter`, `predictShare`, `predictCallees`, `reforms`, `callWindow` | 48, 8, 4, 3, 1024 | With `callTargets`: samples before callees are looked at, the share a callee must take (one in this many), callees compared, times a region is formed again, the readings of the profile a call's samples are kept for. | Tuning `callTargets`. |
 | `dispatch` | `false` | A module placed in a range of the table, a transfer inside it a direct tail call. | The benchmark gains a few per cent at most; games ran slower with it, alone and beside `callTargets`. |
 | `relinkAfter`, `relinkRegions` | 16, 512 | Batch modules published before running regions are gathered into large ones, and how many go into each (0: never). | Fewer, larger modules make transfers cheaper; gathering 4096 regions held a thread 160 ms. |
@@ -97,7 +97,8 @@ something only with a measurement beside it.
 | `executorHoldMs` | 1 | With several executors and more ready threads than they run: how long an executor keeps its thread (its turn) before it gives it up for one that waits. | Shorter is fairer and costs a round trip through the process each turn: four threads on two executors 817-976 ms at 0.25, 747-845 at 1, 752-837 at 2, 1242-1338 giving the thread up every slice. |
 
 The core also takes `cork.pool`, `cork.poolPerProcess`, `cork.poolWindowMs` and `cork.poolDriver`
-(the translation pool's thresholds) beside `config`, and `quantum` and `executors` on `createApp`.
+(the translation pool's thresholds) beside `config`, and `quantum` and `executors` on `createApp`:
+see [`docs/core/configuration.md`](../../docs/core/configuration.md#cpu).
 
 **Diagnostics**
 

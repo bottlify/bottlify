@@ -2,12 +2,12 @@
 
 TCP and UDP for a browser tab, over one WebSocket.
 
-A page cannot open a TCP connection or bind a UDP port; it can open a WebSocket. This package gets
-around that from both ends: a **relay** server (Node, no dependencies) that holds real sockets, and
-a **client** that gives the page sockets through it (streams, datagrams, listening ports, name
-lookups). Pages that join the same **room** share a private network, `10.86.0.0/16`,
-and reach each other directly; anything outside the room is a real connection the relay opens,
-only to the hosts you allow.
+A page cannot open a TCP connection or bind a UDP port, but it can open a WebSocket. This package
+works from both ends of one: a **relay** server (Node, no dependencies) holds real sockets, and a
+**client** gives the page sockets through it (streams, datagrams, listening ports, name lookups).
+Pages that join the same **room** share a private network, `10.86.0.0/16`, and reach each other
+directly; anything outside the room is a real connection the relay opens, only to the hosts you
+allow.
 
 `@bottlify/core` uses it to give a Windows program Winsock, but it does not need the engine: a
 game, an emulator or a tool of your own can use the same transport.
@@ -34,8 +34,8 @@ node src/server/cli.js --port 8787 --origin https://play.example.com
 | `--allow host` | nothing | A host the relay may open real connections to; `*.example.net` allows a suffix. Repeat for more. |
 | `--origin url` | any | Only pages from these origins may connect (checked at the handshake). Repeat for more. |
 
-With no `--allow`, a relay is a private LAN per room and never an open proxy. A page served over
-HTTPS may only open `wss://`, so in a deployment put TLS in front of it, or attach it to the
+With no `--allow`, a relay is a private LAN per room, never an open proxy. A page served over
+HTTPS may only open `wss://`, so in a deployment put TLS in front of the relay, or attach it to the
 HTTPS server you already have:
 
 ```js
@@ -46,7 +46,7 @@ const relay = createRelayServer({ server: httpsServer, path: '/relay',
 httpsServer.listen(443, ()=>relay.listen());
 ```
 
-`policy` decides every outbound connection; it sees the host *name* when the page looked it up
+`policy` decides every outbound connection. It sees the host *name* when the page looked it up
 through the relay, so an allowlist reads the way it was meant. `createRelayServer({ port })` runs
 standalone.
 
@@ -63,9 +63,10 @@ const app = await createApp({
 });
 ```
 
-The engine runs in a worker, so it is given the client's URL and connects from there. Without
-`network`, Winsock has a loopback adapter only. A program's broadcast reaches every peer of its
-room and stops there, so two sessions in different rooms never find each other.
+The engine runs in a worker, so it is given the client's URL and connects from there (the
+`network` option in [`docs/core/api.md`](../../docs/core/api.md)). Without `network`, Winsock has
+only a loopback adapter. A program's broadcast reaches every peer of its room and stops there, so
+two sessions in different rooms never find each other.
 
 ## Use it on your own
 
@@ -101,15 +102,16 @@ client runs there too.
 
 ## The wire
 
-`@bottlify/networking/protocol` is shared by both halves, so they cannot drift apart. Joining and
-the roster are JSON text frames; everything else is a binary frame with a twenty-byte header the
-relay routes without reading the payload, so one `send` is one frame and a datagram keeps its
-boundaries. The RFC 6455 server side is in [`src/server/websocket.js`](src/server/websocket.js), about a hundred lines.
+Both halves share `@bottlify/networking/protocol`, so they cannot drift apart. Joining and the
+roster are JSON text frames; everything else is a binary frame with a twenty-byte header the relay
+routes without reading the payload, so one `send` is one frame and a datagram keeps its
+boundaries. The RFC 6455 server side is [`src/server/websocket.js`](src/server/websocket.js).
 
-Inside `@bottlify/core` the seam is the transport contract in
-[`modules/core/src/layers/win32/wsock32/transport.js`](../core/src/layers/win32/wsock32/transport.js): every part of it is optional, and what is
-missing behaves as no network. `createApp({ win32: { network: transport } })` takes any object
-implementing it, when the engine runs on the page's own thread (`host: 'thread'`).
+Inside `@bottlify/core`, Winsock reaches the network through the transport contract in
+[`modules/core/src/layers/win32/wsock32/transport.js`](../core/src/layers/win32/wsock32/transport.js).
+Every part of it is optional, and a missing part behaves as no network. When the engine runs on
+the page's own thread (`host: 'thread'`), `createApp({ win32: { network: transport } })` takes any
+object implementing it.
 
 ## Tests
 

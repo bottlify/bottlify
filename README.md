@@ -4,10 +4,10 @@
 
 ## What it is
 
-Bottlify is a set of JavaScript modules for running Windows x86 programs and games in a browser. A
-page loads the modules and starts an ordinary `.exe` with them: the program runs right in the tab,
-with no Windows, no plugin and nothing to install. The program itself does not know it is in a
-browser: it sees Windows, a `C:` drive, a registry, windows, DirectX and sound.
+Bottlify runs Windows x86 programs and games in a browser. It is a set of JavaScript modules: a page
+loads them and starts an ordinary `.exe`, and the program runs right in the tab, with no Windows, no
+plugin and nothing to install. The program itself does not know it is in a browser: it sees
+Windows, a `C:` drive, a registry, windows, DirectX and sound.
 
 Supported: 32-bit programs, DirectDraw, Direct3D 7–10, OpenGL 1.1 with extensions, Vulkan,
 DirectSound, DirectMusic, video through DirectShow and networking through Winsock.
@@ -38,9 +38,8 @@ Audio, OPFS), and programs need no rewriting for it.
   of a game's installer, run unchanged inside the engine.
 
 How the whole thing works (threads, startup, translation, Win32, graphics, sound, networking,
-storage) is in [the architecture](docs/architecture.md). Each module is described in its own
-README, linked above. Embedding `@bottlify/core`: [its API, configuration and
-limits](docs/core/README.md). Plans are in [`roadmap/`](roadmap/README.md).
+storage) is in [the architecture](docs/architecture.md). Embedding `@bottlify/core`: [its API,
+configuration and limits](docs/core/README.md). Plans are in [`roadmap/`](roadmap/README.md).
 
 ## Building and testing
 
@@ -52,9 +51,9 @@ npm run test:integration && npm run build
 npm run cdp:probe   # boots the engine in a real headless Chrome
 ```
 
-The modules are in [`modules/`](modules/), development tools (the browser harness, import audits, benchmarks)
-in [`tools/`](tools/). The launcher and the bottle interface live in a repository of their own,
-[`bottlify-ui`](https://github.com/bottlify/bottlify-ui).
+The modules are in [`modules/`](modules/), development tools (the browser harness, import audits,
+benchmarks) in [`tools/`](tools/). The launcher and the bottle interface live in a repository of
+their own, [`bottlify-ui`](https://github.com/bottlify/bottlify-ui).
 
 Bottlify is licensed under the MPL-2.0. Components and code from others are listed in
 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md).

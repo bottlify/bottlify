@@ -2,19 +2,18 @@
 
 Run a 32-bit Windows program in a browser tab: the original `.exe`, unchanged.
 
-The package is a machine and an operating system written for the web: the program's x86 code runs
-on an execution engine in a Web Worker, and its calls into Windows (`kernel32`, `user32`, `gdi32`,
-DirectDraw, Direct3D 7–10, OpenGL, DirectSound, Winsock and the rest) are answered by this
-package, drawing with WebGPU, playing through Web Audio and keeping files in the origin's private
-file system (OPFS). There is no Windows underneath and no Windows code inside.
+The program's x86 code runs on an execution engine in a Web Worker, and this package answers its
+calls into Windows (`kernel32`, `user32`, `gdi32`, DirectDraw, Direct3D 7–10, OpenGL, DirectSound,
+Winsock and the rest) on WebGPU, Web Audio and the origin's private file system (OPFS), with no
+Windows underneath and no Windows code inside ([how it works](../../docs/architecture.md)).
 
-The engine is **cork**, the translator in [`modules/cork`](../cork/README.md), which ships built
-inside this package. The **v86** emulator is the other engine, when you bring a build of it
-(below); then cork is not loaded at all.
+The engine is **cork**, the translator in [`modules/cork`](../cork/README.md), built into this
+package. With a v86 build you bring ([below](#without-cork-v86)), the v86 emulator runs the program
+instead and cork is not loaded.
 
 This is early software: some programs run to their menus and further, many stop at an API that is
-not there yet, and the log names it when they do. [`docs/core/limits.md`](../../docs/core/limits.md)
-says what is missing.
+not there yet, and the log names it. [`docs/core/limits.md`](../../docs/core/limits.md) lists what
+is missing.
 
 ## Play a game in three commands
 
@@ -28,14 +27,14 @@ node tools/play.mjs mygame                                 # prints http://127.0
 
 Open the address in Chrome or Edge (WebGPU) and press Start.
 
-- **The folder** is the game as it is installed: its `.exe`, its DLLs, its data. `pack` takes a
+- **The folder** is the game as installed: its `.exe`, its DLLs, its data. `pack` takes a
   directory, not an archive: unpack a `.zip` first (`unzip game.zip -d game`).
 - **The entry**, the program to start, is guessed as the largest `.exe` that is not a setup or a
   launcher. If the guess is wrong, set `"entry"` in `bundles/mygame/manifest.json` (a path inside
   the bundle, e.g. `"Bin\\Game.exe"`) and delete `bundles/mygame/entry` if it exists.
-- **An installer** instead of an installed folder: see
-  [`@bottlify/installer`](../installer/README.md), which runs the setup inside the engine and
-  makes the bottle from what it installed.
+- **From an installer** rather than an installed folder:
+  [`@bottlify/installer`](../installer/README.md) runs the setup inside the engine and makes the
+  bottle from what it installed.
 - Other bottle commands: `node tools/make-btl.mjs verify mygame`, `list mygame [pattern]`,
   `extract mygame [file]`.
 
@@ -49,20 +48,20 @@ A page needs three things served from one origin:
 | `/bundles/<id>/bundle.btl`, `manifest.json` | the bottle, read a block at a time | `make-btl pack` |
 | `/bundles/<id>/entry` | the program's image, which `createApp` takes as bytes | `node tools/make-btl.mjs extract <id>` |
 
-`bundle.btl` must be served with **HTTP Range** support (`206 Partial Content`): the engine never
-downloads a game whole, it reads the blocks the program asks for and keeps them in OPFS. nginx,
-Caddy, Apache, `npx http-server` and most CDNs do this; Python's `http.server` does not.
+Serve `bundle.btl` with **HTTP Range** support (`206 Partial Content`): the engine never downloads
+a game whole, it reads the blocks the program asks for and keeps them in OPFS. nginx, Caddy,
+Apache, `npx http-server` and most CDNs do this; Python's `http.server` does not.
 
-Optional, and recommended: serve every response with
+Recommended: serve every response with
 
 ```
 Cross-Origin-Opener-Policy: same-origin
 Cross-Origin-Embedder-Policy: require-corp
 ```
 
-so the page is cross-origin isolated and the engine shares memory with its workers (the `isolated`
-mode). Without them it runs in the `compatible` mode, which works anywhere, an iframe on another
-site included, and copies what crosses between threads. WebGPU needs `https://` or `localhost`.
+for the `isolated` mode, where the engine shares memory with its workers; without them the page
+runs in the `compatible` mode. [Which mode](../../docs/core/README.md#which-mode) compares the two.
+WebGPU needs `https://` or `localhost`.
 
 The page itself is [`tools/play/index.html`](../../tools/play/index.html): copy it as it is, or
 take the part that matters:
@@ -92,13 +91,13 @@ document.getElementById('start').onclick = async()=>{
 </script>
 ```
 
-The full page adds sound (an `AudioWorklet` fed by the engine, both with and without isolation) and
-a bottle made by the installer, which is mounted where its setup put it rather than at `C:\App`.
-Sound needs the click: a browser starts audio only from a person's gesture.
+The full page also plays sound ([Sound](../../docs/core/README.md#sound)), which is why it starts
+on a click: a browser starts audio only on a person's gesture. It also mounts a bottle made by the
+installer where its setup put it rather than at `C:\App`.
 
 `node tools/play.mjs <id> [--port 8080] [--compatible]` is a local server for exactly this layout,
-with Range and the isolation headers (`--compatible` leaves them off). The player page takes two more
-things from its address for a measurement: `&executors=3` runs the program's threads on three
+with Range and the isolation headers (`--compatible` leaves them off). For a measurement the player
+page takes two more settings from its address: `&executors=3` runs the program's threads on three
 executors at once (`createApp`'s `executors`), and `&cork={"checkReads":true}` sets the
 translator's settings (`EngineConfig`).
 
@@ -112,10 +111,10 @@ npm install @bottlify/core      # or: npm install <checkout>/modules/core
 import { createApp } from '@bottlify/core';
 ```
 
-`createApp` finds its workers, `cork/` and `vendor/` beside `core.js`; a bundler that moves files
-takes `workerUrl` and `cork: { moduleUrl }`. The FFmpeg video decoder is a subpath,
-`@bottlify/core/video-decoder.wasm`, handed in as `media: { wasmBytes }`; without it a program is
-told no clip can be played. Every option, the controller and the events:
+`createApp` finds its workers, `cork/` and `vendor/` beside `core.js`; for a bundler that moves
+files, pass `workerUrl` and `cork: { moduleUrl }`. The FFmpeg video decoder is a subpath,
+`@bottlify/core/video-decoder.wasm`, passed as `media: { wasmBytes }`; without it a program is told
+no clip can be played. Every option, the controller and the events:
 [`docs/core/api.md`](../../docs/core/api.md).
 
 ### Without cork: v86
@@ -130,7 +129,7 @@ The package carries no v86; `engine: 'emulator'` without a build is refused.
 ### In Node
 
 The same `createApp` runs headless in Node, with no canvas and the engine on the calling thread.
-That is how the tests run programs, and it suits console programs and installers:
+The tests run programs this way, and it suits console programs and installers:
 
 ```js
 import { readFile } from 'node:fs/promises';
