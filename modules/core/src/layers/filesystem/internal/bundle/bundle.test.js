@@ -19,6 +19,7 @@ import zlib from 'node:zlib';
 import { writeBundle } from '../../../../bundle-node.js';
 import { openBundle, withManifest, Codec, HEADER_SIZE, MAGIC } from './format.js';
 import { createBundleSource, BLOCK_MISS } from './source.js';
+import { blockCacheName, cachedBundle, storedLength } from './cache.js';
 
 const BLOCK_SIZE = 1024;
 
@@ -433,4 +434,61 @@ test('a description written into a bundle opens with it, its files as they were'
         decodeBlock, null);
     assert.equal(JSON.parse(new TextDecoder().decode(taken.index)).manifest, undefined,
         'null takes the description out');
+});
+
+test('a bundle held whole in the block cache is written out from it alone', async()=>{
+    // A game played or downloaded here is saved without fetching it again:
+    // the slots the engine filled, laid back to back under a new index.
+    const bundle = await open();
+    const name = blockCacheName('game', bundle.fingerprint);
+    const blocks = new Uint8Array(bundle.blockCount * bundle.blockSize);
+    for (let at = 0; at < bundle.blockCount; at++)
+    {
+        const block = bundle.block(at);
+        const packed = bundleBytes.subarray(block.offset, block.offset + block.packed);
+        // As the engine puts it: a deflate block inflated, any other as it came.
+        const kept = block.codec === Codec.DEFLATE_RAW ? decodeBlock(block.codec, packed) : packed;
+        assert.equal(kept.length, storedLength(block));
+        blocks.set(kept, at * bundle.blockSize);
+    }
+    const codecs = new Set(Array.from({ length: bundle.blockCount },
+        (_, at)=>bundle.block(at).codec));
+    assert.ok(codecs.has(Codec.STORED) && codecs.size > 1, 'the fixture has blocks kept both ways');
+    /** @param {Uint8Array} present */
+    const root = present=>({
+        getFileHandle: async(/** @type {string} */ file)=>({
+            getFile: async()=>new Blob(/** @type {BlobPart[]} */ ([file === `${name}.present` ? present
+                : file === `${name}.blocks` ? blocks : assert.fail(file)])),
+        }),
+    });
+    const whole = new Uint8Array(Math.ceil(bundle.blockCount / 8));
+    for (let at = 0; at < bundle.blockCount; at++)
+    {
+        whole[at >> 3] |= 1 << (at & 7);
+    }
+    const fetchRange = async(/** @type {number} */ at, /** @type {number} */ count)=>
+        at === 0 || at >= bundle.block(bundle.blockCount - 1).offset
+            ? bundleBytes.subarray(at, at + count)
+            : assert.fail(`a block was fetched at ${at}`);
+    const manifest = { title: 'A Game' };
+    const written = await cachedBundle({ root: root(whole), id: 'game', fetchRange,
+        decode: decodeBlock, manifest });
+    assert.ok(written);
+    const bytes = new Uint8Array(await written.arrayBuffer());
+    const read = async(/** @type {number} */ at, /** @type {number} */ count)=>
+        bytes.subarray(at, at + count);
+    const opened = await openBundle(read, decodeBlock);
+    assert.deepEqual(opened.manifest, manifest);
+    assert.deepEqual(opened.files, bundle.files);
+    const source = createBundleSource({ bundle: opened, decode: decodeBlock,
+        readBlock: (_index, offset, packed)=>bytes.subarray(offset, offset + packed) });
+    for (const [path, content] of Object.entries(CONTENT))
+    {
+        same(source.read(path, 0, content.length), content, path);
+    }
+
+    const short = whole.slice();
+    short[0] &= ~1;
+    assert.equal(await cachedBundle({ root: root(short), id: 'game', fetchRange,
+        decode: decodeBlock, manifest }), null, 'a block missing from the cache: nothing to write');
 });

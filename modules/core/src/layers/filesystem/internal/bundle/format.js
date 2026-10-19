@@ -289,9 +289,12 @@ export async function openBundle(fetchRange, decode, options = {}){
  * @param {FetchRange} fetchRange  The container as it is.
  * @param {IndexDecode} decode
  * @param {Record<string, unknown> | null} manifest  null takes a description out.
+ * @param {((index: any) => number) | null} [relay]  Lays the blocks out anew: rewrites the
+ *     index as read and answers where the blocks it laid end -- a container put together
+ *     from somewhere other than this one (`cachedBundle`).
  * @returns {Promise<{ header: Uint8Array, blocks: [number, number], index: Uint8Array }>}
  */
-export async function withManifest(fetchRange, decode, manifest){
+export async function withManifest(fetchRange, decode, manifest, relay = null){
     const header = (await fetchRange(0, HEADER_SIZE)).slice();
     if (header.length < HEADER_SIZE || String.fromCharCode(...header.subarray(0, MAGIC.length))
         !== MAGIC)
@@ -310,6 +313,7 @@ export async function withManifest(fetchRange, decode, manifest){
     const stored = await fetchRange(indexOffset, indexLength);
     const index = JSON.parse(new TextDecoder().decode(
         await decode(view.getUint32(0x20, true), stored, null)));
+    const end = relay ? relay(index) : indexOffset;
     if (manifest === null)
     {
         delete index.manifest;
@@ -319,7 +323,8 @@ export async function withManifest(fetchRange, decode, manifest){
         index.manifest = manifest;
     }
     const written = new TextEncoder().encode(JSON.stringify(index));
+    view.setBigUint64(0x10, BigInt(end), true);
     view.setBigUint64(0x18, BigInt(written.length), true);
     view.setUint32(0x20, Codec.STORED, true);
-    return { header, blocks: [HEADER_SIZE, indexOffset], index: written };
+    return { header, blocks: [HEADER_SIZE, end], index: written };
 }

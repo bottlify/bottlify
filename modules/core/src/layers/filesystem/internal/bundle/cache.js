@@ -33,6 +33,7 @@
  */
 
 import { createOpfsStore } from '../opfs-store.js';
+import { Codec, HEADER_SIZE, openBundle, withManifest } from './format.js';
 
 /** @typedef {{ read: Function, write: Function, truncate: Function, stat: Function, open: Function }} BlockStore */
 
@@ -127,6 +128,92 @@ export async function bundleResidency({ root, id, bundle }){
         }
     }
     return out;
+}
+
+/**
+ * How much of a block its slot holds: a zstd block is kept packed, because the
+ * decoder that answers a guest read runs synchronously, and everything else is
+ * kept in the form a read can use as it stands -- a deflate block inflated.
+ *
+ * @param {{ codec: number, packed: number, length: number }} block
+ */
+export const storedLength = block=>block.codec === Codec.ZSTD ? block.packed : block.length;
+
+/**
+ * A bundle as this machine holds it, put together as a container of its own
+ * from the block cache alone: a game played or downloaded here is saved
+ * without its bytes fetched again. Only the index is read from the container,
+ * and with it the description to write in. A deflate block comes out stored,
+ * as the cache keeps it inflated, and without its checksum, which was of the
+ * packed bytes; the translation seed is left out, being the translator's
+ * store's and not the cache's, and the next start translates afresh.
+ *
+ * @param {Object} options
+ * @param {any} options.root  The origin's file system (`navigator.storage.getDirectory()`).
+ * @param {string} options.id  The bundle's id, as the engine is given it.
+ * @param {import('./format.js').FetchRange} options.fetchRange  The container.
+ * @param {import('./format.js').IndexDecode} options.decode
+ * @param {Record<string, unknown> | null} options.manifest
+ * @returns {Promise<Blob | null>}  A Blob of slices of the cache, copied only as it is
+ *     read; null when the cache does not hold every block.
+ */
+export async function cachedBundle({ root, id, fetchRange, decode, manifest }){
+    /** @type {Map<string, Promise<Uint8Array>>} */
+    const fetched = new Map();
+    /** @type {import('./format.js').FetchRange} */
+    const once = (offset, length)=>{
+        const key = `${offset}+${length}`;
+        if (!fetched.has(key))
+        {
+            fetched.set(key, fetchRange(offset, length));
+        }
+        return /** @type {Promise<Uint8Array>} */ (fetched.get(key));
+    };
+    const bundle = await openBundle(once, decode);
+    const name = blockCacheName(id, bundle.fingerprint).replace(/[^A-Za-z0-9._-]/g, '_');
+    let bitmap;
+    let data;
+    try
+    {
+        bitmap = new Uint8Array(await (await (await root.getFileHandle(`${name}.present`))
+            .getFile()).arrayBuffer());
+        data = await (await root.getFileHandle(`${name}.blocks`)).getFile();
+    }
+    catch {
+        return null;
+    }
+    if (bitmap.length !== bitmapBytes(bundle.blockCount))
+    {
+        return null;
+    }
+    const seed = bundle.translations;
+    /** @type {Blob[]} */
+    const parts = [];
+    let whole = true;
+    const { header, index } = await withManifest(once, decode, manifest, stored=>{
+        let offset = HEADER_SIZE;
+        stored.blocks = stored.blocks.map((/** @type {any} */ record, /** @type {number} */ at)=>{
+            if (seed && at >= seed.firstBlock && at < seed.firstBlock + seed.blocks)
+            {
+                return { offset, packed: 0, codec: Codec.STORED };
+            }
+            whole &&= isSet(bitmap, at);
+            const block = bundle.block(at);
+            const packed = storedLength(block);
+            parts.push(data.slice(at * bundle.blockSize, at * bundle.blockSize + packed));
+            const laid = { ...record, offset, packed };
+            if (block.codec === Codec.DEFLATE_RAW)
+            {
+                laid.codec = Codec.STORED;
+                delete laid.crc;
+            }
+            offset += packed;
+            return laid;
+        });
+        delete stored.translations;
+        return offset;
+    });
+    return whole ? new Blob(/** @type {BlobPart[]} */ ([header, ...parts, index])) : null;
 }
 
 /**

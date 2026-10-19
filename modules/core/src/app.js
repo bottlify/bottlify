@@ -42,7 +42,7 @@ import { createBundleSource } from './layers/filesystem/internal/bundle/source.j
 import { crc32 } from './layers/filesystem/internal/bundle/crc32.js';
 import { createSharingMemory, openSharedSharing } from './layers/filesystem/internal/shared-sharing.js';
 import { resolveTranslationStore } from './layers/cpu/internal/translation-store.js';
-import { blockCacheName, createBlockCache, resolveBlockStore }
+import { blockCacheName, createBlockCache, resolveBlockStore, storedLength }
     from './layers/filesystem/internal/bundle/cache.js';
 import { decompressZstd } from './zstd.js';
 import { mountDiscs } from './discs.js';
@@ -2838,12 +2838,6 @@ async function mountBundle({ options, cpu, events, translationStore }){
         fetchRange,
         (codec, bytes)=>codec === 1 ? inflateRaw(bytes) : decode(codec, bytes, null),
         { verifyIndex: expectIndex(options.bundle.indexSha256) });
-
-    // How much of a block its slot holds: a zstd block is kept packed, because
-    // the decoder that answers a guest read runs synchronously, and everything
-    // else is kept in the form a read can use as it stands.
-    /** @param {any} block */
-    const storedLength = block=>block.codec === 2 ? block.packed : block.length;
 
     const cache = await createBlockCache({
         // Absent means local, and only an explicit falsy value turns it off --
