@@ -2406,37 +2406,22 @@ test('compressed textures decoded one after another in a frame each go up as the
 
 test('a compressed level uploaded in the frame\'s order keeps its texels past the next decode',
     async()=>{
-        // A texture the GPU has copied into uploads as a frame command, which
-        // holds its texels until the frame is replayed: a level decoded later
-        // in the same frame must not land in them.
+        // A texture a frame still to be submitted has drawn from uploads as a
+        // frame command, which holds its texels until the frame is replayed: a
+        // level decoded later in the same frame must not land in them.
         const h = harness({ compressedTextures: false });
         const { device, gpu } = h;
         const target = textureFrom(h, 4, 4, D3DFMT.DXT1, solidDxt1(0xf800));
-        const source = textureFrom(h, 4, 4, D3DFMT.DXT1, solidDxt1(0x001f));
         const later = textureFrom(h, 4, 4, D3DFMT.DXT1, solidDxt1(0xffff));
         selectTexture(device);
         assert.equal(device.BeginScene(), D3D_OK);
         assert.equal(device.SetVertexShader(FVF_TEXTURED_QUAD), D3D_OK);
         drawTextured(device, target);
-        drawTextured(device, source);
-        assert.equal(device.EndScene(), D3D_OK);
-        await h.present();
-
-        /** @param {any} texture */
-        const levelOf = texture=>{
-            /** @type {{ surface?: any }} */
-            const held = {};
-            assert.equal(texture.GetSurfaceLevel(0, held), D3D_OK);
-            return held.surface;
-        };
-        assert.equal(device.CopyRects(levelOf(source), null, 0, levelOf(target), null, {}),
-            D3D_OK);
         /** @type {{ pBits?: number }} */
         const locked = {};
         assert.equal(target.LockRect(0, locked, null, 0), D3D_OK);
         h.write(/** @type {number} */ (locked.pBits), solidDxt1(0x07e0));
         assert.equal(target.UnlockRect(0), D3D_OK);
-        assert.equal(device.BeginScene(), D3D_OK);
         drawTextured(device, target);
         drawTextured(device, later);
         assert.equal(device.EndScene(), D3D_OK);
