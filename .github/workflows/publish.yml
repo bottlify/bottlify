@@ -4,9 +4,11 @@
 name: publish
 
 # By hand only, from main once its ci run is green: every package packed, the
-# tarballs kept as the run's artifacts, and the packages named staged on npm
-# under the token in the NPM_TOKEN secret, a token that may only stage. A staged
-# version goes live once a maintainer approves it with 2FA (npmjs.com, or
+# tarballs kept as the run's artifacts, and the packages named staged on npm.
+# No token: npm trusts this workflow of this repository (trusted publishing,
+# set per package on npmjs.com, which allows it to stage only), and the job
+# proves who it is with its OIDC token. A staged version goes live once a
+# maintainer approves it with 2FA (npmjs.com, or
 # `npm stage approve <id> --otp <code>`). npm refuses a version already
 # published, so a version is raised in its package.json first.
 on:
@@ -28,6 +30,7 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -61,10 +64,9 @@ jobs:
           path: packs/*.tgz
       - name: stage
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           PACKAGES: ${{ inputs.packages }}
         run: |
           for name in $(echo "$PACKAGES" | tr ',' ' '); do
             npm stage publish -w "@bottlify/$name" --access public
           done
-          npm stage list
+          # Listing needs a maintainer's login, which the job does not have.
