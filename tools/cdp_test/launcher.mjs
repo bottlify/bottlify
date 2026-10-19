@@ -23,7 +23,7 @@
  */
 
 import { launchWithGpu, shutdown } from './browser.mjs';
-import { CdpEndpoint } from './cdp.mjs';
+import { CdpEndpoint, openPage } from './cdp.mjs';
 import { summarise } from './profile.mjs';
 
 const argv = process.argv.slice(2);
@@ -68,8 +68,7 @@ try
 {
     cdp = new CdpEndpoint(browser.browserWs);
     await cdp.open();
-    const { targetId } = await cdp.send('Target.createTarget', { url: options.url });
-    const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
+    const { sessionId } = await openPage(cdp, options.url);
     await cdp.send('Runtime.enable', {}, sessionId);
     await cdp.send('Page.enable', {}, sessionId);
 

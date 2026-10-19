@@ -140,3 +140,29 @@ export class CdpEndpoint {
         this.ws?.close();
     }
 }
+
+/**
+ * A page a harness drives, opened so that it cannot take the pointer.
+ *
+ * A launcher or a game page asks for pointer lock when its canvas is clicked,
+ * and a scripted click is one. On Windows the browser then confines the
+ * machine's own cursor, headless or not, and the person at the machine cannot
+ * use it while the harness plays. The page is opened blank, told that a lock
+ * request does nothing, and only then sent where it was going; without the
+ * lock the engine still has relative motion through movementX/Y
+ * (`layers/input/dom.js`).
+ *
+ * @param {CdpEndpoint} cdp
+ * @param {string} url
+ * @returns {Promise<{ targetId: string, sessionId: string }>}
+ */
+export async function openPage(cdp, url){
+    const { targetId } = await cdp.send('Target.createTarget', { url: 'about:blank' });
+    const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
+    await cdp.send('Page.enable', {}, sessionId);
+    await cdp.send('Page.addScriptToEvaluateOnNewDocument', {
+        source: 'Element.prototype.requestPointerLock = function(){ return Promise.resolve(); };',
+    }, sessionId);
+    await cdp.send('Page.navigate', { url }, sessionId);
+    return { targetId, sessionId };
+}

@@ -28,7 +28,7 @@ import { readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { launchWithGpu, shutdown } from './browser.mjs';
-import { CdpEndpoint } from './cdp.mjs';
+import { CdpEndpoint, openPage } from './cdp.mjs';
 import { serveStatic } from './server.mjs';
 import { frameSpread } from './frame-window.mjs';
 import { summariseAllocations } from './profile.mjs';
@@ -408,11 +408,9 @@ try
 {
     cdp = new CdpEndpoint(browser.browserWs);
     await cdp.open();
-    const { targetId } = await cdp.send('Target.createTarget', {
-        url: `http://127.0.0.1:${server.port}/sandbox/test/page/game/index.html`
-            + (options.worker ? '?worker=1' : ''),
-    });
-    const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
+    const { sessionId } = await openPage(cdp,
+        `http://127.0.0.1:${server.port}/sandbox/test/page/game/index.html`
+            + (options.worker ? '?worker=1' : ''));
     await cdp.send('Runtime.enable', {}, sessionId);
 
     /** @param {string} expression */

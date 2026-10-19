@@ -50,7 +50,7 @@ import { createServer } from 'node:http';
 import { writeFile, mkdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { launchWithGpu, shutdown } from '../browser.mjs';
-import { CdpEndpoint } from '../cdp.mjs';
+import { CdpEndpoint, openPage } from '../cdp.mjs';
 import { pausedStack } from '../timeout-report.mjs';
 
 // Another session's walk may hold the defaults: DRIVE_PORT and DRIVE_PROFILE
@@ -84,9 +84,7 @@ browser.proc.once('exit', code=>{
 const downloads = resolve('dbg/live-downloads');
 await mkdir(downloads, { recursive: true });
 await cdp.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: downloads });
-const { targetId } = await cdp.send('Target.createTarget',
-    { url: `${DRIVE_ORIGIN}/library${query ? `?${query}` : ''}` });
-const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
+const { sessionId } = await openPage(cdp, `${DRIVE_ORIGIN}/library${query ? `?${query}` : ''}`);
 
 /** @param {string} method @param {Record<string, unknown>} [params] */
 const send = (method, params = {})=>cdp.send(method, params, sessionId);

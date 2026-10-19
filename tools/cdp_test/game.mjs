@@ -52,7 +52,7 @@ import { readFile } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { launchWithGpu, shutdown } from './browser.mjs';
-import { CdpEndpoint } from './cdp.mjs';
+import { CdpEndpoint, openPage } from './cdp.mjs';
 import { pausedStack, reportTimeout } from './timeout-report.mjs';
 import { serveStatic } from './server.mjs';
 import { describeProfile, profileWorkers, summarise, summariseAllocations } from './profile.mjs';
@@ -1698,9 +1698,7 @@ export async function game(options){
     {
         cdp = new CdpEndpoint(browser.browserWs);
         await cdp.open();
-        const { targetId } = await cdp.send('Target.createTarget', { url: pageUrl });
-        const { sessionId } = await cdp.send(
-            'Target.attachToTarget', { targetId, flatten: true });
+        const { sessionId } = await openPage(cdp, pageUrl);
         await cdp.send('Runtime.enable', {}, sessionId);
         await cdp.send('Page.enable', {}, sessionId);
 
