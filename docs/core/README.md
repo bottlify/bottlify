@@ -39,6 +39,102 @@ page needs:
   the browser grants its JavaScript sampler only to a document or worker served with it. Without
   it the `js` diagnostics table says the sampler was refused; nothing else changes.
 
+## Play a game in three commands
+
+From a checkout of this repository, with Node 22 or later:
+
+```sh
+npm ci && npm run build                                   # builds modules/core/dist
+node tools/make-btl.mjs pack "/path/to/My Game" mygame     # bundles/mygame/bundle.btl + manifest.json
+node tools/play.mjs mygame                                 # prints http://127.0.0.1:8080/?bottle=mygame
+```
+
+Open the address in Chrome or Edge (WebGPU) and press Start.
+
+- **The folder** is the game as installed: its `.exe`, its DLLs, its data. `pack` takes a
+  directory, not an archive: unpack a `.zip` first (`unzip game.zip -d game`).
+- **The entry**, the program to start, is guessed as the largest `.exe` that is not a setup or a
+  launcher. If the guess is wrong, set `"entry"` in `bundles/mygame/manifest.json` (a path inside
+  the bundle, e.g. `"Bin\\Game.exe"`) and delete `bundles/mygame/entry` if it exists.
+- **From an installer** rather than an installed folder:
+  [`@bottlify/installer`](../installer/README.md) runs the setup inside the engine and makes the
+  bottle from what it installed.
+- Other bottle commands: `node tools/make-btl.mjs verify mygame`, `list mygame [pattern]`,
+  `extract mygame [file]`.
+
+## Serving a bottle
+
+A page needs three things served from one origin:
+
+| Path | What | From |
+| --- | --- | --- |
+| `/bottlify/` | the engine: `core.js`, its workers, `worklet.js`, `cork/`, `vendor/` | `modules/core/dist` after `npm run build` |
+| `/bundles/<id>/bundle.btl`, `manifest.json` | the bottle, read a block at a time | `make-btl pack` |
+| `/bundles/<id>/entry` | the program's image, which `createApp` takes as bytes | `node tools/make-btl.mjs extract <id>` |
+
+Serve `bundle.btl` with **HTTP Range** support (`206 Partial Content`): the engine never downloads
+a game whole, it reads the blocks the program asks for and keeps them in OPFS. nginx, Caddy,
+Apache, `npx http-server` and most CDNs do this; Python's `http.server` does not.
+
+The whole player page is [`tools/play/index.html`](../../tools/play/index.html): beyond the
+smallest page it plays sound, which is why it starts on a click, and mounts a bottle made by the
+installer where its setup put it.
+
+`node tools/play.mjs <id> [--port 8080] [--compatible]` is a local server for exactly this layout,
+with Range and the isolation headers (`--compatible` leaves them off). For a measurement the player
+page takes two more settings from its address: `&executors=3` runs the program's threads on three
+executors at once (`createApp`'s `executors`), and `&cork={"checkReads":true}` sets the
+translator's settings (`EngineConfig`).
+
+## Install as a package
+
+```sh
+npm install @bottlify/core      # or: npm install <checkout>/modules/core
+```
+
+```js
+import { createApp } from '@bottlify/core';
+```
+
+`createApp` finds its workers, `cork/` and `vendor/` beside `core.js`; for a bundler that moves
+files, pass `workerUrl` and `cork: { moduleUrl }`. The FFmpeg video decoder is a subpath,
+`@bottlify/core/video-decoder.wasm`, passed as `media: { wasmBytes }`; without it a program is told
+no clip can be played. Every option, the controller and the events:
+[`docs/core/api.md`](api.md).
+
+### Without cork: v86
+
+```js
+const app = await createApp({ executable, engine: 'emulator',
+    v86: { moduleUrl: '/v86/libv86.mjs', wasmBytes: await (await fetch('/v86/v86.wasm')).arrayBuffer() } });
+```
+
+The package carries no v86; `engine: 'emulator'` without a build is refused.
+
+### In Node
+
+The same `createApp` runs headless in Node, with no canvas and the engine on the calling thread.
+The tests run programs this way, and it suits console programs and installers:
+
+```js
+import { readFile } from 'node:fs/promises';
+import { createApp } from '@bottlify/core';
+
+const app = await createApp({ executable: new Uint8Array(await readFile('tool.exe')) });
+app.on('output', ({ text })=>process.stdout.write(text));
+console.log('exit code', await app.run());
+await app.dispose();
+```
+
+## What is in the package
+
+| Export | What it is |
+| --- | --- |
+| `@bottlify/core` | `createApp`, `assembleModules` (the layers without a program), `createLogReader` |
+| `@bottlify/core/bundle`, `/bundle/node` | the `.btl` format's constants; reading and writing bundles in Node |
+| `@bottlify/core/iso` | reading ISO 9660 disc images |
+| `@bottlify/core/worklet.js` | the sound output's `AudioWorklet` |
+
 ## Which mode
 
 `createApp({ mode })` sets how much of the engine uses shared memory, and so what the page must

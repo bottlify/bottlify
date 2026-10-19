@@ -323,7 +323,7 @@ kernel, and where a system call would be, a trap into the bridge fires instead (
 `isolated` mode: 1 GiB for the program by default, plus cork's tables. The layout (program address
 `a` at offset `0x10000 + a`, the state block with the registers, 512 bytes, in the first 64 KiB,
 and after the program's memory cork's tables with one flag byte per 4 KiB page) is in
-[cork's README](../modules/cork/README.md#how-it-works). With several executors, each further one
+[cork's README](cork/README.md#how-it-works). With several executors, each further one
 has a state page and tables of its own (`executorLayout`), while the program's memory is
 everyone's. The page flags are `INACCESSIBLE`, `HAS_CODE`, `VOLATILE`, `CLOSED`, `NO_EXECUTE`, and
 `WATCH` or `WRITTEN` on a page watched for writes (section 7).
@@ -362,7 +362,7 @@ everyone's. The page flags are `INACCESSIBLE`, `HAS_CODE`, `VOLATILE`, `CLOSED`,
   regions) forms it again as the record says and takes it when the bytes hash the same. The store
   also keeps a map of where its regions have entries: a run that meets a block of a stored region
   before the region's entry forms that region rather than a new one
-  ([cork's README](../modules/cork/README.md#how-it-works)). Every process of a run adds its
+  ([cork's README](cork/README.md#how-it-works)). Every process of a run adds its
   regions to that map when it flushes, to the map as the store holds it then, and writes it back
   only when it adds a 64th of it: a tool a game starts many times a run would otherwise write the
   whole map each time. A bundle may bring translations along (`CORKSEED`); they are seeded before
@@ -492,7 +492,7 @@ everyone's. The page flags are `INACCESSIBLE`, `HAS_CODE`, `VOLATILE`, `CLOSED`,
   were made, and a program relies on it with plain `mov`s: data, then a flag another thread waits
   on. On arm64 another core may see the flag first, or read the data before the flag. So on such a
   host a process on several executors runs cork's ordered variant (the `ordered` setting,
-  [cork's README](../modules/cork/README.md#what-it-runs)): an integer operand's load and store are
+  [cork's README](cork/README.md#what-it-runs)): an integer operand's load and store are
   wasm atomics, ordered with every other access around them. The exceptions are an access through
   esp (a thread's own stack), one at an address not a multiple of its width (a wasm atomic traps
   there), and the x87's, MMX's, SSE's and the string instructions' operands: the data around a
@@ -906,7 +906,7 @@ flowchart TB
   Broadcasts reach only the peers in the room listening on that UDP port.
 - **The outside is closed by default.** Unconfigured, the relay is a LAN, not an open proxy. Which
   hosts are allowed is set when the relay starts: `--allow` for the relay run on its own
-  ([the networking README](../modules/networking/README.md#run-a-relay)), the comma-separated
+  ([the networking README](networking/README.md#run-a-relay)), the comma-separated
   `RELAY_ALLOW` for the launcher's; `*` alone allows every host. The relay resolves host names
   itself and remembers them, so the policy judges the name, not just the address. With an empty
   list, DNS answers nothing at all.

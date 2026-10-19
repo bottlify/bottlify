@@ -33,7 +33,7 @@ outward-facing action) or for a wait a rule imposes, and say what waits on what.
   graphics, sound, networking, storage.
 - `docs/core/` — `@bottlify/core`'s public contract: API, configuration, current limits. Kept
   current as work lands; written for someone outside the project.
-- `modules/cork/README.md` — the translator and its runtime.
+- `docs/cork/README.md` — the translator and its runtime.
 - `roadmap/README.md` — the index of the plans: `x64.md`, `direct3d.md` (Direct3D 11 and 12),
   `opengl.md` (OpenGL 2.0 to 4.x), and `decisions.md` (behaviour chosen rather than derived from a
   specification).

@@ -1,6 +1,6 @@
 {
   "name": "@bottlify/core",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Run unchanged Windows programs and games in a browser tab, on a Windows environment written from scratch over WebGPU, Web Audio and OPFS.",
   "type": "module",
   "license": "MPL-2.0",
