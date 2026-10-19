@@ -2,12 +2,10 @@
 
 [По-русски](README.ru.md)
 
-## What it is
-
-Bottlify runs Windows x86 programs and games in a browser. It is a set of JavaScript modules: a page
-loads them and starts an ordinary `.exe`, and the program runs right in the tab, with no Windows, no
-plugin and nothing to install. The program itself does not know it is in a browser: it sees
-Windows, a `C:` drive, a registry, windows, DirectX and sound.
+Bottlify is a set of packages a web page uses to run Windows programs and games right in a browser
+tab. It needs no Windows, no plugin and no install: the page opens an ordinary `.exe`, and the
+program runs as if Windows were around it, with a `C:` drive, a registry, windows, DirectX and
+sound.
 
 Supported: 32-bit programs, DirectDraw, Direct3D 7–10, OpenGL 1.1 with extensions, Vulkan,
 DirectSound, DirectMusic, video through DirectShow and networking through Winsock.
@@ -28,9 +26,7 @@ Audio, OPFS), and programs need no rewriting for it.
   in JavaScript. `kernel32`, `user32`, `gdi32`, DirectX, OpenGL, DirectSound, Winsock and the rest
   of the system libraries, on top of WebGPU, WebAudio and OPFS. A page starts it with one call,
   `createApp()`.
-- **[cork](modules/cork/README.md)** (`@bottlify/cork`): the x86 → WebAssembly translator. It
-  translates the program's machine code into wasm, which the browser compiles for the device's own
-  processor, so the same build runs on x86 and ARM alike.
+- **[cork](modules/cork/README.md)** (`@bottlify/cork`): the x86 processor for core.
 - **[networking](modules/networking/README.md)** (`@bottlify/networking`, optional): TCP and UDP for
   a browser tab over one WebSocket, a relay server and its client. Without it a program reaches
   only the loopback inside its tab.

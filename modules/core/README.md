@@ -2,14 +2,10 @@
 
 Run a 32-bit Windows program in a browser tab: the original `.exe`, unchanged.
 
-The program's x86 code runs on an execution engine in a Web Worker, and this package answers its
-calls into Windows (`kernel32`, `user32`, `gdi32`, DirectDraw, Direct3D 7–10, OpenGL, DirectSound,
-Winsock and the rest) on WebGPU, Web Audio and the origin's private file system (OPFS), with no
-Windows underneath and no Windows code inside ([how it works](../../docs/architecture.md)).
-
-The engine is **cork**, the translator in [`modules/cork`](../cork/README.md), built into this
-package. With a v86 build you bring ([below](#without-cork-v86)), the v86 emulator runs the program
-instead and cork is not loaded.
+This package is the Windows the program sees. It answers the program's calls into Windows
+(`kernel32`, `user32`, `gdi32`, DirectDraw, Direct3D 7–10, OpenGL, DirectSound, Winsock and the
+rest) on WebGPU, Web Audio and the origin's private file system (OPFS), with no Windows underneath
+and no Windows code inside ([how it works](../../docs/architecture.md)).
 
 This is early software: some programs run to their menus and further, many stop at an API that is
 not there yet, and the log names it. [`docs/core/limits.md`](../../docs/core/limits.md) lists what

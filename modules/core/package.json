@@ -1,7 +1,7 @@
 {
   "name": "@bottlify/core",
   "version": "1.0.0",
-  "description": "Run original Win32 x86 programs in the browser: x86 translated to WebAssembly plus a from-scratch Win32/DirectX layer on WebGPU, WebAudio and OPFS.",
+  "description": "Run unchanged Windows programs and games in a browser tab, on a Windows environment written from scratch over WebGPU, Web Audio and OPFS.",
   "type": "module",
   "license": "MPL-2.0",
   "homepage": "https://github.com/bottlify/bottlify#readme",

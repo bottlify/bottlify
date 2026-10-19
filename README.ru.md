@@ -2,12 +2,10 @@
 
 [English](README.md)
 
-## Что это
-
-Bottlify запускает программы и игры для Windows x86 в браузере. Это набор JavaScript-модулей:
-страница подключает их и запускает обычный `.exe`, и программа работает прямо во вкладке, без
-Windows, плагинов и установки. Сама программа не знает, что она в браузере: она видит Windows,
-диск `C:`, реестр, окна, DirectX и звук.
+Bottlify - это набор пакетов, с которыми веб-страница запускает программы и игры для Windows прямо
+во вкладке браузера. Windows, плагины и установка для этого не нужны: страница открывает обычный
+`.exe`, и программа работает так, будто вокруг неё Windows, с диском `C:`, реестром, окнами,
+DirectX и звуком.
 
 Поддерживаются 32-битные программы, DirectDraw, Direct3D 7–10, OpenGL 1.1 с расширениями, Vulkan,
 DirectSound, DirectMusic, видео через DirectShow и сеть через Winsock.
@@ -28,9 +26,7 @@ DirectSound, DirectMusic, видео через DirectShow и сеть чере�
   JavaScript. `kernel32`, `user32`, `gdi32`, DirectX, OpenGL, DirectSound, Winsock и остальные
   системные библиотеки работают поверх WebGPU, WebAudio и OPFS. Страница запускает его одним
   вызовом `createApp()`.
-- **[cork](modules/cork/README.ru.md)** (`@bottlify/cork`): транслятор x86 → WebAssembly. Он
-  переводит машинный код программы в wasm, а браузер компилирует wasm под процессор устройства,
-  поэтому одна и та же сборка работает и на x86, и на ARM.
+- **[cork](modules/cork/README.ru.md)** (`@bottlify/cork`): процессор x86 для core.
 - **[networking](modules/networking/README.md)** (`@bottlify/networking`, по желанию): TCP и UDP
   для вкладки через один WebSocket, сервер-ретранслятор и его клиент. Без него программе доступен
   только loopback внутри вкладки.

@@ -1,8 +1,8 @@
 # @bottlify/core
 
-`@bottlify/core` runs an unchanged 32-bit Windows program in a browser tab: cork translates its x86
-code to WebAssembly, and the engine's layers answer its calls into Windows on WebGPU, Web Audio,
-OPFS and WebSocket ([how it works](../architecture.md)).
+`@bottlify/core` runs an unchanged 32-bit Windows program in a browser tab: its layers answer the
+program's calls into Windows on WebGPU, Web Audio, OPFS and WebSocket
+([how it works](../architecture.md)).
 
 ## The smallest page
 
