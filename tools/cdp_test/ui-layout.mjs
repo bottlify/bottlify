@@ -7,7 +7,8 @@
 /**
  * The launcher's layout at several screen sizes, as screenshots: a phone, a
  * tablet, a laptop and a desktop, each with the page as it opens and, given a
- * card's title, with that card's details open. For judging a layout change by
+ * card's title, with that card in the grid and with its details
+ * open. For judging a layout change by
  * eye on every size at once, without a person resizing a window or holding a
  * phone. Headless, its own profile; nothing of a running launcher tab is
  * touched.
@@ -84,18 +85,18 @@ try
         {
             continue;
         }
-        const opened = await evaluate(`(() => {
-            const re = new RegExp(${JSON.stringify(card.source)}, 'i');
-            const hit = [...document.querySelectorAll('img[alt]')].find((img) => re.test(img.alt));
-            if (!hit) return false;
-            hit.click();
-            return true;
-        })()`);
-        if (!opened)
+        const find = `[...document.querySelectorAll('img[alt]')]
+            .find((img) => new RegExp(${JSON.stringify(card.source)}, 'i').test(img.alt))`;
+        // The card in the grid first, scrolled to the middle of the screen, then its details.
+        if (!(await evaluate(`(() => { const hit = ${find};
+            hit?.scrollIntoView({ block: 'center' }); return Boolean(hit); })()`)))
         {
             console.log(`${size.name}: no card's picture is titled like ${card}`);
             continue;
         }
+        await sleep(500);
+        await shot(`${size.name}-grid.png`);
+        await evaluate(`${find}.click()`);
         await sleep(1200);   // the panel slides in
         await shot(`${size.name}-details.png`);
     }
