@@ -154,6 +154,10 @@ const ROOM = 0.1;
 /** What an answer to another executor's call is taken to cost it, ms, until one is measured. */
 const ANSWER_MS = 0.2;
 
+/** Each kind of move by the kind that takes it back (`placement.js`, `move`). */
+const OPPOSITE = new Map([['in', 'out'], ['out', 'in'], ['trade', 'untrade'],
+    ['untrade', 'trade']]);
+
 /** Turns kept to say what held the processor through a late thread's gap. */
 const RECENT_TURNS = 256;
 
@@ -433,12 +437,14 @@ export function createScheduler(options){
     /** Whether this executor may play a pinned thread's processor on its gains (`playPinned`). */
     const trading = options.playPinned !== false && options.freeHost !== true;
     /**
-     * The moves the threads' gains propose (`gains`), made one at a time and
-     * checked (`placement.js`): a thread taking turns on this executor or not,
-     * this executor playing a pinned thread's processor or its own.
+     * The moves the threads' gains propose (`gains`), made one at a time
+     * (`placement.js`): a thread taking turns on this executor or not, this
+     * executor playing a pinned thread's processor or its own.
      */
-    const placement = createPlacement({ now: wall,
-        apply: key=>move(key, true), undo: key=>move(key, false), ...options.placementTiming });
+    const placement = createPlacement({ now: wall, apply: key=>move(key),
+        opposite: key=>OPPOSITE.get(key.slice(0, key.indexOf(':')))
+            ?.concat(key.slice(key.indexOf(':'))) ?? null,
+        ...options.placementTiming });
     /**
      * Told what a parked thread is about to be resumed with: which wait it
      * was in and the value the call answers. The only record of that answer
@@ -1274,14 +1280,14 @@ export function createScheduler(options){
     };
 
     /**
-     * Makes or takes back a move the gains proposed (`gains`): a thread
-     * taking turns here (`in:` its id) or no longer (`out:`), this executor
-     * playing a pinned thread's processor (`trade:` it) or its own again
-     * (`untrade:` the one it played).
+     * Makes a move the gains proposed (`gains`): a thread taking turns here
+     * (`in:` its id) or no longer (`out:`), this executor playing a pinned
+     * thread's processor (`trade:` it) or its own again (`untrade:` the one
+     * it played).
      *
-     * @param {string} key @param {boolean} forward
+     * @param {string} key
      */
-    const move = (key, forward)=>{
+    const move = key=>{
         const [kind, value] = key.split(':');
         const target = Number(value);
         if (kind === 'in' || kind === 'out')
@@ -1289,17 +1295,13 @@ export function createScheduler(options){
             const thread = threads.find(one=>one.id === target);
             if (thread !== undefined)
             {
-                thread.placedHere = (kind === 'in') === forward;
+                thread.placedHere = kind === 'in';
                 note(thread, thread.placedHere ? 'placed here' : 'placed apart');
             }
         }
-        else if (kind === 'trade')
+        else
         {
-            tradeTarget = forward ? target : 0;
-        }
-        else if (kind === 'untrade')
-        {
-            tradeTarget = forward ? 0 : target;
+            tradeTarget = kind === 'trade' ? target : 0;
         }
     };
 
@@ -2122,13 +2124,9 @@ export function createScheduler(options){
             sharedTime.betweenMs += turnFrom - sharedTurnEnd;
         }
         sharedTime.turns++;
-        // The others' slices so far too: one runs on a quarter of a second
-        // while nothing else wants its executor, longer than a window.
-        const retired = remotes.reduce((sum, remote)=>sum + (remote.retiredSoFar?.() ?? 0),
-            sharedTime.hereRetired + sharedTime.elsewhereRetired);
         if (placementWay === Placement.AUTO || trading)
         {
-            placement.tick(retired, gains);
+            placement.tick(gains);
         }
         playPinned(remotes);
         try
@@ -2499,11 +2497,6 @@ export function createScheduler(options){
 
         /** The processor time the process's threads have taken, in milliseconds. */
         cpuMs: ()=>cpuMs,
-
-        /** A frame the program presented: what its threads' placement is measured by. */
-        noteFrame(){
-            placement.frame();
-        },
 
         /** How many threads are ready to run with no executor running them. */
         readyCount: ()=>ready().length,

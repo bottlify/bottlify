@@ -1022,8 +1022,8 @@ function describe(result, context, calls, symbols){
         const placement = executors.placement;
         if (placement)
         {
-            say(`    placement: ${placement.way}, ${placement.moves} moves (${placement.undone}`
-                + ` undone), here by gains: ${placement.here || 'none'}; last:`
+            say(`    placement: ${placement.way}, ${placement.moves} moves, here by gains:`
+                + ` ${placement.here || 'none'}; last:`
                 + ` ${placement.last || 'none'}; building: ${placement.building || 'nothing'}`);
         }
         const own = executors.own;

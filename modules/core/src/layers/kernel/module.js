@@ -445,13 +445,6 @@ export function createKernelModule(){
                     thread.resumeRegisters = registers ?? null;
                 },
                 currentThread: ()=>live() ? state.scheduler.current() : null,
-                /** A frame the program presented (`placement`). */
-                noteFrame: ()=>{
-                    if (live())
-                    {
-                        state.scheduler.noteFrame();
-                    }
-                },
                 /**
                  * Guest code no slice ends inside (see the scheduler's
                  * `atomicCode`): a routine of the host's that writes what other

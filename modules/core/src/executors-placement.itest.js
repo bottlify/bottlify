@@ -128,8 +128,7 @@ test('a locked count kept by three threads comes out whole spread, concentrated 
     assert.equal(fixed.concentrate, 0, 'concentrated, none did');
 
     // A thread moved in or out every few milliseconds, gains or not (`churnMs`).
-    const moving = await run(executable, 3, { placementTiming: { churnMs: 5, windowMs: 2,
-        verifyMs: 4 } });
+    const moving = await run(executable, 3, { placementTiming: { churnMs: 5, windowMs: 2 } });
     assert.equal(moving.code, 3 * ADDS, 'moved between executors');
     assert.ok(moving.placement.moves >= 5, JSON.stringify(moving.placement));
     assert.ok(moving.scheduler?.executorSlices > 0, 'some of it spread');

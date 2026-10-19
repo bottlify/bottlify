@@ -428,10 +428,11 @@ everyone's. The page flags are `INACCESSIBLE`, `HAS_CODE`, `VOLATILE`, `CLOSED`,
     answers on another, its waits for a turn, its calls into the host), what moving it would gain:
     in, where the process's executor has room for its work and it would stop waiting for answers;
     out, where it waited for a turn here that another executor could give it. The gains build up,
-    leaking with a half-life of two seconds, and a move is made once its sum reaches 300 ms: one
-    thread at a time, checked over the next 1.5 seconds by the frames presented (or instructions
-    retired where none are), and undone where the program went 10% slower, its threshold then
-    raised fourfold and lowered again over a minute. A game whose threads hand work to each other
+    leaking with a half-life of two seconds, and a move is made once its sum reaches 300 ms, one
+    thread at a time. A move is never checked against the frame rate after it: a wrong one shows
+    in the same reckoning, the threads' waits building the gain of the move back, and the move back
+    from one just made needs twice the sum, lowered again with a half-life of 30 seconds, so two
+    moves whose gains answer each other come at ever longer gaps. A game whose threads hand work to each other
     every frame comes to take turns here thread by thread; a compressor's workers stay spread.
   - **A pinned thread** (`cpu.playPinned`). A thread pinned to one processor whose calls into the
     host take the process's executor the most time may have that processor played by the
@@ -443,7 +444,7 @@ everyone's. The page flags are `INACCESSIBLE`, `HAS_CODE`, `VOLATILE`, `CLOSED`,
     the thread pinned to the process's own processor take. A count of calls does not say it: a
     main thread's are many and cheap. The trade is reckoned as any move is: the waits the pinned thread's calls no longer make against
     those the thread pinned to the process's processor will make, where the process's executor has
-    the room, and checked and undone the same way.
+    the room, and given back the same way.
     GetCurrentProcessorNumber answers the processor played, so no thread is told of one its mask
     does not name.
   - **Answering calls.** The process's own thread runs its threads too, and answers the calls the

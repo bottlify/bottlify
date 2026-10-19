@@ -6,7 +6,7 @@
 
 /**
  * Where a process with executors of its own runs its threads, moved one at a
- * time on a signal that has built up, never tried.
+ * time on a signal that has built up, never tried and never measured back.
  *
  * A thread runs on an executor of its own unless it gains by taking turns on
  * the process's (`in`), and comes off it again when it waits there for a turn
@@ -19,20 +19,20 @@
  * half-life of `halfMs`; a move is made once its sum reaches `threshold`
  * milliseconds. A load's burst of a few hundred milliseconds stays under it.
  *
- * It replaced trials that ran the program each way in turn for a window and
- * kept the faster: the slower way's window was a second of slow frames a
- * player saw -- Call of Duty 4 drew a frame every 64 ms concentrated and every
- * 131 traded against 28 and 30 -- and a trial that fell on a load kept the
- * wrong way through the play (a frame every 51 ms where spread drew 20).
+ * A move is not checked against the program's speed after it: a frame rate
+ * read over a second or two is the scene as much as the placement, and a
+ * comparison that undoes a move holds the program the slower way for the
+ * length of the comparison, the slow frames a player sees. A move that was
+ * wrong shows in the same reckoning that made it: the threads' waits after it
+ * build the gain of the move back. So that two moves whose gains answer each
+ * other do not alternate, the move back from one just made needs twice the
+ * threshold the move itself needed, coming down to one with a half-life of
+ * `holdMs`: a pair that keeps answering is made at ever longer gaps. The
+ * window a move falls in, the threads moving, adds nothing to any sum.
  *
  * One move at a time, and a thread at a time, so a change is as small as it
  * can be: concentrating a program is its threads coming in one after another
- * while each gains. Each move is checked after it, the program's speed over
- * `verifyMs` against the same before (frames a millisecond where it presents
- * them, instructions retired where not): a move that left it slower by
- * `margin` is undone, and its threshold made four times as high, coming back
- * down with a half-life of `forgiveMs`, so a move the sums keep proposing and
- * the program keeps refusing is made seldom.
+ * while each gains.
  */
 
 export const Placement = Object.freeze({ SPREAD: 'spread', CONCENTRATE: 'concentrate',
@@ -42,129 +42,62 @@ export const Placement = Object.freeze({ SPREAD: 'spread', CONCENTRATE: 'concent
  * @typedef {Object} PlacementOptions
  * @property {() => number} now  wall milliseconds
  * @property {(key: string) => void} apply  makes a move
- * @property {(key: string) => void} undo  takes it back
+ * @property {(key: string) => string | null} [opposite]  the move that takes `key` back
  * @property {number} [windowMs]  how often the gains are read
  * @property {number} [halfMs]  how fast a sum leaks
  * @property {number} [threshold]  the sum, in ms, a move is made at
- * @property {number} [verifyMs]  how long the speed is weighed before and after a move
- * @property {number} [margin]  by how much slower a move must leave the program to be undone
- * @property {number} [forgiveMs]  how fast a refused move's raised threshold comes back down
+ * @property {number} [holdMs]  how fast the raised threshold of a move back comes down
  * @property {number} [churnMs]  for a gate only: a move every so often, gains or not
  */
 
 /** @param {PlacementOptions} options */
 export function createPlacement(options){
-    const { now, apply, undo } = options;
+    const { now, apply } = options;
+    const opposite = options.opposite ?? (()=>null);
     const windowMs = options.windowMs ?? 250;
     const halfMs = options.halfMs ?? 2000;
     const threshold = options.threshold ?? 300;
-    const verifyMs = options.verifyMs ?? 1500;
-    const margin = options.margin ?? 0.1;
-    const forgiveMs = options.forgiveMs ?? 60_000;
+    const holdMs = options.holdMs ?? 30_000;
     const churnMs = options.churnMs ?? 0;
 
     /** Each move's built-up gain, ms. @type {Map<string, number>} */
     const sums = new Map();
-    /** Each refused move's threshold factor, and when it was set. @type {Map<string, { factor: number, at: number }>} */
+    /** Each move's raised threshold factor, and when it was raised. @type {Map<string, { factor: number, at: number }>} */
     const raised = new Map();
-    /** The windows' speeds, newest last: their length and what the program did in them. */
-    const history = /** @type {{ ms: number, frames: number, retired: number }[]} */ ([]);
     let windowFrom = now();
-    let windowFrames = 0;
-    let windowRetired = -1;
-    /** The move being weighed: what it was, the speed before it, from when its after counts. */
-    let checking = /** @type {{ key: string, before: { ms: number, frames: number, retired: number }, from: number } | null} */ (null);
+    /** Until when the threads are moving and their gains count for nothing. */
+    let movingUntil = -Infinity;
     let lastChurn = windowFrom;
-    const counted = { moves: 0, undone: 0, last: '' };
+    const counted = { moves: 0, last: '' };
 
     /** The factor a move's threshold stands at now. @param {string} key @param {number} at */
     const factorOf = (key, at)=>{
         const one = raised.get(key);
-        return one === undefined ? 1 : 1 + (one.factor - 1) * 0.5 ** ((at - one.at) / forgiveMs);
-    };
-
-    /** The windows since `from`, summed. @param {number} span */
-    const lastWindows = span=>{
-        const sum = { ms: 0, frames: 0, retired: 0 };
-        for (let i = history.length - 1; i >= 0 && sum.ms < span; i--)
-        {
-            sum.ms += history[i].ms;
-            sum.frames += history[i].frames;
-            sum.retired += history[i].retired;
-        }
-        return sum;
-    };
-
-    /**
-     * How fast the program went over a span: frames a millisecond where it
-     * presented a few in both spans, else instructions retired.
-     *
-     * @param {{ ms: number, frames: number, retired: number }} a
-     * @param {{ ms: number, frames: number, retired: number }} b
-     */
-    const slower = (a, b)=>{
-        const byFrames = a.frames >= 3 && b.frames >= 3;
-        const rate = (/** @type {{ ms: number, frames: number, retired: number }} */ one)=>
-            (byFrames ? one.frames : one.retired) / Math.max(one.ms, 1);
-        return rate(b) < rate(a) * (1 - margin);
+        return one === undefined ? 1 : 1 + (one.factor - 1) * 0.5 ** ((at - one.at) / holdMs);
     };
 
     return {
-        /** A frame the program presented, now. */
-        frame(){
-            windowFrames++;
-        },
-
-        /** Whether a move is being weighed now. */
-        checking: ()=>checking !== null,
-
         /**
          * Called every turn: once a window has passed, reads each move's gain,
-         * builds the sums, and makes or checks a move.
+         * builds the sums, and makes a move whose sum has reached its threshold.
          *
-         * @param {number} retired  what every executor has retired so far
          * @param {() => Map<string, number>} gains  each possible move's gain, a share of
          *     the window
          */
-        tick(retired, gains){
+        tick(gains){
             const at = now();
-            if (windowRetired < 0)
-            {
-                windowRetired = retired;
-            }
             const ms = at - windowFrom;
             if (ms < windowMs)
             {
                 return;
             }
-            history.push({ ms, frames: windowFrames, retired: retired - windowRetired });
-            if (history.length > 64)
-            {
-                history.shift();
-            }
             windowFrom = at;
-            windowFrames = 0;
-            windowRetired = retired;
-            if (checking !== null)
+            const offered = gains();
+            if (at <= movingUntil)
             {
-                if (at - checking.from < verifyMs)
-                {
-                    return;
-                }
-                const after = lastWindows(verifyMs);
-                if (slower(checking.before, after))
-                {
-                    undo(checking.key);
-                    counted.undone++;
-                    counted.last = `undid ${checking.key}`;
-                    raised.set(checking.key, { factor: 4 * factorOf(checking.key, at), at });
-                }
-                checking = null;
-                sums.clear();
                 return;
             }
             const leak = 0.5 ** (ms / halfMs);
-            const offered = gains();
             for (const key of new Set([...sums.keys(), ...offered.keys()]))
             {
                 const sum = Math.max(0,
@@ -198,16 +131,19 @@ export function createPlacement(options){
                 return;
             }
             lastChurn = at;
-            const before = lastWindows(verifyMs);
             counted.moves++;
             counted.last = `${best} at ${Math.round(sums.get(best) ?? 0)} ms`;
             sums.clear();
+            const back = opposite(best);
+            if (back !== null)
+            {
+                raised.set(back, { factor: 2 * factorOf(best, at), at });
+            }
             apply(best);
-            // The window the move falls in is the threads moving: the after starts past it.
-            checking = { key: best, before, from: at + windowMs };
+            movingUntil = at + windowMs;
         },
 
-        /** The moves made and undone, the last, and the sums building now. */
+        /** The moves made, the last, and the sums building now. */
         diagnostics: ()=>({ ...counted,
             building: [...sums].map(([key, sum])=>`${key} ${Math.round(sum)}`).join(', ') }),
     };

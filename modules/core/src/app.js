@@ -291,9 +291,9 @@ const hashText = (hash, text)=>{
  *           a program of one thread pays for none. `eager` says which outright.
  *           `placement`: where a process of several cores runs its ready threads --
  *           `auto` (the default) moves each thread onto the process's own core or
- *           off it, one at a time, where what it did says it gains, and undoes a
- *           move the frames say lost; `spread` or `concentrate` one way.
- *           `placementTiming`: the moves' windows, threshold and check, for a test.
+ *           off it, one at a time, where what it did says it gains; `spread` or
+ *           `concentrate` one way.
+ *           `placementTiming`: the moves' windows and thresholds, for a test.
  *           `playPinned`: false keeps every processor on its own core; by default a
  *           thread the program pinned to one processor and that calls into the host
  *           often has its processor played by the process's own core, where those
@@ -4481,9 +4481,6 @@ async function buildApp(options){
             // runs on the guest's clock, which only this assembly can reach:
             // a program times its spin on the blank with its own timers.
             guestNow: ()=>core.api('kernel').clock.virtualTime(),
-            // A frame a program presented: what the scheduler measures where its
-            // threads go by (the kernel's `placement`).
-            presented: ()=>core.api('kernel').noteFrame?.(),
             // A device call that waits on the display -- a Present beat-synced
             // to the retrace -- stops the calling thread until that moment of
             // the guest's clock and returns what its call answers then.

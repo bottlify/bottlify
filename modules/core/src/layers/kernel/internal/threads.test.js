@@ -1490,13 +1490,11 @@ test('a thread this executor keeps calling back from the other one stays here a 
 /**
  * A main thread pinned to the first processor beside a render thread pinned
  * to the second, each making a call a round wherever it runs: the renderer's
- * 2 ms of this executor's, the main thread's 0.2. The program draws a frame a
- * round with each processor on its own executor and `traded` a round with the
- * renderer's played here.
+ * `renderMs` of this executor's, the main thread's 0.2.
  *
- * @param {number} traded
+ * @param {number} renderMs
  */
-function pinnedRenderer(traded){
+function pinnedRenderer(renderMs){
     const { cpu, told } = twoExecutors();
     const [remote] = cpu.executors();
     let clock = 0;
@@ -1504,7 +1502,7 @@ function pinnedRenderer(traded){
     let timed = ()=>{};
     /** A call of the thread current, timed as the cpu layer times it. */
     const call = ()=>{
-        const ms = sched.current()?.name === 'render' ? 2 : 0.2;
+        const ms = sched.current()?.name === 'render' ? renderMs : 0.2;
         clock += ms;
         timed(ms);
     };
@@ -1542,7 +1540,6 @@ function pinnedRenderer(traded){
     const render = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'render' });
     main.affinityMask = 0b01;
     render.affinityMask = 0b10;
-    let frames = 0;
     let round = 0;
     /** Runs the clock `ms` on. */
     const run = (/** @type {number} */ ms)=>{
@@ -1559,41 +1556,34 @@ function pinnedRenderer(traded){
                 assert.equal(sched.processorOf(ran), ran === main ? 0 : 1,
                     `${ran.name} told of another processor at round ${round}`);
             }
-            frames += sched.diagnostics().played.startsWith('1,0') ? traded : 1;
-            for (; frames >= 1; frames--)
-            {
-                sched.noteFrame();
-            }
             round++;
         }
     };
-    /** The processors played, and the trials' account. */
+    /** The processors played, and the moves' account. */
     const said = ()=>({ ...JSON.parse(sched.diagnostics().placement),
         processors: sched.diagnostics().played.split(' ')[0] || '0,1' });
     return { run, said };
 }
 
 test('a pinned thread whose calls take this executor the most time has its processor played'
-    + ' here once its waits for them say it gains, kept where the program draws faster so, and'
-    + ' given back where it does not', ()=>{
+    + ' here once its waits for them say it gains, and kept; one whose calls are cheap is not',
+()=>{
     // Call of Duty 4 pins its main thread to the first processor and its render
     // thread to the last, every Present and Lock of the renderer a few hundred
     // microseconds of this executor's while the main thread computed here.
-    const faster = pinnedRenderer(2);
-    faster.run(8000);
-    assert.deepEqual([faster.said().processors, faster.said().moves, faster.said().undone],
-        ['1,0', 1, 0], `traded, the frames twice as many: ${JSON.stringify(faster.said())}`);
-    faster.run(40_000);
-    assert.deepEqual([faster.said().processors, faster.said().moves], ['1,0', 1],
-        `and kept, no move since: ${JSON.stringify(faster.said())}`);
+    const dear = pinnedRenderer(2);
+    dear.run(8000);
+    assert.deepEqual([dear.said().processors, dear.said().moves],
+        ['1,0', 1], `traded on the renderer's waits: ${JSON.stringify(dear.said())}`);
+    dear.run(40_000);
+    assert.deepEqual([dear.said().processors, dear.said().moves], ['1,0', 1],
+        `and kept, no move since: ${JSON.stringify(dear.said())}`);
 
-    // The same waits, but the program draws half the frames traded: given back.
-    const slower = pinnedRenderer(0.5);
-    slower.run(8000);
-    assert.deepEqual([slower.said().processors, slower.said().undone >= 1],
-        ['0,1', true], `half the frames traded, given back: ${JSON.stringify(slower.said())}`);
-    slower.run(40_000);
-    assert.ok(slower.said().moves <= 3, `tried again seldom: ${JSON.stringify(slower.said())}`);
+    // Calls as cheap as the main thread's: nothing to save by playing it here.
+    const cheap = pinnedRenderer(0.2);
+    cheap.run(48_000);
+    assert.deepEqual([cheap.said().processors, cheap.said().moves], ['0,1', 0],
+        `not traded: ${JSON.stringify(cheap.said())}`);
 });
 
 test('a thread that may run only here takes this executor\'s turn from one that may run on'
