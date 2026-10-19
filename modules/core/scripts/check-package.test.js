@@ -75,17 +75,18 @@ test('a source entry needs every module it imports packed, and no type a comment
             "export { b } from './dir/b.js';",
             "const later = ()=>import('./lazy.js');",
         ].join('\n'),
-        'src/a.js': "import './side.js';",
+        // A worker started beside itself is a module of the package too.
+        'src/a.js': "import './side.js';\nnew Worker(new URL('./a.worker.js', import.meta.url));",
         'src/dir/b.js': "import { c } from '../c.js';",
-        'src/side.js': '', 'src/c.js': '', 'src/lazy.js': '',
+        'src/side.js': '', 'src/c.js': '', 'src/lazy.js': '', 'src/a.worker.js': '',
     };
     /** @param {string} path */
     const read = path=>/** @type {Record<string, string>} */ (sources)[path];
-    assert.deepEqual(sourceClosure(['src/entry.js'], read), ['src/a.js', 'src/c.js', 'src/dir/b.js',
-        'src/entry.js', 'src/lazy.js', 'src/side.js']);
+    assert.deepEqual(sourceClosure(['src/entry.js'], read), ['src/a.js', 'src/a.worker.js',
+        'src/c.js', 'src/dir/b.js', 'src/entry.js', 'src/lazy.js', 'src/side.js']);
     const entry = { exports: { '.': './dist/core.js', './entry': './src/entry.js' } };
-    const files = ['src/entry.js', 'src/a.js', 'src/side.js', 'src/dir/b.js', 'src/lazy.js']
-        .map(path=>({ path }));
+    const files = ['src/entry.js', 'src/a.js', 'src/a.worker.js', 'src/side.js', 'src/dir/b.js',
+        'src/lazy.js'].map(path=>({ path }));
     assert.deepEqual(closureProblems(files, entry, read),
         ['src/c.js: imported by a source entry, not in the tarball']);
 });

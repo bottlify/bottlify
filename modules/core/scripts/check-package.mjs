@@ -90,12 +90,17 @@ function packedFiles(){
     return tarball.files;
 }
 
+/** A module named as a URL beside the one naming it: a worker it starts. */
+const WORKER_URL = /new URL\(\s*['"](\.{1,2}\/[^'"]+\.m?js)['"]\s*,\s*import\.meta\.url/g;
+
 /**
  * Every module of the package's source an entry reaches by its imports -- a
- * static one, an `export ... from`, a dynamic `import('./...')` -- itself
- * included. Not a type named in a comment (`{import('./x.js').T}`), which
- * loads nothing. What a source entry needs in the tarball: the list of files
- * was kept by hand, and three entries came to import modules it did not name.
+ * static one, an `export ... from`, a dynamic `import('./...')` -- or names as
+ * a URL beside itself (`new URL('./x.worker.js', import.meta.url)`, a worker it
+ * starts), itself included. Not a type named in a comment
+ * (`{import('./x.js').T}`), which loads nothing. What a source entry needs in
+ * the tarball: the list of files was kept by hand, and three entries came to
+ * import modules it did not name.
  *
  * @param {string[]} entries  paths below the package's root, `src/...`
  * @param {(path: string) => string} [read]
@@ -117,6 +122,7 @@ export function sourceClosure(entries, read = path=>readFileSync(join(ROOT, path
             ...code.matchAll(/(?:^|[\s;])(?:import|export)\s[^'"`;]*?from\s*['"](\.{1,2}\/[^'"]+)['"]/g),
             ...code.matchAll(/(?:^|[\s;])import\s*['"](\.{1,2}\/[^'"]+)['"]/g),
             ...code.matchAll(/import\(\s*['"](\.{1,2}\/[^'"]+)['"]\s*\)/g),
+            ...code.matchAll(WORKER_URL),
         ].map(match=>match[1]);
         for (const specifier of specifiers)
         {

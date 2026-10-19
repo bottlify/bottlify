@@ -50,6 +50,7 @@
     "src/bundle.js",
     "src/iso.js",
     "src/layers/cpu/internal/translation-store.js",
+    "src/layers/cpu/internal/translation-store.writer.js",
     "src/layers/filesystem/internal/bundle/cache.js",
     "src/layers/filesystem/internal/bundle/crc32.js",
     "src/layers/filesystem/internal/bundle/format.js",
