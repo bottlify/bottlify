@@ -143,8 +143,10 @@
  *   reading zero.
  * - vFace is +1 for a front-facing primitive and -1 for a back-facing one, in
  *   every component; vPos has x and y only.
- * - texkill reads x, y and z and kills when any of them is below zero; the
- *   pixel keeps executing and `killed` reports it.
+ * - texkill kills when a component it tests is below zero: x, y and z in model
+ *   1, and from model 2 every component the register is named with (Wine's
+ *   texkill: "2.0 shaders compare all 4 components"; HLSL's clip(float4) is a
+ *   texkill of all four); the pixel keeps executing and `killed` reports it.
  * - An abs source modifier is accepted in vs_2_0 and later and in ps_3_0.
  * - The two extra operands of sincos in the 2.x models and of sgn are
  *   decoded and validated but not read: they are scratch space for hardware
@@ -3520,9 +3522,10 @@ export function execute(subject, io){
             }
             case 'texkill': {
                 const d = /** @type {Operand} */ (cur.dest);
-                for (let c = 0; c < 3; c++)
+                for (let c = 0; c < 4; c++)
                 {
-                    if (readRaw(d, c, 0) < 0)
+                    const tested = v.major < 2 ? c < 3 : (((d.writeMask || 0xf) >> c) & 1) !== 0;
+                    if (tested && readRaw(d, c, 0) < 0)
                     {
                         killed = true;
                     }

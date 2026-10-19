@@ -1035,7 +1035,10 @@ export function createBuilder(profile){
     };
 
     /**
-     * Kills the pixel if any of the first three lanes of a value is negative.
+     * Kills the pixel if a value is negative: its first lane, in all four lanes
+     * of the register texkill names, as fxc writes it. From model 2 texkill
+     * tests every lane of that register, and one left unwritten -- three were,
+     * once -- decided the kill by whatever it held.
      *
      * @param {Vec} v
      */
@@ -1044,12 +1047,12 @@ export function createBuilder(profile){
         {
             throw new TargetError('X4532', `discard and clip are not available in ${profile.name}`);
         }
-        const reg = newReg(3);
-        reg.fixed = 3;
-        const three = splat(lane(v, 0), 3);
-        instrs.push({ op: 'mov', dest: { kind: 'reg', reg, mask: 7 }, srcs: [three.src] });
+        const reg = newReg(4);
+        reg.fixed = 4;
+        const four = splat(lane(v, 0), 4);
+        instrs.push({ op: 'mov', dest: { kind: 'reg', reg, mask: 15 }, srcs: [four.src] });
         instrs.push({ op: 'texkill', dest: { kind: 'none' },
-            srcs: [{ kind: 'reg', reg, swz: [0, 1, 2] }] });
+            srcs: [{ kind: 'reg', reg, swz: [0, 1, 2, 3] }] });
     };
 
     /**

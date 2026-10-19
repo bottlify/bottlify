@@ -583,13 +583,16 @@ test('texkill and derivatives', ()=>{
     assert.equal(kill([-1, 1, 1, 1]).killed, true);
     assert.equal(kill([1, -1, 1, 1]).killed, true);
     assert.equal(kill([1, 1, -0.5, 1]).killed, true);
-    assert.equal(kill([1, 1, 1, -1]).killed, false);
+    // From model 2 the fourth component is tested too: clip(float4).
+    assert.equal(kill([1, 1, 1, -1]).killed, true);
+    assert.equal(kill([1, 1, 1, -1], 'texkill t0.xyz').killed, false,
+        'unless the mask leaves it out');
     assert.equal(kill([0, -0, 0, 0]).killed, false);
     assert.deepEqual(kill([-1, 1, 1, 1]).outputs.oC0, [1, 1, 1, 1]);
     assert.equal(go('ps_2_0\ndef c0, 1, 1, -1, 1\nmov r0, c0\ntexkill r0\nmov oC0, c0\n',
         {}).killed, true);
     assert.equal(go('ps_2_0\ndef c0, 1, 1, 1, -1\nmov r0, c0\ntexkill r0\nmov oC0, c0\n',
-        {}).killed, false);
+        {}).killed, true);
     rejects(()=>go('ps_2_0\nmov r0.xy, c0\ntexkill r0\n', { constants: { f: [1, 2, 3,
         4] } }),
     /read of unwritten r0.z at instruction 1: texkill r0/);

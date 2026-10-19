@@ -1373,7 +1373,8 @@ export function assemble(ir, options = {}){
         }
         if (instr.op === 'texkill')
         {
-            // The register itself is named; its x, y and z decide.
+            // The register itself is named, and from model 2 all four of its
+            // components decide.
             const src = instr.srcs[0];
             if (src.kind !== 'reg')
             {

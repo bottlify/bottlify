@@ -122,7 +122,7 @@ export function registersOf(type){
  * @property {number} id
  * @property {number} width
  * @property {number} [fixed]      Must occupy components 0 to fixed-1 of its register: a
- *                                 `sincos` result (2), the argument of a `texkill` (3).
+ *                                 `sincos` result (2), the argument of a `texkill` (4).
  * @property {string} [name]
  * @property {boolean} [uniform]  Holds one value in all four components: a model 1 pixel
  *                                shader reads it through any swizzle as it stands.
