@@ -17,7 +17,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import zlib from 'node:zlib';
 import { writeBundle } from '../../../../bundle-node.js';
-import { openBundle, Codec, HEADER_SIZE, MAGIC } from './format.js';
+import { openBundle, withManifest, Codec, HEADER_SIZE, MAGIC } from './format.js';
 import { createBundleSource, BLOCK_MISS } from './source.js';
 
 const BLOCK_SIZE = 1024;
@@ -406,4 +406,31 @@ test('a bundle packed again under the same name has another fingerprint', async(
         decodeBlock);
     assert.match(repacked.fingerprint, /^[0-9a-f]{8}$/);
     assert.notEqual(repacked.fingerprint, again.fingerprint);
+});
+
+test('a description written into a bundle opens with it, its files as they were', async()=>{
+    // A bottle exported carries its title and program, and imported elsewhere
+    // opens as itself; its blocks are the same bytes.
+    const read = async(/** @type {number} */ at, /** @type {number} */ count)=>
+        bundleBytes.subarray(at, at + count);
+    const manifest = { title: 'A Game', entry: 'Game\\Game.exe', root: 'C:\\Games\\A' };
+    const { header, blocks, index } = await withManifest(read, decodeBlock, manifest);
+    const joined = new Uint8Array(header.length + blocks[1] - blocks[0] + index.length);
+    joined.set(header, 0);
+    joined.set(bundleBytes.subarray(blocks[0], blocks[1]), header.length);
+    joined.set(index, header.length + blocks[1] - blocks[0]);
+    const described = await openBundle(async(at, count)=>joined.subarray(at, at + count),
+        decodeBlock);
+    assert.deepEqual(described.manifest, manifest);
+    const before = await open();
+    assert.equal(before.manifest, null, 'a bundle packed without one has none');
+    assert.deepEqual(described.files, before.files);
+    const source = createBundleSource({ bundle: described, decode: decodeBlock,
+        readBlock: (_index, offset, packed)=>joined.subarray(offset, offset + packed) });
+    const notes = CONTENT['Game\\Data\\Notes.txt'];
+    same(source.read('Game\\Data\\Notes.txt', 0, notes.length), notes);
+    const taken = await withManifest(async(at, count)=>joined.subarray(at, at + count),
+        decodeBlock, null);
+    assert.equal(JSON.parse(new TextDecoder().decode(taken.index)).manifest, undefined,
+        'null takes the description out');
 });

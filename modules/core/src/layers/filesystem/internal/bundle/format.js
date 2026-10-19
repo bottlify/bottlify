@@ -128,6 +128,8 @@ export const Codec = {
  * @property {readonly BundleFile[]} files
  * @property {readonly string[]} directories    Recorded empty ones only.
  * @property {BundleMember | null} translations  The translation seed, when there is one.
+ * @property {Record<string, unknown> | null} manifest  The bottle's description written into
+ *     the index (`withManifest`): its title, the program it starts, where it was installed.
  * @property {(path: string) => BundleFile | null} find   Case-insensitive.
  * @property {(index: number) => BundleBlock} block
  * @property {(file: BundleFile, offset: number, length: number) => BlockRange[]} rangesFor
@@ -230,6 +232,8 @@ export async function openBundle(fetchRange, decode, options = {}){
         files,
         directories: index.directories,
         translations,
+        manifest: index.manifest !== null && typeof index.manifest === 'object'
+            && !Array.isArray(index.manifest) ? index.manifest : null,
 
         /** @param {string} path */
         find: path=>byPath.get(path.toLowerCase()) ?? null,
@@ -271,4 +275,51 @@ export async function openBundle(fetchRange, decode, options = {}){
             return ranges;
         },
     };
+}
+
+/**
+ * The same bundle with a description written into its index -- what a bottle
+ * carries when it leaves the place that knew its title, the program it starts
+ * and where it was installed, so that wherever it is opened next it opens as
+ * itself. The blocks are not touched: the answer is a new header, the span of
+ * the container the blocks fill, and a new index stored as it is, for a caller
+ * to lay one after another -- in a browser a Blob of the three, which copies
+ * nothing of a container of any size until it is written out.
+ *
+ * @param {FetchRange} fetchRange  The container as it is.
+ * @param {IndexDecode} decode
+ * @param {Record<string, unknown> | null} manifest  null takes a description out.
+ * @returns {Promise<{ header: Uint8Array, blocks: [number, number], index: Uint8Array }>}
+ */
+export async function withManifest(fetchRange, decode, manifest){
+    const header = (await fetchRange(0, HEADER_SIZE)).slice();
+    if (header.length < HEADER_SIZE || String.fromCharCode(...header.subarray(0, MAGIC.length))
+        !== MAGIC)
+    {
+        throw new Error('This is not a .btl bundle');
+    }
+    const view = new DataView(header.buffer, header.byteOffset, HEADER_SIZE);
+    const version = view.getUint32(4, true);
+    if (!READABLE_VERSIONS.includes(version))
+    {
+        throw new Error(`This bundle is format version ${version}; this reader `
+            + `knows ${READABLE_VERSIONS.join(' and ')}`);
+    }
+    const indexOffset = Number(view.getBigUint64(0x10, true));
+    const indexLength = Number(view.getBigUint64(0x18, true));
+    const stored = await fetchRange(indexOffset, indexLength);
+    const index = JSON.parse(new TextDecoder().decode(
+        await decode(view.getUint32(0x20, true), stored, null)));
+    if (manifest === null)
+    {
+        delete index.manifest;
+    }
+    else
+    {
+        index.manifest = manifest;
+    }
+    const written = new TextEncoder().encode(JSON.stringify(index));
+    view.setBigUint64(0x18, BigInt(written.length), true);
+    view.setUint32(0x20, Codec.STORED, true);
+    return { header, blocks: [HEADER_SIZE, indexOffset], index: written };
 }
