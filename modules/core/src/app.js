@@ -1616,6 +1616,29 @@ const CORK = /** @type {{ env?: { BOTTLIFY_CORK?: string } }} */ (import.meta).e
     ?? '../../cork/src/index.js';
 
 /**
+ * Memory for a graphics resource, cleared. A driver hands out a new surface,
+ * texture or buffer reading as zeroes (the kernel clears what it maps), and a
+ * program may draw one it never wrote: an empty layer under a menu, a target
+ * it clears only in part. The guest heap recycles freed blocks as they were
+ * left, so a texture made after a Reset held the old back buffer's picture.
+ * Memory the heap never handed out is zero already and is not written.
+ *
+ * @param {{ allocate: (bytes: number) => number,
+ *     block: (address: number) => { fresh?: boolean } | null | undefined }} heap
+ * @param {(address: number, value: number, length: number) => void} fill
+ * @param {number} bytes
+ * @returns {number} the address, or 0
+ */
+export function allocateCleared(heap, fill, bytes){
+    const address = heap.allocate(bytes);
+    if (address !== 0 && heap.block(address)?.fresh !== true)
+    {
+        fill(address, 0, bytes);
+    }
+    return address;
+}
+
+/**
  * The translator to load for `cork`: what the caller named, else
  * the one built beside this module (see `CORK`).
  *
@@ -4586,7 +4609,9 @@ async function buildApp(options){
             // reads those bytes back, so it has to be memory the guest can
             // reach -- an address invented for the purpose is one the program
             // writes into nothing and we read nothing out of.
-            allocate: (/** @type {number} */ bytes)=>win32.heap().allocate(bytes),
+            allocate: (/** @type {number} */ bytes)=>allocateCleared(win32.heap(),
+                (address, value, length)=>core.api('memory').fillBytes(address, value, length),
+                bytes),
             // The guest code the seams write, on pages nothing else is handed.
             // None of it waits, and some of it writes records other threads'
             // entries into the host read, so no slice ends inside it.

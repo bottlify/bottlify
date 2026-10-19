@@ -43,6 +43,7 @@ import {
     runProcessId,
     withCpuSetup,
     translatorsBeside,
+    allocateCleared,
 } from './app.js';
 import { createEvents } from './events.js';
 import { filesystemModule } from './layers/filesystem/module.js';
@@ -1872,4 +1873,20 @@ test('a miss brings in more the farther the bundle is, and no more than eight wi
     assert.equal(windowFor(2 * NEAR_ROUND_TRIP_MS), 2 * READ_AHEAD_BYTES);
     assert.equal(windowFor(350), 7 * READ_AHEAD_BYTES, 'a bucket at 350 ms');
     assert.equal(windowFor(60000), 8 * READ_AHEAD_BYTES, 'capped');
+});
+
+test('a graphics resource is handed cleared memory, and fresh memory is not written again', ()=>{
+    /** @type {[number, number, number][]} */
+    const filled = [];
+    const fill = (/** @type {number} */ address, /** @type {number} */ value,
+        /** @type {number} */ length)=>filled.push([address, value, length]);
+    const recycled = { allocate: ()=>0x5000, block: ()=>({ fresh: false }) };
+    assert.equal(allocateCleared(recycled, fill, 64), 0x5000);
+    assert.deepEqual(filled, [[0x5000, 0, 64]]);
+    const fresh = { allocate: ()=>0x9000, block: ()=>({ fresh: true }) };
+    assert.equal(allocateCleared(fresh, fill, 64), 0x9000);
+    assert.equal(filled.length, 1);
+    const full = { allocate: ()=>0, block: ()=>null };
+    assert.equal(allocateCleared(full, fill, 64), 0);
+    assert.equal(filled.length, 1);
 });
