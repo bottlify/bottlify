@@ -197,6 +197,22 @@ test('a program whose work moves between its threads for long enough is tried ag
     assert.equal(once.trials, 1, JSON.stringify(once));
 });
 
+test('a winner tried on a moment that is not the program\'s is tried again once its speed lies'
+    + ' far off the trial\'s, though its threads\' shares hold', ()=>{
+    // Call of Duty 4's level restarted: the trial fell on its loading screen,
+    // a frame every 6.7 ms concentrated against 66 spread; then its play, 66 ms
+    // a frame concentrated against 28 spread, the threads sharing the work as before.
+    const PLAY_AT = 20_000;
+    const { placement, began } = run({ retiredPerMs: { spread: 1000, concentrate: 1000 },
+        ms: 120_000, shares: ()=>({ main: 0.6, worker: 0.4 }),
+        frameMsAt: clock=>(clock < PLAY_AT ? { spread: 66, concentrate: 6.7 }
+            : { spread: 28, concentrate: 66 }) });
+    const said = placement.diagnostics();
+    assert.equal(placement.mode(), Placement.SPREAD, JSON.stringify(said));
+    assert.ok(said.trials === 2 && said.byWork === 1, JSON.stringify(said));
+    assert.ok(began[1] - PLAY_AT <= 16_000, `tried again ${began[1] - PLAY_AT} ms into the play`);
+});
+
 test('another pair of ways is weighed alike: the safer one first, no trial while another runs',
     ()=>{
         // The scheduler weighs a trade of processors with the same trial, and

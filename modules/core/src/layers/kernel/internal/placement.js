@@ -38,9 +38,16 @@
  * again only once the program changes: it begins or stops presenting frames
  * (a game's load decided by what it retired, then its play) for `changeMs`, or
  * the share each of its threads retires moves from the one it had after the
- * trial -- half the summed difference of the shares at least `shift`, over
- * `lasting` windows of `profileMs` in a row, so that a load's burst of a few
- * seconds is not one -- and never sooner than `holdMs` after the last trial.
+ * trial -- half the summed difference of the shares at least `shift` -- or the
+ * winner's own speed, by the trial's measure, lies `drift` times off what the
+ * trial measured for it, each over `lasting` windows of `profileMs` in a row,
+ * so that a load's burst of a few seconds is not one; and never sooner than
+ * `holdMs` after the last trial. The speed is the second sign because a trial
+ * can fall on a moment that is not the program's: Call of Duty 4's level,
+ * restarted, was tried across its load, concentrated drawing a frame every
+ * 6.7 ms of the loading screen against 66 spread, and kept concentrated into
+ * its play at 51 ms a frame, 20 a second where spread drew 50, its threads'
+ * shares moved by 0.17.
  *
  * Frames that come as fast either way -- a program held to the display's rate
  * -- say nothing of what each way costs, and such a tie went to the safer way:
@@ -76,6 +83,8 @@ export const Placement = Object.freeze({ SPREAD: 'spread', CONCENTRATE: 'concent
  * @property {number} [profileMs]  how long a window of the threads' work is
  * @property {number} [shift]  how far a window's shares must lie from those after the trial,
  *     half their summed difference, to count as moved: 0 every window, 1 none
+ * @property {number} [drift]  by what factor, either way, the winner's speed in a window must
+ *     lie off the trial's measure of it to count as moved
  * @property {number} [lasting]  windows in a row the work must have moved for a trial
  * @property {number} [margin]  by how much spreading must win
  * @property {number} [clear]  by how much one way ahead after a window of each ends the trial
@@ -109,6 +118,7 @@ export function createPlacement(options){
     const profileMs = options.profileMs ?? 5000;
     const shift = options.shift ?? 0.25;
     const lasting = options.lasting ?? 2;
+    const drift = options.drift ?? 2;
     const margin = options.margin ?? 0.05;
     const clear = options.clear ?? 0.25;
     const minFrames = options.minFrames ?? 3;
@@ -137,8 +147,19 @@ export function createPlacement(options){
      * @type {Map<string, number> | null}
      */
     let measuredOn = null;
-    /** The window of the threads' work under way: since when, and what each had retired then. */
-    let profile = /** @type {{ from: number, work: Map<string, number> } | null} */ (null);
+    /**
+     * The window of the threads' work under way: since when, what each had
+     * retired then, and the program's frames and instructions then.
+     */
+    let profile = /** @type {{ from: number, work: Map<string, number>, frames: number,
+        retired: number } | null} */ (null);
+    /** The winner's speed as the last trial measured it, and by which measure. */
+    let measuredRate = 0;
+    let measuredByFrames = false;
+    /** Frames the program has presented, every one. */
+    let framesSeen = 0;
+    /** The last window's speed against `measuredRate`. */
+    let lastDrift = 1;
     /** When the first window after a trial begins: once the threads have moved to the winner. */
     let profileFrom = Infinity;
     /** The last window's distance from `measuredOn`, and how many in a row reached `shift`. */
@@ -216,6 +237,8 @@ export function createPlacement(options){
         counted.trials++;
         counted[winner]++;
         counted.byFrames += rated.byFrames ? 1 : 0;
+        measuredRate = winner === risky ? rated.risky : rated.safe;
+        measuredByFrames = rated.byFrames;
         lastByFrames = rated.byFrames;
         counted.last = `${winner} ${rated.byFrames ? 'frames' : 'retired'}`
             + ` ${risky} ${rated.risky.toPrecision(3)} ${safe} ${rated.safe.toPrecision(3)}`
@@ -279,25 +302,29 @@ export function createPlacement(options){
      * first after a trial is what the trial was measured on, each later one
      * weighed against it.
      *
-     * @param {number} at
+     * @param {number} at @param {number} retired
      */
-    const watchWork = at=>{
+    const watchWork = (at, retired)=>{
         if (work === null || at < profileFrom)
         {
             return;
         }
         if (profile === null)
         {
-            profile = { from: at, work: work() };
+            profile = { from: at, work: work(), frames: framesSeen, retired };
             return;
         }
-        if (at - profile.from < profileMs)
+        const ms = at - profile.from;
+        if (ms < profileMs)
         {
             return;
         }
         const done = work();
         const shares = sharesOf(profile.work, done);
-        profile = { from: at, work: done };
+        // By the trial's own measure: frames a millisecond, or instructions.
+        const rate = (measuredByFrames ? framesSeen - profile.frames
+            : retired - profile.retired) / ms;
+        profile = { from: at, work: done, frames: framesSeen, retired };
         if (shares === null)
         {
             return;
@@ -308,7 +335,9 @@ export function createPlacement(options){
             return;
         }
         moved = distance(measuredOn, shares);
-        movedWindows = moved >= shift ? movedWindows + 1 : 0;
+        lastDrift = measuredRate > 0 ? rate / measuredRate : 1;
+        const off = lastDrift > drift || lastDrift * drift < 1;
+        movedWindows = moved >= shift || off ? movedWindows + 1 : 0;
     };
 
     return {
@@ -323,6 +352,7 @@ export function createPlacement(options){
          */
         frame(){
             const at = now();
+            framesSeen++;
             if (open !== null)
             {
                 open.firstFrame = open.firstFrame < 0 ? at : open.firstFrame;
@@ -354,7 +384,7 @@ export function createPlacement(options){
             {
                 changedSince = lastByFrames === null || presenting(at) === lastByFrames ? -1
                     : changedSince < 0 ? at : changedSince;
-                watchWork(at);
+                watchWork(at, retired);
                 const first = lastByFrames === null && at >= nextTrial;
                 const presentsOtherwise = changedSince >= 0 && at - changedSince >= changeMs;
                 const workMoved = movedWindows >= lasting && at >= nextTrial;
@@ -410,10 +440,12 @@ export function createPlacement(options){
         },
 
         /**
-         * The way now, the trials' account, and how far the threads' last window
-         * of work lay from the one after the last trial.
+         * The way now, the trials' account, how far the threads' last window of
+         * work lay from the one after the last trial, and its speed against the
+         * trial's measure of the winner.
          * @returns {Record<string, any>}
          */
-        diagnostics: ()=>({ mode, fixed, ...counted, moved: Number(moved.toFixed(2)) }),
+        diagnostics: ()=>({ mode, fixed, ...counted, moved: Number(moved.toFixed(2)),
+            speed: Number(lastDrift.toFixed(2)) }),
     };
 }
