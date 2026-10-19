@@ -14,7 +14,7 @@
  *
  *   node tools/cdp_test/live/drive.mjs [card] [query]
  *
- * opens https://127.0.0.1:5180/library (the launcher running over TLS, as the
+ * opens https://127.0.0.1:5180/library (DRIVE_ORIGIN names another; the launcher over TLS, as the
  * person's own browser has it), starts the bottle whose card matches the
  * regular expression `card` if one is given, and listens on
  * http://127.0.0.1:9401 (DRIVE_PORT; DRIVE_PROFILE names another profile):
@@ -58,6 +58,10 @@ import { pausedStack } from '../timeout-report.mjs';
 const PORT = Number(process.env.DRIVE_PORT ?? 9401);
 const [pattern = '', query = ''] = process.argv.slice(2);
 
+// DRIVE_ORIGIN drives a launcher on another origin, such as a test build on
+// its own port; the person's own launcher on 5180 is the default.
+const DRIVE_ORIGIN = process.env.DRIVE_ORIGIN ?? 'https://127.0.0.1:5180';
+
 /** @param {number} ms */
 const sleep = ms=>new Promise(done=>setTimeout(done, ms));
 
@@ -81,7 +85,7 @@ const downloads = resolve('dbg/live-downloads');
 await mkdir(downloads, { recursive: true });
 await cdp.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: downloads });
 const { targetId } = await cdp.send('Target.createTarget',
-    { url: `https://127.0.0.1:5180/library${query ? `?${query}` : ''}` });
+    { url: `${DRIVE_ORIGIN}/library${query ? `?${query}` : ''}` });
 const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
 
 /** @param {string} method @param {Record<string, unknown>} [params] */

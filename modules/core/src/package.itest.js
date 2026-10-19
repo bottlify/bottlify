@@ -56,6 +56,68 @@ const artifacts = Object.fromEntries(
 console.log(JSON.stringify({ createApp: typeof createApp, artifacts }));
 `;
 
+/** The other packages published with core, each packed from its folder beside it. */
+const NEIGHBOURS = ['cork', 'installer', 'networking'].map(name=>resolve(PACKAGE, '..', name));
+
+/**
+ * Imports every module entry each installed @bottlify package exports and says
+ * which failed: a worker, the worklet and an artifact are a browser's to load,
+ * not node's, and are left to the probe above.
+ */
+const IMPORT_ALL = `
+import { readFile } from 'node:fs/promises';
+
+const failed = [];
+let imported = 0;
+for (const name of ['core', 'cork', 'installer', 'networking'])
+{
+    const manifest = JSON.parse(await readFile(\`node_modules/@bottlify/\${name}/package.json\`, 'utf8'));
+    for (const [subpath, target] of Object.entries(manifest.exports ?? {}))
+    {
+        const file = typeof target === 'string' ? target : target.default ?? target.import;
+        if (!/\\.m?js$/.test(file) || /worker|worklet/.test(file))
+        {
+            continue;
+        }
+        const specifier = \`@bottlify/\${name}\${subpath.slice(1)}\`;
+        try
+        {
+            await import(specifier);
+            imported++;
+        }
+        catch (error)
+        {
+            failed.push(\`\${specifier}: \${error.message.split('\\n')[0]}\`);
+        }
+    }
+}
+console.log(JSON.stringify({ imported, failed }));
+process.exit(0);
+`;
+
+test('every package installs beside the others and each module entry it exports imports',
+    { timeout: 600000 }, async t=>{
+        npm(PACKAGE, ['run', 'build']);
+        const consumer = await mkdtemp(join(tmpdir(), 'bottlify-pack-all-'));
+        t.after(()=>rm(consumer, { recursive: true, force: true }));
+        const tarballs = [PACKAGE, ...NEIGHBOURS].map(dir=>{
+            const lines = npm(dir, ['pack', '--pack-destination', JSON.stringify(consumer)])
+                .trim().split('\n');
+            return JSON.stringify(join(consumer, lines[lines.length - 1].trim()));
+        });
+        await writeFile(join(consumer, 'package.json'),
+            JSON.stringify({ name: 'consumer', private: true, type: 'module' }));
+        await writeFile(join(consumer, 'import-all.mjs'), IMPORT_ALL);
+        npm(consumer, ['install', ...tarballs, '--no-audit', '--no-fund', '--no-package-lock']);
+
+        const run = spawnSync(process.execPath, ['import-all.mjs'],
+            { cwd: consumer, encoding: 'utf8' });
+        assert.equal(run.status, 0, run.stderr);
+        const { imported, failed } = JSON.parse(run.stdout.trim().split('\n').pop() ?? '{}');
+        assert.deepEqual(failed, [], 'every entry imports from the installed packages');
+        assert.ok(imported >= 15, `only ${imported} entries imported`);
+    });
+
 // `npm run build`, `npm pack` and `npm install` are three real subprocesses,
 // and their wall time is npm's and the disk's, not the engine's: measured on
 // this one machine, back to back, from under a minute to over three. The
