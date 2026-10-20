@@ -226,6 +226,17 @@ export function createBackend(options){
     // three times at its end -- to flush, to count the present, to free the
     // backings retired -- spent its time on buffers it never touched.
     const frameCounts = { presents: 0, submits: 0 };
+    /**
+     * The cuts marked and not yet submitted. Each device replays its own in
+     * the order it marked them, but on a chain of its own: with two devices
+     * on this backend -- two programs of a tab, or two of one program -- one
+     * device's later cut can be submitted while another's earlier one waits
+     * for its pipelines, and counting that as every cut before it submitted
+     * gave a backing back that the waiting frame's draws still read.
+     *
+     * @type {Set<number>}
+     */
+    const unsubmitted = new Set();
     /** @type {Set<any>} */
     const touchedBuffers = new Set();
     const touched = (/** @type {any} */ buffer)=>{
@@ -720,6 +731,7 @@ export function createBackend(options){
          *     to `beginFrame`
          */
         markPresent(){
+            unsubmitted.add(frameCounts.presents);
             return frameCounts.presents++;
         },
 
@@ -1188,10 +1200,18 @@ export function createBackend(options){
                     // still read. Cuts are replayed in the order they are made.
                     if (typeof cut === 'number')
                     {
-                        frameCounts.submits = Math.max(frameCounts.submits, cut + 1);
+                        // Submitted up to the lowest cut still waiting.
+                        unsubmitted.delete(cut);
+                        let lowest = frameCounts.presents;
+                        for (const waiting of unsubmitted)
+                        {
+                            lowest = Math.min(lowest, waiting);
+                        }
+                        frameCounts.submits = Math.max(frameCounts.submits, lowest);
                     }
                     else if (cut === undefined)
                     {
+                        unsubmitted.clear();
                         frameCounts.submits = frameCounts.presents;
                     }
                     for (let i = dying.length - 1; i >= 0; i--)
@@ -1270,6 +1290,10 @@ export function createBackend(options){
                 uniforms: uniforms.stats(),
                 buffers: [...dynamicBuffers].map(buffer=>buffer.diagnostics()),
                 frameOpen: !!(openFrame && !openFrame.ended),
+                // Cuts marked and not yet submitted: a number that only grows
+                // is a cut no frame will replay, and every backing retired
+                // since is held for it.
+                unsubmittedCuts: unsubmitted.size,
                 pendingTextureCopies: pendingCopies.length,
                 // Read against the page's own record of when it copied each
                 // frame: a write to a surface timed before that copy is the

@@ -478,6 +478,38 @@ test('a backing a recorded frame still reads stays retired through frames that e
         assert.equal(made(), before, 'once they are, the pool hands it back');
     });
 
+test('a backing one device\'s queued frame still reads stays retired while another device\'s later '
+    + 'frame is submitted first', ()=>{
+    // Each device replays its own frames in order, on a chain of its own: one
+    // waiting for its pipelines let another's later cut reach the queue first,
+    // and counting every earlier cut submitted with it handed back a backing
+    // the waiting frame's draws still read.
+    const { gpu, backend } = harness();
+    const buffer = backend.createDynamicBuffer({ size: 256, usage: 0, label: 'b' });
+    const made = ()=>gpu.calls.filter(call=>call.op === 'createBuffer'
+        && String(call.descriptor?.label).startsWith('b#')).length;
+    const { DISCARD } = backend.LockFlags;
+    buffer.unlock(buffer.lock(0, 64, DISCARD));
+    buffer.markRead();
+    const read = buffer.gpu;
+    const first = backend.markPresent();
+    // Device A's frame `first` waits; device B marks and submits two frames.
+    buffer.unlock(buffer.lock(0, 64, DISCARD));
+    for (let frame = 0; frame < 2; frame++)
+    {
+        const other = backend.markPresent();
+        backend.beginFrame({ cut: other }).end();
+        buffer.unlock(buffer.lock(0, 64, DISCARD));
+        assert.notEqual(buffer.gpu, read, `B's frame ${frame}: A's draws are not submitted`);
+    }
+    assert.equal(backend.diagnostics().unsubmittedCuts, 1, 'A\'s cut still waits');
+    backend.beginFrame({ cut: first }).end();
+    const before = made();
+    buffer.unlock(buffer.lock(0, 64, DISCARD));
+    assert.equal(made(), before, 'once it is submitted, the pool hands the backing back');
+    assert.equal(backend.diagnostics().unsubmittedCuts, 0);
+});
+
 test('the snapshot is deep enough to find a regression that is not in the top rows', ()=>{
     const { backend } = harness();
     const vertices = backend.createDynamicBuffer({ size: 4096, usage: 0, label: 'vertices' });
