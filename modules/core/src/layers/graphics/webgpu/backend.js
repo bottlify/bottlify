@@ -120,7 +120,12 @@ export function createBackend(options){
     // same group serves the same draw in every frame. A group per draw per
     // frame was a descriptor churn the device did not always keep up with.
     const cache = createBindingCache({ device });
-    /** The dynamic offsets of the group being bound, handed on at once. @type {number[]} */
+    /**
+     * The dynamic offsets of the group being bound, handed on at once: an
+     * array of each count, written over (`dynamicOffsetsOf`).
+     *
+     * @type {number[][]}
+     */
     const bindOffsets = [];
 
     /**
@@ -583,17 +588,27 @@ export function createBackend(options){
                     return group;
                 }
                 groupsBound[index] = group;
-                held.length = 0;
                 if (offsets)
                 {
-                    for (let at = 0; at < offsets.length; at++)
+                    // Written over where the count is the same, as a group's
+                    // always is: emptied and filled, the array was given new
+                    // elements at every draw.
+                    if (held.length !== offsets.length)
                     {
-                        held.push(offsets[at]);
+                        groupOffsets[index] = offsets.slice();
+                    }
+                    else
+                    {
+                        for (let at = 0; at < offsets.length; at++)
+                        {
+                            held[at] = offsets[at];
+                        }
                     }
                     raw.setBindGroup(index, group, offsets);
                 }
                 else
                 {
+                    held.length = 0;
                     raw.setBindGroup(index, group);
                 }
                 return group;

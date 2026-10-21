@@ -49,56 +49,69 @@ export function resourceId(resource){
  * order, or nothing when no binding carries one.
  *
  * @param {any[]} entries
- * @param {number[]} [into]
- *     Where the offsets go, its length set to their count: a caller that hands
- *     them on at once -- setBindGroup copies them -- need not have an array made
- *     for every draw. A fresh one when not given.
+ * @param {number[][]} [arrays]
+ *     Arrays by their length, kept by a caller that hands the offsets on at
+ *     once -- setBindGroup copies them: the one of their count is written
+ *     over, made the first time. A group's count is its layout's, so every
+ *     draw writes the same array and none is resized: an array emptied and
+ *     filled again was given new elements at nearly every draw. A fresh array
+ *     when not given.
  * @returns {number[] | undefined}
  */
-export function dynamicOffsetsOf(entries, into){
-    // Every draw binds through here: one pass when the entries already come
-    // in binding order, as a renderer lays them out.
+export function dynamicOffsetsOf(entries, arrays){
+    // Every draw binds through here: counted in one pass and written in a
+    // second when the entries already come in binding order, as a renderer
+    // lays them out.
     let count = 0;
     let last = -Infinity;
     for (let i = 0; i < entries.length; i++)
     {
         const entry = entries[i];
-        const resource = entry.resource;
-        if (!resource || typeof resource !== 'object' || !resource.buffer
-            || resource.dynamicOffset === undefined)
+        if (!isDynamic(entry.resource))
         {
             continue;
         }
         if (entry.binding < last)
         {
             const sorted = entries
-                .filter(one=>one.resource && typeof one.resource === 'object'
-                    && one.resource.buffer && one.resource.dynamicOffset !== undefined)
+                .filter(one=>isDynamic(one.resource))
                 .sort((left, right)=>left.binding - right.binding)
                 .map(one=>one.resource.dynamicOffset);
-            if (into === undefined)
+            if (arrays === undefined)
             {
                 return sorted;
             }
-            into.length = 0;
-            into.push(...sorted);
+            const into = arrays[sorted.length] ??= new Array(sorted.length).fill(0);
+            for (let at = 0; at < sorted.length; at++)
+            {
+                into[at] = sorted[at];
+            }
             return into;
         }
         last = entry.binding;
-        if (count === 0 && into === undefined)
-        {
-            into = [];
-        }
-        /** @type {number[]} */ (into)[count++] = resource.dynamicOffset;
+        count++;
     }
     if (count === 0)
     {
         return undefined;
     }
-    const offsets = /** @type {number[]} */ (into);
-    offsets.length = count;
+    const offsets = arrays === undefined ? new Array(count)
+        : arrays[count] ??= new Array(count).fill(0);
+    let at = 0;
+    for (let i = 0; i < entries.length; i++)
+    {
+        const resource = entries[i].resource;
+        if (isDynamic(resource))
+        {
+            offsets[at++] = resource.dynamicOffset;
+        }
+    }
     return offsets;
 }
+
+/** @param {any} resource  a buffer binding bound at a dynamic offset */
+const isDynamic = resource=>resource !== null && typeof resource === 'object'
+    && Boolean(resource.buffer) && resource.dynamicOffset !== undefined;
 
 /**
  * A bind-group cache with the lifetime of one render pass.

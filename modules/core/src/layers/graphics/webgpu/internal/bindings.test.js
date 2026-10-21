@@ -212,12 +212,15 @@ test('a slot written into an object and offsets into an array of the caller\'s, 
         const ring = /** @type {any} */ (slot.buffer);
         assert.deepEqual([...new Uint32Array(ring.bytes.slice(256, 272).buffer)], [...bits]);
 
-        /** @type {number[]} */
-        const into = [7, 7, 7];
+        /** @type {number[][]} */
+        const arrays = [];
         const entries = [{ binding: 0, resource: slot }, { binding: 1, resource: {} }];
-        assert.equal(dynamicOffsetsOf(entries, into), into);
-        assert.deepEqual(into, [256]);
-        assert.equal(dynamicOffsetsOf([{ binding: 1, resource: {} }], into), undefined);
+        const offsets = dynamicOffsetsOf(entries, arrays);
+        assert.deepEqual(offsets, [256]);
+        slot.dynamicOffset = 512;
+        assert.equal(dynamicOffsetsOf(entries, arrays), offsets, 'the same array, written over');
+        assert.deepEqual(offsets, [512]);
+        assert.equal(dynamicOffsetsOf([{ binding: 1, resource: {} }], arrays), undefined);
     });
 
 test('a group is made from a copy of the entries, which the caller may write over after', ()=>{
