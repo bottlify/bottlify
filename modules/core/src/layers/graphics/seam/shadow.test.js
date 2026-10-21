@@ -242,7 +242,11 @@ test('the block fits its two pages and its regions follow one another', ()=>{
     assert.equal(SHADOW.SHADERS_VALID + 4, SHADOW.TARGETS);
     // Two pairs of the target getters, a pointer and a count's word each.
     assert.equal(SHADOW.TARGETS + 16, SHADOW.TARGETS_VALID);
-    assert.equal(SHADOW.TARGETS_VALID + 4, SHADOW.SIZE);
+    // Why routines left for the host, counted by the routines.
+    assert.equal(SHADOW.TARGETS_VALID + 4, SHADOW.LEFT_HELD);
+    assert.equal(SHADOW.LEFT_HELD + 4, SHADOW.LEFT_FULL);
+    assert.equal(SHADOW.LEFT_FULL + 4, SHADOW.LEFT_CHECKS);
+    assert.equal(SHADOW.LEFT_CHECKS + 4, SHADOW.SIZE);
     assert.equal(BUFFER.QUEUED + 4, BUFFER.SPARES);
     // A dynamic buffer's other storages, then whether each is the guest's to move onto.
     assert.equal(BUFFER.SPARES + BUFFER.SPARE_COUNT * 4, BUFFER.SPARE_FREE);

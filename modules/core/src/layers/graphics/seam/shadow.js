@@ -204,7 +204,17 @@ export const SHADOW = {
      */
     TARGETS: 5424 + 80,
     TARGETS_VALID: 5424 + 96,
-    SIZE: 5424 + 100,
+    /**
+     * Why routines left for the host, counted by the routines as they leave:
+     * the device's lock taken by the host or a routine on another executor;
+     * the command ring with no room; a command whose arguments the routine
+     * leaves to the host. Each a call that plays the ring on the process's
+     * executor, which a counter of host calls cannot tell apart.
+     */
+    LEFT_HELD: 5424 + 100,
+    LEFT_FULL: 5424 + 104,
+    LEFT_CHECKS: 5424 + 108,
+    SIZE: 5424 + 112,
 };
 
 /** Byte offsets within a query's block. */
@@ -780,24 +790,48 @@ const prologue = (slow = 'slow', flags = FLAG_SLOW_PATH)=>[
 ];
 
 /**
+ * Counts a routine's leaving for the host in a word of the device's block,
+ * `base` a ModR/M register number: a locked increment, as routines on other
+ * executors count into the same word.
+ *
+ *     lock inc dword [base+word]
+ *
+ * @param {number} base @param {number} word
+ */
+const countLeft = (base, word)=>[0xf0, 0xff, 0x80 | base, ...dword(word)];
+
+/** Each `takeHeld` its own label. */
+let heldSites = 0;
+
+/**
  * Takes the device's lock (`SHADOW.HELD`) with the device's block in `base`
  * (a ModR/M register number), or leaves for `busy` -- the host -- when it is
- * held: by the host, or a routine on another executor.
+ * held: by the host, or a routine on another executor, counted (`LEFT_HELD`).
  *
  *     mov eax, HELD_GUEST
  *     xchg [base+HELD], eax
  *     test eax, eax
- *     jnz busy
+ *     jz got
+ *     lock inc dword [base+LEFT_HELD]
+ *     jmp busy
+ *   got:
  *
  * @param {number} base @param {string} busy
- * @returns {(number[] | { jcc: number, to: string, near?: boolean })[]}
+ * @returns {(number[] | { jcc: number, to: string, near?: boolean } | { label: string })[]}
  */
-const takeHeld = (base, busy)=>[
-    [0xb8, ...dword(HELD_GUEST)],                            // mov eax, HELD_GUEST
-    [0x87, 0x80 | base, ...dword(SHADOW.HELD)],              // xchg [base+HELD], eax
-    [0x85, 0xc0],                                            // test eax, eax
-    { jcc: 0x75, to: busy, near: true },                     // jnz busy
-];
+const takeHeld = (base, busy)=>{
+    const got = `held${heldSites++}`;
+    return [
+        [0xb8, ...dword(HELD_GUEST)],                        // mov eax, HELD_GUEST
+        [0x87, 0x80 | base, ...dword(SHADOW.HELD)],          // xchg [base+HELD], eax
+        [0x85, 0xc0],                                        // test eax, eax
+        { jcc: 0x74, to: got },                              // jz got
+        countLeft(base, SHADOW.LEFT_HELD),                   // lock inc dword [base+LEFT_HELD]
+        { jcc: 0xeb, to: busy, near: true },                 // jmp busy
+        { label: got },
+    ];
+};
+
 
 /**
  * Lets the device's lock go, the device's block in `base`, with a locked
@@ -2746,7 +2780,8 @@ export function commandCode(at, trap, shape){
     parts.push(
         { jcc: 0xeb, to: 'take' },                               // jmp take
         { label: 'out' },
-        ...(thread ? [] : [letHeldGo(ECX)]),                     // mov dword [ecx+HELD], 0
+        ...(thread ? [] : [letHeldGo(ECX),                       // mov dword [ecx+HELD], 0
+            countLeft(ECX, SHADOW.LEFT_CHECKS)]),                // lock inc dword [ecx+LEFT_CHECKS]
         { jcc: 0xeb, to: 'slow', near: true },                   // jmp slow
         { label: 'take' },
         [0x53, 0x56, 0x57],                                      // push ebx; push esi; push edi
@@ -2828,7 +2863,8 @@ export function commandCode(at, trap, shape){
         [0x31, 0xc0],                                            // xor eax, eax
         [0xc2, entry - 4 + 4 * popped, 0x00],                    // ret 4*args (+4 for this)
         { label: 'full' },
-        ...(thread ? [] : [letHeldGo(EBX)]),                     // mov dword [ebx+HELD], 0
+        ...(thread ? [] : [letHeldGo(EBX),                       // mov dword [ebx+HELD], 0
+            countLeft(EBX, SHADOW.LEFT_FULL)]),                  // lock inc dword [ebx+LEFT_FULL]
         [0x5f, 0x5e, 0x5b],                                      // pop edi; pop esi; pop ebx
         { jcc: 0xeb, to: 'slow', near: true });                  // jmp slow
     return routine(at, trap, parts);
@@ -5033,6 +5069,12 @@ export function createShadow(deps){
             // Calls the command ring carried past the bridge, and those it holds yet.
             commandCalls: commandReader?.taken() ?? 0,
             commandsQueued: commandReader?.queued() ?? 0,
+            // Why routines left for the host, as they counted (`LEFT_HELD`...).
+            left: address === 0 ? { held: 0, full: 0, checks: 0 } : {
+                held: readWord(address + SHADOW.LEFT_HELD),
+                full: readWord(address + SHADOW.LEFT_FULL),
+                checks: readWord(address + SHADOW.LEFT_CHECKS),
+            },
         }),
     };
 }

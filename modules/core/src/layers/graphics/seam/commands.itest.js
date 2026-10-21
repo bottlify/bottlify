@@ -228,6 +228,15 @@ test('a command routine writes the call into the ring and leaves the rest to the
     host.writePhysical(BLOCK + SHADOW.COMMANDS, new Uint8Array(u32(0)));
     assert.equal(run(ENABLE, [0, 1]), 'trap', 'a device with no ring');
     assert.equal(head(), before + 16);
+
+    // Why they left, as they counted it: the host sees its own flag and a
+    // device without a ring, and nothing else.
+    host.writePhysical(BLOCK + SHADOW.COMMANDS, new Uint8Array(u32(RING)));
+    host.writePhysical(BLOCK + SHADOW.HELD, new Uint8Array(u32(1)));
+    assert.equal(run(ENABLE, [0, 1]), 'trap', 'the device\'s lock taken');
+    host.writePhysical(BLOCK + SHADOW.HELD, new Uint8Array(4));
+    assert.deepEqual([read(BLOCK + SHADOW.LEFT_HELD), read(BLOCK + SHADOW.LEFT_FULL),
+        read(BLOCK + SHADOW.LEFT_CHECKS)], [1, 1, 6], 'held, full, and arguments refused');
 });
 
 test('a draw from the program\'s memory copies the vertices its primitives span', ()=>{
