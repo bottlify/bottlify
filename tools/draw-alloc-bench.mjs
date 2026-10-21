@@ -33,6 +33,9 @@
  *   d3d9-shader   Direct3D 9 through a vertex and a pixel shader, the matrix
  *                 constants set before every draw with the texture and the
  *                 cull mode
+ *   d3d9-materials   the same with a material per draw: a pixel constant, one
+ *                 of 32 textures and an alpha reference out of 96 in turn, so
+ *                 the frame draws with 96 render states
  *   ddraw-32, ddraw-8   DirectDraw: a back buffer filled, N sprites put on it
  *                 with BltFast and a colour key, copied to the primary and
  *                 presented, at 32 and 8 bits a pixel (a draw is a sprite)

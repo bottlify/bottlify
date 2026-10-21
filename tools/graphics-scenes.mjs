@@ -141,12 +141,17 @@ const CUBE_ELEMENTS = [
  * alone with the fixed pixel stage after it (`shader: 'vertex'`). With
  * `rebind`, every draw sets its declaration, its shader and its stream again,
  * the stream alternating between two buffers of one layout -- how a program
- * that draws each model through its own buffer goes.
+ * that draws each model through its own buffer goes. With `states`, a shader
+ * frame of many materials: each draw sets the pixel constants, binds one of
+ * 32 textures and an alpha reference out of `states` in turn, so the frame
+ * draws with `states` render states.
  *
  * @param {{ version: 8 | 9, draws: number, gpu: SceneGpu, moving?: boolean,
- *     shader?: boolean | 'vertex', rebind?: boolean }} scene
+ *     shader?: boolean | 'vertex', rebind?: boolean, states?: number }} scene
  */
-function directScene({ version, draws, gpu, moving = false, shader = false, rebind = false }){
+function directScene({ version, draws, gpu, moving = false, shader = false, rebind = false,
+    states = 0 })
+{
     const nine = version === 9;
     const backend = createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
         now: ()=>0 });
@@ -233,7 +238,7 @@ function directScene({ version, draws, gpu, moving = false, shader = false, rebi
 
     /** @type {any[]} */
     const textures = [];
-    for (let made = 0; made < 2; made++)
+    for (let made = 0; made < (states > 0 ? 32 : 2); made++)
     {
         /** @type {{ texture?: any }} */
         const texture = {};
@@ -242,7 +247,7 @@ function directScene({ version, draws, gpu, moving = false, shader = false, rebi
         const rect = {};
         check(nine ? texture.texture.LockRect(0, rect)
             : texture.texture.LockRect(0, rect, null, 0));
-        ram.fill(0x40 + made * 0x40, /** @type {number} */ (rect.pBits) - RAM_BASE,
+        ram.fill(0x40 + (made & 3) * 0x40, /** @type {number} */ (rect.pBits) - RAM_BASE,
             /** @type {number} */ (rect.pBits) - RAM_BASE + 16 * 16 * 4);
         check(texture.texture.UnlockRect(0));
         textures.push(texture.texture);
@@ -291,6 +296,8 @@ function directScene({ version, draws, gpu, moving = false, shader = false, rebi
         matrix[14] = 20 + (index % 5);
         return matrix;
     });
+    const tints = Array.from({ length: draws }, (_, index)=>
+        new Float32Array([(index % 7) / 7, (index % 5) / 5, (index % 3) / 3, 1]));
     const movingLights = Array.from({ length: draws }, (_, index)=>
         light({ Type: D3DLIGHTTYPE.POINT, Position: { x: index % 13, y: 2, z: index % 9 } }));
     const viewMatrix = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 5, 1]);
@@ -331,7 +338,12 @@ function directScene({ version, draws, gpu, moving = false, shader = false, rebi
                     check(device.SetLight(1, moving ? movingLights[index] : lights[1]), index);
                     check(device.LightEnable(1, true), index);
                 }
-                check(device.SetTexture(0, textures[index & 1]), index);
+                if (states > 0)
+                {
+                    check(device.SetPixelShaderConstantF(0, tints[index], 1), index);
+                    check(device.SetRenderState(D3DRS.ALPHAREF, index % states), index);
+                }
+                check(device.SetTexture(0, textures[states > 0 ? index % 32 : index & 1]), index);
                 check(device.SetRenderState(D3DRS.CULLMODE,
                     index & 2 ? D3DCULL.CW : D3DCULL.CCW), index);
                 check(nine ? device.DrawIndexedPrimitive(D3DPT.TRIANGLELIST, 0, 0, 24, 0, 12)
@@ -781,4 +793,6 @@ export const SCENES = {
     'd3d9-shader': (draws, gpu)=>directScene({ version: 9, draws, gpu, shader: true }),
     'd3d9-vertex-shader': (draws, gpu)=>directScene({ version: 9, draws, gpu, shader: 'vertex',
         rebind: true }),
+    'd3d9-materials': (draws, gpu)=>directScene({ version: 9, draws, gpu, shader: true,
+        states: 96 }),
 };
