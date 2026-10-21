@@ -983,6 +983,41 @@ test('draws switching between two vertex shaders name their state once, each wit
         tinted.shader.release();
     });
 
+test('a frame of a hundred shader states drawn twice builds each state\'s pieces once', async()=>{
+    // A shader-drawn frame names many states, each a shader pair and the
+    // render states the pieces read. Kept first in, first out at 64, a frame
+    // of more than that let go of every state before its next use and built
+    // all of them again every frame.
+    const STATES = 100;
+    const h = harness();
+    /** @type {{ shader?: any }} */
+    const vs = {};
+    /** @type {{ shader?: any }} */
+    const ps = {};
+    assert.equal(h.device.CreateVertexShader(TEXTURED_VERTEX_SHADER, vs), D3D_OK);
+    assert.equal(h.device.CreatePixelShader(PIXEL_SHADER, ps), D3D_OK);
+    h.device.SetVertexShader(vs.shader);
+    h.device.SetPixelShader(ps.shader);
+    h.device.SetTexture(0, h.texture);
+    assert.equal(h.device.BeginScene(), D3D_OK);
+    for (let round = 0; round < 2; round++)
+    {
+        for (let state = 0; state < STATES; state++)
+        {
+            assert.equal(h.device.SetRenderState(D3DRS.ALPHAREF, state), D3D_OK);
+            assert.equal(h.device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+        }
+    }
+    assert.equal(h.device.EndScene(), D3D_OK);
+    assert.deepEqual(h.device.diagnostics().prepared, { built: STATES, reused: STATES });
+    assert.equal(h.device.diagnostics().preparedDropped, 0);
+    h.device.SetTexture(0, null);
+    h.device.SetPixelShader(null);
+    h.device.SetVertexShader(null);
+    vs.shader.release();
+    ps.shader.release();
+});
+
 test('fixed-function draws switching declarations each read through their own', async()=>{
     // The declaration is a binding the version does not move for, and the
     // fixed-function key holds the layout it names: a draw through another

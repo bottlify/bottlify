@@ -3416,6 +3416,12 @@ export function createRenderer(options){
          */
         prepared: { built: 0, reused: 0 },
         /**
+         * Preparations a bounded cache let go of to keep another. Near
+         * `prepared.built`, the frame draws with more states than the cache
+         * holds, and builds each again every frame.
+         */
+        preparedDropped: 0,
+        /**
          * How many times a draw's state was laid out and named. Once per change
          * of state a draw reads, when the device versions its state; one per
          * draw is a version moved by a set that changed nothing.
@@ -6033,7 +6039,7 @@ export function createRenderer(options){
         if (pieces === null)
         {
             const key = programKeyOf(model, stride, topology, program, sampling.key);
-            pieces = programPiecesKept.get(key) ?? null;
+            pieces = keptRecently(programPiecesKept, key) ?? null;
             if (pieces === null)
             {
                 pieces = programPiecesOf(model, stride, topology, program, sampling);
@@ -6041,15 +6047,12 @@ export function createRenderer(options){
                 {
                     return null;
                 }
-                programPiecesKept.set(key, pieces);
-                if (programPiecesKept.size > PREPARED_CACHE_LIMIT)
-                {
-                    const oldest = programPiecesKept.keys().next().value;
-                    if (oldest !== undefined)
-                    {
-                        programPiecesKept.delete(oldest);
-                    }
-                }
+                counters.prepared.built++;
+                keepBounded(programPiecesKept, key, pieces, PIECES_KEPT);
+            }
+            else
+            {
+                counters.prepared.reused++;
             }
             last.version = version;
             last.vertexShader = program.vertexShader;
@@ -6059,6 +6062,10 @@ export function createRenderer(options){
             last.topology = topology;
             last.sampling = sampling.key;
             last.made = version === undefined ? null : pieces;
+        }
+        else
+        {
+            counters.prepared.reused++;
         }
         const { pixel, vertex, samplerPlan, state, source } = pieces;
         const samplerBindings = samplerBindingsOf(model, pieces, samplerPlan);
@@ -6732,7 +6739,7 @@ export function createRenderer(options){
         if (pieces === null)
         {
             const key = programKeyOf(model, stride, topology, program, '', shape);
-            pieces = mixedPiecesKept.get(key) ?? null;
+            pieces = keptRecently(mixedPiecesKept, key) ?? null;
             if (pieces === null)
             {
                 pieces = mixedPiecesOf(model, stride, topology, program);
@@ -6740,15 +6747,7 @@ export function createRenderer(options){
                 {
                     return null;
                 }
-                mixedPiecesKept.set(key, pieces);
-                if (mixedPiecesKept.size > PREPARED_CACHE_LIMIT)
-                {
-                    const oldest = mixedPiecesKept.keys().next().value;
-                    if (oldest !== undefined)
-                    {
-                        mixedPiecesKept.delete(oldest);
-                    }
-                }
+                keepBounded(mixedPiecesKept, key, pieces, PIECES_KEPT);
             }
             else
             {
@@ -7888,6 +7887,51 @@ export function createRenderer(options){
      */
     const preparedCache = new Map();
     const PREPARED_CACHE_LIMIT = 64;
+    /**
+     * The bound on a shader draw's pieces kept by state: a frame drawn through
+     * shaders names many more states than a fixed-function one, each a shader
+     * pair, a declaration and the render states the pieces read, and a piece
+     * rebuilt runs the sampler plan, the program's key and the pipeline
+     * cache's lookup again.
+     */
+    const PIECES_KEPT = 1024;
+
+    /**
+     * What a bounded cache keeps under `key`, moved to the end of its order so
+     * that eviction reaches the entry a frame stopped drawing with first.
+     *
+     * @template T @param {Map<number, T>} cache @param {number} key
+     * @returns {T | undefined}
+     */
+    const keptRecently = (cache, key)=>{
+        const value = cache.get(key);
+        if (value !== undefined)
+        {
+            cache.delete(key);
+            cache.set(key, value);
+        }
+        return value;
+    };
+
+    /**
+     * Keeps `value` under `key`, letting go of the least recently used entry
+     * past `limit` (`preparedDropped`).
+     *
+     * @template T @param {Map<number, T>} cache @param {number} key @param {T} value
+     * @param {number} limit
+     */
+    const keepBounded = (cache, key, value, limit)=>{
+        cache.set(key, value);
+        if (cache.size > limit)
+        {
+            const oldest = cache.keys().next().value;
+            if (oldest !== undefined)
+            {
+                cache.delete(oldest);
+                counters.preparedDropped++;
+            }
+        }
+    };
 
     /**
      * The entries a fixed-function draw binds its group with, made once for
@@ -8726,15 +8770,7 @@ export function createRenderer(options){
         };
         countLighting(model, preparedState);
         preparedState.uniforms = blockFor(model, preparedState);
-        preparedCache.set(key, preparedState);
-        if (preparedCache.size > PREPARED_CACHE_LIMIT)
-        {
-            const oldest = preparedCache.keys().next().value;
-            if (oldest !== undefined)
-            {
-                preparedCache.delete(oldest);
-            }
-        }
+        keepBounded(preparedCache, key, preparedState, PREPARED_CACHE_LIMIT);
         return preparedState;
     };
 
@@ -10325,6 +10361,7 @@ export function createRenderer(options){
                 programmable: counters.programmable,
                 mipsGenerated: counters.mipsGenerated,
                 prepared: { ...counters.prepared },
+                preparedDropped: counters.preparedDropped,
                 statesNamed: counters.statesNamed,
                 programs: programs.stats(),
                 // The fixed-function pipelines the backend built, and the GPU's
