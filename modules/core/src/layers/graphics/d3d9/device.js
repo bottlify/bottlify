@@ -76,7 +76,7 @@ import { runCommands } from './commands.js';
 import { validateStages } from '../d3d8/validity.js';
 import { processStreams } from '../d3d8/process.js';
 import { createBufferLocks } from '../d3d8/buffer-locks.js';
-import { reportDynamicReads } from '../d3d8/drawn.js';
+import { createIndexRanges, reportDynamicReads } from '../d3d8/drawn.js';
 import { storageCalls } from '../d3d8/storages.js';
 import { decodeFvf } from '../webgpu/internal/vertexformat.js';
 import { fullTarget, viewportState } from '../webgpu/internal/viewport.js';
@@ -935,6 +935,12 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
 
     const count = createReferenceCount();
 
+    /**
+     * The vertices each range of a static index buffer named, while none of its
+     * pages is written: an indexed draw from a dynamic buffer reads them to send
+     * only those (`drawn.js`).
+     */
+    const indexRanges = services.drawsFrom ? createIndexRanges(services.watchWrites) : null;
     const renderer = services.backend
         ? createRenderer({
             backend: services.backend,
@@ -3446,7 +3452,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 const read = services.windowMemory ?? services.readMemory;
                 reportDynamicReads(services.drawsFrom, drawnStreams(), base + minIndex, numVertices,
                     indices, startIndex, vertexCountOf(type, primitiveCount),
-                    read ? { read, base } : undefined);
+                    read ? { read, base, ranges: indexRanges } : undefined);
             }
             renderer?.drawIndexedPrimitive(model, type, startIndex, primitiveCount, minIndex,
                 numVertices);

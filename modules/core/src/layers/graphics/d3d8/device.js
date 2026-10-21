@@ -51,7 +51,7 @@ import { GAMMA_RAMP_ENTRIES } from './structs.js';
 import { DEFAULT_RENDER_STATES, createDefaultRenderStates } from './renderstates.js';
 import { createDefaultStageStates } from './stagestates.js';
 import { IDENTITY, STAGE_COUNT, createRenderer, sameLight, vertexCountOf } from './render.js';
-import { reportDynamicReads } from './drawn.js';
+import { createIndexRanges, reportDynamicReads } from './drawn.js';
 import { storageCalls } from './storages.js';
 import { applyBlock, captureBlock, emptyBlock, fillBlock } from './stateblock.js';
 import { processStreams } from './process.js';
@@ -785,6 +785,12 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
 
     const count = createReferenceCount();
 
+    /**
+     * The vertices each range of a static index buffer named, while none of its
+     * pages is written: an indexed draw from a dynamic buffer reads them to send
+     * only those (`drawn.js`).
+     */
+    const indexRanges = services.drawsFrom ? createIndexRanges(services.watchWrites) : null;
     const renderer = services.backend
         ? createRenderer({
             backend: services.backend,
@@ -2259,7 +2265,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 const read = services.windowMemory ?? services.readMemory;
                 reportDynamicReads(services.drawsFrom, streams.values(), baseVertexIndex + minIndex,
                     numVertices, indices, startIndex, vertexCountOf(type, primitiveCount),
-                    read ? { read, base: baseVertexIndex } : undefined);
+                    read ? { read, base: baseVertexIndex, ranges: indexRanges } : undefined);
             }
             if (renderer && stream(0).buffer && indices)
             {

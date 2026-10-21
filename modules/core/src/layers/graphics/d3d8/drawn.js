@@ -32,8 +32,10 @@ const DYNAMIC = 0x200;
  *
  * @param {any} [indices]  the index buffer of an indexed draw
  * @param {number} [startIndex] @param {number} [indexCount]
- * @param {{ read: (address: number, length: number) => Uint8Array, base: number }} [indexed]
- *        guest memory as a view, and the draw's base vertex index
+ * @param {{ read: (address: number, length: number) => Uint8Array, base: number,
+ *     ranges?: IndexRanges | null }} [indexed]
+ *        guest memory as a view, the draw's base vertex index, and the vertices
+ *        ranges of a static index buffer named when last read (`createIndexRanges`)
  */
 export function reportDynamicReads(drawsFrom, streams, first, count, indices, startIndex = 0,
     indexCount = 0, indexed = undefined)
@@ -86,7 +88,8 @@ const SCAN_RATIO = 4;
  *
  * @param {Iterable<{ buffer: any, stride: number, whole?: boolean }>} streams
  * @param {number} count @param {any} indices @param {number} startIndex @param {number} indexCount
- * @param {{ read: (address: number, length: number) => Uint8Array, base: number }} indexed
+ * @param {{ read: (address: number, length: number) => Uint8Array, base: number,
+ *     ranges?: IndexRanges | null }} indexed
  * @returns {{ first: number, count: number } | null}
  */
 function namedRange(streams, count, indices, startIndex, indexCount, indexed){
@@ -105,6 +108,12 @@ function namedRange(streams, count, indices, startIndex, indexCount, indexed){
         || startIndex * size + bytes > indices.length)
     {
         return null;
+    }
+    const ranges = (indices.usage & DYNAMIC) === 0 ? indexed.ranges ?? null : null;
+    const kept = ranges === null ? null : ranges.named(indices, at, bytes);
+    if (kept !== null)
+    {
+        return { first: indexed.base + kept.low, count: kept.high - kept.low + 1 };
     }
     const view = indexed.read(at, bytes);
     if (view.length < bytes)
@@ -131,5 +140,79 @@ function namedRange(streams, count, indices, startIndex, indexCount, indexed){
             high = index;
         }
     }
+    ranges?.keep(indices, at, bytes, low, high);
     return { first: indexed.base + low, count: high - low + 1 };
+}
+
+/**
+ * The lowest and highest index each range of a static index buffer names, as
+ * last read, kept while no page of the range is written (the engine's write
+ * watch, `watchWrites`): a static buffer's indices are the same frame after
+ * frame, and an indexed draw from a dynamic vertex buffer read them every
+ * time to send only the vertices they name -- a skinned model's surfaces,
+ * drawn out of a large buffer of skinned vertices, thousands of times a
+ * frame. Every write reaches the watch, the program's through a lock or a
+ * pointer kept past one and the host's alike; a page found written
+ * forgets every range of the buffer, since another range's look may have
+ * taken that page's write first. Nothing is kept where the engine has no
+ * watch, nor for a dynamic buffer, which is written every frame.
+ *
+ * @typedef {Object} IndexRanges
+ * @property {(indices: any, at: number, bytes: number) => { low: number, high: number } | null}
+ *     named  what the indices at `at` named when last read, if none of their
+ *     pages was written since; looked at from now either way, so a read of
+ *     them after a miss is what the next look compares against
+ * @property {(indices: any, at: number, bytes: number, low: number, high: number) => void} keep
+ *     what a read after `named` found
+ *
+ * @param {((address: number, length: number) =>
+ *     ({ take: (address: number, length: number) => number[] } | null)) | undefined} watchWrites
+ * @returns {IndexRanges | null}
+ */
+export function createIndexRanges(watchWrites){
+    if (typeof watchWrites !== 'function')
+    {
+        return null;
+    }
+    /**
+     * Each buffer's watch, over the storage it had when watched, and its ranges
+     * by their first index's address.
+     *
+     * @type {WeakMap<object, { base: number, watch: { take: (address: number,
+     *     length: number) => number[] } | null, ranges: Map<number,
+     *     { bytes: number, low: number, high: number }> }>}
+     */
+    const buffers = new WeakMap();
+    return {
+        named(indices, at, bytes){
+            let kept = buffers.get(indices);
+            if (kept === undefined || kept.base !== indices.base)
+            {
+                // The watch looks at every page as it begins: the read after
+                // this miss is what it compares against.
+                kept = { base: indices.base, watch: watchWrites(indices.base, indices.length),
+                    ranges: new Map() };
+                buffers.set(indices, kept);
+                return null;
+            }
+            if (kept.watch === null)
+            {
+                return null;
+            }
+            if (kept.watch.take(at, bytes).length > 0)
+            {
+                kept.ranges.clear();
+                return null;
+            }
+            const range = kept.ranges.get(at);
+            return range !== undefined && range.bytes === bytes ? range : null;
+        },
+        keep(indices, at, bytes, low, high){
+            const kept = buffers.get(indices);
+            if (kept !== undefined && kept.watch !== null && kept.base === indices.base)
+            {
+                kept.ranges.set(at, { bytes, low, high });
+            }
+        },
+    };
 }
