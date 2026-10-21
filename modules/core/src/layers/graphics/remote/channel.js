@@ -126,9 +126,9 @@ export function crossable(value, depth = 0){
  *     with a timer sending one the turns leave behind; zero sends one every turn
  * @param {(send: () => void, ms: number) => unknown} [options.timer]
  * @param {{ slots: SharedArrayBuffer, stash: SharedArrayBuffer, memory: Uint8Array,
- *     base?: number } | null} [options.lending]
+ *     base?: number, least?: number } | null} [options.lending]
  *     where the played side reads guest memory in place, the parts of a
- *     lending (`lending.js`) it was sent
+ *     lending (`lending.js`) it was sent, and the smallest allocation it lends
  */
 export function createSender({ post, framesAhead = 2, later = queueMicrotask, on = {},
     now = ()=>performance.now(), gapMs = 0, timer = (send, ms)=>setTimeout(send, ms),

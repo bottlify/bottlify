@@ -3277,11 +3277,15 @@ export function settledAfter(shadow, call){
  * @property {boolean} hostLocked
  * @property {boolean} lends  its bytes may be lent to the graphics worker by a recording
  *     that lends (`ShadowDevice.lendsMemory`): a draw may read it, or a twin copies from it
+ * @property {number} base  where its bytes are, which the recording is asked about
+ *     (`ShadowDevice.lendsAt`)
  * @property {boolean} slow  the guest never locks it: compressed, or a target
  *
  * @typedef {Object} ShadowDevice
  * @property {boolean} [lendsMemory]  a recording for the graphics worker that lends what is
  *     unlocked rather than copying it (`remote/replay.js`)
+ * @property {(address: number) => boolean} [lendsAt]  whether that recording lends what is
+ *     unlocked at an address, or copies it (a small allocation); absent, it lends all
  * @property {(state: number, out: { value?: number }) => number} GetRenderState
  * @property {(type: number, out: { matrix?: ArrayLike<number> }) => number} GetTransform
  * @property {(stage: number, type: number, out: { value?: number }) => number
@@ -3862,6 +3866,15 @@ export function createShadow(deps){
     };
 
     /**
+     * Whether a recording may lend a level's bytes, as it decides: a level it
+     * copies instead is the guest's to lock.
+     *
+     * @param {ShadowLevel} entry
+     */
+    const lentLevel = entry=>device.lendsMemory === true && entry.lends
+        && device.lendsAt?.(entry.base) !== false;
+
+    /**
      * Whether a level's locks are the host's: a level the guest cannot lock,
      * one a device context is held on, and one whose bytes a recording may
      * lend to the graphics worker (`ShadowLevel.lends`), which only the
@@ -3869,8 +3882,8 @@ export function createShadow(deps){
      *
      * @param {ShadowLevel} entry
      */
-    const levelFlags = entry=>(entry.slow || busyFamilies.has(entry.family)
-        || (device.lendsMemory === true && entry.lends) ? FLAG_SLOW_PATH : 0);
+    const levelFlags = entry=>(entry.slow || busyFamilies.has(entry.family) || lentLevel(entry)
+        ? FLAG_SLOW_PATH : 0);
 
     /**
      * Replays what the guest did to a level, as `settle` a buffer's: the lock
@@ -4813,7 +4826,7 @@ export function createShadow(deps){
                 }
                 /** @type {ShadowLevel} */
                 const entry = { level, family: info.family, lock: info.lock, unlock: info.unlock,
-                    hostLocked: info.locked, lends: info.lends, slow: info.slow };
+                    hostLocked: info.locked, lends: info.lends, slow: info.slow, base: info.base };
                 const words = new Uint32Array(LEVEL.SIZE / 4);
                 words[LEVEL.FLAGS / 4] = levelFlags(entry);
                 words[LEVEL.BASE / 4] = info.base;
@@ -4982,7 +4995,7 @@ export function createShadow(deps){
                 : entry.slow ? 'slow'
                     : busyFamilies.has(entry.family) ? 'busy'
                         : held ? 'held'
-                            : device.lendsMemory === true && entry.lends ? 'lent'
+                            : lentLevel(entry) ? 'lent'
                                 : pending ? 'pending' : 'other';
             hostLevelLocks[why]++;
             if (why === 'lent' && pending)

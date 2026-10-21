@@ -518,12 +518,18 @@ function direct(version, steps){
  * to the device after (`settledAfter`).
  *
  * @param {Version} version @param {Step[]} steps @param {boolean} [lent]
+ * @param {boolean} [copied]  a lending device's recording copies these levels instead
+ *     (`lendsAt`): allocations below the lender's least
  */
-function guest(version, steps, lent = false){
+function guest(version, steps, lent = false, copied = false){
     const m = machine(version);
     const { device, textures } = m;
     const host = /** @type {ReturnType<typeof createCorkHost>} */ (m.host);
     device.lendsMemory = lent;
+    if (copied)
+    {
+        device.lendsAt = ()=>false;
+    }
     const surface = m.levelOf(textures.managed, 0);
     /** @type {Map<number, any>} */
     const objects = new Map([['managed', textures.managed], ['surface', surface],
@@ -754,14 +760,17 @@ test('a draw samples, and an update carries, what the program\'s texture held wh
     {
         /** @type {Record<string, number>} */
         const total = {};
+        /** @type {Record<string, number>} */
+        const copiedTotal = {};
         for (let seed = 1; seed <= 40; seed++)
         {
             const steps = generate(seed, 200);
             const expected = direct(version, steps);
-            for (const lent of [false, true])
+            for (const [lent, copied] of [[false, false], [true, false], [true, true]])
             {
-                const actual = guest(version, steps, lent);
-                const label = `${version.name}, seed ${seed}${lent ? ', lent' : ''}`;
+                const actual = guest(version, steps, lent, copied);
+                const label = `${version.name}, seed ${seed}${lent ? ', lent' : ''}`
+                    + `${copied ? ', copied' : ''}`;
                 for (const part of /** @type {const} */ (['answers', 'draws', 'updates']))
                 {
                     const first = expected[part].findIndex((entry, i)=>entry !== actual[part][i]);
@@ -771,7 +780,12 @@ test('a draw samples, and an update carries, what the program\'s texture held wh
                 assert.deepEqual(actual.end, expected.end, `${label}: the levels at the end`);
                 for (const [key, count] of Object.entries(actual.inGuest))
                 {
-                    if (lent)
+                    if (copied)
+                    {
+                        // Copied rather than lent, the levels' locks are the guest's.
+                        copiedTotal[key] = (copiedTotal[key] ?? 0) + count;
+                    }
+                    else if (lent)
                     {
                         // A level a draw may read, or whose update a twin copies
                         // out of what was sent, may be lent: its locks are the host's.
@@ -790,5 +804,7 @@ test('a draw samples, and an update carries, what the program\'s texture held wh
         assert.deepEqual(Object.keys(total).sort(), ['dirty system', 'dirty volume',
             'lock managed', 'lock surface', 'lock system', 'lock volume', 'unlock managed',
             'unlock surface', 'unlock system', 'unlock volume'], version.name);
+        assert.deepEqual(Object.keys(copiedTotal).sort(), Object.keys(total).sort(),
+            `${version.name}: a lending device's copied levels are locked in the guest`);
     }
 });

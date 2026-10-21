@@ -35,6 +35,16 @@ export const LEND_SLOTS = 4096;
 /** The bytes the stash holds: the most the lends outstanding at once may cover. */
 export const STASH_BYTES = 16 << 20;
 
+/**
+ * The smallest allocation whose bytes are lent; a smaller one's are copied
+ * into the batch. A lent level's lock is the host's, since only the host's
+ * lock claims the lend back before the program writes over it: Call of Duty
+ * 4 locks every level of a 32x32 texture every frame, 151 thousand locks in
+ * eight minutes on the process's executor, each a whole sync of the device's
+ * ring and a wait of the thread that draws, to save copying 1.3 KB.
+ */
+export const LEND_LEAST = 64 << 10;
+
 /** How long a claim waits on a read the played side began before it gives the bytes up. */
 const WAIT_LIMIT_MS = 10000;
 
@@ -78,6 +88,7 @@ export function createLendingBuffers(){
  *     whether anything was lent since the last `sent`: the sooner the played
  *     side has it, the likelier it is read before a claim
  * @property {() => void} sent  what was lent went to the played side
+ * @property {number} least  the smallest allocation lent (`LEND_LEAST`)
  * @property {(address: number, length: number) => void} claim
  *     before anything on this side lets the range be written: every lend it
  *     overlaps is made safe to write over
@@ -94,9 +105,12 @@ export function createLendingBuffers(){
  * @param {Uint8Array} options.memory   the guest's memory, as the played side sees it
  * @param {number} [options.base]       the guest address of `memory`'s first byte
  * @param {() => number} [options.now]
+ * @param {number} [options.least]     the smallest allocation lent (`LEND_LEAST`)
  * @returns {Lender}
  */
-export function createLender({ slots, stash, memory, base = 0, now = ()=>performance.now() }){
+export function createLender(options){
+    const { slots, stash, memory, base = 0, now = ()=>performance.now(),
+        least = LEND_LEAST } = options;
     const states = new Int32Array(slots);
     const stashBytes = new Uint8Array(stash);
     /** @type {number[]} */
@@ -207,6 +221,7 @@ export function createLender({ slots, stash, memory, base = 0, now = ()=>perform
     };
 
     return {
+        least,
         lend(address, length){
             const at = address - base;
             if (length <= 0 || at < 0 || at + length > memory.length)

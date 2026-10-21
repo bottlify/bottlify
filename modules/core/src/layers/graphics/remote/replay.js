@@ -890,7 +890,8 @@ export function createRecording(options){
             pending.addresses.delete(address);
             pending.owners.delete(address);
             const extent = extentOf(address, length);
-            const slot = extent > 0 && lender ? lender.lend(address, extent) : -1;
+            const slot = extent > 0 && lendable(address) ? /** @type {any} */ (lender)
+                .lend(address, extent) : -1;
             if (slot >= 0)
             {
                 lent.push({ address, length: extent, slot });
@@ -979,6 +980,24 @@ export function createRecording(options){
         }
         const rest = blocks.ends[found] - address;
         return length === null ? rest : Math.min(length, rest);
+    };
+
+    /**
+     * Whether what is unlocked at an address may be lent rather than copied:
+     * an allocation as large as the lender's least. The seam's guest routines
+     * ask the same (`lendsAt`), and leave a lock of what may be lent to the
+     * host, which claims the lend back first; one that is copied they lock
+     * themselves.
+     *
+     * @param {number} address
+     */
+    const lendable = address=>{
+        if (lender === null)
+        {
+            return false;
+        }
+        const found = blockAt(address);
+        return found >= 0 && blocks.ends[found] - blocks.starts[found] >= lender.least;
     };
 
     /**
@@ -1850,6 +1869,10 @@ export function createRecording(options){
                     // what is unlocked is read later, and a lock in the
                     // guest must come here to claim it first.
                     return lender !== null;
+                }
+                if (key === 'lendsAt')
+                {
+                    return lendable;
                 }
                 const value = Reflect.get(target, key);
                 if (typeof value === 'function' && typeof key === 'string')

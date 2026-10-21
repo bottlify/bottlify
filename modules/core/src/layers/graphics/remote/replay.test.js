@@ -10,7 +10,7 @@ import { loopbackDirect3D } from './loopback.js';
 import { SWEEP_SLICE, createMirror } from './replay.js';
 import { answeredByRenderer, playedDirect3D, recordedDirect3D } from './direct3d.js';
 import { createReceiver, createSender } from './channel.js';
-import { createBorrower, createLendingBuffers } from './lending.js';
+import { LEND_LEAST, createBorrower, createLender, createLendingBuffers } from './lending.js';
 import { D3DFMT, D3DPOOL, D3DSWAPEFFECT, D3D_OK } from '../d3d9/constants.js';
 import { D3DCLEAR, D3DFMT_INDEX, D3DPT, D3DRS, D3DTS } from '../d3d8/constants.js';
 import { D3DQUERYTYPE, createDirect3D9 } from '../d3d9/device.js';
@@ -150,11 +150,11 @@ function toyLoop(){
 /**
  * A toy root whose calls cross a port the test empties itself, over a shared
  * guest memory: with `lend`, what its unlocks let the program write is lent
- * to the played side rather than copied.
+ * to the played side rather than copied, from an allocation of `least` bytes up.
  *
- * @param {boolean} lend
+ * @param {boolean} lend @param {number} [least]
  */
-function toyAcross(lend){
+function toyAcross(lend, least = 0){
     /** @type {any[]} */
     const sides = [];
     const ram = new Uint8Array(new SharedArrayBuffer(1 << 16));
@@ -191,7 +191,7 @@ function toyAcross(lend){
     /** @type {any[]} */
     const sent = [];
     const sender = createSender({ post: message=>sent.push(message), later: ()=>{},
-        lending: lend ? { ...buffers, memory: ram } : null });
+        lending: lend ? { ...buffers, memory: ram, least } : null });
     const root = recordedDirect3D(toy(sides), services, sender);
     return {
         root, ram, sender, said, swept,
@@ -382,6 +382,33 @@ test('the bytes of the batches are counted by the method whose record they are',
     assert.deepEqual(counted.Lock, { count: 3, carries: true });
     const unlock = /** @type {any} */ (sender.methodBytes().find(entry=>entry.name === 'Unlock'));
     assert.ok(unlock.bytes >= 3 * 16, 'its records hold the bytes the unlocks sent');
+});
+
+test('an allocation smaller than the lender\'s least is copied, not lent, and the guest\'s routines'
+    + ' are told so', ()=>{
+    // A level's lock is the host's while its bytes may be lent: Call of Duty
+    // 4's 32x32 levels, locked every frame, crossed to the host each time to
+    // save a copy of 1.3 KB.
+    assert.equal(createLender({ ...createLendingBuffers(), memory: new Uint8Array(16) }).least,
+        LEND_LEAST, 'the least by default');
+    for (const [least, lends] of /** @type {const} */ ([[16, true], [17, false]]))
+    {
+        const { root, ram, sender, played, play } = toyAcross(true, least);
+        /** @type {{ thing?: any }} */
+        const out = {};
+        root.CreateThing(out);
+        const at = out.thing.base;
+        assert.equal(root.lendsAt(at), lends, `least ${least}: the routines are told`);
+        /** @type {{ pBits?: number }} */
+        const locked = {};
+        out.thing.LockRect(locked, null, 0);
+        ram.set([1, 2, 3, 4], at);
+        out.thing.UnlockRect();
+        out.thing.Peek();
+        play();
+        assert.deepEqual(played.seen, [[1, 2, 3, 4]], `least ${least}: the bytes arrive`);
+        assert.equal(sender.lender?.diagnostics().lent, lends ? 1 : 0, `least ${least}`);
+    }
 });
 
 test('a lend the played side read before the program locks again is not stashed', ()=>{
