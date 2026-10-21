@@ -44,7 +44,9 @@ import {
     withCpuSetup,
     translatorsBeside,
     allocateCleared,
+    RESOURCE_ALIGNMENT,
 } from './app.js';
+import { createHeapAllocator } from './layers/win32/kernel32/heap.js';
 import { createEvents } from './events.js';
 import { filesystemModule } from './layers/filesystem/module.js';
 import { createMemoryStore } from './layers/filesystem/internal/memory-store.js';
@@ -1889,4 +1891,21 @@ test('a graphics resource is handed cleared memory, and fresh memory is not writ
     const full = { allocate: ()=>0, block: ()=>null };
     assert.equal(allocateCleared(full, fill, 64), 0);
     assert.equal(filled.length, 1);
+});
+
+test('a graphics resource starts on a 16-byte boundary where the heap\'s next block does not', ()=>{
+    const heap = createHeapAllocator({ base: 0x10000, size: 0x10000 });
+    const fill = ()=>{};
+    let offBoundary = 0;
+    for (const bytes of [4, 36, 1, 44, 8, 52, 4608])
+    {
+        // An eight-byte block between them moves the heap's own next one.
+        heap.allocate(8);
+        const address = allocateCleared(heap, fill, bytes);
+        assert.equal(address % RESOURCE_ALIGNMENT, 0,
+            `${bytes} bytes at 0x${address.toString(16)}`);
+        assert.equal(heap.block(address)?.size, bytes, 'the block is the one handed out');
+        offBoundary += heap.allocate(bytes) % RESOURCE_ALIGNMENT === 0 ? 0 : 1;
+    }
+    assert.ok(offBoundary > 0, 'the heap alone hands out blocks off the boundary');
 });

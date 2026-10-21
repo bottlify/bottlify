@@ -899,3 +899,14 @@ off). Physical memory stays the arena, as WMI reports it. *2026-10-15.*
 `D3DERR_INVALIDCALL`, as Wine's test_reset sees Windows do; only a windowed device measures its
 window for a size of zero. Making such a device at the display's size instead left a program
 laying out a screen of 0x0. *2026-10-15.*
+
+**A graphics resource's memory starts on a 16-byte boundary.** Every surface, texture chain and
+vertex or index buffer storage, the spares a DISCARD moves a dynamic buffer onto among them, comes
+from the guest heap aligned to 16 bytes (`RESOURCE_ALIGNMENT` in `app.js`), where the heap's own
+boundary is 8. Direct3D's documentation promises no boundary; Wine keeps every resource on 16 and
+gives up a GL mapping a driver hands back off it, because programs write what they locked with SSE
+stores. One checks the pointer a DISCARD hands back and, given one off the boundary, unlocks and
+draws nothing it would have written there that frame: Call of Duty 4 skins its animated models into
+such a buffer, and with the buffer's storages taken in turn they showed in two frames of four.
+Levels inside a texture's chain stay packed, as in Wine, so only a chain's first level is on the
+boundary. *2026-10-21.*

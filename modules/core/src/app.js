@@ -1616,21 +1616,32 @@ const CORK = /** @type {{ env?: { BOTTLIFY_CORK?: string } }} */ (import.meta).e
     ?? '../../cork/src/index.js';
 
 /**
- * Memory for a graphics resource, cleared. A driver hands out a new surface,
- * texture or buffer reading as zeroes (the kernel clears what it maps), and a
- * program may draw one it never wrote: an empty layer under a menu, a target
- * it clears only in part. The guest heap recycles freed blocks as they were
- * left, so a texture made after a Reset held the old back buffer's picture.
- * Memory the heap never handed out is zero already and is not written.
+ * Where a graphics resource's memory starts: on a multiple of sixteen bytes,
+ * as Wine keeps every resource (its RESOURCE_ALIGNMENT, for which it drops a
+ * GL mapping a driver hands back off the boundary). A program writes what it
+ * locked with SSE stores, which fault off it, and one checks the pointer a
+ * DISCARD hands back and, given one off it, unlocks and leaves out of the
+ * frame what it would have written there. The heap's own boundary is eight.
+ */
+export const RESOURCE_ALIGNMENT = 16;
+
+/**
+ * Memory for a graphics resource, cleared and on `RESOURCE_ALIGNMENT`. A
+ * driver hands out a new surface, texture or buffer reading as zeroes (the
+ * kernel clears what it maps), and a program may draw one it never wrote: an
+ * empty layer under a menu, a target it clears only in part. The guest heap
+ * recycles freed blocks as they were left, so a texture made after a Reset
+ * held the old back buffer's picture. Memory the heap never handed out is
+ * zero already and is not written.
  *
- * @param {{ allocate: (bytes: number) => number,
+ * @param {{ allocate: (bytes: number, options?: { alignment?: number }) => number,
  *     block: (address: number) => { fresh?: boolean } | null | undefined }} heap
  * @param {(address: number, value: number, length: number) => void} fill
  * @param {number} bytes
  * @returns {number} the address, or 0
  */
 export function allocateCleared(heap, fill, bytes){
-    const address = heap.allocate(bytes);
+    const address = heap.allocate(bytes, { alignment: RESOURCE_ALIGNMENT });
     if (address !== 0 && heap.block(address)?.fresh !== true)
     {
         fill(address, 0, bytes);
@@ -4599,7 +4610,8 @@ async function buildApp(options){
             // hands the program an address it writes through and the unlock
             // reads those bytes back, so it has to be memory the guest can
             // reach -- an address invented for the purpose is one the program
-            // writes into nothing and we read nothing out of.
+            // writes into nothing and we read nothing out of -- and on the
+            // boundary a driver keeps (`RESOURCE_ALIGNMENT`).
             allocate: (/** @type {number} */ bytes)=>allocateCleared(win32.heap(),
                 (address, value, length)=>core.api('memory').fillBytes(address, value, length),
                 bytes),
