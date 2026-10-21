@@ -108,6 +108,9 @@ const USAGE_QUERY_FILTER = 0x00020000;
 const USAGE_QUERY_POSTPIXELSHADER_BLENDING = 0x00080000;
 /** What a draw through a vertex format reads: stream zero alone. */
 const STREAM_ZERO = Object.freeze([0]);
+/** No elements, and no streams past the first, without a list made for each draw. */
+const NO_ELEMENTS = Object.freeze([]);
+const NO_STREAMS = Object.freeze(/** @type {number[]} */ ([]));
 
 /** The three states a device is ever in, as far as a program can tell. */
 export const DEVICE_STATE = Object.freeze({
@@ -1716,6 +1719,25 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
      */
     /** The whole vertices the last draw folded into its first (`streamBias`), for the renderer. */
     let foldedBias = 0;
+    /**
+     * Whether a declaration's elements read stream zero, and the other
+     * streams they read, each once: found once a declaration, where every
+     * draw walked the elements again.
+     *
+     * @type {WeakMap<object, { zero: boolean, others: number[] }>}
+     */
+    const streamsByDeclaration = new WeakMap();
+    /** @param {any[]} elements */
+    const streamsOf = elements=>{
+        let read = streamsByDeclaration.get(elements);
+        if (read === undefined)
+        {
+            const all = [...new Set(elements.map((/** @type {any} */ e)=>e.Stream))];
+            read = { zero: all.includes(0), others: all.filter(number=>number !== 0) };
+            streamsByDeclaration.set(elements, read);
+        }
+        return read;
+    };
     const streamBias = ()=>{
         // Read, not made: `stream` keeps an entry for the index it is asked,
         // and a state block of everything captures every entry there is.
@@ -1723,8 +1745,9 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         // A declaration that reads nothing from stream zero -- none of its elements there, as
         // a vertex shader that makes its vertices from constants has it -- draws whatever
         // stream zero holds, nothing included, as Direct3D does.
-        const elements = vertexDeclaration.declaration?.elements ?? [];
-        if (vertexDeclaration.fvf === 0 && !elements.some((/** @type {any} */ e)=>e.Stream === 0))
+        const elements = vertexDeclaration.declaration?.elements ?? NO_ELEMENTS;
+        const reads = vertexDeclaration.fvf === 0 ? streamsOf(elements) : null;
+        if (reads !== null && !reads.zero)
         {
             foldedBias = 0;
             return 0;
@@ -1744,10 +1767,12 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         // zero far into a shared buffer would otherwise begin before its
         // buffer, and the renderer dropped the draw.
         let bias = Math.floor(source.offset / source.stride);
-        for (const element of vertexDeclaration.fvf === 0 ? elements : [])
+        const others = reads === null ? NO_STREAMS : reads.others;
+        for (let index = 0; index < others.length; index++)
         {
-            const further = element.Stream === 0 ? null : streams.get(element.Stream);
-            const instanced = ((streamFrequencies.get(element.Stream) ?? 1)
+            const number = others[index];
+            const further = streams.get(number);
+            const instanced = ((streamFrequencies.get(number) ?? 1)
                 & STREAMSOURCE_INSTANCEDATA) !== 0;
             if (further?.buffer && further.stride > 0 && !instanced)
             {
@@ -2000,15 +2025,24 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         if (recording)
         {
             record(recording);
+            return D3D_OK;
         }
-        else
+        apply();
+        return stateChanged(binding);
+    };
+    /**
+     * What `setState` does once a state outside a recording is set: the
+     * setters a program calls between most draws (render, stage and sampler
+     * states, textures) set theirs inline and call this, with no two closures
+     * made for each call.
+     *
+     * @param {boolean} binding  whether a binding changed, which moves its own version too
+     */
+    const stateChanged = binding=>{
+        drawStateVersion++;
+        if (binding)
         {
-            apply();
-            drawStateVersion++;
-            if (binding)
-            {
-                bindingVersion++;
-            }
+            bindingVersion++;
         }
         return D3D_OK;
     };
@@ -2531,9 +2565,13 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             {
                 return D3D_OK;
             }
-            return setState(
-                record=>record.renderStates.set(state, value >>> 0),
-                ()=>renderStates.set(state, value >>> 0));
+            if (recording)
+            {
+                recording.renderStates.set(state, value >>> 0);
+                return D3D_OK;
+            }
+            renderStates.set(state, value >>> 0);
+            return stateChanged(false);
         },
 
         /**
@@ -2654,18 +2692,20 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             {
                 return D3D_OK;
             }
-            return setState(
-                record=>record.textures.set(stage, texture ?? null),
-                ()=>{
-                    if (texture)
-                    {
-                        textures.set(stage, texture);
-                    }
-                    else
-                    {
-                        textures.delete(stage);
-                    }
-                }, true);
+            if (recording)
+            {
+                recording.textures.set(stage, texture ?? null);
+                return D3D_OK;
+            }
+            if (texture)
+            {
+                textures.set(stage, texture);
+            }
+            else
+            {
+                textures.delete(stage);
+            }
+            return stateChanged(true);
         },
 
         /**
@@ -2702,9 +2742,13 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             {
                 return D3D_OK;
             }
-            return setState(
-                record=>record.stageStates.set((stage << 8) | type, value >>> 0),
-                ()=>stageStatesFor(stage).set(type, value >>> 0));
+            if (recording)
+            {
+                recording.stageStates.set((stage << 8) | type, value >>> 0);
+                return D3D_OK;
+            }
+            stageStatesFor(stage).set(type, value >>> 0);
+            return stateChanged(false);
         },
 
         /**
@@ -2740,9 +2784,13 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             {
                 return D3D_OK;
             }
-            return setState(
-                record=>record.samplerStates.set((sampler << 8) | type, value >>> 0),
-                ()=>stageStatesFor(sampler).set(SAMPLER_STATE_KEY[type], value >>> 0));
+            if (recording)
+            {
+                recording.samplerStates.set((sampler << 8) | type, value >>> 0);
+                return D3D_OK;
+            }
+            stageStatesFor(sampler).set(SAMPLER_STATE_KEY[type], value >>> 0);
+            return stateChanged(false);
         },
 
         /**
