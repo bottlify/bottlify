@@ -291,6 +291,20 @@ export function createUniformPool(options){
     let pendingTo = 0;
     /** Ring bytes the frame being recorded has used, a wrap's skipped tail included. */
     let frameUsed = 0;
+    /**
+     * The last blocks laid and where, by the frame and ring they were laid
+     * in (`laying`): the same block handed again in that frame -- a stage's
+     * integer and boolean registers, kept while they hold still -- binds the
+     * slot it already has, with nothing copied or written again.
+     */
+    const RECENT = 8;
+    const recentBlocks = /** @type {(ArrayBufferView | null)[]} */ (new Array(RECENT).fill(null));
+    const recentAt = new Int32Array(RECENT);
+    const recentLaying = new Int32Array(RECENT);
+    let recentNext = 0;
+    /** Raised at each frame's end and each new ring: a slot kept from before is not reused. */
+    let laying = 1;
+    let shared = 0;
 
     const flush = ()=>{
         if (ring && pendingTo > pendingFrom)
@@ -305,6 +319,7 @@ export function createUniformPool(options){
 
     const make = ()=>{
         flush();
+        laying++;
         ring = options.device.createBuffer({
             label: `uniforms#${created}`,
             size: capacity,
@@ -318,6 +333,26 @@ export function createUniformPool(options){
         pendingTo = 0;
     };
 
+    /**
+     * The binding of a block laid at `at`: the slot covers one block at offset
+     * zero, and the offset the draw reads from travels beside it, for
+     * setBindGroup.
+     *
+     * @param {ArrayBufferView} block @param {number} at
+     * @param {{ buffer: any, offset: number, size: number, dynamicOffset: number }} [into]
+     */
+    const slotOf = (block, at, into)=>{
+        if (into)
+        {
+            into.buffer = ring;
+            into.offset = 0;
+            into.size = block.byteLength;
+            into.dynamicOffset = at;
+            return into;
+        }
+        return { buffer: ring, offset: 0, size: block.byteLength, dynamicOffset: at };
+    };
+
     return {
         /**
          * @param {ArrayBufferView} block
@@ -327,6 +362,14 @@ export function createUniformPool(options){
          * @returns {{ buffer: any, offset: number, size: number, dynamicOffset: number }}
          */
         allocate(block, into){
+            for (let index = 0; index < RECENT; index++)
+            {
+                if (recentBlocks[index] === block && recentLaying[index] === laying)
+                {
+                    shared++;
+                    return slotOf(block, recentAt[index], into);
+                }
+            }
             const needed = Math.ceil(block.byteLength / UNIFORM_ALIGNMENT) * UNIFORM_ALIGNMENT;
             const tail = cursor + needed > capacity ? capacity - cursor : 0;
             if (needed > capacity || (ring && frameUsed + tail + needed > capacity))
@@ -364,17 +407,11 @@ export function createUniformPool(options){
                     : new Uint8Array(block.buffer, block.byteOffset, block.byteLength), at);
             }
             pendingTo = at + block.byteLength;
-            // The binding covers one block at offset zero; the offset the draw
-            // actually reads from travels beside it, for setBindGroup.
-            if (into)
-            {
-                into.buffer = ring;
-                into.offset = 0;
-                into.size = block.byteLength;
-                into.dynamicOffset = at;
-                return into;
-            }
-            return { buffer: ring, offset: 0, size: block.byteLength, dynamicOffset: at };
+            recentBlocks[recentNext] = block;
+            recentAt[recentNext] = at;
+            recentLaying[recentNext] = laying;
+            recentNext = (recentNext + 1) % RECENT;
+            return slotOf(block, at, into);
         },
 
         /** Writes what was laid since the last write; before every submit. */
@@ -383,10 +420,11 @@ export function createUniformPool(options){
         /** The frame is submitted: the next may wrap onto its blocks. */
         endFrame(){
             frameUsed = 0;
+            laying++;
         },
 
         stats(){
-            return { created, reused, writes };
+            return { created, reused, writes, shared };
         },
     };
 }

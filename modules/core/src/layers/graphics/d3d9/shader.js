@@ -556,6 +556,9 @@ export function createShader(options){
  * @property {Float32Array} floats   Four per register.
  * @property {Int32Array} ints       Four per register.
  * @property {Uint32Array} bools     One per register.
+ * @property {Float32Array} intBits   `ints` and `bools` as floats, the same bits:
+ * @property {Float32Array} boolBits  a block of floats takes them by a copy
+ *           of its own type, which copies bits, with no view made for it.
  * @property {(start: number, values: ArrayLike<number>, count: number) => number} setF
  * @property {(start: number, count: number, out: { values?: Float32Array }) => number} getF
  * @property {(start: number, values: ArrayLike<number>, count: number) => number} setI
@@ -635,6 +638,8 @@ export function createConstantFile(sizes){
         floats,
         ints,
         bools,
+        intBits: new Float32Array(ints.buffer),
+        boolBits: new Float32Array(bools.buffer),
         setF: f.set,
         getF: f.get,
         setI: i.set,

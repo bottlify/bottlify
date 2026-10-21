@@ -313,4 +313,8 @@ test('recorded: Direct3D 9 frames of lit and shader draws ask the same of the GP
         assert.deepEqual(frames, EXPECTED);
     });
 
-const EXPECTED = ['6015eaf9', 'fc294022', '1710935d'];
+// A shader draw's integer and boolean blocks are laid once while they hold
+// still: the offsets bound and the bytes written moved, the bytes each draw
+// reads did not (d3d9/constant-blocks.itest.js; with `keepConstantBlocks: false`
+// these frames are 6015eaf9, fc294022, 1710935d as before).
+const EXPECTED = ['0ef150b9', 'fb8f0e7e', 'd04c9156'];

@@ -172,12 +172,23 @@ export function shapeKey(layout){
  * reads as zero there until the caller fills it: a block shorter than the
  * declaration fails the binding.
  *
- * @param {{ floats: Float32Array, ints: Int32Array, bools: Uint32Array }} file
+ * The integer and boolean blocks are kept (`kept`) while the registers hold
+ * the same values in one arena: the same block for the next draw, which a
+ * program that sets them once a frame, or never, draws every draw with, and
+ * which the uniform ring then lays once (`createUniformPool`). The registers
+ * are compared with a copy of what the kept block was made of, eighty words,
+ * rather than trusted to a count of writes every writer would have to raise.
+ *
+ * @param {{ floats: Float32Array, ints: Int32Array, bools: Uint32Array,
+ *     intBits?: Float32Array, boolBits?: Float32Array }} file
  * @param {number} reach   Float registers the shader declares.
  * @param {(floats: number) => Float32Array} take
+ * @param {KeptBlocks} [kept]  the stage's
+ * @param {number} [serial]  the arena's (`createUniformArena`): a block
+ *     outlives none of its resets, and is never another arena's
  * @returns {Float32Array[]}
  */
-export function constantBlocks(file, reach, take){
+export function constantBlocks(file, reach, take, kept, serial = -1){
     const count = Math.max(1, reach);
     const floats = take(count * 4);
     // A draw sets two stages' blocks: the file whole where it fits, rather
@@ -185,13 +196,89 @@ export function constantBlocks(file, reach, take){
     floats.set(count * 4 >= file.floats.length
         ? file.floats
         : file.floats.subarray(0, count * 4));
+    if (kept === undefined || serial < 0 || file.ints.length !== 64 || file.bools.length !== 16)
+    {
+        return [floats, intsBlock(file, take), boolsBlock(file, take)];
+    }
+    const fresh = kept.serial !== serial;
+    if (fresh || kept.ints === null || !sameWords(kept.intsMade, file.ints))
+    {
+        kept.ints = intsBlock(file, take);
+        kept.intsMade.set(file.ints);
+    }
+    if (fresh || kept.bools === null || !sameWords(kept.boolsMade, file.bools))
+    {
+        kept.bools = boolsBlock(file, take);
+        kept.boolsMade.set(file.bools);
+    }
+    kept.serial = serial;
+    return [floats, kept.ints, kept.bools];
+}
+
+/**
+ * @param {Int32Array | Uint32Array} made @param {Int32Array | Uint32Array} now
+ */
+const sameWords = (made, now)=>{
+    for (let index = 0; index < made.length; index++)
+    {
+        if (made[index] !== now[index])
+        {
+            return false;
+        }
+    }
+    return true;
+};
+
+/**
+ * A stage's integer and boolean blocks, kept by `constantBlocks` while the
+ * registers hold the values they were made of.
+ *
+ * @typedef {Object} KeptBlocks
+ * @property {number} serial
+ * @property {Float32Array | null} ints
+ * @property {Int32Array} intsMade
+ * @property {Float32Array | null} bools
+ * @property {Uint32Array} boolsMade
+ */
+
+/** @returns {KeptBlocks} */
+export const keptBlocks = ()=>({ serial: -1, ints: null, intsMade: new Int32Array(64),
+    bools: null, boolsMade: new Uint32Array(16) });
+
+/**
+ * All sixteen integer registers as a block of floats, the same bits.
+ *
+ * @param {{ ints: Int32Array, intBits?: Float32Array }} file
+ * @param {(floats: number) => Float32Array} take
+ */
+function intsBlock(file, take){
     const ints = take(16 * 4);
+    if (file.intBits !== undefined && file.intBits.length === 64)
+    {
+        ints.set(file.intBits);
+        return ints;
+    }
     new Int32Array(ints.buffer, ints.byteOffset, ints.length)
         .set(file.ints.length === 64 ? file.ints : file.ints.subarray(0, 64));
+    return ints;
+}
+
+/**
+ * The sixteen booleans, one to a float, the same bits.
+ *
+ * @param {{ bools: Uint32Array, boolBits?: Float32Array }} file
+ * @param {(floats: number) => Float32Array} take
+ */
+function boolsBlock(file, take){
     const bools = take(16);
+    if (file.boolBits !== undefined && file.boolBits.length === 16)
+    {
+        bools.set(file.boolBits);
+        return bools;
+    }
     new Uint32Array(bools.buffer, bools.byteOffset, bools.length)
         .set(file.bools.length === 16 ? file.bools : file.bools.subarray(0, 16));
-    return [floats, ints, bools];
+    return bools;
 }
 
 /**

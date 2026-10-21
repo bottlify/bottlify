@@ -121,7 +121,40 @@ test('the ring wraps rather than growing, and a block larger than it gets a larg
     assert.equal(gpu.count('createBuffer'), 2, 'a ring the block fits');
     assert.ok(gpu.of('createBuffer')[1].descriptor.size >= 1024);
     assert.equal(large.dynamicOffset, 0);
-    assert.deepEqual(pool.stats(), { created: 2, reused: 4, writes: 2 });
+    assert.deepEqual(pool.stats(), { created: 2, reused: 4, writes: 2, shared: 0 });
+});
+
+test('a block handed twice in a frame keeps its slot; in the next frame, it is laid again', ()=>{
+    // A shader draw's integer and boolean blocks are the last draw's while the
+    // registers hold still: laid once a frame, not once a draw.
+    const gpu = createFakeDevice();
+    const pool = createUniformPool({ device: gpu.device, queue: gpu.queue, capacity: 1024 });
+    const kept = new Uint8Array(64).fill(7);
+    const first = { ...pool.allocate(kept) };
+    pool.allocate(new Uint8Array(64).fill(1));
+    const again = { ...pool.allocate(kept) };
+    assert.equal(again.dynamicOffset, first.dynamicOffset, 'the same slot');
+    assert.equal(again.buffer, first.buffer);
+    assert.deepEqual(pool.stats(), { created: 1, reused: 2, writes: 0, shared: 1 });
+    pool.flush();
+    assert.equal(first.buffer.bytes[first.dynamicOffset], 7);
+
+    pool.endFrame();
+    const next = pool.allocate(kept);
+    assert.notEqual(next.dynamicOffset, first.dynamicOffset,
+        'a later frame may wrap onto the slot: the block is laid again');
+    assert.equal(pool.stats().shared, 1);
+
+    // A ring made larger mid-frame: what was laid in the old one is not bound
+    // from the new.
+    const grown = createUniformPool({ device: gpu.device, queue: gpu.queue, capacity: 256 });
+    const small = new Uint8Array(64).fill(5);
+    grown.allocate(small);
+    grown.allocate(new Uint8Array(512));
+    const after = grown.allocate(small);
+    assert.equal(grown.stats().shared, 0);
+    grown.flush();
+    assert.equal(after.buffer.bytes[after.dynamicOffset], 5);
 });
 
 test('a frame whose blocks outgrow the ring gets a larger one, not a wrap onto itself', ()=>{

@@ -47,7 +47,7 @@ import { D3DLOCK_NO_DIRTY_UPDATE, levelExtent } from '../d3d9/resources.js';
 import { D3DRS as D3DRS9, sampledOnes } from '../d3d9/constants.js';
 import { resourceId } from '../webgpu/internal/bindings.js';
 import {
-    constantBlocks, createProgramCache, samplerDimension, shapeKey, vertexLayoutOf,
+    constantBlocks, createProgramCache, keptBlocks, samplerDimension, shapeKey, vertexLayoutOf,
 } from '../webgpu/internal/programmable.js';
 import {
     FOG_RANGE_LOCATION, HYBRID_CONSTANTS, VERTEX_SAMPLER_BINDING, fixedVertexStage, translateShader,
@@ -1401,6 +1401,9 @@ function stageConstantsOf(model){
     return floats;
 }
 
+/** The last arena serial handed out (`createUniformArena`). */
+let arenaSerials = 0;
+
 /**
  * Where a frame's uniform blocks are laid: one array the frame's draws take
  * their blocks out of in turn, kept from frame to frame. A block is read at
@@ -1413,8 +1416,14 @@ export function createUniformArena(floats = 1 << 16){
     let storage = new Float32Array(floats);
     let used = 0;
     return {
+        /**
+         * Which arena and which of its frames: new at each reset, and never
+         * another arena's, so a block kept by it is one this frame took.
+         */
+        serial: ++arenaSerials,
         reset(){
             used = 0;
+            this.serial = ++arenaSerials;
         },
         /** @param {number} count @returns {Float32Array} */
         take(count){
@@ -2242,15 +2251,16 @@ export function addressVariantOf(get, dimension){
     {
         return NO_ADDRESS_VARIANT;
     }
-    const axes = dimension === '2d' ? [D3DTSS.ADDRESSU, D3DTSS.ADDRESSV]
-        : [D3DTSS.ADDRESSU, D3DTSS.ADDRESSV, D3DTSS.ADDRESSW];
+    // Read at every shader draw for each sampler: no list made for it.
+    const axes = dimension === '2d' ? 2 : 3;
     let mirrorOnce = 0;
     let border = 0;
-    axes.forEach((state, axis)=>{
-        const mode = get(state);
+    for (let axis = 0; axis < axes; axis++)
+    {
+        const mode = get(ADDRESS_STATES[axis]);
         mirrorOnce |= mode === D3DTADDRESS.MIRRORONCE ? 1 << axis : 0;
         border |= mode === D3DTADDRESS.BORDER ? 1 << axis : 0;
-    });
+    }
     if (mirrorOnce === 0 && border === 0)
     {
         return NO_ADDRESS_VARIANT;
@@ -2261,6 +2271,9 @@ export function addressVariantOf(get, dimension){
         ...(border === 0 ? {} : { border: { mask: border, colour } }),
     };
 }
+
+/** The address states of the U, V and W axes, in that order. */
+const ADDRESS_STATES = Object.freeze([D3DTSS.ADDRESSU, D3DTSS.ADDRESSV, D3DTSS.ADDRESSW]);
 
 /** The furthest a level-of-detail bias moves a sample, either way, as hardware holds it. */
 const LOD_BIAS_LIMIT = 16;
@@ -2971,6 +2984,9 @@ const CLEAR_STRIDE = 20;
  *     Whether a DXT surface uploads as BC blocks (true, when its base is also
  *     block-aligned) or decodes to `bgra8unorm` (false, the default). Never
  *     whether a DXT surface may be created -- that is the device's to say.
+ * @property {boolean} [keepConstantBlocks]  Whether a shader draw's integer and
+ *     boolean blocks are the last draw's while their files hold still (the
+ *     default) or taken again for every draw: the gate's second path.
  */
 
 /** D3DUSAGE_DYNAMIC: a buffer the program keeps writing. */
@@ -3034,6 +3050,7 @@ export function createRenderer(options){
         return tracked;
     };
     const createSampler = options.createSampler ?? null;
+    const keepConstantBlocks = options.keepConstantBlocks !== false;
     const dumpDraws = options.dumpDraws === true;
     const nanProbe = options.nanProbe === true;
     const tableFogOverDepth = options.driverRules === 'current';
@@ -3063,9 +3080,26 @@ export function createRenderer(options){
     const fixedSkips = new Set((options.skipTexture ?? '').split(',').filter(Boolean));
     /** The textures whose draws are dropped: the device's own, or what a running program was given. */
     const skipTextures = ()=>(liveDump?.skipTexture
-        ? new Set(liveDump.skipTexture.split(',').filter(Boolean)) : fixedSkips);
+        ? namedSet(skipTexturesNamed, liveDump.skipTexture) : fixedSkips);
     /** The shaders whose draws are dropped, `vs12,ps40` as a dump names them: a running program's. */
-    const skipShaders = ()=>new Set((liveDump?.skipShader ?? '').split(',').filter(Boolean));
+    const skipShaders = ()=>namedSet(skipShadersNamed, liveDump?.skipShader ?? '');
+    /**
+     * The names a switch's list holds, made again only when the list does: the
+     * switches are read at every draw, and a set made for each was 230 bytes
+     * a shader draw allocated for a switch nobody had set.
+     *
+     * @param {{ from: string, names: Set<string> }} named @param {string} list
+     */
+    const namedSet = (named, list)=>{
+        if (named.from !== list)
+        {
+            named.from = list;
+            named.names = new Set(list.split(',').filter(Boolean));
+        }
+        return named.names;
+    };
+    const skipTexturesNamed = { from: '', names: new Set() };
+    const skipShadersNamed = { from: '', names: new Set() };
     /** How many texture stages a fixed-function draw keeps (`app.debug.stageLimit`), -1 all. */
     const stageLimit = ()=>(typeof liveDump?.stageLimit === 'number' ? liveDump.stageLimit : -1);
     const probeTexture = options.probeTexture ?? null;
@@ -6069,11 +6103,13 @@ export function createRenderer(options){
         }
         const { pixel, vertex, samplerPlan, state, source } = pieces;
         const samplerBindings = samplerBindingsOf(model, pieces, samplerPlan);
-        const take = ensureFrame().arena.take;
+        const arena = ensureFrame().arena;
+        const take = arena.take;
         const vertexBlocks = program.vertex
-            ? shaderVertexBlocks(model, program, vertex, take)
+            ? shaderVertexBlocks(model, program, vertex, take, arena.serial)
             : hybridBlocks(model, take, vertex);
-        const pixelBlocks = constantBlocks(program.pixelConstants, pixel.constants, take);
+        const pixelBlocks = constantBlocks(program.pixelConstants, pixel.constants, take,
+            keptPixelBlocks, arena.serial);
         if (pixel.bumpRegister !== undefined)
         {
             bumpMatrices(model, pixelBlocks[0], pixel.bumpRegister);
@@ -6166,6 +6202,12 @@ export function createRenderer(options){
         pieces.samplerBindings = made;
         return made;
     };
+    /**
+     * Each stage's integer and boolean blocks while their files hold still
+     * (`constantBlocks`); off, every draw takes blocks of its own.
+     */
+    const keptVertexBlocks = keepConstantBlocks ? keptBlocks() : undefined;
+    const keptPixelBlocks = keepConstantBlocks ? keptBlocks() : undefined;
     /** What `samplerBindingsOf` worked out for each planned sampler of the draw. */
     /** @type {any[]} */
     const boundTextures = [];
@@ -6409,6 +6451,14 @@ export function createRenderer(options){
         const vertexOnes = onesAt(model, program.vertex, D3DVERTEXTEXTURESAMPLER0);
         const pixelVariants = variantsAt(model, program.pixel, 0);
         const vertexVariants = variantsAt(model, program.vertex, D3DVERTEXTEXTURESAMPLER0);
+        const version = program.pixel?.version;
+        if (pixelOnes === null && vertexOnes === null && pixelVariants === null
+            && vertexVariants === null && (!version || version.major >= 2))
+        {
+            // What nearly every draw of a shader-model-2 program is: nothing
+            // made for it.
+            return PLAIN_SAMPLING;
+        }
         const pixelPart = (pixelOnes === null ? '' : `|o${onesKey(pixelOnes)}`)
             + (pixelVariants === null ? '' : `|s${variantsKey(pixelVariants)}`);
         const ones = pixelPart + (vertexOnes === null ? '' : `|v${onesKey(vertexOnes)}`)
@@ -6419,7 +6469,6 @@ export function createRenderer(options){
             ...(pixelVariants === null ? {} : { pixelVariants }),
             ...(vertexVariants === null ? {} : { vertexVariants }),
         };
-        const version = program.pixel?.version;
         if (!version || version.major >= 2)
         {
             return ones === '' ? PLAIN_SAMPLING
@@ -6777,8 +6826,9 @@ export function createRenderer(options){
             sampler: pieces.samplers[index],
             placeholder: !texture,
         }));
-        const take = ensureFrame().arena.take;
-        const vertexBlocks = shaderVertexBlocks(model, program, pieces.vertex, take);
+        const arena = ensureFrame().arena;
+        const take = arena.take;
+        const vertexBlocks = shaderVertexBlocks(model, program, pieces.vertex, take, arena.serial);
         const pixelBlocks = [pixelUniformsOf(model, take, mipsApplied, pieces.tail), take(64),
             take(16)];
         return {
@@ -7054,9 +7104,11 @@ export function createRenderer(options){
      * @param {RenderModel} model @param {ProgramState} program
      * @param {import('../d3d9/wgsl.js').TranslatedShader} vertex
      * @param {(floats: number) => Float32Array} take
+     * @param {number} serial  the arena's
      */
-    const shaderVertexBlocks = (model, program, vertex, take)=>{
-        const blocks = constantBlocks(program.vertexConstants, vertex.constants, take);
+    const shaderVertexBlocks = (model, program, vertex, take, serial)=>{
+        const blocks = constantBlocks(program.vertexConstants, vertex.constants, take,
+            keptVertexBlocks, serial);
         if (vertex.viewportRegister !== undefined)
         {
             blocks[0].set(model.viewport.scale, vertex.viewportRegister * 4);

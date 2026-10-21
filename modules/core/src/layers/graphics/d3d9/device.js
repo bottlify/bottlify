@@ -471,6 +471,7 @@ const isDepthFormat = format=>FORMAT_INFO[format] !== undefined && FORMAT_INFO[f
  * @property {boolean} [fog]
  * @property {'legacy' | 'current'} [driverRules]  The renderer's (`createRenderer`).
  * @property {boolean} [rectangleBump]  The renderer's (`createRenderer`).
+ * @property {boolean} [keepConstantBlocks]  The renderer's (`createRenderer`).
  * @property {boolean} [keepMemory]  Released resources' memory is never given back (debugging).
  * @property {boolean} [rereadBuffers]  The renderer's (`createRenderer`).
  * @property {boolean} [drawsNothing]  Nothing is drawn on purpose (the graphics
@@ -528,7 +529,7 @@ export function createDirect3D9(options = {}){
         probeTexture, fog, mips, driverRules, onDeviceLost, gamma, frameQueued, renderedElsewhere,
         occlusionCounted,
         keepMemory, rereadBuffers, drawsFrom, leftStorage, whileStill, rectangleBump, drawsNothing,
-        watchWrites,
+        watchWrites, keepConstantBlocks,
         ...caps
     } = options;
     /** @type {DeviceCaps} */
@@ -544,7 +545,7 @@ export function createDirect3D9(options = {}){
         probeTexture, fog, mips, driverRules, onDeviceLost, gamma, frameQueued, renderedElsewhere,
         occlusionCounted,
         rereadBuffers, drawsFrom, leftStorage, whileStill, rectangleBump, drawsNothing,
-        watchWrites,
+        watchWrites, keepConstantBlocks,
     };
     if (backend && !readMemory)
     {
@@ -953,6 +954,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             occlusionCounted: services.occlusionCounted,
             rereadBuffers: services.rereadBuffers,
             compressedTextures: caps.compressedTextures,
+            keepConstantBlocks: services.keepConstantBlocks,
         })
         : null;
 
