@@ -105,7 +105,6 @@ publishing). The tables list only the settings that are data; `memory` and `load
 | `checkDraws` | `false` | For debugging, with a graphics worker: every Direct3D draw from a buffer compares the bytes it reads in guest memory with what the worker was sent of them; the report's `drawChecks` counts the draws that read stale bytes and keeps the first of them. `app.debug.checkDraws(on)` switches it while a program runs, comparing from that moment. |
 | `rereadBuffers` | `false` | For debugging, without a graphics worker: every Direct3D draw compares the vertices it reaches with guest memory and sends what changed, for every buffer (a dynamic one always does). |
 | `guestTraps` | `[]` | With `guestCode` on, the parts of that guest code kept as traps anyway: methods by name, or the groups `getters`, `ring`, `locks`, `levels` and `counts`. For narrowing down which part a fault is in. |
-| `drainIdle` | `true` | With several executors, the process's own executor, when it has nothing to run, plays the calls a Direct3D 8 or 9 program recorded in its ring so far, so the `Present` or lock that would take them finds less waiting. `false` leaves the ring to the call that takes it, for measurement. |
 
 ## audio
 

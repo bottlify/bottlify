@@ -4171,11 +4171,6 @@ async function buildApp(options){
             // The process's own executor kept for the host's answers while a
             // thread is pinned to its processor (the kernel's `freeHost`).
             freeHost: options.cpu?.freeHost,
-            // What that executor does with nothing of its own to run, in place
-            // of a wait for the others (the kernel's `whileIdle`): a Direct3D
-            // device's ring of calls made ahead of the Present that would take
-            // it, which the thread calling waits for otherwise.
-            whileIdle: ()=>core.api('graphics')?.drain?.() === true,
             // Off unless asked for: see the kernel's `preemption`.
             preemption: options.preemption,
             // Every thread gets the stack the image was linked to expect, the

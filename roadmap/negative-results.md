@@ -1244,3 +1244,40 @@ None yet.
   from being formed over them, stays on: it cost no transfer (xz 103.0 million) and took Far Cry
   from 842 to 345 MB. A stop that keeps out of hot code -- stopping only in code that runs rarely,
   or forming a region again without its stops once a transfer at one turns hot -- is still open.
+
+### 2026-10-21 -- the process's executor makes a Direct3D ring ahead while it has nothing to run
+
+- **Idea.** With the free host (the program's threads on other executors), the render thread's
+  Present took the frame's whole command ring on the process's executor while the thread waited
+  (735 us of host time a Present in a Call of Duty 4 firefight). The process's executor is idle
+  about 30% of the time there; the guess was that it could make the ring between calls, when it
+  has nothing to run (the kernel's shared turn calling the graphics layer before it waits for the
+  other executors), so that a Present finds little left. The device's lock is taken only when free
+  at once; a routine that finds it taken leaves for the host.
+- **Workload.** Call of Duty 4 demo, `bog_a`, the firefight (W held once play starts), scratchpad
+  `cod4/ingame3.sh` (`tools/cdp_test/game.mjs cod4-demo --worker --coi --no-video --fake-gpu --gpu
+  sm3 --memory 2048 --screen 1024x768 --executors 3 --run-seconds 420 --series 100`, the profile
+  `cod4data-e3` warm, its bundle 2 667-2 883 of 5 443 blocks cached), window 240-420 s. Bundle:
+  `bundles/cod4-demo`, manifest sha256 `ead9cfb87a8147ce...`. Tree: `d2ddaf75` with the drain
+  switched by `graphics.drainIdle`; the quiet variant is `d2ddaf75` plus a check that the ring's
+  head has stood still for 0.5 ms.
+- **Values** (ms a frame by the frame series, host / guest, guest instructions in 420 s, the
+  routines that found the device's lock taken, presents' gaps p95 and over 100 ms):
+  without: 64.0 (34.9 / 29.1) 200.5 G, 2 011, 95.9, 117; 60.3 (34.0 / 26.2) 204.4 G, 2 261,
+  83.7, 62; 70.2 (36.6 / 33.5) 197.0 G, 1 670, 101.3, 137. Made ahead whenever idle: 65.8 (30.7 /
+  35.1) 198.7 G, 43 228, 100.5, 139, made 77 673 times (15.6 s); 64.3 (30.5 / 33.8) 201.9 G,
+  44 770, 94.3, 111, 77 980 times (16.3 s). Made ahead once the head stood still: 59.8 (33.0 /
+  26.8) 206.6 G, 2 733, 82.8, 58, made 2 441 times (0.9 s); 66.0 (34.8 / 31.1) 194.2 G, 2 614,
+  102.0, 154, 2 826 times (1.2 s). One run per line, alternated; the same arm varies by +-5 ms.
+  A first made-ahead run (73.2 ms, 40 900) is left out: the tree it loaded was edited during it.
+- **Machine.** The 4-core KVM VM (Intel Xeon @ 2.10 GHz), headless Chromium 141.0.7390.37, the
+  fake GPU, node 22.22.0. Power plan not recorded.
+- **Correctness.** A gate played the frames and streaming gates' seeded programs with the ring
+  made ahead at random points and without, every answer and GPU read the same; it caught the ring
+  made without the buffers the guest let go of settled first.
+- **Decision.** Removed. Made whenever the executor was idle, the ring was taken while the render
+  thread was writing it: its routines found the lock taken twenty times as often and left for the
+  host, and the host time a frame saved (~4 ms) went back as guest time. Made only once the
+  thread had stopped writing, it ran rarely (the thread ends its frame with the Present that
+  takes the ring anyway) and moved nothing. Frame times stayed within the noise either way. A
+  ring taken without the device's lock (records copied out under it, played after) is still open.

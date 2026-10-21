@@ -3586,13 +3586,6 @@ export function createDirect3D9Seam(
 
         /** What that device's program set in the guest, and the calls that never crossed. */
         shadow: ()=>(lastDevice ? shadowOf(lastDevice)?.diagnostics() ?? null : null),
-        /**
-         * The last device's ring made ahead of the call that would take it,
-         * by an executor with nothing to run (the shadow's `drain`).
-         *
-         * @returns {boolean} whether there were records to make
-         */
-        drain: ()=>(lastDevice ? shadowOf(lastDevice)?.drain() ?? false : false),
 
         /** For tests, which have no guest to call through. */
         interfaces: {

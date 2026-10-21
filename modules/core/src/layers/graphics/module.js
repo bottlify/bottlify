@@ -1383,16 +1383,6 @@ export function createGraphicsModule(){
                 },
 
                 /**
-                 * A Direct3D device's ring of recorded calls made ahead of the
-                 * call that would take it, by the process's executor with
-                 * nothing of its own to run (the kernel's `whileIdle`).
-                 *
-                 * @returns {boolean} whether there were records to make
-                 */
-                drain: ()=>(state.seam && !state.disposed && config?.drainIdle !== false
-                    ? state.seam.drain() : false),
-
-                /**
                  * The pixel-format negotiation and frame presentation whose entry
                  * points GDI32 exports. win32 sits below this layer and cannot
                  * reach it, so the assembling caller hands this down.
