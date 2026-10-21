@@ -69,7 +69,8 @@ function buildProgram(worker, own){
  *
  * @param {Uint8Array} executable @param {number} cores
  * @param {{ placement?: 'auto' | 'spread' | 'concentrate',
- *     placementTiming?: Partial<import('./layers/kernel/internal/placement.js').PlacementOptions> }} [cpu]
+ *     placementTiming?: Partial<import('./layers/kernel/internal/placement.js').PlacementOptions>,
+ *     freeHost?: boolean }} [cpu]
  */
 async function run(executable, cores, cpu = {}){
     const app = await createApp({ executable, cpu: { cores, eager: true, ...cpu } });
@@ -98,7 +99,7 @@ test('two threads computing apart are run spread: nothing they do says either ga
         0x49, { jump: 'jnz', to: 'loop' }, // dec ecx; jnz loop
         0x31, 0xc0, 0xc2, 0x04, 0x00, //      xor eax, eax; ret 4
     ], ()=>[]);
-    const { code, placement, scheduler } = await run(executable, 3);
+    const { code, placement, scheduler } = await run(executable, 3, { freeHost: false });
     assert.equal(code, 0);
     assert.deepEqual([placement?.way, placement?.moves, placement?.here], ['auto', 0, ''],
         JSON.stringify(placement));
@@ -128,7 +129,8 @@ test('a locked count kept by three threads comes out whole spread, concentrated 
     assert.equal(fixed.concentrate, 0, 'concentrated, none did');
 
     // A thread moved in or out every few milliseconds, gains or not (`churnMs`).
-    const moving = await run(executable, 3, { placementTiming: { churnMs: 5, windowMs: 2 } });
+    const moving = await run(executable, 3, { placementTiming: { churnMs: 5, windowMs: 2 },
+        freeHost: false });
     assert.equal(moving.code, 3 * ADDS, 'moved between executors');
     assert.ok(moving.placement.moves >= 5, JSON.stringify(moving.placement));
     assert.ok(moving.scheduler?.executorSlices > 0, 'some of it spread');

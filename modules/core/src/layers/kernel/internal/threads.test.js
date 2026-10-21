@@ -1442,8 +1442,9 @@ test('another executor\'s ask inside an unbroken routine here is put off until t
     assert.equal(JSON.parse(JSON.stringify(sched.diagnostics())).asksPutOff, 2);
 });
 
-test('with freeHost a thread pinned to the first processor has it played by another executor,'
-    + ' this one keeping to the host\'s answers, and is told it is on the first still', ()=>{
+test('by default (freeHost) a thread pinned to the first processor has it played by another'
+    + ' executor, this one keeping to the host\'s answers, and is told it is on the first still',
+()=>{
     // A game's main thread, pinned to the first processor, took four tenths of
     // this executor while its render thread, on another, waited half its time
     // for the answers this executor gives.
@@ -1468,7 +1469,7 @@ test('with freeHost a thread pinned to the first processor has it played by anot
         },
     };
     const sched = createScheduler({ cpu: machine, switcher: createSwitcher({ cpu: machine }),
-        quantum: 5000, freeHost: true });
+        quantum: 5000 });
     const main = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
     sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'sound' });
     main.affinityMask = 0b01;
@@ -1593,7 +1594,8 @@ function pinnedRenderer(renderMs){
             trapTimed: (/** @type {(ms: number) => void} */ hook)=>{
                 timed = hook;
             } },
-        switcher: createSwitcher({ cpu }), quantum: 5000, wall: ()=>clock, placement: 'spread' });
+        switcher: createSwitcher({ cpu }), quantum: 5000, wall: ()=>clock, placement: 'spread',
+        freeHost: false });
     const main = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
     const render = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'render' });
     main.affinityMask = 0b01;
@@ -1653,7 +1655,7 @@ test('a thread that may run only here takes this executor\'s turn from one that 
     const { cpu } = twoExecutors();
     const [remote] = cpu.executors();
     const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 5000,
-        placement: 'spread' });
+        placement: 'spread', freeHost: false });
     const main = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
     const mixer = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'mixer' });
     main.affinityMask = 0b01;
@@ -1686,7 +1688,8 @@ test('a thread that may run only here, readied in the slice of one that may run 
                 }
                 return max;
             } },
-        switcher: createSwitcher({ cpu }), quantum: 5000, placement: 'spread' });
+        switcher: createSwitcher({ cpu }), quantum: 5000, placement: 'spread',
+        freeHost: false });
     const main = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
     const worker = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'worker' });
     main.affinityMask = 0b01;

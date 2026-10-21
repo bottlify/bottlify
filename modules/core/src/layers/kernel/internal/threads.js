@@ -302,7 +302,8 @@ const readyNow = thread=>{
  *        the waits it adds (`playPinned`); on unless false.
  * @param {boolean} [options.freeHost]  Whether this executor keeps itself for the host's
  *        answers while a thread is pinned to its processor, playing one nothing is pinned
- *        to (`freeHost`); off unless true, and then the threads spread and none is moved.
+ *        to (`freeHost`); on unless false, and then the threads spread unless the run names
+ *        a placement, and no processor is traded on its gains.
  */
 export function createScheduler(options){
     const { cpu, switcher, quantum = 100_000, now = ()=>0, skipTo = ()=>0 } = options;
@@ -431,11 +432,12 @@ export function createScheduler(options){
     // and without them a report of a production run says nothing of which
     // thread the machine was spent on.
     const wall = options.wall ?? (()=>performance.now());
-    /** How the threads are placed: as the run names, or each moved on its gains. */
-    const placementWay = options.placement
-        ?? (options.freeHost === true ? Placement.SPREAD : Placement.AUTO);
+    /** Whether this executor keeps itself for the host's answers (`freeHost`). */
+    const freeHost = options.freeHost !== false;
+    /** How the threads are placed: as the run names, spread beside a free host, or on gains. */
+    const placementWay = options.placement ?? (freeHost ? Placement.SPREAD : Placement.AUTO);
     /** Whether this executor may play a pinned thread's processor on its gains (`playPinned`). */
-    const trading = options.playPinned !== false && options.freeHost !== true;
+    const trading = options.playPinned !== false && !freeHost;
     /**
      * The moves the threads' gains propose (`gains`), made one at a time
      * (`placement.js`): a thread taking turns on this executor or not, this
@@ -1477,7 +1479,7 @@ export function createScheduler(options){
      * @param {any[]} remotes
      */
     const playPinned = (/** @type {any[]} */ remotes)=>{
-        const want = options.freeHost === true ? freeTarget(remotes) : tradeTarget;
+        const want = freeHost ? freeTarget(remotes) : tradeTarget;
         const here = playedBy(0);
         if (here === want)
         {

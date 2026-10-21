@@ -297,10 +297,11 @@ const hashText = (hash, text)=>{
  *           `playPinned`: false keeps every processor on its own core; by default a
  *           thread the program pinned to one processor and that calls into the host
  *           often has its processor played by the process's own core, where those
- *           calls are answered. `freeHost`: true keeps the process's own core for
- *           the host's answers while a thread is pinned to its processor (a game's
- *           main thread, pinned to the first), the processor played by another core;
- *           off by default, and with it on the threads spread with no trial.
+ *           calls are answered. `freeHost` (on unless false) keeps the process's own
+ *           core for the host's answers while a thread is pinned to its processor (a
+ *           game's main thread, pinned to the first), the processor played by another
+ *           core; with it the threads spread unless `placement` is named, and no
+ *           processor is traded on its gains, so `playPinned` applies only with it off.
  * @property {number} [executors]  `cpu.cores` by its older name: executors of the
  *           program's process under cork, past the process's own thread each a worker
  *           running one of its threads at once with the others, the locked
