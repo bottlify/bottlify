@@ -865,8 +865,9 @@ function describeCork(cork, say){
         + `  forced steps: ${cork.forcedSteps ?? 0}`
         + `  cache: ${cork.cacheHits ?? 0} hit / ${cork.cacheMisses ?? 0} miss`
         + ` (no record ${cork.missNoRecord ?? 0}, another region ${cork.missChanged ?? 0},`
-        + ` no module ${cork.missNoModule ?? 0}; ${cork.hitsFormedAgain ?? 0} hits formed as`
-        + ` their records say, ${cork.toStoredRegion ?? 0} blocks taken as the stored region`
+        + ` no module ${cork.missNoModule ?? 0}; ${cork.formedAsRecorded ?? 0} hits formed`
+        + ` once as their records say, ${cork.hitsFormedAgain ?? 0} formed again so,`
+        + ` ${cork.toStoredRegion ?? 0} blocks taken as the stored region`
         + ' holding them)'
         + `  store batches: ${cork.lookedUpNow ?? 0} at once / ${cork.lookedUpLater ?? 0}`
         + ' a turn later');
@@ -1034,6 +1035,9 @@ function describe(result, context, calls, symbols){
                 + ` between turns ${seconds(own.betweenMs)}; retired`
                 + ` ${(own.hereRetired / 1e9).toFixed(1)} G, ${rate(own.hereRetired, own.hereMs)}`
                 + ' in its slices');
+            // The work done in place of a wait (the kernel's `whileIdle`).
+            say(`    e0 idle work: ${own.idleWork ?? 'not measured'} times,`
+                + ` ${own.idleWorkMs === undefined ? 'not measured' : seconds(own.idleWorkMs)}`);
         }
         for (const one of executors.remotes ?? [])
         {
@@ -1206,7 +1210,8 @@ function describe(result, context, calls, symbols){
                 .map(([why, count])=>`${why} ${count}`).join(', ') || 'none';
             say(`    guest block: commands ${shadow.commandCalls}, buffer locks in the guest`
                 + ` ${shadow.lockCalls}, host waits for a routine ${shadow.heldWaits}`
-                + ` (${shadow.heldWaitMs} ms, ${shadow.heldBroken} broken)`);
+                + ` (${shadow.heldWaitMs} ms, ${shadow.heldBroken} broken), rings made ahead`
+                + ` ${shadow.drained ?? 'not measured'}`);
             say(`      routines left for the host: ${counts(shadow.left)}`);
             say(`      host buffer locks: ${counts(shadow.hostLocks)}`);
             say(`      host level locks: ${counts(shadow.hostLevelLocks)}`);

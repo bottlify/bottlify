@@ -591,6 +591,8 @@ export function machine(version, guestCode, options = {}){
         /** The recording GPU the devices draw on, when asked for. */
         gpu,
         pending,
+        /** The ring made ahead, as an executor with nothing to run does (`shadow.js` `drain`). */
+        drain: ()=>libraries.drain(),
         gone,
         /** Which of the objects named so far the host has let go of, in naming order. */
         ended: ()=>[...objectOf.entries()].filter(([, object])=>ended(object))

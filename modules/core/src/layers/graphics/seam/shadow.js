@@ -592,6 +592,8 @@ export function createCommandReader(deps){
                 }
             }
         },
+        /** Whether the ring holds anything not yet taken: a look at its head. */
+        pending: ()=>readWord(block + SHADOW.COMMAND_HEAD) !== tail,
         /** How many calls the ring has carried. */
         taken: ()=>taken,
         /**
@@ -3508,6 +3510,8 @@ export function createShadow(deps){
      * is one thread, and its operations call one another.
      */
     let holds = 0;
+    /** Rings made ahead by an executor with nothing to run (`drain`). */
+    let drained = 0;
     /** Takes of the lock that found a routine holding it, the time they waited, and those that broke it. */
     const heldWaits = { count: 0, ms: 0, broken: 0 };
     /** Whether the ring is being taken: a mirror written from inside does not take it again. */
@@ -4647,6 +4651,44 @@ export function createShadow(deps){
         },
 
         /**
+         * `sync` ahead of the call that would make it, by an executor with
+         * nothing of its own to run: the ring's records made now, while the
+         * thread that wrote them goes on, and the Present or lock that takes
+         * the ring next finds only what came since. Only with the device's
+         * lock free at once -- a routine holding it is writing, and the next
+         * look takes what it wrote -- and never inside a call of the host's
+         * that holds it.
+         *
+         * @returns {boolean} whether the ring held records and they were made
+         */
+        drain(){
+            if (address === 0 || holds !== 0 || commandReader === null
+                || !commandReader.pending())
+            {
+                return false;
+            }
+            // With one executor the host never runs beside a routine, but a
+            // thread stopped inside one still holds the word.
+            const at = address + SHADOW.HELD;
+            if (deps.compareExchangeU32 === undefined ? readWord(at) !== 0
+                : deps.compareExchangeU32(at, 0, HELD_HOST) !== 0)
+            {
+                return false;
+            }
+            holds = 1;
+            drained++;
+            try
+            {
+                syncAll();
+            }
+            finally
+            {
+                letGo();
+            }
+            return true;
+        },
+
+        /**
          * `sync` before an object's count is read or lowered on the host, when
          * what waits in the ring can bind or unbind it: it is bound now (a
          * record may let it go), a record names one of its pointers, a state
@@ -5058,6 +5100,8 @@ export function createShadow(deps){
             // The host's takes of the device's lock that waited for a routine,
             // how long in all, and how many it broke at HELD_WAIT_MS.
             heldWaits: heldWaits.count,
+            // Rings made ahead of the call that would take them (`drain`).
+            drained,
             heldWaitMs: Math.round(heldWaits.ms),
             heldBroken: heldWaits.broken,
             hostLocks: { ...hostLocks },

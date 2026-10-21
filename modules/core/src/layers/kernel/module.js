@@ -200,6 +200,9 @@ export function createKernelModule(){
                 placementTiming: config?.placementTiming,
                 playPinned: config?.playPinned,
                 freeHost: config?.freeHost,
+                // What the process's executor does in place of a wait: given by
+                // the assembler, which knows the layers above this one.
+                whileIdle: typeof config?.whileIdle === 'function' ? config.whileIdle : undefined,
                 // The guest's Sleep reads it (`mirrorReady`).
                 readyChanged: (/** @type {number} */ count)=>{
                     if (state.readyWord !== 0)

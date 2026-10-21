@@ -300,6 +300,9 @@ const readyNow = thread=>{
  * @param {boolean} [options.playPinned]  Whether this executor may play the processor
  *        of a pinned thread whose calls into the host cost it most, where that saves
  *        the waits it adds (`playPinned`); on unless false.
+ * @param {() => boolean} [options.whileIdle]  Work this executor does when nothing is
+ *        to run here and the others' bell is about to be waited for: true when it did
+ *        some (the graphics layer's rings made ahead, `drain`).
  * @param {boolean} [options.freeHost]  Whether this executor keeps itself for the host's
  *        answers while a thread is pinned to its processor, playing one nothing is pinned
  *        to (`freeHost`); on unless false, and then the threads spread unless the run names
@@ -1042,10 +1045,11 @@ export function createScheduler(options){
      * others (`elsewhereRetired`), whichever threads they were, and the calls
      * into the host the others' threads made (`crossings`), each answered here
      * (`answers` counts the passes that answered them), those of them answered
-     * inside a slice of this one's (`crossingsInTurn`).
+     * inside a slice of this one's (`crossingsInTurn`). And the work done in
+     * place of a wait (`whileIdle`): how many times there was some, and how long.
      */
     const sharedTime = { hereMs: 0, answerMs: 0, waitMs: 0, answers: 0, crossings: 0,
-        crossingsInTurn: 0, turns: 0,
+        crossingsInTurn: 0, turns: 0, idleWork: 0, idleWorkMs: 0,
         betweenMs: 0, heldMs: 0, gapMs: 0, gaps: 0, hereRetired: 0, elsewhereRetired: 0,
         // Counts by bound in ms: the gaps before another executor's next slice,
         // and this executor's own turns.
@@ -2264,6 +2268,19 @@ export function createScheduler(options){
                 // the others ran (`elsewhere`), not an idle machine's: no thread
                 // of this executor's is the turn's, theirs still being run.
                 const deadline = soonest();
+                // The wait spent first on what a call of another thread's would
+                // otherwise wait for (`whileIdle`): a device's ring of recorded
+                // calls made ahead of the Present that takes it. A word that
+                // came meanwhile ends the wait at once.
+                if (options.whileIdle !== undefined)
+                {
+                    const idleFrom = wall();
+                    if (options.whileIdle())
+                    {
+                        sharedTime.idleWork++;
+                        sharedTime.idleWorkMs += wall() - idleFrom;
+                    }
+                }
                 const waitFrom = wall();
                 bell.wait(seen, Math.max(0, Math.min(EXECUTORS_WAIT_MS,
                     deadline === null ? Infinity : deadline - now())));

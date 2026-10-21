@@ -1038,13 +1038,25 @@ export function streaming(seed, steps, nine){
  * @param {Version} version @param {boolean} guestCode @param {Step[]} steps
  * @param {boolean} [worker]  whether the device records for a twin that draws, as in a
  *     graphics worker
+ * @param {number} [drainSeed]  where an executor with nothing to run makes the ring
+ *     ahead (`shadow.js` `drain`): after a third of the calls and writes, drawn from
+ *     this seed; nowhere when 0
  */
-export async function play(version, guestCode, steps, worker = false){
+export async function play(version, guestCode, steps, worker = false, drainSeed = 0){
     const calls = callsOf(version);
     // Clip planes, which a Direct3D 9 device has none of until it is told it
     // has: its guest code takes a plane only below the count.
     const m = machine(version, guestCode, { gpu: true, worker, caps: { maxUserClipPlanes: 6 } });
     const gpu = gpuReads(m.gpu);
+    const drainAt = drainSeed === 0 ? null : random(drainSeed);
+    /** Rings made ahead, which a run with drains must have made for the gate to say anything. */
+    let drained = 0;
+    const mayDrain = ()=>{
+        if (drainAt !== null && drainAt.below(3) === 0 && m.drain())
+        {
+            drained++;
+        }
+    };
     /** @type {string[]} */
     const answers = [];
     /** @type {Map<string, number>} */
@@ -1071,10 +1083,14 @@ export async function play(version, guestCode, steps, worker = false){
         {
             done.set(call.method, (done.get(call.method) ?? 0) + 1);
         }
+        mayDrain();
         return answer;
     };
     /** Writes through what a lock handed back. @param {number} at @param {Uint8Array} bytes */
-    const write = (at, bytes)=>m.memory.writeBytes(at, bytes);
+    const write = (at, bytes)=>{
+        m.memory.writeBytes(at, bytes);
+        mayDrain();
+    };
     /** @param {string} on @param {'texture' | 'level'} through @param {number} fill */
     const texels = (on, through, fill)=>{
         const bytes = Uint8Array.from({ length: TEXELS * TEXELS * 4 },
@@ -1536,7 +1552,7 @@ export async function play(version, guestCode, steps, worker = false){
     run(calls.device('EndScene'));
     run(calls.present);
     await idle(m.gpu);
-    return { answers, gpu, inGuest, done, moves, heldAcross,
+    return { answers, gpu, inGuest, done, moves, heldAcross, drained,
         storages: Object.fromEntries([...storages].map(([on, set])=>[on, set.size])) };
 }
 
@@ -1857,5 +1873,55 @@ export function frameGate(version, which){
             `each buffer moved round its storages: ${JSON.stringify(storages)}`);
         assert.ok(heldAcross > 30, `calls into the host under a held lock of a storage the`
             + ` device had not moved onto (${heldAcross})`);
+    });
+}
+
+/**
+ * The ring made ahead by an executor with nothing to run (`shadow.js`
+ * `drain`) against the ring made only when a call takes it: the same programs,
+ * with the guest code and with the device recording for a twin, drained after a
+ * seeded third of their calls and writes -- between a lock and its writes and
+ * between a write and its unlock among them -- and not at all.
+ *
+ * @param {Version} version
+ */
+export function drainGate(version){
+    const nine = version === D3D9;
+    test(`${nine ? 'Direct3D 9' : 'Direct3D 8'}: a ring made ahead gives the program and the GPU`
+        + ' what a ring made when a call takes it does', async()=>{
+        /** @type {string[]} */
+        const wrong = [];
+        let drained = 0;
+        /** @type {[string, (seed: number) => Step[]][]} */
+        const programs = [
+            ['frames', seed=>generate(seed, 200, callsOf(version).upUnbinds, nine)],
+            ['streaming', seed=>streaming(seed, 300, nine)]];
+        for (const [kind, programOf] of programs)
+        {
+            for (let seed = 1; seed <= 12 && wrong.length === 0; seed++)
+            {
+                const steps = programOf(seed);
+                for (const worker of [false, true])
+                {
+                    const one = await play(version, true, steps, worker);
+                    const other = await play(version, true, steps, worker, seed * 7919);
+                    drained += other.drained;
+                    const arm = worker ? 'recorded' : 'drawing itself';
+                    for (const found of [
+                        parting(['made when taken', one.answers], ['made ahead', other.answers],
+                            'answer'),
+                        parting(['made when taken', one.gpu], ['made ahead', other.gpu],
+                            'GPU draw')])
+                    {
+                        if (found)
+                        {
+                            wrong.push(`${kind} seed ${seed}, ${arm}: ${found}`);
+                        }
+                    }
+                }
+            }
+        }
+        assert.deepEqual(wrong, []);
+        assert.ok(drained > 500, `rings made ahead (${drained})`);
     });
 }

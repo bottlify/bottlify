@@ -175,7 +175,7 @@ const E_OUTOFMEMORY = 0x8007000e | 0;
  *                       swapBuffers: (hdc: number) => boolean | Promise<boolean>,
  *                       entry: (name: string) => ((args: number[]) => number) | null },
  *             diagnostics: () => any,
- *             shadow: () => any }}
+ *             shadow: () => any, drain: () => boolean }}
  */
 export function createGraphicsLibraries(
     { graphics, only, memory, publishInterface, unpublishInterface, screen, gdi, present,
@@ -836,5 +836,14 @@ export function createGraphicsLibraries(
          * report prints it beside the crossings it stands in for.
          */
         shadow: ()=>d3d9?.shadow() ?? d3d8?.shadow() ?? null,
+
+        /**
+         * A Direct3D device's ring of recorded calls made ahead of the call
+         * that would take it (`drain`): what an executor with nothing to run
+         * does in place of a wait.
+         *
+         * @returns {boolean} whether there were records to make
+         */
+        drain: ()=>(d3d9?.drain() ?? false) || (d3d8?.drain() ?? false),
     };
 }
