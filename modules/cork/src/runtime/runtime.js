@@ -1018,7 +1018,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         predictNoRegion: 0, predictHeld: 0, predictQuiet: 0,
         queueDrops: 0, queueEvictions: 0, emitFailures: 0,
         cacheHits: 0, cacheMisses: 0, missNoRecord: 0, missNoModule: 0, missChanged: 0,
-        hitsFormedAgain: 0, toStoredRegion: 0, precisionSwitches: 0,
+        hitsFormedAgain: 0, formedAsRecorded: 0, toStoredRegion: 0, precisionSwitches: 0,
         readSwitches: 0,
         stackCode: 0,
         // Batches the store answered in the call that formed them, and a turn later.
@@ -1870,13 +1870,17 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
      * or one was loading where the work here is bounded, so it goes to one --
      * emitted here only should none be left at all.
      * `lookup`: the store's answers so far (`lookUpOn`), null once the store
-     * cannot answer at once.
+     * cannot answer at once. `known`: what the store answered for the batch's
+     * keys before they were formed (`recordBefore`), and `unpacked` those
+     * records read.
      * @typedef {{ records: (Uint8Array | null | undefined)[] | null,
      *     cached: (import('./cache.js').CachedRegion | null)[], wanted: string[] | null,
-     *     modules: Map<string, Uint8Array | null>, done: boolean }} Lookup
+     *     modules: Map<string, Uint8Array | null>, done: boolean, keys?: string[] }} Lookup
      * @typedef {{ batch: [number, number][], next: number, formed: any[],
      *     covered: Set<number>, ceiling: number, takenAt: number,
-     *     forTranslator: boolean, lookup?: Lookup | null }} Forming
+     *     forTranslator: boolean, lookup?: Lookup | null,
+     *     known?: Map<string, Uint8Array | null>,
+     *     unpacked?: Map<string, import('./cache.js').CachedRegion | null> }} Forming
      * @type {Forming | null}
      */
     let forming = null;
@@ -2605,6 +2609,14 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
             return null;
         }
         let region = one.region;
+        if (region.hash !== shape.hash && one.formedAs !== undefined
+            && one.formedAs === regionKey(one))
+        {
+            // Formed as this record says already (`recordBefore`): other bytes.
+            counts.missChanged++;
+            one.storedOther = true;
+            return null;
+        }
         if (region.hash !== shape.hash)
         {
             const stops = new Set(shape.stops ?? []);
@@ -2648,6 +2660,10 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         if (shape.targets !== undefined)
         {
             one.targets = shape.targets;
+        }
+        if (one.formedAs !== undefined && region === one.formedRegion)
+        {
+            counts.formedAsRecorded++;
         }
         return cached;
     };
@@ -3774,6 +3790,107 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
     };
 
     /**
+     * A record of the store's as `step` read it, once a key.
+     *
+     * @param {Forming} step @param {string} key @param {Uint8Array} bytes
+     */
+    const unpackedOf = (step, key, bytes)=>{
+        const unpacked = step.unpacked ??= new Map();
+        let cached = unpacked.get(key);
+        if (cached === undefined)
+        {
+            cached = unpackRegion(bytes, cacheVersion);
+            unpacked.set(key, cached);
+        }
+        return cached;
+    };
+    /** A candidate's store key at the top it is entered at, or at any top.
+     * @param {number} eip @param {number} entryTop @param {boolean} anyTop */
+    const candidateKey = (eip, entryTop, anyTop)=>regionKey({ region: { entry: eip }, entryTop,
+        loose, wrapped: !readsChecked, anyTop });
+    /**
+     * The batch's candidates' records asked of a store across a link before
+     * they are formed, in one wait, at both keys each (`recordBefore`).
+     *
+     * @param {Forming} step @param {any} store
+     */
+    const prefetch = (step, store)=>{
+        /** @type {string[]} */
+        const keys = [];
+        for (let at = step.next; at < step.batch.length; at++)
+        {
+            const [key, eip] = step.batch[at];
+            const owner = storedOwner(eip, key % 16);
+            const entry = owner >= 0 ? Math.floor(owner / 16) : eip;
+            const top = owner >= 0 ? owner % 16 : key % 16;
+            keys.push(candidateKey(entry, top, false), candidateKey(entry, top, true));
+        }
+        try
+        {
+            /** @type {(Uint8Array | null | undefined)[] | undefined} */
+            const answers = keys.length === 0 ? undefined : store.getManyNow(keys);
+            for (let at = 0; at < (answers?.length ?? 0); at++)
+            {
+                const bytes = answers?.[at];
+                if (bytes !== undefined)
+                {
+                    step.known?.set(keys[at], bytes);
+                }
+            }
+        }
+        catch {
+            // Asked again after forming, as without this.
+        }
+    };
+    /**
+     * A candidate's record before it is formed, where the store answers at
+     * once: at the top it is entered at, then at any top. A region the store
+     * holds is then formed once, as its record says (`accepted`), where it was
+     * formed first as this run's regions and callees had it and then again
+     * as the record says: on eight executors, each forming what it reaches
+     * beside regions of its own, two of three hits were formed twice. A store
+     * across a link was asked as the batch began (`prefetch`); a candidate
+     * added since, a callee, is formed first and looked up after, as before.
+     *
+     * @param {Forming} step @param {any} store @param {number} eip @param {number} entryTop
+     * @returns {{ key: string, shape: import('./cache.js').RegionShape } | null}
+     */
+    const recordBefore = (step, store, eip, entryTop)=>{
+        const known = step.known;
+        if (store === null || known === undefined)
+        {
+            return null;
+        }
+        for (const anyTop of [false, true])
+        {
+            const key = candidateKey(eip, entryTop, anyTop);
+            let bytes = known.get(key);
+            if (bytes === undefined && typeof store.getManyNow !== 'function'
+                && typeof store.getNow === 'function')
+            {
+                try
+                {
+                    bytes = store.getNow(key) ?? undefined;
+                }
+                catch {
+                    bytes = undefined;
+                }
+                if (bytes !== undefined)
+                {
+                    known.set(key, bytes);
+                }
+            }
+            const shape = bytes === undefined || bytes === null ? undefined
+                : unpackedOf(step, key, bytes)?.shape;
+            if (shape !== undefined)
+            {
+                return { key, shape };
+            }
+        }
+        return null;
+    };
+
+    /**
      * A batch's lookups answered at once, where the store can answer without
      * a turn of the event loop (`getNow`: a directory store in a worker reads
      * its records file through a synchronous handle). The batch is then
@@ -3796,7 +3913,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         {
             return 'later';
         }
-        const { formed } = step;
+        const { formed, known } = step;
         /** @type {Lookup} */
         const lookup = step.lookup ?? { records: null, cached: [], wanted: null,
             modules: new Map(), done: false };
@@ -3805,21 +3922,30 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         {
             return 'done';
         }
+        const keys = lookup.keys ??= formed.map(region=>regionKey(region));
         // A store across a link answers the batch's names in one wait; any
-        // other is asked a name at a time.
+        // other is asked a name at a time. A name answered before its region
+        // was formed (`recordBefore`) is not asked again.
         const linked = typeof store.getManyNow === 'function';
         /** @type {(key: string) => Uint8Array | null | undefined} */
         const one = linked ? key=>store.getManyNow([key])?.[0] : key=>store.getNow(key);
+        /** @param {string} key */
+        const answer = key=>(known?.has(key) ? known.get(key) : one(key));
         try
         {
             if (linked && lookup.records === null)
             {
-                lookup.records = formed.length === 0 ? []
-                    : store.getManyNow(formed.map(region=>regionKey(region))) ?? null;
-                if (lookup.records === null || lookup.records.some(bytes=>bytes === undefined))
+                const asked = keys.filter(key=>!known?.has(key));
+                const answers = asked.length === 0 ? [] : store.getManyNow(asked) ?? null;
+                if (answers === null || answers.some((/** @type {any} */ bytes)=>
+                    bytes === undefined))
                 {
                     return 'later';
                 }
+                /** @type {Map<string, Uint8Array | null>} */
+                const byKey = new Map(asked.map((key, at)=>[key, answers[at]]));
+                lookup.records = keys.map(key=>(known?.has(key) ? known.get(key) ?? null
+                    : byKey.get(key) ?? null));
             }
             while (lookup.cached.length < formed.length)
             {
@@ -3829,13 +3955,13 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
                 }
                 any = true;
                 const at = lookup.cached.length;
-                const bytes = lookup.records?.[at] ?? one(regionKey(formed[at]));
+                const bytes = lookup.records !== null ? lookup.records[at] : answer(keys[at]);
                 if (bytes === undefined)
                 {
                     return 'later';
                 }
                 lookup.cached.push(bytes === null ? null
-                    : accepted(formed[at], unpackRegion(bytes, cacheVersion)));
+                    : accepted(formed[at], unpackedOf(step, keys[at], bytes)));
             }
             /** A batch module's bytes are read once for every record naming it. */
             lookup.wanted ??= [...new Set(lookup.cached.map(cached=>cached?.moduleKey)
@@ -4352,6 +4478,17 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         const until = performance.now() + left;
         const first = step.next;
         const formedAt = clock();
+        // A diagnostic run with classes left out, or with an undo log the
+        // stored modules were built without, keeps no translations.
+        const store = storeHere();
+        if (step.known === undefined)
+        {
+            step.known = new Map();
+            if (store !== null && typeof store.getManyNow === 'function')
+            {
+                prefetch(step, store);
+            }
+        }
         // Nothing runs while this call forms, so its regions share what
         // decoding finds; the guest runs between two calls, which may write
         // the code over.
@@ -4391,11 +4528,18 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
             }
             // Another region's blocks are its own once published, as are those of a
             // region formed before this one in the batch, or on its way to being
-            // published: their entries are there by the time this region runs.
+            // published: their entries are there by the time this region runs. One
+            // the store holds is formed as its record says (`recordBefore`).
+            const record = recordBefore(step, store, eip, entryTop);
+            const recordStops = record === null ? null : new Set(record.shape.stops ?? []);
             const region = formRegion(read, eip, { ...formHere, translatable, shared,
-                ...(settings.regionStops !== true ? {} : { entered: address=>
-                    coveredIn(covered, address, entryTop)
-                    || coveredIn(coveredOut, address, entryTop) || publishedAt(address) }) });
+                ...(recordStops !== null ? { entered: (/** @type {number} */ address)=>
+                    recordStops.has(address),
+                ...(record?.shape.targets === undefined ? {}
+                    : { callTargets: new Map(record.shape.targets) }) }
+                    : settings.regionStops !== true ? {} : { entered: address=>
+                        coveredIn(covered, address, entryTop)
+                        || coveredIn(coveredOut, address, entryTop) || publishedAt(address) }) });
             // What the region calls directly lands in the same batch, so
             // the call and the return transfer without a miss -- each
             // callee at the top the call site has, which the tracker
@@ -4440,7 +4584,8 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
             formed.push({ region, entryTop, stamp: stamp(region.pages), cached: null,
                 ...precisionFlags(region, entryTop), loose,
                 wrapped: !readsChecked,
-                checked: checkedAt(region, entryTop) });
+                checked: checkedAt(region, entryTop),
+                ...(record === null ? {} : { formedAs: record.key, formedRegion: region }) });
             for (const covers of coverKeys({ region, entryTop }))
             {
                 covered.add(covers);
@@ -4459,10 +4604,6 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
             resumeWanted = true;
             return 0;
         }
-        // A diagnostic run with classes left out, or with an undo log the
-        // stored modules were built without, keeps no translations.
-        const store = leaveOut.size > 0 || settings.undoLog || profiling
-            ? null : (settings.store ?? null);
         /** @type {'done' | 'part' | 'later' | null} */
         let looked = null;
         if (store !== null && step.lookup !== null)
@@ -5129,6 +5270,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
                 missNoRecord: counts.missNoRecord,
                 missChanged: counts.missChanged,
                 hitsFormedAgain: counts.hitsFormedAgain,
+                formedAsRecorded: counts.formedAsRecorded,
                 toStoredRegion: counts.toStoredRegion,
                 missNoModule: counts.missNoModule,
                 // What the store holds and what its opening kept, where it says.

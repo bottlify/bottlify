@@ -1063,6 +1063,64 @@ test('a region formed beside another one is found by a run that would form it wh
     assert.equal(store.size(), 4, 'nothing stored again');
 });
 
+test('a region the store answers for at once is formed once, as its record says', async()=>{
+    // The run above's two orders, with a store that answers before forming: at once
+    // (`getNow`, a directory store's records file), or for many names in one wait
+    // (`getManyNow`, a store across a link), whose waits are counted.
+    const settle = ()=>new Promise(resolve=>setTimeout(resolve, 0));
+    const LOOP = CODE + 5;
+    for (const linked of [false, true])
+    {
+        /** @type {Map<string, Uint8Array>} */
+        const records = new Map();
+        let waits = 0;
+        const store = {
+            get: async(/** @type {string} */ key)=>records.get(key) ?? null,
+            put: async(/** @type {string} */ key, /** @type {Uint8Array} */ bytes)=>{
+                records.set(key, bytes);
+            },
+            ...linked ? {
+                getManyNow: (/** @type {string[]} */ keys)=>{
+                    waits++;
+                    return keys.map(key=>records.get(key) ?? null);
+                },
+            } : { getNow: (/** @type {string} */ key)=>records.get(key) ?? null },
+        };
+        /** @param {number[]} order */
+        const run = async order=>{
+            const m = machine({ store, bundleId: 'test', regionStops: true });
+            m.write(CODE, COUNTDOWN);
+            m.setReg(4, 0x80000);
+            for (const at of order)
+            {
+                m.runtime.noteHot(at);
+                await m.runtime.translatePending();
+                await settle();
+            }
+            const exit = m.runtime.run(m.runtime.entryOf(CODE), 1_000_000);
+            assert.equal(exit.kind, 'halt');
+            assert.equal(m.reg(1), 0);
+            assert.equal(exit.retired, 1 + 2 * 1000 + 1);
+            return m.runtime.diagnostics();
+        };
+        const first = await run([LOOP, CODE]);
+        assert.equal(first.cacheMisses, 2);
+        const stored = records.size;
+        waits = 0;
+        const second = await run([CODE, LOOP]);
+        assert.deepEqual([second.cacheHits, second.cacheMisses], [2, 0], 'both from the store');
+        assert.equal(second.hitsFormedAgain, 0,
+            `nothing formed twice (${linked ? 'linked' : 'at once'})`);
+        assert.equal(second.formedAsRecorded, 2, 'both formed as their records say');
+        assert.equal(records.size, stored, 'nothing stored again');
+        if (linked)
+        {
+            assert.equal(waits, 2,
+                'a wait a batch: the records asked before forming are not asked again');
+        }
+    }
+});
+
 test('a region with no x87 in it is taken from the store at another top, one with x87 is not',
     async()=>{
         const { memoryTranslationStore } = await import('./cache.js');

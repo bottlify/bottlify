@@ -482,6 +482,8 @@ export function engineContractProblem(engineModule, url){
  * @property {number} [missNoModule]   Misses whose record named a module the store no longer had.
  * @property {number} [hitsFormedAgain]  Hits formed again as their record says, the region formed
  *     here otherwise (beside other regions, or before its callees were known).
+ * @property {number} [formedAsRecorded]  Hits formed once, as their record says: the store
+ *     answered before the region was formed.
  * @property {number} [toStoredRegion]  Candidates at a block of a region the store holds, formed
  *     as that region instead.
  * @property {number} [lookedUpNow]    Batches the store answered without a turn of the event loop.

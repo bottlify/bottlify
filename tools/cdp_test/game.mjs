@@ -865,8 +865,9 @@ function describeCork(cork, say){
         + `  forced steps: ${cork.forcedSteps ?? 0}`
         + `  cache: ${cork.cacheHits ?? 0} hit / ${cork.cacheMisses ?? 0} miss`
         + ` (no record ${cork.missNoRecord ?? 0}, another region ${cork.missChanged ?? 0},`
-        + ` no module ${cork.missNoModule ?? 0}; ${cork.hitsFormedAgain ?? 0} hits formed as`
-        + ` their records say, ${cork.toStoredRegion ?? 0} blocks taken as the stored region`
+        + ` no module ${cork.missNoModule ?? 0}; ${cork.formedAsRecorded ?? 0} hits formed`
+        + ` once as their records say, ${cork.hitsFormedAgain ?? 0} formed again so,`
+        + ` ${cork.toStoredRegion ?? 0} blocks taken as the stored region`
         + ' holding them)'
         + `  store batches: ${cork.lookedUpNow ?? 0} at once / ${cork.lookedUpLater ?? 0}`
         + ' a turn later');
