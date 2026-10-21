@@ -1983,6 +1983,8 @@ export function createHarness(canvas, how = {}){
             callsToWorker: graphics.worker?.calls ?? null,
             // A diagnostic's (`checkDraws`): draws whose bytes the worker had otherwise.
             drawChecks: graphics.worker?.drawChecks ?? null,
+            // Direct3D 8/9's guest block: why locks and routines reached the host.
+            shadow: graphics.shadow ?? null,
             imageDigests: graphics.seam?.imageDigests ?? [],
             keptImages: graphics.seam?.keptImages ?? [],
             imageTimes: graphics.seam?.imageTimes ?? [],

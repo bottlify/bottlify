@@ -1197,6 +1197,21 @@ function describe(result, context, calls, symbols){
                 }
             }
         }
+        const shadow = graphics.shadow;
+        if (shadow?.placed)
+        {
+            // Why Direct3D 8/9's guest routines and locks reached the host.
+            const counts = (/** @type {Record<string, number> | undefined} */ table)=>Object
+                .entries(table ?? {}).filter(([, count])=>count > 0)
+                .map(([why, count])=>`${why} ${count}`).join(', ') || 'none';
+            say(`    guest block: commands ${shadow.commandCalls}, buffer locks in the guest`
+                + ` ${shadow.lockCalls}, host waits for a routine ${shadow.heldWaits}`
+                + ` (${shadow.heldWaitMs} ms, ${shadow.heldBroken} broken)`);
+            say(`      routines left for the host: ${counts(shadow.left)}`);
+            say(`      host buffer locks: ${counts(shadow.hostLocks)}`);
+            say(`      host level locks: ${counts(shadow.hostLevelLocks)}`);
+            say(`        by level: ${counts(shadow.hostLevelKinds)}`);
+        }
         if (graphics.compressedTextures)
         {
             // count:bytes:hash of every compressed block the program handed
