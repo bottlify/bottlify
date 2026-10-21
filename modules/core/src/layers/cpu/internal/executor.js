@@ -398,6 +398,15 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
         retiredSoFar: ()=>(running ? Atomics.load(channel.words, Word.RETIRED) >>> 0 : 0),
         /** Microseconds it has waited for the process's answers since it opened (`Word.WAITED`). */
         waitedUs: ()=>Atomics.load(channel.words, Word.WAITED) >>> 0,
+        /**
+         * The processor it plays from its next slice, the one `cpuid` names
+         * there (`Word.PLAYS`); undefined, its own.
+         *
+         * @param {number | undefined} processor
+         */
+        playProcessor(processor){
+            Atomics.store(channel.words, Word.PLAYS, processor === undefined ? 0 : processor + 1);
+        },
         /** What it has retired since it opened: the slices taken, and the one out so far. */
         retired: ()=>retiredTaken + executor.retiredSoFar(),
         /**

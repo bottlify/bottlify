@@ -1088,6 +1088,15 @@ export function createCpuModule(){
                  * @returns {any[]}
                  */
                 executors: ()=>state.remotes,
+                /**
+                 * The processor this executor plays from its next instruction,
+                 * the one `cpuid` names; undefined, its own (the kernel's trade).
+                 *
+                 * @param {number | undefined} processor
+                 */
+                playProcessor: (/** @type {number | undefined} */ processor)=>{
+                    state.host?.playProcessor?.(processor);
+                },
                 wantExecutor: (/** @type {number} */ index)=>wantExecutor(index),
                 wantExecutors: (/** @type {number} */ count)=>wantExecutors(count),
                 /**

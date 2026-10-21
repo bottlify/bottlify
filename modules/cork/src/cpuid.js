@@ -77,13 +77,19 @@ const ONE = Object.freeze({ processors: 1, processor: 0 });
 const described = new Map();
 
 /**
- * The processors a layout's executor describes (`StateLayout.processors`).
+ * The processors a layout's executor describes (`StateLayout.processors`), it
+ * one of them: its own, or `played` while it plays another's -- an executor
+ * running a thread pinned to a processor that is not its own number (the
+ * kernel's scheduler trades them), whose `cpuid` names the processor the
+ * thread is pinned to, as on the machine.
  *
  * @param {{ processors?: number, processor?: number } | null | undefined} layout
+ * @param {number} [played]
  * @returns {Topology}
  */
-export const topologyOf = layout=>(layout?.processors ?? 1) > 1
-    ? { processors: /** @type {number} */ (layout?.processors), processor: layout?.processor ?? 0 }
+export const topologyOf = (layout, played)=>(layout?.processors ?? 1) > 1
+    ? { processors: /** @type {number} */ (layout?.processors),
+        processor: played ?? layout?.processor ?? 0 }
     : ONE;
 
 /**

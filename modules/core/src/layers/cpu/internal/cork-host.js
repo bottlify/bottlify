@@ -474,6 +474,14 @@ export function createCorkHost(config){
      * @type {any}
      */
     let interpreter = null;
+    /**
+     * The processor this executor plays while it is not its own (`playProcessor`):
+     * the one `cpuid` names. Translated code leaves `cpuid` to the interpreter
+     * under the shared layout, the only one a process of several executors has.
+     *
+     * @type {number | undefined}
+     */
+    let played;
 
     // Cork's own time-stamp counter, at CORK_TSC_MHZ, the rate CPUID's leaves
     // 0x15 and 0x16 state: ticks of the guest's clock once one is given (`useGuestClock`,
@@ -1045,6 +1053,7 @@ export function createCorkHost(config){
         const state = interpreter;
         state.syncIn();
         state.eip = address;
+        state.processor = played;
         // A `hlt` on an earlier run left the block's halted flag set; a slice
         // the machine is awake for clears it, as the host's own flag is.
         state.halted = false;
@@ -1495,6 +1504,15 @@ export function createCorkHost(config){
         x87Top,
         /** Cork's own layout; the reserve is not carved from the guest's RAM. */
         stateLayout: ()=>layout,
+        /**
+         * The processor this executor plays from its next instruction (the
+         * kernel's trade), the one `cpuid` names; undefined, its own.
+         *
+         * @param {number | undefined} processor
+         */
+        playProcessor(processor){
+            played = processor;
+        },
         romBase: -1,
         romSize: 0,
 

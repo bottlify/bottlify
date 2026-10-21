@@ -1223,6 +1223,11 @@ export function createScheduler(options){
         const here = playedBy(0);
         played[0] = playedBy(index);
         played[index] = here;
+        // What `cpuid` names on each, as GetCurrentProcessorNumber answers
+        // (`processorOf`): a thread pinned to a processor reads its number there.
+        cpu.playProcessor?.(played[0] === 0 ? undefined : played[0]);
+        remotes.find(remote=>remote.index === index)?.playProcessor?.(
+            played[index] === index ? undefined : played[index]);
         tradeWanted = -1;
         trades++;
         recentPlacements.push(`processor ${played[0]} here, ${here} on e${index}`);

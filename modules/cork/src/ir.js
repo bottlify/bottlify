@@ -92,6 +92,8 @@ const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
  * @property {number} mxcsr
  * @property {{ processors?: number, processor?: number }} [layout]  the executor's
  *     layout, whose processors `cpuid` describes; absent, one
+ * @property {number} [processor]  the processor the executor plays where it is not
+ *     its own (`topologyOf`): the one `cpuid` names
  */
 
 /**
@@ -939,7 +941,8 @@ export function evaluate(instruction, state){
             return;
         case 'cpuid':
         {
-            const answer = cpuidLeaf(state.reg[0], state.reg[1], topologyOf(state.layout));
+            const answer = cpuidLeaf(state.reg[0], state.reg[1],
+                topologyOf(state.layout, state.processor));
             state.reg[0] = answer.eax;
             state.reg[1] = answer.ecx;
             state.reg[2] = answer.edx;

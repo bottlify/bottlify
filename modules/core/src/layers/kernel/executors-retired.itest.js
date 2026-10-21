@@ -135,12 +135,14 @@ function program(){
 }
 
 /**
- * One run on `cores` executors, opened before the program starts.
+ * One run on `cores` executors, opened before the program starts, the main
+ * thread on the process's own (`freeHost` off), so the render thread's calls
+ * cross.
  *
  * @param {Uint8Array} executable @param {number} cores
  */
 async function run(executable, cores){
-    const app = await createApp({ executable, cpu: { cores, eager: true } });
+    const app = await createApp({ executable, cpu: { cores, eager: true, freeHost: false } });
     try
     {
         const code = await app.run({ timeoutMs: 120_000, maxTurns: Number.MAX_SAFE_INTEGER });

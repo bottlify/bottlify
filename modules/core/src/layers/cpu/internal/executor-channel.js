@@ -29,10 +29,13 @@
  * millisecond (the kernel's `placement.js`). `WAITED` is the microseconds the
  * executor has waited for the process's answers since it opened, never reset:
  * what a thread placed there loses to calls into the host, which the scheduler
- * weighs against the thread's own work when it places it.
+ * weighs against the thread's own work when it places it. `PLAYS` is the
+ * processor the executor plays, one more than its number, while it is not its
+ * own (the kernel trades them), zero otherwise: the one `cpuid` names from the
+ * next slice, set only between slices.
  */
 export const Word = Object.freeze({ STATE: 0, VALUE: 1, FLAGS: 2, LENGTH: 3, EPOCH: 4,
-    RETIRED: 5, WAITED: 6 });
+    RETIRED: 5, WAITED: 6, PLAYS: 7 });
 
 /** The states, each set by the side whose turn it ends. */
 export const Turn = Object.freeze({
