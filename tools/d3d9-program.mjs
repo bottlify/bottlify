@@ -6,9 +6,10 @@
 
 /**
  * A Direct3D 9 program built by `make-pe.mjs`, for the tests that play its
- * device on the graphics worker: a 64x32 window and a device on it, a 64x64
+ * device on the graphics worker: a 64x32 window and a device on it, a 128x128
  * texture locked, filled, unlocked, drawn with and presented once a frame,
- * then ExitProcess(0).
+ * then ExitProcess(0). The texture is 64 KiB, the least the recording lends
+ * (`remote/lending.js`, `LEND_LEAST`): a smaller one is copied.
  *
  * Dev tooling, like `make-pe.mjs`: never imported by a package.
  */
@@ -22,6 +23,9 @@ import { buildExe } from './make-pe.mjs';
 const u32 = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff];
 /** @param {[string, number][]} slots @param {string} name */
 const slotIn = (slots, name)=>3 + slots.findIndex(([entry])=>entry === name);
+
+/** The texture's edge, in texels of four bytes. */
+export const TEXTURE = 128;
 
 /** @param {number} frames  how many it presents */
 export function texturedFrames(frames){
@@ -64,7 +68,7 @@ export function texturedFrames(frames){
                 ...texture('LockRect', [push(0), push(at('locked')), push(0), push(0)]),
                 0x8b, 0x3d, ...u32(at('locked') + 4), //    mov edi, [locked.pBits]
                 0xa1, ...u32(at('frames')), //              mov eax, [frames]
-                0xb9, ...u32(64 * 64), //                   mov ecx, 64*64
+                0xb9, ...u32(TEXTURE * TEXTURE), //         mov ecx, TEXTURE*TEXTURE
                 0xf3, 0xab, //                              rep stosd
                 ...texture('UnlockRect', [push(0)]),
                 ...device('SetTexture', [push(0), [0xff, 0x35, ...u32(at('texture'))]]),
@@ -86,9 +90,9 @@ export function texturedFrames(frames){
                 0x89, 0xc6, //                              mov esi, eax
                 ...call(slotIn(IDIRECT3D9_SLOTS, 'CreateDevice'), [push(0), push(1), [0x57],
                     push(0x20), push(at('present')), push(at('device'))]),
-                // CreateTexture(64, 64, 1, 0, A8R8G8B8, MANAGED, &texture, NULL)
-                ...device('CreateTexture', [push(64), push(64), push(1), push(0), push(21),
-                    push(1), push(at('texture')), push(0)]),
+                // CreateTexture(TEXTURE, TEXTURE, 1, 0, A8R8G8B8, MANAGED, &texture, NULL)
+                ...device('CreateTexture', [push(TEXTURE), push(TEXTURE), push(1), push(0),
+                    push(21), push(1), push(at('texture')), push(0)]),
                 ...frame,
                 0x0f, 0x85, ...u32(-(frame.length + 6)), // jnz frame
                 ...push(0), 0xff, 0x15, ...u32(iat('ExitProcess')),

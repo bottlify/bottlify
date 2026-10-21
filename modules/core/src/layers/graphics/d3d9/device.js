@@ -109,7 +109,7 @@ const USAGE_QUERY_POSTPIXELSHADER_BLENDING = 0x00080000;
 /** What a draw through a vertex format reads: stream zero alone. */
 const STREAM_ZERO = Object.freeze([0]);
 /** No elements, and no streams past the first, without a list made for each draw. */
-const NO_ELEMENTS = Object.freeze([]);
+const NO_ELEMENTS = Object.freeze(/** @type {any[]} */ ([]));
 const NO_STREAMS = Object.freeze(/** @type {number[]} */ ([]));
 
 /** The three states a device is ever in, as far as a program can tell. */
@@ -1727,7 +1727,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
      * @type {WeakMap<object, { zero: boolean, others: number[] }>}
      */
     const streamsByDeclaration = new WeakMap();
-    /** @param {any[]} elements */
+    /** @param {readonly any[]} elements */
     const streamsOf = elements=>{
         let read = streamsByDeclaration.get(elements);
         if (read === undefined)

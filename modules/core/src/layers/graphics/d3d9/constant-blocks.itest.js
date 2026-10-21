@@ -252,7 +252,7 @@ async function play(calls, keep){
         }
         else if (name === 'Shader')
         {
-            const [stage, index] = args;
+            const [stage, index] = /** @type {['Vertex' | 'Pixel', number]} */ (args);
             assert.equal(device[`Set${stage}Shader`](shaders[stage][index]), D3D_OK);
         }
         else if (name === 'Capture' || name === 'Apply')

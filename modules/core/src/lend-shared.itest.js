@@ -19,7 +19,7 @@ import assert from 'node:assert/strict';
 import { Worker } from 'node:worker_threads';
 import { createApp } from './app.js';
 import { createFakeDevice } from './layers/graphics/webgpu/internal/fake-device.js';
-import { texturedFrames } from '../../../tools/d3d9-program.mjs';
+import { TEXTURE, texturedFrames } from '../../../tools/d3d9-program.mjs';
 
 const FRAMES = 3;
 
@@ -87,7 +87,7 @@ test('a texture unlocked each frame is lent to the graphics worker where memory 
         assert.equal(result.code, 0);
         assert.deepEqual(result.divergences, []);
         assert.equal(result.lent.lent, FRAMES, JSON.stringify(result.lent));
-        assert.equal(result.lent.lentBytes, FRAMES * 64 * 64 * 4);
+        assert.equal(result.lent.lentBytes, FRAMES * TEXTURE * TEXTURE * 4);
         assert.ok(result.device, 'the report carries what the played device counted');
         assert.equal(result.device.frames, FRAMES + 0, JSON.stringify(result.device).slice(0, 200));
     });
