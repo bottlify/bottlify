@@ -348,7 +348,10 @@ compared over the same frames rather than the same seconds with
 `node tools/frame-span.mjs <presents.json>... [--skip N] [--frames N]`: the span
 starts after the load's last long stall, and for a program whose simulation
 advances one step a frame and is given no input it is the same work in every
-run. With `--cpu-profile`, the report also says how
+run; it also says how evenly the span's frames came (the gaps' median, 95th and
+99th percentile and worst, and the hitches: gaps over twice the median or over
+100 ms); `--frames 0` runs the span to the last present, and `--seconds A-B` takes
+the presents from A to B seconds after the first, as the frame series counts them. With `--cpu-profile`, the report also says how
 many frames were presented inside the profile's window and how long each took,
 so the profile's milliseconds divide into a frame's. Runs on one machine vary by
 a quarter from one to the next: a difference is only a measurement across
