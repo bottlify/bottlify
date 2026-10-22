@@ -1307,3 +1307,43 @@ None yet.
   they slept and were woken more, while the looking executor kept its long look (it decides
   before it counts itself): worse than the rule on both core counts. The rule stays; on three
   executors it is level with the fixed look within the runs' spread.
+
+### 2026-10-22 -- the shared layout's state and table bases held in locals
+
+- **Idea.** Under the process's shared layout (several executors) a region reads its state
+  block and tables at an offset from two imported immutable globals (`bases.js`), one
+  `global.get` an access. The two-executor layout measured 7-12 % slower than one executor's
+  on some cork-bench workloads in Chrome; reading the globals once a function into two locals
+  (`stateBase`, `tablesBase` after the x87 ones) and taking every access from them was to
+  recover that.
+- **Workload.** cork-bench in headless Chromium (`tools/cork-bench/browser.mjs --paired`, 40
+  rounds, warm 100): fmath-x87, vm-x87, fmath-pc24, game-x87, lua-x87; arms base and head on
+  one executor's layout and on two executors' (`executors: 2`, atomic), the base a snapshot of
+  `0e803748`. Ratios to the base on one executor, median with quartiles.
+- **Values.** fmath-x87: two executors base 1.091 [1.040 1.131], head 1.068 [1.020 1.149];
+  vm-x87: base 1.107 [1.074 1.154], head 1.098 [1.076 1.177]; game-x87: base 1.034, head 1.030;
+  fmath-pc24: base 1.022, head 1.016; lua-x87: base 0.998, head 1.003 (quartiles 0.88-1.13).
+  The same tree's one-executor arm: 0.992-1.030.
+- **Machine.** The 4-core KVM VM (Intel Xeon @ 2.80 GHz), Chromium 141.0.7390.37 (V8
+  14.1.146.11). Power plan not recorded.
+- **Decision.** Reverted: within the quartiles on every workload. V8 reads an immutable
+  imported global about as cheaply as a local; the two-executor layout's cost is elsewhere.
+
+### 2026-10-22 -- the interrupt word looked at every 64th back edge
+
+- **Idea.** Where other executors run beside it, the process's executor compares its budget at
+  every back edge with an interrupt word loaded atomically from its state block
+  (`spentTest`), which cost loops 3-12 % against one executor's layout in Chrome. A counter
+  in a local, the atomic load only every 64th back edge, the budget against 0 between.
+- **Workload.** cork-bench in headless Chromium (`tools/cork-bench/browser.mjs --paired`, 40
+  rounds, warm 100), the two-executor layout (`executors: 2`, atomic) against the base's one-
+  and two-executor layouts, base a snapshot of `0e803748`.
+- **Values** (ratio to the base on one executor, median [quartiles]): crc-x87 base 0.987, counter
+  1.097 [1.037 1.193]; fmath-x87 base 1.049, counter 1.096; sort-x87 base 1.099, counter 1.387
+  [1.334 1.449]; vm-x87 base 1.091, counter 1.257; fmath-pc24 1.043 / 1.035; game-x87 0.990 /
+  0.997.
+- **Machine.** The 4-core KVM VM (Intel Xeon @ 2.80 GHz), Chromium 141.0.7390.37 (V8
+  14.1.146.11). Power plan not recorded.
+- **Decision.** Not taken: the counter's decrement and branch at every back edge cost more than
+  the load. A plain load of the word took instead (0-3 %), the same contract kept: V8 12 and
+  14 do not take it out of a loop that stores nothing.

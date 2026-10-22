@@ -22,7 +22,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { formRegion } from '../region.js';
 import { ModuleBuilder } from '../wasm/encoder.js';
 import { emitRegion, finishModule, prepareModule } from '../emit/region.js';
-import { ownLayout } from './layout.js';
+import { ownLayout, sharedLayout } from './layout.js';
 import { CACHE_VERSION } from './cache.js';
 
 /** The digest of the emitted set, by the cache version that emitted it. */
@@ -80,6 +80,7 @@ const EMITTED = {
     91: '45c665fef42076be',
     92: '18c624d5b1dedc26',
     93: 'c20886250a565df9',
+    94: '2ebe93273ec924dd',
 };
 
 /** Features fixed rather than probed, so every host emits the same bytes. */
@@ -168,6 +169,23 @@ function digest(){
         finishModule(floatsContext, [onFloats.functionIndex]);
         floats.exportFunction('region', onFloats.functionIndex);
         hash.update(`floats:${name}:`).update(floats.toBytes());
+    }
+    // A loop of a process of several executors, whose back edge reads the interrupt word
+    // (`spentTest`): on the first executor's layout and on the others' shared one, atomic.
+    // mov ecx, 1000; L: dec ecx; jnz L; hlt
+    const countdown = [0xb9, 0xe8, 0x03, 0, 0, 0x49, 0x75, 0xfd, 0xf4];
+    const several = ownLayout({ ramSize: 16 << 20, processors: 2 });
+    for (const [name, at] of /** @type {const} */ ([['several', several],
+        ['shared', sharedLayout(several)]]))
+    {
+        const loop = formRegion(address=>countdown[address - 0x1000] ?? 0, 0x1000, {});
+        const loops = new ModuleBuilder();
+        const loopsContext = prepareModule(loops, at, FEATURES, {}, { hash: true,
+            trapPort: 0xb077, resume: true, callReturn: true, atomic: true });
+        const atLoop = emitRegion(loopsContext, loop, { entryTop: 0, checked: false });
+        finishModule(loopsContext, [atLoop.functionIndex]);
+        loops.exportFunction('region', atLoop.functionIndex);
+        hash.update(`${name}:`).update(loops.toBytes());
     }
     return hash.digest('hex').slice(0, 16);
 }

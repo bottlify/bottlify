@@ -2750,9 +2750,12 @@ export class RegionEmitter {
      * Whether a back edge leaves for the host: the budget spent -- at or under
      * zero, or, where other executors run beside this one, under the word they
      * store when they need its answer (`layout.interrupt`), all ones but the
-     * sign then. An atomic load, not a plain one: a loop that stores nothing
-     * would have its plain load of the word taken out of the loop, and the
-     * other executor's store never seen. On x86 it is the plain load.
+     * sign then. A plain load: with the atomic one the loops of a process of
+     * several executors ran 3-12 % slower than one executor's in Chrome 141
+     * (cork-bench), with the plain one 0-3 %, and on ARM it is an `ldar`.
+     * Neither V8 12 nor 14 takes the load out of a loop that stores nothing
+     * (the cork host's test); one that did would leave such a loop when its
+     * budget runs out, as a run with no word does.
      */
     spentTest(){
         const { b } = this;
@@ -2763,7 +2766,7 @@ export class RegionEmitter {
         }
         else
         {
-            atState(this.context, b).atomic('load_i32', { offset: this.layout.interrupt });
+            atState(this.context, b).load('i32', { offset: this.layout.interrupt });
         }
         b.op(I32.leS);
     }

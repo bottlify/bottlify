@@ -316,6 +316,38 @@ test('an ask of another executor the handler puts off is asked again at the gues
         `the guest went on between asks: ${asked}`);
 });
 
+test('a translated loop that stores nothing sees the interrupt word another thread stores, and'
+    + ' leaves at its next back edge', async()=>{
+    // The word is read with a plain load (`spentTest`): a compiler that took it
+    // out of such a loop would run this one's four billion rounds.
+    const { Worker } = await import('node:worker_threads');
+    const h = host({ executors: 2 });
+    // mov ecx, -1; L: dec ecx; jnz L; hlt
+    load(h, 0x1000, [0xb9, 0xff, 0xff, 0xff, 0xff, 0x49, 0x75, 0xfd, 0xf4]);
+    h.cork().noteHot(0x1000, 0);
+    assert.ok(await h.cork().translatePending() >= 1);
+    assert.ok(h.cork().entryOf(0x1000, 0) >= 0, 'translated');
+    let seenAt = 0;
+    h.onInterrupt(()=>{
+        seenAt = performance.now();
+        h.stop();
+        return true;
+    });
+    const at = /** @type {number} */ (h.blockLayout().interrupt) >>> 2;
+    const worker = new Worker(`const { workerData } = require('node:worker_threads');
+        setTimeout(()=>Atomics.store(new Int32Array(workerData.buffer), workerData.at,
+            0x7fffffff), 100);`, { eval: true, workerData: { buffer: h.wasmMemory().buffer, at } });
+    h.writeReg32('eip', 0x1000);
+    const startedAt = performance.now();
+    const retired = h.runSlice(2 ** 31 - 1);
+    const ms = performance.now() - startedAt;
+    await worker.terminate();
+    assert.ok(seenAt > 0, 'the word was answered');
+    assert.ok(ms < 1500 && retired < 2 ** 30,
+        `left after ${ms.toFixed(0)} ms and ${retired} instructions`);
+    assert.equal(h.halted(), false, 'inside the loop');
+});
+
 test('the interpreter stops only at an entry for the top the machine has', async()=>{
     const h = host();
     // fld1; hlt -- translated at top 0 alone.
