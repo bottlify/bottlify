@@ -1354,3 +1354,23 @@ None yet.
   every arm ran on, keeps its own layout (constant addresses) with any number of executors,
   and only the others translate for the shared one, so the change was not in the arms' code.
   Its conclusion about imported globals is not shown and is not to be cited.
+
+### 2026-10-22 -- a block's budget charge carried into the one block it enters
+
+- **Idea.** Every block charges its instructions to the budget at its exit (`charge`, one
+  `sub` an executed block). A block entered only from one block before it could take that
+  block's count as its own and charge both at its own exit, sparing a `sub` on that edge;
+  since the dispatch enters any block, its entry from there would give the carried count back.
+- **Workload.** The machine code V8 makes of Crysis's hottest regions, weighed by block
+  profiles (`tools/cork-asm.mjs --blocks --count`, V8 14.6 arm64 under qemu, stores under the
+  trap handler as on macOS): the 30 regions holding 51 % of the block runs of the CPU
+  benchmark's timedemo (a node stand's profile from 350 s on), and the 8 regions holding 79 %
+  of a whole run with its load.
+- **Values.** Charges are 2.5 % of the executed arm64 instructions in the timedemo's code
+  (6.2 % with the load's inflate loops); blocks entered from one block only are 39.9 % of the
+  block runs (38.3 %); fall-throughs and jumps into such a block, the chains a charge could be
+  merged along with no change to the dispatch, 0 %.
+- **Machine.** Counted instructions, not timed: the 4-core KVM VM, qemu-aarch64 8.2.2, node
+  26.12.1 (V8 14.6.202.34).
+- **Decision.** Not taken: about 1 % of the timedemo's executed instructions for a second
+  entry path into nearly every block inside a loop, which needs a gate of its own.
