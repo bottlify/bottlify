@@ -695,6 +695,34 @@ test('outside precise a read past RAM wraps into it, and a store leaves before i
     }
 });
 
+test('outside precise a RAM that is not a power of two reads inside it as it is and wraps a read'
+    + ' past it below the power of two under it; precise, the read past it faults', ()=>{
+    const ramSize = 0x180000;   // 1.5 MiB
+    /** @param {number} address @param {boolean} precise */
+    const runAt = (address, precise)=>{
+        const m = createTestMachine({ ramSize, precise });
+        m.write(CODE, [0xa1, ...[0, 8, 16, 24].map(shift=>address >>> shift & 0xff), 0xf4]);
+        m.write(0x140010, [0x44, 0x33, 0x22, 0x11]);
+        m.write(0x080010, [0x78, 0x56, 0x34, 0x12]);
+        m.write(0x0ffff0, [0xef, 0xbe, 0xad, 0xde]);
+        m.setReg('esp', STACK);
+        return { m, exit: m.runProgram(CODE) };
+    };
+    // mov eax, [address]: above the power of two, inside RAM; 16 past RAM; at the top of
+    // the address space.
+    const cases = /** @type {[number, number][]} */ ([
+        [0x140010, 0x11223344], [0x180010, 0x12345678], [0xfffffff0, 0xdeadbeef]]);
+    for (const [address, value] of cases)
+    {
+        const { m, exit } = runAt(address, false);
+        assert.equal(exit.kind, Exit.HALT, address.toString(16));
+        assert.equal(m.reg('eax') >>> 0, value, address.toString(16));
+    }
+    assert.equal(runAt(0x140010, true).m.reg('eax') >>> 0, 0x11223344);
+    const { exit } = runAt(0x180010, true);
+    assert.deepEqual([exit.kind, exit.eip], [Exit.FAULT, CODE]);
+});
+
 test('the operand of a jmp, call or push through memory is a read: outside precise past RAM it'
     + ' wraps, precise it faults', ()=>{
     // jmp [0x100010]; call [0x100010]; push [0x100010]; pop eax -- 16 past 1 MiB of RAM,

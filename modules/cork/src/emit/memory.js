@@ -46,15 +46,37 @@ export const PRECISION = 2;
 
 /**
  * Whether an instruction that only reads is left untested, its address wrapped
- * into RAM: not under `precise`, nor `checkReads`, where a page the program
- * cannot read faults, and only with RAM a power of two.
+ * into RAM (`wrapIntoRam`): not under `precise`, nor `checkReads`, where a page
+ * the program cannot read faults.
  *
  * @param {{ precise?: boolean, checkReads?: boolean }} context
- * @param {{ ramSize: number }} layout
  */
-export function readsWrapped(context, layout){
-    return context.precise !== true && context.checkReads !== true
-        && (layout.ramSize & layout.ramSize - 1) === 0;
+export function readsWrapped(context){
+    return context.precise !== true && context.checkReads !== true;
+}
+
+/**
+ * Wraps the address in `addr` into RAM for a read left untested: with RAM a
+ * power of two, one `and`; with any other size, an address past RAM is taken
+ * modulo the largest power of two below it, and one inside RAM is left as it
+ * is, without a branch. Both read RAM where the access would have raised #GP.
+ * A RAM of 1.5 or 3 GB tested every read before (the access's page flags
+ * loaded and tested, an exit for the fault): a load was 46 bytes of wasm.
+ *
+ * @param {import('./region.js').RegionEmitter['b']} b
+ * @param {number} ramSize
+ */
+function wrapIntoRam(b, ramSize){
+    if ((ramSize & ramSize - 1) === 0)
+    {
+        b.localGet(Local.addr).i32const(ramSize - 1).op(I32.and).localSet(Local.addr);
+        return;
+    }
+    const below = 2 ** Math.floor(Math.log2(ramSize));
+    b.localGet(Local.addr);
+    b.localGet(Local.addr).i32const(below - 1).op(I32.and);
+    b.localGet(Local.addr).i32const(ramSize | 0).op(I32.ltU);
+    b.select().localSet(Local.addr);
 }
 
 /**
@@ -93,14 +115,12 @@ export function checkAccess(e, size, { counted = true, store = false } = {}){
     }
     // Outside `precise` an instruction that only reads is not tested: the
     // one page flag a read can find is INACCESSIBLE, which only the pages past
-    // RAM carry, so its address is wrapped into RAM instead (a power of two),
-    // one `and` for a shift, a load and a branch. A read past the end of
+    // RAM carry, so its address is wrapped into RAM instead (`wrapIntoRam`),
+    // in place of a shift, a load and a branch. A read past the end of
     // guest memory then reads RAM where it raised #GP.
-    const { ramSize } = e.layout;
-    if (!store && readsWrapped(e.context, e.layout) && e.layout.codePages < 0
-        && readsOnly(e.current))
+    if (!store && readsWrapped(e.context) && e.layout.codePages < 0 && readsOnly(e.current))
     {
-        b.localGet(Local.addr).i32const(ramSize - 1).op(I32.and).localSet(Local.addr);
+        wrapIntoRam(b, e.layout.ramSize);
         return;
     }
     const table = pageFlagsAt(e.layout);

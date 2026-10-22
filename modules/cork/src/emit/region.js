@@ -1213,7 +1213,7 @@ export class RegionEmitter {
             : this.layout.codePages < 0
                 ? planRegion(blocks, { entry: this.region.entry, backward: flat,
                     heads: new Set([...this.loopEnds.keys(), ...this.x87.cut]),
-                    returns: this.returns, masked: readsWrapped(this.context, this.layout) })
+                    returns: this.returns, masked: readsWrapped(this.context) })
                 : null;
         if (this.copies.length > 0 && !this.copyFunction)
         {

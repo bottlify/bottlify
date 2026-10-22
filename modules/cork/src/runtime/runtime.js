@@ -2538,8 +2538,11 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
     // store's keys: structure, precise, the transfer count, the modules' placing
     // and the call profile, the trap port -- each as the emitter reads it, where
     // structure left unset is on. The entry hash and the tier's resume follow
-    // from the features and the layout, which the key names beside these.
+    // from the features and the layout, which the key names beside these. 'W'
+    // marks reads wrapped into a RAM that is not a power of two, which a store
+    // made before they were (each read tested) holds under the same layout.
     const variant = (settings.structure !== false ? 'S' : '')
+        + ((emitLayout.ramSize & emitLayout.ramSize - 1) !== 0 ? 'W' : '')
         + (settings.precise === true ? 'P' : '') + (settings.countTransfers ? 'T' : '')
         + (settings.dispatch === true ? 'D' : '') + (settings.callTargets === true ? 'C' : '')
         + (settings.callReturn === true ? 'R' : '') + (sharedMemory ? 'M' : '')
