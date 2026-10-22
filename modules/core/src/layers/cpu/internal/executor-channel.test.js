@@ -8,13 +8,15 @@
  * The channel's wakes: a side ending its turn notifies only when the other
  * sleeps on the word (`wake`, `Word.SLEEPING`), and no wake is lost for it --
  * two threads hand turns back and forth thousands of times, each always
- * sleeping, each never sleeping, and a mix, and every turn arrives.
+ * sleeping, each never sleeping, and a mix, and every turn arrives. How long
+ * a wait looks first follows the cores the slices out leave free (`lookFor`).
  */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Worker } from 'node:worker_threads';
-import { CHANNEL_BYTES, Turn, Word, channelOf, sleepAsync, wake } from './executor-channel.js';
+import { BELL_BYTES, BUSY_BESIDE, Bell, CHANNEL_BYTES, SPARE_SPIN_MS, SPIN_MS, Turn, Word,
+    channelOf, lookFor, sleepAsync, wake } from './executor-channel.js';
 
 const CHANNEL_URL = new URL('./executor-channel.js', import.meta.url).href;
 
@@ -93,3 +95,21 @@ test('a wake finds no sleeper and notifies nothing; a wait without blocking is c
         await sleepAsync(words, Word.STATE, 0, Infinity, Word.SLEEPING);
         assert.equal(Atomics.load(words, Word.SLEEPING), 0);
     });
+
+test('a wait looks long while the slices out leave a core free, briefly when they do not', ()=>{
+    const bell = new Int32Array(new SharedArrayBuffer(BELL_BYTES));
+    const look = lookFor(bell, 4, undefined);
+    // Nothing out: the process's executor and the graphics worker on two of four.
+    assert.equal(look(), SPARE_SPIN_MS);
+    Atomics.store(bell, Bell.RUNNING, 4 - BUSY_BESIDE - 1);
+    assert.equal(look(), SPARE_SPIN_MS, 'one core still free');
+    Atomics.store(bell, Bell.RUNNING, 4 - BUSY_BESIDE);
+    assert.equal(look(), SPIN_MS, 'every core taken');
+    Atomics.store(bell, Bell.RUNNING, 0);
+    // The run's own figure stands whatever the cores; an unknown host looks briefly.
+    assert.equal(lookFor(bell, 4, 0.3)(), 0.3);
+    assert.equal(lookFor(bell, undefined, undefined)(), SPIN_MS);
+    assert.equal(lookFor(null, 16, undefined)(), SPIN_MS);
+    // A machine of two cores has none to spare beside the two threads.
+    assert.equal(lookFor(bell, 2, undefined)(), SPIN_MS);
+});

@@ -55,6 +55,22 @@ export const Said = Object.freeze({ HALTED: 1, STOPPED: 2, CLAIMED: 4, FAULTED: 
 export const SPIN_MS = 0.05;
 
 /**
+ * How long a side looks while the host has a core to spare (`lookFor`): an
+ * answer slept through comes a wake later, some 100 us on a loaded machine,
+ * and costs the answering side a notify. A render thread's frame on a stand,
+ * two executors on four cores, took 5.25 ms looking 1 ms against 5.49 looking
+ * 0.05; three executors on the same cores, 7.24 against 6.59: with no core to
+ * spare the looking side holds one the process's own executor wants.
+ */
+export const SPARE_SPIN_MS = 1;
+
+/**
+ * The threads beside the executors' slices that keep a core of the host busy:
+ * the process's own executor, which answers them, and the graphics worker.
+ */
+export const BUSY_BESIDE = 2;
+
+/**
  * The bounds, in microseconds, an executor counts its waits for the process's
  * answers by (`answerWaits` in its account): how many a look of each length
  * before the sleep would have caught.
@@ -152,10 +168,36 @@ export const CHANNEL_BYTES = TEXT_AT + TEXT_BYTES;
 /**
  * The words of a bell, as indices into its `Int32Array`: the count of turns
  * rung, whether an executor may go on with its thread past a slice (`goOn`,
- * `hold` in `executor.js`), and the waits asleep on the count (`sleep`).
+ * `hold` in `executor.js`), the waits asleep on the count (`sleep`), and the
+ * executors with a slice out (`lookFor`).
  */
-export const Bell = Object.freeze({ RUNG: 0, GO_ON: 1, SLEEPING: 2 });
-export const BELL_BYTES = 12;
+export const Bell = Object.freeze({ RUNG: 0, GO_ON: 1, SLEEPING: 2, RUNNING: 3 });
+export const BELL_BYTES = 16;
+
+/**
+ * How long a wait looks before it sleeps, asked as each wait begins: the run's
+ * own `spinMs` when it names one; otherwise `SPARE_SPIN_MS` while the slices
+ * out and the threads beside them (`BUSY_BESIDE`) leave one of the host's
+ * `processors` free, and `SPIN_MS` when they do not -- or when the host does
+ * not say how many it has.
+ *
+ * @param {Int32Array | null} bell  the process's bell (`Bell.RUNNING`)
+ * @param {number | undefined} processors  the host's (`navigator.hardwareConcurrency`)
+ * @param {number | undefined} spinMs  the run's
+ * @returns {() => number}
+ */
+export function lookFor(bell, processors, spinMs){
+    if (spinMs !== undefined)
+    {
+        return ()=>spinMs;
+    }
+    if (bell === null || processors === undefined || !(processors > 0))
+    {
+        return ()=>SPIN_MS;
+    }
+    return ()=>(Atomics.load(bell, Bell.RUNNING) + BUSY_BESIDE < processors
+        ? SPARE_SPIN_MS : SPIN_MS);
+}
 
 /**
  * The views of a channel's memory.
@@ -163,9 +205,11 @@ export const BELL_BYTES = 12;
  * @param {SharedArrayBuffer} buffer
  * @param {Int32Array | null} [bell]  a word the process waits on for all its executors at
  *     once, rung after every turn the executor's side ends
- * @param {number} [spinMs]  how long a side looks before it sleeps (`SPIN_MS`)
+ * @param {number | (() => number)} [spin]  how long a side looks before it sleeps
+ *     (`SPIN_MS`), or what says so as each wait begins (`lookFor`)
  */
-export function channelOf(buffer, bell = null, spinMs = SPIN_MS){
+export function channelOf(buffer, bell = null, spin = SPIN_MS){
+    const look = typeof spin === 'function' ? spin : ()=>spin;
     const words = new Int32Array(buffer, 0, TEXT_AT / 4);
     const text = new Uint8Array(buffer, TEXT_AT, TEXT_BYTES);
     /**
@@ -207,7 +251,7 @@ export function channelOf(buffer, bell = null, spinMs = SPIN_MS){
         await(state){
             while (Atomics.load(words, Word.STATE) === state)
             {
-                if (waitWhile(words, Word.STATE, state, Infinity, spinMs, Word.SLEEPING))
+                if (waitWhile(words, Word.STATE, state, Infinity, look(), Word.SLEEPING))
                 {
                     counts.slept++;
                 }

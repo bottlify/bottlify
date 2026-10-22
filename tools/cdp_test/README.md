@@ -390,8 +390,9 @@ Reading it:
   many of them found it asleep and had to wake it, the turns it ended and how
   many woke e0 asleep on the bell, and how many of its waits for an answer
   slept. `answers by wait`: those waits counted by how long the answer took; a
-  look before the sleep (`cork.config.spinMs`, 0.05 ms by default) catches the
-  counts up to its length, and every sleep it misses costs a wake on both sides.
+  look before the sleep (`cork.config.spinMs`; by default 1 ms while the host has
+  a core free, 0.05 ms when it has none) catches the counts up to its length, and
+  every sleep it misses costs a wake on both sides.
 
 ### Translated code gone wrong
 

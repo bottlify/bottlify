@@ -19,7 +19,7 @@
  * stacks need no carrying.
  */
 
-import { BELL_BYTES, Bell, CHANNEL_BYTES, SPIN_MS, Said, Turn, Word, channelOf, sleepAsync,
+import { BELL_BYTES, Bell, CHANNEL_BYTES, Said, Turn, Word, channelOf, lookFor, sleepAsync,
     waitWhile } from './executor-channel.js';
 
 /**
@@ -63,13 +63,19 @@ async function openWorker(url){
 /**
  * The word a process waits on for all its executors: each rings it at the end
  * of every turn of its own, so one wait covers every channel.
+ *
+ * @param {number} [spinMs]  how long its waits look before they sleep; by default
+ *     longer while the host has a core to spare (`lookFor`)
  */
-export function createBell(spinMs = SPIN_MS){
+export function createBell(spinMs = undefined){
     // The count of turns rung, whether an executor may go on with its thread
-    // past a slice (1 on, 0 not, 2 for a turn's length: `goOn`, `hold`), and the
-    // process's waits asleep on the count, which alone an executor's ring wakes.
+    // past a slice (1 on, 0 not, 2 for a turn's length: `goOn`, `hold`), the
+    // process's waits asleep on the count, which alone an executor's ring wakes,
+    // and the slices out, which the executors count (`Bell.RUNNING`).
     const buffer = new SharedArrayBuffer(BELL_BYTES);
     const word = new Int32Array(buffer);
+    const look = lookFor(word, /** @type {any} */ (globalThis).navigator?.hardwareConcurrency,
+        spinMs);
     return {
         buffer,
         /** The count now: what a wait is from. */
@@ -79,7 +85,7 @@ export function createBell(spinMs = SPIN_MS){
          * @param {number} seen @param {number} [ms]
          */
         wait(seen, ms = Infinity){
-            waitWhile(word, Bell.RUNG, seen, ms, spinMs, Bell.SLEEPING);
+            waitWhile(word, Bell.RUNG, seen, ms, look(), Bell.SLEEPING);
         },
         /**
          * The same wait without blocking: for a caller whose other wake comes

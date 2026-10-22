@@ -19,7 +19,7 @@
  */
 
 import { createCorkHost } from './cork-host.js';
-import { ANSWER_BOUNDS_US, Bell, SPIN_MS, Said, Turn, Word, channelOf, sleepAsync, waitWhile }
+import { ANSWER_BOUNDS_US, Bell, Said, Turn, Word, channelOf, lookFor, sleepAsync, waitWhile }
     from './executor-channel.js';
 import { UNBROKEN_STEP, UNBROKEN_STEPS, unbrokenTable } from './unbroken.js';
 
@@ -126,11 +126,14 @@ async function serve({ engineUrl, config, memory, channel: buffer, bell, unbroke
     const bellWords = new Int32Array(bell);
     const routines = unbroken === undefined ? null : unbrokenTable(unbroken);
     // The pacing the config names (`EngineConfig`), these defaults otherwise.
-    const spinMs = config.cork?.spinMs ?? SPIN_MS;
+    // How long a wait looks before it sleeps: longer while the host has a core
+    // to spare, which the slices out say (`Bell.RUNNING`).
+    const look = lookFor(bellWords, /** @type {any} */ (globalThis).navigator?.hardwareConcurrency,
+        config.cork?.spinMs);
     const idleMs = config.cork?.executorIdleMs ?? IDLE_MS;
     const yieldMs = config.cork?.executorYieldMs ?? YIELD_MS;
     const holdMs = config.cork?.executorHoldMs ?? HOLD_MS;
-    const channel = channelOf(buffer, bellWords, spinMs);
+    const channel = channelOf(buffer, bellWords, look);
     const { words } = channel;
     waits = channel.counts;
     /**
@@ -243,7 +246,7 @@ async function serve({ engineUrl, config, memory, channel: buffer, bell, unbroke
         {
             // The process mostly asks again soon after a slice's end, and a
             // wake through the event loop costs more: a short wait in place first.
-            waitWhile(words, Word.STATE, state, idleMs, spinMs, Word.SLEEPING);
+            waitWhile(words, Word.STATE, state, idleMs, look(), Word.SLEEPING);
             state = Atomics.load(words, 0);
         }
         while (state !== Turn.RUN && state !== Turn.CLOSE)
@@ -272,6 +275,9 @@ async function serve({ engineUrl, config, memory, channel: buffer, bell, unbroke
         const chained = performance.now();
         spent.idleMs += chained - idleFrom;
         spent.slices++;
+        // A core of the host's taken from here to the slice's end, waits for the
+        // process's answers included (`lookFor`).
+        Atomics.add(bellWords, Bell.RUNNING, 1);
         let retired = 0;
         try
         {
@@ -323,6 +329,7 @@ async function serve({ engineUrl, config, memory, channel: buffer, bell, unbroke
             channel.write(fault);
             host.clearFault();
         }
+        Atomics.sub(bellWords, Bell.RUNNING, 1);
         channel.say(Turn.DONE, retired, (host.halted() ? Said.HALTED : 0)
             | (fault !== null ? Said.FAULTED : 0));
         // Taken now, so this executor is given its next thread now.
