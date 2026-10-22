@@ -1494,7 +1494,7 @@ function describe(result, context, calls, symbols){
         say('  frame series (a row per window of presents; per frame, and per draw where it'
             + ' divides):');
         say('      s   frames  frame ms  host ms  guest ms  draws  calls  host us/draw'
-            + '  guest us/draw  calls/draw  upload KB  heap MB');
+            + '  guest us/draw  calls/draw  upload KB  heap MB  M instr');
         for (let i = 1; i < series.length; i++)
         {
             const row = series[i];
@@ -1511,7 +1511,34 @@ function describe(result, context, calls, symbols){
                 + `  ${perDraw(row.guestMs).padStart(13)}`
                 + `  ${(draws > 0 ? crossings / draws : 0).toFixed(1).padStart(10)}`
                 + `  ${((row.uploadBytes - before.uploadBytes) / frames / 1024).toFixed(0)
-                    .padStart(9)}  ${row.heapMb.toFixed(0).padStart(7)}`);
+                    .padStart(9)}  ${row.heapMb.toFixed(0).padStart(7)}`
+                + `  ${row.instructions === null || before.instructions === null ? 'n/a'
+                    : ((row.instructions - before.instructions) / frames / 1e6).toFixed(1)
+                        .padStart(7)}`);
+        }
+        // The last window's frame by thread and by host function: what a level
+        // costs a frame, where the totals since the start are mostly its load.
+        const row = series[series.length - 1];
+        const before = series[series.length - 2];
+        if (row.byThread && before.byThread)
+        {
+            const frames = row.frames > 0 ? row.frames : 1;
+            /** @param {Record<string, number[]>} now @param {Record<string, number[]>} then @param {number} at */
+            const deltas = (now, then, at)=>Object.entries(now)
+                .map(([name, values])=>[name, (values[at] - (then[name]?.[at] ?? 0)) / frames])
+                .filter(([, value])=>Number(value) > 0)
+                .sort((left, right)=>Number(right[1]) - Number(left[1]));
+            const threads = deltas(row.byThread, before.byThread, 0).slice(0, 6)
+                .map(([name, count])=>`${name} ${(Number(count) / 1e6).toFixed(2)}`);
+            say(`  a frame from ${(before.at / 1000).toFixed(0)} s to ${(row.at / 1000).toFixed(0)} s`
+                + `, M instructions by thread: ${threads.join(', ')}`);
+            const heaviest = deltas(row.byFunction, before.byFunction, 1).slice(0, 12)
+                .map(([name, ms])=>`${name} ${((row.byFunction[name][0]
+                    - (before.byFunction[name]?.[0] ?? 0)) / frames).toFixed(1)} calls ${
+                    Number(ms).toFixed(2)} ms`);
+            // The bridge names the 80 functions heaviest since the start: one
+            // light over the run and heavy in the window can be missing here.
+            say(`  its host calls by host ms: ${heaviest.join('; ')}`);
         }
     }
     // The gaps between presents are the shape a stutter has, and the page's

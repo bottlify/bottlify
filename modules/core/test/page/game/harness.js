@@ -906,11 +906,33 @@ export function schedulePresses(app, request, say = ()=>{}){
  */
 
 /**
+ * The counts in a list of `name count ...` lines (the kernel's `byThread`, the
+ * bridge's `byFunction`), and the ms the second figure carries where it ends in
+ * `ms`: what a series row keeps so a window's share of each can be read by
+ * subtracting the row before.
+ *
+ * @param {string[]} lines
+ * @returns {Record<string, number[]>}
+ */
+function countsOf(lines){
+    /** @type {Record<string, number[]>} */
+    const counts = {};
+    for (const line of lines)
+    {
+        const [name, count, ms] = line.split(' ');
+        counts[name] = [Number(count), ms?.endsWith('ms') ? Number(ms.slice(0, -2)) : 0];
+    }
+    return counts;
+}
+
+/**
  * One row of the run's frame series: the log's frame split averaged over the
  * frames since the last row, and the counters a reader turns into rates per
  * frame by subtracting the row before -- the draws the backend encoded, the
- * host calls the bridge dispatched. A long run's totals hide how the cost of a
- * frame moves with what the frame draws; this is what shows it.
+ * host calls the bridge dispatched, the guest instructions retired on every
+ * executor, each thread's, and each host function's calls and ms. A long run's
+ * totals hide how the cost of a frame moves with what the frame draws, and a
+ * load's host calls bury a level's; this is what shows them.
  *
  * @param {any} app
  * @param {number} count  frames since the last row
@@ -938,6 +960,9 @@ export function seriesRow(app, count, at){
         uploadBytes: (counters.bufferUploadBytes ?? 0) + (counters.textureUploadBytes ?? 0),
         calls: layers.bridge?.calls ?? 0,
         heapMb: (/** @type {any} */ (globalThis).performance?.memory?.usedJSHeapSize ?? 0) / 1048576,
+        instructions: layers.cpu?.instructions ?? null,
+        byThread: countsOf(String(layers.kernel?.byThread ?? '').split(' | ').filter(Boolean)),
+        byFunction: countsOf(layers.bridge?.byFunction ?? []),
     };
 }
 
