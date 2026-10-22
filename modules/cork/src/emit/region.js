@@ -188,6 +188,18 @@ const RECORD_LOCALS = [Local.kind, Local.res, Local.op1, Local.op2, Local.cin];
  * emulator's) takes the parameters and loads its state as before.
  */
 export const STATE_PARAMS = 6;
+
+/** The mark of the region's end, before its epilogue (`markBlock`). */
+export const BLOCK_MARK_END = 0xfff;
+
+/**
+ * A block's mark as a diagnostic build stores it (`markBlocks`): a constant no
+ * translation otherwise holds, its low twelve bits the block and the four above
+ * them its copy.
+ *
+ * @param {number} index @param {number} copy
+ */
+export const blockMark = (index, copy)=>(0x6b5a0000 | (copy & 0xf) << 12 | index & 0xfff) >>> 0;
 /** The registers among the parameters: eax, ecx, edx, ebx. */
 export const CARRIED_REGS = STATE_PARAMS - 2;
 const LOCAL_TYPES = [
@@ -240,6 +252,9 @@ const LOCAL_TYPES = [
  *     profile past the tables (a diagnostic run, in a memory sized for it)
  * @property {ExpansionNote} [expansion] told each instruction's wasm bytes as it is
  *     emitted, the checks of its memory plan with it (a diagnostic run)
+ * @property {boolean} [markBlocks] each block's code opens with a store of `blockMark`, which
+ *     finds it in the machine code a compiler makes (`tools/cork-asm.mjs`; a diagnostic
+ *     build that is never run)
  * @property {boolean} [profileCalls] an indirect call notes its address and target in the
  *     layout's call profile while the host has it on
  * @property {boolean} [flat]  every backward jump through the dispatch rather than the loops
@@ -305,9 +320,10 @@ const LOCAL_TYPES = [
  *     structure?: boolean, precise?: boolean, place?: number, profileCalls?: boolean,
  *     resume?: boolean, callReturn?: boolean, emptySites?: boolean, looseStacks?: boolean,
  *     atomic?: boolean, ordered?: boolean, checkReads?: boolean,
- *     expansion?: ExpansionNote | null }}
+ *     expansion?: ExpansionNote | null, markBlocks?: boolean }}
  *     [options]  expansion: told every instruction's wasm bytes as it is emitted
- *     (`tools/cork-expansion.mjs`), in a diagnostic build only; checkReads: an
+ *     (`tools/cork-expansion.mjs`), in a diagnostic build only; markBlocks: each block
+ *     marked for the machine code (`blockMark`), likewise; checkReads: an
  *     instruction that only reads tests its pages too, so a page the program cannot read
  *     faults (a reservation not committed, PAGE_NOACCESS) rather than reading RAM;
  *     atomic: locked instructions as wasm atomics (`locked.js`), for a process
@@ -334,7 +350,7 @@ export function prepareModule(m, layout, features, memory = {},
         wide = false, narrow = false, blockProfile = false, structure = true, precise = false,
         place = 0, profileCalls = false, resume = false, callReturn = false, emptySites = false,
         looseStacks = false, atomic = false, ordered = false, checkReads = false,
-        expansion = null } = {})
+        expansion = null, markBlocks = false } = {})
 {
     m.importMemory('env', 'memory', {
         min: 1, ...(memory.maxPages === undefined ? {} : { max: memory.maxPages }),
@@ -458,6 +474,10 @@ export function prepareModule(m, layout, features, memory = {},
     if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && expansion !== null)
     {
         context.expansion = expansion;
+    }
+    if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && markBlocks)
+    {
+        context.markBlocks = true;
     }
     if (hashed)
     {
@@ -1063,6 +1083,9 @@ export class RegionEmitter {
         this.dead = false;
         /** Instructions retired in the current block so far, to charge at its end. */
         this.blockRetired = 0;
+        /** Each block's marks made so far, in a build that marks them (`markBlock`).
+         * @type {Map<number, number> | null} */
+        this.marksMade = null;
         this.instructions = 0;
         // The vector registers the region touches, found by a scan, each given
         // a local: loaded in the prologue, and written back when written.
@@ -1237,6 +1260,10 @@ export class RegionEmitter {
         b.unreachable();
         this.close(); // dispatch
         this.close(); // out
+        if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && this.context.markBlocks)
+        {
+            this.markBlock(BLOCK_MARK_END);
+        }
         this.epilogue();
         this.fillDeferred();
         const functionIndex = this.context.m.function(
@@ -2612,6 +2639,20 @@ export class RegionEmitter {
     }
 
     /**
+     * A store of the block's mark (`blockMark`): which code a compiler made of
+     * which block, read back from its machine code. A block emitted twice (a
+     * hoisted loop's checked and unchecked copies) is marked with its copy.
+     *
+     * @param {number} index  the block, or `BLOCK_MARK_END` before the epilogue
+     */
+    markBlock(index){
+        this.marksMade ??= new Map();
+        const copy = this.marksMade.get(index) ?? 0;
+        this.marksMade.set(index, copy + 1);
+        this.b.i32const(0).i32const(blockMark(index, copy)).store('i32', { offset: 1020 });
+    }
+
+    /**
      * One more of `mechanism` in a profiling run's counts (`blockProfile`);
      * nothing in any other.
      *
@@ -2636,6 +2677,10 @@ export class RegionEmitter {
      * @param {boolean[]} live @param {Map<number, any>} plan
      */
     emitInstructions(block, index, live, plan){
+        if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && this.context.markBlocks)
+        {
+            this.markBlock(index);
+        }
         if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && this.context.blockProfile)
         {
             this.countBlock(block.start);
