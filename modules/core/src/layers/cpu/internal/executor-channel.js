@@ -80,22 +80,41 @@ export const ANSWER_BOUNDS_US = Object.freeze([10, 25, 50, 100, 200, 500, 1000, 
 /**
  * Waits until `word[index]` is no longer `value`: a look for `spinMs` (`SPIN_MS`),
  * then a sleep for at most `ms`, counted in `word[sleepers]` when that is given.
+ * A look outside a slice is counted among the slices out while it lasts
+ * (`looking`, the bell's `Bell.RUNNING`): it holds a core as one does.
  *
  * @param {Int32Array} word @param {number} index @param {number} value @param {number} [ms]
- * @param {number} [spinMs] @param {number} [sleepers]
+ * @param {number} [spinMs] @param {number} [sleepers] @param {Int32Array | null} [looking]
  * @returns {boolean} whether it slept
  */
-export function waitWhile(word, index, value, ms = Infinity, spinMs = SPIN_MS, sleepers = -1){
+export function waitWhile(word, index, value, ms = Infinity, spinMs = SPIN_MS, sleepers = -1,
+    looking = null)
+{
     const began = performance.now();
+    if (looking !== null)
+    {
+        Atomics.add(looking, Bell.RUNNING, 1);
+    }
+    let slept = false;
     while (Atomics.load(word, index) === value)
     {
         if (performance.now() - began >= spinMs)
         {
+            if (looking !== null)
+            {
+                Atomics.sub(looking, Bell.RUNNING, 1);
+                looking = null;
+            }
             sleep(word, index, value, ms, sleepers);
-            return true;
+            slept = true;
+            break;
         }
     }
-    return false;
+    if (looking !== null)
+    {
+        Atomics.sub(looking, Bell.RUNNING, 1);
+    }
+    return slept;
 }
 
 /**

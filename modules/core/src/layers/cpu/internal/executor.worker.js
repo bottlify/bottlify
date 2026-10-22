@@ -245,8 +245,9 @@ async function serve({ engineUrl, config, memory, channel: buffer, bell, unbroke
         if (state !== Turn.RUN && state !== Turn.CLOSE)
         {
             // The process mostly asks again soon after a slice's end, and a
-            // wake through the event loop costs more: a short wait in place first.
-            waitWhile(words, Word.STATE, state, idleMs, look(), Word.SLEEPING);
+            // wake through the event loop costs more: a short wait in place
+            // first, its look counted as a core taken while it lasts.
+            waitWhile(words, Word.STATE, state, idleMs, look(), Word.SLEEPING, bellWords);
             state = Atomics.load(words, 0);
         }
         while (state !== Turn.RUN && state !== Turn.CLOSE)
