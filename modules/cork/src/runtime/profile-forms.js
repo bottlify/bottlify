@@ -42,10 +42,19 @@ export function formOf(instruction){
  */
 
 /**
- * The forms of the regions given, weighted by their blocks' executions.
- * `emit` emits the regions once, telling `note` each instruction's wasm bytes
- * as it goes; an instruction emitted twice (a region's copies) counts once, as
- * the region's own function has it.
+ * @typedef {Object} RegionRow
+ * @property {number} entry     the region's entry, its function's name in a profile (`r<hex>`)
+ * @property {number} executed  instructions of its blocks the window ran
+ * @property {number} bytes     the wasm bytes those executions ran through
+ */
+
+/**
+ * The forms of the regions given, weighted by their blocks' executions, and
+ * the same by region (`byRegion`), which a sampled profile's time by region
+ * function turns into time an instruction. `emit` emits the regions once,
+ * telling `note` each instruction's wasm bytes as it goes; an instruction
+ * emitted twice (a region's copies) counts once, as the region's own function
+ * has it, and a block in two regions counts in the first.
  *
  * @param {import('../region.js').Region[]} regions
  * @param {Map<number, number>} executions  by block start, how often it ran
@@ -69,8 +78,12 @@ export function profileForms(regions, executions, emit, top = 40){
     const seen = new Set();
     let executed = 0;
     let bytes = 0;
+    /** @type {RegionRow[]} */
+    const byRegion = [];
     for (const region of regions)
     {
+        const executedBefore = executed;
+        const bytesBefore = bytes;
         for (const block of region.blocks)
         {
             const runs = executions.get(block.start) ?? 0;
@@ -95,12 +108,18 @@ export function profileForms(regions, executions, emit, top = 40){
                 bytes += runs * wasm;
             }
         }
+        if (executed > executedBefore)
+        {
+            byRegion.push({ entry: region.entry, executed: executed - executedBefore,
+                bytes: bytes - bytesBefore });
+        }
     }
     /** @type {FormRow[]} */
     const rows = [...byForm].map(([form, row])=>({ form, executed: row.executed,
         bytes: row.bytes, perInstruction: row.bytes / row.executed,
         share: bytes > 0 ? row.bytes / bytes : 0 }));
     rows.sort((a, b)=>b.bytes - a.bytes);
+    byRegion.sort((a, b)=>b.executed - a.executed);
     return { regions: regions.length, executed, bytes,
-        perInstruction: executed > 0 ? bytes / executed : 0, forms: rows.slice(0, top) };
+        perInstruction: executed > 0 ? bytes / executed : 0, forms: rows.slice(0, top), byRegion };
 }

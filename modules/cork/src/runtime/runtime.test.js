@@ -2304,6 +2304,8 @@ test('a block profile says what the hot code is made of: each form\'s executions
     assert.ok(row('dec r32').perInstruction > 0);
     assert.ok(Math.abs(forms.forms.reduce((/** @type {number} */ sum, /** @type {any} */ one)=>
         sum + one.share, 0) - 1) < 1e-9, 'the shares are of the bytes run through');
+    assert.deepEqual(forms.byRegion, [{ entry: CODE, executed: 2002, bytes: forms.bytes }],
+        'the same by region, for a profile\'s time by region function');
 });
 
 test('a block profile with blockProfileFrom counts only what ran after that moment', async()=>{
