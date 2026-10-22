@@ -81,6 +81,7 @@ const EMITTED = {
     92: '18c624d5b1dedc26',
     93: 'c20886250a565df9',
     94: '2ebe93273ec924dd',
+    95: '8ccfab65b1fe8ee0',
 };
 
 /** Features fixed rather than probed, so every host emits the same bytes. */
@@ -175,8 +176,10 @@ function digest(){
     // mov ecx, 1000; L: dec ecx; jnz L; hlt
     const countdown = [0xb9, 0xe8, 0x03, 0, 0, 0x49, 0x75, 0xfd, 0xf4];
     const several = ownLayout({ ramSize: 16 << 20, processors: 2 });
+    // And on the layout with guest RAM from the memory's start, a Windows process's.
+    const low = ownLayout({ ramSize: 16 << 20, processors: 2, ramBase: 0 });
     for (const [name, at] of /** @type {const} */ ([['several', several],
-        ['shared', sharedLayout(several)]]))
+        ['shared', sharedLayout(several)], ['low', low], ['low shared', sharedLayout(low)]]))
     {
         const loop = formRegion(address=>countdown[address - 0x1000] ?? 0, 0x1000, {});
         const loops = new ModuleBuilder();

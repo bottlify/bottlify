@@ -502,11 +502,11 @@ export function emitInstruction(e, instruction, flagsLive){
             {
                 prepare(e, src);
             }
-            writeOp(e, dst, ()=>readOp(e, src));
+            writeOp(e, dst, ()=>readOp(e, src), src.kind === 'reg' || src.kind === 'mem');
             return true;
         case 'movzx':
             prepare(e, src);
-            writeOp(e, dst, ()=>readOp(e, src));
+            writeOp(e, dst, ()=>readOp(e, src), true);
             return true;
         case 'movsx':
             prepare(e, src);
@@ -522,8 +522,8 @@ export function emitInstruction(e, instruction, flagsLive){
             prepare(e, dst.kind === 'mem' ? dst : src);
             readOp(e, dst);
             b.localSet(Local.t1);
-            writeOp(e, dst, ()=>readOp(e, src));
-            writeOp(e, src, ()=>b.localGet(Local.t1));
+            writeOp(e, dst, ()=>readOp(e, src), true);
+            writeOp(e, src, ()=>b.localGet(Local.t1), true);
             return true;
         case 'add': case 'adc': case 'sub': case 'sbb': case 'cmp': case 'xadd':
             arithmetic(e, instruction, flagsLive);
@@ -964,10 +964,10 @@ export function emitInstruction(e, instruction, flagsLive){
             e.record(Kind.SUB, size);
             b.op(I32.eqz);
             e.openIf('equal', EMPTY);
-            writeOp(e, dst, ()=>readOp(e, src));
+            writeOp(e, dst, ()=>readOp(e, src), true);
             b.op(0x05);
             b.localGet(Local.op2);
-            writeReg(e, 0, size, false);
+            writeReg(e, 0, size, false, true);
             e.close();
             return true;
         case 'movs': case 'stos': case 'lods': case 'cmps': case 'scas':
@@ -1306,17 +1306,19 @@ export function readOp(e, operand){
 
 /**
  * Writes an operand: `pushValue` pushes the new value (any high bits are
- * masked here).
+ * masked here, unless `exact` says it has none: a load of the operand's size,
+ * or a register's bytes, read as they are).
  *
  * @param {E} e @param {Operand} operand @param {() => void} pushValue
  */
-export function writeOp(e, operand, pushValue){
+export function writeOp(e, operand, pushValue, exact = false){
     const { b } = e;
     switch (operand.kind)
     {
         case 'reg':
             pushValue();
-            writeReg(e, /** @type {number} */ (operand.reg), operand.size, operand.high === true);
+            writeReg(e, /** @type {number} */ (operand.reg), operand.size, operand.high === true,
+                exact);
             return;
         case 'mem':
             noteStore(e, operand.size);
@@ -1336,11 +1338,14 @@ export function writeOp(e, operand, pushValue){
 
 /**
  * Writes the value on the stack into a register, merging a narrow write
- * into the dword.
+ * into the dword. A value `exact` has no bits past `size` bytes -- a load of
+ * them, zero-extended -- and is merged as it is: the compiler does not know a
+ * narrow load's range and would keep the mask.
  *
  * @param {E} e @param {number} reg @param {number} size @param {boolean} high
+ * @param {boolean} [exact]
  */
-export function writeReg(e, reg, size, high){
+export function writeReg(e, reg, size, high, exact = false){
     const { b } = e;
     const local = Local.reg + reg;
     if (size === 4)
@@ -1350,18 +1355,15 @@ export function writeReg(e, reg, size, high){
     }
     b.localSet(Local.t0);
     b.localGet(local);
-    if (size === 2)
+    b.i32const(size === 2 ? 0xffff0000 | 0 : high ? 0xffff00ff | 0 : 0xffffff00 | 0).op(I32.and);
+    b.localGet(Local.t0);
+    if (!exact)
     {
-        b.i32const(0xffff0000 | 0).op(I32.and).localGet(Local.t0).i32const(0xffff).op(I32.and);
+        b.i32const(size === 2 ? 0xffff : 0xff).op(I32.and);
     }
-    else if (high)
+    if (size === 1 && high)
     {
-        b.i32const(0xffff00ff | 0).op(I32.and).localGet(Local.t0).i32const(0xff).op(I32.and)
-            .i32const(8).op(I32.shl);
-    }
-    else
-    {
-        b.i32const(0xffffff00 | 0).op(I32.and).localGet(Local.t0).i32const(0xff).op(I32.and);
+        b.i32const(8).op(I32.shl);
     }
     b.op(I32.or).localSet(local);
 }
@@ -2738,7 +2740,7 @@ function stringInstruction(e, instruction){
             break;
         case 'lods':
             checkedLoad(esi);
-            writeReg(e, 0, size, false);
+            writeReg(e, 0, size, false, true);
             advance(esi);
             break;
         case 'cmps':
