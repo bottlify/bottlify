@@ -1,0 +1,95 @@
+/*
+ * Copyright © 2026 Bottlify Project
+ * Licensed under the Mozilla Public License, version 2.0
+ * See LICENSE for details
+ */
+
+/**
+ * The channel's wakes: a side ending its turn notifies only when the other
+ * sleeps on the word (`wake`, `Word.SLEEPING`), and no wake is lost for it --
+ * two threads hand turns back and forth thousands of times, each always
+ * sleeping, each never sleeping, and a mix, and every turn arrives.
+ */
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { Worker } from 'node:worker_threads';
+import { CHANNEL_BYTES, Turn, Word, channelOf, sleepAsync, wake } from './executor-channel.js';
+
+const CHANNEL_URL = new URL('./executor-channel.js', import.meta.url).href;
+
+/** The other side: answers each `RUN` with `DONE` and the value one more. */
+const ANSWERER = `
+import { workerData, parentPort } from 'node:worker_threads';
+import { Turn, channelOf } from ${JSON.stringify(CHANNEL_URL)};
+const channel = channelOf(workerData.buffer, null, workerData.spinMs);
+for (let round = 0; round < workerData.rounds; round++)
+{
+    channel.await(Turn.DONE);
+    channel.say(Turn.DONE, channel.value() + 1);
+}
+parentPort.postMessage({ ...channel.counts });
+`;
+
+/**
+ * Hands `rounds` turns to a worker and back, each side looking `spinMs` before
+ * it sleeps.
+ *
+ * @param {number} rounds @param {number} mineMs @param {number} theirsMs
+ */
+async function handTurns(rounds, mineMs, theirsMs){
+    const buffer = new SharedArrayBuffer(CHANNEL_BYTES);
+    const channel = channelOf(buffer, null, mineMs);
+    Atomics.store(channel.words, Word.STATE, Turn.DONE);
+    const worker = new Worker(new URL(`data:text/javascript,${encodeURIComponent(ANSWERER)}`),
+        { workerData: { buffer, rounds, spinMs: theirsMs } });
+    const theirs = new Promise((resolve, reject)=>{
+        worker.once('message', resolve);
+        worker.once('error', reject);
+    });
+    for (let round = 0; round < rounds; round++)
+    {
+        channel.say(Turn.RUN, round);
+        assert.equal(channel.await(Turn.RUN), Turn.DONE);
+        assert.equal(channel.value(), round + 1, `round ${round}`);
+    }
+    const counts = /** @type {Record<string, number>} */ (await theirs);
+    await worker.terminate();
+    assert.equal(Atomics.load(channel.words, Word.SLEEPING), 0, 'no sleeper left counted');
+    return { mine: channel.counts, theirs: counts };
+}
+
+test('a turn ended while the other side looks wakes nothing, and one it sleeps through wakes it',
+    async()=>{
+        // Both always asleep by their turn's end: every turn wakes the other,
+        // or the hand-over would stop for good.
+        const asleep = await handTurns(2000, 0, 0);
+        assert.equal(asleep.mine.said, 2000);
+        assert.equal(asleep.theirs.said, 2000);
+        assert.ok(asleep.mine.slept > 0 && asleep.theirs.slept > 0, JSON.stringify(asleep));
+        assert.ok(asleep.mine.woke > 0 && asleep.theirs.woke > 0, JSON.stringify(asleep));
+        // Both looking for longer than the other takes: no notify at all.
+        const awake = await handTurns(2000, 5000, 5000);
+        assert.deepEqual([awake.mine.slept, awake.theirs.slept, awake.mine.woke,
+            awake.theirs.woke], [0, 0, 0, 0], JSON.stringify(awake));
+        // One sleeping, one looking: only the sleeper is woken.
+        const mixed = await handTurns(2000, 5000, 0);
+        assert.equal(mixed.mine.slept, 0);
+        assert.equal(mixed.theirs.woke, 0, 'the looking side was never notified');
+        assert.ok(mixed.mine.woke > 0, JSON.stringify(mixed));
+    });
+
+test('a wake finds no sleeper and notifies nothing; a wait without blocking is counted while on',
+    async()=>{
+        const words = new Int32Array(new SharedArrayBuffer(CHANNEL_BYTES));
+        assert.equal(wake(words, Word.STATE, Word.SLEEPING), false);
+        const waiting = sleepAsync(words, Word.STATE, 0, Infinity, Word.SLEEPING);
+        assert.equal(Atomics.load(words, Word.SLEEPING), 1);
+        Atomics.store(words, Word.STATE, 1);
+        assert.equal(wake(words, Word.STATE, Word.SLEEPING), true);
+        await waiting;
+        assert.equal(Atomics.load(words, Word.SLEEPING), 0);
+        // A wait whose word already moved resolves at once and counts nothing.
+        await sleepAsync(words, Word.STATE, 0, Infinity, Word.SLEEPING);
+        assert.equal(Atomics.load(words, Word.SLEEPING), 0);
+    });

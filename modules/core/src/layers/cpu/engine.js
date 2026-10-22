@@ -341,8 +341,8 @@ export function engineContractProblem(engineModule, url){
  * @property {number} [interpretChunk]  Instructions the interpreter runs at a time. Default 8192.
  * @property {number} [sliceMs]  How long a slice that has interpreted may take. Default 8.
  * @property {number} [tscDriftMs]  How far `rdtsc` runs ahead of the guest's clock. Default 16.
- * @property {number} [spinMs]  With several executors, how long a side of their channel looks
- *     at it before it sleeps. Default 0.05.
+ * @property {number} [spinMs]  With several executors, how long a side of their channel, and the
+ *     process on their bell, looks at it before it sleeps. Default 0.05.
  * @property {number} [executorIdleMs]  How long an executor waits in place for its next slice
  *     before its event loop does. Default 2.
  * @property {number} [executorYieldMs]  The longest an executor goes without a turn of its

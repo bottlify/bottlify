@@ -32,10 +32,11 @@
  * weighs against the thread's own work when it places it. `PLAYS` is the
  * processor the executor plays, one more than its number, while it is not its
  * own (the kernel trades them), zero otherwise: the one `cpuid` names from the
- * next slice, set only between slices.
+ * next slice, set only between slices. `SLEEPING` counts the waits asleep on
+ * `STATE` (`sleep`): a side ending its turn wakes the other only when it sleeps.
  */
 export const Word = Object.freeze({ STATE: 0, VALUE: 1, FLAGS: 2, LENGTH: 3, EPOCH: 4,
-    RETIRED: 5, WAITED: 6, PLAYS: 7 });
+    RETIRED: 5, WAITED: 6, PLAYS: 7, SLEEPING: 8 });
 
 /** The states, each set by the side whose turn it ends. */
 export const Turn = Object.freeze({
@@ -54,28 +55,107 @@ export const Said = Object.freeze({ HALTED: 1, STOPPED: 2, CLAIMED: 4, FAULTED: 
 export const SPIN_MS = 0.05;
 
 /**
+ * The bounds, in microseconds, an executor counts its waits for the process's
+ * answers by (`answerWaits` in its account): how many a look of each length
+ * before the sleep would have caught.
+ */
+export const ANSWER_BOUNDS_US = Object.freeze([10, 25, 50, 100, 200, 500, 1000, 5000]);
+
+/**
  * Waits until `word[index]` is no longer `value`: a look for `spinMs` (`SPIN_MS`),
- * then a sleep for at most `ms`.
+ * then a sleep for at most `ms`, counted in `word[sleepers]` when that is given.
  *
  * @param {Int32Array} word @param {number} index @param {number} value @param {number} [ms]
- * @param {number} [spinMs]
+ * @param {number} [spinMs] @param {number} [sleepers]
+ * @returns {boolean} whether it slept
  */
-export function waitWhile(word, index, value, ms = Infinity, spinMs = SPIN_MS){
+export function waitWhile(word, index, value, ms = Infinity, spinMs = SPIN_MS, sleepers = -1){
     const began = performance.now();
     while (Atomics.load(word, index) === value)
     {
         if (performance.now() - began >= spinMs)
         {
-            Atomics.wait(word, index, value, ms);
-            return;
+            sleep(word, index, value, ms, sleepers);
+            return true;
         }
     }
+    return false;
+}
+
+/**
+ * Sleeps on `word[index]` while it is `value`, at most `ms`, counted in
+ * `word[sleepers]` (not, when negative) for `wake`. The count is raised before
+ * the wait looks at the word, and both are sequentially consistent: a side
+ * that stores the word and then finds no sleeper knows that a wait yet to
+ * come sees what it stored, and one that finds a sleeper notifies under the
+ * lock the wait takes, so no wake is lost between the look and the sleep.
+ *
+ * @param {Int32Array} word @param {number} index @param {number} value @param {number} ms
+ * @param {number} sleepers
+ */
+export function sleep(word, index, value, ms, sleepers){
+    if (sleepers < 0)
+    {
+        Atomics.wait(word, index, value, ms);
+        return;
+    }
+    Atomics.add(word, sleepers, 1);
+    Atomics.wait(word, index, value, ms);
+    Atomics.sub(word, sleepers, 1);
+}
+
+/**
+ * The same sleep without blocking (`Atomics.waitAsync`): counted until it ends,
+ * for a side whose other wakes come through its event loop.
+ *
+ * @param {Int32Array} word @param {number} index @param {number} value @param {number} ms
+ * @param {number} sleepers
+ * @returns {Promise<void>}
+ */
+export function sleepAsync(word, index, value, ms, sleepers){
+    Atomics.add(word, sleepers, 1);
+    const waiting = /** @type {any} */ (Atomics).waitAsync(word, index, value, ms);
+    if (!waiting.async)
+    {
+        Atomics.sub(word, sleepers, 1);
+        return Promise.resolve();
+    }
+    return waiting.value.then(()=>{
+        Atomics.sub(word, sleepers, 1);
+    });
+}
+
+/**
+ * Wakes what sleeps on `word[index]`, which the caller has just stored, when
+ * something does (`word[sleepers]`, `sleep`): a notify takes a lock every
+ * thread of the page shares -- the process's own executor answers every other
+ * executor's host calls, and its notify after each answer found the asker
+ * mostly still looking.
+ *
+ * @param {Int32Array} word @param {number} index @param {number} sleepers
+ * @returns {boolean} whether it notified
+ */
+export function wake(word, index, sleepers){
+    if (Atomics.load(word, sleepers) === 0)
+    {
+        return false;
+    }
+    Atomics.notify(word, index);
+    return true;
 }
 
 /** Bytes before the text, and the text's room. */
 const TEXT_AT = 64;
 const TEXT_BYTES = 4096;
 export const CHANNEL_BYTES = TEXT_AT + TEXT_BYTES;
+
+/**
+ * The words of a bell, as indices into its `Int32Array`: the count of turns
+ * rung, whether an executor may go on with its thread past a slice (`goOn`,
+ * `hold` in `executor.js`), and the waits asleep on the count (`sleep`).
+ */
+export const Bell = Object.freeze({ RUNG: 0, GO_ON: 1, SLEEPING: 2 });
+export const BELL_BYTES = 12;
 
 /**
  * The views of a channel's memory.
@@ -88,21 +168,36 @@ export const CHANNEL_BYTES = TEXT_AT + TEXT_BYTES;
 export function channelOf(buffer, bell = null, spinMs = SPIN_MS){
     const words = new Int32Array(buffer, 0, TEXT_AT / 4);
     const text = new Uint8Array(buffer, TEXT_AT, TEXT_BYTES);
+    /**
+     * The turns this side ended, the other side's sleeps they woke, the
+     * process's sleeps on the bell they woke, and this side's own sleeps.
+     */
+    const counts = { said: 0, woke: 0, wokeBell: 0, slept: 0 };
     return {
         words,
+        counts,
         /**
-         * Ends this side's turn: the state stored, then the other side woken.
+         * Ends this side's turn: the state stored, then the other side woken
+         * if it sleeps on it, and the bell rung -- the process woken if it
+         * sleeps on that.
          * @param {number} state @param {number} [value] @param {number} [flags]
          */
         say(state, value = 0, flags = 0){
             Atomics.store(words, Word.VALUE, value | 0);
             Atomics.store(words, Word.FLAGS, flags | 0);
             Atomics.store(words, Word.STATE, state);
-            Atomics.notify(words, Word.STATE);
+            counts.said++;
+            if (wake(words, Word.STATE, Word.SLEEPING))
+            {
+                counts.woke++;
+            }
             if (bell !== null)
             {
-                Atomics.add(bell, 0, 1);
-                Atomics.notify(bell, 0);
+                Atomics.add(bell, Bell.RUNG, 1);
+                if (wake(bell, Bell.RUNG, Bell.SLEEPING))
+                {
+                    counts.wokeBell++;
+                }
             }
         },
         /**
@@ -112,7 +207,10 @@ export function channelOf(buffer, bell = null, spinMs = SPIN_MS){
         await(state){
             while (Atomics.load(words, Word.STATE) === state)
             {
-                waitWhile(words, Word.STATE, state, Infinity, spinMs);
+                if (waitWhile(words, Word.STATE, state, Infinity, spinMs, Word.SLEEPING))
+                {
+                    counts.slept++;
+                }
             }
             return Atomics.load(words, Word.STATE);
         },

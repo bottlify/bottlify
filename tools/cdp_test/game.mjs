@@ -1049,6 +1049,28 @@ function describe(result, context, calls, symbols){
                 + ` answer waits ${seconds(spent.answerWaitMs)} (${spent.traps} traps), idle`
                 + ` ${seconds(spent.idleMs)}; retired ${(one.retired / 1e9).toFixed(1)} G,`
                 + ` ${rate(one.retired, computing)} computing`);
+            // Who woke whom: a notify is a lock every thread shares and a sleeping
+            // side's wake tens of microseconds, so the share asleep is the cost.
+            const theirs = spent.waits;
+            const ours = one.said;
+            say(`      wakes: e0 ended ${ours?.said ?? 'not measured'} turns here, woke the`
+                + ` executor asleep ${ours?.woke ?? 'not measured'}; it ended`
+                + ` ${theirs?.said ?? 'not measured'}, woke e0 asleep on the bell`
+                + ` ${theirs?.wokeBell ?? 'not measured'}; its answer waits slept`
+                + ` ${theirs?.slept ?? 'not measured'} of ${spent.traps + spent.faults}`);
+            const bounds = spent.answerBoundsUs;
+            if (Array.isArray(spent.answerWaits) && Array.isArray(bounds))
+            {
+                // Each count is of the answers that took up to that bound: a look
+                // that long before a sleep catches the counts up to it.
+                say(`      answers by wait: ${bounds.map((bound, at)=>`<=${bound} us`
+                    + ` ${spent.answerWaits[at]}`).join(', ')}, longer`
+                    + ` ${spent.answerWaits[bounds.length]}`);
+            }
+            else
+            {
+                say('      answers by wait: not measured');
+            }
         }
     }
     say(`  adapter: ${JSON.stringify(result.adapter)}`);

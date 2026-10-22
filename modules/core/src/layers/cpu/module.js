@@ -685,7 +685,7 @@ export function createCpuModule(){
                             {
                                 cork.translators = 1;
                             }
-                            const bell = createBell();
+                            const bell = createBell(settings.cork?.spinMs);
                             state.bell = bell;
                             const host = state.host;
                             state.openExecutor = index=>createRemoteExecutor({ host, index,
@@ -1615,8 +1615,10 @@ export function createCpuModule(){
                             instance.remoteFigures.set(remote.index, value);
                         }).catch(()=>{});
                         const figures = instance.remoteFigures.get(remote.index);
-                        // What its slices retired is the process's to say, now.
+                        // What its slices retired is the process's to say, now, and
+                        // so is what the process's turns in their channel woke.
                         const instructions = remote.retired?.() ?? null;
+                        const said = remote.waits?.() ?? null;
                         return figures ? {
                             index: remote.index,
                             instructions,
@@ -1628,7 +1630,8 @@ export function createCpuModule(){
                             translateMs: figures.translateMs,
                             workerBusyMs: figures.workerBusyMs,
                             spent: figures.spent,
-                        } : { index: remote.index, instructions, answer: 'not answered yet' };
+                            said,
+                        } : { index: remote.index, instructions, said, answer: 'not answered yet' };
                     }),
                 },
             };

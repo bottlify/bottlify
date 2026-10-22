@@ -1914,7 +1914,8 @@ export function createHarness(canvas, how = {}){
             own: typeof metrics('kernel').sharedTime === 'string'
                 ? JSON.parse(metrics('kernel').sharedTime) : metrics('kernel').sharedTime ?? null,
             remotes: (metrics('cpu').executors ?? []).map((/** @type {any} */ one)=>({
-                index: one.index, retired: one.retired ?? null, spent: one.spent ?? null })),
+                index: one.index, retired: one.retired ?? null, spent: one.spent ?? null,
+                said: one.said ?? null })),
         };
         result.threads = {
             byState: metrics('kernel').byState ?? {},

@@ -385,6 +385,13 @@ Reading it:
   finished without posting its completion.
 - An unresolved import is a real answer, not noise: a program that cannot bind
   one may take a different path silently.
+- With several executors, each other executor's line has two under it.
+  `wakes`: the turns the process's executor (e0) ended in its channel and how
+  many of them found it asleep and had to wake it, the turns it ended and how
+  many woke e0 asleep on the bell, and how many of its waits for an answer
+  slept. `answers by wait`: those waits counted by how long the answer took; a
+  look before the sleep (`cork.config.spinMs`, 0.05 ms by default) catches the
+  counts up to its length, and every sleep it misses costs a wake on both sides.
 
 ### Translated code gone wrong
 

@@ -19,7 +19,8 @@
  * stacks need no carrying.
  */
 
-import { CHANNEL_BYTES, Said, Turn, Word, channelOf, waitWhile } from './executor-channel.js';
+import { BELL_BYTES, Bell, CHANNEL_BYTES, SPIN_MS, Said, Turn, Word, channelOf, sleepAsync,
+    waitWhile } from './executor-channel.js';
 
 /**
  * A worker, as a page's `Worker` or Node's `worker_threads` makes one.
@@ -63,21 +64,22 @@ async function openWorker(url){
  * The word a process waits on for all its executors: each rings it at the end
  * of every turn of its own, so one wait covers every channel.
  */
-export function createBell(){
-    // The count of turns rung, then whether an executor may go on with its
-    // thread past a slice: 1 on, 0 not, 2 for a turn's length (`goOn`, `hold`).
-    const buffer = new SharedArrayBuffer(8);
+export function createBell(spinMs = SPIN_MS){
+    // The count of turns rung, whether an executor may go on with its thread
+    // past a slice (1 on, 0 not, 2 for a turn's length: `goOn`, `hold`), and the
+    // process's waits asleep on the count, which alone an executor's ring wakes.
+    const buffer = new SharedArrayBuffer(BELL_BYTES);
     const word = new Int32Array(buffer);
     return {
         buffer,
         /** The count now: what a wait is from. */
-        rung: ()=>Atomics.load(word, 0),
+        rung: ()=>Atomics.load(word, Bell.RUNG),
         /**
          * Waits until the bell rings past `seen`, at most `ms`.
          * @param {number} seen @param {number} [ms]
          */
         wait(seen, ms = Infinity){
-            waitWhile(word, 0, seen, ms);
+            waitWhile(word, Bell.RUNG, seen, ms, spinMs, Bell.SLEEPING);
         },
         /**
          * The same wait without blocking: for a caller whose other wake comes
@@ -87,8 +89,7 @@ export function createBell(){
          * @returns {Promise<void>}
          */
         waitAsync(seen, ms){
-            const waiting = /** @type {any} */ (Atomics).waitAsync(word, 0, seen, ms);
-            return waiting.async ? waiting.value.then(()=>{}) : Promise.resolve();
+            return sleepAsync(word, Bell.RUNG, seen, ms, Bell.SLEEPING);
         },
         /**
          * Whether no ready thread waits for an executor: then one whose slice
@@ -99,7 +100,7 @@ export function createBell(){
          * @param {boolean} on
          */
         goOn(on){
-            Atomics.store(word, 1, on ? 1 : 0);
+            Atomics.store(word, Bell.GO_ON, on ? 1 : 0);
         },
         /**
          * Ready threads wait for an executor, none of them at once: one whose
@@ -110,7 +111,7 @@ export function createBell(){
          * four threads on two executors ran barely faster than on one.
          */
         hold(){
-            Atomics.store(word, 1, 2);
+            Atomics.store(word, Bell.GO_ON, 2);
         },
     };
 }
@@ -398,6 +399,8 @@ export async function createRemoteExecutor({ host, index, engineUrl, config,
         retiredSoFar: ()=>(running ? Atomics.load(channel.words, Word.RETIRED) >>> 0 : 0),
         /** Microseconds it has waited for the process's answers since it opened (`Word.WAITED`). */
         waitedUs: ()=>Atomics.load(channel.words, Word.WAITED) >>> 0,
+        /** The process's side of its channel: the turns it ended, and the executor's sleeps they woke. */
+        waits: ()=>({ ...channel.counts }),
         /**
          * The processor it plays from its next slice, the one `cpuid` names
          * there (`Word.PLAYS`); undefined, its own.
