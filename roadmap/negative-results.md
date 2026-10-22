@@ -1347,3 +1347,10 @@ None yet.
 - **Decision.** Not taken: the counter's decrement and branch at every back edge cost more than
   the load. A plain load of the word took instead (0-3 %), the same contract kept: V8 12 and
   14 do not take it out of a loop that stores nothing.
+
+### 2026-10-22 -- invalidated: "the shared layout's state and table bases held in locals"
+
+- The entry above measured nothing of the shared layout: the cork host's executor 0, which
+  every arm ran on, keeps its own layout (constant addresses) with any number of executors,
+  and only the others translate for the shared one, so the change was not in the arms' code.
+  Its conclusion about imported globals is not shown and is not to be cited.

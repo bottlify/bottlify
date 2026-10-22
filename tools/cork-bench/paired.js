@@ -21,14 +21,17 @@ const ENTRY_VECTOR = 0x7000;
  * the program's main to its `hlt`, the translator fed between slices as
  * `bench.mjs` feeds it.
  *
- * @param {{ createCorkHost: Function, engine: object, cork?: object, executors?: number }} arm
- *     executors: memory laid out for that many, as a process of several has it
+ * @param {{ createCorkHost: Function, engine: object, cork?: object, executors?: number,
+ *     executor?: number }} arm
+ *     executors: memory laid out for that many, as a process of several has it; executor: the
+ *     one the program runs on, the process's own (0, its own layout) or another (the shared)
  * @param {Uint8Array} image
  */
-export function hostOf({ createCorkHost, engine, cork = {}, executors = 1 }, image){
+export function hostOf(arm, image){
+    const { createCorkHost, engine, cork = {}, executors = 1, executor = 0 } = arm;
     const host = createCorkHost({
         engine, memorySize: 16 << 20, trapPort: 0xb077, entryVector: ENTRY_VECTOR,
-        initialStack: 0x800000, cork, ...(executors > 1 ? { executors } : {}),
+        initialStack: 0x800000, cork, ...(executors > 1 ? { executors, executor } : {}),
     });
     host.writePhysical(IMAGE_BASE, image);
     const vector = new Uint8Array(4);
@@ -49,7 +52,8 @@ export function hostOf({ createCorkHost, engine, cork = {}, executors = 1 }, ima
 /**
  * Every arm warmed, then `rounds` rounds of `block` iterations each.
  *
- * @param {{ createCorkHost: Function, engine: object, cork?: object, executors?: number }[]} arms
+ * @param {{ createCorkHost: Function, engine: object, cork?: object, executors?: number,
+ *     executor?: number }[]} arms
  * @param {Uint8Array} image
  * @param {{ warm: number, rounds: number, block: number }} plan
  * @returns {{ times: number[][], eax: string[] }}  each round's microseconds an
