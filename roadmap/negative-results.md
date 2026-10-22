@@ -1281,3 +1281,29 @@ None yet.
   thread had stopped writing, it ran rarely (the thread ends its frame with the Present that
   takes the ring anyway) and moved nothing. Frame times stayed within the noise either way. A
   ring taken without the device's lock (records copied out under it, played after) is still open.
+
+### 2026-10-22 -- an executor's look for its next slice counted among the cores taken
+
+- **Idea.** The wait rule (`lookFor`, `executor-channel.js`) looks 1 ms before it sleeps while
+  the executors' slices out and the two threads always beside them leave one of the host's
+  processors free, and 0.05 ms otherwise. An executor between slices looks the same way without
+  being counted, so on a host with no core to spare it might hold one the rule thinks free;
+  counting its look among the slices out (`Bell.RUNNING`, given back when the look ends or the
+  wait sleeps) was to keep the long look off such a host.
+- **Workload.** The Direct3D stand (scratchpad `d3dstand/run-wake.mjs 200 30 20 1000000 2 C
+  '{"program":{"vbBytes":65536,"pin":true,"renderWork":1000000}}'`: main computes 1 M rounds a
+  frame and waits on a render thread that computes 1 M rounds and draws 30 batches of 20 quads,
+  the graphics worker over the fake GPU), C = 2 and 3 executors, 200 frames; ms a frame over the
+  run. Arms: a fixed 0.05 ms look (`fdc588b2`), the rule (`d4bc2788`), the rule with the look
+  counted (`53f1cc0b`); snapshot worktrees, alternated, 4 runs an arm and core count, nothing
+  else running.
+- **Values** (ms a frame; best three, median): two executors: fixed 5.797 6.156 6.721 6.938
+  (6.225, 6.438); rule 5.472 5.932 6.266 7.066 (5.890, 6.099); counted 5.957 6.111 6.323 6.477
+  (6.130, 6.217). Three executors: fixed 6.993 7.103 7.462 7.976 (7.186, 7.282); rule 7.057 7.084
+  7.251 7.391 (7.131, 7.168); counted 7.168 7.462 7.818 8.473 (7.483, 7.640). An earlier set of
+  the rule against the fixed look (4 runs each): two executors 5.98 / 6.22, three 7.33 / 7.10.
+- **Machine.** The 4-core KVM VM (Intel Xeon @ 2.80 GHz), node 22.22.0. Power plan not recorded.
+- **Decision.** Reverted. Counted looks made the other executors' waits for answers short, so
+  they slept and were woken more, while the looking executor kept its long look (it decides
+  before it counts itself): worse than the rule on both core counts. The rule stays; on three
+  executors it is level with the fixed look within the runs' spread.

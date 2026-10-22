@@ -16,7 +16,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Worker } from 'node:worker_threads';
 import { BELL_BYTES, BUSY_BESIDE, Bell, CHANNEL_BYTES, SPARE_SPIN_MS, SPIN_MS, Turn, Word,
-    channelOf, lookFor, sleepAsync, waitWhile, wake } from './executor-channel.js';
+    channelOf, lookFor, sleepAsync, wake } from './executor-channel.js';
 
 const CHANNEL_URL = new URL('./executor-channel.js', import.meta.url).href;
 
@@ -113,41 +113,3 @@ test('a wait looks long while the slices out leave a core free, briefly when the
     // A machine of two cores has none to spare beside the two threads.
     assert.equal(lookFor(bell, 2, undefined)(), SPIN_MS);
 });
-
-test('a look outside a slice is counted as a core taken while it lasts, and not once it sleeps',
-    async()=>{
-        const bell = new Int32Array(new SharedArrayBuffer(BELL_BYTES));
-        const words = new Int32Array(new SharedArrayBuffer(CHANNEL_BYTES));
-        // Another thread watches the count while this one looks 30 ms, then
-        // sleeps 30 ms: it sees one, then none.
-        const watcher = new Worker(new URL(`data:text/javascript,${encodeURIComponent(`
-            import { workerData, parentPort } from 'node:worker_threads';
-            const seen = new Set();
-            parentPort.postMessage('ready');
-            const until = performance.now() + 200;
-            while (performance.now() < until) seen.add(Atomics.load(workerData.bell, 3));
-            parentPort.postMessage([...seen]);`)}`), { workerData: { bell } });
-        /** @type {unknown[]} */
-        const messages = [];
-        /** @type {(value?: unknown) => void} */
-        let heard = ()=>{};
-        watcher.on('message', message=>{
-            messages.push(message);
-            heard();
-        });
-        const next = ()=>new Promise(resolve=>{
-            heard = resolve;
-        });
-        await next();
-        const seen = next();
-        assert.equal(waitWhile(words, Word.STATE, 0, 30, 30, Word.SLEEPING, bell), true);
-        assert.equal(Atomics.load(bell, Bell.RUNNING), 0, 'given back');
-        await seen;
-        const counts = /** @type {number[]} */ (messages[1]);
-        await watcher.terminate();
-        assert.ok(counts.includes(1) && counts.includes(0), JSON.stringify(counts));
-        // A word already moved: no look, nothing left counted.
-        Atomics.store(words, Word.STATE, 1);
-        assert.equal(waitWhile(words, Word.STATE, 0, 30, 30, Word.SLEEPING, bell), false);
-        assert.equal(Atomics.load(bell, Bell.RUNNING), 0);
-    });
