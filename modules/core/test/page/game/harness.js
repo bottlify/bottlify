@@ -2170,6 +2170,11 @@ export function createHarness(canvas, how = {}){
         /** @param {number} frames */
         dumpFrames: frames=>(running ? running.debug.dumpFrames(frames) : 0),
         lastDumped: ()=>(running ? running.debug.dumped() : null),
+        // Any switch of the running engine by its name (`app.debug.<name>`):
+        // `pick`, `shader`, `snapshot`, `skipShader`... answered as the
+        // switch answers, for a driver on the control port.
+        /** @param {string} name @param {...any} args */
+        debug: (name, ...args)=>(running ? running.debug[name](...args) : null),
         // The tail of the engine's journal, formatted: what a category a run
         // switched on has recorded, read while the run is still going.
         /** @param {number} [count] */
