@@ -64,7 +64,7 @@ export function fillWith(bytes, pixel){
  * @param {{ compilationMessages?: Record<string, any[]>,
  *           refusePipeline?: (descriptor: any) => string | null | undefined,
  *           occlusionSamples?: (index: number) => number,
- *           workDone?: boolean, features?: string[] }} [options]
+ *           workDone?: boolean, features?: string[], pipelineDelayMs?: number }} [options]
  *        `occlusionSamples` is what the occlusion query at each slot of a query
  *        set resolves to, standing in for the rasteriser; zero when absent.
  *        `workDone` gives the queue an `onSubmittedWorkDone` whose answers the
@@ -454,7 +454,9 @@ export function createFakeDevice(options = {}){
         createRenderPipeline: recorder('createRenderPipeline'),
         // Recorded under the same name, so a test counts pipelines one way.
         // `options.refusePipeline` names the validation message a descriptor
-        // is refused with, for a test of a build that fails.
+        // is refused with, for a test of a build that fails;
+        // `options.pipelineDelayMs` how long a build takes, as a GPU that
+        // compiles the pipeline's shaders does.
         /** @param {any} descriptor */
         createRenderPipelineAsync: descriptor=>{
             const refused = options.refusePipeline?.(descriptor);
@@ -462,7 +464,10 @@ export function createFakeDevice(options = {}){
             {
                 return Promise.reject(new Error(refused));
             }
-            return Promise.resolve(recorder('createRenderPipeline')(descriptor));
+            const made = recorder('createRenderPipeline')(descriptor);
+            return (options.pipelineDelayMs ?? 0) > 0
+                ? new Promise(resolve=>setTimeout(()=>resolve(made), options.pipelineDelayMs))
+                : Promise.resolve(made);
         },
     };
 

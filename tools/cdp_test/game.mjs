@@ -1239,6 +1239,15 @@ function describe(result, context, calls, symbols){
         if (device)
         {
             say(`    frames=${device.frames} draws=${device.draws} clears=${device.clears}`);
+            // A frame that draws a state for the first time in the run waits for
+            // its pipeline's shaders to be compiled: a hitch a warm translation
+            // store does not take away.
+            const waits = device.pipelineWaits;
+            say(`    frames waiting for pipelines being built: ${waits
+                ? `${waits.frames}, ${waits.ms} ms in all, the longest ${waits.worst} ms`
+                : 'not measured'}; pipelines built: fixed-function`
+                + ` ${device.fixedPipelines?.built ?? 'not measured'}, shader programs`
+                + ` ${device.programs?.built ?? 'not measured'}`);
             const skipped = Object.entries(device.skipped ?? {})
                 .filter(([, count])=>count > 0)
                 .map(([name, count])=>`${name}=${count}`).join(' ');

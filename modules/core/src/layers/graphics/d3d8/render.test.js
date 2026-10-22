@@ -90,10 +90,11 @@ const FVF_TEXTURED_QUAD = FVF.XYZRHW | FVF.DIFFUSE | (1 << FVF.TEXCOUNT_SHIFT);
  *           probeTexture?: string,
  *           divergence?: (api: string, detail: string)=>void,
  *           skipTexture?: string, compressedTextures?: boolean,
- *           driverRules?: 'legacy' | 'current', writable?: boolean }} [options]
+ *           driverRules?: 'legacy' | 'current', writable?: boolean,
+ *           gpu?: Parameters<typeof createFakeDevice>[0] }} [options]
  */
 function harness(options = {}){
-    const gpu = createFakeDevice();
+    const gpu = createFakeDevice(options.gpu ?? {});
     /** @type {any[]} */
     const presented = [];
     const backend = createBackend({
@@ -441,6 +442,27 @@ test('byte-exact: a solid fill is that colour in every pixel it covers, blue byt
     // The whole image: two rows of clear colour around a 2x2 blue block.
     assert.equal(toBase64(surface),
         'VjQS/1Y0Ev9WNBL/VjQS/1Y0Ev//AAD//wAA/1Y0Ev9WNBL//wAA//8AAP9WNBL/VjQS/1Y0Ev9WNBL/VjQS/w==');
+});
+
+test('a frame that waits for a pipeline still being built is counted, with how long', async()=>{
+    // Each build takes 30 ms, as a driver compiling the pipeline's shaders: the
+    // first frame waits for it, the second draws the same state and does not.
+    const h = harness({ gpu: { pipelineDelayMs: 30 } });
+    const { device } = h;
+    const frame = async()=>{
+        assert.equal(device.BeginScene(), D3D_OK);
+        assert.equal(device.SetVertexShader(FVF_QUAD), D3D_OK);
+        assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 2,
+            quad([1, 1, 3, 3], argb(0, 0, 255)), 20), D3D_OK);
+        assert.equal(device.EndScene(), D3D_OK);
+        await h.present();
+        return { ...device.diagnostics().pipelineWaits };
+    };
+    const first = await frame();
+    assert.equal(first.frames, 1, 'the first frame waited for its pipeline');
+    assert.ok(first.ms >= 20 && first.worst >= 20,
+        `and for about its build: ${JSON.stringify(first)}`);
+    assert.deepEqual(await frame(), first, 'the same state again: no wait');
 });
 
 test('byte-exact: alpha blending is straight, rounds, and the two ends are exact', async()=>{

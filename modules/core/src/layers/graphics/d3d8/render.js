@@ -82,6 +82,12 @@ const ZERO_STREAM_BYTES = 2048;
 /** A count no draw of a frame could fall short of: what `occlusion: 'visible'` answers. */
 const OCCLUSION_ALL_VISIBLE = 0x00ffffff;
 
+/**
+ * How long a replay's wait for its pipelines must be to count as one
+ * (`pipelineWaits`), in ms: built already, they answer within a turn.
+ */
+const PIPELINE_WAIT_MS = 1;
+
 /** A stage state's DWORD, as the D3D8 header lays it out. */
 const D3DTA_SELECTMASK = D3DTA.SELECTMASK;
 
@@ -3455,6 +3461,14 @@ export function createRenderer(options){
          * holds, and builds each again every frame.
          */
         preparedDropped: 0,
+        /**
+         * Frames whose replay waited for a pipeline still being built (its
+         * shaders compiled by the GPU's driver), the time they waited in all,
+         * and the longest: a frame that draws a state for the first time in
+         * the run is late by that long, whatever was cached of the program's
+         * code. Over `PIPELINE_WAIT_MS` only: a replay always yields once.
+         */
+        pipelineWaits: { frames: 0, ms: 0, worst: 0 },
         /**
          * How many times a draw's state was laid out and named. Once per change
          * of state a draw reads, when the device versions its state; one per
@@ -10414,6 +10428,9 @@ export function createRenderer(options){
                 mipsGenerated: counters.mipsGenerated,
                 prepared: { ...counters.prepared },
                 preparedDropped: counters.preparedDropped,
+                pipelineWaits: { frames: counters.pipelineWaits.frames,
+                    ms: Math.round(counters.pipelineWaits.ms),
+                    worst: Math.round(counters.pipelineWaits.worst) },
                 statesNamed: counters.statesNamed,
                 programs: programs.stats(),
                 // The fixed-function pipelines the backend built, and the GPU's
@@ -10502,8 +10519,16 @@ export function createRenderer(options){
      * @returns {Promise<any>} the snapshot's pixels, when one was asked for
      */
     async function replay(recorded, surface, snapshot = null, again = null){
+        const waitFrom = clock();
         const pipelines = await Promise.allSettled(recorded.pipelines);
         const began = clock();
+        if (began - waitFrom >= PIPELINE_WAIT_MS)
+        {
+            const waits = counters.pipelineWaits;
+            waits.frames++;
+            waits.ms += began - waitFrom;
+            waits.worst = Math.max(waits.worst, began - waitFrom);
+        }
         const frame = backend.beginFrame({ cut: recorded.cut });
         // A frame counts when a query is open as it starts or opens in it,
         // and then every pass of it can: a BEGIN may land in any of them.
