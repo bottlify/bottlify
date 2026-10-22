@@ -129,6 +129,15 @@ self.onmessage = ({ data })=>{
             self.postMessage({ type: 'answer', id: data.id,
                 value: harness?.lastDumped() ?? null });
             break;
+        case 'debug':
+            // A switch may answer later (`pick` waits for the graphics
+            // worker): the answer goes when it settles, a refusal as its message.
+            Promise.resolve()
+                .then(()=>harness?.debug(data.name, ...data.args) ?? null)
+                .then(value=>self.postMessage({ type: 'answer', id: data.id, value }),
+                    error=>self.postMessage({ type: 'answer', id: data.id, value: {
+                        error: String(error instanceof Error ? error.message : error) } }));
+            break;
         case 'standing':
             (harness ? harness.standing(data.list) : Promise.resolve(null)).then(value=>{
                 self.postMessage({ type: 'answer', id: data.id, value });

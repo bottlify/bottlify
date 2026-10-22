@@ -154,6 +154,8 @@ if (inWorker)
     namespace.frameShot = ()=>ask('frameShot');
     namespace.dumpFrames = (/** @type {number} */ frames)=>ask('dumpFrames', { frames });
     namespace.lastDumped = ()=>ask('lastDumped');
+    namespace.debug = (/** @type {string} */ name, /** @type {any[]} */ ...args)=>
+        ask('debug', { name, args });
     namespace.journalRecent = (/** @type {number} */ count)=>ask('journalRecent', { count });
     namespace.standing = (/** @type {string | undefined} */ list)=>ask('standing', { list });
     namespace.input = (/** @type {any} */ event)=>ask('input', { event });
@@ -174,6 +176,7 @@ else
     namespace.frameShot = harness.frameShot;
     namespace.dumpFrames = harness.dumpFrames;
     namespace.lastDumped = harness.lastDumped;
+    namespace.debug = harness.debug;
     namespace.journalRecent = harness.journalRecent;
     namespace.standing = harness.standing;
     namespace.input = harness.input;
