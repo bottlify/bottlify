@@ -814,7 +814,16 @@ async function main(){
     {
         // Whether the run was warm: the regions found in the store against those
         // translated anew.
-        console.log(`  translation store: ${cork.cacheHits} hits, ${cork.cacheMisses} misses`);
+        console.log(`  translation store: ${cork.cacheHits} hits, ${cork.cacheMisses} misses`
+            + ` (no record ${cork.missNoRecord}, no module ${cork.missNoModule}, changed`
+            + ` ${cork.missChanged}: other bytes ${cork.missBytes}, formed again otherwise`
+            + ` ${cork.missFormedOther}, other modes ${cork.missModes}); hits formed again`
+            + ` ${cork.hitsFormedAgain}, as recorded ${cork.formedAsRecorded}, to a stored region`
+            + ` ${cork.toStoredRegion}; modes: precision ${cork.missPrecision}, floats`
+            + ` ${cork.missFloats}; precision switches ${cork.precisionSwitches}, entries`
+            + ` ${JSON.stringify(cork.precision)}, shape checked ${cork.shapeChecked}, float misses`
+            + ` ${cork.floatMisses}, rounded ${cork.floatsRounded}`
+            + `${cork.store ? `; store ${JSON.stringify(cork.store)}` : ''}`);
     }
     if (corkOut !== null && cork)
     {

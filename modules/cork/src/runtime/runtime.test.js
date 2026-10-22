@@ -1282,6 +1282,92 @@ test('an entry that moved to another precision control is taken from the store a
         assert.deepEqual(d.precision, { wide: 1, narrow: 0, mixed: 0 });
     });
 
+test('a region formed as its record says, its callees formed in, and refused for its precision is'
+    + ' translated with those callees and published', async()=>{
+    if (!probeFeatures().tailCalls)
+    {
+        return;
+    }
+    const settle = ()=>new Promise(resolve=>setTimeout(resolve, 0));
+    /** @type {Map<string, Uint8Array>} */
+    const records = new Map();
+    const store = {
+        get: async(/** @type {string} */ key)=>records.get(key) ?? null,
+        put: async(/** @type {string} */ key, /** @type {Uint8Array} */ bytes)=>{
+            records.set(key, bytes);
+        },
+        getNow: (/** @type {string} */ key)=>records.get(key) ?? null,
+    };
+    // mov ecx, 1600; L: mov eax, ecx; and eax, 15; call [TABLE + eax*4]; dec ecx; jnz L;
+    // hlt; F: fld1; fstp st0; add edx, 1; ret; G: add edx, 3; ret -- F and G in turn.
+    const table = CODE + 0x100;
+    const code = [0xb9, 0x40, 0x06, 0, 0, 0x89, 0xc8, 0x83, 0xe0, 0x0f,
+        0xff, 0x14, 0x85, table & 0xff, table >>> 8 & 0xff, 0, 0, 0x49, 0x75, 0xf1, 0xf4,
+        0xd9, 0xe8, 0xdd, 0xd8, 0x83, 0xc2, 0x01, 0xc3,
+        0x83, 0xc2, 0x03, 0xc3];
+    const [f, g] = [CODE + 21, CODE + 29];
+    const slots = Array.from({ length: 16 }, (_, k)=>(k % 2 === 1 ? g : f));
+    /** @param {object} config @param {number} control */
+    const begin = (config, control)=>{
+        const m = machine({ store, bundleId: 'test', callTargets: true, ...config });
+        m.write(CODE, code);
+        m.write(table, slots.flatMap(slot=>[slot & 0xff, slot >>> 8 & 0xff, 0, 0]));
+        new DataView(m.memory.buffer).setUint16(m.layout.x87Control, control, true);
+        return m;
+    };
+    /** @param {ReturnType<typeof machine>} m */
+    const run = m=>{
+        m.setReg(2, 0);
+        m.setReg(4, 0x80000);
+        assert.equal(m.runtime.run(m.runtime.entryOf(CODE), 1_000_000).kind, 'halt');
+        assert.equal(m.reg(2), 800 + 800 * 3);
+    };
+    // Under single, the call sampled until F and G are formed into the loop's region.
+    const first = begin({}, 0x07f);
+    for (const at of [f, g, CODE])
+    {
+        first.runtime.noteHot(at);
+    }
+    for (let i = 0; i < 8 && [f, g, CODE].some(at=>first.runtime.entryOf(at) < 0); i++)
+    {
+        await first.runtime.translatePending();
+    }
+    for (let i = 0; i < 64 && first.runtime.diagnostics().reforms === 0; i++)
+    {
+        run(first);
+        await first.runtime.translatePending();
+    }
+    assert.equal(first.runtime.diagnostics().reforms, 1, 'formed again with its callees');
+    await first.runtime.flush();
+    // Formed while the machine holds double: the record is refused for its precision, and
+    // the translator, forming the region again from what it is sent, forms the same one.
+    const second = begin({ worker: true }, 0x27f);
+    try
+    {
+        // The worker ready first: until then a batch is emitted here, from the region as
+        // formed here.
+        for (let i = 0; i < 500 && second.runtime.diagnostics().worker !== 'ready'; i++)
+        {
+            await new Promise(resolve=>setTimeout(resolve, 10));
+        }
+        second.runtime.noteHot(CODE);
+        for (let i = 0; i < 200 && second.runtime.entryOf(CODE) < 0; i++)
+        {
+            await second.runtime.translatePending();
+            await new Promise(resolve=>setTimeout(resolve, 10));
+        }
+        await settle();
+        const d = second.runtime.diagnostics();
+        assert.deepEqual([d.cacheMisses, d.missPrecision], [1, 1], 'refused for its precision');
+        assert.ok(second.runtime.entryOf(CODE) >= 0, 'published');
+        run(second);
+    }
+    finally
+    {
+        await second.runtime.flush();
+    }
+});
+
 test('a block of an x87 region formed earlier in the batch is not formed again beside it',
     async()=>{
         const m = machine({ batchRegions: 2, maxBatchRegions: 2 });

@@ -1017,7 +1017,11 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         predictDue: 0, predictNoShare: 0, predictReformsOut: 0, predictNotFormed: 0,
         predictNoRegion: 0, predictHeld: 0, predictQuiet: 0,
         queueDrops: 0, queueEvictions: 0, emitFailures: 0,
+        // A changed record by why (`accepted`): formed as it says with other
+        // bytes, formed again by it with other bytes, or other modes (x87
+        // precision, floats, the stack shape's tests).
         cacheHits: 0, cacheMisses: 0, missNoRecord: 0, missNoModule: 0, missChanged: 0,
+        missBytes: 0, missFormedOther: 0, missModes: 0, missPrecision: 0, missFloats: 0,
         hitsFormedAgain: 0, formedAsRecorded: 0, toStoredRegion: 0, precisionSwitches: 0,
         readSwitches: 0,
         stackCode: 0,
@@ -2617,6 +2621,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         {
             // Formed as this record says already (`recordBefore`): other bytes.
             counts.missChanged++;
+            counts.missBytes++;
             one.storedOther = true;
             return null;
         }
@@ -2629,6 +2634,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
             if (region.hash !== shape.hash)
             {
                 counts.missChanged++;
+                counts.missFormedOther++;
                 one.storedOther = true;
                 return null;
             }
@@ -2642,11 +2648,16 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
                 : 'mixed';
         }
         const flags = precisionFlags(region, one.entryTop);
-        if (flags.wide !== (shape.wide === true) || flags.narrow !== (shape.narrow === true)
-            || (shape.floats === true && !flags.floats)
+        const otherPrecision = flags.wide !== (shape.wide === true)
+            || flags.narrow !== (shape.narrow === true);
+        const otherFloats = shape.floats === true && !flags.floats;
+        if (otherPrecision || otherFloats
             || (shape.checked !== true && checkedAt(region, one.entryTop)))
         {
             counts.missChanged++;
+            counts.missModes++;
+            counts.missPrecision += otherPrecision ? 1 : 0;
+            counts.missFloats += !otherPrecision && otherFloats ? 1 : 0;
             one.storedOther = true;
             return null;
         }
@@ -4588,7 +4599,12 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
                 ...precisionFlags(region, entryTop), loose,
                 wrapped: !readsChecked,
                 checked: checkedAt(region, entryTop),
-                ...(record === null ? {} : { formedAs: record.key, formedRegion: region }) });
+                // Formed with the record's callees, and translated with them should
+                // the record be refused: the translator forms the region again from
+                // what it is sent, and refuses it when it hashes otherwise.
+                ...(record === null ? {} : { formedAs: record.key, formedRegion: region,
+                    ...(record.shape.targets === undefined ? {}
+                        : { targets: record.shape.targets }) }) });
             for (const covers of coverKeys({ region, entryTop }))
             {
                 covered.add(covers);
@@ -5272,6 +5288,11 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
                 cacheMisses: counts.cacheMisses,
                 missNoRecord: counts.missNoRecord,
                 missChanged: counts.missChanged,
+                missBytes: counts.missBytes,
+                missFormedOther: counts.missFormedOther,
+                missModes: counts.missModes,
+                missPrecision: counts.missPrecision,
+                missFloats: counts.missFloats,
                 hitsFormedAgain: counts.hitsFormedAgain,
                 formedAsRecorded: counts.formedAsRecorded,
                 toStoredRegion: counts.toStoredRegion,

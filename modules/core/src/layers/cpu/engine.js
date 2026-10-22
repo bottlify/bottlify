@@ -481,6 +481,12 @@ export function engineContractProblem(engineModule, url){
  * @property {number} [missNoRecord]   Misses the store had nothing for at the region's entry.
  * @property {number} [missChanged]    Misses where it had another region: other bytes, or one
  *     compiled for what this run does not give the entry (its precision, its stack's shape).
+ * @property {number} [missBytes]      Of those, formed as its record says over other bytes.
+ * @property {number} [missFormedOther]  Of those, formed again as its record says and other still.
+ * @property {number} [missModes]      Of those, compiled for other modes: x87 precision, floats or
+ *     the stack shape's tests.
+ * @property {number} [missPrecision]  Of the modes, for another x87 precision control.
+ * @property {number} [missFloats]     Of the modes, with floats where this run rounds.
  * @property {number} [missNoModule]   Misses whose record named a module the store no longer had.
  * @property {number} [hitsFormedAgain]  Hits formed again as their record says, the region formed
  *     here otherwise (beside other regions, or before its callees were known).
