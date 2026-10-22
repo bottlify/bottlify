@@ -7,6 +7,7 @@
 import { SURFACE, TEXTURE, createDeviceCalls } from './device.js';
 import { IFF } from './images.js';
 import { FMT, decodeTexels, isCompressed, isSupported, layoutOf } from './pixels.js';
+import { charactersOf, readToTerminator } from '../common/scan-windows.js';
 
 /**
  * D3DXSaveTextureToFile, D3DXSaveSurfaceToFile and their InMemory forms: a
@@ -375,18 +376,14 @@ export function createTextureSaver(host, buffers){
         return { format, levels: [{ width: right - left, height: bottom - top, bytes }] };
     };
 
-    /** @param {number} at @param {boolean} wide */
-    const pathAt = (at, wide)=>{
-        if (!wide)
-        {
-            const bytes = host.readMemory(at >>> 0, 260);
-            const end = bytes.indexOf(0);
-            return String.fromCharCode(...bytes.subarray(0, end < 0 ? bytes.length : end));
-        }
-        const units = new Uint16Array(host.readMemory(at >>> 0, 520).slice().buffer);
-        const end = units.indexOf(0);
-        return String.fromCharCode(...units.subarray(0, end < 0 ? units.length : end));
-    };
+    /**
+     * A file's name, at most MAX_PATH characters, read a window at a time so
+     * one at the end of what the program allocated is not read past.
+     *
+     * @param {number} at @param {boolean} wide
+     */
+    const pathAt = (at, wide)=>charactersOf(
+        readToTerminator(host, at, wide ? 2 : 1, 260).bytes, wide ? 2 : 1);
 
     /**
      * D3DXSaveTextureToFile and D3DXSaveSurfaceToFile: the file made, then written whole.

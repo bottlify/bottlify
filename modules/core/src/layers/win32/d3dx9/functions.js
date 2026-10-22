@@ -51,6 +51,7 @@ import { createShaderSemantics } from './semantics.js';
 import { createMeshFunctions } from './mesh.js';
 import { createMeshObjects } from './mesh-object.js';
 import { createShapes } from './shapes.js';
+import { charactersOf, readToTerminator } from '../common/scan-windows.js';
 import { createDeclarationFunctions } from './fvf.js';
 import { preprocess, preprocessTracked } from './preprocess.js';
 import { compileShader } from './hlsl-compile.js';
@@ -174,12 +175,13 @@ export function createD3dxFunctions(host, options = {}){
         const bytes = host.readMemory(address >>> 0, 4);
         return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
     };
-    /** A NUL-ended string's bytes, at most 4 KB of them. @param {number} address */
-    const cString = address=>{
-        const bytes = host.readMemory(address >>> 0, 4096);
-        const end = bytes.indexOf(0);
-        return bytes.slice(0, end < 0 ? bytes.length : end);
-    };
+    /**
+     * A NUL-ended string's bytes, at most 4 KB of them, read a window at a time
+     * so one at the end of what the program allocated is not read past.
+     *
+     * @param {number} address
+     */
+    const cString = address=>readToTerminator(host, address, 1, 4096).bytes;
     /** @param {number} at @param {number} value */
     const putU32 = (at, value)=>host.writeMemory(at >>> 0, Uint8Array.of(value & 0xff,
         value >> 8 & 0xff, value >> 16 & 0xff, value >>> 24));
@@ -261,9 +263,7 @@ export function createD3dxFunctions(host, options = {}){
         {
             return latin1(cString(at)).slice(0, 31);
         }
-        const units = new Uint16Array(host.readMemory(at >>> 0, 64).slice().buffer);
-        const end = units.indexOf(0);
-        return String.fromCharCode(...units.subarray(0, end < 0 ? 32 : end)).slice(0, 31);
+        return charactersOf(readToTerminator(host, at, 2, 32).bytes, 2).slice(0, 31);
     };
 
     /**
@@ -358,12 +358,8 @@ export function createD3dxFunctions(host, options = {}){
     /** The most compiles kept; the oldest goes first. */
     const COMPILES_KEPT = 512;
 
-    /** A wide string, at most 1023 characters. @param {number} address */
-    const wideAt = address=>{
-        const units = new Uint16Array(host.readMemory(address >>> 0, 2048).slice().buffer);
-        const end = units.indexOf(0);
-        return String.fromCharCode(...units.subarray(0, end < 0 ? units.length : end));
-    };
+    /** A wide string, at most 1024 characters. @param {number} address */
+    const wideAt = address=>charactersOf(readToTerminator(host, address, 2, 1024).bytes, 2);
 
     /** @typedef {NonNullable<import('./preprocess.js').PreprocessOptions['include']>} Include */
 

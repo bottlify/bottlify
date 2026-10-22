@@ -250,6 +250,30 @@ test('wglGetProcAddress refuses a core entry point', ()=>{
     assert.equal(table.wglGetProcAddress.handler([0x1000]), 0);
 });
 
+test('wglGetProcAddress reads a name that ends just short of the end of its memory', ()=>{
+    // Past the end lies another allocation, or nothing: memory refuses a read
+    // that runs into it, as the memory layer refuses one past a region's end.
+    const box = machine();
+    const end = 0x2000;
+    const opengl = createOpengl({
+        readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>{
+            assert.ok(at >= end || at + length <= end,
+                `read of ${length} bytes at 0x${at.toString(16)} runs past the end of memory`);
+            return box.readMemory(at, length);
+        },
+        writeMemory: box.writeMemory,
+        screen: ()=>({ width: 4, height: 4 }),
+        scratch: box.scratch,
+        exportAddress: ()=>0x7000_0000,
+    });
+    const table = /** @type {Table} */ (opengl.table);
+    startDrawing(table);
+    const name = new TextEncoder().encode('glActiveTextureARB\0');
+    const at = end - 8 - name.length;
+    box.writeMemory(at, name);
+    assert.equal(table.wglGetProcAddress.handler([at]), 0x7000_0000);
+});
+
 test('the whole path: choose a format, make a context, clear, swap', ()=>{
     const { table, box, presented } = library();
 

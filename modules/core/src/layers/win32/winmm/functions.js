@@ -38,6 +38,7 @@ import { parseWave } from './wave.js';
 import { MAX_PERIOD } from './timers.js';
 import { SOUND_ADAPTER_NAME } from '../devices.js';
 import { createMciVideo } from './mci-video.js';
+import { charactersOf, readToTerminator } from '../common/scan-windows.js';
 
 /** Success, and the errors a caller distinguishes. */
 const MMSYSERR_NOERROR = 0;
@@ -595,52 +596,21 @@ export function createWinmmFunctions(host){
     };
 
     /**
-     * An ANSI string out of guest memory, read a piece at a time so a short
+     * An ANSI string out of guest memory, read a window at a time so a short
      * one near the end of mapped memory is not read past.
      *
      * @param {number} address @param {number} limit
      */
-    const ansiAt = (address, limit)=>{
-        let text = '';
-        for (let at = address >>> 0; text.length < limit; at += 64)
-        {
-            const piece = host.readMemory(at, 64);
-            const end = piece.indexOf(0);
-            text += String.fromCharCode(...piece.subarray(0, end < 0 ? piece.length : end));
-            if (end >= 0 || piece.length < 64)
-            {
-                break;
-            }
-        }
-        return text.slice(0, limit);
-    };
+    const ansiAt = (address, limit)=>charactersOf(
+        readToTerminator(host, address, 1, limit).bytes);
 
     /**
      * A UTF-16 string out of guest memory, read the same way.
      *
      * @param {number} address @param {number} limit
      */
-    const wideAt = (address, limit)=>{
-        let text = '';
-        for (let at = address >>> 0; text.length < limit; at += 64)
-        {
-            const piece = host.readMemory(at, 64);
-            for (let index = 0; index + 1 < piece.length; index += 2)
-            {
-                const unit = piece[index] | piece[index + 1] << 8;
-                if (unit === 0)
-                {
-                    return text.slice(0, limit);
-                }
-                text += String.fromCharCode(unit);
-            }
-            if (piece.length < 64)
-            {
-                break;
-            }
-        }
-        return text.slice(0, limit);
-    };
+    const wideAt = (address, limit)=>charactersOf(
+        readToTerminator(host, address, 2, limit).bytes, 2);
 
     /**
      * A string into a caller's buffer of `room` characters, cut to fit with

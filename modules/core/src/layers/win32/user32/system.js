@@ -56,6 +56,7 @@ import { LOGFONTA, LOGFONTW_SIZE, logFontBytes } from '../gdi32/structs.js';
 import { ANY_WINDOW, threadIdOf } from './messages.js';
 import { VIDEO_ADAPTER_NAME } from '../devices.js';
 import { createRefusals } from '../common/refusal.js';
+import { charactersOf, readToTerminator } from '../common/scan-windows.js';
 
 /** GetSystemMetrics indices this build has a real answer for. */
 /** How many argument slots a `va_list` is read for, since it carries no count. */
@@ -1121,36 +1122,13 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
     };
 
     /**
-     * The bytes of a terminated string, terminator excluded, read a piece at
-     * a time so a long one is not read whole and a short one is not read past.
+     * The bytes of a terminated string, terminator excluded, at most 64 KB of
+     * them, read a window at a time so a long one is not read whole and a
+     * short one is not read past.
      *
      * @param {number} address
      */
-    const readStringBytes = address=>{
-        const STEP = 64;
-        const LIMIT = 0x10000;
-        /** @type {Uint8Array[]} */
-        const pieces = [];
-        for (let at = 0; at < LIMIT; at += STEP)
-        {
-            const piece = host.readMemory(address + at, STEP);
-            const end = piece.indexOf(0);
-            if (end >= 0)
-            {
-                pieces.push(piece.subarray(0, end));
-                break;
-            }
-            pieces.push(piece);
-        }
-        const bytes = new Uint8Array(pieces.reduce((sum, piece)=>sum + piece.length, 0));
-        let at = 0;
-        for (const piece of pieces)
-        {
-            bytes.set(piece, at);
-            at += piece.length;
-        }
-        return bytes;
-    };
+    const readStringBytes = address=>readToTerminator(host, address, 1, 0x10000).bytes;
 
     /** @param {boolean} upper */
     const caseOfString = upper=>({
@@ -1352,29 +1330,13 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
     };
 
     /**
-     * A terminated UTF-16 string, read a piece at a time like the byte one.
+     * A terminated UTF-16 string, at most 64 K characters, read a window at a
+     * time like the byte one.
      *
      * @param {number} address
      */
-    const readWideString = address=>{
-        const STEP = 128;
-        const LIMIT = 0x20000;
-        let text = '';
-        for (let at = 0; at < LIMIT; at += STEP)
-        {
-            const piece = host.readMemory(address + at, STEP);
-            for (let i = 0; i + 1 < piece.length; i += 2)
-            {
-                const code = piece[i] | piece[i + 1] << 8;
-                if (code === 0)
-                {
-                    return text;
-                }
-                text += String.fromCharCode(code);
-            }
-        }
-        return text;
-    };
+    const readWideString = address=>charactersOf(
+        readToTerminator(host, address, 2, 0x10000).bytes, 2);
 
     /** @param {number} address @param {string} text @param {number} limit */
     const writeWideString = (address, text, limit)=>{

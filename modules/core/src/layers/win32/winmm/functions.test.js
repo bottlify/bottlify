@@ -1075,6 +1075,28 @@ test('the wide MCI string calls answer as the ANSI ones do, in UTF-16', ()=>{
     assert.deepEqual([m.winmm.mciSendStringW.argBytes, m.winmm.mciGetDeviceIDW.argBytes], [16, 4]);
 });
 
+test('an MCI string ending just short of the end of its memory is read without reading past it',
+    ()=>{
+        // Past the end lies another allocation, or nothing: memory refuses a read
+        // that runs into it, as the memory layer refuses one past a region's end.
+        const m = machine();
+        const end = m.memory.length;
+        const read = m.host.readMemory;
+        m.host.readMemory = (address, length)=>{
+            assert.ok(address + length <= end, `read of ${length} bytes at`
+                + ` 0x${address.toString(16)} runs past the end of memory`);
+            return read(address, length);
+        };
+        const command = 'sysinfo all quantity';
+        const wide = end - 8 - (command.length + 1) * 2;
+        [...command, '\0'].forEach((c, index)=>
+            m.memory.set([c.charCodeAt(0), 0], wide + index * 2));
+        assert.equal(m.winmm.mciSendStringW.handler([wide, 0x600, 0x20, 0]), 0);
+        assert.deepEqual([...m.memory.slice(0x600, 0x604)], [0x30, 0, 0, 0]);
+        m.memory.set([...'all'].map(c=>c.charCodeAt(0)).concat([0]), end - 8 - 4);
+        assert.equal(m.winmm.mciGetDeviceIDA.handler([end - 8 - 4]), 0xffffffff);
+    });
+
 test('MCI answers a command string as a machine with no MCI device does', ()=>{
     // mci.c test_mciParser for the parse errors; mcicda.c for what opening the
     // CD player gives where it cannot load; and nothing ever opens here.

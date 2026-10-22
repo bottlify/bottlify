@@ -35,10 +35,12 @@ const le32 = value=>[value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, 
 
 /**
  * A stub message, a buffer, a heap and an OBJREF maker in one small memory.
+ * `end` is where an allocation ends and nothing may lie past it: memory
+ * refuses a read across it.
  *
- * @param {{ client?: boolean }} [options]
+ * @param {{ client?: boolean, end?: number }} [options]
  */
-function harness({ client = true } = {}){
+function harness({ client = true, end = 0 } = {}){
     const memory = new Uint8Array(0x20000);
     const view = new DataView(memory.buffer);
     let top = HEAP;
@@ -55,7 +57,11 @@ function harness({ client = true } = {}){
     /** @type {{ objref: number[], iid: number[] | null }[]} */
     const imported = [];
     const ndr = createNdr({
-        readMemory: (address, length)=>memory.subarray(address, address + length),
+        readMemory: (address, length)=>{
+            assert.ok(address >= end || address + length <= end, `read of ${length} bytes at`
+                + ` 0x${address.toString(16)} runs past the end of an allocation`);
+            return memory.subarray(address, address + length);
+        },
         writeMemory: (address, bytes)=>memory.set(bytes, address),
         allocate: (_call, bytes)=>{
             const at = (top + 7) & ~7;
@@ -254,6 +260,19 @@ test('a conformant string is its maximum, offset and actual counts, then its cha
         assert.deepEqual(h.made, [copy], 'a client gets a copy of its own');
         assert.deepEqual([...h.memory.subarray(copy, copy + 6)], wire.slice(16));
     });
+
+test('a string ending just short of the end of its memory is not read past', async()=>{
+    const end = HEAP;
+    const h = harness({ end });
+    const format = h.place(FORMAT, [FC.UP, POINTER.SIMPLE_POINTER, FC.C_CSTRING, FC.PAD]);
+    const at = h.place(end - 8 - 6, [...'hello'].map(c=>c.charCodeAt(0)).concat(0));
+    const wire = [...ID1, 6, 0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0x68, 0x65, 0x6c, 0x6c, 0x6f, 0];
+    assert.deepEqual(await h.marshalled(at, format), { length: 22, bytes: wire });
+    const wide = h.place(FORMAT + 0x10, [FC.RP, POINTER.SIMPLE_POINTER, FC.C_WSTRING, FC.PAD]);
+    const hi = h.place(end - 8 - 6, [0x68, 0, 0x69, 0, 0, 0]);
+    assert.deepEqual(await h.marshalled(hi, wide), { length: 18,
+        bytes: [3, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0x68, 0, 0x69, 0, 0, 0] });
+});
 
 test('a wide string counts characters, not bytes', async()=>{
     const h = harness();

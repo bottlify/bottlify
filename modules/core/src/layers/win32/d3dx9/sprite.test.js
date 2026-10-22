@@ -148,7 +148,8 @@ function rig(){
             inHandler = false;
         }
     };
-    return { memory, view, heap, device, texture, other, calls, sprites, fonts, invoke, objects };
+    return { memory, view, heap, device, texture, other, calls, sprites, fonts, invoke, objects,
+        host };
 }
 
 /** @param {any} r @param {number[]} values */
@@ -241,4 +242,33 @@ test('text is drawn from glyphs kept in a page, its lines laid out as DrawText d
                 pageObject.data + (y * 256 + x) * 4 + 4)];
         assert.deepEqual(texel(1, 1), [255, 255, 255, 200]);
         assert.deepEqual(texel(0, 0), [255, 255, 255, 0]);
+    });
+
+test('text to its NUL ending just short of the end of its memory is read without reading past it',
+    async()=>{
+        // Past the end lies another allocation, or nothing: memory refuses a read
+        // that runs into it, as the memory layer refuses one past a region's end.
+        const r = rig();
+        const end = r.memory.length;
+        const read = r.host.readMemory;
+        r.host.readMemory = (/** @type {number} */ at, /** @type {number} */ length)=>{
+            assert.ok(at + length <= end,
+                `read of ${length} bytes at 0x${at.toString(16)} runs past the end of memory`);
+            return read(at, length);
+        };
+        const font = { state: { device: r.device, desc: { height: -10, weight: 400,
+            italic: 0, charSet: 0, pitchAndFamily: 0, faceName: 'Arial' },
+        logFont: {}, glyphs: new Map(), pages: [] } };
+        const rect = r.heap.allocate(16);
+        const ansi = end - 8 - 6;
+        r.memory.set([...'ab cd\0'].map(c=>c.charCodeAt(0)), ansi);
+        new Int32Array(r.memory.buffer, rect, 4).set([10, 20, 22, 100]);
+        // DT_CALCRECT | DT_WORDBREAK in a rectangle 12 wide: "ab" and "cd" on two lines.
+        assert.equal(await r.invoke(r.fonts.font, 'DrawTextA', font,
+            [0, ansi, -1, rect, 0x410, 0xffffffff]), 20);
+        const wide = end - 8 - 12;
+        r.memory.set(new Uint8Array(Uint16Array.from('ab cd\0', c=>c.charCodeAt(0)).buffer), wide);
+        new Int32Array(r.memory.buffer, rect, 4).set([10, 20, 22, 100]);
+        assert.equal(await r.invoke(r.fonts.font, 'DrawTextW', font,
+            [0, wide, -1, rect, 0x410, 0xffffffff]), 20);
     });

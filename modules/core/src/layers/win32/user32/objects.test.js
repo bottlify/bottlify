@@ -827,6 +827,31 @@ test('CF_UNICODETEXT is read as UTF-16 and preferred over the byte formats', ()=
     assert.deepEqual(copied, ['wide \u0416']);
 });
 
+test('clipboard text ending just short of the end of its memory is read without reading past it',
+    ()=>{
+        // Past the end lies another allocation, or nothing: memory refuses a read
+        // that runs into it, as the memory layer refuses one past a region's end.
+        const { copied, host } = clipboardListener();
+        const { memory, fns } = setup(host);
+        const end = memory.bytes.length;
+        const read = memory.readMemory;
+        memory.readMemory = (address, length)=>{
+            assert.ok(address + length <= end, `read of ${length} bytes at`
+                + ` 0x${address.toString(16)} runs past the end of memory`);
+            return read(address, length);
+        };
+        putWideString(memory, end - 8 - 14, 'wide \u0416');
+        fns.OpenClipboard.handler([0]);
+        fns.SetClipboardData.handler([CF_UNICODETEXT, end - 8 - 14]);
+        fns.CloseClipboard.handler([]);
+        memory.putString(end - 8 - 7, 'narrow');
+        fns.OpenClipboard.handler([0]);
+        fns.EmptyClipboard.handler([]);
+        fns.SetClipboardData.handler([CF_TEXT, end - 8 - 7]);
+        fns.CloseClipboard.handler([]);
+        assert.deepEqual(copied, ['wide \u0416', 'narrow']);
+    });
+
 test('CF_TEXT reaches the host as the characters its bytes are in the ANSI page', ()=>{
     // 0x80 is the euro sign there, 0x99 the trade mark and 0x97 an em dash,
     // as Windows turns CF_TEXT into the Unicode text it offers.

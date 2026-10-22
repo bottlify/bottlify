@@ -526,8 +526,10 @@ test('DragFinish pops the drop it is handed', ()=>{
  * lists it points at.
  *
  * @param {Record<string, any>} [extra]  More of the host, laid over the rest.
+ * @param {number} [allocationEnd]  Where an allocation ends and nothing may lie
+ *     past it: memory refuses a read across it.
  */
-async function machineWithVolume(extra = {}){
+async function machineWithVolume(extra = {}, allocationEnd = 0){
     const fs = await filesystemModule.create({});
     const volume = /** @type {any} */ (createVolume(fs));
     volume.mkdir('C:\\work');
@@ -542,7 +544,12 @@ async function machineWithVolume(extra = {}){
     const view = new DataView(memory.buffer);
     let next = 0x1000;
     const shell = /** @type {any} */ (createShellFunctions({
-        readMemory: (address, length)=>memory.slice(address, address + length),
+        readMemory: (address, length)=>{
+            assert.ok(address >= allocationEnd || address + length <= allocationEnd,
+                `read of ${length} bytes at`
+                + ` 0x${address.toString(16)} runs past the end of an allocation`);
+            return memory.slice(address, address + length);
+        },
         writeMemory: (address, bytes)=>memory.set(bytes, address),
         // As the memory layer reads an ANSI string: in Windows-1252, which is
         // what the Encoding standard calls latin1.
@@ -634,6 +641,30 @@ test('SHFileOperation copies, moves, renames and deletes on the volume', async()
     assert.equal(m.view.getUint32(0x112, true), 0xaaaaaaaa, 'and the record left alone');
     assert.deepEqual([m.shell.SHFileOperationA.argBytes, m.shell.SHFileOperationW.argBytes],
         [4, 4]);
+});
+
+test('SHFileOperation reads lists that end just short of the end of their memory', async()=>{
+    const end = 0x4000;
+    const m = await machineWithVolume({}, end);
+    /** @param {string[]} names @param {boolean} wide @param {number} before */
+    const listBefore = (names, wide, before)=>{
+        const units = [...names.join('\0'), '\0', '\0'].map(c=>c.charCodeAt(0));
+        const bytes = wide ? new Uint8Array(Uint16Array.from(units).buffer)
+            : Uint8Array.from(units);
+        m.memory.set(bytes, before - 8 - bytes.length);
+        return before - 8 - bytes.length;
+    };
+    const copy = m.record(2, listBefore(['a.txt', 'b.txt'], true, 0x3000),
+        listBefore(['copies'], true, end), 0x0614);
+    assert.equal(await m.shell.SHFileOperationW.handler([copy]), 0);
+    assert.ok(m.volume.stat('copies\\a.txt') && m.volume.stat('copies\\b.txt'));
+    const remove = m.record(3, listBefore(['copies'], false, end), 0, 0x0614);
+    assert.equal(await m.shell.SHFileOperationA.handler([remove]), 0);
+    assert.ok(!m.volume.stat('copies'));
+    // A path is one name: the list's second terminator is the next thing in memory.
+    assert.equal(m.shell.SHCreateDirectoryExW.handler([0, listBefore(['C:\\work\\made'], true,
+        end), 0]), 0);
+    assert.ok(m.volume.stat('C:\\work\\made')?.isDirectory);
 });
 
 test('an ANSI name in the upper half of the page names the file CreateFileA made by it', async()=>{

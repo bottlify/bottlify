@@ -24,7 +24,7 @@
     "test": "npm run test -w @bottlify/core && npm run test -w @bottlify/networking && npm run test -w @bottlify/installer && npm run test -w @bottlify/cork",
     "test:integration": "npm run test:integration -w @bottlify/core && npm run test:integration -w @bottlify/cork",
     "test:tools": "node --test --test-timeout=60000 \"tools/**/*.test.js\"",
-    "check:boundaries": "npm run check:boundaries -w @bottlify/core && node tools/check-emit-options.mjs && node tools/check-budget-writes.mjs && node tools/check-lock-release.mjs",
+    "check:boundaries": "npm run check:boundaries -w @bottlify/core && node tools/check-emit-options.mjs && node tools/check-budget-writes.mjs && node tools/check-lock-release.mjs && node tools/check-scan-windows.mjs",
     "cdp:probe": "node tools/cdp_test/cli.mjs probe",
     "cdp:shaders": "node tools/cdp_test/shader-gate.mjs",
     "cdp:lighting": "node tools/cdp_test/gl-lighting-gate.mjs",

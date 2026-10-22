@@ -29,6 +29,8 @@
  * second time from the field types to hold this file to the registry.
  */
 
+import { readToTerminator } from '../../win32/common/scan-windows.js';
+
 // --- base types ------------------------------------------------------------
 
 export const VkExtent2D = Object.freeze({ width: 0x00, height: 0x04, SIZE: 0x08 });
@@ -856,8 +858,9 @@ export function writeU64(memory, address, value){
 }
 
 /**
- * A NUL-terminated string, read up to `max` bytes. Vulkan strings are UTF-8;
- * the names that matter here are ASCII.
+ * A NUL-terminated string, read up to `max` bytes a window at a time, so one
+ * at the end of what the program allocated is not read past. Vulkan strings
+ * are UTF-8; the names that matter here are ASCII.
  *
  * @param {GuestMemory} memory @param {number} address @param {number} [max]
  * @returns {string}
@@ -867,13 +870,7 @@ export function readCString(memory, address, max = 256){
     {
         return '';
     }
-    const bytes = memory.readMemory(address >>> 0, max);
-    let end = 0;
-    while (end < bytes.length && bytes[end] !== 0)
-    {
-        end++;
-    }
-    return new TextDecoder().decode(bytes.subarray(0, end));
+    return new TextDecoder().decode(readToTerminator(memory, address, 1, max).bytes);
 }
 
 /**

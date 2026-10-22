@@ -761,6 +761,26 @@ async function checkMoniker(t, moniker, expected){
     assert.deepEqual(await t.saved(moniker), expected.saved);
 }
 
+test('a name ending just short of the end of its memory is read without reading past it',
+    async()=>{
+        // Past the end lies another allocation, or nothing: memory refuses a read
+        // that runs into it, as the memory layer refuses one past a region's end.
+        const t = setup();
+        const end = t.bytes.length;
+        const read = t.env.readMemory;
+        t.env.readMemory = (address, length)=>{
+            assert.ok(address >= end || address + length <= end, `read of ${length} bytes`
+                + ` at 0x${address.toString(16)} runs past the end of memory`);
+            return read(address, length);
+        };
+        const path = 'C:\\data\\a.txt';
+        const at = end - 8 - (path.length + 1) * 2;
+        [...path, '\0'].forEach((c, index)=>
+            t.view.setUint16(at + index * 2, c.charCodeAt(0), true));
+        const moniker = await t.made('CreateFileMoniker', at);
+        assert.equal(await t.display(moniker), path);
+    });
+
 test('the exports take the stack Windows gives them', ()=>{
     const t = setup();
     const sizes = Object.fromEntries(Object.entries(t.functions).map(([name, entry])=>

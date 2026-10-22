@@ -33,6 +33,7 @@
 
 import { encodeAnsi } from '../kernel32/locale.js';
 import { createRefusals } from '../common/refusal.js';
+import { charactersOf, readToTerminator } from '../common/scan-windows.js';
 
 /**
  * @typedef {Object} CommonDialogHost
@@ -296,31 +297,13 @@ export function createCommonDialogFunctions(host){
     };
 
     /**
-     * A UTF-16 path read a piece at a time, up to its terminator.
+     * A UTF-16 path up to its terminator, read a window at a time so one at
+     * the end of what the program allocated is not read past.
      *
      * @param {number} address
      */
-    const readWidePath = address=>{
-        let text = '';
-        for (let at = address >>> 0; text.length < MAX_PATH; at += 64)
-        {
-            const piece = host.readMemory(at, 64);
-            for (let index = 0; index + 1 < piece.length; index += 2)
-            {
-                const unit = piece[index] | piece[index + 1] << 8;
-                if (unit === 0)
-                {
-                    return text;
-                }
-                text += String.fromCharCode(unit);
-            }
-            if (piece.length < 64)
-            {
-                break;
-            }
-        }
-        return text;
-    };
+    const readWidePath = address=>charactersOf(
+        readToTerminator(host, address, 2, MAX_PATH).bytes, 2);
 
     /** @param {number} address */
     const cancelled = address=>{

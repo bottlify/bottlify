@@ -35,6 +35,7 @@
 import { GUID_NULL, formatGuid, readGuid } from './guid.js';
 import { OBJREF_BYTES, decodeObjref } from './objref.js';
 import { IID_ISTORAGE, IID_ISTREAM } from './storage.js';
+import { readToTerminator } from '../common/scan-windows.js';
 
 const WDT_INPROC_CALL = 0x48746457;
 const WDT_REMOTE_CALL = 0x52746457;
@@ -218,27 +219,13 @@ export function createUserMarshalFunctions(host){
     const inProcess = flags=>context(flags) === MSHCTX_INPROC;
 
     /**
-     * The UTF-16 units of a terminated wide string, its terminator excluded.
+     * The UTF-16 units of a terminated wide string, its terminator excluded;
+     * read a window at a time, so one at the end of what the program
+     * allocated is not read past.
      *
      * @param {number} address
      */
-    const wideUnits = address=>{
-        for (let at = address; ; at += 256)
-        {
-            const piece = host.readMemory(at, 256);
-            for (let index = 0; index + 1 < piece.length; index += 2)
-            {
-                if (piece[index] === 0 && piece[index + 1] === 0)
-                {
-                    return (at - address + index) / 2;
-                }
-            }
-            if (piece.length < 256)
-            {
-                return (at - address + piece.length) >> 1;
-            }
-        }
-    };
+    const wideUnits = address=>readToTerminator(host, address, 2).bytes.length >> 1;
     /** @param {Uint8Array} bytes */
     const wideText = bytes=>{
         let text = '';

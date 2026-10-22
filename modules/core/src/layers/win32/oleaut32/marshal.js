@@ -41,6 +41,7 @@ import { STDOLE_GUID, STDOLE_TYPES, parseTypeLibrary } from './sltg.js';
 import { parsePe, rvaToFileOffset } from '../../loader/internal/pe.js';
 import { findResource } from '../../loader/internal/resources.js';
 import { decodeAnsi } from '../kernel32/locale.js';
+import { readToTerminator } from '../common/scan-windows.js';
 
 export const IID_IUNKNOWN = '{00000000-0000-0000-C000-000000000046}';
 export const IID_IDISPATCH = '{00020400-0000-0000-C000-000000000046}';
@@ -655,30 +656,15 @@ export function createInterfaceCatalog(host){
  * @param {MarshalSide} side
  */
 export function createWire(side){
-    /** @param {number} address @param {boolean} wide */
-    const readString = (address, wide)=>{
-        const unit = wide ? 2 : 1;
-        const chunk = 256;
-        /** @type {number[]} */
-        const out = [];
-        for (let at = address; out.length < LONGEST_STRING; at += chunk)
-        {
-            const bytes = side.readMemory(at, chunk);
-            for (let index = 0; index + unit <= bytes.length; index += unit)
-            {
-                if (bytes[index] === 0 && (!wide || bytes[index + 1] === 0))
-                {
-                    return Uint8Array.from(out);
-                }
-                out.push(bytes[index]);
-                if (wide)
-                {
-                    out.push(bytes[index + 1]);
-                }
-            }
-        }
-        return Uint8Array.from(out);
-    };
+    /**
+     * A string's bytes before its terminator, at most LONGEST_STRING of them;
+     * read a window at a time, so one at the end of what the program
+     * allocated is not read past.
+     *
+     * @param {number} address @param {boolean} wide
+     */
+    const readString = (address, wide)=>
+        readToTerminator(side, address, wide ? 2 : 1, LONGEST_STRING / (wide ? 2 : 1)).bytes;
 
     /** @param {number} address */
     const readBstr = address=>{

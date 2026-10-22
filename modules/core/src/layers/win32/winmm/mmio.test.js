@@ -56,12 +56,15 @@ function waveFile(){
 }
 
 /**
- * @param {{ late?: boolean, allocator?: boolean,
+ * @param {{ late?: boolean, allocator?: boolean, end?: number,
  *           call?: (entry: number, args: number[], thread?: unknown) => Promise<number> }}
- *        [options]  `call` runs the program's code, for its own I/O procedures.
+ *        [options]  `call` runs the program's code, for its own I/O procedures; `end` is
+ *        where an allocation ends and nothing may lie past it: memory refuses a read
+ *        across it.
  */
 function build(options = {}){
     const memory = fakeMemory();
+    const end = options.end ?? 0;
     const files = fakeVolume({ 'C:\\click.wav': waveFile() }, options);
     const handles = fakeHandles(files);
     /** @type {number[]} */
@@ -69,7 +72,11 @@ function build(options = {}){
     /** @type {string[]} */
     const diverged = [];
     const fns = /** @type {any} */ (createMmioFunctions({
-        readMemory: memory.readMemory,
+        readMemory: (address, length)=>{
+            assert.ok(address >= end || address + length <= end, `read of ${length} bytes at`
+                + ` 0x${address.toString(16)} runs past the end of an allocation`);
+            return memory.readMemory(address, length);
+        },
         writeMemory: memory.writeMemory,
         readCString: memory.readCString,
         files,
@@ -642,6 +649,16 @@ test('mmioFlush writes what the buffer holds, and MMIO_EMPTYBUF starts it again'
     assert.equal(fns.mmioFlush.handler([block, MMIO_EMPTYBUF]), 0);
     assert.equal(fns.mmioSeek.handler([block, 0, SEEK_END]), 16, 'the memory file is all there');
 });
+
+test('a wide name ending just short of the end of its memory is read without reading past it',
+    ()=>{
+        const end = 0x20000;
+        const { memory, fns } = build({ end });
+        const at = end - 8 - 10;
+        memory.writeMemory(at,
+            new Uint8Array(Uint16Array.from('wave\0', c=>c.charCodeAt(0)).buffer));
+        assert.equal(fns.mmioStringToFOURCCW.handler([at, 0]), fourcc('wave'));
+    });
 
 test('the wide four-character code and procedure calls are the ANSI ones', ()=>{
     const { memory, fns } = build();

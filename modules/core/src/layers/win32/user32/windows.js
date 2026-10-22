@@ -59,6 +59,7 @@ import {
     writeWindowClassA,
 } from './structs.js';
 import { convertCharacter, readText, translated, writeText } from './unicode.js';
+import { charactersOf, readToTerminator } from '../common/scan-windows.js';
 import { DESKTOP_WINDOW, HWND_BROADCAST, createWindowDirectory } from './directory.js';
 import { boundsOf, subtractFromArea } from '../gdi32/rects.js';
 import { areaOf } from '../gdi32/regions.js';
@@ -1235,32 +1236,19 @@ export function createWindowFunctions(host){
     };
 
     /**
-     * The bytes a terminated string occupies, terminator included.
+     * The bytes a terminated string occupies, terminator included: one cut at
+     * MAX_CARRIED_TEXT characters is given its terminator. Read a window at a
+     * time, so a string at the end of what the program allocated is not read
+     * past.
      *
      * @param {number} address @param {boolean} wide
      */
     const terminatedBytes = (address, wide)=>{
         const width = wide ? 2 : 1;
-        /** @type {number[]} */
-        const bytes = [];
-        for (let at = address; bytes.length < MAX_CARRIED_TEXT * width; at += 256)
-        {
-            const piece = host.readMemory(at, 256);
-            for (let i = 0; i + width <= piece.length; i += width)
-            {
-                const unit = wide ? piece[i] | piece[i + 1] << 8 : piece[i];
-                bytes.push(...piece.subarray(i, i + width));
-                if (unit === 0)
-                {
-                    return Uint8Array.from(bytes);
-                }
-            }
-            if (piece.length < 256)
-            {
-                break;
-            }
-        }
-        return Uint8Array.from([...bytes, ...new Array(width).fill(0)]);
+        const { bytes } = readToTerminator(host, address, width, MAX_CARRIED_TEXT);
+        const whole = new Uint8Array(bytes.length + width);
+        whole.set(bytes);
+        return whole;
     };
 
     /**
@@ -1491,26 +1479,9 @@ export function createWindowFunctions(host){
         {
             return 0;
         }
-        let text = '';
-        for (let at = wide >>> 0; text.length < 0x8000; at += 256)
-        {
-            const piece = host.readMemory(at, 256);
-            let end = -1;
-            for (let i = 0; i + 1 < piece.length; i += 2)
-            {
-                const unit = piece[i] | piece[i + 1] << 8;
-                if (unit === 0)
-                {
-                    end = i;
-                    break;
-                }
-                text += String.fromCharCode(unit);
-            }
-            if (end >= 0 || piece.length < 256)
-            {
-                break;
-            }
-        }
+        // Read a window at a time, so a string at the end of what the program
+        // allocated is not read past.
+        const text = charactersOf(readToTerminator(host, wide, 2, 0x8000).bytes, 2);
         const bytes = new Uint8Array(text.length + 1);
         bytes.set(encodeAnsi(text));
         const ansi = host.allocate(bytes.length);

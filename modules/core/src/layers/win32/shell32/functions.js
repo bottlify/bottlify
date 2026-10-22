@@ -42,6 +42,7 @@ import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { fileAttributes, msToFileTime } from '../kernel32/filetime.js';
 import { WIN32_FIND_DATAA } from '../kernel32/files.js';
 import { urlOfShortcut } from './internet-shortcut.js';
+import { charactersOf, readToTerminator } from '../common/scan-windows.js';
 
 /**
  * The exports a program imports from shell32 by number alone, by their XP
@@ -289,6 +290,8 @@ const SHDID_COMPUTER_FIXED = 8;
 export function createShellFunctions(host){
     /** Which windows said they would take a drop. Nothing ever drops on them. */
     const accepting = new Set();
+    /** Memory to scan, where the host gives it: asked only once `host.readMemory` is seen. */
+    const scanned = /** @type {import('../common/scan-windows.js').ScannedMemory} */ (host);
 
     /** @param {number} csidl @returns {string | null} */
     const folderOf = csidl=>host.folders?.[CSIDL_FOLDERS[csidl & ~CSIDL_FLAG_MASK]] ?? null;
@@ -457,61 +460,36 @@ export function createShellFunctions(host){
         }
         /** @type {string[]} */
         const names = [];
-        let name = '';
         const unit = wide ? 2 : 1;
-        // An ANSI name is the page's, as the path of every other ANSI call is.
-        const text = (/** @type {string} */ units)=>(wide ? units
-            : decodeAnsi(Uint8Array.from(units, character=>character.charCodeAt(0))));
-        for (let at = address >>> 0; at - (address >>> 0) < MAX_LIST * unit; at += 256)
+        // Each name read a window at a time, so a list at the end of what the
+        // program allocated is not read past; one cut short by the end of the
+        // list's room or of memory is no name.
+        for (let at = address >>> 0, read = 0; read < MAX_LIST;)
         {
-            const bytes = host.readMemory(at, 256);
-            for (let index = 0; index + unit <= bytes.length; index += unit)
+            const { bytes, terminated } = readToTerminator(scanned, at, unit, MAX_LIST - read);
+            if (!terminated || bytes.length === 0)
             {
-                const code = wide ? bytes[index] | bytes[index + 1] << 8 : bytes[index];
-                if (code !== 0)
-                {
-                    name += String.fromCharCode(code);
-                    continue;
-                }
-                if (name === '')
-                {
-                    return names;
-                }
-                names.push(text(name));
-                name = '';
+                return names;
             }
+            // An ANSI name is the page's, as the path of every other ANSI call is.
+            names.push(wide ? charactersOf(bytes, 2) : decodeAnsi(bytes));
+            read += bytes.length / unit + 1;
+            at += bytes.length + unit;
         }
         return names;
     };
 
     /**
-     * The UTF-16 string an argument points at, or null for a null pointer.
+     * The UTF-16 string an argument points at, or null for a null pointer;
+     * read a window at a time, so one at the end of what the program
+     * allocated is not read past.
      *
      * @param {number} address
      * @param {number} [limit]  How many characters are read at most.
      * @returns {string | null}
      */
-    const wideStringOf = (address, limit = MAX_PATH)=>{
-        if ((address >>> 0) === 0 || !host.readMemory)
-        {
-            return null;
-        }
-        let text = '';
-        for (let at = address >>> 0; text.length < limit; at += 64)
-        {
-            const bytes = host.readMemory(at, 64);
-            for (let index = 0; index + 1 < bytes.length && text.length < limit; index += 2)
-            {
-                const code = bytes[index] | bytes[index + 1] << 8;
-                if (code === 0)
-                {
-                    return text;
-                }
-                text += String.fromCharCode(code);
-            }
-        }
-        return text;
-    };
+    const wideStringOf = (address, limit = MAX_PATH)=>((address >>> 0) === 0 || !host.readMemory
+        ? null : charactersOf(readToTerminator(scanned, address, 2, limit).bytes, 2));
 
     /**
      * A string argument in the spelling the call was made in.

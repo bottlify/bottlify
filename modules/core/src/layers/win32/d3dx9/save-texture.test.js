@@ -60,6 +60,35 @@ test('a DDS file keeps every level in the texture\'s own format', async()=>{
     assert.ok(r.calls.filter(c=>c[0] === 'LockRect').every(c=>c[4] === 0x10), 'read-only locks');
 });
 
+test('a file name ending just short of the end of its memory is read without reading past it',
+    async()=>{
+        // Past the end lies another allocation, or nothing: memory refuses a read
+        // that runs into it, as the memory layer refuses one past a region's end.
+        const { r, texture } = setup();
+        const end = r.memory.length;
+        /** @type {string[]} */
+        const paths = [];
+        const saver = /** @type {any} */ (createTextureSaver({ ...r.host,
+            readMemory: (at, length)=>{
+                assert.ok(at + length <= end,
+                    `read of ${length} bytes at 0x${at.toString(16)} runs past the end of memory`);
+                return r.host.readMemory(at, length);
+            },
+            writeFile: path=>{
+                paths.push(path);
+                return true;
+            } }, { giveBuffer: ()=>0 }));
+        const ansi = new TextEncoder().encode('shot.dds\0');
+        r.memory.set(ansi, end - 8 - ansi.length);
+        assert.equal(await r.call(saver.D3DXSaveTextureToFileA,
+            [end - 8 - ansi.length, IFF_DDS, texture, 0]), 0);
+        const wide = new Uint8Array(Uint16Array.from('wide.dds\0', c=>c.charCodeAt(0)).buffer);
+        r.memory.set(wide, end - 8 - wide.length);
+        assert.equal(await r.call(saver.D3DXSaveTextureToFileW,
+            [end - 8 - wide.length, IFF_DDS, texture, 0]), 0);
+        assert.deepEqual(paths, ['shot.dds', 'wide.dds']);
+    });
+
 test('a DDS file of a format with no masks names it by its four-character code', ()=>{
     const dxt = writeDds(FMT.DXT5, [{ width: 4, height: 4, bytes: new Uint8Array(16) }]);
     const view = new DataView(dxt.buffer);

@@ -33,6 +33,7 @@ import { fileAttributes, msToFileTime } from './filetime.js';
 import { decodeAnsi, decodeOem, encodeAnsi, encodeOem } from './locale.js';
 import { createCommFunctions } from './comm.js';
 import { createResourceUpdates } from './resource-update.js';
+import { readToTerminator } from '../common/scan-windows.js';
 
 /** Codes this surface reports through the last-error slot. */
 const ERROR_SUCCESS = 0;
@@ -543,30 +544,14 @@ export function createFileFunctions(host){
 
     /**
      * A NUL-terminated name in the page the ANSI spellings use now, at most
-     * `limit` bytes.
+     * `limit` bytes; read a window at a time, so one at the end of what the
+     * program allocated is not read past.
      *
      * @param {number} address @param {number} limit
      */
-    const readName = (address, limit)=>{
-        if (!fileApisOem)
-        {
-            return host.readCString(address, limit);
-        }
-        /** @type {number[]} */
-        const bytes = [];
-        while (bytes.length < limit)
-        {
-            const chunk = host.readMemory(address + bytes.length,
-                Math.min(256, limit - bytes.length));
-            const end = chunk.indexOf(0);
-            bytes.push(...(end < 0 ? chunk : chunk.subarray(0, end)));
-            if (end >= 0)
-            {
-                break;
-            }
-        }
-        return decodeOem(Uint8Array.from(bytes));
-    };
+    const readName = (address, limit)=>(fileApisOem
+        ? decodeOem(readToTerminator(host, address, 1, limit).bytes)
+        : host.readCString(address, limit));
 
     /**
      * The two-call protocol every path-returning function here shares: called

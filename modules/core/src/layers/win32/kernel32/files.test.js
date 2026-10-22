@@ -1286,6 +1286,27 @@ test('after SetFileApisToOEM the ANSI spellings read and write names in the OEM 
     assert.equal(fns.AreFileApisANSI.handler(), 1);
 });
 
+test('in the OEM page a name ending just short of the end of its memory is read without reading'
+    + ' past it', ()=>{
+    // Past the end lies another allocation, or nothing: memory refuses a read
+    // that runs into it, as the memory layer refuses one past a region's end.
+    const end = 0x1000;
+    const { files, memory, fns } = setup({
+        readMemory: (/** @type {number} */ address, /** @type {number} */ length)=>{
+            assert.ok(address + length <= end, `read of ${length} bytes at`
+                + ` 0x${address.toString(16)} runs past the end of memory`);
+            return memory.bytes.subarray(address, address + length);
+        },
+    });
+    files.put('C:\\GAME\\\u00fc.TXT', 'umlaut');
+    const name = Uint8Array.from([...'C:\\GAME\\'].map(c=>c.charCodeAt(0))
+        .concat([0x81], [...'.TXT'].map(c=>c.charCodeAt(0)), [0]));
+    memory.writeMemory(end - 8 - name.length, name);
+    fns.SetFileApisToOEM.handler();
+    assert.notEqual(fns.GetFileAttributesA.handler([end - 8 - name.length]), 0xffffffff);
+    fns.SetFileApisToANSI.handler();
+});
+
 test('a wide directory listing writes twice as wide a name, at the same offset', ()=>{
     // WIN32_FIND_DATAW shares every offset up to cFileName with the ANSI form
     // and then does not, which is exactly why the tail is easy to get wrong.

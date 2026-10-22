@@ -57,6 +57,7 @@ import { PFD } from './constants.js';
 import {
     COMMAND_RING_BYTES, TEB_GL_CONTEXT, createCommandReader, placeCommandRing,
 } from '../seam/shadow.js';
+import { readToTerminator } from '../../win32/common/scan-windows.js';
 
 /** A page: the block and the ring each take pages of their own. */
 const RING_PAGE = 4096;
@@ -719,12 +720,14 @@ export function createOpengl(services){
         };
     };
 
-    /** @param {number} address @returns {string} */
-    const readCString = address=>{
-        const bytes = services.readMemory(address >>> 0, 256);
-        const end = bytes.indexOf(0);
-        return new TextDecoder().decode(bytes.subarray(0, end < 0 ? bytes.length : end));
-    };
+    /**
+     * A name, at most 256 bytes of it, read a window at a time: one at the end
+     * of what the program allocated is not read past.
+     *
+     * @param {number} address @returns {string}
+     */
+    const readCString = address=>new TextDecoder().decode(
+        readToTerminator(services, address, 1, 256).bytes);
 
     /**
      * Writes a typed query's answer where the caller asked for it. A query the

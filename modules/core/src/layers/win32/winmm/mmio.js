@@ -39,6 +39,7 @@
  */
 
 import { encodeAnsi } from '../kernel32/locale.js';
+import { charactersOf, readToTerminator } from '../common/scan-windows.js';
 
 const MMIO_READ = 0x0000;
 const MMIO_WRITE = 0x0001;
@@ -341,32 +342,13 @@ export function createMmioFunctions(host){
     const field = (address, offset)=>u32(host.readMemory(address + offset, 4), 0);
 
     /**
-     * A UTF-16 string, read a piece at a time so a short one near the end of
+     * A UTF-16 string, read a window at a time so a short one near the end of
      * what is mapped is not read past.
      *
      * @param {number} address @param {number} limit
      */
-    const wideAt = (address, limit)=>{
-        let text = '';
-        for (let at = address; text.length < limit; at += 64)
-        {
-            const bytes = host.readMemory(at, 64);
-            for (let index = 0; index + 1 < bytes.length; index += 2)
-            {
-                const unit = bytes[index] | bytes[index + 1] << 8;
-                if (unit === 0)
-                {
-                    return text.slice(0, limit);
-                }
-                text += String.fromCharCode(unit);
-            }
-            if (bytes.length < 64)
-            {
-                break;
-            }
-        }
-        return text.slice(0, limit);
-    };
+    const wideAt = (address, limit)=>charactersOf(
+        readToTerminator(host, address, 2, limit).bytes, 2);
 
     /** @param {MmioFile} file */
     const position = file=>file.origin + file.next;

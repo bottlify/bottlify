@@ -44,6 +44,8 @@
  * RPC_S_CANNOT_SUPPORT rather than walking on through bytes it cannot read.
  */
 
+import { readToTerminator } from '../common/scan-windows.js';
+
 /** Format characters. */
 export const FC = Object.freeze({
     BYTE: 0x01,
@@ -1006,24 +1008,18 @@ export function createNdr(host){
     const charSize = format=>u8(format) === FC.C_WSTRING ? 2 : 1;
 
     /**
-     * Characters up to and including the terminator.
+     * Characters up to and including the terminator; read a window at a time,
+     * so a string at the end of what the program allocated is not read past.
      *
      * @param {number} memory @param {number} unit
      */
     const stringLength = (memory, unit)=>{
-        const chunk = 512;
-        for (let at = memory, count = 0; count < LONGEST_STRING; at += chunk)
+        const { bytes, terminated } = readToTerminator(host, memory, unit, LONGEST_STRING);
+        if (!terminated)
         {
-            const bytes = host.readMemory(at, chunk);
-            for (let index = 0; index + unit <= bytes.length; index += unit, count++)
-            {
-                if (bytes[index] === 0 && (unit === 1 || bytes[index + 1] === 0))
-                {
-                    return count + 1;
-                }
-            }
+            throw new RpcException(RPC_STATUS.X_BAD_STUB_DATA, 'a string without an end');
         }
-        throw new RpcException(RPC_STATUS.X_BAD_STUB_DATA, 'a string without an end');
+        return bytes.length / unit + 1;
     };
 
     /**

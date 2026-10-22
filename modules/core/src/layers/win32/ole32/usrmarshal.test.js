@@ -72,9 +72,10 @@ class Raised extends Error {
 /**
  * A process: its memory and heap, guest COM objects counting references, a
  * marshaler that makes an OBJREF whose reference is the object's own, and
- * gdi32 and user32 as far as these routines lean on them.
+ * gdi32 and user32 as far as these routines lean on them. `end` is where an
+ * allocation ends and nothing may lie past it: memory refuses a read across it.
  *
- * @param {{ gdi?: boolean, clipboard?: boolean, call?: boolean }} [options]
+ * @param {{ gdi?: boolean, clipboard?: boolean, call?: boolean, end?: number }} [options]
  */
 function setup(options = {}){
     const memory = new Uint8Array(0x100000);
@@ -163,7 +164,12 @@ function setup(options = {}){
 
     /** @type {import('./usrmarshal.js').UserMarshalHost} */
     const host = {
-        readMemory: (address, length)=>memory.subarray(address, address + length),
+        readMemory: (address, length)=>{
+            const end = options.end ?? 0;
+            assert.ok(address >= end || address + length <= end, `read of ${length} bytes at`
+                + ` 0x${address.toString(16)} runs past the end of an allocation`);
+            return memory.subarray(address, address + length);
+        },
         writeMemory: (address, bytes)=>memory.set(bytes, address),
         heap,
         raise: code=>{
@@ -831,6 +837,20 @@ test('STGMEDIUM: a file name goes as a conformant string', ()=>{
     p.run('STGMEDIUM_UserFree', [flags, MEDIUM2]);
     assert.equal(p.heap.block(copy), null);
     assert.equal(p.divergences.length, 1, 'the file is not deleted, and that is said');
+});
+
+test('STGMEDIUM: a file name ending just short of the end of its memory is not read past', ()=>{
+    const p = setup({ end: VTABLE });
+    const flags = p.umcb(MSHCTX_LOCAL);
+    const name = 'C:\\a.txt';
+    const at = VTABLE - 8 - (name.length + 1) * 2;
+    p.memory.set([...name].flatMap(c=>[c.charCodeAt(0), 0]).concat(0, 0), at);
+    medium(p, MEDIUM, [TYMED_FILE, at, 0]);
+    const units = name.length + 1;
+    const size = p.run('STGMEDIUM_UserSize', [flags, 0, MEDIUM]);
+    assert.equal(size, 12 + 12 + units * 2);
+    assert.equal(p.run('STGMEDIUM_UserMarshal', [flags, BUFFER, MEDIUM]), BUFFER + size);
+    assert.deepEqual([12, 16, 20].map(offset=>p.u32(BUFFER + offset)), [units, 0, units]);
 });
 
 test('STGMEDIUM: a medium with no wire form here is refused', ()=>{

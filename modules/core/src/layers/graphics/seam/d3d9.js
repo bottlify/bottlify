@@ -68,6 +68,7 @@ import { D3DCREATE, D3DDEVTYPE, PALETTE_BYTES } from '../d3d9/device.js';
 import { MAX_DECLARATION_LENGTH } from '../d3d9/declaration.js';
 import { END_TOKEN } from '../d3d9/shader.js';
 import { REFRESH_HZ, displayModes, refreshRatesOf } from '../../win32/user32/display.js';
+import { scanWindows } from '../../win32/common/scan-windows.js';
 import { createPresentQueue, createRaster, rasterStatus } from './raster.js';
 import { queryAs, readGuid } from './guid.js';
 import { D3D_PRIVATE_DATA, createPrivateData } from './privatedata.js';
@@ -589,24 +590,27 @@ export function createDirect3D9Seam(
 
     /**
      * A shader's tokens, read up to its end token. The stream carries no
-     * length, so it is read a window at a time and scanned for the end; a
-     * comment's own length is honoured, since one may contain anything.
-     * Each window ends at a multiple of its size, so none reaches across a
-     * page: tokens that end near the end of what the program allocated are
-     * read without reading what lies past it, which may be nothing at all.
+     * length, so it is scanned a window at a time (`scanWindows`: none reaches
+     * past the region the tokens end in, which may be the last thing the
+     * program allocated); a comment's own length is honoured, since one may
+     * contain anything.
      *
      * @param {number} pointer
      * @returns {Uint32Array | null}
      */
     const readTokens = pointer=>{
-        const span = 256;
         /** @type {number[]} */
         const tokens = [];
         let skip = 0;
-        while (tokens.length < MAX_SHADER_DWORDS)
+        const windows = scanWindows({ readMemory: memory.windowMemory ?? memory.readMemory },
+            pointer, 4);
+        for (const piece of windows)
         {
-            const at = ((pointer >>> 0) + tokens.length * 4) >>> 0;
-            const chunk = readDwords(at, Math.max(1, (span - at % span) >>> 2));
+            if (tokens.length >= MAX_SHADER_DWORDS)
+            {
+                return null;
+            }
+            const chunk = dwordsOf(piece, piece.length >>> 2);
             for (const token of chunk)
             {
                 tokens.push(token);

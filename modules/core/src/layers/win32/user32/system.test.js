@@ -1664,6 +1664,22 @@ test('CharLowerA and CharUpperA convert a string in place, or a character by val
     assert.equal(fns.CharLowerBuffA.handler([0, 4]), 0);
 });
 
+test('CharUpperA and CharUpperW read a string ending just short of its region\'s end', ()=>{
+    // Past the end lies another allocation, or nothing: memory refuses a read
+    // that runs into it, as the memory layer refuses one past a region's end.
+    const { memory, fns } = setup();
+    memory.regionAt = address=>address >= 0x10000 && address < 0x14000
+        ? { base: 0x10000, size: 0x4000 } : null;
+    const ansi = 0x14000 - 8 - 4;
+    memory.putString(ansi, 'abc');
+    assert.equal(fns.CharUpperA.handler([ansi]), ansi);
+    assert.equal(memory.readCString(ansi, 16), 'ABC');
+    const wide = 0x14000 - 8 - 8;
+    memory.bytes.set([0x61, 0, 0x62, 0, 0x63, 0, 0, 0], wide);
+    assert.equal(fns.CharUpperW.handler([wide]), wide);
+    assert.deepEqual([...memory.bytes.subarray(wide, wide + 8)], [0x41, 0, 0x42, 0, 0x43, 0, 0, 0]);
+});
+
 test('the IsChar family classifies a character of the ANSI page, or a UTF-16 one', ()=>{
     const { fns } = setup();
     /** @param {string} name @param {number} code */

@@ -49,7 +49,11 @@ const VALID = {
 };
 
 /** Guest memory, a task heap that counts what it holds, and objects that count references. */
-function build({ calls = true, slowDestroy = false } = {}){
+/**
+ * @param {{ calls?: boolean, slowDestroy?: boolean, end?: number }} [options]  `end`: where
+ *     an allocation ends and nothing may lie past it, so memory refuses a read across it.
+ */
+function build({ calls = true, slowDestroy = false, end = 0 } = {}){
     const bytes = new Uint8Array(0x40000);
     const view = new DataView(bytes.buffer);
     /** @type {Map<number, number>} */
@@ -151,7 +155,11 @@ function build({ calls = true, slowDestroy = false } = {}){
     /** @type {string[]} */
     const reported = [];
     const fns = /** @type {any} */ (createPropVariantFunctions({
-        readMemory: (at, length)=>bytes.subarray(at, at + length),
+        readMemory: (at, length)=>{
+            assert.ok(at >= end || at + length <= end, `read of ${length} bytes at`
+                + ` 0x${at.toString(16)} runs past the end of an allocation`);
+            return bytes.subarray(at, at + length);
+        },
         writeMemory: (at, data)=>bytes.set(data, at),
         heap,
         bstr,
@@ -310,6 +318,20 @@ test('strings are copied into memory of their own, and a BSTR up to its first NU
     assert.equal(await m.fns.PropVariantClear.handler([DEST]), S_OK);
     assert.equal(m.heap.live.size, baseline, 'every copy and every string is let go');
 });
+
+test('a string ending just short of the end of its memory is copied without reading past it',
+    async()=>{
+        const end = 0x3000;
+        const m = build({ end });
+        m.set(SOURCE, VT_LPWSTR, m.wide(end - 8 - 24, 'Test String'));
+        assert.equal(await m.fns.PropVariantCopy.handler([DEST, SOURCE]), S_OK);
+        assert.equal(m.wideAt(m.read(DEST)[1]), 'Test String');
+        assert.equal(await m.fns.PropVariantClear.handler([DEST]), S_OK);
+        m.set(SOURCE, VT_LPSTR, m.ansi(end - 8 - 12, 'Test String'));
+        assert.equal(await m.fns.PropVariantCopy.handler([DEST, SOURCE]), S_OK);
+        assert.equal(m.ansiAt(m.read(DEST)[1]), 'Test String');
+        assert.equal(await m.fns.PropVariantClear.handler([DEST]), S_OK);
+    });
 
 test('an interface is copied with a reference of its own, and let go of by the clear', async()=>{
     // propvariant.c test_copy: VT_UNKNOWN, and a VT_ARRAY | VT_UNKNOWN, which

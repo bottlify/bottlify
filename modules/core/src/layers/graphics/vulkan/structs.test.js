@@ -444,6 +444,23 @@ test('strings: a fixed field is NUL-padded, and a pointer array reads each name'
     assert.equal(S.readCString(memory, 0), '', 'a null pointer is the empty string');
 });
 
+test('a name ending just short of the end of its memory is read without reading past it', ()=>{
+    // Past the end lies another allocation, or nothing: memory refuses a read
+    // that runs into it, as the memory layer refuses one past a region's end.
+    const memory = createMemory();
+    const end = memory.bytes.length;
+    const read = memory.readMemory;
+    memory.readMemory = (address, length)=>{
+        assert.ok(address + length <= end, `read of ${length} bytes at 0x${address.toString(16)}`
+            + ' runs past the end of memory');
+        return read(address, length);
+    };
+    const name = new TextEncoder().encode('VK_KHR_win32_surface\0');
+    const at = end - 8 - name.length;
+    memory.bytes.set(name, at);
+    assert.equal(S.readCString(memory, at), 'VK_KHR_win32_surface');
+});
+
 test('a rectangle and an extent go through their nested offsets', ()=>{
     const memory = createMemory();
     S.writeU32(memory, 0x10, -3 >>> 0);

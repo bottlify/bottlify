@@ -24,6 +24,8 @@
  * clear refuses it with STG_E_INVALIDPARAMETER and zeroes the record anyway.
  */
 
+import { readToTerminator } from '../common/scan-windows.js';
+
 const S_OK = 0;
 const E_INVALIDARG = 0x80070057 | 0;
 const E_OUTOFMEMORY = 0x8007000e | 0;
@@ -186,26 +188,15 @@ export function createPropVariantFunctions(host){
 
     /**
      * The length of a terminated string in bytes, its terminator included,
-     * or as much as memory holds of one that runs off its end.
+     * or as much as memory holds of one that runs off its end; read a window
+     * at a time, so one at the end of what the program allocated is not read
+     * past.
      *
      * @param {number} address @param {number} unit  1 or 2
      */
     const terminatedBytes = (address, unit)=>{
-        for (let at = address; ; at += 256)
-        {
-            const piece = host.readMemory(at, 256);
-            for (let index = 0; index + unit <= piece.length; index += unit)
-            {
-                if (piece[index] === 0 && (unit === 1 || piece[index + 1] === 0))
-                {
-                    return at - address + index + unit;
-                }
-            }
-            if (piece.length < 256)
-            {
-                return at - address + piece.length;
-            }
-        }
+        const { bytes, terminated } = readToTerminator(host, address, unit);
+        return bytes.length + (terminated ? unit : 0);
     };
 
     /**

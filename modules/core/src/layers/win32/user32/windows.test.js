@@ -4753,6 +4753,61 @@ test('SetWindowTextW hands an ANSI window its text in the ANSI page, lent for th
     assert.equal(fns.SetWindowTextW.handler([0x9999, WIDE]), 0, 'no such window');
 });
 
+test('text ending just short of the end of its memory is read without reading past it', async()=>{
+    // Past the end lies another allocation, or nothing: memory refuses a read
+    // that runs into it, as the memory layer refuses one past a region's end.
+    const WM_SETTEXT = 0x000c;
+    /** @param {ReturnType<typeof fakeMemory>} memory */
+    const ending = memory=>{
+        const end = memory.bytes.length;
+        const read = memory.readMemory;
+        memory.readMemory = (address, length)=>{
+            assert.ok(address + length <= end, `read of ${length} bytes at`
+                + ` 0x${address.toString(16)} runs past the end of memory`);
+            return read(address, length);
+        };
+        return end;
+    };
+
+    // SetDlgItemTextW hands the control its text in the ANSI page.
+    const context = setup({
+        heap: true,
+        reply: (/** @type {any} */ message)=>context.fns.DefWindowProcA.handler(
+            [message.hwnd, message.message, message.wParam, message.lParam]),
+    });
+    const { fns, memory } = context;
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const dialog = createWindow(fns, memory);
+    const control = createWindow(fns, memory, { style: WS_CHILD, parent: dialog, menu: 0x5aa });
+    const end = ending(memory);
+    putWide(memory, end - 8 - 12, 'Ready');
+    assert.equal(fns.SetDlgItemTextW.handler([dialog, 0x5aa, end - 8 - 12]), 1);
+    assert.equal(fns.GetWindowTextA.handler([control, TEXT_BUFFER, 64]), 5);
+    assert.equal(memory.readCString(TEXT_BUFFER, 64), 'Ready');
+
+    // A WM_SETTEXT for another program's window carries the text across.
+    const directory = createWindowDirectory();
+    const first = setup({ directory, processId: 0x100,
+        caller: { current: { name: 'main', id: 0x104 } } });
+    const second = setup({ directory, processId: 0x200, heap: true,
+        caller: { current: { name: 'other', id: 0x204 } } });
+    for (const each of [first, second])
+    {
+        putClass(each.memory);
+        each.fns.RegisterClassA.handler([CLASS_STRUCT]);
+    }
+    const theirs = createWindow(second.fns, second.memory);
+    const away = ending(first.memory);
+    first.memory.putString(away - 8 - 6, 'title');
+    assert.equal(await first.fns.SendNotifyMessageA.handler([theirs, WM_SETTEXT, 0,
+        away - 8 - 6]), 1);
+    second.fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]);
+    const delivered = second.dispatched.find(each=>each.message === WM_SETTEXT);
+    assert.ok(delivered, 'the text reached the other program');
+    assert.equal(second.memory.readCString(delivered.lParam, 16), 'title');
+});
+
 test('SetWindowTextW fails where there is no heap to put the ANSI text in', ()=>{
     const { fns, memory, hwnd } = withWindow();
     memory.writeMemory(0x10600, new Uint8Array(Buffer.from('Title\0', 'utf16le')));

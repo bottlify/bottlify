@@ -281,6 +281,35 @@ test('GetIDsOfNames: the names cross whole though their count comes after them, 
     assert.deepEqual([caller.u32(ids), caller.u32(ids + 4)], [11, 12]);
 });
 
+test('GetIDsOfNames: a name ending just short of the end of its memory is not read past',
+    async()=>{
+        // Past the end lies another allocation, or nothing: memory refuses a read
+        // that runs into it, as the memory layer refuses one past a region's end.
+        const method = /** @type {any} */ ((await createInterfaceCatalog({ readFile: ()=>null })
+            .describe(IID_IDISPATCH))?.methods[5]);
+        const caller = side('caller');
+        const callee = side('callee');
+        const end = caller.bytes.length;
+        const read = caller.readMemory;
+        caller.readMemory = (at, length)=>{
+            assert.ok(at + length <= end,
+                `read of ${length} bytes at 0x${at.toString(16)} runs past the end of memory`);
+            return read(at, length);
+        };
+        const riid = caller.allocate(16);
+        caller.writeMemory(riid, new Uint8Array(16));
+        const names = caller.allocate(4);
+        const name = Uint8Array.from([...caller.wide('Quit'), 0, 0]);
+        caller.writeMemory(end - 8 - name.length, name);
+        caller.put(names, end - 8 - name.length);
+        const request = await marshalRequest(caller, method, [riid, names, 1, 0x409,
+            caller.allocate(4)]);
+        const call = await unmarshalRequest(callee, method, request);
+        const theirs = callee.u32(call.words[1]);
+        assert.equal(text(callee.readMemory(theirs, 8)), 'Quit');
+        assert.equal(callee.u32(theirs + 8) & 0xffff, 0);
+    });
+
 test('a by-reference variant at a NULL string crosses as a cell holding NULL, and none as none',
     async()=>{
         // An installer's progress object is set a status text through

@@ -61,6 +61,25 @@ test('a wide string and an ANSI one are stored as the guest stores them', ()=>{
     assert.equal(readWideString(m, 0x100, 4), 'wide');
 });
 
+test('a wide string ending just short of the end of its memory is read without reading past it',
+    ()=>{
+        // Past the end lies another allocation, or nothing: memory refuses a read
+        // that runs into it, as the memory layer refuses one past a region's end.
+        const m = memory();
+        const end = m.bytes.length;
+        const read = m.readMemory;
+        m.readMemory = (address, length)=>{
+            assert.ok(address + length <= end, `read of ${length} bytes at`
+                + ` 0x${address.toString(16)} runs past the end of memory`);
+            return read(address, length);
+        };
+        for (const at of [end - 8 - 20, end - 9 - 20])
+        {
+            m.writeMemory(at, textBytes('wide text', true));
+            assert.equal(readWideString(m, at), 'wide text', `at 0x${at.toString(16)}`);
+        }
+    });
+
 test('text written into a buffer is cut to its room, terminator counted', ()=>{
     const m = memory();
     assert.equal(writeText(m, 0x200, 'abcdef', 4, true), 3);

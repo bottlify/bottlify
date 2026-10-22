@@ -295,3 +295,75 @@ test('a point transformed to a w of zero is divided by one', ()=>{
     fns.D3DXVec3TransformCoord.handler([OUT, B, A]);
     assert.deepEqual(getFloats(OUT, 3), [6, 8, 10]);
 });
+
+/**
+ * A guest whose memory ends in several places -- the ends of allocations,
+ * past which may lie nothing -- and refuses a read across one, as the memory
+ * layer refuses one past a region's end; with a heap, a place for objects and
+ * a disk that records what was opened.
+ *
+ * @param {number[]} ends
+ */
+function endingMemory(ends){
+    const memory = new Uint8Array(Math.max(...ends));
+    /** @type {any[]} */
+    const published = [];
+    /** @type {string[]} */
+    const opened = [];
+    let free = 0x100;
+    const fns = /** @type {any} */ (createD3dxFunctions({
+        readMemory: (address, length)=>{
+            for (const end of ends)
+            {
+                assert.ok(address >= end || address + length <= end, `read of ${length} bytes`
+                    + ` at 0x${address.toString(16)} runs past an end at 0x${end.toString(16)}`);
+            }
+            return memory.subarray(address, address + length);
+        },
+        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        readFile: async path=>{
+            opened.push(path);
+            return new TextEncoder().encode('float4 tint() : COLOR0 { return 1; }');
+        },
+        heap: { allocate: bytes=>{
+            const at = free;
+            free += bytes + 15 & ~15;
+            return at;
+        }, free: ()=>{} },
+        vtables: { publish: object=>{
+            published.push(object);
+            return 0x10 + published.length * 16;
+        } },
+    }));
+    /**
+     * Text ending 8 bytes before an end, terminator included.
+     *
+     * @param {string} text @param {number} end @param {boolean} [wide]
+     */
+    const before = (text, end, wide = false)=>{
+        const bytes = wide
+            ? new Uint8Array(Uint16Array.from(`${text}\0`, c=>c.charCodeAt(0)).buffer)
+            : new TextEncoder().encode(`${text}\0`);
+        const at = end - 8 - bytes.length;
+        memory.set(bytes, at);
+        return at;
+    };
+    return { fns, published, opened, before };
+}
+
+test('names that end just short of the end of their memory are read without reading past it',
+    async()=>{
+        const ends = [0x4000, 0x6000, 0x8000, 0xa000, 0xc000];
+        const m = endingMemory(ends);
+        const out = 0x200;
+        assert.equal(m.fns.D3DXCreateFontA.handler([0x900, 16, 0, 400, 1, 0, 0, 0, 0, 0,
+            m.before('Tahoma', ends[0]), out]), 0);
+        assert.equal(m.fns.D3DXCreateFontW.handler([0x900, 16, 0, 400, 1, 0, 0, 0, 0, 0,
+            m.before('Arial', ends[1], true), out]), 0);
+        assert.deepEqual(m.published.map(font=>font.state.desc.faceName), ['Tahoma', 'Arial']);
+
+        assert.equal(await m.fns.D3DXCompileShaderFromFileW.handler([
+            m.before('shaders\\tint.psh', ends[2], true), 0, 0, m.before('tint', ends[3]),
+            m.before('ps_2_0', ends[4]), 0, out, out + 4, out + 8]), 0);
+        assert.deepEqual(m.opened, ['shaders\\tint.psh']);
+    });

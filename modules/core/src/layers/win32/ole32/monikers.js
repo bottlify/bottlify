@@ -30,6 +30,7 @@
 import { GUID_NULL, GUID_SIZE, canonicalGuid, formatGuid, parseGuid } from './guid.js';
 import { HKEY_CLASSES_ROOT } from '../advapi32/registry.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
+import { charactersOf, readToTerminator } from '../common/scan-windows.js';
 
 const S_OK = 0;
 const S_FALSE = 1;
@@ -448,33 +449,14 @@ export function createMonikerFunctions(env){
     const readGuidAt = address=>formatGuid(env.readMemory(address >>> 0, GUID_SIZE).slice());
 
     /**
-     * An OLESTR a program hands in, read in pieces so a short one near the
-     * end of its block is not read past.
+     * An OLESTR a program hands in, read a window at a time so a short one at
+     * the end of its block is not read past.
      *
      * @param {number} address
      * @returns {string | null} null for a NULL pointer
      */
-    const readWide = address=>{
-        if ((address >>> 0) === 0)
-        {
-            return null;
-        }
-        let text = '';
-        for (let at = address >>> 0; text.length < MAX_STRING; at += 128)
-        {
-            const bytes = env.readMemory(at, 128);
-            for (let index = 0; index + 1 < bytes.length; index += 2)
-            {
-                const unit = bytes[index] | (bytes[index + 1] << 8);
-                if (unit === 0)
-                {
-                    return text;
-                }
-                text += String.fromCharCode(unit);
-            }
-        }
-        return text;
-    };
+    const readWide = address=>((address >>> 0) === 0 ? null
+        : charactersOf(readToTerminator(env, address, 2, MAX_STRING).bytes, 2));
 
     /** @param {string} api @param {string} detail */
     const diverge = (api, detail)=>env.divergence?.(api, detail);

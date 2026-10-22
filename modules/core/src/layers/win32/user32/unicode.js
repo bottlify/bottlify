@@ -24,6 +24,7 @@
  */
 
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
+import { charactersOf, readToTerminator } from '../common/scan-windows.js';
 
 const WM_CREATE = 0x0001;
 const WM_SETTEXT = 0x000c;
@@ -116,33 +117,14 @@ const MAX_TEXT = 0x8000;
  */
 
 /**
- * A terminated UTF-16 string, read a piece at a time: the text may end close
+ * A terminated UTF-16 string, read a window at a time: the text may end close
  * to the end of what is mapped, and reading past its terminator must not fault.
  *
  * @param {TextMemory} memory @param {number} address @param {number} [limit]  in characters
  * @returns {string}
  */
 export function readWideString(memory, address, limit = MAX_TEXT){
-    const STEP = 128;
-    let text = '';
-    for (let at = address >>> 0; text.length < limit; at += STEP)
-    {
-        const piece = memory.readMemory(at, STEP);
-        for (let i = 0; i + 1 < piece.length; i += 2)
-        {
-            const code = piece[i] | piece[i + 1] << 8;
-            if (code === 0 || text.length >= limit)
-            {
-                return text;
-            }
-            text += String.fromCharCode(code);
-        }
-        if (piece.length < STEP)
-        {
-            break;
-        }
-    }
-    return text;
+    return charactersOf(readToTerminator(memory, address, 2, limit).bytes, 2);
 }
 
 /**

@@ -32,6 +32,7 @@
 import { ddbToBgra, dibToBgra, planesToBgra } from './cursors.js';
 import { decodeAnsi, encodeAnsi } from '../kernel32/locale.js';
 import { readText, readWideString, writeText } from './unicode.js';
+import { charactersOf, readToTerminator } from '../common/scan-windows.js';
 
 /** The resource directories a cursor and an icon are named in. */
 export const RT_GROUP_CURSOR = 12;
@@ -672,29 +673,14 @@ export function createObjectFunctions({ host, live, clipboardService, menuChange
     ];
 
     /**
-     * A terminated string read a piece at a time, so a short one does not
-     * cost the whole ceiling and a long one is not refused at a fixed limit.
+     * A terminated string read a window at a time, so a short one does not
+     * cost the whole ceiling, a long one is not refused at a fixed limit, and
+     * one at the end of what the program allocated is not read past.
      *
      * @param {number} address @param {1 | 2} width Bytes per character.
      */
-    const readTerminated = (address, width)=>{
-        const STEP = 256;
-        let text = '';
-        for (let at = 0; at < MAX_CLIPBOARD_TEXT; at += STEP)
-        {
-            const piece = host.readMemory(address + at, STEP);
-            for (let index = 0; index + width <= piece.length; index += width)
-            {
-                const code = width === 2 ? piece[index] | piece[index + 1] << 8 : piece[index];
-                if (code === 0)
-                {
-                    return text;
-                }
-                text += String.fromCharCode(code);
-            }
-        }
-        return text;
-    };
+    const readTerminated = (address, width)=>charactersOf(
+        readToTerminator(host, address, width, MAX_CLIPBOARD_TEXT / width).bytes, width);
 
     /** CF_TEXT's bytes, as the characters they are in the ANSI page. @param {number} address */
     const readAnsiText = address=>decodeAnsi(Uint8Array.from(readTerminated(address, 1),

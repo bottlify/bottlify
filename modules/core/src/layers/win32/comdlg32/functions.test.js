@@ -267,3 +267,24 @@ test('GetFileTitleW is GetFileTitleA in UTF-16', ()=>{
     assert.equal(m.fns.GetFileTitleW.handler([0, 0x200, 32]), -1);
     assert.equal(m.fns.GetFileTitleW.argBytes, 12);
 });
+
+test('GetFileTitleW reads a path that ends just short of the end of its memory', ()=>{
+    // Past the end lies another allocation, or nothing: memory refuses a read
+    // that runs into it, as the memory layer refuses one past a region's end.
+    const memory = new Uint8Array(0x400);
+    const end = memory.length;
+    const fns = /** @type {any} */ (createCommonDialogFunctions({
+        readMemory: (address, length)=>{
+            assert.ok(address + length <= end, `read of ${length} bytes at`
+                + ` 0x${address.toString(16)} runs past the end of memory`);
+            return memory.slice(address, address + length);
+        },
+        writeMemory: (address, bytes)=>memory.set(bytes, address),
+    }));
+    const path = new Uint8Array(Uint16Array.from('C:\\slot.sav\0', c=>c.charCodeAt(0)).buffer);
+    const at = end - 8 - path.length;
+    memory.set(path, at);
+    assert.equal(fns.GetFileTitleW.handler([at, 0x100, 32]), 0);
+    assert.equal(new TextDecoder('utf-16le').decode(memory.subarray(0x100, 0x100 + 16)),
+        'slot.sav');
+});

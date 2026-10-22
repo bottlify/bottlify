@@ -8,6 +8,7 @@ import { createComObject } from '../ole32/objects.js';
 import { writeTextMetrics, writeTextMetricsW } from '../gdi32/structs.js';
 import { DEVICE, TEXTURE, createDeviceCalls } from './device.js';
 import { SPRITE } from './sprite.js';
+import { readToTerminator } from '../common/scan-windows.js';
 
 /**
  * ID3DXFont: text drawn on the program's device, as D3DX draws it -- each
@@ -366,18 +367,16 @@ export function createFonts(host, sprites){
         return height;
     };
 
+    // A count of -1 is a string to its NUL, read a window at a time so one at the
+    // end of what the program allocated is not read past.
     /** @param {number} at @param {number} count  -1: to the NUL. */
-    const ansi = (at, count)=>{
-        const bytes = host.readMemory(at >>> 0, count < 0 ? 4096 : count);
-        const end = count < 0 ? bytes.indexOf(0) : bytes.length;
-        return [...bytes.subarray(0, end < 0 ? bytes.length : end)];
-    };
+    const ansi = (at, count)=>[...(count < 0 ? readToTerminator(host, at, 1, 4096).bytes
+        : host.readMemory(at >>> 0, count))];
     /** @param {number} at @param {number} count */
     const wide = (at, count)=>{
-        const bytes = host.readMemory(at >>> 0, (count < 0 ? 2048 : count) * 2).slice();
-        const units = [...new Uint16Array(bytes.buffer)];
-        const end = count < 0 ? units.indexOf(0) : units.length;
-        return units.slice(0, end < 0 ? units.length : end);
+        const bytes = count < 0 ? readToTerminator(host, at, 2, 2048).bytes
+            : host.readMemory(at >>> 0, count * 2).slice();
+        return [...new Uint16Array(bytes.buffer, bytes.byteOffset, bytes.length >> 1)];
     };
 
     /**
