@@ -15,6 +15,7 @@
  *         [--js-flags FLAGS] [--json]
  *
  *     --arms '{"base":{"root":"/tmp/base"},"head":{},"off":{"cork":{"floatSingles":false}}}'
+ *     --arms '{"one":{},"two":{"executors":2,"cork":{"atomic":true}}}'  (a process of two)
  *
  * A run is one tab: a cold iteration, `--warm` more, then `--iters` timed
  * (`usPerIter`). The arms are interleaved and their order turned round every
@@ -110,9 +111,10 @@ async function newTab(){
  */
 async function job(arm, name){
     const message = arm < 0
-        ? { arms: labels.map((label, i)=>({ root: `/a${i}/`, cork: arms[label].cork ?? {} })),
-            name, warm, rounds, block }
-        : { root: `/a${arm}/`, name, warm, iters, cork: arms[labels[arm]].cork ?? {} };
+        ? { arms: labels.map((label, i)=>({ root: `/a${i}/`, cork: arms[label].cork ?? {},
+            executors: arms[label].executors ?? 1 })), name, warm, rounds, block }
+        : { root: `/a${arm}/`, name, warm, iters, cork: arms[labels[arm]].cork ?? {},
+            executors: arms[labels[arm]].executors ?? 1 };
     const tab = await newTab();
     try
     {

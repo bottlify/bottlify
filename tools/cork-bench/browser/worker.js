@@ -25,14 +25,14 @@ async function answer(data){
     if (data.arms !== undefined)
     {
         const arms = [];
-        for (const { root, cork } of data.arms)
+        for (const { root, cork, executors } of data.arms)
         {
-            arms.push({ ...await engineOf(root), cork });
+            arms.push({ ...await engineOf(root), cork, executors });
         }
         return paired(arms, await imageOf(data.arms[0].root, data.name), data);
     }
-    const { root, name, warm, iters, cork } = data;
-    const { host, iteration } = hostOf({ ...await engineOf(root), cork },
+    const { root, name, warm, iters, cork, executors } = data;
+    const { host, iteration } = hostOf({ ...await engineOf(root), cork, executors },
         await imageOf(root, name));
     const coldAt = performance.now();
     iteration();
