@@ -31,12 +31,13 @@ import { replaySlice } from './testing/differential.js';
 
 export {
     ownLayout, executorLayout, executorBytes, sharedLayout, basesOf, pagesFor, layoutId, Tables,
-    tablesSize,
+    tablesSize, blockFields, LOW_STATE,
     STATE_BLOCK_SIZE, PAGE,
 } from './runtime/layout.js';
 export { interpret, blockState } from './interp.js';
 export {
-    createWasmInterpreter, WasmExit, WASM_INTERPRETER_AREA, WASM_INTERPRETER_STATICS_AT, HOT_SLOTS,
+    createWasmInterpreter, WasmExit, WASM_INTERPRETER_AREA, WASM_INTERPRETER_STATICS,
+    WASM_INTERPRETER_STATICS_AT, HOT_SLOTS,
 } from './interp-wasm.js';
 export { eflagsOf, setEflags } from './emit/flags.js';
 export { SHARED_CODE_BYTES } from './runtime/shared-code.js';

@@ -64,12 +64,12 @@ test('the register file lent to the bridge is the registers themselves, in encod
 
 test('a span of dwords reads signed into an array at an offset, as the words read one by one', ()=>{
     const h = host();
-    h.writePhysical(0x2000, new Uint8Array([1, 0, 0, 0, 0xfe, 0xff, 0xff, 0xff, 0, 0, 0, 0x80]));
+    h.writePhysical(0x12000, new Uint8Array([1, 0, 0, 0, 0xfe, 0xff, 0xff, 0xff, 0, 0, 0, 0x80]));
     /** @type {number[]} */
     const into = [9, 0, 0, 0];
-    h.readU32sInto(0x2000, 3, into, 1);
+    h.readU32sInto(0x12000, 3, into, 1);
     assert.deepEqual(into, [9, 1, -2, -0x80000000]);
-    assert.deepEqual(into.slice(1), [0x2000, 0x2004, 0x2008].map(at=>h.readU32(at) | 0));
+    assert.deepEqual(into.slice(1), [0x12000, 0x12004, 0x12008].map(at=>h.readU32(at) | 0));
 });
 
 test('a captured context round-trips every block field', ()=>{
@@ -135,7 +135,7 @@ function load(h, at, bytes){
 test('the interpreter\'s retired instructions read back through instructionCount', ()=>{
     const h = host();
     // mov eax, 0; inc eax; inc eax; inc eax; hlt -- five instructions.
-    load(h, 0x1000, [0xb8, 0, 0, 0, 0, 0x40, 0x40, 0x40, 0xf4]);
+    load(h, 0x11000, [0xb8, 0, 0, 0, 0, 0x40, 0x40, 0x40, 0xf4]);
     assert.equal(h.runSlice(100), 5);
     assert.equal(h.instructionCount(), 5);
 
@@ -143,7 +143,7 @@ test('the interpreter\'s retired instructions read back through instructionCount
     // everything retired, not the last slice's worth.
     const loop = host();
     // mov ecx, 2000; dec ecx; jnz -3; hlt -- 1 + 2000*2 + 1 = 4002.
-    load(loop, 0x2000, [0xb9, 0xd0, 0x07, 0, 0, 0x49, 0x75, 0xfd, 0xf4]);
+    load(loop, 0x12000, [0xb9, 0xd0, 0x07, 0, 0, 0x49, 0x75, 0xfd, 0xf4]);
     // To its halt, however many slices: an interpreted slice also ends on time.
     for (let slices = 0; !loop.halted() && slices < 1000; slices++)
     {
@@ -157,7 +157,7 @@ test('a slice that interprets ends once it has taken its time, and the next goes
         // Nothing translated: mov ecx, 1500000; dec ecx; jnz -3; hlt -- three million
         // instructions, interpreted, under one slice's budget of all of them.
         const h = host({ cork: { translate: false } });
-        load(h, 0x2000, [0xb9, 0x60, 0xe3, 0x16, 0, 0x49, 0x75, 0xfd, 0xf4]);
+        load(h, 0x12000, [0xb9, 0x60, 0xe3, 0x16, 0, 0x49, 0x75, 0xfd, 0xf4]);
         const total = 1 + 1_500_000 * 2 + 1;
         const first = h.runSlice(total);
         assert.ok(first < total, `the first slice ended early (${first})`);
@@ -177,12 +177,12 @@ test('an instruction no tier carries is an invalid-opcode fault, and the slice c
         // for an instruction it does not know, rather than the engine stopping.
         const h = host();
         // Four nops, then lar eax, [eax]: the model has no case for it.
-        load(h, 0x1000, [0x90, 0x90, 0x90, 0x90, 0x0f, 0x02, 0x00, 0xf4]);
+        load(h, 0x11000, [0x90, 0x90, 0x90, 0x90, 0x0f, 0x02, 0x00, 0xf4]);
         h.runSlice(100);
         assert.equal(h.instructionCount(), 4, 'the four nops it ran, not the one it stopped on');
         const fault = h.fault();
         assert.equal(fault?.vector, 6, '#UD');
-        assert.equal(fault?.eip, 0x1004, 'at the instruction');
+        assert.equal(fault?.eip, 0x11004, 'at the instruction');
         assert.deepEqual(h.corkDiagnostics().untiered?.length, 1, 'and named in the diagnostics');
     });
 
@@ -222,9 +222,9 @@ test('a call into code left untranslated runs on the wasm tier in place, not thr
             // mov al, 0xc3; mov ecx, CALLS; L: call F; dec ecx; jnz L; hlt -- where F is
             // mov [F + 5], al; ret: a routine that writes its own page, which is left to
             // the interpreter once its regions have been dropped often enough.
-            load(h, 0x1000, [0xb0, 0xc3, 0xb9, ...u32(CALLS), 0xe8, ...u32(0x4000 - 0x100c),
+            load(h, 0x11000, [0xb0, 0xc3, 0xb9, ...u32(CALLS), 0xe8, ...u32(0x14000 - 0x1100c),
                 0x49, 0x75, 0xf8, 0xf4]);
-            h.writePhysical(0x4000, Uint8Array.from([0xa2, ...u32(0x4005), 0xc3]));
+            h.writePhysical(0x14000, Uint8Array.from([0xa2, ...u32(0x14005), 0xc3]));
             while (!h.halted())
             {
                 h.runSlice(100_000);
@@ -247,7 +247,7 @@ test('the status words the wasm tier stores unless precise are counted in the di
         // The tier from the first instruction, not after the JavaScript interpreter's stretch.
         const h = host({ cork: { translate: false, precise, wasmInterpreterAfter: 0 } });
         // fld1; fnstsw ax; hlt
-        load(h, 0x1000, [0xd9, 0xe8, 0xdf, 0xe0, 0xf4]);
+        load(h, 0x11000, [0xd9, 0xe8, 0xdf, 0xe0, 0xf4]);
         assert.equal(h.runSlice(100), 3);
         assert.equal(h.corkDiagnostics().interpretedRelaxedReads, precise ? 0 : 1);
     }
@@ -268,10 +268,10 @@ test('guest memory is shared where the host can share it, and regions translate 
         const h = host();
         assert.ok(h.wasmMemory().buffer instanceof SharedArrayBuffer, 'node can share it');
         // mov ecx, 1000; L: add eax, ecx; dec ecx; jnz L; hlt
-        load(h, 0x1000, [0xb9, 0xe8, 0x03, 0, 0, 0x01, 0xc8, 0x49, 0x75, 0xfb, 0xf4]);
-        h.cork().noteHot(0x1000, 0);
+        load(h, 0x11000, [0xb9, 0xe8, 0x03, 0, 0, 0x01, 0xc8, 0x49, 0x75, 0xfb, 0xf4]);
+        h.cork().noteHot(0x11000, 0);
         assert.ok(await h.cork().translatePending() >= 1, 'a region was published over it');
-        h.writeReg32('eip', 0x1000);
+        h.writeReg32('eip', 0x11000);
         for (let slice = 0; slice < 100 && !h.halted(); slice++)
         {
             h.runSlice(10_000);
@@ -293,8 +293,8 @@ test('an ask of another executor the handler puts off is asked again at the gues
     const h = host({ executors: 2 });
     assert.equal(h.interruptible, true);
     // mov ecx, 100; L: inc edx; dec ecx; jnz L; hlt
-    load(h, 0x1000, [0xb9, 100, 0, 0, 0, 0x42, 0x49, 0x75, 0xfc, 0xf4]);
-    h.cork().noteHot(0x1000, 0);
+    load(h, 0x11000, [0xb9, 100, 0, 0, 0, 0x42, 0x49, 0x75, 0xfc, 0xf4]);
+    h.cork().noteHot(0x11000, 0);
     assert.ok(await h.cork().translatePending() >= 1);
     /** @type {number[]} */
     const asked = [];
@@ -302,7 +302,7 @@ test('an ask of another executor the handler puts off is asked again at the gues
         asked.push(h.readReg32('edx'));
         return asked.length > 3;
     });
-    h.writeReg32('eip', 0x1000);
+    h.writeReg32('eip', 0x11000);
     h.writeReg32('edx', 0);
     h.interruptProcess();
     for (let slice = 0; slice < 10 && !h.halted(); slice++)
@@ -323,21 +323,22 @@ test('a translated loop that stores nothing sees the interrupt word another thre
     const { Worker } = await import('node:worker_threads');
     const h = host({ executors: 2 });
     // mov ecx, -1; L: dec ecx; jnz L; hlt
-    load(h, 0x1000, [0xb9, 0xff, 0xff, 0xff, 0xff, 0x49, 0x75, 0xfd, 0xf4]);
-    h.cork().noteHot(0x1000, 0);
+    load(h, 0x11000, [0xb9, 0xff, 0xff, 0xff, 0xff, 0x49, 0x75, 0xfd, 0xf4]);
+    h.cork().noteHot(0x11000, 0);
     assert.ok(await h.cork().translatePending() >= 1);
-    assert.ok(h.cork().entryOf(0x1000, 0) >= 0, 'translated');
+    assert.ok(h.cork().entryOf(0x11000, 0) >= 0, 'translated');
     let seenAt = 0;
     h.onInterrupt(()=>{
         seenAt = performance.now();
         h.stop();
         return true;
     });
-    const at = /** @type {number} */ (h.blockLayout().interrupt) >>> 2;
+    // The word's place in the whole memory: the block's own offset into it.
+    const at = (h.block().byteOffset + /** @type {number} */ (h.blockLayout().interrupt)) >>> 2;
     const worker = new Worker(`const { workerData } = require('node:worker_threads');
         setTimeout(()=>Atomics.store(new Int32Array(workerData.buffer), workerData.at,
             0x7fffffff), 100);`, { eval: true, workerData: { buffer: h.wasmMemory().buffer, at } });
-    h.writeReg32('eip', 0x1000);
+    h.writeReg32('eip', 0x11000);
     const startedAt = performance.now();
     const retired = h.runSlice(2 ** 31 - 1);
     const ms = performance.now() - startedAt;
@@ -351,16 +352,16 @@ test('a translated loop that stores nothing sees the interrupt word another thre
 test('the interpreter stops only at an entry for the top the machine has', async()=>{
     const h = host();
     // fld1; hlt -- translated at top 0 alone.
-    load(h, 0x1000, [0xd9, 0xe8, 0xf4]);
-    h.cork().noteHot(0x1000, 0);
+    load(h, 0x11000, [0xd9, 0xe8, 0xf4]);
+    h.cork().noteHot(0x11000, 0);
     assert.ok(await h.cork().translatePending() >= 1, 'the top 0 region formed');
-    assert.ok(h.cork().entryOf(0x1000, 0) >= 0);
-    assert.equal(h.cork().entryOf(0x1000, 1), -1, 'no region for top 1');
+    assert.ok(h.cork().entryOf(0x11000, 0) >= 0);
+    assert.equal(h.cork().entryOf(0x11000, 1), -1, 'no region for top 1');
     // The machine stands at the same address with top 1: the entry compiled
     // for top 0 is no answer, so the interpreter runs the code and leaves the
     // top its own fld1 wrote (0), not the region's static (7).
     h.block()[h.blockLayout().x87Top] = 1;
-    h.writeReg32('eip', 0x1000);
+    h.writeReg32('eip', 0x11000);
     assert.equal(h.runSlice(100), 2, 'the interpreter ran fld1 and hlt');
     assert.equal(h.block()[h.blockLayout().x87Top], 0, 'the machine top, not the region top');
 });
@@ -368,7 +369,7 @@ test('the interpreter stops only at an entry for the top the machine has', async
 test('only a jump target is a hot start, not where a slice stopped', ()=>{
     const h = host({ cork: { translate: false } });
     // mov ecx, 3; nop; nop; L: dec ecx; jnz L; hlt
-    load(h, 0x1000, [0xb9, 3, 0, 0, 0, 0x90, 0x90, 0x49, 0x75, 0xfd, 0xf4]);
+    load(h, 0x11000, [0xb9, 3, 0, 0, 0, 0x90, 0x90, 0x49, 0x75, 0xfd, 0xf4]);
     const runtime = h.cork();
     /** @type {number[]} */
     const noted = [];
@@ -379,26 +380,26 @@ test('only a jump target is a hot start, not where a slice stopped', ()=>{
     // starting where the last one stopped, then the loop to its end.
     for (let pass = 0; pass < 2; pass++)
     {
-        h.writeReg32('eip', 0x1000);
+        h.writeReg32('eip', 0x11000);
         for (let i = 0; i < 3; i++)
         {
             h.runSlice(1);
         }
     }
     h.runSlice(100);
-    assert.deepEqual(noted, [0x1007], 'the loop head its jnz reached twice, and nothing else');
+    assert.deepEqual(noted, [0x11007], 'the loop head its jnz reached twice, and nothing else');
 });
 
 test('eflags read through the host folds the record a region left, a write replaces it',
     async()=>{
         const h = host();
         // cmp eax, ebx; hlt -- translated, so the region leaves its record.
-        load(h, 0x1000, [0x39, 0xd8, 0xf4]);
-        h.cork().noteHot(0x1000, 0);
+        load(h, 0x11000, [0x39, 0xd8, 0xf4]);
+        h.cork().noteHot(0x11000, 0);
         assert.ok(await h.cork().translatePending() >= 1);
         h.writeReg32('eax', 1);
         h.writeReg32('ebx', 2);
-        h.writeReg32('eip', 0x1000);
+        h.writeReg32('eip', 0x11000);
         h.runSlice(100);
         assert.equal(h.readReg32('eflags') & 0x81, 0x81, 'CF and SF of 1 - 2');
         h.writeReg32('eflags', 0x202);
@@ -409,11 +410,11 @@ test('a hlt ends the slice and the next slice goes on after it, as the timer int
     ()=>{
         const h = host();
         // hlt; jmp -3 -- the idle loop a scheduler parks the processor in.
-        load(h, 0x1000, [0xf4, 0xeb, 0xfd]);
-        h.writeReg32('eip', 0x1000);
+        load(h, 0x11000, [0xf4, 0xeb, 0xfd]);
+        h.writeReg32('eip', 0x11000);
         assert.equal(h.runSlice(100), 1, 'the hlt retired and ended the slice');
         assert.equal(h.halted(), true);
-        assert.equal(h.readReg32('eip'), 0x1001, 'eip past the hlt');
+        assert.equal(h.readReg32('eip'), 0x11001, 'eip past the hlt');
         assert.equal(h.runSlice(100), 2, 'the next slice runs the jump and halts again');
         assert.equal(h.halted(), true);
         assert.equal(h.runSlice(100), 2);
@@ -422,16 +423,16 @@ test('a hlt ends the slice and the next slice goes on after it, as the timer int
 test('a loop whose stores reach translated code goes on to its end', async()=>{
     const h = host();
     // A region on the data page: its code makes the page's stores notes.
-    h.writePhysical(0x3100, Uint8Array.from([0xc3]));
-    h.cork().noteHot(0x3100, 0);
-    // mov esi, 0x3000; mov ecx, 64; L: mov eax, [esi]; mov [esi+4], eax;
+    h.writePhysical(0x13100, Uint8Array.from([0xc3]));
+    h.cork().noteHot(0x13100, 0);
+    // mov esi, 0x13000; mov ecx, 64; L: mov eax, [esi]; mov [esi+4], eax;
     // add esi, 8; dec ecx; jnz L; hlt -- the loop's two accesses are one
-    // group, whose window meets the code at 0x3100.
-    load(h, 0x1000, [0xbe, 0x00, 0x30, 0, 0, 0xb9, 64, 0, 0, 0,
+    // group, whose window meets the code at 0x13100.
+    load(h, 0x11000, [0xbe, 0x00, 0x30, 0x01, 0, 0xb9, 64, 0, 0, 0,
         0x8b, 0x06, 0x89, 0x46, 0x04, 0x83, 0xc6, 0x08, 0x49, 0x75, 0xf5, 0xf4]);
-    h.cork().noteHot(0x1000, 0);
+    h.cork().noteHot(0x11000, 0);
     assert.ok(await h.cork().translatePending() >= 2);
-    h.writeReg32('eip', 0x1000);
+    h.writeReg32('eip', 0x11000);
     // The group's check leaves for the host, which interprets the access;
     // an exit the epilogue probed straight back into the same entry spun
     // there for ever with the budget untouched.
@@ -441,27 +442,27 @@ test('a loop whose stores reach translated code goes on to its end', async()=>{
     }
     assert.equal(h.halted(), true, 'the loop ran to its hlt');
     assert.equal(h.readReg32('ecx'), 0);
-    assert.equal(h.readReg32('esi'), 0x3200);
+    assert.equal(h.readReg32('esi'), 0x13200);
 });
 
 test('a trap a region leaves for with x87 held in its locals runs the handler', async()=>{
     const h = host();
     // fld1; mov dx, 0x1234; mov eax, 0x55; out dx, eax; int3 -- a hook stub that
     // holds EIP, reached with the x87 stack live: the handler moves EIP on.
-    load(h, 0x1000, [0xd9, 0xe8, 0x66, 0xba, 0x34, 0x12, 0xb8, 0x55, 0, 0, 0, 0xef, 0xcc]);
-    h.writePhysical(0x1100, Uint8Array.from([0xf4]));
+    load(h, 0x11000, [0xd9, 0xe8, 0x66, 0xba, 0x34, 0x12, 0xb8, 0x55, 0, 0, 0, 0xef, 0xcc]);
+    h.writePhysical(0x11100, Uint8Array.from([0xf4]));
     /** @type {number[]} */
     const seen = [];
     h.onTrap((/** @type {number} */ value)=>{
         seen.push(value);
-        h.writeReg32('eip', 0x1100);
+        h.writeReg32('eip', 0x11100);
     });
-    h.cork().noteHot(0x1000, 0);
+    h.cork().noteHot(0x11000, 0);
     assert.ok(await h.cork().translatePending() >= 1);
-    h.writeReg32('eip', 0x1000);
+    h.writeReg32('eip', 0x11000);
     h.runSlice(100);
     assert.deepEqual(seen, [0x55]);
-    assert.equal(h.readReg32('eip'), 0x1101, 'where the handler put EIP, then its hlt');
+    assert.equal(h.readReg32('eip'), 0x11101, 'where the handler put EIP, then its hlt');
 });
 
 test('a context carries the flags, the x87 block and fsBase field for field', ()=>{
@@ -488,24 +489,24 @@ test('a context carries the flags, the x87 block and fsBase field for field', ()
 test('a host write into a translated page invalidates the region', async()=>{
     const h = host();
     const runtime = h.cork();
-    h.writePhysical(0x1000, Uint8Array.from([0xb8, 1, 0, 0, 0, 0xf4]));
-    runtime.noteHot(0x1000);
+    h.writePhysical(0x11000, Uint8Array.from([0xb8, 1, 0, 0, 0, 0xf4]));
+    runtime.noteHot(0x11000);
     assert.equal(await runtime.translatePending(), 1, 'the region was formed');
-    assert.equal(runtime.holdsPage(0x1000 >>> 12), true);
-    h.writePhysical(0x1000, Uint8Array.from([0x90]));
-    assert.equal(runtime.holdsPage(0x1000 >>> 12), false, 'the host write dropped it');
+    assert.equal(runtime.holdsPage(0x11000 >>> 12), true);
+    h.writePhysical(0x11000, Uint8Array.from([0x90]));
+    assert.equal(runtime.holdsPage(0x11000 >>> 12), false, 'the host write dropped it');
 });
 
 test('code the host rewrites between two calls of it runs as written; a host write beside it'
     + ' leaves it translated', async()=>{
     const h = host();
     const runtime = h.cork();
-    // call F; mov ebx, eax; mov dx, 0x1234; out dx, eax; call F; hlt -- F (0x1100): mov eax,
+    // call F; mov ebx, eax; mov dx, 0x1234; out dx, eax; call F; hlt -- F (0x11100): mov eax,
     // 1; ret, translated before the program starts; the trap's handler rewrites F's immediate.
-    load(h, 0x1000, [0xe8, 0xfb, 0x00, 0, 0, 0x89, 0xc3, 0x66, 0xba, 0x34, 0x12, 0xef,
+    load(h, 0x11000, [0xe8, 0xfb, 0x00, 0, 0, 0x89, 0xc3, 0x66, 0xba, 0x34, 0x12, 0xef,
         0xe8, 0xef, 0x00, 0, 0, 0xf4]);
-    h.writePhysical(0x1100, Uint8Array.from([0xb8, 1, 0, 0, 0, 0xc3]));
-    runtime.noteHot(0x1100);
+    h.writePhysical(0x11100, Uint8Array.from([0xb8, 1, 0, 0, 0, 0xc3]));
+    runtime.noteHot(0x11100);
     assert.equal(await runtime.translatePending(), 1);
     /** @type {boolean[]} */
     const held = [];
@@ -513,9 +514,9 @@ test('code the host rewrites between two calls of it runs as written; a host wri
         // An answer into the stack's page, where nothing of the translator's is.
         h.writeData(0x2fff00, Uint8Array.from([1, 2, 3, 4]));
         h.fillData(0x2fff04, 0, 8);
-        held.push(runtime.entryOf(0x1100) >= 0);
-        h.writeData(0x1101, Uint8Array.from([7]));
-        held.push(runtime.entryOf(0x1100) >= 0);
+        held.push(runtime.entryOf(0x11100) >= 0);
+        h.writeData(0x11101, Uint8Array.from([7]));
+        held.push(runtime.entryOf(0x11100) >= 0);
     });
     for (let slice = 0; slice < 10 && !h.halted(); slice++)
     {
@@ -553,7 +554,8 @@ test('a tight loop run with no frame to feed the translator is translated in its
     // mov ecx, 400000; L: add eax, ecx; xor ebx, eax; dec ecx; jnz L; hlt -- every
     // note of the loop's head falls in its first 2048 interpreted instructions,
     // and only slices of the scheduler's quantum run it, as a loader's do.
-    load(h, 0x1000, [0xb9, 0x80, 0x1a, 0x06, 0x00, 0x01, 0xc8, 0x31, 0xc3, 0x49, 0x75, 0xf9, 0xf4]);
+    load(h, 0x11000, [0xb9, 0x80, 0x1a, 0x06, 0x00, 0x01, 0xc8, 0x31, 0xc3, 0x49, 0x75, 0xf9,
+        0xf4]);
     let retired = h.runSlice(100_000);
     while (!h.halted())
     {
@@ -616,7 +618,7 @@ const countdown = (/** @type {number} */ n)=>[0xb9, n & 0xff, n >>> 8 & 0xff, n 
 function runCounted(counted, code, cork = {}){
     const before = { ...counted.retired };
     const h = host({ engine: counted.counting, cork: { translate: false, ...cork } });
-    load(h, 0x1000, code);
+    load(h, 0x11000, code);
     // To its halt, however many slices: an interpreted slice also ends on time.
     for (let slices = 0; !h.halted() && slices < 1000; slices++)
     {
@@ -667,7 +669,7 @@ test('a slow slice accounts for itself only when the translator\'s timings are a
                 // the host call's own time
             }
         });
-        load(h, 0x1000, [0x66, 0xba, 0x34, 0x12, 0xef, 0xf4]);
+        load(h, 0x11000, [0x66, 0xba, 0x34, 0x12, 0xef, 0xf4]);
         // The slice ends past the handler, its time spent, before the hlt.
         assert.equal(h.runSlice(100), 2);
         const stalls = /** @type {any} */ (h.cork().diagnostics()).stalls;
@@ -701,8 +703,8 @@ test('rdtsc counts the guest\'s clock once one is given, at CORK_TSC_MHZ, never 
     h.useGuestClock(()=>ms);
     /** @returns {bigint} edx:eax after rdtsc; hlt */
     const read = ()=>{
-        load(h, 0x1000, [0x0f, 0x31, 0xf4]);
-        h.writeReg32('eip', 0x1000);
+        load(h, 0x11000, [0x0f, 0x31, 0xf4]);
+        h.writeReg32('eip', 0x11000);
         h.wake?.();
         h.runSlice(10);
         return BigInt(h.readReg32('edx') >>> 0) << 32n | BigInt(h.readReg32('eax') >>> 0);
@@ -721,10 +723,10 @@ test('rdtsc counts the guest\'s clock once one is given, at CORK_TSC_MHZ, never 
 test('the RAM lent to the memory layer is the machine\'s own, byte 0 at address 0', ()=>{
     const h = host();
     const ram = h.ramView();
-    h.writePhysical(0x2000, new Uint8Array([0x78, 0x56, 0x34, 0x12]));
-    assert.equal(new DataView(ram.buffer, ram.byteOffset).getUint32(0x2000, true), 0x12345678);
-    ram[0x3000] = 0xab;
-    assert.equal(h.readU32(0x3000) & 0xff, 0xab, 'and a byte written in place reads back');
+    h.writePhysical(0x12000, new Uint8Array([0x78, 0x56, 0x34, 0x12]));
+    assert.equal(new DataView(ram.buffer, ram.byteOffset).getUint32(0x12000, true), 0x12345678);
+    ram[0x13000] = 0xab;
+    assert.equal(h.readU32(0x13000) & 0xff, 0xab, 'and a byte written in place reads back');
     assert.equal(h.ramView(), ram, 'one view for the life of the machine');
 });
 
@@ -737,8 +739,8 @@ test('a span the engine copies at once is the bytes it reads one by one, zeros p
             return engine.createEngine(given);
         } } });
         h.writePhysical(MEMORY - 4, new Uint8Array([1, 2, 3, 4]));
-        h.writePhysical(0x2000, new Uint8Array([0xde, 0xad, 0xbe, 0xef]));
-        for (const [start, end] of [[0x1ffe, 0x2006], [MEMORY - 6, MEMORY + 3], [MEMORY + 8,
+        h.writePhysical(0x12000, new Uint8Array([0xde, 0xad, 0xbe, 0xef]));
+        for (const [start, end] of [[0x11ffe, 0x12006], [MEMORY - 6, MEMORY + 3], [MEMORY + 8,
             MEMORY + 12]])
         {
             assert.deepEqual(env.readBytes(start, end),
@@ -768,12 +770,83 @@ test('addresses below closedBelow fault on a fetch and a store; none are closed 
         assert.equal(open.fault(), null);
     });
 
+for (const translated of [false, true])
+{
+    test(`the engine's pages under 64 KiB are closed to the guest's stores, the rest of the range`
+        + ` is not, ${translated ? 'translated' : 'interpreted'}`, async()=>{
+        // Guest RAM starts at the memory's start, and the state page and the wasm
+        // interpreter's statics lie in the range a Windows program never maps:
+        // a store there faults rather than rewriting the machine's registers.
+        const store = host({ cork: { translate: translated } });
+        const before = store.block().slice();
+        // mov [eax+4], eax; hlt -- with eax the state page's own address.
+        load(store, 0x20000, [0x89, 0x40, 0x04, 0xf4]);
+        store.writeReg32('eax', store.block().byteOffset);
+        if (translated)
+        {
+            store.cork().noteHot(0x20000, 0);
+            assert.ok(await store.cork().translatePending() >= 1);
+        }
+        store.runSlice(100);
+        const fault = store.fault();
+        assert.equal(fault?.vector, 14, 'a page fault');
+        assert.equal(fault?.eip, 0x20000, 'at the store');
+        assert.equal(fault?.address, store.block().byteOffset + 4);
+        const registers = store.blockLayout().regs;
+        assert.deepEqual([...store.block().slice(registers + 4, registers + 8)],
+            [...before.slice(registers + 4, registers + 8)], 'ECX as it was');
+
+        // mov [0x54], eax; mov ebx, [0x58]; mov [0x8000], eax; hlt -- the first page,
+        // and the range past the engine's pages, read and take a store as before:
+        // a mixer thread reads through a pointer not yet set.
+        const low = host({ cork: { translate: translated } });
+        load(low, 0x20000, [0xa3, 0x54, 0, 0, 0, 0x8b, 0x1d, 0x58, 0, 0, 0,
+            0xa3, 0x00, 0x80, 0, 0, 0xf4]);
+        low.writeReg32('eax', 0x1234);
+        low.writeReg32('ebx', -1);
+        if (translated)
+        {
+            low.cork().noteHot(0x20000, 0);
+            assert.ok(await low.cork().translatePending() >= 1);
+        }
+        low.runSlice(100);
+        assert.equal(low.fault(), null);
+        assert.deepEqual([low.readU32(0x54), low.readU32(0x8000)], [0x1234, 0x1234]);
+        assert.equal(low.readReg32('ebx'), 0, 'a zero, not the engine\'s');
+    });
+}
+
+test('a host write across the engine\'s pages, the whole RAM made new, leaves the machine as it'
+    + ' was', ()=>{
+    for (const wasmInterpreter of [false, true])
+    {
+        const h = host({ cork: { translate: false, wasmInterpreter,
+            wasmInterpreterAfter: 0 } });
+        h.writeReg32('ebx', 0x1234);
+        const before = h.block().slice();
+        h.writePhysical(0, new Uint8Array(MEMORY));
+        h.writeData(0x800, new Uint8Array(0x8000).fill(0x5a));
+        h.fillData(0, 0xa5, 0x6000);
+        assert.deepEqual(h.block(), before, 'the state block');
+        assert.equal(h.readU32(0x800), 0xa5a5a5a5, 'the guest\'s first page took the writes');
+        assert.equal(h.readU32(0x5000), 0xa5a5a5a5, 'and the range past the engine\'s pages');
+        // mov ecx, 2000; L: dec ecx; jnz L; hlt -- the interpreter's statics whole.
+        load(h, 0x20000, [0xb9, 0xd0, 0x07, 0, 0, 0x49, 0x75, 0xfd, 0xf4]);
+        for (let slices = 0; !h.halted() && slices < 1000; slices++)
+        {
+            h.runSlice(1 << 16);
+        }
+        assert.equal(h.instructionCount(), 4002, `wasm interpreter ${wasmInterpreter}`);
+        assert.equal(h.readReg32('ebx'), 0x1234);
+    }
+});
+
 test('a dword the host writes or reads is whole to a thread on the same memory', async()=>{
     // As an x86 dword store and load are: a pointer, a count or a flag the host
     // publishes is read by guest code on another executor while it is written.
     const { Worker } = await import('node:worker_threads');
     const h = host();
-    const address = 0x2004; // 4-aligned, not 8-aligned: the shared copy's byte path
+    const address = 0x12004; // 4-aligned, not 8-aligned: the shared copy's byte path
     const index = (h.blockLayout().ramBase + address) / 4;
     const control = new Int32Array(new SharedArrayBuffer(16));
     const worker = new Worker(`

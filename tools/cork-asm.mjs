@@ -25,6 +25,8 @@
  *                     and --image)
  *   --atomic          the variant several executors run
  *   --ram MB          the guest RAM the layout is made for (default 2048, the launcher's)
+ *   --ram-base N      where guest RAM lies in the memory: 0 (the default, a Windows
+ *                     process's first executor) or 65536 (a page in, cork's own default)
  *   --listing         every region's machine code, after its row
  *   --runner COMMAND  the node that compiles, with what runs it: another
  *                     architecture's node under an emulator, e.g.
@@ -39,6 +41,9 @@
  *                     each with its code
  *   --processors N    the executors the layout is the first of (default 3, as a game's
  *                     process: its back edges read the interrupt word)
+ *   --classes         with --blocks, what the executed machine instructions are, by kind
+ *                     (`classOf`), and the --count pattern weighed the same way: where a
+ *                     translation's instructions go besides the guest's own work
  *
  * The compiler is this node's V8, which is older than a current browser's: the
  * counts compare two emitters on one V8, not cork with a browser.
@@ -50,6 +55,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { regionModule } from '../modules/cork/src/region-module.js';
 import { BLOCK_MARK_END } from '../modules/cork/src/emit/region.js';
+import { ownLayout } from '../modules/cork/src/runtime/layout.js';
 
 const args = process.argv.slice(2);
 /** @param {string} name */
@@ -209,6 +215,11 @@ else
 const entries = (value('--entry') ?? String(at)).split(',').map(Number);
 const hash = pePath !== null || args.includes('--image') || args.includes('--hash');
 const ramSize = Number(value('--ram') ?? 2048) * (1 << 20);
+// Guest RAM from the memory's start, as a Windows process's first executor has it
+// (`ownLayout`'s `ramBase` 0), unless `--ram-base` says one page in.
+const ramBase = Number(value('--ram-base') ?? 0);
+/** Where a block's mark is stored: in the state page, short of `nanFirst`. */
+const markOffset = ownLayout({ ramSize, ramBase }).regs + 1020;
 
 /**
  * The machine code of each block, by the marks a diagnostic build stores at
@@ -253,8 +264,8 @@ function blockCode(lines){
                 marks.add(lines[i - 1]);
             }
             // The store of the value made, where it follows close.
-            const store = lines.slice(i + 1, i + 4)
-                .find(next=>new RegExp(`str\\s+w${arm[2]}, \\[x\\d+, #1020\\]`).test(next));
+            const stored = new RegExp(`str\\s+w${arm[2]}, \\[x\\d+, #${markOffset}\\]`);
+            const store = lines.slice(i + 1, i + 4).find(next=>stored.test(next));
             if (store)
             {
                 marks.add(store);
@@ -312,6 +323,60 @@ if (value('--blocks') !== null)
         profile.set(key, (profile.get(key) ?? 0) + count);
     }
 }
+/**
+ * What a machine instruction is for, by its text in V8's printer, x86-64 or
+ * arm64 alike: a stack slot's load or store (`frame`, the register allocator's
+ * spills), a register copied (`move`, mostly the merges of a loop's values), a
+ * constant made, a guest address wrapped into RAM (`wrap`), another load or
+ * store (`memory`: guest RAM, the state block, the page flags), a branch, a
+ * comparison or a select, and the rest of the arithmetic.
+ *
+ * @param {string} line
+ * @returns {string}
+ */
+function classOf(line){
+    const text = line.replace(/^0x[0-9a-f]+\s+[0-9a-f]+\s+[0-9a-f]+\s+/, '')
+        .replace(/^REX\.W\s+/, '');
+    const [mnemonic = '', ...rest] = text.split(/\s+/);
+    const operands = rest.join(' ');
+    if (/\[(rbp|rsp|sp|fp)\b/.test(operands))
+    {
+        return 'frame';
+    }
+    if (/,\s*(#)?0x7fffffff\b/.test(operands) && /^and/.test(mnemonic))
+    {
+        return 'wrap';
+    }
+    if (/^mov[lqwb]?$/.test(mnemonic) && /^[a-z][a-z0-9]*,\s*[a-z][a-z0-9]*$/.test(operands))
+    {
+        return 'move';
+    }
+    if (/^(movz|movk|movn)$/.test(mnemonic) || /^mov[lqwb]?$/.test(mnemonic)
+        && /^[a-z][a-z0-9]*,\s*#?(0x[0-9a-f]+|-?\d+)\b/.test(operands)
+        || /^xor[lq]?$/.test(mnemonic) && /^([a-z0-9]+),\s*\1$/.test(operands))
+    {
+        return 'constant';
+    }
+    // An address computed is arithmetic, though it is written as one.
+    if (/^lea/.test(mnemonic))
+    {
+        return 'other';
+    }
+    if (operands.includes('[') || /^(ld|st)/.test(mnemonic))
+    {
+        return 'memory';
+    }
+    if (/^(j|b$|b\.|bl|br|cbz|cbnz|tbz|tbnz|ret|call)/.test(mnemonic))
+    {
+        return 'branch';
+    }
+    if (/^(cmp|cmn|test|tst|set|cset|csel|csinc|csinv|csneg|ccmp|cmov)/.test(mnemonic))
+    {
+        return 'compare';
+    }
+    return 'other';
+}
+
 const processors = Number(value('--processors') ?? 3);
 const counted = value('--count') === null ? null : new RegExp(/** @type {string} */ (value('--count')));
 console.log(`     entry  blocks  x86  wasm B  machine  bytes  per x86${counted ? '  matched' : ''}`
@@ -321,11 +386,14 @@ let sumMachine = 0;
 let sumMatched = 0;
 let ranX86 = 0;
 let ranMachine = 0;
+/** Executed machine instructions by kind (`classOf`), and the --count pattern's. */
+const classes = new Map();
+let ranMatched = 0;
 /** @type {{ start: number, runs: number, x86: number, code: string[] }[]} */
 const heavy = [];
 for (const entry of entries)
 {
-    const made = regionModule({ code, at, entry, hash, callReturn: hash, ramSize,
+    const made = regionModule({ code, at, entry, hash, callReturn: hash, ramSize, ramBase,
         atomic: args.includes('--atomic'), checked: false, wide: true, looseStacks: true,
         processors, markBlocks: profile !== null });
     const x86 = made.blocks.reduce((sum, block)=>sum + block.instructions, 0);
@@ -346,6 +414,16 @@ for (const entry of entries)
             {
                 regionX86 += runs * block.instructions;
                 regionMachine += runs * machine;
+                for (const line of /** @type {string[]} */ (byBlock.get(index)))
+                {
+                    if (/\s(nop|int3)\b|jump table entry|constant pool/.test(line))
+                    {
+                        continue;
+                    }
+                    const kind = classOf(line);
+                    classes.set(kind, (classes.get(kind) ?? 0) + runs);
+                    ranMatched += counted !== null && counted.test(line) ? runs : 0;
+                }
                 heavy.push({ start: block.start, runs, x86: block.instructions,
                     code: /** @type {string[]} */ (byBlock.get(index)) });
             }
@@ -397,4 +475,14 @@ if (profile !== null && ranX86 > 0)
 {
     console.log(`ran: ${(ranX86 / 1e9).toFixed(2)} G guest instructions in these blocks,`
         + ` ${(ranMachine / ranX86).toFixed(3)} machine instructions an executed one`);
+    if (args.includes('--classes'))
+    {
+        const kinds = [...classes].sort((a, b)=>b[1] - a[1]);
+        console.log('by kind, an executed guest instruction: ' + kinds.map(([kind, runs])=>
+            `${kind} ${(runs / ranX86).toFixed(3)} (${(runs / ranMachine * 100).toFixed(1)}%)`)
+            .join(', ')
+            + (counted === null ? ''
+                : `; --count ${(ranMatched / ranX86).toFixed(3)}`
+                    + ` (${(ranMatched / ranMachine * 100).toFixed(1)}%)`));
+    }
 }

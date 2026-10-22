@@ -194,56 +194,82 @@ export const CALL_STRIDE = 64;
 export const blockSlot = address=>Math.imul(address, 0x9e3779b1) >>> 12;
 
 /**
+ * Where the first executor's state page lies when guest RAM starts at the
+ * memory's start (`ownLayout`'s `ramBase` 0): past the guest's first page,
+ * whose reads through a null pointer -- a mixer thread's before its creator set
+ * the pointer -- find the zeroes they find on a page nobody maps, and short of
+ * 4 KiB in from it, so its words are reached by an arm64 load's own offset.
+ */
+export const LOW_STATE = 4096;
+
+/**
  * Cork's own layout for a memory holding `ramSize` bytes of guest RAM.
  *
- * @param {{ ramSize: number, hashSlots?: number, processors?: number }} options
+ * Guest RAM lies at `ramBase`: a page in, past the state page, unless the
+ * guest maps nothing in its first 64 KiB -- a Windows program never does --
+ * where it lies at 0 and the state page and the wasm interpreter's statics
+ * lie inside that range, from `LOW_STATE`. RAM at 0 is RAM a load reaches
+ * with no offset: on arm64 one instruction where the page's offset took two
+ * more, and a store's bounds check -- arm64 checks a store wider than a byte,
+ * which may otherwise write part of itself before it faults -- against a
+ * limit one subtraction makes rather than a constant built in two.
+ *
+ * @param {{ ramSize: number, hashSlots?: number, processors?: number,
+ *     ramBase?: number }} options
  *     `hashSlots`: the entry hash's, a power of two (`Tables.HASH_SLOTS` unless given);
  *     `processors`: the process's executors, which `cpuid` says the machine has --
  *     a field only past one, so one processor's layout, and its translations, are
- *     what they were
+ *     what they were;
+ *     `ramBase`: `PAGE` (the default) or 0
  * @returns {import('../../../core/src/layers/cpu/engine.js').StateLayout}
  */
-export function ownLayout({ ramSize, hashSlots = Tables.HASH_SLOTS, processors = 1 }){
+export function ownLayout({ ramSize, hashSlots = Tables.HASH_SLOTS, processors = 1,
+    ramBase = PAGE })
+{
     if (!(hashSlots >= 1 << 10 && hashSlots <= 1 << 26 && (hashSlots & (hashSlots - 1)) === 0))
     {
         throw new Error(`cork: ${hashSlots} entry hash slots is not a power of two`
             + ' from 2^10 to 2^26');
     }
-    const ramBase = PAGE;
+    if (ramBase !== PAGE && ramBase !== 0)
+    {
+        throw new Error(`cork: guest RAM at ${ramBase}, not at 0 or one page in`);
+    }
+    const state = ramBase === 0 ? LOW_STATE : 0;
     const fields = {
         bits: /** @type {32} */ (32),
         ramBase,
         ramSize,
-        regs: 0,
-        eip: 32,
-        previousIp: 36,
-        eflags: 40,
+        regs: state,
+        eip: state + 32,
+        previousIp: state + 36,
+        eflags: state + 40,
         // The lazy flag record a region leaves (kind, result, two operands,
         // carry in), folded by whoever reads the word (`eflagsOf`).
-        flagRecord: 44,
+        flagRecord: state + 44,
         flagsChanged: -1,
-        x87: 64,
+        x87: state + 64,
         x87Format: /** @type {'f64'} */ ('f64'),
-        x87Top: 192,
-        x87Empty: 193,
-        x87Control: 194,
-        x87Status: 196,
+        x87Top: state + 192,
+        x87Empty: state + 193,
+        x87Control: state + 194,
+        x87Status: state + 196,
         // The registers holding a quadword `fild`'s integer, the integer in the
         // eight bytes past each register's double: an interpreter's run, or a
         // thread's slice, may end between the load and the store.
-        x87Exact: 198,
-        xmm: 208,
-        mxcsr: 336,
-        fsBase: 340,
+        x87Exact: state + 198,
+        xmm: state + 208,
+        mxcsr: state + 336,
+        fsBase: state + 340,
         gsBase: -1,
-        counter: 344,
+        counter: state + 344,
         // The indirect calls' profile: a flag the runtime sets, a count, and
         // sixteen (address, target) pairs, the last calls made while it is set.
-        callProfile: 352,
+        callProfile: state + 352,
         // The budget the run started with, past the call profile's sixteen pairs.
-        origin: 488,
+        origin: state + 488,
         // Past the state block, so a thread switch does not carry it.
-        nanFirst: 1024,
+        nanFirst: state + 1024,
         tables: ramBase + ramSize,
         codePages: -1,
         // The entry hash's slot is the top bits of eip times the golden ratio,
@@ -254,7 +280,7 @@ export function ownLayout({ ramSize, hashSlots = Tables.HASH_SLOTS, processors =
         // translated code reads at every back edge as the floor its budget is
         // looked at against (`spentTest`), so a slice ends there however long
         // it was given -- only where other executors run beside this one.
-        ...processors > 1 ? { processors, processor: 0, interrupt: 2048 } : {},
+        ...processors > 1 ? { processors, processor: 0, interrupt: state + 2048 } : {},
     };
     return { ...fields, id: layoutId(fields) };
 }
@@ -291,9 +317,39 @@ export const codeRangesAt = layout=>layout.codeRanges ?? layout.tables + Tables.
 export const executorBytes = layout=>PAGE + Math.ceil(tablesSize(layout) / PAGE) * PAGE;
 
 /**
+ * Where the first executor's state page lies, which `executorLayout` and
+ * `sharedLayout` take every state field's place in a page from.
+ *
+ * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout  `ownLayout`'s
+ */
+export const statePageOf = layout=>layout.regs;
+
+/**
+ * A layout's fields as a state block's views read them: each state field from
+ * the start of its executor's state page rather than from the memory's -- the
+ * same on every executor, which a thread's context taken from one block and
+ * put into another depends on.
+ *
+ * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout  `ownLayout`'s
+ * @returns {import('../../../core/src/layers/cpu/engine.js').StateLayout}
+ */
+export function blockFields(layout){
+    /** @type {Record<string, any>} */
+    const fields = { ...layout };
+    for (const name of STATE_FIELDS)
+    {
+        if (typeof fields[name] === 'number' && fields[name] >= 0)
+        {
+            fields[name] -= statePageOf(layout);
+        }
+    }
+    return /** @type {any} */ (fields);
+}
+
+/**
  * Cork's own layout moved to another executor's state page at `base`, a
  * multiple of `PAGE`: the state fields from `base` as the first executor's are
- * from 0, the tables past the page. Translated code addresses all of them by
+ * from its own page's start, the tables past the page. Translated code addresses all of them by
  * constants, so a translation is the executor's own and the layout's id tells.
  * The page flags and the code granules stay the first executor's: whether a
  * page may be read, and whether a store into it reaches code some executor
@@ -319,7 +375,7 @@ export function executorLayout(layout, base, index = 1){
     {
         if (typeof fields[name] === 'number' && fields[name] >= 0)
         {
-            fields[name] += base;
+            fields[name] += base - statePageOf(layout);
         }
     }
     fields.tables = base + PAGE;
@@ -349,7 +405,7 @@ export function executorLayout(layout, base, index = 1){
  * @returns {import('../../../core/src/layers/cpu/engine.js').StateLayout}
  */
 export function sharedLayout(layout){
-    if (layout.regs !== 0)
+    if (layout.pageFlags !== undefined)
     {
         throw new Error('layout: the shared layout is made from the first executor\'s');
     }
@@ -357,6 +413,14 @@ export function sharedLayout(layout){
     const fields = { ...layout };
     delete fields.id;
     delete fields.processor;
+    // Each field where it lies in a state page, from the page's start.
+    for (const name of STATE_FIELDS)
+    {
+        if (typeof fields[name] === 'number' && fields[name] >= 0)
+        {
+            fields[name] -= statePageOf(layout);
+        }
+    }
     // The other executors are not interrupted: the process ends a chain of
     // their slices at a slice's end (`goOn`), and their back edges stay as
     // one executor's are.

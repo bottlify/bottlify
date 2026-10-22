@@ -21,7 +21,10 @@ import assert from 'node:assert/strict';
 import { createJudge } from '../testing/sequences-judge.js';
 import { LOCKED_POOL } from '../testing/locked-sequences.js';
 import { bodyOf, namesOf, preambleOf, random } from '../testing/sequences.js';
-import { PAGE, executorBytes, executorLayout, ownLayout, tablesSize } from './layout.js';
+import {
+    LOW_STATE, PAGE, blockFields, executorBytes, executorLayout, ownLayout, sharedLayout,
+    statePageOf, tablesSize,
+} from './layout.js';
 
 const COUNT = Number(process.env.EXECUTOR_SEQUENCES ?? 2000);
 const THIRD = { executors: 3, executor: 2 };
@@ -72,6 +75,28 @@ test('an executor\'s layout moves its state and tables, and only those', ()=>{
     assert.equal(moved.flagsChanged, -1, 'an absent field stays absent');
     assert.notEqual(moved.id, own.id, 'its translations are its own');
     assert.throws(()=>executorLayout(own, own.tables), /not one past the first's/);
+});
+
+test('RAM from the memory\'s start puts the state page at LOW_STATE, each field where it lies'
+    + ' in a page as with RAM a page in', ()=>{
+    const paged = ownLayout({ ramSize: 1 << 20, hashSlots: 1 << 16, processors: 2 });
+    const low = ownLayout({ ramSize: 1 << 20, hashSlots: 1 << 16, processors: 2, ramBase: 0 });
+    assert.deepEqual([low.ramBase, low.regs, low.tables], [0, LOW_STATE, 1 << 20]);
+    assert.equal(low.interrupt, LOW_STATE + /** @type {number} */ (paged.interrupt));
+    assert.equal(low.nanFirst, LOW_STATE + /** @type {number} */ (paged.nanFirst));
+    assert.notEqual(low.id, paged.id, 'its translations are its own');
+    assert.deepEqual(blockFields(low), { ...blockFields(paged), ramBase: 0, tables: 1 << 20,
+        id: low.id }, 'a state block reads the same either way');
+    assert.equal(blockFields(low).eflags, paged.eflags);
+    const base = Math.ceil((low.tables + tablesSize(low)) / PAGE) * PAGE;
+    const moved = executorLayout(low, base, 1);
+    assert.deepEqual([moved.regs, moved.eflags, moved.tables], [base, base + paged.eflags,
+        base + PAGE]);
+    const shared = sharedLayout(low);
+    assert.deepEqual([shared.regs, shared.eflags, shared.interrupt],
+        [0, paged.eflags, sharedLayout(paged).interrupt], 'from the instance\'s state base');
+    assert.equal(statePageOf(low), LOW_STATE);
+    assert.throws(()=>ownLayout({ ramSize: 1 << 20, ramBase: LOW_STATE }), /not at 0 or one page/);
 });
 
 test('a layout of several executors names the processor each is, and one names none', ()=>{

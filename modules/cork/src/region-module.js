@@ -20,14 +20,14 @@ import { formRegion } from './region.js';
 import { ModuleBuilder } from './wasm/encoder.js';
 import { features } from './wasm/features.js';
 import { emitRegion, finishModule, prepareModule } from './emit/region.js';
-import { ownLayout } from './runtime/layout.js';
+import { ownLayout, PAGE } from './runtime/layout.js';
 
 /**
  * @param {{ code: ArrayLike<number>, at: number, entry?: number, precise?: boolean,
  *     atomic?: boolean, ramSize?: number, hash?: boolean, callReturn?: boolean,
  *     looseStacks?: boolean, structure?: boolean,
  *     expansion?: import('./emit/region.js').ExpansionNote | null, wide?: boolean,
- *     checked?: boolean, processors?: number, markBlocks?: boolean }} what
+ *     checked?: boolean, processors?: number, markBlocks?: boolean, ramBase?: number }} what
  *     the bytes and the guest address they lie at; `entry` where the region starts (`at` by
  *     default); `precise`, `atomic`, `hash`, `callReturn`, `looseStacks`, `structure`: as the
  *     translator's configuration has them; `expansion` told each instruction's wasm bytes
@@ -35,12 +35,14 @@ import { ownLayout } from './runtime/layout.js';
  *     run whose control word says so has it; `checked` false the x87 stack's shape at the
  *     entry tested once rather than at every instruction, as the runtime speculates;
  *     `processors` the executors the layout is the first of (its back edges then read the
- *     interrupt word); `markBlocks` each block marked for the machine code (`blockMark`)
+ *     interrupt word); `markBlocks` each block marked for the machine code (`blockMark`);
+ *     `ramBase` where guest RAM lies in the memory (`ownLayout`'s: 0 as a Windows process's
+ *     first executor has it)
  */
 export function regionModule({ code, at, entry = at, precise = false, atomic = false,
     ramSize = 16 << 20, hash = false, callReturn = false, looseStacks = false,
     structure = true, expansion = null, wide = false, checked = true, processors = 1,
-    markBlocks = false })
+    markBlocks = false, ramBase = PAGE })
 {
     const bytes = Uint8Array.from(code);
     // Bytes past the code read as `hlt`, so a region never runs off into them.
@@ -50,7 +52,7 @@ export function regionModule({ code, at, entry = at, precise = false, atomic = f
     };
     const region = formRegion(read, entry, {});
     const m = new ModuleBuilder();
-    const context = prepareModule(m, ownLayout({ ramSize, processors }), features(), {},
+    const context = prepareModule(m, ownLayout({ ramSize, processors, ramBase }), features(), {},
         { precise, atomic, hash, callReturn: hash && callReturn, looseStacks, structure,
             expansion, wide, markBlocks });
     const translation = emitRegion(context, region, { entryTop: 0, checked });
