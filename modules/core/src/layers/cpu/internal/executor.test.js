@@ -61,8 +61,12 @@ function program(next){
             case 3: body.push(0xa3, ...u32(DATA + 4 * next(16))); break; // mov [d], eax
             case 4: body.push(0x03, 0x05, ...u32(DATA + 4 * next(16))); break; // add eax, [d]
             case 5: body.push(0xef); break; // out dx, eax: a trap
-            // mov esi, [low]: a fault
-            case 6: body.push(0x8b, 0x35, ...u32(next(0x10000) & ~3)); break;
+            // mov [low], esi: a fault in every tier. A read there faults only
+            // where the interpreters run it, translated code wraps it into
+            // RAM, so its outcome followed which ran first: on the other
+            // executor, whose translations land later under load, the read
+            // faulted where the process's own had translated it.
+            case 6: body.push(0x89, 0x35, ...u32(next(0x10000) & ~3)); break;
             default: body.push(0xc1, 0xc0, next(32)); break; // rol eax, n
         }
     }
