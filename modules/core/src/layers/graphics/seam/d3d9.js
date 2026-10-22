@@ -589,20 +589,24 @@ export function createDirect3D9Seam(
 
     /**
      * A shader's tokens, read up to its end token. The stream carries no
-     * length, so it is read a page at a time and scanned for the end; a
+     * length, so it is read a window at a time and scanned for the end; a
      * comment's own length is honoured, since one may contain anything.
+     * Each window ends at a multiple of its size, so none reaches across a
+     * page: tokens that end near the end of what the program allocated are
+     * read without reading what lies past it, which may be nothing at all.
      *
      * @param {number} pointer
      * @returns {Uint32Array | null}
      */
     const readTokens = pointer=>{
-        const page = 64;
+        const span = 256;
         /** @type {number[]} */
         const tokens = [];
         let skip = 0;
         while (tokens.length < MAX_SHADER_DWORDS)
         {
-            const chunk = readDwords((pointer >>> 0) + tokens.length * 4, page);
+            const at = ((pointer >>> 0) + tokens.length * 4) >>> 0;
+            const chunk = readDwords(at, Math.max(1, (span - at % span) >>> 2));
             for (const token of chunk)
             {
                 tokens.push(token);

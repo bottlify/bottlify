@@ -1191,6 +1191,40 @@ test('a shader is read from the guest up to its end token and handed back as byt
     h.release(root);
 });
 
+test('a shader ending just short of the end of its memory is read without reading past it', ()=>{
+    const h = seamed({ caps: { vertexShaderVersion: { major: 2, minor: 0 } } });
+    const root = h.create();
+    const { device } = h.createDevice(root);
+    const tokens = Uint32Array.from([
+        versionToken(SHADER_KIND.VERTEX, 2, 0),
+        0x02000001, 0x800f0000, 0x90e40000,
+        END_TOKEN,
+    ]);
+    // Past `end` lies another allocation, or nothing: the program's tokens
+    // stop eight bytes short of it, as at the end of the region they were
+    // allocated in, and a read that runs on past them fails there.
+    const end = 0x4000;
+    const at = end - 8 - tokens.byteLength;
+    h.box.services.writeMemory(at, new Uint8Array(tokens.buffer));
+    const read = h.box.services.readMemory;
+    /** @type {string[]} */
+    const crossed = [];
+    h.box.services.readMemory = (/** @type {number} */ address, /** @type {number} */ length)=>{
+        if (address < end && address + length > end)
+        {
+            crossed.push(`0x${address.toString(16)}+${length}`);
+        }
+        return read(address, length);
+    };
+    const out = 0x3100;
+    assert.equal(h.device(device, 'CreateVertexShader', [at, out]), D3D_OK);
+    assert.deepEqual(crossed, []);
+    h.box.services.readMemory = read;
+    assert.equal(h.release(h.box.memory.readU32(out)), 0);
+    assert.equal(h.release(device), 0);
+    h.release(root);
+});
+
 test('a shader on a device that runs none is refused with the pointer cleared', ()=>{
     const h = seamed({ caps: { pixelShaderVersion: { major: 0, minor: 0 } } });
     const root = h.create();
