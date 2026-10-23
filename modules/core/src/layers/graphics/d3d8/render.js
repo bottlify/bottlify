@@ -7354,12 +7354,18 @@ export function createRenderer(options){
         }
         replayingLast = true;
         const shotAsked = liveDump?.snapshot ? snapshotAsked(liveDump) : null;
-        chain = chain.then(()=>replay(shown.recorded, shown.surface,
+        const played = chain.then(()=>replay(shown.recorded, shown.surface,
             shotAsked ? shotAsked.map(one=>one.gpu) : null, { cut }))
             .then(shots=>handSnapshots(shotAsked, shots))
-            .catch(failure).finally(()=>{
-                replayingLast = false;
-            });
+            .catch(failure);
+        chain = played;
+        // The next one only once the GPU has drawn this one: a GPU slower than
+        // the timer asking for them (SwiftShader, seconds a frame) would be
+        // handed replays faster than it draws them, and its queue -- and every
+        // read-back and answer queued behind it -- would only grow.
+        played.then(()=>backend.workDone?.()).catch(()=>{}).finally(()=>{
+            replayingLast = false;
+        });
         return true;
     };
 

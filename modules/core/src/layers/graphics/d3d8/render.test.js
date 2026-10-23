@@ -4550,6 +4550,34 @@ test('a dump asked for on a running device writes down that many frames, then st
     assert.deepEqual(handed, [{ lines: dumped, frame: 1 }]);
 });
 
+test('a frozen frame is played again only once the GPU has drawn its last playing', async()=>{
+    /** @type {any} */
+    const liveDump = { dumpFrames: 0 };
+    const h = harness({ width: 64, height: 64, liveDump, gpu: { workDone: true } });
+    const { device, gpu } = h;
+    assert.equal(device.SetVertexShader(FVF_QUAD), D3D_OK);
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 2,
+        quad([0, 0, 8, 8], argb(255, 255, 0, 0)), 20), D3D_OK);
+    assert.equal(device.EndScene(), D3D_OK);
+    await h.present();
+    const submits = gpu.count('submit');
+    assert.equal(liveDump.replayLast(), true);
+    await device.idle();
+    assert.equal(gpu.count('submit'), submits + 1, 'played again');
+    // The freeze asks every 150 ms, and a software GPU takes seconds a frame:
+    // asked before it is done, there is nothing to hand it.
+    for (let ask = 0; ask < 4; ask++)
+    {
+        await new Promise(done=>setTimeout(done, 0));
+        assert.equal(liveDump.replayLast(), false, 'not while the GPU draws the last one');
+    }
+    assert.equal(gpu.count('submit'), submits + 1);
+    gpu.finish();
+    await new Promise(done=>setTimeout(done, 0));
+    assert.equal(liveDump.replayLast(), true, 'and again once it has');
+});
+
 test('a frame submitted early for a read-back keeps the lines of its draws', async()=>{
     const h = harness({ width: 64, height: 64, dumpDraws: true });
     const { device } = h;
