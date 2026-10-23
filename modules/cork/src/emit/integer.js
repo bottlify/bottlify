@@ -31,7 +31,7 @@ import { checkAccess, emitStaleExit, looseStackStore, noteStore, stackAccess } f
 import { CALL_STRIDE, Mechanism, Tables, pageFlagsAt } from '../runtime/layout.js';
 import { PageFlag, STORE_FLAGS } from '../runtime/pages.js';
 import { emitSimd } from './simd.js';
-import { atState, atTables, intoState, intoTables } from './bases.js';
+import { atState, intoState, intoTables } from './bases.js';
 import { emitLocked, isLocked } from './locked.js';
 import { emitX87, isX87, topAfterCall, x87AfterCall, x87Normalise, x87Reloaded } from './x87.js';
 
@@ -187,7 +187,7 @@ function countApart(e){
  */
 function callAndReturn(e, next, pushTarget, mechanism){
     const { b, layout, context } = e;
-    const depth = layout.tables + CallStack.DEPTH;
+    const depth = layout.regs + CallStack.DEPTH;
     e.countMechanism(mechanism);
     countApart(e);
     e.charge();
@@ -222,16 +222,16 @@ function callAndReturn(e, next, pushTarget, mechanism){
             .op(I32.add).op(I32.sub).localSet(Local.budget);
         b.else();
     }
-    atTables(context, b).load('i32', { offset: depth }).localTee(Local.t1)
+    atState(context, b).load('i32', { offset: depth }).localTee(Local.t1)
         .i32const(CallStack.LIMIT).op(I32.geU)
         .localGet(Local.budget).i32const(0).op(I32.leS).op(I32.or);
     e.openGuard('plain');
     e.exitDynamic(Exit.UNTRANSLATED);
     e.close();
     b.localGet(Local.t1).i32const(2).op(I32.shl);
-    intoTables(context, b).i32const(next)
-        .store('i32', { offset: layout.tables + CallStack.STACK });
-    atTables(context, b).localGet(Local.t1).i32const(1).op(I32.add)
+    intoState(context, b).i32const(next)
+        .store('i32', { offset: layout.regs + CallStack.STACK });
+    atState(context, b).localGet(Local.t1).i32const(1).op(I32.add)
         .store('i32', { offset: depth });
     // What the callee does not take in its parameters goes through the state
     // block; the count is left alone, the callee answering what is left of
@@ -254,10 +254,10 @@ function callAndReturn(e, next, pushTarget, mechanism){
     e.openGuard('elsewhere');
     e.countMechanism(Mechanism.CALL_ELSEWHERE);
     // Left for the host somewhere inside: the state block holds it all.
-    atTables(context, b).localGet(Local.t1).store('i32', { offset: depth });
+    atState(context, b).localGet(Local.t1).store('i32', { offset: depth });
     b.localGet(Local.t0).return();
     e.close();
-    atTables(context, b).load('i32', { offset: layout.tables + CallStack.BUDGET })
+    atState(context, b).load('i32', { offset: layout.regs + CallStack.BUDGET })
         .localSet(Local.budget);
     e.loadState();
     if (e.x87.active)
@@ -282,15 +282,15 @@ function callAndReturn(e, next, pushTarget, mechanism){
  */
 function returnToCall(e){
     const { b, layout, context } = e;
-    const depth = layout.tables + CallStack.DEPTH;
-    atTables(context, b).load('i32', { offset: depth }).localTee(Local.t1);
+    const depth = layout.regs + CallStack.DEPTH;
+    atState(context, b).load('i32', { offset: depth }).localTee(Local.t1);
     e.openIf('called');
     b.localGet(Local.t1).i32const(2).op(I32.shl);
-    intoTables(context, b).load('i32', { offset: layout.tables + CallStack.STACK - 4 })
+    intoState(context, b).load('i32', { offset: layout.regs + CallStack.STACK - 4 })
         .localGet(Local.eip).op(I32.eq);
     e.openIf('returns');
     e.countMechanism(Mechanism.RET_TO_CALL);
-    atTables(context, b).localGet(Local.t1).i32const(1).op(I32.sub)
+    atState(context, b).localGet(Local.t1).i32const(1).op(I32.sub)
         .store('i32', { offset: depth });
     e.returnToCaller();
     e.close();

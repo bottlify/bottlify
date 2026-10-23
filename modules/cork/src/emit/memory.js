@@ -80,6 +80,23 @@ function wrapIntoRam(b, ramSize){
 }
 
 /**
+ * The flags of the page whose index is on the stack, as `type` loads them:
+ * the table's address joined to the index by `or` where its low 20 bits are
+ * clear, which an arm64 `orr` takes as an immediate, and as the load's offset
+ * otherwise.
+ *
+ * @param {import('./region.js').RegionEmitter['b']} b @param {number} table
+ * @param {'i32_8u' | 'i32_16u'} type
+ */
+function loadFlags(b, table, type){
+    if ((table & 0xfffff) === 0)
+    {
+        return b.i32const(table | 0).op(I32.or).load(type, { offset: 0 });
+    }
+    return b.load(type, { offset: table });
+}
+
+/**
  * Stores whose code note `checkAccess` already made, by the instruction they
  * belong to: `noteStore` for that instruction only keeps the undo log.
  *
@@ -96,7 +113,9 @@ const noted = new WeakMap();
  * next one, read as a halfword (the last byte lies in one of the two),
  * against INACCESSIBLE -- and for `store` against HAS_CODE and WATCH too
  * (`STORE_FLAGS`), the store's code note and its mark of a watched page made
- * here rather than in a second test in `noteStore`.
+ * here rather than in a second test in `noteStore`. The bits stand in every
+ * byte of the mask, which tests a halfword's two all the same and is one an
+ * arm64 `tst` holds in the instruction.
  * Only when a flag is up are the last byte's own flags read, so an access
  * beside an unmapped page or a code page is neither a fault nor a note
  * unless it reaches it.
@@ -126,9 +145,9 @@ export function checkAccess(e, size, { counted = true, store = false } = {}){
     const table = pageFlagsAt(e.layout);
     const noting = store && e.layout.codePages < 0 && size <= 16;
     const bits = PageFlag.INACCESSIBLE | (noting ? STORE_FLAGS : 0);
-    b.localGet(Local.addr).i32const(12).op(I32.shrU)
-        .load(size > 1 ? 'i32_16u' : 'i32_8u', { offset: table })
-        .localTee(Local.pflags).i32const(size > 1 ? bits * 0x101 : bits).op(I32.and);
+    b.localGet(Local.addr).i32const(12).op(I32.shrU);
+    loadFlags(b, table, size > 1 ? 'i32_16u' : 'i32_8u')
+        .localTee(Local.pflags).i32const(size > 1 ? bits * 0x01010101 : bits).op(I32.and);
     e.openGuard('flagged', EMPTY);
     if (size > 1)
     {
@@ -203,7 +222,7 @@ export function noteStore(e, size){
                 .load('i32_8u', { offset: pageFlagsAt(e.layout) }).op(I32.or);
         }
         // The next page's flag too: a wide access's halfword holds it.
-        b.i32const(STORE_FLAGS * 0x101).op(I32.and);
+        b.i32const(STORE_FLAGS * 0x01010101).op(I32.and);
         e.openGuard('maybeCode', EMPTY);
         noteCodeStore(e, size);
         e.close();
@@ -1466,8 +1485,8 @@ export function emitGroupChecks(e, checks, at = -1){
         // pages and the stores' granules looked at.
         const stores = group.list.some(access=>access.store);
         const bits = PageFlag.INACCESSIBLE | (stores ? STORE_FLAGS : 0);
-        b.localGet(Local.addr).i32const(12).op(I32.shrU).load('i32_16u', { offset: table })
-            .i32const(bits * 0x101).op(I32.and);
+        b.localGet(Local.addr).i32const(12).op(I32.shrU);
+        loadFlags(b, table, 'i32_16u').i32const(bits * 0x01010101).op(I32.and);
         // Out of line: a window seldom finds a flag up, and its test inline
         // was most of the bytes of a region's stack accesses.
         e.openGuard('window', EMPTY);
@@ -1683,7 +1702,7 @@ export function emitStreamWindow(e, streams, turns, forward = false){
             {
                 b.i32const(at).op(I32.add);
             }
-            b.i32const(12).op(I32.shrU).load('i32_8u', { offset: table });
+            loadFlags(b.i32const(12).op(I32.shrU), table, 'i32_8u');
             if (k > 0)
             {
                 b.op(I32.or);

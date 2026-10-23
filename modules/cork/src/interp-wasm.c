@@ -62,7 +62,7 @@ enum
 #define NO_EXECUTE 16u
 /* A page watched for writes (PageFlag.WATCH): a store there is left to the
  * JavaScript tier, which marks the page written; the next is a store as any. */
-#define WATCH 32u
+#define WATCH 4u
 #define NONE 0xffffffffu
 
 static u8 *ram;

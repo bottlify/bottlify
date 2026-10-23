@@ -24,6 +24,8 @@
  *   --hash            entry hash and calls as wasm calls, as a game runs (on with --pe
  *                     and --image)
  *   --atomic          the variant several executors run
+ *   --ordered         with --atomic, the variant several executors run on a host that
+ *                     reorders plain accesses (an arm64 one)
  *   --ram MB          the guest RAM the layout is made for (default 2048, the launcher's)
  *   --ram-base N      where guest RAM lies in the memory: 0 (the default, a Windows
  *                     process's first executor) or 65536 (a page in, cork's own default)
@@ -394,7 +396,8 @@ const heavy = [];
 for (const entry of entries)
 {
     const made = regionModule({ code, at, entry, hash, callReturn: hash, ramSize, ramBase,
-        atomic: args.includes('--atomic'), checked: false, wide: true, looseStacks: true,
+        atomic: args.includes('--atomic'), ordered: args.includes('--ordered'), checked: false,
+        wide: true, looseStacks: true,
         processors, markBlocks: profile !== null });
     const x86 = made.blocks.reduce((sum, block)=>sum + block.instructions, 0);
     const lines = machineCode(made.wasm, exportedIndex(made.wasm, 'region'));

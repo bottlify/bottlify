@@ -56,7 +56,7 @@ import {
     planLoop, planRegion, readsWrapped,
 } from './memory.js';
 import { importHelpers } from './helpers.js';
-import { atState, atTables, importBases, intoTables } from './bases.js';
+import { atState, atTables, importBases, intoState, intoTables } from './bases.js';
 import { Mechanism, Tables, blockProfileAt, blockSlot, hashSlotsOf, mechanismAt,
     pageFlagsAt, transferTargetAt }
     from '../runtime/layout.js';
@@ -125,15 +125,19 @@ export const Exit = Object.freeze({
 
 /**
  * Where a module with `callReturn` keeps the return addresses its wasm calls
- * wait at, from `layout.tables`: a depth, then a stack of addresses. The undo
- * ring's area, which only a differential build fills and which then has no
- * calls of this kind.
+ * wait at, in the executor's state page from its start (`layout.regs`), past
+ * the interrupt word: a depth, then a stack of addresses. There every load and
+ * store of a call and its `ret` holds its address in the instruction; in the
+ * tables, a megabyte past guest RAM, arm64 built each in a register first:
+ * 4 % of what Crysis's rendering code ran. Past the state block,
+ * so a thread's context does not carry it: no wasm call waits when one is
+ * switched.
  */
 export const CallStack = Object.freeze({
-    DEPTH: Tables.UNDO_RING,
+    DEPTH: 2560,
     // What a returning call left of the budget, for its caller to go on with.
-    BUDGET: Tables.UNDO_RING + 4,
-    STACK: Tables.UNDO_RING + 16,
+    BUDGET: 2564,
+    STACK: 2576,
     // Deeper calls leave as any call does, so the wasm stack stays bounded.
     LIMIT: 256,
 });
@@ -715,7 +719,7 @@ function emptyReturn(context, b, slotAt, code){
     const flags = pageFlagsAt(layout);
     b.localGet(slotAt).load('i32_8u', { offset: 11 }).localTee(code);
     b.if(EMPTY);
-    atTables(context, b).load('i32', { offset: layout.tables + CallStack.DEPTH }).localTee(depth);
+    atState(context, b).load('i32', { offset: layout.regs + CallStack.DEPTH }).localTee(depth);
     b.if(EMPTY);
     atState(context, b).load('i32', { offset: layout.regs + 16 }).localTee(esp);
     b.i32const(12).op(I32.shrU).load('i32_8u', { offset: flags });
@@ -724,7 +728,7 @@ function emptyReturn(context, b, slotAt, code){
     b.op(I32.or).i32const(PageFlag.INACCESSIBLE).op(I32.and).op(I32.eqz);
     b.if(EMPTY);
     b.localGet(depth).i32const(2).op(I32.shl);
-    intoTables(context, b).load('i32', { offset: layout.tables + CallStack.STACK - 4 })
+    intoState(context, b).load('i32', { offset: layout.regs + CallStack.STACK - 4 })
         .localGet(esp).load('i32', { offset: layout.ramBase }).op(I32.eq);
     b.if(EMPTY);
     if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && context.blockProfile)
@@ -733,8 +737,8 @@ function emptyReturn(context, b, slotAt, code){
         atTables(context, atTables(context, b)).load('i64', { offset: at }).i64const(1n)
             .op(I64_ADD).store('i64', { offset: at });
     }
-    atTables(context, b).localGet(depth).i32const(1).op(I32.sub)
-        .store('i32', { offset: layout.tables + CallStack.DEPTH });
+    atState(context, b).localGet(depth).i32const(1).op(I32.sub)
+        .store('i32', { offset: layout.regs + CallStack.DEPTH });
     // The low six bits are the dwords popped plus one: the return address's and the rest.
     atState(context, b).localGet(esp).localGet(code).i32const(63).op(I32.and).i32const(2)
         .op(I32.shl).op(I32.add).store('i32', { offset: layout.regs + 16 });
@@ -742,9 +746,9 @@ function emptyReturn(context, b, slotAt, code){
     {
         atState(context, b).localGet(Local.reg + r).store('i32', { offset: layout.regs + r * 4 });
     }
-    atTables(context, b).localGet(Local.budget).localGet(code).i32const(6).op(I32.shrU)
+    atState(context, b).localGet(Local.budget).localGet(code).i32const(6).op(I32.shrU)
         .i32const(1).op(I32.add).op(I32.sub)
-        .store('i32', { offset: layout.tables + CallStack.BUDGET });
+        .store('i32', { offset: layout.regs + CallStack.BUDGET });
     b.i32const(Exit.RETURNED).return();
     b.end();
     b.end();
@@ -1593,8 +1597,8 @@ export class RegionEmitter {
                 .store('i32', { offset: this.flagRecord + i * 4 });
         }
         atState(this.context, b).localGet(Local.flags).store('i32', { offset: layout.eflags });
-        atTables(this.context, b).localGet(Local.budget)
-            .store('i32', { offset: layout.tables + CallStack.BUDGET });
+        atState(this.context, b).localGet(Local.budget)
+            .store('i32', { offset: layout.regs + CallStack.BUDGET });
         b.i32const(Exit.RETURNED).return();
     }
 

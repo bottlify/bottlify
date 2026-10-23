@@ -34,9 +34,14 @@ import { Tables, codeRangesAt, pageFlagsAt } from './layout.js';
  * store to the page goes by as to any other; the host reads WRITTEN and arms
  * the page again in another (`takeWritten`). A watched page is in one state or
  * the other, never both and never neither, whoever wins a race.
+ *
+ * INACCESSIBLE, HAS_CODE and WATCH are the low three bits: what a store tests
+ * its page for is then a mask an arm64 `tst` holds in the instruction
+ * (`checkAccess`), where with WATCH a bit higher the mask was built in a
+ * register first.
  */
 export const PageFlag = Object.freeze({
-    INACCESSIBLE: 1, HAS_CODE: 2, VOLATILE: 4, CLOSED: 8, NO_EXECUTE: 16, WATCH: 32,
+    INACCESSIBLE: 1, HAS_CODE: 2, WATCH: 4, CLOSED: 8, NO_EXECUTE: 16, VOLATILE: 32,
     WRITTEN: 64,
 });
 
