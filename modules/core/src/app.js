@@ -8895,12 +8895,15 @@ function volumeMemory(){
  *
  * @param {any} worker  the graphics worker, when the run has one
  * @param {{ pause: () => void, resume: () => void, paused: () => boolean }} [control]
- *     the run's pause, which `pick` holds while it takes a frame apart
+ *     the run's pause, which `pick` holds while it takes a frame apart and
+ *     `freeze` while it shows one
  */
-function liveDumpOf(worker, control){
+export function liveDumpOf(worker, control){
     /** @type {{ lines: string[], frame: number } | null} */
     let last = null;
     let listening = false;
+    /** Whether `freeze` paused the run, and so is the one to resume it. */
+    let frozePaused = false;
     /** The textures read off the GPU on asking (`snapshot`), by the id a dump gives. @type {Map<string, any>} */
     const shots = new Map();
     const listen = ()=>{
@@ -9086,6 +9089,10 @@ function liveDumpOf(worker, control){
         /**
          * Shows the last frame again and again, the program paused, so a cut
          * (`maxDraws`) is seen on a picture that holds still; false stops it.
+         * A running program is paused here and resumed by `freeze(false)`: a
+         * program left running presents new frames, and the frame shown again
+         * becomes each new one, so a switch is never seen on one picture. A
+         * pause someone else holds stays theirs.
          *
          * @param {boolean} [on]
          */
@@ -9095,6 +9102,16 @@ function liveDumpOf(worker, control){
                 throw new Error('freeze: this run draws without a graphics worker');
             }
             listen();
+            if (on && !frozePaused && control && !control.paused())
+            {
+                control.pause();
+                frozePaused = true;
+            }
+            else if (!on && frozePaused)
+            {
+                control?.resume();
+                frozePaused = false;
+            }
             worker.postMessage({ type: 'debug', freeze: on });
             return on;
         },

@@ -45,6 +45,7 @@ import {
     translatorsBeside,
     allocateCleared,
     RESOURCE_ALIGNMENT,
+    liveDumpOf,
 } from './app.js';
 import { createHeapAllocator } from './layers/win32/kernel32/heap.js';
 import { createEvents } from './events.js';
@@ -1908,4 +1909,34 @@ test('a graphics resource starts on a 16-byte boundary where the heap\'s next bl
         offBoundary += heap.allocate(bytes) % RESOURCE_ALIGNMENT === 0 ? 0 : 1;
     }
     assert.ok(offBoundary > 0, 'the heap alone hands out blocks off the boundary');
+});
+
+test('freeze pauses a running program while it shows a frame, and ends only its own pause', ()=>{
+    /** @type {any[]} */
+    const posted = [];
+    const worker = { postMessage: (/** @type {any} */ data)=>posted.push(data),
+        addEventListener: ()=>{} };
+    let paused = false;
+    /** @type {string[]} */
+    const told = [];
+    const control = {
+        pause: ()=>{ paused = true; told.push('pause'); },
+        resume: ()=>{ paused = false; told.push('resume'); },
+        paused: ()=>paused,
+    };
+    const debug = liveDumpOf(worker, control);
+    // A program left running would present new frames, each the one shown again.
+    debug.freeze(true);
+    assert.equal(paused, true);
+    debug.freeze(true);
+    debug.freeze(false);
+    assert.equal(paused, false);
+    assert.deepEqual(told, ['pause', 'resume']);
+    assert.deepEqual(posted.map(each=>each.freeze), [true, true, false]);
+    // Someone else's pause is theirs to end.
+    control.pause();
+    debug.freeze(true);
+    debug.freeze(false);
+    assert.equal(paused, true);
+    assert.deepEqual(told, ['pause', 'resume', 'pause']);
 });

@@ -165,7 +165,7 @@ ones need the graphics worker.
 | `snapshot('t4414')`, then `snapped('t4414')` | a texture as the GPU holds it at the end of the next frame: an intermediate target or a shadow map a dump names |
 | `shader('ps585')` | a shader the program drew with, by the id a dump names it: its bytecode and every WGSL translation made of it, each under its variant (fog, sampling, alpha test); `shader.mjs` prints the bytecode disassembled beside them |
 | `pick(x, y)` | which draw painted that pixel: the program paused while the frame is taken apart |
-| `freeze(on)` | shows the last frame over and over, the program paused, so a cut is seen on a still picture |
+| `freeze(on)` | shows the last frame over and over, the program paused (a running one is paused here and `freeze(false)` resumes it), so a cut or a switch is seen on a still picture |
 | `maxDraws(n)` | keeps the first n draws of every frame (-1 all): bisects which draw paints a region |
 | `skipTexture('t12,t40')` | drops every draw sampling those textures (names as a dump gives them) |
 | `skipShader('vs12,ps40')` | drops every draw made with those shaders |
