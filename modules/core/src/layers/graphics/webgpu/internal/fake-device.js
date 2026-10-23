@@ -64,7 +64,8 @@ export function fillWith(bytes, pixel){
  * @param {{ compilationMessages?: Record<string, any[]>,
  *           refusePipeline?: (descriptor: any) => string | null | undefined,
  *           occlusionSamples?: (index: number) => number,
- *           workDone?: boolean, features?: string[], pipelineDelayMs?: number }} [options]
+ *           workDone?: boolean, features?: string[], pipelineDelayMs?: number,
+ *           quiet?: boolean }} [options]
  *        `occlusionSamples` is what the occlusion query at each slot of a query
  *        set resolves to, standing in for the rasteriser; zero when absent.
  *        `workDone` gives the queue an `onSubmittedWorkDone` whose answers the
@@ -72,10 +73,28 @@ export function fillWith(bytes, pixel){
  *        to (`finish`). Without it the queue has none, as a double that
  *        cannot say when anything is done should not pretend to.
  *        `features` are the optional features the device says it was made with.
+ *        `quiet` keeps no log of calls and does no more per call than a
+ *        device that renders must: what a buffer or texture holds is still
+ *        kept, so read-backs answer, but nothing a test would look at. For a
+ *        run that measures the engine over it (`--fake-gpu`, the replay of a
+ *        capture), where the log's copies and records were a third of the
+ *        played side's time.
  */
 export function createFakeDevice(options = {}){
+    const quiet = options.quiet === true;
+    /**
+     * What a renderer asked of the device, counted however quiet: draws, bind
+     * groups set, and what the queue was handed to copy.
+     */
+    const stats = { draws: 0, bindGroups: 0, writes: 0, written: 0, textureWrites: 0,
+        texels: 0, submits: 0 };
     /** @type {any[]} */
     const calls = [];
+    if (quiet)
+    {
+        // Every site below logs through this; quiet, it keeps nothing.
+        calls.push = ()=>0;
+    }
     /** Submits made, and how many of them the device has finished. */
     const work = { submitted: 0, finished: 0 };
     /** @type {{ mark: number, resolve: () => void }[]} answers owed, oldest first */
@@ -253,8 +272,10 @@ export function createFakeDevice(options = {}){
                 deferred.push(()=>fillWith(texture.bytes, pixel));
             }
         }
-        /** @param {string} op @param {any} args */
-        const record = (op, args)=>calls.push({ op, pass, ...args });
+        /** @type {(op: string, args: any) => void} */
+        const record = quiet ? ()=>{} : (op, args)=>{
+            calls.push({ op, pass, ...args });
+        };
         pass.setViewport = (/** @type {number[]} */ ...rect)=>record('setViewport', { rect });
         pass.setScissorRect = (/** @type {number[]} */ ...rect)=>record('setScissorRect', { rect });
         pass.setStencilReference = (/** @type {number} */ reference)=>
@@ -275,7 +296,8 @@ export function createFakeDevice(options = {}){
          * @param {number[] | undefined} offsets
          */
         pass.setBindGroup = (index, group, offsets)=>{
-            const both = /** @type {any[]} */ (group?.entries ?? [])
+            stats.bindGroups++;
+            const both =/** @type {any[]} */ (group?.entries ?? [])
                 .find(entry=>entry.resource?.texture && written.some(view=>
                     overlaps(view, entry.resource)));
             if (both && !encoder.invalid)
@@ -285,7 +307,11 @@ export function createFakeDevice(options = {}){
                     + ' (TextureBinding|RenderAttachment) includes writable usage and another'
                     + ' usage in the same synchronization scope.');
             }
-            const dynamic = /** @type {any[]} */ (group?.entries ?? [])
+            if (quiet)
+            {
+                return;
+            }
+            const dynamic =/** @type {any[]} */ (group?.entries ?? [])
                 .filter(entry=>entry.resource && entry.resource.buffer)
                 .sort((left, right)=>left.binding - right.binding);
             const resolved = dynamic.map((entry, k)=>{
@@ -311,8 +337,14 @@ export function createFakeDevice(options = {}){
             /** @type {number} */ offset)=>record('setVertexBuffer', { slot, buffer, offset });
         pass.setIndexBuffer = (/** @type {any} */ buffer, /** @type {string} */ format,
             /** @type {number} */ offset)=>record('setIndexBuffer', { buffer, format, offset });
-        pass.draw = (/** @type {number[]} */ ...args)=>record('draw', { args });
-        pass.drawIndexed = (/** @type {number[]} */ ...args)=>record('drawIndexed', { args });
+        pass.draw = (/** @type {number[]} */ ...args)=>{
+            stats.draws++;
+            record('draw', { args });
+        };
+        pass.drawIndexed = (/** @type {number[]} */ ...args)=>{
+            stats.draws++;
+            record('drawIndexed', { args });
+        };
         pass.end = ()=>record('endPass', {});
         calls.push({ op: 'beginRenderPass', pass, descriptor });
         return pass;
@@ -481,6 +513,16 @@ export function createFakeDevice(options = {}){
          */
         writeBuffer(buffer, bufferOffset, data, dataOffset = 0, size = undefined){
             const length = size === undefined ? data.byteLength - dataOffset : size;
+            stats.writes++;
+            stats.written += length;
+            if (quiet)
+            {
+                // One copy, as a device makes of what it is handed.
+                buffer.bytes?.set(ArrayBuffer.isView(data)
+                    ? new Uint8Array(data.buffer, data.byteOffset + dataOffset, length)
+                    : new Uint8Array(data, dataOffset, length), bufferOffset);
+                return;
+            }
             if (buffer.bytes)
             {
                 buffer.bytes.set(
@@ -500,6 +542,16 @@ export function createFakeDevice(options = {}){
          * @param {any} destination @param {any} data @param {any} layout @param {any} size
          */
         writeTexture(destination, data, layout, size){
+            stats.textureWrites++;
+            stats.texels += data.byteLength;
+            if (quiet)
+            {
+                moveTexels({ buffer: { bytes: ArrayBuffer.isView(data)
+                    ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
+                    : new Uint8Array(data) },
+                offset: layout.offset ?? 0, bytesPerRow: layout.bytesPerRow }, destination, size);
+                return;
+            }
             moveTexels({ buffer: { bytes: Uint8Array.prototype.slice.call(data) },
                 offset: layout.offset ?? 0, bytesPerRow: layout.bytesPerRow },
             destination, size);
@@ -513,6 +565,7 @@ export function createFakeDevice(options = {}){
         },
         /** @param {any[]} buffers */
         submit(buffers){
+            stats.submits++;
             for (const buffer of buffers)
             {
                 // An invalid command buffer is refused whole, as a device
@@ -585,6 +638,7 @@ export function createFakeDevice(options = {}){
         device,
         queue,
         calls,
+        stats,
         errors,
         screen,
         canvas,

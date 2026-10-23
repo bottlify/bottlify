@@ -111,6 +111,7 @@ node tools/cdp_test/game.mjs <bundle-id> [--wait 900] [--turns 200000] [--calls 
 | `--headed` | headless | a browser window on the machine's own GPU, as the launcher has it: a headless browser's adapter is not the one a person plays on, so a question about speed or about what the screen shows is asked headed |
 | `--worker` | page thread | run the engine in a worker with the page's canvas transferred to it, which is how the launcher runs it |
 | `--fake-gpu` | off | a GPU that takes every call and draws nothing, the devices played in a graphics worker over it: a run that measures the engine alone. A software adapter (SwiftShader, where the machine has no GPU) takes the same cores as the engine and holds it waiting for frames, which is not what a person's GPU does; nothing is drawn, so nothing about the picture can be asked of such a run |
+| `--graphics-capture FILE` | off | everything the graphics worker is sent, from its start, written to FILE (gzip) when the run ends. The frames to measure are marked while it runs with `captureFrames(n)` (below), and the capture ends n presents after the mark. The guest memory the calls carry (vertices, indices, texels: pieces of 4 KB and more) is kept as zeros and everything else whole, so a run of minutes is tens of megabytes. `tools/graphics-replay.mjs` plays it again in node (below) |
 | `--pacing page\|event` | `page` | with `--worker`: how the loop waits: a look every few milliseconds, or sleep until something happens |
 | `--coi` | off | serve with the cross-origin isolation headers, so the page comes up `crossOriginIsolated` and `SharedArrayBuffer` exists, which the shared-table audio backend and its worklet need |
 | `--user-data-dir DIR` | a fresh temp dir, removed on shutdown | a browser profile of your own, kept rather than thrown away when the run ends. Needed for `--store local` to warm anything: OPFS lives in the profile, so a later run only reads it back if it is the same profile. A browser an earlier run left on the same profile (its node process killed outright) is closed before the launch |
@@ -174,6 +175,7 @@ ones need the graphics worker.
 | `occlusion(mode)` | how occlusion counts are answered from now on ('' as measured) |
 | `bufferLocks(mode)` | how buffer locks are taken ('' as asked, 'rename' renaming at each) |
 | `checkDraws(on)` | every draw from a buffer compares what it reads with what the graphics worker was sent, from now on; the report's `drawChecks` gains an entry each time it is turned on (`stale` draws, the first ones as samples) |
+| `captureFrames(n)`, then `captured()` | in a run whose graphics worker captures what it is sent (`game.mjs --graphics-capture`): the frames to measure begin here and the capture ends n presents later; `captured()` ends it if it has not ended and answers `{ bytes, counts }`, the gzip stream and how many batches, presents and bytes it saw and zeroed |
 | `handleWords(on)` | `false`: every wait on an event or mutex, SetEvent, ResetEvent and ReleaseMutex crosses into the host, as with `win32.handleWords: false`; `true` gives the guest its answers back |
 | `windows()`, `desktop()` | every live window as the window manager lists it; the desktop picture |
 | `modules()`, `moduleAt(address)` | every image mapped and where; which image an address is in |
@@ -476,6 +478,20 @@ commit before is `git worktree add --detach ../base <commit>`). `--json` prints 
 profiler and prints the functions a crossing spends its time in (the dispatch, the reads of
 guest memory, the bookkeeping), which is what a change to the crossing is judged by. Pin it to
 one core (`taskset -c N`) on a quiet machine: the spread printed is how far to trust a median.
+
+## `../graphics-replay.mjs`: what a title's frames cost the graphics worker
+
+`node tools/graphics-replay.mjs FILE [--root DIR] [--reps N] [--profile OUT] [--all] [--json]` plays a
+capture (`game.mjs --graphics-capture FILE`, the frames marked with `captureFrames(n)`) through
+the played side of an engine, this checkout's or `--root DIR`'s, over a quiet fake GPU in node:
+every root made as it was, every batch played in its order, the frames after the mark measured.
+It prints, a frame, the played side's own time (the batches' calls and their replay onto the
+device), the draws, bind groups and buffer writes with their bytes, and the texels handed to the
+device. A change to the worker's draw path is judged here before a browser: the same frames of a
+real title, both arms on one machine, `--root` for the commit before. `--reps N` plays it N
+times, each on a fresh worker; `--profile OUT` writes a CPU profile of the last rep's measured
+frames; `--all` measures every frame of a capture that was never marked. The zeroed memory costs what the program's did to move, by its size; what a device does
+with what it is handed (a real GPU's encoding, its copies) is not here.
 
 ## Two rules the numbers depend on
 

@@ -12,12 +12,9 @@
 import { serveGraphics } from '../../../src/layers/graphics/remote/worker.js';
 import { createFakeDevice } from '../../../src/layers/graphics/webgpu/internal/fake-device.js';
 
-const gpu = createFakeDevice();
-// The fake keeps every call it was given for a test to look at; a run minutes
-// long would hold gigabytes of it. Nothing reads the log here.
-setInterval(()=>{
-    gpu.calls.length = 0;
-}, 1000);
+// Quiet: nothing reads a log of the calls here, and keeping one cost the
+// played side a third of its time -- what a run measures is the engine.
+const gpu = createFakeDevice({ quiet: true });
 Object.assign(gpu.device, { queue: gpu.queue, features: new Set(),
     createSampler: (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor }) });
 serveGraphics(/** @type {any} */ (self), /** @type {any} */ ({

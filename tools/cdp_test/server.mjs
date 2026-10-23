@@ -5,7 +5,7 @@
  */
 
 import { createServer } from 'node:http';
-import { createReadStream } from 'node:fs';
+import { createReadStream, createWriteStream } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import { extname, resolve } from 'node:path';
 
@@ -60,9 +60,16 @@ const MIME = {
  *        `127.0.0.1:<port>` is a different origin every time the port moves --
  *        so a store meant to survive between separate runs of this tool needs
  *        the same port each time, in the same persistent browser profile.
+ * @param {{ path: string, file: string }[]} [roots.receive]
+ *        Paths a page may POST bytes to, each written whole to its file before
+ *        the answer: what a run hands back that is too large for an answer
+ *        over the protocol (a graphics capture is hundreds of megabytes).
  * @returns {Promise<StaticServer>}
  */
-export async function serveStatic({ sandboxDir, srcDir, extra = [], coi = false, port = 0 }){
+export async function serveStatic({
+    sandboxDir, srcDir, extra = [], coi = false, port = 0, receive = [],
+})
+{
     const routes = [
         { prefix: '/sandbox/', root: sandboxDir },
         { prefix: '/src/', root: srcDir },
@@ -79,6 +86,21 @@ export async function serveStatic({ sandboxDir, srcDir, extra = [], coi = false,
         // asked for by nothing else, so it changes nothing for a run without it.
         res.setHeader('Document-Policy', 'js-profiling');
         const url = new URL(req.url ?? '/', 'http://localhost');
+        const into = req.method === 'POST' ? receive.find(one=>one.path === url.pathname)
+            : undefined;
+        if (into)
+        {
+            const out = createWriteStream(into.file);
+            let bytes = 0;
+            req.on('data', (/** @type {Buffer} */ chunk)=>{
+                bytes += chunk.length;
+            });
+            req.pipe(out);
+            out.on('finish', ()=>res.writeHead(200, { 'Content-Type': 'application/json' })
+                .end(JSON.stringify({ bytes })));
+            out.on('error', error=>res.writeHead(500).end(String(error)));
+            return;
+        }
         const route = routes.find(entry=>url.pathname.startsWith(entry.prefix));
         if (!route)
         {

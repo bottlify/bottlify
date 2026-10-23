@@ -11,9 +11,10 @@
  */
 
 /**
- * @param {{ url?: URL | string, timeoutMs?: number, frames?: string,
+ * @param {{ url?: URL | string, timeoutMs?: number, frames?: string, capture?: boolean,
  *     make?: (url: URL | string) => any }} [options]
- *     `frames` is how the worker sends a presented frame back (`worker.js`)
+ *     `frames` is how the worker sends a presented frame back (`worker.js`);
+ *     `capture` has it write down everything it is sent (`remote/capture.js`)
  * @returns {Promise<{ worker: any, adapter: any } | { worker: null, reason: string }>}
  */
 export async function openGraphicsWorker(options = {}){
@@ -57,7 +58,8 @@ export async function openGraphicsWorker(options = {}){
             reason: String(event?.message ?? 'the graphics worker failed to load') });
         worker.addEventListener('message', listen);
         worker.addEventListener('error', fail);
-        worker.postMessage({ type: 'open', frames: options.frames ?? 'bitmap' });
+        worker.postMessage({ type: 'open', frames: options.frames ?? 'bitmap',
+            ...options.capture === true ? { capture: true } : {} });
     });
     if (!answer.worker)
     {

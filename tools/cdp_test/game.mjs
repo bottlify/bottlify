@@ -587,6 +587,12 @@ function parse(argv){
         graphics: argv.includes('--graphics-config')
             ? JSON.parse(argv[argv.indexOf('--graphics-config') + 1])
             : null,
+        // Everything the graphics worker is sent, written to FILE for
+        // `tools/graphics-replay.mjs`: `--graphics-capture FILE`, with the
+        // frames to keep marked during the run (`captureFrames(n)`).
+        graphicsCapture: argv.includes('--graphics-capture')
+            ? argv[argv.indexOf('--graphics-capture') + 1]
+            : null,
         // The graphics a bottle chooses in the launcher -- `directx8` leaves the
         // machine DirectDraw and Direct3D 8 and reports DirectX 8.1 -- as
         // `createApp`'s `graphicsApi` takes it.
@@ -713,6 +719,9 @@ async function poll(cdp, sessionId, expression, timeoutMs){
  * pixels are in it.
  */
 const RESULT_CHUNK = 1 << 19;
+
+/** Where the page posts the graphics worker's capture (`--graphics-capture`). */
+const GRAPHICS_CAPTURE_PATH = '/__receive/graphics-capture';
 
 /**
  * How long past the run the page has to answer, at most: the wait counts from
@@ -1747,6 +1756,9 @@ export async function game(options){
         ],
         coi: options.coi,
         port: options.port,
+        // What the page hands back that no answer over the protocol carries.
+        receive: options.graphicsCapture
+            ? [{ path: GRAPHICS_CAPTURE_PATH, file: options.graphicsCapture }] : [],
     });
     const browser = await launchWithGpu({ profileDir: options.userDataDir ?? undefined,
         headed: options.headed,
@@ -1854,6 +1866,8 @@ export async function game(options){
             probeTexture: options.probeTexture,
             fog: options.fog,
             graphics: options.graphics,
+            captureGraphics: Boolean(options.graphicsCapture),
+            captureGraphicsTo: options.graphicsCapture ? GRAPHICS_CAPTURE_PATH : undefined,
             graphicsApi: options.graphicsApi ?? undefined,
             audio: options.audio ?? undefined,
             captureAudio: options.captureAudio ?? undefined,
@@ -2168,6 +2182,21 @@ export async function game(options){
         {
             result = await readResult(cdp, sessionId, options.waitMs + RESULT_GRACE_MS);
             result.answeredAfterMs = Date.now() - startedAt;
+            if (options.graphicsCapture && result.graphicsCapture)
+            {
+                const capture = result.graphicsCapture;
+                const counts = capture.counts ?? {};
+                const mb = (/** @type {number} */ bytes)=>(bytes / 1048576).toFixed(0);
+                console.log(capture.posted?.bytes > 0
+                    ? `graphics capture: ${options.graphicsCapture} (${
+                        (capture.posted.bytes / 1048576).toFixed(1)} MB; ${counts.batches}`
+                        + ` batches, ${counts.presents} presents, ${mb(counts.sent)} MB sent, ${
+                            mb(counts.zeroed)} MB of it zeroed${
+                            counts.stopped ? '' : '; never marked: the whole run'})`
+                    : `graphics capture: none written (${capture.posted?.failed
+                        ?? `${capture.bytes} bytes captured`}${counts.failed
+                        ? `; it stopped: ${counts.failed}` : ''})`);
+            }
         }
         catch (e){
             const behind = deviceWatched ? await device.read() ?? lastDevice : null;

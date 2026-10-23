@@ -18,11 +18,13 @@
  * Messages to the worker:
  *   { type: 'shown' }                the program's thread has shown the frame sent
  *                                    last; the next goes when it has
- *   { type: 'open', frames }         `frames` 'bitmap' sends each presented
+ *   { type: 'open', frames, capture } `frames` 'bitmap' sends each presented
  *                                    frame back as a picture, 'pixels' as its
  *                                    bytes read back, 'count' says only that
  *                                    one was presented; anything else keeps them.
- *                                    Answered every time it is asked.
+ *                                    Answered every time it is asked. `capture`
+ *                                    true writes down everything sent from then
+ *                                    on (`capture.js`), for `tools/graphics-replay.mjs`
  *   { type: 'root', api, options, port, memory, lending, source }
  *                                    `api` 'd3d7', 'd3d8', 'd3d9' or 'opengl', `options` the
  *                                    plain part of what the root was made with;
@@ -46,6 +48,8 @@
  *                                    the processes in turn; `dropped` counts those a
  *                                    newer one replaced unsent
  *   { type: 'lost', reason }
+ *   { type: 'captured', bytes, counts }  the capture, ended, as `{ type: 'debug',
+ *                                    captured: true }` asked; `bytes` null without one
  */
 
 import { createDirect3D8 } from '../d3d8/device.js';
@@ -54,6 +58,7 @@ import { createDirect3D9 } from '../d3d9/device.js';
 import { createOpenglRoot } from '../opengl/root.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFrameLatency } from '../webgpu/internal/latency.js';
+import { createCapture } from './capture.js';
 import { createReceiver } from './channel.js';
 import { createBorrower } from './lending.js';
 import { playedDirect3D } from './direct3d.js';
@@ -93,6 +98,13 @@ export function serveGraphics(scope, deps){
     let lost = false;
     /** The ports of processes on other threads, told when the GPU goes away. @type {Set<MessagePort>} */
     const clients = new Set();
+    /**
+     * What this worker is sent, written down when it was opened to (`capture`):
+     * every root made after that and every batch played.
+     *
+     * @type {ReturnType<typeof createCapture> | null}
+     */
+    let capture = null;
     /** What told them, for a client that comes after. @type {{ type: 'lost', reason: string } | null} */
     let lostWith = null;
     /**
@@ -492,9 +504,14 @@ export function serveGraphics(scope, deps){
             });
         }
         receiver = createReceiver({ played, post });
+        // Written down as made, before any of its batches can come: the
+        // capture's roots are made again in its order when it is played.
+        const captured = capture?.root({ api, options, source, lending: lending !== null,
+            memory: memory?.length ?? 0 }) ?? 0;
         port.onmessage = event=>{
             if (event.data?.type === 'close')
             {
+                capture?.close(captured);
                 port.onmessage = null;
                 port.close();
                 const left = (rootsOf.get(/** @type {number} */ (source)) ?? 1) - 1;
@@ -512,6 +529,20 @@ export function serveGraphics(scope, deps){
                 }
                 return;
             }
+            if (capture && event.data?.type === 'calls')
+            {
+                try
+                {
+                    capture.calls(captured, event.data.buffer);
+                }
+                catch (e){
+                    // What is written down never stands in the way of what is
+                    // played: the capture stops, and says why.
+                    capture.fail(e);
+                    post({ type: 'divergence', api: 'capture',
+                        detail: `the capture stopped: ${String(/** @type {any} */ (e)?.stack ?? e)}` });
+                }
+            }
             receiver.receive(event.data);
         };
     };
@@ -526,6 +557,11 @@ export function serveGraphics(scope, deps){
         {
             case 'open':
                 frames = data.frames ?? 'none';
+                if (data.capture === true && capture === null)
+                {
+                    capture = createCapture();
+                    capture.open(frames);
+                }
                 opened ??= open();
                 opened.then(({ adapter })=>scope.postMessage({ type: 'opened', adapter }),
                     e=>scope.postMessage({ type: 'failed', message: String(e?.message ?? e) }));
@@ -546,6 +582,19 @@ export function serveGraphics(scope, deps){
                 if ('dumpFrames' in data)
                 {
                     liveDump.dumpFrames = Math.max(0, Math.floor(Number(data.dumpFrames) || 0));
+                }
+                if ('captureFrames' in data)
+                {
+                    capture?.mark(Number(data.captureFrames) || 1);
+                }
+                if (data.captured === true)
+                {
+                    const counts = capture?.counts() ?? null;
+                    (capture ? capture.finish() : Promise.resolve(null)).then(bytes=>
+                        scope.postMessage({ type: 'captured', bytes, counts },
+                            bytes ? [bytes.buffer] : []),
+                    (/** @type {any} */ e)=>scope.postMessage({ type: 'captured', bytes: null,
+                        counts, failed: String(e?.message ?? e) }));
                 }
                 if ('bufferLocks' in data)
                 {

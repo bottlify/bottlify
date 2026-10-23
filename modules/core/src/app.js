@@ -8943,6 +8943,47 @@ export function liveDumpOf(worker, control){
     return {
         dumpFrames,
         /**
+         * The graphics worker's capture of what it is sent (a worker opened
+         * with `capture`, `remote/capture.js`) keeps `frames` more presents
+         * from now and ends: the frames `tools/graphics-replay.mjs` measures.
+         *
+         * @param {number} [frames]
+         */
+        captureFrames: (frames = 300)=>{
+            if (!worker)
+            {
+                throw new Error('captureFrames: this run draws without a graphics worker');
+            }
+            worker.postMessage({ type: 'debug', captureFrames: frames });
+            return frames;
+        },
+        /**
+         * The capture, ended: its gzip bytes and what it counted, or null
+         * bytes when the worker was opened without one.
+         *
+         * @returns {Promise<{ bytes: Uint8Array | null, counts: any }>}
+         */
+        captured: ()=>{
+            if (!worker)
+            {
+                return Promise.reject(
+                    new Error('captured: this run draws without a graphics worker'));
+            }
+            return new Promise(resolve=>{
+                /** @param {{ data: any }} event */
+                const take = event=>{
+                    if (event.data?.type === 'captured')
+                    {
+                        worker.removeEventListener('message', take);
+                        resolve({ bytes: event.data.bytes ?? null,
+                            counts: event.data.counts ?? null });
+                    }
+                };
+                worker.addEventListener('message', take);
+                worker.postMessage({ type: 'debug', captured: true });
+            });
+        },
+        /**
          * A texture as the GPU holds it at the end of the next frame -- `t4414`
          * as a frame dump names it, its top level, in its GPU format -- for
          * `snapped` to hand over: what an intermediate target or a shadow

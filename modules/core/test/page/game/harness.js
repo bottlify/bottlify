@@ -301,12 +301,9 @@ async function openDevice(errors){
  * @returns {GpuHandle}
  */
 function fakeDevice(){
-    const gpu = createFakeDevice();
-    // The fake keeps every call it was given for a test to look at; a run
-    // minutes long would hold gigabytes of it. Nothing reads the log here.
-    setInterval(()=>{
-        gpu.calls.length = 0;
-    }, 1000);
+    // Quiet: nothing reads a log of the calls here, and keeping one costs
+    // what the run is there to measure.
+    const gpu = createFakeDevice({ quiet: true });
     Object.assign(gpu.device, { queue: gpu.queue, features: new Set(),
         createSampler: (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor }) });
     return { available: true, device: gpu.device,
@@ -1478,10 +1475,16 @@ export function createHarness(canvas, how = {}){
         // a player's machine does takes the same split.
         // With the fake device the devices are played in a worker of their own
         // over another fake, as the player's split has them.
+        // `captureGraphics` has the worker write down everything it is sent,
+        // for `tools/graphics-replay.mjs` to play again in node; the capture
+        // is posted to the driver's server at `captureGraphicsTo` at the end.
+        const captureGraphics = request.captureGraphics === true;
         const graphicsWorker = request.fakeGpu
-            ? await openGraphicsWorker({ frames: 'count',
+            ? await openGraphicsWorker({ frames: 'count', capture: captureGraphics,
                 url: new URL('./fake-graphics.worker.js', import.meta.url) })
-            : request.graphicsWorker ? await openGraphicsWorker({ frames: 'pixels' }) : null;
+            : request.graphicsWorker
+                ? await openGraphicsWorker({ frames: 'pixels', capture: captureGraphics })
+                : null;
         if (graphicsWorker && !graphicsWorker.worker)
         {
             const why = 'reason' in graphicsWorker ? graphicsWorker.reason : '';
@@ -1911,6 +1914,21 @@ export function createHarness(canvas, how = {}){
         if (capture && capture.blocks.length > 0)
         {
             result.audioCapture = packCapture(capture, app.audio.format().sampleRate);
+        }
+        if (captureGraphics && graphicsWorker?.worker)
+        {
+            // Hundreds of megabytes: posted to the driver, which writes them
+            // down as they come, rather than carried in the result.
+            const captured = await app.debug.captured();
+            const bytes = captured.bytes;
+            const posted = bytes && typeof request.captureGraphicsTo === 'string'
+                ? await fetch(request.captureGraphicsTo, { method: 'POST', body: bytes })
+                    .then(answer=>(answer.ok ? answer.json()
+                        : { failed: `the driver answered ${answer.status}` }),
+                    (/** @type {any} */ error)=>({ failed: String(error?.message ?? error) }))
+                : null;
+            result.graphicsCapture = { bytes: bytes?.byteLength ?? 0, counts: captured.counts,
+                posted };
         }
 
         const layers = app.diagnostics();
