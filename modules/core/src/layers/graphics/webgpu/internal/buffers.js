@@ -172,6 +172,9 @@ export function createDynamicBuffer(options){
     // NOOVERWRITE locks over bytes a draw not yet submitted reads.
     let overwrites = 0;
     let lockedBytes = 0;
+    // The bytes unlocks and rewrites named, each counted where it fell: against
+    // `written`, how much the one span a flush sends adds between them.
+    let marked = 0;
     let locks = 0;
     let wholeLocks = 0;
     /** The carry whose copy fills the live backing, while it can still be written. @type {Carry | null} */
@@ -394,6 +397,7 @@ export function createDynamicBuffer(options){
             lockedBytes += lock.length;
             if (end > start)
             {
+                marked += end - start;
                 dirtyStart = dirtyStart < 0 ? start : Math.min(dirtyStart, start);
                 dirtyEnd = Math.max(dirtyEnd, end);
             }
@@ -412,6 +416,7 @@ export function createDynamicBuffer(options){
          */
         rewrite(offset, bytes){
             shadow.set(bytes, offset);
+            marked += bytes.length;
             dirtyStart = dirtyStart < 0 ? offset : Math.min(dirtyStart, offset);
             dirtyEnd = Math.max(dirtyEnd, offset + bytes.length);
             touch();
@@ -520,6 +525,7 @@ export function createDynamicBuffer(options){
                 hazards,
                 overwrites,
                 locked: lockedBytes,
+                marked,
                 locks,
                 wholeLocks,
                 pooled: available.length + retired.length,

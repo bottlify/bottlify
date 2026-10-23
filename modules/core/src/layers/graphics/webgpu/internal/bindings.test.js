@@ -121,7 +121,10 @@ test('the ring wraps rather than growing, and a block larger than it gets a larg
     assert.equal(gpu.count('createBuffer'), 2, 'a ring the block fits');
     assert.ok(gpu.of('createBuffer')[1].descriptor.size >= 1024);
     assert.equal(large.dynamicOffset, 0);
-    assert.deepEqual(pool.stats(), { created: 2, reused: 4, writes: 2, shared: 0 });
+    // Written: the two blocks before the wrap with the alignment between them, and the one
+    // after; laid: the blocks themselves.
+    assert.deepEqual(pool.stats(), { created: 2, reused: 4, writes: 2, shared: 0, written: 384,
+        laid: 1216 });
 });
 
 test('a block handed twice in a frame keeps its slot; in the next frame, it is laid again', ()=>{
@@ -135,7 +138,8 @@ test('a block handed twice in a frame keeps its slot; in the next frame, it is l
     const again = { ...pool.allocate(kept) };
     assert.equal(again.dynamicOffset, first.dynamicOffset, 'the same slot');
     assert.equal(again.buffer, first.buffer);
-    assert.deepEqual(pool.stats(), { created: 1, reused: 2, writes: 0, shared: 1 });
+    assert.deepEqual(pool.stats(), { created: 1, reused: 2, writes: 0, shared: 1, written: 0,
+        laid: 128 });
     pool.flush();
     assert.equal(first.buffer.bytes[first.dynamicOffset], 7);
 

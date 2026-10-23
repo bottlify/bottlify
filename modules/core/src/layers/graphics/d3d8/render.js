@@ -3043,6 +3043,23 @@ const CLEAR_STRIDE = 20;
 const D3DUSAGE_DYNAMIC = 0x200;
 
 /**
+ * What the backend's buffers cost to bring to the GPU, the heaviest first:
+ * each write is a trip to the GPU process and its bytes a copy there, and a
+ * renderer in a graphics worker has nothing else that says how many of them
+ * a frame takes.
+ *
+ * @param {any} own  the backend's diagnostics
+ */
+const uploadsOf = own=>({
+    uniforms: own.uniforms,
+    buffers: (own.buffers ?? []).filter((/** @type {any} */ one)=>one.writes > 0)
+        .sort((/** @type {any} */ a, /** @type {any} */ b)=>b.written - a.written)
+        .slice(0, 12)
+        .map((/** @type {any} */ { label, size, writes, written, marked, renames, discards,
+            locks })=>({ label, size, writes, written, marked, renames, discards, locks })),
+});
+
+/**
  * @param {RendererOptions} options
  * @returns {any}
  */
@@ -4908,6 +4925,7 @@ export function createRenderer(options){
                 {
                     const stale = counters.shapes.staleDraws;
                     stale[source.length] = (stale[source.length] ?? 0) + 1;
+                    frameStats.heldDraws++;
                 }
                 for (let index = 0; index < spans.length; index += 2)
                 {
@@ -4929,6 +4947,7 @@ export function createRenderer(options){
                 {
                     const stale = counters.shapes.staleDraws;
                     stale[source.length] = (stale[source.length] ?? 0) + 1;
+                    frameStats.heldDraws++;
                     for (let index = 0; index < spans.length; index += 2)
                     {
                         gpu.rewrite(start + spans[index],
@@ -5721,18 +5740,27 @@ export function createRenderer(options){
      * @returns {{ draws: number, placeholder: number, truncated: number, fogged: number,
      *             fog: string, fogs: Map<string, number>,
      *     uploads: number, textures: Set<any>, clears: number, clearColor: number,
-     *     offscreenDraws: number, offscreenTargets: Set<any> }}
+     *     offscreenDraws: number, offscreenTargets: Set<any>, drawMs: number,
+     *     heldDraws: number }}
      */
     const blankFrameStats = ()=>({
         draws: 0, placeholder: 0, truncated: 0, uploads: 0, fogged: 0, fog: '',
         fogs: new Map(), textures: new Set(), clears: 0, clearColor: -1, offscreenDraws: 0,
-        offscreenTargets: new Set(),
+        offscreenTargets: new Set(), drawMs: 0, heldDraws: 0,
     });
     let frameStats = blankFrameStats();
-    /** @type {{ index: number, draws: number, placeholder: number, truncated: number,
+    /**
+     * `drawMs` is what the frame's draws took this side as the program made
+     * them, `replayMs` what its replay onto the device took once presented,
+     * and `heldDraws` the draws that found bytes the program had written
+     * since the last to send first (`readHeld`): a diagnostics build's
+     * account of a draw's cost on the machine it ran on, frame by frame.
+     *
+     * @type {{ index: number, draws: number, placeholder: number, truncated: number,
      *     uploads: number, textures: number, fogged: number, fog: string, fogs: string,
      *     lights: string, clears: number, clearColor: string, offscreenDraws: number,
-     *     offscreenTargets: number, viewport: string, target: string }[]} */
+     *     offscreenTargets: number, viewport: string, target: string, drawMs?: number,
+     *     heldDraws?: number, replayMs?: number }[]} */
     const frameHistory = [];
     const FRAME_HISTORY = 240;
     /** How many frames `dumpEvery` keeps the account of. */
@@ -9203,7 +9231,7 @@ export function createRenderer(options){
     const ascending = (/** @type {number} */ count)=>
         Uint32Array.from({ length: count }, (_, index)=>index);
 
-    return {
+    const renderer = {
         /**
          * A run of the command ring begins (true) or ends (false): the
          * program does not run until it ends, so its memory stands still.
@@ -10302,7 +10330,8 @@ export function createRenderer(options){
             kept = 0;
             const shown = describe(model.backBuffer);
             const rect = model.viewport.rect;
-            frameHistory.push({
+            /** @type {(typeof frameHistory)[number]} */
+            const told = {
                 index: counters.frames,
                 draws: frameStats.draws,
                 placeholder: frameStats.placeholder,
@@ -10331,7 +10360,15 @@ export function createRenderer(options){
                     `${round(light.Diffuse.r)},${round(light.Diffuse.g)},${round(light.Diffuse.b)}`
                     + `@${Math.round(light.Position.x)},${Math.round(light.Position.y)}`
                     + `,${Math.round(light.Position.z)}`).join(' '),
-            });
+            };
+            if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
+            {
+                told.drawMs = Math.round(frameStats.drawMs * 100) / 100;
+                told.heldDraws = frameStats.heldDraws;
+                // Its replay comes later, and says how long it took then.
+                recorded.told = told;
+            }
+            frameHistory.push(told);
             if (frameHistory.length > FRAME_HISTORY)
             {
                 frameHistory.shift();
@@ -10500,7 +10537,8 @@ export function createRenderer(options){
                 // draw that is slow on the GPU, or rebuilt every frame, shows as.
                 ...(()=>{
                     const own = backend.diagnostics?.();
-                    return own ? { fixedPipelines: own.pipelines, gpuPasses: own.gpuPasses } : {};
+                    return own ? { fixedPipelines: own.pipelines, gpuPasses: own.gpuPasses,
+                        uploads: uploadsOf(own) } : {};
                 })(),
                 skipped: { ...counters.skipped },
                 cascade: {
@@ -10569,6 +10607,38 @@ export function createRenderer(options){
             });
         },
     };
+    if (import.meta.BOTTLIFY_DIAGNOSTICS !== false)
+    {
+        // What a frame's draws take as the program makes them, frame by frame
+        // (`drawMs`): beside the replay's own time, the cost of a draw on the
+        // machine that ran it, which a profile of minified code does not name.
+        const { drawPrimitive, drawIndexedPrimitive } = renderer;
+        /** @param {Parameters<typeof drawPrimitive>} args */
+        renderer.drawPrimitive = (...args)=>{
+            const began = clock();
+            try
+            {
+                return drawPrimitive(...args);
+            }
+            finally
+            {
+                frameStats.drawMs += clock() - began;
+            }
+        };
+        /** @param {Parameters<typeof drawIndexedPrimitive>} args */
+        renderer.drawIndexedPrimitive = (...args)=>{
+            const began = clock();
+            try
+            {
+                return drawIndexedPrimitive(...args);
+            }
+            finally
+            {
+                frameStats.drawMs += clock() - began;
+            }
+        };
+    }
+    return renderer;
 
     /**
      * @param {any} recorded
@@ -10687,6 +10757,10 @@ export function createRenderer(options){
             timing.replays++;
             timing.replayMs += took;
             timing.worstReplayMs = Math.max(timing.worstReplayMs, took);
+            if (recorded.told && again === null)
+            {
+                recorded.told.replayMs = Math.round(took * 100) / 100;
+            }
             // How far the GPU runs behind what was handed to it: an answer
             // that needs the GPU -- a count, a read back -- waits that long.
             const submitted = clock();

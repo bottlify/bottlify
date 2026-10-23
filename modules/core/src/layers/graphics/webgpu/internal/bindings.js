@@ -289,6 +289,10 @@ export function createUniformPool(options){
     let created = 0;
     let reused = 0;
     let writes = 0;
+    // Bytes the writes carried, and of them the blocks' own: the rest is the
+    // alignment each block is laid at, which travels with them.
+    let written = 0;
+    let laid = 0;
     /** @type {any} */
     let ring = null;
     /** @type {Uint8Array} */
@@ -325,6 +329,7 @@ export function createUniformPool(options){
             options.queue.writeBuffer(ring, pendingFrom, staging, pendingFrom,
                 pendingTo - pendingFrom);
             writes++;
+            written += pendingTo - pendingFrom;
         }
         pendingFrom = cursor;
         pendingTo = cursor;
@@ -420,6 +425,7 @@ export function createUniformPool(options){
                     : new Uint8Array(block.buffer, block.byteOffset, block.byteLength), at);
             }
             pendingTo = at + block.byteLength;
+            laid += block.byteLength;
             recentBlocks[recentNext] = block;
             recentAt[recentNext] = at;
             recentLaying[recentNext] = laying;
@@ -437,7 +443,7 @@ export function createUniformPool(options){
         },
 
         stats(){
-            return { created, reused, writes, shared };
+            return { created, reused, writes, shared, written, laid };
         },
     };
 }
