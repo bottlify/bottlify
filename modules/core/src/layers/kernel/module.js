@@ -195,9 +195,9 @@ export function createKernelModule(){
                 // A quantum asked for is kept to the instruction: a test's, a profile's.
                 turnMs: config?.quantum === undefined ? TURN_MS : undefined,
                 soloQuantum: config?.soloQuantum,
-                // Where a process of several executors runs its ready threads: one
-                // way when the caller names it, else each thread moved on its gains
-                // (`placement.js`).
+                // Where a process of several executors runs its ready threads: the
+                // way the caller names, else spread beside a free host (`freeHost`),
+                // or each thread moved on its gains without one (`placement.js`).
                 placement: ['spread', 'concentrate', 'auto'].includes(config?.placement)
                     ? config.placement : null,
                 placementTiming: config?.placementTiming,
