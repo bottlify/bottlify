@@ -1499,3 +1499,25 @@ None yet.
   noise not measured.
 - **Decision.** Laying formed callees out between call and return is dropped: the emitter does it.
   Hot callees formed in, if taken up again, start from the new ways out and the forming again.
+
+### 2026-10-23: what a shader draw's samplers read, kept by the words it is made from
+
+- **Idea.** `samplingOf` in the Direct3D renderer makes, for every shader draw, key strings and
+  lists of what its samplers read beyond its shaders (the channels a texture of fewer than four
+  lacks, a level-of-detail bias, mirror-once and border addressing). A draw reads the same as
+  some draw before it nearly always: number the textures' channels and the sampler states it
+  reads as words, and keep what was made by that number.
+- **Workload.** A capture of the graphics worker's input in the Call of Duty 4 demo's firefight
+  (300 frames after the mark, 2254 draws a frame), played in node over the quiet fake GPU
+  (`tools/graphics-replay.mjs`). Arms: the tree with written pages as bits and the last group
+  bound kept (A), and A with the sampling kept (B); four runs each, alternated.
+- **Values.** Milliseconds a frame of the played side: A 42.96, 43.86, 42.88, 45.76; B 46.61,
+  41.16, 48.21, 45.86. The profile before it put `samplingOf` at 5.4 % of the played side's time,
+  the key strings (`onesKey`) at 1.0 %. The gate (every draw given the same shaders with the
+  sampling made again; it caught each word left out) passed.
+- **Why.** Not measured: whether the words cost each draw what the strings did, or the
+  profile's share overstated the strings, no run here says.
+- **Machine.** The 4-core KVM VM (Xeon 2.10 GHz); node 22.22.0 (V8 12.4). Spread between runs of
+  one arm: 42.9 to 45.8 ms a frame.
+- **Decision.** Not taken. The patch and its gate (`d3d9/sampling.itest.js`) are kept outside the
+  tree.
