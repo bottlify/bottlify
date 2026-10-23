@@ -903,3 +903,99 @@ test('a snapshot still in flight at dispose() destroys its buffer instead of par
         assert.equal(gpu.count('destroy'), before + 1,
             'the in-flight snapshot destroys its buffer rather than parking it into spareStaging');
     });
+
+test('a group bound again from what the last binding at its index named is the group the cache keys'
+    + ' those entries by, over seeded bindings', ()=>{
+    for (let seed = 1; seed <= 20; seed++)
+    {
+        let state = seed;
+        const below = (/** @type {number} */ n)=>{
+            state = (Math.imul(state, 1103515245) + 12345) >>> 0;
+            return (state >>> 8) % n;
+        };
+        const { gpu, backend } = harness();
+        const layouts = [0, 1, 2].map(()=>backend.createBindGroupLayout({ entries: [] }));
+        const views = Array.from({ length: 4 }, (_, index)=>({ kind: 'view', index }));
+        const samplers = Array.from({ length: 3 }, (_, index)=>({ kind: 'sampler', index }));
+        // A renderer's lists of uniform entries, one per length, written over
+        // at every draw as its blocks are given slots in the ring.
+        const blockLists = [1, 2, 3].map(length=>Array.from({ length }, (_, binding)=>({
+            binding, resource: { buffer: null, offset: 0, size: 0, dynamicOffset: 0 } })));
+        // A renderer's lists of texture entries, made once for each set.
+        const samplerLists = Array.from({ length: 6 }, ()=>{
+            const count = 1 + below(2);
+            return Array.from({ length: count * 2 }, (_, binding)=>({ binding,
+                resource: binding % 2 === 0 ? views[below(views.length)]
+                    : samplers[below(samplers.length)] }));
+        });
+        /** @type {Map<object, number>} */
+        const ids = new Map();
+        /** @param {object} object */
+        const idOf = object=>{
+            if (!ids.has(object))
+            {
+                ids.set(object, ids.size + 1);
+            }
+            return ids.get(object);
+        };
+        /** @type {Set<string>} */
+        const keys = new Set();
+        let frame = backend.beginFrame();
+        let pass = frame.beginPass({ target: target(backend) });
+        for (let step = 0; step < 400; step++)
+        {
+            const choice = below(20);
+            if (choice === 0)
+            {
+                frame.end();
+                frame = backend.beginFrame();
+                pass = frame.beginPass({ target: target(backend) });
+                continue;
+            }
+            if (choice === 1)
+            {
+                pass = frame.beginPass({ target: target(backend) });
+                continue;
+            }
+            if (choice === 2)
+            {
+                // A block larger than the ring: the ring is made anew, and the
+                // groups bound so far name the one before.
+                pass.uniforms(new Uint8Array((1 << 22) + 256));
+                continue;
+            }
+            const index = below(3);
+            const layout = layouts[below(2) === 0 ? index : below(3)];
+            /** @type {any[]} */
+            let entries;
+            if (index < 2)
+            {
+                entries = blockLists[below(blockLists.length)];
+                for (const entry of entries)
+                {
+                    pass.uniforms(new Uint8Array(64 * (1 + below(3))), entry.resource);
+                }
+            }
+            else
+            {
+                entries = samplerLists[below(samplerLists.length)];
+            }
+            const group = pass.setBindings(index, layout, entries);
+            const asked = entries.map(entry=>(entry.resource.buffer
+                ? [entry.binding, idOf(entry.resource.buffer), entry.resource.offset ?? 0,
+                    entry.resource.size ?? -1]
+                : [entry.binding, idOf(entry.resource)]));
+            keys.add(JSON.stringify([idOf(layout), asked]));
+            assert.equal(group.descriptor.layout, layout, `seed ${seed} step ${step}: layout`);
+            assert.deepEqual(group.descriptor.entries.map((/** @type {any} */ entry)=>(
+                entry.resource.buffer
+                    ? [entry.binding, idOf(entry.resource.buffer), entry.resource.offset ?? 0,
+                        entry.resource.size ?? -1]
+                    : [entry.binding, idOf(entry.resource)])), asked,
+            `seed ${seed} step ${step}: the group names what was asked`);
+        }
+        frame.end();
+        assert.equal(gpu.count('createBindGroup'), keys.size,
+            `seed ${seed}: one group for each set of entries, no more`);
+    }
+});

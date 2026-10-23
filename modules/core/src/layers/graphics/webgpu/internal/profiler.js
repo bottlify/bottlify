@@ -101,6 +101,42 @@ export function createProfiler(options){
             frame = blankFrame();
         },
 
+        // What every draw counts, by name in the code rather than in a
+        // string: `count` looks a name up, and a draw made six such looks.
+        countDraw(){
+            counters.draws++;
+            if (frame)
+            {
+                frame.draws++;
+            }
+        },
+        /** @param {boolean} created  a group made for this binding, not one kept */
+        countBindGroup(created){
+            if (created)
+            {
+                counters.bindGroupsCreated++;
+                if (frame)
+                {
+                    frame.bindGroupsCreated++;
+                }
+            }
+            else
+            {
+                counters.bindGroupsReused++;
+                if (frame)
+                {
+                    frame.bindGroupsReused++;
+                }
+            }
+        },
+        countUniformBlock(){
+            counters.uniformBlocks++;
+            if (frame)
+            {
+                frame.uniformBlocks++;
+            }
+        },
+
         /**
          * Opens a named phase; the returned function closes it. Phases nest by
          * name rather than by stack, so an unclosed one shows up as a missing

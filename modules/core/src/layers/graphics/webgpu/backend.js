@@ -121,6 +121,89 @@ export function createBackend(options){
     // frame was a descriptor churn the device did not always keep up with.
     const cache = createBindingCache({ device });
     /**
+     * Each group index's last group and what it was asked with, flat: the
+     * layout, then each entry's binding, the object it binds (a buffer
+     * binding's buffer) and a buffer binding's offset and size. A draw that
+     * binds what the draw before bound at an index -- the uniform ring's
+     * groups nearly always, a material's textures for its every draw -- is
+     * answered by comparing objects, with no key worked out for the cache.
+     * What the cache keys a group by, and so the same group.
+     *
+     * @type {{ group: any, asked: any[] }[]}
+     */
+    const lastGroups = [];
+    /**
+     * The group bound last at `index` when it was asked for with the same
+     * layout and entries, or null.
+     *
+     * @param {number} index @param {any} layout @param {any[]} entries
+     */
+    const sameGroup = (index, layout, entries)=>{
+        const last = lastGroups[index];
+        if (last === undefined)
+        {
+            return null;
+        }
+        const asked = last.asked;
+        if (asked.length !== 1 + entries.length * 4 || asked[0] !== layout)
+        {
+            return null;
+        }
+        for (let i = 0, at = 1; i < entries.length; i++, at += 4)
+        {
+            const entry = entries[i];
+            const resource = entry.resource;
+            if (asked[at] !== entry.binding)
+            {
+                return null;
+            }
+            if (resource !== null && typeof resource === 'object' && resource.buffer)
+            {
+                if (asked[at + 1] !== resource.buffer
+                    || asked[at + 2] !== (resource.offset === undefined ? 0 : resource.offset)
+                    || asked[at + 3] !== (resource.size === undefined ? -1 : resource.size))
+                {
+                    return null;
+                }
+            }
+            else if (asked[at + 1] !== resource || asked[at + 2] !== null)
+            {
+                return null;
+            }
+        }
+        return last.group;
+    };
+    /**
+     * Keeps what a group was asked with, for the next binding at `index`.
+     *
+     * @param {number} index @param {any} layout @param {any[]} entries @param {any} group
+     */
+    const keepGroup = (index, layout, entries, group)=>{
+        const last = lastGroups[index] ??= { group: null, asked: [] };
+        const asked = last.asked;
+        asked.length = 1 + entries.length * 4;
+        asked[0] = layout;
+        for (let i = 0, at = 1; i < entries.length; i++, at += 4)
+        {
+            const resource = entries[i].resource;
+            asked[at] = entries[i].binding;
+            if (resource !== null && typeof resource === 'object' && resource.buffer)
+            {
+                asked[at + 1] = resource.buffer;
+                asked[at + 2] = resource.offset === undefined ? 0 : resource.offset;
+                asked[at + 3] = resource.size === undefined ? -1 : resource.size;
+            }
+            else
+            {
+                asked[at + 1] = resource;
+                asked[at + 2] = null;
+                asked[at + 3] = null;
+            }
+        }
+        last.group = group;
+        return group;
+    };
+    /**
      * The dynamic offsets of the group being bound, handed on at once: an
      * array of each count, written over (`dynamicOffsetsOf`).
      *
@@ -576,10 +659,9 @@ export function createBackend(options){
              */
             setBindings(index, layout, entries, label){
                 const before = cache.created();
-                const group = cache.get(layout, entries, label);
-                profiler.count(cache.created() > before
-                    ? 'bindGroupsCreated'
-                    : 'bindGroupsReused');
+                const group = sameGroup(index, layout, entries)
+                    ?? keepGroup(index, layout, entries, cache.get(layout, entries, label));
+                profiler.countBindGroup(cache.created() > before);
                 // setBindGroup copies the offsets it is handed.
                 const offsets = dynamicOffsetsOf(entries, bindOffsets);
                 const held = groupOffsets[index] ??= [];
@@ -625,7 +707,7 @@ export function createBackend(options){
              *     once and keeps nothing; an object of its own otherwise.
              */
             uniforms(block, into){
-                profiler.count('uniformBlocks');
+                profiler.countUniformBlock();
                 return uniforms.allocate(block, into);
             },
 
@@ -665,7 +747,7 @@ export function createBackend(options){
              * @param {number} [firstInstance]
              */
             draw(count, instances, first, firstInstance){
-                profiler.count('draws');
+                profiler.countDraw();
                 switch (arguments.length)
                 {
                     case 1: raw.draw(count); break;
@@ -682,7 +764,7 @@ export function createBackend(options){
              * @param {number} [baseVertex] @param {number} [firstInstance]
              */
             drawIndexed(count, instances, first, baseVertex, firstInstance){
-                profiler.count('draws');
+                profiler.countDraw();
                 switch (arguments.length)
                 {
                     case 1: raw.drawIndexed(count); break;
