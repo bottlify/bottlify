@@ -31,7 +31,8 @@ import { checkAccess, emitStaleExit, looseStackStore, noteStore, stackAccess } f
 import { CALL_STRIDE, Mechanism, Tables, pageFlagsAt } from '../runtime/layout.js';
 import { PageFlag, STORE_FLAGS } from '../runtime/pages.js';
 import { emitSimd } from './simd.js';
-import { atState, intoState, intoTables } from './bases.js';
+import { atState, atTables, intoState, intoTables } from './bases.js';
+import { ANY_TOP, slotOf } from '../runtime/entries.js';
 import { emitLocked, isLocked } from './locked.js';
 import { emitX87, isX87, topAfterCall, x87AfterCall, x87Normalise, x87Reloaded } from './x87.js';
 
@@ -180,18 +181,33 @@ function countApart(e){
  * written back and no transfer called. A target held further along the probe
  * goes through the transfer, which returns from it as well (`finishModule`).
  *
+ * A direct call's target is known here, and so is the first slot of the entry
+ * hash its address takes (`slotOf`): where that slot holds the target for the
+ * machine's top and not a function that does nothing -- what the transfer
+ * would take at its first look and call the same way -- its function is called
+ * from here, with the slot's label, and the transfer's hashing and probe are
+ * not run (`linkedCall`, unless `linkedCalls` is off). Anything else goes
+ * through the transfer as before.
+ *
  * @param {import('./region.js').RegionEmitter} e
  * @param {number} next  the return address, a block of the region
- * @param {() => void} pushTarget  pushes the callee's address
+ * @param {number | null} target  a direct call's callee, null for one held in `count`
  * @param {number} mechanism  what a profiling run counts it as (`Mechanism`)
  */
-function callAndReturn(e, next, pushTarget, mechanism){
+function callAndReturn(e, next, target, mechanism){
     const { b, layout, context } = e;
     const depth = layout.regs + CallStack.DEPTH;
     e.countMechanism(mechanism);
     countApart(e);
     e.charge();
-    pushTarget();
+    if (target === null)
+    {
+        b.localGet(Local.count);
+    }
+    else
+    {
+        b.i32const(target | 0);
+    }
     b.localSet(Local.eip);
     if (e.staleCheck)
     {
@@ -253,13 +269,23 @@ function callAndReturn(e, next, pushTarget, mechanism){
     }
     e.storeMemoryState(call);
     e.storeUncarriedState(call);
-    b.localGet(Local.eip);
-    for (let local = Local.budget; local < STATE_PARAMS; local++)
+    // An empty slot's key is 0 and a removed one's all ones: a call to either
+    // address would take such a slot for its own.
+    if (target !== null && target !== 0 && target >>> 0 !== 0xffffffff
+        && context.placed === undefined && context.linkedCalls !== false)
     {
-        b.localGet(local);
+        linkedCall(e, target);
     }
-    b.call(/** @type {number} */ (e.context.transfer)).localTee(Local.t0)
-        .i32const(Exit.RETURNED).op(I32.ne);
+    else
+    {
+        b.localGet(Local.eip);
+        for (let local = Local.budget; local < STATE_PARAMS; local++)
+        {
+            b.localGet(local);
+        }
+        b.call(/** @type {number} */ (e.context.transfer));
+    }
+    b.localTee(Local.t0).i32const(Exit.RETURNED).op(I32.ne);
     e.openGuard('elsewhere');
     e.countMechanism(Mechanism.CALL_ELSEWHERE);
     // Left for the host somewhere inside: the state block holds it all.
@@ -279,6 +305,58 @@ function callAndReturn(e, next, pushTarget, mechanism){
     }
     b.i32const(next).localSet(Local.eip);
     e.returned = true;
+}
+
+/**
+ * A direct call's wasm call, the parameters and the state block as the
+ * transfer takes them: the first slot of the target's address read, and where
+ * it holds the target compiled for any top or for the one the machine has,
+ * and not as a function that does nothing, the slot's function called through
+ * the table with the slot's label, as the transfer would call it at its first
+ * look. Anything else -- a slot that holds another address or none, an entry
+ * compiled for another top, a function that does nothing -- goes through the
+ * transfer, out of the way, which looks further and answers each of those as
+ * before. Leaves the call's answer on the stack.
+ *
+ * @param {E} e @param {number} target
+ */
+function linkedCall(e, target){
+    const { b, layout, context } = e;
+    const slot = layout.tables + Tables.HASH
+        + slotOf(target, layout.hashShift ?? 16) * Tables.HASH_SLOT;
+    // The index, the label, the top and the empty code in one word, the call
+    // taking two of them: with an empty code of 0 the top two bytes are the top.
+    intoTables(context, b.i32const(slot)).localTee(Local.t2)
+        .load('i64', { offset: 4, align: 2 }).localTee(Local.t64)
+        .i64const(48n).op(I64.shrU).op(I64.wrap).localTee(Local.t0);
+    b.i32const(ANY_TOP).op(I32.eq).localGet(Local.t0);
+    atState(context, b).load('i32_8u', { offset: layout.x87Top });
+    b.op(I32.eq).op(I32.or);
+    b.localGet(Local.t2).load('i32').i32const(target | 0).op(I32.eq).op(I32.and).op(I32.eqz);
+    e.openGuard('unlinked', ValType.i32);
+    b.localGet(Local.eip);
+    for (let local = Local.budget; local < STATE_PARAMS; local++)
+    {
+        b.localGet(local);
+    }
+    b.call(/** @type {number} */ (context.transfer));
+    b.else();
+    e.countMechanism(Mechanism.CALL_LINKED);
+    if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && context.countTransfers)
+    {
+        // Counted as the transfer it stands in for.
+        const at = layout.tables + Tables.TRANSFERS;
+        atTables(context, atTables(context, b)).load('i32', { offset: at }).i32const(1)
+            .op(I32.add).store('i32', { offset: at });
+    }
+    b.localGet(Local.t64).i64const(32n).op(I64.shrU).op(I64.wrap).i32const(0xffff).op(I32.and);
+    for (let local = Local.budget; local < STATE_PARAMS; local++)
+    {
+        b.localGet(local);
+    }
+    b.localGet(Local.t64).op(I64.wrap);
+    b.callIndirect(context.regionType, 0);
+    e.close();
 }
 
 /**
@@ -828,10 +906,9 @@ export function emitInstruction(e, instruction, flagsLive){
                 {
                     profileCall(e, instruction.eip);
                 }
-                callAndReturn(e, next, dst.kind === 'rel'
-                    ? ()=>b.i32const(/** @type {number} */ (dst.target))
-                    : ()=>b.localGet(Local.count),
-                dst.kind === 'rel' ? Mechanism.CALL_REL : Mechanism.CALL_INDIRECT);
+                callAndReturn(e, next,
+                    dst.kind === 'rel' ? /** @type {number} */ (dst.target) : null,
+                    dst.kind === 'rel' ? Mechanism.CALL_REL : Mechanism.CALL_INDIRECT);
                 return true;
             }
             if (dst.kind === 'rel')

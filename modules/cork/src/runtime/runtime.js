@@ -267,6 +267,12 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         // returns from such a function in place, without calling the transfer
         // (`callAndReturn` in emit/integer.js).
         emptySites: false,
+        // A direct call out of a region reads its target's first slot in the
+        // entry hash and, where the entry there is the one the transfer would
+        // take at its first look, calls its function itself: the transfer's
+        // hashing, probe and checks not run (`linkedCall` in emit/integer.js;
+        // false: every call through the transfer).
+        linkedCalls: true,
         // Each x87 region compiled for the precision control it runs under --
         // the wide ones (double, extended) or single -- a block testing
         // precision control once rather than every operation rounding by it;
@@ -1970,6 +1976,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         profileCalls: table !== null && settings.callTargets === true,
         callReturn: table !== null && settings.callReturn === true && !settings.undoLog,
         emptySites: settings.emptySites === true && settings.emptyCalls !== false,
+        linkedCalls: settings.linkedCalls !== false,
         resume: resumable,
         structure: settings.structure,
         precise: settings.precise === true,
@@ -2551,6 +2558,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         + (settings.dispatch === true ? 'D' : '') + (settings.callTargets === true ? 'C' : '')
         + (settings.callReturn === true ? 'R' : '') + (sharedMemory ? 'M' : '')
         + (settings.emptySites === true && settings.emptyCalls !== false ? 'E' : '')
+        + (settings.linkedCalls !== false ? 'L' : '')
         + (settings.atomic === true ? 'A' : '')
         + (settings.atomic === true && settings.ordered === true ? 'O' : '')
         + `p${(settings.trapPort ?? 0).toString(16)}`;

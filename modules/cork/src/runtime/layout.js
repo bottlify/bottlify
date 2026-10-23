@@ -133,6 +133,8 @@ export const Mechanism = Object.freeze({
     EMPTY_RETURN: 18,
     /** A call to a function that does nothing, returned from at the call (`emptySites`). */
     EMPTY_SITE: 19,
+    /** A direct call that found its callee in its address's first slot and called it there. */
+    CALL_LINKED: 20,
 });
 
 /** The names of `Mechanism`'s counts, by index. */

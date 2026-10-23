@@ -258,6 +258,9 @@ const LOCAL_TYPES = [
  * @property {boolean} [emptySites] with `callReturn`, such a call looks its target up in the
  *     entry hash first and does the `ret` of a function that does nothing in place
  *     (`callAndReturn`)
+ * @property {boolean} [linkedCalls] with `callReturn`, a direct call reads its target's first
+ *     slot of the entry hash and calls the function there itself where the transfer would
+ *     at its first look (`linkedCall`); false: through the transfer
  * @property {boolean} [countTransfers] each transfer through the hash adds one to the
  *     tables' transfer count (a diagnostic run)
  * @property {boolean} [blockProfile] each block counts its executions in the block
@@ -330,8 +333,8 @@ const LOCAL_TYPES = [
  * @param {{ undoLog?: boolean, hash?: boolean, trapPort?: number, leaveOut?: Set<string>,
  *     countTransfers?: boolean, wide?: boolean, narrow?: boolean, blockProfile?: boolean,
  *     structure?: boolean, precise?: boolean, place?: number, profileCalls?: boolean,
- *     resume?: boolean, callReturn?: boolean, emptySites?: boolean, looseStacks?: boolean,
- *     atomic?: boolean, ordered?: boolean, checkReads?: boolean,
+ *     resume?: boolean, callReturn?: boolean, emptySites?: boolean, linkedCalls?: boolean,
+ *     looseStacks?: boolean, atomic?: boolean, ordered?: boolean, checkReads?: boolean,
  *     expansion?: ExpansionNote | null, markBlocks?: boolean }}
  *     [options]  expansion: told every instruction's wasm bytes as it is emitted
  *     (`tools/cork-expansion.mjs`), in a diagnostic build only; markBlocks: each block
@@ -361,8 +364,8 @@ export function prepareModule(m, layout, features, memory = {},
     { undoLog = false, hash = false, trapPort, leaveOut = new Set(), countTransfers = false,
         wide = false, narrow = false, blockProfile = false, structure = true, precise = false,
         place = 0, profileCalls = false, resume = false, callReturn = false, emptySites = false,
-        looseStacks = false, atomic = false, ordered = false, checkReads = false,
-        expansion = null, markBlocks = false } = {})
+        linkedCalls = true, looseStacks = false, atomic = false, ordered = false,
+        checkReads = false, expansion = null, markBlocks = false } = {})
 {
     m.importMemory('env', 'memory', {
         min: 1, ...(memory.maxPages === undefined ? {} : { max: memory.maxPages }),
@@ -437,6 +440,10 @@ export function prepareModule(m, layout, features, memory = {},
         if (emptySites)
         {
             context.emptySites = true;
+        }
+        if (!linkedCalls)
+        {
+            context.linkedCalls = false;
         }
     }
     if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && countTransfers)

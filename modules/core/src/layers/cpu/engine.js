@@ -302,6 +302,9 @@ export function engineContractProblem(engineModule, url){
  * @property {boolean} [emptySites]  With `emptyCalls`, a call out of a region reads its target's
  *     slot first and returns from such a function in place, without calling the transfer.
  *     Default false.
+ * @property {boolean} [linkedCalls]  A direct call out of a region reads its target's first slot
+ *     and, where the entry there is the one the transfer would take at its first look, calls
+ *     its function itself, without the transfer's hashing and probe. Default true.
  * @property {boolean} [wideFirst]  Each x87 region compiled for the precision control it runs
  *     under, tested once a block; one seen under both tests at every rounding operation.
  *     Default true.
