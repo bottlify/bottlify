@@ -32,6 +32,9 @@ export const ABSENT_PROFILER = Object.freeze({
     textureUpload(){},
     endFrame(){},
     count(){},
+    countDraw(){},
+    countBindGroup(){},
+    countUniformBlock(){},
     snapshot: ()=>({ frames: 0, counters: {}, uploadsByLabel: {}, recentFrames: [] }),
 });
 
