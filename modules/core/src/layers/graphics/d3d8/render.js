@@ -62,7 +62,8 @@ import { decodeS3tc } from '../webgpu/internal/s3tc.js';
 import { convertTexels } from '../d3d10/blocks.js';
 import { fromHalf, storedToHalves } from '../d3d9/half.js';
 import { passedSamples, reachableArea } from '../webgpu/internal/occlusion.js';
-import { changedSpans, createCompared, writtenSpans } from '../webgpu/internal/changed.js';
+import { changedSpans, createCompared, pageMarksOf, writtenSpans }
+    from '../webgpu/internal/changed.js';
 import {
     CLIP_LOCATION, clipStateOf, fixedFragmentStage, generates, generationOf, readsNormal, tailOf,
     vertexTailOf,
@@ -3081,7 +3082,8 @@ export function createRenderer(options){
      *
      * @type {WeakMap<object, { base: number, gpu: any,
      *     watch: { take: (address: number, length: number) => number[] },
-     *     dirty: Set<number>, stale: Set<number> }>}
+     *     dirty: import('../webgpu/internal/changed.js').PageMarks,
+     *     stale: import('../webgpu/internal/changed.js').PageMarks }>}
      */
     const writtenPages = new WeakMap();
     /** @param {any} buffer @param {any} gpu  the copy the bytes go into */
@@ -3100,19 +3102,14 @@ export function createRenderer(options){
         {
             return null;
         }
-        const pages = new Set();
-        const last = (buffer.base + buffer.length - 1) >>> 12;
-        for (let page = buffer.base >>> 12; page <= last; page++)
-        {
-            pages.add(page);
-        }
         const dynamic = ((buffer.usage ?? 0) & D3DUSAGE_DYNAMIC) !== 0;
         if (dynamic)
         {
             watch.take(buffer.base, buffer.length);
         }
-        const tracked = { base: buffer.base, gpu, watch, dirty: dynamic ? new Set() : pages,
-            stale: dynamic ? pages : new Set() };
+        const tracked = { base: buffer.base, gpu, watch,
+            dirty: pageMarksOf(buffer.base, buffer.length, !dynamic),
+            stale: pageMarksOf(buffer.base, buffer.length, dynamic) };
         writtenPages.set(buffer, tracked);
         return tracked;
     };
@@ -4911,14 +4908,8 @@ export function createRenderer(options){
             {
                 if (tracked.stale.size > 0)
                 {
-                    const last = (source.base + to - 1) >>> 12;
-                    for (let page = (source.base + from) >>> 12; page <= last; page++)
-                    {
-                        if (tracked.stale.delete(page))
-                        {
-                            tracked.dirty.add(page);
-                        }
-                    }
+                    tracked.stale.take((source.base + from) >>> 12, (source.base + to - 1) >>> 12,
+                        tracked.dirty);
                 }
                 const spans = writtenSpans(tracked, source.base, source.length, from, to);
                 if (spans.length > 0)

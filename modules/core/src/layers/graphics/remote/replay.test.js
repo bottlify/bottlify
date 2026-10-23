@@ -621,6 +621,95 @@ test('the mirror keeps what is written to it across its pages, and zero elsewher
 });
 
 /**
+ * The mirror's watches as they were before a 64 KiB page could be passed
+ * over: every 4 KiB page of a take asked of a map of stamps. The reference
+ * the watch is held to.
+ */
+const watchesAskingEachPage = ()=>{
+    /** @type {Map<number, number>} */
+    const stamps = new Map();
+    let stamp = 0;
+    return {
+        /** @param {number} address @param {number} length */
+        write(address, length){
+            stamp++;
+            const last = (address + length - 1) >>> 12;
+            for (let page = address >>> 12; page <= last; page++)
+            {
+                stamps.set(page, stamp);
+            }
+        },
+        /** @param {number} address @param {number} length */
+        watch(address, length){
+            /** @type {Map<number, number>} */
+            const seen = new Map();
+            const first = address >>> 12;
+            const end = (address + Math.max(length, 1) - 1) >>> 12;
+            return {
+                /** @param {number} from @param {number} bytes */
+                take(from, bytes){
+                    const taken = [];
+                    const last = Math.min(end, (from + Math.max(bytes, 1) - 1) >>> 12);
+                    for (let page = Math.max(first, from >>> 12); page <= last; page++)
+                    {
+                        const at = stamps.get(page);
+                        if (at !== undefined && at !== seen.get(page))
+                        {
+                            seen.set(page, at);
+                            taken.push(page);
+                        }
+                    }
+                    return taken;
+                },
+            };
+        },
+    };
+};
+
+test('the mirror\'s watches take what watches asking each page take, over seeded writes', ()=>{
+    for (let seed = 1; seed <= 40; seed++)
+    {
+        let state = seed;
+        const below = (/** @type {number} */ n)=>{
+            state = (Math.imul(state, 1103515245) + 12345) >>> 0;
+            return (state >>> 8) % n;
+        };
+        const mirror = createMirror();
+        const reference = watchesAskingEachPage();
+        /** @type {{ base: number, length: number, one: any, two: any }[]} */
+        const watches = [];
+        for (let step = 0; step < 300; step++)
+        {
+            const kind = below(4);
+            if (kind === 0 || watches.length === 0)
+            {
+                // A buffer of a few pages to a few hundred, on or off a page.
+                const base = below(1 << 12) * 4096 + (below(2) === 0 ? 0 : below(4096));
+                const length = 1 + below(below(2) === 0 ? 1 << 14 : 3 << 20);
+                watches.push({ base, length, one: mirror.watch(base, length),
+                    two: reference.watch(base, length) });
+            }
+            else if (kind === 1)
+            {
+                const address = below(1 << 12) * 4096 + below(4096);
+                const length = 1 + below(below(3) === 0 ? 1 << 18 : 300);
+                mirror.write(address, new Uint8Array(length));
+                reference.write(address, length);
+            }
+            else
+            {
+                const { base, length, one, two } = watches[below(watches.length)];
+                const whole = below(3) === 0;
+                const from = whole ? base : base + below(length);
+                const bytes = whole ? length : 1 + below(base + length - from);
+                assert.deepEqual(one.take(from, bytes), two.take(from, bytes),
+                    `seed ${seed} step ${step}: ${bytes} bytes from ${from}`);
+            }
+        }
+    }
+});
+
+/**
  * What a frame asked of the GPU, as text: an object the double made by its
  * id, bytes by their exact bits.
  *

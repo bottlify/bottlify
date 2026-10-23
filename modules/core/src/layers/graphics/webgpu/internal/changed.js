@@ -152,6 +152,141 @@ export function changedSpans(now, was, gap = 64){
     return spans;
 }
 
+/** The set bits of a 32-bit word. @param {number} word */
+const bitsIn = word=>{
+    const value = word >>> 0;
+    let bits = value - ((value >>> 1) & 0x55555555);
+    bits = (bits & 0x33333333) + ((bits >>> 2) & 0x33333333);
+    return Math.imul((bits + (bits >>> 4)) & 0x0f0f0f0f, 0x01010101) >>> 24;
+};
+
+/** Bits `low` to `high` of a word, both inside it. @param {number} low @param {number} high */
+const bitsFrom = (low, high)=>((0xffffffff >>> (31 - high)) & (0xffffffff << low)) >>> 0;
+
+/**
+ * 4 KiB page numbers over one buffer's pages, as bits: the pages its write
+ * watch said were written and are not sent yet (`writtenSpans`). A draw
+ * reaches hundreds of a buffer's pages, and a set asked for each of them
+ * cost the draw its range; bits are read a word of 32 pages at a time.
+ */
+export class PageMarks
+{
+    /**
+     * @param {number} first  the buffer's first page
+     * @param {number} count  how many pages it spans
+     * @param {boolean} [all]  every one of them marked
+     */
+    constructor(first, count, all = false){
+        this.first = first;
+        this.count = count;
+        this.words = new Uint32Array((count + 31) >>> 5);
+        /** How many pages are marked. */
+        this.size = 0;
+        if (all && count > 0)
+        {
+            this.words.fill(0xffffffff);
+            this.words[this.words.length - 1] = bitsFrom(0, (count - 1) & 31);
+            this.size = count;
+        }
+    }
+
+    /** Marks a page of the buffer; one outside it is not the buffer's. @param {number} page */
+    add(page){
+        const at = page - this.first;
+        if (at >= 0 && at < this.count)
+        {
+            const bit = 1 << (at & 31);
+            const word = this.words[at >>> 5];
+            if ((word & bit) === 0)
+            {
+                this.words[at >>> 5] = word | bit;
+                this.size++;
+            }
+        }
+    }
+
+    /** @param {number} page */
+    has(page){
+        const at = page - this.first;
+        return at >= 0 && at < this.count && (this.words[at >>> 5] & (1 << (at & 31))) !== 0;
+    }
+
+    /**
+     * The first page in `[from, last]` marked (`set` true) or not, or -1.
+     *
+     * @param {number} from @param {number} last @param {boolean} set
+     */
+    find(from, last, set){
+        let at = Math.max(from - this.first, 0);
+        const end = Math.min(last - this.first, this.count - 1);
+        while (at <= end)
+        {
+            const word = set ? this.words[at >>> 5] : ~this.words[at >>> 5];
+            const bits = word >>> (at & 31);
+            if (bits !== 0)
+            {
+                const found = at + 31 - Math.clz32(bits & -bits);
+                return found <= end ? found + this.first : -1;
+            }
+            at = ((at >>> 5) + 1) << 5;
+        }
+        return -1;
+    }
+
+    /**
+     * Unmarks `[from, last]`, and with `into`, marks over the same pages,
+     * marks there what it unmarked here.
+     *
+     * @param {number} from @param {number} last @param {PageMarks} [into]
+     */
+    take(from, last, into){
+        const low = Math.max(from - this.first, 0);
+        const high = Math.min(last - this.first, this.count - 1);
+        if (low > high)
+        {
+            return;
+        }
+        for (let word = low >>> 5; word <= high >>> 5; word++)
+        {
+            const mask = bitsFrom(Math.max(low, word << 5) & 31,
+                Math.min(high, (word << 5) + 31) & 31);
+            const taken = this.words[word] & mask;
+            if (taken === 0)
+            {
+                continue;
+            }
+            this.words[word] &= ~mask;
+            this.size -= bitsIn(taken);
+            if (into)
+            {
+                into.size += bitsIn(taken & ~into.words[word]);
+                into.words[word] |= taken;
+            }
+        }
+    }
+}
+
+/**
+ * The pages of a buffer at `base` of `length` bytes, unmarked, or all of
+ * them marked.
+ *
+ * @param {number} base @param {number} length @param {boolean} [all]
+ */
+export const pageMarksOf = (base, length, all = false)=>{
+    const first = base >>> 12;
+    return new PageMarks(first, length > 0 ? ((base + length - 1) >>> 12) - first + 1 : 0, all);
+};
+
+/**
+ * Whether `[low, high)` of a buffer at `base` of `length` bytes holds all of
+ * the page the buffer has of `page`.
+ *
+ * @param {number} base @param {number} length @param {number} page
+ * @param {number} low @param {number} high
+ */
+const holdsPage = (base, length, page, low, high)=>Math.max(0, page * 4096 - base) >= low
+    && Math.min(length, (page + 1) * 4096 - base) <= high;
+
 /**
  * The parts of a buffer's `[from, to)` on pages its write watch says were
  * written since they were last taken: what is sent or uploaded of them as it
@@ -161,7 +296,7 @@ export function changedSpans(now, was, gap = 64){
  * holds.
  *
  * @param {{ watch: { take: (address: number, length: number) => number[] },
- *     dirty: Set<number> }} tracked
+ *     dirty: PageMarks }} tracked
  * @param {number} base @param {number} length  the buffer's
  * @param {number} from @param {number} to  within it
  * @returns {number[]}  start and end (exclusive) of each span, flat, in the buffer
@@ -171,40 +306,34 @@ export function writtenSpans(tracked, base, length, from, to){
     {
         return [];
     }
+    const dirty = tracked.dirty;
     for (const page of tracked.watch.take(base + from, to - from))
     {
-        tracked.dirty.add(page);
+        dirty.add(page);
     }
     /** @type {number[]} */
     const spans = [];
-    if (tracked.dirty.size === 0)
+    if (dirty.size === 0)
     {
         return spans;
     }
     const last = (base + to - 1) >>> 12;
-    for (let page = (base + from) >>> 12; page <= last; page++)
+    for (let page = dirty.find((base + from) >>> 12, last, true); page >= 0;)
     {
-        if (!tracked.dirty.has(page))
+        const clear = dirty.find(page, last, false);
+        const end = clear < 0 ? last : clear - 1;
+        const low = Math.max(from, page * 4096 - base);
+        const high = Math.min(to, (end + 1) * 4096 - base);
+        spans.push(low, high);
+        // Only its first and last pages can be held in part: those stay
+        // marked, and the rest are sent.
+        const sentFrom = holdsPage(base, length, page, low, high) ? page : page + 1;
+        const sentTo = holdsPage(base, length, end, low, high) ? end : end - 1;
+        if (sentFrom <= sentTo)
         {
-            continue;
+            dirty.take(sentFrom, sentTo);
         }
-        let end = page;
-        while (end < last && tracked.dirty.has(end + 1))
-        {
-            end++;
-        }
-        const lo = Math.max(from, page * 4096 - base);
-        const hi = Math.min(to, (end + 1) * 4096 - base);
-        spans.push(lo, hi);
-        for (let done = page; done <= end; done++)
-        {
-            if (Math.max(0, done * 4096 - base) >= lo
-                && Math.min(length, (done + 1) * 4096 - base) <= hi)
-            {
-                tracked.dirty.delete(done);
-            }
-        }
-        page = end;
+        page = end < last ? dirty.find(end + 1, last, true) : -1;
     }
     return spans;
 }

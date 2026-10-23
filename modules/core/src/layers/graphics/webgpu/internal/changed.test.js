@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { changedSpans, createCompared } from './changed.js';
+import { PageMarks, changedSpans, createCompared, pageMarksOf, writtenSpans } from './changed.js';
 
 /**
  * The same answer byte by byte: every changed byte is in a span, and a span
@@ -159,4 +159,194 @@ test('a block changed inside a span ends the span at its last change, not at the
         now[0] = 1;
         now[36] = 1;
         assert.deepEqual(changedSpans(now, was, 64), [0, 40]);
+    });
+
+/** A seeded generator of integers below `n`. @param {number} seed */
+const seededBelow = seed=>{
+    let state = seed >>> 0;
+    return (/** @type {number} */ n)=>{
+        state = (Math.imul(state, 1103515245) + 12345) >>> 0;
+        return (state >>> 8) % n;
+    };
+};
+
+test('page marks answer every question a set of the same pages does, over seeded steps', ()=>{
+    for (let seed = 1; seed <= 30; seed++)
+    {
+        const below = seededBelow(seed);
+        const first = 100 + below(5000);
+        const count = 1 + below(300);
+        const all = below(2) === 0;
+        const marks = new PageMarks(first, count, all);
+        const other = new PageMarks(first, count);
+        /** @type {Set<number>} */
+        const set = new Set(all ? Array.from({ length: count }, (_, at)=>first + at) : []);
+        /** @type {Set<number>} */
+        const otherSet = new Set();
+        for (let step = 0; step < 300; step++)
+        {
+            const from = first - 3 + below(count + 6);
+            const last = from + below(80) - 10;
+            const kind = below(5);
+            if (kind === 0)
+            {
+                marks.add(from);
+                if (from >= first && from < first + count)
+                {
+                    set.add(from);
+                }
+            }
+            else if (kind === 1)
+            {
+                const into = below(2) === 0;
+                marks.take(from, last, into ? other : undefined);
+                for (let page = from; page <= last; page++)
+                {
+                    if (set.delete(page) && into)
+                    {
+                        otherSet.add(page);
+                    }
+                }
+            }
+            else
+            {
+                const want = kind === 2;
+                let expected = -1;
+                for (let page = Math.max(from, first); page <= Math.min(last, first + count - 1);
+                    page++)
+                {
+                    if (set.has(page) === want)
+                    {
+                        expected = page;
+                        break;
+                    }
+                }
+                assert.equal(marks.find(from, last, want), expected,
+                    `seed ${seed} step ${step}: the first ${want ? 'marked' : 'clear'} page`
+                    + ` in [${from}, ${last}]`);
+            }
+            assert.equal(marks.size, set.size, `seed ${seed} step ${step}: size`);
+            assert.equal(other.size, otherSet.size, `seed ${seed} step ${step}: size moved into`);
+            assert.equal(marks.has(from), set.has(from));
+        }
+    }
+});
+
+/**
+ * `writtenSpans` as it was with a set of pages, asking it of every page in
+ * the range: the reference the page marks are held to.
+ *
+ * @param {{ watch: { take: (address: number, length: number) => number[] },
+ *     dirty: Set<number> }} tracked
+ * @param {number} base @param {number} length @param {number} from @param {number} to
+ */
+const spansAskingEachPage = (tracked, base, length, from, to)=>{
+    if (to <= from)
+    {
+        return [];
+    }
+    for (const page of tracked.watch.take(base + from, to - from))
+    {
+        tracked.dirty.add(page);
+    }
+    /** @type {number[]} */
+    const spans = [];
+    if (tracked.dirty.size === 0)
+    {
+        return spans;
+    }
+    const last = (base + to - 1) >>> 12;
+    for (let page = (base + from) >>> 12; page <= last; page++)
+    {
+        if (!tracked.dirty.has(page))
+        {
+            continue;
+        }
+        let end = page;
+        while (end < last && tracked.dirty.has(end + 1))
+        {
+            end++;
+        }
+        const lo = Math.max(from, page * 4096 - base);
+        const hi = Math.min(to, (end + 1) * 4096 - base);
+        spans.push(lo, hi);
+        for (let done = page; done <= end; done++)
+        {
+            if (Math.max(0, done * 4096 - base) >= lo
+                && Math.min(length, (done + 1) * 4096 - base) <= hi)
+            {
+                tracked.dirty.delete(done);
+            }
+        }
+        page = end;
+    }
+    return spans;
+};
+
+/**
+ * A write watch over a buffer's pages fed the same writes as another: what
+ * each take answers is the pages written since that watch last took them.
+ *
+ * @param {number} base @param {number} length
+ */
+const pagesWatch = (base, length)=>{
+    /** @type {Set<number>} */
+    const written = new Set();
+    return {
+        /** @param {number} page */
+        write: page=>written.add(page),
+        watch: {
+            /** @param {number} address @param {number} bytes */
+            take(address, bytes){
+                const pages = [];
+                const last = Math.min((address + bytes - 1) >>> 12, (base + length - 1) >>> 12);
+                for (let page = address >>> 12; page <= last; page++)
+                {
+                    if (written.delete(page))
+                    {
+                        pages.push(page);
+                    }
+                }
+                return pages;
+            },
+        },
+    };
+};
+
+test('written spans with page marks are those of a set asked page by page, over seeded draws',
+    ()=>{
+        for (let seed = 1; seed <= 60; seed++)
+        {
+            const below = seededBelow(seed);
+            // A buffer off a page boundary or on one, of a few pages to a few hundred.
+            const base = 0x400000 + below(64) * 4096 + (below(2) === 0 ? 0 : below(4096));
+            const length = 1 + below(below(2) === 0 ? 3 << 12 : 600 << 12);
+            const firstPage = base >>> 12;
+            const pageCount = ((base + length - 1) >>> 12) - firstPage + 1;
+            const dynamic = below(2) === 0;
+            const one = pagesWatch(base, length);
+            const two = pagesWatch(base, length);
+            const marked = { watch: one.watch, dirty: pageMarksOf(base, length, !dynamic) };
+            const asked = { watch: two.watch, dirty: new Set(dynamic ? []
+                : Array.from({ length: pageCount }, (_, at)=>firstPage + at)) };
+            for (let step = 0; step < 200; step++)
+            {
+                for (let writes = below(4); writes > 0; writes--)
+                {
+                    const page = firstPage + below(pageCount);
+                    one.write(page);
+                    two.write(page);
+                }
+                const from = below(length);
+                const to = Math.min(length, from + 1 + below(below(3) === 0 ? length : 20000));
+                assert.deepEqual(writtenSpans(marked, base, length, from, to),
+                    spansAskingEachPage(asked, base, length, from, to),
+                    `seed ${seed} step ${step}: [${from}, ${to}) of ${length} at ${base}`);
+                assert.equal(marked.dirty.size, asked.dirty.size);
+            }
+            for (let page = firstPage; page < firstPage + pageCount; page++)
+            {
+                assert.equal(marked.dirty.has(page), asked.dirty.has(page));
+            }
+        }
     });

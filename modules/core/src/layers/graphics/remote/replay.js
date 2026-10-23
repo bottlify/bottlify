@@ -24,7 +24,8 @@
  */
 
 import { OP, SECTION, SERVICE_REF, WAIT, createReader, createSite } from './wire.js';
-import { changedSpans, createCompared, writtenSpans } from '../webgpu/internal/changed.js';
+import { changedSpans, createCompared, pageMarksOf, writtenSpans }
+    from '../webgpu/internal/changed.js';
 import { createDrawCheck } from './draw-check.js';
 
 /**
@@ -124,7 +125,7 @@ function partOf(args){
  *
  * @typedef {{ base: number, length: number, bytes: Uint8Array | null,
  *     watch: { take: (address: number, length: number) => number[] } | null,
- *     dirty: Set<number> }} Sent
+ *     dirty: import('../webgpu/internal/changed.js').PageMarks }} Sent
  */
 
 /**
@@ -1061,7 +1062,7 @@ export function createRecording(options){
             if (watch)
             {
                 sentOf.set(storageOf(target), { base, length, bytes: null, watch,
-                    dirty: new Set() });
+                    dirty: pageMarksOf(base, length) });
             }
         }
         return ranges.flatMap(range=>rangeFrom(range));
@@ -2046,7 +2047,7 @@ export function createRecording(options){
                 const bytes = readMemory(base, buffer.length);
                 // Kept only to compare against where there is no watch to say.
                 sentOf.set(key, { base, length: buffer.length, bytes: watch ? null : bytes,
-                    watch, dirty: new Set() });
+                    watch, dirty: pageMarksOf(base, buffer.length) });
                 compared.take(key, 0, buffer.length);
                 (drawn ??= []).push({ address: base, bytes });
                 const now = checking();
@@ -2457,13 +2458,31 @@ export function createMirror(){
     /** @type {Map<number, Uint8Array>} */
     const pages = new Map();
     /**
-     * Each 4 KiB page's last write, numbered; a watch keeps the number it last
-     * saw of each.
-     *
-     * @type {Map<number, number>}
+     * Each 4 KiB page's last write, numbered from 1, and each 64 KiB page's
+     * latest of its pages': a watch looks at a 64 KiB page's own only when
+     * that has moved since it last looked at all of them. A draw reaches
+     * hundreds of a buffer's pages, nearly always none of them written since
+     * the draw before. Grown to the highest page written.
      */
-    const stamps = new Map();
+    let stamps = new Uint32Array(0);
+    let largeStamps = new Uint32Array(0);
     let stamp = 0;
+    /** @param {number} last  the highest page a write reaches */
+    const stampsTo = last=>{
+        if (last < stamps.length)
+        {
+            return;
+        }
+        // Whole 64 KiB pages, so each 4 KiB page has a stamp for its 64 KiB one.
+        const length = Math.min(1 << 20,
+            (Math.max(last + 1, stamps.length * 2, 1 << 12) + 15) & ~15);
+        const grown = new Uint32Array(length);
+        grown.set(stamps);
+        stamps = grown;
+        const large = new Uint32Array(length >>> 4);
+        large.set(largeStamps);
+        largeStamps = large;
+    };
     /** @param {number} page */
     const pageOf = page=>{
         let bytes = pages.get(page);
@@ -2477,14 +2496,14 @@ export function createMirror(){
     return {
         /** @param {number} address @param {Uint8Array} bytes */
         write(address, bytes){
-            if (bytes.length > 0)
+            const first = address >>> 12;
+            const last = (address + bytes.length - 1) >>> 12;
+            if (bytes.length > 0 && last >= first)
             {
                 stamp++;
-                const last = (address + bytes.length - 1) >>> 12;
-                for (let page = address >>> 12; page <= last; page++)
-                {
-                    stamps.set(page, stamp);
-                }
+                stampsTo(last);
+                stamps.fill(stamp, first, last + 1);
+                largeStamps.fill(stamp, first >>> 4, (last >>> 4) + 1);
             }
             let done = 0;
             while (done < bytes.length)
@@ -2505,22 +2524,50 @@ export function createMirror(){
          * @returns {{ take: (from: number, bytes: number) => number[] }}
          */
         watch(address, length){
-            /** @type {Map<number, number>} */
-            const seen = new Map();
             const first = address >>> 12;
             const end = (address + Math.max(length, 1) - 1) >>> 12;
+            /** The stamp of each page of the range when this watch last took it. */
+            const seen = new Uint32Array(end - first + 1);
+            /**
+             * Each 64 KiB page's stamp when this watch last looked at all of
+             * its pages in the range: one whose stamp still says that has
+             * nothing new.
+             */
+            const looked = new Uint32Array((end >>> 4) - (first >>> 4) + 1);
             return {
                 take(from, bytes){
                     /** @type {number[]} */
                     const taken = [];
-                    const last = Math.min(end, (from + Math.max(bytes, 1) - 1) >>> 12);
-                    for (let page = Math.max(first, from >>> 12); page <= last; page++)
+                    const low = Math.max(first, from >>> 12);
+                    // Nothing was ever written past the stamps' end.
+                    const high = Math.min(end, (from + Math.max(bytes, 1) - 1) >>> 12,
+                        stamps.length - 1);
+                    if (high < low)
                     {
-                        const at = stamps.get(page);
-                        if (at !== undefined && at !== seen.get(page))
+                        return taken;
+                    }
+                    for (let large = low >>> 4; large <= high >>> 4; large++)
+                    {
+                        const now = largeStamps[large];
+                        if (now === looked[large - (first >>> 4)])
                         {
-                            seen.set(page, at);
-                            taken.push(page);
+                            continue;
+                        }
+                        const lowHere = Math.max(low, large << 4);
+                        const highHere = Math.min(high, (large << 4) + 15);
+                        for (let page = lowHere; page <= highHere; page++)
+                        {
+                            const at = stamps[page];
+                            if (at !== 0 && at !== seen[page - first])
+                            {
+                                seen[page - first] = at;
+                                taken.push(page);
+                            }
+                        }
+                        if (lowHere === Math.max(first, large << 4)
+                            && highHere === Math.min(end, (large << 4) + 15))
+                        {
+                            looked[large - (first >>> 4)] = now;
                         }
                     }
                     return taken;
