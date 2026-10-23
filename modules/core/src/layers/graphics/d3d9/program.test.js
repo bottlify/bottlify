@@ -17,7 +17,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { D3DFMT, D3DPOOL, D3DSWAPEFFECT, D3D_OK, floatToDword } from './constants.js';
+import {
+    D3DFMT, D3DPOOL, D3DRS as D3DRS9, D3DSWAPEFFECT, D3D_OK, floatToDword,
+} from './constants.js';
+import { D3DSAMP } from './samplerstates.js';
 import { D3DFMT_INDEX, D3DPT, D3DRS, D3DTS, D3DTSS } from '../d3d8/constants.js';
 import { createDirect3D9 } from './device.js';
 import { D3DDECLTYPE, D3DDECLUSAGE } from './declaration.js';
@@ -652,6 +655,53 @@ test('a programmable draw is not blind to the dump: shaders, declaration and sam
     // read the same otherwise.
     assert.doesNotMatch(dump[0], /#0:placeholder/);
     assert.match(dump[0], /\[#0:t\d+:/);
+
+    h.device.SetTexture(0, null);
+    h.device.SetVertexShader(null);
+    h.device.SetPixelShader(null);
+    h.device.SetVertexDeclaration(null);
+    h.device.SetStreamSource(0, null, 0, 0);
+    vs.shader.release();
+    ps.shader.release();
+    h.texture.release();
+    h.declaration.release();
+    h.vb.release();
+    assert.equal(h.device.release(), 0);
+});
+
+test('a dump line names the sRGB states a draw was asked to read and write with', async()=>{
+    // Nothing here decodes or encodes sRGB, so a program that sets the
+    // states without asking CheckDeviceFormat first draws in the wrong
+    // space; whether it did is a question about one frame, answered by its
+    // dump.
+    const h = harness({ dumpDraws: true });
+    /** @type {{ shader?: any }} */
+    const vs = {};
+    /** @type {{ shader?: any }} */
+    const ps = {};
+    assert.equal(h.device.CreateVertexShader(VERTEX_SHADER, vs), D3D_OK);
+    assert.equal(h.device.CreatePixelShader(PIXEL_SHADER, ps), D3D_OK);
+    h.device.SetVertexShader(vs.shader);
+    h.device.SetPixelShader(ps.shader);
+    h.device.SetTexture(0, h.texture);
+
+    await h.draw();
+    assert.doesNotMatch(h.device.diagnostics().lastDump[0], / srgb=/,
+        'a draw with neither state says nothing of them');
+
+    assert.equal(h.device.SetSamplerState(0, D3DSAMP.SRGBTEXTURE, 1), D3D_OK);
+    await h.draw();
+    assert.match(h.device.diagnostics().lastDump[0], / cw=\d+ srgb=0 /);
+
+    assert.equal(h.device.SetRenderState(D3DRS9.SRGBWRITEENABLE, 1), D3D_OK);
+    await h.draw();
+    assert.match(h.device.diagnostics().lastDump[0], / cw=\d+ srgb=w0 /);
+
+    assert.equal(h.device.SetSamplerState(0, D3DSAMP.SRGBTEXTURE, 0), D3D_OK);
+    await h.draw();
+    assert.match(h.device.diagnostics().lastDump[0], / cw=\d+ srgb=w /,
+        'a target written as sRGB with no stage read so');
+    assert.deepEqual(h.reports, []);
 
     h.device.SetTexture(0, null);
     h.device.SetVertexShader(null);

@@ -53,7 +53,9 @@ import {
     FOG_RANGE_LOCATION, HYBRID_CONSTANTS, VERTEX_SAMPLER_BINDING, fixedVertexStage, translateShader,
     varyingLocation,
 } from '../d3d9/wgsl.js';
-import { D3DTSS9, D3DVERTEXTEXTURESAMPLER0 } from '../d3d9/samplerstates.js';
+import {
+    D3DSAMP, D3DTSS9, D3DVERTEXTEXTURESAMPLER0, SAMPLER_COUNT, SAMPLER_STATE_KEY,
+} from '../d3d9/samplerstates.js';
 import { D3DDECLUSAGE, MAX_STREAMS } from '../d3d9/declaration.js';
 import { OPCODE, REGISTER, SHADER_KIND } from '../d3d9/shader.js';
 import { decodeS3tc } from '../webgpu/internal/s3tc.js';
@@ -1983,6 +1985,48 @@ const stageTransforms = model=>{
  * @returns {number}
  */
 const lodOf = texture=>texture?.GetLOD?.() ?? 0;
+
+/** Where D3DSAMP_SRGBTEXTURE lives in a stage's states (`SAMPLER_STATE_KEY`). */
+const SRGB_TEXTURE = SAMPLER_STATE_KEY[D3DSAMP.SRGBTEXTURE];
+
+/**
+ * Whether a stage samples its texture as sRGB (Direct3D 9's
+ * D3DSAMP_SRGBTEXTURE; 8 has no such state): texels decoded to linear before
+ * the shader sees them.
+ *
+ * @param {RenderModel} model @param {number} stage
+ */
+const readsSrgb = (model, stage)=>(model.stageStates(stage)?.get(SRGB_TEXTURE) ?? 0) !== 0;
+
+/**
+ * Whether the target is written as sRGB (D3DRS_SRGBWRITEENABLE): what a draw
+ * outputs encoded on the way into a target whose format has an sRGB form.
+ *
+ * @param {RenderModel} model
+ */
+const writesSrgb = model=>(model.renderStates.get(D3DRS9.SRGBWRITEENABLE) ?? 0) !== 0;
+
+/**
+ * A draw's sRGB states as a dump writes them: `w` for a target written as
+ * sRGB, then each stage sampled as sRGB; nothing when neither. What the
+ * program asked, not what was done: every texel here is read and written as
+ * stored, and CheckDeviceFormat says so, so only a program that sets the
+ * states without asking draws with this note, and draws in the wrong space.
+ *
+ * @param {RenderModel} model
+ */
+const srgbNoteOf = model=>{
+    const stages = [];
+    for (let stage = 0; stage < SAMPLER_COUNT; stage++)
+    {
+        if (readsSrgb(model, stage))
+        {
+            stages.push(stage);
+        }
+    }
+    const write = writesSrgb(model);
+    return write || stages.length > 0 ? ` srgb=${write ? 'w' : ''}${stages.join(',')}` : '';
+};
 
 /** @param {RenderModel} model @param {boolean} mips */
 const stageFlags = (model, mips)=>{
@@ -4037,7 +4081,7 @@ export function createRenderer(options){
             // Which channels the draw may write, and the stencil states in
             // force: a draw that writes no colour is one made for the
             // stencil, and one drawn under a stencil test is what reads it.
-            + ` cw=${state.colorWrite}`
+            + ` cw=${state.colorWrite}${srgbNoteOf(model)}`
             + (model.renderStates.get(52) ? ` stencil=${[53, 54, 55, 56, 57, 58, 59]
                 .map(index=>((model.renderStates.get(index) ?? 0) >>> 0).toString(16))
                 .join('/')}` : '')
@@ -4132,7 +4176,7 @@ export function createRenderer(options){
             // Blending, the alpha test and the colour mask run after any
             // shader, and without a pixel shader so does the stage cascade:
             // a quad drawn under them can paint nothing at all.
-            + ` cw=${state.colorWrite}`
+            + ` cw=${state.colorWrite}${srgbNoteOf(model)}`
             + ` blend=${state.blend ? `${state.srcBlend},${state.destBlend}`
                 + `${state.blendOp && state.blendOp !== 1 ? `/op${state.blendOp}` : ''}` : '-'}`
             + ` aTest=${state.alphaTest
