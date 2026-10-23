@@ -423,14 +423,15 @@ function buildSectionHandoffExe(){
  * pseudo-handles, and the host's GetCurrentThreadId the block's id and, in a
  * second thread, the id CreateThread answered; lstrlen and lstrcpy in both
  * widths, a null pointer 0 in the guest and one the guest cannot read (0x100)
- * 0 from the host, and a copy compared by the host's lstrcmpA.
+ * 0 from the host, a copy compared by the host's lstrcmpA, and a pointer that
+ * EncodePointer and DecodePointer give back as it is.
  */
 function buildSimpleCallsExe(){
     return buildExe({
         imports: { 'KERNEL32.dll': ['GetProcessHeap', 'HeapAlloc', 'GetVersion',
             'GetCurrentProcess', 'GetCurrentThread', 'GetCurrentThreadId', 'lstrlenA',
             'lstrlenW', 'lstrcpyA', 'lstrcpyW', 'lstrcmpA', 'CreateThread', 'ExitThread',
-            'WaitForSingleObject', 'ExitProcess'] },
+            'WaitForSingleObject', 'EncodePointer', 'DecodePointer', 'ExitProcess'] },
         data: { text: [...'hello', '\0'].map(c=>c.charCodeAt(0)),
             wide: [...'h\u00e9llo', '\0']
                 .flatMap(c=>[c.charCodeAt(0) & 0xff, c.charCodeAt(0) >>> 8]),
@@ -479,6 +480,8 @@ function buildSimpleCallsExe(){
                 [0xa1, ...u32(context.at('seen'))], [0x3b, 0x05, ...u32(context.at('id'))],
                 { jump: JNE, to: 'fail' },
                 [0x3b, 0x05, ...u32(context.at('main'))], { jump: JE, to: 'fail' },
+                check(11), pushValue(0x12345678), call('EncodePointer'), ...expect(0x12345678),
+                pushValue(0x12345678), call('DecodePointer'), ...expect(0x12345678),
                 exit(),
                 ...fail(),
             ]);
@@ -564,7 +567,8 @@ test(`the calls a few instructions long answer in the guest as the host does`,
         assert.equal(code, 0, 'the number of the first check that failed');
         const crossed = Object.fromEntries(hot);
         for (const name of ['GetProcessHeap', 'GetVersion', 'GetCurrentProcess',
-            'GetCurrentThread', 'lstrlenW', 'lstrcpyA', 'lstrcpyW'])
+            'GetCurrentThread', 'lstrlenW', 'lstrcpyA', 'lstrcpyW', 'EncodePointer',
+            'DecodePointer'])
         {
             assert.equal(crossed[`KERNEL32.dll!${name}`], undefined, `${name} crossed`);
         }

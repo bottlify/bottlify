@@ -75,6 +75,9 @@ const CSD_VERSION = 20;
 /** The pseudo-handle GetCurrentProcess returns; it is -1 on every Windows. */
 const CURRENT_PROCESS = 0xffffffff;
 
+/** EncodePointer and DecodePointer's guest code: `mov eax, [esp+4]; ret 4`. */
+const POINTER_AS_IS = [0x8b, 0x44, 0x24, 0x04, 0xc2, 0x04, 0x00];
+
 /**
  * Ticks per second for the performance counter unless `config.json` says another: a
  * gigahertz, a tick a nanosecond. Every answer is later than the last by a tick at least, so the
@@ -1624,17 +1627,21 @@ export function createProcessFunctions(host){
          *
          * They are here because a runtime asks for them by name and calls what
          * it is given. Answering nothing sends it down a fallback path, and one
-         * measured run asked twenty-six times.
+         * measured run asked twenty-six times; Call of Duty 4's runtime asks
+         * for its function pointers through DecodePointer 37 000 times a
+         * run, so the identity is guest code, with no crossing.
          */
         EncodePointer: {
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pointer])=>pointer >>> 0,
+            code: ()=>Uint8Array.from(POINTER_AS_IS),
         },
         DecodePointer: {
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pointer])=>pointer >>> 0,
+            code: ()=>Uint8Array.from(POINTER_AS_IS),
         },
         /** The same pair, under the names a runtime built for a system DLL uses. */
         EncodeSystemPointer: {
