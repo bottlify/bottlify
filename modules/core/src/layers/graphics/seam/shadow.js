@@ -671,6 +671,22 @@ const D3DLOCK_DISCARD = 0x2000;
  */
 export const LOCK_IN_PLACE = 0x80000000;
 
+/**
+ * The flags the host replays a buffer block's locks with: what the routines
+ * or-ed in since it last looked, less `LOCK_IN_PLACE`, and with a DISCARD
+ * among them the DISCARD alone. One lock with both DISCARD and NOOVERWRITE
+ * is a NOOVERWRITE (Wine's `wined3d_resource_sanitise_map_flags`), which
+ * renames nothing; or-ed, the two are a DISCARD taken in place and the
+ * NOOVERWRITE locks after it, and the replay has to rename as the DISCARD
+ * did, or a ring started over is written into the copy the frames still
+ * queued for the GPU draw from. A rename keeps what the copy held, so a
+ * program's own lock with both flags loses nothing by it.
+ *
+ * @param {number} flags  a block's LOCK_FLAGS
+ */
+export const replayedFlags = flags=>((flags & D3DLOCK_DISCARD) !== 0
+    ? flags & ~(LOCK_IN_PLACE | D3DLOCK_NOOVERWRITE) : flags & ~LOCK_IN_PLACE);
+
 /** D3DTS_WORLD is 256 and WORLD1..3 follow it; they take the slots after TEXTURE7. */
 const WORLD_TYPE = 256;
 const WORLD_SLOT = 24;
@@ -4091,7 +4107,7 @@ export function createShadow(deps){
                 entry.hostLocked = false;
             }
             if (entry.buffer.Lock(from, to - from, {},
-                words[BUFFER.LOCK_FLAGS / 4] & ~LOCK_IN_PLACE) === 0)
+                replayedFlags(words[BUFFER.LOCK_FLAGS / 4])) === 0)
             {
                 entry.hostLocked = true;
                 if (locked)
@@ -4254,7 +4270,7 @@ export function createShadow(deps){
             return true;
         }
         heldReplays.replayed++;
-        if (entry.buffer.Lock(from, to - from, {}, flags & ~LOCK_IN_PLACE) === 0)
+        if (entry.buffer.Lock(from, to - from, {}, replayedFlags(flags)) === 0)
         {
             entry.buffer.Unlock();
             markLent(block);

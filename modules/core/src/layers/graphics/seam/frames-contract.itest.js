@@ -230,7 +230,7 @@ const callsOf = version=>{
  * @param {any} gpu  a recording GPU (`createFakeDevice`)
  * @returns {string[]}
  */
-function gpuReads(gpu){
+export function gpuReads(gpu){
     /** @type {string[]} */
     const reads = [];
     /** @type {Map<any, any>} */
@@ -459,7 +459,7 @@ function gpuReads(gpu){
  *
  * @param {any} gpu
  */
-async function idle(gpu){
+export async function idle(gpu){
     let quiet = 0;
     let seen = -1;
     while (quiet < 4)

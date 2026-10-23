@@ -4873,6 +4873,72 @@ export function createRenderer(options){
     let pausing = false;
 
     /**
+     * What a draw reaches of a buffer the device holds no lock on: a dynamic
+     * buffer's memory stays the buffer's after the unlock, as a driver's
+     * does, and a program may go on writing there: a game that skins its
+     * models into one after unlocking it drew every model in the pose of the
+     * frame before. What the guest's memory holds now against what was sent:
+     * a difference is sent. Four bytes at a time, and only the spans that
+     * differ are taken: it runs for every draw from such a buffer. They wait
+     * in the buffer's copy for the frame's end, which uploads every buffer
+     * written once, before the frame's draws are submitted: a write to the
+     * queue at each draw was a trip to the GPU a model, and ordered nothing
+     * the one at the end does not.
+     *
+     * @param {any} source  the guest's buffer @param {any} gpu  its backend buffer
+     * @param {number} from @param {number} to  the bytes the draw reaches
+     */
+    const readLoose = (source, gpu, from, to)=>{
+        if (((source.usage ?? 0) & D3DUSAGE_DYNAMIC) === 0 && options.rereadBuffers !== true)
+        {
+            return;
+        }
+        const tracked = writtenOf(source, gpu);
+        if (tracked)
+        {
+            if (tracked.stale.size > 0)
+            {
+                tracked.stale.take((source.base + from) >>> 12, (source.base + to - 1) >>> 12,
+                    tracked.dirty);
+            }
+            const spans = writtenSpans(tracked, source.base, source.length, from, to);
+            if (spans.length > 0)
+            {
+                const stale = counters.shapes.staleDraws;
+                stale[source.length] = (stale[source.length] ?? 0) + 1;
+                frameStats.heldDraws++;
+            }
+            for (let index = 0; index < spans.length; index += 2)
+            {
+                gpu.rewrite(spans[index], windowMemory(source.base + spans[index],
+                    spans[index + 1] - spans[index]));
+            }
+            return;
+        }
+        // In a run of the command ring a range is compared once, however
+        // many draws read it: the program does not run in between.
+        const open = pausing ? compared.take(source, from, to) : [from, to];
+        for (let part = 0; part < open.length; part += 2)
+        {
+            const start = open[part];
+            const length = open[part + 1] - start;
+            const now = windowMemory(source.base + start, length);
+            const spans = changedSpans(now, gpu.bytes(start, length));
+            if (spans.length > 0)
+            {
+                const stale = counters.shapes.staleDraws;
+                stale[source.length] = (stale[source.length] ?? 0) + 1;
+                frameStats.heldDraws++;
+                for (let index = 0; index < spans.length; index += 2)
+                {
+                    gpu.rewrite(start + spans[index],
+                        now.subarray(spans[index], spans[index + 1]));
+                }
+            }
+        }
+    };
+
+    /**
      * A draw from a buffer the program still holds locked reads what the
      * program has written there so far: the locked part of what it reaches is
      * read from guest memory now and sent before the draw, where it would
@@ -4883,83 +4949,39 @@ export function createRenderer(options){
      * on that: drawn from the bytes of the unlock before, every model it drew
      * stood in the pose of the frame before.
      *
+     * What it reaches past the lock is read as from a buffer held by no lock:
+     * after a move onto another storage those pages reach the GPU only with
+     * a draw (`writtenOf`), and a lock the host holds for the guest's -- a
+     * ring's next batches written in the guest while the draws of the last
+     * ones are made -- left a draw of them reading the copy's bytes from
+     * before the move.
+     *
      * @param {any} source  the guest's buffer @param {any} gpu  its backend buffer
      * @param {number} from @param {number} to  the bytes the draw reaches
      */
     const readHeld = (source, gpu, from, to)=>{
+        if (typeof source?.base !== 'number' || to <= from)
+        {
+            return;
+        }
         const held = buffers.get(source)?.held;
-        const dynamic = ((source?.usage ?? 0) & D3DUSAGE_DYNAMIC) !== 0;
-        if (!held && (dynamic || options.rereadBuffers === true)
-            && typeof source?.base === 'number' && to > from)
-        {
-            // A dynamic buffer's memory stays the buffer's after the unlock,
-            // as a driver's does, and a program may go on writing there: a
-            // game that skins its models into one after unlocking it drew
-            // every model in the pose of the frame before. What the guest's
-            // memory holds now against what was sent: a difference is sent.
-            // Four bytes at a time, and only the spans that differ are taken:
-            // it runs for every draw from such a buffer. They wait in the
-            // buffer's copy for the frame's end, which uploads every buffer
-            // written once, before the frame's draws are submitted: a write
-            // to the queue at each draw was a trip to the GPU a model, and
-            // ordered nothing the one at the end does not.
-            const tracked = writtenOf(source, gpu);
-            if (tracked)
-            {
-                if (tracked.stale.size > 0)
-                {
-                    tracked.stale.take((source.base + from) >>> 12, (source.base + to - 1) >>> 12,
-                        tracked.dirty);
-                }
-                const spans = writtenSpans(tracked, source.base, source.length, from, to);
-                if (spans.length > 0)
-                {
-                    const stale = counters.shapes.staleDraws;
-                    stale[source.length] = (stale[source.length] ?? 0) + 1;
-                    frameStats.heldDraws++;
-                }
-                for (let index = 0; index < spans.length; index += 2)
-                {
-                    gpu.rewrite(spans[index], windowMemory(source.base + spans[index],
-                        spans[index + 1] - spans[index]));
-                }
-                return;
-            }
-            // In a run of the command ring a range is compared once, however
-            // many draws read it: the program does not run in between.
-            const open = pausing ? compared.take(source, from, to) : [from, to];
-            for (let part = 0; part < open.length; part += 2)
-            {
-                const start = open[part];
-                const length = open[part + 1] - start;
-                const now = windowMemory(source.base + start, length);
-                const spans = changedSpans(now, gpu.bytes(start, length));
-                if (spans.length > 0)
-                {
-                    const stale = counters.shapes.staleDraws;
-                    stale[source.length] = (stale[source.length] ?? 0) + 1;
-                    frameStats.heldDraws++;
-                    for (let index = 0; index < spans.length; index += 2)
-                    {
-                        gpu.rewrite(start + spans[index],
-                            now.subarray(spans[index], spans[index + 1]));
-                    }
-                }
-            }
-            return;
-        }
-        if (!held || typeof source?.base !== 'number')
-        {
-            return;
-        }
-        const start = Math.max(from, held.offset);
-        const end = Math.min(to, held.offset + held.length);
+        const start = held ? Math.max(from, held.offset) : to;
+        const end = held ? Math.min(to, held.offset + held.length) : to;
         if (end <= start)
         {
+            readLoose(source, gpu, from, to);
             return;
+        }
+        if (from < start)
+        {
+            readLoose(source, gpu, from, start);
         }
         // Uploaded at the frame's end with the rest, as above.
         gpu.rewrite(start, windowMemory(source.base + start, end - start));
+        if (end < to)
+        {
+            readLoose(source, gpu, end, to);
+        }
     };
 
     /**
