@@ -3340,6 +3340,48 @@ test('with callReturn a call out of a region returns into it as a wasm call: the
     }
 });
 
+test('with callReturn a call stores what some way to it wrote since the state block last held it:'
+    + ' a register written on one path, across the back edge, before a call to an empty function',
+async()=>{
+    // mov ecx, 300; xor edx, edx; L: test cl, 1; jz S; add esi, 3; S: cmp ecx, 100; call F;
+    // call G; inc ebp; add esi, 1; call E; call H; dec ecx; jnz L; hlt;
+    // F: adc edx, ebp; add edi, esi; ret; G: lea edx, [edx + edi*2]; ret; E: ret;
+    // H: xor edx, esi; ret. esi, edi and ebp come in from the state block, so only the
+    // loop's own paths write them: esi on odd turns and before the empty call, ebp on the
+    // back edge, edi in F, which G reads after F's return loaded it back.
+    const program = [
+        0xb9, 0x2c, 0x01, 0, 0, 0x31, 0xd2, 0xf6, 0xc1, 0x01, 0x74, 0x03, 0x83, 0xc6, 0x03,
+        0x83, 0xf9, 0x64, 0xe8, 0x17, 0, 0, 0, 0xe8, 0x17, 0, 0, 0, 0x45, 0x83, 0xc6, 0x01,
+        0xe8, 0x12, 0, 0, 0, 0xe8, 0x0e, 0, 0, 0, 0x49, 0x75, 0xda, 0xf4,
+        0x11, 0xea, 0x01, 0xf7, 0xc3, 0x8d, 0x14, 0x7a, 0xc3, 0xc3, 0x31, 0xf2, 0xc3,
+    ];
+    let [edx, ebp, esi, edi] = [0, 100, 7, 11];
+    for (let ecx = 300; ecx > 0; ecx--)
+    {
+        esi = (ecx & 1) !== 0 ? (esi + 3) >>> 0 : esi;
+        edx = (edx + ebp + (ecx < 100 ? 1 : 0)) >>> 0;
+        edi = (edi + esi) >>> 0;
+        edx = (edx + edi * 2) >>> 0;
+        ebp = (ebp + 1) >>> 0;
+        esi = (esi + 1) >>> 0;
+        edx = (edx ^ esi) >>> 0;
+    }
+    for (const config of [{ callReturn: false }, { callReturn: true },
+        { callReturn: true, emptySites: true }])
+    {
+        const m = machine({ leafCalls: false, ...config });
+        m.write(CODE, program);
+        m.setReg(4, 0x80000);
+        m.setReg(5, 100);
+        m.setReg(6, 7);
+        m.setReg(7, 11);
+        new DataView(m.memory.buffer).setUint32(m.layout.eip, CODE, true);
+        await runToHalt(m);
+        assert.deepEqual([m.reg(2), m.reg(5), m.reg(6), m.reg(7), m.reg(4)],
+            [edx, ebp, esi, edi, 0x80000], JSON.stringify(config));
+    }
+});
+
 test('with callReturn an x87 callee returns the stack as it left it: its top, its empty mask and'
     + ' its registers in their places', async()=>{
     // mov ecx, 1; L: call F; dec ecx; jnz L; hlt; F: fld1; fldz; fxch; ret -- the return

@@ -143,6 +143,14 @@ export const CallStack = Object.freeze({
 });
 
 /**
+ * A guest call a block ends with, made as a wasm call (`callAndReturn`): the
+ * block, the locals it wrote before the call, and whether the call may go on
+ * without the transfer (`emptySites`), the block's writes carried on unstored.
+ *
+ * @typedef {{ block: number, written: Set<number>, empty: boolean }} CallSite
+ */
+
+/**
  * The function table's index a module with `resume` calls the interpreter tier
  * in wasm through (`Runtime.interpretWith`): until the host puts the tier's
  * entry there, a function answering 0, which leaves as a miss always did.
@@ -991,6 +999,20 @@ export class RegionEmitter {
          */
         this.leaving = new Set();
         this.blockIndex = 0;
+        /**
+         * By block, the locals its code writes, every copy of it in this function
+         * together: what a path through it leaves out of step with the state block.
+         * @type {(Set<number> | undefined)[]}
+         */
+        this.blockWrites = [];
+        /**
+         * By block, the guest call it ends with as a wasm call (`callAndReturn`):
+         * the locals the block wrote before the call, and whether the call may go
+         * on past the target without the transfer -- a function that does nothing,
+         * returned from in place -- carrying them on unstored.
+         * @type {Map<number, CallSite>}
+         */
+        this.callSites = new Map();
         /** Whether the current block is a wasm loop onto itself (see `emitBlock`). */
         this.selfLoop = false;
         /**
@@ -1169,9 +1191,10 @@ export class RegionEmitter {
          * written and the locals it uses are known (`fillDeferred`): the
          * integer registers, the x87 ones, or both. `regs`: every register the
          * body names (`all`), only the ones the parameters do not carry
-         * (`uncarried`), or none.
+         * (`uncarried`), or none. `site`: a guest call's stores, which leave out
+         * what the state block already holds (`fillDeferred`).
          * @type {{ at: number, kind: 'load' | 'store', regs: 'all' | 'uncarried' | 'none',
-         *     x87: boolean }[]}
+         *     x87: boolean, site?: CallSite }[]}
          */
         this.deferred = [];
     }
@@ -1561,11 +1584,19 @@ export class RegionEmitter {
     /**
      * What a transfer under cork's layout leaves in the state block for its
      * callee rather than in its parameters: esp to edi as far as written, the
-     * record and the flags word.
+     * record and the flags word. At a guest call (`site`) all three wait for
+     * the whole body (`fillDeferred`): what no path to the call wrote since
+     * the state block last held it is there already.
+     *
+     * @param {CallSite} [site]
      */
-    storeUncarriedState(){
+    storeUncarriedState(site){
         const { b, layout, context } = this;
-        this.deferred.push({ at: b.length, kind: 'store', regs: 'uncarried', x87: false });
+        this.deferred.push({ at: b.length, kind: 'store', regs: 'uncarried', x87: false, site });
+        if (site !== undefined)
+        {
+            return;
+        }
         for (const [i, local] of RECORD_LOCALS.entries())
         {
             atState(context, b).localGet(local).store('i32', { offset: this.flagRecord + i * 4 });
@@ -1604,12 +1635,16 @@ export class RegionEmitter {
 
     /**
      * What lives in the state block alone, a transfer's callee loading it from
-     * there: the vector registers written and the x87 block.
+     * there: the vector registers written and the x87 block. At a guest call
+     * (`site`) the vector registers wait for the whole body, as
+     * `storeUncarriedState`'s do.
+     *
+     * @param {CallSite} [site]
      */
-    storeMemoryState(){
+    storeMemoryState(site){
         const { b, layout } = this;
-        this.deferred.push({ at: b.length, kind: 'store', regs: 'none', x87: true });
-        for (const index of this.xmmWritten)
+        this.deferred.push({ at: b.length, kind: 'store', regs: 'none', x87: true, site });
+        for (const index of site === undefined ? this.xmmWritten : [])
         {
             atState(this.context, b).localGet(this.xmmLocal(index))
                 .storeV128({ offset: layout.xmm + index * 16 });
@@ -1685,11 +1720,19 @@ export class RegionEmitter {
         // the next transfer passes them whether the region names them or not.
         // The others are, as every register is under the emulator's layout.
         const carried = this.flagRecord >= 0 ? CARRIED_REGS : 0;
+        const onEntry = this.deferred.some(one=>one.site !== undefined)
+            ? this.writtenOnEntry() : [];
         /** @type {{ at: number, body: Body }[]} */
         const pieces = [];
-        for (const { at, kind, regs, x87 } of this.deferred.reverse())
+        for (const { at, kind, regs, x87, site } of this.deferred.reverse())
         {
             const b = this.b = new Body();
+            // At a guest call, what the state block holds already stays: only
+            // what some way to the call wrote since it last held it is stored.
+            const stale = site === undefined ? null
+                : new Set([...onEntry[site.block] ?? [], ...site.written]);
+            /** @param {number} local */
+            const due = local=>stale === null || stale.has(local);
             for (let r = 0; r < (regs === 'none' ? 0 : 8); r++)
             {
                 const offset = layout.regs + r * 4;
@@ -1702,7 +1745,8 @@ export class RegionEmitter {
                 {
                     atState(this.context, b).load('i32', { offset }).localSet(Local.reg + r);
                 }
-                if (kind === 'store' && (always || main.writes(Local.reg + r)))
+                if (kind === 'store' && (always || main.writes(Local.reg + r))
+                    && due(Local.reg + r))
                 {
                     atState(this.context, b).localGet(Local.reg + r).store('i32', { offset });
                 }
@@ -1718,10 +1762,92 @@ export class RegionEmitter {
                     x87StoreRegisters(this, k=>main.writes(this.x87.base + k));
                 }
             }
+            if (site !== undefined && x87)
+            {
+                // `storeMemoryState`'s vector registers.
+                for (const index of this.xmmWritten)
+                {
+                    const local = this.xmmLocal(index);
+                    if (due(local))
+                    {
+                        atState(this.context, b).localGet(local)
+                            .storeV128({ offset: layout.xmm + index * 16 });
+                    }
+                }
+            }
+            if (site !== undefined && regs === 'uncarried')
+            {
+                // `storeUncarriedState`'s record and flags word.
+                for (const [i, local] of RECORD_LOCALS.entries())
+                {
+                    if (due(local))
+                    {
+                        atState(this.context, b).localGet(local)
+                            .store('i32', { offset: this.flagRecord + i * 4 });
+                    }
+                }
+                if (due(Local.flags))
+                {
+                    atState(this.context, b).localGet(Local.flags)
+                        .store('i32', { offset: layout.eflags });
+                }
+            }
             pieces.push({ at, body: b });
         }
         main.insertAll(pieces.reverse());
         this.b = main;
+    }
+
+    /**
+     * What each block may start with written and not yet back in the state
+     * block, for a guest call's stores (`fillDeferred`): the union over its
+     * ways in of what each wrote since the state block was last the truth --
+     * the run's start, which loads what the region names, or a wasm call's
+     * return, after which everything is loaded back. A call that leaves the
+     * region starts what follows anew, as an entry does; a call to a function
+     * that does nothing (`emptySites`) goes on with what was written before
+     * it. A block not emitted in this function runs nothing here.
+     *
+     * @returns {Set<number>[]}  by block, the locals
+     */
+    writtenOnEntry(){
+        const blocks = this.region.blocks;
+        /** @type {Set<number>[]} */
+        const into = blocks.map(()=>new Set());
+        const ways = blocks.map(block=>jumpsOf(block, this.returns, this.callReturn, this.labels)
+            .flatMap(target=>{
+                const at = this.labels.get(target);
+                return at === undefined ? [] : [at];
+            }));
+        const work = blocks.map((_, i)=>i);
+        const queued = new Set(work);
+        while (work.length > 0)
+        {
+            const i = /** @type {number} */ (work.pop());
+            queued.delete(i);
+            const written = this.blockWrites[i];
+            const site = this.callSites.get(i);
+            if (written === undefined || (site === undefined
+                ? callsOut(blocks[i], this.labels) : !site.empty))
+            {
+                continue;
+            }
+            const out = new Set([...into[i], ...(site === undefined ? written : site.written)]);
+            for (const j of ways[i])
+            {
+                const before = into[j].size;
+                for (const local of out)
+                {
+                    into[j].add(local);
+                }
+                if (into[j].size !== before && !queued.has(j))
+                {
+                    queued.add(j);
+                    work.push(j);
+                }
+            }
+        }
+        return into;
     }
 
     /**
@@ -2473,6 +2599,9 @@ export class RegionEmitter {
         this.blockRetired = 0;
         this.blockDepth = this.controls.length;
         this.blockIndex = index;
+        // Until the next block starts, what is written is this block's: its
+        // instructions and its ways out.
+        this.b.written = this.blockWrites[index] ??= new Set();
         if (block.instructions.length === 0)
         {
             this.leaving.add(index);

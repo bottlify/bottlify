@@ -190,6 +190,12 @@ export class Body {
         this.touched = new Uint8Array(64);
         /** Where the branches marked unlikely start, in bytes. @type {number[]} */
         this.hints = [];
+        /**
+         * Where the locals written from now on are added too, when given: the
+         * region emitter's account of what each block writes.
+         * @type {Set<number> | null}
+         */
+        this.written = null;
     }
 
     /** Whether the body reads or writes a local. @param {number} index */
@@ -211,6 +217,10 @@ export class Body {
             this.touched = grown;
         }
         this.touched[index] |= how;
+        if (how === 3)
+        {
+            this.written?.add(index);
+        }
     }
 
     /** The next instruction, an `if` or a `br_if`, is a branch rarely taken. */

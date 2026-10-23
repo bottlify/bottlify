@@ -242,8 +242,17 @@ function callAndReturn(e, next, pushTarget, mechanism){
     {
         x87Normalise(e);
     }
-    e.storeMemoryState();
-    e.storeUncarriedState();
+    // What the block wrote so far: the stores wait for the whole body, and a
+    // local no way to this call wrote since the state block last held it is
+    // left out (`fillDeferred`).
+    const call = e.b.written === null ? undefined
+        : { block: e.blockIndex, written: new Set(e.b.written), empty: site };
+    if (call !== undefined)
+    {
+        e.callSites.set(e.blockIndex, call);
+    }
+    e.storeMemoryState(call);
+    e.storeUncarriedState(call);
     b.localGet(Local.eip);
     for (let local = Local.budget; local < STATE_PARAMS; local++)
     {

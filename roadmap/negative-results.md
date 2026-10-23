@@ -1374,3 +1374,60 @@ None yet.
   26.12.1 (V8 14.6.202.34).
 - **Decision.** Not taken: about 1 % of the timedemo's executed instructions for a second
   entry path into nearly every block inside a loop, which needs a gate of its own.
+
+### 2026-10-23 -- a call's register reloads left out where the value lives on in a local
+
+- **Idea.** After a guest `call` returns through a wasm call, the caller reloads every guest
+  register from the state block. A register the caller still holds in a local and the callee
+  cannot have changed (a callee-saved register by the calling convention the call site
+  shows) need not be reloaded: up to 37 machine instructions of the about 115 a call site
+  costs in Crysis's main-thread code.
+- **Workload.** The machine code V8 makes of the Crysis CPU benchmark's main-thread regions,
+  weighed by the timedemo's block profile (`tools/cork-asm.mjs --blocks --classes`, a node
+  stand's profile from 350 s on, the 400 heaviest blocks: 15.79 G guest instructions), the
+  macOS arm64 model (`--no-wasm-bounds-checks`), atomic variant, RAM at 0.
+- **Values** (machine instructions an executed guest instruction): base 7.553; reloads left out
+  7.579 (+0.3 %): loads and stores of the state block fell 2.457 -> 2.285, stack spills rose
+  0.284 -> 0.498. A wasm call keeps nothing in registers across it, so a value kept live in a
+  local is spilled and refilled by V8 instead of reloaded from the state block: the same
+  memory traffic, at another address.
+- **Machine.** Counted instructions, not timed: the 4-core KVM VM, qemu-aarch64 8.2.2, node
+  26.12.1 (V8 14.6.202.34).
+- **Decision.** Not taken.
+
+### 2026-10-23 -- the callee's flag record taken back only where code after the call reads a flag
+
+- **Idea.** After a call the caller takes back the callee's lazy flag record (five loads)
+  before going on. Code after a call almost always sets the flags before it reads one, so the
+  record is needed only where the block after the call reads a flag first (`flagsLiveIn`).
+- **Workload.** As the entry above.
+- **Values.** Base 7.553; the record left out and its locals kept stale 7.613 (+0.8 %: V8
+  kept the stale locals live across the call); left out and the locals zeroed 7.538 (-0.2 %).
+- **Machine.** As the entry above.
+- **Decision.** Not taken now: 0.2 % of the executed instructions does not pay for a cache
+  version of its own (every store cold once). The patch waits for a translator change that
+  needs a new cache version anyway.
+
+### 2026-10-23 -- callees formed into their callers one level deeper (`formDepth` 2)
+
+- **Idea.** A small callee formed into its caller may make direct calls of its own; with
+  `formDepth` 1 those leave as wasm calls. Formed one level deeper, a small callee's own small
+  callees join the region too: fewer wasm calls, each about 110 machine instructions at the
+  caller in Crysis's main-thread code.
+- **Workload.** Crysis demo, `benchmark_gpu` (the island flythrough, High, every setting before
+  `+map`), on the node stand (`tools/launch-probe.mjs`, one executor, atomic variant, 2048 MB,
+  a translation store of its own for each arm, 700 s a run): timedemo Run 0, which streams the
+  level, as Game.log gives it. The arms alternated: cold, then two warm runs each. Statically:
+  `tools/cork-asm.mjs --form-depth` on the timedemo's 400 heaviest main-thread blocks
+  (block profile from 350 s on, macOS arm64 model, atomic variant, RAM at 0).
+- **Values.** Run 0 fps, `formDepth` 1 / 2: cold 7.57 / 6.58; warm 8.50 and 8.37 / 8.15 and
+  8.64 (the 8.15 run had a stray `find /` beside its last 40 s). Run 1 (no streaming): 9.43,
+  9.69, 9.05 / 9.18. Static: 7.553 -> 7.681 machine instructions an executed guest
+  instruction (+1.7 %): 3.6 % fewer calls (447 -> 431 M in these blocks), and the blocks
+  without a call grew from 3.87 to 4.30 a guest instruction.
+- **Machine.** The 4-core KVM VM (Xeon 2.80 GHz), node 22.22.0 (V8 12.4); the static counts
+  by qemu-aarch64 8.2.2 running node 26.12.1 (V8 14.6.202.34). Noise between warm runs of
+  one arm: about 3 %.
+- **Decision.** Not taken: no warm gain past the noise, the code itself counted 1.7 % worse,
+  and a cold run 13 % slower for the extra forming. `formDepth` stays 1; the tools keep the
+  switch (`--form-depth`) for the next measurement of forming.
