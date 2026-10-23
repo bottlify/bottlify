@@ -15,14 +15,19 @@
  * what it handed the device -- draws, bind groups, bytes to copy.
  *
  *     node tools/graphics-replay.mjs FILE [--root DIR] [--reps N] [--profile OUT]
- *         [--all] [--json]
+ *         [--all] [--uploads] [--json]
  *
  * `--reps` plays the capture that many times, each on a worker of its own,
  * and reports every one: the first frames of the measured window are warm
  * already, since the run's load and everything before the mark were played
  * before it. `--profile OUT` writes a CPU profile of the measured frames of
  * the last rep. `--all` measures every frame from the first, for a capture
- * that was never marked. The bytes a capture zeroed (vertices, texels) cost
+ * that was never marked. `--uploads` prints what the played device's
+ * buffers moved over the measured frames -- each dynamic buffer's writes,
+ * bytes written and bytes marked by unlocks and draws, and the uniform
+ * ring's -- from the diagnostics the run asked the device for in them (the
+ * driver asks every few seconds), the first answer after the mark against
+ * the last. The bytes a capture zeroed (vertices, texels) cost
  * as much to move as the program's; a device's own work -- a real GPU's
  * encoding, its copies -- is not here: what the frame costs on a device is
  * this plus that.
@@ -43,7 +48,7 @@ const file = args.find((arg, index)=>!arg.startsWith('--')
 if (!file)
 {
     console.error('usage: node tools/graphics-replay.mjs FILE [--root DIR] [--reps N]'
-        + ' [--profile OUT] [--all] [--json]');
+        + ' [--profile OUT] [--all] [--uploads] [--json]');
     process.exit(2);
 }
 const root = pathToFileURL(`${resolve(flag('--root', '.'))}/`).href;
@@ -51,6 +56,7 @@ const reps = Number(flag('--reps', '1'));
 const profileOut = flag('--profile', '');
 const json = args.includes('--json');
 const all = args.includes('--all');
+const uploads = args.includes('--uploads');
 
 const graphics = `${root}modules/core/src/layers/graphics/`;
 const { serveGraphics } = await import(`${graphics}remote/worker.js`);
@@ -107,6 +113,13 @@ const play = async profiled=>{
     /** @type {MessagePort[]} */
     const others = [];
     let measuring = all;
+    /**
+     * The device's diagnostics the run asked for while measuring: the first
+     * and the last answer.
+     *
+     * @type {any[]}
+     */
+    const told = [];
     /** @type {{ ms: number, draws: number, bindGroups: number, written: number, writes: number,
      *     texels: number }[]} */
     const frames = [];
@@ -120,8 +133,15 @@ const play = async profiled=>{
         {
             const { port1, port2 } = new MessageChannel();
             // What the played side answers goes nowhere: the capture is what
-            // the program did with the answers it had.
-            port1.onmessage = ()=>{};
+            // the program did with the answers it had. Its diagnostics are
+            // kept, for `--uploads`.
+            port1.onmessage = (/** @type {MessageEvent} */ event)=>{
+                if (measuring && event.data?.type === 'diagnostics')
+                {
+                    told[told.length === 0 ? 0 : 1] = { diagnostics: event.data.diagnostics,
+                        frames: frames.length };
+                }
+            };
             others.push(port1);
             const made = record.json;
             const lending = made.lending && made.memory > 0 ? createLendingBuffers() : null;
@@ -196,17 +216,57 @@ const play = async profiled=>{
         writeFileSync(profileOut, JSON.stringify(profile));
         session.disconnect();
     }
+    // Answers posted in the last batches arrive before the ports close.
+    await settle(4);
     for (const port of [...ports.values(), ...others])
     {
         port.close();
     }
-    return frames;
+    return { frames, told };
+};
+
+/**
+ * What each dynamic buffer and the uniform ring moved between two of the
+ * device's diagnostics, the heaviest first, and over how many frames.
+ *
+ * @param {{ diagnostics: any, frames: number }} from
+ * @param {{ diagnostics: any, frames: number }} to
+ */
+const uploadsBetween = (from, to)=>{
+    const first = from.diagnostics;
+    const last = to.diagnostics;
+    // By number: buffers of one size share a label.
+    const before = new Map((first?.uploads?.buffers ?? []).map((/** @type {any} */ one)=>
+        [one.id, one]));
+    const lines = [];
+    for (const one of last?.uploads?.buffers ?? [])
+    {
+        const was = before.get(one.id);
+        if (was === undefined)
+        {
+            // Not among the heaviest at the first answer: what it moved since
+            // is not known.
+            continue;
+        }
+        lines.push({ label: `${one.label} #${one.id}`, size: one.size,
+            writes: one.writes - was.writes, written: one.written - was.written,
+            marked: one.marked - was.marked });
+    }
+    const ring = last?.uploads?.uniforms ?? {};
+    const ringBefore = first?.uploads?.uniforms ?? {};
+    return {
+        frames: to.frames - from.frames,
+        buffers: lines.sort((a, b)=>b.written - a.written),
+        uniforms: { writes: (ring.writes ?? 0) - (ringBefore.writes ?? 0),
+            written: (ring.written ?? 0) - (ringBefore.written ?? 0),
+            laid: (ring.laid ?? 0) - (ringBefore.laid ?? 0) },
+    };
 };
 
 const results = [];
 for (let rep = 0; rep < reps; rep++)
 {
-    const frames = await play(rep === reps - 1 && profileOut !== '');
+    const { frames, told } = await play(rep === reps - 1 && profileOut !== '');
     if (frames.length === 0)
     {
         console.error(`${file}: no frame after a mark in the capture -- nothing to measure`
@@ -228,6 +288,8 @@ for (let rep = 0; rep < reps; rep++)
         writesPerFrame: sum('writes') / Math.max(1, frames.length),
         writtenKBPerFrame: sum('written') / 1024 / Math.max(1, frames.length),
         texelsKBPerFrame: sum('texels') / 1024 / Math.max(1, frames.length),
+        ...(uploads ? { uploads: told.length < 2 ? null
+            : uploadsBetween(told[0], told[1]) } : {}),
     });
 }
 if (json)
@@ -245,6 +307,25 @@ else
             + ` ${one.writesPerFrame.toFixed(0)} buffer writes`
             + ` of ${one.writtenKBPerFrame.toFixed(0)} KB,`
             + ` ${one.texelsKBPerFrame.toFixed(0)} KB of texels a frame`);
+        if (uploads)
+        {
+            if (!one.uploads)
+            {
+                console.log('  uploads: not measured (fewer than two diagnostics asked for'
+                    + ' while measuring)');
+                continue;
+            }
+            const mb = (/** @type {number} */ bytes)=>(bytes / 1048576).toFixed(1);
+            console.log(`  over ${one.uploads.frames} frames:`);
+            console.log(`  uniform ring: ${one.uploads.uniforms.writes} writes,`
+                + ` ${mb(one.uploads.uniforms.written)} MB written,`
+                + ` ${mb(one.uploads.uniforms.laid)} MB of blocks`);
+            for (const buffer of one.uploads.buffers.slice(0, 12))
+            {
+                console.log(`  ${buffer.label} (${mb(buffer.size)} MB): ${buffer.writes} writes,`
+                    + ` ${mb(buffer.written)} MB written, ${mb(buffer.marked)} MB marked`);
+            }
+        }
     }
     if (profileOut)
     {

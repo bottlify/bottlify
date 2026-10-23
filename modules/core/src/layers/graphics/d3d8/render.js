@@ -3055,9 +3055,9 @@ const uploadsOf = own=>({
     uniforms: own.uniforms,
     buffers: (own.buffers ?? []).filter((/** @type {any} */ one)=>one.writes > 0)
         .sort((/** @type {any} */ a, /** @type {any} */ b)=>b.written - a.written)
-        .slice(0, 12)
-        .map((/** @type {any} */ { label, size, writes, written, marked, renames, discards,
-            locks })=>({ label, size, writes, written, marked, renames, discards, locks })),
+        .slice(0, 24)
+        .map((/** @type {any} */ { id, label, size, writes, written, marked, renames, discards,
+            locks })=>({ id, label, size, writes, written, marked, renames, discards, locks })),
 });
 
 /**

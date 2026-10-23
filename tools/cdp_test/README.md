@@ -481,7 +481,7 @@ one core (`taskset -c N`) on a quiet machine: the spread printed is how far to t
 
 ## `../graphics-replay.mjs`: what a title's frames cost the graphics worker
 
-`node tools/graphics-replay.mjs FILE [--root DIR] [--reps N] [--profile OUT] [--all] [--json]` plays a
+`node tools/graphics-replay.mjs FILE [--root DIR] [--reps N] [--profile OUT] [--all] [--uploads] [--json]` plays a
 capture (`game.mjs --graphics-capture FILE`, the frames marked with `captureFrames(n)`) through
 the played side of an engine, this checkout's or `--root DIR`'s, over a quiet fake GPU in node:
 every root made as it was, every batch played in its order, the frames after the mark measured.
@@ -490,7 +490,9 @@ device), the draws, bind groups and buffer writes with their bytes, and the texe
 device. A change to the worker's draw path is judged here before a browser: the same frames of a
 real title, both arms on one machine, `--root` for the commit before. `--reps N` plays it N
 times, each on a fresh worker; `--profile OUT` writes a CPU profile of the last rep's measured
-frames; `--all` measures every frame of a capture that was never marked. The zeroed memory costs what the program's did to move, by its size; what a device does
+frames; `--all` measures every frame of a capture that was never marked; `--uploads` prints what
+each dynamic buffer and the uniform ring moved over the measured frames (writes, bytes written,
+bytes marked by unlocks and draws), from the device's diagnostics the run asked for in them. The zeroed memory costs what the program's did to move, by its size; what a device does
 with what it is handed (a real GPU's encoding, its copies) is not here.
 
 ## Two rules the numbers depend on

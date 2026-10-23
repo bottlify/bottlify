@@ -111,6 +111,9 @@ export function carriedRanges(carry){
     return ranges;
 }
 
+/** Each dynamic buffer's number, which its diagnostics name it by beside a label others share. */
+let nextDynamicId = 1;
+
 /**
  * @param {Object} options
  * @param {import('../contract.js').GpuDeviceLike} options.device
@@ -135,6 +138,7 @@ export function carriedRanges(carry){
  * @returns {any}
  */
 export function createDynamicBuffer(options){
+    const id = nextDynamicId++;
     const alignment = options.alignment === undefined ? UPLOAD_ALIGNMENT : options.alignment;
     const label = options.label === undefined ? 'buffer' : options.label;
     // The shadow copy is padded so an outward-aligned upload of the tail cannot
@@ -516,6 +520,7 @@ export function createDynamicBuffer(options){
 
         diagnostics(){
             return {
+                id,
                 label,
                 size: options.size,
                 renames,
