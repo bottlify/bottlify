@@ -40,13 +40,24 @@ export const MIRROR = Object.freeze({
  */
 export const MUTEX_TAG = 2;
 
+/**
+ * A handle onto an event with a word of its own (`event-words.js`) has the
+ * word's address with this low bit set: the event is the word, and the guest
+ * sets, resets and takes it there.
+ */
+export const EVENT_TAG = 1;
+
 /** Handles are multiples of four; the two bits below are the program's own. */
 const HANDLE_SHIFT = 2;
 
 /**
  * @param {(address: number, value: number) => void} write  a word of guest memory
+ * @param {(object: any) => boolean} [own]  whether this process made the object:
+ *     one another process on this thread made, found here by its name, keeps
+ *     its own word in that process's memory and tells that process's table of
+ *     its changes, so a handle here onto it has no word
  */
-export function createEventMirror(write){
+export function createEventMirror(write, own = ()=>true){
     let table = 0;
     let slots = 0;
     /** The table's handles while it is detached (`detach`), 0 while attached. */
@@ -86,7 +97,7 @@ export function createEventMirror(write){
          */
         opened(handle, type, object){
             const index = handle >>> HANDLE_SHIFT;
-            if (slots === 0 || object.remote || index >= slots)
+            if (slots === 0 || object.remote || index >= slots || !own(object))
             {
                 return;
             }
@@ -102,6 +113,11 @@ export function createEventMirror(write){
                 return;
             }
             byHandle.set(handle, object);
+            if (typeof object.word === 'number')
+            {
+                write(address, (object.word | EVENT_TAG) >>> 0);
+                return;
+            }
             const held = words.get(object);
             if (held)
             {

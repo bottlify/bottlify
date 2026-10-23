@@ -429,10 +429,11 @@ test('a thread on another executor polling an event spins in the guest and takes
     + ' once', async()=>{
     // The worker, pinned to the other executor, polls `go` until a poll takes
     // it, counts, and signals `ack`; the main thread computes and sets `go`,
-    // ROUNDS times, each after the last `ack`. A poll of `go` unset is answered by the
-    // worker's own guest code from the word the process keeps for it: only
-    // the poll that takes it and the SetEvent cross, two a round, where every
-    // poll crossed and waited for the process's executor to answer.
+    // ROUNDS times, each after the last `ack`. Every poll of `go`, the one
+    // that takes it too, is answered by the worker's own guest code from the
+    // event's word: only the SetEvent of `ack` the main thread waits on
+    // crosses, about one a round, where every poll crossed and waited for the
+    // process's executor to answer.
     const ROUNDS = 200;
     const executable = buildProgram(['CreateEventA', 'CreateThread', 'ResumeThread', 'SetEvent',
         'SetThreadAffinityMask', 'WaitForSingleObject', 'ExitProcess'],
@@ -469,9 +470,8 @@ test('a thread on another executor polling an event spins in the guest and takes
     const { code, scheduler } = await run(executable, 2);
     assert.equal(code, ROUNDS, 'every signal taken once');
     const shared = JSON.parse(scheduler?.sharedTime ?? '{}');
-    assert.ok(shared.crossings >= ROUNDS * 2, `${shared.crossings} calls crossed: the worker ran`
-        + ' on the other executor, its SetEvent and the poll that took the event among them');
-    assert.ok(shared.crossings < ROUNDS * 4,
+    assert.ok(shared.elsewhereRetired > 0, 'the worker ran on the other executor');
+    assert.ok(shared.crossings < ROUNDS * 2,
         `${shared.crossings} calls crossed from the other executor in ${ROUNDS} rounds`);
 });
 

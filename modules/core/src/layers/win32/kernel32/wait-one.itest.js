@@ -15,7 +15,8 @@ import assert from 'node:assert/strict';
 import { createCorkHost } from '../../cpu/internal/cork-host.js';
 import { runToHalt } from '../../cpu/internal/halt.fixture.js';
 import * as cork from '../../../../../cork/src/index.js';
-import { MIRROR, MUTEX_TAG } from '../../kernel/internal/event-mirror.js';
+import { EVENT_TAG, MIRROR, MUTEX_TAG } from '../../kernel/internal/event-mirror.js';
+import { EVENT_WORD } from '../../kernel/internal/event-words.js';
 import { MUTEX_WORD } from '../../kernel/internal/mutex-words.js';
 import { EVENT_SLOTS, eventStateCode, releaseMutexCode, waitOneCode } from './wait-one.js';
 
@@ -25,6 +26,8 @@ const POLL = 0x8200;
 const TRAP = 0x8400;
 const TABLE = 0x100000;
 const STACK = 0x300000;
+/** What the kernel's words say, as the routines are handed it. */
+const VALUES = { clear: MIRROR.CLEAR, set: MIRROR.SET, mutexTag: MUTEX_TAG, eventTag: EVENT_TAG };
 
 /** @param {number} value @returns {number[]} */
 const u32 = value=>[
@@ -41,7 +44,7 @@ test('the guest poll times out an unsignalled event and leaves every other wait 
             initialStack: STACK,
             cork: {},
         });
-        host.writePhysical(POLL, waitOneCode(POLL, TRAP, TABLE, MIRROR.CLEAR, MUTEX_TAG));
+        host.writePhysical(POLL, waitOneCode(POLL, TRAP, TABLE, VALUES));
         host.writePhysical(TRAP, new Uint8Array([0xf4]));
         /** @param {number} handle @param {number} value */
         const word = (handle, value)=>host.writePhysical(TABLE + (handle >>> 2) * 4,
@@ -109,8 +112,8 @@ test('the guest takes a free mutex or its own again, gives back its own, and lea
         initialStack: STACK,
         cork: {},
     });
-    host.writePhysical(POLL, waitOneCode(POLL, TRAP, TABLE, MIRROR.CLEAR, MUTEX_TAG));
-    host.writePhysical(RELEASE, releaseMutexCode(RELEASE, TRAP, TABLE, MUTEX_TAG));
+    host.writePhysical(POLL, waitOneCode(POLL, TRAP, TABLE, VALUES));
+    host.writePhysical(RELEASE, releaseMutexCode(RELEASE, TRAP, TABLE, VALUES));
     host.writePhysical(TRAP, new Uint8Array([0xf4]));
     // FS's base is zero here: FS:[0x24], the caller's id, is linear 0x24.
     host.writePhysical(0x24, new Uint8Array(u32(ME)));
@@ -205,8 +208,8 @@ test('the guest answers SetEvent of a signalled event and ResetEvent of a clear 
         initialStack: STACK,
         cork: {},
     });
-    host.writePhysical(SET, eventStateCode(SET, TRAP, TABLE, MIRROR.SET));
-    host.writePhysical(RESET, eventStateCode(RESET, TRAP, TABLE, MIRROR.CLEAR));
+    host.writePhysical(SET, eventStateCode(SET, TRAP, TABLE, VALUES, true));
+    host.writePhysical(RESET, eventStateCode(RESET, TRAP, TABLE, VALUES, false));
     host.writePhysical(TRAP, new Uint8Array([0xf4]));
     host.writePhysical(PROGRAM, new Uint8Array([0xf4]));
     host.writePhysical(0x7000, new Uint8Array(u32(PROGRAM)));
@@ -255,6 +258,119 @@ test('the guest answers SetEvent of a signalled event and ResetEvent of a clear 
         assert.equal(call(routine, EVENT_SLOTS * 4), 'host', 'past the table');
         assert.equal(call(routine, 0xffffffff), 'host', 'a pseudo-handle');
     }
+    host.stop();
+});
+
+test('the guest takes, sets and resets an event by its own word, and answers what changes nothing'
+    + ' of one the host keeps', async()=>{
+    const SET = 0x8600;
+    const RESET = 0x8700;
+    const RELEASE = 0x8800;
+    const EVENT = 0x120000;
+    const HANDLE = 0x170;
+    const host = createCorkHost({
+        engine: cork,
+        memorySize: 64 * 1024 * 1024,
+        trapPort: 0xb077,
+        entryVector: 0x7000,
+        initialStack: STACK,
+        cork: {},
+    });
+    host.writePhysical(POLL, waitOneCode(POLL, TRAP, TABLE, VALUES));
+    host.writePhysical(SET, eventStateCode(SET, TRAP, TABLE, VALUES, true));
+    host.writePhysical(RESET, eventStateCode(RESET, TRAP, TABLE, VALUES, false));
+    host.writePhysical(RELEASE, releaseMutexCode(RELEASE, TRAP, TABLE, VALUES));
+    host.writePhysical(TRAP, new Uint8Array([0xf4]));
+    host.writePhysical(TABLE + (HANDLE >>> 2) * 4, new Uint8Array(u32((EVENT | EVENT_TAG) >>> 0)));
+    host.writePhysical(PROGRAM, new Uint8Array([0xf4]));
+    host.writePhysical(0x7000, new Uint8Array(u32(PROGRAM)));
+    runToHalt(host, 1000);
+
+    /** @param {number} value */
+    const setWord = value=>host.writePhysical(EVENT, new Uint8Array(u32(value)));
+    const word = ()=>{
+        const bytes = host.readPhysical(EVENT, 4);
+        return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
+    };
+    /**
+     * Calls a routine with `args` pushed, from a fresh stack: its answer, or
+     * 'host' where it left for the host with the call as it was made.
+     *
+     * @param {number} routine @param {number[]} args
+     */
+    const call = (routine, args)=>{
+        const pushes = args.slice().reverse().flatMap(value=>[0x68, ...u32(value)]);
+        const at = PROGRAM + pushes.length;
+        const code = [...pushes, 0xe8, ...u32((routine - (at + 5)) | 0), 0xf4];
+        host.writePhysical(PROGRAM, new Uint8Array(code));
+        host.writeReg32('eip', PROGRAM);
+        host.writeReg32('esp', STACK);
+        host.writeReg32('eax', 0x5a5a5a5a);
+        host.wake();
+        runToHalt(host, 1000);
+        if (host.readReg32('eip') === TRAP + 1)
+        {
+            assert.equal(host.readReg32('esp'), STACK - 4 - 4 * args.length,
+                'the host is reached with the call as it was made');
+            return 'host';
+        }
+        assert.equal(host.readReg32('eip'), PROGRAM + code.length);
+        assert.equal(host.readReg32('esp'), STACK, 'its arguments popped');
+        return host.readReg32('eax');
+    };
+    const { SIGNALLED, MANUAL, HOST } = EVENT_WORD;
+
+    setWord(0);
+    assert.equal(call(POLL, [HANDLE, 0]), 0x102,
+        'an auto-reset event not signalled: a poll times out');
+    assert.equal(call(POLL, [HANDLE, 5]), 'host', 'a wait that may wait is the host\'s');
+    assert.equal(call(SET, [HANDLE]), 1, 'set here');
+    assert.equal(word(), SIGNALLED);
+    assert.equal(call(SET, [HANDLE | 3]), 1, 'and again, the low bits aside');
+    assert.equal(word(), SIGNALLED);
+    assert.equal(call(POLL, [HANDLE, 0xffffffff]), 0, 'taken here');
+    assert.equal(word(), 0, 'an auto-reset event taken goes clear');
+    assert.equal(call(POLL, [HANDLE, 0]), 0x102);
+    assert.equal(call(SET, [HANDLE]), 1);
+    assert.equal(call(RESET, [HANDLE]), 1, 'reset here');
+    assert.equal(word(), 0);
+    assert.equal(call(RESET, [HANDLE]), 1, 'and again');
+    assert.equal(word(), 0);
+
+    setWord(MANUAL);
+    assert.equal(call(POLL, [HANDLE, 0]), 0x102, 'a manual-reset event not signalled');
+    assert.equal(call(SET, [HANDLE]), 1);
+    assert.equal(word(), SIGNALLED | MANUAL);
+    assert.equal(call(POLL, [HANDLE, 0xffffffff]), 0, 'taken here...');
+    assert.equal(call(POLL, [HANDLE, 0]), 0, '...and again: a manual-reset event stays signalled');
+    assert.equal(word(), SIGNALLED | MANUAL);
+    assert.equal(call(RESET, [HANDLE]), 1);
+    assert.equal(word(), MANUAL);
+
+    // The host keeps the word while a thread waits on the event, and still
+    // says there whether it is signalled: what changes nothing is answered.
+    for (const kept of [HOST, HOST | MANUAL])
+    {
+        setWord(kept);
+        assert.equal(call(POLL, [HANDLE, 0xffffffff]), 'host', 'a wait is the host\'s');
+        assert.equal(call(POLL, [HANDLE, 0]), 0x102, 'a poll of an event not signalled');
+        assert.equal(call(SET, [HANDLE]), 'host', 'a set may release a waiter');
+        assert.equal(call(RESET, [HANDLE]), 1, 'a reset of an event not signalled');
+        assert.equal(word(), kept, 'untouched');
+    }
+    for (const kept of [HOST | SIGNALLED, HOST | SIGNALLED | MANUAL])
+    {
+        setWord(kept);
+        assert.equal(call(POLL, [HANDLE, 0xffffffff]), 'host', 'a signalled event is the host\'s'
+            + ' to take');
+        assert.equal(call(POLL, [HANDLE, 0]), 'host');
+        assert.equal(call(SET, [HANDLE]), 1, 'a set of a signalled event');
+        assert.equal(call(RESET, [HANDLE]), 'host', 'a reset of one');
+        assert.equal(word(), kept, 'untouched');
+    }
+    setWord(SIGNALLED);
+    assert.equal(call(RELEASE, [HANDLE]), 'host', 'an event\'s handle is the host\'s to refuse');
+    assert.equal(word(), SIGNALLED, 'untouched');
     host.stop();
 });
 
@@ -456,5 +572,227 @@ test('seeded event and mutex programs answer alike with the guest\'s answers swi
         });
         assert.equal(switched.code, inHost.code, `seed ${seed}: the answers differ`);
         assert.ok(switches >= 4, `seed ${seed}: switched ${switches} times while it ran`);
+    }
+});
+
+/**
+ * Code with labels: `jump` leaves room for a jump to a label placed later.
+ */
+function assembler(){
+    /** @type {number[]} */
+    const bytes = [];
+    /** @type {Record<string, number>} */
+    const labels = {};
+    /** @type {{ at: number, label: string, size: number }[]} */
+    const jumps = [];
+    return {
+        /** @param {...number} values */
+        emit: (...values)=>void bytes.push(...values),
+        /** @param {string} name */
+        label: name=>void (labels[name] = bytes.length),
+        /**
+         * A short jcc (one opcode byte), a long one (two), or `jmp rel32` (0xe9).
+         *
+         * @param {number[]} opcode @param {string} label
+         */
+        jump: (opcode, label)=>{
+            const size = opcode.length === 1 && opcode[0] !== 0xe9 ? 1 : 4;
+            bytes.push(...opcode, ...new Array(size).fill(0));
+            jumps.push({ at: bytes.length - size, label, size });
+        },
+        done: ()=>{
+            for (const { at, label, size } of jumps)
+            {
+                const distance = labels[label] - (at + size);
+                if (size === 1 && (distance < -128 || distance > 127))
+                {
+                    throw new Error(`${label} is ${distance} bytes away`);
+                }
+                bytes.splice(at, size, ...(size === 1 ? [distance & 0xff] : u32(distance | 0)));
+            }
+            return bytes;
+        },
+    };
+}
+
+/**
+ * A ring of `count` threads passing one token through auto-reset events, a
+ * thread's own each, `rounds` times round: the holder reads a counter, works
+ * a while, and writes it back one more, so a token two threads held at once
+ * (an event taken twice) loses a count on executors running at once, and a
+ * set that woke nobody it should have (a waiter left queued) never ends.
+ * Odd threads poll for the token, even ones wait; between, each sets, resets
+ * or polls an event all of them share, whose answers go nowhere.
+ *
+ * @param {typeof import('../../../../../../tools/make-pe.mjs').buildExe} buildExe
+ * @param {number} count @param {number} rounds
+ */
+function tokenRing(buildExe, count, rounds){
+    const WORKER = 0x400;
+    return buildExe({
+        imports: { 'KERNEL32.dll': ['CreateEventA', 'SetEvent', 'ResetEvent', 'CreateThread',
+            'WaitForSingleObject', 'ExitProcess'] },
+        codeSize: WORKER + 0x200,
+        data: { events: new Array(count * 4).fill(0), threads: new Array(count * 4).fill(0),
+            side: [0, 0, 0, 0], counter: [0, 0, 0, 0] },
+        code: ({ iat, at, code })=>{
+            /** @param {string} name */
+            const call = name=>[0xff, 0x15, ...u32(iat(name))];
+            /** @type {number[]} */
+            const main = [];
+            /** CreateEventA(NULL, manual, FALSE, NULL), the handle to `slot`. */
+            const event = (/** @type {number} */ slot, /** @type {number} */ manual)=>main.push(
+                0x6a, 0x00, 0x6a, 0x00, 0x6a, manual, 0x6a, 0x00, ...call('CreateEventA'),
+                0xa3, ...u32(slot));
+            for (let index = 0; index < count; index++)
+            {
+                event(at('events') + index * 4, 0);
+            }
+            event(at('side'), 1);
+            for (let index = 0; index < count; index++)
+            {
+                // CreateThread(NULL, 0, worker, index, 0, NULL)
+                main.push(0x6a, 0x00, 0x6a, 0x00, 0x6a, index, 0x68, ...u32(code(WORKER)),
+                    0x6a, 0x00, 0x6a, 0x00, ...call('CreateThread'),
+                    0xa3, ...u32(at('threads') + index * 4));
+            }
+            main.push(0xff, 0x35, ...u32(at('events')), ...call('SetEvent'));
+            for (let index = 0; index < count; index++)
+            {
+                main.push(0x6a, 0xff, 0xff, 0x35, ...u32(at('threads') + index * 4),
+                    ...call('WaitForSingleObject'));
+            }
+            main.push(0xff, 0x35, ...u32(at('counter')), ...call('ExitProcess'));
+
+            const w = assembler();
+            /** push dword [events + register*4], ebx's (0x9d) or eax's (0x85) */
+            const ownEvent = (/** @type {number} */ sib)=>[0xff, 0x34, sib, ...u32(at('events'))];
+            w.emit(0x8b, 0x5c, 0x24, 0x04); //             mov ebx, [esp+4]
+            w.emit(0xbe, ...u32(rounds)); //               mov esi, rounds
+            w.label('top');
+            w.emit(0xf6, 0xc3, 0x01); //                   test bl, 1
+            w.jump([0x75], 'polling');
+            w.emit(0x6a, 0xff, ...ownEvent(0x9d), ...call('WaitForSingleObject'));
+            w.jump([0xeb], 'got');
+            w.label('polling');
+            w.emit(0x6a, 0x00, ...ownEvent(0x9d), ...call('WaitForSingleObject'));
+            w.emit(0x85, 0xc0); //                         test eax, eax
+            w.jump([0x75], 'polling');
+            w.label('got');
+            w.emit(0xa1, ...u32(at('counter'))); //        mov eax, [counter]
+            w.emit(0x6b, 0xcb, 0x61, 0x83, 0xc1, 0x32); // imul ecx, ebx, 97; add ecx, 50
+            w.label('work');
+            w.emit(0x49); //                               dec ecx
+            w.jump([0x75], 'work');
+            w.emit(0x40, 0xa3, ...u32(at('counter'))); //  inc eax; mov [counter], eax
+            w.emit(0x89, 0xf0, 0x83, 0xe0, 0x03); //       mov eax, esi; and eax, 3
+            w.jump([0x74], 'set');
+            w.emit(0x48); //                               dec eax
+            w.jump([0x74], 'reset');
+            w.emit(0x48);
+            w.jump([0x74], 'poll');
+            w.jump([0xeb], 'next');
+            w.label('set');
+            w.emit(0xff, 0x35, ...u32(at('side')), ...call('SetEvent'));
+            w.jump([0xeb], 'next');
+            w.label('reset');
+            w.emit(0xff, 0x35, ...u32(at('side')), ...call('ResetEvent'));
+            w.jump([0xeb], 'next');
+            w.label('poll');
+            w.emit(0x6a, 0x00, 0xff, 0x35, ...u32(at('side')), ...call('WaitForSingleObject'));
+            w.label('next');
+            w.emit(0x8d, 0x43, 0x01, 0x83, 0xf8, count); // lea eax, [ebx+1]; cmp eax, count
+            w.jump([0x72], 'wrap');
+            w.emit(0x31, 0xc0); //                         xor eax, eax
+            w.label('wrap');
+            w.emit(...ownEvent(0x85), ...call('SetEvent'));
+            w.emit(0x4e); //                               dec esi
+            w.jump([0x0f, 0x85], 'top');
+            w.emit(0x31, 0xc0, 0xc2, 0x04, 0x00); //       xor eax, eax; ret 4
+            return [...main, ...new Array(WORKER - main.length).fill(0x90), ...w.done()];
+        },
+    });
+}
+
+test('a token passed round a ring of threads on several executors through auto-reset events is'
+    + ' held by one thread at a time, and every set wakes its waiter, with the guest\'s answers'
+    + ' and with every call in the host', async()=>{
+    const { buildExe } = await import('../../../../../../tools/make-pe.mjs');
+    const COUNT = 4;
+    const ROUNDS = 150;
+    const executable = tokenRing(buildExe, COUNT, ROUNDS);
+    const cpu = { cores: 3, eager: true };
+    const inGuest = await runEvents(executable, /!(SetEvent|ResetEvent|WaitForSingleObject)$/,
+        { cpu });
+    const inHost = await runEvents(executable, /!(SetEvent|ResetEvent|WaitForSingleObject)$/,
+        { cpu, win32: { handleWords: false } });
+    assert.equal(inHost.code, COUNT * ROUNDS, 'every round counted once, every call in the host');
+    assert.equal(inGuest.code, COUNT * ROUNDS,
+        'every round counted once with the guest\'s answers');
+    assert.ok(inGuest.calls < inHost.calls, `${inGuest.calls} calls crossed with the guest's`
+        + ` answers, ${inHost.calls} without`);
+});
+
+test('an event a thread waits on together with another is set and not taken: the guest reads it'
+    + ' signalled while the host keeps it', async()=>{
+    // The worker waits for both A and B; A set, it cannot go, and A stays
+    // signalled with a thread queued on it, its word the host's. The main
+    // thread's poll takes A, a second times out, a reset of A set again
+    // clears it: each read from the word the host writes the state into.
+    const { buildExe } = await import('../../../../../../tools/make-pe.mjs');
+    const WORKER = 0x300;
+    const executable = buildExe({
+        imports: { 'KERNEL32.dll': ['CreateEventA', 'SetEvent', 'ResetEvent', 'CreateThread',
+            'WaitForSingleObject', 'WaitForMultipleObjects', 'Sleep', 'ExitProcess'] },
+        codeSize: WORKER + 0x40,
+        data: { both: [0, 0, 0, 0, 0, 0, 0, 0], thread: [0, 0, 0, 0] },
+        code: ({ iat, at, code })=>{
+            /** @param {string} name */
+            const call = name=>[0xff, 0x15, ...u32(iat(name))];
+            const a = at('both');
+            const b = at('both') + 4;
+            // imul edi, edi, 31; add edi, eax
+            const fold = [0x6b, 0xff, 0x1f, 0x01, 0xc7];
+            /** @param {number} slot */
+            const push = slot=>[0xff, 0x35, ...u32(slot)];
+            /** @param {number} slot */
+            const poll = slot=>[0x6a, 0x00, ...push(slot), ...call('WaitForSingleObject'), ...fold];
+            /** CreateEventA(NULL, FALSE, FALSE, NULL), the handle to `slot`. @param {number} slot */
+            const event = slot=>[0x6a, 0x00, 0x6a, 0x00, 0x6a, 0x00, 0x6a, 0x00,
+                ...call('CreateEventA'), 0xa3, ...u32(slot)];
+            const main = [
+                0x31, 0xff, //                                     xor edi, edi
+                ...event(a), ...event(b),
+                0x6a, 0x00, 0x6a, 0x00, 0x6a, 0x00, 0x68, ...u32(code(WORKER)), 0x6a, 0x00,
+                0x6a, 0x00, ...call('CreateThread'), 0xa3, ...u32(at('thread')),
+                0x6a, 0x64, ...call('Sleep'), //                  the worker queued on both
+                ...push(a), ...call('SetEvent'), ...fold,
+                ...poll(a), //                                     WAIT_OBJECT_0: taken here
+                ...poll(a), //                                     WAIT_TIMEOUT
+                ...push(a), ...call('SetEvent'), ...fold,
+                ...push(a), ...call('ResetEvent'), ...fold,
+                ...poll(a), //                                     WAIT_TIMEOUT
+                ...push(a), ...call('SetEvent'), ...fold,
+                ...push(b), ...call('SetEvent'), ...fold, //       the worker goes
+                0x6a, 0xff, ...push(at('thread')), ...call('WaitForSingleObject'), ...fold,
+                ...poll(a), //                                     taken by the worker
+                0x57, ...call('ExitProcess'), //                   push edi
+            ];
+            // WaitForMultipleObjects(2, both, TRUE, INFINITE); ret 4
+            const worker = [0x6a, 0xff, 0x6a, 0x01, 0x68, ...u32(at('both')), 0x6a, 0x02,
+                ...call('WaitForMultipleObjects'), 0xc2, 0x04, 0x00];
+            return [...main, ...new Array(WORKER - main.length).fill(0x90), ...worker];
+        },
+    });
+    const expected = [1, 0, 0x102, 1, 1, 0x102, 1, 1, 0, 0x102]
+        .reduce((sum, answer)=>(Math.imul(sum, 31) + answer) >>> 0, 0);
+    for (const cores of [1, 2])
+    {
+        const inGuest = await runEvents(executable, /!(SetEvent|ResetEvent|WaitForSingleObject)$/,
+            { cpu: { cores, eager: true } });
+        const inHost = await runEvents(executable, /!(SetEvent|ResetEvent|WaitForSingleObject)$/,
+            { cpu: { cores, eager: true }, win32: { handleWords: false } });
+        assert.equal(inHost.code, expected, `${cores} executors: every call in the host`);
+        assert.equal(inGuest.code, expected, `${cores} executors: with the guest's answers`);
     }
 });

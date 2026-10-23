@@ -45,6 +45,12 @@ export const MUTEX_WORD = Object.freeze({
 const MAX_OWNER = 1 << 24;
 
 /**
+ * Mutexes made before kernel32 places the words, kept to be given theirs then:
+ * a run that never places them (`handleWords: false`) keeps no more than this.
+ */
+const BEFORE_ROOM = 1024;
+
+/**
  * @typedef {Object} MutexMemory
  * @property {(address: number) => number} readU32
  * @property {(address: number, expected: number, value: number) => number} compareExchangeU32
@@ -197,7 +203,10 @@ export function createMutexWords(memory, threadById){
             }
             if (slots === 0)
             {
-                waiting.push(mutex);
+                if (waiting.length < BEFORE_ROOM)
+                {
+                    waiting.push(mutex);
+                }
                 return;
             }
             wire(mutex);

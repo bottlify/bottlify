@@ -627,14 +627,15 @@ sequenceDiagram
   the program runs itself, with no trap, at cork's speed; only what they cannot handle goes to the
   bridge. Some are written as x86: msvcrt's and kernel32's functions a program calls most, among
   them the interlocked calls, critical sections, slim reader/writer locks, one-time
-  initialisation, SLists, the heap's small blocks (up to 1 KiB) and WaitForSingleObject's poll of
-  an event that is not signalled. The poll reads a word the kernel keeps for each handle onto an
-  event, so a thread on another executor polling for work never waits for the process's executor
-  to answer. SetEvent of an event already signalled and ResetEvent of one already clear answer in
-  the guest from the same word, since they change nothing. A mutex nobody else wants is taken and
-  given back in the guest with `lock cmpxchg` on a word of the mutex's own, which the host takes
-  over (one flag) as soon as anyone waits, the mutex is abandoned or the host otherwise touches
-  it. Sleep(0) answers in the guest while no thread waits to run, read from a count the scheduler
+  initialisation, SLists, the heap's small blocks (up to 1 KiB), and events and mutexes nobody
+  waits on. An event has a word of its own in program memory: SetEvent and ResetEvent change it
+  and WaitForSingleObject takes a signalled one with `lock cmpxchg`, and a poll of one that is not
+  signalled times out there, so a thread on another executor handing work to another, or polling
+  for it, does not wait for the process's executor to answer. The host takes the word over (one
+  flag) while a thread is queued on the event, since only the host wakes a waiter. A mutex nobody
+  else wants is taken and given back in the guest the same way, on a word of the mutex's own,
+  which the host takes over as soon as anyone waits, the mutex is abandoned or the host otherwise
+  touches it. Sleep(0) answers in the guest while no thread waits to run, read from a count the scheduler
   keeps. Others are written once in JavaScript, marked `@guestCode`, and compiled to i386 by the
   build ([`core/scripts/guest-code/`](../modules/core/scripts/guest-code/)): the compiled bytes sit beside the source as `*.x86.js`. The
   JavaScript stays the host's handler and the reference a test holds the x86 to, and

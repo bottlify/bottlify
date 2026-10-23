@@ -6,20 +6,33 @@
 
 /**
  * WaitForSingleObject, ReleaseMutex, SetEvent and ResetEvent, answered in the
- * guest where the answer changes nothing the host keeps, or only a mutex
- * nobody waits for.
+ * guest where the answer changes nothing the host keeps, or only a mutex or an
+ * event nobody waits for.
  *
- * Each handle below EVENT_SLOTS has a word in the kernel's table:
- * an event's says whether it is signalled (`kernel/internal/event-mirror.js`),
- * and a poll -- a zero timeout -- of one that is not times out here; a mutex's
- * is the address of the mutex's own word with MUTEX_TAG set
- * (`kernel/internal/mutex-words.js`), and a free mutex, or one the caller owns
- * already, is taken here with `lock cmpxchg`, and one the caller owns given
- * back the same way. SetEvent of a signalled event and ResetEvent of one that
- * is not change nothing, and are answered here too. Everything else goes to
- * the host as the call was made: a timeout to wait, a signalled event to take,
- * an event to change, a mutex another thread holds or the host keeps, an
- * exchange lost to another thread, a handle with no word.
+ * Each handle below EVENT_SLOTS has a word in the kernel's table. An event's
+ * is the address of the event's own word with EVENT_TAG set
+ * (`kernel/internal/event-words.js`): a signalled one is taken there with
+ * `lock cmpxchg` (an auto-reset event goes clear, a manual-reset one stays
+ * signalled), a poll -- a zero timeout -- of one that is not times out there,
+ * and SetEvent and ResetEvent change it there; while the host keeps the word
+ * (HOST: a thread waits on the event) it still says whether the event is
+ * signalled, and what changes nothing -- a poll of an event that is not, a set
+ * of one that is, a reset of one that is not -- is still answered there. An
+ * event with no word of its own has its state in the table instead
+ * (`kernel/internal/event-mirror.js`):
+ * a poll of one that is not signalled times out here, and SetEvent of a
+ * signalled one or ResetEvent of one that is not changes nothing and answers
+ * here. A mutex's word is the address of the mutex's own word with MUTEX_TAG
+ * set (`kernel/internal/mutex-words.js`): a free mutex, or one the caller owns
+ * already, is taken there with `lock cmpxchg`, and one the caller owns given
+ * back the same way. Everything else goes to the host as the call was made: a
+ * timeout to wait, an event or a mutex the host keeps, a mutex another thread
+ * holds, an exchange lost to another thread, a handle with no word.
+ *
+ * Every answer that takes or changes a word does so with `lock cmpxchg`, even
+ * one that writes the word back as it was: the exchange orders the caller's
+ * memory against the other thread's as the host's crossing did, which a
+ * plain read does not on a host that reorders loads.
  *
  *   WaitForSingleObject(handle, milliseconds):
  *     mov eax, [esp+4]            ; handle, its low two bits the program's
@@ -27,13 +40,32 @@
  *     cmp eax, EVENT_SLOTS
  *     jae slow
  *     mov eax, [table+eax*4]
- *     cmp eax, 4                  ; a mutex's word is an address
- *     jae mutex
+ *     cmp eax, 4                  ; an object's own word is an address
+ *     jae word
  *     cmp eax, CLEAR              ; an event not signalled...
  *     jne slow
+ *   poll:
  *     cmp dword [esp+8], 0        ; ...polled
  *     jne slow
  *     mov eax, WAIT_TIMEOUT
+ *     ret 8
+ *   word:
+ *     test al, MUTEX_TAG
+ *     jnz mutex
+ *     lea ecx, [eax-EVENT_TAG]    ; the event's word
+ *     mov eax, [ecx]
+ *     test al, SIGNALLED
+ *     jz poll                     ; whoever keeps it
+ *     cmp eax, 3                  ; past SIGNALLED|MANUAL: the host keeps it
+ *     ja slow
+ *     mov edx, eax                ; a manual-reset event stays signalled...
+ *     test al, MANUAL
+ *     jnz taken
+ *     xor edx, edx                ; ...an auto-reset one goes clear
+ *   taken:
+ *     lock cmpxchg [ecx], edx
+ *     jne slow
+ *     xor eax, eax                ; WAIT_OBJECT_0
  *     ret 8
  *   mutex:
  *     lea ecx, [eax-MUTEX_TAG]    ; the mutex's word
@@ -70,8 +102,27 @@ export const EVENT_SLOTS = 0x4000;
 /** Mutexes with a word of their own (`mutex-words.js`): 64 KiB of them. */
 export const MUTEX_SLOTS = 0x4000;
 
+/** Events with a word of their own (`event-words.js`): 64 KiB of them. */
+export const EVENT_WORD_SLOTS = 0x4000;
+
+/**
+ * What the kernel's words say, from the kernel (`kernel.EventMirror`,
+ * `kernel.MUTEX_TAG`, `kernel.EVENT_TAG`).
+ *
+ * @typedef {Object} HandleWordValues
+ * @property {number} clear     the word of an event with none of its own, not signalled
+ * @property {number} set       the same, signalled
+ * @property {number} mutexTag  the low bits of a mutex's word
+ * @property {number} eventTag  the low bits of an event's word
+ */
+
 const WAIT_TIMEOUT = 0x102;
 const TEB_THREAD_ID = 0x24;
+
+/** An event's own word (`event-words.js`): its state, past which the host keeps it. */
+const SIGNALLED = 0x1;
+const MANUAL = 0x2;
+const GUEST_STATES = SIGNALLED | MANUAL;
 
 /** @param {number} value @returns {number[]} */
 const dword = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff];
@@ -82,6 +133,7 @@ const jcc = (/** @type {number} */ op, /** @type {number} */ from, /** @type {nu
 
 const JAE = 0x83;
 const JB = 0x82;
+const JE = 0x84;
 const JNE = 0x85;
 const JA = 0x87;
 
@@ -89,14 +141,16 @@ const JA = 0x87;
  * @param {number} at     Where the code lands, for the jump to the trap.
  * @param {number} trap   The host's WaitForSingleObject.
  * @param {number} table  The kernel's words, one a handle.
- * @param {number} clear  The word of an event that is not signalled.
- * @param {number} tag    The low bits of a mutex's word.
+ * @param {HandleWordValues} values
  * @returns {Uint8Array}
  */
-export function waitOneCode(at, trap, table, clear, tag){
-    const mutex = 62;
-    const held = 99;
-    const slow = 130;
+export function waitOneCode(at, trap, table, { clear, mutexTag, eventTag }){
+    const poll = 43;
+    const word = 62;
+    const taken = 96;
+    const mutex = 111;
+    const held = 148;
+    const slow = 179;
     const bytes = [
         0x8b, 0x44, 0x24, 0x04,                                      // 0: mov eax, [esp+4]
         0xc1, 0xe8, 0x02,                                            // 4: shr eax, 2
@@ -104,37 +158,56 @@ export function waitOneCode(at, trap, table, clear, tag){
         ...jcc(JAE, 12, slow),                                       // 12: jae slow
         0x8b, 0x04, 0x85, ...dword(table),                           // 18: mov eax, [table+eax*4]
         0x83, 0xf8, 0x04,                                            // 25: cmp eax, 4
-        ...jcc(JAE, 28, mutex),                                      // 28: jae mutex
+        ...jcc(JAE, 28, word),                                       // 28: jae word
         0x83, 0xf8, clear,                                           // 34: cmp eax, CLEAR
         ...jcc(JNE, 37, slow),                                       // 37: jne slow
+        // poll: (43)
         0x83, 0x7c, 0x24, 0x08, 0x00,                                // 43: cmp dword [esp+8], 0
         ...jcc(JNE, 48, slow),                                       // 48: jne slow
         0xb8, ...dword(WAIT_TIMEOUT),                                // 54: mov eax, WAIT_TIMEOUT
         0xc2, 0x08, 0x00,                                            // 59: ret 8
-        // mutex: (62)
-        0x8d, 0x48, (-tag) & 0xff,                                   // 62: lea ecx, [eax-tag]
-        0x64, 0x8b, 0x15, ...dword(TEB_THREAD_ID),                   // 65: mov edx, fs:[0x24]
-        0xc1, 0xe2, 0x08,                                            // 72: shl edx, 8
-        0x8b, 0x01,                                                  // 75: mov eax, [ecx]
-        0x85, 0xc0,                                                  // 77: test eax, eax
-        0x75, held - 81,                                             // 79: jnz held
-        0x83, 0xca, 0x01,                                            // 81: or edx, 1
-        0xf0, 0x0f, 0xb1, 0x11,                                      // 84: lock cmpxchg [ecx], edx
-        ...jcc(JNE, 88, slow),                                       // 88: jne slow
-        0x31, 0xc0,                                                  // 94: xor eax, eax
-        0xc2, 0x08, 0x00,                                            // 96: ret 8
-        // held: (99)
-        0x31, 0xd0,                                                  // 99: xor eax, edx
-        0x83, 0xf8, 0x7f,                                            // 101: cmp eax, 0x7f
-        ...jcc(JAE, 104, slow),                                      // 104: jae slow
-        0x31, 0xd0,                                                  // 110: xor eax, edx
-        0x8d, 0x50, 0x01,                                            // 112: lea edx, [eax+1]
-        0xf0, 0x0f, 0xb1, 0x11,                                      // 115: lock cmpxchg [ecx], edx
-        ...jcc(JNE, 119, slow),                                      // 119: jne slow
-        0x31, 0xc0,                                                  // 125: xor eax, eax
-        0xc2, 0x08, 0x00,                                            // 127: ret 8
-        // slow: (130)
-        0xe9, ...dword(trap - (at + slow + 5)),                      // 130: jmp trap
+        // word: (62)
+        0xa8, mutexTag,                                              // 62: test al, MUTEX_TAG
+        ...jcc(JNE, 64, mutex),                                      // 64: jnz mutex
+        0x8d, 0x48, (-eventTag) & 0xff,                              // 70: lea ecx, [eax-EVENT_TAG]
+        0x8b, 0x01,                                                  // 73: mov eax, [ecx]
+        0xa8, SIGNALLED,                                             // 75: test al, SIGNALLED
+        0x74, (poll - 79) & 0xff,                                    // 77: jz poll
+        0x83, 0xf8, GUEST_STATES,                                    // 79: cmp eax, 3
+        ...jcc(JA, 82, slow),                                        // 82: ja slow
+        0x89, 0xc2,                                                  // 88: mov edx, eax
+        0xa8, MANUAL,                                                // 90: test al, MANUAL
+        0x75, taken - 94,                                            // 92: jnz taken
+        0x31, 0xd2,                                                  // 94: xor edx, edx
+        // taken: (96)
+        0xf0, 0x0f, 0xb1, 0x11,                                      // 96: lock cmpxchg [ecx], edx
+        ...jcc(JNE, 100, slow),                                      // 100: jne slow
+        0x31, 0xc0,                                                  // 106: xor eax, eax
+        0xc2, 0x08, 0x00,                                            // 108: ret 8
+        // mutex: (111)
+        0x8d, 0x48, (-mutexTag) & 0xff,                              // 111: lea ecx, [eax-tag]
+        0x64, 0x8b, 0x15, ...dword(TEB_THREAD_ID),                   // 114: mov edx, fs:[0x24]
+        0xc1, 0xe2, 0x08,                                            // 121: shl edx, 8
+        0x8b, 0x01,                                                  // 124: mov eax, [ecx]
+        0x85, 0xc0,                                                  // 126: test eax, eax
+        0x75, held - 130,                                            // 128: jnz held
+        0x83, 0xca, 0x01,                                            // 130: or edx, 1
+        0xf0, 0x0f, 0xb1, 0x11,                                      // 133: lock cmpxchg [ecx], edx
+        ...jcc(JNE, 137, slow),                                      // 137: jne slow
+        0x31, 0xc0,                                                  // 143: xor eax, eax
+        0xc2, 0x08, 0x00,                                            // 145: ret 8
+        // held: (148)
+        0x31, 0xd0,                                                  // 148: xor eax, edx
+        0x83, 0xf8, 0x7f,                                            // 150: cmp eax, 0x7f
+        ...jcc(JAE, 153, slow),                                      // 153: jae slow
+        0x31, 0xd0,                                                  // 159: xor eax, edx
+        0x8d, 0x50, 0x01,                                            // 161: lea edx, [eax+1]
+        0xf0, 0x0f, 0xb1, 0x11,                                      // 164: lock cmpxchg [ecx], edx
+        ...jcc(JNE, 168, slow),                                      // 168: jne slow
+        0x31, 0xc0,                                                  // 174: xor eax, eax
+        0xc2, 0x08, 0x00,                                            // 176: ret 8
+        // slow: (179)
+        0xe9, ...dword(trap - (at + slow + 5)),                      // 179: jmp trap
     ];
     return new Uint8Array(bytes);
 }
@@ -142,8 +215,9 @@ export function waitOneCode(at, trap, table, clear, tag){
 /**
  * ReleaseMutex as guest code: a mutex the caller owns and the host does not
  * keep is given back by one with `lock cmpxchg`, freed at its last; every
- * other call -- not the caller's, the host's to keep, a handle with no word, a
- * lost exchange -- is the host's, which answers failures and their errors.
+ * other call -- not the caller's, the host's to keep, an event's handle, a
+ * handle with no word, a lost exchange -- is the host's, which answers
+ * failures and their errors.
  *
  *     mov eax, [esp+4]
  *     shr eax, 2
@@ -151,7 +225,9 @@ export function waitOneCode(at, trap, table, clear, tag){
  *     jae slow
  *     mov eax, [table+eax*4]
  *     cmp eax, 4
- *     jb slow                     ; an event's word, or none
+ *     jb slow                     ; an event's state, or nothing
+ *     test al, MUTEX_TAG
+ *     jz slow                     ; an event's own word
  *     lea ecx, [eax-MUTEX_TAG]
  *     mov edx, fs:[0x24]
  *     shl edx, 8
@@ -182,12 +258,12 @@ export function waitOneCode(at, trap, table, clear, tag){
  * @param {number} at     Where the code lands, for the jump to the trap.
  * @param {number} trap   The host's ReleaseMutex.
  * @param {number} table  The kernel's words, one a handle.
- * @param {number} tag    The low bits of a mutex's word.
+ * @param {HandleWordValues} values
  * @returns {Uint8Array}
  */
-export function releaseMutexCode(at, trap, table, tag){
-    const last = 89;
-    const slow = 112;
+export function releaseMutexCode(at, trap, table, { mutexTag }){
+    const last = 97;
+    const slow = 120;
     return new Uint8Array([
         0x8b, 0x44, 0x24, 0x04,                                      // 0: mov eax, [esp+4]
         0xc1, 0xe8, 0x02,                                            // 4: shr eax, 2
@@ -196,51 +272,74 @@ export function releaseMutexCode(at, trap, table, tag){
         0x8b, 0x04, 0x85, ...dword(table),                           // 18: mov eax, [table+eax*4]
         0x83, 0xf8, 0x04,                                            // 25: cmp eax, 4
         ...jcc(JB, 28, slow),                                        // 28: jb slow
-        0x8d, 0x48, (-tag) & 0xff,                                   // 34: lea ecx, [eax-tag]
-        0x64, 0x8b, 0x15, ...dword(TEB_THREAD_ID),                   // 37: mov edx, fs:[0x24]
-        0xc1, 0xe2, 0x08,                                            // 44: shl edx, 8
-        0x8b, 0x01,                                                  // 47: mov eax, [ecx]
-        0x31, 0xd0,                                                  // 49: xor eax, edx
-        0x48,                                                        // 51: dec eax
-        0x83, 0xf8, 0x7e,                                            // 52: cmp eax, 0x7e
-        ...jcc(JA, 55, slow),                                        // 55: ja slow
-        0x85, 0xc0,                                                  // 61: test eax, eax
-        0x74, last - 65,                                             // 63: jz last
-        0x40,                                                        // 65: inc eax
-        0x31, 0xd0,                                                  // 66: xor eax, edx
-        0x8d, 0x50, 0xff,                                            // 68: lea edx, [eax-1]
-        0xf0, 0x0f, 0xb1, 0x11,                                      // 71: lock cmpxchg [ecx], edx
-        ...jcc(JNE, 75, slow),                                       // 75: jne slow
-        0xb8, ...dword(1),                                           // 81: mov eax, 1
-        0xc2, 0x04, 0x00,                                            // 86: ret 4
-        // last: (89)
-        0x8d, 0x42, 0x01,                                            // 89: lea eax, [edx+1]
-        0x31, 0xd2,                                                  // 92: xor edx, edx
-        0xf0, 0x0f, 0xb1, 0x11,                                      // 94: lock cmpxchg [ecx], edx
-        ...jcc(JNE, 98, slow),                                       // 98: jne slow
-        0xb8, ...dword(1),                                           // 104: mov eax, 1
-        0xc2, 0x04, 0x00,                                            // 109: ret 4
-        // slow: (112)
-        0xe9, ...dword(trap - (at + slow + 5)),                      // 112: jmp trap
+        0xa8, mutexTag,                                              // 34: test al, MUTEX_TAG
+        ...jcc(JE, 36, slow),                                        // 36: jz slow
+        0x8d, 0x48, (-mutexTag) & 0xff,                              // 42: lea ecx, [eax-MUTEX_TAG]
+        0x64, 0x8b, 0x15, ...dword(TEB_THREAD_ID),                   // 45: mov edx, fs:[0x24]
+        0xc1, 0xe2, 0x08,                                            // 52: shl edx, 8
+        0x8b, 0x01,                                                  // 55: mov eax, [ecx]
+        0x31, 0xd0,                                                  // 57: xor eax, edx
+        0x48,                                                        // 59: dec eax
+        0x83, 0xf8, 0x7e,                                            // 60: cmp eax, 0x7e
+        ...jcc(JA, 63, slow),                                        // 63: ja slow
+        0x85, 0xc0,                                                  // 69: test eax, eax
+        0x74, last - 73,                                             // 71: jz last
+        0x40,                                                        // 73: inc eax
+        0x31, 0xd0,                                                  // 74: xor eax, edx
+        0x8d, 0x50, 0xff,                                            // 76: lea edx, [eax-1]
+        0xf0, 0x0f, 0xb1, 0x11,                                      // 79: lock cmpxchg [ecx], edx
+        ...jcc(JNE, 83, slow),                                       // 83: jne slow
+        0xb8, ...dword(1),                                           // 89: mov eax, 1
+        0xc2, 0x04, 0x00,                                            // 94: ret 4
+        // last: (97)
+        0x8d, 0x42, 0x01,                                            // 97: lea eax, [edx+1]
+        0x31, 0xd2,                                                  // 100: xor edx, edx
+        0xf0, 0x0f, 0xb1, 0x11,                                      // 102: lock cmpxchg [ecx], edx
+        ...jcc(JNE, 106, slow),                                      // 106: jne slow
+        0xb8, ...dword(1),                                           // 112: mov eax, 1
+        0xc2, 0x04, 0x00,                                            // 117: ret 4
+        // slow: (120)
+        0xe9, ...dword(trap - (at + slow + 5)),                      // 120: jmp trap
     ]);
 }
 
 /**
- * SetEvent or ResetEvent as guest code: a call that asks for the state the
- * event's word already says it is in changes nothing and answers TRUE here --
- * a signalled event has no waiter to release, its waiters having been released
- * as it was set. Call of Duty 4 set events already set 16.9 million times in a
- * nine-minute session, 95% of its SetEvent calls and two thirds of all its
- * crossings, each from another executor a wait for the process's executor to
- * answer. Every other call is the host's: an event
- * to change, a handle with no word or past the table, a mutex's word.
+ * SetEvent or ResetEvent as guest code. An event with a word of its own,
+ * which the host does not keep, is set or cleared there with `lock cmpxchg`:
+ * the host keeps every event a thread is queued on, so a word the guest has
+ * is an event with no waiter to release. An event already in the state the
+ * call asks for changes nothing and answers TRUE here, whoever keeps its word
+ * (a signalled event has no waiter either), the word exchanged with itself to
+ * order the caller's memory as a change would; an event with no word of its
+ * own the same, by the state its handle's word says. Call of Duty 4 set events
+ * already set 16.9 million times in a nine-minute session, 95% of its SetEvent
+ * calls and two thirds of all its crossings, each from another executor a wait
+ * for the process's executor to answer. Every other call is the host's: an
+ * event to change that the host keeps or that has no word, a handle with no
+ * word or past the table, a mutex's word, a lost exchange.
  *
  *     mov eax, [esp+4]
  *     shr eax, 2
  *     cmp eax, EVENT_SLOTS
  *     jae slow
- *     cmp dword [table+eax*4], state  ; the state the call asks for
+ *     mov ecx, [table+eax*4]
+ *     cmp ecx, state              ; no word of its own, in the state the call asks for
+ *     je done
+ *     cmp ecx, 4
+ *     jb slow
+ *     test cl, MUTEX_TAG
+ *     jnz slow
+ *     mov eax, [ecx-EVENT_TAG]    ; the event's word
+ *     mov edx, eax
+ *     test al, SIGNALLED
+ *     jnz same                    ; ResetEvent: jz
+ *     cmp eax, 3                  ; past SIGNALLED|MANUAL: the host keeps it
+ *     ja slow
+ *     or edx, SIGNALLED           ; ResetEvent: and edx, ~SIGNALLED
+ *   same:
+ *     lock cmpxchg [ecx-EVENT_TAG], edx
  *     jne slow
+ *   done:
  *     mov eax, 1
  *     ret 4
  *   slow:
@@ -249,21 +348,41 @@ export function releaseMutexCode(at, trap, table, tag){
  * @param {number} at       Where the code lands, for the jump to the trap.
  * @param {number} trap     The host's SetEvent or ResetEvent.
  * @param {number} table    The kernel's words, one a handle.
- * @param {number} already  The word of an event the call leaves as it is.
+ * @param {HandleWordValues} values
+ * @param {boolean} signal  SetEvent; ResetEvent where false
  * @returns {Uint8Array}
  */
-export function eventStateCode(at, trap, table, already){
-    const slow = 40;
+export function eventStateCode(at, trap, table, { clear, set, mutexTag, eventTag }, signal){
+    const same = 73;
+    const done = 84;
+    const slow = 92;
     return new Uint8Array([
         0x8b, 0x44, 0x24, 0x04,                                      // 0: mov eax, [esp+4]
         0xc1, 0xe8, 0x02,                                            // 4: shr eax, 2
         0x3d, ...dword(EVENT_SLOTS),                                 // 7: cmp eax, EVENT_SLOTS
         ...jcc(JAE, 12, slow),                                       // 12: jae slow
-        0x83, 0x3c, 0x85, ...dword(table), already,                  // 18: cmp [table+eax*4], state
-        ...jcc(JNE, 26, slow),                                       // 26: jne slow
-        0xb8, ...dword(1),                                           // 32: mov eax, 1
-        0xc2, 0x04, 0x00,                                            // 37: ret 4
-        // slow: (40)
-        0xe9, ...dword(trap - (at + slow + 5)),                      // 40: jmp trap
+        0x8b, 0x0c, 0x85, ...dword(table),                           // 18: mov ecx, [table+eax*4]
+        0x83, 0xf9, signal ? set : clear,                            // 25: cmp ecx, state
+        ...jcc(JE, 28, done),                                        // 28: je done
+        0x83, 0xf9, 0x04,                                            // 34: cmp ecx, 4
+        ...jcc(JB, 37, slow),                                        // 37: jb slow
+        0xf6, 0xc1, mutexTag,                                        // 43: test cl, MUTEX_TAG
+        ...jcc(JNE, 46, slow),                                       // 46: jnz slow
+        0x8b, 0x41, (-eventTag) & 0xff,                              // 52: mov eax, [ecx-EVENT_TAG]
+        0x89, 0xc2,                                                  // 55: mov edx, eax
+        0xa8, SIGNALLED,                                             // 57: test al, SIGNALLED
+        signal ? 0x75 : 0x74, same - 61,                             // 59: jnz same / jz same
+        0x83, 0xf8, GUEST_STATES,                                    // 61: cmp eax, 3
+        ...jcc(JA, 64, slow),                                        // 64: ja slow
+        ...signal ? [0x83, 0xca, SIGNALLED]                          // 70: or edx, SIGNALLED
+            : [0x83, 0xe2, ~SIGNALLED & 0xff],                       // 70: and edx, ~SIGNALLED
+        // same: (73)
+        0xf0, 0x0f, 0xb1, 0x51, (-eventTag) & 0xff,                  // 73: lock cmpxchg [ecx-1],edx
+        ...jcc(JNE, 78, slow),                                       // 78: jne slow
+        // done: (84)
+        0xb8, ...dword(1),                                           // 84: mov eax, 1
+        0xc2, 0x04, 0x00,                                            // 89: ret 4
+        // slow: (92)
+        0xe9, ...dword(trap - (at + slow + 5)),                      // 92: jmp trap
     ]);
 }

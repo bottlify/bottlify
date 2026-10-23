@@ -91,10 +91,17 @@ export function signalledNow(object){
  *     The words the guest takes and releases mutexes by (`mutex-words.js`): told of
  *     each mutex made, and asked after every call here and every wait run out to
  *     hand back to the guest the words of mutexes nobody waits for
+ * @param {{ made: (event: any) => void, settle: () => void } | null} [options.eventWords]
+ *     The words the guest sets, resets and takes events by (`event-words.js`), as
+ *     `mutexWords` for mutexes
  */
-export function createSyncObjects({ scheduler, remote = null, eventChanged, mutexWords = null }){
+export function createSyncObjects({ scheduler, remote = null, eventChanged, mutexWords = null,
+    eventWords = null })
+{
     /** @type {any[]} */
     const objects = [];
+    /** The same, to ask of one whether it was made here (`owns`). @type {WeakSet<any>} */
+    const made = new WeakSet();
     /** How many of each kind were ever made; the cheap answer about the table. */
     const created = {
         [SyncKind.EVENT]: 0, [SyncKind.MUTEX]: 0, [SyncKind.SEMAPHORE]: 0, [SyncKind.TIMER]: 0,
@@ -150,6 +157,7 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
         thread.queuedOn = null;
         thread.waitSet = null;
         mutexWords?.settle();
+        eventWords?.settle();
     };
     scheduler.onTimeout?.(stopWaiting);
 
@@ -396,7 +404,9 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
                 },
             };
             objects.push(object);
+            made.add(object);
             created[SyncKind.EVENT]++;
+            eventWords?.made(object);
             return object;
         },
 
@@ -407,6 +417,7 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
                 owner: null, recursion: 0, abandoned: false, waiters: [],
             };
             objects.push(object);
+            made.add(object);
             created[SyncKind.MUTEX]++;
             mutexWords?.made(object);
             return object;
@@ -428,6 +439,7 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
                 count: initial, maximum, waiters: [],
             };
             objects.push(object);
+            made.add(object);
             created[SyncKind.SEMAPHORE]++;
             return object;
         },
@@ -451,6 +463,7 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
                 fired: null,
             };
             objects.push(object);
+            made.add(object);
             created[SyncKind.TIMER]++;
             return object;
         },
@@ -865,6 +878,17 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
         },
 
         /**
+         * Whether the object was made here: one another process on this
+         * thread made is found here by its name, its words in that process's
+         * memory.
+         *
+         * @param {any} object
+         */
+        owns(object){
+            return made.has(object);
+        },
+
+        /**
          * One row per object ever created. A program makes thousands of these
          * and never lets one go, so this is asked for on purpose, not carried
          * in every snapshot.
@@ -883,13 +907,15 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
         },
     };
 
-    // Every call here may have taken a mutex's word for the host; each hands
-    // back those nobody waits for once it is done (`mutex-words.js`).
-    if (mutexWords !== null)
+    // Every call here may have taken a mutex's or an event's word for the host;
+    // each hands back those nobody waits for once it is done (`mutex-words.js`,
+    // `event-words.js`).
+    if (mutexWords !== null || eventWords !== null)
     {
         for (const [name, call] of Object.entries(api))
         {
-            if (typeof call === 'function')
+            // `owns` reads no state a word holds.
+            if (typeof call === 'function' && name !== 'owns')
             {
                 /** @type {any} */ (api)[name] = (/** @type {any[]} */ ...args)=>{
                     try
@@ -898,7 +924,8 @@ export function createSyncObjects({ scheduler, remote = null, eventChanged, mute
                     }
                     finally
                     {
-                        mutexWords.settle();
+                        mutexWords?.settle();
+                        eventWords?.settle();
                     }
                 };
             }

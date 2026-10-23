@@ -4,7 +4,8 @@
  * See LICENSE for details
  */
 
-import { MIRROR, MUTEX_TAG, createEventMirror } from './internal/event-mirror.js';
+import { EVENT_TAG, MIRROR, MUTEX_TAG, createEventMirror } from './internal/event-mirror.js';
+import { createEventWords } from './internal/event-words.js';
 import { createMutexWords } from './internal/mutex-words.js';
 import { createHandleTable } from './internal/handles.js';
 import { createSwitcher } from './internal/switch.js';
@@ -118,7 +119,7 @@ export function createKernelModule(){
              *          processes: any, stacks: any, disposed: boolean, resumeLog: string[],
              *          refreshClock: (() => void) | undefined,
              *          hostAnswering: (() => boolean) | undefined, readyWord: number,
-             *          mutexWords: any }}
+             *          mutexWords: any, eventWords: any }}
              */
             const state = {
                 stacks,
@@ -135,6 +136,8 @@ export function createKernelModule(){
                 readyWord: 0,
                 // The words of the process's mutexes (`mutex-words.js`).
                 mutexWords: null,
+                // The words of the process's events (`event-words.js`).
+                eventWords: null,
                 // The last parks, holds and scheduled resumes, newest last: what a
                 // thread that sits in the park loop is read by.
                 resumeLog: [],
@@ -229,16 +232,21 @@ export function createKernelModule(){
             }
             // The words the guest reads its events by, once kernel32 places
             // the table (`mirrorEvents`); until then nothing is written.
-            const mirror = createEventMirror((address, value)=>memory.writeU32(address, value));
+            const mirror = createEventMirror((address, value)=>memory.writeU32(address, value),
+                object=>state.sync?.owns(object) === true);
             // The words the guest takes and releases mutexes by, once kernel32
             // places them (`mirrorEvents`): a thread's id is what FS:[0x24] holds.
             const mutexWords = createMutexWords(/** @type {any} */ (memory), id=>state.scheduler.all()
                 .find((/** @type {any} */ thread)=>thread.id === id
                     && thread.state !== ThreadState.TERMINATED) ?? null);
             state.mutexWords = mutexWords;
+            // The words the guest sets, resets and takes events by, once kernel32
+            // places them (`mirrorEvents`).
+            const eventWords = createEventWords(/** @type {any} */ (memory));
+            state.eventWords = eventWords;
             state.sync = createSyncObjects({ scheduler: state.scheduler,
                 remote: config?.remoteObjects ?? null,
-                eventChanged: event=>mirror.changed(event), mutexWords });
+                eventChanged: event=>mirror.changed(event), mutexWords, eventWords });
             // A wait of this process on another's object, across a link,
             // ends there; the word comes back here.
             config?.remoteObjects?.onWake?.((/** @type {number} */ token,
@@ -264,6 +272,7 @@ export function createKernelModule(){
                 // What a handle's word says (`mirrorEvents`).
                 EventMirror: MIRROR,
                 MUTEX_TAG,
+                EVENT_TAG,
 
                 /**
                  * Creates a thread, giving it a stack of its own.
@@ -804,17 +813,27 @@ export function createKernelModule(){
                  * (`event-mirror.js`), from the events already open on; and,
                  * with room for them, each mutex's own word, `mutexCount` of
                  * them at `mutexTable`, its handles' words pointing there
-                 * (`mutex-words.js`).
+                 * (`mutex-words.js`), and each event's, `eventCount` of them at
+                 * `eventTable` (`event-words.js`).
                  *
                  * @param {number} table @param {number} count
                  * @param {number} [mutexTable] @param {number} [mutexCount]
+                 * @param {number} [eventTable] @param {number} [eventCount]
                  */
-                mirrorEvents: (table, count, mutexTable = 0, mutexCount = 0)=>{
+                mirrorEvents: (table, count, mutexTable = 0, mutexCount = 0, eventTable = 0,
+                    eventCount = 0)=>
+                {
                     if (live())
                     {
                         if (mutexTable !== 0 && mutexCount > 0)
                         {
                             state.mutexWords.attach(mutexTable, mutexCount);
+                        }
+                        // Before the handles' words: an event open already
+                        // gets its word, and its handles point there.
+                        if (eventTable !== 0 && eventCount > 0)
+                        {
+                            state.eventWords.attach(eventTable, eventCount);
                         }
                         mirror.attach(table, count, state.handles.list());
                     }
@@ -841,12 +860,14 @@ export function createKernelModule(){
                     if (on)
                     {
                         mutexWords.reattach();
+                        eventWords.reattach();
                         mirror.reattach(state.handles.list());
                     }
                     else
                     {
                         mirror.detach();
                         mutexWords.detach();
+                        eventWords.detach();
                     }
                     return mirror.attached();
                 },
@@ -943,6 +964,10 @@ export function createKernelModule(){
                     recentScheduled: instance.resumeLog.slice(),
                     handles: instance.handles.diagnostics(),
                     sync: instance.sync.summary(),
+                    // The events the guest sets, resets and takes by itself:
+                    // words given out, kept by the host now, and the hand-overs.
+                    // A string: a report keeps the flat metrics only.
+                    eventWords: JSON.stringify(instance.eventWords?.diagnostics() ?? {}),
                     processes: instance.processes.diagnostics(),
                     time: instance.clock.diagnostics(),
                 },
