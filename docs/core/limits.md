@@ -19,12 +19,11 @@ differently raises a `divergence` event naming the API.
 - With several executors (`cpu.cores`), the others see what one thread does in the order the host
   keeps. The locked instructions, `xchg` and the kernel's own objects are atomic and ordered
   everywhere; a plain store is ordered after the stores before it only on a host that keeps that
-  order itself (x86 does). On a host that does not (an ARM machine; a browser that does not name
-  its processor is taken for one), the cpu layer turns on cork's `ordered` variant, which keeps
-  that order at some cost in speed. A page that sets `cork.config.ordered` to `false` gives
-  it up, and a program passing a message through plain stores alone (a flag after its payload, a
-  spinlock released with `mov`) may then see the flag before the payload. The cost is not
-  measured on such a host yet.
+  order itself (x86 does). On a host that does not (an ARM machine), a program passing a message
+  through plain stores alone (a flag after its payload, a spinlock released with `mov`) may see
+  the flag before the payload. A page that sets `cork.config.ordered` to `true` turns on cork's
+  `ordered` variant, which keeps that order at a cost in speed: counted on arm64, about an eighth
+  more machine code on a game's main thread.
 - With several executors, a store into bytes another executor is translating at that instant can
   be missed: when the store's page check came before the other set the page's code flag, and the
   store landed after it read the bytes back. The window is a few instructions, longer (at most a

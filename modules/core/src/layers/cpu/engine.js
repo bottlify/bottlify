@@ -182,8 +182,8 @@ export function engineContractProblem(engineModule, url){
  *     whose threads run on more than one executor. Default false.
  * @property {boolean} [ordered]         With `atomic`, the integer loads and stores not through
  *     esp as wasm atomics too, so a program's plain stores reach its other threads in their
- *     order, as on x86, on a host that reorders plain accesses (arm64). Unset, the cpu layer
- *     turns it on for several executors on such a host (`reordersPlainAccesses`).
+ *     order, as on x86, on a host that reorders plain accesses (arm64). Default false, on every
+ *     host: it makes every such access an atomic one.
  * @property {boolean} [blockProfile]    A diagnostic: every block counts its executions.
  * @property {number} [blockProfileFrom]  With `blockProfile`: seconds after start at which the
  *           counts start over.

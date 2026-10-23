@@ -738,6 +738,17 @@ program locks the same texture again before the worker has played the last draw,
 copies what the batch would have, and nothing is gained. `graphics.lendMemory: false` turns it
 off. *2026-10-04, 1.9.*
 
+**On an arm64 host a process on several executors keeps x86's order between plain memory
+accesses only when the page asks for it (`cork.config.ordered: true`).** x86 shows one thread's
+plain stores to another in the order they were made, and arm64 does not; cork keeps that order in
+its ordered variant, where every integer load and store not through esp is a wasm atomic. Counted
+on the arm64 model, that is 13% more machine instructions on a game's main-thread code (7.93 to
+8.97 an executed guest instruction), and the flicker it was first turned on for came from a
+thread with no thread-local block, not from the order. Locked instructions, `xchg`, the kernel's
+objects and the engine's own routines are ordered either way. A program that hands data to
+another thread through plain stores alone (a flag after its payload) can see the flag first on
+such a host without the variant; `ordered: true` is the switch for it. *2026-10-23.*
+
 ## C. Process model and porting
 
 **Process replacement, not two processes in one address space or two machines.** `CreateProcess`

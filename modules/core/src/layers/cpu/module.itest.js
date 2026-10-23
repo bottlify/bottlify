@@ -173,3 +173,35 @@ test('a disposed cpu answers as a never-booted one does, after a real boot', asy
     assert.throws(()=>api.runSlice(1),
         /cpu: boot\(\) must be called before the guest can run/);
 });
+
+test('several executors keep plain accesses in order only when the run asks for it', async()=>{
+    // The ordered variant makes every integer access an atomic one: a price a
+    // run pays only when it asks, on whatever host it runs -- here one that
+    // reorders plain accesses, where a default taken from the host would be on.
+    const arch = Object.getOwnPropertyDescriptor(process, 'arch');
+    Object.defineProperty(process, 'arch', { value: 'arm64', configurable: true });
+    try
+    {
+        for (const [cork, expected] of /** @type {[any, boolean][]} */ ([
+            [undefined, false], [{ ordered: false }, false], [{ ordered: true }, true],
+        ]))
+        {
+            const { api } = await booted(new Uint8Array([0x48, 0xeb, 0xfd]), GUEST_CODE,
+                { executors: 2, ...(cork ? { cork } : {}) });
+            assert.equal(/** @type {any} */ (cpuModule.diagnostics().metrics).ordered, expected,
+                `cork ${JSON.stringify(cork)}`);
+            api.stop();
+            await cpuModule.dispose();
+        }
+        const { api } = await booted(new Uint8Array([0x48, 0xeb, 0xfd]), GUEST_CODE,
+            { cork: { ordered: true } });
+        assert.equal(/** @type {any} */ (cpuModule.diagnostics().metrics).ordered, null,
+            'one executor has no other to keep an order for');
+        api.stop();
+        await cpuModule.dispose();
+    }
+    finally
+    {
+        Object.defineProperty(process, 'arch', /** @type {PropertyDescriptor} */ (arch));
+    }
+});

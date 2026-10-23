@@ -9,7 +9,6 @@ import { createCorkHost, createTsc } from './internal/cork-host.js';
 import { createBell, createRemoteExecutor } from './internal/executor.js';
 import { unbrokenTable } from './internal/unbroken.js';
 import { createWriteClock } from './internal/write-clock.js';
-import { reordersPlainAccesses } from './internal/memory-order.js';
 import { engineContractProblem } from './engine.js';
 import { createFpu } from './internal/fpu.js';
 import { createThunkTable, FORWARD_SAVE } from './internal/thunks.js';
@@ -634,11 +633,11 @@ export function createCpuModule(){
                             throw new Error(problem);
                         }
                         const several = settings.executors > 1;
-                        // A program's plain stores reach its other threads in their
-                        // order on an x86 host; elsewhere the ordered variant keeps it,
-                        // unless the run says otherwise.
-                        const ordered = several && (typeof settings.cork?.ordered === 'boolean'
-                            ? settings.cork.ordered : await reordersPlainAccesses());
+                        // Only when the run asks: the ordered variant makes every
+                        // integer access an atomic one, a price a program pays for
+                        // nothing unless it hands data to another thread through
+                        // plain stores alone on a host that reorders them (arm64).
+                        const ordered = several && settings.cork?.ordered === true;
                         state.ordered = several ? ordered : null;
                         const hostConfig = {
                             memorySize: settings.memorySize,
@@ -1553,7 +1552,7 @@ export function createCpuModule(){
                         && instance.host.wasmMemory?.()?.buffer instanceof SharedArrayBuffer,
                     executorsRefused: instance.executorsRefused,
                     // Whether the executors keep the program's plain accesses in
-                    // order (`reordersPlainAccesses`); null on one executor.
+                    // order (cork's `ordered`, as the run asked); null on one executor.
                     ordered: instance.ordered,
                     running: instance.running,
                     instructions: retiredEverywhere(instance),

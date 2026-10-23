@@ -499,18 +499,18 @@ everyone's. The page flags are `INACCESSIBLE`, `HAS_CODE`, `VOLATILE`, `CLOSED`,
     ran again.
 - **Memory order between executors.** x86 shows one thread's stores to another in the order they
   were made, and a program relies on it with plain `mov`s: data, then a flag another thread waits
-  on. On arm64 another core may see the flag first, or read the data before the flag. So on such a
-  host a process on several executors runs cork's ordered variant (the `ordered` setting,
+  on. On arm64 another core may see the flag first, or read the data before the flag. cork's
+  ordered variant keeps x86's order there (the `ordered` setting,
   [cork's README](cork/README.md#what-it-runs)): an integer operand's load and store are
   wasm atomics, ordered with every other access around them. The exceptions are an access through
   esp (a thread's own stack), one at an address not a multiple of its width (a wasm atomic traps
   there), and the x87's, MMX's, SSE's and the string instructions' operands: the data around a
-  flag, which the flag's access orders. Code the interpreters run is not ordered. On an x86 host,
-  and on one executor, nothing changes. The cpu layer's `reordersPlainAccesses` recognises such a host
-  (node's `process.arch`, a Chromium page's `userAgentData`, otherwise the user agent string; a Mac
-  is taken to be arm64), `cork.config.ordered` overrides the choice, and the cpu layer's
-  diagnostics say which was made (`ordered`). The engine's own routines lock and let go with
-  locked instructions in either variant (`tools/check-lock-release.mjs`).
+  flag, which the flag's access orders. Code the interpreters run is not ordered. The variant is
+  off unless a page sets `cork.config.ordered` to `true`: every integer access becoming an atomic
+  one costs about an eighth more machine code on arm64, and a program that hands data between its
+  threads through locked instructions and kernel objects does not need it. The cpu layer's
+  diagnostics say which way a process runs (`ordered`). The engine's own routines lock and let go
+  with locked instructions in either variant (`tools/check-lock-release.mjs`).
 - **Exact exceptions.** A region exits right before the faulting instruction, with its EIP and
   registers. Division by zero gives #DE, an unknown instruction #UD, an access to a page the program cannot
   reach #PF with its address (translated code leaves, and the JavaScript interpreter runs the
