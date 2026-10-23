@@ -28,7 +28,8 @@ import { ownLayout, PAGE } from './runtime/layout.js';
  *     looseStacks?: boolean, structure?: boolean,
  *     expansion?: import('./emit/region.js').ExpansionNote | null, wide?: boolean,
  *     checked?: boolean, processors?: number, markBlocks?: boolean, ramBase?: number,
- *     ordered?: boolean, hostFeatures?: Partial<import('./wasm/features.js').Features> }} what
+ *     ordered?: boolean, hostFeatures?: Partial<import('./wasm/features.js').Features>,
+ *     form?: Parameters<typeof formRegion>[2] }} what
  *     the bytes and the guest address they lie at; `entry` where the region starts (`at` by
  *     default); `precise`, `atomic`, `ordered`, `hash`, `callReturn`, `looseStacks`,
  *     `structure`: as the translator's configuration has them; `expansion` told each
@@ -41,12 +42,13 @@ import { ownLayout, PAGE } from './runtime/layout.js';
  *     a Windows process's first executor has it); `hostFeatures` what another host's engine
  *     has in place of this one's (`features`), the module emitted as that host emits it --
  *     an arm64 one's default NaN is positive, and its float arithmetic carries the fix-ups
- *     an x86 host emits no code for
+ *     an x86 host emits no code for; `form` how the region is formed (`formRegion`'s
+ *     options: `formDepth`, the leaves' limits)
  */
 export function regionModule({ code, at, entry = at, precise = false, atomic = false,
     ramSize = 16 << 20, hash = false, callReturn = false, looseStacks = false,
     structure = true, expansion = null, wide = false, checked = true, processors = 1,
-    markBlocks = false, ramBase = PAGE, ordered = false, hostFeatures = {} })
+    markBlocks = false, ramBase = PAGE, ordered = false, hostFeatures = {}, form = {} })
 {
     const bytes = Uint8Array.from(code);
     // Bytes past the code read as `hlt`, so a region never runs off into them.
@@ -54,7 +56,7 @@ export function regionModule({ code, at, entry = at, precise = false, atomic = f
         const offset = address - at;
         return offset >= 0 && offset < bytes.length ? bytes[offset] : 0xf4;
     };
-    const region = formRegion(read, entry, {});
+    const region = formRegion(read, entry, form);
     const m = new ModuleBuilder();
     const context = prepareModule(m, ownLayout({ ramSize, processors, ramBase }),
         { ...features(), ...hostFeatures }, {},

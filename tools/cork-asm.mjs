@@ -27,6 +27,8 @@
  *   --ordered         with --atomic, the variant several executors run on a host that
  *                     reorders plain accesses (an arm64 one)
  *   --ram MB          the guest RAM the layout is made for (default 2048, the launcher's)
+ *   --form-depth N    how many levels of callees a region forms in (the runtime's
+ *                     `formDepth`, default 1)
  *   --ram-base N      where guest RAM lies in the memory: 0 (the default, a Windows
  *                     process's first executor) or 65536 (a page in, cork's own default)
  *   --listing         every region's machine code, after its row
@@ -49,6 +51,13 @@
  *   --classes         with --blocks, what the executed machine instructions are, by kind
  *                     (`classOf`), and the --count pattern weighed the same way: where a
  *                     translation's instructions go besides the guest's own work
+ *   --calls           with --blocks, the blocks that make a guest call as a wasm call
+ *                     (`callReturn`) taken apart (`callPartOf`): the return stack, the
+ *                     registers written into the state block, the target's lookup and the
+ *                     call itself, V8's spills, and after the call the registers read back,
+ *                     V8's reloads and the rest. A block's code is weighed whole, the
+ *                     lookup's probe of the entry hash included, which a call that finds
+ *                     its target at once does not run
  *
  * The compiler is this node's V8, which is older than a current browser's: the
  * counts compare two emitters on one V8, not cork with a browser.
@@ -59,7 +68,7 @@ import { readFileSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { regionModule } from '../modules/cork/src/region-module.js';
-import { BLOCK_MARK_END } from '../modules/cork/src/emit/region.js';
+import { BLOCK_MARK_END, CallStack } from '../modules/cork/src/emit/region.js';
 import { ownLayout } from '../modules/cork/src/runtime/layout.js';
 
 const args = process.argv.slice(2);
@@ -220,6 +229,7 @@ else
 const entries = (value('--entry') ?? String(at)).split(',').map(Number);
 const hash = pePath !== null || args.includes('--image') || args.includes('--hash');
 const ramSize = Number(value('--ram') ?? 2048) * (1 << 20);
+const formDepth = value('--form-depth') === null ? null : Number(value('--form-depth'));
 // Guest RAM from the memory's start, as a Windows process's first executor has it
 // (`ownLayout`'s `ramBase` 0), unless `--ram-base` says one page in.
 const ramBase = Number(value('--ram-base') ?? 0);
@@ -382,6 +392,61 @@ function classOf(line){
     return 'other';
 }
 
+/** The state page as the modules' layout has it: the registers from `regs`, the return stack past them. */
+const statePage = ownLayout({ ramSize, ramBase });
+
+/**
+ * A block's machine instructions by what they do for the guest call it ends with, made as a
+ * wasm call (`--calls`); null for a block that makes none, whose code never reaches the
+ * return stack. The site runs from the block's first access to the return stack to its last
+ * call (`blr` on arm64, `call` on x86-64, the transfer's): the push, the registers the
+ * callee reads written into the state block, the target looked up in the entry hash and the
+ * call. After it the caller reads back what the callee may have changed.
+ *
+ * @param {string[]} lines  the block's, nops and tables left out
+ * @returns {Map<string, number> | null}
+ */
+function callPartsOf(lines){
+    const depth = statePage.regs + CallStack.DEPTH;
+    const stackEnd = statePage.regs + CallStack.STACK + 4 * CallStack.LIMIT;
+    const texts = lines.map(line=>line.replace(/^0x[0-9a-f]+\s+[0-9a-f]+\s+[0-9a-f]+\s+/, '')
+        .replace(/^REX\.W\s+/, ''));
+    /** The displacement a memory operand names, -1 for none. @param {string} text */
+    const offsetOf = text=>{
+        const found = /\[[^\]]*?(?:#|\+\s*)(0x[0-9a-f]+|\d+)\]/.exec(text);
+        return found === null ? -1 : Number(found[1]);
+    };
+    const first = texts.findIndex(text=>{
+        const offset = offsetOf(text);
+        return offset >= depth && offset < stackEnd;
+    });
+    const calls = texts.flatMap((text, i)=>(/^(blr|bl|call)\s/.test(text) ? [i] : []));
+    const last = calls[calls.length - 1] ?? -1;
+    if (first < 0 || last < first)
+    {
+        return null;
+    }
+    /** @type {Map<string, number>} */
+    const parts = new Map();
+    texts.forEach((text, i)=>{
+        const [mnemonic = '', ...rest] = text.split(/\s+/);
+        const operands = rest.join(' ');
+        const offset = offsetOf(text);
+        const state = offset >= statePage.regs && offset < depth;
+        const frame = /\[(rbp|rsp|sp|fp)\b/.test(operands);
+        // A store names memory first on x86-64 (`movl [r14+0x1000],rax`).
+        const store = /^st/.test(mnemonic) || /^mov/.test(mnemonic) && operands.startsWith('[');
+        const part = i < first ? 'before the call'
+            : i <= last ? (offset >= depth && offset < stackEnd ? 'return stack'
+                : frame ? 'V8 spills' : state && store ? 'registers written back'
+                    : 'lookup and call')
+                : frame ? 'V8 reloads' : state && !store ? 'registers read back'
+                    : 'after the call';
+        parts.set(part, (parts.get(part) ?? 0) + 1);
+    });
+    return parts;
+}
+
 const processors = Number(value('--processors') ?? 3);
 /** The module as the runner's own host emits it: an arm64 one's default NaN is positive. */
 const hostFeatures = /aarch64|arm64/.test(value('--runner') ?? process.arch)
@@ -399,6 +464,9 @@ let ranMachine = 0;
 /** Executed machine instructions by kind (`classOf`), and the --count pattern's. */
 const classes = new Map();
 let ranMatched = 0;
+/** With --calls, executed machine instructions by their part in a call (`callPartsOf`). */
+const callParts = new Map();
+let callsRan = 0;
 /** @type {{ start: number, runs: number, x86: number, code: string[] }[]} */
 const heavy = [];
 for (const entry of entries)
@@ -406,7 +474,8 @@ for (const entry of entries)
     const made = regionModule({ code, at, entry, hash, callReturn: hash, ramSize, ramBase,
         atomic: args.includes('--atomic'), ordered: args.includes('--ordered'), checked: false,
         wide: true, looseStacks: true, hostFeatures,
-        processors, markBlocks: profile !== null });
+        processors, markBlocks: profile !== null,
+        form: formDepth === null ? {} : { formDepth } });
     const x86 = made.blocks.reduce((sum, block)=>sum + block.instructions, 0);
     const lines = machineCode(made.wasm, exportedIndex(made.wasm, 'region'));
     const { code: byBlock, marks } = profile === null ? { code: new Map(), marks: new Set() }
@@ -434,6 +503,17 @@ for (const entry of entries)
                     const kind = classOf(line);
                     classes.set(kind, (classes.get(kind) ?? 0) + runs);
                     ranMatched += counted !== null && counted.test(line) ? runs : 0;
+                }
+                if (args.includes('--calls'))
+                {
+                    const parts = callPartsOf(/** @type {string[]} */ (byBlock.get(index))
+                        .filter(line=>!/\s(nop|int3)\b|jump table entry|constant pool/.test(line)))
+                        ?? new Map([['blocks without a guest call', machine]]);
+                    callsRan += parts.has('blocks without a guest call') ? 0 : runs;
+                    for (const [part, count] of parts)
+                    {
+                        callParts.set(part, (callParts.get(part) ?? 0) + runs * count);
+                    }
                 }
                 heavy.push({ start: block.start, runs, x86: block.instructions,
                     code: /** @type {string[]} */ (byBlock.get(index)) });
@@ -495,5 +575,18 @@ if (profile !== null && ranX86 > 0)
             + (counted === null ? ''
                 : `; --count ${(ranMatched / ranX86).toFixed(3)}`
                     + ` (${(ranMatched / ranMachine * 100).toFixed(1)}%)`));
+    }
+    if (args.includes('--calls'))
+    {
+        console.log(callsRan === 0 ? 'calls: none of these blocks makes a guest call'
+            : `calls: ${(callsRan / 1e6).toFixed(1)} M guest calls, one every`
+                + ` ${(ranX86 / callsRan).toFixed(1)} guest instructions; the executed machine`
+                + ' instructions by part (each block weighed whole):');
+        for (const [part, runs] of [...callParts].sort((a, b)=>b[1] - a[1]))
+        {
+            console.log(`  ${part.padEnd(28)} ${(runs / ranMachine * 100).toFixed(1).padStart(5)}%`
+                + (part === 'blocks without a guest call' || callsRan === 0 ? ''
+                    : `  ${(runs / callsRan).toFixed(1).padStart(6)} a call`));
+        }
     }
 }
