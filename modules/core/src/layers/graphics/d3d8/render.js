@@ -9782,6 +9782,18 @@ export function createRenderer(options){
             {
                 return;
             }
+            if (dumping())
+            {
+                // A target drawn into by passes that each write some of its
+                // channels keeps the rest from its clear: without the clears a
+                // dump cannot say what those channels hold.
+                dump.push(`#${dump.length} clear flags=${flags}`
+                    + ` color=${(color >>> 0).toString(16).padStart(8, '0')}`
+                    + ` z=${round(z)} stencil=${stencil >>> 0}`
+                    + ` areas=${areas.map(area=>`${area.x1},${area.y1}-${area.x2},${area.y2}`)
+                        .join(';')}`
+                    + ` target=${describeTarget(model)}`);
+            }
             counters.clears++;
             frameStats.clears++;
             if ((flags & D3DCLEAR.TARGET) !== 0 && model.renderTarget === model.backBuffer)

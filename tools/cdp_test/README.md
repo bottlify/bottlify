@@ -161,7 +161,7 @@ ones need the graphics worker.
 
 | switch | what it does |
 |---|---|
-| `dumpFrames(n)`, then `dumped()` | the next n frames written down, every draw with its shaders, stages and state; `dumped()` is the last |
+| `dumpFrames(n)`, then `dumped()` | the next n frames written down, every draw with its shaders, stages and state, and every clear with its colour, rectangles and target; `dumped()` is the last |
 | `snapshot('t4414')`, then `snapped('t4414')` | a texture as the GPU holds it at the end of the next frame: an intermediate target or a shadow map a dump names |
 | `shader('ps585')` | a shader the program drew with, by the id a dump names it: its bytecode and every WGSL translation made of it, each under its variant (fog, sampling, alpha test); `shader.mjs` prints the bytecode disassembled beside them |
 | `pick(x, y)` | which draw painted that pixel: the program paused while the frame is taken apart |

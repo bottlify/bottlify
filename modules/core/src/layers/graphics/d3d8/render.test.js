@@ -3099,6 +3099,31 @@ test('the frame dump says where each draw landed and is empty unless asked for',
         'the corners themselves, because the union of a draw`s quads is not one of them');
 });
 
+test('a clear is a line of the frame dump: what it set, where, and into which target', async()=>{
+    // Recorded commands. A target that passes write some of the channels of
+    // keeps the others from its clear, and the draws alone cannot say what
+    // those hold.
+    const h = harness({ width: 640, height: 480, dumpDraws: true });
+    const device = h.device;
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.Clear(0, null, D3DCLEAR.TARGET, argb(0x12, 0x34, 0x56, 0x78), 1, 0),
+        D3D_OK);
+    assert.equal(device.Clear(1, [{ x1: 10, y1: 20, x2: 110, y2: 70 }], D3DCLEAR.TARGET,
+        argb(255, 255, 255), 1, 0), D3D_OK);
+    assert.equal(device.SetVertexShader(FVF_QUAD), D3D_OK);
+    assert.equal(device.DrawPrimitiveUP(
+        D3DPT.TRIANGLELIST, 2, quad([10, 20, 110, 70], argb(255, 0, 0)), 20), D3D_OK);
+    assert.equal(device.EndScene(), D3D_OK);
+    await h.present();
+
+    const dumped = device.diagnostics().lastDump;
+    assert.equal(dumped.length, 3, 'both clears and the draw, in the order they were made');
+    assert.match(dumped[0],
+        /^#0 clear flags=1 color=78123456 z=1 stencil=0 areas=0,0-640,480 target=s\d+$/);
+    assert.match(dumped[1], /^#1 clear flags=1 color=ffffffff .* areas=10,20-110,70 target=/);
+    assert.match(dumped[2], /^#2 10,20\.\.110,70 \(100x50\) /);
+});
+
 test('every few frames keep their dump, each checked against what the GPU held', async()=>{
     // A picture wrong in one frame of a few is caught with its draws only when
     // more than the last frame is written down.
