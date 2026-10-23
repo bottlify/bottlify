@@ -35,7 +35,8 @@ const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
  *     trap?: (value: number) => number, rdtsc?: () => bigint,
  *     leaveOut?: string[], precise?: boolean, structure?: boolean,
  *     resume?: boolean, looseStacks?: boolean, executor?: number, hashSlots?: number,
- *     processors?: number, shared?: boolean }} [given]
+ *     processors?: number, shared?: boolean,
+ *     features?: Partial<import('../wasm/features.js').Features> }} [given]
  *     trapPort: `out dx, eax` to it calls
  *     `trap` from inside the region (answering 1 when it moved EIP), as under a host with
  *     a call channel; without `trap`, one that answers 0; precise: nothing relaxed -- on
@@ -48,7 +49,9 @@ const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
  *     for it, its state page and tables past the first's (`executorLayout`), 0 by default;
  *     processors: the executors `cpuid` says the machine has (`ownLayout`), one by default;
  *     shared: regions translated for the process's shared layout (`sharedLayout`) and run
- *     here with this executor's bases, as every executor of a process runs them
+ *     here with this executor's bases, as every executor of a process runs them; features:
+ *     another host's engine in place of this one's (`features`), the regions translated as
+ *     that host's translator makes them -- an arm64 one's default NaN is positive
  */
 export function createTestMachine(given = {}){
     const { ramSize = 1 << 20, codePages = false, trapPort, trap, rdtsc, leaveOut = [],
@@ -81,7 +84,7 @@ export function createTestMachine(given = {}){
     new DataView(memory.buffer).setUint32(layout.mxcsr, 0x1f80, true);
     const view = ()=>new DataView(memory.buffer);
     const bytes = ()=>new Uint8Array(memory.buffer);
-    const found = features();
+    const found = { ...features(), ...given.features };
     // The function table and the entry hash a runtime keeps, so a program
     // run through `runProgram` transfers between its regions as the
     // runtime's would.

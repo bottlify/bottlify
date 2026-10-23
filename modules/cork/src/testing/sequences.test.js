@@ -69,8 +69,9 @@ test('the pool holds every class the defect needs, with the operands named', ()=
     assert.deepEqual(kinds('psrlw xmm0, 4'), ['xmm', 'imm']);
     assert.deepEqual(kinds('psrldq xmm0, 4'), ['xmm', 'imm']);
     assert.deepEqual(kinds('addss xmm0, xmm1'), ['xmm', 'xmm']);
+    assert.deepEqual(kinds('divsd xmm0, qword [m]'), ['xmm', 'mem']);
     assert.deepEqual(kinds('fst qword [m]'), ['mem', 'x87']);
-    assert.equal(POOL.length, 45, 'the pool the itest draws from');
+    assert.equal(POOL.length, 56, 'the pool the itest draws from');
     for (const name of ['fld1', 'fldz', 'fstp qword [m]', 'fst qword [m]', 'faddp',
         'fmul st0, st1', 'fxch st1', 'fnstenv [m]', 'fldenv [m]', 'fninit', 'fnclex',
         'ffree st0', 'paddw mm0, mm1', 'pxor mm1, mm1', 'emms', 'andnps xmm0, xmm1',

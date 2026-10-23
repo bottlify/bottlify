@@ -125,6 +125,10 @@ export function engineContractProblem(engineModule, url){
  *     answers for `[start, end)`, copied at once: what the engine keeps of a region's code
  *     to find it rewritten, taken a byte at a time through `read` where this is absent.
  * @property {EngineImports} imports
+ * @property {{ simd: boolean, tailCalls: boolean, sharedMemory: boolean,
+ *     defaultNaNNegative: boolean }} [features]  Cork's own: the host features its
+ *     translator makes code for, in place of the ones it finds here -- a test's run of what
+ *     an arm64 host's translator makes, whose default NaN is positive.
  */
 
 /**

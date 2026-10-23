@@ -40,8 +40,10 @@ const F32 = Object.freeze({
     truncSatI32S: 0xfc00, reinterpretI32: 0xbe,
 });
 const F64 = Object.freeze({
+    eq: 0x61, ne: 0x62, lt: 0x63, gt: 0x64,
     add: 0xa0, sub: 0xa1, mul: 0xa2, div: 0xa3, sqrt: 0x9f, nearest: 0x9e, trunc: 0x9d,
     ceil: 0x9b, floor: 0x9c, convertI32S: 0xb7, promoteF32: 0xbb, truncSatI32S: 0xfc02,
+    reinterpretI64: 0xbf,
 });
 
 /**
@@ -438,22 +440,31 @@ function emitForm(e, instruction, flagsLive){
         case 'addss': case 'subss': case 'mulss': case 'divss':
         case 'addsd': case 'subsd': case 'mulsd': case 'divsd':
         {
-            const base = op.slice(0, 3);
+            const base = /** @type {'add' | 'sub' | 'mul' | 'div'} */ (op.slice(0, 3));
             const double = op.endsWith('pd') || op.endsWith('sd');
             const scalar = op.endsWith('ss') || op.endsWith('sd');
+            if (scalar && scalarsApart(e))
+            {
+                scalarFloat(e, dst, src, double ? F64[base] : F32[base], double);
+                return true;
+            }
             const opcode = double
                 ? { add: SIMD.f64x2Add, sub: SIMD.f64x2Sub, mul: SIMD.f64x2Mul,
                     div: SIMD.f64x2Div }[base]
                 : { add: SIMD.f32x4Add, sub: SIMD.f32x4Sub, mul: SIMD.f32x4Mul,
                     div: SIMD.f32x4Div }[base];
-            binary(e, dst, src, ()=>simd(/** @type {number} */ (opcode)), scalar ? (double ? 8 : 4) : 0,
-                double ? 8 : 4);
+            binary(e, dst, src, ()=>simd(opcode), scalar ? (double ? 8 : 4) : 0, double ? 8 : 4);
             return true;
         }
         case 'sqrtps': case 'sqrtpd': case 'sqrtss': case 'sqrtsd':
         {
             const double = op.endsWith('pd') || op.endsWith('sd');
             const scalar = op.endsWith('ss') || op.endsWith('sd');
+            if (scalar && scalarsApart(e))
+            {
+                scalarFloat(e, dst, src, double ? F64.sqrt : F32.sqrt, double, true);
+                return true;
+            }
             unary(e, dst, src, ()=>simd(double ? SIMD.f64x2Sqrt : SIMD.f32x4Sqrt),
                 scalar ? (double ? 8 : 4) : 0, double ? 8 : 4);
             return true;
@@ -480,6 +491,11 @@ function emitForm(e, instruction, flagsLive){
             const min = op.startsWith('min');
             // (a < b) ? a : b for min, (a > b) ? a : b for max: the second
             // operand whenever the compare is false, NaN and zeros included.
+            if (scalar && scalarsApart(e))
+            {
+                scalarSelect(e, dst, src, double, min);
+                return true;
+            }
             binary(e, dst, src, ()=>{
                 // stack: a b
                 b.localSet(vecTemp(e));   // b
@@ -1155,6 +1171,128 @@ const F64X2_ROUND = {
 };
 
 // --- forms ---
+
+/**
+ * Pushes the low lane of an xmm operand, or the float of a scalar form's memory
+ * operand, as an f32 or an f64. `again`: the operand was read before in this
+ * instruction, its address left in `addr` and its page tested.
+ *
+ * @param {E} e @param {Operand} operand @param {boolean} double @param {boolean} [again]
+ */
+function pushLow(e, operand, double, again = false){
+    const { b } = e;
+    if (operand.kind === 'xmm')
+    {
+        b.localGet(e.xmmLocal(/** @type {number} */ (operand.reg)));
+        b.op(0xfd, [double ? SIMD.f64x2ExtractLane : SIMD.f32x4ExtractLane, 0]);
+        return;
+    }
+    if (!again)
+    {
+        prepareAddress(e, operand);
+    }
+    b.localGet(Local.addr).load(double ? 'f64' : 'f32', { offset: e.layout.ramBase });
+}
+
+/**
+ * Whether a scalar float form is worked on its low lane alone (`scalarFloat`,
+ * `scalarSelect`) rather than as the vector form with that lane shuffled into
+ * dst: on a host whose default NaN is positive, an arm64 one. There the
+ * vector form's fix-up of the default NaN and the shuffle -- a register copy
+ * and four lane moves -- made one `mulss` fourteen instructions around the
+ * multiply, six this way. On x86 the vector form is the multiply and one
+ * blend, and the scalar one ran slower (Chromium 141, cork-bench paired:
+ * fmath-sse 1.18, game-sse 1.02).
+ *
+ * @param {E} e
+ */
+const scalarsApart = e=>!e.context.features.defaultNaNNegative;
+
+/**
+ * The scalar form of a float arithmetic instruction (`addss` to `divsd`,
+ * `sqrtss`, `sqrtsd`) where `scalarsApart`: the low lane in wasm's own f32
+ * or f64 arithmetic, put back over dst, whose other lanes stay as they were.
+ *
+ * @param {E} e @param {Operand} dst @param {Operand} src
+ * @param {number} opcode  the f32 or f64 operation
+ * @param {boolean} double @param {boolean} [unaryForm]  sqrt: of src alone
+ */
+function scalarFloat(e, dst, src, opcode, double, unaryForm = false){
+    const { b } = e;
+    b.localGet(e.xmmLocal(/** @type {number} */ (dst.reg)));
+    if (!unaryForm)
+    {
+        pushLow(e, dst, double);
+    }
+    pushLow(e, src, double);
+    b.op(opcode);
+    scalarDefaultNaN(e, unaryForm ? [src] : [dst, src], double);
+    b.op(0xfd, [double ? SIMD.f64x2ReplaceLane : SIMD.f32x4ReplaceLane, 0]);
+    writeV(e, dst, null);
+}
+
+/**
+ * `minss` to `maxsd` where `scalarsApart`: the low lane of dst the lesser
+ * (`min`) or the greater of its own and src's, as a compare and a select --
+ * src's whenever the compare is false, a NaN or two zeros included -- put
+ * back over dst.
+ *
+ * @param {E} e @param {Operand} dst @param {Operand} src @param {boolean} double
+ * @param {boolean} min
+ */
+function scalarSelect(e, dst, src, double, min){
+    const { b } = e;
+    const [a, c] = double ? [Local.d0, Local.d1] : [Local.f0, Local.f1];
+    b.localGet(e.xmmLocal(/** @type {number} */ (dst.reg)));
+    pushLow(e, dst, double);
+    b.localTee(a);
+    pushLow(e, src, double);
+    b.localTee(c);
+    b.localGet(a).localGet(c)
+        .op(double ? (min ? F64.lt : F64.gt) : (min ? F32.lt : F32.gt))
+        .select();
+    b.op(0xfd, [double ? SIMD.f64x2ReplaceLane : SIMD.f32x4ReplaceLane, 0]);
+    writeV(e, dst, null);
+}
+
+/**
+ * The scalar result on the stack, a NaN while no operand was, made the
+ * processor's default NaN, sign set, as `defaultNaN` does a lane. The common
+ * path is the result compared with itself; the operands are read again only
+ * when that finds a NaN.
+ *
+ * @param {E} e @param {Operand[]} operands @param {boolean} double
+ */
+function scalarDefaultNaN(e, operands, double){
+    const { b } = e;
+    const result = double ? Local.d0 : Local.f0;
+    const [eq, ne] = double ? [F64.eq, F64.ne] : [F32.eq, F32.ne];
+    b.localSet(result);
+    b.localGet(result).localGet(result).op(ne);
+    e.openGuard('nan', EMPTY);
+    operands.forEach((operand, i)=>{
+        pushLow(e, operand, double, true);
+        pushLow(e, operand, double, true);
+        b.op(eq);
+        if (i > 0)
+        {
+            b.op(I32.and);
+        }
+    });
+    e.openIf('invalid', EMPTY);
+    if (double)
+    {
+        b.i64const(0xfff8000000000000n).op(F64.reinterpretI64);
+    }
+    else
+    {
+        b.i32const(0xffc00000 | 0).op(F32.reinterpretI32);
+    }
+    b.localSet(result);
+    e.close();
+    e.close();
+    b.localGet(result);
+}
 
 /**
  * dst = op(dst, src) on v128, with the result merged into the low `scalar`

@@ -151,6 +151,9 @@ const hex = (value, width = 8)=>(value >>> 0).toString(16).padStart(width, '0');
  * @property {SharedArrayBuffer} [tsc]  The time-stamp counter every executor of the process
  *     shares (`TscWord`): the guest's clock as the process last published it, and the last
  *     count any of them read.
+ * @property {{ simd: boolean, tailCalls: boolean, sharedMemory: boolean,
+ *     defaultNaNNegative: boolean }} [features]  What the engine translates for in place of
+ *     what it finds in this host's: the tests run here what another host's translator makes.
  */
 
 /**
@@ -183,7 +186,7 @@ export const CORK_TSC_MHZ = 3000;
 export function createCorkHost(config){
     const { engine, memorySize, trapPort, entryVector, initialStack, cork: corkConfig,
         closedBelow = 0, noExecuteBelow = 0, executors = 1, executor = 0, memory: given,
-        reused, tsc } = config;
+        reused, tsc, features } = config;
     // Where code may run from: a closed range runs nothing either.
     const runsFrom = Math.max(closedBelow, noExecuteBelow) >>> 0;
     for (const name of ENGINE_EXPORTS)
@@ -614,6 +617,7 @@ export function createCorkHost(config){
     const runtime = createEngine({
         memory,
         layout,
+        ...(features === undefined ? {} : { features }),
         // One translation for every other executor of the process: made for
         // the shared layout, it is the same on each, so the arena and the
         // store keep it once whichever of them asked for it first. The

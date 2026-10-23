@@ -158,6 +158,67 @@ test('scalar forms touch the low lane and keep the rest', { skip }, ()=>{
     assert.equal(words(nan, 2)[0], 0x7fc00003);
 });
 
+test('the scalar forms worked on their low lane, as a host whose default NaN is positive'
+    + ' translates them, leave every bit the vector forms leave', { skip }, ()=>{
+    // Run here, where the host's NaN is x86's already, the arm64 host's translation --
+    // the lane alone, an invalid operation's NaN fixed up -- is held to this host's,
+    // the vector form and its shuffle: bit for bit, the fix-up's own branch taken by
+    // 0/0, inf - inf and the root of a negative number. Register forms over xmm0 and
+    // xmm1, then memory forms over the data, into xmm2..xmm7.
+    const REGISTERS_FORMS = [
+        0xf3, 0x0f, 0x58, 0xd1, // addss xmm2, xmm1
+        0xf3, 0x0f, 0x5c, 0xd9, // subss xmm3, xmm1
+        0xf3, 0x0f, 0x59, 0xe1, // mulss xmm4, xmm1
+        0xf3, 0x0f, 0x5e, 0xe8, // divss xmm5, xmm0
+        0xf3, 0x0f, 0x51, 0xf0, // sqrtss xmm6, xmm0
+        0xf2, 0x0f, 0x58, 0xf9, // addsd xmm7, xmm1
+        0xf3, 0x0f, 0x5d, 0xd0, // minss xmm2, xmm0
+        0xf2, 0x0f, 0x5f, 0xd8, // maxsd xmm3, xmm0
+        0xf4];
+    const MEMORY_FORMS = [
+        0xf2, 0x0f, 0x59, 0xd1, // mulsd xmm2, xmm1
+        0xf2, 0x0f, 0x5c, 0xd8, // subsd xmm3, xmm0
+        0xf2, 0x0f, 0x51, 0xe1, // sqrtsd xmm4, xmm1
+        0xf3, 0x0f, 0x5e, 0x2d, 0x00, 0x20, 0, 0, // divss xmm5, [DATA]
+        0xf2, 0x0f, 0x59, 0x35, 0x08, 0x20, 0, 0, // mulsd xmm6, [DATA+8]
+        0xf3, 0x0f, 0x51, 0x3d, 0x04, 0x20, 0, 0, // sqrtss xmm7, [DATA+4]
+        0xf2, 0x0f, 0x5e, 0x15, 0x10, 0x20, 0, 0, // divsd xmm2, [DATA+16]
+        0xf3, 0x0f, 0x5f, 0x1d, 0x14, 0x20, 0, 0, // maxss xmm3, [DATA+20]
+        0xf4];
+    // Zeros, ones, infinities, NaNs with and without a payload, a signalling one, a
+    // denormal; and the high words of doubles with the same meanings.
+    const WORDS = [0, 0x80000000, 0x3f800000, 0xbf800000, 0x7f800000, 0xff800000, 0x7fc00001,
+        0xffc00000, 0x7f800001, 1, 0x40490fdb, 0x7ff00000, 0xfff80000, 0x3ff00000, 0x7ff00001];
+    const hostOf = (/** @type {boolean} */ positive)=>createTestMachine(positive
+        ? { features: { defaultNaNNegative: false } } : {});
+    const machines = [hostOf(false), hostOf(true)];
+    let seed = 0x5ca1a;
+    const next = ()=>{
+        seed = (Math.imul(seed, 1103515245) + 12345) >>> 0;
+        return WORDS[(seed >>> 16) % WORDS.length];
+    };
+    for (let round = 0; round < 40; round++)
+    {
+        const xmm = Array.from({ length: 32 }, next);
+        const data = Array.from({ length: 6 }, next);
+        for (const program of [REGISTERS_FORMS, MEMORY_FORMS])
+        {
+            const ends = machines.map(m=>{
+                const view = new DataView(m.memory.buffer);
+                xmm.forEach((word, i)=>view.setUint32(m.layout.xmm + i * 4, word, true));
+                data.forEach((word, i)=>view.setUint32(DATA + i * 4, word, true));
+                m.write(CODE, program);
+                m.setReg('esp', 0x80000);
+                m.setEflags(2);
+                assert.equal(m.runProgram(CODE).kind, 3);
+                return [0, 1, 2, 3, 4, 5, 6, 7].flatMap(index=>words(m, index));
+            });
+            assert.deepEqual(ends[1], ends[0], `round ${round}, ${program === REGISTERS_FORMS
+                ? 'register' : 'memory'} forms`);
+        }
+    }
+});
+
 test('minps and maxps return the second operand for a NaN or two zeros', { skip }, ()=>{
     const m = run([0x0f, 0x5d, 0xc1], { xmm0: [1, NaN, 0, 5], xmm1: [2, 3, -0, NaN] }); // minps
     const got = lanes(m, 0);

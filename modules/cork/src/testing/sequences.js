@@ -95,6 +95,17 @@ export const POOL = [
     { name: 'addss xmm0, xmm1', bytes: [0xf3, 0x0f, 0x58, 0xc1] },
     { name: 'addsd xmm0, xmm1', bytes: [0xf2, 0x0f, 0x58, 0xc1] },
     { name: 'mulss xmm0, xmm1', bytes: [0xf3, 0x0f, 0x59, 0xc1] },
+    { name: 'subss xmm0, xmm1', bytes: [0xf3, 0x0f, 0x5c, 0xc1] },
+    { name: 'divss xmm0, xmm1', bytes: [0xf3, 0x0f, 0x5e, 0xc1] },
+    { name: 'sqrtss xmm0, xmm1', bytes: [0xf3, 0x0f, 0x51, 0xc1] },
+    { name: 'minss xmm0, xmm1', bytes: [0xf3, 0x0f, 0x5d, 0xc1] },
+    { name: 'mulsd xmm0, xmm1', bytes: [0xf2, 0x0f, 0x59, 0xc1] },
+    { name: 'divsd xmm0, xmm1', bytes: [0xf2, 0x0f, 0x5e, 0xc1] },
+    { name: 'sqrtsd xmm0, xmm1', bytes: [0xf2, 0x0f, 0x51, 0xc1] },
+    { name: 'maxsd xmm0, xmm1', bytes: [0xf2, 0x0f, 0x5f, 0xc1] },
+    { name: 'mulss xmm0, dword [m]', bytes: [0xf3, 0x0f, 0x59, 0x05, ...disp32(M0)] },
+    { name: 'maxss xmm0, dword [m]', bytes: [0xf3, 0x0f, 0x5f, 0x05, ...disp32(M0)] },
+    { name: 'divsd xmm0, qword [m]', bytes: [0xf2, 0x0f, 0x5e, 0x05, ...disp32(M0)] },
     // --- x87: the tag word a non-popping store leaves ---
     { name: 'fst qword [m]', bytes: [0xdd, 0x15, ...disp32(M0)] },
     // --- integer, between them ---

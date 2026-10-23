@@ -75,24 +75,32 @@ const MEMORY = 4 << 20;
  * @param {import('../../../core/src/layers/cpu/engine.js').EngineConfig} cork
  * @param {{ executors?: number, executor?: number }} [where]  which executor of a memory
  *     shared by several the host is (the first by default)
+ * @param {import('../../../core/src/layers/cpu/engine.js').EngineEnv['features']} [features]
+ *     another host's, the translation made as there
  * @returns {CorkHost}
  */
-const hostOf = (cork, where = {})=>/** @type {CorkHost} */ (createCorkHost({
-    engine, memorySize: MEMORY, trapPort: 0xb077, entryVector: 0x7000,
-    initialStack: REGISTERS.esp, cork, ...where,
-}));
+const hostOf = (cork, where = {}, features = undefined)=>/** @type {CorkHost} */ (
+    createCorkHost({
+        engine, memorySize: MEMORY, trapPort: 0xb077, entryVector: 0x7000,
+        initialStack: REGISTERS.esp, cork, ...where, ...(features ? { features } : {}),
+    }));
 
 /**
  * Makes the model and the translator, each over a host of its own, and answers
  * a judge that runs one sequence on both from one state.
  *
  * @param {{ pool?: import('./sequences.js').Form[], cork?: Record<string, unknown>,
- *     executor?: { executors: number, executor: number } }} [given]
- *     pool: the forms the sequences index (`POOL` by default); cork: the translator's
- *     settings besides the judge's own (the atomic variant's judge sets `atomic`); executor:
- *     which executor of a shared memory the translator's host is (the executors' judge)
+ *     executor?: { executors: number, executor: number },
+ *     features?: import('../../../core/src/layers/cpu/engine.js').EngineEnv['features'] }}
+ *     [given]  pool: the forms the sequences index (`POOL` by default); cork: the
+ *     translator's settings besides the judge's own (the atomic variant's judge sets
+ *     `atomic`); executor: which executor of a shared memory the translator's host is (the
+ *     executors' judge); features: the host the translator makes code for, another than
+ *     this one (an arm64 one's default NaN is positive)
  */
-export function createJudge({ pool = undefined, cork = {}, executor = undefined } = {}){
+export function createJudge({ pool = undefined, cork = {}, executor = undefined,
+    features = undefined } = {})
+{
     // The model is the JavaScript interpreter alone: the wasm tier is an
     // implementation of the instructions of its own, not their description.
     const model = hostOf({ translate: false, wasmInterpreter: false });
@@ -109,7 +117,7 @@ export function createJudge({ pool = undefined, cork = {}, executor = undefined 
         hotThreshold: Number.POSITIVE_INFINITY,
         wasmInterpreter: false,
         ...cork,
-    }, executor);
+    }, executor, features);
     const runtime = translator.cork();
 
     // A fresh FPU with its registers zeros, so an MMX read of one is a known
@@ -204,12 +212,14 @@ export function createJudge({ pool = undefined, cork = {}, executor = undefined 
  * One part of the run: the sequences whose index is `part` modulo `of`.
  *
  * @param {number} part @param {number} of
+ * @param {import('../../../core/src/layers/cpu/engine.js').EngineEnv['features']} [features]
+ *     the host the translator makes code for, another than this one (`createJudge`)
  */
-export function testSequences(part, of){
+export function testSequences(part, of, features = undefined){
     test(`translated sequences of x87, MMX and SSE leave what the instruction model leaves`
-        + ` (part ${part + 1} of ${of})`,
+        + `${features ? ' as another host translates them' : ''} (part ${part + 1} of ${of})`,
     async()=>{
-        const machine = createJudge();
+        const machine = createJudge({ features });
         const started = Date.now();
         const next = random(SEED);
         /** @type {Map<string, { count: number, at: string, what: string }>} */
