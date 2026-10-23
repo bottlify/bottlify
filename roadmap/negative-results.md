@@ -1431,3 +1431,40 @@ None yet.
 - **Decision.** Not taken: no warm gain past the noise, the code itself counted 1.7 % worse,
   and a cold run 13 % slower for the extra forming. `formDepth` stays 1; the tools keep the
   switch (`--form-depth`) for the next measurement of forming.
+
+### 2026-10-23 -- hot direct callees formed into their callers past the caps
+
+- **Idea.** A direct call whose callee forming left out for its size (more blocks than a
+  leaf's, or a region already full of its own function) is sampled as an indirect call is;
+  once hot, its region is formed again with the callee in, which may take up to 256 blocks
+  and 8192 bytes past the caps, formed at its caller's depth (its own callees in as in its own
+  region), at most two calls a region to one such callee. Each call formed in saves the wasm
+  call's ~110 machine instructions at the caller.
+- **Workload.** Statically: the Crysis demo timedemo's 21 main-thread regions, weighed by its
+  block profile (node stand, from 350 s on). Timed: cork-bench in Chromium (`browser.mjs
+  --paired`, against the parent a33c9493); cork-bench in node; a loop calling a function of 25
+  blocks a million times; the Crysis demo `benchmark_cpu` (High, every setting before `+map`,
+  3 executors, fake GPU, 2048 MB, 330 s, each arm warmed once on a Chrome profile of its own),
+  ms a frame over timedemo frames 10-60.
+- **Values.** Static: 276 M calls out of these regions (direct, region full 107.5 M; direct,
+  callee too large 66.8 M; indirect, no callee predicted 94.4 M), the 25 hottest direct ones
+  84 M. Named hot, 40 M of them formed in with 64 blocks of room, 60 M with 128, 81 M with
+  256, the regions two fifths larger; held to a leaf's size, 17.7 M. Micro: 20 -> 7 ns a
+  call. lua-x87 in Chromium: 1.87 and 1.93 times as long (warm 100, 2 x 60 rounds, interquartile
+  1.49-2.31), 1.38 (warm 800, 40 rounds, 1.17-1.92); tree, game-x87, vm, vcall within the
+  noise. lua-x87 in node: best rep 2.33 -> 2.94-3.29 ms an iteration; its emitted modules 7.2 ->
+  20.8 MB, regions formed again 21 -> 200. Crysis: base 593 ms a frame (median 440); with it
+  735 (median 685) and 435 (median 409); the base's second run stopped at start (the OPFS
+  "file not found" of a reused profile).
+- **Why.** A callee formed in keeps its blocks in address order, so of the call and the
+  return one edge runs backward: the budget test and, unless to a loop's head, the region's
+  dispatch, a `br_table` whose target changes with every caller, where a wasm call and its
+  return are a direct call and a return the processor predicts. In the 21 regions the callees
+  formed in already take 89.5 M calls a profile, 43.3 M of them backward and 33.7 M of their
+  returns. Large callees in an interpreter's loop also made its region's code larger and its
+  hot paths slower.
+- **Machine.** The 4-core KVM VM (Xeon 2.80 GHz); Chromium 141 (V8 14.1); node 22.22.0 (V8 12.4).
+  Noise between Crysis runs of one arm: 435 vs 735 ms a frame.
+- **Decision.** Not taken. Before forming more in, a callee formed in should be laid out between
+  its call and the call's return, so both edges branch forward; then this is worth measuring again
+  (the patch and its gate are kept outside the tree).
