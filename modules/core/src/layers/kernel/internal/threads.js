@@ -79,6 +79,14 @@ const SHORT_WAIT_MS = 20;
 const LATE_GAP_MS = 40;
 
 /**
+ * The host ms a thread's blocking waits lasted until another thread woke it,
+ * counted below each bound and past the last (`blockedFor`): whether a wait
+ * that looked at its object a little longer in the guest would have found it
+ * signalled rather than leaving its executor and waiting for the process's.
+ */
+const BLOCKED_BOUNDS = [0.02, 0.05, 0.1, 0.2, 0.5, 1, 5, 20];
+
+/**
  * Calls into the host an instruction past which a thread runs on the process's
  * own executor (`keptHere`): one every 30 000 instructions, 10 to 100 us of
  * translated code, against 5 us a call from another executor took to be
@@ -2633,6 +2641,7 @@ export function createScheduler(options){
             thread.deadline = timed?.deadline ?? null;
             thread.timeoutResult = timed?.result ?? 0;
             thread.shortWait = thread.deadline !== null && thread.deadline - now() <= SHORT_WAIT_MS;
+            thread.blockedAt = wall();
             // Whether a queued APC may end this wait early. Set for the one
             // block made inside an alertable call and no other, and gone again
             // at the wake: a later wait that is not alertable must not be
@@ -2656,6 +2665,13 @@ export function createScheduler(options){
             thread.waitingOn = null;
             thread.deadline = null;
             thread.alertable = false;
+            if (thread.blockedAt !== undefined)
+            {
+                const ms = wall() - thread.blockedAt;
+                thread.blockedFor ??= new Array(BLOCKED_BOUNDS.length + 1).fill(0);
+                const under = BLOCKED_BOUNDS.findIndex(bound=>ms < bound);
+                thread.blockedFor[under < 0 ? BLOCKED_BOUNDS.length : under]++;
+            }
             // Woken by the running thread -- an event it set, a mutex or a
             // semaphore it released -- a thread of higher priority takes the
             // processor at once on Windows, before the next instruction of the
@@ -3013,6 +3029,10 @@ export function createScheduler(options){
                 // The other executors' asks met inside an unbroken routine here.
                 asksPutOff: putOff,
                 recentWakes: recentWakes.slice(),
+                // Each thread's waits another thread ended, by how long they
+                // lasted: counts below 0.02, 0.05, ... 20 ms and past it.
+                blockedFor: threads.filter(thread=>thread.blockedFor !== undefined)
+                    .map(thread=>`${thread.name} ${thread.blockedFor.join('/')}`).join(' | '),
                 recentByThread: threads.filter(thread=>thread.state !== ThreadState.TERMINATED)
                     .map(thread=>`${thread.name}: ${(thread.recent ?? []).join(' > ')}`),
                 // The last gaps past LATE_GAP_MS a short-period thread went
