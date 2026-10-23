@@ -2371,6 +2371,28 @@ test('a block profile counts how calls and returns went, transfers and rdtscs', 
         'a run without the profile counts nothing');
 });
 
+test('a block profile counts each jump back by how it is taken: to a loop\'s head, or through'
+    + ' the dispatch where the region is laid out flat', async()=>{
+    // mov ecx, 100; L: inc eax; test cl, 1; jz S; inc edx; S: dec ecx; jnz L; hlt -- a loop
+    // of three blocks, its jump back taken 99 times.
+    const code = [0xb9, 100, 0, 0, 0, 0x40, 0xf6, 0xc1, 0x01, 0x74, 0x01, 0x42, 0x49, 0x75, 0xf6,
+        0xf4];
+    for (const [structure, counted, other] of /** @type {const} */ ([
+        [true, 'JUMP_LOOP', 'JUMP_DISPATCH'], [false, 'JUMP_DISPATCH', 'JUMP_LOOP']]))
+    {
+        const m = machine({ blockProfile: true, structure });
+        m.write(CODE, code);
+        m.runtime.noteHot(CODE);
+        await m.runtime.translatePending();
+        const exit = m.runtime.run(m.runtime.entryOf(CODE), 1_000_000);
+        assert.equal(exit.kind, 'halt');
+        assert.deepEqual([m.reg(0), m.reg(2)], [100, 50]);
+        const { mechanisms } = /** @type {any} */ (m.runtime.diagnostics());
+        assert.equal(mechanisms[counted], 99, `structure ${structure}: dec ecx; jnz L, taken`);
+        assert.equal(mechanisms[other] + mechanisms.JUMP_OUT, 0, `structure ${structure}`);
+    }
+});
+
 test('a block profile says what the hot code is made of: each form\'s executions and the wasm'
     + ' bytes they ran through, emitted without the profile\'s counts', async()=>{
     const m = machine({ blockProfile: true });

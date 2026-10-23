@@ -1468,3 +1468,34 @@ None yet.
 - **Decision.** Not taken. Before forming more in, a callee formed in should be laid out between
   its call and the call's return, so both edges branch forward; then this is worth measuring again
   (the patch and its gate are kept outside the tree).
+
+### 2026-10-23 -- the backward edges given as the cause in the entry above, invalidated
+
+- **Idea.** Before laying a formed callee out between its call and the call's return (the entry
+  above's decision), how the emitter itself takes those edges, and where the lua-x87 time went.
+- **Workload.** Statically: the same 21 main-thread regions of the Crysis demo timedemo, formed
+  and emitted as the translator does, every jump the emitter makes classed as a branch forward,
+  a branch back to the head of a loop around it, a trip through the function's dispatch or a way
+  out, weighed by the same block profile. Run: lua-x87 in node with the block profile and its
+  counts of jumps back (`JUMP_LOOP`, `JUMP_DISPATCH`, `JUMP_OUT`), a33c9493 against a33c9493
+  with the hot-callee patch; 100 iterations from the start, and 200 measured after 400 warm.
+- **Values.** Static: of the 89.5 M formed calls, all forward; none through the dispatch or to a
+  loop's head; their returns all forward too. The 43.3 M calls and 33.7 M returns backward of the
+  entry above were counted in address order, which a structured region is not emitted in: its
+  blocks follow the control flow (`planStructure`), and a callee formed in falls between its call
+  and the call's return. lua-x87, the measured 200 iterations, per 1000 guest instructions (base,
+  patch): through the dispatch 6.73, 6.89; to a loop's head 13.15, 12.87; calls formed in 5.18,
+  10.80; direct wasm calls 8.55, 2.78; rets that left the region 0.31, 1.10; wasm calls come back
+  by a way out 0.03, 0.45; transfers 2.20, 3.95; calls that left 0.007, 0.16. An iteration once
+  warm: 7564 and 7716 us without the profile, 9188 and 8894 us with it. From the start, 100
+  iterations with the profile: 4.3 and 9.6 s; regions formed again 21 and 187; module bytes 10.7
+  and 29.2 MB.
+- **Why.** The cause given above is wrong: the edges of a callee formed in run forward already.
+  Once warm, in node, the patch runs at the base's speed: the wasm calls it saves are paid back
+  by the new ways out of the regions (rets that leave, wasm calls left by an exit, transfers).
+  The loss of the short runs is the forming again and the compiling of the larger modules. Why
+  lua-x87 in Chromium stayed 1.38 times as long at warm 800 is not measured.
+- **Machine.** The 4-core KVM VM (Xeon 2.80 GHz); node 22.22.0 (V8 12.4); one run of each arm,
+  noise not measured.
+- **Decision.** Laying formed callees out between call and return is dropped: the emitter does it.
+  Hot callees formed in, if taken up again, start from the new ways out and the forming again.

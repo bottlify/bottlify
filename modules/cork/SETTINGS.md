@@ -105,7 +105,7 @@ see [`docs/core/configuration.md`](../../docs/core/configuration.md#cpu).
 
 | Setting | What it records |
 | --- | --- |
-| `blockProfile`, `blockProfileFrom` | Execution counts per block, from a given second on. Beside them `mechanisms` (how calls and returns went: formed into a region, wasm calls or ways out, why a callee was not formed in, calls to empty functions; transfers through the entry hash; `rdtsc`s) and `forms` (each instruction form's executions and the wasm bytes the hot regions emit for it). |
+| `blockProfile`, `blockProfileFrom` | Execution counts per block, from a given second on. Beside them `mechanisms` (how calls and returns went: formed into a region, wasm calls or ways out, why a callee was not formed in, calls to empty functions; jumps back inside a region, to a loop's head, through its dispatch or out of it; transfers through the entry hash; `rdtsc`s) and `forms` (each instruction form's executions and the wasm bytes the hot regions emit for it). |
 | `timings` | The translator's phases timed. |
 | `traceStore` | Translation store keys. |
 | `checkStale` | Regions whose bytes changed. |

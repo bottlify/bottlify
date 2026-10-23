@@ -3199,9 +3199,11 @@ export class RegionEmitter {
         this.close();
         if (this.copyFunction ? !this.copyIndex.has(label) : this.interior.has(label))
         {
+            this.countMechanism(Mechanism.JUMP_OUT);
             this.exitAfterEdge(target, Exit.UNTRANSLATED);
             return;
         }
+        this.countMechanism(around ? Mechanism.JUMP_LOOP : Mechanism.JUMP_DISPATCH);
         if (!around || this.entered.has(label))
         {
             b.i32const(this.labelFor(label)).localSet(Local.label);
