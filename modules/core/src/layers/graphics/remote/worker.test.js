@@ -233,6 +233,63 @@ test('asked for its diagnostics, the played device answers, and the asker can wa
         }
     });
 
+test('a present the worker held for its GPU is in what the worker says with its diagnostics',
+    async()=>{
+        // The GPU here finishes nothing until told: the fourth frame is one past
+        // the bound of three, and its present waits. The program's side sees
+        // that as a wait on the worker; the bound's own count says it was the GPU.
+        const gpu = createFakeDevice({ workDone: true });
+        Object.assign(gpu.device, { queue: gpu.queue });
+        /** @type {any} */
+        const scope = { postMessage: ()=>{}, onmessage: null };
+        serveGraphics(scope, {
+            gpu: { requestAdapter: async()=>({ features: new Set(), info: {},
+                requestDevice: async()=>gpu.device }) },
+            canvas: (width, height)=>Object.assign(gpu.canvas, { width, height,
+                transferToImageBitmap: ()=>({ width, height, close: ()=>{} }) }),
+        });
+        scope.onmessage({ data: { type: 'open', frames: 'bitmap' } });
+        await settle();
+        const { port1, port2 } = new MessageChannel();
+        scope.onmessage({ data: { type: 'root', api: 'd3d9', options: {}, port: port2 } });
+        const sender = createSender({ post: (message, transfer)=>port1.postMessage(message,
+            transfer), framesAhead: 100 });
+        port1.onmessage = event=>sender.receive(event.data);
+        const d3d = recordedDirect3D(createDirect3D9, {}, sender);
+        /** @type {{ device?: any }} */
+        const out = {};
+        d3d.CreateDevice({ swapEffect: D3DSWAPEFFECT.DISCARD, backBufferCount: 1,
+            backBufferWidth: 8, backBufferHeight: 8, backBufferFormat: D3DFMT.X8R8G8B8 }, out);
+        try
+        {
+            assert.equal(sender.latency(), null, 'nothing said yet: not measured, never zero');
+            for (let frame = 0; frame < 4; frame++)
+            {
+                out.device.BeginScene();
+                out.device.Clear(0, null, D3DCLEAR.TARGET, 0xff000000 + frame, 1, 0);
+                out.device.EndScene();
+                await out.device.Present();
+            }
+            await settle();
+            out.device.diagnostics();
+            await sender.answered();
+            const held = sender.latency();
+            assert.equal(held?.limit, 3);
+            assert.equal(held?.frames, 4, 'every present counted');
+            assert.equal(held?.held, 1, 'the one past the bound waited for the GPU');
+            assert.equal(held?.waiting, 1, 'and still does');
+            assert.equal(sender.behind(), 1, 'its frame not played, as far as the program knows');
+            gpu.finish();
+            await settle();
+            assert.equal(sender.behind(), 0, 'played once the GPU has finished the oldest');
+        }
+        finally
+        {
+            port1.close();
+            port2.close();
+        }
+    });
+
 test('a client port takes roots as the worker does, and is told when the GPU goes away',
     async()=>{
         const gpu = createFakeDevice();

@@ -371,6 +371,134 @@ test('a dynamic buffer written after its unlock draws what was written', async()
     created.buffer.release();
 });
 
+test('every vertex a draw reads of streams bound at offsets into a dynamic buffer written after its'
+    + ' unlock is where the binding reads it', async()=>{
+    // Direct3D 9 reads a stream's vertex v at the stream's offset plus v times
+    // its stride, v the base vertex plus the index. The device folds the whole
+    // vertices of stream zero's offset into the first vertex and each binding
+    // takes them back; what a draw uploads of a buffer written after its unlock
+    // has to be counted the same way, since only the draw sends those bytes --
+    // counted from a further stream's own offset it lay that many vertices
+    // past what the GPU read. Positions in stream zero and colours in stream
+    // one, out of one buffer at offsets of their own, drawn indexed and not:
+    // each vertex the GPU reads through what the device bound is compared with
+    // what the program wrote where Direct3D says the vertex is.
+    const h = harness({ width: 8, height: 8 });
+    const { device } = h;
+    const BYTES = 64 << 10;
+    /** @type {{ declaration?: any }} */
+    const made = {};
+    assert.equal(device.CreateVertexDeclaration([
+        { Stream: 0, Offset: 0, Type: D3DDECLTYPE.FLOAT4, Method: 0,
+            Usage: D3DDECLUSAGE.POSITIONT, UsageIndex: 0 },
+        { Stream: 1, Offset: 0, Type: D3DDECLTYPE.D3DCOLOR, Method: 0,
+            Usage: D3DDECLUSAGE.COLOR, UsageIndex: 0 },
+    ], made), D3D_OK);
+    assert.equal(device.SetVertexDeclaration(made.declaration), D3D_OK);
+    /** @type {{ buffer?: any }} */
+    const created = {};
+    assert.equal(device.CreateVertexBuffer(BYTES, D3DUSAGE.DYNAMIC | D3DUSAGE.WRITEONLY, 0,
+        D3DPOOL.DEFAULT, created), D3D_OK);
+    /** @type {{ buffer?: any }} */
+    const indices = {};
+    assert.equal(device.CreateIndexBuffer(64, 0, D3DFMT_INDEX.INDEX16, D3DPOOL.MANAGED, indices),
+        D3D_OK);
+    assert.equal(device.SetIndices(indices.buffer), D3D_OK);
+    let seed = 0x2545f491;
+    /** @param {number} n */
+    const below = n=>{
+        seed = (Math.imul(seed, 1103515245) + 12345) >>> 0;
+        return (seed >>> 8) % n;
+    };
+    /** @type {string[]} */
+    const wrong = [];
+    let folded = 0;
+    for (let round = 0; round < 48; round++)
+    {
+        const strides = [16 + 4 * below(5), 4 * (1 + below(3))];
+        // Stream zero in the buffer's first half, stream one in its second.
+        const offsets = [4 * below(4096), (32 << 10) + 4 * below(4096)];
+        const indexed = below(2) === 0;
+        const count = 3 * (1 + below(3));
+        const base = below(40);
+        const low = below(10);
+        /** The vertices Direct3D reads, in its numbering: base vertex plus each index. */
+        const order = indexed ? Array.from({ length: count }, ()=>low + below(count))
+            : Array.from({ length: count }, (unused, k)=>k);
+        folded += Math.min(...offsets.map((offset, stream)=>
+            Math.floor(offset / strides[stream]))) > 0 ? 1 : 0;
+        /** @type {{ pBits?: number }} */
+        const locked = {};
+        assert.equal(created.buffer.Lock(0, 0, locked, D3DLOCK.DISCARD), D3D_OK);
+        assert.equal(created.buffer.Unlock(), D3D_OK);
+        const at = /** @type {number} */ (locked.pBits);
+        /** Each vertex's bytes in each stream, as written after the unlock. @type {Map<string, Uint8Array>} */
+        const wrote = new Map();
+        for (const index of order)
+        {
+            const v = base + index;
+            strides.forEach((stride, stream)=>{
+                const bytes = Uint8Array.from({ length: stride },
+                    (unused, k)=>(round * 31 + v * 7 + stream * 101 + k * 13 + 1) & 0xff);
+                if (stream === 0)
+                {
+                    // A position the stage can take: x, y in the target, z, rhw.
+                    const view = new DataView(bytes.buffer);
+                    view.setFloat32(0, 1 + (v % 6), true);
+                    view.setFloat32(4, 1 + (v % 5), true);
+                    view.setFloat32(8, 0.5, true);
+                    view.setFloat32(12, 1, true);
+                }
+                h.write(at + offsets[stream] + v * stride, bytes);
+                wrote.set(`${stream}:${v}`, bytes);
+            });
+        }
+        if (indexed)
+        {
+            /** @type {{ pBits?: number }} */
+            const out = {};
+            assert.equal(indices.buffer.Lock(0, 0, out, 0), D3D_OK);
+            h.write(/** @type {number} */ (out.pBits),
+                new Uint8Array(Uint16Array.from(order).buffer));
+            assert.equal(indices.buffer.Unlock(), D3D_OK);
+        }
+        strides.forEach((stride, stream)=>assert.equal(
+            device.SetStreamSource(stream, created.buffer, offsets[stream], stride), D3D_OK));
+        assert.equal(device.BeginScene(), D3D_OK);
+        assert.equal(indexed
+            ? device.DrawIndexedPrimitive(D3DPT.TRIANGLELIST, base, low, count, 0, count / 3)
+            : device.DrawPrimitive(D3DPT.TRIANGLELIST, base, count / 3), D3D_OK);
+        assert.equal(device.EndScene(), D3D_OK);
+        await h.present();
+
+        const draws = device.diagnostics().lastFrame.filter(
+            (/** @type {any} */ command)=>command.kind === 'draw');
+        assert.equal(draws.length, 1, `round ${round}: the draw was made`);
+        const [draw] = draws;
+        /** Where the GPU reads each stream: the buffer and offset bound for it. */
+        const bound = [draw.vertices, draw.streams?.[0]];
+        order.forEach((index, k)=>{
+            // The vertex the GPU fetches, numbered as the device bound it.
+            const fetched = indexed ? draw.baseVertex + index : draw.first + k;
+            strides.forEach((stride, stream)=>{
+                const from = bound[stream].offset + fetched * stride;
+                const read = /** @type {Uint8Array} */ (bound[stream].gpu.bytes)
+                    .subarray(from, from + stride);
+                if (!read.every((byte, i)=>byte === wrote.get(`${stream}:${base + index}`)?.[i]))
+                {
+                    wrong.push(`round ${round}: stream ${stream} (offset ${offsets[stream]},`
+                        + ` stride ${stride}) vertex ${base + index} of a`
+                        + ` ${indexed ? 'indexed' : 'plain'} draw`);
+                }
+            });
+        });
+    }
+    assert.deepEqual(wrong.slice(0, 4), []);
+    assert.ok(folded > 24, `stream zero's offset folded into the first vertex (${folded} of 48)`);
+    created.buffer.release();
+    indices.buffer.release();
+});
+
 test('models written one after another into a dynamic buffer after its unlock draw each its own'
     + ' vertices, and the buffer goes to the queue once a frame', async()=>{
     // A skinning buffer: locked with DISCARD and unlocked once a frame, then

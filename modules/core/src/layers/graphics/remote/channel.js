@@ -21,10 +21,12 @@
  *                      { type: 'presented', count }
  *                      { type: 'counts', counts }      occlusion counts the GPU has just
  *                                                      given, sent unasked
- *                      { type: 'diagnostics', diagnostics, phases? }
+ *                      { type: 'diagnostics', diagnostics, phases?, latency? }
  *                                                      what a device said of itself when asked,
- *                                                      and where the receiving thread's time
- *                                                      went (`WorkerPhases`)
+ *                                                      where the receiving thread's time
+ *                                                      went (`WorkerPhases`), and how far the
+ *                                                      GPU ran behind its presents
+ *                                                      (`FrameLatencyState`)
  *                      { type: 'wrote', writes }       guest memory the played side wrote later:
  *                                                      the bytes, or where it wrote shared memory
  *                      { type: 'divergence', api, detail }
@@ -55,6 +57,18 @@ const LENT_GAP_MS = 0.25;
  *
  * @typedef {{ 'batch-read': { count: number, ms: number, selfMs: number },
  *     'batch-sweep': { count: number, ms: number } }} WorkerPhases
+ */
+
+/**
+ * The bound on the frames the played side's GPU may still be drawing
+ * (`latency.js`), as it stood: a present that queued one past it waited for
+ * the GPU (`held`, `heldMs`), which is the only account of a GPU too slow for
+ * the frames it is handed -- the played side's thread is idle meanwhile, and
+ * the program's waits on its presents look the same whichever of the two
+ * held them.
+ *
+ * @typedef {ReturnType<ReturnType<typeof import('../webgpu/internal/latency.js')
+ *     .createFrameLatency>['diagnostics']>} FrameLatencyState
  */
 
 /**
@@ -176,6 +190,8 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
     let diagnostics = null;
     /** Where the played side's time went, as it said last. @type {WorkerPhases | null} */
     let phases = null;
+    /** How far its GPU ran behind, as it said last. @type {FrameLatencyState | null} */
+    let latency = null;
     let failure = /** @type {string | null} */ (null);
     /** The diagnostics asked for, and those the played side has answered. */
     let asked = 0;
@@ -392,6 +408,7 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
                 case 'diagnostics':
                     diagnostics = message.diagnostics;
                     phases = message.phases ?? null;
+                    latency = message.latency ?? null;
                     told++;
                     hear();
                     break;
@@ -532,6 +549,12 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
         /** Where the played side's time went, as it said with its last diagnostics; null before. */
         phases: ()=>phases,
 
+        /**
+         * How far the played side's GPU ran behind its presents, as it said
+         * with its last diagnostics; null before, and where nothing bounds it.
+         */
+        latency: ()=>latency,
+
         /** The calls waited on, by name, with the milliseconds they took. */
         waits: ()=>Object.fromEntries([...waits].map(([name, sum])=>[name, {
             count: sum.count, ms: Math.round(sum.ms), maxMs: Math.round(sum.maxMs),
@@ -554,8 +577,10 @@ const shared = ()=>(typeof performance === 'undefined' ? Date.now()
  * @param {Object} options
  * @param {ReturnType<typeof import('./direct3d.js').playedDirect3D>} options.played
  * @param {(message: any, transfer?: Transferable[]) => void} options.post
+ * @param {() => FrameLatencyState} [options.latency]  the bound the played device's
+ *     presents wait on, where it has one
  */
-export function createReceiver({ played, post }){
+export function createReceiver({ played, post, latency }){
     let presented = 0;
     /** @type {WorkerPhases} */
     const phases = { 'batch-read': { count: 0, ms: 0, selfMs: 0 },
@@ -640,7 +665,7 @@ export function createReceiver({ played, post }){
                     if (call.m === 'diagnostics')
                     {
                         post({ type: 'diagnostics', diagnostics: crossable(answer),
-                            phases: phasesNow() });
+                            phases: phasesNow(), latency: latency?.() });
                     }
                     else if (call.wait === WAIT.ANSWER)
                     {

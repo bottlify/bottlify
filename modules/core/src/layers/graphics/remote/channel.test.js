@@ -165,3 +165,38 @@ test('the played side counts its batches\' time and says it with its diagnostics
     s.made.receive(told);
     assert.deepEqual(s.made.phases(), told.phases);
 });
+
+test('the played side says how far its GPU ran behind with its diagnostics', ()=>{
+    // A present that queued a frame past the bound waited for the GPU, which
+    // the program's side sees as a wait on the worker like any other: the
+    // bound's own account of the presents it held comes with the diagnostics.
+    const bound = { limit: 3, counting: true, inFlight: 2, peak: 4, frames: 120, held: 7,
+        heldMs: 35, waiting: 0 };
+    const played = {
+        /** @param {ArrayBuffer} buffer @param {(call: any) => void} each */
+        read: (buffer, each)=>{
+            each({ m: 'diagnostics', wait: WAIT.ANSWER });
+            return undefined;
+        },
+        play: ()=>({ frames: 1 }),
+    };
+    /** @param {(() => any) | undefined} latency */
+    const toldBy = latency=>{
+        /** @type {any[]} */
+        const said = [];
+        createReceiver({ played: /** @type {any} */ (played), post: message=>said.push(message),
+            latency }).receive({ type: 'calls', buffer: new ArrayBuffer(4) });
+        return said.find(message=>message.type === 'diagnostics');
+    };
+
+    const told = toldBy(()=>({ ...bound }));
+    assert.deepEqual(told.latency, bound);
+    const s = sender(0);
+    assert.equal(s.made.latency(), null, 'nothing said yet: not measured, never zero');
+    s.made.receive(told);
+    assert.deepEqual(s.made.latency(), bound);
+
+    const unbounded = sender(0);
+    unbounded.made.receive(toldBy(undefined));
+    assert.equal(unbounded.made.latency(), null, 'a played side with no bound says none');
+});

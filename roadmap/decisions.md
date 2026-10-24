@@ -487,11 +487,14 @@ up the whole buffer's contents; a driver that renames hands back other memory, o
 the GPU hands back the same. The host keeps a buffer's storage at a DISCARD, and the renderer
 carries the old contents over into the GPU copy it renames (`webgpu/internal/buffers.js`): a game
 that draws after a DISCARD what it wrote before it, past the range it locked, draws it right on a
-driver that hands the same memory back. The guest's lock routine, which moves the buffer onto a
-spare storage instead (`d3d8/storages.js`), copies the bytes before and after the range locked
-from the storage left (`moveCopyCode`), so that both paths give a program the same bytes; a
-DISCARD of the whole buffer copies nothing. The bytes copied are counted (`moved.copied` in the
-device's shadow diagnostics). *2026-10-24.*
+driver that hands the same memory back. World of Warcraft's sky does so: it fills the end of its
+ring, wraps the ring with DISCARD for the next batch and then draws the end. The guest's lock
+routine, which moves the buffer onto a spare storage instead (`d3d8/storages.js`), copies the
+bytes before and after the range locked from the storage left (`moveCopyCode`), so that both paths
+give a program the same bytes; a DISCARD of the whole buffer copies nothing. The bytes copied are
+counted (`moved.copied` in the device's shadow diagnostics). The price is a copy in the guest:
+Call of Duty 4 locks part of its 4.5 MB skinning buffer with DISCARD every frame, and its moves
+copied 25.5 GB in a run of 326 s (27 620 moves, three executors, the fake GPU). *2026-10-24.*
 
 ## B. From measured optimisation work
 
