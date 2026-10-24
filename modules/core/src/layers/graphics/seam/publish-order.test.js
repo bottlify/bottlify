@@ -25,8 +25,8 @@ import assert from 'node:assert/strict';
 import {
     COMMAND, SHADOW, commandCode, createCommandReader, getRenderStateCode, getSamplerStateCode,
     getShaderCode, getSurfaceDescCode, getSurfaceLevelCode, getTargetCode, getTextureStageStateCode,
-    getTransformCode, getViewportCode, lock7Code, lockCode, lockLevelCode, unlockCode,
-    unlockLevelCode,
+    getTransformCode, getViewportCode, lock7Code, lockCode, lockLevelCode, moveCopyCode,
+    unlockCode, unlockLevelCode,
 } from './shadow.js';
 import { COMMANDS as D3D9_COMMANDS, commandSlot as d3d9Slot } from '../d3d9/commands.js';
 import { D3D8_COMMANDS } from '../d3d8/commands.js';
@@ -113,7 +113,8 @@ test('every routine lets the device\'s lock go with a locked store', ()=>{
     /** @type {[string, Uint8Array][]} */
     const routines = [
         ['lock', lockCode(AT, TRAP)],
-        ['lock with moves', lockCode(AT, TRAP, 0x7f)],
+        ['lock with moves', lockCode(AT, TRAP, 0x7f, AT + 0x1000)],
+        ['the copy of a move', moveCopyCode()],
         ['lock7', lock7Code(AT, TRAP)],
         ['unlock', unlockCode(AT, TRAP)],
         ['texture LockRect', lockLevelCode(AT, TRAP, { find: 'texture' })],
@@ -155,7 +156,7 @@ test('a command record\'s length is its last word, published with xchg', ()=>{
         assert.equal(lengths[0].op, 'xchg', `${name}: the length is published with xchg`);
     }
     // And the record of a buffer's move onto another of its storages.
-    const moved = stores(lockCode(AT, TRAP, 0x7f))
+    const moved = stores(lockCode(AT, TRAP, 0x7f, AT + 0x1000))
         .filter(store=>store.mem.base === EAX && store.mem.index < 0
             && store.mem.disp === COMMAND.BYTES);
     assert.equal(moved.length, 1, 'the move writes its record\'s length once');

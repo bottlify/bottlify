@@ -755,7 +755,10 @@ flowchart TB
   of its length (`d3d8/storages.js`, two at most). From then on the guest's `Lock` moves the buffer onto
   a free one, writes the move into the ring (`Buffer.Rename`) and goes on writing there; the host
   makes the move in order with the draws, so each draw reads the storage it was made with, and
-  frees the storage left. Each storage is sent whole once, then by the pages written since. A draw
+  frees the storage left. What the buffer held outside the range locked comes along, copied by
+  the guest from the storage left: the host's DISCARD keeps the storage, and a program may draw
+  what it wrote before a DISCARD past the range it locked (decision A52). Each storage is sent
+  whole once, then by the pages written since. A draw
   from a dynamic buffer reads its indices, as its vertices, out of guest memory at the draw. No
   move while a lock taken in place (with no draw in the ring) waits for the host to replay it
   before the ring's next run, nor for a lock the host would refuse. A dynamic buffer held locked

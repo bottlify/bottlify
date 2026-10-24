@@ -28,7 +28,8 @@ import { decode } from '../modules/cork/src/decode/decoder.js';
 import {
     commandCode, getRenderStateCode, getSamplerStateCode, getShaderCode, getSurfaceDescCode,
     getSurfaceLevelCode, getTargetCode, getTextureStageStateCode, getTransformCode,
-    getViewportCode, lock7Code, lockCode, lockLevelCode, unlockCode, unlockLevelCode,
+    getViewportCode, lock7Code, lockCode, lockLevelCode, moveCopyCode, unlockCode,
+    unlockLevelCode,
 } from '../modules/core/src/layers/graphics/seam/shadow.js';
 import { COMMANDS as D3D9_COMMANDS, commandSlot as d3d9Slot }
     from '../modules/core/src/layers/graphics/d3d9/commands.js';
@@ -97,7 +98,8 @@ const sameWord = (a, b)=>(a.base ?? -1) === (b.base ?? -1) && (a.index ?? -1) ==
 /** @type {[string, Uint8Array][]} */
 const routines = [
     ['Lock', lockCode(AT, TRAP)],
-    ['Lock with moves', lockCode(AT, TRAP, 0x7f)],
+    ['Lock with moves', lockCode(AT, TRAP, 0x7f, AT + 0x1000)],
+    ['the copy of a move', moveCopyCode()],
     ['Lock (Direct3D 7)', lock7Code(AT, TRAP)],
     ['Unlock', unlockCode(AT, TRAP)],
     ['texture LockRect', lockLevelCode(AT, TRAP, { find: 'texture' })],

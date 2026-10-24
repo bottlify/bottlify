@@ -58,13 +58,14 @@ const NAME = /** @type {const} */ ({ vertices: '#2', indices: '#3' });
  *     | { kind: 'write', on: Ring, offset: number, size: number, fill: number, reach: number }
  *     | { kind: 'release', on: Ring }
  *     | { kind: 'draw', base: number, min: number, count: number, start: number,
- *         triangles: number }
+ *         triangles: number, across?: boolean }
  *     | { kind: 'host' } | { kind: 'present' } | { kind: 'turns', count: number }} Step
  *
  * A lock is taken, written and let go of at once; a hold is a lock left held,
  * written through by the writes after it and let go of by a release. A write
  * of indices names vertices below `reach`, counted from the draw's base. A
- * draw names its vertices as MinIndex and NumVertices. `host` is a call the
+ * draw names its vertices as MinIndex and NumVertices, and says whether it
+ * draws a batch again across a DISCARD of a ring since. `host` is a call the
  * host answers, which makes the ring's draws; `turns` lets the graphics
  * worker's chain run that many turns, replaying the frames queued so far.
  */
@@ -92,9 +93,13 @@ const bytesFor = (on, offset, size, fill, reach)=>(on === 'indices'
  * NOOVERWRITE lock writes only past what was drawn since the last DISCARD.
  *
  * @param {number} seed @param {number} frames  how many
- * @param {{ short?: boolean }} [options]  `short`: a draw names fewer vertices
- *     than its indices reach, as a program whose MinIndex and NumVertices are
- *     wrong does
+ * @param {{ short?: boolean, again?: boolean }} [options]  `short`: a draw names
+ *     fewer vertices than its indices reach, as a program whose MinIndex and
+ *     NumVertices are wrong does; `again`: a batch drawn before is drawn again
+ *     now and then, from a lap of its ring before the last DISCARD too, where
+ *     no lock taken since has reached it -- as a renderer that draws a batch in
+ *     one pass and again in a later one, its ring started over between them,
+ *     counts on the bytes past the DISCARD's range being there still
  * @returns {Step[]}
  */
 export function rings(seed, frames, options = {}){
@@ -106,6 +111,27 @@ export function rings(seed, frames, options = {}){
     /** @type {Step[]} */
     const steps = [];
     const calm = below(2) === 0;
+    /**
+     * With `again`: each unit of each ring by the write that put it there,
+     * -1 where a DISCARD's range left it unwritten -- the bytes a storage the
+     * buffer moved onto holds there are not the program's -- and the last
+     * batches drawn, by their writes.
+     */
+    const stamps = { vertices: new Int32Array(TOTAL.vertices).fill(-1),
+        indices: new Int32Array(TOTAL.indices).fill(-1) };
+    let writes = 0;
+    /** How often each ring was started over. */
+    const laps = { vertices: 0, indices: 0 };
+    /** @param {Ring} on @param {number} first @param {number} units */
+    const stamp = (on, first, units)=>stamps[on].fill(++writes, first, first + units);
+    /**
+     * @type {{ draw: Step & { kind: 'draw' }, units: Record<Ring, number>,
+     *     write: Record<Ring, number>, laps: Record<Ring, number> }[]}
+     */
+    const drawn = [];
+    /** @param {Ring} on @param {number} first @param {number} units @param {number} write */
+    const intact = (on, first, units, write)=>stamps[on].subarray(first, first + units)
+        .every(value=>value === write);
     /**
      * Room for `units` more in a ring: in its held lock where it has room
      * left, written there; otherwise let go of, and locked anew after the
@@ -122,6 +148,7 @@ export function rings(seed, frames, options = {}){
             const first = cursor[on];
             steps.push({ kind: 'write', on, offset: first * unit, size: units * unit, fill,
                 reach });
+            stamp(on, first, units);
             cursor[on] = first + units;
             return first;
         }
@@ -136,6 +163,7 @@ export function rings(seed, frames, options = {}){
         {
             first = 0;
             flags = D3DLOCK_DISCARD;
+            laps[on]++;
         }
         if (below(4) === 0)
         {
@@ -145,14 +173,39 @@ export function rings(seed, frames, options = {}){
             steps.push({ kind: 'write', on, offset: first * unit, size: units * unit, fill,
                 reach });
             held[on] = last;
+            if (flags === D3DLOCK_DISCARD)
+            {
+                stamps[on].fill(-1, 0, last);
+            }
         }
         else
         {
             steps.push({ kind: 'lock', on, offset: first * unit, size: units * unit, flags, fill,
                 reach });
         }
+        stamp(on, first, units);
         cursor[on] = first + units;
         return first;
+    };
+    /**
+     * A batch drawn before, drawn again where its vertices and indices are
+     * the ones it wrote; the rings' next batches then go past it, as the
+     * promise of a NOOVERWRITE lock asks.
+     */
+    const drawAgain = ()=>{
+        const { draw, units, write, laps: then } = drawn[below(drawn.length)];
+        const first = { vertices: draw.base, indices: draw.start };
+        if (!(/** @type {Ring[]} */ (['vertices', 'indices'])).every(on=>
+            intact(on, first[on], units[on], write[on])))
+        {
+            return;
+        }
+        steps.push({ ...draw,
+            across: laps.vertices > then.vertices || laps.indices > then.indices });
+        for (const on of /** @type {Ring[]} */ (['vertices', 'indices']))
+        {
+            cursor[on] = Math.max(cursor[on], first[on] + units[on]);
+        }
     };
     for (let frame = 0; frame < frames; frame++)
     {
@@ -163,9 +216,25 @@ export function rings(seed, frames, options = {}){
             const triangles = 1 + below(Math.min(300, vertices * 2));
             const fill = 1 + below(250);
             const base = place('vertices', vertices, fill, 0);
+            const vertexWrite = writes;
             const start = place('indices', triangles * 3, fill, vertices);
             const count = options.short && below(2) === 0 ? 1 + below(vertices) : vertices;
-            steps.push({ kind: 'draw', base, min: 0, count, start, triangles });
+            /** @type {Step & { kind: 'draw' }} */
+            const draw = { kind: 'draw', base, min: 0, count, start, triangles };
+            steps.push(draw);
+            if (options.again)
+            {
+                drawn.push({ draw, units: { vertices, indices: triangles * 3 },
+                    write: { vertices: vertexWrite, indices: writes }, laps: { ...laps } });
+                if (drawn.length > 64)
+                {
+                    drawn.shift();
+                }
+                if (below(3) === 0)
+                {
+                    drawAgain();
+                }
+            }
             if (below(calm ? 40 : 8) === 0)
             {
                 steps.push({ kind: 'host' });
@@ -356,6 +425,36 @@ test('Direct3D 9: rings of vertices and indices streamed a batch at a time, star
     assert.deepEqual(wrong, []);
     assert.ok(moves > 20, `DISCARDs moved the rings onto storages of their own (${moves})`);
     assert.ok(hostCalls > 20, `calls into the host made the ring's draws (${hostCalls})`);
+});
+
+test('Direct3D 9: batches drawn again after their rings were started over under DISCARD, from'
+    + ' past the ranges the DISCARDs locked, give the GPU what every call a trap does -- a move'
+    + ' onto another storage takes along what the buffer held outside its lock -- recorded for'
+    + ' a graphics worker', async()=>{
+    // The host's DISCARD keeps the buffer's storage, and the bytes past the
+    // range it locked are the program's still; a move left them on the
+    // storage it moved off, and a batch drawn again from there read what
+    // another lap had put on the new one.
+    /** @type {string[]} */
+    const wrong = [];
+    let moves = 0;
+    let across = 0;
+    for (let seed = 1; seed <= 12 && wrong.length === 0; seed++)
+    {
+        const steps = rings(seed, 30, { again: true });
+        across += steps.filter(step=>step.kind === 'draw' && step.across).length;
+        const trapped = await play(false, steps);
+        const guest = await play(true, steps);
+        moves += guest.moves;
+        const found = parting(trapped.gpu, guest.gpu);
+        if (found)
+        {
+            wrong.push(`seed ${seed}: ${found}`);
+        }
+    }
+    assert.deepEqual(wrong, []);
+    assert.ok(moves > 20, `DISCARDs moved the rings onto storages of their own (${moves})`);
+    assert.ok(across > 20, `batches drawn again across a DISCARD of their rings (${across})`);
 });
 
 /**

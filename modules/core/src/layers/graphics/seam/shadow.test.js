@@ -246,7 +246,9 @@ test('the block fits its two pages and its regions follow one another', ()=>{
     assert.equal(SHADOW.TARGETS_VALID + 4, SHADOW.LEFT_HELD);
     assert.equal(SHADOW.LEFT_HELD + 4, SHADOW.LEFT_FULL);
     assert.equal(SHADOW.LEFT_FULL + 4, SHADOW.LEFT_CHECKS);
-    assert.equal(SHADOW.LEFT_CHECKS + 4, SHADOW.SIZE);
+    // The bytes the moves copied, two words.
+    assert.equal(SHADOW.LEFT_CHECKS + 4, SHADOW.MOVE_COPIED);
+    assert.equal(SHADOW.MOVE_COPIED + 8, SHADOW.SIZE);
     assert.equal(BUFFER.QUEUED + 4, BUFFER.SPARES);
     // A dynamic buffer's other storages, then whether each is the guest's to move onto.
     assert.equal(BUFFER.SPARES + BUFFER.SPARE_COUNT * 4, BUFFER.SPARE_FREE);

@@ -66,7 +66,8 @@ import {
     COPY_GUARD_8,
     getRenderStateCode, getSurfaceDescCode, getSurfaceLevelCode, getTextureStageStateCode,
     getTransformCode,
-    getViewportCode, lockCode, stageStateMirror, unlockCode, HOST_MIRRORS, appendCommand,
+    getViewportCode, lockCode, moveCopyCode, stageStateMirror, unlockCode, HOST_MIRRORS,
+    appendCommand,
     getShaderCode, getTargetCode, shaderMirror,
     guestWords, createLevelLocks, levelIndex, lockLevelCode, unlockLevelCode,
 } from './shadow.js';
@@ -287,9 +288,10 @@ const S_FALSE = 1;
  *        Guest memory for the state a program sets without crossing into the
  *        host; without it every setter stays a trap.
  * @param {number} [deps.ringBytes]  A device's command ring's size (`shadow.js`).
- * @param {(bytes: number) => number} [deps.allocateCode]
+ * @param {(bytes: number, unbroken?: boolean) => number} [deps.allocateCode]
  *        Pages of their own for the guest code this seam writes, where a store
- *        into the state beside it cannot invalidate it; `allocate` without it.
+ *        into the state beside it cannot invalidate it, and which no slice ends
+ *        inside unless `unbroken` is false; `allocate` without it.
  * @param {(api: string, detail: string) => void} [deps.divergence]
  *        Where a value set in the guest that the device refuses is reported.
  * @param {(cursor: CursorNotice) => void} [deps.cursor]  A program cursor for the host.
@@ -447,17 +449,30 @@ export function createDirect3D8Seam(
         privateData.released(resource);
         resourceShadows.get(resource)?.sync();
     };
-    /** @param {(at: number) => Uint8Array} code */
-    const placeCode = code=>{
+    /**
+     * @param {(at: number) => Uint8Array} code
+     * @param {boolean} [unbroken]  false for code a slice may end inside
+     */
+    const placeCode = (code, unbroken = true)=>{
         if (!allocate)
         {
             return 0;
         }
         // Sized by a throwaway rendering: the bytes depend on where they
         // land only through relative jumps, never in length.
-        const at = (allocateCode ?? allocate)(code(0).length);
+        const length = code(0).length;
+        const at = allocateCode ? allocateCode(length, unbroken) : allocate(length);
         memory.writeMemory(at, code(at));
         return at;
+    };
+    /** Where the copy a buffer's move makes (`moveCopyCode`) is, once placed. */
+    let moveCopyAt = 0;
+    const moveCopy = ()=>{
+        if (moveCopyAt === 0)
+        {
+            moveCopyAt = placeCode(()=>moveCopyCode(), false);
+        }
+        return moveCopyAt;
     };
 
     /**
@@ -1099,8 +1114,8 @@ export function createDirect3D8Seam(
         ? {
             // `moves` kept as a trap: a DISCARD under draws comes to the host
             // instead of moving the buffer onto a spare storage in the guest.
-            Lock: ({ trap })=>placeCode(at=>lockCode(at, trap,
-                traps.has('moves') ? undefined : D3D8_COMMANDS.commandSlot('Buffer.Rename'))),
+            Lock: ({ trap })=>placeCode(at=>(traps.has('moves') ? lockCode(at, trap)
+                : lockCode(at, trap, D3D8_COMMANDS.commandSlot('Buffer.Rename'), moveCopy()))),
             Unlock: ({ trap })=>placeCode(at=>unlockCode(at, trap)),
         }
         : {});

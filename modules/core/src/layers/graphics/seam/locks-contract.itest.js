@@ -25,7 +25,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createCorkHost } from '../../cpu/internal/cork-host.js';
 import * as cork from '../../../../../cork/src/index.js';
-import { commandCode, createShadow, lockCode, settledAfter, unlockCode } from './shadow.js';
+import {
+    commandCode, createShadow, lockCode, moveCopyCode, settledAfter, unlockCode,
+} from './shadow.js';
 import { COMMAND_MIRRORS as MIRRORS_8 } from './d3d8.js';
 import { COMMAND_MIRRORS as MIRRORS_9 } from './d3d9.js';
 import { D3D8_COMMANDS } from '../d3d8/commands.js';
@@ -35,6 +37,8 @@ import { createDirect3D9 } from '../d3d9/device.js';
 
 const PROGRAM = 0x8000;
 const LOCK = 0x9000;
+/** The copy a move goes on to (`moveCopyCode`), past the lock routine's end. */
+const COPY = 0x9300;
 const UNLOCK = 0x9400;
 const DRAW = 0x9800;
 /** Where each routine leaves for the host: a halt each, so the one it took is known. */
@@ -96,9 +100,11 @@ const random = seed=>{
 /**
  * A program that keeps the promises a lock's flags make: a NOOVERWRITE lock
  * writes nothing a draw since the last lock without it reads, and a draw
- * reads only what was written since the last DISCARD -- the rest of the
- * buffer is undefined after one. An entry is a call that reaches the host for
- * some other reason, as any device call may.
+ * reads only what was written -- before a DISCARD too, past the range it
+ * locked: a driver hands the same memory back once the GPU is done with it,
+ * the host's DISCARD keeps the buffer's storage, and a move onto another one
+ * takes those bytes along (`moveCopyCode`). An entry is a call that reaches
+ * the host for some other reason, as any device call may.
  *
  * @param {number} seed @param {number} count @returns {Step[]}
  */
@@ -106,8 +112,8 @@ function generate(seed, count){
     const next = random(seed);
     /** Bytes the draws since the last lock without NOOVERWRITE read. */
     let read = new Uint8Array(LENGTH);
-    /** Bytes written since the last DISCARD. */
-    let defined = new Uint8Array(LENGTH);
+    /** Bytes written, and not inside a DISCARD's range since unless written there. */
+    const defined = new Uint8Array(LENGTH);
     /** @type {Step[]} */
     const steps = [];
     while (steps.length < count)
@@ -128,10 +134,6 @@ function generate(seed, count){
             if (flags !== D3DLOCK_NOOVERWRITE)
             {
                 read = new Uint8Array(LENGTH);
-            }
-            if ((flags & D3DLOCK_DISCARD) !== 0)
-            {
-                defined = new Uint8Array(LENGTH);
             }
             defined.fill(1, offset, offset + length);
             // Held through draws of what it wrote: whole triangles of its own range.
@@ -455,7 +457,8 @@ function guest(version, steps, lent = false){
     host.writePhysical(DEVICE + 4, new Uint8Array(u32(shadow.address())));
     host.writePhysical(BUFFER_IF + 4, new Uint8Array(u32(shadow.attachBuffer(buffer))));
     host.writePhysical(LOCK, lockCode(LOCK, LOCK_TRAP,
-        version.commands.commandSlot('Buffer.Rename')));
+        version.commands.commandSlot('Buffer.Rename'), COPY));
+    host.writePhysical(COPY, moveCopyCode());
     host.writePhysical(UNLOCK, unlockCode(UNLOCK, UNLOCK_TRAP));
     host.writePhysical(DRAW, commandCode(DRAW, DRAW_TRAP, {
         ...version.commands.COMMANDS.DrawPrimitive,

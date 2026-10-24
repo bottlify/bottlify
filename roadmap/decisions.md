@@ -481,6 +481,18 @@ and must be within the 64 the thread-local array holds; a library given none, or
 not every thread has room, is refused as one whose import is missing is (`LoadLibrary` answers
 NULL), as Windows fails a load it cannot give TLS to. *2026-10-18.*
 
+**A52. A dynamic buffer the guest's DISCARD moves onto another storage takes along what it held
+outside the range locked.** Direct3D 9 documents a DISCARD of a vertex or index buffer as giving
+up the whole buffer's contents; a driver that renames hands back other memory, one that waits for
+the GPU hands back the same. The host keeps a buffer's storage at a DISCARD, and the renderer
+carries the old contents over into the GPU copy it renames (`webgpu/internal/buffers.js`): a game
+that draws after a DISCARD what it wrote before it, past the range it locked, draws it right on a
+driver that hands the same memory back. The guest's lock routine, which moves the buffer onto a
+spare storage instead (`d3d8/storages.js`), copies the bytes before and after the range locked
+from the storage left (`moveCopyCode`), so that both paths give a program the same bytes; a
+DISCARD of the whole buffer copies nothing. The bytes copied are counted (`moved.copied` in the
+device's shadow diagnostics). *2026-10-24.*
+
 ## B. From measured optimisation work
 
 **The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this

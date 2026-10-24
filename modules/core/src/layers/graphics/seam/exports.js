@@ -110,9 +110,10 @@ const E_OUTOFMEMORY = 0x8007000e | 0;
  * @param {() => import('../d3d7/device.js').RenderServices} [deps.render]
  *        What a Direct3D 7 device draws with, reached when one is first made.
  * @param {(bytes: number) => number} [deps.allocate]
- * @param {(bytes: number) => number} [deps.allocateCode]  pages of their own for the guest
- *        code a seam writes, where a store beside it cannot invalidate it
  *        Guest memory for the state a program sets without crossing into the host.
+ * @param {(bytes: number, unbroken?: boolean) => number} [deps.allocateCode]  pages of
+ *        their own for the guest code a seam writes, where a store beside it cannot
+ *        invalidate it, and which no slice ends inside unless `unbroken` is false
  * @param {(address: number) => void} [deps.free]
  *        And the way to give it back, for a map a program has finished with.
  * @param {(bytes: number) => number} [deps.processHeapAllocate]

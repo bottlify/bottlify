@@ -77,7 +77,7 @@ import {
     DEPTH_STENCIL_MIRROR, RENDER_TARGET_MIRROR, VIEWPORT_GUARD_9, VIEWPORT_MIRROR, commandCode,
     STRETCH_GUARD, compiledAt, createShadow, getRenderStateCode, getTargetCode,
     getSamplerStateCode, getSurfaceDescCode, getSurfaceLevelCode, getTextureStageStateCode,
-    getTransformCode, getViewportCode, lockCode, settledAfter, stageStateMirror,
+    getTransformCode, getViewportCode, lockCode, moveCopyCode, settledAfter, stageStateMirror,
     unlockCode, HOST_MIRRORS, POLLS_BETWEEN, QUERY, appendCommand, guestWords,
     createLevelLocks, levelIndex, lockLevelCode, unlockLevelCode,
 } from './shadow.js';
@@ -200,8 +200,9 @@ const MAX_SHADER_DWORDS = 1 << 16;
  * @param {(bytes: number) => number} [deps.allocate]  Guest memory, for a device's
  *     block of the state its setters write without leaving the guest.
  * @param {number} [deps.ringBytes]  A device's command ring's size (`shadow.js`).
- * @param {(bytes: number) => number} [deps.allocateCode]  Pages of their own for
- *     those setters' code.
+ * @param {(bytes: number, unbroken?: boolean) => number} [deps.allocateCode]  Pages of
+ *     their own for those setters' code, which no slice ends inside unless `unbroken`
+ *     is false.
  * @param {import('./shadow.js').ShadowPhases} [deps.phases]  Where a device's entry work is timed.
  */
 export function createDirect3D9Seam(
@@ -395,14 +396,27 @@ export function createDirect3D9Seam(
         privateData.released(resource);
         shadowOf(owners.get(resource))?.sync();
     };
-    /** @param {(at: number) => Uint8Array} code */
-    const placeCode = code=>{
+    /**
+     * @param {(at: number) => Uint8Array} code
+     * @param {boolean} [unbroken]  false for code a slice may end inside
+     */
+    const placeCode = (code, unbroken = true)=>{
         // Sized by a throwaway rendering: the bytes depend on where they
         // land only through relative jumps, never in length.
-        const at = (allocateCode ?? /** @type {(bytes: number) => number} */ (allocate))(
-            code(0).length);
+        const length = code(0).length;
+        const at = allocateCode ? allocateCode(length, unbroken)
+            : /** @type {(bytes: number) => number} */ (allocate)(length);
         memory.writeMemory(at, code(at));
         return at;
+    };
+    /** Where the copy a buffer's move makes (`moveCopyCode`) is, once placed. */
+    let moveCopyAt = 0;
+    const moveCopy = ()=>{
+        if (moveCopyAt === 0)
+        {
+            moveCopyAt = placeCode(()=>moveCopyCode(), false);
+        }
+        return moveCopyAt;
     };
 
     /**
@@ -1094,8 +1108,8 @@ export function createDirect3D9Seam(
         ? {
             // `moves` kept as a trap: a DISCARD under draws comes to the host
             // instead of moving the buffer onto a spare storage in the guest.
-            Lock: ({ trap })=>placeCode(at=>lockCode(at, trap,
-                traps.has('moves') ? undefined : commandSlot('Buffer.Rename'))),
+            Lock: ({ trap })=>placeCode(at=>(traps.has('moves') ? lockCode(at, trap)
+                : lockCode(at, trap, commandSlot('Buffer.Rename'), moveCopy()))),
             Unlock: ({ trap })=>placeCode(at=>unlockCode(at, trap)),
         }
         : {});

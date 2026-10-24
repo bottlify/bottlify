@@ -4619,10 +4619,12 @@ async function buildApp(options){
                 bytes),
             // The guest code the seams write, on pages nothing else is handed.
             // None of it waits, and some of it writes records other threads'
-            // entries into the host read, so no slice ends inside it.
-            allocateCode: (/** @type {number} */ bytes)=>{
+            // entries into the host read, so no slice ends inside it -- but in
+            // what says it may (`unbroken` false): a copy longer than the steps
+            // that finish a routine run.
+            allocateCode: (/** @type {number} */ bytes, unbroken = true)=>{
                 const at = win32.heap().allocateCode(bytes);
-                if (at !== 0)
+                if (at !== 0 && unbroken)
                 {
                     core.api('kernel').atomicCode(at, bytes);
                 }

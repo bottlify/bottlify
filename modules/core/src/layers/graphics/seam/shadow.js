@@ -214,7 +214,12 @@ export const SHADOW = {
     LEFT_HELD: 5424 + 100,
     LEFT_FULL: 5424 + 104,
     LEFT_CHECKS: 5424 + 108,
-    SIZE: 5424 + 112,
+    /**
+     * The bytes the guest's moves of a buffer copied from the storage left
+     * into the new one (`moveCopyCode`), as two words, low then high.
+     */
+    MOVE_COPIED: 5424 + 112,
+    SIZE: 5424 + 120,
 };
 
 /** Byte offsets within a query's block. */
@@ -950,14 +955,22 @@ const dirtyPrologue = (kind, slow)=>[
 export const TEB_GL_CONTEXT = 0xbf0;
 
 /**
- * A routine's bytes: its body, then the jump to the trap its slow label
- * lands on.
+ * A routine's bytes: its body, then a jump for each of `exits` -- a label the
+ * body branches to, and the address outside it the label goes on to -- and
+ * last the jump to the trap its slow label lands on.
  *
  * @param {number} at @param {number} trap
  * @param {(number[] | { label: string } | { jcc: number, to: string, near?: boolean })[]} parts
+ * @param {Record<string, number>} [exits]
  */
-const routine = (at, trap, parts)=>{
-    const body = assemble([...parts, { label: 'slow' }]);
+const routine = (at, trap, parts, exits = {})=>{
+    const names = Object.keys(exits);
+    const body = assemble([...parts,
+        ...names.flatMap(name=>[{ label: name }, [0xe9, 0, 0, 0, 0]]), { label: 'slow' }]);
+    names.forEach((name, i)=>{
+        const from = body.length - (names.length - i) * 5;
+        body.set(jump(at + from, exits[name]), from);
+    });
     return new Uint8Array([...body, ...jump(at + body.length, trap)]);
 };
 
@@ -1033,6 +1046,16 @@ export function getRenderStateCode(at, trap){
  * nor for a lock the host refuses: the move would hold that replay back past
  * the draws after it, or move a buffer whose lock failed.
  *
+ * What the buffer held outside the lock comes along (`copyAt`, `moveCopyCode`):
+ * the host's DISCARD keeps the buffer's storage, as a driver hands the same
+ * memory back once the GPU is done with it, and a program may draw after a
+ * DISCARD what it wrote before it past the range it locked -- from a storage
+ * that held another lap's bytes there, had the move left them. Inside the
+ * lock the program writes; a DISCARD of the whole buffer copies nothing. The
+ * copy is code a slice may end inside, which this routine is not, so the
+ * routine goes on to it once the lock is taken, the storage left in the slot
+ * of `this`.
+ *
  *     mov edx, [ecx+DEVICE]
  *     (take the device's lock through EDX, or slow)
  *     cmp dword [ecx+LOCKED], 0
@@ -1095,6 +1118,7 @@ export function getRenderStateCode(at, trap){
  *     mov [eax+ARGS+4], esi
  *     xchg esi, [ecx+BASE]        ; the move: the storage left in the spare's place
  *     mov [ecx+ebx+SPARES], esi
+ *     mov [esp+12], esi           ; and in the slot of this, for the copy
  *     mov dword [ecx+ebx+SPARE_FREE], 0
  *     mov dword [ecx+LENT], 0     ; the new storage was never lent
  *     mov dword [eax+BYTES], 16   ; the record counts from here
@@ -1163,15 +1187,27 @@ export function getRenderStateCode(at, trap){
  *     mov ebx, [esp+20]           ; out
  *     mov [ebx], eax
  *     pop ebx
+ *     mov edx, [esp+4]            ; this, or the storage a move left (with renameSlot)
+ *     cmp edx, [ecx+SPARES]
+ *     je moved
+ *     cmp edx, [ecx+SPARES+4]
+ *     je moved
  *     xor eax, eax
  *     ret 20
+ *   moved:
+ *     jmp copyAt                  ; EAX the address handed out
  *
  * @param {number} at @param {number} trap
  * @param {number} [renameSlot]  `Buffer.Rename`'s slot in the device's ring; without it a
  *     DISCARD under draws or over lent bytes is always the host's
+ * @param {number} [copyAt]  where `moveCopyCode` is, with `renameSlot`
  * @returns {Uint8Array}
  */
-export function lockCode(at, trap, renameSlot){
+export function lockCode(at, trap, renameSlot, copyAt){
+    if (renameSlot !== undefined && copyAt === undefined)
+    {
+        throw new Error('shadow: a lock routine that moves a buffer needs the copy it goes on to');
+    }
     /** The move onto a spare storage, for a DISCARD alone: the comment's, from `guarded`. */
     const move = renameSlot === undefined ? [{ jcc: 0xeb, to: 'held' }] : [
         [0x3d, ...dword(D3DLOCK_DISCARD)],                       // cmp eax, 0x2000
@@ -1220,6 +1256,7 @@ export function lockCode(at, trap, renameSlot){
         [0x89, 0x70, COMMAND.ARGS + 4],                          // mov [eax+12], esi
         [0x87, 0x71, BUFFER.BASE],                               // xchg esi, [ecx+4]
         [0x89, 0x74, 0x19, BUFFER.SPARES],                       // mov [ecx+ebx+40], esi
+        [0x89, 0x74, 0x24, 0x0c],                                // mov [esp+12], esi
         [0xc7, 0x44, 0x19, BUFFER.SPARE_FREE, ...dword(0)],      // mov dword [ecx+ebx+48], 0
         [0xc7, 0x41, BUFFER.LENT, ...dword(0)],                  // mov dword [ecx+32], 0
         // The record whole, published with `xchg` as every record's length is.
@@ -1311,12 +1348,104 @@ export function lockCode(at, trap, renameSlot){
         [0x8b, 0x5c, 0x24, 0x14],                                // mov ebx, [esp+20]
         [0x89, 0x03],                                            // mov [ebx], eax
         [0x5b],                                                  // pop ebx
+        ...(renameSlot === undefined ? [] : [
+            [0x8b, 0x54, 0x24, 0x04],                            // mov edx, [esp+4]
+            [0x3b, 0x51, BUFFER.SPARES],                         // cmp edx, [ecx+40]
+            { jcc: 0x74, to: 'moved' },                          // je moved
+            [0x3b, 0x51, BUFFER.SPARES + 4],                     // cmp edx, [ecx+44]
+            { jcc: 0x74, to: 'moved' },                          // je moved
+        ]),
         [0x31, 0xc0],                                            // xor eax, eax
         [0xc2, 0x14, 0x00],                                      // ret 20
     ];
+    if (renameSlot === undefined)
+    {
+        return routine(at, trap, parts);
+    }
     // The move puts the checks further from their targets than a byte reaches.
-    return routine(at, trap, renameSlot === undefined ? parts : parts.map(part=>(
-        'jcc' in part && part.jcc !== 0xeb ? { ...part, near: true } : part)));
+    return routine(at, trap, parts.map(part=>(
+        'jcc' in part && part.jcc !== 0xeb ? { ...part, near: true } : part)),
+    { moved: /** @type {number} */ (copyAt) });
+}
+
+/**
+ * The rest of a Lock whose routine moved the buffer (`lockCode`): what the
+ * buffer held outside the lock, copied from the storage left into the new
+ * one, and counted in the device's block (`MOVE_COPIED`). Code a slice may
+ * end inside, as the routine is not: a copy of most of a buffer of hundreds
+ * of kilobytes is more than the steps that finish a routine take. The lock is
+ * taken and the device's lock let go of already; nothing else writes either
+ * storage while the program holds the lock, and the new one's pages are the
+ * GPU's to upload from here as draws reach them, whenever the ring's move is
+ * made. Entered with EAX the address handed out, ECX the buffer's block, and
+ * the storage left in the slot of `this`.
+ *
+ *     push esi
+ *     push edi
+ *     push ebx
+ *     mov edx, [ecx+LENGTH]
+ *     mov ebx, [esp+24]           ; size, three words further for the pushes
+ *     test ebx, ebx
+ *     jnz sized
+ *     mov ebx, edx
+ *     sub ebx, [esp+20]           ; zero: to the end
+ *   sized:
+ *     mov edi, eax
+ *     sub edi, [esp+20]           ; the new storage
+ *     mov esi, [esp+16]           ; the storage left
+ *     sub edx, ebx                ; the bytes outside the lock
+ *     mov eax, [ecx+DEVICE]
+ *     lock add [eax+MOVE_COPIED], edx
+ *     jnc counted
+ *     lock inc dword [eax+MOVE_COPIED+4]
+ *   counted:
+ *     mov ecx, [esp+20]           ; offset: the bytes before the lock
+ *     cld
+ *     rep movsb
+ *     add esi, ebx
+ *     add edi, ebx                ; past the lock
+ *     mov ecx, edx
+ *     sub ecx, [esp+20]           ; the bytes after it
+ *     rep movsb
+ *     pop ebx
+ *     pop edi
+ *     pop esi
+ *     xor eax, eax
+ *     ret 20
+ *
+ * @returns {Uint8Array}
+ */
+export function moveCopyCode(){
+    return assemble([
+        [0x56, 0x57, 0x53],                                      // push esi; push edi; push ebx
+        [0x8b, 0x51, BUFFER.LENGTH],                             // mov edx, [ecx+8]
+        [0x8b, 0x5c, 0x24, 0x18],                                // mov ebx, [esp+24]
+        [0x85, 0xdb],                                            // test ebx, ebx
+        { jcc: 0x75, to: 'sized' },                              // jnz sized
+        [0x89, 0xd3],                                            // mov ebx, edx
+        [0x2b, 0x5c, 0x24, 0x14],                                // sub ebx, [esp+20]
+        { label: 'sized' },
+        [0x89, 0xc7],                                            // mov edi, eax
+        [0x2b, 0x7c, 0x24, 0x14],                                // sub edi, [esp+20]
+        [0x8b, 0x74, 0x24, 0x10],                                // mov esi, [esp+16]
+        [0x29, 0xda],                                            // sub edx, ebx
+        [0x8b, 0x41, BUFFER.DEVICE],                             // mov eax, [ecx+28]
+        [0xf0, 0x01, 0x90, ...dword(SHADOW.MOVE_COPIED)],        // lock add [eax+disp], edx
+        { jcc: 0x73, to: 'counted' },                            // jnc counted
+        [0xf0, 0xff, 0x80, ...dword(SHADOW.MOVE_COPIED + 4)],    // lock inc dword [eax+disp]
+        { label: 'counted' },
+        [0x8b, 0x4c, 0x24, 0x14],                                // mov ecx, [esp+20]
+        [0xfc],                                                  // cld
+        [0xf3, 0xa4],                                            // rep movsb
+        [0x01, 0xde],                                            // add esi, ebx
+        [0x01, 0xdf],                                            // add edi, ebx
+        [0x89, 0xd1],                                            // mov ecx, edx
+        [0x2b, 0x4c, 0x24, 0x14],                                // sub ecx, [esp+20]
+        [0xf3, 0xa4],                                            // rep movsb
+        [0x5b, 0x5f, 0x5e],                                      // pop ebx; pop edi; pop esi
+        [0x31, 0xc0],                                            // xor eax, eax
+        [0xc2, 0x14, 0x00],                                      // ret 20
+    ]);
 }
 
 /**
@@ -5077,7 +5206,10 @@ export function createShadow(deps){
             heldWaitMs: Math.round(heldWaits.ms),
             heldBroken: heldWaits.broken,
             hostLocks: { ...hostLocks },
-            moved: { ...moved },
+            // And the bytes those moves copied in the guest (`moveCopyCode`).
+            moved: { ...moved, copied: address === 0 ? 0
+                : readWord(address + SHADOW.MOVE_COPIED)
+                    + readWord(address + SHADOW.MOVE_COPIED + 4) * 2 ** 32 },
             held: { ...heldReplays },
             hostLevelLocks: { ...hostLevelLocks },
             hostLevelKinds: Object.fromEntries([...hostLevelKinds].sort((a, b)=>b[1] - a[1])
