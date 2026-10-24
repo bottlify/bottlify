@@ -659,6 +659,62 @@ test('the frame record says what was cleared, what was drawn and where, and what
         target.surface.release();
     });
 
+test('a frame says how many of its draws went into each target, and through how many viewports',
+    async()=>{
+        // A shadow map is one target drawn through a viewport a cascade: a
+        // frame that draws four times as much after a small turn of the
+        // camera says by this whether the draws went into the picture or
+        // into such a pass, which a count of draws off the back buffer
+        // cannot.
+        const h = harness({ width: 8, height: 8 });
+        const { device } = h;
+        /** @type {{ buffer?: any }} */
+        const created = {};
+        assert.equal(device.CreateVertexBuffer(3 * TRIANGLE_STRIDE, D3DUSAGE.WRITEONLY,
+            FVF_TRIANGLE, D3DPOOL.DEFAULT, created), D3D_OK);
+        /** @type {{ pBits?: number }} */
+        const locked = {};
+        assert.equal(created.buffer.Lock(0, 0, locked, 0), D3D_OK);
+        const at = /** @type {number} */ (locked.pBits);
+        [[1, 1], [7, 1], [1, 4]].forEach(([x, y], index)=>
+            h.write(at + index * TRIANGLE_STRIDE, vertex(x, y, argb(0, 0, 255))));
+        assert.equal(created.buffer.Unlock(), D3D_OK);
+        assert.equal(device.SetStreamSource(0, created.buffer, 0, TRIANGLE_STRIDE), D3D_OK);
+        assert.equal(device.SetFVF(FVF_TRIANGLE), D3D_OK);
+        /** @type {{ texture?: any }} */
+        const map = {};
+        assert.equal(device.CreateTexture(4, 8, 1, D3DUSAGE.RENDERTARGET, D3DFMT.A8R8G8B8,
+            D3DPOOL.DEFAULT, map), D3D_OK);
+        /** @type {{ surface?: any }} */
+        const level = {};
+        assert.equal(map.texture.GetSurfaceLevel(0, level), D3D_OK);
+        /** @type {{ surface?: any }} */
+        const back = {};
+        assert.equal(device.GetBackBuffer(0, 0, 0, back), D3D_OK);
+
+        assert.equal(device.BeginScene(), D3D_OK);
+        assert.equal(device.SetRenderTarget(0, level.surface), D3D_OK);
+        for (const y of [0, 4, 4])
+        {
+            assert.equal(device.SetViewport({ X: 0, Y: y, Width: 4, Height: 4, MinZ: 0,
+                MaxZ: 1 }), D3D_OK);
+            assert.equal(device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+        }
+        assert.equal(device.SetRenderTarget(0, back.surface), D3D_OK);
+        assert.equal(device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+        assert.equal(device.EndScene(), D3D_OK);
+        await h.present();
+        // A frame that drew nothing names no target.
+        await h.present();
+
+        const frames = h.device.diagnostics().recentFrames;
+        assert.deepEqual(frames.map((/** @type {any} */ frame)=>frame.targets),
+            ['4x8 x3 in 2 views, back 8x8 x1', '']);
+        back.surface.release();
+        level.surface.release();
+        map.texture.release();
+    });
+
 test('a stream bound at an offset draws from there, not from the start of the buffer',
     async()=>{
         const h = harness({ width: 8, height: 8 });

@@ -5777,26 +5777,74 @@ export function createRenderer(options){
      *             fog: string, fogs: Map<string, number>,
      *     uploads: number, textures: Set<any>, clears: number, clearColor: number,
      *     offscreenDraws: number, offscreenTargets: Set<any>, drawMs: number,
-     *     heldDraws: number }}
+     *     heldDraws: number, targets: Map<any, { draws: number, views: number[] }> }}
      */
     const blankFrameStats = ()=>({
         draws: 0, placeholder: 0, truncated: 0, uploads: 0, fogged: 0, fog: '',
         fogs: new Map(), textures: new Set(), clears: 0, clearColor: -1, offscreenDraws: 0,
-        offscreenTargets: new Set(), drawMs: 0, heldDraws: 0,
+        offscreenTargets: new Set(), drawMs: 0, heldDraws: 0, targets: new Map(),
     });
     let frameStats = blankFrameStats();
+    /** The viewports counted for one target, past which a frame says only that there were more. */
+    const VIEWS_COUNTED = 8;
+    /**
+     * A draw into its target, and through which viewport: a frame drawing
+     * four times as much after a small turn of the camera says by these
+     * whether it drew more of the picture, a shadow map (one target drawn
+     * through a viewport a cascade) or a pass of its own.
+     *
+     * @param {RenderModel} model
+     */
+    const countTarget = model=>{
+        let into = frameStats.targets.get(model.renderTarget);
+        if (into === undefined)
+        {
+            into = { draws: 0, views: [] };
+            frameStats.targets.set(model.renderTarget, into);
+        }
+        into.draws++;
+        const { x, y, width, height } = model.viewport.rect;
+        const views = into.views;
+        for (let at = 0; at < views.length; at += 4)
+        {
+            if (views[at] === x && views[at + 1] === y && views[at + 2] === width
+                && views[at + 3] === height)
+            {
+                return;
+            }
+        }
+        if (views.length < VIEWS_COUNTED * 4)
+        {
+            views.push(x, y, width, height);
+        }
+    };
+    /**
+     * A frame's draws by the target they went into, in the order it first
+     * drew into each: `back` for the one presented, the target's size, its
+     * draws and, past one, the viewports they were drawn through.
+     *
+     * @param {Map<any, { draws: number, views: number[] }>} targets @param {any} backBuffer
+     */
+    const targetsOf = (targets, backBuffer)=>[...targets].map(([target, into])=>{
+        const desc = target ? describe(target) : null;
+        const views = into.views.length / 4;
+        return `${target === backBuffer ? 'back ' : ''}`
+            + `${desc ? `${desc.Width}x${desc.Height}` : 'none'} x${into.draws}`
+            + `${views > 1 ? ` in ${views}${views === VIEWS_COUNTED ? '+' : ''} views` : ''}`;
+    }).join(', ');
     /**
      * `drawMs` is what the frame's draws took this side as the program made
      * them, `replayMs` what its replay onto the device took once presented,
      * and `heldDraws` the draws that found bytes the program had written
      * since the last to send first (`readHeld`): a diagnostics build's
      * account of a draw's cost on the machine it ran on, frame by frame.
+     * `targets` is where the draws went (`targetsOf`).
      *
      * @type {{ index: number, draws: number, placeholder: number, truncated: number,
      *     uploads: number, textures: number, fogged: number, fog: string, fogs: string,
      *     lights: string, clears: number, clearColor: string, offscreenDraws: number,
-     *     offscreenTargets: number, viewport: string, target: string, drawMs?: number,
-     *     heldDraws?: number, replayMs?: number }[]} */
+     *     offscreenTargets: number, targets: string, viewport: string, target: string,
+     *     drawMs?: number, heldDraws?: number, replayMs?: number }[]} */
     const frameHistory = [];
     const FRAME_HISTORY = 240;
     /** How many frames `dumpEvery` keeps the account of. */
@@ -7785,6 +7833,7 @@ export function createRenderer(options){
         }
         kept++;
         frameStats.draws++;
+        countTarget(model);
         if (model.renderTarget !== model.backBuffer)
         {
             frameStats.offscreenDraws++;
@@ -10427,6 +10476,7 @@ export function createRenderer(options){
                     ? '' : `#${frameStats.clearColor.toString(16).padStart(8, '0')}`,
                 offscreenDraws: frameStats.offscreenDraws,
                 offscreenTargets: frameStats.offscreenTargets.size,
+                targets: targetsOf(frameStats.targets, model.backBuffer),
                 viewport: `${rect.x},${rect.y} ${rect.width}x${rect.height}`,
                 target: `${shown.Width}x${shown.Height}`,
                 fogged: frameStats.fogged,
