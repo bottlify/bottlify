@@ -490,8 +490,15 @@ export function connectGraphicsWorker(options){
             const memory = sharedMemory?.() ?? null;
             const lending = memory && lendMemory && (api === 'd3d8' || api === 'd3d9')
                 && (mayBlock ??= mayWait()) ? createLendingBuffers() : null;
+            // The RAM goes only to a root that lends from it. JavaScriptCore counts
+            // every buffer a thread holds as part of that thread's heap and lets
+            // garbage grow in proportion before it collects it whole: the
+            // graphics worker of a run with 512 MB of guest memory held as
+            // much garbage again, and a phone's page was killed for it. A root
+            // that does not lend has its read-backs written here, as bytes.
             worker.postMessage({ type: 'root', api, options: plainOf(services), port: port2,
-                memory, lending, source, frameLatency: maxFrameLatency }, [port2]);
+                memory: lending ? memory : null, lending, source, frameLatency: maxFrameLatency },
+            [port2]);
             const sender = createSender({
                 post: (message, transfer)=>port1.postMessage(message, transfer),
                 on: {
