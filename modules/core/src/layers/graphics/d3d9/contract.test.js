@@ -1158,6 +1158,64 @@ test('ColorFill of a target drawn elsewhere, or not at all, writes no guest byte
     assert.deepEqual(filled({ drawsNothing: true }), { target: 0, plain: 0x33 });
 });
 
+test('a target the program cannot lock, drawn elsewhere or not at all, is not cleared first', ()=>{
+    // What it holds before it is drawn into is undefined and its pixels are
+    // the GPU's: clearing its guest bytes was 22 MB of writes a frame on the
+    // program's thread where Crysis makes and drops its targets. A lockable
+    // target, and everything else, still starts out cleared.
+    /** @param {{ renderedElsewhere?: boolean, drawsNothing?: boolean }} how */
+    const clearedWhen = how=>{
+        /** @type {boolean[]} */
+        const cleared = [];
+        let next = 0x1000;
+        const { device } = make({ services: {
+            ...how,
+            allocate: (/** @type {number} */ bytes, /** @type {boolean | undefined} */ clear)=>{
+                cleared.push(clear !== false);
+                const at = next;
+                next += (bytes + 15) & ~15;
+                return at;
+            },
+        } });
+        /** @type {Record<string, boolean[]>} */
+        const answer = {};
+        /** @param {string} name @param {(out: any) => number} create */
+        const made = (name, create)=>{
+            const from = cleared.length;
+            /** @type {{ texture?: any, surface?: any }} */
+            const out = {};
+            assert.equal(create(out), D3D_OK, name);
+            answer[name] = cleared.slice(from);
+            (out.texture ?? out.surface).release();
+        };
+        made('target texture', out=>device.CreateTexture(8, 8, 1, D3DUSAGE.RENDERTARGET,
+            D3DFMT.A8R8G8B8, D3DPOOL.DEFAULT, out));
+        made('target cube', out=>device.CreateCubeTexture(8, 1, D3DUSAGE.RENDERTARGET,
+            D3DFMT.A8R8G8B8, D3DPOOL.DEFAULT, out));
+        made('target', out=>device.CreateRenderTarget(8, 8, D3DFMT.A8R8G8B8, false, out));
+        made('lockable target', out=>device.CreateRenderTarget(8, 8, D3DFMT.A8R8G8B8, true, out));
+        made('texture', out=>device.CreateTexture(8, 8, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.DEFAULT,
+            out));
+        made('dynamic texture', out=>device.CreateTexture(8, 8, 1, D3DUSAGE.DYNAMIC,
+            D3DFMT.A8R8G8B8, D3DPOOL.DEFAULT, out));
+        made('plain', out=>device.CreateOffscreenPlainSurface(8, 8, D3DFMT.A8R8G8B8,
+            D3DPOOL.DEFAULT, out));
+        device.release();
+        return answer;
+    };
+    // A cube's faces are six storages.
+    const faces = (/** @type {boolean} */ cleared)=>Array(6).fill(cleared);
+    const everything = {
+        'target texture': [true], 'target cube': faces(true), target: [true],
+        'lockable target': [true], texture: [true], 'dynamic texture': [true], plain: [true],
+    };
+    assert.deepEqual(clearedWhen({}), everything, 'drawing here, every resource is cleared');
+    const notTargets = { ...everything, 'target texture': [false], 'target cube': faces(false),
+        target: [false] };
+    assert.deepEqual(clearedWhen({ renderedElsewhere: true }), notTargets);
+    assert.deepEqual(clearedWhen({ drawsNothing: true }), notTargets);
+});
+
 test('GetRenderTargetData wants a system-memory twin of the target', ()=>{
     /** @type {string[]} */
     const reports = [];

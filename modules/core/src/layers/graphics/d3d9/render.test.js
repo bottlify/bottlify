@@ -1474,6 +1474,52 @@ test('recorded: a render target that makes its own levels makes them from what w
         texture.release();
     });
 
+test('a render-target texture starts out as the GPU makes it, and goes up only once written',
+    async()=>{
+        // What a target holds before it is drawn into is undefined, the
+        // program cannot lock it, and the GPU's texture starts out as zeroes:
+        // Crysis made four (2560x1600 down to 320x200) every frame of a view
+        // toward the sea, and their 22 MB of zeroes went up each frame. A copy
+        // into one still goes up.
+        const h = harness();
+        const { device, gpu } = h;
+        /** @type {{ texture?: any }} */
+        const out = {};
+        assert.equal(device.CreateTexture(4, 4, 1, D3DUSAGE.RENDERTARGET, D3DFMT.X8R8G8B8,
+            D3DPOOL.DEFAULT, out), D3D_OK);
+        const texture = out.texture;
+        /** @type {{ surface?: any }} */
+        const level = {};
+        assert.equal(texture.GetSurfaceLevel(0, level), D3D_OK);
+        /** @type {{ surface?: any }} */
+        const back = {};
+        assert.equal(device.GetRenderTarget(0, back), D3D_OK);
+        assert.equal(device.SetRenderTarget(0, level.surface), D3D_OK);
+        assert.equal(device.Clear(0, null, D3DCLEAR.TARGET, 0xff00ff00, 1, 0), D3D_OK);
+        assert.equal(device.SetRenderTarget(0, back.surface), D3D_OK);
+        assert.equal(device.SetTexture(0, texture), D3D_OK);
+        await drawTextured(h);
+        const made = gpu.of('createTexture').find(
+            (/** @type {any} */ call)=>call.descriptor.label === 'texture');
+        assert.ok(made, 'the target has its GPU texture');
+        const uploads = ()=>[...gpu.of('copyBufferToTexture'), ...gpu.of('writeTexture')]
+            .filter((/** @type {any} */ call)=>call.destination.texture === made.texture).length;
+        assert.equal(uploads(), 0, 'drawn into and sampled, nothing went up');
+
+        /** @type {{ texture?: any }} */
+        const source = {};
+        assert.equal(device.CreateTexture(4, 4, 1, 0, D3DFMT.X8R8G8B8, D3DPOOL.SYSTEMMEM, source),
+            D3D_OK);
+        assert.equal(device.UpdateTexture(source.texture, texture), D3D_OK);
+        await drawTextured(h);
+        assert.equal(uploads(), 1, 'what a copy wrote goes up');
+        level.surface.release();
+        back.surface.release();
+        assert.equal(device.SetTexture(0, null), D3D_OK);
+        source.texture.release();
+        texture.release();
+    });
+
 test('recorded: an additional swap chain shows its own back buffer in the device\'s window',
     async()=>{
         const h = harness();

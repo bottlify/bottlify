@@ -15,7 +15,7 @@
  * what it handed the device -- draws, bind groups, bytes to copy.
  *
  *     node tools/graphics-replay.mjs FILE [--root DIR] [--reps N] [--profile OUT]
- *         [--all] [--uploads] [--json]
+ *         [--all] [--uploads] [--json] [--digest OUT]
  *
  * `--reps` plays the capture that many times, each on a worker of its own,
  * and reports every one: the first frames of the measured window are warm
@@ -31,6 +31,13 @@
  * as much to move as the program's; a device's own work -- a real GPU's
  * encoding, its copies -- is not here: what the frame costs on a device is
  * this plus that.
+ *
+ * `--digest OUT` writes, for every batch that presents, a digest of all the
+ * device was asked meanwhile -- each call, the objects it names by the order
+ * they were made, the bytes written by their content -- one line a batch: two
+ * checkouts that play a capture into the same lines handed the GPU the same
+ * work, and the first line that differs is where they parted. The device then
+ * keeps its log, so the times are not a measurement.
  */
 
 import { createReadStream, writeFileSync } from 'node:fs';
@@ -44,11 +51,11 @@ const args = process.argv.slice(2);
 /** @param {string} name @param {string} fallback */
 const flag = (name, fallback)=>(args.includes(name) ? args[args.indexOf(name) + 1] : fallback);
 const file = args.find((arg, index)=>!arg.startsWith('--')
-    && (index === 0 || !['--root', '--reps', '--profile'].includes(args[index - 1])));
+    && (index === 0 || !['--root', '--reps', '--profile', '--digest'].includes(args[index - 1])));
 if (!file)
 {
     console.error('usage: node tools/graphics-replay.mjs FILE [--root DIR] [--reps N]'
-        + ' [--profile OUT] [--all] [--uploads] [--json]');
+        + ' [--profile OUT] [--all] [--uploads] [--json] [--digest OUT]');
     process.exit(2);
 }
 const root = pathToFileURL(`${resolve(flag('--root', '.'))}/`).href;
@@ -57,6 +64,7 @@ const profileOut = flag('--profile', '');
 const json = args.includes('--json');
 const all = args.includes('--all');
 const uploads = args.includes('--uploads');
+const digestOut = flag('--digest', '');
 
 const graphics = `${root}modules/core/src/layers/graphics/`;
 const { serveGraphics } = await import(`${graphics}remote/worker.js`);
@@ -84,9 +92,126 @@ const quantile = (values, q)=>{
     return sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))] ?? 0;
 };
 
+/**
+ * A running digest of what the device is asked: two FNV-1a lanes over every
+ * call's operation and arguments, a device object by its id (the order it
+ * was made in), bytes by their content, a dictionary by its keys in order.
+ */
+const createDigest = ()=>{
+    let a = 0x811c9dc5;
+    let b = 0x2f6b1a77;
+    let count = 0;
+    const scratch = new Float64Array(1);
+    const words = new Int32Array(scratch.buffer);
+    /** @param {number} word */
+    const mix = word=>{
+        a = Math.imul(a ^ word, 0x01000193);
+        b = Math.imul(b ^ word, 0x5bd1e995);
+    };
+    /** @param {string} text */
+    const mixText = text=>{
+        mix(text.length);
+        for (let index = 0; index < text.length; index++)
+        {
+            mix(text.charCodeAt(index));
+        }
+    };
+    /** @param {Uint8Array} bytes */
+    const mixBytes = bytes=>{
+        mix(bytes.length);
+        for (let index = 0; index < bytes.length; index++)
+        {
+            mix(bytes[index]);
+        }
+    };
+    /** @param {any} value @param {number} depth */
+    const visit = (value, depth)=>{
+        if (value === null || value === undefined)
+        {
+            mixText(String(value));
+            return;
+        }
+        if (typeof value === 'number')
+        {
+            scratch[0] = value;
+            mix(words[0]);
+            mix(words[1]);
+            return;
+        }
+        if (typeof value === 'string' || typeof value === 'boolean' || typeof value === 'bigint')
+        {
+            mixText(String(value));
+            return;
+        }
+        if (typeof value !== 'object')
+        {
+            return;
+        }
+        if (typeof value.kind === 'string' && typeof value.id === 'string')
+        {
+            mixText(value.id);
+            return;
+        }
+        if (ArrayBuffer.isView(value))
+        {
+            mixBytes(new Uint8Array(value.buffer, value.byteOffset, value.byteLength));
+            return;
+        }
+        if (value instanceof ArrayBuffer || value instanceof SharedArrayBuffer)
+        {
+            mixBytes(new Uint8Array(value));
+            return;
+        }
+        if (depth > 8)
+        {
+            mixText('deeper');
+            return;
+        }
+        if (Array.isArray(value))
+        {
+            mix(value.length);
+            for (const item of value)
+            {
+                visit(item, depth + 1);
+            }
+            return;
+        }
+        for (const key of Object.keys(value).sort())
+        {
+            mixText(key);
+            visit(value[key], depth + 1);
+        }
+    };
+    return {
+        /** @param {any} call */
+        add: call=>{
+            count++;
+            visit(call, 0);
+            return 0;
+        },
+        /** The digest of the calls since the last take, and how many they were. */
+        take: ()=>{
+            const line = `${(a >>> 0).toString(16).padStart(8, '0')}`
+                + `${(b >>> 0).toString(16).padStart(8, '0')} ${count}`;
+            a = 0x811c9dc5;
+            b = 0x2f6b1a77;
+            count = 0;
+            return line;
+        },
+    };
+};
+
 /** @param {boolean} profiled */
 const play = async profiled=>{
-    const gpu = createFakeDevice({ quiet: true });
+    const gpu = createFakeDevice({ quiet: digestOut === '' });
+    const digest = digestOut === '' ? null : createDigest();
+    if (digest)
+    {
+        gpu.device.calls.push = digest.add;
+    }
+    /** One line a batch that presented: its place, its presents, the digest. @type {string[]} */
+    const digests = [];
+    let batches = 0;
     Object.assign(gpu.device, { queue: gpu.queue, features: new Set(),
         createSampler: (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor }) });
     /** @type {any} */
@@ -171,9 +296,14 @@ const play = async profiled=>{
             }
             const began = performance.now();
             port.onmessage({ data: { type: 'calls', buffer: record.buffer, at: 0 } });
+            batches++;
             if ((record.presents ?? 0) > 0)
             {
                 await settle();
+                if (digest)
+                {
+                    digests.push(`${batches} ${record.presents} ${digest.take()}`);
+                }
             }
             if (measuring)
             {
@@ -222,7 +352,7 @@ const play = async profiled=>{
     {
         port.close();
     }
-    return { frames, told };
+    return { frames, told, digests };
 };
 
 /**
@@ -266,7 +396,13 @@ const uploadsBetween = (from, to)=>{
 const results = [];
 for (let rep = 0; rep < reps; rep++)
 {
-    const { frames, told } = await play(rep === reps - 1 && profileOut !== '');
+    const { frames, told, digests } = await play(rep === reps - 1 && profileOut !== '');
+    if (digestOut !== '' && rep === reps - 1)
+    {
+        writeFileSync(digestOut, `${digests.join('\n')}\n`);
+        console.log(`digests of ${digests.length} presenting batches: ${digestOut}`
+            + ' (the device kept its log: the times below are not a measurement)');
+    }
     if (frames.length === 0)
     {
         console.error(`${file}: no frame after a mark in the capture -- nothing to measure`

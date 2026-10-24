@@ -1547,6 +1547,55 @@ test('recording for a device that draws elsewhere, a copy between two targets mo
         }
     });
 
+test('recording for a device that draws elsewhere, a target the program cannot lock is not'
+    + ' cleared first', ()=>{
+    // What it holds before it is drawn into is undefined, and its pixels are
+    // the played device's: clearing its guest bytes was writes on the
+    // program's thread for nothing. A lockable target, and everything else,
+    // still starts out cleared.
+    for (const elsewhere of [false, true])
+    {
+        /** @type {boolean[]} */
+        const cleared = [];
+        let next = 0x1000;
+        const device = createDevice({ caps: {
+            renderedElsewhere: elsewhere,
+            allocate: (/** @type {number} */ bytes, /** @type {boolean | undefined} */ clear)=>{
+                cleared.push(clear !== false);
+                const at = next;
+                next += (bytes + 15) & ~15;
+                return at;
+            },
+        } });
+        /** @type {Record<string, boolean[]>} */
+        const answer = {};
+        /** @param {string} name @param {(out: any) => number} create */
+        const made = (name, create)=>{
+            const from = cleared.length;
+            /** @type {{ texture?: any, surface?: any }} */
+            const out = {};
+            assert.equal(create(out), D3D_OK, name);
+            answer[name] = cleared.slice(from);
+            (out.texture ?? out.surface).release();
+        };
+        made('target texture', out=>device.CreateTexture(8, 8, 1, D3DUSAGE.RENDERTARGET,
+            D3DFMT.A8R8G8B8, D3DPOOL.DEFAULT, out));
+        made('target cube', out=>device.CreateCubeTexture(8, 1, D3DUSAGE.RENDERTARGET,
+            D3DFMT.A8R8G8B8, D3DPOOL.DEFAULT, out));
+        made('target', out=>device.CreateRenderTarget(8, 8, D3DFMT.A8R8G8B8, false, out));
+        made('lockable target', out=>device.CreateRenderTarget(8, 8, D3DFMT.A8R8G8B8, true, out));
+        made('texture', out=>device.CreateTexture(8, 8, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.DEFAULT,
+            out));
+        // A cube's faces are six storages.
+        const faces = Array(6).fill(!elsewhere);
+        assert.deepEqual(answer, {
+            'target texture': [!elsewhere], 'target cube': faces, target: [!elsewhere],
+            'lockable target': [true], texture: [true],
+        }, elsewhere ? 'drawn elsewhere' : 'drawn here');
+        assertFullyReleased(device);
+    }
+});
+
 // --- image surfaces, where D3D9 has offscreen plain ones ---
 
 test('an image surface is always system memory with no usage', ()=>{

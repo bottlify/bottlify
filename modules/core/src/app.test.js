@@ -1892,6 +1892,10 @@ test('a graphics resource is handed cleared memory, and fresh memory is not writ
     const full = { allocate: ()=>0, block: ()=>null };
     assert.equal(allocateCleared(full, fill, 64), 0);
     assert.equal(filled.length, 1);
+    // Bytes nobody reads before they are written -- a render target another
+    // device draws -- are left as the heap had them.
+    assert.equal(allocateCleared(recycled, fill, 64, false), 0x5000);
+    assert.equal(filled.length, 1);
 });
 
 test('a graphics resource starts on a 16-byte boundary where the heap\'s next block does not', ()=>{

@@ -6301,7 +6301,7 @@ export function createRenderer(options){
             lighting: null,
             fogSetting: '',
             layout: null,
-            textures: [],
+            textures: NO_TEXTURES,
             truncated: null,
             pipelineFrame: null,
             pipelineIndex: 0,
@@ -6532,6 +6532,14 @@ export function createRenderer(options){
     const PLAIN_SAMPLING = Object.freeze({ key: '', pixelKey: '' });
 
     /**
+     * The textures a shader draw's preparation lists for a fixed stage, which
+     * it has none of: one list for every such draw, read and never written.
+     *
+     * @type {any[]}
+     */
+    const NO_TEXTURES = /** @type {any[]} */ (/** @type {unknown} */ (Object.freeze([])));
+
+    /**
      * The channels the texture bound at each of a shader's samplers samples as
      * one that the GPU's texture lacks, by sampler number; null when there are
      * none, which is every draw of four-channel textures. A texture of another
@@ -6586,10 +6594,9 @@ export function createRenderer(options){
         let variants = null;
         for (const { index, dimension } of declaredSamplers(parsed))
         {
-            const states = model.stageStates(first + index);
-            const get = (/** @type {number} */ state)=>states.get(state) ?? 0;
-            const lodBias = lodBiasOf(get(D3DTSS.MIPMAPLODBIAS));
-            const addressing = addressVariantOf(get,
+            variantStates = model.stageStates(first + index);
+            const lodBias = lodBiasOf(variantState(D3DTSS.MIPMAPLODBIAS));
+            const addressing = addressVariantOf(variantState,
                 dimension ?? textureDimensionOf(model.textures.get(first + index)));
             if (lodBias !== 0 || addressing !== NO_ADDRESS_VARIANT)
             {
@@ -6597,8 +6604,19 @@ export function createRenderer(options){
                 variants[index] = { ...(lodBias === 0 ? {} : { lodBias }), ...addressing };
             }
         }
+        variantStates = null;
         return variants;
     };
+    /**
+     * The sampler `variantsAt` reads, and one reader of it for every draw: a
+     * reader made for each sampler of each shader draw was a closure a
+     * sampler a draw on the heap.
+     *
+     * @type {Map<number, number> | null}
+     */
+    let variantStates = null;
+    /** @param {number} state */
+    const variantState = state=>variantStates?.get(state) ?? 0;
 
     /**
      * What a shader's reads depend on beyond the shader: the channels each
@@ -8174,21 +8192,21 @@ export function createRenderer(options){
      * @returns {{ binding: number, resource: any }[]}
      */
     const bindingEntriesOf = stageBindings=>{
-        let entries = bindingEntries.get(stageBindings);
+        const held = /** @type {{ groupEntries?: { binding: number, resource: any }[] }} */ (
+            /** @type {unknown} */ (stageBindings));
+        let entries = held.groupEntries;
         if (entries === undefined)
         {
             entries = [{ binding: 0, resource: null }];
-            stageBindings.forEach((stage, index)=>{
-                /** @type {{ binding: number, resource: any }[]} */ (entries).push(
-                    { binding: 1 + index * 2, resource: stage.view },
-                    { binding: 2 + index * 2, resource: stage.sampler });
-            });
-            bindingEntries.set(stageBindings, entries);
+            for (let index = 0; index < stageBindings.length; index++)
+            {
+                entries.push({ binding: 1 + index * 2, resource: stageBindings[index].view },
+                    { binding: 2 + index * 2, resource: stageBindings[index].sampler });
+            }
+            held.groupEntries = entries;
         }
         return entries;
     };
-    /** @type {WeakMap<object, { binding: number, resource: any }[]>} */
-    const bindingEntries = new WeakMap();
 
     /**
      * A shader stage's constant blocks as the entries of its group, each
@@ -8228,24 +8246,31 @@ export function createRenderer(options){
     /**
      * A shader draw's samplers as the entries of its group, made once for each
      * list of bindings, which a draw that binds what the one before bound
-     * shares with it.
+     * shares with it. They are kept on the list itself (`groupEntries`), as a
+     * fixed-function draw's are: a WeakMap beside the lists cost a lookup a
+     * draw and an entry for each new list, which the collector then had to
+     * clear.
      *
      * @param {{ view: any, sampler: any, binding?: number }[]} samplerBindings
      */
     const samplerEntriesOf = samplerBindings=>{
-        let entries = samplerEntries.get(samplerBindings);
+        const held = /** @type {{ groupEntries?: { binding: number, resource: any }[] }} */ (
+            /** @type {unknown} */ (samplerBindings));
+        let entries = held.groupEntries;
         if (entries === undefined)
         {
-            entries = samplerBindings.flatMap((bound, index)=>[
-                { binding: bound.binding ?? index * 2, resource: bound.view },
-                { binding: (bound.binding ?? index * 2) + 1, resource: bound.sampler },
-            ]);
-            samplerEntries.set(samplerBindings, entries);
+            entries = [];
+            for (let index = 0; index < samplerBindings.length; index++)
+            {
+                const bound = samplerBindings[index];
+                const binding = bound.binding ?? index * 2;
+                entries.push({ binding, resource: bound.view },
+                    { binding: binding + 1, resource: bound.sampler });
+            }
+            held.groupEntries = entries;
         }
         return entries;
     };
-    /** @type {WeakMap<object, { binding: number, resource: any }[]>} */
-    const samplerEntries = new WeakMap();
 
     /** @type {WeakMap<object, number>} */
     const surfaceIds = new WeakMap();
@@ -9465,8 +9490,9 @@ export function createRenderer(options){
             // The GPU's copy of a texture that makes its own levels holds the
             // whole chain, of which the program sees the top.
             const gpuLevels = desc.gpuLevels ?? levels;
+            const target = ((desc.usage ?? 0) & D3DUSAGE.RENDERTARGET) !== 0;
             const entry = {
-                gpu: null, dirty: true, base: 0, levels, faces, texture, gpuLevels,
+                gpu: null, dirty: !target, base: 0, levels, faces, texture, gpuLevels,
                 autogen: gpuLevels > levels,
                 volume: texture.volume === true,
                 // A render-target texture is written by the GPU as well as
@@ -9474,12 +9500,18 @@ export function createRenderer(options){
                 // the frame; see `uploadTexels`. A copy landing in a plain
                 // texture turns this on too.
                 // So is one whose levels the GPU makes from the top.
-                ordered: ((desc.usage ?? 0) & D3DUSAGE.RENDERTARGET) !== 0 || gpuLevels > levels,
+                ordered: target || gpuLevels > levels,
                 // Every level, until each has been uploaded once: a program
                 // fills the chain it asked for, and a chain sampled with a
                 // level missing shows the gap at the distance that level
-                // covers.
-                dirtyLevels: new Set(Array.from({ length: levels * faces }, (_, index)=>index)),
+                // covers. Not a render target's: what it holds before it is
+                // drawn into is undefined, the program cannot lock it, and
+                // the GPU's texture starts out as zeroes; a copy into it marks
+                // what it wrote. Crysis made four (2560x1600 down to 320x200)
+                // and let them go every frame of a view toward the sea, and
+                // 22 MB of zeroes went up for them each frame.
+                dirtyLevels: target ? new Set()
+                    : new Set(Array.from({ length: levels * faces }, (_, index)=>index)),
                 serial: nextTextureId,
                 id: `t${nextTextureId++}`,
                 // A per-texture generation of its contents, so a preparation

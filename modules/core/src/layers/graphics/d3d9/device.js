@@ -456,10 +456,11 @@ const isDepthFormat = format=>FORMAT_INFO[format] !== undefined && FORMAT_INFO[f
  *     Where a fill or a copy between surfaces writes. Without it those calls
  *     describe their moves for the caller to make.
  * @property {(descriptor: any)=>any} [createSampler]
- * @property {(bytes: number)=>number} [allocate]
+ * @property {(bytes: number, cleared?: boolean)=>number} [allocate]
  *     Where a resource's storage goes. It has to be memory the guest can write
  *     through, because a lock hands the program this address and the unlock
- *     reads back exactly what it wrote there.
+ *     reads back exactly what it wrote there. Cleared unless `cleared` is
+ *     false, for bytes nobody reads before they are written (`storageFor`).
  * @property {(address: number)=>void} [free]
  * @property {(api: string, detail: string)=>void} [divergence]
  *     Where "this call succeeded and did not do all of what it promises" goes.
@@ -995,16 +996,16 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
      * Storage addresses are handed out rather than computed, so that two
      * surfaces never overlap and the offset a lock reports means something.
      *
-     * @param {number} bytes
+     * @param {number} bytes @param {boolean} [cleared]
      */
-    const allocate = bytes=>{
+    const allocate = (bytes, cleared = true)=>{
         // Real guest memory when the assembling caller supplied a way to get
         // some. An address invented here has nothing behind it, so a program
         // that locks, writes and unlocks loses everything it wrote and no call
         // reports a failure.
         if (services.allocate)
         {
-            const address = services.allocate(Math.max(bytes, 1));
+            const address = services.allocate(Math.max(bytes, 1), cleared);
             if (address !== 0)
             {
                 return address;
@@ -1017,6 +1018,25 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
         fabricated.add(address);
         return address;
     };
+
+    /**
+     * Where a resource of this usage keeps its bytes. A render target the
+     * program cannot lock, drawn by another device -- one the graphics worker
+     * plays, or none at all -- is left as the heap had it: what a target holds
+     * before it is drawn into is undefined, and its pixels live on that
+     * device's GPU, whose texture starts out as zeroes. Crysis made and let go
+     * of four targets, 22 MB, every frame of a view toward the sea, and the
+     * program's thread cleared all of them each time.
+     *
+     * @param {number} usage @param {boolean} [lockable]
+     * @returns {(bytes: number) => number}
+     */
+    const storageFor = (usage, lockable = false)=>(!lockable
+        && (usage & D3DUSAGE.RENDERTARGET) !== 0
+        && (services.renderedElsewhere === true || services.drawsNothing === true)
+        ? unread : allocate);
+    /** @param {number} bytes */
+    const unread = bytes=>allocate(bytes, false);
 
     /** @param {number} address */
     const free = address=>{
@@ -2002,7 +2022,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             count: explicitCount(spec.pool, undefined,
                 chainBytes(spec.format, spec.width, spec.height, 1, spec.levels)
                 * (spec.cube ? 6 : 1)),
-            allocate: spec.allocate ?? allocate,
+            allocate: spec.allocate ?? storageFor(spec.usage),
             free: spec.free ?? free,
             // This version refuses a lock rectangle that is not one.
             rejectsMalformedRects: true,
@@ -4004,7 +4024,8 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 pool: D3DPOOL.DEFAULT,
                 usage: D3DUSAGE.RENDERTARGET | usage,
                 lockable,
-                base: allocate(surfaceBytes(format, width, height)),
+                base: storageFor(D3DUSAGE.RENDERTARGET, lockable)(
+                    surfaceBytes(format, width, height)),
                 count: explicitCount(D3DPOOL.DEFAULT, ()=>retireSurface(surface),
                     surfaceBytes(format, width, height)),
                 rejectsMalformedRects: true,
