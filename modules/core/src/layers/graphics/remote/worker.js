@@ -503,7 +503,7 @@ export function serveGraphics(scope, deps){
                 gamma: options.gamma ? { applies: ()=>true, set: ()=>{} } : undefined,
             });
         }
-        receiver = createReceiver({ played, post });
+        receiver = createReceiver({ played, post, latency: ()=>latency.diagnostics() });
         // Written down as made, before any of its batches can come: the
         // capture's roots are made again in its order when it is played.
         const captured = capture?.root({ api, options, source, lending: lending !== null,

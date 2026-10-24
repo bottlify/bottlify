@@ -274,3 +274,27 @@ test('the worker\'s phase totals are summed over the roots that said them', asyn
     }
     end.dispose();
 });
+
+test('the worker\'s GPU bound is its one device\'s, said by whichever root answered', async()=>{
+    const worker = fakeWorker();
+    const end = connectGraphicsWorker({ worker });
+    const services = { readMemory: ()=>new Uint8Array(0), gamma: { applies: ()=>true, set(){} } };
+    const factory = (/** @type {any} */ given)=>({ given });
+    end.root('d3d9', factory, services);
+    end.root('d3d9', factory, services);
+    assert.equal(end.diagnostics().latency, null, 'nothing said yet: not measured');
+
+    const ports = worker.posted.filter(posted=>posted.type === 'root').map(posted=>posted.port);
+    const bound = { limit: 3, counting: true, inFlight: 1, peak: 4, frames: 300, held: 12,
+        heldMs: 96, waiting: 0 };
+    // The first root has not answered; the second says the bound they share.
+    ports[1].postMessage({ type: 'diagnostics', diagnostics: {}, latency: bound });
+    await new Promise(resolve=>setTimeout(resolve, 10));
+
+    assert.deepEqual(end.diagnostics().latency, bound, 'one bound, not a sum over roots');
+    for (const port of ports)
+    {
+        port.close();
+    }
+    end.dispose();
+});

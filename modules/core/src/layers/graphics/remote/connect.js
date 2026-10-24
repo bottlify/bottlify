@@ -68,11 +68,14 @@ function plainOf(services){
  *     occlusion: { counted: number, ms: number, maxMs: number, polls: number, asks: number,
  *         beside: number, sentAfterMs: number, tripMs: number, under: number[], trace: any[] },
  *     calls: string, answers: string,
- *     phases: import('./channel.js').WorkerPhases | null }}
+ *     phases: import('./channel.js').WorkerPhases | null,
+ *     latency: import('./channel.js').FrameLatencyState | null }}
  *     diagnostics  `phases`: where the worker's thread spent its time on this process's
  *     batches, summed over the roots that have answered a diagnostics ask (null before
- *     any has, or in a build that times nothing); `waits`: what the program's thread
- *     waited on the worker for, by call;
+ *     any has, or in a build that times nothing); `latency`: the bound on the frames the
+ *     worker's GPU may still be drawing, with the presents that waited for it (`held`,
+ *     `heldMs`) -- one device, so one bound, whichever root said it (null before any
+ *     has); `waits`: what the program's thread waited on the worker for, by call;
  *     `readBack`: the bytes the worker wrote into guest memory, sent here to be written or
  *     written in shared memory in place; `lent`: the unlocked bytes lent to the worker rather
  *     than copied, those taken into the stash first, and the claims that waited; `sent`: the
@@ -434,6 +437,7 @@ export function connectGraphicsWorker(options){
             return { roots: ports.length, frames, dropped, waits,
                 behind: senders.map(sender=>sender.behind()), readBack: { ...readBack },
                 phases: phasesOf(senders),
+                latency: senders.map(sender=>sender.latency()).find(said=>said !== null) ?? null,
                 answers: senders.map(sender=>sender.answers()).join(' '),
                 occlusion: senders.reduce((sum, sender)=>{
                     const one = sender.occlusion();

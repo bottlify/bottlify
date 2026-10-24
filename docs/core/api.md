@@ -99,7 +99,11 @@ go of), `ring-take` (calls the program left in the command ring) and, inside tha
 table: `graphics.worker.phases` holds its totals since it started, `batch-read` (each batch of
 calls read and played; its `selfMs` excludes the sweep) and `batch-sweep` (the once-a-frame look
 at objects whose count reached zero). It is `null` until the worker has answered a diagnostics
-request, and in a build that times nothing.
+request, and in a build that times nothing. `graphics.worker.latency` is the worker's bound on the
+frames its GPU may still be drawing (three): `held` and `heldMs` count the presents that waited
+for the GPU to finish a frame, and `peak` is the most frames it was behind. A
+wait on a present in `graphics.worker.waits` that `heldMs` does not account for was the worker's
+thread, not the GPU.
 
 ## The controller
 
