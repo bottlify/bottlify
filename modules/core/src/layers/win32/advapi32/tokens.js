@@ -406,6 +406,165 @@ export const selfRelativeDescriptor = parts=>{
     return { bytes, offsets };
 };
 
+/** The access rights SDDL names with two letters. */
+const SDDL_RIGHTS = Object.freeze({
+    GA: 0x10000000, GR: 0x80000000, GW: 0x40000000, GX: 0x20000000,
+    RC: 0x00020000, SD: 0x00010000, WD: 0x00040000, WO: 0x00080000,
+    RP: 0x10, WP: 0x20, CC: 0x01, DC: 0x02, LC: 0x04, SW: 0x08, LO: 0x80, DT: 0x40, CR: 0x100,
+    FA: 0x001f01ff, FR: 0x00120089, FW: 0x00120116, FX: 0x001200a0,
+    KA: 0x000f003f, KR: 0x00020019, KW: 0x00020006, KX: 0x00020019,
+});
+/** The ACE flags SDDL names: inheritance, and the audit outcomes. */
+const SDDL_ACE_FLAGS = Object.freeze({
+    OI: 0x01, CI: 0x02, NP: 0x04, IO: 0x08, ID: INHERITED_ACE,
+    SA: SUCCESSFUL_ACCESS_ACE_FLAG, FA: FAILED_ACCESS_ACE_FLAG,
+});
+/** The ACE types SDDL names that this builds: the ones naming one trustee. */
+const SDDL_ACE_TYPES = Object.freeze({
+    A: ACCESS_ALLOWED_ACE_TYPE, D: ACCESS_DENIED_ACE_TYPE, AU: SYSTEM_AUDIT_ACE_TYPE,
+    AL: SYSTEM_ALARM_ACE_TYPE,
+});
+const SE_DACL_PROTECTED = 0x1000;
+const SE_SACL_PROTECTED = 0x2000;
+const SE_DACL_AUTO_INHERITED = 0x0400;
+const SE_SACL_AUTO_INHERITED = 0x0800;
+
+/**
+ * Two-letter names run together, as SDDL writes rights and flags: every pair
+ * has to be one the table knows.
+ *
+ * @param {string} text @param {Readonly<Record<string, number>>} table
+ * @returns {number | null}
+ */
+const sddlBits = (text, table)=>{
+    if (/^0x[0-9a-f]{1,8}$/i.test(text))
+    {
+        return Number(text) >>> 0;
+    }
+    if (text.length % 2 !== 0)
+    {
+        return null;
+    }
+    let bits = 0;
+    for (let at = 0; at < text.length; at += 2)
+    {
+        const bit = table[/** @type {keyof typeof table} */ (text.slice(at, at + 2).toUpperCase())];
+        if (bit === undefined)
+        {
+            return null;
+        }
+        bits = (bits | bit) >>> 0;
+    }
+    return bits;
+};
+
+/**
+ * An ACL's part of an SDDL string -- its flags, then its ACEs in brackets --
+ * as the control bits it sets and the ACL, null for `NO_ACCESS_CONTROL` (the
+ * null ACL); undefined for text that is not one. An ACE naming an object type
+ * is refused: the object ACEs are a directory service's.
+ *
+ * @param {string} text @param {'dacl' | 'sacl'} which
+ * @returns {{ control: number, acl: Uint8Array | null } | undefined}
+ */
+const sddlAcl = (text, which)=>{
+    const head = /^([A-Z_]*)((?:\([^)]*\))*)$/i.exec(text);
+    if (!head)
+    {
+        return undefined;
+    }
+    const flags = head[1].toUpperCase();
+    let control = 0;
+    let rest = flags;
+    if (rest.includes('NO_ACCESS_CONTROL'))
+    {
+        rest = rest.replace('NO_ACCESS_CONTROL', '');
+        if (head[2] === '' && rest === '')
+        {
+            return { control: 0, acl: null };
+        }
+    }
+    for (const [name, bit] of /** @type {[string, number][]} */ ([
+        ['AI', which === 'dacl' ? SE_DACL_AUTO_INHERITED : SE_SACL_AUTO_INHERITED],
+        ['AR', 0],
+        ['P', which === 'dacl' ? SE_DACL_PROTECTED : SE_SACL_PROTECTED]]))
+    {
+        if (rest.includes(name))
+        {
+            rest = rest.replace(name, '');
+            control |= bit;
+        }
+    }
+    if (rest !== '')
+    {
+        return undefined;
+    }
+    /** @type {Uint8Array[]} */
+    const aces = [];
+    for (const [, body] of head[2].matchAll(/\(([^)]*)\)/g))
+    {
+        const [type, aceFlags, rights, object, inherited, trustee, ...more] = body.split(';');
+        const kind = SDDL_ACE_TYPES[/** @type {keyof typeof SDDL_ACE_TYPES} */ (type.toUpperCase())];
+        const bits = sddlBits(aceFlags, SDDL_ACE_FLAGS);
+        const mask = sddlBits(rights, SDDL_RIGHTS);
+        const sid = parseSid(trustee ?? '');
+        if (kind === undefined || bits === null || mask === null || !sid || more.length > 0
+            || (object ?? '') !== '' || (inherited ?? '') !== '')
+        {
+            return undefined;
+        }
+        aces.push(aceBytes(kind, bits, mask, sid));
+    }
+    return { control, acl: aclBytes(aces) };
+};
+
+/**
+ * A security descriptor's SDDL -- `O:` owner, `G:` group, `D:` DACL, `S:`
+ * SACL, each optional -- as a self-relative descriptor's bytes, or null for
+ * text that is not one.
+ *
+ * @param {string} text @returns {Uint8Array | null}
+ */
+export const parseSddl = text=>{
+    /** @type {{ owner?: Uint8Array, group?: Uint8Array, dacl?: Uint8Array | null,
+     *           sacl?: Uint8Array | null }} */
+    const parts = {};
+    let control = 0;
+    const sections = text.trim().split(/(?=[OGDS]:)/);
+    for (const section of sections)
+    {
+        const kind = section.slice(0, 2).toUpperCase();
+        const body = section.slice(2);
+        if (kind === 'O:' || kind === 'G:')
+        {
+            const sid = parseSid(body);
+            if (!sid)
+            {
+                return null;
+            }
+            parts[kind === 'O:' ? 'owner' : 'group'] = sid;
+        }
+        else if (kind === 'D:' || kind === 'S:')
+        {
+            const acl = sddlAcl(body, kind === 'D:' ? 'dacl' : 'sacl');
+            if (!acl)
+            {
+                return null;
+            }
+            parts[kind === 'D:' ? 'dacl' : 'sacl'] = acl.acl;
+            control |= acl.control;
+        }
+        else if (section !== '')
+        {
+            return null;
+        }
+    }
+    const { bytes } = selfRelativeDescriptor(parts);
+    const view = new DataView(bytes.buffer);
+    view.setUint16(SD.CONTROL, view.getUint16(SD.CONTROL, true) | control, true);
+    return bytes;
+};
+
 /**
  * A string of the caller's in UTF-16, up to its terminator or the limit.
  *
@@ -987,6 +1146,36 @@ export function createTokenFunctions(host){
             const block = host.allocate(sid.length);
             host.writeMemory(block, sid);
             writeDword(out >>> 0, block);
+            host.setLastError(ERROR_SUCCESS);
+            return 1;
+        },
+    });
+
+    /** @param {boolean} wide */
+    const convertDescriptor = wide=>({
+        argBytes: 16,
+        /** @param {number[]} args */
+        handler: ([text, revision, out, size])=>{
+            if ((text >>> 0) === 0 || (out >>> 0) === 0)
+            {
+                return fail(ERROR_INVALID_PARAMETER);
+            }
+            if ((revision >>> 0) !== 1)
+            {
+                return fail(ERROR_UNKNOWN_REVISION);
+            }
+            const descriptor = parseSddl(/** @type {string} */ (textAt(text, wide, 4096)));
+            if (!descriptor)
+            {
+                return fail(ERROR_INVALID_PARAMETER);
+            }
+            const block = host.allocate(descriptor.length);
+            host.writeMemory(block, descriptor);
+            writeDword(out >>> 0, block);
+            if ((size >>> 0) !== 0)
+            {
+                writeDword(size >>> 0, descriptor.length);
+            }
             host.setLastError(ERROR_SUCCESS);
             return 1;
         },
@@ -2120,6 +2309,19 @@ export function createTokenFunctions(host){
          * "S-1-<authority>-<sub>..." in a LocalAlloc block the caller frees
          * with LocalFree; an authority past 32 bits is written in hex.
          */
+        /**
+         * BOOL ConvertStringSecurityDescriptorToSecurityDescriptorA(LPCSTR
+         *     StringSecurityDescriptor, DWORD StringSDRevision,
+         *     PSECURITY_DESCRIPTOR *SecurityDescriptor, PULONG SecurityDescriptorSize)
+         * and the W form.
+         *
+         * The descriptor the SDDL names (parseSddl), self-relative, in a
+         * LocalAlloc block the caller frees with LocalFree; only SDDL_REVISION_1
+         * exists, and text that names no descriptor is ERROR_INVALID_PARAMETER.
+         */
+        ConvertStringSecurityDescriptorToSecurityDescriptorA: convertDescriptor(false),
+        ConvertStringSecurityDescriptorToSecurityDescriptorW: convertDescriptor(true),
+
         ConvertSidToStringSidA: convertSid(false),
         ConvertSidToStringSidW: convertSid(true),
 
