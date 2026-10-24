@@ -33,6 +33,7 @@ import { jumpBytes, relocatablePrefix } from './layers/loader/internal/hooks.js'
 import { mangledCall } from './layers/loader/internal/mangling.js';
 import { mapImage } from './layers/loader/internal/image.js';
 import { createProcessBlocks, TEB } from './layers/win32/kernel32/teb.js';
+import { SHARED_USER_DATA, createSharedUserData } from './layers/win32/kernel32/shared-data.js';
 import { supportedOsOf, windowsVersion } from './layers/win32/kernel32/versions.js';
 import { GRAPHICS_CHOICES, graphicsChoice } from './layers/graphics/choice.js';
 import { searchesBesideProgram } from './layers/win32/kernel32/modules.js';
@@ -1476,10 +1477,12 @@ export function placeMainStack(reserve, poolBase, poolSize){
 
 /**
  * How much of the guest's RAM the heap gets: what the caller asked for, or
- * everything from the heap's base to the end of RAM. The heap is the last
- * region, so the end of RAM is the only ceiling there is -- and a fixed size
- * short of it was what a program loading a level ran into, reporting the
- * machine's memory as exhausted while most of it sat unused above.
+ * everything from the heap's base to the end of RAM, short of the system's
+ * shared page at 0x7FFE0000 in a RAM that reaches it (`shared-data.js`), as a
+ * Windows process's own memory ends there. The heap is otherwise the last
+ * region, so the end of RAM is the only ceiling -- and a fixed size short of
+ * it was what a program loading a level ran into, reporting the machine's
+ * memory as exhausted while most of it sat unused above.
  *
  * @param {number} memorySize
  * @param {number} [asked]
@@ -1494,7 +1497,7 @@ export function heapSizeFor(memorySize, asked, base = 0x0c000000){
     {
         throw new Error(`heap: ${memorySize} bytes of RAM is less than the heap's base`);
     }
-    return memorySize - base;
+    return Math.min(memorySize, SHARED_USER_DATA) - base;
 }
 
 /**
@@ -6773,6 +6776,17 @@ async function buildApp(options){
             } : held),
     });
     threadBlocks = process;
+
+    // The page every NT process reads at 0x7FFE0000 without a call: the same
+    // version as every other road, and the clocks GetTickCount answers with.
+    const sharedData = createSharedUserData({ memory, version: windowsVersion(options.windows) });
+    if (sharedData)
+    {
+        const refresh = ()=>sharedData.refresh(kernel.clock.virtualTime(),
+            kernel.clock.wallClock());
+        refresh();
+        kernel.clock.whenMoved(refresh);
+    }
 
     // The program's first thread. Everything after this runs under the
     // scheduler, including the main thread -- there is no privileged path.

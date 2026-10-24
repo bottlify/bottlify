@@ -1336,6 +1336,8 @@ test('the heap reaches the end of RAM unless a size was asked for', ()=>{
     assert.equal(heapSizeFor(1024 * 1024 * 1024), 1024 * 1024 * 1024 - 0x0c000000);
     assert.equal(heapSizeFor(1024 * 1024 * 1024, 0x14000000), 0x14000000, 'an asked-for size wins');
     assert.throws(()=>heapSizeFor(64 * 1024 * 1024), /less than the heap's base/);
+    assert.equal(heapSizeFor(0x80000000), 0x7ffe0000 - 0x0c000000,
+        'two gigabytes end below the shared page, as the memory of a process does');
 });
 
 /**
