@@ -92,6 +92,7 @@ import { createIphlpapiFunctions } from './iphlpapi/functions.js';
 import { createCrypt32Functions } from './crypt32/functions.js';
 import { createAdvpackFunctions } from './advpack/functions.js';
 import { SFC_ORDINALS, createSfcFunctions } from './sfc/functions.js';
+import { createHidFunctions } from './hid/functions.js';
 import { ODBC32_ORDINALS, createOdbcFunctions } from './odbc32/functions.js';
 import { createOleaccFunctions } from './oleacc/functions.js';
 import { createSyssetupFunctions } from './syssetup/functions.js';
@@ -2466,6 +2467,7 @@ export function createWin32Module(){
                 'pdh.dll': createPdhFunctions({ writeMemory }),
 
                 'SFC.dll': createSfcFunctions({ writeMemory, readCString, files: volume }),
+                'HID.DLL': createHidFunctions({ writeMemory, setLastError: setError }),
 
                 // The ODBC Driver Manager, with no driver and no data source set up.
                 'ODBC32.dll': createOdbcFunctions({ writeMemory }),
