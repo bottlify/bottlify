@@ -490,7 +490,7 @@ one core (`taskset -c N`) on a quiet machine: the spread printed is how far to t
 
 ## `../graphics-replay.mjs`: what a title's frames cost the graphics worker
 
-`node tools/graphics-replay.mjs FILE [--root DIR] [--reps N] [--profile OUT] [--all] [--uploads] [--json]` plays a
+`node tools/graphics-replay.mjs FILE [--root DIR] [--reps N] [--profile OUT] [--all] [--uploads] [--json] [--digest OUT]` plays a
 capture (`game.mjs --graphics-capture FILE`, the frames marked with `captureFrames(n)`) through
 the played side of an engine, this checkout's or `--root DIR`'s, over a quiet fake GPU in node:
 every root made as it was, every batch played in its order, the frames after the mark measured.
@@ -502,7 +502,13 @@ times, each on a fresh worker; `--profile OUT` writes a CPU profile of the last 
 frames; `--all` measures every frame of a capture that was never marked; `--uploads` prints what
 each dynamic buffer and the uniform ring moved over the measured frames (writes, bytes written,
 bytes marked by unlocks and draws), from the device's diagnostics the run asked for in them. The zeroed memory costs what the program's did to move, by its size; what a device does
-with what it is handed (a real GPU's encoding, its copies) is not here.
+with what it is handed (a real GPU's encoding, its copies) is not here. `--digest OUT` writes one
+line for every batch that presents: a digest of all the device was asked meanwhile (each call,
+the objects it names by the order they were made, the bytes it wrote by their content). Two
+checkouts that play a capture into the same lines handed the GPU the same work, and the first
+line that differs is where they parted: a change to the draw path that should only be faster is
+checked with it before it is timed. The device keeps its call log then, so that run's times are
+not a measurement.
 
 ## Two rules the numbers depend on
 
