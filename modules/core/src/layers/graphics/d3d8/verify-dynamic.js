@@ -16,10 +16,11 @@
  * bytes the draw reads -- the vertices its indices name, not the range it
  * declares -- in the played side's memory against the buffer's copy as the
  * draw is recorded, and against what the GPU buffer the draw binds holds once
- * its frame is submitted: on a device that keeps its bytes (the fake one)
- * read there, on any other copied out after the frame's draws and read back
- * (`readBack`), within a budget a frame. A byte that differs is one the draw
- * takes stale.
+ * its frame is submitted: copied out after the frame's draws and read back
+ * (`readBack`), within a budget a frame -- on the fake device as on a real
+ * one, so that a run here checks the path a real GPU's run takes; read in
+ * place only where a frame has no copy out. A byte that differs is one the
+ * draw takes stale.
  */
 
 /** D3DUSAGE_DYNAMIC. */
@@ -221,8 +222,8 @@ export function createDynamicVerify(read){
         },
         /**
          * The frame's draws are encoded and its end not yet made: what they
-         * read of GPU buffers that keep no bytes of their own is copied out
-         * after them, within the budget, to be read once it is submitted.
+         * read of GPU buffers is copied out after them, within the budget, to
+         * be read once it is submitted.
          *
          * @param {any} recording
          * @param {{ copyOut?: (ranges: { buffer: any, offset: number, size: number }[])
@@ -239,10 +240,6 @@ export function createDynamicVerify(read){
             const taken = [];
             for (const check of checks)
             {
-                if (check.backing?.bytes instanceof Uint8Array)
-                {
-                    continue;
-                }
                 if (check.expected.length > left)
                 {
                     check.skipped = true;
@@ -260,8 +257,9 @@ export function createDynamicVerify(read){
             }
         },
         /**
-         * A frame was submitted: what its draws' GPU buffers hold now, where
-         * the device keeps it, and the read back of the rest begun.
+         * A frame was submitted: the read back of what its draws' GPU buffers
+         * hold begun, or, for a frame that copied nothing out, what a device
+         * that keeps its bytes holds now.
          */
         submitted(/** @type {any} */ recording){
             const checks = recording?.verifyChecks;
@@ -272,7 +270,7 @@ export function createDynamicVerify(read){
             recording.verifyChecks = undefined;
             const reading = recording.verifyRead;
             recording.verifyRead = undefined;
-            for (const check of checks)
+            for (const check of reading ? [] : checks)
             {
                 const bytes = check.backing?.bytes;
                 if (bytes instanceof Uint8Array)
@@ -280,7 +278,7 @@ export function createDynamicVerify(read){
                     compare(check, bytes.subarray(check.offset,
                         check.offset + check.expected.length));
                 }
-                else if (!check.skipped && !reading?.checks.includes(check))
+                else if (!check.skipped)
                 {
                     figures.gpuUnknown++;
                 }

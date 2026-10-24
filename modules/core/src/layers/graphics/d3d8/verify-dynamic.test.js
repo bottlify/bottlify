@@ -7,6 +7,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createDynamicVerify } from './verify-dynamic.js';
+import { createBackend } from '../webgpu/backend.js';
+import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 
 /** D3DUSAGE_DYNAMIC. */
 const DYNAMIC = 0x200;
@@ -156,4 +158,47 @@ test('a frame reads back no more than its budget, and a device with no read back
     verify.readBack(other, {});
     verify.submitted(other);
     assert.equal(verify.figures().gpuUnknown, 1);
+});
+
+test('through a backend: what a frame binds is copied out after its draws and read back once it'
+    + ' is submitted, and a copy rewritten before the frame\'s end is found', async()=>{
+    const gpu = createFakeDevice();
+    const backend = createBackend({ device: gpu.device, queue: gpu.queue, presentTo: ()=>{},
+        now: ()=>0 });
+    const memory = new Uint8Array(0x3000);
+    const verify = createDynamicVerify((address, length)=>
+        memory.subarray(address, address + length));
+    const source = { base: 0x1000, length: 0x200, usage: DYNAMIC };
+    const vertices = backend.createDynamicBuffer({ size: 0x200, usage: 0, label: 'vertices' });
+    /** @param {number} fill @param {boolean} overwrite */
+    const frameOf = async(fill, overwrite)=>{
+        memory.fill(fill, 0x1000, 0x1200);
+        const lock = vertices.lock(0, 0x200, backend.LockFlags.DISCARD);
+        lock.data.fill(fill);
+        vertices.unlock(lock);
+        const frame = backend.beginFrame();
+        verify.draw(1, 0);
+        // An odd range: the copy out takes whole words around it.
+        verify.range('vb0', source, vertices, 0x13, 0x51, null, true);
+        const recording = {};
+        verify.attach(recording);
+        verify.readBack(recording, frame);
+        if (overwrite)
+        {
+            // The copy rewritten after the draw was recorded, before the
+            // frame's end uploads it: the draw reads bytes it was not made with.
+            vertices.rewrite(0x20, new Uint8Array(4).fill(0xee));
+        }
+        frame.end();
+        verify.submitted(recording);
+        await new Promise(resolve=>setImmediate(resolve));
+    };
+    await frameOf(7, false);
+    assert.deepEqual([verify.figures().gpuChecked, verify.figures().gpuStale], [1, 0]);
+    await frameOf(8, true);
+    const found = verify.figures();
+    assert.deepEqual([found.gpuChecked, found.gpuStale, found.readsFailed, found.readsPending],
+        [2, 1, 0, 0]);
+    assert.equal(found.gpuSamples[0].first, 0x20 - 0x13);
+    assert.equal(found.gpuSamples[0].have.slice(0, 2), 'ee');
 });
