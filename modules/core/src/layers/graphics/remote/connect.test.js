@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { connectGraphicsWorker } from './connect.js';
-import { createSender } from './channel.js';
+import { createSender, sharedNow } from './channel.js';
 import { WAIT } from './wire.js';
 import { openGraphicsWorker } from '../../../host/graphics-worker.js';
 
@@ -76,6 +76,30 @@ test('a frame the worker sends back is presented as one drawn here, its texture 
     end.dispose();
     assert.ok(device.calls.includes('destroy'));
 });
+
+test('a frame\'s way from the worker is timed: waiting there, coming here, shown, answered',
+    ()=>{
+        const worker = fakeWorker();
+        const end = connectGraphicsWorker({ worker, device: fakeDevice(), presentTo: ()=>{} });
+        /** @param {Record<string, any>} times */
+        const frame = times=>worker.answer({ type: 'frame', pixels: new Uint8Array(256 * 2),
+            bytesPerRow: 256, width: 2, height: 2, frameIndex: 1, format: 'bgra8unorm', ...times });
+        assert.equal(end.diagnostics().handoff, null, 'no frame yet: not measured');
+        frame({});
+        assert.equal(end.diagnostics().handoff, null, 'a frame without its times says none');
+        frame({ sentAt: sharedNow() - 7, waitedMs: 3, back: { count: 1, ms: 2, maxMs: 2 } });
+        const handoff = end.diagnostics().handoff;
+        assert.equal(handoff?.frames, 1);
+        assert.equal(handoff?.waitedMs, 3);
+        assert.ok((handoff?.thereMs ?? 0) >= 7, 'from when it went to when it came');
+        assert.ok((handoff?.showMs ?? -1) >= 0);
+        assert.deepEqual(handoff?.back, { count: 1, ms: 2, maxMs: 2 });
+        const answers = worker.posted.filter(message=>message.type === 'shown');
+        assert.equal(answers.length, 2);
+        assert.ok(answers.every(message=>typeof message.at === 'number'),
+            'every answer says when it went, for the worker to time its way back');
+        end.dispose();
+    });
 
 test('a frame the worker counted is presented with no picture, and nothing is drawn', ()=>{
     const worker = fakeWorker();

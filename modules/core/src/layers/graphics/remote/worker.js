@@ -16,8 +16,9 @@
  * the cursor stay where they are.
  *
  * Messages to the worker:
- *   { type: 'shown' }                the program's thread has shown the frame sent
- *                                    last; the next goes when it has
+ *   { type: 'shown', at }            the program's thread has shown the frame sent
+ *                                    last; the next goes when it has. `at` when it
+ *                                    said so, on the clock both read (`sharedNow`)
  *   { type: 'open', frames, capture } `frames` 'bitmap' sends each presented
  *                                    frame back as a picture, 'pixels' as its
  *                                    bytes read back, 'count' says only that
@@ -43,12 +44,16 @@
  *                                    `{ type: 'close' }` on the port ends it
  * Messages from it:
  *   { type: 'opened', adapter } | { type: 'failed', message }
- *   { type: 'frame', bitmap, frameIndex, format, dropped, source }
- *   { type: 'frame', pixels, bytesPerRow, width, height, frameIndex, format, dropped, source }
+ *   { type: 'frame', bitmap, frameIndex, format, dropped, source, sentAt, waitedMs, back }
+ *   { type: 'frame', pixels, bytesPerRow, width, height, frameIndex, format, dropped, source,
+ *     sentAt, waitedMs, back }
  *   { type: 'frame', frameIndex, source }  under 'count', every frame presented
  *                                    one at a time, the newest presented of a process,
  *                                    the processes in turn; `dropped` counts those a
- *                                    newer one replaced unsent
+ *                                    newer one replaced unsent, `sentAt` when it went,
+ *                                    `waitedMs` how long since it was presented, and
+ *                                    `back` the `shown` answers so far and the
+ *                                    milliseconds they took to come
  *   { type: 'lost', reason }
  *   { type: 'captured', bytes, counts }  the capture, ended, as `{ type: 'debug',
  *                                    captured: true }` asked; `bytes` null without one
@@ -61,7 +66,7 @@ import { createOpenglRoot } from '../opengl/root.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFrameLatency } from '../webgpu/internal/latency.js';
 import { createCapture } from './capture.js';
-import { createReceiver } from './channel.js';
+import { createReceiver, sharedNow } from './channel.js';
 import { createBorrower } from './lending.js';
 import { playedDirect3D } from './direct3d.js';
 import { playedOpengl } from './opengl.js';
@@ -168,7 +173,7 @@ export function serveGraphics(scope, deps){
      * process presenting often keep another's frames from ever being sent.
      *
      * @typedef {{ texture: any, width: number, height: number, format: string,
-     *     frameIndex: number, fresh: boolean, waiting: number,
+     *     frameIndex: number, fresh: boolean, waiting: number, presentedAt: number,
      *     source: number | undefined }} Slot
      * @type {Map<number | undefined, Slot>}
      */
@@ -220,6 +225,19 @@ export function serveGraphics(scope, deps){
     let sending = false;
     /** Frames presented that a newer one replaced before they were sent. */
     let dropped = 0;
+    /**
+     * The `shown` answers and how long each took to come back: one frame
+     * goes at a time, so the way there, the showing and this way back
+     * together bound the frames shown a second, however many are drawn.
+     */
+    const back = { count: 0, ms: 0, maxMs: 0 };
+    /** @param {Slot} surface */
+    const sentWith = surface=>{
+        const sentAt = sharedNow();
+        return { sentAt, waitedMs: Math.max(0, sentAt - surface.presentedAt),
+            back: { count: back.count, ms: Math.round(back.ms * 100) / 100,
+                maxMs: Math.round(back.maxMs * 100) / 100 } };
+    };
 
     /**
      * A presented frame, kept to be sent back: at once when the frame before
@@ -257,7 +275,8 @@ export function serveGraphics(scope, deps){
                     size: [surface.width, surface.height], format: surface.format,
                     usage: COPY_SRC | COPY_DST }),
                 width: surface.width, height: surface.height, format: surface.format,
-                frameIndex: frame.frameIndex, fresh: false, waiting: 0, source: playing,
+                frameIndex: frame.frameIndex, fresh: false, waiting: 0, presentedAt: 0,
+                source: playing,
             };
             newest.set(playing, slot);
         }
@@ -275,6 +294,7 @@ export function serveGraphics(scope, deps){
         device.queue.submit([encoder.finish()]);
         slot.fresh = true;
         slot.frameIndex = frame.frameIndex;
+        slot.presentedAt = sharedNow();
         if (!sending)
         {
             send(device);
@@ -321,7 +341,8 @@ export function serveGraphics(scope, deps){
         device.queue.submit([encoder.finish()]);
         const bitmap = screen.canvas.transferToImageBitmap();
         scope.postMessage({ type: 'frame', bitmap, frameIndex: surface.frameIndex,
-            format: surface.format, dropped, source: surface.source }, [bitmap]);
+            format: surface.format, dropped, source: surface.source, ...sentWith(surface) },
+        [bitmap]);
     };
 
     /**
@@ -332,8 +353,7 @@ export function serveGraphics(scope, deps){
      * happening.
      *
      * @param {any} device
-     * @param {{ surface: { texture: any, width: number, height: number, format: string,
-     *     source?: number }, frameIndex: number }} frame
+     * @param {{ surface: Slot, frameIndex: number }} frame
      */
     const readPixels = (device, { surface, frameIndex })=>{
         const { width, height, format } = surface;
@@ -348,7 +368,8 @@ export function serveGraphics(scope, deps){
             const pixels = new Uint8Array(buffer.getMappedRange()).slice();
             buffer.destroy();
             scope.postMessage({ type: 'frame', pixels, bytesPerRow, width, height, frameIndex,
-                format, dropped, source: surface.source }, [pixels.buffer]);
+                format, dropped, source: surface.source, ...sentWith(surface) },
+            [pixels.buffer]);
         }, ()=>{
             buffer.destroy();
             sending = false;
@@ -583,6 +604,13 @@ export function serveGraphics(scope, deps){
                 break;
             case 'shown':
                 sending = false;
+                if (typeof data.at === 'number')
+                {
+                    const took = Math.max(0, sharedNow() - data.at);
+                    back.count++;
+                    back.ms += took;
+                    back.maxMs = Math.max(back.maxMs, took);
+                }
                 opened?.then(({ device })=>send(device), ()=>{});
                 break;
             case 'root':

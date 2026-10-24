@@ -570,6 +570,7 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
  */
 const shared = ()=>(typeof performance === 'undefined' ? Date.now()
     : performance.timeOrigin + performance.now());
+export { shared as sharedNow };
 
 /**
  * The played side.

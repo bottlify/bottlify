@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { serveGraphics } from './worker.js';
-import { createSender } from './channel.js';
+import { createSender, sharedNow } from './channel.js';
 import { recordedDirect3D } from './direct3d.js';
 import { createDirect3D9 } from '../d3d9/device.js';
 import { D3DCLEAR, D3DFMT, D3DSWAPEFFECT, D3D_OK } from '../d3d8/constants.js';
@@ -63,12 +63,18 @@ test('the worker sends one frame at a time, the newest, and counts those replace
                 await settle();
             }
             assert.equal(frames().length, 1, 'one sent while it is not yet shown');
-            scope.onmessage({ data: { type: 'shown' } });
+            const [first] = frames();
+            assert.equal(typeof first.sentAt, 'number', 'it says when it went');
+            assert.ok(first.waitedMs >= 0 && first.waitedMs <= sharedNow() - first.sentAt + 1e3);
+            assert.deepEqual(first.back, { count: 0, ms: 0, maxMs: 0 }, 'no answer yet');
+            scope.onmessage({ data: { type: 'shown', at: sharedNow() - 5 } });
             await settle();
             assert.equal(frames().length, 2, 'the next once it was');
             assert.equal(frames()[1].frameIndex > frames()[0].frameIndex + 1, true,
                 'the newest of those presented meanwhile');
             assert.equal(frames()[1].dropped, 1, 'the one it replaced counted');
+            assert.equal(frames()[1].back.count, 1, 'the answer timed on its way back');
+            assert.ok(frames()[1].back.ms >= 5 && frames()[1].back.maxMs === frames()[1].back.ms);
             scope.onmessage({ data: { type: 'shown' } });
             await settle();
             assert.equal(frames().length, 2, 'and nothing more until another is presented');

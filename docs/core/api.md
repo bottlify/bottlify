@@ -103,7 +103,11 @@ request, and in a build that times nothing. `graphics.worker.latency` is the bou
 the worker's GPU may still be drawing (`graphics.maxFrameLatency`), summed over the devices drawn
 there: `held` and `heldMs` count the presents that waited for the GPU to finish a frame, and
 `peak` is the most frames it was behind. A wait on a present in `graphics.worker.waits` that
-`heldMs` does not account for was the worker's thread, not the GPU.
+`heldMs` does not account for was the worker's thread, not the GPU. `graphics.worker.handoff`
+times the frames the worker sends to be shown, one at a time: how long each waited there for the
+one before (`waitedMs`), its way to the thread that shows it (`thereMs`), showing it (`showMs`),
+and the answer's way back (`back`), each a sum with its worst. Together they bound the frames shown
+a second, whatever the worker draws; `graphics.worker.dropped` counts those a newer one replaced.
 
 ## The controller
 

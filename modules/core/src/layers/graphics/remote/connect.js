@@ -12,7 +12,7 @@
  * and presented as a frame drawn here would be.
  */
 
-import { createSender } from './channel.js';
+import { createSender, sharedNow } from './channel.js';
 import { createLendingBuffers, mayWait } from './lending.js';
 import { recordedDirect3D } from './direct3d.js';
 import { recordedDirect3D7 } from './d3d7.js';
@@ -69,8 +69,14 @@ function plainOf(services){
  *         beside: number, sentAfterMs: number, tripMs: number, under: number[], trace: any[] },
  *     calls: string, answers: string,
  *     phases: import('./channel.js').WorkerPhases | null,
- *     latency: import('./channel.js').FrameLatencyState | null }}
- *     diagnostics  `phases`: where the worker's thread spent its time on this process's
+ *     latency: import('./channel.js').FrameLatencyState | null,
+ *     handoff: { frames: number, waitedMs: number, worstWaitedMs: number, thereMs: number,
+ *         worstThereMs: number, showMs: number, worstShowMs: number,
+ *         back: { count: number, ms: number, maxMs: number } | null } | null }}
+ *     diagnostics  `handoff`: the frames the worker sent here, how long they waited there
+ *     for the one before to be shown, their way here, showing them, and the answers' way
+ *     back (null before a frame has come with its times); `phases`: where the worker's
+ *     thread spent its time on this process's
  *     batches, summed over the roots that have answered a diagnostics ask (null before
  *     any has, or in a build that times nothing); `latency`: each root's bound on the
  *     frames the worker's GPU may still be drawing, with the presents that waited for it
@@ -246,7 +252,7 @@ function join(worker, connection){
                 case 'frame':
                     showing(connections)?.frame(data);
                     // The worker sends the next once this one is on this thread's queue.
-                    worker.postMessage({ type: 'shown' });
+                    worker.postMessage({ type: 'shown', at: sharedNow() });
                     break;
                 case 'lost':
                     for (const each of [...connections])
@@ -397,14 +403,47 @@ export function connectGraphicsWorker(options){
 
     /** Frames the worker presented and replaced before they were sent. */
     let dropped = 0;
+    /**
+     * The way of the frames the worker sent: how long each waited there,
+     * once presented, for the one before it to be shown (`waited`), its
+     * way here (`there`), taking it onto this thread's device and the
+     * presenter (`show`), and, as the worker timed it, the answer's way
+     * back (`back`). The worker sends one at a time, so these bound the
+     * frames shown a second whatever it draws: a frame is dropped there
+     * when a newer one comes before the answer.
+     */
+    const handoff = { frames: 0, waitedMs: 0, worstWaitedMs: 0, thereMs: 0, worstThereMs: 0,
+        showMs: 0, worstShowMs: 0 };
+    /** The answers' way back, as the worker said with its last frame. @type {any} */
+    let back = null;
+    /** @param {any} data @param {number} arrived @param {number} took */
+    const handed = (data, arrived, took)=>{
+        const waited = Math.max(0, Number(data.waitedMs) || 0);
+        const there = Math.max(0, arrived - data.sentAt);
+        handoff.frames++;
+        handoff.waitedMs += waited;
+        handoff.worstWaitedMs = Math.max(handoff.worstWaitedMs, waited);
+        handoff.thereMs += there;
+        handoff.worstThereMs = Math.max(handoff.worstThereMs, there);
+        handoff.showMs += took;
+        handoff.worstShowMs = Math.max(handoff.worstShowMs, took);
+        back = data.back ?? back;
+    };
+    /** @param {number} ms */
+    const rounded = ms=>Math.round(ms * 100) / 100;
 
     /** @type {Connection} */
     const connection = {
         drew: ()=>ports.length > 0,
         /** @param {any} data */
         frame: data=>{
+            const arrived = sharedNow();
             dropped = data.dropped ?? dropped;
             present(data);
+            if (typeof data.sentAt === 'number')
+            {
+                handed(data, arrived, sharedNow() - arrived);
+            }
         },
         lost: ()=>lost?.(),
         refused: (message, seen)=>divergence?.('graphics', `the GPU refused a frame: ${message}`
@@ -469,6 +508,16 @@ export function connectGraphicsWorker(options){
                 }
             }
             return { roots: ports.length, frames, dropped, waits,
+                handoff: handoff.frames === 0 ? null : {
+                    frames: handoff.frames,
+                    waitedMs: rounded(handoff.waitedMs),
+                    worstWaitedMs: rounded(handoff.worstWaitedMs),
+                    thereMs: rounded(handoff.thereMs),
+                    worstThereMs: rounded(handoff.worstThereMs),
+                    showMs: rounded(handoff.showMs),
+                    worstShowMs: rounded(handoff.worstShowMs),
+                    back,
+                },
                 behind: senders.map(sender=>sender.behind()), readBack: { ...readBack },
                 phases: phasesOf(senders),
                 latency: latencyOf(senders),
