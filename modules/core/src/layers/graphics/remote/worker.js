@@ -25,15 +25,17 @@
  *                                    Answered every time it is asked. `capture`
  *                                    true writes down everything sent from then
  *                                    on (`capture.js`), for `tools/graphics-replay.mjs`
- *   { type: 'root', api, options, port, memory, lending, source }
+ *   { type: 'root', api, options, port, memory, lending, source, frameLatency }
  *                                    `api` 'd3d7', 'd3d8', 'd3d9' or 'opengl', `options` the
  *                                    plain part of what the root was made with;
  *                                    `memory` the guest's RAM where it is shared, and
  *                                    `lending` the slots and stash a Direct3D 8 or 9
  *                                    root lends guest memory through (`lending.js`);
  *                                    `source` the process it draws for, which its
- *                                    frames carry back; `{ type: 'close' }` on the
- *                                    port ends it
+ *                                    frames carry back; `frameLatency` the frames its
+ *                                    presents may leave the GPU drawing (`latency.js`;
+ *                                    absent, Direct3D's three, 0 no bound);
+ *                                    `{ type: 'close' }` on the port ends it
  *   { type: 'client', port }         a way in for a process on another thread: `root`
  *                                    on the port is taken as it is here, and `lost`
  *                                    is told there too; its frames come here, as every
@@ -85,7 +87,7 @@ const MAP_READ = 0x01;
  */
 export function serveGraphics(scope, deps){
     const { gpu, canvas = (width, height)=>new OffscreenCanvas(width, height) } = deps;
-    /** @type {Promise<{ device: any, backend: any, latency: any, adapter: any }> | null} */
+    /** @type {Promise<{ device: any, backend: any, adapter: any }> | null} */
     let opened = null;
     /** Where frames go: back to the program's thread as pictures, or nowhere. */
     let frames = 'none';
@@ -404,8 +406,7 @@ export function serveGraphics(scope, deps){
         });
         const backend = createBackend({ device, queue: device.queue,
             presentTo: (/** @type {any} */ frame)=>present(device, frame) });
-        const latency = createFrameLatency({ queue: device.queue, lost: device.lost });
-        return { device, backend, latency, adapter: {
+        return { device, backend, adapter: {
             vendor: adapter.info?.vendor ?? '',
             architecture: adapter.info?.architecture ?? '',
             description: adapter.info?.description ?? '',
@@ -418,9 +419,17 @@ export function serveGraphics(scope, deps){
      * @param {{ slots: SharedArrayBuffer, stash: SharedArrayBuffer } | null} lending
      *     the parts of a lending, where the engine lends guest memory rather than copying it
      * @param {number | undefined} source  the process it draws for
+     * @param {number | undefined} frameLatency  the frames its presents may leave the GPU
+     *     drawing; absent, Direct3D's default
      */
-    const root = async(api, options, port, memory, lending, source)=>{
-        const { device, backend: shared, latency } = await /** @type {Promise<any>} */ (opened);
+    const root = async(api, options, port, memory, lending, source, frameLatency)=>{
+        const { device, backend: shared } = await /** @type {Promise<any>} */ (opened);
+        // A bound of its own, as a Direct3D device has. It counts a frame done
+        // when this thread hears so from the browser's GPU process, which a
+        // driver's fence does not wait on: the run's `maxFrameLatency` decides
+        // how many, as it does for a device drawn on the run's own thread.
+        const latency = createFrameLatency({ queue: device.queue, lost: device.lost,
+            limit: frameLatency });
         const backend = source === undefined ? shared : drawingFor(shared, source);
         if (source !== undefined)
         {
@@ -549,7 +558,8 @@ export function serveGraphics(scope, deps){
 
     /** @param {any} data */
     const takeRoot = data=>root(data.api, data.options ?? {}, data.port, data.memory ?? null,
-        data.lending ?? null, typeof data.source === 'number' ? data.source : undefined).catch(e=>
+        data.lending ?? null, typeof data.source === 'number' ? data.source : undefined,
+        typeof data.frameLatency === 'number' ? data.frameLatency : undefined).catch(e=>
         data.port.postMessage({ type: 'failed', message: String(e?.message ?? e) }));
 
     scope.onmessage = ({ data })=>{

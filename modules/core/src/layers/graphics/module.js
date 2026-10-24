@@ -418,6 +418,9 @@ export function createGraphicsModule(){
                     sharedMemory: ()=>memory.shared?.() ?? null,
                     adoptMemory: (address, length)=>memory.adopt?.(address, length),
                     lendMemory: config?.lendMemory !== false,
+                    // The bound the run's presenter holds a device here to, for
+                    // the devices that draw there.
+                    maxFrameLatency: config?.maxFrameLatency,
                     // The process its frames are told apart by on the screen.
                     source: typeof config?.processId === 'number' ? config.processId : undefined,
                     divergence: config?.divergence,

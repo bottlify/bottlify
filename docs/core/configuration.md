@@ -92,7 +92,7 @@ publishing). The tables list only the settings that are data; `memory` and `load
 | --- | --- | --- |
 | `screen` | 640 × 480, 32 | The display the devices start from. |
 | `compressedTextures` | `false` | Upload DXT textures as BC where the GPU has `texture-compression-bc`; otherwise they are decoded on the CPU. |
-| `maxFrameLatency` | 3 | Frames the GPU may still be drawing when `Present` returns; 0 for no bound. |
+| `maxFrameLatency` | 3 | Frames the GPU may still be drawing when `Present` returns; 0 for no bound. A device in the graphics worker counts a frame drawn when the browser's GPU process says so, later than the GPU finishes it. |
 | `maxFps` | 60 | Passed to the presenter; not applied yet ([limits.md](limits.md#graphics)). |
 | `choice` | every API | `createApp`'s `graphicsApi`: which roots are built ([api.md](api.md)). |
 | `videoMemory` | the choice's | Megabytes of video memory every API reports (DirectDraw's caps and `GetAvailableVidMem`, Direct3D 8/9's `GetAvailableTextureMem`, DXGI's adapter description). Absent, the `graphicsApi` preset's era: 64 for DirectX 7, 128 for 8, 256 for 9, 1024 for 10, 256 for OpenGL and for no choice. |

@@ -275,26 +275,55 @@ test('the worker\'s phase totals are summed over the roots that said them', asyn
     end.dispose();
 });
 
-test('the worker\'s GPU bound is its one device\'s, said by whichever root answered', async()=>{
+test('each root goes with the run\'s frame bound, and the roots\' holds are summed', async()=>{
     const worker = fakeWorker();
-    const end = connectGraphicsWorker({ worker });
+    const end = connectGraphicsWorker({ worker, maxFrameLatency: 6 });
     const services = { readMemory: ()=>new Uint8Array(0), gamma: { applies: ()=>true, set(){} } };
     const factory = (/** @type {any} */ given)=>({ given });
     end.root('d3d9', factory, services);
     end.root('d3d9', factory, services);
-    assert.equal(end.diagnostics().latency, null, 'nothing said yet: not measured');
-
-    const ports = worker.posted.filter(posted=>posted.type === 'root').map(posted=>posted.port);
-    const bound = { limit: 3, counting: true, inFlight: 1, peak: 4, frames: 300, held: 12,
-        heldMs: 96, waiting: 0 };
-    // The first root has not answered; the second says the bound they share.
-    ports[1].postMessage({ type: 'diagnostics', diagnostics: {}, latency: bound });
-    await new Promise(resolve=>setTimeout(resolve, 10));
-
-    assert.deepEqual(end.diagnostics().latency, bound, 'one bound, not a sum over roots');
-    for (const port of ports)
+    end.root('d3d9', factory, services);
+    const roots = worker.posted.filter(posted=>posted.type === 'root');
+    const ports = roots.map(posted=>posted.port);
+    try
     {
-        port.close();
+        assert.deepEqual(roots.map(root=>root.frameLatency), [6, 6, 6]);
+        assert.equal(end.diagnostics().latency, null, 'nothing said yet: not measured');
+
+        const bound = (/** @type {number} */ frames, /** @type {number} */ held,
+            /** @type {number} */ peak)=>({ limit: 6, counting: true, inFlight: 1, peak, frames,
+            held, heldMs: held * 8, waiting: 0 });
+        ports[0].postMessage({ type: 'diagnostics', diagnostics: {}, latency: bound(300, 12, 7) });
+        ports[1].postMessage({ type: 'diagnostics', diagnostics: {}, latency: bound(40, 1, 3) });
+        // The third root has said nothing: it is left out.
+        await new Promise(resolve=>setTimeout(resolve, 10));
+
+        assert.deepEqual(end.diagnostics().latency, { limit: 6, counting: true, inFlight: 1,
+            peak: 7, frames: 340, held: 13, heldMs: 104, waiting: 0 });
     }
-    end.dispose();
+    finally
+    {
+        for (const port of ports)
+        {
+            port.close();
+        }
+        end.dispose();
+    }
+});
+
+test('a root goes without a frame bound where the run named none', ()=>{
+    const worker = fakeWorker();
+    const end = connectGraphicsWorker({ worker });
+    end.root('d3d9', (/** @type {any} */ given)=>({ given }),
+        { readMemory: ()=>new Uint8Array(0), gamma: { applies: ()=>true, set(){} } });
+    const [root] = worker.posted.filter(posted=>posted.type === 'root');
+    try
+    {
+        assert.equal(root.frameLatency, undefined, 'the worker then holds it to Direct3D\'s three');
+    }
+    finally
+    {
+        root.port.close();
+        end.dispose();
+    }
 });

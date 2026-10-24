@@ -72,10 +72,10 @@ function plainOf(services){
  *     latency: import('./channel.js').FrameLatencyState | null }}
  *     diagnostics  `phases`: where the worker's thread spent its time on this process's
  *     batches, summed over the roots that have answered a diagnostics ask (null before
- *     any has, or in a build that times nothing); `latency`: the bound on the frames the
- *     worker's GPU may still be drawing, with the presents that waited for it (`held`,
- *     `heldMs`) -- one device, so one bound, whichever root said it (null before any
- *     has); `waits`: what the program's thread waited on the worker for, by call;
+ *     any has, or in a build that times nothing); `latency`: each root's bound on the
+ *     frames the worker's GPU may still be drawing, with the presents that waited for it
+ *     (`held`, `heldMs`), summed over the roots that have said it (null before any has);
+ *     `waits`: what the program's thread waited on the worker for, by call;
  *     `readBack`: the bytes the worker wrote into guest memory, sent here to be written or
  *     written in shared memory in place; `lent`: the unlocked bytes lent to the worker rather
  *     than copied, those taken into the stash first, and the claims that waited; `sent`: the
@@ -133,6 +133,38 @@ const phasesOf = senders=>{
         sum['batch-read'].selfMs += phases['batch-read'].selfMs;
         sum['batch-sweep'].count += phases['batch-sweep'].count;
         sum['batch-sweep'].ms += phases['batch-sweep'].ms;
+    }
+    return sum;
+};
+
+/**
+ * Every root's GPU bound, as each said it last: its frames and the presents
+ * it held summed, the most frames any was behind, and the bound they were
+ * held to. Null before any root has said one.
+ *
+ * @param {{ latency: () => import('./channel.js').FrameLatencyState | null }[]} senders
+ * @returns {import('./channel.js').FrameLatencyState | null}
+ */
+const latencyOf = senders=>{
+    /** @type {import('./channel.js').FrameLatencyState | null} */
+    let sum = null;
+    for (const sender of senders)
+    {
+        const one = sender.latency();
+        if (one === null)
+        {
+            continue;
+        }
+        sum = sum === null ? { ...one } : {
+            limit: Math.max(sum.limit, one.limit),
+            counting: sum.counting || one.counting,
+            inFlight: Math.max(sum.inFlight, one.inFlight),
+            peak: Math.max(sum.peak, one.peak),
+            frames: sum.frames + one.frames,
+            held: sum.held + one.held,
+            heldMs: sum.heldMs + one.heldMs,
+            waiting: sum.waiting + one.waiting,
+        };
     }
     return sum;
 };
@@ -274,6 +306,8 @@ function join(worker, connection){
  * @param {boolean} [options.lendMemory]  where the RAM is shared, whether what a Direct3D 8
  *     or 9 program unlocks is lent to the worker to read in place (`lending.js`) rather
  *     than copied to it; on unless false
+ * @param {number} [options.maxFrameLatency]  the frames a root's presents may leave the
+ *     worker's GPU drawing (`graphics.maxFrameLatency`); absent, Direct3D's three, 0 no bound
  * @param {(api: string, detail: string) => void} [options.divergence]
  * @param {() => void} [options.lost]    the worker's GPU went away
  * @param {(message: string) => void} [options.failed]  a root's calls could not be played
@@ -281,7 +315,7 @@ function join(worker, connection){
  */
 export function connectGraphicsWorker(options){
     const { worker, device, presentTo, writeMemory, sharedMemory, adoptMemory, divergence, lost,
-        failed, lendMemory = true, source } = options;
+        failed, lendMemory = true, source, maxFrameLatency } = options;
     /** Whether this thread may wait on the worker, which a lend's claim may have to. */
     let mayBlock = /** @type {boolean | null} */ (null);
     /** @type {{ texture: any, view: any, width: number, height: number, format: string } | null} */
@@ -386,7 +420,7 @@ export function connectGraphicsWorker(options){
             const lending = memory && lendMemory && (api === 'd3d8' || api === 'd3d9')
                 && (mayBlock ??= mayWait()) ? createLendingBuffers() : null;
             worker.postMessage({ type: 'root', api, options: plainOf(services), port: port2,
-                memory, lending, source }, [port2]);
+                memory, lending, source, frameLatency: maxFrameLatency }, [port2]);
             const sender = createSender({
                 post: (message, transfer)=>port1.postMessage(message, transfer),
                 on: {
@@ -437,7 +471,7 @@ export function connectGraphicsWorker(options){
             return { roots: ports.length, frames, dropped, waits,
                 behind: senders.map(sender=>sender.behind()), readBack: { ...readBack },
                 phases: phasesOf(senders),
-                latency: senders.map(sender=>sender.latency()).find(said=>said !== null) ?? null,
+                latency: latencyOf(senders),
                 answers: senders.map(sender=>sender.answers()).join(' '),
                 occlusion: senders.reduce((sum, sender)=>{
                     const one = sender.occlusion();
