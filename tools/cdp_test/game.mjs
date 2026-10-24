@@ -89,6 +89,8 @@ const REPO_ROOT = resolve(TOOL_ROOT, '..', '..');
  * Orders for a run while it goes on, on http://127.0.0.1:PORT:
  *
  *   /shot                    the frame presented last, as a PNG; answers the path
+ *   /frames?count=N          the next N presents, every one, as PNGs in a folder
+ *                            written as they are read back; answers the folder
  *   /click?x=&y=&hold=MS&settle=MS  a left click at the program's pixels, settle
  *                            after the move (300 ms) and hold the button (120 ms)
  *   /move?x=&y=              the pointer moved there
@@ -97,7 +99,7 @@ const REPO_ROOT = resolve(TOOL_ROOT, '..', '..');
  *   /stop                    the run ended now, as though its time were up
  *
  * @param {number} port
- * @param {{ shot: () => Promise<string | null>,
+ * @param {{ shot: () => Promise<string | null>, frames: (count: number) => Promise<string>,
  *     evaluate: (expression: string) => Promise<any> }} page
  */
 function serveControl(port, page){
@@ -109,6 +111,7 @@ function serveControl(port, page){
     /** @type {Record<string, (query: URLSearchParams) => Promise<any>>} */
     const orders = {
         shot: ()=>page.shot(),
+        frames: query=>page.frames(Number(query.get('count') ?? 100)),
         // No dx or dy: the router takes the motion from the last position, as
         // from a mouse, so a program reading DirectInput's mouse sees it move.
         move: async query=>send({ kind: 'pointerMove', x: Number(query.get('x')),
@@ -148,7 +151,7 @@ function serveControl(port, page){
         });
     });
     server.listen(port, '127.0.0.1');
-    console.log(`  control: http://127.0.0.1:${port}/ (shot click move key eval stop)`);
+    console.log(`  control: http://127.0.0.1:${port}/ (shot frames click move key eval stop)`);
     return server;
 }
 const PACKAGE_DIR = join(REPO_ROOT, 'modules', 'core');
@@ -2160,9 +2163,66 @@ export async function game(options){
                 });
             }, options.shotsEvery * 1000)
             : null;
+        /** @type {ReturnType<typeof setInterval> | null} */
+        let framesPoll = null;
+        /**
+         * The next `count` presents, every one, read back by the page as each
+         * is presented and written here as PNGs as they come, named by the
+         * frame's index and the page's count of presents: a defect that lasts
+         * a few frames is caught whole, where shots seconds apart fall
+         * between. A later series replaces one still being written.
+         *
+         * @param {number} count
+         * @returns {Promise<string>} the folder
+         */
+        const takeFrames = async count=>{
+            const folder = join(REPORTS_DIR, `game-${shotsStamp}-frames-`
+                + `${String(Math.round((Date.now() - startedAt) / 1000)).padStart(5, '0')}s`);
+            mkdirSync(folder, { recursive: true });
+            const evaluate = (/** @type {string} */ expression)=>cdp.send('Runtime.evaluate',
+                { expression, returnByValue: true, awaitPromise: true }, sessionId);
+            await evaluate(`window.__bottlify__.frameSeries(${Math.max(0, count | 0)})`);
+            if (framesPoll !== null)
+            {
+                clearInterval(framesPoll);
+            }
+            let written = 0;
+            let fetching = false;
+            const pulling = setInterval(()=>{
+                if (fetching)
+                {
+                    return;
+                }
+                fetching = true;
+                evaluate('window.__bottlify__.takeFrames(2)').then(answer=>{
+                    const taken = answer?.result?.value;
+                    for (const frame of taken?.frames ?? [])
+                    {
+                        const image = toPng(frame.width, frame.height,
+                            toBgra(Buffer.from(frame.pixels, 'base64')));
+                        writeFileSync(join(folder, `f${String(frame.frameIndex).padStart(7, '0')}`
+                            + `-p${frame.presents}.png`), image);
+                        written++;
+                    }
+                    const finished = !taken || !taken.running
+                        || (taken.left === 0 && taken.reading === 0 && taken.frames.length === 0);
+                    if (finished && framesPoll === pulling)
+                    {
+                        clearInterval(pulling);
+                        framesPoll = null;
+                        console.log(`  frames: ${written} written in ${folder}`);
+                    }
+                }, ()=>{}).finally(()=>{
+                    fetching = false;
+                });
+            }, 250);
+            framesPoll = pulling;
+            return folder;
+        };
         const control = options.control > 0
             ? serveControl(options.control, {
                 shot: takeShot,
+                frames: takeFrames,
                 evaluate: async(/** @type {string} */ expression)=>{
                     const answer = await cdp.send('Runtime.evaluate', { expression,
                         returnByValue: true, awaitPromise: true }, sessionId);
@@ -2292,7 +2352,11 @@ the run as it stands: ${path}`;
             if (shotsTimer !== null)
             {
                 clearInterval(shotsTimer);
-                control?.close();
+            }
+            control?.close();
+            if (framesPoll !== null)
+            {
+                clearInterval(framesPoll);
             }
             if (dumpTimer !== null)
             {

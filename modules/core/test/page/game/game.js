@@ -152,6 +152,8 @@ if (inWorker)
     namespace.logLines = ()=>callLog.length;
     namespace.frameReport = ()=>ask('frameReport');
     namespace.frameShot = ()=>ask('frameShot');
+    namespace.frameSeries = (/** @type {number} */ count)=>ask('frameSeries', { count });
+    namespace.takeFrames = (/** @type {number} */ most)=>ask('takeFrames', { most });
     namespace.dumpFrames = (/** @type {number} */ frames)=>ask('dumpFrames', { frames });
     namespace.lastDumped = ()=>ask('lastDumped');
     namespace.debug = (/** @type {string} */ name, /** @type {any[]} */ ...args)=>
@@ -174,6 +176,8 @@ else
     namespace.logLines = harness.logLines;
     namespace.frameReport = harness.frameReport;
     namespace.frameShot = harness.frameShot;
+    namespace.frameSeries = harness.frameSeries;
+    namespace.takeFrames = harness.takeFrames;
     namespace.dumpFrames = harness.dumpFrames;
     namespace.lastDumped = harness.lastDumped;
     namespace.debug = harness.debug;

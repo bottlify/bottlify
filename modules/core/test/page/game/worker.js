@@ -114,6 +114,14 @@ self.onmessage = ({ data })=>{
                 self.postMessage({ type: 'answer', id: data.id, value });
             });
             break;
+        case 'frameSeries':
+            self.postMessage({ type: 'answer', id: data.id,
+                value: harness?.frameSeries(data.count) ?? 0 });
+            break;
+        case 'takeFrames':
+            self.postMessage({ type: 'answer', id: data.id,
+                value: harness?.takeFrames(data.most) ?? null });
+            break;
         case 'dumpFrames':
             try
             {

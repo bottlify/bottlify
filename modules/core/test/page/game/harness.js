@@ -1427,6 +1427,13 @@ export function createHarness(canvas, how = {}){
     let runningEvents = [];
     /** The frames `snapFrame` asked for, being read back, by frame. @type {Map<number, Promise<any>>} */
     const snaps = new Map();
+    /**
+     * The frames `frameSeries` asked for: how many presents are still to be
+     * read back, those read and not yet taken, and how many are being read.
+     *
+     * @type {{ left: number, ready: any[], reading: number } | null}
+     */
+    let series = null;
     /** @type {PresentState} */
     const presentState = {
         presented: null, pointerDown: false, pointerAt: { x: 0, y: 0 },
@@ -1775,6 +1782,24 @@ export function createHarness(canvas, how = {}){
                     {
                         snaps.set(counted,
                             readBack(handle.device, frame.surface));
+                    }
+                    // Every present while a series is asked for, read back as
+                    // it was presented: a defect that comes and goes for a
+                    // few frames is in the series, and a shot now and then
+                    // falls between its frames.
+                    if (series && series.left > 0)
+                    {
+                        const taking = series;
+                        taking.left--;
+                        taking.reading++;
+                        const index = frame.frameIndex;
+                        const presents = presentState.presents;
+                        readBack(handle.device, frame.surface).then(image=>{
+                            taking.ready.push({ width: image.width, height: image.height,
+                                pixels: toBase64(image.pixels), frameIndex: index, presents });
+                        }, ()=>{}).finally(()=>{
+                            taking.reading--;
+                        });
                     }
                 },
             },
@@ -2194,6 +2219,20 @@ export function createHarness(canvas, how = {}){
         // switch answers, for a driver on the control port.
         /** @param {string} name @param {...any} args */
         debug: (name, ...args)=>(running ? running.debug[name](...args) : null),
+        // The next `count` presents read back one by one (`series`), taken a
+        // few at a time by `takeFrames` so that the page keeps only what the
+        // driver has not fetched yet. With a graphics worker these are the
+        // frames it hands the page, which it replaces while the page is behind.
+        /** @param {number} count */
+        frameSeries: count=>{
+            series = { left: Math.max(0, count | 0), ready: [], reading: 0 };
+            return series.left;
+        },
+        /** @param {number} [most] */
+        takeFrames: (most = 2)=>(series
+            ? { frames: series.ready.splice(0, most), left: series.left,
+                reading: series.reading, running: running !== null }
+            : null),
         // The tail of the engine's journal, formatted: what a category a run
         // switched on has recorded, read while the run is still going.
         /** @param {number} [count] */
