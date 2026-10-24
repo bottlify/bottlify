@@ -1521,3 +1521,36 @@ None yet.
   one arm: 42.9 to 45.8 ms a frame.
 - **Decision.** Not taken. The patch and its gate (`d3d9/sampling.itest.js`) are kept outside the
   tree.
+
+### 2026-10-24: a smaller start in WebKit through cork's region and module sizes, and through JavaScriptCore's tiers
+
+- **Idea.** Safari on an iPhone (iOS 26) reloads the page at every game's start while Safari on a
+  Mac runs it, which is the page's process killed for its memory. The process was measured in
+  Playwright's WebKit (26.6, WPE, headless) on Linux while the launcher starts the Quake III Arena
+  demo, and the guess was that what cork compiles at once makes the peak: smaller regions, no
+  relinked modules, or JavaScriptCore's optimizing tiers kept out would lower it.
+- **Workload.** The launcher (`bottlify-ui` at 2882751) on this tree (597e6d4), the demo's bundle
+  `baf676901226a7e870606221` (`bundle.btl` sha256 e074da0d...c5f8), 512 MB of guest memory, one
+  core, sound on; WebKit has no WebGPU, so the engine and graphics workers were built with the fake
+  device (`fake-device.js`) standing in for `navigator.gpu`; 30 s from the press, the isolated web
+  process's RSS read from `/proc` once a second. Peak and the median from 15 s on, MB.
+- **Values.** One run each unless counted: as it is, 1595, 1949, 2071, 1920 peak (2875 in a fifth,
+  two engines at once, the launcher's double start since fixed) and 1144-1184 after; `relinkAfter:
+  0`, 1989 / 1083; `relinkRegions: 64`, 1491 / 1145; `maxRegionBlocks: 64, maxRegionBytes: 4096`,
+  2024, 1856, 1360 / 1143-1166; 32 and 2048 with `leafCalls` off, 1876, 1783, 1893 / 1092-1133;
+  `translate: false`, 1244 / 943; `cork.worker: false`, 1366, 1883 / 1149-1168;
+  `JSC_useOMGJIT=false`, 1624 / 1081; `JSC_useBBQJIT=false`, 1629 / 1174; both, 1708 / 1174;
+  `JSC_useFTLJIT=false`, 1957 / 1112; `JSC_useDFGJIT=false`, 2023 / 1399;
+  `JSC_numberOfWasmCompilerThreads=1`, 2098 / 1309; `JSC_jitMemoryReservationSize` 32 MB and
+  16 MB (the option is honoured: the JIT region was 16 MB instead of 1024), 1823 / 974 and 1512 /
+  1209, no crash. The page alone with the engine loaded idle: 275 MB anonymous.
+- **Why.** Not one lever moved the peak beyond the spread of runs of one arm (1595 to 2071); the
+  peak follows when the collector runs. The JS heaps' live objects were small (the engine worker
+  about 60 MB in a heap snapshot); what did move was garbage: in Chromium the engine worker
+  allocated 388 MiB/s, three quarters in PeekMessage, recvfrom and WSAGetLastError, which the game
+  calls 900 000 times a second each while it waits for a frame (fixed in user32 and wsock32, 130
+  MiB/s after). The same fix measured in WebKit by RSS: 1702, 2044, 1724 peak, no change seen.
+- **Machine.** The 4-core KVM VM (Xeon 2.10 GHz), 15 GB, Ubuntu 24.04, no GPU; Playwright 1.63.0.
+  Spread between runs of one arm: about 500 MB at the peak, 100 MB after.
+- **Decision.** None of the settings changed. What the phone's process holds at the moment it is
+  killed is to be read from its own JetsamEvent report.

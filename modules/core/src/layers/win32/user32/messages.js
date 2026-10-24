@@ -410,6 +410,13 @@ export function createMessageQueue(options = {}){
      *
      * @param {MessageFilter} filter
      */
+    /**
+     * No timer is due before this; -Infinity once a timer is set or moves on,
+     * until the next look works it out again. A timer killed leaves it early,
+     * which costs a look the walk, never a tick.
+     */
+    let soonestTimer = -Infinity;
+
     /** How well a timer's ticks are delivered against what it asked for. */
     let timerTicks = 0;
     let timerLateTicks = 0;
@@ -523,6 +530,22 @@ export function createMessageQueue(options = {}){
     /** @param {MessageFilter} filter */
     const takeTimer = filter=>{
         const at = now();
+        // A queue is looked at hundreds of thousands of times a second and a
+        // timer comes due a few dozen: the earliest due time is kept, so a
+        // look before it walks no timers and makes no garbage.
+        if (at < soonestTimer)
+        {
+            return null;
+        }
+        soonestTimer = Infinity;
+        for (const timer of timers.values())
+        {
+            soonestTimer = Math.min(soonestTimer, timer.due);
+        }
+        if (at < soonestTimer)
+        {
+            return null;
+        }
         for (const [key, timer] of timers)
         {
             if (timer.due > at || !deliverable(key, timer, filter.thread ?? null))
@@ -567,6 +590,7 @@ export function createMessageQueue(options = {}){
             // later. Skipped forward when it has fallen a whole period behind,
             // because catching up on missed ticks is a backlog nobody wants.
             timer.due = Math.max(at, timer.due) + timer.elapse;
+            soonestTimer = -Infinity;
             return message;
         }
         return null;
@@ -651,13 +675,19 @@ export function createMessageQueue(options = {}){
      * @returns {[number | null, number] | null}
      */
     const quitFor = thread=>{
-        for (const key of [thread, null])
+        if (quits.size === 0)
         {
-            const code = quits.get(key);
-            if (code !== undefined)
-            {
-                return [key, code];
-            }
+            return null;
+        }
+        const own = quits.get(thread);
+        if (own !== undefined)
+        {
+            return [thread, own];
+        }
+        const anyone = quits.get(null);
+        if (anyone !== undefined)
+        {
+            return [null, anyone];
         }
         const first = thread === null ? quits.entries().next() : null;
         return first && !first.done ? first.value : null;
@@ -860,6 +890,25 @@ export function createMessageQueue(options = {}){
             return pending.filter(entry=>belongs(entry, asking));
         },
 
+        /**
+         * Whether anything posted waits for a thread, asked before `queued`
+         * copies it: a game's loop looks at an empty queue hundreds of
+         * thousands of times a second.
+         *
+         * @param {number | null} [thread]  Whose; the running thread's if left out.
+         */
+        hasQueued: thread=>{
+            const asking = whose(thread);
+            for (let at = 0; at < pending.length; at++)
+            {
+                if (belongs(pending[at], asking))
+                {
+                    return true;
+                }
+            }
+            return false;
+        },
+
         /** Whether a retrieval's filter takes a message. */
         accepts,
 
@@ -1032,6 +1081,7 @@ export function createMessageQueue(options = {}){
             // period continuously, and a program that asks for zero means "as
             // often as you can".
             const period = Math.max(10, elapse >>> 0);
+            soonestTimer = -Infinity;
             timers.set(`${hwnd >>> 0}:${id >>> 0}`, {
                 hwnd: hwnd >>> 0, id: id >>> 0, elapse: period, proc: proc >>> 0,
                 due: now() + period,
@@ -1118,12 +1168,21 @@ export function createMessageQueue(options = {}){
             // GetQueueStatus itself does.
             releaseLater();
             const asking = whose(filter.thread);
-            const scoped = { ...filter, thread: asking };
             const look = lookOf(asking);
             look.changed = 0;
             look.at = now();
-            const index = pending.findIndex(entry=>belongs(entry, asking)
-                && accepts(entry, filter));
+            // A loop rather than findIndex, and the filter copied only where
+            // it names no thread: an empty queue is looked at hundreds of
+            // thousands of times a second, and each look's garbage counts.
+            let index = -1;
+            for (let at = 0; at < pending.length; at++)
+            {
+                if (belongs(pending[at], asking) && accepts(pending[at], filter))
+                {
+                    index = at;
+                    break;
+                }
+            }
             if (index >= 0)
             {
                 const entry = pending[index];
@@ -1176,6 +1235,7 @@ export function createMessageQueue(options = {}){
             // timer. Not removed, because retrieval does not paint: the area
             // stays until BeginPaint clears it, and the next look finds it
             // again exactly as Windows would.
+            const scoped = filter.thread === asking ? filter : { ...filter, thread: asking };
             const paint = takePaint(scoped);
             if (paint)
             {
