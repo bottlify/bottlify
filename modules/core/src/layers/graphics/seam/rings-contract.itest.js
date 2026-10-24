@@ -194,9 +194,10 @@ export function rings(seed, frames, options = {}){
  * @param {boolean} guestCode @param {Step[]} steps
  * @param {boolean} [worker]  whether the device records for a twin that draws, as in a
  *     graphics worker
+ * @param {string[]} [traps]  the parts of the guest code kept as traps (`guestTraps`)
  */
-export async function play(guestCode, steps, worker = true){
-    const m = machine(D3D9, guestCode, { gpu: true, worker });
+export async function play(guestCode, steps, worker = true, traps = []){
+    const m = machine(D3D9, guestCode, { gpu: true, worker, traps });
     const gpu = gpuReads(/** @type {any} */ (m.gpu));
     /** @param {string} method @param {any[]} [args] @returns {Call} */
     const device = (method, args = [])=>({ on: DEVICE, kind: 'device', method, args });
@@ -434,4 +435,25 @@ test('Direct3D 9: a ring moved onto another storage draws what it wrote there pa
     const guest = await play(true, steps);
     assert.equal(parting(trapped.gpu, guest.gpu), null);
     assert.ok(guest.moves >= 1, `the guest moved the ring (${guest.moves})`);
+});
+
+test('Direct3D 9: the moves kept as traps (`guestTraps: [\'moves\']`) leave every DISCARD of a'
+    + ' ring under draws to the host, and the GPU is given what every call a trap gives it',
+async()=>{
+    // The switch that tells a fault in the guest's moves from one elsewhere
+    // in its locks: the locks stay the guest's, a DISCARD the guest would
+    // have answered with a move comes to the host.
+    let moves = 0;
+    let inGuest = 0;
+    for (let seed = 1; seed <= 4; seed++)
+    {
+        const steps = rings(seed, 30);
+        const trapped = await play(false, steps);
+        const kept = await play(true, steps, true, ['moves']);
+        assert.equal(parting(trapped.gpu, kept.gpu), null, `seed ${seed}`);
+        moves += kept.moves;
+        inGuest += kept.inGuest;
+    }
+    assert.equal(moves, 0, 'no ring moved in the guest');
+    assert.ok(inGuest > 100, `the locks and draws were still the guest's (${inGuest})`);
 });

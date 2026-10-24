@@ -1097,8 +1097,10 @@ export function createDirect3D8Seam(
     /** @type {Record<string, (builder: { trap: number }) => number>} */
     const bufferGuests = guestsBut('locks', allocate
         ? {
+            // `moves` kept as a trap: a DISCARD under draws comes to the host
+            // instead of moving the buffer onto a spare storage in the guest.
             Lock: ({ trap })=>placeCode(at=>lockCode(at, trap,
-                D3D8_COMMANDS.commandSlot('Buffer.Rename'))),
+                traps.has('moves') ? undefined : D3D8_COMMANDS.commandSlot('Buffer.Rename'))),
             Unlock: ({ trap })=>placeCode(at=>unlockCode(at, trap)),
         }
         : {});

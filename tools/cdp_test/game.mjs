@@ -635,6 +635,7 @@ function parse(argv){
         // a graphics worker over it: what measures the engine alone, with no
         // software rasteriser taking the machine's cores and holding it for frames.
         fakeGpu: argv.includes('--fake-gpu'),
+        fakePipelineMs: number('--fake-pipeline-ms', 0),
         // The call areas a person's report is taken with, traced from the
         // first instruction: what tracing costs a run is part of what it measures.
         journalCalls: argv.includes('--journal-calls'),
@@ -1279,6 +1280,29 @@ function describe(result, context, calls, symbols){
                 : 'not measured'}; pipelines built: fixed-function`
                 + ` ${device.fixedPipelines?.built ?? 'not measured'}, shader programs`
                 + ` ${device.programs?.built ?? 'not measured'}`);
+            const verified = device.verifyDynamic;
+            if (verified)
+            {
+                say(`    dynamic draws verified: draws=${verified.draws} ranges=${verified.ranges}`
+                    + ` bytes=${verified.bytes} copy-stale=${verified.copyStale}`
+                    + ` gpu-checked=${verified.gpuChecked} gpu-stale=${verified.gpuStale}`
+                    + ` gpu-unknown=${verified.gpuUnknown} gpu-skipped=${verified.gpuSkipped}`
+                    + ` reads pending=${verified.readsPending} failed=${verified.readsFailed}`
+                    + ` beyond-declared=${verified.beyond}`
+                    + ` by size ${JSON.stringify(verified.staleBySize)}`);
+                const moves = (verified.lastMoves ?? []).slice(-8)
+                    .map((/** @type {any} */ move)=>`${move.size}@${move.base}[${move.storage}]`
+                        + ` ${move.frame}:${move.draw}`);
+                say(`      last moves: ${moves.join(', ')}`);
+                for (const [name, list] of [['copy', verified.copySamples],
+                    ['gpu', verified.gpuSamples], ['beyond', verified.beyondSamples]])
+                {
+                    for (const sample of list ?? [])
+                    {
+                        say(`      ${name}: ${JSON.stringify(sample)}`);
+                    }
+                }
+            }
             const skipped = Object.entries(device.skipped ?? {})
                 .filter(([, count])=>count > 0)
                 .map(([name, count])=>`${name}=${count}`).join(' ');
@@ -1850,6 +1874,7 @@ export async function game(options){
             cpu: options.cpuConfig,
             graphicsWorker: options.graphicsWorker,
             fakeGpu: options.fakeGpu,
+            fakePipelineMs: options.fakePipelineMs,
             ...options.journalCalls ? { logCapacity: 100000, logCategories: {
                 'call.cpu': 'trace', 'call.gpu': 'trace', 'call.net': 'trace' } } : {},
             log: Boolean(options.log),

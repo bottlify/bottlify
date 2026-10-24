@@ -1092,7 +1092,10 @@ export function createDirect3D9Seam(
     /** @type {Record<string, (builder: { trap: number }) => number>} */
     const bufferGuests = guestsBut('locks', allocate
         ? {
-            Lock: ({ trap })=>placeCode(at=>lockCode(at, trap, commandSlot('Buffer.Rename'))),
+            // `moves` kept as a trap: a DISCARD under draws comes to the host
+            // instead of moving the buffer onto a spare storage in the guest.
+            Lock: ({ trap })=>placeCode(at=>lockCode(at, trap,
+                traps.has('moves') ? undefined : commandSlot('Buffer.Rename'))),
             Unlock: ({ trap })=>placeCode(at=>unlockCode(at, trap)),
         }
         : {});

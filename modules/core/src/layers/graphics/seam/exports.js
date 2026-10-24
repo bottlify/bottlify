@@ -164,7 +164,9 @@ const E_OUTOFMEMORY = 0x8007000e | 0;
  * @param {string[]} [deps.guestTraps]
  *        With guest code on, the parts of it kept as traps all the same: methods
  *        by name, or the groups `getters`, `ring`, `locks`, `levels` and
- *        `counts` -- for finding which part a fault is in.
+ *        `counts`, and `moves`, a buffer's DISCARD under draws that the lock
+ *        would answer by moving it onto a spare storage -- for finding which
+ *        part a fault is in.
  * @returns {{ libraries: Record<string, Record<string, any>>,
  *             opengl: { pixelFormat: { size: () => number, count: () => number,
  *                                      choose: (bytes: Uint8Array) => number,

@@ -282,12 +282,13 @@ export const D3D8 = {
  * @param {Version} version
  * @param {boolean} guestCode
  * @param {{ onDevice?: (device: any) => void, gpu?: boolean, worker?: boolean,
- *     caps?: object }} [options]
+ *     caps?: object, traps?: string[] }} [options]
  *     `onDevice` is told of each device made; `gpu` has the devices draw
  *     through a backend over a recording GPU, the machine's `gpu`; `worker`
  *     has them record what they are asked, as in a graphics worker, for a
  *     twin that plays each call at once to draw; `caps` is what the root is
- *     told its devices can do, past what every device of the version can
+ *     told its devices can do, past what every device of the version can;
+ *     `traps` the parts of the guest code kept as traps (`guestTraps`)
  */
 export function machine(version, guestCode, options = {}){
     /** @type {(device: any) => void} */
@@ -425,6 +426,7 @@ export function machine(version, guestCode, options = {}){
         allocate,
         allocateCode,
         guestCode,
+        guestTraps: options.traps ?? [],
         // A ring of the size the gates fill many times over (`getters-contract`'s bursts).
         ringBytes: COMMAND_RING_BYTES,
         divergence: ()=>{},

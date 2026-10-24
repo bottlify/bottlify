@@ -1481,7 +1481,8 @@ export function createHarness(canvas, how = {}){
         const captureGraphics = request.captureGraphics === true;
         const graphicsWorker = request.fakeGpu
             ? await openGraphicsWorker({ frames: 'count', capture: captureGraphics,
-                url: new URL('./fake-graphics.worker.js', import.meta.url) })
+                url: new URL(`./fake-graphics.worker.js?pipelineMs=${request.fakePipelineMs ?? 0}`,
+                    import.meta.url) })
             : request.graphicsWorker
                 ? await openGraphicsWorker({ frames: 'pixels', capture: captureGraphics })
                 : null;

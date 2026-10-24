@@ -477,6 +477,7 @@ const isDepthFormat = format=>FORMAT_INFO[format] !== undefined && FORMAT_INFO[f
  * @property {boolean} [keepConstantBlocks]  The renderer's (`createRenderer`).
  * @property {boolean} [keepMemory]  Released resources' memory is never given back (debugging).
  * @property {boolean} [rereadBuffers]  The renderer's (`createRenderer`).
+ * @property {boolean} [verifyDynamic]  The renderer's (`createRenderer`).
  * @property {boolean} [drawsNothing]  Nothing is drawn on purpose (the graphics
  *     setting `draw: false`): an occlusion query without a renderer counts every
  *     pixel of the target rather than none, and a copy between two surfaces whose
@@ -532,7 +533,7 @@ export function createDirect3D9(options = {}){
         probeTexture, fog, mips, driverRules, onDeviceLost, gamma, frameQueued, renderedElsewhere,
         occlusionCounted,
         keepMemory, rereadBuffers, drawsFrom, leftStorage, whileStill, rectangleBump, drawsNothing,
-        watchWrites, keepConstantBlocks,
+        watchWrites, keepConstantBlocks, verifyDynamic,
         ...caps
     } = options;
     /** @type {DeviceCaps} */
@@ -548,7 +549,7 @@ export function createDirect3D9(options = {}){
         probeTexture, fog, mips, driverRules, onDeviceLost, gamma, frameQueued, renderedElsewhere,
         occlusionCounted,
         rereadBuffers, drawsFrom, leftStorage, whileStill, rectangleBump, drawsNothing,
-        watchWrites, keepConstantBlocks,
+        watchWrites, keepConstantBlocks, verifyDynamic,
     };
     if (backend && !readMemory)
     {
@@ -962,6 +963,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             rectangleBump: services.rectangleBump,
             occlusionCounted: services.occlusionCounted,
             rereadBuffers: services.rereadBuffers,
+            verifyDynamic: services.verifyDynamic === true,
             compressedTextures: caps.compressedTextures,
             keepConstantBlocks: services.keepConstantBlocks,
         })

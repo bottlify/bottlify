@@ -14,7 +14,10 @@ import { createFakeDevice } from '../../../src/layers/graphics/webgpu/internal/f
 
 // Quiet: nothing reads a log of the calls here, and keeping one cost the
 // played side a third of its time -- what a run measures is the engine.
-const gpu = createFakeDevice({ quiet: true });
+// `?pipelineMs=N`: a pipeline takes that long to build, as a GPU compiling its
+// shaders does, so frames queue behind their pipelines as on a real device.
+const pipelineDelayMs = Number(new URL(self.location.href).searchParams.get('pipelineMs') ?? 0);
+const gpu = createFakeDevice({ quiet: true, pipelineDelayMs });
 Object.assign(gpu.device, { queue: gpu.queue, features: new Set(),
     createSampler: (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor }) });
 serveGraphics(/** @type {any} */ (self), /** @type {any} */ ({

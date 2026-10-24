@@ -36,6 +36,7 @@
  */
 
 import { HashedStates } from './statehash.js';
+import { createDynamicVerify } from './verify-dynamic.js';
 import {
     COLORWRITEENABLE_ALPHA, COORD_SET_MASK, D3DBLEND, D3DCLEAR, D3DCMP, D3DCULL, D3DFILL, D3DFMT,
     D3DFMT_INDEX, D3DFOG, D3DLOCK, D3DPOOL, D3DPT, D3DRS, D3DSHADE, D3DTA, D3DTADDRESS, D3DTEXF,
@@ -2971,6 +2972,9 @@ const CLEAR_STRIDE = 20;
  *     under. Off by default: it transforms every vertex of every draw a second
  *     time on the processor, which is a cost an ordinary run must not pay.
  * @property {number} [dumpEvery]
+ * @property {boolean} [verifyDynamic]
+ *     A diagnostic: what each draw reads of a dynamic buffer is compared
+ *     with the buffer's copy and the GPU's (`verify-dynamic.js`).
  * @property {boolean} [rereadBuffers]
  *     Every draw reads the bytes it reaches from guest memory again, held
  *     lock or not -- a debugging aid, for a program that writes a buffer
@@ -3067,6 +3071,10 @@ const uploadsOf = own=>({
 export function createRenderer(options){
     const { backend, readMemory } = options;
     const windowMemory = options.windowMemory ?? readMemory;
+    const verify = options.verifyDynamic === true
+        ? createDynamicVerify(windowMemory) : null;
+    /** The vertices the draw being verified reads, numbered as stream zero's. @type {{ first: number, count: number } | null} */
+    let verifySpan = null;
     /**
      * Each buffer's write watch and the pages it said were written that are
      * not uploaded whole yet (`writtenSpans`): what a draw or an unlock
@@ -5034,6 +5042,14 @@ export function createRenderer(options){
             const from = (source.offset ?? 0) + (ranged ? span.first * source.stride : 0);
             const to = ranged ? from + span.count * source.stride : buffer.size;
             readHeld(source.buffer, buffer, from, Math.min(to, buffer.size));
+            if (verify && verifySpan && !instanced)
+            {
+                const actual = (source.offset ?? 0) + verifySpan.first * source.stride;
+                verify.range(`vb${index + 1}`, source.buffer, buffer, actual,
+                    Math.min(actual + verifySpan.count * source.stride, buffer.size),
+                    ranged ? { from, to: Math.min(to, buffer.size) } : null, true,
+                    { stride: source.stride, offset: source.offset ?? 0 });
+            }
             buffer.markRead(from, Math.min(to, buffer.size));
             bound.push({ slot: index + 1, gpu: buffer.gpu, offset });
         }
@@ -7834,6 +7850,7 @@ export function createRenderer(options){
         command.instances = instances !== 1 ? instances : undefined;
         command.check = undefined;
         frame.commands.push(command);
+        verify?.attach(frame);
     };
 
     /**
@@ -9275,6 +9292,7 @@ export function createRenderer(options){
             const lockKey = `${buffer.length}:${kind}`;
             counters.shapes.locks[lockKey] = (counters.shapes.locks[lockKey] ?? 0) + 1;
             lockedBuffers.add(buffer);
+            verify?.locked(buffer, flags, offset, length);
             // `app.debug.bufferLocks('rename')`: every lock renames, so what a
             // queued draw reads is never written over -- for telling a defect
             // in following what draws read apart from one elsewhere.
@@ -9293,6 +9311,7 @@ export function createRenderer(options){
          * @param {any} buffer
          */
         renameBuffer(buffer){
+            verify?.moved(buffer);
             // What a pause compared of the storage left is not what the
             // draws after the move read.
             compared.forget(buffer);
@@ -10033,6 +10052,16 @@ export function createRenderer(options){
             {
                 readHeld(stream.buffer, streamBuffer, from, from + count * stream.stride);
             }
+            if (verify)
+            {
+                verify.draw(counters.frames, frameStats.draws);
+                verifySpan = { first: startVertex, count };
+                if (streamBuffer)
+                {
+                    verify.range('vb0', stream.buffer, streamBuffer, from,
+                        Math.min(from + count * stream.stride, streamBuffer.size), null, true);
+                }
+            }
             streamBuffer?.markRead(from, from + count * stream.stride);
             record(model, prepared, {
                 vertices: { gpu: streamBuffer?.gpu ?? zeroBuffer().gpu, offset: start },
@@ -10040,6 +10069,7 @@ export function createRenderer(options){
                     ? ascendingGeometry(type, count, startVertex, fill)
                     : { indices: null, count, first: startVertex }),
             }, true, streamZeroBias(model), { first: startVertex, count });
+            verifySpan = null;
             if (dumping() && prepared.program)
             {
                 dumpProgram(model, prepared, count);
@@ -10153,6 +10183,35 @@ export function createRenderer(options){
                 // No range given: every vertex from the stream's start may be read.
                 streamBuffer.markRead(start, streamBuffer.size);
             }
+            if (verify)
+            {
+                verify.draw(counters.frames, frameStats.draws);
+                const indexEnd = Math.min(byteOffset + count * format.bytes, model.indices.length);
+                const order = indicesFrom(indexBuffer.bytes(byteOffset, indexEnd - byteOffset),
+                    format.bytes);
+                let low = Infinity;
+                let high = -1;
+                for (let k = 0; k < order.length; k++)
+                {
+                    low = Math.min(low, order[k]);
+                    high = Math.max(high, order[k]);
+                }
+                const more = { minIndex, numVertices, baseVertex: model.baseVertexIndex,
+                    low, high, type, list: list !== undefined };
+                verify.range('ib', model.indices, indexBuffer, byteOffset, indexEnd, null,
+                    list === undefined, more);
+                verifySpan = high >= 0
+                    ? { first: model.baseVertexIndex + low, count: high - low + 1 } : null;
+                if (verifySpan)
+                {
+                    const actual = start + verifySpan.first * stream.stride;
+                    verify.range('vb0', stream.buffer, streamBuffer, actual,
+                        Math.min(actual + verifySpan.count * stream.stride, streamBuffer.size),
+                        span ? { from: start + span.first * stream.stride,
+                            to: start + (span.first + span.count) * stream.stride } : null,
+                        true, more);
+                }
+            }
             indexBuffer.markRead(byteOffset, byteOffset + count * format.bytes);
             const vertices = streamBinding(streamBuffer.gpu, start);
             if (list === undefined)
@@ -10164,6 +10223,7 @@ export function createRenderer(options){
                 geometry.first = 0;
                 geometry.baseVertex = model.baseVertexIndex;
                 record(model, prepared, geometry, true, streamZeroBias(model), span);
+                verifySpan = null;
                 if (dumping() && prepared.program)
                 {
                     dumpProgram(model, prepared, count);
@@ -10184,6 +10244,7 @@ export function createRenderer(options){
                 vertices,
                 ...expandedGeometry(type, order, model.baseVertexIndex, fill),
             }, true, streamZeroBias(model), span);
+            verifySpan = null;
             if (dumping() && prepared.program)
             {
                 dumpProgram(model, prepared, count);
@@ -10543,6 +10604,7 @@ export function createRenderer(options){
                 pipelineWaits: { frames: counters.pipelineWaits.frames,
                     ms: Math.round(counters.pipelineWaits.ms),
                     worst: Math.round(counters.pipelineWaits.worst) },
+                ...verify ? { verifyDynamic: verify.figures() } : {},
                 statesNamed: counters.statesNamed,
                 programs: programs.stats(),
                 // The fixed-function pipelines the backend built, and the GPU's
@@ -10706,6 +10768,10 @@ export function createRenderer(options){
                     })()
                     : frame.snapshot(snapshot);
             }
+            if (again === null)
+            {
+                verify?.readBack(recorded, frame);
+            }
             // After the draws, so the copies see the buffers as the draws did:
             // a flush at the end of the frame lands before the whole command
             // buffer, draws and copies alike.
@@ -10766,6 +10832,10 @@ export function createRenderer(options){
             // becomes every frame after it, and the only symptom is a picture
             // that stopped changing while the counters keep climbing.
             frame.end();
+            if (again === null)
+            {
+                verify?.submitted(recorded);
+            }
             const took = clock() - began;
             timing.replays++;
             timing.replayMs += took;

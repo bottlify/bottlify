@@ -297,6 +297,7 @@ function isTransformType(type){
  *     Whether fog is applied at all. Off, every draw renders as if the
  *     program had never enabled it: a frame that clears up with it was fog.
  * @property {boolean} [nanProbe]
+ * @property {boolean} [verifyDynamic]  The renderer's (`createRenderer`).
  * @property {'legacy' | 'current'} [driverRules]  The renderer's (`createRenderer`).
  * @property {boolean} [rectangleBump]  The renderer's (`createRenderer`).
  * @property {boolean} [mips]
@@ -427,7 +428,7 @@ export function createDirect3D8(options = {}){
         free: giveBack, dumpDraws, dumpEvery, liveDump, maxDraws, divergence, skipTexture,
         probeTexture, fog, mips, nanProbe, driverRules, onDeviceLost, gamma, frameQueued, drawsFrom,
         occlusionCounted, leftStorage,
-        whileStill, rectangleBump, renderedElsewhere, watchWrites, ...caps
+        whileStill, rectangleBump, renderedElsewhere, watchWrites, verifyDynamic, ...caps
     } = options;
     /** @type {DeviceCaps} */
     const resolved = { ...DEFAULT_CAPS, ...caps, fullscreenGamma: gamma?.applies() === true };
@@ -437,7 +438,7 @@ export function createDirect3D8(options = {}){
         free: giveBack, dumpDraws, dumpEvery, liveDump, maxDraws, divergence, skipTexture,
         probeTexture, fog, mips, nanProbe, driverRules, onDeviceLost, gamma, frameQueued, drawsFrom,
         occlusionCounted, leftStorage,
-        whileStill, rectangleBump, renderedElsewhere, watchWrites,
+        whileStill, rectangleBump, renderedElsewhere, watchWrites, verifyDynamic,
     };
     if (backend && !readMemory)
     {
@@ -809,6 +810,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             fog: services.fog,
             mips: services.mips,
             nanProbe: services.nanProbe === true,
+            verifyDynamic: services.verifyDynamic === true,
             driverRules: services.driverRules,
             rectangleBump: services.rectangleBump,
             occlusionCounted: services.occlusionCounted,

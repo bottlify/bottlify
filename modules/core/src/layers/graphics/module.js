@@ -599,6 +599,7 @@ export function createGraphicsModule(){
                     ...profileBehaviour(device?.adapter),
                     keepMemory: config?.keepMemory,
                     rereadBuffers: config?.rereadBuffers,
+                    verifyDynamic: config?.verifyDynamic,
                     onDeviceLost,
                     // Where a full-screen device's gamma ramp is shown.
                     gamma: displayGamma,
@@ -656,6 +657,7 @@ export function createGraphicsModule(){
                     ...profileBehaviour(device?.adapter),
                     keepMemory: config?.keepMemory,
                     rereadBuffers: config?.rereadBuffers,
+                    verifyDynamic: config?.verifyDynamic,
                     onDeviceLost,
                     gamma: displayGamma,
                     frameQueued,
