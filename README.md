@@ -1,6 +1,10 @@
-# Bottlify
+# Bottlify: run Windows games and programs in the browser
 
 [По-русски](README.ru.md)
+
+**Play old PC games and run Windows programs in a web browser**, with no Windows, no install
+and no plugin: a Windows compatibility layer (in the spirit of Wine) and an x86-to-WebAssembly
+translator, with DirectX and OpenGL drawn through WebGPU. Try it at [bottlify.app](https://bottlify.app/).
 
 Bottlify is a set of packages a web page uses to run Windows programs and games right in a browser
 tab. It needs no Windows, no plugin and no install: the page opens an ordinary `.exe`, and the
