@@ -15,6 +15,8 @@ test('the defaults are a private LAN on a known port', ()=>{
     assert.equal(parsed.port, 8787);
     assert.deepEqual(parsed.allow, [], 'nothing outside the room, unless asked');
     assert.deepEqual(parsed.origins, []);
+    assert.equal(parsed.resumeSeconds, 10);
+    assert.equal(parsed.addressHeader, '');
 });
 
 test('arguments are read, and repeated ones accumulate', ()=>{
@@ -22,12 +24,19 @@ test('arguments are read, and repeated ones accumulate', ()=>{
         '--port', '9000', '--host', '127.0.0.1',
         '--allow', 'a.example.com', '--allow', '*.example.net',
         '--origin', 'https://play.example.com',
+        '--address-header', 'CF-Connecting-IP', '--resume-seconds', '30',
     ]);
 
     assert.equal(parsed.port, 9000);
     assert.equal(parsed.host, '127.0.0.1');
     assert.deepEqual(parsed.allow, ['a.example.com', '*.example.net']);
     assert.deepEqual(parsed.origins, ['https://play.example.com']);
+    assert.equal(parsed.addressHeader, 'cf-connecting-ip');
+    assert.equal(parsed.resumeSeconds, 30);
+});
+
+test('a resume window that is not a number is an error', ()=>{
+    assert.throws(()=>parseArguments(['--resume-seconds', 'soon']), /wants a number/);
 });
 
 test('an argument nobody implements is an error rather than a silent default', ()=>{

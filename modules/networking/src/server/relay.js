@@ -39,8 +39,19 @@
  * connection itself, the peer disappearing mid-dial -- ends in a HANGUP carrying
  * the tag that was dialled. A dial that simply stops leaves a guest thread
  * parked in connect for the rest of the session.
+ *
+ * A peer outlives its WebSocket by the resume window. A mobile network or a
+ * proxy drops an idle or a moving link more often than a player leaves, and a
+ * session rebuilt from nothing has a new address and none of its connections.
+ * So a client that asked to be resumable is given a session secret; both ends
+ * number the binary frames they send and keep the ones the other has not
+ * acknowledged, and a client coming back with the secret inside the window
+ * takes over its own peer, with each side resending what the other missed.
+ * The acknowledgements double as the heartbeat that finds a link which died
+ * without closing.
  */
 
+import { randomBytes } from 'node:crypto';
 import { Socket } from 'node:net';
 import { createSocket } from 'node:dgram';
 import { lookup } from 'node:dns/promises';
@@ -60,6 +71,29 @@ const ACCEPTED_TAG_BASE = 0x80000000;
 
 /** @param {number} host host order */
 const inRoom = host=>((host & ROOM_MASK) >>> 0) === ROOM_SUBNET;
+
+/**
+ * Networks no real socket is opened to unless the relay is told otherwise:
+ * this machine, the private and shared ranges, link-local (where a cloud keeps
+ * its metadata service), documentation, benchmarking, multicast and the rest.
+ * A policy written against names cannot see that an allowed name resolves to
+ * one of them, so the address is judged on its own as well.
+ */
+const RESERVED = [
+    [0x00000000, 8], [0x0a000000, 8], [0x64400000, 10], [0x7f000000, 8],
+    [0xa9fe0000, 16], [0xac100000, 12], [0xc0000000, 24], [0xc0000200, 24],
+    [0xc0a80000, 16], [0xc6120000, 15], [0xc6336400, 24], [0xcb007100, 24],
+    [0xe0000000, 4], [0xf0000000, 4],
+];
+
+/** @param {number} host host order */
+export const reserved = host=>RESERVED.some(([net, bits])=>((host ^ net) >>> (32 - bits)) === 0);
+
+/** The frames a resumable peer keeps for resending, by their bytes. */
+const REPLAY_BYTES = 512 * 1024;
+
+/** What may wait in a link before the real sockets feeding it are paused. */
+const HIGH_WATER = 1024 * 1024;
 
 /**
  * @typedef {Object} PolicyRequest
@@ -83,6 +117,18 @@ const inRoom = host=>((host & ROOM_MASK) >>> 0) === ROOM_SUBNET;
  *      default, which is the only safe thing an unconfigured relay can do.
  * @property {number} [maxSocketsPerPeer]
  * @property {number} [maxPeersPerRoom]
+ * @property {boolean} [privateNetworks]
+ *      Whether real sockets may reach this machine and private networks
+ *      (`RESERVED`). Off by default: a relay on a server would otherwise open
+ *      its loopback and its provider's internal network to any page.
+ * @property {number} [resumeWindowMs]
+ *      How long a resumable peer whose link dropped is kept for its client to
+ *      come back to (10 s by default; 0 ends it with the link).
+ * @property {number} [heartbeatMs]
+ *      How often each side acknowledges what it has received (5 s by
+ *      default); a link silent for three of these is taken for dead.
+ * @property {number} [helloTimeoutMs]
+ *      How long a connection may stay without joining a room (10 s).
  */
 
 /**
@@ -99,10 +145,18 @@ export function createRelay(options = {}){
     const policy = options.policy ?? (()=>false);
     const maxSockets = options.maxSocketsPerPeer ?? 64;
     const maxPeers = options.maxPeersPerRoom ?? 32;
+    const privateNetworks = options.privateNetworks === true;
+    const resumeWindow = options.resumeWindowMs ?? 10000;
+    const heartbeat = options.heartbeatMs ?? 5000;
+    const helloTimeout = options.helloTimeoutMs ?? 10000;
 
     /** @type {Map<string, Map<number, any>>} room name -> address -> peer */
     const rooms = new Map();
+    /** @type {Map<string, any>} session secret -> resumable peer */
+    const sessions = new Map();
     let accepted = ACCEPTED_TAG_BASE;
+    /** @type {any} */
+    let beating = null;
 
     /** @param {string} name */
     const roomOf = name=>{
@@ -141,10 +195,50 @@ export function createRelay(options = {}){
      */
 
     /**
+     * A frame to a peer, numbered and kept for resending when the peer is
+     * resumable. A lossy one (a datagram) is dropped while the peer has no
+     * link, as a network that is down drops it; anything else waits for the
+     * client to come back. The replay is bounded: what falls out of it before
+     * the client said it had it makes the session one that cannot be resumed.
+     *
      * @param {any} peer
      * @param {Partial<import('../protocol.js').Frame> & { op: number }} frame
      */
-    const send = (peer, frame)=>peer.sendBinary(encodeFrame(frame));
+    const send = (peer, frame, lossy = false)=>{
+        if (peer.gone || (lossy && !peer.link))
+        {
+            return;
+        }
+        const bytes = encodeFrame(frame);
+        if (peer.session)
+        {
+            peer.sent++;
+            peer.replay.push(bytes);
+            peer.replayBytes += bytes.length;
+            while (peer.replayBytes > REPLAY_BYTES)
+            {
+                peer.replayBytes -= peer.replay.shift().length;
+                peer.replayFirst++;
+            }
+        }
+        peer.link?.sendBinary(bytes);
+    };
+
+    /** @param {any} peer @param {import('../protocol.js').Control} message */
+    const tell = (peer, message)=>peer.link?.sendText(encodeControl(message));
+
+    /** Whether what feeds this peer should stop until its link drains. */
+    const congested = (/** @type {any} */ peer)=>!peer.link
+        || (peer.link.buffered?.() ?? 0) > HIGH_WATER;
+
+    /** The real sockets paused for this peer, reading again. */
+    const drained = (/** @type {any} */ peer)=>{
+        for (const socket of peer.paused)
+        {
+            socket.resume();
+        }
+        peer.paused.clear();
+    };
 
     /**
      * Ends a stream in whichever way it exists, and tells the peer why.
@@ -221,6 +315,11 @@ export function createRelay(options = {}){
             refuse(Wsa.CONNREFUSED);
             return;
         }
+        if (!privateNetworks && reserved(frame.toIp))
+        {
+            refuse(Wsa.NETUNREACH);
+            return;
+        }
         // The name it was resolved from, when it was: a policy written against
         // host names can only see one if the resolve that produced this address
         // is remembered, and the guest only ever passes the address on.
@@ -249,9 +348,17 @@ export function createRelay(options = {}){
                 toIp: frame.toIp, toPort: frame.toPort,
             });
         });
-        socket.on('data', chunk=>send(peer, {
-            op: Op.STREAM, tag: frame.tag, payload: new Uint8Array(chunk),
-        }));
+        socket.on('data', chunk=>{
+            send(peer, { op: Op.STREAM, tag: frame.tag, payload: new Uint8Array(chunk) });
+            // Read no faster than the page takes it: a client that stops
+            // reading would otherwise have the server hold everything the far
+            // end sends. Paused, the far end is slowed by TCP itself.
+            if (congested(peer))
+            {
+                socket.pause();
+                peer.paused.add(socket);
+            }
+        });
         socket.on('error', (/** @type {any} */ error)=>{
             peer.dialling.delete(socket);
             if (!peer.streams.has(frame.tag))
@@ -270,6 +377,7 @@ export function createRelay(options = {}){
         });
         socket.on('close', ()=>{
             peer.dialling.delete(socket);
+            peer.paused.delete(socket);
             if (!peer.streams.has(frame.tag))
             {
                 return;
@@ -341,7 +449,7 @@ export function createRelay(options = {}){
                 fromIp: parseIp(from.address), fromPort: from.port,
                 toIp: peer.address, toPort: fromPort,
                 payload: new Uint8Array(chunk),
-            });
+            }, true);
         });
         socket.on('error', ()=>{});
         socket.bind();
@@ -361,7 +469,7 @@ export function createRelay(options = {}){
             {
                 if (far !== peer && far.listening.has(`udp:${frame.toPort}`))
                 {
-                    send(far, { ...frame, fromIp: peer.address });
+                    send(far, { ...frame, fromIp: peer.address }, true);
                 }
             }
             return;
@@ -371,8 +479,12 @@ export function createRelay(options = {}){
             const far = room.get(frame.toIp >>> 0);
             if (far && far.listening.has(`udp:${frame.toPort}`))
             {
-                send(far, { ...frame, fromIp: peer.address });
+                send(far, { ...frame, fromIp: peer.address }, true);
             }
+            return;
+        }
+        if (!privateNetworks && reserved(frame.toIp))
+        {
             return;
         }
 
@@ -408,12 +520,20 @@ export function createRelay(options = {}){
         try {
             const found = await lookup(name, { all: true, family: 4 });
             const addresses = found.map(entry=>parseIp(entry.address))
-                .filter(address=>address !== 0 && !inRoom(address));
+                .filter(address=>address !== 0 && !inRoom(address)
+                    && (privateNetworks || !reserved(address)));
             // Remembered so a later dial to one of these can be judged by the
-            // name it came from rather than by a bare address.
+            // name it came from rather than by a bare address. Bounded, the
+            // oldest forgotten first: a peer resolving names in a loop must
+            // not grow this without end.
             for (const address of addresses)
             {
+                peer.resolved.delete(address);
                 peer.resolved.set(address, name);
+                if (peer.resolved.size > 1024)
+                {
+                    peer.resolved.delete(peer.resolved.keys().next().value);
+                }
             }
             answer(addresses);
         }
@@ -458,19 +578,83 @@ export function createRelay(options = {}){
         });
     };
 
+    /**
+     * A peer gone for good: its sockets closed, its address freed, the room
+     * told. Called when a link closes without a session to keep, when the
+     * resume window passes, and when a session cannot be resumed.
+     *
+     * @param {any} peer
+     */
+    const leave = peer=>{
+        if (peer.gone)
+        {
+            return;
+        }
+        peer.gone = true;
+        clearTimeout(peer.parked);
+        sessions.delete(peer.session);
+        dropStreams(peer);
+        const link = peer.link;
+        peer.link = null;
+        link?.disconnect();
+        if (!peer.joined)
+        {
+            return;
+        }
+        const room = roomOf(peer.room);
+        room.delete(peer.address);
+        for (const far of room.values())
+        {
+            tell(far, { t: 'peer', address: formatIp(peer.address), joined: false });
+        }
+        if (room.size === 0)
+        {
+            rooms.delete(peer.room);
+        }
+    };
+
+    /**
+     * Every resumable peer's acknowledgement, which is also its heartbeat, and
+     * the end of a link that has said nothing for three of them -- a link that
+     * died without closing, which only silence tells apart from a quiet one.
+     */
+    const beat = ()=>{
+        const now = Date.now();
+        for (const peer of sessions.values())
+        {
+            if (!peer.link)
+            {
+                continue;
+            }
+            if (now - peer.heard > heartbeat * 3)
+            {
+                peer.link.disconnect();
+                continue;
+            }
+            tell(peer, { t: 'ack', received: peer.received });
+        }
+        if (sessions.size === 0)
+        {
+            clearInterval(beating);
+            beating = null;
+        }
+    };
+
     const api = {
         /**
-         * Admits a runtime, once it has said which room it wants.
+         * Admits a runtime, once it has said which room it wants, or hands it
+         * back the peer it had when it comes back with that peer's secret.
          *
          * @param {Object} link
          * @param {(bytes: Uint8Array) => void} link.sendBinary
          * @param {(text: string) => void} link.sendText
          * @param {() => void} link.disconnect
+         * @param {() => number} [link.buffered]  bytes still waiting to go out
          */
         connect(link){
             /** @type {any} */
-            const peer = {
-                ...link,
+            let peer = {
+                link,
                 room: '',
                 address: 0,
                 joined: false,
@@ -485,17 +669,71 @@ export function createRelay(options = {}){
                 dialling: new Set(),
                 /** @type {Map<number, string>} */
                 resolved: new Map(),
+                /** @type {Set<any>} */
+                paused: new Set(),
+                session: '',
+                sent: 0,
+                received: 0,
+                /** @type {Uint8Array[]} */
+                replay: [],
+                replayFirst: 1,
+                replayBytes: 0,
+                heard: Date.now(),
+                parked: /** @type {any} */ (null),
             };
 
             /** @param {string} reason */
             const refuse = reason=>{
-                peer.sendText(encodeControl({ t: 'error', reason }));
-                peer.disconnect();
+                link.sendText(encodeControl({ t: 'error', reason }));
+                link.disconnect();
+            };
+
+            const waiting = setTimeout(()=>{
+                if (!peer.joined)
+                {
+                    refuse('no hello');
+                }
+            }, helloTimeout);
+            waiting.unref?.();
+
+            /** @param {any} message @param {string} name */
+            const resume = (message, name)=>{
+                const held = sessions.get(String(message.session));
+                const received = Number(message.received);
+                // What the client has must still be in the replay to resend
+                // the rest from; anything else is not this session any more.
+                if (!held || held.gone || held.room !== name || !Number.isInteger(received)
+                    || received < held.replayFirst - 1 || received > held.sent)
+                {
+                    refuse('cannot resume');
+                    return;
+                }
+                const old = held.link;
+                held.link = link;
+                clearTimeout(held.parked);
+                held.parked = null;
+                held.heard = Date.now();
+                // The old link may still look open here: it died without
+                // closing, and the client noticed first.
+                old?.disconnect();
+                peer = held;
+                link.sendText(encodeControl({
+                    t: 'welcome', address: formatIp(held.address), room: name,
+                    peers: [...roomOf(name).keys()].filter(one=>one !== held.address)
+                        .map(formatIp),
+                    session: held.session, resume: resumeWindow, heartbeat,
+                    received: held.received,
+                }));
+                for (let at = received + 1 - held.replayFirst; at < held.replay.length; at++)
+                {
+                    link.sendBinary(held.replay[at]);
+                }
+                drained(held);
             };
 
             /** @param {string} text */
             const hello = text=>{
-                const message = decodeControl(text);
+                const message = /** @type {any} */ (decodeControl(text));
                 if (!message || message.t !== 'hello')
                 {
                     refuse('expected hello');
@@ -510,6 +748,11 @@ export function createRelay(options = {}){
                 if (name === '' || name.length > 128)
                 {
                     refuse('bad room');
+                    return;
+                }
+                if (message.session !== undefined)
+                {
+                    resume(message, name);
                     return;
                 }
                 const room = roomOf(name);
@@ -527,18 +770,26 @@ export function createRelay(options = {}){
                 peer.room = name;
                 peer.address = address;
                 peer.joined = true;
+                if (message.resumable === true && resumeWindow > 0)
+                {
+                    peer.session = randomBytes(16).toString('hex');
+                    sessions.set(peer.session, peer);
+                    beating ??= setInterval(beat, heartbeat);
+                    beating.unref?.();
+                }
                 const existing = [...room.keys()].map(formatIp);
                 room.set(address, peer);
-                peer.sendText(encodeControl({
+                tell(peer, {
                     t: 'welcome', address: formatIp(address), room: name, peers: existing,
-                }));
+                    ...(peer.session
+                        ? { session: peer.session, resume: resumeWindow, heartbeat }
+                        : {}),
+                });
                 for (const far of room.values())
                 {
                     if (far !== peer)
                     {
-                        far.sendText(encodeControl({
-                            t: 'peer', address: formatIp(address), joined: true,
-                        }));
+                        tell(far, { t: 'peer', address: formatIp(address), joined: true });
                     }
                 }
             };
@@ -546,20 +797,33 @@ export function createRelay(options = {}){
             return {
                 /** @param {Uint8Array | string} data @param {boolean} binary */
                 message(data, binary){
-                    if (peer.gone)
+                    if (peer.gone || peer.link !== link)
                     {
                         return;
                     }
+                    peer.heard = Date.now();
                     if (!binary)
                     {
-                        if (peer.joined)
+                        if (!peer.joined)
                         {
-                            // Nothing follows hello on the control channel, so a
-                            // second one is a peer that has lost its place.
-                            refuse('already joined');
+                            hello(/** @type {string} */ (data));
                             return;
                         }
-                        hello(/** @type {string} */ (data));
+                        const message = /** @type {any} */ (decodeControl(/** @type {string} */ (data)));
+                        if (message?.t === 'ack' && peer.session)
+                        {
+                            // What the client has, so the replay need not keep it.
+                            const received = Number(message.received);
+                            while (peer.replay.length > 0 && peer.replayFirst <= received)
+                            {
+                                peer.replayBytes -= peer.replay.shift().length;
+                                peer.replayFirst++;
+                            }
+                            return;
+                        }
+                        // Nothing else follows hello on the control channel, so
+                        // anything else is a peer that has lost its place.
+                        refuse('already joined');
                         return;
                     }
                     if (!peer.joined)
@@ -573,35 +837,38 @@ export function createRelay(options = {}){
                         refuse('bad frame');
                         return;
                     }
+                    peer.received++;
                     api.route(peer, frame);
                 },
 
-                close(){
-                    if (peer.gone)
+                /** The link can take more: what was paused for it reads again. */
+                drained(){
+                    if (peer.link === link)
                     {
-                        return;
-                    }
-                    peer.gone = true;
-                    dropStreams(peer);
-                    if (!peer.joined)
-                    {
-                        return;
-                    }
-                    const room = roomOf(peer.room);
-                    room.delete(peer.address);
-                    for (const far of room.values())
-                    {
-                        far.sendText(encodeControl({
-                            t: 'peer', address: formatIp(peer.address), joined: false,
-                        }));
-                    }
-                    if (room.size === 0)
-                    {
-                        rooms.delete(peer.room);
+                        drained(peer);
                     }
                 },
 
-                peer,
+                close(){
+                    clearTimeout(waiting);
+                    // A link this peer has since been resumed on is not its link.
+                    if (peer.gone || peer.link !== link)
+                    {
+                        return;
+                    }
+                    peer.link = null;
+                    if (!peer.session)
+                    {
+                        leave(peer);
+                        return;
+                    }
+                    peer.parked = setTimeout(()=>leave(peer), resumeWindow);
+                    peer.parked.unref?.();
+                },
+
+                get peer(){
+                    return peer;
+                },
             };
         },
 
@@ -640,8 +907,13 @@ export function createRelay(options = {}){
                     void datagram(peer, frame);
                     return;
                 case Op.LISTEN:
-                    peer.listening.add(
-                        `${frame.flags & FLAG_STREAM ? 'tcp' : 'udp'}:${frame.toPort}`);
+                    // As many ports as sockets: each is a set entry the peer
+                    // could otherwise add without end.
+                    if (peer.listening.size < maxSockets)
+                    {
+                        peer.listening.add(
+                            `${frame.flags & FLAG_STREAM ? 'tcp' : 'udp'}:${frame.toPort}`);
+                    }
                     return;
                 case Op.UNLISTEN:
                     peer.listening.delete(
@@ -661,6 +933,8 @@ export function createRelay(options = {}){
         diagnostics: ()=>({
             rooms: rooms.size,
             peers: [...rooms.values()].reduce((total, room)=>total + room.size, 0),
+            // Peers whose link dropped, kept for their client to come back to.
+            parked: [...sessions.values()].filter(peer=>!peer.link).length,
         }),
     };
 

@@ -21,14 +21,18 @@ import {
     decodeControl, decodeFrame, encodeControl, encodeFrame, formatIp, parseIp, unpackAddresses,
     unpackError,
 } from '../protocol.js';
-import { createRelay } from './relay.js';
+import { createRelay, reserved } from './relay.js';
 
 /**
  * A peer that records what the relay said to it.
  *
  * @param {any} relay
+ * @param {string} [room]
+ * @param {any} [options]
  */
-function join(relay, room = 'room', { silent = false } = {}){
+function join(relay, room = 'room', options = {}){
+    const { silent = false, resumable = false, hello = {}, buffered = ()=>0 }
+        = /** @type {{ silent?: boolean, resumable?: boolean, hello?: any, buffered?: () => number }} */ (options);
     /** @type {any[]} */
     const frames = [];
     /** @type {any[]} */
@@ -41,12 +45,15 @@ function join(relay, room = 'room', { silent = false } = {}){
         disconnect: ()=>{
             disconnected = true;
         },
+        buffered,
     });
 
     if (!silent)
     {
-        session.message(
-            encodeControl({ t: 'hello', protocol: PROTOCOL_VERSION, room }), false);
+        session.message(encodeControl(/** @type {any} */ ({
+            t: 'hello', protocol: PROTOCOL_VERSION, room,
+            ...(resumable ? { resumable: true } : {}), ...hello,
+        })), false);
     }
 
     return {
@@ -326,7 +333,7 @@ test('a real connection is opened, carries bytes and closes', async t=>{
     const port = /** @type {any} */ (echo.address()).port;
     t.after(()=>echo.close());
 
-    const relay = createRelay({ policy: ()=>true });
+    const relay = createRelay({ policy: ()=>true, privateNetworks: true });
     const client = join(relay);
     client.send({ op: Op.DIAL, tag: 3, toIp: parseIp('127.0.0.1'), toPort: port });
 
@@ -346,7 +353,7 @@ test('a connection to a closed port is refused, not left hanging', async()=>{
     const port = /** @type {any} */ (idle.address()).port;
     await new Promise(resolve=>idle.close(()=>resolve(null)));
 
-    const relay = createRelay({ policy: ()=>true });
+    const relay = createRelay({ policy: ()=>true, privateNetworks: true });
     const client = join(relay);
     client.send({ op: Op.DIAL, tag: 3, toIp: parseIp('127.0.0.1'), toPort: port });
 
@@ -356,7 +363,7 @@ test('a connection to a closed port is refused, not left hanging', async()=>{
 });
 
 test('a peer that leaves mid-dial does not leave a socket behind', async()=>{
-    const relay = createRelay({ policy: ()=>true });
+    const relay = createRelay({ policy: ()=>true, privateNetworks: true });
     const client = join(relay);
     // 192.0.2.0/24 is reserved for documentation and routes nowhere, so this
     // dial stays in flight for as long as the test needs it to.
@@ -421,7 +428,7 @@ test('a peer cannot open unlimited sockets', async t=>{
         sink.close();
     });
 
-    const relay = createRelay({ policy: ()=>true, maxSocketsPerPeer: 2 });
+    const relay = createRelay({ policy: ()=>true, privateNetworks: true, maxSocketsPerPeer: 2 });
     const client = join(relay);
     t.after(()=>client.session.close());
     for (let tag = 1; tag <= 3; tag++)
@@ -473,7 +480,7 @@ test('a name is refused unless the policy allows it, and the refusal is an empty
 });
 
 test('a name that does not resolve answers empty rather than not at all', async()=>{
-    const relay = createRelay({ policy: ()=>true });
+    const relay = createRelay({ policy: ()=>true, privateNetworks: true });
     const client = join(relay);
 
     client.send({
@@ -486,7 +493,7 @@ test('a name that does not resolve answers empty rather than not at all', async(
 });
 
 test('localhost resolves, and the answer is usable as an address', async()=>{
-    const relay = createRelay({ policy: ()=>true });
+    const relay = createRelay({ policy: ()=>true, privateNetworks: true });
     const client = join(relay);
 
     client.send({ op: Op.RESOLVE, tag: 4, payload: new TextEncoder().encode('localhost') });
@@ -524,3 +531,229 @@ async function waitFor(ready, within = 4000){
         await new Promise(resolve=>setTimeout(resolve, 5));
     }
 }
+
+test('this machine and private networks are unreachable even where all is allowed', async()=>{
+    const relay = createRelay({ policy: ()=>true });
+    const client = join(relay);
+    const inside = ['127.0.0.1', '10.0.0.1', '169.254.169.254', '172.16.0.1', '192.168.1.1'];
+    inside.forEach((host, tag)=>client.send({
+        op: Op.DIAL, tag: tag + 1, toIp: parseIp(host), toPort: 80,
+    }));
+    await settle();
+
+    const refused = client.all(Op.HANGUP);
+    assert.equal(refused.length, inside.length);
+    for (const hangup of refused)
+    {
+        assert.ok(hangup.flags & FLAG_REJECT);
+        assert.equal(unpackError(hangup.payload), Wsa.NETUNREACH);
+    }
+
+    client.send({ op: Op.DATAGRAM, fromPort: 5000, toIp: parseIp('127.0.0.1'), toPort: 53,
+        payload: new Uint8Array([1]) });
+    await settle();
+    assert.equal(client.session.peer.datagrams.size, 0, 'no socket was made for it');
+    client.session.close();
+});
+
+test('the reserved ranges end where they end', ()=>{
+    for (const host of ['0.1.2.3', '100.64.0.1', '127.255.255.255', '172.31.255.255',
+        '192.0.2.9', '198.19.0.1', '224.0.0.1', '255.255.255.255'])
+    {
+        assert.ok(reserved(parseIp(host)), host);
+    }
+    for (const host of ['8.8.8.8', '93.184.216.34', '100.63.255.255', '100.128.0.0',
+        '172.15.255.255', '172.32.0.0', '192.169.0.0', '223.255.255.255'])
+    {
+        assert.ok(!reserved(parseIp(host)), host);
+    }
+});
+
+test('a name that resolves into a private network answers empty', async()=>{
+    const relay = createRelay({ policy: ()=>true });
+    const client = join(relay);
+
+    client.send({ op: Op.RESOLVE, tag: 4, payload: new TextEncoder().encode('localhost') });
+
+    const answer = await waitFor(()=>client.first(Op.RESOLVED));
+    assert.equal(answer.payload.length, 0);
+});
+
+test('a connection that never says hello is let go', async()=>{
+    const relay = createRelay({ helloTimeoutMs: 10 });
+    const client = join(relay, 'room', { silent: true });
+
+    await waitFor(()=>client.disconnected);
+    assert.equal(client.control[0].reason, 'no hello');
+});
+
+test('a peer cannot listen on unlimited ports', ()=>{
+    const relay = createRelay({ maxSocketsPerPeer: 2 });
+    const client = join(relay);
+    for (let port = 1; port <= 5; port++)
+    {
+        client.send({ op: Op.LISTEN, toPort: port });
+    }
+    assert.equal(client.session.peer.listening.size, 2);
+});
+
+test('a real socket stops reading while the page is behind, and reads on once it is not', async t=>{
+    const source = createServer(socket=>socket.write(Buffer.alloc(4096, 7)));
+    await new Promise(resolve=>source.listen(0, '127.0.0.1', ()=>resolve(null)));
+    const port = /** @type {any} */ (source.address()).port;
+    t.after(()=>source.close());
+
+    let behind = 2 * 1024 * 1024;
+    const relay = createRelay({ policy: ()=>true, privateNetworks: true });
+    const client = join(relay, 'room', { buffered: ()=>behind });
+    t.after(()=>client.session.close());
+    client.send({ op: Op.DIAL, tag: 3, toIp: parseIp('127.0.0.1'), toPort: port });
+
+    await waitFor(()=>client.all(Op.STREAM).length > 0);
+    const peer = client.session.peer;
+    assert.equal(peer.paused.size, 1, 'paused behind a full link');
+    const [socket] = peer.paused;
+    assert.ok(socket.isPaused());
+
+    behind = 0;
+    client.session.drained();
+    assert.equal(peer.paused.size, 0);
+    assert.ok(!socket.isPaused());
+});
+
+test('only a resumable peer is given a session, with the window and the heartbeat', ()=>{
+    const relay = createRelay({ resumeWindowMs: 7000, heartbeatMs: 3000 });
+    const plain = join(relay);
+    const resumable = join(relay, 'room', { resumable: true });
+
+    assert.equal(plain.control[0].session, undefined);
+    const welcome = resumable.control[0];
+    assert.match(welcome.session, /^[0-9a-f]{32}$/);
+    assert.equal(welcome.resume, 7000);
+    assert.equal(welcome.heartbeat, 3000);
+});
+
+test('a resumable peer whose link drops keeps its address, and comes back to what it missed', ()=>{
+    const relay = createRelay();
+    const client = join(relay, 'room', { resumable: true });
+    const other = join(relay);
+    const { session, address } = client.control[0];
+    client.send({ op: Op.LISTEN, flags: FLAG_STREAM, toPort: 6112 });
+    client.send({ op: Op.LISTEN, toPort: 6112 });
+    other.send({ op: Op.DIAL, tag: 1, toIp: parseIp(address), toPort: 6112 });
+    other.send({ op: Op.STREAM, tag: 1, payload: new Uint8Array([1]) });
+    assert.equal(client.frames.length, 2, 'ACCEPTED and the first bytes');
+
+    client.session.close();
+    assert.equal(relay.diagnostics().parked, 1);
+    assert.ok(!other.control.some(message=>message?.t === 'peer' && !message.joined),
+        'the room is not told it left');
+    other.send({ op: Op.STREAM, tag: 1, payload: new Uint8Array([2]) });
+    other.send({
+        op: Op.DATAGRAM, toIp: parseIp(address), toPort: 6112, payload: new Uint8Array([9]),
+    });
+
+    // It had ACCEPTED only; the relay resends the rest.
+    const back = join(relay, 'room', { hello: { session, received: 1 } });
+    const welcome = back.control[0];
+    assert.equal(welcome.t, 'welcome');
+    assert.equal(welcome.address, address);
+    assert.equal(welcome.session, session);
+    assert.deepEqual(back.frames.map(frame=>[frame.op, [...frame.payload]]),
+        [[Op.STREAM, [1]], [Op.STREAM, [2]]],
+        'a datagram sent while it was away is lost, as on a network');
+    assert.equal(relay.diagnostics().parked, 0);
+
+    back.send({ op: Op.STREAM, tag: client.frames[0].tag, payload: new Uint8Array([3]) });
+    assert.deepEqual([...other.all(Op.STREAM).at(-1).payload], [3],
+        'the stream still carries both ways');
+    back.session.close();
+});
+
+test('the relay says on resuming how many frames it had from the client', ()=>{
+    const relay = createRelay();
+    const client = join(relay, 'room', { resumable: true });
+    client.send({ op: Op.LISTEN, toPort: 1 });
+    client.send({ op: Op.LISTEN, toPort: 2 });
+    client.session.close();
+
+    const back = join(relay, 'room',
+        { hello: { session: client.control[0].session, received: 0 } });
+    assert.equal(back.control[0].received, 2);
+    back.session.close();
+});
+
+test('coming back with a wrong secret, to another room, or with frames never sent is refused', ()=>{
+    const relay = createRelay();
+    const client = join(relay, 'room', { resumable: true });
+    const { session } = client.control[0];
+    client.session.close();
+
+    for (const [room, hello] of [['room', { session: 'f'.repeat(32), received: 0 }],
+        ['elsewhere', { session, received: 0 }], ['room', { session, received: 5 }],
+        ['room', { session, received: 'many' }]])
+    {
+        const back = join(relay, /** @type {string} */ (room), { hello });
+        assert.equal(back.control[0].reason, 'cannot resume', JSON.stringify(hello));
+        assert.ok(back.disconnected);
+    }
+    assert.equal(relay.diagnostics().parked, 1, 'a refused attempt leaves the session be');
+});
+
+test('what the client acknowledged is forgotten and cannot be asked for again', ()=>{
+    const relay = createRelay();
+    const client = join(relay, 'room', { resumable: true });
+    const other = join(relay);
+    const { session, address } = client.control[0];
+    client.send({ op: Op.LISTEN, flags: FLAG_STREAM, toPort: 6112 });
+    other.send({ op: Op.DIAL, tag: 1, toIp: parseIp(address), toPort: 6112 });
+    other.send({ op: Op.STREAM, tag: 1, payload: new Uint8Array([1]) });
+    client.session.message(encodeControl({ t: 'ack', received: 2 }), false);
+    assert.equal(client.session.peer.replay.length, 0);
+    client.session.close();
+
+    assert.equal(join(relay, 'room', { hello: { session, received: 1 } }).control[0].reason,
+        'cannot resume');
+    const back = join(relay, 'room', { hello: { session, received: 2 } });
+    assert.equal(back.control[0].t, 'welcome');
+    assert.equal(back.frames.length, 0);
+    back.session.close();
+});
+
+test('a peer not back within the window is gone, and the room is told', async()=>{
+    const relay = createRelay({ resumeWindowMs: 10 });
+    const client = join(relay, 'room', { resumable: true });
+    const other = join(relay);
+    const { session } = client.control[0];
+    client.session.close();
+
+    await waitFor(()=>other.control.some(message=>message?.t === 'peer' && !message.joined));
+    assert.equal(relay.diagnostics().peers, 1);
+    assert.equal(join(relay, 'room', { hello: { session, received: 0 } }).control[0].reason,
+        'cannot resume');
+});
+
+test('a link that still looks open is replaced, and its late close changes nothing', ()=>{
+    const relay = createRelay();
+    const client = join(relay, 'room', { resumable: true });
+    const back = join(relay, 'room',
+        { hello: { session: client.control[0].session, received: 0 } });
+
+    assert.ok(client.disconnected, 'the old link is hung up');
+    client.session.close();
+    client.send({ op: Op.LISTEN, toPort: 9 });
+    assert.equal(relay.diagnostics().parked, 0);
+    assert.equal(back.session.peer.listening.size, 0, 'the old link no longer speaks for the peer');
+    back.session.close();
+});
+
+test('the heartbeat acknowledges, and a link silent for three beats is dropped but kept', async()=>{
+    const relay = createRelay({ heartbeatMs: 10 });
+    const client = join(relay, 'room', { resumable: true });
+
+    await waitFor(()=>client.control.some(message=>message?.t === 'ack'));
+    await waitFor(()=>client.disconnected);
+    client.session.close();
+    assert.equal(relay.diagnostics().parked, 1);
+    assert.equal(relay.diagnostics().peers, 1);
+});
