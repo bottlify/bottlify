@@ -48,6 +48,17 @@ const TOTAL = /** @type {const} */ ({ vertices: VERTEX_BYTES / STRIDE, indices: 
 const DEVICE = '#1';
 /** The program's names for the two rings, in the order it makes them. */
 const NAME = /** @type {const} */ ({ vertices: '#2', indices: '#3' });
+/** The vertex declaration a program drawing two streams makes after them. */
+const DECLARATION = '#4';
+/**
+ * D3DVERTEXELEMENT9s, two words each: the position from stream zero, the
+ * colour from stream one, each a whole stride of its own, and the end.
+ */
+const TWO_STREAMS = [
+    0x00000000, 0x00000002, // stream 0 at 0: FLOAT3, POSITION
+    0x00000001, 0x000a0004, // stream 1 at 0: D3DCOLOR, COLOR
+    0x000000ff, 0x00000011, // D3DDECL_END
+];
 
 /**
  * @typedef {'vertices' | 'indices'} Ring
@@ -58,14 +69,16 @@ const NAME = /** @type {const} */ ({ vertices: '#2', indices: '#3' });
  *     | { kind: 'write', on: Ring, offset: number, size: number, fill: number, reach: number }
  *     | { kind: 'release', on: Ring }
  *     | { kind: 'draw', base: number, min: number, count: number, start: number,
- *         triangles: number, across?: boolean }
+ *         triangles: number, across?: boolean, second?: number }
  *     | { kind: 'host' } | { kind: 'present' } | { kind: 'turns', count: number }} Step
  *
  * A lock is taken, written and let go of at once; a hold is a lock left held,
  * written through by the writes after it and let go of by a release. A write
  * of indices names vertices below `reach`, counted from the draw's base. A
  * draw names its vertices as MinIndex and NumVertices, and says whether it
- * draws a batch again across a DISCARD of a ring since. `host` is a call the
+ * draws a batch again across a DISCARD of a ring since; one with a `second`
+ * binds the ring as two streams at offsets, its first vertex as stream zero's
+ * and its `second` unit as stream one's, and draws from base vertex zero. `host` is a call the
  * host answers, which makes the ring's draws; `turns` lets the graphics
  * worker's chain run that many turns, replaying the frames queued so far.
  */
@@ -93,13 +106,16 @@ const bytesFor = (on, offset, size, fill, reach)=>(on === 'indices'
  * NOOVERWRITE lock writes only past what was drawn since the last DISCARD.
  *
  * @param {number} seed @param {number} frames  how many
- * @param {{ short?: boolean, again?: boolean }} [options]  `short`: a draw names
- *     fewer vertices than its indices reach, as a program whose MinIndex and
+ * @param {{ short?: boolean, again?: boolean, offsets?: boolean }} [options]  `short`: a
+ *     draw names fewer vertices than its indices reach, as a program whose MinIndex and
  *     NumVertices are wrong does; `again`: a batch drawn before is drawn again
  *     now and then, from a lap of its ring before the last DISCARD too, where
  *     no lock taken since has reached it -- as a renderer that draws a batch in
  *     one pass and again in a later one, its ring started over between them,
- *     counts on the bytes past the DISCARD's range being there still
+ *     counts on the bytes past the DISCARD's range being there still;
+ *     `offsets`: a batch is its vertices' positions and then their colours, each
+ *     drawn from a stream of its own bound at its offset in the ring -- as a
+ *     renderer that binds each stretch of a shared ring where it lies does
  * @returns {Step[]}
  */
 export function rings(seed, frames, options = {}){
@@ -215,16 +231,18 @@ export function rings(seed, frames, options = {}){
             const vertices = 3 + below(below(4) === 0 ? 1500 : 200);
             const triangles = 1 + below(Math.min(300, vertices * 2));
             const fill = 1 + below(250);
-            const base = place('vertices', vertices, fill, 0);
+            const units = options.offsets ? vertices * 2 : vertices;
+            const base = place('vertices', units, fill, 0);
             const vertexWrite = writes;
             const start = place('indices', triangles * 3, fill, vertices);
             const count = options.short && below(2) === 0 ? 1 + below(vertices) : vertices;
             /** @type {Step & { kind: 'draw' }} */
-            const draw = { kind: 'draw', base, min: 0, count, start, triangles };
+            const draw = { kind: 'draw', base, min: 0, count, start, triangles,
+                ...(options.offsets ? { second: base + vertices } : {}) };
             steps.push(draw);
             if (options.again)
             {
-                drawn.push({ draw, units: { vertices, indices: triangles * 3 },
+                drawn.push({ draw, units: { vertices: units, indices: triangles * 3 },
                     write: { vertices: vertexWrite, indices: writes }, laps: { ...laps } });
                 if (drawn.length > 64)
                 {
@@ -289,7 +307,17 @@ export async function play(guestCode, steps, worker = true, traps = []){
     run(device('CreateIndexBuffer', [INDEX_BYTES, D3DUSAGE_DYNAMIC | D3DUSAGE_WRITEONLY,
         D3DFMT_INDEX16, D3DPOOL_DEFAULT, 'out', 0]));
     run(device('SetRenderState', [D3DRS_LIGHTING, 0]));
-    run(device('SetFVF', [FVF]));
+    const streams = steps.some(step=>step.kind === 'draw' && step.second !== undefined);
+    if (streams)
+    {
+        run(device('CreateVertexDeclaration', [{ words: TWO_STREAMS }, 'out']));
+        run(device('SetVertexDeclaration', [DECLARATION]));
+        run(device('SetStreamSource', [1, NAME.vertices, 0, STRIDE]));
+    }
+    else
+    {
+        run(device('SetFVF', [FVF]));
+    }
     run(device('SetStreamSource', [0, NAME.vertices, 0, STRIDE]));
     run(device('SetIndices', [NAME.indices]));
     /** Where each ring's last lock put its first byte, for the writes after it. */
@@ -355,6 +383,12 @@ export async function play(guestCode, steps, worker = true, traps = []){
         else if (step.kind === 'release')
         {
             unlock(step.on);
+        }
+        else if (step.kind === 'draw' && step.second !== undefined)
+        {
+            run(device('SetStreamSource', [0, NAME.vertices, step.base * STRIDE, STRIDE]));
+            run(device('SetStreamSource', [1, NAME.vertices, step.second * STRIDE, STRIDE]));
+            draw(0, step.min, step.count, step.start, step.triangles);
         }
         else if (step.kind === 'draw')
         {
@@ -455,6 +489,33 @@ test('Direct3D 9: batches drawn again after their rings were started over under 
     assert.deepEqual(wrong, []);
     assert.ok(moves > 20, `DISCARDs moved the rings onto storages of their own (${moves})`);
     assert.ok(across > 20, `batches drawn again across a DISCARD of their rings (${across})`);
+});
+
+test('Direct3D 9: a ring bound as two streams at the offsets of its stretches, started over'
+    + ' under DISCARD, gives the GPU what every call a trap does, recorded for a graphics worker',
+async()=>{
+    // Each stretch of the ring is its vertices' positions, then their colours,
+    // bound where they lie, drawn from base vertex zero: the device folds the
+    // whole vertices of stream zero's offset into the first vertex, and the
+    // colours a draw reads are at stream one's offset all the same. After a
+    // move every page of the new storage reaches the GPU only with a draw.
+    /** @type {string[]} */
+    const wrong = [];
+    let moves = 0;
+    for (let seed = 1; seed <= 12 && wrong.length === 0; seed++)
+    {
+        const steps = rings(seed, 30, { offsets: true });
+        const trapped = await play(false, steps);
+        const guest = await play(true, steps);
+        moves += guest.moves;
+        const found = parting(trapped.gpu, guest.gpu);
+        if (found)
+        {
+            wrong.push(`seed ${seed}: ${found}`);
+        }
+    }
+    assert.deepEqual(wrong, []);
+    assert.ok(moves > 20, `DISCARDs moved the ring onto storages of its own (${moves})`);
 });
 
 /**

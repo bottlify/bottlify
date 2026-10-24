@@ -5037,14 +5037,21 @@ export function createRenderer(options){
             // unranged mark never makes it do. A program that keeps vertices
             // from frame to frame in a ring -- a skinning cache -- and writes
             // the next stretch under NOOVERWRITE otherwise overwrote the
-            // vertices queued frames still drew from.
+            // vertices queued frames still drew from. The span counts the
+            // vertices folded in from stream zero's offset, which the binding
+            // takes back; counted from the stream's own offset, the range lay
+            // that many vertices past what the GPU reads, and after a move
+            // onto another storage, where a page reaches the GPU only with a
+            // draw that reads it, the GPU drew the stream's bytes of a lap of
+            // the ring before. Crysis binds its characters' further streams
+            // at offsets into its rings.
             const ranged = span && !instanced;
-            const from = (source.offset ?? 0) + (ranged ? span.first * source.stride : 0);
+            const from = ranged ? offset + span.first * source.stride : source.offset ?? 0;
             const to = ranged ? from + span.count * source.stride : buffer.size;
             readHeld(source.buffer, buffer, from, Math.min(to, buffer.size));
             if (verify && verifySpan && !instanced)
             {
-                const actual = (source.offset ?? 0) + verifySpan.first * source.stride;
+                const actual = offset + verifySpan.first * source.stride;
                 verify.range(`vb${index + 1}`, source.buffer, buffer, actual,
                     Math.min(actual + verifySpan.count * source.stride, buffer.size),
                     ranged ? { from, to: Math.min(to, buffer.size) } : null, true,
