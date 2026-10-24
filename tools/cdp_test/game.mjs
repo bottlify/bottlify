@@ -1233,6 +1233,26 @@ function describe(result, context, calls, symbols){
                 }
             }
         }
+        const handoff = graphics.handoff;
+        if (handoff)
+        {
+            // One frame at a time to the screen: the way there, its showing
+            // and the answer back bound the frames shown a second.
+            const mean = (/** @type {number} */ ms, /** @type {number} */ count)=>
+                (count > 0 ? (ms / count).toFixed(2) : 'not measured');
+            say(`    frames to the screen: ${handoff.frames},`
+                + ` replaced unsent ${graphics.dropped ?? 0},`
+                + ` waited there ${mean(handoff.waitedMs, handoff.frames)} ms, way here`
+                + ` ${mean(handoff.thereMs, handoff.frames)} ms, answers back`
+                + ` ${mean(handoff.back?.ms ?? 0, handoff.back?.count ?? 0)} ms,`
+                + ` sent before their answer ${handoff.back?.early ?? 'not measured'}`);
+        }
+        const held = graphics.latency;
+        if (held)
+        {
+            say(`    presents held for the worker's GPU: ${held.held} of ${held.frames},`
+                + ` ${Math.round(held.heldMs)} ms (bound ${held.limit})`);
+        }
         const shadow = graphics.shadow;
         if (shadow?.placed)
         {

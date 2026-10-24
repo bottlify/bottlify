@@ -382,6 +382,14 @@ Reading it:
 - `frames presented: 0` with `graphics: created=[]`: it never reached a
   device. The question is what it was doing instead, which is in the last
   calls.
+- `frames to the screen` (a graphics worker drawing real pictures): the worker
+  sends one frame at a time, the next once the one before was shown.
+  `replaced unsent` counts the frames a newer one replaced, the three times are
+  the averages of a frame's wait there, its way here and the answer's way back,
+  and `sent before their answer` the frames the shared word let go at a
+  present. Few frames shown against many presented, with a long way back, is
+  the showing that bounds the run, not the drawing. `presents held for the
+  worker's GPU` appears once the run has asked the worker for its diagnostics.
 - Every thread in a timed wait that always expires, while the clock advances:
   not a deadlock, and not stopped time. Something is never signalled, and the
   blocked lines name what.
