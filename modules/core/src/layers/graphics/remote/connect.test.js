@@ -415,3 +415,21 @@ test('a root goes without a frame bound where the run named none', ()=>{
         end.dispose();
     }
 });
+
+test('the guest\'s RAM goes only to a root that lends from it', ()=>{
+    const worker = fakeWorker();
+    const ram = new Uint8Array(new SharedArrayBuffer(1 << 16));
+    const end = connectGraphicsWorker({ worker, sharedMemory: ()=>ram });
+    const services = { vertexShaderVersion: { major: 2, minor: 0 },
+        readMemory: ()=>new Uint8Array(0), gamma: { applies: ()=>true, set(){} } };
+    end.root('opengl', ()=>({}), services);
+    end.root('d3d9', ()=>({}), services);
+    const [opengl, d3d9] = worker.posted.filter(posted=>posted.type === 'root');
+    // JavaScriptCore counts a buffer a thread holds in that thread's heap and
+    // lets garbage grow by as much before it collects it whole.
+    assert.equal(opengl.memory, null, 'a root that does not lend is not handed the RAM');
+    assert.equal(opengl.lending, null);
+    assert.ok(d3d9.lending, 'Direct3D 9 lends');
+    assert.equal(d3d9.memory, ram, 'and is handed the RAM it lends from');
+    end.dispose();
+});
