@@ -11,7 +11,8 @@ runs as if Windows were around it, with a `C:` drive, a registry, windows, Direc
 WebGPU, and sound.
 
 Supported: 32-bit programs, DirectDraw, Direct3D 7–10, OpenGL 1.1 with extensions, Vulkan,
-DirectSound, DirectMusic, video through DirectShow and networking through Winsock.
+DirectSound, DirectMusic, video through DirectShow and networking through Winsock. Which games
+and programs run: [the list](docs/games.md).
 
 ## Why
 

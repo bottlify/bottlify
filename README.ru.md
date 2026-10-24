@@ -10,7 +10,8 @@ Bottlify - это набор пакетов, с которыми веб-стра
 так, будто вокруг неё Windows, с диском `C:`, реестром, окнами, DirectX через WebGPU и звуком.
 
 Поддерживаются 32-битные программы, DirectDraw, Direct3D 7–10, OpenGL 1.1 с расширениями, Vulkan,
-DirectSound, DirectMusic, видео через DirectShow и сеть через Winsock.
+DirectSound, DirectMusic, видео через DirectShow и сеть через Winsock. Какие игры и программы
+запускаются: [список](docs/games.ru.md).
 
 ## Зачем
 
