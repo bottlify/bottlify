@@ -375,8 +375,8 @@ for (const version of /** @type {const} */ ([9, 8]))
         assert.equal(passes.length, 2);
         assert.equal(passes[0].target.texture, draw.stageBindings[0].view.texture,
             'the level the clear went into and the texture the draw samples are one texture');
-        assert.equal(h.gpu.count('copyBufferToTexture') + h.gpu.count('writeTexture'), 1,
-            'the level was uploaded once, from its untouched guest bytes, and never again');
+        assert.equal(h.gpu.count('copyBufferToTexture') + h.gpu.count('writeTexture'), 0,
+            'nothing went up for the level: what was drawn into it is all it holds');
         const presented = rasterise(h).of(h.presented[0].surface);
         assert.deepEqual(pixelAt(presented, 0, 0), [0x56, 0x34, 0x12, 0xff]);
         assert.deepEqual(pixelAt(presented, 3, 3), [0x56, 0x34, 0x12, 0xff]);

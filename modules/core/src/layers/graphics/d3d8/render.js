@@ -9465,8 +9465,9 @@ export function createRenderer(options){
             // The GPU's copy of a texture that makes its own levels holds the
             // whole chain, of which the program sees the top.
             const gpuLevels = desc.gpuLevels ?? levels;
+            const target = ((desc.usage ?? 0) & D3DUSAGE.RENDERTARGET) !== 0;
             const entry = {
-                gpu: null, dirty: true, base: 0, levels, faces, texture, gpuLevels,
+                gpu: null, dirty: !target, base: 0, levels, faces, texture, gpuLevels,
                 autogen: gpuLevels > levels,
                 volume: texture.volume === true,
                 // A render-target texture is written by the GPU as well as
@@ -9474,12 +9475,18 @@ export function createRenderer(options){
                 // the frame; see `uploadTexels`. A copy landing in a plain
                 // texture turns this on too.
                 // So is one whose levels the GPU makes from the top.
-                ordered: ((desc.usage ?? 0) & D3DUSAGE.RENDERTARGET) !== 0 || gpuLevels > levels,
+                ordered: target || gpuLevels > levels,
                 // Every level, until each has been uploaded once: a program
                 // fills the chain it asked for, and a chain sampled with a
                 // level missing shows the gap at the distance that level
-                // covers.
-                dirtyLevels: new Set(Array.from({ length: levels * faces }, (_, index)=>index)),
+                // covers. Not a render target's: what it holds before it is
+                // drawn into is undefined, the program cannot lock it, and
+                // the GPU's texture starts out as zeroes; a copy into it marks
+                // what it wrote. Crysis made four (2560x1600 down to 320x200)
+                // and let them go every frame of a view toward the sea, and
+                // 22 MB of zeroes went up for them each frame.
+                dirtyLevels: target ? new Set()
+                    : new Set(Array.from({ length: levels * faces }, (_, index)=>index)),
                 serial: nextTextureId,
                 id: `t${nextTextureId++}`,
                 // A per-texture generation of its contents, so a preparation

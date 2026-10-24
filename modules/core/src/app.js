@@ -1634,17 +1634,20 @@ export const RESOURCE_ALIGNMENT = 16;
  * empty layer under a menu, a target it clears only in part. The guest heap
  * recycles freed blocks as they were left, so a texture made after a Reset
  * held the old back buffer's picture. Memory the heap never handed out is
- * zero already and is not written.
+ * zero already and is not written, and neither is memory the device says
+ * nobody reads before it is written (`cleared` false): a render target drawn
+ * by another device.
  *
  * @param {{ allocate: (bytes: number, options?: { alignment?: number }) => number,
  *     block: (address: number) => { fresh?: boolean } | null | undefined }} heap
  * @param {(address: number, value: number, length: number) => void} fill
  * @param {number} bytes
+ * @param {boolean} [cleared]
  * @returns {number} the address, or 0
  */
-export function allocateCleared(heap, fill, bytes){
+export function allocateCleared(heap, fill, bytes, cleared = true){
     const address = heap.allocate(bytes, { alignment: RESOURCE_ALIGNMENT });
-    if (address !== 0 && heap.block(address)?.fresh !== true)
+    if (cleared && address !== 0 && heap.block(address)?.fresh !== true)
     {
         fill(address, 0, bytes);
     }
@@ -4614,9 +4617,9 @@ async function buildApp(options){
             // reach -- an address invented for the purpose is one the program
             // writes into nothing and we read nothing out of -- and on the
             // boundary a driver keeps (`RESOURCE_ALIGNMENT`).
-            allocate: (/** @type {number} */ bytes)=>allocateCleared(win32.heap(),
-                (address, value, length)=>core.api('memory').fillBytes(address, value, length),
-                bytes),
+            allocate: (/** @type {number} */ bytes, /** @type {boolean | undefined} */ cleared)=>
+                allocateCleared(win32.heap(), (address, value, length)=>
+                    core.api('memory').fillBytes(address, value, length), bytes, cleared !== false),
             // The guest code the seams write, on pages nothing else is handed.
             // None of it waits, and some of it writes records other threads'
             // entries into the host read, so no slice ends inside it -- but in

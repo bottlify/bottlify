@@ -268,11 +268,12 @@ function isTransformType(type){
  *     How a lock of a render target brings the drawn pixels into the guest's
  *     bytes. Absent, the lock hands out the bytes as they are and says so.
  * @property {(descriptor: any)=>any} [createSampler]
- * @property {(bytes: number)=>number} [allocate]
+ * @property {(bytes: number, cleared?: boolean)=>number} [allocate]
  *     Guest memory for a resource's bytes. A lock hands the program an address
  *     it writes through and the unlock reads those bytes back, so it has to be
  *     memory the guest can reach. Absent, addresses are invented -- which works
- *     exactly until something reads one.
+ *     exactly until something reads one. Cleared unless `cleared` is false,
+ *     for bytes nobody reads before they are written (`storageFor`).
  * @property {(address: number)=>void} [free]
  *     Gives that memory back when the last reference to a resource goes.
  *     Absent, storage is held for the life of the process -- which the program
@@ -860,14 +861,14 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
      * Storage addresses are handed out rather than computed, so that two
      * surfaces never overlap and the offset a lock reports means something.
      *
-     * @param {number} bytes
+     * @param {number} bytes @param {boolean} [cleared]
      */
-    const allocate = bytes=>{
+    const allocate = (bytes, cleared = true)=>{
         // Real guest memory when the assembling caller supplied a way to get
         // some, and given back when the last reference goes -- see `free`.
         if (services.allocate)
         {
-            const address = services.allocate(Math.max(bytes, 1));
+            const address = services.allocate(Math.max(bytes, 1), cleared);
             if (address !== 0)
             {
                 return address;
@@ -880,6 +881,22 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         fabricated.add(address);
         return address;
     };
+
+    /**
+     * Where a resource of this usage keeps its bytes. A render target the
+     * program cannot lock, drawn by the graphics worker, is left as the heap
+     * had it, as the Direct3D 9 device's is: what a target holds before it is
+     * drawn into is undefined, and its pixels live on the worker's GPU, whose
+     * texture starts out as zeroes.
+     *
+     * @param {number} usage @param {boolean} [lockable]
+     * @returns {(bytes: number) => number}
+     */
+    const storageFor = (usage, lockable = false)=>(!lockable
+        && (usage & D3DUSAGE.RENDERTARGET) !== 0
+        && services.renderedElsewhere === true ? unread : allocate);
+    /** @param {number} bytes */
+    const unread = bytes=>allocate(bytes, false);
 
     /**
      * Gives a resource's storage back.
@@ -2886,7 +2903,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 pool,
                 usage,
                 count: explicitCount(pool, undefined, chainBytes(format, width, height, 1, chain)),
-                allocate,
+                allocate: storageFor(usage),
                 free,
             });
             if (renderer)
@@ -2955,7 +2972,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 usage,
                 count: explicitCount(pool, undefined,
                     chainBytes(format, edgeLength, edgeLength, 1, chain) * 6),
-                allocate,
+                allocate: storageFor(usage),
                 free,
                 cube: true,
             });
@@ -2989,7 +3006,8 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 divergence: services.divergence ?? null,
                 lockable,
                 pixels: targetPixels(),
-                base: allocate(surfaceBytes(format, width, height)),
+                base: storageFor(D3DUSAGE.RENDERTARGET, lockable)(
+                    surfaceBytes(format, width, height)),
                 count: explicitCount(D3DPOOL.DEFAULT, ()=>retireSurface(surface),
                     surfaceBytes(format, width, height)),
             });
