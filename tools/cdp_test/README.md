@@ -182,7 +182,8 @@ ones need the graphics worker.
 | `modules()`, `moduleAt(address)` | every image mapped and where; which image an address is in |
 | `read(address, length)` | guest memory |
 | `hook(address, how)` | a watch in front of a routine: its calls in the trace with arguments and answer |
-| `ringTrace(n)`, `callRingSkip('A,B')` | the bridge's recent calls; names kept out of that ring |
+| `ringTrace(n)` | keeps the last n Direct3D calls the guest's command rings carried (calls that never cross to the host one by one), 0 stops; answers what was kept |
+| `callRingSkip('A,B')` | names kept out of the bridge's call ring, the one `app.diagnostics()` reads as the bridge's `recentDetailed` (each call with its caller `from`, arguments and answer) |
 | `processes()`, `diagnosticsOf(id)` | every process standing; one process's diagnostics |
 | `registry`, `exported(lib, name)` | the program's registry; whether a system library exports a name |
 
