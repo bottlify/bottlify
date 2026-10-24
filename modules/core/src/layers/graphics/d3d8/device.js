@@ -62,8 +62,8 @@ import {
     reportedBackBufferCount, targetPairResult, validatePresentParameters, validateStages,
 } from './validity.js';
 import {
-    HeldBindings, chainBytes, createPriority, createReferenceCount, createSurface, createTexture,
-    createVideoMemory, createVolumeTexture, rectMoveOf, regionAtLevel, volumeUpdate,
+    HeldBindings, chainBytes, countedBuffer, createPriority, createReferenceCount, createSurface,
+    createTexture, createVideoMemory, createVolumeTexture, rectMoveOf, regionAtLevel, volumeUpdate,
     writeFrontBuffer, writePixels,
 } from '../d3d9/resources.js';
 import { volumeCreateResult, volumeLevelCount } from '../d3d9/validity.js';
@@ -1250,20 +1250,14 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             lock: (offset, length, flags)=>renderer?.lockBuffer(buffer, offset, length, flags),
             unlock: ()=>renderer?.unlockBuffer(buffer),
         });
-        const buffer = {
+        const buffer = countedBuffer({
             ...spec,
             base: storages[0],
             ...createPriority(spec.pool),
-            get refCount(){
-                return bufferCount.value;
-            },
             // Where guest code may count its references (`ReferenceCount.place`).
             counter: bufferCount,
             addRef: ()=>bufferCount.addRef(),
             release: ()=>bufferCount.release(),
-            get destroyed(){
-                return bufferCount.destroyed;
-            },
             /** The device binds it (see `createReferenceCount`). */
             hold: ()=>bufferCount.hold?.(),
             letGo: ()=>bufferCount.letGo?.(),
@@ -1310,11 +1304,9 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 return locks.release() ? D3D_OK : D3DERR_INVALIDCALL;
             },
 
-            /** How many locks are held: they nest (`createBufferLocks`). */
-            get lockCount(){
-                return locks.count;
-            },
-        };
+            /** How many locks are held, which nest (`createBufferLocks`): its `lockCount`. */
+            locks,
+        });
         Object.assign(buffer, storageCalls(buffer, storages,
             { allocate, renderer, left: services.leftStorage }));
         return buffer;

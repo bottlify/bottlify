@@ -117,34 +117,53 @@ export class HeldBindings extends Map {
 }
 
 /**
- * @param {{ implicit?: boolean, onFirstRef?: () => void, onLastRef?: () => void,
- *           onZero?: () => void }} [options]
- *        `onZero`: the program's count reached zero, whether or not the device
- *        still holds the resource bound.
- * @returns {ReferenceCount}
+ * A resource's count, kept in a class of its own: a texture's count is
+ * reached at every SetTexture that binds or unbinds it, thousands of times a
+ * frame on both sides of a graphics worker, and an object made by a literal
+ * with getters of its own is one V8 keeps as a dictionary -- each look a hash
+ * probe through memory long out of the cache.
  */
-export function createReferenceCount(options = {}){
-    const implicit = options.implicit === true;
-    let kept = implicit ? 0 : 1;
+class Count {
+    /** @type {{ implicit?: boolean, onFirstRef?: () => void, onLastRef?: () => void, onZero?: () => void }} */
+    #options;
+    #implicit;
+    /** The program's count while no cell keeps it. */
+    #kept;
     /** @type {CountCell | null} */
-    let cell = null;
-    let destroyed = false;
-    // Read and written where it is kept: guest code may have moved it since.
-    const count = {
-        get value(){
-            return cell ? cell.read() : kept;
-        },
-        set value(value){
-            if (cell)
-            {
-                cell.write(value);
-            }
-            else
-            {
-                kept = value;
-            }
-        },
-    };
+    #cell = null;
+    #destroyed = false;
+    /**
+     * The device's references to it while bound. Windows keeps a bound
+     * resource alive past the program's last Release, with a count of zero,
+     * and hands the same object back when asked for what is bound; it goes
+     * once it is unbound too.
+     */
+    #held = 0;
+
+    /** @param {{ implicit?: boolean, onFirstRef?: () => void, onLastRef?: () => void, onZero?: () => void }} options */
+    constructor(options){
+        this.#options = options;
+        this.#implicit = options.implicit === true;
+        this.#kept = this.#implicit ? 0 : 1;
+    }
+
+    /** Read where it is kept: guest code may have moved it since. */
+    get value(){
+        return this.#cell ? this.#cell.read() : this.#kept;
+    }
+
+    /** @param {number} value */
+    #store(value){
+        if (this.#cell)
+        {
+            this.#cell.write(value);
+        }
+        else
+        {
+            this.#kept = value;
+        }
+    }
+
     /**
      * The count moved by `step` from what it holds, unless that is 0 and the
      * step down: the guest's AddRef and Release, on another executor, move a
@@ -155,18 +174,19 @@ export function createReferenceCount(options = {}){
      * @param {number} step  1 or -1
      * @returns {{ was: number, now: number }}
      */
-    const move = step=>{
+    #move(step){
         for (;;)
         {
-            const was = count.value >>> 0;
+            const was = this.value >>> 0;
             if (was === 0 && step < 0)
             {
                 return { was, now: 0 };
             }
             const now = (was + step) >>> 0;
+            const cell = this.#cell;
             if (cell?.exchange === undefined)
             {
-                count.value = now;
+                this.#store(now);
                 return { was, now };
             }
             if ((cell.exchange(was, now) >>> 0) === was)
@@ -174,90 +194,102 @@ export function createReferenceCount(options = {}){
                 return { was, now };
             }
         }
-    };
-    // The device's references to a resource bound to it. Windows keeps a
-    // bound resource alive past the program's last Release, with a count of
-    // zero, and hands the same object back when asked for what is bound; it
-    // goes once it is unbound too.
-    let held = 0;
-    const gone = ()=>{
-        options.onLastRef?.();
-        destroyed = !implicit;
-    };
+    }
 
-    return {
-        get value(){
-            return count.value;
-        },
-        // Whether the last reference has gone for good. An implicit resource
-        // never reaches this: the device owns it and hands out the same pointer
-        // for as long as it lives, so its storage must not be reclaimed.
-        get destroyed(){
-            return destroyed;
-        },
-        addRef(){
-            if (destroyed)
-            {
-                throw new Error('AddRef on a resource whose last reference was released');
-            }
-            // A count at 0 moves only here -- the guest's AddRef asks the host
-            // there -- so what is read as 0 stays 0 until this step.
-            if (count.value === 0)
-            {
-                options.onFirstRef?.();
-            }
-            return move(1).now;
-        },
-        release(){
-            const { was, now: left } = move(-1);
-            if (was === 0)
-            {
-                return 0;
-            }
-            if (left === 0)
-            {
-                options.onZero?.();
-            }
-            // An implicit resource outlives its own count: the device owns
-            // it, so the pointer a program kept stays the same one.
-            if (left === 0 && held === 0)
-            {
-                gone();
-            }
-            return left;
-        },
-        place(next){
-            const value = count.value;
-            cell = next;
-            count.value = value;
-        },
-        get placed(){
-            return cell?.address ?? 0;
-        },
-        /** How many bindings of the device keep it: a ring that may unbind it is played first. */
-        get held(){
-            return held;
-        },
-        // An implicit resource is the device's own for as long as the device
-        // lives, so a binding has nothing to keep alive.
-        hold(){
-            if (!implicit)
-            {
-                held++;
-            }
-        },
-        letGo(){
-            if (held === 0)
-            {
-                return;
-            }
-            held--;
-            if (held === 0 && count.value === 0 && !destroyed)
-            {
-                gone();
-            }
-        },
-    };
+    #gone(){
+        this.#options.onLastRef?.();
+        this.#destroyed = !this.#implicit;
+    }
+
+    /**
+     * Whether the last reference has gone for good. An implicit resource
+     * never reaches this: the device owns it and hands out the same pointer
+     * for as long as it lives, so its storage must not be reclaimed.
+     */
+    get destroyed(){
+        return this.#destroyed;
+    }
+
+    addRef(){
+        if (this.#destroyed)
+        {
+            throw new Error('AddRef on a resource whose last reference was released');
+        }
+        // A count at 0 moves only here -- the guest's AddRef asks the host
+        // there -- so what is read as 0 stays 0 until this step.
+        if (this.value === 0)
+        {
+            this.#options.onFirstRef?.();
+        }
+        return this.#move(1).now;
+    }
+
+    release(){
+        const { was, now: left } = this.#move(-1);
+        if (was === 0)
+        {
+            return 0;
+        }
+        if (left === 0)
+        {
+            this.#options.onZero?.();
+        }
+        // An implicit resource outlives its own count: the device owns
+        // it, so the pointer a program kept stays the same one.
+        if (left === 0 && this.#held === 0)
+        {
+            this.#gone();
+        }
+        return left;
+    }
+
+    /** @param {CountCell | null} next */
+    place(next){
+        const value = this.value;
+        this.#cell = next;
+        this.#store(value);
+    }
+
+    get placed(){
+        return this.#cell?.address ?? 0;
+    }
+
+    /** How many bindings of the device keep it: a ring that may unbind it is played first. */
+    get held(){
+        return this.#held;
+    }
+
+    // An implicit resource is the device's own for as long as the device
+    // lives, so a binding has nothing to keep alive.
+    hold(){
+        if (!this.#implicit)
+        {
+            this.#held++;
+        }
+    }
+
+    letGo(){
+        if (this.#held === 0)
+        {
+            return;
+        }
+        this.#held--;
+        if (this.#held === 0 && this.value === 0 && !this.#destroyed)
+        {
+            this.#gone();
+        }
+    }
+}
+
+/**
+ * @param {{ implicit?: boolean, onFirstRef?: () => void, onLastRef?: () => void,
+ *           onZero?: () => void }} [options]
+ *        `onZero`: the program's count reached zero, whether or not the device
+ *        still holds the resource bound.
+ * @returns {ReferenceCount}
+ */
+export function createReferenceCount(options = {}){
+    return new Count(options);
 }
 
 /**
@@ -265,47 +297,128 @@ export function createReferenceCount(options = {}){
  * back when the count is over. A level holds a reference on its container, so
  * the last one can go through a level -- a program releases the texture and
  * then the surface it asked for -- and the storage has to go whichever it is.
- *
- * @param {ReturnType<typeof createReferenceCount>} count
+ */
+class SharedCount {
+    /** @type {ReferenceCount} */
+    #count;
+    /** @type {() => void} */
+    #retire;
+
+    /** @param {ReferenceCount} count @param {() => void} retire */
+    constructor(count, retire){
+        this.#count = count;
+        this.#retire = retire;
+    }
+
+    get value(){
+        return this.#count.value;
+    }
+
+    get held(){
+        return this.#count.held;
+    }
+
+    hold(){
+        this.#count.hold?.();
+    }
+
+    // The binding was the last thing keeping it: its storage goes now.
+    letGo(){
+        const was = this.#count.destroyed;
+        this.#count.letGo?.();
+        if (!was && this.#count.destroyed)
+        {
+            this.#retire();
+        }
+    }
+
+    get destroyed(){
+        return this.#count.destroyed;
+    }
+
+    addRef(){
+        return this.#count.addRef();
+    }
+
+    release(){
+        const left = this.#count.release();
+        if (this.#count.destroyed)
+        {
+            this.#retire();
+        }
+        return left;
+    }
+
+    /** @param {CountCell | null} cell */
+    place(cell){
+        this.#count.place(cell);
+    }
+
+    get placed(){
+        return this.#count.placed;
+    }
+}
+
+/**
+ * @param {ReferenceCount} count
  * @param {() => void} retire
  */
-function sharedCount(count, retire){
-    return {
-        get value(){
-            return count.value;
-        },
-        get held(){
-            return count.held;
-        },
-        hold: ()=>count.hold?.(),
-        // The binding was the last thing keeping it: its storage goes now.
-        letGo(){
-            const was = count.destroyed;
-            count.letGo?.();
-            if (!was && count.destroyed)
-            {
-                retire();
-            }
-        },
-        get destroyed(){
-            return count.destroyed;
-        },
-        addRef: ()=>count.addRef(),
-        release(){
-            const left = count.release();
-            if (count.destroyed)
-            {
-                retire();
-            }
-            return left;
-        },
-        /** @param {CountCell | null} cell */
-        place: cell=>count.place(cell),
-        get placed(){
-            return count.placed;
-        },
-    };
-}
+const sharedCount = (count, retire)=>new SharedCount(count, retire);
+
+/**
+ * What a resource answers of its count, read through its `counter`: getters
+ * of one object, which every resource takes as its prototype. A literal's own
+ * getters are closures each resource makes, and V8 keeps every object of such
+ * a literal after the first as a dictionary -- the look at a bound texture's
+ * `hold` at each SetTexture was a hash probe through memory long out of the
+ * cache.
+ */
+const COUNTED = {
+    /** @this {{ counter: { value: number } }} */
+    get refCount(){
+        return this.counter.value;
+    },
+    /**
+     * Whether the last reference has gone for good: a resource its device or
+     * chain owns outlives a count of zero, and the pointer a program kept
+     * must still reach it (Wine's d3d8 and d3d9 test_refcount).
+     *
+     * @this {{ counter: { destroyed: boolean } }}
+     */
+    get destroyed(){
+        return this.counter.destroyed;
+    },
+};
+
+/**
+ * A resource with `refCount` and `destroyed` read off its `counter`
+ * (`COUNTED`), made with no getters of its own.
+ *
+ * @template T
+ * @param {T} body
+ * @returns {NoInfer<T> & { readonly refCount: number, readonly destroyed: boolean }}
+ */
+export const counted = body=>Object.setPrototypeOf(body, COUNTED);
+
+/** A buffer's prototype: `COUNTED`'s, and how many of its locks are held, which nest. */
+const COUNTED_BUFFER = {
+    __proto__: COUNTED,
+    /** @this {{ locks: { count: number } }} */
+    get lockCount(){
+        return this.locks.count;
+    },
+};
+
+/**
+ * A buffer as `counted` makes a resource, with `lockCount` read off its
+ * `locks` (`createBufferLocks`).
+ *
+ * @template T
+ * @param {T} body
+ * @returns {NoInfer<T> & { readonly refCount: number, readonly destroyed: boolean,
+ *     readonly lockCount: number }}
+ */
+export const countedBuffer = body=>Object.setPrototypeOf(body, COUNTED_BUFFER);
 
 /**
  * The video memory a device reports as available: what it starts with, less
@@ -580,19 +693,10 @@ export function createSurface(options){
     };
 
     /** @type {Surface} */
-    const self = {
+    const self = counted({
         base: options.base,
         /** Which of the five shapes this is: what a copy or a fill may do depends on it. */
         kind: options.type,
-        get refCount(){
-            return options.count.value;
-        },
-        // Whether the last reference has gone for good: a surface its device
-        // or chain owns outlives a count of zero, and the pointer a program
-        // kept must still reach it (Wine's d3d8 and d3d9 test_refcount).
-        get destroyed(){
-            return options.count.destroyed;
-        },
         reachable: ()=>!options.count.destroyed,
         // Where guest code may count its references (`ReferenceCount.place`).
         counter: options.count,
@@ -768,7 +872,7 @@ export function createSurface(options){
             lockRect = null;
             return self.UnlockRect();
         },
-    };
+    });
     return self;
 }
 
@@ -1139,7 +1243,7 @@ export function createTexture(options){
     /** The most detailed level a managed texture lets a sample reach. */
     let lod = 0;
 
-    const texture = {
+    const texture = counted({
         levels: options.levels,
         cube,
         pool: options.pool,
@@ -1200,12 +1304,6 @@ export function createTexture(options){
             return region;
         },
 
-        get refCount(){
-            return options.count.value;
-        },
-        get destroyed(){
-            return options.count.destroyed;
-        },
         // Where guest code may count its references (`ReferenceCount.place`).
         counter: count,
         addRef: ()=>options.count.addRef(),
@@ -1294,7 +1392,7 @@ export function createTexture(options){
             const surface = surfaceFor(face, level);
             return surface ? surface.UnlockRect() : D3DERR_INVALIDCALL;
         },
-    };
+    });
     return texture;
 }
 
@@ -1415,7 +1513,7 @@ export function createVolume(options){
         Height: options.height,
         Depth: options.depth,
     };
-    return {
+    return counted({
         base: options.base,
         width: options.width,
         height: options.height,
@@ -1425,12 +1523,6 @@ export function createVolume(options){
         texelBytes,
         /** @type {any} the volume texture this is a level of */
         container: null,
-        get refCount(){
-            return options.count.value;
-        },
-        get destroyed(){
-            return options.count.destroyed;
-        },
         reachable: ()=>!options.count.destroyed,
         // Where guest code may count its references (`ReferenceCount.place`).
         counter: options.count,
@@ -1484,7 +1576,7 @@ export function createVolume(options){
         get lockFlags(){
             return lockFlags;
         },
-    };
+    });
 }
 
 /**
@@ -1582,7 +1674,7 @@ export function createVolumeTexture(options){
 
     let lod = 0;
 
-    const texture = {
+    const texture = counted({
         levels: options.levels,
         volume: true,
         format: options.format,
@@ -1640,12 +1732,6 @@ export function createVolumeTexture(options){
             return region;
         },
 
-        get refCount(){
-            return options.count.value;
-        },
-        get destroyed(){
-            return options.count.destroyed;
-        },
         // Where guest code may count its references (`ReferenceCount.place`).
         counter: count,
         addRef: ()=>options.count.addRef(),
@@ -1687,7 +1773,7 @@ export function createVolumeTexture(options){
             const volume = volumeFor(level);
             return volume ? volume.UnlockBox() : D3DERR_INVALIDCALL;
         },
-    };
+    });
     // Every level's block as the texture is made, as a texture's chains are.
     for (let level = 0; level < options.levels; level++)
     {

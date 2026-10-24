@@ -63,9 +63,9 @@ import {
 import { createDefaultStageStates } from '../d3d8/stagestates.js';
 import { createDefaultRenderStates } from './renderstates.js';
 import {
-    HeldBindings, chainBytes, createPriority, createReferenceCount, createSurface, createTexture,
-    createVideoMemory, createVolumeTexture, packColour, rectMoveOf, regionAtLevel, volumeUpdate,
-    writeFrontBuffer, writePixels,
+    HeldBindings, chainBytes, countedBuffer, createPriority, createReferenceCount, createSurface,
+    createTexture, createVideoMemory, createVolumeTexture, packColour, rectMoveOf, regionAtLevel,
+    volumeUpdate, writeFrontBuffer, writePixels,
 } from './resources.js';
 import {
     SURFACE_TYPE, reportedBackBufferCount, validatePresentParameters, volumeCreateResult,
@@ -1344,16 +1344,10 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
             lock: (offset, length, flags)=>renderer?.lockBuffer(buffer, offset, length, flags),
             unlock: ()=>renderer?.unlockBuffer(buffer),
         });
-        const buffer = {
+        const buffer = countedBuffer({
             ...options,
             base: storages[0],
             ...createPriority(options.pool),
-            get refCount(){
-                return bufferCount.value;
-            },
-            get destroyed(){
-                return bufferCount.destroyed;
-            },
             reachable: ()=>!bufferCount.destroyed,
             // Where guest code may count its references (`ReferenceCount.place`).
             counter: bufferCount,
@@ -1389,11 +1383,8 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 return locks.release() ? D3D_OK : D3DERR_INVALIDCALL;
             },
 
-            /** How many locks are held: they nest (`createBufferLocks`). */
-            get lockCount(){
-                return locks.count;
-            },
-
+            /** How many locks are held, which nest (`createBufferLocks`): its `lockCount`. */
+            locks,
 
             /** @param {{ desc?: any }} out */
             GetDesc(out){
@@ -1407,7 +1398,7 @@ function createDeviceObject(parameters, caps, services, identity, extended = fal
                 };
                 return D3D_OK;
             },
-        };
+        });
         Object.assign(buffer, storageCalls(buffer, storages,
             { allocate, renderer, left: services.leftStorage }));
         return buffer;
