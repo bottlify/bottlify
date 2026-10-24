@@ -232,6 +232,31 @@ const showing = connections=>{
 };
 
 /**
+ * The word a graphics worker reads to know that a frame it sent was shown,
+ * given to it over memory this thread shares with it; none where this thread
+ * shares none, and the worker waits for each answer.
+ *
+ * @param {{ postMessage: (message: any) => void }} worker
+ * @returns {Int32Array | null}
+ */
+const shownWordFor = worker=>{
+    if (typeof SharedArrayBuffer !== 'function'
+        || /** @type {any} */ (globalThis).crossOriginIsolated === false)
+    {
+        return null;
+    }
+    const word = new Int32Array(new SharedArrayBuffer(4));
+    try
+    {
+        worker.postMessage({ type: 'showing', word });
+    }
+    catch {
+        return null;
+    }
+    return word;
+};
+
+/**
  * @param {{ postMessage: (message: any) => void,
  *     addEventListener: (type: 'message', listener: (event: { data: any }) => void) => void,
  *     removeEventListener: (type: 'message', listener: (event: { data: any }) => void) => void }}
@@ -245,14 +270,21 @@ function join(worker, connection){
     {
         /** @type {Connection[]} */
         const connections = [];
+        const word = shownWordFor(worker);
         /** @param {{ data: any }} event */
         const listener = ({ data })=>{
             switch (data?.type)
             {
                 case 'frame':
                     showing(connections)?.frame(data);
+                    // Read at the worker's next present: the answer may wait
+                    // there behind every batch it has yet to play.
+                    if (word && typeof data.serial === 'number')
+                    {
+                        Atomics.store(word, 0, data.serial);
+                    }
                     // The worker sends the next once this one is on this thread's queue.
-                    worker.postMessage({ type: 'shown', at: sharedNow() });
+                    worker.postMessage({ type: 'shown', at: sharedNow(), serial: data.serial });
                     break;
                 case 'lost':
                     for (const each of [...connections])

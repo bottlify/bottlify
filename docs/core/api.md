@@ -108,6 +108,10 @@ times the frames the worker sends to be shown, one at a time: how long each wait
 one before (`waitedMs`), its way to the thread that shows it (`thereMs`), showing it (`showMs`),
 and the answer's way back (`back`), each a sum with its worst. Together they bound the frames shown
 a second, whatever the worker draws; `graphics.worker.dropped` counts those a newer one replaced.
+Where the two threads share memory, the thread that shows the frames also writes the number of each
+one it shows into a word the worker reads at every present: a frame then goes as soon as the one
+before it was shown, not once the answer has come through the worker's queue, and `back.early`
+counts the frames that went so.
 
 ## The controller
 

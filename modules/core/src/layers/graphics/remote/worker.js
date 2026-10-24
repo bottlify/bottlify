@@ -16,9 +16,12 @@
  * the cursor stay where they are.
  *
  * Messages to the worker:
- *   { type: 'shown', at }            the program's thread has shown the frame sent
- *                                    last; the next goes when it has. `at` when it
- *                                    said so, on the clock both read (`sharedNow`)
+ *   { type: 'shown', at, serial }    the program's thread has shown the frame `serial`;
+ *                                    the next goes when the one sent last has. `at`
+ *                                    when it said so, on the clock both read (`sharedNow`)
+ *   { type: 'showing', word }        an Int32Array over shared memory where the program's
+ *                                    thread writes the `serial` of each frame it shows,
+ *                                    before it answers `shown`: read at each present
  *   { type: 'open', frames, capture } `frames` 'bitmap' sends each presented
  *                                    frame back as a picture, 'pixels' as its
  *                                    bytes read back, 'count' says only that
@@ -44,16 +47,18 @@
  *                                    `{ type: 'close' }` on the port ends it
  * Messages from it:
  *   { type: 'opened', adapter } | { type: 'failed', message }
- *   { type: 'frame', bitmap, frameIndex, format, dropped, source, sentAt, waitedMs, back }
+ *   { type: 'frame', bitmap, frameIndex, format, dropped, source, serial, sentAt, waitedMs,
+ *     back }
  *   { type: 'frame', pixels, bytesPerRow, width, height, frameIndex, format, dropped, source,
- *     sentAt, waitedMs, back }
+ *     serial, sentAt, waitedMs, back }
  *   { type: 'frame', frameIndex, source }  under 'count', every frame presented
  *                                    one at a time, the newest presented of a process,
- *                                    the processes in turn; `dropped` counts those a
- *                                    newer one replaced unsent, `sentAt` when it went,
- *                                    `waitedMs` how long since it was presented, and
- *                                    `back` the `shown` answers so far and the
- *                                    milliseconds they took to come
+ *                                    the processes in turn; `serial` counts the frames
+ *                                    sent, `dropped` those a newer one replaced unsent,
+ *                                    `sentAt` when it went, `waitedMs` how long since it
+ *                                    was presented, and `back` the `shown` answers so
+ *                                    far, the milliseconds they took to come and the
+ *                                    frames the shared word let go before them (`early`)
  *   { type: 'lost', reason }
  *   { type: 'captured', bytes, counts }  the capture, ended, as `{ type: 'debug',
  *                                    captured: true }` asked; `bytes` null without one
@@ -223,21 +228,37 @@ export function serveGraphics(scope, deps){
     });
     /** Whether a frame sent has not yet been shown by the program's thread. */
     let sending = false;
+    /** The frames sent so far: each goes with its number, which its showing answers with. */
+    let sent = 0;
+    /**
+     * Where the thread that shows the frames writes the number of the last
+     * one it showed, when it shares memory with this worker (`showing`).
+     * Its answer is a message, which waits behind every batch that came
+     * before it: a worker playing a heavy scene read it 5.5 ms late on
+     * average and replaced a third of its frames meanwhile. A present reads
+     * the word instead and sends at once when the frame before was shown.
+     *
+     * @type {Int32Array | null}
+     */
+    let shownWord = null;
     /** Frames presented that a newer one replaced before they were sent. */
     let dropped = 0;
     /**
      * The `shown` answers and how long each took to come back: one frame
      * goes at a time, so the way there, the showing and this way back
      * together bound the frames shown a second, however many are drawn.
+     * `early` counts the frames the shared word let go before their answer.
      */
-    const back = { count: 0, ms: 0, maxMs: 0 };
-    /** @param {Slot} surface */
-    const sentWith = surface=>{
+    const back = { count: 0, ms: 0, maxMs: 0, early: 0 };
+    /** @param {Slot} surface @param {number} serial */
+    const sentWith = (surface, serial)=>{
         const sentAt = sharedNow();
-        return { sentAt, waitedMs: Math.max(0, sentAt - surface.presentedAt),
+        return { serial, sentAt, waitedMs: Math.max(0, sentAt - surface.presentedAt),
             back: { count: back.count, ms: Math.round(back.ms * 100) / 100,
-                maxMs: Math.round(back.maxMs * 100) / 100 } };
+                maxMs: Math.round(back.maxMs * 100) / 100, early: back.early } };
     };
+    /** Whether the frame sent last has been shown, as the shared word says. */
+    const shownAlready = ()=>shownWord !== null && ((Atomics.load(shownWord, 0) - sent) | 0) >= 0;
 
     /**
      * A presented frame, kept to be sent back: at once when the frame before
@@ -295,6 +316,11 @@ export function serveGraphics(scope, deps){
         slot.fresh = true;
         slot.frameIndex = frame.frameIndex;
         slot.presentedAt = sharedNow();
+        if (sending && shownAlready())
+        {
+            sending = false;
+            back.early++;
+        }
         if (!sending)
         {
             send(device);
@@ -318,9 +344,11 @@ export function serveGraphics(scope, deps){
         }
         surface.fresh = false;
         sending = true;
+        sent = (sent + 1) | 0;
+        const serial = sent;
         if (frames === 'pixels')
         {
-            readPixels(device, { surface, frameIndex: surface.frameIndex });
+            readPixels(device, { surface, frameIndex: surface.frameIndex, serial });
             return;
         }
         if (!screen || screen.canvas.width !== surface.width
@@ -341,7 +369,7 @@ export function serveGraphics(scope, deps){
         device.queue.submit([encoder.finish()]);
         const bitmap = screen.canvas.transferToImageBitmap();
         scope.postMessage({ type: 'frame', bitmap, frameIndex: surface.frameIndex,
-            format: surface.format, dropped, source: surface.source, ...sentWith(surface) },
+            format: surface.format, dropped, source: surface.source, ...sentWith(surface, serial) },
         [bitmap]);
     };
 
@@ -353,9 +381,9 @@ export function serveGraphics(scope, deps){
      * happening.
      *
      * @param {any} device
-     * @param {{ surface: Slot, frameIndex: number }} frame
+     * @param {{ surface: Slot, frameIndex: number, serial: number }} frame
      */
-    const readPixels = (device, { surface, frameIndex })=>{
+    const readPixels = (device, { surface, frameIndex, serial })=>{
         const { width, height, format } = surface;
         const bytesPerRow = Math.ceil(width * 4 / 256) * 256;
         const buffer = device.createBuffer({ size: bytesPerRow * height,
@@ -368,7 +396,7 @@ export function serveGraphics(scope, deps){
             const pixels = new Uint8Array(buffer.getMappedRange()).slice();
             buffer.destroy();
             scope.postMessage({ type: 'frame', pixels, bytesPerRow, width, height, frameIndex,
-                format, dropped, source: surface.source, ...sentWith(surface) },
+                format, dropped, source: surface.source, ...sentWith(surface, serial) },
             [pixels.buffer]);
         }, ()=>{
             buffer.destroy();
@@ -602,8 +630,10 @@ export function serveGraphics(scope, deps){
                 // the frames go as bytes.
                 frames = data.frames;
                 break;
+            case 'showing':
+                shownWord = data.word instanceof Int32Array ? data.word : null;
+                break;
             case 'shown':
-                sending = false;
                 if (typeof data.at === 'number')
                 {
                     const took = Math.max(0, sharedNow() - data.at);
@@ -611,6 +641,14 @@ export function serveGraphics(scope, deps){
                     back.ms += took;
                     back.maxMs = Math.max(back.maxMs, took);
                 }
+                // The answer for a frame before the one sent last: the shared
+                // word let that one go already, and the one in flight is not
+                // shown yet.
+                if (typeof data.serial === 'number' && data.serial !== sent)
+                {
+                    break;
+                }
+                sending = false;
                 opened?.then(({ device })=>send(device), ()=>{});
                 break;
             case 'root':

@@ -101,6 +101,69 @@ test('a frame\'s way from the worker is timed: waiting there, coming here, shown
         end.dispose();
     });
 
+test('a frame shown is written into the word the worker reads, before its answer goes', ()=>{
+    // The answer waits on a busy worker behind the batches it has yet to
+    // play; the word is read at its next present.
+    const worker = fakeWorker();
+    const end = connectGraphicsWorker({ worker, device: fakeDevice(), presentTo: ()=>{} });
+    try
+    {
+        const given = worker.posted.filter(message=>message.type === 'showing');
+        assert.equal(given.length, 1, 'given once, as the worker is joined');
+        const { word } = given[0];
+        assert.ok(word instanceof Int32Array && word.buffer instanceof SharedArrayBuffer);
+        /** @type {number[]} */
+        const read = [];
+        const post = worker.postMessage;
+        worker.postMessage = (/** @type {any} */ message)=>{
+            if (message.type === 'shown')
+            {
+                read.push(Atomics.load(word, 0));
+            }
+            post.call(worker, message);
+        };
+        worker.answer({ type: 'frame', pixels: new Uint8Array(256 * 2), bytesPerRow: 256,
+            width: 2, height: 2, frameIndex: 4, format: 'bgra8unorm', serial: 7 });
+        assert.deepEqual(read, [7], 'the word says it before the answer goes');
+        assert.equal(worker.posted.at(-1).serial, 7, 'and the answer names the frame');
+        const second = connectGraphicsWorker({ worker, device: fakeDevice(), presentTo: ()=>{} });
+        assert.equal(worker.posted.filter(message=>message.type === 'showing').length, 1,
+            'a second process on the worker shares the word, as it shares the picture');
+        second.dispose();
+    }
+    finally
+    {
+        end.dispose();
+    }
+});
+
+test('where this thread shares no memory, the worker is given no word and waits for answers',
+    ()=>{
+        const isolated = Object.getOwnPropertyDescriptor(globalThis, 'crossOriginIsolated');
+        Object.defineProperty(globalThis, 'crossOriginIsolated', { value: false,
+            configurable: true });
+        const worker = fakeWorker();
+        const end = connectGraphicsWorker({ worker, device: fakeDevice(), presentTo: ()=>{} });
+        try
+        {
+            worker.answer({ type: 'frame', pixels: new Uint8Array(256 * 2), bytesPerRow: 256,
+                width: 2, height: 2, frameIndex: 4, format: 'bgra8unorm', serial: 1 });
+            assert.deepEqual(worker.posted.map(message=>message.type), ['shown']);
+        }
+        finally
+        {
+            end.dispose();
+            if (isolated)
+            {
+                Object.defineProperty(globalThis, 'crossOriginIsolated', isolated);
+            }
+            else
+            {
+                delete (/** @type {any} */ (globalThis)).crossOriginIsolated;
+            }
+        }
+    });
+
 test('a frame the worker counted is presented with no picture, and nothing is drawn', ()=>{
     const worker = fakeWorker();
     const device = fakeDevice();
@@ -135,8 +198,9 @@ test('a picture this thread\'s device refuses has the worker send bytes from the
         worker.answer({ type: 'frame', bitmap, frameIndex: 1, format: 'bgra8unorm' });
         assert.equal(shown.length, 0, 'the refused frame is not shown');
         assert.ok(closed, 'and its picture is given back');
-        assert.deepEqual(worker.posted.map(message=>message.type), ['frames', 'shown']);
-        assert.equal(worker.posted[0].frames, 'pixels');
+        const told = worker.posted.filter(message=>message.type !== 'showing');
+        assert.deepEqual(told.map(message=>message.type), ['frames', 'shown']);
+        assert.equal(told[0].frames, 'pixels');
         worker.answer({ type: 'frame', pixels: new Uint8Array(256 * 2), bytesPerRow: 256,
             width: 2, height: 2, frameIndex: 2, format: 'bgra8unorm' });
         assert.deepEqual(shown.map(frame=>frame.frameIndex), [2]);
