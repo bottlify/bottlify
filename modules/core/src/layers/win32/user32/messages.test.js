@@ -192,6 +192,42 @@ test('a slow handler does not build a backlog of ticks', ()=>{
     assert.equal(queue.peek(ALL), null);
 });
 
+test('a timer set after a look is handed out when due, though one set before is due later', ()=>{
+    const { clock, queue } = timed();
+    queue.setTimer(0x40, 1, 1000, 0);
+    // The look learns that nothing is due before 1000.
+    assert.equal(queue.peek(ALL), null);
+
+    queue.setTimer(0x40, 2, 10, 0);
+    clock.at = 10;
+    assert.equal(queue.peek(ALL)?.wParam, 2, 'the new timer is not hidden behind the old one');
+    clock.at = 20;
+    assert.equal(queue.peek(ALL)?.wParam, 2, 'and its next tick comes in its own period');
+});
+
+test('a timer killed before its tick leaves the next one due when it is due', ()=>{
+    const { clock, queue } = timed();
+    queue.setTimer(0x40, 1, 10, 0);
+    queue.setTimer(0x40, 2, 30, 0);
+    assert.equal(queue.peek(ALL), null);
+    queue.killTimer(0x40, 1);
+
+    clock.at = 10;
+    assert.equal(queue.peek(ALL), null, 'the killed timer hands out nothing');
+    clock.at = 30;
+    assert.equal(queue.peek(ALL)?.wParam, 2);
+});
+
+test('whether anything posted waits is said without taking it', ()=>{
+    const queue = createMessageQueue();
+    assert.equal(queue.hasQueued(null), false);
+    queue.post({ hwnd: 0x40, message: 0x400, wParam: 0, lParam: 0 });
+    assert.equal(queue.hasQueued(null), true);
+    assert.equal(queue.hasQueued(null), true, 'asking twice takes nothing');
+    assert.ok(queue.peek(ALL));
+    assert.equal(queue.hasQueued(null), false);
+});
+
 /** A queue whose pump is run by one thread or another, as a test says. */
 function threaded(){
     const clock = { at: 0 };

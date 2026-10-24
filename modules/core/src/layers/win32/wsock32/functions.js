@@ -351,9 +351,9 @@ export function createWinsockFunctions(host){
      * @param {any} socket
      * @param {() => any} attempt
      * @param {(outcome: any) => number} settle
+     * @param {any} [outcome]  The first try's outcome, where the caller already made it.
      */
-    const blocking = (socket, attempt, settle)=>{
-        const outcome = attempt();
+    const blocking = (socket, attempt, settle, outcome = attempt())=>{
         if (outcome.error !== WSAEWOULDBLOCK)
         {
             return settle(outcome);
@@ -364,6 +364,39 @@ export function createWinsockFunctions(host){
         }
         return until(socket, attempt).then(settle);
     };
+
+    /**
+     * recv and recvfrom past their first try, apart from them: a function
+     * whose variables a closure takes keeps them in an environment made at
+     * every call, and the first try answers most calls a game makes.
+     *
+     * @param {any} socket @param {number} wanted @param {number} buffer
+     * @param {number} name  Where recvfrom puts the sender; 0 for recv.
+     * @param {number} lengthPointer @param {any} first
+     */
+    const receiveInto = (socket, wanted, buffer, name, lengthPointer, first)=>blocking(socket,
+        ()=>registry.receive(socket, wanted), outcome=>{
+            rearm(socket, 'read');
+            if (outcome.error)
+            {
+                return fail(outcome.error);
+            }
+            if (outcome.value > 0)
+            {
+                host.writeMemory(buffer >>> 0, outcome.bytes);
+            }
+            if (name !== 0 && outcome.from)
+            {
+                writeSockaddr(host.writeMemory, name, outcome.from);
+                if (lengthPointer !== 0)
+                {
+                    writeDword(lengthPointer, SOCKADDR_IN_SIZE);
+                }
+            }
+            // A datagram that did not fit reports the loss, and does so
+            // *after* the bytes that did fit have been handed over.
+            return outcome.truncated ? fail(WSAEMSGSIZE) : ok(outcome.value);
+        }, first);
 
     /** How many bytes writeHostentAt needs, past what the caller already has room for. */
     const HOSTENT_BLOCK_SIZE = HOSTENT.SIZE + 64;
@@ -1279,18 +1312,15 @@ export function createWinsockFunctions(host){
                     return fail(WSAENOTSOCK);
                 }
                 const wanted = length >>> 0;
-                return blocking(socket, ()=>registry.receive(socket, wanted), outcome=>{
-                    rearm(socket, 'read');
-                    if (outcome.error)
-                    {
-                        return fail(outcome.error);
-                    }
-                    if (outcome.value > 0)
-                    {
-                        host.writeMemory(buffer >>> 0, outcome.bytes);
-                    }
-                    return ok(outcome.value);
-                });
+                // A game polls its socket in the loop that waits for a frame:
+                // nothing there on a socket that does not block is answered
+                // before anything is made to wait with.
+                const first = registry.receive(socket, wanted);
+                if (first.error === WSAEWOULDBLOCK && socket.nonBlocking)
+                {
+                    return fail(WSAEWOULDBLOCK);
+                }
+                return receiveInto(socket, wanted, buffer, 0, 0, first);
             },
         },
 
@@ -1324,28 +1354,15 @@ export function createWinsockFunctions(host){
                     return fail(WSAENOTSOCK);
                 }
                 const wanted = length >>> 0;
-                return blocking(socket, ()=>registry.receive(socket, wanted), outcome=>{
-                    rearm(socket, 'read');
-                    if (outcome.error)
-                    {
-                        return fail(outcome.error);
-                    }
-                    if (outcome.value > 0)
-                    {
-                        host.writeMemory(buffer >>> 0, outcome.bytes);
-                    }
-                    if (name !== 0 && outcome.from)
-                    {
-                        writeSockaddr(host.writeMemory, name, outcome.from);
-                        if (lengthPointer !== 0)
-                        {
-                            writeDword(lengthPointer, SOCKADDR_IN_SIZE);
-                        }
-                    }
-                    // A datagram that did not fit reports the loss, and does so
-                    // *after* the bytes that did fit have been handed over.
-                    return outcome.truncated ? fail(WSAEMSGSIZE) : ok(outcome.value);
-                });
+                // A game polls its socket in the loop that waits for a frame:
+                // nothing there on a socket that does not block is answered
+                // before anything is made to wait with.
+                const first = registry.receive(socket, wanted);
+                if (first.error === WSAEWOULDBLOCK && socket.nonBlocking)
+                {
+                    return fail(WSAEWOULDBLOCK);
+                }
+                return receiveInto(socket, wanted, buffer, name, lengthPointer, first);
             },
         },
 
