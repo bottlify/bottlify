@@ -1578,3 +1578,22 @@ None yet.
 - **Decision.** The translation worker is not nudged; the graphics worker is (`nudgeWhenAsked`).
   The change itself is 20 lines (a `gcNudge` runtime setting passed to the worker with `ready`,
   an interval started on it) and was not kept.
+
+### 2026-10-25: a DXT level's blocks let go in the graphics worker once uploaded
+
+- **Idea.** On a device that takes no BC blocks the worker decodes a compressed level for its
+  upload and keeps the blocks for nothing else: after 2c521083 lets uploaded texels go, letting the
+  blocks go too (a data property in place of the decoding getter, `compressed` null) would give
+  back the 47 MB of DXT blocks the Doom 3 demo's first level loads.
+- **Workload.** The engine's test page built as the package is (minified, diagnostics off), fake
+  GPU in a graphics worker, the Doom 3 demo's bundle `3f84befac918afe335547b36` straight into
+  `game/demo_mars_city1`, 2 GB of guest memory, one executor, 130 s; the web process's RSS once a
+  second. Arms alternated, two pairs: 2c521083 against it with the blocks let go.
+- **Values.** RSS 80-125 s: 1975, 1980 against 2057, 2100 MB; highest by 125 s: 2324, 2431
+  against 2772, 2787; anonymous memory at 120 s: 1377, 1430 against 1350, 1438. Bytes let go in
+  the worker 175 MB against 185 MB: of the 47 MB of blocks, 10 MB had been uploaded by then.
+- **Why.** The gain is 10 MB at that point; the higher peaks are not explained (both pairs).
+- **Machine.** The 4-core KVM VM (Xeon 2.10 GHz), 15 GB, Ubuntu 24.04, no GPU; Playwright 1.63.0
+  (WebKit 26.6, WPE, headless). Spread between runs of one arm in that level: about 300 MB at the
+  peak, 50 MB in the mean.
+- **Decision.** Not kept; the blocks stay. The patch (28 lines and its test) is not in the tree.
