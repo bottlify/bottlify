@@ -430,6 +430,9 @@ export function createGpuRenderer(services){
         // Texels let go once on the device, in bytes, and levels carried from
         // a texture's old copy to the one that replaced it (`textureFor`).
         letGo: 0, carried: 0,
+        // Compressed levels a device without their blocks took decoded: the
+        // blocks' bytes and the texels' they were uploaded as.
+        decoded: { levels: 0, blockBytes: 0, texelBytes: 0 },
         // Draws a context assembled vertex by vertex rather than handed over
         // as arrays, and their vertices, by why (`noteAssembled`): each one
         // is processor work on the program's thread and again in a worker.
@@ -1004,6 +1007,12 @@ export function createGpuRenderer(services){
                 continue;
             }
             const area = rect ?? { x: 0, y: 0, width: image.width, height: image.height };
+            if (image.compressed && rect === null)
+            {
+                stats.decoded.levels++;
+                stats.decoded.blockBytes += image.compressed.bytes.byteLength;
+                stats.decoded.texelBytes += image.width * image.height * 4;
+            }
             upload({
                 texture: record.gpu.texture,
                 format: TEXTURE_FORMAT,
