@@ -6461,6 +6461,20 @@ export function createWindowFunctions(host){
     };
 
     /**
+     * Each thread's filter for the looks that answer at once, filled in place:
+     * a game waiting for a frame looks hundreds of thousands of times a
+     * second, and a filter made at each was most of what the engine's thread
+     * made as garbage. A look that goes on past its call -- a sent message,
+     * a hook -- keeps its filter until it settles, and a look meanwhile is
+     * given a new one.
+     *
+     * @type {WeakMap<object, import('./messages.js').MessageFilter>}
+     */
+    const lookFilters = new WeakMap();
+    /** @type {WeakSet<object>} */
+    const filtersHeld = new WeakSet();
+
+    /**
      * PeekMessage, in either encoding.
      *
      * @param {number[]} args  lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax, wRemoveMsg.
@@ -6470,16 +6484,36 @@ export function createWindowFunctions(host){
         const remove = (removeFlag & PM_REMOVE) !== 0;
         const thread = host.callerThread?.();
         hasQueue(thread);
-        const filter = { hwnd: windowFilter(hwnd), first: filterMin >>> 0,
-            last: filterMax >>> 0, remove, thread: threadIdOf(thread) };
+        const owner = typeof thread === 'object' && thread !== null ? thread : null;
+        let filter = owner === null ? undefined : lookFilters.get(owner);
+        if (filter === undefined || filtersHeld.has(filter))
+        {
+            filter = { hwnd: 0, first: 0, last: 0, remove: false, thread: 0 };
+            if (owner !== null)
+            {
+                lookFilters.set(owner, filter);
+            }
+        }
+        filter.hwnd = windowFilter(hwnd);
+        filter.first = filterMin >>> 0;
+        filter.last = filterMax >>> 0;
+        filter.remove = remove;
+        filter.thread = threadIdOf(thread);
         // What other threads sent is handled before anything posted is looked
         // for. A game waiting for its next frame looks at an empty queue
         // hundreds of thousands of times a second, so the way through makes
         // no closure while every step answers at once: the garbage of those
         // looks outran the collector on a phone, and the tab was killed.
         const sent = receiveSent(thread);
-        return promised(sent) ? peekAfter(sent, out, filter, thread, unicode)
+        const answer = promised(sent) ? peekAfter(sent, out, filter, thread, unicode)
             : peekQueued(out, filter, thread, unicode);
+        if (promised(answer))
+        {
+            const held = filter;
+            filtersHeld.add(held);
+            answer.then(()=>filtersHeld.delete(held), ()=>filtersHeld.delete(held));
+        }
+        return answer;
     };
 
     /**

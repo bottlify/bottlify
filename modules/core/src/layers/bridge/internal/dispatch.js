@@ -80,7 +80,9 @@ import { isDriven } from './drive.js';
  * @property {boolean} hook
  * @property {number} target
  * @property {Map<number, number>} [callers]  Sampled crossings by return address.
- * @property {Map<string, number>} [chains]  The same, by the two callers above it.
+ * @property {Map<number, Map<number, number>>} [chains]  The same, by the two callers above
+ *     it: the first return address, then the second.
+ * @property {number} chainCount  The pairs `chains` holds, kept to CALLERS_KEPT.
  * @property {Map<string, number>} [threads]  The same, by the thread that made them.
  * @property {boolean} site
  * @property {number} trampoline
@@ -217,6 +219,41 @@ const HOOK_AREA = 'call.hook';
 const TRAP_SAMPLE = 32;
 /** How many return addresses each function's sampled crossings are counted at. */
 const CALLERS_KEPT = 64;
+
+/**
+ * A function's sampled frame chains as text and counts: "0xA<0xB", the first
+ * return address alone where the chain had one, "" where it had none.
+ *
+ * @param {Map<number, Map<number, number>>} chains
+ * @returns {[string, number][]}
+ */
+const chainCounts = chains=>[...chains].flatMap(([first, below])=>[...below].map(
+    ([second, count])=>/** @type {[string, number]} */ ([first === 0 ? ''
+        : `0x${first.toString(16)}${second === 0 ? '' : `<0x${second.toString(16)}`}`, count])));
+
+/**
+ * A call's argument array, made to hold each word as a value from the start.
+ *
+ * V8 keeps an array of small integers unboxed and moves it, the first time it
+ * is given a number past them -- a word from 0x40000000 up, which a handle, a
+ * flag or a high pointer is -- to doubles for good; from then on a handler
+ * that destructures its arguments, as nearly every one does, boxes every
+ * element at every call. A game polling PeekMessage and recvfrom made a
+ * hundred megabytes of garbage a second that way. An array that has once held
+ * something other than a number never goes to doubles: a small word stays
+ * unboxed, and a large one is boxed once when it is written.
+ *
+ * @param {number} count @returns {number[]}
+ */
+const argumentArray = count=>{
+    const words = /** @type {any[]} */ ([null]);
+    words.length = 0;
+    for (let index = 0; index < count; index++)
+    {
+        words.push(0);
+    }
+    return words;
+};
 const TRAP_WEIGHT = Object.freeze({ weight: TRAP_SAMPLE });
 /** What a phase inside a timed crossing stands for: as many as the crossing (`innerBegin`). */
 const INNER_WEIGHT = Object.freeze({ weight: TRAP_SAMPLE, withParent: true });
@@ -475,6 +512,9 @@ class Dispatcher {
         this.untilSample = this.sampleInterval();
         /** Whether the crossing being made is a sampled one, whose caller is counted. */
         this.sampleCaller = false;
+        /** The two return addresses `frameChain` read last, zero past the chain's end. */
+        this.chainFirst = 0;
+        this.chainSecond = 0;
         /**
          * What a phase opened inside the crossing being made stands for
          * (`innerBegin`): with every call a phase of its own, each is timed and
@@ -614,24 +654,35 @@ class Dispatcher {
 
     /**
      * The return addresses of the two frames an EBP chain names from `ebp`,
-     * as text; a frame outside mapped memory ends it.
+     * into `chainFirst` and `chainSecond`, zero where the chain ends sooner; a
+     * frame outside mapped memory ends it. Numbers rather than text: a sampled
+     * crossing runs this tens of thousands of times a second, and text made
+     * at each was megabytes of garbage a second for a statistic.
      *
      * @param {number} ebp
      */
     frameChain(ebp){
-        const found = [];
+        this.chainFirst = 0;
+        this.chainSecond = 0;
         let frame = ebp >>> 0;
-        while (found.length < 2 && frame !== 0)
+        for (let depth = 0; depth < 2 && frame !== 0; depth++)
         {
             const region = this.memory.find?.(frame);
             if (!region || frame + 8 > region.base + region.size)
             {
                 break;
             }
-            found.push(`0x${(this.memory.readU32(frame + 4) >>> 0).toString(16)}`);
+            const returnTo = this.memory.readU32(frame + 4) >>> 0;
+            if (depth === 0)
+            {
+                this.chainFirst = returnTo;
+            }
+            else
+            {
+                this.chainSecond = returnTo;
+            }
             frame = this.memory.readU32(frame) >>> 0;
         }
-        return found.join('<');
     }
 
     /**
@@ -991,7 +1042,7 @@ class Dispatcher {
         // is waiting for: they are its now, and the next call gets fresh
         // ones. Paid only by a call that already costs a wait, never by the
         // prompt ones.
-        entry.args = new Array(args.length);
+        entry.args = argumentArray(args.length);
         this.frames[this.depth] = undefined;
         // A parked call's EAX belongs to whatever wakes the thread, and it
         // carries the wait's own result. Writing a placeholder here would
@@ -1130,12 +1181,25 @@ class Dispatcher {
             }
             // And the two callers above it, by the frame chain: the caller is
             // often a wrapper that sixty places call, and the loop is in one.
-            const chain = this.frameChain(regs === null
-                ? this.cpu.readReg32('ebp') : regs[EBP] >>> 0);
+            this.frameChain(regs === null ? this.cpu.readReg32('ebp') : regs[EBP] >>> 0);
+            // By the first address, then the second: a pair seen before
+            // counts without making anything.
             const chains = entry.chains ??= new Map();
-            if (chains.has(chain) || chains.size < CALLERS_KEPT)
+            let below = chains.get(this.chainFirst);
+            if (below === undefined && entry.chainCount < CALLERS_KEPT)
             {
-                chains.set(chain, (chains.get(chain) ?? 0) + 1);
+                below = new Map();
+                chains.set(this.chainFirst, below);
+            }
+            const seen = below?.get(this.chainSecond);
+            if (seen !== undefined)
+            {
+                below.set(this.chainSecond, seen + 1);
+            }
+            else if (below && entry.chainCount < CALLERS_KEPT)
+            {
+                below.set(this.chainSecond, 1);
+                entry.chainCount++;
             }
         }
         // Copied, because a handler that writes through a pointer can
@@ -1423,8 +1487,9 @@ class Dispatcher {
             hookStats: hook
                 ? { calls: 0, handled: 0, fellThrough: 0, mismatches: 0, ms: 0 } : null,
             readsError: this.errorReader && fn.lastError !== false,
-            args: new Array(site ? 8 : stackWords + registerArgs),
+            args: argumentArray(site ? 8 : stackWords + registerArgs),
             kept: Math.min(site ? 8 : stackWords + registerArgs, KEPT_ARGS),
+            chainCount: 0,
             writer: typeof this.memory?.writer === 'function' ? this.memory.writer(fn.name) : -1,
             sinkRevision: -1,
             sinkOn: true,
@@ -1647,7 +1712,7 @@ class Dispatcher {
                     ? ` from ${[...entry.callers].sort((a, b)=>b[1] - a[1]).slice(0, 3)
                         .map(([from, count])=>`0x${(from >>> 0).toString(16)}x${count}`)
                         .join(',')}` : ''}${entry.chains
-                    ? ` via ${[...entry.chains].sort((a, b)=>b[1] - a[1]).slice(0, 3)
+                    ? ` via ${chainCounts(entry.chains).sort((a, b)=>b[1] - a[1]).slice(0, 3)
                         .map(([chain, count])=>`${chain}x${count}`).join(',')}` : ''}${entry.threads
                     ? ` by ${[...entry.threads].sort((a, b)=>b[1] - a[1]).slice(0, 3)
                         .map(([name, count])=>`${name}x${count}`).join(',')}` : ''}`),

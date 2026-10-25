@@ -57,8 +57,10 @@ const NT_PRODUCT_WIN_NT = 1;
  * computes is what GetTickCount answers.
  */
 const MULTIPLIER_ONE = 0x01000000;
-/** 100-nanosecond units between 1601 and 1970, FILETIME's epoch and Date's. */
-const FILETIME_EPOCH = 116444736000000000n;
+/** Milliseconds between 1601 and 1970, FILETIME's epoch and Date's. */
+const FILETIME_EPOCH_MS = 11644473600000;
+const TWO_16 = 0x10000;
+const TWO_32 = 0x100000000;
 
 /**
  * @param {Object} options
@@ -123,12 +125,21 @@ export function createSharedUserData({ memory, version, physicalPages = 0x40000 
      * the low word, then the first high word, so a reader that finds the two
      * high words equal has a whole value.
      *
-     * @param {number} at @param {bigint} value
+     * The value is milliseconds, written as 100-nanosecond units -- in plain
+     * numbers, a millisecond count split in two so no product passes 2^53:
+     * BigInt arithmetic here was an allocation per field wherever guest time
+     * moved.
+     *
+     * @param {number} at @param {number} milliseconds
      */
-    const writeTime = (at, value)=>{
-        const high = Number(value >> 32n & 0xffffffffn);
+    const writeTime = (at, milliseconds)=>{
+        const whole = Math.floor(milliseconds);
+        const upper = Math.floor(whole / TWO_16) * 10_000;
+        const lower = whole % TWO_16 * 10_000;
+        const sum = upper % TWO_16 * TWO_16 + lower;
+        const high = Math.floor(upper / TWO_16) + Math.floor(sum / TWO_32);
         put(at + 8, high);
-        put(at, Number(value & 0xffffffffn));
+        put(at, sum % TWO_32);
         put(at + 4, high);
     };
     /**
@@ -154,12 +165,16 @@ export function createSharedUserData({ memory, version, physicalPages = 0x40000 
         // ponytail: TimeZoneBias stays zero; fill it from GetTimeZoneInformation's
         // zone when a program is seen reading local time from here.
         refresh(milliseconds, systemTimeMs){
-            const ticks = BigInt(Math.floor(milliseconds));
-            put(KUSER.TICK_COUNT_LOW, Number(ticks & 0xffffffffn));
-            writeTime(KUSER.TICK_COUNT, ticks);
-            writeTime(KUSER.INTERRUPT_TIME, ticks * 10_000n);
-            writeTime(KUSER.SYSTEM_TIME,
-                BigInt(Math.floor(systemTimeMs)) * 10_000n + FILETIME_EPOCH);
+            const ticks = Math.floor(milliseconds);
+            put(KUSER.TICK_COUNT_LOW, ticks % TWO_32);
+            // The tick count in milliseconds (the multiplier is one), its high
+            // word in both high slots.
+            const tickHigh = Math.floor(ticks / TWO_32);
+            put(KUSER.TICK_COUNT + 8, tickHigh);
+            put(KUSER.TICK_COUNT, ticks % TWO_32);
+            put(KUSER.TICK_COUNT + 4, tickHigh);
+            writeTime(KUSER.INTERRUPT_TIME, ticks);
+            writeTime(KUSER.SYSTEM_TIME, Math.floor(systemTimeMs) + FILETIME_EPOCH_MS);
         },
     };
 }
