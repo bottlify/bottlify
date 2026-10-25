@@ -19,6 +19,7 @@
  */
 
 import { createCorkHost } from './cork-host.js';
+import { startGcNudge } from './gc-nudge.js';
 import { ANSWER_BOUNDS_US, Bell, Said, Turn, Word, channelOf, lookFor, sleepAsync, waitWhile }
     from './executor-channel.js';
 import { UNBROKEN_STEP, UNBROKEN_STEPS, unbrokenTable } from './unbroken.js';
@@ -123,6 +124,11 @@ async function serve({ engineUrl, config, memory, channel: buffer, bell, unbroke
     const host = createCorkHost({ ...config, engine, memory,
         ...(store === true ? { cork: { ...config.cork, store: processStore(send) } } : {}) });
     running = host;
+    // This thread holds the guest's memory too (`gcNudge`, settled by the process).
+    if (config.gcNudge)
+    {
+        startGcNudge(config.gcNudge);
+    }
     const bellWords = new Int32Array(bell);
     const routines = unbroken === undefined ? null : unbrokenTable(unbroken);
     // The pacing the config names (`EngineConfig`), these defaults otherwise.

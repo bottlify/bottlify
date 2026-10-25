@@ -154,6 +154,9 @@ const hex = (value, width = 8)=>(value >>> 0).toString(16).padStart(width, '0');
  * @property {{ simd: boolean, tailCalls: boolean, sharedMemory: boolean,
  *     defaultNaNNegative: boolean }} [features]  What the engine translates for in place of
  *     what it finds in this host's: the tests run here what another host's translator makes.
+ * @property {{ everyMs: number, bytes: number } | false} [gcNudge]  How the threads holding
+ *     the guest's memory bring JavaScriptCore's collections forward (`gc-nudge.js`), as the
+ *     process settled it; an executor's worker nudges by it.
  */
 
 /**

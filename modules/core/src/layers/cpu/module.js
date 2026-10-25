@@ -6,6 +6,7 @@
 
 import { createV86Host } from './internal/v86-host.js';
 import { createCorkHost, createTsc } from './internal/cork-host.js';
+import { gcNudgeOf, startGcNudge } from './internal/gc-nudge.js';
 import { createBell, createRemoteExecutor } from './internal/executor.js';
 import { unbrokenTable } from './internal/unbroken.js';
 import { createWriteClock } from './internal/write-clock.js';
@@ -240,10 +241,11 @@ export function createCpuModule(){
              *          remoteFigures: Map<number, any>, executorsRefused: string | null,
              *          ordered: boolean | null,
              *          writes: { host: any, clock: ReturnType<typeof createWriteClock> } | null,
-             *          learned: { store: any, opened: number } | null }}
+             *          learned: { store: any, opened: number } | null,
+             *          nudge: ReturnType<typeof startGcNudge> | null }}
              */
             const state = {
-                host: null, thunks: null, running: false, tableWritten: false,
+                host: null, thunks: null, running: false, tableWritten: false, nudge: null,
                 worstInterpreted: 0, worstInterpretedAt: 0, interpretedBefore: 0,
                 lastFault: null, disposed: false, samples: createSampleTable(), engine,
                 cork: null,
@@ -639,6 +641,7 @@ export function createCpuModule(){
                         // plain stores alone on a host that reorders them (arm64).
                         const ordered = several && settings.cork?.ordered === true;
                         state.ordered = several ? ordered : null;
+                        const nudging = gcNudgeOf(config?.gcNudge);
                         const hostConfig = {
                             memorySize: settings.memorySize,
                             trapPort: settings.trapPort,
@@ -662,9 +665,14 @@ export function createCpuModule(){
                             executors: settings.executors,
                             // One time-stamp counter for every executor (`useGuestClock`).
                             ...(several ? { tsc: createTsc() } : {}),
+                            // Settled here, once, for every executor of the process:
+                            // each thread that holds the guest's memory is nudged.
+                            gcNudge: nudging ?? /** @type {false} */ (false),
                         };
                         state.host = createCorkHost({ ...hostConfig, engine: engineModule,
                             reused: settings.reused });
+                        state.nudge?.stop();
+                        state.nudge = nudging ? startGcNudge(nudging) : null;
                         if (several)
                         {
                             // What crosses to a worker is data: the translation store
@@ -1554,6 +1562,9 @@ export function createCpuModule(){
                     // Whether the executors keep the program's plain accesses in
                     // order (cork's `ordered`, as the run asked); null on one executor.
                     ordered: instance.ordered,
+                    // The buffers made to bring JavaScriptCore's collections forward
+                    // on this thread (`gcNudge`); null where none are made.
+                    gcNudges: instance.nudge?.made() ?? null,
                     running: instance.running,
                     instructions: retiredEverywhere(instance),
                     protectedMode: instance.host.inProtectedMode(),
@@ -1651,6 +1662,8 @@ export function createCpuModule(){
                 {
                     current.host.stop();
                 }
+                current.nudge?.stop();
+                current.nudge = null;
                 // Every executor's worker gone before the machine is: the memory
                 // may be handed to the next process (`CorkHostConfig.reused`).
                 // One still opening closes itself once open.

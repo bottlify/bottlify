@@ -278,7 +278,8 @@ const hashText = (hash, text)=>{
  *           due within 16 ms. Default ten quanta.
  * @property {{ cores?: number, eager?: boolean, placement?: 'auto' | 'spread' | 'concentrate',
  *           placementTiming?: Partial<import('./layers/kernel/internal/placement.js').PlacementOptions>,
- *           playPinned?: boolean, freeHost?: boolean }} [cpu]
+ *           playPinned?: boolean, freeHost?: boolean,
+ *           gcNudge?: boolean | { everyMs?: number, bytes?: number } }} [cpu]
  *           The machine's processor. `cores`: how many
  *           processors the program is told it has -- by every road Windows has to say
  *           it -- and the executors that run its threads at once, each a worker past
@@ -304,6 +305,10 @@ const hashText = (hash, text)=>{
  *           game's main thread, pinned to the first), the processor played by another
  *           core; with it the threads spread unless `placement` is named, and no
  *           processor is traded on its gains, so `playPinned` applies only with it off.
+ *           `gcNudge`: each thread that holds the guest's memory makes and drops an
+ *           untouched buffer (64 MB every 50 ms unless named) so that JavaScriptCore
+ *           collects its young garbage before it piles up; on by default where
+ *           JavaScriptCore runs and nowhere else, `false` for none.
  * @property {number} [executors]  `cpu.cores` by its older name: executors of the
  *           program's process under cork, past the process's own thread each a worker
  *           running one of its threads at once with the others, the locked
@@ -4213,6 +4218,9 @@ async function buildApp(options){
             engine: options.engine ?? DEFAULT_ENGINE,
             executors: options.executors ?? 1,
             eagerExecutors: options.cpu?.eager === true,
+            // The threads holding the guest's memory bring JavaScriptCore's
+            // collections forward (`gc-nudge.js`): by default there only.
+            gcNudge: options.cpu?.gcNudge,
             engineUrl: (options.engine ?? DEFAULT_ENGINE) !== 'emulator'
                 ? corkArtifacts(options.cork).moduleUrl : null,
             cork: {
