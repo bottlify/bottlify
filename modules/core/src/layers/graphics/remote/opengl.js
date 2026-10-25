@@ -88,7 +88,8 @@ export function recordedOpengl(factory, services, transport){
  *         => number | undefined }}
  */
 export function playedOpengl(factory, services){
-    const mirror = createMirror();
+    // Every byte a played context reads is sent with the call that reads it.
+    const mirror = createMirror({ forget: true });
     /** @type {ReturnType<typeof createPlayer> | null} */
     let player = null;
     let playing = false;
@@ -115,13 +116,26 @@ export function playedOpengl(factory, services){
             playing = true;
             try
             {
-                return live.play(call);
+                const answer = live.play(call);
+                // What this side holds of the program's memory, which only it can say.
+                return call.m === 'diagnostics' && answer
+                    ? { ...answer, mirrored: { held: mirror.bytes(), reached: mirror.reached() } }
+                    : answer;
             }
             finally
             {
                 playing = false;
             }
         },
-        read: live.read,
+        read: (buffer, each)=>{
+            try
+            {
+                return live.read(buffer, each);
+            }
+            finally
+            {
+                mirror.settle();
+            }
+        },
     };
 }

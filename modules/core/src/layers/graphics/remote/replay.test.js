@@ -618,7 +618,36 @@ test('the mirror keeps what is written to it across its pages, and zero elsewher
     mirror.write(0x1ff80, bytes);
     assert.deepEqual([...mirror.read(0x1ff80, 300)], [...bytes]);
     assert.deepEqual([...mirror.read(0x1ff70, 0x10)], new Array(0x10).fill(0));
+    assert.equal(mirror.bytes(), 2 * 0x10000, 'the two 64 KiB pages the write reached');
 });
+
+test('a forgetting mirror lets go of a page no write reached since the settle before the last',
+    ()=>{
+        const mirror = createMirror({ forget: true });
+        const kept = createMirror();
+        for (const one of [mirror, kept])
+        {
+            one.write(0x10000, Uint8Array.of(1, 2, 3));
+            one.write(0x30000, Uint8Array.of(4));
+            one.settle();
+            one.write(0x30000, Uint8Array.of(5));
+            one.settle();
+            assert.deepEqual([...one.read(0x10000, 3)], [1, 2, 3],
+                'a page written in the batch before the last is still held');
+            one.write(0x50000, Uint8Array.of(6));
+            one.settle();
+        }
+        assert.deepEqual([...kept.read(0x10000, 3)], [1, 2, 3]);
+        assert.deepEqual([...mirror.read(0x10000, 3)], [0, 0, 0], 'let go: it reads as never sent');
+        assert.deepEqual([...mirror.read(0x30000, 1)], [5]);
+        assert.deepEqual([...mirror.read(0x50000, 1)], [6]);
+        assert.equal(mirror.bytes(), 2 * 0x10000);
+        assert.equal(mirror.reached(), 3 * 0x10000, 'every page ever written');
+        assert.equal(kept.bytes(), 3 * 0x10000);
+        // A page made again from one let go starts as zeros.
+        mirror.write(0x70002, Uint8Array.of(7));
+        assert.deepEqual([...mirror.read(0x70000, 4)], [0, 0, 7, 0]);
+    });
 
 /**
  * The mirror's watches as they were before a 64 KiB page could be passed
