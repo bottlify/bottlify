@@ -1018,6 +1018,68 @@ test('a writer that cannot stand beside the store\'s handle leaves the writes to
     });
 
 /**
+ * The origin's file system as a worker has it, whose records file refuses a
+ * synchronous handle -- always, or only one asked for in a shared mode -- and
+ * counts the streams opened on it.
+ *
+ * @param {'always' | 'shared'} refuses
+ */
+const refusingDirectory = refuses=>{
+    const streams = { opened: 0 };
+    const wrap = (/** @type {any} */ directory)=>({
+        ...directory,
+        getDirectoryHandle: async(/** @type {string} */ name, /** @type {any} */ options)=>
+            wrap(await directory.getDirectoryHandle(name, options)),
+        getFileHandle: async(/** @type {string} */ name, /** @type {any} */ options)=>{
+            const handle = await directory.getFileHandle(name, options);
+            if (!name.startsWith('records'))
+            {
+                return handle;
+            }
+            return {
+                ...handle,
+                createSyncAccessHandle: async(/** @type {any} */ asked)=>{
+                    if (refuses === 'always' || asked?.mode !== undefined)
+                    {
+                        throw new DOMException('refused', 'NoModificationAllowedError');
+                    }
+                    return handle.createSyncAccessHandle();
+                },
+                createWritable: async()=>{
+                    streams.opened++;
+                    throw new Error('a stream copies the whole records file');
+                },
+            };
+        },
+    });
+    return { root: wrap(createMemoryDirectory()), streams };
+};
+
+test('a worker holds the records file alone where a shared handle is refused, and never'
+    + ' writes it through a stream', async()=>{
+    const writer = { closed: 0 };
+    const shared = refusingDirectory('shared');
+    const store = await createDirectoryTranslationStore(shared.root, 'game', undefined,
+        { writer: ()=>({ open: async()=>true, write: async()=>{
+            throw new Error('not this writer');
+        }, flush: async()=>{}, close: ()=>{
+            writer.closed++;
+        } }) });
+    await store.put('cork/41/a/x', new Uint8Array([1, 2, 3]));
+    assert.deepEqual([...store.getNow('cork/41/a/x') ?? []], [1, 2, 3], 'written alone');
+    assert.equal(writer.closed, 1, 'the writer let go');
+    assert.equal(shared.streams.opened, 0);
+
+    const refused = refusingDirectory('always');
+    const without = await createDirectoryTranslationStore(refused.root, 'game', undefined,
+        { writer: ()=>null });
+    await without.put('cork/41/a/x', new Uint8Array([1, 2, 3]));
+    assert.equal(await without.get('cork/41/a/x'), null, 'no cache rather than a copy a put');
+    assert.equal(refused.streams.opened, 0);
+    assert.equal(without.stats().broken, true);
+});
+
+/**
  * A record as its length and an FNV-1a hash of its bytes, or what stood for it.
  *
  * @param {Uint8Array | null | undefined} bytes

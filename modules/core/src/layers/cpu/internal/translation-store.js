@@ -543,7 +543,17 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
                     writer = openWriter();
                 }
                 access = await records.createSyncAccessHandle(writer === null ? undefined
-                    : { mode: 'readwrite-unsafe' });
+                    : { mode: 'readwrite-unsafe' }).catch((/** @type {any} */ e)=>{
+                    // A browser that has no shared handle refuses the mode
+                    // or the second holder: the store holds the file alone.
+                    if (writer === null)
+                    {
+                        throw e;
+                    }
+                    writer.close();
+                    writer = null;
+                    return records.createSyncAccessHandle();
+                });
                 end = access.getSize();
                 // A writer that cannot stand beside this handle leaves the
                 // writes to the store, as before there was one.
@@ -554,7 +564,15 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
                 }
             }
             catch {
+                // Not the stream instead: a stream is a copy of the whole
+                // records file made at every append -- hundreds of megabytes
+                // a batch -- and WebKit leaves each copy behind in its
+                // temporary directory (FileSystemWritableStream*), which grew
+                // a Mac's and an iPhone's Safari by tens of gigabytes. A
+                // worker that cannot hold the file runs without the cache.
                 access = null;
+                broken = true;
+                return;
             }
         }
         if (access === null)
