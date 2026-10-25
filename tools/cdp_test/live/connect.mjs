@@ -44,7 +44,9 @@ export async function connect(match = process.env.CDP_TAB ?? '5180'){
         return answer.result?.value;
     };
     /**
-     * The page's workers, each with its script URL.
+     * The page's workers, each with its script URL, and the workers they made
+     * in turn: the engine's worker starts the graphics worker and the
+     * executors itself, and only an attach inside its session reaches them.
      *
      * @returns {Promise<{ sessionId: string, url: string }[]>}
      */
@@ -55,6 +57,9 @@ export async function connect(match = process.env.CDP_TAB ?? '5180'){
             if (params.targetInfo?.type === 'worker')
             {
                 found.push({ sessionId: params.sessionId, url: String(params.targetInfo.url) });
+                cdp.send('Target.setAutoAttach',
+                    { autoAttach: true, waitForDebuggerOnStart: false, flatten: true },
+                    params.sessionId).catch(()=>{});
             }
         });
         await cdp.send('Target.setAutoAttach',

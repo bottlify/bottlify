@@ -97,9 +97,11 @@ export class CdpEndpoint {
      * @param {string} method
      * @param {Object} [params]
      * @param {string | null} [sessionId]
+     * @param {number} [timeoutMs]  30 s unless the command is known to take longer
+     *     (a heap snapshot of a worker holding gigabytes)
      * @returns {Promise<any>} result payload
      */
-    send(method, params = {}, sessionId = null){
+    send(method, params = {}, sessionId = null, timeoutMs = 30000){
         /** @type {CdpMessage} */
         const message = { id: this.nextId++, method, params };
         if (sessionId)
@@ -115,7 +117,7 @@ export class CdpEndpoint {
                     this.pending.delete(message.id);
                     reject(new Error(`CDP command timed out: ${method}`));
                 }
-            }, 30000);
+            }, timeoutMs);
         });
     }
 
