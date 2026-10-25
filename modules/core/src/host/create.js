@@ -25,9 +25,7 @@
  * whole engine's memory alive. Nothing watches while a program runs.
  */
 
-import { createApp as createEngine } from '../app.js';
 import { createRemoteApp } from './remote.js';
-import { serveEngine } from './serve.js';
 
 /**
  * @typedef {import('./messages.js').StartOptions & {
@@ -51,10 +49,11 @@ import { serveEngine } from './serve.js';
 /**
  * Where a program runs: its worker, or a port to the engine on this thread.
  * `closed` once its canvas left the page and took it; `unwatch` stops the
- * watch on that canvas, which runs only while no program does.
+ * watch on that canvas, which runs only while no program does. `ready`
+ * settles once the engine on this thread is loaded and serving its port.
  *
  * @typedef {{ worker: any, close: () => void, closed?: boolean,
- *     unwatch?: () => void }} Host
+ *     unwatch?: () => void, ready?: Promise<void> }} Host
  */
 
 /**
@@ -138,12 +137,27 @@ function openHost(mode, workerUrl){
             { type: 'module' });
         return { worker, close: ()=>worker.terminate() };
     }
+    // The engine is loaded only where it runs on this thread: a page whose
+    // engine runs in a worker holds none of it (in WebKit 26 the bundled
+    // engine imported on a page held 66 MB more than the page did without it).
+    // What the page posts before the engine listens waits in the port.
     const channel = new MessageChannel();
-    const serving = serveEngine(channel.port2, { createApp: createEngine });
+    /** @type {{ close: () => void } | null} */
+    let serving = null;
+    let closed = false;
+    const ready = Promise.all([import('../app.js'), import('./serve.js')])
+        .then(([engine, serve])=>{
+            if (!closed)
+            {
+                serving = serve.serveEngine(channel.port2, { createApp: engine.createApp });
+            }
+        });
     return {
         worker: channel.port1,
+        ready,
         close(){
-            serving.close();
+            closed = true;
+            serving?.close();
             channel.port1.close();
             channel.port2.close();
         },
@@ -176,6 +190,7 @@ export async function createApp(options){
     let app;
     try
     {
+        await opened.ready;
         app = await createRemoteApp({
             worker: opened.worker,
             // Transferred the first time; the host keeps it after that.

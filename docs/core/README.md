@@ -68,7 +68,7 @@ A page needs three things served from one origin:
 
 | Path | What | From |
 | --- | --- | --- |
-| `/bottlify/` | the engine: `core.js`, its workers, `worklet.js`, `cork/`, `vendor/` | `modules/core/dist` after `npm run build` |
+| `/bottlify/` | the engine: `core.js` and its `core-*.js` chunks, its workers, `worklet.js`, `cork/`, `vendor/` | `modules/core/dist` after `npm run build` |
 | `/bundles/<id>/bundle.btl`, `manifest.json` | the bottle, read a block at a time | `make-btl pack` |
 | `/bundles/<id>/entry` | the program's image, which `createApp` takes as bytes | `node tools/make-btl.mjs extract <id>` |
 
@@ -97,7 +97,10 @@ import { createApp } from '@bottlify/core';
 ```
 
 `createApp` finds its workers, `cork/` and `vendor/` beside `core.js`; for a bundler that moves
-files, pass `workerUrl` and `cork: { moduleUrl }`. `cork/` is the build of the `@bottlify/cork`
+files, pass `workerUrl` and `cork: { moduleUrl }`. The page itself loads only the side that talks
+to the engine's worker: the engine is in `core-*.js` chunks beside `core.js`, loaded only for
+`host: 'thread'` or `assembleModules`, so they must be served with it but cost a page nothing
+otherwise. `cork/` is the build of the `@bottlify/cork`
 version the package depends on, installed with it. Another cork named by `moduleUrl` must implement
 the same engine contract (its `contract` export); one that does not is refused at start. The FFmpeg video decoder is a subpath,
 `@bottlify/core/video-decoder.wasm`, passed as `media: { wasmBytes }`; without it a program is told

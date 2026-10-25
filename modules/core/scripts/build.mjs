@@ -6,7 +6,7 @@
 
 import { build } from 'esbuild';
 import { createHash } from 'node:crypto';
-import { copyFile, mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildGuestCode } from './build-guest-code.mjs';
@@ -46,6 +46,9 @@ const VENDOR_ARTIFACTS = [
 
 /** Files that must travel with the package, copied from the repository root. */
 const LEGAL = ['LICENSE', 'THIRD-PARTY-NOTICES.md'];
+
+/** The chunks the page's module is split into (`chunkNames` below). */
+const CHUNK = /^core-.+-[A-Z0-9]{8}\.js$/;
 
 /**
  * Walks a directory and returns every file path.
@@ -163,26 +166,11 @@ if (keepDiagnostics)
 {
     console.log('diagnostics: kept in the bundle');
 }
-// Seven entries, one build: the module a page imports and the workers it
-// starts -- the engine and the log keeper -- and the ones the engine starts:
-// the one Direct3D draws in, a child process's own, a process's further
-// executors (`layers/cpu/internal/executor.worker.js`), and the one that writes
-// the translation store's records (`translation-store.writer.js`). Bundled apart because
-// a worker is loaded by URL, not imported, and each carries what it needs. All
-// sit in dist/, so the vendor directory below is the same for each.
-await build({
-    entryPoints: [
-        join(SRC, 'index.js'),
-        join(SRC, 'host', 'engine.worker.js'),
-        join(SRC, 'host', 'log.worker.js'),
-        join(SRC, 'host', 'graphics.worker.js'),
-        join(SRC, 'host', 'process.worker.js'),
-        join(SRC, 'layers', 'cpu', 'internal', 'executor.worker.js'),
-        join(SRC, 'layers', 'cpu', 'internal', 'translation-store.writer.js'),
-    ],
+/** What every bundle of the engine is built with. */
+const ENGINE_BUILD = {
     bundle: true,
-    format: 'esm',
-    platform: 'browser',
+    format: /** @type {const} */ ('esm'),
+    platform: /** @type {const} */ ('browser'),
     target: ['es2022'],
     // A Node fallback for compression that a browser never reaches: every
     // engine with WebGPU has CompressionStream, so the dynamic import stays
@@ -203,11 +191,50 @@ await build({
     },
     outdir: DIST,
     entryNames: '[name]',
-    logLevel: 'info',
+    logLevel: /** @type {const} */ ('info'),
+};
+// The module a page imports, split where it imports lazily: the engine, which
+// a page loads only to run a program on its own thread, and the layers behind
+// `assembleModules` go into chunks of their own, so a page whose program runs
+// in a worker loads only the side that talks to it. The chunks sit in dist/
+// beside the workers, because the engine finds its workers, the translator
+// and the vendor directory beside the module it runs from; the last build's
+// are removed first, since their names carry their contents' hash.
+for (const file of await readdir(DIST))
+{
+    if (CHUNK.test(file))
+    {
+        await rm(join(DIST, file));
+    }
+}
+await build({
+    ...ENGINE_BUILD,
+    entryPoints: [join(SRC, 'index.js')],
+    splitting: true,
+    chunkNames: 'core-[name]-[hash]',
 });
 // `index.js` is the package's entry and `core.js` is the file the exports map
-// names; esbuild names an output after its entry.
+// names; esbuild names an output after its entry, and puts what the entry
+// shares with a chunk into a chunk too, so none imports the entry by name.
 await rename(join(DIST, 'index.js'), join(DIST, 'core.js'));
+// Six more, one build: the workers the page starts -- the engine and the log
+// keeper -- and the ones the engine starts: the one Direct3D draws in, a child
+// process's own, a process's further executors
+// (`layers/cpu/internal/executor.worker.js`), and the one that writes the
+// translation store's records (`translation-store.writer.js`). Bundled apart
+// because a worker is loaded by URL, not imported, and each carries what it
+// needs. All sit in dist/, so the vendor directory below is the same for each.
+await build({
+    ...ENGINE_BUILD,
+    entryPoints: [
+        join(SRC, 'host', 'engine.worker.js'),
+        join(SRC, 'host', 'log.worker.js'),
+        join(SRC, 'host', 'graphics.worker.js'),
+        join(SRC, 'host', 'process.worker.js'),
+        join(SRC, 'layers', 'cpu', 'internal', 'executor.worker.js'),
+        join(SRC, 'layers', 'cpu', 'internal', 'translation-store.writer.js'),
+    ],
+});
 // The translator, which the cpu layer loads by URL rather than imports: its
 // engine module and the translation worker it opens from beside itself, under
 // the same define. Node's worker and zlib are for a test process, never a page.
