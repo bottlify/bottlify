@@ -38,6 +38,7 @@ const FORMAT_BYTES = Object.freeze({
     'bc2-rgba-unorm': 1, 'bc2-rgba-unorm-srgb': 1, 'bc3-rgba-unorm': 1, 'bc3-rgba-unorm-srgb': 1,
     'bc5-rg-unorm': 1, 'bc5-rg-snorm': 1, 'bc6h-rgb-ufloat': 1, 'bc6h-rgb-float': 1,
     'bc7-rgba-unorm': 1, 'bc7-rgba-unorm-srgb': 1,
+    'astc-4x4-unorm': 1, 'astc-4x4-unorm-srgb': 1,
 });
 
 /**

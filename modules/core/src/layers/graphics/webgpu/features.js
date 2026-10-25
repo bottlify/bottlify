@@ -11,6 +11,8 @@
  * on one and another on the other:
  *
  *  - texture-compression-bc: DXT textures stay compressed on the GPU;
+ *  - texture-compression-astc: where there is no BC, a phone's GPU, DXT1
+ *    textures stay compressed as ASTC (`internal/astc.js`);
  *  - depth-clip-control: a draw can leave depth unclipped (D3D10's
  *    DepthClipEnable = FALSE);
  *  - clip-distances: the user clip planes are the rasteriser's; without it a
@@ -21,7 +23,8 @@
  *    pass (`internal/gputime.js`).
  */
 export const OPTIONAL_GPU_FEATURES = Object.freeze(['texture-compression-bc',
-    'depth-clip-control', 'clip-distances', 'float32-filterable', 'float32-blendable',
+    'texture-compression-astc', 'depth-clip-control', 'clip-distances', 'float32-filterable',
+    'float32-blendable',
     ...(import.meta.BOTTLIFY_DIAGNOSTICS !== false ? ['timestamp-query'] : [])]);
 
 /**

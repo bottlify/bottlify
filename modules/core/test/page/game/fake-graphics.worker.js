@@ -17,13 +17,17 @@ import { nudgeWhenAsked } from '../../../src/layers/cpu/internal/gc-nudge.js';
 // played side a third of its time -- what a run measures is the engine.
 // `?pipelineMs=N`: a pipeline takes that long to build, as a GPU compiling its
 // shaders does, so frames queue behind their pipelines as on a real device.
-const pipelineDelayMs = Number(new URL(self.location.href).searchParams.get('pipelineMs') ?? 0);
+// `?features=a,b`: the optional features the device says it has, as a phone's
+// GPU says texture-compression-astc and not -bc.
+const search = new URL(self.location.href).searchParams;
+const pipelineDelayMs = Number(search.get('pipelineMs') ?? 0);
+const features = new Set((search.get('features') ?? '').split(',').filter(Boolean));
 const gpu = createFakeDevice({ quiet: true, pipelineDelayMs });
 nudgeWhenAsked(self);
-Object.assign(gpu.device, { queue: gpu.queue, features: new Set(),
+Object.assign(gpu.device, { queue: gpu.queue, features,
     createSampler: (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor }) });
 serveGraphics(/** @type {any} */ (self), /** @type {any} */ ({
-    gpu: { requestAdapter: async()=>({ features: new Set(), info: { vendor: 'fake' },
+    gpu: { requestAdapter: async()=>({ features, info: { vendor: 'fake' },
         requestDevice: async()=>gpu.device }) },
     canvas: (/** @type {number} */ width, /** @type {number} */ height)=>Object.assign(gpu.canvas,
         { width, height, transferToImageBitmap: ()=>({ width, height, close: ()=>{} }) }),

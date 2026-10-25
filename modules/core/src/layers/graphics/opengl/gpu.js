@@ -48,6 +48,7 @@ import { createBufferReads } from './buffer-reads.js';
 import { identity, invert, multiply, transpose } from './matrix.js';
 import { normalMatrix } from './lighting.js';
 import { FACE_STRIDE, createTextureObject, isTextureComplete, levelKey } from './objects.js';
+import { dxt1ToAstc, dxt1Transcodes } from '../webgpu/internal/astc.js';
 import {
     CANONICAL_LAYOUT, clientReads, expandIndices, isList, lockedFor, packVertices, planLayout,
     scanIndices, topologyOf,
@@ -122,6 +123,22 @@ const BC_FORMATS = Object.freeze({
     [GL.COMPRESSED_RGBA_S3TC_DXT5_EXT]: 'bc3-rgba-unorm',
 });
 
+/** The format a DXT1 texture travels as where it is transcoded. */
+const ASTC_FROM_DXT1 = 'astc-4x4-unorm';
+
+/**
+ * What a device with ASTC and no BC takes an S3TC format as: DXT1 only.
+ * DXT3's and DXT5's alpha (sixteen explicit values, or eight steps between
+ * two) would need a second plane of weights ASTC 4x4 has no room for at
+ * their precision, and stays decoded.
+ *
+ * @type {Readonly<Record<number, string>>}
+ */
+const ASTC_FORMATS = Object.freeze({
+    [GL.COMPRESSED_RGB_S3TC_DXT1_EXT]: ASTC_FROM_DXT1,
+    [GL.COMPRESSED_RGBA_S3TC_DXT1_EXT]: ASTC_FROM_DXT1,
+});
+
 /**
  * @typedef {Object} GpuServices
  * @property {any} backend
@@ -139,6 +156,10 @@ const BC_FORMATS = Object.freeze({
  * @property {boolean} [compressedTextures]  the device has `texture-compression-bc`:
  *           an S3TC texture whose every level kept its blocks travels as
  *           blocks instead of the texels the context decoded them into
+ * @property {boolean} [astcTextures]  the device has `texture-compression-astc` and
+ *           no BC: a DXT1 texture whose every level kept its blocks, none of
+ *           them with a texel of the fourth colour, travels as ASTC 4x4 blocks
+ *           (`webgpu/internal/astc.js`), a byte a texel where decoded it is four
  */
 
 /**
@@ -433,6 +454,8 @@ export function createGpuRenderer(services){
         // Compressed levels a device without their blocks took decoded: the
         // blocks' bytes and the texels' they were uploaded as.
         decoded: { levels: 0, blockBytes: 0, texelBytes: 0 },
+        // DXT1 levels a device with ASTC and no BC took as ASTC blocks.
+        transcoded: { levels: 0, blockBytes: 0, astcBytes: 0 },
         // Draws a context assembled vertex by vertex rather than handed over
         // as arrays, and their vertices, by why (`noteAssembled`): each one
         // is processor work on the program's thread and again in a worker.
@@ -803,18 +826,20 @@ export function createGpuRenderer(services){
      * @returns {string | null}
      */
     const bcFormatOf = (texture, levels, cube)=>{
-        if (!services.compressedTextures)
+        if (!services.compressedTextures && !services.astcTextures)
         {
             return null;
         }
+        const formats = services.compressedTextures ? BC_FORMATS : ASTC_FORMATS;
         let format = null;
         for (let level = 0; level < levels; level++)
         {
             for (let face = 0; face < (cube ? 6 : 1); face++)
             {
                 const image = texture.levels.get(levelKey(level, face));
-                const mapped = image?.compressed ? BC_FORMATS[image.compressed.format] : undefined;
-                if (!mapped || (format !== null && format !== mapped))
+                const mapped = image?.compressed ? formats[image.compressed.format] : undefined;
+                if (!mapped || (format !== null && format !== mapped)
+                    || (mapped === ASTC_FROM_DXT1 && !transcodable(/** @type {any} */ (image))))
                 {
                     return null;
                 }
@@ -830,6 +855,25 @@ export function createGpuRenderer(services){
             }
         }
         return format;
+    };
+
+    /**
+     * Whether a DXT1 level's blocks transcode to ASTC, asked of its blocks
+     * once: a texture's format is settled at each use.
+     *
+     * @type {WeakMap<Uint8Array, boolean>}
+     */
+    const transcodes = new WeakMap();
+    /** @param {{ compressed: { bytes: Uint8Array }, width: number, height: number }} image */
+    const transcodable = image=>{
+        const { bytes } = image.compressed;
+        let known = transcodes.get(bytes);
+        if (known === undefined)
+        {
+            known = dxt1Transcodes(bytes, image.width, image.height);
+            transcodes.set(bytes, known);
+        }
+        return known;
     };
 
     /** The levels whose texels were let go once on the device (`textureFor`). */
@@ -995,6 +1039,17 @@ export function createGpuRenderer(services){
             {
                 const compressed = /** @type {NonNullable<typeof image.compressed>} */ (
                     image.compressed);
+                // Transcoded, the blocks are bytes of their own already.
+                const astc = bcFormat === ASTC_FROM_DXT1
+                    ? /** @type {Uint8Array} */ (dxt1ToAstc(compressed.bytes, image.width,
+                        image.height))
+                    : null;
+                if (astc)
+                {
+                    stats.transcoded.levels++;
+                    stats.transcoded.blockBytes += compressed.bytes.byteLength;
+                    stats.transcoded.astcBytes += astc.byteLength;
+                }
                 upload({
                     texture: record.gpu.texture,
                     format: bcFormat,
@@ -1002,7 +1057,7 @@ export function createGpuRenderer(services){
                     width: image.width,
                     height: image.height,
                     origin: { x: 0, y: 0, z: face },
-                    data: ordered ? compressed.bytes.slice() : compressed.bytes,
+                    data: astc ?? (ordered ? compressed.bytes.slice() : compressed.bytes),
                 });
                 continue;
             }

@@ -91,7 +91,7 @@ publishing). The tables list only the settings that are data; `memory` and `load
 | Setting | Default | What it does |
 | --- | --- | --- |
 | `screen` | 640 × 480, 32 | The display the devices start from. |
-| `compressedTextures` | `false` | Upload DXT textures as BC where the GPU has `texture-compression-bc`; otherwise they are decoded on the CPU. |
+| `compressedTextures` | `false` | Upload DXT textures as BC where the GPU has `texture-compression-bc`. Where it has `texture-compression-astc` and not BC, as a phone's GPU, OpenGL's DXT1 textures are uploaded as ASTC 4x4 blocks, a byte a texel instead of four. Otherwise they are decoded on the CPU. |
 | `maxFrameLatency` | 3 | Frames the GPU may still be drawing when `Present` returns; 0 for no bound. A device in the graphics worker counts a frame drawn when the browser's GPU process says so, later than the GPU finishes it. |
 | `maxFps` | 60 | Passed to the presenter; not applied yet ([limits.md](limits.md#graphics)). |
 | `choice` | every API | `createApp`'s `graphicsApi`: which roots are built ([api.md](api.md)). |

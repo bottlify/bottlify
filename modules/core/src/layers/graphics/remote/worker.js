@@ -532,6 +532,8 @@ export function serveGraphics(scope, deps){
                 // Blocks are uploaded as blocks only where this device takes them.
                 compressedTextures: options.compressedTextures === true
                     && device.features?.has?.('texture-compression-bc') === true,
+                astcTextures: options.astcTextures === true
+                    && device.features?.has?.('texture-compression-astc') === true,
                 writeMemory: wrote,
                 divergence: (/** @type {string} */ detail)=>
                     post({ type: 'divergence', api: 'OpenGL', detail }),

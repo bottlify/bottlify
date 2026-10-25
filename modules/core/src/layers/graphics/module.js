@@ -335,9 +335,17 @@ export function createGraphicsModule(){
             // has the final say either way: a device without it never samples BC.
             const hasBcFeature = device?.device?.features?.has('texture-compression-bc') === true;
             const compressedTextures = config?.compressedTextures === true && hasBcFeature;
+            // Asked, and with no BC but ASTC -- a phone's GPU -- OpenGL's DXT1
+            // textures travel as ASTC blocks instead (`webgpu/internal/astc.js`).
+            const hasAstcFeature =
+                device?.device?.features?.has('texture-compression-astc') === true;
+            const astcTextures = config?.compressedTextures === true && !hasBcFeature
+                && hasAstcFeature;
             // What a report says of it: asked, offered, and so taken or not.
             state.blockCompression = { asked: config?.compressedTextures === true,
-                deviceHasBc: device ? hasBcFeature : 'no device', on: compressedTextures };
+                deviceHasBc: device ? hasBcFeature : 'no device',
+                deviceHasAstc: device ? hasAstcFeature : 'no device', on: compressedTextures,
+                astc: astcTextures };
             /** A factory's own override still cannot ask for BC on a device that cannot sample it. */
             const gatedCompressedTextures = (/** @type {any} */ caps)=>
                 (caps?.compressedTextures ?? compressedTextures) && hasBcFeature;
@@ -687,6 +695,7 @@ export function createGraphicsModule(){
                     // and spare the processor decoding every S3TC texture in the
                     // guest's own code.
                     compressedTextures,
+                    astcTextures,
                     presenter: ()=>state.shown,
                     frameQueued,
                     // The same per-draw account the Direct3D 8 device takes, on
