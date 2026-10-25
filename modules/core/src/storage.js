@@ -82,9 +82,18 @@ async function recode(bytes, format, compress){
         : globalThis.DecompressionStream;
     if (Stream)
     {
-        const part = /** @type {any} */ (bytes);
-        const stream = new Blob([part]).stream().pipeThrough(new Stream(format));
-        return new Uint8Array(await new Response(stream).arrayBuffer());
+        // Written into the stream itself, not through a Blob: WebKit keeps a
+        // Blob's bytes in a file of its own on the disk until the Blob is
+        // collected (BlobRegistryImpl::createDataSegment), and a bundle read
+        // a deflated block at a time grew an iPhone's Safari by gigabytes a
+        // run. A view of shared memory is copied, which a stream refuses.
+        const stream = new Stream(format);
+        const writer = stream.writable.getWriter();
+        const part = bytes.buffer instanceof ArrayBuffer ? bytes : bytes.slice();
+        // Their failures are the readable side's, read below.
+        writer.write(/** @type {any} */ (part)).catch(()=>{});
+        writer.close().catch(()=>{});
+        return new Uint8Array(await new Response(stream.readable).arrayBuffer());
     }
 
     const zlib = await import('node:zlib');

@@ -7,12 +7,35 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    coalescedSaver,
+    coalescedSaver, inflateRaw,
     normaliseSession, opfsSession, packSession, resolveStorage, unpackSession,
 } from './storage.js';
 
 /** @param {number} size @param {number} fill */
 const bytes = (size, fill)=>new Uint8Array(size).fill(fill);
+
+test('a deflated block is inflated through the stream, with no Blob made for it', async()=>{
+    const { deflateRawSync } = await import('node:zlib');
+    const plain = new Uint8Array(300000).map((_, at)=>(at * 7) & 0xff);
+    const packed = new Uint8Array(deflateRawSync(plain));
+    const shared = new Uint8Array(new SharedArrayBuffer(packed.length));
+    shared.set(packed);
+    const Blob = globalThis.Blob;
+    // WebKit keeps every Blob's bytes in a file on the disk: none may be made.
+    globalThis.Blob = /** @type {any} */ (class { constructor(){
+        throw new Error('a Blob was made');
+    } });
+    try
+    {
+        assert.deepEqual(await inflateRaw(packed), plain);
+        assert.deepEqual(await inflateRaw(shared), plain, 'a view of shared memory');
+        await assert.rejects(inflateRaw(new Uint8Array([1, 2, 3])), 'a broken stream is an error');
+    }
+    finally
+    {
+        globalThis.Blob = Blob;
+    }
+});
 
 test('a session survives being packed and unpacked', async()=>{
     const files = [
