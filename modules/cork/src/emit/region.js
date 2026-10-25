@@ -138,7 +138,9 @@ export const CallStack = Object.freeze({
     // What a returning call left of the budget, for its caller to go on with.
     BUDGET: 2564,
     STACK: 2576,
-    // Deeper calls leave as any call does, so the wasm stack stays bounded.
+    // Deeper calls leave as any call does, so the wasm stack stays bounded: the
+    // most the stack holds, and the depth a module's calls stop at unless it is
+    // given a lower one (`callDepth`).
     LIMIT: 256,
 });
 
@@ -263,6 +265,8 @@ const LOCAL_TYPES = [
  *     at its first look (`linkedCall`); false: through the transfer
  * @property {boolean} [crossTailCalls] false: a transfer to a region of another module leaves
  *     for the host's loop rather than tail-calling into the other instance (`finishModule`)
+ * @property {number} [callDepth] with `callReturn`, how many wasm calls may wait at once: a
+ *     call made deeper leaves as any call does (`callAndReturn`); `CallStack.LIMIT` at most
  * @property {boolean} [countTransfers] each transfer through the hash adds one to the
  *     tables' transfer count (a diagnostic run)
  * @property {boolean} [blockProfile] each block counts its executions in the block
@@ -337,7 +341,8 @@ const LOCAL_TYPES = [
  *     structure?: boolean, precise?: boolean, place?: number, profileCalls?: boolean,
  *     resume?: boolean, callReturn?: boolean, emptySites?: boolean, linkedCalls?: boolean,
  *     looseStacks?: boolean, atomic?: boolean, ordered?: boolean, checkReads?: boolean,
- *     expansion?: ExpansionNote | null, markBlocks?: boolean, crossTailCalls?: boolean }}
+ *     expansion?: ExpansionNote | null, markBlocks?: boolean, crossTailCalls?: boolean,
+ *     callDepth?: number }}
  *     [options]  expansion: told every instruction's wasm bytes as it is emitted
  *     (`tools/cork-expansion.mjs`), in a diagnostic build only; markBlocks: each block
  *     marked for the machine code (`blockMark`), likewise; checkReads: an
@@ -369,7 +374,8 @@ export function prepareModule(m, layout, features, memory = {},
         wide = false, narrow = false, blockProfile = false, structure = true, precise = false,
         place = 0, profileCalls = false, resume = false, callReturn = false, emptySites = false,
         linkedCalls = true, looseStacks = false, atomic = false, ordered = false,
-        checkReads = false, expansion = null, markBlocks = false, crossTailCalls = true } = {})
+        checkReads = false, expansion = null, markBlocks = false, crossTailCalls = true,
+        callDepth = CallStack.LIMIT } = {})
 {
     m.importMemory('env', 'memory', {
         min: 1, ...(memory.maxPages === undefined ? {} : { max: memory.maxPages }),
@@ -441,6 +447,7 @@ export function prepareModule(m, layout, features, memory = {},
     if (callReturn && hashed && !undoLog && (layout.flagRecord ?? -1) >= 0)
     {
         context.callReturn = true;
+        context.callDepth = Math.max(1, Math.min(CallStack.LIMIT, Math.trunc(callDepth)));
         if (emptySites)
         {
             context.emptySites = true;

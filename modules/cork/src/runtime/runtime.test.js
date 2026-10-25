@@ -10,12 +10,13 @@ import { Tables, ownLayout, pagesFor, tablesSize } from './layout.js';
 import { PageFlag } from './pages.js';
 import { createCorkRuntime } from './runtime.js';
 import { eflagsOf } from '../emit/flags.js';
+import { CallStack } from '../emit/region.js';
 import { features as probeFeatures } from '../wasm/features.js';
 
 const CODE = 0x1000;
 
 /** A machine of 4 MiB with cork's own layout and a runtime over it. */
-function machine(config = {}, ramSize = 4 << 20){
+function machine(config = {}, ramSize = 4 << 20, imports = {}){
     const layout = ownLayout({ ramSize, hashSlots: 1 << 16 });
     const memory = new WebAssembly.Memory({ initial: pagesFor(layout,
         tablesSize(layout) + (/** @type {any} */ (config).blockProfile ? Tables.BLOCK_PROFILE_SIZE : 0)) });
@@ -28,7 +29,7 @@ function machine(config = {}, ramSize = 4 << 20){
         memory, layout, config,
         read: address=>bytes()[layout.ramBase + address],
         imports: { trap: ()=>0, getEflags: ()=>view().getUint32(layout.eflags, true),
-            x87Read: ()=>0, rdtsc: ()=>0n },
+            x87Read: ()=>0, rdtsc: ()=>0n, ...imports },
     });
     return {
         layout, memory, runtime,
@@ -3589,6 +3590,67 @@ test('with callReturn calls deeper than the stack of waiting calls go on as plai
         assert.deepEqual(results[1], results[0]);
         assert.deepEqual(results[1].slice(1, 5), [0, 300, 299, 0x80000]);
     });
+
+test('with callReturn no more calls wait as wasm calls than the module\'s depth, and a recursion '
+    + 'past it gives what it gives with none waiting', async()=>{
+    // mov ecx, 600; mov esi, A; call esi; hlt
+    // A: rdtsc; dec ecx; jz 1f; inc ebx; call esi; 1: ret
+    // Through a register, as a virtual method recursing down a tree calls
+    // itself: a direct call to the region's own entry is a jump within it. The
+    // rdtsc is the host's import, called in place: it reads how many calls
+    // wait (`CallStack.DEPTH`) and counts the wasm frames on the host's stack.
+    const a = CODE + 13;
+    const program = [
+        0xb9, 0x58, 0x02, 0, 0, 0xbe, a & 0xff, a >>> 8 & 0xff, a >>> 16 & 0xff, a >>> 24,
+        0xff, 0xd6, 0xf4,
+        0x0f, 0x31, 0x49, 0x74, 0x03, 0x43, 0xff, 0xd6, 0xc3,
+    ];
+    /** @type {{ result: number[], depth: number, frames: number }[]} */
+    const runs = [];
+    for (const config of [{ callReturn: false }, { callReturn: true },
+        { callReturn: true, callDepth: 8 }, { callReturn: true, callDepth: 1 }])
+    {
+        let depth = 0;
+        let frames = 0;
+        /** @type {ReturnType<typeof machine> | null} */
+        let held = null;
+        const rdtsc = ()=>{
+            const m = /** @type {ReturnType<typeof machine>} */ (held);
+            depth = Math.max(depth, new DataView(m.memory.buffer)
+                .getUint32(m.layout.regs + CallStack.DEPTH, true));
+            const limit = Error.stackTraceLimit;
+            Error.stackTraceLimit = Infinity;
+            const stack = String(new Error().stack);
+            Error.stackTraceLimit = limit;
+            frames = Math.max(frames, stack.split('\n').filter(line=>/wasm/.test(line)).length);
+            return 0n;
+        };
+        const m = machine({ leafCalls: false, callTargets: false, ...config }, 4 << 20,
+            { rdtsc });
+        held = m;
+        m.write(CODE, program);
+        m.setReg(4, 0x80000);
+        new DataView(m.memory.buffer).setUint32(m.layout.eip, CODE, true);
+        const retired = await runToHalt(m);
+        runs.push({ result: [retired, m.reg(0), m.reg(1), m.reg(2), m.reg(3), m.reg(4), m.eip(),
+            ...new Uint8Array(m.memory.buffer, m.layout.ramBase + 0x80000 - 4096, 4096)],
+        depth, frames });
+        assert.equal(new DataView(m.memory.buffer).getUint32(m.layout.regs + CallStack.DEPTH,
+            true), 0, 'no call left waiting');
+    }
+    const [plain, deep, eight, one] = runs;
+    for (const run of [deep, eight, one])
+    {
+        assert.deepEqual(run.result, plain.result,
+            'the same instructions retired, registers and stack as with no call waiting');
+    }
+    assert.equal(plain.depth, 0);
+    assert.equal(deep.depth, CallStack.LIMIT, 'the stack of waiting calls filled');
+    assert.equal(eight.depth, 8, 'eight calls at most wait');
+    assert.equal(one.depth, 1);
+    assert.ok(eight.frames < deep.frames / 8,
+        `the host's stack holds the frames of eight calls: ${eight.frames} of ${deep.frames}`);
+});
 
 test('under precise the first x87 NaN made from numbers, NaN result, stack fault, NaN load and '
     + 'NaN store are noted with their instructions, and outside it nothing is', async()=>{

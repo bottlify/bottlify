@@ -1811,14 +1811,28 @@ export function mobileOrSafari(navigator = /** @type {any} */ (globalThis).navig
 }
 
 /**
+ * HACK until iOS ships https://github.com/WebKit/WebKit/pull/76671, with
+ * `withoutFaultingTailCalls`: how many of cork's calls made as wasm calls
+ * (`callReturn`) may wait at once on an iPhone. Each waits as a region's frames
+ * on the worker's stack, which on iOS is the system's 512 KB for a thread
+ * other than the main one: the Doom 3 demo's load recursed through one region
+ * 256 deep (cork's most, 9 KB of the game's own stack) and an iPhone 13 Pro
+ * Max with iOS 27.0.1 ran out of it ("Maximum call stack size exceeded"),
+ * three runs at one point. A deeper call goes through the runtime's loop and
+ * its callers return through the entry hash.
+ */
+const IOS_CALL_DEPTH = 64;
+
+/**
  * HACK until iOS ships https://github.com/WebKit/WebKit/pull/76671 (see
  * `tailCallsFault`). The run's tail calls kept inside one instance where a tail
  * call into another faults, in the interpreter tier every wasm function starts
  * in: cork's regions placed by module (`dispatch`), a
  * transfer within a module a direct tail call and one out of it entered by the
  * runtime's loop (`crossTailCalls`); the emulator's chaining, every link of it
- * into another module, off. The caller's own settings win. Decided on the page
- * and carried to every worker in the options.
+ * into another module, off. With them fewer calls wait as wasm calls
+ * (`IOS_CALL_DEPTH`). The caller's own settings win. Decided on the page and
+ * carried to every worker in the options.
  *
  * @template {Record<string, any>} T
  * @param {T} options
@@ -1828,7 +1842,8 @@ export function mobileOrSafari(navigator = /** @type {any} */ (globalThis).navig
 export function withoutFaultingTailCalls(options, fault = tailCallsFault()){
     return fault ? { ...options,
         cork: { ...options.cork,
-            config: { crossTailCalls: false, dispatch: true, ...options.cork?.config } },
+            config: { crossTailCalls: false, dispatch: true, callDepth: IOS_CALL_DEPTH,
+                ...options.cork?.config } },
         jit: { [JIT_CONFIG_CHAINING]: 0, ...options.jit } } : options;
 }
 

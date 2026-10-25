@@ -171,8 +171,10 @@ function countApart(e){
  * ran every region in between inside the call, and the host's return stack
  * predicts the way back where the entry hash and its indirect jump did not.
  * Any other answer is an exit the state block already holds: it goes up as it
- * came, this call's entry taken off the stack. Past the stack's limit, or with
- * the budget spent, the call leaves as any call does.
+ * came, this call's entry taken off the stack. Past the module's depth
+ * (`callDepth`, the stack's limit at most), or with the budget spent, the call
+ * leaves as any call does: every call waiting below it comes back through the
+ * entry hash, and the host's stack holds no more than that many calls' frames.
  *
  * With `emptySites`, outside x87 code, the target's first slot in the entry hash
  * is read first: a function that does nothing there (`emptyCode`, the slot's
@@ -239,7 +241,7 @@ function callAndReturn(e, next, target, mechanism){
         b.else();
     }
     atState(context, b).load('i32', { offset: depth }).localTee(Local.t1)
-        .i32const(CallStack.LIMIT).op(I32.geU)
+        .i32const(context.callDepth ?? CallStack.LIMIT).op(I32.geU)
         .localGet(Local.budget).i32const(0).op(I32.leS).op(I32.or);
     e.openGuard('plain');
     e.exitDynamic(Exit.UNTRANSLATED);

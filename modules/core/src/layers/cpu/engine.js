@@ -240,6 +240,10 @@ export function engineContractProblem(engineModule, url){
  *     transfer to another module's region entered by the runtime's loop; `createApp` sets it,
  *     with `dispatch`, on an iPhone, whose WebKit faults on one into another instance (HACK until
  *     iOS ships https://github.com/WebKit/WebKit/pull/76671).
+ * @property {number} [callDepth]  With `callReturn`, how many calls made as wasm calls may wait
+ *     at once, each a region's frames on the worker's stack; a deeper call leaves for the
+ *     runtime's loop and its callers return through the entry hash. Default 256; `createApp`
+ *     gives an iPhone fewer (HACK until iOS ships https://github.com/WebKit/WebKit/pull/76671).
  * @property {boolean} [sharedMemory]  Under cork, guest memory a `SharedArrayBuffer` where
  *     the host can share one (node, a cross-origin isolated page) -- what lets another
  *     worker read and write it in place. `false` keeps it the engine's alone.

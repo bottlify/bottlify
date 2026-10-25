@@ -27,7 +27,7 @@
  */
 
 import { emptyCode, formRegion, formShared, hashRegion } from '../region.js';
-import { TIER_SLOT, enterRegion, mathImports } from '../emit/region.js';
+import { CallStack, TIER_SLOT, enterRegion, mathImports } from '../emit/region.js';
 import { decode } from '../decode/decoder.js';
 import { NanRecord, RANGE, SHAPE, isX87, trackRegion } from '../emit/x87.js';
 import { HELD, PRECISION } from '../emit/memory.js';
@@ -414,6 +414,13 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         // module's own regions stay direct tail calls (the host decides,
         // `withoutFaultingTailCalls` in core's app.js).
         crossTailCalls: true,
+        // With `callReturn`, how many wasm calls may wait at once, each the
+        // frames of a region function on the host's stack; a deeper call
+        // leaves for this loop (`callAndReturn` in emit/integer.js). A host
+        // whose worker stack holds fewer of them is given fewer (HACK until iOS
+        // ships https://github.com/WebKit/WebKit/pull/76671, with
+        // `crossTailCalls`: `withoutFaultingTailCalls` in core's app.js).
+        callDepth: CallStack.LIMIT,
         ...config,
     };
     // The version translations are kept under: the translator's own, or a higher one
@@ -1986,6 +1993,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         emptySites: settings.emptySites === true && settings.emptyCalls !== false,
         linkedCalls: settings.linkedCalls !== false,
         crossTailCalls: settings.crossTailCalls !== false,
+        ...(settings.callDepth === CallStack.LIMIT ? {} : { callDepth: settings.callDepth }),
         resume: resumable,
         structure: settings.structure,
         precise: settings.precise === true,
@@ -2569,6 +2577,8 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         + (settings.emptySites === true && settings.emptyCalls !== false ? 'E' : '')
         + (settings.linkedCalls !== false ? 'L' : '')
         + (settings.crossTailCalls === false ? 'X' : '')
+        + (settings.callReturn === true && settings.callDepth !== CallStack.LIMIT
+            ? `d${settings.callDepth}` : '')
         + (settings.atomic === true ? 'A' : '')
         + (settings.atomic === true && settings.ordered === true ? 'O' : '')
         + `p${(settings.trapPort ?? 0).toString(16)}`;
