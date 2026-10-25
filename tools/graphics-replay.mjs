@@ -15,13 +15,15 @@
  * what it handed the device -- draws, bind groups, bytes to copy.
  *
  *     node tools/graphics-replay.mjs FILE [--root DIR] [--reps N] [--profile OUT]
- *         [--all] [--uploads] [--json] [--digest OUT]
+ *         [--heap OUT] [--all] [--uploads] [--json] [--digest OUT]
  *
  * `--reps` plays the capture that many times, each on a worker of its own,
  * and reports every one: the first frames of the measured window are warm
  * already, since the run's load and everything before the mark were played
  * before it. `--profile OUT` writes a CPU profile of the measured frames of
- * the last rep. `--all` measures every frame from the first, for a capture
+ * the last rep, and `--heap OUT` a sampling profile of what they allocated:
+ * what a draw leaves for the collector, by the function that made it. `--all`
+ * measures every frame from the first, for a capture
  * that was never marked. `--uploads` prints what the played device's
  * buffers moved over the measured frames -- each dynamic buffer's writes,
  * bytes written and bytes marked by unlocks and draws, and the uniform
@@ -51,16 +53,18 @@ const args = process.argv.slice(2);
 /** @param {string} name @param {string} fallback */
 const flag = (name, fallback)=>(args.includes(name) ? args[args.indexOf(name) + 1] : fallback);
 const file = args.find((arg, index)=>!arg.startsWith('--')
-    && (index === 0 || !['--root', '--reps', '--profile', '--digest'].includes(args[index - 1])));
+    && (index === 0
+        || !['--root', '--reps', '--profile', '--heap', '--digest'].includes(args[index - 1])));
 if (!file)
 {
     console.error('usage: node tools/graphics-replay.mjs FILE [--root DIR] [--reps N]'
-        + ' [--profile OUT] [--all] [--uploads] [--json] [--digest OUT]');
+        + ' [--profile OUT] [--heap OUT] [--all] [--uploads] [--json] [--digest OUT]');
     process.exit(2);
 }
 const root = pathToFileURL(`${resolve(flag('--root', '.'))}/`).href;
 const reps = Number(flag('--reps', '1'));
 const profileOut = flag('--profile', '');
+const heapOut = flag('--heap', '');
 const json = args.includes('--json');
 const all = args.includes('--all');
 const uploads = args.includes('--uploads');
@@ -331,19 +335,42 @@ const play = async profiled=>{
         {
             measuring = true;
             before = { ...gpu.stats };
-            if (profiled)
+            if (profiled && (profileOut !== '' || heapOut !== ''))
             {
                 session = new Session();
                 session.connect();
-                await session.post('Profiler.enable');
-                await session.post('Profiler.start');
+                if (profileOut !== '')
+                {
+                    await session.post('Profiler.enable');
+                    await session.post('Profiler.start');
+                }
+                if (heapOut !== '')
+                {
+                    // Every 4 KiB on average: a draw's objects are tens of
+                    // bytes, and the default's coarser samples name few of them.
+                    // What the collector took back is counted too: a draw's
+                    // garbage is the question, and by the end of the window
+                    // nearly all of it is gone.
+                    await session.post('HeapProfiler.enable');
+                    await session.post('HeapProfiler.startSampling', { samplingInterval: 4096,
+                        includeObjectsCollectedByMajorGC: true,
+                        includeObjectsCollectedByMinorGC: true });
+                }
             }
         }
     }
     if (session)
     {
-        const { profile } = await session.post('Profiler.stop');
-        writeFileSync(profileOut, JSON.stringify(profile));
+        if (profileOut !== '')
+        {
+            const { profile } = await session.post('Profiler.stop');
+            writeFileSync(profileOut, JSON.stringify(profile));
+        }
+        if (heapOut !== '')
+        {
+            const { profile } = await session.post('HeapProfiler.stopSampling');
+            writeFileSync(heapOut, JSON.stringify(profile));
+        }
         session.disconnect();
     }
     // Answers posted in the last batches arrive before the ports close.
@@ -396,7 +423,7 @@ const uploadsBetween = (from, to)=>{
 const results = [];
 for (let rep = 0; rep < reps; rep++)
 {
-    const { frames, told, digests } = await play(rep === reps - 1 && profileOut !== '');
+    const { frames, told, digests } = await play(rep === reps - 1);
     if (digestOut !== '' && rep === reps - 1)
     {
         writeFileSync(digestOut, `${digests.join('\n')}\n`);
