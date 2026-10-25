@@ -261,6 +261,8 @@ const LOCAL_TYPES = [
  * @property {boolean} [linkedCalls] with `callReturn`, a direct call reads its target's first
  *     slot of the entry hash and calls the function there itself where the transfer would
  *     at its first look (`linkedCall`); false: through the transfer
+ * @property {boolean} [crossTailCalls] false: a transfer to a region of another module leaves
+ *     for the host's loop rather than tail-calling into the other instance (`finishModule`)
  * @property {boolean} [countTransfers] each transfer through the hash adds one to the
  *     tables' transfer count (a diagnostic run)
  * @property {boolean} [blockProfile] each block counts its executions in the block
@@ -335,7 +337,7 @@ const LOCAL_TYPES = [
  *     structure?: boolean, precise?: boolean, place?: number, profileCalls?: boolean,
  *     resume?: boolean, callReturn?: boolean, emptySites?: boolean, linkedCalls?: boolean,
  *     looseStacks?: boolean, atomic?: boolean, ordered?: boolean, checkReads?: boolean,
- *     expansion?: ExpansionNote | null, markBlocks?: boolean }}
+ *     expansion?: ExpansionNote | null, markBlocks?: boolean, crossTailCalls?: boolean }}
  *     [options]  expansion: told every instruction's wasm bytes as it is emitted
  *     (`tools/cork-expansion.mjs`), in a diagnostic build only; markBlocks: each block
  *     marked for the machine code (`blockMark`), likewise; checkReads: an
@@ -357,7 +359,9 @@ const LOCAL_TYPES = [
  *     layout's call profile, when it has one (`callProfile`); structure: a region's loops
  *     as wasm loops (`planStructure`), false for every backward jump through the dispatch;
  *     resume: with hash, under cork's own layout, a miss of the hash runs the interpreter
- *     tier in wasm through the table's `TIER_SLOT` (`finishModule`)
+ *     tier in wasm through the table's `TIER_SLOT` (`finishModule`); crossTailCalls: false
+ *     for an engine whose tail call into another instance faults, a transfer out of the
+ *     module (all of them where it is not placed) leaving for the host's loop
  * @returns {ModuleContext}
  */
 export function prepareModule(m, layout, features, memory = {},
@@ -365,7 +369,7 @@ export function prepareModule(m, layout, features, memory = {},
         wide = false, narrow = false, blockProfile = false, structure = true, precise = false,
         place = 0, profileCalls = false, resume = false, callReturn = false, emptySites = false,
         linkedCalls = true, looseStacks = false, atomic = false, ordered = false,
-        checkReads = false, expansion = null, markBlocks = false } = {})
+        checkReads = false, expansion = null, markBlocks = false, crossTailCalls = true } = {})
 {
     m.importMemory('env', 'memory', {
         min: 1, ...(memory.maxPages === undefined ? {} : { max: memory.maxPages }),
@@ -508,6 +512,10 @@ export function prepareModule(m, layout, features, memory = {},
             context.resume = addResume(m, layout, bases, materialise, context.transfer);
         }
     }
+    if (hashed && !crossTailCalls)
+    {
+        context.crossTailCalls = false;
+    }
     if (hashed && place > 0)
     {
         // The base starts where no table index minus it lands in the range,
@@ -629,6 +637,68 @@ export function finishModule(context, functions){
         atTables(context, atTables(context, b)).load('i32', { offset: at }).i32const(1)
             .op(I32.add).store('i32', { offset: at });
     }
+    /** The registers, EIP and count written back as the region's epilogue writes them. */
+    const writeBack = ()=>{
+        if (!carried)
+        {
+            return;
+        }
+        // As the region's epilogue writes it (`storeCarriedState`): the
+        // registers the parameters carry -- the rest, the record and the flags
+        // word the region left in the block -- EIP and the count, the run's
+        // budget restarting from here for a resume that goes on.
+        const origin = /** @type {number} */ (layout.origin);
+        for (let r = 0; r < CARRIED_REGS; r++)
+        {
+            atState(context, b).localGet(Local.reg + r)
+                .store('i32', { offset: layout.regs + r * 4 });
+        }
+        if (layout.flagsChanged >= 0)
+        {
+            atState(context, b).i32const(0).store('i32', { offset: layout.flagsChanged });
+        }
+        atState(context, b).localGet(eip).store('i32', { offset: layout.eip });
+        if (layout.previousIp >= 0)
+        {
+            atState(context, b).localGet(eip).store('i32', { offset: layout.previousIp });
+        }
+        atState(context, b);
+        atState(context, b).load('i32', { offset: layout.counter });
+        atState(context, b).load('i32', { offset: origin }).op(I32.add)
+            .localGet(Local.budget).op(I32.sub);
+        b.store('i32', { offset: layout.counter });
+        atState(context, b).localGet(Local.budget).store('i32', { offset: origin });
+    };
+    /** What left the module through the table, for the runtime's merges. */
+    const crossed = ()=>{
+        if (placed !== undefined)
+        {
+            b.globalGet(placed.crossings).i32const(1).op(I32.add).globalSet(placed.crossings);
+            b.localGet(slotAt).load('i32', { offset: 4 }).globalSet(placed.crossedTo);
+        }
+    };
+    if (context.crossTailCalls === false)
+    {
+        // HACK until iOS ships https://github.com/WebKit/WebKit/pull/76671:
+        // an engine whose tail call into another instance faults (iOS 27's
+        // JavaScriptCore, WebKit bug 325447) has a region of another module
+        // entered by the host's loop, as a miss is -- only not through the
+        // tier's resume, which would find the region and come straight back.
+        // A region of this module, placed, is still a direct tail call below.
+        if (placed !== undefined)
+        {
+            b.localGet(slotAt).load('i32', { offset: 4 }).globalGet(placed.base).op(I32.sub)
+                .i32const(placed.arms).op(I32.geU);
+            b.if(EMPTY);
+        }
+        crossed();
+        writeBack();
+        b.i32const(Exit.UNTRANSLATED).return();
+        if (placed !== undefined)
+        {
+            b.end();
+        }
+    }
     if (carried && context.callReturn === true)
     {
         emptyReturn(context, b, slotAt, key);
@@ -661,42 +731,14 @@ export function finishModule(context, functions){
         }
         b.end(); // the table's way
         b.else();
-        b.globalGet(placed.crossings).i32const(1).op(I32.add).globalSet(placed.crossings);
-        b.localGet(slotAt).load('i32', { offset: 4 }).globalSet(placed.crossedTo);
+        crossed();
         b.end();
     }
     pass();
     b.localGet(slotAt).load('i32', { offset: 4 });
     b.returnCallIndirect(regionType, 0);
     b.end(); // miss
-    if (carried)
-    {
-        // As the region's epilogue writes it (`storeCarriedState`): the
-        // registers the parameters carry -- the rest, the record and the flags
-        // word the region left in the block -- EIP and the count, the run's
-        // budget restarting from here for a resume that goes on.
-        const origin = /** @type {number} */ (layout.origin);
-        for (let r = 0; r < CARRIED_REGS; r++)
-        {
-            atState(context, b).localGet(Local.reg + r)
-                .store('i32', { offset: layout.regs + r * 4 });
-        }
-        if (layout.flagsChanged >= 0)
-        {
-            atState(context, b).i32const(0).store('i32', { offset: layout.flagsChanged });
-        }
-        atState(context, b).localGet(eip).store('i32', { offset: layout.eip });
-        if (layout.previousIp >= 0)
-        {
-            atState(context, b).localGet(eip).store('i32', { offset: layout.previousIp });
-        }
-        atState(context, b);
-        atState(context, b).load('i32', { offset: layout.counter });
-        atState(context, b).load('i32', { offset: origin }).op(I32.add)
-            .localGet(Local.budget).op(I32.sub);
-        b.store('i32', { offset: layout.counter });
-        atState(context, b).localGet(Local.budget).store('i32', { offset: origin });
-    }
+    writeBack();
     if (context.resume !== undefined && carried)
     {
         b.localGet(Local.budget).returnCall(context.resume);

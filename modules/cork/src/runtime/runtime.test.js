@@ -2570,6 +2570,51 @@ test('a transfer to a region of its own module is not a crossing; one into anoth
     assert.equal(two.runtime.diagnostics().crossings, 2000);
 });
 
+test('without tail calls into another instance, a transfer out of the module is entered by the'
+    + ' loop and one inside it stays a tail call, with the same answers', async()=>{
+    if (!probeFeatures().tailCalls)
+    {
+        return;
+    }
+    /** @param {Record<string, unknown>} config @param {boolean} split */
+    const run = async(config, split)=>{
+        const m = machine({ leafCalls: false, mergeAfter: 0, dispatch: true, callReturn: false,
+            ...config });
+        m.write(CODE, callLoop(1000));
+        m.setReg(4, 0x80000);
+        if (split)
+        {
+            m.runtime.noteHot(CODE + 14);
+            await m.runtime.translatePending();
+        }
+        m.runtime.noteHot(CODE);
+        await m.runtime.translatePending();
+        // The host's loop: each exit entered again where it left, as the engine's slices do.
+        let left = 0;
+        let exit = m.runtime.run(m.runtime.entryOf(CODE), 1_000_000);
+        for (; exit.kind === 'untranslated' && left < 10_000; left++)
+        {
+            assert.ok(m.runtime.entryOf(m.eip()) >= 0, `left at 0x${m.eip().toString(16)}`);
+            exit = m.runtime.run(m.runtime.entryOf(m.eip()), 1_000_000);
+        }
+        assert.equal(exit.kind, 'halt');
+        return { edx: m.reg(2), ecx: m.reg(1), esp: m.reg(4), left,
+            crossings: m.runtime.diagnostics().crossings };
+    };
+    // Two modules: each call and each return crosses.
+    const tail = await run({}, true);
+    const loop = await run({ crossTailCalls: false }, true);
+    assert.deepEqual({ ...loop, left: 0 }, { ...tail, left: 0 },
+        'the same registers and crossings');
+    assert.equal(tail.edx, 1000);
+    assert.ok(loop.left >= tail.left + 2000,
+        `every crossing left for the loop (${loop.left} against ${tail.left})`);
+    // One module: nothing leaves, crossTailCalls or not.
+    const inside = await run({ crossTailCalls: false }, false);
+    assert.equal(inside.edx, 1000);
+    assert.equal(inside.left, (await run({}, false)).left, 'no transfer left the module');
+});
+
 test('a placed module whose regions have all gone gives its range of the table back', async()=>{
     if (!probeFeatures().tailCalls)
     {

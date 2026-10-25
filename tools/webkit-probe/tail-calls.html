@@ -1,0 +1,126 @@
+<!doctype html>
+<!--
+  Copyright © 2026 Bottlify Project
+  Licensed under the Mozilla Public License, version 2.0
+  See LICENSE for details
+
+  Which wasm tail call takes the browser's page down (tail-calls.js). A test
+  that kills the page's process leaves no error behind -- the page is gone --
+  so each one's name is written down before it runs, and the page, reloaded,
+  marks the test that never finished as the one that crashed and goes on.
+  Served by the launcher (needs its /cork/ route and cross-origin isolation).
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tail call probe</title>
+<style>
+  :root { color-scheme: light dark; --bg: #fff; --fg: #111; --bad: #c62828; --good: #2e7d32; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #111; --fg: #eee; --bad: #ef5350; --good: #66bb6a; } }
+  body { background: var(--bg); color: var(--fg); font: 15px/1.4 system-ui, sans-serif; margin: 16px; }
+  table { border-collapse: collapse; width: 100%; }
+  td { border-bottom: 1px solid #8884; padding: 6px 4px; vertical-align: top; }
+  .crashed, .error { color: var(--bad); font-weight: 600; }
+  .ok { color: var(--good); }
+  code { font-size: 12px; word-break: break-all; }
+  button { font-size: 16px; padding: 8px 14px; margin: 8px 8px 8px 0; }
+</style>
+</head>
+<body>
+<h1>Tail call probe</h1>
+<p><code id="agent"></code></p>
+<p id="state"></p>
+<button id="reset">Start over</button>
+<table id="results"></table>
+<script type="module">
+import { TESTS, IN_WORKER } from './tail-calls.js';
+
+const KEY = 'bottlify-tail-call-probe';
+const order = [...Object.keys(TESTS), ...IN_WORKER.map(id=>`worker:${id}`)];
+const load = ()=>{
+    try
+    {
+        return JSON.parse(localStorage.getItem(KEY) ?? '') ?? { results: {}, running: null };
+    }
+    catch
+    {
+        return { results: {}, running: null };
+    }
+};
+const save = state=>localStorage.setItem(KEY, JSON.stringify(state));
+const state = load();
+// The test that was running when the page last went away killed it.
+if (state.running && !state.results[state.running])
+{
+    state.results[state.running] = { crashed: true };
+}
+state.running = null;
+save(state);
+
+document.getElementById('agent').textContent = navigator.userAgent;
+document.getElementById('reset').onclick = ()=>{
+    localStorage.removeItem(KEY);
+    location.reload();
+};
+
+const show = ()=>{
+    const rows = order.map(id=>{
+        const result = state.results[id];
+        const title = TESTS[id.replace('worker:', '')].title + (id.startsWith('worker:') ? ' (worker)' : '');
+        const cell = !result ? (state.running === id ? 'running…' : '')
+            : result.crashed ? '<span class="crashed">CRASHED the page</span>'
+            : result.error ? `<span class="error">error: ${result.error}</span>`
+            : `<span class="ok">ok, ${result.ok}</span>`;
+        return `<tr><td><code>${id}</code><br>${title}</td><td>${cell}</td></tr>`;
+    });
+    document.getElementById('results').innerHTML = rows.join('');
+};
+
+/** @param {string} id */
+const runOne = id=>new Promise(resolve=>{
+    if (!id.startsWith('worker:'))
+    {
+        Promise.resolve().then(()=>TESTS[id].run()).then(ok=>resolve({ ok }),
+            e=>resolve({ error: String(e?.message ?? e) }));
+        return;
+    }
+    const worker = new Worker(new URL('./tail-calls.js?worker', import.meta.url), { type: 'module' });
+    worker.onmessage = ({ data })=>{
+        worker.terminate();
+        resolve(data);
+    };
+    worker.onerror = e=>{
+        worker.terminate();
+        resolve({ error: e.message || 'the worker failed' });
+    };
+    worker.postMessage(id.slice('worker:'.length));
+});
+
+const next = async()=>{
+    const id = order.find(one=>!state.results[one]);
+    if (!id)
+    {
+        document.getElementById('state').textContent = 'Done.';
+        console.log('tail call probe', JSON.stringify(state.results));
+        show();
+        return;
+    }
+    state.running = id;
+    save(state);
+    show();
+    document.getElementById('state').textContent = `Running ${id}…`;
+    // A frame to draw the row before a test that may take the page with it.
+    await new Promise(resolve=>setTimeout(resolve, 300));
+    const result = await runOne(id);
+    state.results[id] = result;
+    state.running = null;
+    save(state);
+    console.log('tail call probe', id, JSON.stringify(result));
+    next();
+};
+show();
+next();
+</script>
+</body>
+</html>

@@ -664,3 +664,186 @@ test('the Escape a browser spends on leaving pointer lock still reaches the prog
         }
     }
 });
+
+/**
+ * A page around the canvas, as far as the keyboard's field needs one: one
+ * element holds the focus, and moving it blurs the one before with the new
+ * one as its related target, as a browser does.
+ */
+function withPage(/** @type {any} */ canvas){
+    /** @type {any} */
+    const page = { activeElement: null, appended: /** @type {any[]} */ ([]) };
+    /** @param {any} to */
+    const moveFocus = to=>{
+        const from = page.activeElement;
+        if (from === to)
+        {
+            return;
+        }
+        page.activeElement = to;
+        from?.fire('blur', { relatedTarget: to });
+        to?.fire('focus', { relatedTarget: from });
+    };
+    page.moveFocus = moveFocus;
+    page.createElement = ()=>{
+        /** @type {Map<string, ((event: any) => void)[]>} */
+        const handlers = new Map();
+        const element = {
+            style: {},
+            value: '',
+            selection: /** @type {number[]} */ ([]),
+            attributes: /** @type {Record<string, string>} */ ({}),
+            /** @param {string} name @param {string} value */
+            setAttribute(name, value){
+                element.attributes[name] = value;
+            },
+            /** @param {number} start @param {number} end */
+            setSelectionRange(start, end){
+                element.selection = [start, end];
+            },
+            /** @param {string} type @param {(event: any) => void} handler */
+            addEventListener(type, handler){
+                handlers.set(type, [...handlers.get(type) ?? [], handler]);
+            },
+            /** @param {string} type @param {(event: any) => void} handler */
+            removeEventListener(type, handler){
+                handlers.set(type, (handlers.get(type) ?? []).filter(entry=>entry !== handler));
+            },
+            focus: ()=>moveFocus(element),
+            remove(){
+                page.appended = page.appended.filter((/** @type {any} */ each)=>each !== element);
+            },
+            /** @param {string} type @param {any} event */
+            fire(type, event){
+                const full = { preventDefault(){
+                    full.prevented = true;
+                }, prevented: false, timeStamp: 0, ...event };
+                for (const handler of handlers.get(type) ?? [])
+                {
+                    handler(full);
+                }
+                return full;
+            },
+            listenerCount: ()=>[...handlers.values()].reduce((total, list)=>total + list.length, 0),
+        };
+        return element;
+    };
+    page.body = { append: (/** @type {any} */ element)=>page.appended.push(element) };
+    canvas.ownerDocument = page;
+    canvas.parentElement = page.body;
+    canvas.focus = ()=>{
+        canvas.focused++;
+        moveFocus(canvas);
+    };
+    return page;
+}
+
+test('a phone\'s keyboard types into a field beside the canvas, and the game keeps the focus', ()=>{
+    const h = harness();
+    const page = withPage(h.canvas);
+    h.canvas.focus();
+    h.drain();
+
+    assert.equal(h.adapter.showKeyboard(), true);
+    const [field] = page.appended;
+    assert.equal(page.activeElement, field,
+        'the field holds the focus, so the phone shows its keyboard');
+    assert.equal(field.style.fontSize, '16px', 'big enough that the phone does not zoom in');
+    assert.equal(field.value, ' ', 'something for a Backspace to delete');
+    assert.equal(h.adapter.keyboardShown(), true);
+    assert.deepEqual(h.drain(), [], 'moving into the field is not the game losing the focus');
+
+    h.adapter.hideKeyboard();
+    assert.equal(page.activeElement, h.canvas);
+    assert.equal(h.adapter.keyboardShown(), false);
+    assert.deepEqual(h.drain(), [], 'nor is moving back');
+});
+
+test('what a phone\'s keyboard types reaches the program as the keys that type it', ()=>{
+    const h = harness();
+    const page = withPage(h.canvas);
+    h.adapter.showKeyboard();
+    const [field] = page.appended;
+    assert.deepEqual(h.drain(), [{ kind: 'focus', gained: true }],
+        'a game that did not have the focus gains it');
+
+    // A phone's own keyboard names no key: its keydown is let through, and
+    // the edit after it says what was typed.
+    const soft = field.fire('keydown', { code: '', key: 'a' });
+    assert.equal(soft.prevented, false);
+    assert.deepEqual(h.drain(), []);
+
+    field.value = ' a';
+    const edit = field.fire('beforeinput', { inputType: 'insertText', data: 'a' });
+    assert.equal(edit.prevented, true, 'the field keeps nothing');
+    assert.equal(field.value, ' ');
+    assert.deepEqual(h.drain(), [
+        { kind: 'key', code: 'KeyA', down: true },
+        { kind: 'text', text: 'a' },
+        { kind: 'key', code: 'KeyA', down: false },
+    ]);
+
+    field.fire('beforeinput', { inputType: 'deleteContentBackward', data: null });
+    assert.deepEqual(h.drain().map(event=>event.code ?? event.text),
+        ['Backspace', '\b', 'Backspace']);
+
+    // Enter makes no edit of a single-line field.
+    const enter = field.fire('keydown', { code: '', key: 'Enter' });
+    assert.equal(enter.prevented, true);
+    assert.deepEqual(h.drain().map(event=>event.code ?? event.text), ['Enter', '\r', 'Enter']);
+
+    // An input method's composition is sent whole when it ends.
+    const composing = field.fire('beforeinput', { inputType: 'insertCompositionText', data: 'ж' });
+    assert.equal(composing.prevented, false);
+    field.fire('compositionend', { data: 'ж' });
+    assert.deepEqual(h.drain(), [{ kind: 'type', text: 'ж' }]);
+});
+
+test('a paired keyboard\'s keys go through the field as keys, with no edit after them', ()=>{
+    const h = harness();
+    const page = withPage(h.canvas);
+    h.adapter.showKeyboard();
+    const [field] = page.appended;
+    h.drain();
+
+    const down = field.fire('keydown', { code: 'KeyW', key: 'w' });
+    assert.equal(down.prevented, true, 'prevented, so no edit types it a second time');
+    field.fire('keyup', { code: 'KeyW', key: 'w' });
+    assert.deepEqual(h.drain(), [
+        { kind: 'key', code: 'KeyW', down: true },
+        { kind: 'text', text: 'w' },
+        { kind: 'key', code: 'KeyW', down: false },
+    ]);
+});
+
+test('a keyboard the phone puts away leaves the game the focus; a page taking it keeps it', ()=>{
+    const h = harness();
+    const page = withPage(h.canvas);
+    h.canvas.focus();
+    h.adapter.showKeyboard();
+    const [field] = page.appended;
+    h.drain();
+
+    // The phone's own button: the focus goes to nothing.
+    page.moveFocus(null);
+    assert.equal(page.activeElement, h.canvas);
+    assert.deepEqual(h.drain(), []);
+
+    h.adapter.showKeyboard();
+    const other = page.createElement();
+    page.moveFocus(other);
+    assert.equal(page.activeElement, other);
+    assert.deepEqual(h.drain(), [{ kind: 'focus', gained: false }]);
+    assert.equal(field.listenerCount() > 0, true);
+});
+
+test('detaching takes the keyboard\'s field away with every listener on it', ()=>{
+    const h = harness();
+    const page = withPage(h.canvas);
+    h.adapter.showKeyboard();
+    const [field] = page.appended;
+    h.adapter.detach();
+    assert.deepEqual(page.appended, []);
+    assert.equal(field.listenerCount(), 0);
+    assert.equal(h.adapter.keyboardShown(), false);
+});

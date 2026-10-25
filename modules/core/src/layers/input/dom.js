@@ -28,6 +28,11 @@
  * - **Nothing is captured by accident.** No listener outlives `detach`, and
  *   detaching releases whatever was held, because a key whose release is never
  *   delivered stays down inside the guest for ever.
+ * - **A phone's keyboard is the one exception, and only when asked for.** A
+ *   phone shows its keyboard for a focused text field and nothing else, so
+ *   `showKeyboard` puts one field beside the canvas and treats the two as one
+ *   place for the focus; what is typed into it becomes key presses
+ *   (`typing.js`).
  *
  * ## Escape
  *
@@ -50,6 +55,7 @@
  */
 
 import { keyFor } from '../win32/user32/keys.js';
+import { CONTROL_TEXT, editEvents, keyTap } from './typing.js';
 
 /**
  * Keys the browser has already claimed. Preventing their default either does
@@ -57,20 +63,6 @@ import { keyFor } from '../win32/user32/keys.js';
  * business taking (reload, fullscreen, the way out of pointer lock).
  */
 const RESERVED = new Set(['Escape', 'F5', 'F11', 'F12']);
-
-/**
- * What a key press means as text, where the browser's own answer is a name
- * rather than a character. Everything else composes through the keyboard
- * layout and arrives as `KeyboardEvent.key`, which is the only source of a
- * character a table of key codes cannot be.
- */
-const CONTROL_TEXT = Object.freeze({
-    Enter: '\r',
-    NumpadEnter: '\r',
-    Tab: '\t',
-    Backspace: '\b',
-    Escape: '\x1b',
-});
 
 /** `MouseEvent.button`, in the order the DOM numbers them. */
 const BUTTON_NAMES = Object.freeze(['left', 'middle', 'right', 'x1', 'x2']);
@@ -562,18 +554,165 @@ export function createDomInput({ canvas, send, pointerLock = false, resolution }
     };
 
     const onFocus = ()=>{
-        focused = true;
         canvas.style.outline = FOCUS_OUTLINE;
+        // The keyboard's field and the canvas are one place for the game: the
+        // focus moving from one to the other is not the game gaining it again.
+        if (focused)
+        {
+            return;
+        }
+        focused = true;
         send({ kind: 'focus', gained: true });
     };
 
     const onBlur = ()=>{
+        if (handingOver)
+        {
+            return;
+        }
         focused = false;
         // Leaving releases everything held, buttons and the page's pointer key.
         heldButtons = 0;
         releaseHeld = false;
         canvas.style.outline = '';
         send({ kind: 'focus', gained: false });
+    };
+
+    /**
+     * The field a keyboard with no keys of its own types into: a phone shows
+     * its keyboard for a focused text field and for nothing else, and only
+     * when the focus is given inside a touch. The one element this file puts
+     * on the page, beside the canvas, made the first time it is asked for and
+     * taken away on `detach`. Kept on the screen but transparent, a pixel
+     * across, at 16 px type so the phone does not zoom in on it; holding one
+     * space so a Backspace has something to delete and fires an edit.
+     *
+     * @type {HTMLInputElement | null}
+     */
+    let field = null;
+    /** @type {[string, (event: any) => void][]} */
+    const fieldListeners = [];
+    /** Whether the focus is being moved between the canvas and the field on purpose. */
+    let handingOver = false;
+
+    const resetField = ()=>{
+        if (field)
+        {
+            field.value = ' ';
+            field.setSelectionRange?.(1, 1);
+        }
+    };
+
+    /** @param {InputEvent} e */
+    const onEdit = e=>{
+        // A composition (an input method's) is not cancellable and is sent
+        // whole when it ends.
+        if (e.inputType === 'insertCompositionText')
+        {
+            return;
+        }
+        e.preventDefault();
+        for (const event of editEvents({ inputType: e.inputType, data: e.data }))
+        {
+            send(event);
+        }
+        resetField();
+    };
+
+    /** @param {CompositionEvent} e */
+    const onCompositionEnd = e=>{
+        for (const event of editEvents({ inputType: 'insertText', data: e.data }))
+        {
+            send(event);
+        }
+        resetField();
+    };
+
+    /**
+     * A key on a keyboard with keys, typed while the field holds the focus --
+     * a tablet's, a phone's paired one -- is the key, as on the canvas; it is
+     * prevented there, so no edit follows it. A phone's own keyboard names no
+     * key (an empty code), and its edit is what says what it typed -- save
+     * Enter, Escape and Tab, which a single-line field makes no edit of.
+     *
+     * @param {KeyboardEvent} e
+     */
+    const onFieldKeyDown = e=>{
+        if (keyFor(e.code))
+        {
+            onKeyDown(e);
+            return;
+        }
+        if (e.key === 'Enter' || e.key === 'Escape' || e.key === 'Tab')
+        {
+            e.preventDefault();
+            for (const event of keyTap(e.key))
+            {
+                send(event);
+            }
+        }
+    };
+
+    /** @param {KeyboardEvent} e */
+    const onFieldKeyUp = e=>{
+        if (keyFor(e.code))
+        {
+            onKeyUp(e);
+        }
+    };
+
+    /** @param {FocusEvent} e */
+    const onFieldBlur = e=>{
+        if (handingOver)
+        {
+            return;
+        }
+        // The phone's own button that puts its keyboard away leaves the focus
+        // on nothing; the game keeps it. Anything else on the page that took
+        // it, keeps it.
+        if (!e.relatedTarget)
+        {
+            handOver(canvas);
+            return;
+        }
+        onBlur();
+    };
+
+    /** @param {HTMLElement} to */
+    const handOver = to=>{
+        handingOver = true;
+        try
+        {
+            to.focus({ preventScroll: true });
+        }
+        finally
+        {
+            handingOver = false;
+        }
+    };
+
+    const makeField = ()=>{
+        const made = canvas.ownerDocument.createElement('input');
+        made.type = 'text';
+        made.setAttribute('aria-label', 'Keyboard');
+        for (const [name, value] of [['autocomplete', 'off'], ['autocorrect', 'off'],
+            ['autocapitalize', 'off'], ['spellcheck', 'false'], ['enterkeyhint', 'enter']])
+        {
+            made.setAttribute(name, value);
+        }
+        Object.assign(made.style, { position: 'fixed', left: '0', bottom: '0', width: '1px',
+            height: '1px', opacity: '0', border: '0', padding: '0', fontSize: '16px',
+            pointerEvents: 'none', caretColor: 'transparent' });
+        for (const [type, handler] of /** @type {[string, (event: any) => void][]} */ ([
+            ['beforeinput', onEdit], ['compositionend', onCompositionEnd],
+            ['keydown', onFieldKeyDown], ['keyup', onFieldKeyUp], ['paste', onPaste],
+            ['focus', onFocus], ['blur', onFieldBlur]]))
+        {
+            made.addEventListener(type, handler);
+            fieldListeners.push([type, handler]);
+        }
+        (canvas.parentElement ?? canvas.ownerDocument.body).append(made);
+        return made;
     };
 
     /**
@@ -649,6 +788,29 @@ export function createDomInput({ canvas, send, pointerLock = false, resolution }
     return {
         /** Puts the keyboard on the game, for a host with its own play button. */
         focus: ()=>canvas.focus(),
+
+        /**
+         * Shows a phone's keyboard, typing into the game: only from inside a
+         * touch's own handler, the one moment a phone shows it. Answers
+         * whether the field took the focus.
+         */
+        showKeyboard(){
+            field ??= makeField();
+            resetField();
+            handOver(field);
+            return canvas.ownerDocument.activeElement === field;
+        },
+
+        /** Puts a phone's keyboard away; the game keeps the focus. */
+        hideKeyboard(){
+            if (field && canvas.ownerDocument.activeElement === field)
+            {
+                handOver(canvas);
+            }
+        },
+
+        /** Whether a phone's keyboard is up, typing into the game. */
+        keyboardShown: ()=>field !== null && canvas.ownerDocument.activeElement === field,
         lockPointer,
         focused: ()=>focused,
 
@@ -699,6 +861,16 @@ export function createDomInput({ canvas, send, pointerLock = false, resolution }
             if (watchesLock)
             {
                 document.removeEventListener('pointerlockchange', onPointerLockChange);
+            }
+            if (field)
+            {
+                for (const [type, handler] of fieldListeners)
+                {
+                    field.removeEventListener(type, handler);
+                }
+                fieldListeners.length = 0;
+                field.remove();
+                field = null;
             }
             heldPaste = null;
             if (heldTimer !== null)

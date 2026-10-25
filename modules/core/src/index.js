@@ -28,7 +28,14 @@ export async function assembleModules(config){
     const core = await import('./core.js');
     return core.assembleModules(config);
 }
+// The page's speaker, opened inside the gesture that starts a run.
+export { openSpeaker } from './host/speaker.js';
+// The page's screen while a run plays: fullscreen in every browser's names, kept lit.
+export { canFullscreen, exitFullscreen, fullscreenElement, keepScreenAwake, requestFullscreen,
+    watchFullscreen } from './host/screen.js';
 // For a consumer that wants a reader of its own over `app.log.memory()` -- a
 // worker of its own, a view that polls at its own rate. The controller already
 // holds one; this is for reading the same memory from somewhere else.
 export { createLogReader } from './layers/log/reader.js';
+// A program's own icon, for a page to show it by (a tab's, a home screen's).
+export { programIcon } from './layers/win32/shell32/icons.js';

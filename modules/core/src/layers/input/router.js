@@ -48,6 +48,8 @@ const VK_CAPITAL = 0x14;
 const VK_NUMLOCK = 0x90;
 const VK_SCROLL = 0x91;
 const VK_F10 = 0x79;
+/** The virtual key Windows makes for a character typed with no key behind it. */
+const VK_PACKET = 0xe7;
 
 /** The three keys whose low bit reports a toggle rather than a press. */
 const TOGGLE_KEYS = new Set([VK_CAPITAL, VK_NUMLOCK, VK_SCROLL]);
@@ -91,8 +93,8 @@ const BUTTONS = Object.freeze({
 
 /**
  * @typedef {Object} HostInputEvent
- * @property {'key' | 'text' | 'paste' | 'pointerMove' | 'pointerButton' | 'wheel' | 'focus'
- *           | 'padAxis' | 'padButton'} kind
+ * @property {'key' | 'text' | 'type' | 'paste' | 'pointerMove' | 'pointerButton' | 'wheel'
+ *           | 'focus' | 'padAxis' | 'padButton'} kind
  * @property {string} [code]     For `key`: a `KeyboardEvent.code`.
  * @property {number} [vk]       For `key` with no `code`: a virtual key,
  *           `SendInput`'s own way of naming one -- resolved to the physical
@@ -104,7 +106,10 @@ const BUTTONS = Object.freeze({
  *           program wrote beside it, perhaps none -- what DirectInput 8 keys
  *           the event by, where earlier versions take the virtual key.
  * @property {boolean} [down]    For `key`, `pointerButton` and `padButton`.
- * @property {string} [text]     For `text`: the character the browser composed.
+ * @property {string} [text]     For `text`: the character the browser composed
+ *           from the `key` press sent just before it, which carries it.
+ *           For `type`: characters with no key press behind them -- a phone's
+ *           keyboard, an input method's result, SendInput's KEYEVENTF_UNICODE.
  *           For `paste`: what the person pasted, for the clipboard.
  * @property {number} [x]        For `pointerMove`: client coordinates.
  * @property {number} [y]
@@ -421,6 +426,33 @@ export function createInputRouter(
             // One per code unit, which is what a surrogate pair produces on
             // Windows too -- the program reassembles it, if it cares.
             composeCharacter(string.charCodeAt(index), lastKeyLParam);
+        }
+        return string.length > 0;
+    };
+
+    /**
+     * Characters with no key press behind them, as Windows delivers SendInput's
+     * KEYEVENTF_UNICODE: a VK_PACKET press and release for each code unit, the
+     * character in the press's scan code field, and the WM_CHAR made by
+     * TranslateMessage from the press. A `text` event cannot carry one: it
+     * belongs to the press before it, which has long been translated when a
+     * phone's keyboard types.
+     *
+     * @param {HostInputEvent} event
+     */
+    const type = event=>{
+        const string = event.text ?? '';
+        if (!windowHears('keyboard'))
+        {
+            return false;
+        }
+        for (let index = 0; index < string.length; index++)
+        {
+            const character = string.charCodeAt(index);
+            const lParam = (1 | (character & 0xff) << 16) >>> 0;
+            composeCharacter(character, lParam);
+            emit(WM.KEYDOWN, VK_PACKET, lParam);
+            emit(WM.KEYUP, VK_PACKET, (lParam | 1 << 30 | 1 << 31) >>> 0);
         }
         return string.length > 0;
     };
@@ -745,6 +777,8 @@ export function createInputRouter(
                     return key(event);
                 case 'text':
                     return text(event);
+                case 'type':
+                    return type(event);
                 case 'paste':
                     if (!paste || typeof event.text !== 'string')
                     {

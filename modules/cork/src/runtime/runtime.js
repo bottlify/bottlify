@@ -406,6 +406,14 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         // their small callees formed in as well (`formRegion`).
         formDepth: 1,
         switchEntries: 1024,
+        // HACK until iOS ships https://github.com/WebKit/WebKit/pull/76671:
+        // false keeps every tail call inside its own instance, a transfer to a
+        // region of another module leaving for this loop, which enters it. iOS
+        // 27's JavaScriptCore faults on a tail call into another instance
+        // (WebKit bug 325447) and runs those inside one; with `dispatch` a
+        // module's own regions stay direct tail calls (the host decides,
+        // `withoutFaultingTailCalls` in core's app.js).
+        crossTailCalls: true,
         ...config,
     };
     // The version translations are kept under: the translator's own, or a higher one
@@ -1977,6 +1985,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         callReturn: table !== null && settings.callReturn === true && !settings.undoLog,
         emptySites: settings.emptySites === true && settings.emptyCalls !== false,
         linkedCalls: settings.linkedCalls !== false,
+        crossTailCalls: settings.crossTailCalls !== false,
         resume: resumable,
         structure: settings.structure,
         precise: settings.precise === true,
@@ -2559,6 +2568,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         + (settings.callReturn === true ? 'R' : '') + (sharedMemory ? 'M' : '')
         + (settings.emptySites === true && settings.emptyCalls !== false ? 'E' : '')
         + (settings.linkedCalls !== false ? 'L' : '')
+        + (settings.crossTailCalls === false ? 'X' : '')
         + (settings.atomic === true ? 'A' : '')
         + (settings.atomic === true && settings.ordered === true ? 'O' : '')
         + `p${(settings.trapPort ?? 0).toString(16)}`;

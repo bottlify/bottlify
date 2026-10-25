@@ -711,6 +711,9 @@ export async function createRemoteApp(wiring){
                 send(message);
             },
             poll: ()=>dom?.poll(),
+            showKeyboard: ()=>dom?.showKeyboard() ?? false,
+            hideKeyboard: ()=>dom?.hideKeyboard(),
+            keyboardShown: ()=>dom?.keyboardShown() ?? false,
         },
 
         /**

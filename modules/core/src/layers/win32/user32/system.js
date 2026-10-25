@@ -1645,7 +1645,7 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
         {
             if (!up)
             {
-                host.sendInput?.({ kind: 'text', text: String.fromCharCode(wScan) });
+                host.sendInput?.({ kind: 'type', text: String.fromCharCode(wScan) });
             }
             return true;
         }

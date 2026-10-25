@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createShellFunctions } from './functions.js';
+import { programIcon } from './icons.js';
 import { filesystemModule } from '../../filesystem/module.js';
 import { createVolume } from '../kernel32/vfs.js';
 import { decodeAnsi } from '../kernel32/locale.js';
@@ -340,4 +341,38 @@ test('ExtractAssociatedIconEx gives the file\'s own icon and its id, or NULL', a
         m.put('C:\\work\\readme.txt', false), 0x900, 0x902]), 0, 'no icon of its own');
     assert.equal(m.diverged.length, 1);
     assert.equal(m.shell.ExtractAssociatedIconExW.argBytes, 16);
+});
+
+test('a program\'s icon for a page is its first group\'s largest image, in RGBA', ()=>{
+    const icon = programIcon(libraryWithIcons());
+    assert.equal(icon?.width, 32);
+    assert.equal(icon?.height, 32);
+    assert.deepEqual([...icon?.rgba?.subarray(0, 4) ?? []], [0, 0xff, 0, 0xff],
+        'the green standard-sized image of MAINICON, not the red one or group 7\'s blue');
+});
+
+test('a PNG image in the group is handed over as the file it is', ()=>{
+    // 256 by 256, the size a group stores as a PNG since Vista; only the
+    // signature and the header's size fields matter here.
+    const png = new Uint8Array(33);
+    png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52,
+        0, 0, 1, 0, 0, 0, 1, 0]);
+    const small = iconImage(32, RED);
+    const bytes = buildImage(buildResources([
+        { type: RT_ICON, names: [
+            { name: 1, langs: [{ lang: ENGLISH, data: [...small] }] },
+            { name: 2, langs: [{ lang: ENGLISH, data: [...png] }] },
+        ] },
+        { type: RT_GROUP_ICON, names: [{ name: 1, langs: [{ lang: ENGLISH, data: groupDirectory([
+            { side: 32, id: 1, length: small.length }, { side: 0, id: 2, length: png.length },
+        ]) }] }] },
+    ])).bytes;
+    const icon = programIcon(bytes);
+    assert.deepEqual({ width: icon?.width, height: icon?.height, png: [...icon?.png ?? []] },
+        { width: 256, height: 256, png: [...png] });
+});
+
+test('bytes that are no image, or an image with no icon, give no program icon', ()=>{
+    assert.equal(programIcon(new Uint8Array([1, 2, 3])), null);
+    assert.equal(programIcon(buildImage(buildResources([])).bytes), null);
 });

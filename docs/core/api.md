@@ -10,7 +10,29 @@ with a controller once the program is ready to run. On failure it rejects with a
 `reason` names the cause (`gpu`: the canvas gives no WebGPU context).
 
 The package also exports `assembleModules` (the layers without a program, see
-[configuration.md](configuration.md)) and `createLogReader` (reads the log from shared memory).
+[configuration.md](configuration.md)), `createLogReader` (reads the log from shared memory) and
+`openSpeaker` (the page's audio output, below), and the page's screen while a run plays
+(`requestFullscreen`, `exitFullscreen`, `fullscreenElement`, `watchFullscreen`, `canFullscreen`,
+`keepScreenAwake`, below), and `programIcon(bytes)`: a program's own icon from its executable, for a
+page to show the game by -- the first icon group's largest image, `{ width, height, rgba }` for one
+stored as a bitmap or `{ width, height, png }` for one stored as a PNG, null for none.
+
+## The speaker
+
+`openSpeaker({ worklet?, latencyHint? })`, called inside the click or touch that starts a run and
+before any await, opens the audio context, sets `navigator.audioSession.type` to `playback` where
+the browser has it, and starts the worklet loading (`worklet`: its URL, the package's `worklet.js`
+beside `core.js` by default). It answers a speaker:
+
+| Member | What it does |
+| --- | --- |
+| `ready(timeoutMs = 1000)` | `{ running: true }` once the worklet is loaded and the context runs, or `{ running: false, reason }`. A context still stopped is kept open and started at the person's next gesture. |
+| `audioOptions()` | The `audio` option for `createApp`: `{ drained: true, sampleRate }`, and `port` on a page without shared memory. |
+| `connect(app)` | Plays the built app: the worklet node, reading its track table and every process's beside it, or fed from the port. Once per speaker. |
+| `volume(level)` | What is heard, 0 silent; the program's cursors move as they would. |
+| `suspend()`, `resume()` | Holds it with a paused run; nothing else starts it again. A stop the browser made on its own (`interrupted` on a phone, a device change) is resumed when the context says so and at the next gesture. |
+| `close()` | Stops the worklet and closes the context. |
+| `context`, `state()` | The `AudioContext` and its state. |
 
 ## Options
 
@@ -113,6 +135,16 @@ one it shows into a word the worker reads at every present: a frame then goes as
 before it was shown, not once the answer has come through the worker's queue, and `back.early`
 counts the frames that went so.
 
+## The screen
+
+| Export | What it does |
+| --- | --- |
+| `requestFullscreen(element)` | Inside a click's or a key's handler: puts the element into fullscreen by the standard name or by Safari's `webkit` one, and settles with `{ entered: true }`, or `{ entered: false, reason }`: `unsupported` where the browser has no fullscreen for an element (Safari on an iPhone, which has it only for a video; a web app added to the home screen is the way to play there without the browser around it), `refused` with the browser's `message`. |
+| `canFullscreen(element)` | Whether either name exists, so a page can offer the home screen instead of a button that does nothing. |
+| `fullscreenElement()`, `exitFullscreen()` | The element in fullscreen or null, and leaving it, by either name. |
+| `watchFullscreen(handler)` | Calls `handler(element or null)` on every change, by either event name; answers the function that stops. |
+| `keepScreenAwake()` | Holds a screen wake lock while a program runs, so a game watched rather than played -- an intro, a cutscene -- does not dim and lock the screen. Asked for again whenever the page is shown (the browser lets it go when the page is hidden) and at the next gesture after a refusal. Answers `{ held(), pause(), resume(), release(), refusal() }`: `pause` with a paused run, `release` when it ends; `refusal()` is why the browser would not hold it, `unsupported` with no wake lock. |
+
 ## The controller
 
 | Member | What it does |
@@ -123,7 +155,8 @@ counts the frames that went so.
 | `on(name, handler)` | Subscribes to an event (below); returns the function that unsubscribes. |
 | `answerMessageBox(id, button)` | Answers a `message-box` event with the id of the button pressed. |
 | `input.attach(canvas, { pointerLock? })`, `input.detach()` | Capture keyboard, mouse and gamepads from the canvas, or stop. |
-| `input.send(event)`, `input.poll()` | Send an input event yourself; poll the gamepads (call once a frame). |
+| `input.send(event)`, `input.poll()` | Send an input event yourself; poll the gamepads (call once a frame). An event is `{ kind, ... }`: `key` (`code` a `KeyboardEvent.code`, `down`), `text` (`text`, the character the `key` press sent just before it typed: it rides on that press and reaches no one alone), `type` (`text`, characters with no key behind them, delivered as Windows delivers `SendInput`'s Unicode input: a `VK_PACKET` press and release each, and `WM_CHAR` from `TranslateMessage`), `paste` (`text`, for the clipboard), `pointerMove` (`x`, `y` in the picture's pixels, and/or `dx`, `dy`), `pointerButton` (`button` `left`/`right`/`middle`/`x1`/`x2`, `down`), `wheel` (`delta` in multiples of 120), `focus` (`gained`), `padAxis` (`axis`, `value` -1..1), `padButton` (`index`, `down`). |
+| `input.showKeyboard()`, `input.hideKeyboard()`, `input.keyboardShown()` | A phone's on-screen keyboard, typing into the game. `showKeyboard` must be called inside a touch's own handler (`click`, `touchend`), the only moment a phone shows its keyboard; it focuses a field the engine keeps beside the attached canvas and answers whether the field took the focus. What is typed reaches the program as a keyboard with keys would send it: each character on the US layout's key that types it, with Shift held where needed (so `WM_KEYDOWN`, `GetAsyncKeyState` and DirectInput see it), a character no key there types as `type`, a line break as Enter and a deletion as Backspace; a paired keyboard's keys go through as keys. Put away by the phone's own button, the keyboard leaves the game the focus. `false` with no canvas attached. |
 | `input.route()` | Clicks and key taps driven from outside, one step at a time. `click(x, y, { button? })` and `key(code, frames?)` queue steps; `tick()` sends the next and returns how many are left (call it once a frame, or on a timer for a program that does not present). A click first pushes the pointer far up and left, on the next step moves it from the corner to the point and presses, and releases on the step after. A program that moves its own cursor by relative motion (DirectInput) thus clicks where the window's pointer is, wherever it had put its cursor. |
 | `audio.memory()`, `audio.format()` | The output's shared table and `{ sampleRate, channels }`, for the `AudioWorkletNode`. |
 | `adapter` | `{ vendor, architecture, description }` of the GPU the engine opened. |
