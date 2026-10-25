@@ -158,8 +158,12 @@ test('the first thread may bring its own stack', async()=>{
  */
 async function makeRunningKernel(slots, size = STACK_SIZE){
     const memory = fakeMemory();
+    /** @type {[number, number][]} */
+    const noted = [];
     const cpu = {
         ...fakeCpu(),
+        /** @param {number} base @param {number} bytes */
+        noteStack: (base, bytes)=>noted.push([base, bytes]),
         captureContext: ()=>({}),
         restoreContext: ()=>{},
         resumeContextAt: ()=>{},
@@ -174,8 +178,24 @@ async function makeRunningKernel(slots, size = STACK_SIZE){
             provide: ()=>{},
         }),
     );
-    return { kernel, memory };
+    return { kernel, memory, noted };
 }
+
+test('a fiber stack comes from the thread stack pool, is known to the translator, and goes back'
+    + ' to the pool once given back', async()=>{
+    const { kernel, memory, noted } = await makeRunningKernel(2);
+    const stack = kernel.allocateStack({});
+    assert.ok(stack);
+    assert.equal(stack.top - stack.base, STACK_SIZE);
+    assert.deepEqual(noted, [[stack.base, STACK_SIZE]], 'noted as a thread stack is');
+    assert.ok(kernel.createThread({ entry: 0x00402000, name: 'beside it' }));
+    assert.equal(kernel.allocateStack({}), null, 'a full pool has no room for another');
+
+    kernel.releaseStack(stack);
+    const again = kernel.allocateStack({});
+    assert.equal(again?.base, stack.base, 'the one given back is given out again');
+    assert.equal(memory.regions.length, 2);
+});
 
 test('a thread that exits gives its stack back, and the next thread is given it', async()=>{
     // Otherwise a program that makes a worker per task and lets each one end

@@ -23,9 +23,12 @@
  * So there is no half-open state to get wrong -- connectRelay resolves when the
  * runtime is on the network, or rejects.
  *
- * A dropped link is reported, not repaired. Reconnecting would get a different
- * address and an empty room, so every socket the guest holds would be stale
- * while looking healthy. Telling the runtime the network has gone is both the
+ * A dropped link is repaired only as the same session. A fresh join would get a
+ * different address and an empty room, so every socket the guest holds would be
+ * stale while looking healthy. A relay that keeps the session for a resume
+ * window lets the link come back to the same peer, with whatever either side
+ * missed resent, and the guest sees a pause. Past the window, or with a relay
+ * that keeps nothing, the runtime is told the network has gone -- both the
  * truth and the thing a program is written to handle: reads return, connects
  * fail, and the game shows its own "connection lost" rather than hanging.
  *
@@ -42,6 +45,9 @@ import {
 
 /** How long the join may take before it is given up on. */
 const JOIN_TIMEOUT_MS = 15000;
+
+/** The frames kept for resending after a dropped link, by their bytes. */
+const REPLAY_BYTES = 2 * 1024 * 1024;
 
 /**
  * An address as the runtime keeps one: host order, both fields.
@@ -92,6 +98,9 @@ const JOIN_TIMEOUT_MS = 15000;
  * @property {(event: { type: string, address?: string }) => void} [onRoster]
  *      Told when a peer joins or leaves, for a lobby to display. The guest's
  *      sockets do not need it and do not see it.
+ * @property {boolean} [resumable]
+ *      Whether to ask the relay to keep this session through a dropped link
+ *      (yes by default); the relay says for how long.
  * @property {typeof WebSocket} [WebSocketImpl]  For tests.
  */
 
@@ -107,14 +116,36 @@ const JOIN_TIMEOUT_MS = 15000;
  * @returns {Promise<ClientTransport>}
  */
 export function connectRelay(options){
+    return join(options, {
+        t: 'hello', protocol: PROTOCOL_VERSION, room: options.room, token: options.token,
+        ...(options.resumable === false ? {} : { resumable: true }),
+    }, options.joinTimeoutMs ?? JOIN_TIMEOUT_MS,
+    (socket, welcome)=>makeTransport(socket, welcome, options));
+}
+
+/**
+ * Opens a link and says hello on it: the first join, or coming back to a
+ * session. `adopt` takes the link and the welcome inside the welcome's own
+ * event, before the next message is dispatched -- the relay sends the frames a
+ * resumed session missed right behind the welcome, and a listener attached a
+ * microtask later would never see them. Resolves with what `adopt` returned,
+ * or rejects with the reason.
+ *
+ * @template T
+ * @param {RelayOptions} options
+ * @param {import('../protocol.js').Hello} hello
+ * @param {number} within
+ * @param {(socket: any, welcome: import('../protocol.js').Welcome) => T} adopt
+ * @returns {Promise<T>}
+ */
+function join(options, hello, within, adopt){
     const Impl = options.WebSocketImpl ?? WebSocket;
     const socket = new Impl(options.url);
     socket.binaryType = 'arraybuffer';
 
     return new Promise((resolve, reject)=>{
         /** @type {any} */
-        let timer = setTimeout(()=>fail('relay did not answer in time'),
-            options.joinTimeoutMs ?? JOIN_TIMEOUT_MS);
+        let timer = setTimeout(()=>fail('relay did not answer in time'), within);
         let done = false;
 
         const detach = ()=>{
@@ -150,10 +181,7 @@ export function connectRelay(options){
         }
 
         function onOpen(){
-            socket.send(encodeControl({
-                t: 'hello', protocol: PROTOCOL_VERSION,
-                room: options.room, token: options.token,
-            }));
+            socket.send(encodeControl(hello));
         }
 
         /** @param {any} event */
@@ -179,7 +207,7 @@ export function connectRelay(options){
                 return;
             }
             detach();
-            resolve(makeTransport(socket, message, options));
+            resolve(adopt(socket, message));
         }
 
         socket.addEventListener('error', onError);
@@ -190,14 +218,21 @@ export function connectRelay(options){
 }
 
 /**
- * @param {any} socket
+ * @param {any} first
  * @param {import('../protocol.js').Welcome} welcome
  * @param {RelayOptions} options
  * @returns {ClientTransport}
  */
-function makeTransport(socket, welcome, options){
+function makeTransport(first, welcome, options){
     const address = parseIp(welcome.address);
     const encoder = new TextEncoder();
+    // A session the relay keeps after a dropped link, when it gave one.
+    const session = welcome.session ?? '';
+    const window = welcome.resume ?? 0;
+    const heartbeat = welcome.heartbeat ?? 0;
+
+    /** @type {any} */
+    let socket = first;
 
     /** @type {TransportInbound | null} */
     let inbound = null;
@@ -215,17 +250,55 @@ function makeTransport(socket, welcome, options){
 
     let nextQuery = 1;
     let lost = false;
+    let disposed = false;
     let sent = 0;
     let received = 0;
+    let resumed = 0;
+    // Back on a link after a drop: frames written meanwhile wait in the replay.
+    let away = false;
+    let heard = Date.now();
+
+    /** What was sent and not yet acknowledged, for resending on coming back. */
+    /** @type {Uint8Array[]} */
+    const replay = [];
+    let replayFirst = 1;
+    let replayBytes = 0;
+
+    /** @param {number} upTo */
+    const forget = upTo=>{
+        while (replay.length > 0 && replayFirst <= upTo)
+        {
+            replayBytes -= /** @type {Uint8Array} */ (replay.shift()).length;
+            replayFirst++;
+        }
+    };
 
     /** @param {Partial<import('../protocol.js').Frame> & { op: number }} frame */
     const write = frame=>{
-        if (lost || socket.readyState !== 1)
+        if (lost)
         {
             return;
         }
-        socket.send(encodeFrame(frame));
+        const bytes = encodeFrame(frame);
+        if (session)
+        {
+            replay.push(bytes);
+            replayBytes += bytes.length;
+            while (replayBytes > REPLAY_BYTES)
+            {
+                replayBytes -= /** @type {Uint8Array} */ (replay.shift()).length;
+                replayFirst++;
+            }
+        }
+        else if (socket.readyState !== 1)
+        {
+            return;
+        }
         sent++;
+        if (!away && socket.readyState === 1)
+        {
+            socket.send(bytes);
+        }
     };
 
     /**
@@ -242,6 +315,7 @@ function makeTransport(socket, welcome, options){
             return;
         }
         lost = true;
+        clearInterval(beating);
         for (const settle of [...dialling.values()])
         {
             settle({ error: Wsa.NETDOWN });
@@ -257,29 +331,135 @@ function makeTransport(socket, welcome, options){
         options.onRoster?.({ type: 'lost' });
     };
 
-    socket.addEventListener('close', drop);
-    socket.addEventListener('error', drop);
-
-    socket.addEventListener('message', (/** @type {any} */ event)=>{
-        if (typeof event.data === 'string')
-        {
-            const message = decodeControl(event.data);
-            if (message && message.t === 'peer')
+    /**
+     * Back to the session after the link dropped, within the window the relay
+     * keeps it: what the relay missed is resent, and the guest sees nothing but
+     * a pause. Only a relay that refuses, or a window that passes, is a loss.
+     */
+    const comeBack = ()=>{
+        away = true;
+        const until = Date.now() + window;
+        let attempt = 0;
+        const again = ()=>{
+            if (disposed || lost)
             {
-                options.onRoster?.({
-                    type: message.joined ? 'joined' : 'left', address: message.address,
-                });
+                return;
             }
-            return;
-        }
-        const frame = decodeFrame(new Uint8Array(event.data));
-        if (!frame)
+            const left = until - Date.now();
+            if (left <= 0)
+            {
+                drop();
+                return;
+            }
+            join(options, {
+                t: 'hello', protocol: PROTOCOL_VERSION, room: welcome.room, token: options.token,
+                session, received,
+            }, left, (link, back)=>{
+                const had = back.received ?? 0;
+                if (disposed || lost || had < replayFirst - 1 || had > sent)
+                {
+                    link.close();
+                    drop();
+                    return;
+                }
+                socket = link;
+                wire(link);
+                forget(had);
+                for (const bytes of replay)
+                {
+                    link.send(bytes);
+                }
+                away = false;
+                heard = Date.now();
+                resumed++;
+                options.onRoster?.({ type: 'resumed' });
+            }).catch((/** @type {Error} */ error)=>{
+                if (error.message === 'cannot resume')
+                {
+                    drop();
+                    return;
+                }
+                const pause = Math.min(250 * 2 ** attempt++, 2000);
+                setTimeout(again, Math.min(pause, Math.max(until - Date.now(), 0)));
+            });
+        };
+        again();
+    };
+
+    /** @param {any} link */
+    const broken = link=>{
+        if (link !== socket || lost || away)
         {
             return;
         }
-        received++;
-        deliver(frame);
-    });
+        if (session && window > 0 && !disposed)
+        {
+            comeBack();
+            return;
+        }
+        drop();
+    };
+
+    /**
+     * The heartbeat: what this side has received, so the relay may forget it,
+     * and a link that has heard nothing for three beats taken for dead -- a
+     * link that died without closing never says so itself.
+     */
+    /** @type {any} */
+    const beating = session && heartbeat > 0 ? setInterval(()=>{
+        if (away || lost)
+        {
+            return;
+        }
+        if (Date.now() - heard > heartbeat * 3)
+        {
+            const dead = socket;
+            dead.close();
+            broken(dead);
+            return;
+        }
+        if (socket.readyState === 1)
+        {
+            socket.send(encodeControl({ t: 'ack', received }));
+        }
+    }, heartbeat) : null;
+
+    /** @param {any} link */
+    const wire = link=>{
+        link.addEventListener('close', ()=>broken(link));
+        link.addEventListener('error', ()=>broken(link));
+        link.addEventListener('message', (/** @type {any} */ event)=>{
+            if (link !== socket)
+            {
+                return;
+            }
+            heard = Date.now();
+            if (typeof event.data === 'string')
+            {
+                const message = decodeControl(event.data);
+                if (message?.t === 'ack')
+                {
+                    forget(message.received);
+                }
+                else if (message?.t === 'peer')
+                {
+                    options.onRoster?.({
+                        type: message.joined ? 'joined' : 'left', address: message.address,
+                    });
+                }
+                return;
+            }
+            // Counted before it is read, as the relay counted it when it sent it.
+            received++;
+            const frame = decodeFrame(new Uint8Array(event.data));
+            if (!frame)
+            {
+                return;
+            }
+            deliver(frame);
+        });
+    };
+    wire(socket);
 
     /** @param {import('../protocol.js').Frame} frame */
     const deliver = frame=>{
@@ -428,6 +608,7 @@ function makeTransport(socket, welcome, options){
 
         /** Closes the link. Everything on it is reported as lost, as it is. */
         dispose(){
+            disposed = true;
             socket.close();
             drop();
         },
@@ -436,7 +617,9 @@ function makeTransport(socket, welcome, options){
             transport: 'relay',
             room: welcome.room,
             address: welcome.address,
-            connected: !lost,
+            connected: !lost && !away,
+            resumable: session !== '',
+            resumed,
             streams: open.size,
             dialling: dialling.size,
             sent,

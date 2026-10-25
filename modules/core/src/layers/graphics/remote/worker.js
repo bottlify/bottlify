@@ -70,6 +70,7 @@ import { createDirect3D9 } from '../d3d9/device.js';
 import { createOpenglRoot } from '../opengl/root.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFrameLatency } from '../webgpu/internal/latency.js';
+import { trackDevice } from '../webgpu/ledger.js';
 import { createCapture } from './capture.js';
 import { createReceiver, sharedNow } from './channel.js';
 import { createBorrower } from './lending.js';
@@ -119,6 +120,8 @@ export function serveGraphics(scope, deps){
     let capture = null;
     /** What told them, for a client that comes after. @type {{ type: 'lost', reason: string } | null} */
     let lostWith = null;
+    /** What the device holds, weighed (`ledger.js`). @type {ReturnType<typeof trackDevice> | null} */
+    let ledger = null;
     /**
      * Asked of the page on a running program (`app.debug.dumpFrames`): every
      * Direct3D 8 and 9 device here writes its next frames down while this is
@@ -411,6 +414,7 @@ export function serveGraphics(scope, deps){
             throw new Error('no GPU adapter answered requestAdapter in the graphics worker');
         }
         const device = await adapter.requestDevice({ requiredFeatures: gpuFeaturesOf(adapter) });
+        ledger = trackDevice(device);
         device.lost?.then((/** @type {{ reason?: string }} */ info)=>{
             if (info?.reason === 'destroyed')
             {
@@ -561,7 +565,8 @@ export function serveGraphics(scope, deps){
                 gamma: options.gamma ? { applies: ()=>true, set: ()=>{} } : undefined,
             });
         }
-        receiver = createReceiver({ played, post, latency: ()=>latency.diagnostics() });
+        receiver = createReceiver({ played, post, latency: ()=>latency.diagnostics(),
+            gpuMemory: ()=>ledger?.diagnostics() ?? null });
         // Written down as made, before any of its batches can come: the
         // capture's roots are made again in its order when it is played.
         const captured = capture?.root({ api, options, source, lending: lending !== null,

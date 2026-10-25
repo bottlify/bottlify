@@ -142,7 +142,7 @@ workers answer nothing to a direct attach.
 | `worker-profile.mjs` | the engine worker's time: idle, GC, top functions, and every pause outside guest code with when it began | `node tools/cdp_test/live/worker-profile.mjs [seconds] [minMs]` |
 | `worker-allocations.mjs` | what the engine worker allocates, garbage included: MiB/s and the functions that allocate most, with their callers, which is what a collector pause pays for | `node tools/cdp_test/live/worker-allocations.mjs [seconds] [top]` |
 | `allocations.mjs` | which functions of the engine worker allocate the most, garbage included | `node tools/cdp_test/live/allocations.mjs [seconds]` |
-| `big-buffers.mjs` | every backing store over a size in the engine worker, and what holds it | `node tools/cdp_test/live/big-buffers.mjs [minMB]` |
+| `big-buffers.mjs` | every backing store over a size in a worker (the engine's, or `graphics`, `executor`, `translator`), what holds it, and the whole heap summed by kind; snapshots of any size | `node tools/cdp_test/live/big-buffers.mjs [minMB] [worker]` |
 | `drive.mjs` | a headless launcher tab that stays up and takes orders on http://127.0.0.1:9401: `/shot` (the picture as a PNG), `/click?x=&y=` in the program's pixels, `/move?x=&y=` (no button), `/drag?x=&y=&to=X,Y&steps=N` (the left button held along the way, to drag a window), `/key?code=`, `/type?text=`, `/eval?js=`, `/stack` (where the tab's own code is running when it answers nothing else; the debugger interrupts it), `/upload?file=` (a file into the page's file input, the library's Add, to run an installer), `/quit`. It is for walking a title's screens a step at a time with screenshots, a person saying what to press next; the engine is `globalThis.app` in the tab, reports land in dbg/live-downloads | `node tools/cdp_test/live/drive.mjs [card regex] [query]` (launcher running over TLS on 5180) |
 | `report-diff.mjs` | what happened between two of the launcher's reports of one run: frames and rate, host calls by time (calls, seconds, a frame, a call), bytes sent to the worker a frame; a window of a scene rather than a whole run | `node tools/cdp_test/live/report-diff.mjs before.json after.json [top]` |
 | `bottle-contents.mjs` | what an installation finished in the driven tab would put in its bottle, by directory and size, after the collection rule, and what that rule leaves out; read it before Save | `node tools/cdp_test/live/bottle-contents.mjs [depth] [port]` |
@@ -182,7 +182,8 @@ ones need the graphics worker.
 | `modules()`, `moduleAt(address)` | every image mapped and where; which image an address is in |
 | `read(address, length)` | guest memory |
 | `hook(address, how)` | a watch in front of a routine: its calls in the trace with arguments and answer |
-| `ringTrace(n)`, `callRingSkip('A,B')` | the bridge's recent calls; names kept out of that ring |
+| `ringTrace(n)` | keeps the last n Direct3D calls the guest's command rings carried (calls that never cross to the host one by one), 0 stops; answers what was kept |
+| `callRingSkip('A,B')` | names kept out of the bridge's call ring, the one `app.diagnostics()` reads as the bridge's `recentDetailed` (each call with its caller `from`, arguments and answer) |
 | `processes()`, `diagnosticsOf(id)` | every process standing; one process's diagnostics |
 | `registry`, `exported(lib, name)` | the program's registry; whether a system library exports a name |
 

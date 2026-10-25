@@ -14,6 +14,7 @@
  */
 
 import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
 import test from 'node:test';
 
 import {
@@ -77,11 +78,11 @@ class FakeSocket {
     }
 
     /** Completes the handshake and puts this socket in a room. */
-    welcome(address = '10.86.0.1', room = 'room'){
+    welcome(address = '10.86.0.1', room = 'room', more = {}){
         this.readyState = 1;
         this.emit('open');
         this.emit('message', {
-            data: encodeControl({ t: 'welcome', address, room, peers: [] }),
+            data: encodeControl({ t: 'welcome', address, room, peers: [], ...more }),
         });
     }
 
@@ -166,7 +167,7 @@ test('joining sends a hello and answers with the address the relay gave', async(
     const { transport, socket } = await joined();
 
     assert.deepEqual(socket.control()[0], {
-        t: 'hello', protocol: PROTOCOL_VERSION, room: 'room',
+        t: 'hello', protocol: PROTOCOL_VERSION, room: 'room', resumable: true,
     });
     assert.equal(transport.localAddress(), parseIp('10.86.0.1'));
     assert.equal(transport.diagnostics().address, '10.86.0.1');
@@ -457,8 +458,8 @@ test('two runtimes on one relay reach each other, over a real socket', async t=>
     assert.equal(back.streamId, 1);
 });
 
-test('a runtime whose relay goes away learns it, over a real socket', async t=>{
-    const server = createRelayServer({ port: 0 });
+test('a runtime whose relay goes away learns it once its window passes, for real', async t=>{
+    const server = createRelayServer({ port: 0, resumeWindowMs: 200 });
     const port = await server.listen();
     const transport = await connectRelay({ url: `ws://127.0.0.1:${port}`, room: 'a-game' });
     t.after(()=>transport.dispose());
@@ -488,3 +489,168 @@ async function waitFor(ready, within = 5000){
         await new Promise(resolve=>setTimeout(resolve, 5));
     }
 }
+
+/** Lets the transport's own promises settle. */
+const settle = ()=>new Promise(resolve=>setImmediate(resolve));
+
+/**
+ * A transport the relay gave a session, and every socket it opens: the first
+ * is welcomed at once, the ones it opens to come back are the test's to answer.
+ *
+ * @param {{ resume?: number, heartbeat?: number }} [given]
+ */
+async function resumable({ resume = 1000, heartbeat = 0 } = {}){
+    /** @type {FakeSocket[]} */
+    const sockets = [];
+    class Captured extends FakeSocket {
+        /** @param {string} url */
+        constructor(url){
+            super(url);
+            sockets.push(this);
+            if (sockets.length === 1)
+            {
+                queueMicrotask(()=>this.welcome('10.86.0.1', 'room',
+                    { session: 'secret', resume, heartbeat }));
+            }
+        }
+    }
+    const transport = await connectRelay({
+        url: 'wss://relay.invalid', room: 'room', WebSocketImpl: /** @type {any} */ (Captured),
+    });
+    const recorder = inboundRecorder();
+    transport.attach(recorder.handlers);
+    return { transport, sockets, recorder };
+}
+
+test('a dropped link comes back to its session and resends what the relay had not had', async()=>{
+    const { transport, sockets, recorder } = await resumable();
+    const dial = transport.connect(7, { host: parseIp('93.184.216.34'), port: 80 });
+    transport.send(7, new Uint8Array([1]));
+
+    sockets[0].close();
+    transport.send(7, new Uint8Array([2]));
+    assert.equal(sockets.length, 2, 'it opened a link to come back on');
+    const back = sockets[1];
+    back.readyState = 1;
+    back.emit('open');
+    assert.deepEqual(back.control()[0], {
+        t: 'hello', protocol: PROTOCOL_VERSION, room: 'room', session: 'secret', received: 0,
+    });
+
+    // The relay had the dial and nothing after it.
+    back.emit('message', { data: encodeControl({
+        t: 'welcome', address: '10.86.0.1', room: 'room', peers: [], session: 'secret',
+        resume: 1000, heartbeat: 0, received: 1,
+    }) });
+    await settle();
+    assert.deepEqual(back.frames().map(frame=>[frame?.op, [...(frame?.payload ?? [])]]),
+        [[Op.STREAM, [1]], [Op.STREAM, [2]]]);
+
+    back.deliver({ op: Op.OPENED, tag: 7, fromPort: 4000 });
+    assert.ok(!(await dial).error, 'the dial outlived the drop');
+    assert.equal(recorder.of('lost').length, 0);
+    assert.equal(transport.diagnostics().resumed, 1);
+    transport.dispose();
+});
+
+test('frames the relay acknowledged are not resent', async()=>{
+    const { transport, sockets } = await resumable();
+    transport.listen(false, 1);
+    transport.listen(false, 2);
+    transport.listen(false, 3);
+    sockets[0].emit('message', { data: encodeControl({ t: 'ack', received: 2 }) });
+
+    sockets[0].close();
+    const back = sockets[1];
+    back.readyState = 1;
+    back.emit('open');
+    back.emit('message', { data: encodeControl({
+        t: 'welcome', address: '10.86.0.1', room: 'room', peers: [], session: 'secret',
+        received: 2,
+    }) });
+    await settle();
+    assert.deepEqual(back.frames().map(frame=>frame?.toPort), [3]);
+    transport.dispose();
+});
+
+test('a relay that will not resume the session ends it as a lost network', async()=>{
+    const { transport, sockets, recorder } = await resumable();
+    const dial = transport.connect(7, { host: parseIp('93.184.216.34'), port: 80 });
+
+    sockets[0].close();
+    const back = sockets[1];
+    back.readyState = 1;
+    back.emit('open');
+    back.emit('message', { data: encodeControl({ t: 'error', reason: 'cannot resume' }) });
+
+    assert.equal((await dial).error, Wsa.NETDOWN);
+    assert.equal(recorder.of('lost').length, 1);
+    assert.equal(sockets.length, 2, 'and does not try again');
+});
+
+test('a session not back within its window is lost', async()=>{
+    const { sockets, recorder } = await resumable({ resume: 60 });
+
+    sockets[0].close();
+    // Every way back fails as an unreachable relay does.
+    const failing = setInterval(()=>sockets.at(-1)?.emit('error'), 5);
+    try {
+        await waitFor(()=>recorder.of('lost')[0]);
+    }
+    finally {
+        clearInterval(failing);
+    }
+    assert.ok(sockets.length >= 2);
+});
+
+test('the heartbeat acknowledges, and a link that hears nothing is taken for dead', async()=>{
+    const { transport, sockets } = await resumable({ heartbeat: 10 });
+
+    await waitFor(()=>sockets[0].control().some(message=>message?.t === 'ack'));
+    await waitFor(()=>sockets.length === 2);
+    assert.equal(sockets[0].readyState, 3, 'the silent link was closed');
+    transport.dispose();
+});
+
+test('a link cut under a runtime comes back to the same address, over a real socket', async t=>{
+    const http = createServer();
+    /** @type {any[]} */
+    const links = [];
+    http.on('upgrade', (_, socket)=>links.push(socket));
+    const server = createRelayServer({ server: http, path: '/relay' });
+    await new Promise(resolve=>http.listen(0, '127.0.0.1', ()=>resolve(null)));
+    await server.listen();
+    t.after(()=>{
+        server.close();
+        http.close();
+    });
+
+    const port = /** @type {any} */ (http.address()).port;
+    const url = `ws://127.0.0.1:${port}/relay`;
+    const host = await connectRelay({ url, room: 'a-game' });
+    const guest = await connectRelay({ url, room: 'a-game' });
+    t.after(()=>{
+        host.dispose();
+        guest.dispose();
+    });
+    const atHost = inboundRecorder();
+    const atGuest = inboundRecorder();
+    host.attach(atHost.handlers);
+    guest.attach(atGuest.handlers);
+    host.listen(true, 6112);
+    assert.ok(!(await guest.connect(1, { host: host.localAddress(), port: 6112 })).error);
+    const accepted = await waitFor(()=>atHost.of('accepted')[0]);
+
+    const address = guest.localAddress();
+    links[1].destroy();
+    guest.send(1, new Uint8Array([1, 2]));
+    host.send(accepted.streamId, new Uint8Array([3]));
+
+    const there = await waitFor(()=>atHost.of('received')[0]);
+    const here = await waitFor(()=>atGuest.of('received')[0]);
+    assert.deepEqual([...there.bytes], [1, 2]);
+    assert.deepEqual([...here.bytes], [3]);
+    assert.equal(guest.localAddress(), address);
+    assert.equal(guest.diagnostics().resumed, 1);
+    assert.equal(atGuest.of('lost').length, 0);
+});

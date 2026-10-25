@@ -16,6 +16,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { createServer } from 'node:http';
+import { connect } from 'node:net';
 import { createWebSocketServer } from './websocket.js';
 
 /**
@@ -278,4 +279,64 @@ test('attached to a server that already exists, it answers upgrades on its path 
     await server.close();
     assert.ok(owner.listening, 'closing the attached server leaves the owner listening');
     client.close();
+});
+
+/**
+ * A client that completes the handshake by hand and then reads nothing, as a
+ * page that stopped reading looks from the server.
+ *
+ * @param {any} t
+ */
+async function stalled(t){
+    /** @type {any} */
+    let connection = null;
+    const server = createWebSocketServer({ port: 0 }, made=>{
+        connection = made;
+    });
+    const port = await server.listen();
+    t.after(()=>server.close());
+
+    const socket = connect(port, '127.0.0.1');
+    t.after(()=>socket.destroy());
+    await new Promise(resolve=>socket.once('connect', resolve));
+    socket.write([
+        'GET / HTTP/1.1', `Host: 127.0.0.1:${port}`, 'Upgrade: websocket', 'Connection: Upgrade',
+        'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==', 'Sec-WebSocket-Version: 13', '', '',
+    ].join('\r\n'));
+    await new Promise(resolve=>socket.once('data', resolve));
+    socket.pause();
+    return { socket, connection: await waitFor(()=>connection) };
+}
+
+test('what waits for a slow client is counted, and its draining is told', async t=>{
+    const { socket, connection } = await stalled(t);
+    let drained = 0;
+    connection.on('drain', ()=>{
+        drained++;
+    });
+
+    for (let index = 0; index < 8; index++)
+    {
+        connection.sendBinary(new Uint8Array(1024 * 1024));
+    }
+    assert.ok(connection.waiting > 0, 'the kernel cannot take 8 MB at once');
+
+    socket.resume();
+    await waitFor(()=>drained > 0);
+    assert.equal(connection.waiting, 0);
+});
+
+test('a client that never reads is let go before it holds the server\'s memory', async t=>{
+    const { connection } = await stalled(t);
+    let closed = false;
+    connection.on('close', ()=>{
+        closed = true;
+    });
+
+    for (let index = 0; index < 40; index++)
+    {
+        connection.sendBinary(new Uint8Array(1024 * 1024));
+    }
+    await waitFor(()=>closed);
+    assert.ok(connection.socket.destroyed);
 });

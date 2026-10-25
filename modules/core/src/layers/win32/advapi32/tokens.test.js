@@ -991,3 +991,29 @@ test('MapGenericMask replaces each generic right with the mapping\'s specific on
     assert.equal(fns.MapGenericMask.handler([0x100, 0x110]), 0);
     assert.equal(dword(0x100), 0x105, 'the generic bits gone, read and execute mapped in');
 });
+
+test('ConvertStringSecurityDescriptorToSecurityDescriptor lays out the descriptor its SDDL names',
+    ()=>{
+        const { bytes, errors, fns, dword } = setup();
+        const convert = fns.ConvertStringSecurityDescriptorToSecurityDescriptorW.handler;
+        assert.equal(convert([putWide(bytes, 0x300, 'D:(A;;GA;;;WD)'), 1, OUT, NEEDED]), 1);
+        const at = dword(OUT);
+        assert.equal(dword(NEEDED), 48);
+        // Self-relative, a DACL present, one ACE granting Everyone GENERIC_ALL.
+        assert.deepEqual([...bytes.subarray(at, at + 48)], [
+            1, 0, 4, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x14, 0, 0, 0,
+            2, 0, 0x1c, 0, 1, 0, 0, 0,
+            0, 0, 0x14, 0, 0, 0, 0, 0x10, 1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0,
+        ]);
+        assert.equal(fns.ConvertStringSecurityDescriptorToSecurityDescriptorA
+            .handler([putNarrow(bytes, 0x300, 'O:BAG:SYD:P(A;OICI;FA;;;BA)'), 1, OUT, 0]), 1);
+        const owned = dword(OUT);
+        assert.equal(bytes[owned + 3], 0x90, 'protected, self-relative');
+        assert.notEqual(dword(owned + 4), 0, 'an owner');
+        assert.notEqual(dword(owned + 8), 0, 'a group');
+        assert.equal(convert([putWide(bytes, 0x300, 'D:NO_ACCESS_CONTROL'), 1, OUT, 0]), 1);
+        assert.equal(dword(dword(OUT) + 16), 0, 'the null DACL: present, at no offset');
+        assert.equal(convert([putWide(bytes, 0x300, 'D:(Z;;GA;;;WD)'), 1, OUT, 0]), 0);
+        assert.equal(convert([putWide(bytes, 0x300, 'D:(A;;GA;;;WD)'), 2, OUT, 0]), 0);
+        assert.deepEqual(errors.filter(code=>code !== 0), [87, 1305]);
+    });

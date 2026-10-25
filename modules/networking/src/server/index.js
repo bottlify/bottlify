@@ -30,9 +30,17 @@ export { permits } from './cli.js';
  *     server?: import('node:http').Server,
  *     path?: string,
  *     origins?: string[],
+ *     maxConnections?: number,
+ *     maxConnectionsPerAddress?: number,
+ *     addressOf?: (request: import('node:http').IncomingMessage) => string,
  * }} RelayServerOptions
  *     `server` and `path` attach the relay to an existing HTTP or HTTPS
  *     server at one path instead of listening on a port of its own.
+ *     `maxConnections` (1024) and `maxConnectionsPerAddress` (16) bound the
+ *     links at once, the second by the address `addressOf` names: the socket's
+ *     own by default, or a header a proxy in front sets, such as Cloudflare's
+ *     `cf-connecting-ip` -- trusted only when nothing but that proxy can
+ *     reach the relay.
  */
 
 /**
@@ -41,6 +49,12 @@ export { permits } from './cli.js';
 export function createRelayServer(options = {}){
     const relay = createRelay(options);
     const origins = options.origins;
+    const maxConnections = options.maxConnections ?? 1024;
+    const maxPerAddress = options.maxConnectionsPerAddress ?? 16;
+    const addressOf = options.addressOf ?? (request=>String(request.socket.remoteAddress ?? ''));
+    /** @type {Map<string, number>} */
+    const open = new Map();
+    let total = 0;
 
     const server = createWebSocketServer({
         port: options.port,
@@ -50,21 +64,40 @@ export function createRelayServer(options = {}){
         // An unlisted origin is refused at the handshake rather than after
         // joining: a browser will happily open a WebSocket cross-origin, so the
         // only place to decide whose pages may use this relay is here.
-        allow: request=>!origins
-            || origins.includes(String(request.headers.origin ?? '')),
-    }, connection=>{
+        // The bounds are checked here too, so one address opening links in a
+        // loop is refused before a handshake rather than after a join.
+        allow: request=>(!origins || origins.includes(String(request.headers.origin ?? '')))
+            && total < maxConnections && (open.get(addressOf(request)) ?? 0) < maxPerAddress,
+    }, (connection, request)=>{
+        const address = addressOf(request);
+        open.set(address, (open.get(address) ?? 0) + 1);
+        total++;
         const session = relay.connect({
             sendBinary: bytes=>connection.sendBinary(bytes),
             sendText: text=>connection.sendText(text),
             disconnect: ()=>connection.close(),
+            buffered: ()=>connection.waiting,
         });
         connection.on('message', (data, binary)=>session.message(data, binary));
-        connection.on('close', ()=>session.close());
+        connection.on('drain', ()=>session.drained());
+        connection.on('close', ()=>{
+            total--;
+            const left = (open.get(address) ?? 1) - 1;
+            if (left === 0)
+            {
+                open.delete(address);
+            }
+            else
+            {
+                open.set(address, left);
+            }
+            session.close();
+        });
     });
 
     return {
         listen: ()=>server.listen(),
         close: ()=>server.close(),
-        diagnostics: ()=>relay.diagnostics(),
+        diagnostics: ()=>({ ...relay.diagnostics(), links: total }),
     };
 }

@@ -33,8 +33,14 @@ node src/server/cli.js --port 8787 --origin https://play.example.com
 | `--host` | `0.0.0.0` | The address it binds. |
 | `--allow host` | nothing | A host the relay may open real connections to; `*.example.net` allows a suffix. Repeat for more. |
 | `--origin url` | any | Only pages from these origins may connect (checked at the handshake). Repeat for more. |
+| `--resume-seconds n` | 10 | How long a peer whose link dropped is kept for its page to come back to; 0 ends it with the link. |
+| `--address-header name` | none | Behind a proxy, the header with the client's address (`cf-connecting-ip`), which the per-address limit counts by. Only when nothing but that proxy reaches the relay. |
 
-With no `--allow`, a relay is a private LAN per room, never an open proxy. A page served over
+With no `--allow`, a relay is a private LAN per room, never an open proxy. Whatever the policy
+says, real sockets never reach the relay's own machine or a private, link-local or reserved network
+(`privateNetworks: true` allows it, for a relay on one's own machine). A relay takes at most 1024
+links, 16 from one address (`maxConnections`, `maxConnectionsPerAddress`), drops a link that has
+not joined a room within 10 s, and stops reading a real socket while the page it feeds is behind. A page served over
 HTTPS may only open `wss://`, so in a deployment put TLS in front of the relay, or attach it to the
 HTTPS server you already have:
 
@@ -96,8 +102,17 @@ net.disconnect(1, false);
 ```
 
 Addresses are `{ host, port }`, the host a 32-bit number in host byte order. `listen(true, port)`
-accepts streams. A dropped link is reported through `lost`, never repaired silently: reconnecting
-would mean a new address and an empty room. Node 22 and later has `WebSocket` built in, so the
+accepts streams.
+
+A dropped link comes back as the same session. The client asks to be resumable when it joins
+(`resumable: false` does not), and the relay keeps its peer -- address, streams, real sockets -- for
+the resume window after the link drops. Both sides number their binary frames, acknowledge them
+every heartbeat (5 s), and keep the ones not yet acknowledged; the client reconnects with its
+session secret and each side resends what the other missed, so the program sees a pause, not a
+loss. Datagrams sent while the link is down are dropped, as a network drops them. A link silent for
+three heartbeats is taken for dead and comes back the same way. Past the window, or when the relay
+will not resume, the loss is reported through `lost`: a fresh join would mean a new address and an
+empty room. Node 22 and later has `WebSocket` built in, so the
 client runs there too.
 
 ## The wire

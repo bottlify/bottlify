@@ -31,6 +31,9 @@ import { gpuFeaturesOf } from '../layers/graphics/webgpu/features.js';
 /** How many presented frames are remembered for a diagnostic to read back. */
 const PRESENT_HISTORY = 600;
 
+/** How long a run waits for the relay before it starts without a network. */
+const RELAY_JOIN_MS = 5000;
+
 /**
  * How long a worker runs turns back to back before giving its event loop a
  * turn regardless.
@@ -651,10 +654,20 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
             }
             if (relay)
             {
-                const { connectRelay } = await import(/* @vite-ignore */ relay.module);
-                transport = await connectRelay({
-                    url: relay.url, room: relay.room, token: relay.token,
-                });
+                // A relay that is down, or a client that will not load, is a
+                // machine with no network, not a program that cannot start:
+                // Winsock then fails each connect as an unreachable network.
+                try {
+                    const { connectRelay } = await import(/* @vite-ignore */ relay.module);
+                    transport = await connectRelay({
+                        url: relay.url, room: relay.room, token: relay.token,
+                        joinTimeoutMs: RELAY_JOIN_MS,
+                    });
+                } catch (e){
+                    console.warn(`network: ${/** @type {any} */ (e)?.message ?? e};`
+                        + ' the program runs without one');
+                    transport = null;
+                }
             }
             const { port: soundPort, ...soundOptions } = rest.audio ?? {};
             /**

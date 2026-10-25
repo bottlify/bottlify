@@ -762,15 +762,18 @@ export function createProcessFunctions(host){
         const milliseconds = host.now();
         if (clockWords !== null)
         {
-            const counter = ticksOf(milliseconds);
+            // In plain numbers, exact to 2^53 ticks: a BigInt here was four
+            // allocations wherever guest time moved, thousands of times a second.
+            const counter = Math.round(milliseconds * performanceFrequency / 1000);
             // The sequence odd before the words move and even after, every
             // word by Atomics: a plain store may reach a reader on another
             // executor ahead of the odd sequence on a host that reorders
             // stores (arm64), and the reader would take half a counter.
             Atomics.store(clockWords, CLOCK.SEQUENCE >> 2, ++sequence);
             Atomics.store(clockWords, CLOCK.TICKS >> 2, Math.floor(milliseconds));
-            Atomics.store(clockWords, CLOCK.COUNTER >> 2, Number(counter & 0xffffffffn) | 0);
-            Atomics.store(clockWords, (CLOCK.COUNTER >> 2) + 1, Number(counter >> 32n) | 0);
+            Atomics.store(clockWords, CLOCK.COUNTER >> 2, counter % 0x100000000 | 0);
+            Atomics.store(clockWords, (CLOCK.COUNTER >> 2) + 1,
+                Math.floor(counter / 0x100000000) | 0);
             Atomics.store(clockWords, CLOCK.SEQUENCE >> 2, ++sequence);
             return;
         }

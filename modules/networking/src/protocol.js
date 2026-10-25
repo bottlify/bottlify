@@ -273,6 +273,9 @@ export function unpackError(payload){
  * @property {number} protocol
  * @property {string} room   Peers sharing a room see each other and nobody else.
  * @property {string} [token]
+ * @property {boolean} [resumable]  The client can come back to its peer after a dropped link.
+ * @property {string} [session]     Coming back: the secret a resumable welcome gave.
+ * @property {number} [received]    Coming back: the binary frames the client has had.
  */
 
 /**
@@ -281,6 +284,19 @@ export function unpackError(payload){
  * @property {string} address  This runtime's address on the room's network.
  * @property {string} room
  * @property {string[]} peers  Everyone already here.
+ * @property {string} [session]    A resumable peer's secret, for coming back to it.
+ * @property {number} [resume]     How long, in ms, the peer is kept after its link drops.
+ * @property {number} [heartbeat]  How often, in ms, each side acknowledges.
+ * @property {number} [received]   Coming back: the binary frames the relay has had.
+ */
+
+/**
+ * What one side has received, so the other may forget it; sent every
+ * heartbeat, it is also how a link that died without closing is noticed.
+ *
+ * @typedef {Object} Acknowledged
+ * @property {'ack'} t
+ * @property {number} received  Binary frames received on this session so far.
  */
 
 /**
@@ -297,7 +313,7 @@ export function unpackError(payload){
  */
 
 /**
- * @typedef {Hello | Welcome | PeerChanged | Refused} Control
+ * @typedef {Hello | Welcome | PeerChanged | Refused | Acknowledged} Control
  */
 
 /**

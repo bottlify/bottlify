@@ -192,6 +192,8 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
     let phases = null;
     /** How far its GPU ran behind, as it said last. @type {FrameLatencyState | null} */
     let latency = null;
+    /** What the worker's device held, as it said last (`ledger.js`). @type {any} */
+    let gpuMemory = null;
     let failure = /** @type {string | null} */ (null);
     /** The diagnostics asked for, and those the played side has answered. */
     let asked = 0;
@@ -409,6 +411,7 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
                     diagnostics = message.diagnostics;
                     phases = message.phases ?? null;
                     latency = message.latency ?? null;
+                    gpuMemory = message.gpuMemory ?? null;
                     told++;
                     hear();
                     break;
@@ -555,6 +558,9 @@ export function createSender({ post, framesAhead = 2, later = queueMicrotask, on
          */
         latency: ()=>latency,
 
+        /** What the worker's device held with its last diagnostics, or null. */
+        gpuMemory: ()=>gpuMemory,
+
         /** The calls waited on, by name, with the milliseconds they took. */
         waits: ()=>Object.fromEntries([...waits].map(([name, sum])=>[name, {
             count: sum.count, ms: Math.round(sum.ms), maxMs: Math.round(sum.maxMs),
@@ -580,8 +586,9 @@ export { shared as sharedNow };
  * @param {(message: any, transfer?: Transferable[]) => void} options.post
  * @param {() => FrameLatencyState} [options.latency]  the bound the played device's
  *     presents wait on, where it has one
+ * @param {() => any} [options.gpuMemory]  what the worker's device holds (`ledger.js`)
  */
-export function createReceiver({ played, post, latency }){
+export function createReceiver({ played, post, latency, gpuMemory }){
     let presented = 0;
     /** @type {WorkerPhases} */
     const phases = { 'batch-read': { count: 0, ms: 0, selfMs: 0 },
@@ -666,7 +673,7 @@ export function createReceiver({ played, post, latency }){
                     if (call.m === 'diagnostics')
                     {
                         post({ type: 'diagnostics', diagnostics: crossable(answer),
-                            phases: phasesNow(), latency: latency?.() });
+                            phases: phasesNow(), latency: latency?.(), gpuMemory: gpuMemory?.() });
                     }
                     else if (call.wait === WAIT.ANSWER)
                     {

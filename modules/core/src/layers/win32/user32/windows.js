@@ -1462,6 +1462,13 @@ export function createWindowFunctions(host){
         : then(value));
 
     /**
+     * Whether a step answered with a promise rather than at once.
+     *
+     * @param {any} value @returns {value is Promise<any>}
+     */
+    const promised = value=>typeof value?.then === 'function';
+
+    /**
      * Runs `use` with a wide string turned into the ANSI page, in guest
      * memory the process heap lends for as long as the call takes; a null
      * pointer is handed on as null. Without a heap there is nowhere to put
@@ -4833,7 +4840,17 @@ export function createWindowFunctions(host){
      * @param {import('./messages.js').MessageFilter} filter @param {unknown} thread
      * @returns {null | Promise<null>}
      */
-    const placeWaiting = (filter, thread)=>{
+    const placeWaiting = (filter, thread)=>(host.queue.hasQueued(filter.thread
+        ?? threadIdOf(thread)) ? placeQueued(filter, thread) : null);
+
+    /**
+     * `placeWaiting` over a queue that holds something. Mostly the queue is
+     * empty, and finding that out makes nothing.
+     *
+     * @param {import('./messages.js').MessageFilter} filter @param {unknown} thread
+     * @returns {null | Promise<null>}
+     */
+    const placeQueued = (filter, thread)=>{
         const asked = new Set();
         /** @param {number} kind */
         const inRange = kind=>(filter.first === 0 && filter.last === 0)
@@ -4869,7 +4886,19 @@ export function createWindowFunctions(host){
      * @param {import('./messages.js').MessageFilter} filter @param {unknown} thread
      * @returns {any}
      */
-    const takeThrough = (filter, thread)=>andThen(placeWaiting(filter, thread), ()=>{
+    const takeThrough = (filter, thread)=>{
+        const placed = placeWaiting(filter, thread);
+        return placed === null ? takeNext(filter, thread)
+            : thenStep(placed, takeNext, filter, thread);
+    };
+
+    /**
+     * `takeThrough` once the waiting messages are placed.
+     *
+     * @param {import('./messages.js').MessageFilter} filter @param {unknown} thread
+     * @returns {any}
+     */
+    const takeNext = (filter, thread)=>{
         const entry = host.queue.peek(filter.thread === undefined
             ? { ...filter, thread: threadIdOf(thread) } : filter);
         if (!entry)
@@ -4882,7 +4911,7 @@ export function createWindowFunctions(host){
                 (/** @type {number} */ refused)=>((refused | 0) !== 0
                     ? takeThrough(filter, thread) : entry)))
             : takeThrough(filter, thread)));
-    });
+    };
 
     /**
      * A key message being retrieved, shown to the thread's WH_KEYBOARD hooks
@@ -5669,8 +5698,11 @@ export function createWindowFunctions(host){
         // keep theirs for as long as it stays hidden. The order is only
         // worked out when it has two windows to choose between.
         let waiting = false;
-        /** @type {any[]} */
-        const due = [];
+        // The first window due, and a list only once a second one is.
+        /** @type {any} */
+        let first = null;
+        /** @type {any[] | null} */
+        let due = null;
         for (const record of windows.values())
         {
             if (!paint.owesPaint(record) || record.destroyed || dying(record))
@@ -5682,20 +5714,27 @@ export function createWindowFunctions(host){
                 && (filter.hwnd === ANY_WINDOW || filter.hwnd === record.hwnd)
                 && (asking === null || creatorOf(record) === null || creatorOf(record) === asking))
             {
-                due.push(record);
+                if (first === null)
+                {
+                    first = record;
+                }
+                else
+                {
+                    (due ??= [first]).push(record);
+                }
             }
         }
-        if (due.length === 1)
+        if (first !== null && due === null)
         {
-            return due[0].hwnd;
+            return first.hwnd;
         }
-        if (due.length > 1)
+        if (due !== null)
         {
             const choosable = new Set(due);
-            const first = paintOrder().find(record=>choosable.has(record));
-            if (first)
+            const earliest = paintOrder().find(record=>choosable.has(record));
+            if (earliest)
             {
-                return first.hwnd;
+                return earliest.hwnd;
             }
         }
         if (!waiting)
@@ -6422,6 +6461,20 @@ export function createWindowFunctions(host){
     };
 
     /**
+     * Each thread's filter for the looks that answer at once, filled in place:
+     * a game waiting for a frame looks hundreds of thousands of times a
+     * second, and a filter made at each was most of what the engine's thread
+     * made as garbage. A look that goes on past its call -- a sent message,
+     * a hook -- keeps its filter until it settles, and a look meanwhile is
+     * given a new one.
+     *
+     * @type {WeakMap<object, import('./messages.js').MessageFilter>}
+     */
+    const lookFilters = new WeakMap();
+    /** @type {WeakSet<object>} */
+    const filtersHeld = new WeakSet();
+
+    /**
      * PeekMessage, in either encoding.
      *
      * @param {number[]} args  lpMsg, hWnd, wMsgFilterMin, wMsgFilterMax, wRemoveMsg.
@@ -6431,31 +6484,119 @@ export function createWindowFunctions(host){
         const remove = (removeFlag & PM_REMOVE) !== 0;
         const thread = host.callerThread?.();
         hasQueue(thread);
-        const filter = { hwnd: windowFilter(hwnd), first: filterMin >>> 0,
-            last: filterMax >>> 0, remove, thread: threadIdOf(thread) };
-        // Only a message taken activates: a look leaves the press,
-        // and the activation, for the call that takes it.
-        // What other threads sent is handled before anything posted is looked for.
-        const entry = andThen(receiveSent(thread), ()=>(remove ? takeThrough(filter, thread)
-            : andThen(placeWaiting(filter, thread), ()=>{
-                const seen = host.queue.peek(filter);
-                return seen ? andThen(askInputHooks(seen, HC_NOREMOVE, thread), ()=>seen) : seen;
-            })));
-        return andThen(entry, (/** @type {any} */ taken)=>{
-            if (!taken)
+        const owner = typeof thread === 'object' && thread !== null ? thread : null;
+        let filter = owner === null ? undefined : lookFilters.get(owner);
+        if (filter === undefined || filtersHeld.has(filter))
+        {
+            filter = { hwnd: 0, first: 0, last: 0, remove: false, thread: 0 };
+            if (owner !== null)
             {
-                return 0;
+                lookFilters.set(owner, filter);
             }
-            // Taken all the same, with nowhere to put it (msg.c: "PeekMessage
-            // (NULL) fails, but still removes the message").
-            if (host.canWrite?.(out >>> 0, MSG.SIZE) === false)
-            {
-                host.setLastError?.(ERROR_NOACCESS);
-                return 0;
-            }
-            writeMessage(host, out, retrieved(taken, unicode));
-            return andThen(showGotMessage(out, remove, thread), ()=>1);
-        });
+        }
+        filter.hwnd = windowFilter(hwnd);
+        filter.first = filterMin >>> 0;
+        filter.last = filterMax >>> 0;
+        filter.remove = remove;
+        filter.thread = threadIdOf(thread);
+        // What other threads sent is handled before anything posted is looked
+        // for. A game waiting for its next frame looks at an empty queue
+        // hundreds of thousands of times a second, so the way through makes
+        // no closure while every step answers at once: the garbage of those
+        // looks outran the collector on a phone, and the tab was killed.
+        const sent = receiveSent(thread);
+        const answer = promised(sent) ? peekAfter(sent, out, filter, thread, unicode)
+            : peekQueued(out, filter, thread, unicode);
+        if (promised(answer))
+        {
+            const held = filter;
+            filtersHeld.add(held);
+            answer.then(()=>filtersHeld.delete(held), ()=>filtersHeld.delete(held));
+        }
+        return answer;
+    };
+
+    /**
+     * The continuations that wait live apart from the steps that answer at
+     * once: a function whose variables a closure takes keeps them in an
+     * environment made at every call, whether or not the closure is.
+     *
+     * @param {Promise<any>} sent @param {number} out
+     * @param {import('./messages.js').MessageFilter} filter
+     * @param {unknown} thread @param {boolean} unicode
+     */
+    const peekAfter = (sent, out, filter, thread, unicode)=>sent.then(()=>peekQueued(out, filter,
+        thread, unicode));
+
+    /**
+     * PeekMessage past the sent messages: only a message taken activates,
+     * so a look leaves the press, and the activation, for the call that
+     * takes it.
+     *
+     * @param {number} out @param {import('./messages.js').MessageFilter} filter
+     * @param {unknown} thread @param {boolean} unicode
+     */
+    const peekQueued = (out, filter, thread, unicode)=>{
+        const entry = filter.remove ? takeThrough(filter, thread) : lookThrough(filter, thread);
+        return promised(entry) ? answerLater(entry, out, filter, thread, unicode)
+            : answerPeek(out, entry, filter.remove, thread, unicode);
+    };
+
+    /**
+     * @param {Promise<any>} entry @param {number} out
+     * @param {import('./messages.js').MessageFilter} filter
+     * @param {unknown} thread @param {boolean} unicode
+     */
+    const answerLater = (entry, out, filter, thread, unicode)=>entry.then(
+        (/** @type {any} */ taken)=>answerPeek(out, taken, filter.remove, thread, unicode));
+
+    /**
+     * The message a look that removes nothing finds, shown to the input hooks.
+     *
+     * @param {import('./messages.js').MessageFilter} filter @param {unknown} thread
+     */
+    const lookThrough = (filter, thread)=>{
+        const placed = placeWaiting(filter, thread);
+        return placed === null ? lookNext(filter, thread)
+            : thenStep(placed, lookNext, filter, thread);
+    };
+
+    /** @param {import('./messages.js').MessageFilter} filter @param {unknown} thread */
+    const lookNext = (filter, thread)=>{
+        const seen = host.queue.peek(filter);
+        return seen ? showLook(seen, thread) : seen;
+    };
+
+    /** A message looked at, shown to the input hooks. @param {any} seen @param {unknown} thread */
+    const showLook = (seen, thread)=>andThen(askInputHooks(seen, HC_NOREMOVE, thread), ()=>seen);
+
+    /**
+     * `step(filter, thread)` once `placed` settles.
+     *
+     * @param {Promise<any>} placed
+     * @param {(filter: import('./messages.js').MessageFilter, thread: unknown) => any} step
+     * @param {import('./messages.js').MessageFilter} filter @param {unknown} thread
+     */
+    const thenStep = (placed, step, filter, thread)=>placed.then(()=>step(filter, thread));
+
+    /**
+     * @param {number} out @param {any} taken @param {boolean} remove
+     * @param {unknown} thread @param {boolean} unicode
+     */
+    const answerPeek = (out, taken, remove, thread, unicode)=>{
+        if (!taken)
+        {
+            return 0;
+        }
+        // Taken all the same, with nowhere to put it (msg.c: "PeekMessage
+        // (NULL) fails, but still removes the message").
+        if (host.canWrite?.(out >>> 0, MSG.SIZE) === false)
+        {
+            host.setLastError?.(ERROR_NOACCESS);
+            return 0;
+        }
+        writeMessage(host, out, retrieved(taken, unicode));
+        return andThen(showGotMessage(out, remove, thread), ()=>1);
     };
 
     /**

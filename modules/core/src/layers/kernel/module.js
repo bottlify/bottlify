@@ -264,6 +264,14 @@ export function createKernelModule(){
             /** The kernel's `threadGone`. @param {any} thread */
             const threadGone = thread=>thread.state === ThreadState.TERMINATED
                 && !state.scheduler.running(thread);
+            /**
+             * Whether a pooled stack's owner is done with it: a thread that has
+             * ended and let it go, or a stack given back by name (a fiber's).
+             *
+             * @param {any} owner
+             */
+            const stackReleased = owner=>owner.released === true
+                || (owner.releasesStack === true && threadGone(owner));
 
             current = state;
             return {
@@ -335,8 +343,7 @@ export function createKernelModule(){
                     if (stackTop === undefined)
                     {
                         slot = stacks.allocate({ commit: stackSize, reserve: stackReserve },
-                            (/** @type {any} */ owner)=>owner.releasesStack === true
-                                && threadGone(owner));
+                            stackReleased);
                         if (!slot)
                         {
                             log.warn?.('kernel', 'no room in the stack pool for a thread'
@@ -385,6 +392,32 @@ export function createKernelModule(){
                         slot.owner = thread;
                     }
                     return thread;
+                },
+
+                /**
+                 * A stack from the threads' pool for something that runs on a
+                 * thread without being one -- a fiber -- made known to the
+                 * translator as a thread's is. Given back with `releaseStack`,
+                 * and taken back by the pool at its next allocation.
+                 *
+                 * @param {{ commit?: number, reserve?: number }} asked
+                 * @returns {{ base: number, top: number, owner: { released: boolean } } | null}
+                 *     null when the pool has no room
+                 */
+                allocateStack(asked){
+                    const slot = live() ? stacks.allocate(asked, stackReleased) : null;
+                    if (!slot)
+                    {
+                        return null;
+                    }
+                    slot.owner = { released: false };
+                    cpu.noteStack?.(slot.base, slot.size);
+                    return { base: slot.base, top: slot.base + slot.size, owner: slot.owner };
+                },
+
+                /** @param {{ owner: { released: boolean } }} stack */
+                releaseStack(stack){
+                    stack.owner.released = true;
                 },
 
                 /**

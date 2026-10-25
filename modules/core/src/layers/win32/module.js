@@ -6,6 +6,7 @@
 
 import { createConsoleFunctions, HANDLE_STDOUT, HANDLE_STDERR } from './kernel32/console.js';
 import { createThreadingFunctions } from './kernel32/threading.js';
+import { createFiberFunctions } from './kernel32/fibers.js';
 import { createNamedObjects, createRemoteNamedObjects } from './kernel32/named-objects.js';
 import { createRegistryService } from './advapi32/registry-service.js';
 import { createDebugFunctions } from './kernel32/debug.js';
@@ -91,6 +92,7 @@ import { createIphlpapiFunctions } from './iphlpapi/functions.js';
 import { createCrypt32Functions } from './crypt32/functions.js';
 import { createAdvpackFunctions } from './advpack/functions.js';
 import { SFC_ORDINALS, createSfcFunctions } from './sfc/functions.js';
+import { createHidFunctions } from './hid/functions.js';
 import { ODBC32_ORDINALS, createOdbcFunctions } from './odbc32/functions.js';
 import { createOleaccFunctions } from './oleacc/functions.js';
 import { createSyssetupFunctions } from './syssetup/functions.js';
@@ -1606,6 +1608,22 @@ export function createWin32Module(){
                         /** @param {number} bytes */
                         allocateCode: bytes=>heap.allocateCode(bytes),
                     }),
+                    ...createFiberFunctions({
+                        readU32: address=>memory.readU32(address),
+                        writeU32: (address, value)=>memory.writeU32(address, value >>> 0),
+                        registers: ()=>Object.fromEntries(
+                            registerNames.map(name=>[name, cpuRegisters.read(name) >>> 0])),
+                        setRegisters,
+                        currentThread: ()=>kernel.currentThread(),
+                        teb: ()=>kernel.currentThread()?.tebAddress ?? 0,
+                        allocate: bytes=>heap.allocate(bytes),
+                        free: address=>heap.free(address),
+                        allocateStack: asked=>kernel.allocateStack?.(asked) ?? null,
+                        releaseStack: stack=>kernel.releaseStack?.(stack),
+                        threadReturn: ()=>threadReturnAddress(),
+                        exitThread: code=>libraries['KERNEL32.dll'].ExitThread.handler([code]),
+                        setLastError: setError,
+                    }),
                     ...apcs.table,
                     ...createThreadPool({
                         kernel,
@@ -2449,6 +2467,7 @@ export function createWin32Module(){
                 'pdh.dll': createPdhFunctions({ writeMemory }),
 
                 'SFC.dll': createSfcFunctions({ writeMemory, readCString, files: volume }),
+                'HID.DLL': createHidFunctions({ writeMemory, setLastError: setError }),
 
                 // The ODBC Driver Manager, with no driver and no data source set up.
                 'ODBC32.dll': createOdbcFunctions({ writeMemory }),

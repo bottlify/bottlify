@@ -50,6 +50,13 @@ const OPCODE_PONG = 0xa;
 /** Beyond this a message is refused rather than assembled. */
 const MAX_MESSAGE = 1024 * 1024;
 
+/**
+ * What may wait to go out to a client before it is taken for one that stopped
+ * reading. The relay pauses the sockets feeding a link long before this; what
+ * reaches it is traffic nothing can pause, such as a peer flooding another.
+ */
+const MAX_BUFFERED = 16 * 1024 * 1024;
+
 /** A control frame's payload cannot be fragmented and cannot exceed this. */
 const MAX_CONTROL = 125;
 
@@ -94,7 +101,8 @@ function frame(opcode, payload){
 /**
  * One accepted connection.
  *
- * Emits `message` with `(data, isBinary)`, and `close`. Errors on the socket are
+ * Emits `message` with `(data, isBinary)`, `drain` when what was waiting to
+ * go out has gone, and `close`. Errors on the socket are
  * a close and nothing else -- there is no recovering a WebSocket whose transport
  * has failed, and treating it as a distinct event only means two code paths for
  * one outcome.
@@ -114,8 +122,14 @@ export class Connection extends EventEmitter {
         this.fragmentLength = 0;
 
         socket.on('data', chunk=>this.#feed(chunk));
+        socket.on('drain', ()=>this.emit('drain'));
         socket.on('error', ()=>this.#finish());
         socket.on('close', ()=>this.#finish());
+    }
+
+    /** Bytes written and not yet sent. */
+    get waiting(){
+        return this.socket.writableLength;
     }
 
     /** @param {Uint8Array} payload */
@@ -155,6 +169,10 @@ export class Connection extends EventEmitter {
             return;
         }
         this.socket.write(frame(opcode, payload));
+        if (this.socket.writableLength > MAX_BUFFERED)
+        {
+            this.socket.destroy();
+        }
     }
 
     #finish(){

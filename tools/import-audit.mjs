@@ -188,7 +188,8 @@ async function gather(path){
         {
             for (const file of bundle.list())
             {
-                if (file.size < 0x40)
+                // Only an image is read whole: a game's archives run to gigabytes.
+                if (file.size < 0x40 || !isMz(new Uint8Array(await bundle.read(file.path, 0, 2))))
                 {
                     continue;
                 }
@@ -206,9 +207,19 @@ async function gather(path){
         }
         return found;
     }
+    const head = await open(path, 'r');
+    const mz = Buffer.alloc(2);
+    await head.read(mz, 0, 2, 0).finally(()=>head.close());
+    if (info.size < 0x40 || !isMz(mz))
+    {
+        return [];
+    }
     const bytes = new Uint8Array(await readFile(path));
     return isImage(bytes) ? [{ name: basename(path), where: path, bytes }] : [];
 }
+
+/** Whether bytes start as an MS-DOS header does, as every PE image does. @param {Uint8Array} bytes */
+const isMz = bytes=>bytes[0] === 0x4d && bytes[1] === 0x5a;
 
 const images = (await Promise.all(paths.map(gather))).flat().map(found=>{
     try

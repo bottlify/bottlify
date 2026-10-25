@@ -13,14 +13,21 @@
  * hosts, and `*.` opens a suffix.
  *
  *     node src/server/cli.js --port 8787 --allow logon.example.com --allow '*.example.net'
+ *
+ * Behind a proxy, `--address-header` names the header carrying the client's
+ * address (Cloudflare's `cf-connecting-ip`), which the per-address limit then
+ * counts by; `--resume-seconds` is how long a peer whose link dropped is kept
+ * for its client to come back to.
  */
 
 import { createRelayServer } from './index.js';
 
 /** @param {string[]} argv */
 export function parseArguments(argv){
-    /** @type {{ port: number, host: string, allow: string[], origins: string[] }} */
-    const parsed = { port: 8787, host: '0.0.0.0', allow: [], origins: [] };
+    /** @type {{ port: number, host: string, allow: string[], origins: string[],
+     *     addressHeader: string, resumeSeconds: number }} */
+    const parsed = { port: 8787, host: '0.0.0.0', allow: [], origins: [],
+        addressHeader: '', resumeSeconds: 10 };
     for (let at = 0; at < argv.length; at++)
     {
         const value = argv[at + 1];
@@ -30,6 +37,18 @@ export function parseArguments(argv){
             case '--host': parsed.host = String(value); at++; break;
             case '--allow': parsed.allow.push(String(value)); at++; break;
             case '--origin': parsed.origins.push(String(value)); at++; break;
+            case '--address-header':
+                parsed.addressHeader = String(value).toLowerCase();
+                at++;
+                break;
+            case '--resume-seconds':
+                parsed.resumeSeconds = Number(value);
+                if (!(parsed.resumeSeconds >= 0))
+                {
+                    throw new Error(`--resume-seconds wants a number, not ${value}`);
+                }
+                at++;
+                break;
             default: throw new Error(`unknown argument ${argv[at]}`);
         }
     }
@@ -69,6 +88,12 @@ if (process.argv[1] && import.meta.url.endsWith(process.argv[1].replace(/\\/g, '
         host: options.host,
         origins: options.origins.length > 0 ? options.origins : undefined,
         policy: request=>permits(options.allow, request.host),
+        resumeWindowMs: options.resumeSeconds * 1000,
+        ...(options.addressHeader ? {
+            addressOf: (/** @type {import('node:http').IncomingMessage} */ request)=>
+                String(request.headers[options.addressHeader]
+                    ?? request.socket.remoteAddress ?? ''),
+        } : {}),
     });
     const port = await server.listen();
     process.stdout.write(`relay listening on ${options.host}:${port}\n`);

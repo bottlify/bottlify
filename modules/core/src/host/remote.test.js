@@ -1089,8 +1089,20 @@ test('a network named at start is opened by the worker and closed with the run',
     const fake = await import(module);
     assert.equal(fake.opened.length, 1);
     assert.deepEqual(fake.opened[0].options,
-        { url: 'wss://play/relay', room: 'b', token: undefined });
+        { url: 'wss://play/relay', room: 'b', token: undefined, joinTimeoutMs: 5000 });
     assert.equal(built().win32.network, fake.opened[0], 'handed to createApp as win32.network');
     await remote.dispose();
     assert.equal(fake.opened[0].disposed, 1, 'closed with the run');
+});
+
+test('a relay that is down, or a client that will not load, leaves a run no network', async()=>{
+    for (const module of [new URL('./fake-relay-down.test.mjs', import.meta.url).href,
+        new URL('./no-such-relay-client.mjs', import.meta.url).href])
+    {
+        const { remote, built } = await connect({
+            network: { module, url: 'wss://play/relay', room: 'b' },
+        });
+        assert.equal(built().win32.network, undefined, module);
+        await remote.dispose();
+    }
 });

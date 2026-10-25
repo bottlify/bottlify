@@ -52,8 +52,23 @@ import { TRANSPORT_LOST, asNetwork } from './transport.js';
 const EPHEMERAL_FIRST = 49152;
 const EPHEMERAL_LAST = 65535;
 
-/** An outcome that is a failure, so a count and an error cannot be confused. */
-const failure = (/** @type {number} */ error)=>({ error });
+/**
+ * An outcome that is a failure, so a count and an error cannot be confused.
+ * One frozen object per error: a game polls an empty socket hundreds of
+ * thousands of times a second, and every answer would otherwise be garbage.
+ *
+ * @type {Map<number, Readonly<{ error: number }>>}
+ */
+const failures = new Map();
+const failure = (/** @type {number} */ error)=>{
+    let outcome = failures.get(error);
+    if (outcome === undefined)
+    {
+        outcome = Object.freeze({ error });
+        failures.set(error, outcome);
+    }
+    return outcome;
+};
 
 /** An outcome that is a count. */
 const count = (/** @type {number} */ value)=>({ value });
