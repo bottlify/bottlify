@@ -236,6 +236,10 @@ export function engineContractProblem(engineModule, url){
  * @property {string} [bundleId]         The cache's namespace.
  * @property {boolean} [translate]       Test-only: false keeps the translator off, so a run
  *     is the interpreter tier's alone. Default true.
+ * @property {boolean} [crossTailCalls]  False keeps every tail call inside its instance, a
+ *     transfer to another module's region entered by the runtime's loop; `createApp` sets it,
+ *     with `dispatch`, on an iPhone, whose WebKit faults on one into another instance (HACK until
+ *     iOS ships https://github.com/WebKit/WebKit/pull/76671).
  * @property {boolean} [sharedMemory]  Under cork, guest memory a `SharedArrayBuffer` where
  *     the host can share one (node, a cross-origin isolated page) -- what lets another
  *     worker read and write it in place. `false` keeps it the engine's alone.

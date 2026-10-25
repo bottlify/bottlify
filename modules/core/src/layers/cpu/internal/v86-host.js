@@ -94,7 +94,7 @@ const OPCODE_TABLES = {
 };
 
 /** The emulator's configuration index for chaining generated modules. */
-const JIT_CONFIG_CHAINING = 6;
+export const JIT_CONFIG_CHAINING = 6;
 
 /**
  * Why the interpreter ran, in the order of the emulator's reason counters.

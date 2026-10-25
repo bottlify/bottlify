@@ -16,6 +16,7 @@ import {
     DEFAULT_THUNK_BASE, DEFAULT_THUNK_CAPACITY, MAX_EXECUTORS, processorsFor,
 } from './layers/cpu/module.js';
 import { CORK_TSC_MHZ } from './layers/cpu/internal/cork-host.js';
+import { JIT_CONFIG_CHAINING } from './layers/cpu/internal/v86-host.js';
 import { engineContractProblem } from './layers/cpu/engine.js';
 import { SETTINGS, processorName } from './settings.js';
 import { createPresenter } from './layers/graphics/webgpu/internal/presenter.js';
@@ -1768,11 +1769,77 @@ export function withCpuSetup(options, host = coresHost()){
 }
 
 /**
+ * HACK: a workaround for a WebKit defect, to be removed once an iOS release
+ * carries the fix -- https://github.com/WebKit/WebKit/pull/76671 (WebKit bug
+ * 325447): iOS 27's JavaScriptCore kills the page with a pointer-authentication
+ * failure on a wasm tail call into another instance.
+ *
+ * Whether the page is an iPhone's WebKit: on an iPhone (iOS Safari 27.0.1,
+ * 2026-10-25) the page's process died as cork's regions began to run, and
+ * `tools/webkit-probe/tail-calls.html` found every tail call into another
+ * instance fatal and every one inside an instance sound; Safari on an M4 Mac
+ * runs them all. Every browser on iOS is WebKit. An iPad, not measured, keeps them.
+ * The defect came with iOS 27: Safari's "Version/" is the system's (its "iPhone OS"
+ * is frozen), and an earlier one keeps its tail calls; a browser that names no
+ * version (Chrome's CriOS, Firefox's FxiOS) is taken for one that has the defect.
+ *
+ * @param {{ userAgent?: string }} [navigator]
+ */
+export function tailCallsFault(navigator = /** @type {any} */ (globalThis).navigator ?? {}){
+    const agent = String(navigator.userAgent ?? '');
+    const version = /Version\/(\d+)/.exec(agent);
+    return /iPhone|iPod/.test(agent) && (version === null || Number(version[1]) >= 27);
+}
+
+/**
+ * Whether the page is Safari on any machine (an iPad's among them, which names
+ * itself a Mac), or any browser on a phone: Chromium says "Chrome/" beside its
+ * "AppleWebKit".
+ *
+ * @param {{ userAgent?: string }} [navigator]
+ */
+export function mobileOrSafari(navigator = /** @type {any} */ (globalThis).navigator ?? {}){
+    const agent = String(navigator.userAgent ?? '');
+    return tailCallsFault(navigator) || /Android|Mobi/.test(agent)
+        || /AppleWebKit\//.test(agent) && !/Chrome\/|Chromium\//.test(agent);
+}
+
+/**
+ * HACK until iOS ships https://github.com/WebKit/WebKit/pull/76671 (see
+ * `tailCallsFault`). The run's tail calls kept inside one instance where a tail
+ * call into another faults, in the interpreter tier every wasm function starts
+ * in: cork's regions placed by module (`dispatch`), a
+ * transfer within a module a direct tail call and one out of it entered by the
+ * runtime's loop (`crossTailCalls`); the emulator's chaining, every link of it
+ * into another module, off. The caller's own settings win. Decided on the page
+ * and carried to every worker in the options.
+ *
+ * @template {Record<string, any>} T
+ * @param {T} options
+ * @param {boolean} [fault]
+ * @returns {T & { cork?: any, jit?: Record<string, number> }}
+ */
+export function withoutFaultingTailCalls(options, fault = tailCallsFault()){
+    return fault ? { ...options,
+        cork: { ...options.cork,
+            config: { crossTailCalls: false, dispatch: true, ...options.cork?.config } },
+        jit: { [JIT_CONFIG_CHAINING]: 0, ...options.jit } } : options;
+}
+
+/**
  * Where a run is made, as far as its cores go: whether it is node, the cores
  * `BOTTLIFY_CORES` names there, the host's processors and whether its threads
  * can share memory.
  *
- * @typedef {{ node: boolean, named?: string, processors?: number, shareable: boolean }} CoresHost
+ * `oneCore`: a phone or Safari, where cores are not chosen for the run. Each
+ * core is a worker holding the guest's memory, and JavaScriptCore lets a
+ * thread's garbage grow with the buffers it holds (in WebKit 26.6 a worker
+ * making the same garbage stood at 286 MB holding nothing and sawed between 350
+ * and 830 MB holding an untouched 512 MB buffer); a phone has the least memory
+ * to give it.
+ *
+ * @typedef {{ node: boolean, named?: string, processors?: number, shareable: boolean,
+ *     oneCore?: boolean }} CoresHost
  */
 
 /** @returns {CoresHost} */
@@ -1780,7 +1847,8 @@ export function coresHost(){
     const scope = /** @type {any} */ (globalThis);
     return { node: scope.process?.versions?.node !== undefined,
         named: scope.process?.env?.BOTTLIFY_CORES,
-        processors: scope.navigator?.hardwareConcurrency, shareable: canShareMemory() };
+        processors: scope.navigator?.hardwareConcurrency, shareable: canShareMemory(),
+        oneCore: mobileOrSafari(scope.navigator ?? {}) };
 }
 
 /** The most cores a run that names none is given: an estimate, not a measurement. */
@@ -1806,7 +1874,7 @@ export function automaticCores(options, host){
     {
         return host.named === undefined || host.named === '' ? undefined : Number(host.named);
     }
-    if (!host.shareable || options.mode === 'compatible'
+    if (!host.shareable || host.oneCore || options.mode === 'compatible'
         || options.cork?.config?.sharedMemory === false
         || (options.engine ?? DEFAULT_ENGINE) === 'emulator'
         || !(Number(host.processors) >= 2))
@@ -9286,7 +9354,7 @@ export async function createApp(options){
     // fails later somewhere that says nothing about why.
     windowsVersion(options.windows);
     // Settled once, here, so every process the run makes is built in it.
-    options = withRunMode(withCpuSetup(options));
+    options = withRunMode(withCpuSetup(withoutFaultingTailCalls(options)));
     options = { ...options, processId: options.processId ?? runProcessId() };
     graphicsChoice(options.graphicsApi);
     emulatorOf(options);

@@ -42,6 +42,10 @@ import {
     versionResourceOf,
     runProcessId,
     withCpuSetup,
+    withoutFaultingTailCalls,
+    tailCallsFault,
+    mobileOrSafari,
+    automaticCores,
     translatorsBeside,
     allocateCleared,
     RESOURCE_ALIGNMENT,
@@ -1945,4 +1949,50 @@ test('freeze pauses a running program while it shows a frame, and ends only its 
     debug.freeze(false);
     assert.equal(paused, true);
     assert.deepEqual(told, ['pause', 'resume', 'pause']);
+});
+
+test('an iPhone translates without wasm tail calls; phones and Safari run on one core', ()=>{
+    const iphone = 'Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15 '
+        + '(KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1';
+    const chromeIos = 'Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15 '
+        + '(KHTML, like Gecko) CriOS/141.0 Mobile/15E148 Safari/604.1';
+    const mac = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 '
+        + '(KHTML, like Gecko) Version/26.0 Safari/605.1.15';
+    const chrome = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+        + '(KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36';
+    const android = 'Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 (KHTML, like Gecko) '
+        + 'Chrome/141.0.0.0 Mobile Safari/537.36';
+    const iphone26 = iphone.replace('Version/26.0', 'Version/26.4');
+    const iphone27 = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 '
+        + '(KHTML, like Gecko) Version/27.0.1 Mobile/15E148 Safari/604.1';
+    for (const userAgent of [iphone27, chromeIos])
+    {
+        assert.equal(tailCallsFault({ userAgent }), true, userAgent);
+    }
+    // iOS 26 had no such defect; the Mac's agent is an iPad's too: tail calls kept.
+    for (const userAgent of [iphone26, mac, chrome, android, 'Node.js/22', ''])
+    {
+        assert.equal(tailCallsFault({ userAgent }), false, userAgent);
+    }
+    for (const userAgent of [iphone, chromeIos, mac, android])
+    {
+        assert.equal(mobileOrSafari({ userAgent }), true, userAgent);
+    }
+    for (const userAgent of [chrome, 'Node.js/22', ''])
+    {
+        assert.equal(mobileOrSafari({ userAgent }), false, userAgent);
+    }
+    const off = withoutFaultingTailCalls({ cork: { config: { worker: false } } }, true);
+    assert.deepEqual(off.cork.config, { crossTailCalls: false, dispatch: true, worker: false });
+    assert.deepEqual(off.jit, { 6: 0 }, 'the emulator chains no modules');
+    assert.equal(withoutFaultingTailCalls({ cork: { config: { crossTailCalls: true } } }, true)
+        .cork.config.crossTailCalls, true, 'the caller\'s own setting wins');
+    const options = { engine: 'cork' };
+    assert.equal(withoutFaultingTailCalls(options, false), options);
+
+    const browser = { node: false, processors: 8, shareable: true };
+    assert.equal(automaticCores({}, browser), 7);
+    assert.equal(automaticCores({}, { ...browser, oneCore: true }), undefined, 'one core');
+    assert.equal(withCpuSetup({ cpu: { cores: 3 } }, { ...browser, oneCore: true }).executors, 3,
+        'cores asked for by name are given');
 });
