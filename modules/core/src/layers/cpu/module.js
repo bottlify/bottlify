@@ -641,7 +641,7 @@ export function createCpuModule(){
                         // plain stores alone on a host that reorders them (arm64).
                         const ordered = several && settings.cork?.ordered === true;
                         state.ordered = several ? ordered : null;
-                        const nudging = gcNudgeOf(config?.gcNudge);
+                        const nudging = gcNudgeOf(config?.gcNudge, undefined, settings.memorySize);
                         const hostConfig = {
                             memorySize: settings.memorySize,
                             trapPort: settings.trapPort,
@@ -1211,6 +1211,9 @@ export function createCpuModule(){
                  */
                 runSlice(maxInstructions){
                     state.running = true;
+                    // A load runs slice after slice without the event loop
+                    // coming round to the nudge's timer (`gc-nudge.js`).
+                    state.nudge?.poke();
                     const machine = started();
                     const from = machine.eip();
                     let instructions = 0;

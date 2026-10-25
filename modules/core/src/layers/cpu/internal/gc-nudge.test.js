@@ -35,6 +35,43 @@ test('a run is nudged by default only on JavaScriptCore, and as it asks otherwis
     assert.deepEqual(gcNudgeOf({ everyMs: 20 }, CHROME), { everyMs: 20, bytes: GC_NUDGE.bytes });
 });
 
+test('the default buffer is an eighth of the guest memory past 512 MB, and never less', ()=>{
+    const MB = 1024 * 1024;
+    assert.equal(gcNudgeOf(undefined, SAFARI, 256 * MB)?.bytes, GC_NUDGE.bytes);
+    assert.equal(gcNudgeOf(undefined, SAFARI, 512 * MB)?.bytes, 64 * MB);
+    assert.equal(gcNudgeOf(undefined, SAFARI, 2048 * MB)?.bytes, 256 * MB);
+    assert.equal(gcNudgeOf({ bytes: MB }, SAFARI, 2048 * MB)?.bytes, MB, 'as asked');
+});
+
+test('a poke makes a buffer only once a period has passed since the last', ()=>{
+    let time = 0;
+    /** @type {(() => void) | null} */
+    let tick = null;
+    const nudge = startGcNudge({ everyMs: 50, bytes: 1024 }, {
+        every: run=>{
+            tick = run;
+            return 'timer';
+        },
+        cancel: ()=>{},
+        now: ()=>time,
+    });
+    time = 30;
+    nudge.poke();
+    assert.equal(nudge.made(), 0, 'too soon');
+    time = 50;
+    nudge.poke();
+    assert.equal(nudge.made(), 1);
+    time = 80;
+    /** @type {() => void} */ (/** @type {unknown} */ (tick))();
+    assert.equal(nudge.made(), 2, 'the timer still makes one');
+    time = 120;
+    nudge.poke();
+    assert.equal(nudge.made(), 2, 'the period counts from the timer\'s');
+    time = 130;
+    nudge.poke();
+    assert.equal(nudge.made(), 3);
+});
+
 test('the nudge makes a buffer at each tick until it is stopped', ()=>{
     /** @type {(() => void) | null} */
     let tick = null;

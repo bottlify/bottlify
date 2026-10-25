@@ -31,7 +31,8 @@
  * holds, and gains nothing from it; by default only JavaScriptCore is nudged.
  */
 
-/** What is made and how often, by default where it is made at all. */
+/** What is made and how often, by default where it is made at all: `bytes` for
+ * 512 MB of guest memory and less, an eighth of the memory past that. */
 export const GC_NUDGE = Object.freeze({ everyMs: 50, bytes: 64 * 1024 * 1024 });
 
 /**
@@ -48,38 +49,59 @@ export function runsJavaScriptCore(agent = globalThis.navigator?.userAgent ?? ''
 
 /**
  * The nudge a run asked for: `false` for none, an object for its own, and
- * otherwise the default where JavaScriptCore runs.
+ * otherwise the default where JavaScriptCore runs. JavaScriptCore lets a heap
+ * take in garbage in proportion to what it holds, the guest's memory twice
+ * over included, so the default buffer grows with the memory: with 2 GB of
+ * guest memory a 64 MB one every 50 ms left the Doom 3 demo's engine thread
+ * 7.5 s of its load without a collection.
  *
  * @param {{ everyMs?: number, bytes?: number } | boolean | undefined} asked
  * @param {string} [agent]
+ * @param {number} [memoryBytes]  the guest's memory
  * @returns {{ everyMs: number, bytes: number } | null}
  */
-export function gcNudgeOf(asked, agent){
+export function gcNudgeOf(asked, agent, memoryBytes = 0){
     if (asked === false || (asked === undefined && !runsJavaScriptCore(agent)))
     {
         return null;
     }
     const own = typeof asked === 'object' && asked !== null ? asked : {};
-    return { everyMs: own.everyMs ?? GC_NUDGE.everyMs, bytes: own.bytes ?? GC_NUDGE.bytes };
+    return { everyMs: own.everyMs ?? GC_NUDGE.everyMs,
+        bytes: own.bytes ?? Math.max(GC_NUDGE.bytes, Math.ceil(memoryBytes / 8 / 65536) * 65536) };
 }
 
 /**
- * Makes and drops a buffer of `bytes` every `everyMs` until stopped.
+ * Makes and drops a buffer of `bytes` every `everyMs` until stopped, by a timer
+ * and by `poke`: a thread that runs the guest for seconds without coming back
+ * to its event loop, as the engine's does through a load, fires no timer, and
+ * pokes from its own loop instead.
  *
  * @param {{ everyMs: number, bytes: number }} nudge
- * @param {{ every?: (run: () => void, ms: number) => any, cancel?: (timer: any) => void }} [clock]
+ * @param {{ every?: (run: () => void, ms: number) => any, cancel?: (timer: any) => void,
+ *     now?: () => number }} [clock]
  */
 export function startGcNudge(nudge, clock = {}){
     const every = clock.every ?? ((run, ms)=>setInterval(run, ms));
     const cancel = clock.cancel ?? (timer=>clearInterval(timer));
+    const now = clock.now ?? (()=>performance.now());
     let made = 0;
-    const timer = every(()=>{
+    let last = now();
+    const make = ()=>{
         // Neither kept nor written: its pages are never touched.
         new ArrayBuffer(nudge.bytes);
         made++;
-    }, nudge.everyMs);
+        last = now();
+    };
+    const timer = every(make, nudge.everyMs);
     return {
         stop: ()=>cancel(timer),
+        /** One buffer now if a period has passed since the last. */
+        poke(){
+            if (now() - last >= nudge.everyMs)
+            {
+                make();
+            }
+        },
         /** The buffers made so far. */
         made: ()=>made,
     };

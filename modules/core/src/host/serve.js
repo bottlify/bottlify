@@ -25,6 +25,7 @@ import { createInboundReader } from './inbound.js';
 import { ringPacing } from './ring-pacing.js';
 import { openGraphicsWorker } from './graphics-worker.js';
 import { gcNudgeOf } from '../layers/cpu/internal/gc-nudge.js';
+import { DEFAULT_MEMORY_SIZE } from '../layers/cpu/module.js';
 import { createLogReader } from '../layers/log/reader.js';
 import { FEED_AHEAD_MS, createFeeder } from '../layers/audio/output/feed.js';
 import { gpuFeaturesOf } from '../layers/graphics/webgpu/features.js';
@@ -643,7 +644,8 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
                 // A worker that opens no device is no worker to draw in: the
                 // devices then draw here, and the journal says why.
                 const answer = await openGraphicsWorker({ frames: returned,
-                    gcNudge: gcNudgeOf(rest.cpu?.gcNudge) });
+                    gcNudge: gcNudgeOf(rest.cpu?.gcNudge, undefined,
+                        rest.memorySize ?? DEFAULT_MEMORY_SIZE) });
                 if (answer.worker)
                 {
                     graphics = { worker: answer.worker, frames: returned };
