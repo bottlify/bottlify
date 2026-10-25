@@ -11,7 +11,9 @@ with a controller once the program is ready to run. On failure it rejects with a
 
 The package also exports `assembleModules` (the layers without a program, see
 [configuration.md](configuration.md)), `createLogReader` (reads the log from shared memory) and
-`openSpeaker` (the page's audio output, below).
+`openSpeaker` (the page's audio output, below), and the page's screen while a run plays
+(`requestFullscreen`, `exitFullscreen`, `fullscreenElement`, `watchFullscreen`, `canFullscreen`,
+`keepScreenAwake`, below).
 
 ## The speaker
 
@@ -130,6 +132,16 @@ Where the two threads share memory, the thread that shows the frames also writes
 one it shows into a word the worker reads at every present: a frame then goes as soon as the one
 before it was shown, not once the answer has come through the worker's queue, and `back.early`
 counts the frames that went so.
+
+## The screen
+
+| Export | What it does |
+| --- | --- |
+| `requestFullscreen(element)` | Inside a click's or a key's handler: puts the element into fullscreen by the standard name or by Safari's `webkit` one, and settles with `{ entered: true }`, or `{ entered: false, reason }`: `unsupported` where the browser has no fullscreen for an element (Safari on an iPhone, which has it only for a video; a web app added to the home screen is the way to play there without the browser around it), `refused` with the browser's `message`. |
+| `canFullscreen(element)` | Whether either name exists, so a page can offer the home screen instead of a button that does nothing. |
+| `fullscreenElement()`, `exitFullscreen()` | The element in fullscreen or null, and leaving it, by either name. |
+| `watchFullscreen(handler)` | Calls `handler(element or null)` on every change, by either event name; answers the function that stops. |
+| `keepScreenAwake()` | Holds a screen wake lock while a program runs, so a game watched rather than played -- an intro, a cutscene -- does not dim and lock the screen. Asked for again whenever the page is shown (the browser lets it go when the page is hidden) and at the next gesture after a refusal. Answers `{ held(), pause(), resume(), release(), refusal() }`: `pause` with a paused run, `release` when it ends; `refusal()` is why the browser would not hold it, `unsupported` with no wake lock. |
 
 ## The controller
 
