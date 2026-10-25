@@ -85,12 +85,22 @@ export function startGcNudge(nudge, clock = {}){
     const cancel = clock.cancel ?? (timer=>clearInterval(timer));
     const now = clock.now ?? (()=>performance.now());
     let made = 0;
+    let refused = 0;
     let last = now();
     const make = ()=>{
-        // Neither kept nor written: its pages are never touched.
-        new ArrayBuffer(nudge.bytes);
-        made++;
         last = now();
+        // Neither kept nor written: its pages are never touched. A browser
+        // near its limit refuses one (an iPhone's, on a page reloaded over a
+        // run, "RangeError: Out of memory"), which a hint to collect must not
+        // turn into the run's end: it is counted and the run goes on.
+        try
+        {
+            new ArrayBuffer(nudge.bytes);
+            made++;
+        }
+        catch {
+            refused++;
+        }
     };
     const timer = every(make, nudge.everyMs);
     return {
@@ -104,6 +114,8 @@ export function startGcNudge(nudge, clock = {}){
         },
         /** The buffers made so far. */
         made: ()=>made,
+        /** The buffers the browser would not make. */
+        refused: ()=>refused,
     };
 }
 

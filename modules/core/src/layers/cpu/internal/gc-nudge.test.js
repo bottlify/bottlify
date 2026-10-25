@@ -72,6 +72,29 @@ test('a poke makes a buffer only once a period has passed since the last', ()=>{
     assert.equal(nudge.made(), 3);
 });
 
+test('a buffer the browser will not make is counted and does not end the run', ()=>{
+    let time = 0;
+    /** @type {(() => void) | null} */
+    let tick = null;
+    // Past what any engine allocates: the RangeError an iPhone's gave near its limit.
+    const nudge = startGcNudge({ everyMs: 50, bytes: Number.MAX_SAFE_INTEGER }, {
+        every: run=>{
+            tick = run;
+            return 'timer';
+        },
+        cancel: ()=>{},
+        now: ()=>time,
+    });
+    time = 50;
+    assert.doesNotThrow(()=>nudge.poke());
+    /** @type {() => void} */ (/** @type {unknown} */ (tick))();
+    assert.equal(nudge.made(), 0);
+    assert.equal(nudge.refused(), 2);
+    time = 70;
+    nudge.poke();
+    assert.equal(nudge.refused(), 2, 'a refusal waits its period as a buffer made does');
+});
+
 test('the nudge makes a buffer at each tick until it is stopped', ()=>{
     /** @type {(() => void) | null} */
     let tick = null;

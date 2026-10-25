@@ -1252,8 +1252,13 @@ export function createCpuModule(){
                                 // Any range error reads so, and a host's own --
                                 // its stack spent on something else -- is told
                                 // apart by where it was thrown.
-                                + `; the host said: ${String(/** @type {any} */ (e).stack ?? e)
-                                    .split('\n').slice(0, 3).join(' ')}`,
+                                // JavaScriptCore's stack carries no message, so
+                                // the error's own name and message go first:
+                                // a spent stack and memory refused read apart.
+                                + `; the host said: ${e.name}: ${e.message} at `
+                                + String(/** @type {any} */ (e).stack ?? '')
+                                    .split('\n').filter(line=>!line.startsWith(e.name))
+                                    .slice(0, 8).join(' '),
                         });
                         // Nothing more may run: the next slice would only walk
                         // into the same fault. A halt is what the stub behind a
@@ -1568,6 +1573,8 @@ export function createCpuModule(){
                     // The buffers made to bring JavaScriptCore's collections forward
                     // on this thread (`gcNudge`); null where none are made.
                     gcNudges: instance.nudge?.made() ?? null,
+                    // Those the browser would not make, near its limit.
+                    gcNudgesRefused: instance.nudge?.refused() ?? null,
                     running: instance.running,
                     instructions: retiredEverywhere(instance),
                     protectedMode: instance.host.inProtectedMode(),
