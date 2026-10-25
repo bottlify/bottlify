@@ -119,6 +119,9 @@ differently raises a `divergence` event naming the API.
 - No Direct3D 11 or 12.
 - Direct3D 10 and Vulkan draw on the engine thread; Direct3D 7, 8, 9 and OpenGL in the graphics
   worker.
+- OpenGL keeps a texture's data only where it draws: in the graphics worker, until the device's
+  copy holds the texture's whole mip chain. `glGetTexImage` reads black, as `glReadPixels` on a
+  device does, and says so as a divergence.
 - Direct3D 10 has no geometry shaders: WebGPU has no geometry stage and none is emulated, so
   `CreateGeometryShader` and its stream-output variant answer `E_NOTIMPL` for a valid shader. An
   effect pass that sets one is drawn without it, and the effect says so.

@@ -1936,3 +1936,134 @@ test('a user clip plane reaches the uniform block, and the shader cuts by it', a
     assert.ok(modules.some((/** @type {string} */ code)=>/clipLow/.test(code)
         && /discard/.test(code)), 'a device without clip-distances discards what it cuts');
 });
+
+/** @param {any} context */
+function drawUnswapped(context){
+    context.glBegin(GL.TRIANGLES);
+    context.glVertex2f(0, 0);
+    context.glVertex2f(8, 0);
+    context.glVertex2f(8, 8);
+    context.glEnd();
+}
+
+test('on a device a level\'s texels are let go once uploaded', async()=>{
+    const r = rig();
+    const { context } = r;
+    context.glGenTextures(2);
+    context.glEnable(GL.TEXTURE_2D);
+    context.glBindTexture(GL.TEXTURE_2D, 1);
+    for (const [level, side] of [[0, 4], [1, 2], [2, 1]])
+    {
+        context.glTexImage2D(GL.TEXTURE_2D, level, GL.RGBA, side, side, 0, GL.RGBA,
+            GL.UNSIGNED_BYTE, new Uint8Array(side * side * 4).fill(0x40));
+    }
+    drawUnswapped(context);
+    context.glBindTexture(GL.TEXTURE_2D, 2);
+    context.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.LINEAR);
+    context.glTexImage2D(GL.TEXTURE_2D, 0, GL.RGBA, 4, 4, 0, GL.RGBA, GL.UNSIGNED_BYTE,
+        new Uint8Array(64).fill(0x40));
+    drawUnswapped(context);
+    await r.swap();
+    const levelsOf = (/** @type {number} */ name)=>
+        context.shareGroup.textures.objects.get(name).levels;
+    assert.deepEqual([...levelsOf(1).values()].map(level=>level.texels), [null, null, null],
+        'the whole chain is on the device and nowhere else');
+    assert.equal(levelsOf(2).get(0).texels, null, 'and a base alone');
+
+    // A rectangle written later goes up alone, and is let go after.
+    const uploads = r.gpu.of('writeTexture').length;
+    context.glBindTexture(GL.TEXTURE_2D, 1);
+    context.glTexSubImage2D(GL.TEXTURE_2D, 0, 1, 2, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE,
+        Uint8Array.from([1, 2, 3, 4]));
+    drawUnswapped(context);
+    await r.swap();
+    const rect = r.gpu.of('writeTexture').slice(uploads);
+    assert.equal(rect.length, 1);
+    assert.deepEqual(rect[0].destination.origin, { x: 1, y: 2, z: 0 });
+    assert.deepEqual([...rect[0].bytes.subarray(0, 4)], [1, 2, 3, 4]);
+    assert.equal(levelsOf(1).get(0).texels, null);
+    assert.deepEqual(r.divergences.filter(d=>/let go/.test(d)), []);
+});
+
+test('on a device a DXT level is decoded for each read and a sub-image on it is kept', async()=>{
+    const r = rig();
+    const { context } = r;
+    context.glGenTextures(1);
+    context.glBindTexture(GL.TEXTURE_2D, 1);
+    context.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.LINEAR);
+    context.glCompressedTexImage2DARB(GL.TEXTURE_2D, 0,
+        GL.COMPRESSED_RGBA_S3TC_DXT5_EXT, 4, 4, 0, 16, new Uint8Array(16).fill(7));
+    context.glEnable(GL.TEXTURE_2D);
+    drawUnswapped(context);
+    await r.swap();
+    const level = context.shareGroup.textures.objects.get(1).levels.get(0);
+    assert.notEqual(level.texels, level.texels, 'decoded when read, never kept');
+
+    context.glTexSubImage2D(GL.TEXTURE_2D, 0, 0, 0, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE,
+        Uint8Array.from([1, 2, 3, 4]));
+    const uploads = r.gpu.of('writeTexture').length;
+    drawUnswapped(context);
+    await r.swap();
+    const upload = r.gpu.of('writeTexture')[uploads];
+    assert.deepEqual([...upload.bytes.subarray(0, 4)], [1, 2, 3, 4],
+        'the written texel reaches the device over the decoded blocks');
+});
+
+test('a context whose twin draws keeps no texture data, only its shapes', ()=>{
+    /** @type {string[]} */
+    const divergences = [];
+    /** @type {any} */
+    const context = createGlContext({ keepTexels: false, divergence: d=>divergences.push(d) });
+    context.attach({ width: 8, height: 8, doubleBuffered: true, depthBits: 24 });
+    context.glGenTextures(2);
+    context.glBindTexture(GL.TEXTURE_2D, 1);
+    context.glTexImage2D(GL.TEXTURE_2D, 0, GL.RGBA, 4, 4, 0, GL.RGBA, GL.UNSIGNED_BYTE,
+        new Uint8Array(64).fill(9));
+    context.glTexSubImage2D(GL.TEXTURE_2D, 0, 0, 0, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE,
+        Uint8Array.from([1, 2, 3, 4]));
+    context.glBindTexture(GL.TEXTURE_2D, 2);
+    context.glCompressedTexImage2DARB(GL.TEXTURE_2D, 0,
+        GL.COMPRESSED_RGBA_S3TC_DXT5_EXT, 4, 4, 0, 16, new Uint8Array(16).fill(7));
+    assert.equal(context.glGetError(), GL.NO_ERROR);
+    const levelOf = (/** @type {number} */ name)=>
+        context.shareGroup.textures.objects.get(name).levels.get(0);
+    assert.equal(levelOf(1).texels, null);
+    assert.equal(levelOf(2).texels, null);
+    assert.equal(levelOf(2).compressed, null);
+    assert.deepEqual([levelOf(2).width, levelOf(2).compressedBytes], [4, 16],
+        'what a query asks of the level is still known');
+
+    context.glBindTexture(GL.TEXTURE_2D, 1);
+    const read = context.glGetTexImage(GL.TEXTURE_2D, 0, GL.RGBA, GL.UNSIGNED_BYTE);
+    assert.deepEqual([...read.subarray(0, 4)], [0, 0, 0, 0]);
+    assert.ok(divergences.some(d=>/glGetTexImage .*read black/.test(d)), 'and says so');
+});
+
+test('a level let go is carried on the device when its texture is given more levels', async()=>{
+    const r = rig();
+    const { context } = r;
+    context.glGenTextures(1);
+    context.glEnable(GL.TEXTURE_2D);
+    context.glBindTexture(GL.TEXTURE_2D, 1);
+    context.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.LINEAR);
+    context.glTexImage2D(GL.TEXTURE_2D, 0, GL.RGBA, 4, 4, 0, GL.RGBA, GL.UNSIGNED_BYTE,
+        new Uint8Array(64).fill(0x40));
+    drawUnswapped(context);
+    await r.swap();
+    /** Every write into a texture, direct or staged, by its mip level. */
+    const written = ()=>[...r.gpu.of('writeTexture'), ...r.gpu.of('copyBufferToTexture')]
+        .map(w=>w.destination.mipLevel);
+    const uploads = written().length;
+    context.glTexImage2D(GL.TEXTURE_2D, 1, GL.RGBA, 2, 2, 0, GL.RGBA, GL.UNSIGNED_BYTE,
+        new Uint8Array(16).fill(0x20));
+    context.glTexImage2D(GL.TEXTURE_2D, 2, GL.RGBA, 1, 1, 0, GL.RGBA, GL.UNSIGNED_BYTE,
+        new Uint8Array(4).fill(0x10));
+    drawUnswapped(context);
+    await r.swap();
+    const copies = r.gpu.of('copyTextureToTexture');
+    assert.equal(copies.length, 1, 'the base the old copy holds is carried, not lost');
+    assert.equal(copies[0].source.mipLevel, 0);
+    assert.deepEqual(written().slice(uploads).sort(), [1, 2],
+        'the new levels go up from their texels, after the carry');
+    assert.deepEqual(r.divergences.filter(d=>/let go/.test(d)), []);
+});

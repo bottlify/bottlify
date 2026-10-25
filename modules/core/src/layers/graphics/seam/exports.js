@@ -828,6 +828,9 @@ export function createGraphicsLibraries(
             // ring before each cost and what the calls themselves did.
             openglRingMs: opengl ? opengl.diagnostics().ringMs : 0,
             openglCallMs: opengl ? opengl.diagnostics().callMs : 0,
+            // What OpenGL's textures hold on this side: their levels' texels
+            // and compressed blocks.
+            openglHeld: opengl ? opengl.diagnostics().held : null,
             vulkan: vulkan?.diagnostics() ?? null,
             // How the Presents of the version that presented were paced.
             presentPacing: [d3d9?.presentPacing(), d3d8?.presentPacing()]

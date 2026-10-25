@@ -603,7 +603,7 @@ export function installTextureCalls(context, kernel){
         }
         image.texture.levels.set(levelKey(level, image.face), {
             width, height, internalFormat: internal, border, baseFormat,
-            texels: texels instanceof Uint8Array ? texels : null,
+            texels: texels instanceof Uint8Array && kernel.keepTexels ? texels : null,
             compressed: null,
         });
         markDirty(image.texture, levelKey(level, image.face), null);
@@ -678,16 +678,21 @@ export function installTextureCalls(context, kernel){
      * @param {Uint8Array} texels
      */
     function writeSubImage(level, xoffset, yoffset, width, height, texels){
-        if (!level.texels)
+        if (!kernel.keepTexels)
         {
-            level.texels = new Uint8Array(level.width * level.height * 4);
+            return;
         }
+        // Read once: a compressed level decodes at each read on a device, and
+        // from this write on the level is the texels it holds, not its blocks.
+        const into = level.texels ?? new Uint8Array(level.width * level.height * 4);
         for (let y = 0; y < height; y++)
         {
-            level.texels.set(
+            into.set(
                 texels.subarray(y * width * 4, (y + 1) * width * 4),
                 ((yoffset + y) * level.width + xoffset) * 4);
         }
+        Object.defineProperty(level, 'texels',
+            { value: into, writable: true, configurable: true, enumerable: true });
     }
 
     /**
@@ -1058,20 +1063,30 @@ export function installTextureCalls(context, kernel){
         // read-back, a device that takes no blocks -- and not otherwise: a
         // device that samples the blocks never asks, and the decode was the
         // whole upload's cost on both the program's thread and the worker's.
+        // On a device the texels are read once, to upload them where the
+        // device takes no blocks, and not kept: decoded, a level holds four to
+        // eight times its blocks for as long as the texture lives (the Doom 3
+        // demo's first level, 47 MB of blocks). A processor's rasteriser reads
+        // them every draw and keeps them.
         /** @type {Uint8Array | null | undefined} */
         let decoded;
+        const kept = kernel.keepTexels ? bytes : null;
+        const decode = ()=>(kept && width > 0 && height > 0
+            ? decodeS3tc(kept, internal, width, height) : null);
         image.texture.levels.set(levelKey(level, image.face), {
             width, height, internalFormat: internal, border,
             baseFormat: /** @type {number} */ (baseFormatOf(internal)),
             get texels(){
-                decoded ??= bytes && width > 0 && height > 0
-                    ? decodeS3tc(bytes, internal, width, height)
-                    : null;
+                if (kernel.gpuBacked())
+                {
+                    return decoded ?? decode();
+                }
+                decoded ??= decode();
                 return decoded;
             },
             compressedFormat: internal,
             compressedBytes: size,
-            compressed: bytes ? { format: internal, bytes } : null,
+            compressed: kept ? { format: internal, bytes: kept } : null,
         });
         markDirty(image.texture, levelKey(level, image.face), null);
         kernel.shareGroup().used = true;
@@ -1496,6 +1511,11 @@ export function installTextureCalls(context, kernel){
             {
                 setError(GL.INVALID_VALUE);
                 return null;
+            }
+            if (!kernel.keepTexels)
+            {
+                diverge('glGetTexImage was accepted and read black: the texels live with'
+                    + ' the context that draws, in the graphics worker, and are not read back');
             }
             return stored.texels ?? new Uint8Array(stored.width * stored.height * 4);
         },

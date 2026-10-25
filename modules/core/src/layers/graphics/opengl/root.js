@@ -99,6 +99,12 @@ export function createOpenglRoot(services){
                 memory,
                 divergence: services.divergence,
                 gpu: renderer() ?? undefined,
+                // A model's twin draws, and is sent each level's data with
+                // the call that gives it: kept here as well, every texture a
+                // program loaded was held twice (the Doom 3 demo's first
+                // level: 161 MB of texels and 47 MB of blocks on the engine's
+                // thread).
+                keepTexels: !services.model,
                 raster: services.raster,
                 keepPrimitives: services.keepPrimitives,
             });

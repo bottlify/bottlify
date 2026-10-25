@@ -249,13 +249,13 @@ function describeCensus(texture){
             distinct.push('missing');
             continue;
         }
-        if (!level.texels)
+        const texels = level.texels;
+        if (!texels)
         {
             distinct.push('gpu-only');
             continue;
         }
-        const words = new Uint32Array(level.texels.buffer, level.texels.byteOffset,
-            level.texels.byteLength >> 2);
+        const words = new Uint32Array(texels.buffer, texels.byteOffset, texels.byteLength >> 2);
         // A census is a diagnostic, not a second upload path: past a megapixel
         // it samples every fourth texel and says so with a tilde.
         const step = words.length > (1 << 20) ? 4 : 1;
@@ -427,6 +427,9 @@ export function createGpuRenderer(services){
     const stats = {
         frames: 0, pipelines: 0, draws: 0, clears: 0, fallbacks: 0, uploads: 0, renames: 0,
         refused: 0, skipped: 0, cut: 0,
+        // Texels let go once on the device, in bytes, and levels carried from
+        // a texture's old copy to the one that replaced it (`textureFor`).
+        letGo: 0, carried: 0,
         // Draws a context assembled vertex by vertex rather than handed over
         // as arrays, and their vertices, by why (`noteAssembled`): each one
         // is processor work on the program's thread and again in a worker.
@@ -826,6 +829,10 @@ export function createGpuRenderer(services){
         return format;
     };
 
+    /** The levels whose texels were let go once on the device (`textureFor`). */
+    /** @type {WeakSet<object>} */
+    const releasedLevels = new WeakSet();
+
     /**
      * The bytes of one rectangle of a level's decoded texels, packed with no
      * gap between rows -- what an upload of just that rectangle needs, since
@@ -836,20 +843,22 @@ export function createGpuRenderer(services){
      * @returns {Uint8Array}
      */
     const sliceRect = (image, rect)=>{
-        if (!image.texels)
+        // Read once: a compressed level on a device decodes at each read.
+        const texels = image.texels;
+        if (!texels)
         {
             return new Uint8Array(rect.width * rect.height * 4);
         }
         if (rect.x === 0 && rect.width === image.width)
         {
-            return image.texels.subarray(rect.y * image.width * 4,
+            return texels.subarray(rect.y * image.width * 4,
                 (rect.y + rect.height) * image.width * 4);
         }
         const packed = new Uint8Array(rect.width * rect.height * 4);
         for (let row = 0; row < rect.height; row++)
         {
             const from = ((rect.y + row) * image.width + rect.x) * 4;
-            packed.set(image.texels.subarray(from, from + rect.width * 4), row * rect.width * 4);
+            packed.set(texels.subarray(from, from + rect.width * 4), row * rect.width * 4);
         }
         return packed;
     };
@@ -886,11 +895,16 @@ export function createGpuRenderer(services){
         const bcFormat = bcFormatOf(texture, levels, cube);
         const format = bcFormat ?? TEXTURE_FORMAT;
         let record = textures.get(texture);
+        /** The copy a changed shape replaces: what it holds of a let-go level is carried over. */
+        let previous = null;
         if (record && (record.width !== base.width || record.height !== base.height
             || record.levels !== levels || record.cube !== cube || record.format !== format))
         {
+            previous = record;
             record = undefined;
         }
+        /** Whether a level was carried over on the device, which the uploads must follow. */
+        let carried = false;
         if (!record)
         {
             record = {
@@ -919,17 +933,42 @@ export function createGpuRenderer(services){
                 views: new Map(),
             };
             textures.set(texture, record);
-            // A fresh copy has every level to receive.
-            for (const key of texture.levels.keys())
+            // A fresh copy has every level to receive: from the texels kept
+            // here, or, for a level whose texels were let go, from the copy
+            // it replaces, on the device -- and then a rectangle written
+            // since goes up after it.
+            for (const [key, image] of texture.levels)
             {
+                if (!releasedLevels.has(image))
+                {
+                    texture.dirty.set(key, null);
+                    continue;
+                }
+                const level = key % FACE_STRIDE;
+                const face = (key - level) / FACE_STRIDE;
+                if (previous !== null && previous.format === format && level < previous.levels
+                    && level < levels && face < (previous.cube ? 6 : 1)
+                    && image.width === Math.max(1, previous.width >> level)
+                    && image.height === Math.max(1, previous.height >> level))
+                {
+                    recording.commands.push({ kind: 'carry', from: previous.gpu.texture,
+                        to: record.gpu.texture, level, face, width: image.width,
+                        height: image.height });
+                    stats.carried++;
+                    carried = true;
+                    continue;
+                }
                 texture.dirty.set(key, null);
+                diverge('a texture was made again on the device in a shape its old copy does'
+                    + ' not hold, after its texels were let go: those levels upload as black');
             }
         }
         // The queue runs a direct write before every frame not yet flushed,
         // so one whose commands already use the texture would see texels
         // written after them; the upload then takes its place among the
         // commands of the frame being recorded.
-        const ordered = record.usedIn !== undefined && unflushed.has(record.usedIn);
+        const ordered = carried
+            || (record.usedIn !== undefined && unflushed.has(record.usedIn));
         /** @param {any} request */
         const upload = request=>{
             if (ordered)
@@ -979,6 +1018,28 @@ export function createGpuRenderer(services){
         }
         texture.dirty.clear();
         record.usedIn = recording.id;
+        // Uploaded, a level's texels are the device's; kept here as well,
+        // every texture a program loaded was held twice in this worker (the
+        // Doom 3 demo's first level: 161 MB of them). They are let go: a
+        // rectangle written later goes up alone, from texels made for it, and
+        // a copy made again in another shape takes the level from the one it
+        // replaces. A level past the chain was never uploaded and keeps its
+        // own; one decoded from blocks never held any. A run that dumps or
+        // probes its draws from its start keeps them for the dump's census.
+        if (!bcFormat && !fixedDump && probeSpec === null)
+        {
+            for (const [key, image] of texture.levels)
+            {
+                const level = key % FACE_STRIDE;
+                const texels = Object.getOwnPropertyDescriptor(image, 'texels')?.value;
+                if (level < levels && texels)
+                {
+                    stats.letGo += texels.byteLength;
+                    image.texels = null;
+                    releasedLevels.add(image);
+                }
+            }
+        }
         return record;
     };
 
@@ -2467,6 +2528,17 @@ export function createGpuRenderer(services){
                 {
                     // A staged copy closes the pass it lands in.
                     backend.uploadTexture(command.upload);
+                    pass = null;
+                    continue;
+                }
+                if (command.kind === 'carry')
+                {
+                    frame.copyTexture(
+                        { texture: command.from, mipLevel: command.level,
+                            origin: { x: 0, y: 0, z: command.face } },
+                        { texture: command.to, mipLevel: command.level,
+                            origin: { x: 0, y: 0, z: command.face } },
+                        { width: command.width, height: command.height, depthOrArrayLayers: 1 });
                     pass = null;
                     continue;
                 }

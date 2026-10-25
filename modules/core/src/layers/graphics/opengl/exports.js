@@ -2161,6 +2161,7 @@ export function createOpengl(services){
             // thing this layer can say about a run that drew nothing.
             unimplemented: Object.fromEntries(unimplemented),
             gpu: onDevice && madeContext ? root.diagnostics() : null,
+            held: heldTextureBytes(contexts.values()),
             compressed: `${compressedDigest.count}:${compressedDigest.bytes}:`
                 + compressedDigest.hash.toString(16),
             images: imageDigests.slice(),
@@ -2169,6 +2170,42 @@ export function createOpengl(services){
                 height: image.height, rgba: base64Of(image.texels) })),
         }),
     };
+}
+
+/**
+ * What the contexts' textures hold in this thread's memory, each share group
+ * once: the texels of the levels kept here, and the blocks of the compressed
+ * ones (the texels a compressed level decodes when read are not counted).
+ *
+ * @param {Iterable<{ shareGroup:
+ *     ReturnType<typeof import('./objects.js').createShareGroup> }>} contexts
+ */
+export function heldTextureBytes(contexts){
+    const groups = new Set();
+    let texels = 0;
+    let compressed = 0;
+    let levels = 0;
+    for (const context of contexts)
+    {
+        if (groups.has(context.shareGroup))
+        {
+            continue;
+        }
+        groups.add(context.shareGroup);
+        for (const texture of context.shareGroup.textures.objects.values())
+        {
+            for (const level of texture?.levels?.values() ?? [])
+            {
+                levels++;
+                // A compressed level decodes its texels when they are first
+                // read: counted only once they are, never decoded to be counted.
+                const own = Object.getOwnPropertyDescriptor(level, 'texels');
+                texels += own && 'value' in own ? own.value?.byteLength ?? 0 : 0;
+                compressed += level.compressed?.bytes?.byteLength ?? 0;
+            }
+        }
+    }
+    return { levels, texels, compressed };
 }
 
 /** @param {Uint8Array} bytes @returns {string} */

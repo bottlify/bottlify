@@ -236,6 +236,11 @@ const NOTHING_KEPT = Object.freeze(/** @type {{ mode: number, vertices: any[] }[
  *           scene, but nothing reaches `framebuffer`. A diagnostic for a run
  *           without a device that measures something other than the
  *           rasteriser; a context with a `gpu` never rasterises either way.
+ * @property {boolean} [keepTexels]
+ *           `false` keeps no texels and no compressed blocks of a texture's
+ *           levels, only their shapes: a context whose twin elsewhere draws
+ *           has the data sent there with each call and never reads it again.
+ *           Such a context reads a level back (glGetTexImage) as black.
  * @property {boolean} [keepPrimitives]
  *           Every primitive drawn is kept, with its vertices, for
  *           `submittedPrimitives` to answer -- what a test reads back to see
@@ -380,6 +385,7 @@ export function createGlContext(options = {}){
             : null,
         bufferDeleted: gpu ? buffer=>gpu.releaseBuffer(buffer) : null,
         gpuBacked: ()=>gpu !== null && attached,
+        keepTexels: options.keepTexels !== false,
         currentVertex,
         currentAttributes,
         side: {},
