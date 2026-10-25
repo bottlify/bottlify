@@ -1554,3 +1554,27 @@ None yet.
   Spread between runs of one arm: about 500 MB at the peak, 100 MB after.
 - **Decision.** None of the settings changed. What the phone's process holds at the moment it is
   killed is to be read from its own JetsamEvent report.
+
+### 2026-10-25: the translation worker nudged into collecting sooner, as the engine's thread is
+
+- **Idea.** With the engine's thread nudged (`cpu.gcNudge`: an untouched 64 MB buffer made and
+  dropped every 50 ms where JavaScriptCore runs), the web process still held about 200 MB more
+  with translation than without, in small anonymous mappings, and the translation worker's heap
+  stood at 120-200 MB before each collection against 50-130 MB after: the same nudge in that
+  worker would collect its garbage sooner and give the difference back.
+- **Workload.** The engine's test page (`test/page/game`, fake GPU in a graphics worker, engine in
+  a worker) on 66fd44b5, the Quake III Arena demo's bundle `baf676901226a7e870606221`, 512 MB of
+  guest memory, one core, 60 s from the start; the web process's RSS read from `/proc` once a
+  second; the median from 15 s on, MB. Arms alternated, three runs each. The nudge reached the
+  worker through cork's `gcNudge` setting, sent with `ready`; the GC log (`JSC_logGC`) showed it
+  working: 201 collections of the translation worker's heap in 30 s instead of 26.
+- **Values.** Head 941, 1028, 1001 (peak 1249, 1317, 1196); translation worker nudged 948, 1055,
+  944 (peak 1259, 1191, 1311). Frames 4817-5014 and 4824-4955. For comparison, the graphics
+  worker nudged instead: 934, 981, 947 against 1085, 1015, 956 in the next three pairs.
+- **Why.** Not established. Collected sooner, the worker's garbage did not leave the process any
+  sooner; the libpas pages its heap frees may be returned to the system on a schedule of their own.
+- **Machine.** The 4-core KVM VM (Xeon 2.10 GHz), 15 GB, Ubuntu 24.04, no GPU; Playwright 1.63.0
+  (WebKit 26.6, WPE, headless). Spread between runs of one arm: about 100 MB after the start.
+- **Decision.** The translation worker is not nudged; the graphics worker is (`nudgeWhenAsked`).
+  The change itself is 20 lines (a `gcNudge` runtime setting passed to the worker with `ready`,
+  an interval started on it) and was not kept.

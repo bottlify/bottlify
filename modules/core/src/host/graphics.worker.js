@@ -11,5 +11,7 @@
  */
 
 import { serveGraphics } from '../layers/graphics/remote/worker.js';
+import { nudgeWhenAsked } from '../layers/cpu/internal/gc-nudge.js';
 
+nudgeWhenAsked(/** @type {any} */ (globalThis));
 serveGraphics(/** @type {any} */ (globalThis), { gpu: /** @type {any} */ (navigator).gpu });

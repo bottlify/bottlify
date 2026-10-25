@@ -26,6 +26,7 @@
 import { createApp } from '../../../src/app.js';
 import { placeHooks, watchFrom } from '../../../src/host/serve.js';
 import { openGraphicsWorker } from '../../../src/host/graphics-worker.js';
+import { gcNudgeOf } from '../../../src/layers/cpu/internal/gc-nudge.js';
 import { createFakeDevice } from '../../../src/layers/graphics/webgpu/internal/fake-device.js';
 import { createInputRoute } from '../../../src/layers/input/route.js';
 import {
@@ -1486,12 +1487,14 @@ export function createHarness(canvas, how = {}){
         // for `tools/graphics-replay.mjs` to play again in node; the capture
         // is posted to the driver's server at `captureGraphicsTo` at the end.
         const captureGraphics = request.captureGraphics === true;
+        // Nudged as the player's is, by the run's own setting.
+        const gcNudge = gcNudgeOf(request.cpu?.gcNudge);
         const graphicsWorker = request.fakeGpu
-            ? await openGraphicsWorker({ frames: 'count', capture: captureGraphics,
+            ? await openGraphicsWorker({ frames: 'count', capture: captureGraphics, gcNudge,
                 url: new URL(`./fake-graphics.worker.js?pipelineMs=${request.fakePipelineMs ?? 0}`,
                     import.meta.url) })
             : request.graphicsWorker
-                ? await openGraphicsWorker({ frames: 'pixels', capture: captureGraphics })
+                ? await openGraphicsWorker({ frames: 'pixels', capture: captureGraphics, gcNudge })
                 : null;
         if (graphicsWorker && !graphicsWorker.worker)
         {

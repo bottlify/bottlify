@@ -6,7 +6,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { GC_NUDGE, gcNudgeOf, runsJavaScriptCore, startGcNudge } from './gc-nudge.js';
+import { GC_NUDGE, gcNudgeOf, nudgeWhenAsked, runsJavaScriptCore, startGcNudge }
+    from './gc-nudge.js';
 
 const SAFARI = 'Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15'
     + ' (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1';
@@ -54,4 +55,25 @@ test('the nudge makes a buffer at each tick until it is stopped', ()=>{
     assert.equal(nudge.made(), 2);
     nudge.stop();
     assert.equal(cancelled, 'timer');
+});
+
+test('a worker is nudged from the first message that asks, and once', ()=>{
+    /** @type {((event: { data: any }) => void) | null} */
+    let listener = null;
+    /** @type {(() => void)[]} */
+    const ticks = [];
+    const nudge = nudgeWhenAsked({ addEventListener: (type, listen)=>{
+        assert.equal(type, 'message');
+        listener = listen;
+    } }, { every: run=>ticks.push(run), cancel: ()=>{} });
+    const send = (/** @type {any} */ data)=>
+        /** @type {(event: { data: any }) => void} */ (/** @type {unknown} */ (listener))({ data });
+    send({ type: 'open' });
+    send(null);
+    assert.equal(ticks.length, 0, 'nothing started unasked');
+    send({ type: 'open', gcNudge: { everyMs: 50, bytes: 1024 } });
+    send({ type: 'open', gcNudge: { everyMs: 50, bytes: 1024 } });
+    assert.equal(ticks.length, 1, 'one nudge for the worker');
+    ticks[0]();
+    assert.equal(nudge.made(), 1);
 });

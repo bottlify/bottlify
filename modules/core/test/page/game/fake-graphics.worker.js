@@ -11,6 +11,7 @@
 
 import { serveGraphics } from '../../../src/layers/graphics/remote/worker.js';
 import { createFakeDevice } from '../../../src/layers/graphics/webgpu/internal/fake-device.js';
+import { nudgeWhenAsked } from '../../../src/layers/cpu/internal/gc-nudge.js';
 
 // Quiet: nothing reads a log of the calls here, and keeping one cost the
 // played side a third of its time -- what a run measures is the engine.
@@ -18,6 +19,7 @@ import { createFakeDevice } from '../../../src/layers/graphics/webgpu/internal/f
 // shaders does, so frames queue behind their pipelines as on a real device.
 const pipelineDelayMs = Number(new URL(self.location.href).searchParams.get('pipelineMs') ?? 0);
 const gpu = createFakeDevice({ quiet: true, pipelineDelayMs });
+nudgeWhenAsked(self);
 Object.assign(gpu.device, { queue: gpu.queue, features: new Set(),
     createSampler: (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor }) });
 serveGraphics(/** @type {any} */ (self), /** @type {any} */ ({

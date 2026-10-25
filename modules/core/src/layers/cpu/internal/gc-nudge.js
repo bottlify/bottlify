@@ -21,6 +21,12 @@
  * start peaked at 1.29-1.38 GB, and held 0.96-1.00 GB instead of 1.06-1.44
  * after it, with as many frames (three runs each).
  *
+ * The graphics worker, which throws away most of what it makes for a frame,
+ * is nudged too (`nudgeWhenAsked`): the same start stood at 0.92-0.98 GB
+ * after its load instead of 0.94-1.09 GB (six runs against nine). The
+ * translation worker is not: nudged, it collected ten times as often and the
+ * process held what it held before.
+ *
  * V8 sizes its young generation by what it allocates, not by what a thread
  * holds, and gains nothing from it; by default only JavaScriptCore is nudged.
  */
@@ -76,5 +82,29 @@ export function startGcNudge(nudge, clock = {}){
         stop: ()=>cancel(timer),
         /** The buffers made so far. */
         made: ()=>made,
+    };
+}
+
+/**
+ * A worker's own nudge, started by the first message to it that carries one
+ * (`gcNudge`, as `gcNudgeOf` settled it where the run was set up): a worker
+ * opened by the engine knows nothing of the run's settings until told.
+ *
+ * @param {{ addEventListener: (type: 'message',
+ *     listener: (event: { data: any }) => void) => void }} scope
+ * @param {Parameters<typeof startGcNudge>[1]} [clock]
+ */
+export function nudgeWhenAsked(scope, clock){
+    /** @type {ReturnType<typeof startGcNudge> | null} */
+    let nudge = null;
+    scope.addEventListener('message', ({ data })=>{
+        if (nudge === null && data?.gcNudge)
+        {
+            nudge = startGcNudge(data.gcNudge, clock);
+        }
+    });
+    return {
+        /** The buffers made so far: none before a message asked. */
+        made: ()=>nudge?.made() ?? 0,
     };
 }
