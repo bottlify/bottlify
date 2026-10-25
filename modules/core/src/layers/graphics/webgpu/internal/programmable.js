@@ -182,7 +182,7 @@ export function shapeKey(layout){
  * @param {{ floats: Float32Array, ints: Int32Array, bools: Uint32Array,
  *     intBits?: Float32Array, boolBits?: Float32Array }} file
  * @param {number} reach   Float registers the shader declares.
- * @param {(floats: number) => Float32Array} take
+ * @param {(floats: number, written?: boolean) => Float32Array} take
  * @param {KeptBlocks} [kept]  the stage's
  * @param {number} [serial]  the arena's (`createUniformArena`): a block
  *     outlives none of its resets, and is never another arena's
@@ -190,12 +190,16 @@ export function shapeKey(layout){
  */
 export function constantBlocks(file, reach, take, kept, serial = -1){
     const count = Math.max(1, reach);
-    const floats = take(count * 4);
+    // A block the file covers is written whole by the copy, so the arena
+    // need not clear it first; one reaching past the file is cleared for
+    // the registers past it.
+    const covered = count * 4 <= file.floats.length;
+    const floats = take(count * 4, covered);
     // A draw sets two stages' blocks: the file whole where it fits, rather
     // than a view of it made to say so.
     floats.set(count * 4 >= file.floats.length
         ? file.floats
-        : file.floats.subarray(0, count * 4));
+        : leadingFloats(file.floats, count, kept));
     if (kept === undefined || serial < 0 || file.ints.length !== 64 || file.bools.length !== 16)
     {
         return [floats, intsBlock(file, take), boolsBlock(file, take)];
@@ -216,6 +220,27 @@ export function constantBlocks(file, reach, take, kept, serial = -1){
 }
 
 /**
+ * The first `count` registers of a float file, as a view kept from draw to
+ * draw (`kept`): every shader draw copies two of them, and a view made each
+ * time was most of what a draw left behind.
+ *
+ * @param {Float32Array} floats @param {number} count
+ * @param {KeptBlocks} [kept]
+ */
+const leadingFloats = (floats, count, kept)=>{
+    if (kept === undefined)
+    {
+        return floats.subarray(0, count * 4);
+    }
+    if (kept.leadingOf !== floats)
+    {
+        kept.leadingOf = floats;
+        kept.leading = [];
+    }
+    return kept.leading[count] ??= floats.subarray(0, count * 4);
+};
+
+/**
  * @param {Int32Array | Uint32Array} made @param {Int32Array | Uint32Array} now
  */
 const sameWords = (made, now)=>{
@@ -231,7 +256,8 @@ const sameWords = (made, now)=>{
 
 /**
  * A stage's integer and boolean blocks, kept by `constantBlocks` while the
- * registers hold the values they were made of.
+ * registers hold the values they were made of, and the views of its float
+ * file the draws copy from (`leadingFloats`).
  *
  * @typedef {Object} KeptBlocks
  * @property {number} serial
@@ -239,11 +265,13 @@ const sameWords = (made, now)=>{
  * @property {Int32Array} intsMade
  * @property {Float32Array | null} bools
  * @property {Uint32Array} boolsMade
+ * @property {Float32Array | null} leadingOf  the float file the views below are of
+ * @property {Float32Array[]} leading  views of its first registers, by count
  */
 
 /** @returns {KeptBlocks} */
 export const keptBlocks = ()=>({ serial: -1, ints: null, intsMade: new Int32Array(64),
-    bools: null, boolsMade: new Uint32Array(16) });
+    bools: null, boolsMade: new Uint32Array(16), leadingOf: null, leading: [] });
 
 /**
  * All sixteen integer registers as a block of floats, the same bits.

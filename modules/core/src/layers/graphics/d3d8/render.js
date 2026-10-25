@@ -180,10 +180,24 @@ function declaredSamplers(parsed){
 
 /**
  * A list of `onesAt`'s, for a key: each sampler's channels, empty for none.
+ * Built by hand: a shader draw sampling a texture of fewer than four channels
+ * (a shadow map of one) asks for it every draw, and a mapped copy joined was
+ * an array and a closure each time.
  *
  * @param {number[] | null} ones
  */
-const onesKey = ones=>(ones === null ? '' : Array.from(ones, value=>value ?? 0).join(','));
+const onesKey = ones=>{
+    if (ones === null)
+    {
+        return '';
+    }
+    let key = '';
+    for (let index = 0; index < ones.length; index++)
+    {
+        key += index === 0 ? `${ones[index] ?? 0}` : `,${ones[index] ?? 0}`;
+    }
+    return key;
+};
 
 /**
  * A list of `variantsAt`'s, for a key: each sampler's variant, empty for none.
@@ -1435,8 +1449,13 @@ export function createUniformArena(floats = 1 << 16){
             used = 0;
             this.serial = ++arenaSerials;
         },
-        /** @param {number} count @returns {Float32Array} */
-        take(count){
+        /**
+         * @param {number} count
+         * @param {boolean} [written]  the caller writes every float of the
+         *     block, which then need not be cleared of an earlier frame's
+         * @returns {Float32Array}
+         */
+        take(count, written = false){
             // The arena outgrown: the draws recorded so far keep their views
             // of the old array, which the old array keeps alive for them.
             if (used + count > storage.length)
@@ -1445,7 +1464,10 @@ export function createUniformArena(floats = 1 << 16){
                 used = 0;
             }
             const block = storage.subarray(used, used + count);
-            block.fill(0);
+            if (!written)
+            {
+                block.fill(0);
+            }
             // Blocks are bound at a 256-byte alignment on the GPU side; kept
             // here at a 4-float one, which every field of a block already has.
             used += Math.ceil(count / 4) * 4;
@@ -3237,11 +3259,13 @@ export function createRenderer(options){
     /**
      * The channels a bound texture samples as one that its GPU texture lacks,
      * by its format (`sampledOnes`): what every path that samples it fills.
+     * Kept by the texture (`ones`): asked for each sampler of every shader
+     * draw, and the format table is keyed by four-character codes too.
      *
      * @param {any} texture
      * @returns {number}
      */
-    const onesOfTexture = texture=>(texture ? sampledOnes(textures.get(texture)?.format) : 0);
+    const onesOfTexture = texture=>(texture ? textures.get(texture)?.ones ?? 0 : 0);
     /** @type {WeakMap<object, number>} a level's surface -> which level it is */
     const surfaceLevels = new WeakMap();
     /** @type {WeakMap<object, number>} a cube face's surface -> which face it is */
@@ -3470,7 +3494,11 @@ export function createRenderer(options){
              * @type {Record<string, number>}
              */
             locks: /** @type {Record<string, number>} */ ({}),
-            /** @type {Record<string, number>} */
+            /**
+             * Counted by each buffer (`lockedBuffers`) and written here as
+             * the diagnostics are read.
+             * @type {Record<string, number>}
+             */
             lockedDraws: /** @type {Record<string, number>} */ ({}),
             /** Draws from a buffer that is locked as they are made, by its size. @type {Record<string, number>} */
             drawsWhileLocked: /** @type {Record<string, number>} */ ({}),
@@ -4465,7 +4493,9 @@ export function createRenderer(options){
                 ? textures.get(prepared.textures.find((/** @type {any} */ texture)=>
                     texture && textures.get(texture)?.id === probeTexture))?.gpu ?? null
                 : null,
-            vertices: command.vertices,
+            // The command's binding is written over by the draw it is taken
+            // for next: the check keeps what this one bound.
+            vertices: { gpu: command.vertices.gpu, offset: command.vertices.offset },
             // A pipeline of the same shader under another key, to draw with a
             // pipeline object other than the cached one.
             alternate: probeTexture !== null && recording
@@ -4604,7 +4634,7 @@ export function createRenderer(options){
         const command = commands[commands.length - 1];
         if (command?.check && command.indices && !command.check.indices)
         {
-            command.check.indices = { buffer: command.indices, bytes: bytes.slice() };
+            command.check.indices = { buffer: { ...command.indices }, bytes: bytes.slice() };
         }
     };
 
@@ -5773,16 +5803,20 @@ export function createRenderer(options){
     /**
      * What one frame drew, as it is being recorded: closed out at present.
      *
+     * `textures` counts the textures sampled, each once (`countedIn`), and a
+     * target's `offscreen` says a draw went into it while it was not the back
+     * buffer.
+     *
      * @returns {{ draws: number, placeholder: number, truncated: number, fogged: number,
      *             fog: string, fogs: Map<string, number>,
-     *     uploads: number, textures: Set<any>, clears: number, clearColor: number,
-     *     offscreenDraws: number, offscreenTargets: Set<any>, drawMs: number,
-     *     heldDraws: number, targets: Map<any, { draws: number, views: number[] }> }}
+     *     uploads: number, textures: number, clears: number, clearColor: number,
+     *     offscreenDraws: number, drawMs: number, heldDraws: number,
+     *     targets: Map<any, { draws: number, views: number[], offscreen: boolean }> }}
      */
     const blankFrameStats = ()=>({
         draws: 0, placeholder: 0, truncated: 0, uploads: 0, fogged: 0, fog: '',
-        fogs: new Map(), textures: new Set(), clears: 0, clearColor: -1, offscreenDraws: 0,
-        offscreenTargets: new Set(), drawMs: 0, heldDraws: 0, targets: new Map(),
+        fogs: new Map(), textures: 0, clears: 0, clearColor: -1, offscreenDraws: 0,
+        drawMs: 0, heldDraws: 0, targets: new Map(),
     });
     let frameStats = blankFrameStats();
     /** The viewports counted for one target, past which a frame says only that there were more. */
@@ -5794,12 +5828,13 @@ export function createRenderer(options){
      * through a viewport a cascade) or a pass of its own.
      *
      * @param {RenderModel} model
+     * @returns {{ draws: number, views: number[], offscreen: boolean }} the target's count
      */
     const countTarget = model=>{
         let into = frameStats.targets.get(model.renderTarget);
         if (into === undefined)
         {
-            into = { draws: 0, views: [] };
+            into = { draws: 0, views: [], offscreen: false };
             frameStats.targets.set(model.renderTarget, into);
         }
         into.draws++;
@@ -5810,13 +5845,27 @@ export function createRenderer(options){
             if (views[at] === x && views[at + 1] === y && views[at + 2] === width
                 && views[at + 3] === height)
             {
-                return;
+                return into;
             }
         }
         if (views.length < VIEWS_COUNTED * 4)
         {
             views.push(x, y, width, height);
         }
+        return into;
+    };
+    /**
+     * The targets a frame drew into while they were not the back buffer.
+     *
+     * @param {Map<any, { offscreen: boolean }>} targets
+     */
+    const offscreenTargetsOf = targets=>{
+        let count = 0;
+        for (const into of targets.values())
+        {
+            count += into.offscreen ? 1 : 0;
+        }
+        return count;
     };
     /**
      * A frame's draws by the target they went into, in the order it first
@@ -7851,24 +7900,36 @@ export function createRenderer(options){
         }
         kept++;
         frameStats.draws++;
-        countTarget(model);
+        const into = countTarget(model);
         if (model.renderTarget !== model.backBuffer)
         {
             frameStats.offscreenDraws++;
-            frameStats.offscreenTargets.add(model.renderTarget);
+            into.offscreen = true;
         }
-        for (const binding of prepared.stageBindings)
+        // By index: a loop over the list's iterator made an iterator and a
+        // result a stage at every draw, which this function is too large for
+        // the compiler to take away.
+        const stageBindings = prepared.stageBindings;
+        for (let index = 0; index < stageBindings.length; index++)
         {
+            const binding = stageBindings[index];
             if (binding.placeholder)
             {
                 frameStats.placeholder++;
             }
             else
             {
-                frameStats.textures.add(binding.view);
+                // A texture is counted once a frame, by its own mark: a set of
+                // the views sampled was an add a stage at every draw.
+                const sampled = binding.record;
+                if (sampled.countedIn !== counters.frames)
+                {
+                    sampled.countedIn = counters.frames;
+                    frameStats.textures++;
+                }
                 // A preparation served again samples without asking for an
                 // upload, and a later write has to know this frame reads it.
-                binding.record.usedIn = counters.frames;
+                sampled.usedIn = counters.frames;
             }
         }
         const frame = ensureViewport(model);
@@ -7915,8 +7976,26 @@ export function createRenderer(options){
         // A shader draw binds its samplers from its program, the same list.
         command.program = bindings === prepared.stageBindings || !prepared.program
             ? prepared.program : { ...prepared.program, samplerBindings: bindings };
-        command.vertices = geometry.vertices;
-        command.indices = geometry.indices;
+        // Copied into the command's own bindings: the geometry's are the
+        // caller's to write again for its next draw. One kept for each offset
+        // an index buffer was drawn from was a map that grew with every
+        // offset of a ring of indices (CoD4's of 2 MB), looked up each draw.
+        const vertices = command.ownVertices;
+        vertices.gpu = geometry.vertices.gpu;
+        vertices.offset = geometry.vertices.offset;
+        command.vertices = vertices;
+        if (geometry.indices)
+        {
+            const indices = command.ownIndices;
+            indices.gpu = geometry.indices.gpu;
+            indices.offset = geometry.indices.offset;
+            indices.format = geometry.indices.format;
+            command.indices = indices;
+        }
+        else
+        {
+            command.indices = null;
+        }
         command.count = geometry.count;
         command.first = geometry.first;
         command.baseVertex = geometry.baseVertex ?? 0;
@@ -8018,7 +8097,11 @@ export function createRenderer(options){
         return snapshot;
     };
 
-    /** A draw command of the one shape every draw is recorded in. */
+    /**
+     * A draw command of the one shape every draw is recorded in, with the
+     * vertex and index bindings it binds: its own, written over for every
+     * draw it is taken for (`record`).
+     */
     const blankDraw = ()=>({
         kind: 'draw', points: false, pipeline: 0, state: /** @type {any} */ (null),
         uniforms: /** @type {any} */ (null), stageBindings: /** @type {any} */ (null),
@@ -8026,6 +8109,8 @@ export function createRenderer(options){
         indices: /** @type {any} */ (null), count: 0, first: 0, baseVertex: 0,
         streams: /** @type {any} */ (undefined), instances: /** @type {number | undefined} */ (undefined),
         check: /** @type {any} */ (undefined),
+        ownVertices: { gpu: /** @type {any} */ (null), offset: 0 },
+        ownIndices: { gpu: /** @type {any} */ (null), offset: 0, format: '' },
     });
 
     /**
@@ -9039,17 +9124,10 @@ export function createRenderer(options){
         ?? prepared.program?.source?.layout?.streams)?.length ?? 0) > 0;
 
     /** @param {number} format D3DFMT_INDEX @returns {{ gpu: string, bytes: number } | null} */
-    const indexFormatOf = format=>{
-        if (format === D3DFMT_INDEX.INDEX16)
-        {
-            return { gpu: 'uint16', bytes: 2 };
-        }
-        if (format === D3DFMT_INDEX.INDEX32)
-        {
-            return { gpu: 'uint32', bytes: 4 };
-        }
-        return null;
-    };
+    const indexFormatOf = format=>(format === D3DFMT_INDEX.INDEX16 ? INDEX16
+        : format === D3DFMT_INDEX.INDEX32 ? INDEX32 : null);
+    const INDEX16 = Object.freeze({ gpu: 'uint16', bytes: 2 });
+    const INDEX32 = Object.freeze({ gpu: 'uint32', bytes: 4 });
 
     /**
      * @param {Uint8Array} bytes
@@ -9096,19 +9174,47 @@ export function createRenderer(options){
         }
         shapes.strides[stride] = (shapes.strides[stride] ?? 0) + 1;
         const source = model.stream.buffer;
-        if (source && lockedBuffers.has(source))
+        const locked = source ? lockedBuffers.get(source) : undefined;
+        if (locked !== undefined)
         {
-            shapes.lockedDraws[source.length] = (shapes.lockedDraws[source.length] ?? 0) + 1;
+            locked.draws++;
             if (buffers.get(source)?.held)
             {
-                shapes.drawsWhileLocked[source.length]
-                    = (shapes.drawsWhileLocked[source.length] ?? 0) + 1;
+                locked.whileLocked++;
             }
         }
     };
 
-    /** Buffers the program has locked for writing, for `countShape`. @type {WeakSet<object>} */
-    const lockedBuffers = new WeakSet();
+    /**
+     * Buffers the program has locked for writing, for `countShape`, each with
+     * the counts of its size, which a draw from it adds to: a count looked up
+     * by size in an object whose keys are sizes of megabytes was a
+     * dictionary's read and write at every such draw.
+     *
+     * @type {WeakMap<object, { draws: number, whileLocked: number }>}
+     */
+    const lockedBuffers = new WeakMap();
+    /** The same counts by buffer size. @type {Map<number, { draws: number, whileLocked: number }>} */
+    const lockedBySize = new Map();
+    /**
+     * One of those counts by buffer size, for the diagnostics: the sizes a
+     * draw was counted for, as the counters were kept before.
+     *
+     * @param {'draws' | 'whileLocked'} which
+     * @returns {Record<string, number>}
+     */
+    const lockedCounts = which=>{
+        /** @type {Record<string, number>} */
+        const counts = {};
+        for (const [size, counted] of lockedBySize)
+        {
+            if (counted[which] > 0)
+            {
+                counts[size] = counted[which];
+            }
+        }
+        return counts;
+    };
 
 
     /**
@@ -9119,58 +9225,32 @@ export function createRenderer(options){
      */
     const scratchGeometry = { vertices: null, indices: null, count: 0, first: 0, baseVertex: 0 };
 
-    /** @type {WeakMap<object, { gpu: any, offset: number }>} */
-    const wholeBindings = new WeakMap();
     /**
-     * A GPU buffer bound from its start, one object per buffer: commands hold
-     * it until they replay and never change it, so every draw of a buffer
-     * shares one.
-     *
-     * @param {any} gpu
-     */
-    const wholeBinding = gpu=>{
-        let bound = wholeBindings.get(gpu);
-        if (!bound)
-        {
-            bound = { gpu, offset: 0 };
-            wholeBindings.set(gpu, bound);
-        }
-        return bound;
-    };
-
-    /**
-     * Stream zero's buffer bound at `start` bytes: the shared whole binding
-     * at zero, which is every draw of a stream whose offset is whole
-     * vertices, and a binding of its own otherwise.
+     * Stream zero's buffer bound at `start` bytes, in one binding every draw
+     * writes over: `record` copies it into the command's own.
      *
      * @param {any} gpu @param {number} start
      */
-    const streamBinding = (gpu, start)=>(start === 0 ? wholeBinding(gpu) : { gpu, offset: start });
+    const streamBinding = (gpu, start)=>{
+        scratchStream.gpu = gpu;
+        scratchStream.offset = start;
+        return scratchStream;
+    };
+    const scratchStream = { gpu: /** @type {any} */ (null), offset: 0 };
 
-    /** @type {WeakMap<object, Map<number, { gpu: any, offset: number, format: string }>>} */
-    const indexBindings = new WeakMap();
     /**
-     * An index buffer bound at an offset in a format, one object per buffer,
-     * offset and format, shared as `wholeBinding` shares its own.
+     * An index buffer bound at an offset in a format, in one binding every
+     * draw writes over, as `streamBinding`'s.
      *
      * @param {any} gpu @param {number} offset @param {string} format
      */
     const indexBinding = (gpu, offset, format)=>{
-        let byOffset = indexBindings.get(gpu);
-        if (!byOffset)
-        {
-            byOffset = new Map();
-            indexBindings.set(gpu, byOffset);
-        }
-        const key = offset * 2 + (format === 'uint32' ? 1 : 0);
-        let bound = byOffset.get(key);
-        if (!bound)
-        {
-            bound = { gpu, offset, format };
-            byOffset.set(key, bound);
-        }
-        return bound;
+        scratchIndex.gpu = gpu;
+        scratchIndex.offset = offset;
+        scratchIndex.format = format;
+        return scratchIndex;
     };
+    const scratchIndex = { gpu: /** @type {any} */ (null), offset: 0, format: '' };
 
     /**
      * An indexed point list's vertices in index order: a point is drawn as an
@@ -9372,7 +9452,16 @@ export function createRenderer(options){
                 : (flags & D3DLOCK.DISCARD) !== 0 ? 'discard' : 'none';
             const lockKey = `${buffer.length}:${kind}`;
             counters.shapes.locks[lockKey] = (counters.shapes.locks[lockKey] ?? 0) + 1;
-            lockedBuffers.add(buffer);
+            if (!lockedBuffers.has(buffer))
+            {
+                let counted = lockedBySize.get(buffer.length);
+                if (counted === undefined)
+                {
+                    counted = { draws: 0, whileLocked: 0 };
+                    lockedBySize.set(buffer.length, counted);
+                }
+                lockedBuffers.set(buffer, counted);
+            }
             verify?.locked(buffer, flags, offset, length);
             // `app.debug.bufferLocks('rename')`: every lock renames, so what a
             // queued draw reads is never written over -- for telling a defect
@@ -9514,6 +9603,9 @@ export function createRenderer(options){
                     : new Set(Array.from({ length: levels * faces }, (_, index)=>index)),
                 serial: nextTextureId,
                 id: `t${nextTextureId++}`,
+                // The frame whose draws counted it (`frameStats.textures`).
+                countedIn: -1,
+                ones: sampledOnes(desc.format),
                 // A per-texture generation of its contents, so a preparation
                 // key can say which bytes it was built against without a
                 // global counter that would invalidate every other texture's.
@@ -10499,7 +10591,7 @@ export function createRenderer(options){
                 placeholder: frameStats.placeholder,
                 truncated: frameStats.truncated,
                 uploads: frameStats.uploads,
-                textures: frameStats.textures.size,
+                textures: frameStats.textures,
                 // What decides a black or a frozen picture: a frame that only
                 // cleared, or drew only into targets that are not the one
                 // shown, or a viewport that was not the back buffer at all.
@@ -10507,7 +10599,7 @@ export function createRenderer(options){
                 clearColor: frameStats.clearColor < 0
                     ? '' : `#${frameStats.clearColor.toString(16).padStart(8, '0')}`,
                 offscreenDraws: frameStats.offscreenDraws,
-                offscreenTargets: frameStats.offscreenTargets.size,
+                offscreenTargets: offscreenTargetsOf(frameStats.targets),
                 targets: targetsOf(frameStats.targets, model.backBuffer),
                 viewport: `${rect.x},${rect.y} ${rect.width}x${rect.height}`,
                 target: `${shown.Width}x${shown.Height}`,
@@ -10682,8 +10774,8 @@ export function createRenderer(options){
                 clears: counters.clears,
                 shapes: { ...counters.shapes, strides: { ...counters.shapes.strides },
                     locks: { ...counters.shapes.locks },
-                    lockedDraws: { ...counters.shapes.lockedDraws },
-                    drawsWhileLocked: { ...counters.shapes.drawsWhileLocked },
+                    lockedDraws: lockedCounts('draws'),
+                    drawsWhileLocked: lockedCounts('whileLocked'),
                     unlocks: { ...counters.shapes.unlocks },
                     staleDraws: { ...counters.shapes.staleDraws } },
                 programmable: counters.programmable,
