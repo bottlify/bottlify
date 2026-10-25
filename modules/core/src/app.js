@@ -374,7 +374,8 @@ const hashText = (hash, text)=>{
  *           The graphics layer's configuration (docs/core/configuration.md,
  *           graphics), forwarded to it as given: `compressedTextures`
  *           turns the block-compressed upload path on where the device has the
- *           feature, and `maxFrameLatency` is how many frames the device may
+ *           feature (BC, or for OpenGL's DXT1 ASTC where there is no BC), and
+ *           `maxFrameLatency` is how many frames the device may
  *           still be working on when a present answers (three; zero for no
  *           bound), a bound the run's presenter keeps. `graphics.presenter` is
  *           the run's presenter -- the canvas, its configured format, the pacer

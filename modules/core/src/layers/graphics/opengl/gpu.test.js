@@ -13,6 +13,7 @@ import { CANONICAL_STRIDE } from './gpu-layout.js';
 import { COPY_UNIFORM_FLOATS, UNIFORM } from './wgsl.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
+import { dxt1ToAstc } from '../webgpu/internal/astc.js';
 
 /**
  * A context on a renderer on a backend on a recording device: what the
@@ -750,6 +751,74 @@ test('a sub-image write into a kept level falls that texture back to the decoded
         assert.equal(surface.descriptor.format, 'rgba8unorm',
             'the rewritten level has no blocks to keep, so the whole texture falls back');
     });
+
+/**
+ * Loads one compressed 4x4 level as texture 1, draws a triangle with it and
+ * swaps: what a texture's format is settled by.
+ *
+ * @param {ReturnType<typeof rig>} r @param {number} format @param {Uint8Array} block
+ */
+const drawCompressed = async(r, format, block)=>{
+    const { context } = r;
+    context.glGenTextures(1);
+    context.glBindTexture(GL.TEXTURE_2D, 1);
+    context.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.LINEAR);
+    context.glCompressedTexImage2DARB(GL.TEXTURE_2D, 0, format, 4, 4, 0, block.length, block);
+    assert.equal(context.glGetError(), GL.NO_ERROR, 'the compressed level loaded');
+    context.glEnable(GL.TEXTURE_2D);
+    context.glBegin(GL.TRIANGLES);
+    context.glVertex2f(0, 0);
+    context.glVertex2f(8, 0);
+    context.glVertex2f(8, 8);
+    context.glEnd();
+    await r.swap();
+    return r.gpu.of('createTexture').find(c=>/gl-texture:1/.test(c.descriptor.label));
+};
+
+/** A four-stop DXT1 block: its first endpoint the greater. */
+const FOUR_STOP_DXT1 = Uint8Array.of(0x00, 0xf8, 0x1f, 0x00, 0x1b, 0x6c, 0xb1, 0xe4);
+
+test('on a device with ASTC and no BC a DXT1 texture travels as ASTC blocks', async()=>{
+    const r = rig({ astcTextures: true });
+    const surface = await drawCompressed(r, GL.COMPRESSED_RGB_S3TC_DXT1_EXT, FOUR_STOP_DXT1);
+    assert.equal(surface.descriptor.format, 'astc-4x4-unorm');
+    assert.equal(surface.descriptor.usage & r.backend.TextureUsage.RENDER_ATTACHMENT, 0,
+        'a compressed surface never asks for a render attachment');
+    assert.equal(r.gpu.of('writeTexture').length, 0, 'nothing went up decoded');
+    const expected = /** @type {Uint8Array} */ (dxt1ToAstc(FOUR_STOP_DXT1, 4, 4));
+    const staged = r.gpu.of('writeBuffer').find(w=>w.bytes.length >= 16
+        && w.bytes.subarray(0, 16).every((/** @type {number} */ byte, /** @type {number} */ at)=>
+            byte === expected[at]));
+    assert.ok(staged, 'the transcoded block travelled through staging');
+    assert.ok(r.gpu.of('copyBufferToTexture').find(c=>c.destination.texture === surface.texture),
+        'and was copied into the ASTC surface');
+    assert.deepEqual(r.renderer.diagnostics().transcoded,
+        { levels: 1, blockBytes: 8, astcBytes: 16 });
+    assert.equal(r.renderer.diagnostics().decoded.levels, 0);
+});
+
+test('a DXT1 texture with a texel of a block\'s fourth colour, or DXT5, goes up decoded',
+    async()=>{
+        const fourth = Uint8Array.of(0x1f, 0x00, 0x00, 0xf8, 0x03, 0x00, 0x00, 0x00);
+        for (const [format, block] of /** @type {[number, Uint8Array][]} */ ([
+            [GL.COMPRESSED_RGBA_S3TC_DXT1_EXT, fourth],
+            [GL.COMPRESSED_RGBA_S3TC_DXT5_EXT, new Uint8Array(16).fill(7)],
+        ]))
+        {
+            const r = rig({ astcTextures: true });
+            const surface = await drawCompressed(r, format, block);
+            assert.equal(surface.descriptor.format, 'rgba8unorm');
+            assert.equal(r.gpu.of('writeTexture').length, 1, 'the level went up decoded');
+            assert.equal(r.renderer.diagnostics().transcoded.levels, 0);
+            assert.equal(r.renderer.diagnostics().decoded.levels, 1);
+        }
+    });
+
+test('a device with BC takes DXT1 as BC1, whatever it says of ASTC', async()=>{
+    const r = rig({ compressedTextures: true, astcTextures: true });
+    const surface = await drawCompressed(r, GL.COMPRESSED_RGB_S3TC_DXT1_EXT, FOUR_STOP_DXT1);
+    assert.equal(surface.descriptor.format, 'bc1-rgba-unorm');
+});
 
 test('with the depth test off a draw writes no depth, whatever the depth mask', async()=>{
     // glEnable(GL_DEPTH_TEST): "even if the depth buffer exists and the depth

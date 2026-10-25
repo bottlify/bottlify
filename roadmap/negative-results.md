@@ -1597,3 +1597,47 @@ None yet.
   (WebKit 26.6, WPE, headless). Spread between runs of one arm in that level: about 300 MB at the
   peak, 50 MB in the mean.
 - **Decision.** Not kept; the blocks stay. The patch (28 lines and its test) is not in the tree.
+
+### 2026-10-25: a smaller translation arena, and no relinks, for the page's memory
+
+- **Idea.** Translation costs the Doom 3 demo's web process about 250 MB at equal progress (no
+  translation, 130 s: 930 MB against about 1190 at 60 s with it). The arena keeps 48 MB of emitted
+  functions for relinks, and each relink emits every live region again into one module, two copies
+  of the code until the old one dies: an 8 MB arena, or no relinks, would give some of it back.
+- **Workload.** The engine's test page built as the package is (minified, diagnostics off), fake
+  GPU in a graphics worker, the Doom 3 demo's bundle `3f84befac918afe335547b36`, 2 GB of guest
+  memory, one executor; the web process's RSS once a second. Its menu, 60 s, median from 15 s and
+  highest, alternated: head (95438a8f) against `cork.config.arenaBytes` 8 MB, three runs each.
+  Its first level (`+map game/demo_mars_city1`), 130 s, mean 80-125 s and highest by 125 s, two
+  pairs alternated: head (632a0aa5) against `relinkAfter: 0`.
+- **Values.** Menu, arena 8 MB: median 1231, 1189, 1195 against 1205, 1208, 1205; highest 1328,
+  1379, 1314 against 1460, 1417, 1344. Level, no relinks: mean 1879, 1891 against 1920, 1929;
+  highest 2322, 2308 against 2055, 2542; module bytes emitted 100, 103 MB against 195, 202 MB;
+  instructions 51.9, 54.6 G against 52.5, 51.6 G.
+- **Why.** The arena's pages are not what the process keeps, and an old module dies once its
+  regions are relinked, so the second copy does not stay.
+- **Machine.** The 4-core KVM VM (Xeon 2.10 GHz), 15 GB, Ubuntu 24.04, no GPU; Playwright 1.63.0
+  (WebKit 26.6, WPE, headless). Spread between runs of one arm: about 10 MB in the menu's median,
+  300 MB in the level's highest.
+- **Decision.** Neither default changed.
+
+### 2026-10-25: a context that keeps no texels reads a program's pixels without converting them
+
+- **Idea.** On the engine's thread an OpenGL context recorded for the graphics worker keeps no
+  texels (2c521083), yet every glTexImage2D and glTexSubImage2D still turned the program's pixels
+  into RGBA, digested them and threw them away: about 160 MB of garbage in the Doom 3 demo's first
+  level load. Read the bytes (the read is what sends them to the worker) and convert nothing;
+  digest an upload only in a build with diagnostics.
+- **Workload.** The engine's test page built as the package is (minified, diagnostics off), fake
+  GPU in a graphics worker, the Doom 3 demo's bundle `3f84befac918afe335547b36` straight into
+  `game/demo_mars_city1`, 2 GB of guest memory, one executor, 130 s; the web process's RSS once a
+  second. Arms alternated, three pairs: 270100b7 against it with the change.
+- **Values.** RSS 80-125 s: 1994, 1897, 1947 against 1918, 1979, 1971 MB; highest by 125 s:
+  2610, 2343, 2153 against 2078, 2302, 2374; anonymous memory at 120 s: 1389, 1368, 1360 against
+  1383, 1384, 1394.
+- **Why.** Garbage the collector takes back in the load: not what the process holds, and not
+  what sets its highest, which moves 450 MB between runs of one arm.
+- **Machine.** The 4-core KVM VM (Xeon 2.10 GHz), 15 GB, Ubuntu 24.04, no GPU; Playwright 1.63.0
+  (WebKit 26.6, WPE, headless).
+- **Decision.** Not kept; the patch (`readPixels` with a `convert` flag, digests by
+  `BOTTLIFY_DIAGNOSTICS`) is not in the tree.

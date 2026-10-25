@@ -32,6 +32,7 @@ import { createModelRenderer } from './gpu-model.js';
  * @property {boolean} [raster]
  * @property {boolean} [keepPrimitives]
  * @property {boolean} [compressedTextures]
+ * @property {boolean} [astcTextures]
  * @property {boolean} [dumpDraws]
  * @property {number} [maxDraws]
  * @property {string | null} [skipTexture]
@@ -78,6 +79,7 @@ export function createOpenglRoot(services){
                     skipTexture: services.skipTexture,
                     probeTexture: services.probeTexture,
                     compressedTextures: services.compressedTextures,
+                    astcTextures: services.astcTextures,
                     liveDump: services.liveDump,
                 });
             }

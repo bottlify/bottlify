@@ -17,6 +17,8 @@ test('a texture weighs its texels at every level, a compressed one by whole bloc
     // BC1 at half a byte a texel, and a 1x1 level still a whole 4x4 block.
     assert.equal(textureBytes({ size: [4, 4], format: 'bc1-rgba-unorm', mipLevelCount: 3 }).bytes,
         3 * 16 * 0.5);
+    // ASTC 4x4 at a byte a texel, its 16-byte block over 16 texels.
+    assert.equal(textureBytes({ size: [8, 8], format: 'astc-4x4-unorm' }).bytes, 64);
     assert.equal(textureBytes({ size: [8, 8, 6], format: 'r8unorm' }).bytes, 8 * 8 * 6,
         'six layers');
     assert.equal(textureBytes({ size: [8, 8], format: 'depth24plus', sampleCount: 4 }).bytes,

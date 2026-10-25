@@ -2451,12 +2451,26 @@ export function createPlayer({ root, ship, read, borrow }){
  * only by what is sent, so it says which 4 KiB pages were written since a
  * reader last looked (`watch`), as the engine's write watch does for guest
  * memory: a dynamic buffer's upload is those pages, not a comparison.
+ *
+ * With `forget`, for a reader sent every byte it reads with the call that
+ * reads it (OpenGL's), a page not written since the batch before the last
+ * is let go at `settle`: kept, every page a program ever handed its pixels or
+ * vertices from stays, as the Doom 3 demo's temporary buffers did. A page let
+ * go is made again, zeroed, from the few kept for it.
+ *
+ * @param {{ forget?: boolean }} [options]
  */
-export function createMirror(){
+export function createMirror({ forget = false } = {}){
     const SHIFT = 16;
     const SIZE = 1 << SHIFT;
+    /** Pages let go, kept to be made again rather than allocated: at most this many. */
+    const SPARE = 64;
     /** @type {Map<number, Uint8Array>} */
     const pages = new Map();
+    /** @type {Uint8Array[]} */
+    const spare = [];
+    /** The write count at the last two settles, the older first. */
+    const settled = [0, 0];
     /**
      * Each 4 KiB page's last write, numbered from 1, and each 64 KiB page's
      * latest of its pages': a watch looks at a 64 KiB page's own only when
@@ -2488,7 +2502,7 @@ export function createMirror(){
         let bytes = pages.get(page);
         if (!bytes)
         {
-            bytes = new Uint8Array(SIZE);
+            bytes = spare.pop()?.fill(0) ?? new Uint8Array(SIZE);
             pages.set(page, bytes);
         }
         return bytes;
@@ -2574,6 +2588,36 @@ export function createMirror(){
                 },
             };
         },
+        /**
+         * Lets go of the pages no write reached since the settle before the
+         * last, where the mirror forgets: called between batches, so the bytes
+         * a call was sent are never let go before it is played, however a
+         * batch was cut.
+         */
+        settle(){
+            if (!forget)
+            {
+                return;
+            }
+            const before = settled[0];
+            for (const [page, bytes] of pages)
+            {
+                if (largeStamps[page] <= before)
+                {
+                    pages.delete(page);
+                    if (spare.length < SPARE)
+                    {
+                        spare.push(bytes);
+                    }
+                }
+            }
+            settled[0] = settled[1];
+            settled[1] = stamp;
+        },
+        /** The bytes of the 64 KiB pages held. */
+        bytes: ()=>pages.size * SIZE,
+        /** The bytes of every 64 KiB page ever written: what it holds if it forgets none. */
+        reached: ()=>largeStamps.reduce((sum, at)=>sum + (at !== 0 ? SIZE : 0), 0),
         /** @param {number} address @param {number} length @returns {Uint8Array} */
         read(address, length){
             const out = new Uint8Array(length);

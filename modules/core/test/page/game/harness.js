@@ -300,13 +300,14 @@ async function openDevice(errors){
  * measures the engine alone: a software rasteriser shares the machine's cores
  * with it and holds it waiting for frames, which a person's GPU does not.
  *
+ * @param {string[]} [features]  the optional features it says it has
  * @returns {GpuHandle}
  */
-function fakeDevice(){
+function fakeDevice(features = []){
     // Quiet: nothing reads a log of the calls here, and keeping one costs
     // what the run is there to measure.
     const gpu = createFakeDevice({ quiet: true });
-    Object.assign(gpu.device, { queue: gpu.queue, features: new Set(),
+    Object.assign(gpu.device, { queue: gpu.queue, features: new Set(features),
         createSampler: (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor }) });
     return { available: true, device: gpu.device,
         adapter: { vendor: 'fake', architecture: '', description: 'draws nothing',
@@ -1469,12 +1470,13 @@ export function createHarness(canvas, how = {}){
      *           wholeFiles?: boolean,
      *           sampling?: boolean,
      *           store?: string, prefetch?: boolean, bundleId?: string, fakeGpu?: boolean,
+     *           fakeFeatures?: string[],
      *           watch?: { libraries: Record<string, number[] | null>,
      *               strings: number[] }, record?: number, memorySize?: number }} request
      * @returns {Promise<any>}
      */
     async function run(request){
-        const handle = request.fakeGpu ? fakeDevice() : await opened;
+        const handle = request.fakeGpu ? fakeDevice(request.fakeFeatures) : await opened;
         if (!handle.available)
         {
             return { ok: false, gpu: false, reason: handle.reason };
@@ -1493,8 +1495,8 @@ export function createHarness(canvas, how = {}){
             request.memorySize ?? DEFAULT_MEMORY_SIZE);
         const graphicsWorker = request.fakeGpu
             ? await openGraphicsWorker({ frames: 'count', capture: captureGraphics, gcNudge,
-                url: new URL(`./fake-graphics.worker.js?pipelineMs=${request.fakePipelineMs ?? 0}`,
-                    import.meta.url) })
+                url: new URL(`./fake-graphics.worker.js?pipelineMs=${request.fakePipelineMs ?? 0}`
+                    + `&features=${(request.fakeFeatures ?? []).join(',')}`, import.meta.url) })
             : request.graphicsWorker
                 ? await openGraphicsWorker({ frames: 'pixels', capture: captureGraphics, gcNudge })
                 : null;

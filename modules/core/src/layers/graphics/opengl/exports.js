@@ -348,6 +348,7 @@ const LIST_TYPES = new Map([
  * @property {number[]} [keepImages]
  *           Indices of uncompressed uploads whose texels the diagnostics carry.
  * @property {boolean} [compressedTextures]
+ * @property {boolean} [astcTextures]
  *           The device has `texture-compression-bc`: an S3TC texture whose
  *           every level kept its blocks uploads them as blocks instead of
  *           the four-to-eight-times-larger texels the context decoded.
@@ -391,6 +392,7 @@ export function createOpengl(services){
         divergence: detail=>services.divergence?.('OpenGL', detail),
         raster: services.raster,
         compressedTextures: services.compressedTextures,
+        astcTextures: services.astcTextures,
         dumpDraws: services.dumpDraws,
         maxDraws: services.maxDraws,
         skipTexture: services.skipTexture,
