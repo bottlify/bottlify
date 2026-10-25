@@ -1620,3 +1620,24 @@ None yet.
   (WebKit 26.6, WPE, headless). Spread between runs of one arm: about 10 MB in the menu's median,
   300 MB in the level's highest.
 - **Decision.** Neither default changed.
+
+### 2026-10-25: a context that keeps no texels reads a program's pixels without converting them
+
+- **Idea.** On the engine's thread an OpenGL context recorded for the graphics worker keeps no
+  texels (2c521083), yet every glTexImage2D and glTexSubImage2D still turned the program's pixels
+  into RGBA, digested them and threw them away: about 160 MB of garbage in the Doom 3 demo's first
+  level load. Read the bytes (the read is what sends them to the worker) and convert nothing;
+  digest an upload only in a build with diagnostics.
+- **Workload.** The engine's test page built as the package is (minified, diagnostics off), fake
+  GPU in a graphics worker, the Doom 3 demo's bundle `3f84befac918afe335547b36` straight into
+  `game/demo_mars_city1`, 2 GB of guest memory, one executor, 130 s; the web process's RSS once a
+  second. Arms alternated, three pairs: 270100b7 against it with the change.
+- **Values.** RSS 80-125 s: 1994, 1897, 1947 against 1918, 1979, 1971 MB; highest by 125 s:
+  2610, 2343, 2153 against 2078, 2302, 2374; anonymous memory at 120 s: 1389, 1368, 1360 against
+  1383, 1384, 1394.
+- **Why.** Garbage the collector takes back in the load: not what the process holds, and not
+  what sets its highest, which moves 450 MB between runs of one arm.
+- **Machine.** The 4-core KVM VM (Xeon 2.10 GHz), 15 GB, Ubuntu 24.04, no GPU; Playwright 1.63.0
+  (WebKit 26.6, WPE, headless).
+- **Decision.** Not kept; the patch (`readPixels` with a `convert` flag, digests by
+  `BOTTLIFY_DIAGNOSTICS`) is not in the tree.
