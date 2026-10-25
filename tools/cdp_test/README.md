@@ -524,6 +524,15 @@ and goes on. On iOS 27 (Safari 27.0.1) every tail call into another instance cra
 cork with the workaround ran (WebKit PR 76671); run it again when an iOS release carries the
 fix, before the workaround goes.
 
+## `../webkit-probe/storage.html`: what the origin keeps in a browser with no devtools
+
+Served the same way (`/probe/storage.html`): what `navigator.storage.estimate()` says is used and
+allowed, every file of the origin private file system summed by directory with the 40 largest and
+their ages, and the Cache API's and IndexedDB's names; "Copy as text" puts the whole of it on the
+clipboard. A file's size is its length, not what the disk holds: a bundle's `.blocks` file is as
+long as the bundle unpacked, written only where blocks arrived, so the files can sum to many times
+what the estimate says. A file a running engine holds open may not answer and is counted as locked.
+
 ## Two rules the numbers depend on
 
 - A frame rate is counted on the canvas the person sees (the browser's

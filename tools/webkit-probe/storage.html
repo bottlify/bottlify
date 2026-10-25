@@ -1,0 +1,165 @@
+<!doctype html>
+<!--
+  Copyright © 2026 Bottlify Project
+  Licensed under the Mozilla Public License, version 2.0
+  See LICENSE for details
+
+  What the origin keeps in the browser, for a browser with no devtools to ask
+  (a phone's): what the browser says is used and allowed, every file of the
+  origin private file system summed by directory with the largest files and
+  their ages, and the Cache API's and IndexedDB's names. Served by the
+  launcher from dist/probe/ so it is the launcher's origin it reads. A file a
+  running engine holds open may not answer its size; it is counted as locked.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Storage probe</title>
+<style>
+  :root { color-scheme: light dark; --bg: #fff; --fg: #111; --dim: #666; --bad: #c62828; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #111; --fg: #eee; --dim: #999; --bad: #ef5350; } }
+  body { background: var(--bg); color: var(--fg); font: 14px/1.4 system-ui, sans-serif; margin: 16px; }
+  table { border-collapse: collapse; width: 100%; margin-bottom: 16px; }
+  td, th { border-bottom: 1px solid #8884; padding: 4px; text-align: left; vertical-align: top; }
+  td.n { text-align: right; white-space: nowrap; }
+  code { font-size: 12px; word-break: break-all; }
+  .dim { color: var(--dim); }
+  .bad { color: var(--bad); font-weight: 600; }
+  button { font-size: 16px; padding: 8px 14px; margin: 0 8px 8px 0; }
+</style>
+</head>
+<body>
+<h1>Storage probe</h1>
+<p><code id="agent"></code></p>
+<button id="again">Measure again</button>
+<button id="copy">Copy as text</button>
+<div id="out">Measuring…</div>
+<script type="module">
+const MB = n=>(n / 1048576).toFixed(1);
+const ago = ms=>{
+    const minutes = Math.round((Date.now() - ms) / 60000);
+    return minutes < 120 ? `${minutes} min` : `${(minutes / 60).toFixed(1)} h`;
+};
+const escape = text=>String(text).replace(/[&<>]/g, c=>`&#${c.charCodeAt(0)};`);
+let report = '';
+
+/** Every file under `dir`: its path, size and age, or why it gave none. */
+async function walk(dir, path, files){
+    for await (const [name, handle] of dir.entries())
+    {
+        const at = `${path}/${name}`;
+        if (handle.kind === 'directory')
+        {
+            await walk(handle, at, files);
+            continue;
+        }
+        try
+        {
+            const file = await handle.getFile();
+            files.push({ path: at, size: file.size, modified: file.lastModified });
+        }
+        catch (e)
+        {
+            files.push({ path: at, size: null, modified: null, error: e?.name ?? String(e) });
+        }
+    }
+}
+
+/** Files summed by their first `depth` path parts. */
+const byDirectory = (files, depth)=>{
+    const sums = new Map();
+    for (const file of files)
+    {
+        const parts = file.path.split('/').filter(Boolean);
+        const key = parts.length > depth ? parts.slice(0, depth).join('/') : '(top level)';
+        const sum = sums.get(key) ?? { bytes: 0, files: 0, locked: 0, newest: 0 };
+        sum.bytes += file.size ?? 0;
+        sum.files += 1;
+        sum.locked += file.size === null ? 1 : 0;
+        sum.newest = Math.max(sum.newest, file.modified ?? 0);
+        sums.set(key, sum);
+    }
+    return [...sums].sort((a, b)=>b[1].bytes - a[1].bytes);
+};
+
+async function measure(){
+    const out = document.getElementById('out');
+    out.textContent = 'Measuring…';
+    const lines = [`agent ${navigator.userAgent}`, `at ${new Date().toISOString()}`];
+    let html = '';
+    const estimate = await navigator.storage?.estimate?.().catch(e=>({ error: String(e) }));
+    if (estimate && !estimate.error)
+    {
+        html += `<p><b>Browser says:</b> ${MB(estimate.usage)} MB used of ${MB(estimate.quota)} MB allowed</p>`;
+        lines.push(`estimate used ${MB(estimate.usage)} MB of ${MB(estimate.quota)} MB`);
+    }
+    else
+    {
+        html += `<p class="bad">storage.estimate: ${escape(estimate?.error ?? 'not available')}</p>`;
+        lines.push(`estimate not measured: ${estimate?.error ?? 'not available'}`);
+    }
+    const persisted = await navigator.storage?.persisted?.().catch(()=>null);
+    html += `<p class="dim">persisted: ${persisted}</p>`;
+    lines.push(`persisted ${persisted}`);
+
+    const files = [];
+    try
+    {
+        await walk(await navigator.storage.getDirectory(), '', files);
+    }
+    catch (e)
+    {
+        html += `<p class="bad">OPFS not read: ${escape(e?.message ?? e)}</p>`;
+        lines.push(`opfs not read: ${e?.message ?? e}`);
+    }
+    const total = files.reduce((sum, file)=>sum + (file.size ?? 0), 0);
+    const locked = files.filter(file=>file.size === null).length;
+    html += `<p><b>OPFS:</b> ${MB(total)} MB in ${files.length} files${locked
+        ? `, <span class="bad">${locked} locked (size unknown)</span>` : ''}</p>`;
+    lines.push(`opfs ${MB(total)} MB in ${files.length} files, ${locked} locked`);
+
+    for (const depth of [1, 2])
+    {
+        const rows = byDirectory(files, depth);
+        html += `<h2>By directory, ${depth} level${depth > 1 ? 's' : ''}</h2><table>`
+            + '<tr><th>directory</th><th>MB</th><th>files</th><th>newest</th></tr>'
+            + rows.map(([key, sum])=>`<tr><td><code>${escape(key)}</code>${sum.locked
+                ? ` <span class="bad">${sum.locked} locked</span>` : ''}</td><td class="n">${MB(sum.bytes)}</td>`
+                + `<td class="n">${sum.files}</td><td class="n">${sum.newest ? ago(sum.newest) : ''}</td></tr>`).join('')
+            + '</table>';
+        lines.push(`-- by directory, depth ${depth}`,
+            ...rows.map(([key, sum])=>`${MB(sum.bytes).padStart(10)} MB ${String(sum.files).padStart(6)} files`
+                + `${sum.locked ? ` ${sum.locked} locked` : ''}  ${key}`));
+    }
+
+    const largest = [...files].sort((a, b)=>(b.size ?? -1) - (a.size ?? -1)).slice(0, 40);
+    html += '<h2>Largest files</h2><table><tr><th>file</th><th>MB</th><th>modified</th></tr>'
+        + largest.map(file=>`<tr><td><code>${escape(file.path)}</code></td>`
+            + `<td class="n">${file.size === null ? `<span class="bad">${escape(file.error)}</span>` : MB(file.size)}</td>`
+            + `<td class="n">${file.modified ? ago(file.modified) : ''}</td></tr>`).join('')
+        + '</table>';
+    lines.push('-- largest files', ...largest.map(file=>`${file.size === null ? file.error.padStart(10)
+        : `${MB(file.size).padStart(10)} MB`}  ${file.modified ? ago(file.modified).padStart(8) : ''}  ${file.path}`));
+
+    const cacheNames = await globalThis.caches?.keys?.().catch(()=>null);
+    html += `<p><b>Cache API:</b> ${cacheNames === null || cacheNames === undefined ? 'not available'
+        : cacheNames.length ? escape(cacheNames.join(', ')) : 'none'}</p>`;
+    lines.push(`caches ${cacheNames ? cacheNames.join(', ') || 'none' : 'not available'}`);
+    const databases = await globalThis.indexedDB?.databases?.().catch(()=>null);
+    html += `<p><b>IndexedDB:</b> ${databases === null || databases === undefined ? 'not available'
+        : databases.length ? escape(databases.map(db=>db.name).join(', ')) : 'none'}</p>`;
+    lines.push(`indexeddb ${databases ? databases.map(db=>db.name).join(', ') || 'none' : 'not available'}`);
+
+    out.innerHTML = html;
+    report = lines.join('\n');
+    console.log(report);
+}
+
+document.getElementById('agent').textContent = navigator.userAgent;
+document.getElementById('again').onclick = measure;
+document.getElementById('copy').onclick = ()=>navigator.clipboard.writeText(report);
+measure();
+</script>
+</body>
+</html>
