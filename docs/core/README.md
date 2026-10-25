@@ -161,33 +161,30 @@ under `concurrency` in [api.md](api.md).
 
 ## Sound
 
-Sound is mixed on the browser's audio thread from a table the engine writes into shared memory:
+Sound is mixed on the browser's audio thread. `openSpeaker` opens the page's side of it -- the
+audio context and the package's worklet -- and must be called inside the click or touch that starts
+the run, before anything is awaited: a phone's browser starts sound in that handler and nowhere
+else.
 
 ```js
-const audio = new AudioContext();
-await audio.audioWorklet.addModule(workletUrl);   // the package's worklet.js, served by your page
-const app = await createApp({ ...options, audio: { drained: true, sampleRate: audio.sampleRate } });
-const { channels } = app.audio.format();
-const node = new AudioWorkletNode(audio, 'bottlify-output', {
-    outputChannelCount: [channels],
-    processorOptions: { table: app.audio.memory().table, channels },
-});
-node.connect(audio.destination);
+import { createApp, openSpeaker } from '@bottlify/core';
+
+button.onclick = async()=>{
+    const speaker = openSpeaker();                // first, inside the gesture
+    const { running, reason } = await speaker.ready();
+    const app = await createApp({ ...options, audio: running ? speaker.audioOptions() : undefined });
+    if (running) speaker.connect(app);
+    else await speaker.close();                   // and say why: `reason`
+};
 ```
 
-Without cross-origin isolation there is no table to share: the engine mixes on its own thread and
-posts the mix down a channel the page makes, one end to the engine, the other to the worklet:
-
-```js
-const sound = new MessageChannel();
-const app = await createApp({ ...options,
-    audio: { drained: true, sampleRate: audio.sampleRate, port: sound.port2 } });
-const node = new AudioWorkletNode(audio, 'bottlify-output', {
-    outputChannelCount: [2], processorOptions: { channels: 2 },
-});
-node.port.postMessage({ type: 'feed', port: sound.port1 }, [sound.port1]);
-node.connect(audio.destination);
-```
+The speaker sets the page's audio session to playback, so a phone's silent switch does not mute the
+game; resumes a context the browser stopped on its own (a call, the app in the background) as soon
+as it may, and at the person's next gesture; and finds the worklet beside itself in the package
+(`openSpeaker({ worklet })` names another URL). With cross-origin isolation the worklet reads a
+track table the engine writes into shared memory; without it, `audioOptions()` carries the port the
+engine posts its mix down. `speaker.volume(level)` turns what is heard down without the program
+knowing, `suspend()` and `resume()` hold it with a paused run, and `close()` ends it.
 
 ## What `createApp` returns
 

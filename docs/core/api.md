@@ -10,7 +10,25 @@ with a controller once the program is ready to run. On failure it rejects with a
 `reason` names the cause (`gpu`: the canvas gives no WebGPU context).
 
 The package also exports `assembleModules` (the layers without a program, see
-[configuration.md](configuration.md)) and `createLogReader` (reads the log from shared memory).
+[configuration.md](configuration.md)), `createLogReader` (reads the log from shared memory) and
+`openSpeaker` (the page's audio output, below).
+
+## The speaker
+
+`openSpeaker({ worklet?, latencyHint? })`, called inside the click or touch that starts a run and
+before any await, opens the audio context, sets `navigator.audioSession.type` to `playback` where
+the browser has it, and starts the worklet loading (`worklet`: its URL, the package's `worklet.js`
+beside `core.js` by default). It answers a speaker:
+
+| Member | What it does |
+| --- | --- |
+| `ready(timeoutMs = 1000)` | `{ running: true }` once the worklet is loaded and the context runs, or `{ running: false, reason }`. A context still stopped is kept open and started at the person's next gesture. |
+| `audioOptions()` | The `audio` option for `createApp`: `{ drained: true, sampleRate }`, and `port` on a page without shared memory. |
+| `connect(app)` | Plays the built app: the worklet node, reading its track table and every process's beside it, or fed from the port. Once per speaker. |
+| `volume(level)` | What is heard, 0 silent; the program's cursors move as they would. |
+| `suspend()`, `resume()` | Holds it with a paused run; nothing else starts it again. A stop the browser made on its own (`interrupted` on a phone, a device change) is resumed when the context says so and at the next gesture. |
+| `close()` | Stops the worklet and closes the context. |
+| `context`, `state()` | The `AudioContext` and its state. |
 
 ## Options
 
