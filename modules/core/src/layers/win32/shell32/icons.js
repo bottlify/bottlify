@@ -315,3 +315,82 @@ export function readFileIcons(volume, path, index, side = ICON_SIZE){
     volume.close(node);
     return found;
 }
+
+/** The eight bytes every PNG starts with: a Vista-era icon image stored as one. */
+const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+
+/**
+ * @typedef {Object} ProgramIcon
+ * @property {number} width
+ * @property {number} height
+ * @property {Uint8ClampedArray} [rgba]  The pixels, for an image stored as a DIB.
+ * @property {Uint8Array} [png]  The file, for an image stored as a PNG.
+ */
+
+/**
+ * A program's own icon, for a page to show it by: the first icon group of
+ * the image, as Explorer shows the file, at the largest size the group has
+ * (the deepest where two are as large). Null for an image with no icon, one
+ * whose icon cannot be read, or bytes that are not a 32-bit image.
+ *
+ * @param {Uint8Array} bytes  The whole file.
+ * @returns {ProgramIcon | null}
+ */
+export function programIcon(bytes){
+    try
+    {
+        const image = parsePe(bytes);
+        const group = listResources(bytes, image).find(resource=>resource.type === RT_GROUP_ICON);
+        if (!group)
+        {
+            return null;
+        }
+        const at = rvaToFileOffset(image, group.rva);
+        const entries = bytes.subarray(at, at + group.size);
+        const count = Math.min(u16(entries, 4),
+            Math.floor((entries.length - ICONDIR_HEADER) / GROUP_ENTRY));
+        let best = null;
+        for (let index = 0; index < count; index++)
+        {
+            const entry = ICONDIR_HEADER + index * GROUP_ENTRY;
+            // A BYTE of width, where 0 means 256.
+            const width = entries[entry] || 256;
+            const depth = u16(entries, entry + 6);
+            if (!best || width > best.width || (width === best.width && depth > best.depth))
+            {
+                best = { width, depth, id: u16(entries, entry + 12) };
+            }
+        }
+        const icon = best && findResource(bytes, image, RT_ICON, best.id);
+        if (!icon)
+        {
+            return null;
+        }
+        const from = rvaToFileOffset(image, icon.rva);
+        const bits = bytes.subarray(from, from + icon.size);
+        if (PNG_SIGNATURE.every((byte, index)=>bits[index] === byte))
+        {
+            // The PNG's own header says its size: the width and height at 16 and 20.
+            const height = (bits[20] << 24 | bits[21] << 16 | bits[22] << 8 | bits[23]) >>> 0;
+            const width = (bits[16] << 24 | bits[17] << 16 | bits[18] << 8 | bits[19]) >>> 0;
+            return { width, height, png: bits.slice() };
+        }
+        const picture = dibToBgra(bits);
+        if (!picture)
+        {
+            return null;
+        }
+        const rgba = new Uint8ClampedArray(picture.bgra.length);
+        for (let pixel = 0; pixel < rgba.length; pixel += 4)
+        {
+            rgba[pixel] = picture.bgra[pixel + 2];
+            rgba[pixel + 1] = picture.bgra[pixel + 1];
+            rgba[pixel + 2] = picture.bgra[pixel];
+            rgba[pixel + 3] = picture.bgra[pixel + 3];
+        }
+        return { width: picture.width, height: picture.height, rgba };
+    }
+    catch {
+        return null;
+    }
+}

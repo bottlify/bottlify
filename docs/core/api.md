@@ -13,7 +13,9 @@ The package also exports `assembleModules` (the layers without a program, see
 [configuration.md](configuration.md)), `createLogReader` (reads the log from shared memory) and
 `openSpeaker` (the page's audio output, below), and the page's screen while a run plays
 (`requestFullscreen`, `exitFullscreen`, `fullscreenElement`, `watchFullscreen`, `canFullscreen`,
-`keepScreenAwake`, below).
+`keepScreenAwake`, below), and `programIcon(bytes)`: a program's own icon from its executable, for a
+page to show the game by -- the first icon group's largest image, `{ width, height, rgba }` for one
+stored as a bitmap or `{ width, height, png }` for one stored as a PNG, null for none.
 
 ## The speaker
 

@@ -23,3 +23,5 @@ export { canFullscreen, exitFullscreen, fullscreenElement, keepScreenAwake, requ
 // worker of its own, a view that polls at its own rate. The controller already
 // holds one; this is for reading the same memory from somewhere else.
 export { createLogReader } from './layers/log/reader.js';
+// A program's own icon, for a page to show it by (a tab's, a home screen's).
+export { programIcon } from './layers/win32/shell32/icons.js';
