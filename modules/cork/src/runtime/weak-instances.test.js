@@ -39,3 +39,20 @@ test('what nothing else holds is let go, key and all; what is held stays', async
     assert.equal(map.has('dropped 0'), false);
     assert.equal(map.get('dropped 0'), undefined);
 });
+
+test('one forgotten while held is not found, and its key names the next set under it',
+    async()=>{
+        /** @type {ReturnType<typeof createWeakInstances<{ name: string }>>} */
+        const map = createWeakInstances();
+        const first = { name: 'evicted' };
+        map.set('module', first);
+        map.delete('module');
+        assert.equal(map.get('module'), undefined, 'while something else still holds it');
+        const second = { name: 'brought back' };
+        map.set('module', second);
+        await turn();
+        gc();
+        await turn();
+        assert.equal(map.get('module'), second);
+        assert.equal(first.name, 'evicted');
+    });

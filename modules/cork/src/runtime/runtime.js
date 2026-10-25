@@ -226,6 +226,25 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         // a frame lost and a sound mixer late.
         relinkAfter: 16,
         relinkRegions: 512,
+        // The regions a relink found no entry of in the last while go into
+        // modules of this many: a module is held or let go whole (`cacheBytes`),
+        // and one hot region in a module of cold ones held them all.
+        relinkCold: 128,
+        // The wasm bytes of the modules some running region's function is in,
+        // past which those gone longest without running are let go (0: no
+        // ceiling): their regions leave the table and the entry hash, stay in
+        // the store, and are brought back from it as any miss is. One brought
+        // back is kept this many translated instructions whatever its mark,
+        // twice as many each time again.
+        cacheBytes: 256 << 20,
+        evictHold: 1 << 28,
+        // Without tail calls into another module (`crossTailCalls`), the
+        // crossings out of placed modules since the last gathering past which
+        // the hottest regions, wherever they are, are built into one module
+        // (0: never): where two full modules keep crossing, a merge cannot.
+        // At most this many go into that module.
+        gatherAfter: 1 << 18,
+        gatherRegions: 2048,
         // A small leaf callee formed into its caller, the call and its return
         // jumps inside the region (false: every call crosses regions).
         leafCalls: true,
@@ -630,6 +649,26 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
     const placedLive = new Set();
     /** The running region at each table index. @type {Map<number, RegionRecord>} */
     const recordAt = new Map();
+    /**
+     * A module some running region's function is in (`cacheBytes`): its wasm
+     * bytes, those regions, the translated instructions (`corkRetired`) when
+     * one of them last ran -- an entry from the host, a crossing out of the
+     * module or into it -- and until when one brought back after an eviction
+     * is kept whatever that says.
+     *
+     * @typedef {{ instance: WebAssembly.Instance, bytes: number,
+     *     records: Set<RegionRecord>, ran: number, keepUntil: number }} Held
+     */
+    /** @type {Map<WebAssembly.Instance, Held>} */
+    const heldModules = new Map();
+    let heldBytes = 0;
+    /** Each instance's wasm bytes, and the store key its batch is kept under.
+     * @type {WeakMap<WebAssembly.Instance, number>} */
+    const instanceBytes = new WeakMap();
+    /** @type {WeakMap<WebAssembly.Instance, string>} */
+    const instanceKeys = new WeakMap();
+    /** A module compiled off the thread, by its bytes. @type {WeakMap<WebAssembly.Module, number>} */
+    const compiledBytes = new WeakMap();
     const entries = createEntries(
         table
             ? { memory, hashBase: layout.tables + Tables.HASH, shift: layout.hashShift ?? 16,
@@ -867,6 +906,10 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
      * @property {number[]} [closed]  the starts of those blocks with no entry
      * @property {number} [blocks]  how many blocks it has: a label from twice as many is a copy's
      * @property {Placed} [module]  the placed module its table index is in (`placeModule`)
+     * @property {Held} [held]  the module its function is in (`cacheBytes`)
+     * @property {number} [heat]  its entries and the crossings into it, halved at each
+     *     reading (`foldHeat`)
+     * @property {number} [crossed]  crossings into it read since the last reading
      * @property {boolean} [movedAlone]  a merge took it alone into the module calling it
      * @property {number} [merged]  the merges that built it again (`MERGES_A_REGION`)
      * @property {number} [floatMisses]  its float results that were not the processor's
@@ -1059,6 +1102,13 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         // `translateMs` is their sum, so a frame's own figure and the split
         // always agree.
         relinks: 0, relinked: 0, merges: 0, merged: 0, reforms: 0, copied: 0,
+        // The hottest regions built into one module (`gatherAfter`), and how
+        // many; at the last weighing, the regions with any heat and the share
+        // of it those built took.
+        gathers: 0, gathered: 0, gatherWarm: 0, gatherShare: 0,
+        // Modules let go past `cacheBytes`, their regions, and the regions of
+        // them published again; the crossings counted by modules no longer placed.
+        evictions: 0, evictedRegions: 0, broughtBack: 0, crossingsGone: 0,
         formingMs: 0, lookupMs: 0, emitMs: 0, encodeMs: 0, storeMs: 0, instantiateMs: 0,
         publishMs: 0,
         // Emitting and encoding the worker did: reported apart from
@@ -1203,6 +1253,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
                 }
             }
             leaveModule(record);
+            leaveHeld(record);
             for (const p of record.pages)
             {
                 byPage.get(p)?.delete(record);
@@ -2161,8 +2212,10 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
             return;
         }
         placed.records.delete(record);
+        record.module = undefined;
         if (placed.records.size === 0)
         {
+            counts.crossingsGone += placed.crossings.value;
             placedLive.delete(placed);
             for (const other of placedLive)
             {
@@ -2187,6 +2240,111 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         }
     };
 
+    /** Regions let go past `cacheBytes`, by key(entry, top): how many times, so
+     * one brought back is kept the longer the more often it went. @type {Map<number, number>} */
+    const evictedKeys = new Map();
+
+    /**
+     * A record into the module its function is in; a module not held yet is
+     * made room for first. Its entries stamp the module from then on.
+     *
+     * @param {RegionRecord} record @param {WebAssembly.Instance} instance
+     */
+    const joinHeld = (record, instance)=>{
+        let held = heldModules.get(instance);
+        if (held === undefined || record.held !== held)
+        {
+            leaveHeld(record);
+            if (held === undefined)
+            {
+                const bytes = instanceBytes.get(instance) ?? 0;
+                makeRoom(bytes);
+                held = { instance, bytes, records: new Set(), ran: corkRetired, keepUntil: 0 };
+                heldModules.set(instance, held);
+                heldBytes += bytes;
+            }
+            held.records.add(record);
+            record.held = held;
+        }
+        for (const slot of record.slots)
+        {
+            entries.at(slot).owner = held;
+        }
+    };
+    /** A record out of its module, dropped or moved: the module is let go with its last.
+     * @param {RegionRecord} record */
+    const leaveHeld = record=>{
+        const held = record.held;
+        if (held === undefined)
+        {
+            return;
+        }
+        record.held = undefined;
+        held.records.delete(record);
+        if (held.records.size === 0)
+        {
+            heldModules.delete(held.instance);
+            heldBytes -= held.bytes;
+        }
+    };
+    /**
+     * Lets modules go until `bytes` more fit under `cacheBytes`: those gone
+     * longest without running first, one brought back lately only once the
+     * rest have gone. A module larger than the ceiling is held alone.
+     *
+     * @param {number} bytes
+     */
+    const makeRoom = bytes=>{
+        const cap = settings.cacheBytes;
+        if (!(cap > 0) || heldBytes + bytes <= cap)
+        {
+            return;
+        }
+        const order = [...heldModules.values()].sort((a, b)=>
+            Number(a.keepUntil > corkRetired) - Number(b.keepUntil > corkRetired) || a.ran - b.ran);
+        for (const held of order)
+        {
+            if (heldBytes + bytes <= cap)
+            {
+                break;
+            }
+            evict(held);
+        }
+    };
+    /**
+     * A module let go: its regions leave the entry hash, the table and its
+     * range of it, as a write into their code takes them (`unpublish`), and
+     * nothing here holds its instance any more. Their records stay in the
+     * store, and a miss at one of them brings its module back from there.
+     * Only between slices, so no frame of the module is on the stack.
+     *
+     * @param {Held} held
+     */
+    const evict = held=>{
+        const records = [...held.records];
+        for (const record of records)
+        {
+            const key = keyOf(record.entry, record.entryTop);
+            if (evictedKeys.size >= MISSES_CAP && !evictedKeys.has(key))
+            {
+                evictedKeys.clear();
+            }
+            evictedKeys.set(key, (evictedKeys.get(key) ?? 0) + 1);
+        }
+        unpublish(records);
+        const key = instanceKeys.get(held.instance);
+        if (key !== undefined && batchInstances.get(key) === held.instance)
+        {
+            batchInstances.delete(key);
+        }
+        counts.evictions++;
+        counts.evictedRegions += records.length;
+    };
+
+    /** @param {Uint8Array | WebAssembly.Module} module @returns {number} its wasm bytes */
+    const bytesOf = module=>(module instanceof WebAssembly.Module
+        ? compiledBytes.get(module) ?? 0 : module?.length ?? 0);
+
     /**
      * One instance of a module of regions -- a batch's, or a stored region's
      * own -- or null when it is refused (the program then runs on as it did).
@@ -2194,9 +2352,11 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
      * from the store, or a build made here, are compiled here.
      *
      * @param {Uint8Array | WebAssembly.Module} module
+     * @param {number} [bytes]  its wasm bytes, room made for under `cacheBytes` first
      * @returns {WebAssembly.Instance | null}
      */
-    const instantiate = module=>{
+    const instantiate = (module, bytes = bytesOf(module))=>{
+        makeRoom(bytes);
         const instantiateAt = clock();
         try
         {
@@ -2212,6 +2372,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
                 },
             });
             counts.modules++;
+            instanceBytes.set(instance, bytes);
             placeModule(instance);
             return instance;
         }
@@ -2238,10 +2399,16 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
      */
     /** @type {ReturnType<typeof createWeakInstances<WebAssembly.Instance>>} */
     const batchInstances = createWeakInstances();
+    /** A batch's instance under its store key, and the key by the instance, which
+     * an eviction forgets. @param {string} key @param {WebAssembly.Instance} instance */
+    const keepBatch = (key, instance)=>{
+        batchInstances.set(key, instance);
+        instanceKeys.set(instance, key);
+    };
     /** Batch modules instantiated since the last relink began. */
     let modulesSinceRelink = 0;
-    /** The running regions a relink still has to gather, or null between relinks.
-     * @type {RegionRecord[] | null} */
+    /** The chunks of running regions a relink still has to gather, or null between
+     * relinks. @type {RegionRecord[][] | null} */
     let relinkQueue = null;
     /** Candidates taken into a batch that has not published yet, by when: noted
      * again meanwhile they are not queued a second time (the interpreter keeps
@@ -2468,7 +2635,12 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
                 holder.slots = holder.slots.filter(other=>other !== slot);
                 slot = entries.add(start, fn, label, top, record.table, empty);
             }
-            if (entries.at(slot).fn === fn)
+            // The same function there already -- this region published again
+            // from an instance a running record of it holds -- stays that
+            // record's: an entry two records list is taken away by the first
+            // dropped (`evict`) and named still by the other.
+            const owner = recordOf.get(slot);
+            if (entries.at(slot).fn === fn && (owner === undefined || !regions.has(owner)))
             {
                 record.slots.push(slot);
                 recordOf.set(slot, record);
@@ -2543,6 +2715,19 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
             counts.dropped++;
             counts.publishMs += clock() - publishAt;
             return 0;
+        }
+        joinHeld(record, instance);
+        const bounced = evictedKeys.get(keyOf(region.entry, one.entryTop));
+        if (bounced !== undefined && record.held !== undefined)
+        {
+            // Let go and asked for again: something still runs it, which the
+            // marks may not show (a tail call into it from another module), so
+            // its module stays a while, longer each time, and a relink takes
+            // it with the hot.
+            counts.broughtBack++;
+            record.heat = (record.heat ?? 0) + 1;
+            record.held.keepUntil = Math.max(record.held.keepUntil,
+                corkRetired + settings.evictHold * 2 ** Math.min(bounced - 1, 6));
         }
         counts.publishMs += clock() - publishAt;
         return 1;
@@ -2846,7 +3031,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
             return 0;
         }
         counts.moduleBytes += batch.module.length;
-        const instance = instantiate(compiled ?? batch.module);
+        const instance = instantiate(compiled ?? batch.module, batch.module.length);
         modulesSinceRelink++;
         /** @type {string | undefined} */
         let key;
@@ -2856,7 +3041,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
             key = storeModule(store, batch);
             if (instance !== null)
             {
-                batchInstances.set(key, instance);
+                keepBatch(key, instance);
             }
             counts.storeMs += clock() - storeAt;
         }
@@ -2923,7 +3108,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
             return;
         }
         counts.moduleBytes += batch.module.length;
-        const instance = instantiate(compiled ?? batch.module);
+        const instance = instantiate(compiled ?? batch.module, batch.module.length);
         if (instance === null)
         {
             return;
@@ -2933,7 +3118,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         if (store !== null)
         {
             key = storeModule(store, batch);
-            batchInstances.set(key, instance);
+            keepBatch(key, instance);
         }
         // A region left on its old module until it is moved runs the same
         // code there: each moves on its own.
@@ -3003,6 +3188,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         {
             entries.retable(slot, fn, record.table);
         }
+        joinHeld(record, instance);
         record.linked = true;
         counts.relinked++;
         if (store !== null)
@@ -3060,7 +3246,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
     const relinkStep = store=>{
         if (relinkQueue === null)
         {
-            if (mergeStep(store))
+            if (mergeStep(store) || gatherStep(store))
             {
                 return true;
             }
@@ -3069,18 +3255,57 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
                 return false;
             }
             // Only what still lives in a batch's own small module: a region
-            // relinked once stays in its big one.
-            relinkQueue = [...regions].filter(record=>!record.linked);
+            // relinked once stays in its big one, unless a gathering takes it.
+            // The hottest first, so they share the big modules, and those no
+            // entry or crossing reached lately in small ones of their own.
+            foldHeat();
+            const waiting = [...regions].filter(record=>!record.linked);
+            const hot = waiting.filter(record=>(record.heat ?? 0) >= 1)
+                .sort((a, b)=>(b.heat ?? 0) - (a.heat ?? 0));
+            const cold = waiting.filter(record=>!((record.heat ?? 0) >= 1));
+            relinkQueue = [...chunksOf(hot, settings.relinkRegions),
+                ...chunksOf(cold, Math.min(settings.relinkCold, settings.relinkRegions))];
             modulesSinceRelink = 0;
             counts.relinks++;
         }
-        const chunk = relinkQueue.splice(0, settings.relinkRegions)
-            .filter(record=>regions.has(record));
+        const chunk = (relinkQueue.shift() ?? []).filter(record=>regions.has(record));
         if (relinkQueue.length === 0)
         {
             relinkQueue = null;
         }
         return relinkChunk(chunk, store);
+    };
+
+    /** @param {RegionRecord[]} records @param {number} size @returns {RegionRecord[][]} */
+    const chunksOf = (records, size)=>{
+        /** @type {RegionRecord[][]} */
+        const chunks = [];
+        for (let at = 0; at < records.length; at += Math.max(1, size))
+        {
+            chunks.push(records.slice(at, at + Math.max(1, size)));
+        }
+        return chunks;
+    };
+
+    /**
+     * Each running region's heat: what it had, halved, and the host's entries
+     * into it and the crossings read into it since (`readModules`). Read only
+     * when a relink or a gathering is weighed: the entries count themselves.
+     * One entered once and not since is under one at the next reading: cold.
+     */
+    const foldHeat = ()=>{
+        for (const record of regions)
+        {
+            let fresh = record.crossed ?? 0;
+            for (const slot of record.slots)
+            {
+                const entry = entries.at(slot);
+                fresh += entry.heat;
+                entry.heat = 0;
+            }
+            record.crossed = 0;
+            record.heat = (record.heat ?? 0) / 2 + fresh;
+        }
     };
 
     /** Translated instructions between two readings of the modules' crossings. */
@@ -3101,6 +3326,115 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
     // next new one: without a bound, every module of new code calling into a
     // hot one could have it built again, for as long as new code arrives.
     const MERGES_A_REGION = settings.mergesARegion;
+    /** Readings of the modules' crossings, and the one the merges last weighed. */
+    let modulesRead = 0;
+    let mergeRead = 0;
+    /** Crossings read since the last gathering. */
+    let crossedSince = 0;
+    /**
+     * Reads each placed module's count of transfers out of it, every so many
+     * translated instructions, not every call: a loading phase has hundreds
+     * of modules and calls here between slices. A module that crossed out and
+     * the one its last crossing went into ran (`Held`), the region it went
+     * into was entered, and the merges learn where each module crossed to.
+     */
+    const readModules = ()=>{
+        if (placedLive.size === 0 || corkRetired - sampledAt < MERGE_SAMPLE)
+        {
+            return;
+        }
+        sampledAt = corkRetired;
+        modulesRead++;
+        for (const placed of placedLive)
+        {
+            const now = placed.crossings.value;
+            const crossed = (now - placed.seen) >>> 0;
+            placed.seen = now;
+            if (crossed === 0)
+            {
+                continue;
+            }
+            crossedSince += crossed;
+            const from = heldModules.get(placed.instance);
+            if (from !== undefined)
+            {
+                from.ran = corkRetired;
+            }
+            const target = recordAt.get(placed.crossedTo.value >>> 0);
+            if (target === undefined)
+            {
+                continue;
+            }
+            target.crossed = (target.crossed ?? 0) + crossed;
+            if (target.held !== undefined)
+            {
+                target.held.ran = corkRetired;
+            }
+            const into = target.module;
+            if (settings.mergeAfter > 0 && into !== undefined && into !== placed)
+            {
+                placed.toward.set(into, (placed.toward.get(into) ?? 0) + crossed);
+            }
+        }
+    };
+
+    // Without tail calls into another instance every crossing leaves for the
+    // host's loop, and a merge cannot help two full modules: past
+    // `gatherAfter` crossings the hottest regions, wherever they are, are
+    // built into one module -- those that took all but a hundredth of the
+    // heat, `gatherRegions` at most. Paced as merges are, the wait doubling
+    // while the hottest stay the same ones: a working set larger than the
+    // module crosses on, and building it again buys nothing.
+    const GATHER_AFTER = settings.crossTailCalls === false ? settings.gatherAfter : 0;
+    let gatheredAt = -MERGE_EVERY;
+    let gatherWait = MERGE_EVERY;
+    /** @type {Set<RegionRecord>} */
+    let lastGathered = new Set();
+    /**
+     * @param {any} store
+     * @returns {boolean} whether a gathering was taken this call
+     */
+    const gatherStep = store=>{
+        if (!(GATHER_AFTER > 0) || !translatorReady() || crossedSince < GATHER_AFTER
+            || corkRetired - gatheredAt < gatherWait)
+        {
+            return false;
+        }
+        crossedSince = 0;
+        gatheredAt = corkRetired;
+        foldHeat();
+        const warm = [...regions].filter(record=>(record.heat ?? 0) >= 1)
+            .sort((a, b)=>(b.heat ?? 0) - (a.heat ?? 0));
+        const total = warm.reduce((sum, record)=>sum + (record.heat ?? 0), 0);
+        /** @type {RegionRecord[]} */
+        const hot = [];
+        let covered = 0;
+        for (const record of warm)
+        {
+            if (hot.length >= settings.gatherRegions || covered >= total * 0.99)
+            {
+                break;
+            }
+            hot.push(record);
+            covered += record.heat ?? 0;
+        }
+        counts.gatherWarm = warm.length;
+        counts.gatherShare = total > 0 ? covered / total : 0;
+        const modules = new Set(hot.map(record=>record.module));
+        // The hottest in one module already: what crosses is between them and
+        // the rest, which a gathering of these would not change.
+        if (hot.length < 2 || (modules.size === 1 && !modules.has(undefined)))
+        {
+            return false;
+        }
+        const again = hot.filter(record=>lastGathered.has(record)).length * 2 >= hot.length;
+        gatherWait = again ? Math.min(gatherWait * 2, MERGE_EVERY * 1024)
+            : Math.max(MERGE_EVERY, hot.length * MERGE_PER_REGION);
+        lastGathered = new Set(hot);
+        counts.gathers++;
+        counts.gathered += hot.length;
+        return relinkChunk(hot, store);
+    };
     /**
      * What a merge of `from` into `into` would build: both whole when they fit
      * in `relinkRegions`, else the region `from` crossed into last, alone, into
@@ -3150,27 +3484,17 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
      */
     const mergeStep = store=>{
         // Only on the worker: a merge is a relink after the warm-up, which on
-        // the engine thread would be a slice's toll. Read every so many
-        // translated instructions, not every call: a loading phase has
-        // hundreds of modules and calls here between slices.
-        if (settings.mergeAfter <= 0 || !translatorReady()
-            || corkRetired - sampledAt < MERGE_SAMPLE)
+        // the engine thread would be a slice's toll; weighed once a reading.
+        if (settings.mergeAfter <= 0 || !translatorReady())
         {
             return false;
         }
-        sampledAt = corkRetired;
-        for (const placed of placedLive)
+        readModules();
+        if (modulesRead === mergeRead)
         {
-            const now = placed.crossings.value;
-            const crossed = (now - placed.seen) >>> 0;
-            placed.seen = now;
-            const into = crossed === 0 ? undefined
-                : recordAt.get(placed.crossedTo.value >>> 0)?.module;
-            if (into !== undefined && into !== placed)
-            {
-                placed.toward.set(into, (placed.toward.get(into) ?? 0) + crossed);
-            }
+            return false;
         }
+        mergeRead = modulesRead;
         if (corkRetired - mergedAt < mergeWait)
         {
             return false;
@@ -4100,6 +4424,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
             counts.compiledApart++;
             batch.started.push(WebAssembly.compile(/** @type {Uint8Array<ArrayBuffer>} */ (bytes))
                 .then(module=>{
+                    compiledBytes.set(module, bytes.length);
                     batch.compiled.set(source, module);
                 }, (/** @type {unknown} */ e)=>{
                     refused.batch = (refused.batch ?? 0) + 1;
@@ -4144,7 +4469,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
             batch.instances.set(source, made);
             if (made !== null && typeof source === 'string')
             {
-                batchInstances.set(source, made);
+                keepBatch(source, made);
                 modulesSinceRelink++;
             }
         }
@@ -4257,7 +4582,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
                     ?? undefined;
                 if (instance !== undefined && key !== undefined)
                 {
-                    batchInstances.set(key, instance);
+                    keepBatch(key, instance);
                     modulesSinceRelink++;
                 }
             }
@@ -4384,6 +4709,7 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
         {
             sampleCalls();
         }
+        readModules();
         if (settings.timings === true)
         {
             const now = performance.now();
@@ -4801,7 +5127,15 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
             return entry;
         },
         run(entry, budget){
-            const { fn, label } = entries.at(entry);
+            const one = entries.at(entry);
+            const { fn, label } = one;
+            // The heat a relink and a gathering weigh by, and the mark of the
+            // module the eviction weighs by.
+            one.heat++;
+            if (one.owner !== null)
+            {
+                one.owner.ran = corkRetired;
+            }
             if (import.meta.BOTTLIFY_DIAGNOSTICS !== false && profileResetAt !== null
                 && performance.now() >= profileResetAt)
             {
@@ -5284,6 +5618,24 @@ export function createCorkRuntime({ memory, layout, sharedLayout = undefined, co
                 // Transfers that left a placed module through the table, as it
                 // counts them (running modules only).
                 crossings: [...placedLive].reduce((sum, placed)=>sum + placed.crossings.value, 0),
+                // And all of them since the start, those of modules gone included.
+                crossingsAll: counts.crossingsGone
+                    + [...placedLive].reduce((sum, placed)=>sum + placed.crossings.value, 0),
+                gathers: counts.gathers,
+                gathered: counts.gathered,
+                gatherWarm: counts.gatherWarm,
+                gatherShare: counts.gatherShare,
+                // The wasm bytes of the modules some running region's function is
+                // in, and how many: what the translated code holds now, against
+                // `moduleBytes`, all made in the run. Past `cacheBytes` the modules
+                // gone longest without running were let go (`evictions`), their
+                // regions brought back from the store when asked for again.
+                heldBytes,
+                heldModules: heldModules.size,
+                cacheBytes: settings.cacheBytes,
+                evictions: counts.evictions,
+                evictedRegions: counts.evictedRegions,
+                broughtBack: counts.broughtBack,
                 // The function table's length: what the regions' indices span.
                 tableSize: table ? table.length : 0,
                 entries: table ? entries.hashed() : entries.count(),

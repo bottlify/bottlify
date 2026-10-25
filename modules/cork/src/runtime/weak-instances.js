@@ -33,6 +33,10 @@ export function createWeakInstances(){
             held.set(key, new WeakRef(instance));
             gone.register(instance, key);
         },
+        /** Forgets one, collected or not: a key taken again names a new object. @param {string} key */
+        delete(key){
+            held.delete(key);
+        },
         /** How many are still reachable. Reading one holds it to the end of the turn. */
         live: ()=>[...held.values()].filter(ref=>ref.deref() !== undefined).length,
         /** How many keys are still there, collected or not yet swept. */

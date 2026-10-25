@@ -184,6 +184,30 @@ export function createTsc(){
  */
 export const CORK_TSC_MHZ = 3000;
 
+/** The least a runtime is given to hold its modules in: its own `cacheBytes` 0 would be none. */
+const LEAST_CACHE = 8 << 20;
+
+/**
+ * An executor's part of what its process's translators may hold of their
+ * modules: each executor's runtime makes instances of its own, so the zone is
+ * split, not given whole to each. One executor (a phone's) holds it all. With
+ * more, the process's own executor, which runs the main thread and every
+ * thread bound to the host, takes three quarters and the others share the
+ * rest: a half each way had the process's own let its modules go and bring
+ * them back thousands of times a run (the Doom 3 demo, four executors) while
+ * the others held little. Never less than `LEAST_CACHE`, which a zone the
+ * tables leave too little of goes past (the run's zones table says so).
+ *
+ * @param {number} bytes  the zone less the engine's tables
+ * @param {number} executors
+ * @param {number} executor
+ */
+export function cacheShare(bytes, executors, executor){
+    const share = executors <= 1 ? bytes
+        : executor === 0 ? bytes * 3 / 4 : bytes / 4 / (executors - 1);
+    return Math.max(LEAST_CACHE, Math.floor(share));
+}
+
 /**
  * Builds the cork host over a memory of its own.
  *
@@ -280,8 +304,8 @@ export function createCorkHost(config){
     // The memory past the guest's RAM: the engine's tables and pages for every
     // executor, which the translator's zone holds before any module of it.
     const engineBytes = memory.buffer.byteLength - own.ramBase - memorySize;
-    const cacheBytes = corkConfig?.cacheBytes
-        ?? (translationZone === undefined ? undefined : Math.max(0, translationZone - engineBytes));
+    const cacheBytes = corkConfig?.cacheBytes ?? (translationZone === undefined ? undefined
+        : cacheShare(translationZone - engineBytes, executors, executor));
     if (taken !== undefined)
     {
         // A new memory is zero; this one is made so where it was used: its

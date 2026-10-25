@@ -280,6 +280,12 @@ export function engineContractProblem(engineModule, url){
  *     Default 2^23.
  * @property {number} [mergePerRegion]  Of those, per region a merge builds again. Default 2^19.
  * @property {number} [mergesARegion]  Merges one region may take part in. Default 2.
+ * @property {number} [relinkCold]  Regions in each module a relink builds of those no entry
+ *     or crossing reached lately: a module is held or let go whole. Default 128.
+ * @property {number} [gatherAfter]  With `crossTailCalls` false and `dispatch`, crossings out
+ *     of placed modules past which the hottest regions are built into one module (0: never).
+ *     Default 2^18.
+ * @property {number} [gatherRegions]  The most regions such a module takes. Default 2048.
  * @property {boolean} [dispatch]  Each module placed in a range of the table, a transfer inside
  *     it a direct tail call. Default false.
  * @property {boolean} [leafCalls]  A small leaf callee formed into its caller. Default true.
@@ -335,10 +341,13 @@ export function engineContractProblem(engineModule, url){
  *     48 MiB.
  * @property {SharedArrayBuffer} [arena]  The arena itself, made by the host for every executor of
  *     a process (cork's `createArena`): what one executor's translators emitted, the others take.
- * @property {number} [cacheBytes]  The most the runtime holds of its modules in memory, past
- *     which it lets the coldest go; its diagnostics say what it holds (`heldBytes`). The cpu
- *     layer gives it what the translation zone (`TRANSLATION_ZONE_BYTES`) leaves after the
- *     engine's tables.
+ * @property {number} [cacheBytes]  Wasm bytes of the modules running regions are in, past
+ *     which those gone longest without running are let go and brought back from the store
+ *     when asked for (0: no ceiling). Default 256 MiB; the cpu layer gives each executor's
+ *     runtime its part of what the translation zone (`TRANSLATION_ZONE_BYTES`) leaves after
+ *     the engine's tables (`cacheShare`). Its diagnostics say what it holds (`heldBytes`).
+ * @property {number} [evictHold]  Translated instructions a module brought back after an
+ *     eviction is kept whatever its mark, twice as many each time again. Default 2^28.
  * @property {number} [loadingBatch]  While the translation worker loads, the largest batch
  *     emitted on the engine thread -- none where `holdMs` bounds the work there: a batch waits
  *     for the worker. Default 16.
@@ -599,6 +608,15 @@ export function engineContractProblem(engineModule, url){
  *     reported apart from `translateMs`, which is the engine thread's own.
  * @property {number} moduleBytes      Wasm bytes built this run.
  * @property {number} [batchModulesHeld]  Stored batches' instances still reachable (held weakly).
+ * @property {number} [heldBytes]  Wasm bytes of the modules some running region is in now
+ *     (what translated code holds; `moduleBytes` is all made in the run).
+ * @property {number} [heldModules]  How many such modules.
+ * @property {number} [evictions]  Modules let go past `cacheBytes`.
+ * @property {number} [evictedRegions]  Their regions.
+ * @property {number} [broughtBack]  Regions of those published again (from the store).
+ * @property {number} [crossingsAll]  Crossings out of placed modules since the start,
+ *     modules gone included (`crossings` counts the running ones only).
+ * @property {number} [gathers]  Gatherings of the hottest regions into one module.
  * @property {number} handoffMisses    Hybrid: slices the emulator ran through translated code.
  */
 

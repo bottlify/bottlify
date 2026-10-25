@@ -38,6 +38,9 @@ const REMOVED = 0xffffffff;
  * @property {number} slot     the entry's slot in the hash, or -1
  * @property {number} empty    the block a function that does nothing, as `emptyCode` (region.js)
  *     answers it, or 0
+ * @property {number} heat     times the host entered it (`run`), until the runtime reads them
+ * @property {{ ran: number } | null} owner  the mark of the module its function is in, which
+ *     an entry stamps, or null
  */
 
 /**
@@ -136,7 +139,8 @@ export function createEntries({ memory, hashBase = -1, shift = 16, load: share =
             }
             const page = eip >>> 12;
             const slot = insert(eip, table, label, top, empty);
-            const index = slots.push({ eip, fn, label, page, top, table, slot, empty }) - 1;
+            const index = slots.push({ eip, fn, label, page, top, table, slot, empty, heat: 0,
+                owner: null }) - 1;
             byEip.set(keyOf(eip, top), index);
             // One for the top alone comes before one for any top.
             lastEip = -1;
