@@ -1577,6 +1577,8 @@ export function createHarness(canvas, how = {}){
                 // that decodes and is never seen is the difference between these
                 // two and nothing else.
                 presenter: layers.graphics?.presenter ?? null,
+                // What the graphics worker's device holds, weighed (`webgpu/ledger.js`).
+                gpuMemory: layers.graphics?.worker?.gpuMemory ?? null,
                 // Every layer's own metrics, for a run that never answers: what
                 // it waits on is in the kernel's and the bridge's.
                 layers,
