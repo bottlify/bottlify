@@ -32,8 +32,8 @@
  */
 
 /** What is made and how often, by default where it is made at all: `bytes` for
- * 512 MB of guest memory and less, an eighth of the memory past that. */
-export const GC_NUDGE = Object.freeze({ everyMs: 50, bytes: 64 * 1024 * 1024 });
+ * 256 MB of guest memory and less, a quarter of the memory past that. */
+export const GC_NUDGE = Object.freeze({ everyMs: 20, bytes: 64 * 1024 * 1024 });
 
 /**
  * Whether this thread runs on JavaScriptCore, by its agent string: WebKit's,
@@ -53,7 +53,10 @@ export function runsJavaScriptCore(agent = globalThis.navigator?.userAgent ?? ''
  * take in garbage in proportion to what it holds, the guest's memory twice
  * over included, so the default buffer grows with the memory: with 2 GB of
  * guest memory a 64 MB one every 50 ms left the Doom 3 demo's engine thread
- * 7.5 s of its load without a collection.
+ * 7.5 s of its load without a collection. A quarter of it every 20 ms rather
+ * than an eighth every 50 kept the same demo's first level 40-80 MB lower and
+ * its highest 50-180 MB lower than that (WebKit 26.6, two pairs; its menu:
+ * 70 MB at the highest, four runs each), with as many instructions run.
  *
  * @param {{ everyMs?: number, bytes?: number } | boolean | undefined} asked
  * @param {string} [agent]
@@ -67,7 +70,7 @@ export function gcNudgeOf(asked, agent, memoryBytes = 0){
     }
     const own = typeof asked === 'object' && asked !== null ? asked : {};
     return { everyMs: own.everyMs ?? GC_NUDGE.everyMs,
-        bytes: own.bytes ?? Math.max(GC_NUDGE.bytes, Math.ceil(memoryBytes / 8 / 65536) * 65536) };
+        bytes: own.bytes ?? Math.max(GC_NUDGE.bytes, Math.ceil(memoryBytes / 4 / 65536) * 65536) };
 }
 
 /**

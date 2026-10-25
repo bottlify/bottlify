@@ -35,11 +35,11 @@ test('a run is nudged by default only on JavaScriptCore, and as it asks otherwis
     assert.deepEqual(gcNudgeOf({ everyMs: 20 }, CHROME), { everyMs: 20, bytes: GC_NUDGE.bytes });
 });
 
-test('the default buffer is an eighth of the guest memory past 512 MB, and never less', ()=>{
+test('the default buffer is a quarter of the guest memory past 256 MB, and never less', ()=>{
     const MB = 1024 * 1024;
-    assert.equal(gcNudgeOf(undefined, SAFARI, 256 * MB)?.bytes, GC_NUDGE.bytes);
-    assert.equal(gcNudgeOf(undefined, SAFARI, 512 * MB)?.bytes, 64 * MB);
-    assert.equal(gcNudgeOf(undefined, SAFARI, 2048 * MB)?.bytes, 256 * MB);
+    assert.equal(gcNudgeOf(undefined, SAFARI, 128 * MB)?.bytes, GC_NUDGE.bytes);
+    assert.equal(gcNudgeOf(undefined, SAFARI, 256 * MB)?.bytes, 64 * MB);
+    assert.equal(gcNudgeOf(undefined, SAFARI, 2048 * MB)?.bytes, 512 * MB);
     assert.equal(gcNudgeOf({ bytes: MB }, SAFARI, 2048 * MB)?.bytes, MB, 'as asked');
 });
 
