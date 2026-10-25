@@ -165,6 +165,36 @@ test('without storage the blocks are held in the heap, and bounded', async()=>{
     assert.equal(cache.has(4), true);
 });
 
+test('without storage the heap holds no more than its ceiling between reads, and says so',
+    async()=>{
+        // The heaps' pool (`HEAP_POOLS.blockCache`) at a size a test can fill: a
+        // run of reads, each of a few blocks, never leaves more than the bound.
+        const ceiling = 5 * 16;
+        const cache = await createBlockCache({ store: null, ...OPTIONS, maxHeapBytes: ceiling });
+        let seed = 7;
+        for (let read = 0; read < 200; read++)
+        {
+            const wanted = 1 + (read % 3);
+            for (let block = 0; block < wanted; block++)
+            {
+                seed = (seed * 1103515245 + 12345) >>> 0;
+                cache.put(seed % OPTIONS.blockCount, new Uint8Array(16));
+            }
+            await cache.persist();
+            cache.put(read % OPTIONS.blockCount, new Uint8Array(16));
+            await cache.persist();
+            const { bytes, heapBytes } = cache.diagnostics();
+            assert.ok(bytes <= ceiling, `read ${read}: ${bytes} bytes held past ${ceiling}`);
+            assert.equal(heapBytes, bytes, 'what it holds is the heap\'s');
+        }
+    });
+
+test('a cache on storage holds only its record of blocks in the heap', async()=>{
+    const cache = await createBlockCache({ store: fakeStore(), ...OPTIONS, blockCount: 1000 });
+    cache.put(3, new Uint8Array(16));
+    assert.equal(cache.diagnostics().heapBytes, 125, 'a bit a block');
+});
+
 test('the cache is backed by the store it was given, under a name the store allows', async()=>{
     const store = fakeStore();
     const cache = await createBlockCache({ store, ...OPTIONS, name: 'a/game:with\\odd chars' });

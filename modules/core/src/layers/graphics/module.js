@@ -212,6 +212,35 @@ const bufferTotals = backend=>{
     };
 };
 
+/** What a pool says when nothing here can measure it. */
+const NOT_MEASURED = 'not measured';
+
+/**
+ * What this layer holds of the tab's memory, by zone (`memory-zones.js`): of
+ * the heaps, the pages of guest memory a played OpenGL device keeps (its
+ * answer's `mirrored`), and what is not measured yet -- the engine thread's
+ * recorded batches and shadows, the worker's other caches; and the device's
+ * buffers and textures as its ledger counts them, a zone of their own: a GPU
+ * process holds them, not the tab, unless the device is one in JavaScript.
+ *
+ * @param {any} worker  the graphics worker's figures, or null
+ * @param {any} seam  the seam's
+ */
+const bytesHeldOf = (worker, seam)=>{
+    const mirrored = seam?.device?.mirrored?.held;
+    const ledger = worker?.gpuMemory;
+    /** @param {any} kind */
+    const bytesOf = kind=>(typeof kind?.bytes === 'number' ? kind.bytes : NOT_MEASURED);
+    return {
+        heaps: {
+            mirror: typeof mirrored === 'number' ? mirrored : NOT_MEASURED,
+            engine: NOT_MEASURED,
+            worker: NOT_MEASURED,
+        },
+        device: { buffers: bytesOf(ledger?.buffers), textures: bytesOf(ledger?.textures) },
+    };
+};
+
 const DISPLAY_RAMP = 'display';
 
 /** The graphics layer's module for one graph; see `defaultModules`. */
@@ -1428,6 +1457,8 @@ export function createGraphicsModule(){
                     },
                 };
             }
+            const worker = instance.remote ? instance.remote.diagnostics() : null;
+            const seam = instance.seam.diagnostics();
             return {
                 name: 'graphics',
                 version: '0.1.0',
@@ -1443,12 +1474,14 @@ export function createGraphicsModule(){
                     created: instance.created,
                     // Whether Direct3D 8 and 9 draw in the graphics worker, and
                     // how many roots it plays.
-                    worker: instance.remote ? instance.remote.diagnostics() : null,
+                    worker,
                     // Kept flat, where a report drops the structure above.
-                    workerAnswers: instance.remote ? instance.remote.diagnostics().answers : null,
+                    workerAnswers: worker ? worker.answers : null,
                     // DXT textures kept as BC blocks on the GPU, or decoded first.
                     blockCompression: instance.blockCompression,
-                    seam: instance.seam.diagnostics(),
+                    seam,
+                    // What this layer holds of the tab's memory (`memory-zones.js`).
+                    bytesHeld: bytesHeldOf(worker, seam),
                     // GDI's copies by path, and why one went a pixel at a time.
                     blits: { ...blitPaths, why: { ...blitPaths.why } },
                     // State the program set in the guest, and the calls that never

@@ -33,6 +33,20 @@ function host(config = {}){
     });
 }
 
+test('the translator is given what its zone leaves after the engine\'s own pages', ()=>{
+    const zone = 64 << 20;
+    const zoned = host({ translationZone: zone });
+    const engineBytes = zoned.engineBytes();
+    assert.equal(engineBytes, zoned.wasmMemory().buffer.byteLength - MEMORY,
+        'the memory past the guest\'s RAM');
+    assert.ok(engineBytes > 0);
+    assert.equal(zoned.cacheBytes(), zone - engineBytes);
+    assert.equal(host({ translationZone: zone, cork: { cacheBytes: 12345 } }).cacheBytes(), 12345,
+        'a figure the config names is kept');
+    assert.equal(host().cacheBytes(), null, 'no zone, no figure');
+    assert.equal(host({ translationZone: 1 }).cacheBytes(), 0, 'never below nothing');
+});
+
 test('the eager flags word is what readReg32("eflags") answers', ()=>{
     const h = host();
     h.writeReg32('eflags', 0x246);

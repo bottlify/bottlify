@@ -994,6 +994,8 @@ export function createKernelModule(){
                     ...instance.scheduler.diagnostics(),
                     ...instance.switcher.diagnostics(),
                     ...instance.stacks.diagnostics(),
+                    // The threads' stacks are the guest's memory (`memory-zones.js`).
+                    bytesHeld: { guest: { stacks: instance.stacks.diagnostics().stackBytesHeld } },
                     recentScheduled: instance.resumeLog.slice(),
                     handles: instance.handles.diagnostics(),
                     sync: instance.sync.summary(),

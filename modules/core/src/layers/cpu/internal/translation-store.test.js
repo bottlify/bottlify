@@ -405,6 +405,75 @@ test('a compaction cut short before its generation is named leaves the old one w
     assert.deepEqual([...(await fifth.get('b') ?? [])], [5]);
 });
 
+test('opening a store removes what its named generation is not made of, or, none named,'
+    + ' files it does not know', async()=>{
+    const root = fakeDirectory();
+    const first = await createDirectoryTranslationStore(root, 'bundle');
+    await first.put('a', new Uint8Array([1, 2, 3]));
+    await first.close();
+    const directory = root.children.get('cork').children.get(`bundle.v${STORE_VERSION}`);
+    // A generation a compaction left (the tab closed before it removed the
+    // old one, or before it named the new one), and a file nothing reads.
+    for (const [name, bytes] of [['records.4', 40], ['index.4', 4], ['records.tmp', 7]])
+    {
+        const stray = await directory.getFileHandle(/** @type {string} */ (name),
+            { create: true });
+        stray.bytes = new Uint8Array(/** @type {number} */ (bytes));
+    }
+    const second = await createDirectoryTranslationStore(root, 'bundle');
+    assert.deepEqual([...(await second.get('a') ?? [])], [1, 2, 3], 'its own records read');
+    // No generation named: another's files may be the current one's, and stay.
+    assert.deepEqual([...directory.children.keys()].sort(),
+        ['index', 'index.4', 'records', 'records.4']);
+    assert.equal(second.stats().opened.swept, 1);
+    assert.equal(second.stats().opened.sweptBytes, 7);
+    await second.close();
+    // Named current, a later generation keeps its own files and loses the first's.
+    const named = await directory.getFileHandle('current', { create: true });
+    named.bytes = new TextEncoder().encode('2');
+    for (const name of ['records.2', 'index.2'])
+    {
+        (await directory.getFileHandle(name, { create: true })).bytes = new Uint8Array(0);
+    }
+    const third = await createDirectoryTranslationStore(root, 'bundle');
+    await third.get('a');
+    assert.deepEqual([...directory.children.keys()].sort(),
+        ['current', 'index.2', 'records.2'], 'what the current generation is made of');
+    assert.equal(third.stats().opened.swept, 4);
+    await third.close();
+});
+
+test('an opening that cannot read which generation is current removes nothing', async()=>{
+    const root = fakeDirectory();
+    const first = await createDirectoryTranslationStore(root, 'bundle');
+    await first.put('a', new Uint8Array([1]));
+    await first.close();
+    const directory = root.children.get('cork').children.get(`bundle.v${STORE_VERSION}`);
+    for (const name of ['current', 'records.2', 'index.2'])
+    {
+        (await directory.getFileHandle(name, { create: true })).bytes = name === 'current'
+            ? new TextEncoder().encode('2') : new Uint8Array(0);
+    }
+    // The file there and its read refused, as a browser's storage does at times.
+    const files = [...directory.children.keys()].sort();
+    const getFileHandle = directory.getFileHandle.bind(directory);
+    directory.getFileHandle = async(/** @type {string} */ name, /** @type {any} */ options)=>{
+        if (name === 'current')
+        {
+            throw new Error('A requested file or directory could not be found');
+        }
+        return getFileHandle(name, options);
+    };
+    const second = await createDirectoryTranslationStore(root, 'bundle');
+    await second.get('a');
+    assert.equal(second.stats().opened.swept, 0);
+    for (const name of files)
+    {
+        assert.ok(directory.children.has(name), `${name} kept`);
+    }
+    await second.close();
+});
+
 test('an index of touches is rewritten when it outgrows its records', async()=>{
     // A warm run that only reads: every run touches the same forty records,
     // and the records stay far under the compaction floor.
@@ -473,7 +542,7 @@ test('the last run\'s records stay whole however far past the cap they are', asy
         assert.equal((await store.get(`r${i}`))?.[0], i, `r${i}, the last run's`);
     }
     assert.deepEqual({ ...store.stats().opened, ms: 0 }, { records: 9, bytes: 90, kept: 8,
-        keptBytes: 80, overCap: 10, orphans: 0, compacted: false, ms: 0 },
+        keptBytes: 80, overCap: 10, orphans: 0, compacted: false, ms: 0, swept: 0, sweptBytes: 0 },
     'past the cap only what an older run used, and a ninth of the file is no copy\'s worth');
     assert.equal((await store.get('old'))?.length, 10, 'readable until a copy leaves it out');
 });

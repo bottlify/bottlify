@@ -131,6 +131,9 @@ const hex = (value, width = 8)=>(value >>> 0).toString(16).padStart(width, '0');
  * @property {number} [thunkBase]  Where the thunk table and its park loop begin.
  * @property {number} initialStack Initial guest ESP.
  * @property {import('../engine.js').EngineConfig} [cork]  The translator's config.
+ * @property {number} [translationZone]  The bytes the translator may hold, its tables
+ *     past the guest's RAM included: the runtime is given the rest (`cacheBytes`) unless
+ *     its config names a figure of its own.
  * @property {number} [noExecuteBelow]  Addresses below this run nothing -- an
  *     instruction fetched there is a page fault -- whatever reads and writes
  *     they answer.
@@ -189,7 +192,7 @@ export const CORK_TSC_MHZ = 3000;
 export function createCorkHost(config){
     const { engine, memorySize, trapPort, entryVector, initialStack, cork: corkConfig,
         closedBelow = 0, noExecuteBelow = 0, executors = 1, executor = 0, memory: given,
-        reused, tsc, features } = config;
+        reused, tsc, features, translationZone } = config;
     // Where code may run from: a closed range runs nothing either.
     const runsFrom = Math.max(closedBelow, noExecuteBelow) >>> 0;
     for (const name of ENGINE_EXPORTS)
@@ -274,6 +277,11 @@ export function createCorkHost(config){
         ? reused.memory : undefined;
     const memory = given ?? taken
         ?? new WebAssembly.Memory({ initial: pages, maximum: pages, shared });
+    // The memory past the guest's RAM: the engine's tables and pages for every
+    // executor, which the translator's zone holds before any module of it.
+    const engineBytes = memory.buffer.byteLength - own.ramBase - memorySize;
+    const cacheBytes = corkConfig?.cacheBytes
+        ?? (translationZone === undefined ? undefined : Math.max(0, translationZone - engineBytes));
     if (taken !== undefined)
     {
         // A new memory is zero; this one is made so where it was used: its
@@ -636,6 +644,7 @@ export function createCorkHost(config){
         ...(executors > 1 && executor !== 0 && typeof engine.sharedLayout === 'function'
             ? { sharedLayout: engine.sharedLayout(own) } : {}),
         config: { ...(trapPort === undefined ? {} : { trapPort }), ...corkConfig,
+            ...(cacheBytes === undefined ? {} : { cacheBytes }),
             ...(sharedAt < 0 ? {} : { sharedCode: { at: sharedAt, index: executor } }) },
         read: (/** @type {number} */ address)=>ram[address],
         // Past RAM's end `read` answers nothing, which a copy keeps as zeros.
@@ -1482,6 +1491,10 @@ export function createCorkHost(config){
         engine: ()=>'cork',
         /** The translator's runtime, for the layer's sampler and diagnostics. */
         cork: ()=>runtime,
+        /** The memory's bytes past the guest's RAM: the engine's, every executor's. */
+        engineBytes: ()=>engineBytes,
+        /** What the translator was given to hold its modules in, if anything. */
+        cacheBytes: ()=>cacheBytes ?? null,
         corkDiagnostics: ()=>({
             ...runtime.diagnostics(),
             ...wasmTier === null ? {} : { interpretedRelaxedReads: wasmTier.relaxedReads() },

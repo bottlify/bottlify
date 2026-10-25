@@ -335,6 +335,10 @@ export function engineContractProblem(engineModule, url){
  *     48 MiB.
  * @property {SharedArrayBuffer} [arena]  The arena itself, made by the host for every executor of
  *     a process (cork's `createArena`): what one executor's translators emitted, the others take.
+ * @property {number} [cacheBytes]  The most the runtime holds of its modules in memory, past
+ *     which it lets the coldest go; its diagnostics say what it holds (`heldBytes`). The cpu
+ *     layer gives it what the translation zone (`TRANSLATION_ZONE_BYTES`) leaves after the
+ *     engine's tables.
  * @property {number} [loadingBatch]  While the translation worker loads, the largest batch
  *     emitted on the engine thread -- none where `holdMs` bounds the work there: a batch waits
  *     for the worker. Default 16.

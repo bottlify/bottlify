@@ -257,6 +257,23 @@ function createMemoryCache(maxBytes, reason){
     const pinned = new Set();
     let bytes = 0;
 
+    /** Lets the least recently used blocks go, those of the read being served aside. */
+    const trim = ()=>{
+        for (const [at, stored] of held)
+        {
+            if (bytes <= maxBytes)
+            {
+                break;
+            }
+            if (pinned.has(at))
+            {
+                continue;
+            }
+            held.delete(at);
+            bytes -= stored.length;
+        }
+    };
+
     return {
         backed: false,
         reason,
@@ -283,30 +300,25 @@ function createMemoryCache(maxBytes, reason){
 
         /** @param {number} index @param {Uint8Array} value */
         put(index, value){
+            // A block put again replaces itself, counted once.
+            bytes += value.length - (held.get(index)?.length ?? 0);
+            held.delete(index);
             held.set(index, value);
             pinned.add(index);
-            bytes += value.length;
-            for (const [at, stored] of held)
-            {
-                if (bytes <= maxBytes)
-                {
-                    break;
-                }
-                if (pinned.has(at))
-                {
-                    continue;
-                }
-                held.delete(at);
-                bytes -= stored.length;
-            }
+            trim();
         },
 
-        /** Not persistence here, but the end of a read: what it needed is free. */
+        /**
+         * Not persistence here, but the end of a read: what it needed is free,
+         * and what it held past the bound goes now rather than at the next put.
+         */
         async persist(){
             pinned.clear();
+            trim();
         },
 
-        diagnostics: ()=>({ backed: false, resident: held.size, bytes }),
+        // `heapBytes`: what of it the tab's heaps hold (`memory-zones.js`), all of it here.
+        diagnostics: ()=>({ backed: false, resident: held.size, bytes, heapBytes: bytes }),
     };
 }
 
@@ -465,7 +477,8 @@ export async function createBlockCache(options){
             {
                 resident += isSet(bitmap, at) ? 1 : 0;
             }
-            return { backed: true, resident, blocks: blockCount };
+            // In the heap only the record of which blocks are here: the blocks are on disk.
+            return { backed: true, resident, blocks: blockCount, heapBytes: bitmap.length };
         },
     };
 }

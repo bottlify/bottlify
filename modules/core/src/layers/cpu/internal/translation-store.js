@@ -32,13 +32,15 @@
 /**
  * What a store holds and what its opening found and kept (`stats`): records and
  * bytes before, the records kept and their bytes, the bytes the cap left out,
- * the regions dropped for a module gone, whether the file was copied, and how
- * long the opening's sorting and copying took.
+ * the regions dropped for a module gone, whether the file was copied, how
+ * long the opening's sorting and copying took, and the files of no generation
+ * of its own it removed and their bytes.
  *
  * @typedef {{ session: number, generation: number, records: number, bytes: number,
  *     regionsWithModule: number, broken: boolean,
  *     opened: { records: number, bytes: number, kept: number, keptBytes: number,
- *         overCap: number, orphans: number, compacted: boolean, ms: number } }} StoreStats
+ *         overCap: number, orphans: number, compacted: boolean, ms: number,
+ *         swept: number, sweptBytes: number } }} StoreStats
  */
 /**
  * @typedef {TranslationStore & {
@@ -327,6 +329,52 @@ export function fileNameOf(key){
 /** @param {any} file */
 const textOf = async file=>new TextDecoder().decode(new Uint8Array(await file.arrayBuffer()));
 
+/** A generation's records or index, by the name `generationName` gives it. */
+const GENERATION_FILE = new RegExp(`^(${RECORDS}|${INDEX})\\.\\d+$`);
+
+/**
+ * Removes from a store's directory every file but the current generation's
+ * and the two that name it: a generation a compaction made and did not get
+ * to remove the old one of (the tab closed between the two), and anything
+ * else nothing reads. Run at opening, which holds the bundle's lock, so no
+ * other user reads them. Where no generation was named -- `current` absent,
+ * or not found by a read the browser's storage refuses at times -- another
+ * generation's files stay: one of them may be the current.
+ *
+ * @param {any} directory  the store's own
+ * @param {number} generation  the current one
+ * @param {boolean} named  whether `current` named it
+ * @returns {Promise<{ files: number, bytes: number }>}
+ */
+async function sweepStale(directory, generation, named){
+    const swept = { files: 0, bytes: 0 };
+    if (typeof directory.entries !== 'function' || typeof directory.removeEntry !== 'function')
+    {
+        return swept;
+    }
+    const keep = new Set([CURRENT, SEEDED, generationName(RECORDS, generation),
+        generationName(INDEX, generation)]);
+    /** @type {[string, any][]} */
+    const stale = [];
+    for await (const [name, handle] of directory.entries())
+    {
+        if (!keep.has(name) && (named || !GENERATION_FILE.test(name)))
+        {
+            stale.push([name, handle]);
+        }
+    }
+    for (const [name, handle] of stale)
+    {
+        const size = typeof handle?.getFile === 'function'
+            ? await handle.getFile().then((/** @type {any} */ file)=>file.size, ()=>0) : 0;
+        await directory.removeEntry(name, { recursive: true }).then(()=>{
+            swept.files++;
+            swept.bytes += size;
+        }, ()=>{});
+    }
+    return swept;
+}
+
 /**
  * Removes `<name>.v<n>` directories of any version but this one.
  *
@@ -526,7 +574,7 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
     let closing = false;
     /** What this opening found and kept, for the report (`stats`). */
     const found = { records: 0, bytes: 0, kept: 0, keptBytes: 0, overCap: 0,
-        orphans: 0, compacted: false, ms: 0 };
+        orphans: 0, compacted: false, ms: 0, swept: 0, sweptBytes: 0 };
 
     /** Opens the current generation's records file: its handle, access and size. */
     const openRecords = async()=>{
@@ -777,16 +825,22 @@ export async function createDirectoryTranslationStore(root, name, limits = LIMIT
             try
             {
                 places = new Map();
+                /** Whether the current generation was read, not taken for the first. */
+                let named = false;
                 try
                 {
                     const current = await directory.getFileHandle(CURRENT);
                     const text = await textOf(await current.getFile());
                     generation = Number.isInteger(Number(text)) && Number(text) > 0
                         ? Number(text) : 0;
+                    named = true;
                 }
                 catch {
                     generation = 0;
                 }
+                const swept = await sweepStale(directory, generation, named);
+                found.swept = swept.files;
+                found.sweptBytes = swept.bytes;
                 await openRecords();
                 let last = 0;
                 try

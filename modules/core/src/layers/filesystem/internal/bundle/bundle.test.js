@@ -123,6 +123,7 @@ const open = ()=>openBundle(
  * @param {number[] | null} [options.resident]
  * @param {number} [options.cacheBlocks]
  * @param {number} [options.hotBlocks]
+ * @param {number} [options.maxDecodedBytes]
  */
 async function mount(options = {}){
     const bundle = await open();
@@ -130,7 +131,7 @@ async function mount(options = {}){
     const { readBlock, asked } = blockReader(options.resident ?? null);
     const source = createBundleSource({
         bundle, readBlock, decode, cacheBlocks: options.cacheBlocks,
-        hotBlocks: options.hotBlocks,
+        hotBlocks: options.hotBlocks, maxDecodedBytes: options.maxDecodedBytes,
     });
     return { bundle, source, calls, asked };
 }
@@ -301,6 +302,31 @@ test('a block read twice is not decoded again when a scan passes over it', async
     same(source.read('Game\\Ramp.dat', 0, 16), ramp.subarray(0, 16),
         'the header outlived the scan');
     assert.equal(calls.length, 3, 'and looking at it again decoded nothing');
+});
+
+test('the decoded blocks kept stay under their bytes\' ceiling, a read served whole', async()=>{
+    // The heaps' pool (`HEAP_POOLS.decodedBlocks`) at two of the fixture's
+    // blocks: by count the tiers would keep all of them.
+    const ceiling = 2 * 1024;
+    const { source } = await mount({ cacheBlocks: 16, hotBlocks: 8, maxDecodedBytes: ceiling });
+    const ramp = CONTENT['Game\\Ramp.dat'];
+    let seed = 3;
+    for (let read = 0; read < 300; read++)
+    {
+        seed = (seed * 1103515245 + 12345) >>> 0;
+        const at = seed % ramp.length;
+        const length = 1 + (seed >>> 8) % (ramp.length - at);
+        same(source.read('Game\\Ramp.dat', at, length), ramp.subarray(at, at + length));
+        for (const [path, bytes] of Object.entries(CONTENT))
+        {
+            if (read % 37 === 0)
+            {
+                same(source.read(path, 0, bytes.length), bytes, path);
+            }
+        }
+        assert.ok(source.heldBytes() <= ceiling, `read ${read}: ${source.heldBytes()} bytes kept`);
+    }
+    assert.ok(source.heldBytes() > 0, 'something is kept');
 });
 
 test('a cache big enough for the file decodes each block once', async()=>{

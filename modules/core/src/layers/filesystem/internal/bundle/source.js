@@ -90,6 +90,10 @@ const SEPARATOR = String.fromCharCode(92);
  * @param {number} [options.hotBlocks]
  *        Blocks kept because they were read more than once, out of reach of a
  *        scan through the rest.
+ * @param {number} [options.maxDecodedBytes]
+ *        The most both tiers hold together, in bytes: a pool of the tab's
+ *        heaps (`memory-zones.js`), which a bundle of large blocks would
+ *        otherwise fill by count alone. The scan tier gives way first.
  * @param {string} [options.prefix]
  *        A directory the whole bundle appears under, without separators at
  *        either end. A game belongs in a directory of its own rather than at
@@ -101,11 +105,11 @@ const SEPARATOR = String.fromCharCode(92);
  *        `prefix`, by their path in the bundle: what a bottle carries for
  *        `C:\WINDOWS\system32` lies in the bundle beside its registry, and is
  *        found where Windows keeps it. No separators at either end of either.
- * @returns {import('../memory-store.js').SourceStore}
+ * @returns {import('../memory-store.js').SourceStore & { heldBytes: () => number }}
  */
 export function createBundleSource({
     bundle, readBlock, decode, cacheBlocks = DEFAULT_CACHE_BLOCKS,
-    hotBlocks = DEFAULT_HOT_BLOCKS, prefix = '', relocate = {},
+    hotBlocks = DEFAULT_HOT_BLOCKS, maxDecodedBytes = Infinity, prefix = '', relocate = {},
 })
 {
     /** @type {import('../memory-store.js').StoredEntry[]} */
@@ -173,11 +177,34 @@ export function createBundleSource({
      */
     const hot = new Map();
 
-    /** @param {Map<number, Uint8Array>} tier @param {number} bound */
-    const trim = (tier, bound)=>{
+    /** Bytes of the decoded blocks both tiers hold. */
+    let heldBytes = 0;
+
+    /** @param {Map<number, Uint8Array>} tier @returns {number} the bytes let go */
+    const dropOldest = tier=>{
+        const [index, bytes] = /** @type {[number, Uint8Array]} */ (tier.entries().next().value);
+        tier.delete(index);
+        return bytes.length;
+    };
+
+    /**
+     * @param {Map<number, Uint8Array>} tier @param {number} bound
+     * @param {number} keep  the block just kept, which stays however large: a
+     *     read wants it next
+     */
+    const trim = (tier, bound, keep)=>{
         while (tier.size > bound)
         {
-            tier.delete(/** @type {number} */ (tier.keys().next().value));
+            heldBytes -= dropOldest(tier);
+        }
+        while (heldBytes > maxDecodedBytes)
+        {
+            const from = [cache, hot].find(one=>one.size > 0 && one.keys().next().value !== keep);
+            if (from === undefined)
+            {
+                break;
+            }
+            heldBytes -= dropOldest(from);
         }
     };
 
@@ -198,17 +225,21 @@ export function createBundleSource({
         // tier a scan cannot evict is where it belongs from now on.
         cache.delete(index);
         hot.set(index, hit);
-        trim(hot, hotBlocks);
+        trim(hot, hotBlocks, index);
         return hit;
     };
 
     /** @param {number} index @param {Uint8Array} bytes */
     const remember = (index, bytes)=>{
+        heldBytes += bytes.length - (cache.get(index)?.length ?? 0);
         cache.set(index, bytes);
-        trim(cache, cacheBlocks);
+        trim(cache, cacheBlocks, index);
     };
 
     return {
+        /** Bytes of the decoded blocks kept, for the tab's heaps (`memory-zones.js`). */
+        heldBytes: ()=>heldBytes,
+
         list: ()=>entries.map(entry=>({ ...entry })),
 
         /** @param {string} path */

@@ -11,6 +11,8 @@ import { assembleModules } from './core.js';
 import { createEvents } from './events.js';
 import { captureTrace, describeAddress, formatTrace } from './trace.js';
 import { coalescedSaver, inflateRaw, normaliseSession, resolveStorage } from './storage.js';
+import { HEAP_POOLS, NOT_MEASURED, withZones } from './memory-zones.js';
+import { keepOriginStorageWithin } from './storage-budget.js';
 import {
     DEFAULT_ENGINE, DEFAULT_INITIAL_STACK, DEFAULT_MEMORY_SIZE,
     DEFAULT_THUNK_BASE, DEFAULT_THUNK_CAPACITY, MAX_EXECUTORS, processorsFor,
@@ -2871,6 +2873,7 @@ export async function zstdWasmFor(options, here = import.meta.url){
  *                     refetched: () => { blocks: number, bytes: number },
  *                     ranges: () => { requests: number, bytes: number },
  *                     decoded: () => { blocks: number, bytes: number, ms: number },
+ *                     held: () => Record<string, number | string>,
  *                     registry: Promise<any> } | null>}
  */
 async function mountBundle({ options, cpu, events, translationStore }){
@@ -2947,17 +2950,28 @@ async function mountBundle({ options, cpu, events, translationStore }){
         (codec, bytes)=>codec === 1 ? inflateRaw(bytes) : decode(codec, bytes, null),
         { verifyIndex: expectIndex(options.bundle.indexSha256) });
 
+    const blockStore = options.bundle.store === undefined ? 'local' : options.bundle.store;
+    if (blockStore === 'local')
+    {
+        // The origin's caches kept under its budget, the oldest let go: in the
+        // background, as nothing of this run's own is touched.
+        keepOriginStorageWithin({
+            blocks: blockCacheName(options.bundle.id ?? options.id ?? 'bundle', bundle.fingerprint),
+            translations: options.bundle.id ?? options.id ?? 'bundle',
+        }).then(result=>events.emit('storage-budget', result), ()=>{});
+    }
     const cache = await createBlockCache({
         // Absent means local, and only an explicit falsy value turns it off --
         // so `??` will not do here: `store: null` has to mean no cache.
-        store: await resolveBlockStore(
-            options.bundle.store === undefined ? 'local' : options.bundle.store),
-        // ponytail: the cache of a bundle packed again is left behind on the
-        // store; drop names of this bundle with another fingerprint when the
-        // space matters.
+        store: await resolveBlockStore(blockStore),
+        // A cache of this bundle as it was packed before stays on the store
+        // until the origin's budget lets it go (`storage-budget.js`).
         name: blockCacheName(options.bundle.id ?? options.id ?? 'bundle', bundle.fingerprint),
         blockSize: bundle.blockSize,
         blockCount: bundle.blockCount,
+        // Where the blocks have no store but the heap, the heaps' pool for them:
+        // a read in flight keeps its blocks past it, and nothing else does.
+        maxHeapBytes: HEAP_POOLS.blockCache,
     });
 
     const source = createBundleSource({
@@ -2965,6 +2979,7 @@ async function mountBundle({ options, cpu, events, translationStore }){
         /** @param {number} index */
         readBlock: index=>cache.read(index, storedLength(bundle.block(index))),
         decode,
+        maxDecodedBytes: HEAP_POOLS.decodedBlocks,
         // A game lives in a directory of its own, the way an installation does.
         // At the root of the volume a program's own directory and the system
         // root are the same place, so every answer to "where do I live" happens
@@ -3378,6 +3393,11 @@ async function mountBundle({ options, cpu, events, translationStore }){
          *  that has to stay at zero. */
         refetched: ()=>({ ...refetched }),
         decoded: ()=>({ ...decoded }),
+        /** What the bundle's pools hold of the tab's heaps (`memory-zones.js`). */
+        held: ()=>({
+            blockCache: cache.diagnostics().heapBytes ?? NOT_MEASURED,
+            decodedBlocks: source.heldBytes(),
+        }),
         /** Range requests made and bytes asked for, ever. */
         ranges: ()=>({ ...ranges }),
         stop(){
@@ -3841,6 +3861,28 @@ async function buildApp(options){
     /** @type {Map<number, any>} */
     const byBase = new Map();
     /**
+     * What the program holds of its RAM now, by pool (`memory-zones.js`): the
+     * images mapped below the heap (one in the heap is a block of it), the
+     * first thread's stack where it is not under the stub table, and the
+     * heap's blocks handed out; the other threads' stacks are the kernel's to
+     * say. What the program took, not the RAM: the pages past it are an
+     * address space the tab does not pay for.
+     */
+    const guestHeld = ()=>{
+        let images = 0;
+        for (const held of byBase.values())
+        {
+            images += held.loaded !== false && held.base < HEAP_BASE ? held.size ?? 0 : 0;
+        }
+        return {
+            images,
+            mainStack: mainStack.initialStack === undefined
+                ? Math.max(mainImage.stackReserve >>> 0, 0x10000)
+                : mainStack.initialStack - STACK_POOL_START,
+            heap: core.api('win32')?.heap?.()?.diagnostics?.()?.used ?? NOT_MEASURED,
+        };
+    };
+    /**
      * Libraries LoadLibraryEx loaded as data, by the handle it gave out: no
      * modules, so in neither table above.
      *
@@ -3967,8 +4009,11 @@ async function buildApp(options){
      *          refetched: () => { blocks: number, bytes: number },
      *          ranges: () => { requests: number, bytes: number },
      *          decoded?: () => { blocks: number, bytes: number, ms: number },
+     *          held?: () => Record<string, number | string>,
      *          registry: Promise<any> } | null} */
     let blocks = null;
+    /** Whether this process mounted the bundle, and so reports what its pools hold. */
+    let mountedBlocks = false;
     /**
      * Where a thread's environment block comes from, once the process has
      * one to hand out. Every thread needs its own: FS points at it, and a
@@ -5254,6 +5299,7 @@ async function buildApp(options){
     // block cache, the background fill -- and every process after it mounts
     // the same one, rather than each reading the index again and filling a
     // second cache from the network beside the first.
+    mountedBlocks = !options.system?.bundle;
     blocks = options.system?.bundle
         ?? await mountBundle({ options, cpu, events, translationStore });
     if (options.system && blocks)
@@ -8390,7 +8436,8 @@ async function buildApp(options){
          */
         readImage: path=>readProgramImage(filesystem, blocks, path),
 
-        diagnostics: ()=>[
+        // The zones' sums last (`memory-zones.js`), over what this thread holds.
+        diagnostics: ()=>withZones([
             ...core.diagnostics(),
             // The run's windows, where this thread keeps them (`manager.js`).
             ...options.system?.windows?.manager ? [{ name: 'windows', status: 'ready',
@@ -8449,9 +8496,16 @@ async function buildApp(options){
                     // mode, the page's messages read between turns, the yields
                     // to the event loop, and the sleeps on the doorbell.
                     pacing: /** @type {any} */ (pacing).counts?.() ?? null,
+                    // What the program holds of its RAM, and the bundle's pools,
+                    // where this process mounted it: a bundle the run's system
+                    // mounted is the system's to report.
+                    bytesHeld: {
+                        guest: guestHeld(),
+                        heaps: mountedBlocks ? blocks?.held?.() ?? {} : {},
+                    },
                 },
             },
-        ],
+        ]),
 
         /**
          * Where the machine is standing, right now, asked from outside.
@@ -8963,11 +9017,17 @@ async function buildSystemHost(deps){
             const own = [...core.diagnostics(),
                 { name: 'audio', status: 'ready', metrics: output.diagnostics() },
                 { name: 'windows', status: 'ready',
-                    metrics: system.windows.manager.diagnostics() }];
+                    metrics: system.windows.manager.diagnostics() },
+                // The bundle, mounted here for every process to read.
+                { name: 'system-bundle', status: 'ready',
+                    metrics: { bytesHeld: { heaps: blocks?.held?.() ?? {} } } }];
             const theirs = programTables.filter(table=>ownTables.get(table.name) !== table.name);
             const named = new Set(theirs.map(table=>table.name));
-            return [...own.map(table=>({ ...table, name: ownTables.get(table.name) ?? table.name }))
-                .filter(table=>!named.has(table.name)), ...theirs];
+            // The zones' sums over both threads' tables, the process's own sums
+            // made again with what this thread holds.
+            return withZones([...own.map(table=>({ ...table,
+                name: ownTables.get(table.name) ?? table.name }))
+                .filter(table=>!named.has(table.name)), ...theirs]);
         },
         /** The program's tables as it ended. @param {any[] | undefined} tables */
         ended: tables=>{

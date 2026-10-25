@@ -13,6 +13,11 @@ differently raises a `divergence` event naming the API.
 - An import nothing implements returns 0 when its argument size is known (a decorated name, a cdecl
   library, a library the program brought). Otherwise the program stops with `unimplemented import`
   and the function's name.
+- The guest's zone is measured, not enforced: a program that holds more than 1 GiB of its RAM marks
+  the zones' table `over` and goes on.
+- The tab's memory is held to 1.5 GiB in three zones ([configuration.md](configuration.md#memory-zones)).
+  Not every pool of the engine's own heaps is measured yet: the zones' table names those that are
+  not, and the bytes they hold are counted nowhere.
 
 ## Processes
 

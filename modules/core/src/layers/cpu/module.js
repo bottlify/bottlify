@@ -33,6 +33,15 @@ import { fileNameOf } from './internal/translation-store.js';
 export const DEFAULT_MEMORY_SIZE = 1024 * 1024 * 1024;
 
 /**
+ * The translator's zone of the tab's memory: its modules and their compiled
+ * code, the arena they are emitted into, and the tables past the guest's RAM
+ * (entry hash, call stacks, page flags) every executor keeps. Cork is given
+ * what is left of it after the tables (`cacheBytes`) and lets its coldest
+ * modules go to stay under that.
+ */
+export const TRANSLATION_ZONE_BYTES = 256 * 1024 * 1024;
+
+/**
  * The execution engines a launch may select (`engine.js` for the contract):
  * `cork`, the translator, and `emulator`, v86 -- which the package does not
  * carry, so only a caller that brings it can boot it.
@@ -110,6 +119,49 @@ const retiredEverywhere = instance=>{
         total += remote.retired?.() ?? 0;
     }
     return total;
+};
+
+/** What a zone's pool says when nothing here can measure it. */
+const NOT_MEASURED = 'not measured';
+
+/**
+ * The bytes a translator's runtime holds of its modules, as its diagnostics
+ * say them (`heldBytes`, kept under `EngineConfig.cacheBytes`). A runtime that
+ * does not say is not measured, not zero.
+ *
+ * @param {any} figures  the runtime's diagnostics, or null
+ * @returns {number | string}
+ */
+const translationHeld = figures=>(typeof figures?.heldBytes === 'number'
+    ? figures.heldBytes : NOT_MEASURED);
+
+/**
+ * What a process's cpu holds of the tab's memory, by zone (`memory-zones.js`):
+ * the translator's tables past the guest's RAM and the modules each
+ * executor's runtime holds; of the heaps, the translations' store's index of
+ * its records, which nothing here weighs yet. An executor not yet answered is
+ * not measured.
+ *
+ * @param {any} instance
+ * @param {any} cork  the process's own runtime's diagnostics, or null
+ */
+const bytesHeldOf = (instance, cork)=>{
+    if (instance.engine !== 'cork')
+    {
+        return {};
+    }
+    /** @type {Record<string, number | string>} */
+    const translation = {
+        tables: instance.host?.engineBytes?.() ?? NOT_MEASURED,
+        modules: translationHeld(cork),
+    };
+    for (const remote of instance.remotes)
+    {
+        translation[`executor ${remote.index}`] = translationHeld(
+            instance.remoteFigures.get(remote.index) ?? null);
+    }
+    return { translation,
+        ...instance.store ? { heaps: { storeIndex: NOT_MEASURED } } : {} };
 };
 
 /** Where each general register sits in a saved context, in the processor's own order. */
@@ -242,10 +294,12 @@ export function createCpuModule(){
              *          ordered: boolean | null,
              *          writes: { host: any, clock: ReturnType<typeof createWriteClock> } | null,
              *          learned: { store: any, opened: number } | null,
-             *          nudge: ReturnType<typeof startGcNudge> | null }}
+             *          nudge: ReturnType<typeof startGcNudge> | null, store: any }}
              */
             const state = {
                 host: null, thunks: null, running: false, tableWritten: false, nudge: null,
+                // The translations' store the run gave, for its figures.
+                store: null,
                 worstInterpreted: 0, worstInterpretedAt: 0, interpretedBefore: 0,
                 lastFault: null, disposed: false, samples: createSampleTable(), engine,
                 cork: null,
@@ -437,6 +491,7 @@ export function createCpuModule(){
                 // for each (`processorsFor`).
                 executors: Math.min(MAX_EXECUTORS, Math.max(1, config?.executors ?? 1)),
             };
+            state.store = settings.cork?.store ?? null;
             // Executors past one share the program's memory with workers, which
             // only a SharedArrayBuffer allows, and a page that is not
             // cross-origin isolated has none: the program then runs on one, as
@@ -668,6 +723,7 @@ export function createCpuModule(){
                             // Settled here, once, for every executor of the process:
                             // each thread that holds the guest's memory is nudged.
                             gcNudge: nudging ?? /** @type {false} */ (false),
+                            translationZone: TRANSLATION_ZONE_BYTES,
                         };
                         state.host = createCorkHost({ ...hostConfig, engine: engineModule,
                             reused: settings.reused });
@@ -1554,6 +1610,12 @@ export function createCpuModule(){
                     metrics: instance ? { engine: instance.engine } : {},
                 };
             }
+            // The translator's own report, with what its host adds -- the
+            // interpreter tier's reads, instructions no tier carries -- or
+            // null when none is attached.
+            const cork = instance.cork
+                ? instance.host?.corkDiagnostics?.() ?? instance.cork.diagnostics()
+                : null;
             return {
                 name: 'cpu',
                 version: '0.1.0',
@@ -1621,12 +1683,12 @@ export function createCpuModule(){
                         overflow: instance.samples.overflow,
                         top: topSamples(instance.samples, 64),
                     },
-                    // The translator's own report, with what its host adds -- the
-                    // interpreter tier's reads, instructions no tier carries -- or
-                    // null when none is attached.
-                    cork: instance.cork
-                        ? instance.host?.corkDiagnostics?.() ?? instance.cork.diagnostics()
-                        : null,
+                    cork,
+                    // The translations' store: what its opening found, kept and swept.
+                    store: instance.store?.stats?.() ?? null,
+                    // What this layer holds of the tab's memory, by zone
+                    // (`memory-zones.js`).
+                    bytesHeld: bytesHeldOf(instance, cork),
                     // The other executors' translators, as each answered last: they
                     // answer between their slices, so a report carries the answer to
                     // the report before it, and says so of one not yet given.
@@ -1650,6 +1712,7 @@ export function createCpuModule(){
                             translateMs: figures.translateMs,
                             workerBusyMs: figures.workerBusyMs,
                             spent: figures.spent,
+                            heldBytes: figures.heldBytes ?? null,
                             said,
                         } : { index: remote.index, instructions, said, answer: 'not answered yet' };
                     }),
