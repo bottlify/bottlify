@@ -511,6 +511,18 @@ line that differs is where they parted: a change to the draw path that should on
 checked with it before it is timed. The device keeps its call log then, so that run's times are
 not a measurement.
 
+## `../webkit-probe/tail-calls.html`: which wasm tail call takes a browser's page down
+
+A page for a phone, served by the launcher (copy `tools/webkit-probe/tail-calls.*` to the
+launcher's `dist/probe/` and open `/probe/tail-calls.html`): each shape of tail call cork uses --
+inside a module, through a table to its own instance, into another instance, to an import,
+cork's ring of instances -- and real cork on a guest loop with and without the iOS 27 workaround
+(`crossTailCalls`), on the page and in a worker. A test that kills the page leaves no error, so
+each one's name is kept in `localStorage` before it runs and the reloaded page marks it CRASHED
+and goes on. On iOS 27 (Safari 27.0.1) every tail call into another instance crashed and real
+cork with the workaround ran (WebKit PR 76671); run it again when an iOS release carries the
+fix, before the workaround goes.
+
 ## Two rules the numbers depend on
 
 - A frame rate is counted on the canvas the person sees (the browser's
