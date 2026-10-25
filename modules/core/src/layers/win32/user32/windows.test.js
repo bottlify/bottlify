@@ -3733,6 +3733,17 @@ test('a key the host composed nothing for still translates from the table', ()=>
     assert.equal(h.queue.peek({ hwnd: null, first: 0, last: 0, remove: true })?.wParam, 0x61);
 });
 
+test('a VK_PACKET press translates into the character typed with it', ()=>{
+    // SendInput's KEYEVENTF_UNICODE and a phone's keyboard: no key types the
+    // character, and the layout table has nothing for VK_PACKET.
+    const h = setup();
+    h.queue.compose(0x436, 0x00360001);
+    h.memory.putU32s(MSG_BUFFER, [0x40, WM_KEYDOWN, 0xe7, 0x00360001, 0, 0, 0]);
+
+    assert.equal(h.fns.TranslateMessage.handler([MSG_BUFFER]), 1);
+    assert.equal(h.queue.peek({ hwnd: null, first: 0, last: 0, remove: true })?.wParam, 0x436);
+});
+
 test('a modifier does not take the character meant for the key after it', ()=>{
     // A modifier goes down producing nothing. Handing it the next character in
     // the queue would put it on the wrong press and lose the right one.

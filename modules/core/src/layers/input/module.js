@@ -260,6 +260,14 @@ export function createInputModule(){
                 },
 
                 /**
+                 * A phone's keyboard, typing into the attached canvas's game;
+                 * from inside a touch's handler (`dom.js`). False with no canvas.
+                 */
+                showKeyboard: ()=>attached?.showKeyboard() ?? false,
+                hideKeyboard: ()=>attached?.hideKeyboard(),
+                keyboardShown: ()=>attached?.keyboardShown() ?? false,
+
+                /**
                  * The cursor's coordinate space, as the program declared it with
                  * ClipCursor. Passed straight to the router, which scales pointer
                  * motion into it.

@@ -2684,7 +2684,7 @@ test('SendInput turns KEYEVENTF_UNICODE into a character with no physical key', 
 
     assert.equal(fns.SendInput.handler([1, INPUT_BUFFER, 28]), 1,
         'the down half produces the character');
-    assert.deepEqual(sent, [{ kind: 'text', text: 'A' }]);
+    assert.deepEqual(sent, [{ kind: 'type', text: 'A' }]);
 
     sent.length = 0;
     memory.putU32s(INPUT_BUFFER,

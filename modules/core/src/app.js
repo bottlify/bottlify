@@ -7863,6 +7863,9 @@ async function buildApp(options){
             /** @param {any} event */
             send: event=>input.send(event),
             poll: ()=>input.poll(),
+            showKeyboard: ()=>input.showKeyboard?.() ?? false,
+            hideKeyboard: ()=>input.hideKeyboard?.(),
+            keyboardShown: ()=>input.keyboardShown?.() ?? false,
             route: ()=>createInputRoute(event=>input.send(event)),
             // Where the cursor is: where a locked pointer points
             // (`inputRecipient`), which no event of the page says.
@@ -8733,6 +8736,10 @@ async function buildSystemHost(deps){
                 return Boolean(process);
             },
             poll: ()=>{},
+            // The page's half has the keyboard's field; this thread has no page.
+            showKeyboard: ()=>false,
+            hideKeyboard: ()=>{},
+            keyboardShown: ()=>false,
             /** @returns {ReturnType<typeof createInputRoute>} */
             route(){
                 return createInputRoute(event=>this.send(event));

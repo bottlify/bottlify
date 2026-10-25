@@ -339,9 +339,38 @@ test('text is composed against the key press it came from, not posted', ()=>{
 
 test('a character outside the basic plane is composed as two code units', ()=>{
     const h = harness();
+    h.send({ kind: 'key', code: 'KeyA', down: true });
+    h.drain();
     assert.equal(h.send({ kind: 'text', text: '\u{1f600}' }), true);
     assert.deepEqual(h.composed().map(entry=>entry.character), [0xd83d, 0xde00]);
     assert.deepEqual(h.drain(), []);
+});
+
+test('a character with no key behind it is a VK_PACKET press, as SendInput makes one', ()=>{
+    // KEYEVENTF_UNICODE on Windows: WM_KEYDOWN and WM_KEYUP of VK_PACKET, the
+    // character in the scan code field, and WM_CHAR from TranslateMessage --
+    // which takes the composed character by the press's lParam.
+    const VK_PACKET = 0xe7;
+    const h = harness();
+    h.send({ kind: 'key', code: 'KeyW', down: true });
+    h.drain();
+    assert.equal(h.send({ kind: 'type', text: 'h\u0436' }), true);
+    assert.deepEqual(h.drain().map(m=>[m.message, m.wParam, m.lParam]), [
+        [WM.KEYDOWN, VK_PACKET, 0x00680001], [WM.KEYUP, VK_PACKET, 0xc0680001],
+        [WM.KEYDOWN, VK_PACKET, 0x00360001], [WM.KEYUP, VK_PACKET, 0xc0360001],
+    ]);
+    assert.deepEqual(h.composed(), [{ character: 0x68, lParam: 0x00680001 },
+        { character: 0x436, lParam: 0x00360001 }],
+    'each against its own press, not against W held down before it');
+    assert.equal(h.router.keyState(0x57), 0x8000, 'and what is held stays held');
+    assert.equal(h.send({ kind: 'type', text: '' }), false);
+});
+
+test('a keyboard held exclusively hears no typed character either', ()=>{
+    const h = harness({ exclusive: device=>device === 'keyboard' });
+    assert.equal(h.send({ kind: 'type', text: 'a' }), false);
+    assert.deepEqual(h.all(), []);
+    assert.deepEqual(h.composed(), []);
 });
 
 test('whether a character is a system one is TranslateMessage\'s to decide', ()=>{
