@@ -560,6 +560,8 @@ export function connectGraphicsWorker(options){
                 behind: senders.map(sender=>sender.behind()), readBack: { ...readBack },
                 phases: phasesOf(senders),
                 latency: latencyOf(senders),
+                // One device serves the worker's roots: the first that said.
+                gpuMemory: senders.map(sender=>sender.gpuMemory()).find(held=>held) ?? null,
                 answers: senders.map(sender=>sender.answers()).join(' '),
                 occlusion: senders.reduce((sum, sender)=>{
                     const one = sender.occlusion();
