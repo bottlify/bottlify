@@ -766,6 +766,41 @@ const MAX_WINDOW_TEXT = 1 << 16;
  */
 
 /**
+ * The windows by handle, and their records as a list kept until the table
+ * next changes: every look into a queue walks every window for one that owes
+ * a paint, a game's loop looks hundreds of thousands of times a second, and
+ * walking the map made an iterator and a result a window at each look.
+ *
+ * @extends {Map<number, any>}
+ */
+class WindowTable extends Map {
+    /** @type {any[] | null} */
+    listed = null;
+
+    /** @param {number} hwnd @param {any} record */
+    set(hwnd, record){
+        this.listed = null;
+        return super.set(hwnd, record);
+    }
+
+    /** @param {number} hwnd */
+    delete(hwnd){
+        this.listed = null;
+        return super.delete(hwnd);
+    }
+
+    clear(){
+        this.listed = null;
+        super.clear();
+    }
+
+    /** The records in the order they were made. @returns {any[]} */
+    records(){
+        return this.listed ??= Array.from(super.values());
+    }
+}
+
+/**
  * Builds the function table: name -> { argBytes, handler }.
  *
  * `argBytes` is the size of the argument list the guest compiled against. All
@@ -784,9 +819,9 @@ export function createWindowFunctions(host){
      * itself is closed at that moment, which is what makes the window stop
      * existing as far as the guest is concerned.
      *
-     * @type {Map<number, any>}
+     * @type {WindowTable}
      */
-    const windows = new Map();
+    const windows = new WindowTable();
     /**
      * Moves on with every change that can change what part of the screen a
      * window's device context reaches: a window made, gone or restacked --
@@ -1068,6 +1103,11 @@ export function createWindowFunctions(host){
      * thread waiting on a send of its own keeps doing, or two threads
      * sending to each other would each wait for ever.
      *
+     * The steps that wait are functions of their own: a function whose
+     * variables a closure takes keeps them in an environment made at every
+     * call, and an empty queue is looked at hundreds of thousands of times a
+     * second.
+     *
      * @param {unknown} thread
      * @returns {number | Promise<number>}
      */
@@ -1080,15 +1120,29 @@ export function createWindowFunctions(host){
         const owed = answered.get(id)?.shift();
         if (owed)
         {
-            return andThen(host.call?.(owed.callback,
-                [owed.hwnd, owed.message, owed.data, owed.result], thread) ?? 0,
-            ()=>receiveSent(thread));
+            return answerOwed(owed, thread);
         }
         const sent = inbox.get(id)?.shift();
-        if (!sent)
-        {
-            return 0;
-        }
+        return sent ? runSent(sent, id, thread) : 0;
+    };
+
+    /**
+     * A SendMessageCallback's callback, then whatever else is waiting.
+     *
+     * @param {any} owed @param {unknown} thread
+     * @returns {number | Promise<number>}
+     */
+    const answerOwed = (owed, thread)=>andThen(host.call?.(owed.callback,
+        [owed.hwnd, owed.message, owed.data, owed.result], thread) ?? 0,
+    ()=>receiveSent(thread));
+
+    /**
+     * A message another thread sent, then whatever else is waiting.
+     *
+     * @param {any} sent @param {number} id @param {unknown} thread
+     * @returns {number | Promise<number>}
+     */
+    const runSent = (sent, id, thread)=>{
         // Work another process asked of this thread, done on it.
         if (/** @type {any} */ (sent).run)
         {
@@ -5703,8 +5757,10 @@ export function createWindowFunctions(host){
         let first = null;
         /** @type {any[] | null} */
         let due = null;
-        for (const record of windows.values())
+        const records = windows.records();
+        for (let at = 0; at < records.length; at++)
         {
+            const record = records[at];
             if (!paint.owesPaint(record) || record.destroyed || dying(record))
             {
                 continue;
