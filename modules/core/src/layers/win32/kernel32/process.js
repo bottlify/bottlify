@@ -580,6 +580,11 @@ export function createProcessFunctions(host){
      * @type {(number | null)[]}
      */
     const slots = new Array(TLS_SLOTS).fill(null);
+    // Index 0 is taken before the program runs and never handed out, so it
+    // reads as zero in every thread until a program writes it, as Windows
+    // answers TlsGetValue(0); without it the loader's own first TlsAlloc, for
+    // an image's implicit TLS, would put that image's block there.
+    slots[0] = 0;
     let generation = 0;
 
     const memory = {
@@ -593,6 +598,9 @@ export function createProcessFunctions(host){
     };
     const { stateOf, setError, lastErrorOf } = createThreadState(host.currentThread, memory);
     const processors = host.processors ?? createProcessors();
+
+    /** SetProcessPriorityBoost's setting. */
+    let priorityBoostDisabled = false;
 
     /** The process's place in the shutdown order, which it may move. */
     const shutdown = { level: SHUTDOWN_DEFAULT_LEVEL, flags: 0 };
@@ -1342,6 +1350,41 @@ export function createProcessFunctions(host){
         SetPriorityClass: {
             argBytes: 8,
             handler: ()=>1,
+        },
+
+        /**
+         * BOOL SetProcessPriorityBoost(HANDLE hProcess, BOOL bDisablePriorityBoost)
+         * BOOL GetProcessPriorityBoost(HANDLE hProcess, PBOOL pDisablePriorityBoost)
+         *
+         * The process's setting is also every thread's: setting it sets each
+         * thread's, and a thread may then set its own back without changing
+         * the process's. Like the thread's, it changes nothing a thread can
+         * measure here, and reads back as it was set.
+         */
+        SetProcessPriorityBoost: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([, disable])=>{
+                priorityBoostDisabled = (disable >>> 0) !== 0;
+                for (const thread of host.allThreads?.() ?? [host.currentThread()])
+                {
+                    thread.priorityBoostDisabled = priorityBoostDisabled;
+                }
+                return 1;
+            },
+        },
+        GetProcessPriorityBoost: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([, out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    setError(ERROR_NOACCESS);
+                    return 0;
+                }
+                memory.writeU32(out >>> 0, priorityBoostDisabled ? 1 : 0);
+                return 1;
+            },
         },
 
         /**
