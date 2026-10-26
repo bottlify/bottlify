@@ -143,6 +143,8 @@ function setup(){
     const desktop = createSurface({ width: SCREEN.width, height: SCREEN.height });
     /** The code of every WM_NOTIFY the parent was sent, in order. @type {number[]} */
     const codes = [];
+    /** Every WinEvent a hook heard, as [event, object, child]. @type {number[][]} */
+    const events = [];
     /** What the parent answers TCN_SELCHANGING with: TRUE refuses. */
     const answers = { selChanging: 0 };
     let heapNext = HEAP;
@@ -203,6 +205,12 @@ function setup(){
                 [message.hwnd, message.message, message.wParam, message.lParam]);
         },
         callerThread: ()=>THREAD,
+        // The only guest routine these tests hand over is a WinEvent hook:
+        // what it is called with is recorded as [event, object, child].
+        call: (entry, args)=>{
+            events.push([args[1], args[3] | 0, args[4] | 0]);
+            return 0;
+        },
         park: ()=>({ parked: true }),
         idle: ()=>new Promise(()=>{}),
         dc: ()=>({
@@ -328,7 +336,14 @@ function setup(){
         return { left: memory.i32(OUT + 0x100), top: memory.i32(OUT + 0x104) };
     };
 
-    return { memory, desktop, fns: table, send, pump, codes, answers, makeParent, tabs,
+    /** Hooks every WinEvent in context, as comctl32's tab test does, and forgets what came before. */
+    const hookEvents = ()=>{
+        table.SetWinEventHook.handler([1, 0x7fffffff, HINSTANCE, 0x401000, 0, 0, 4]);
+        events.length = 0;
+    };
+
+    return { memory, desktop, fns: table, send, pump, codes, answers, makeParent, tabs, events,
+        hookEvents,
         insert, stateOf, itemRect, measure, windowRect, gdi32, lists: imageLists.functions };
 }
 
@@ -438,6 +453,77 @@ test('TCM_SETCURFOCUS past the end is passed over, a negative index takes the fo
     context.send([hwnd, TCM_SETCURFOCUS, 0, 0]);
     assert.equal(context.send([hwnd, TCM_GETCURSEL, 0, 0]), 0);
     assert.equal(context.send([hwnd, TCM_GETCURFOCUS, 0, 0]), 0);
+});
+
+// comctl32's tab tests, their sequences' winevent_hook entries: the child is
+// the item's index plus one, zero for no item.
+const EVENT_OBJECT_CREATE = 0x8000;
+const EVENT_OBJECT_DESTROY = 0x8001;
+const EVENT_OBJECT_FOCUS = 0x8005;
+const EVENT_OBJECT_SELECTION = 0x8006;
+const OBJID_CLIENT = -4;
+
+test('a tab control raises EVENT_OBJECT_SELECTION as its selection moves, by the program or '
+    + 'through the focus', async()=>{
+    const context = setup();
+    await context.makeParent();
+    const hwnd = await context.tabs(TCS_FIXEDWIDTH, 5);
+    context.hookEvents();
+    context.send([hwnd, TCM_SETCURFOCUS, 4, 0]);
+    context.send([hwnd, TCM_SETCURFOCUS, -10, 0]);
+    context.send([hwnd, TCM_SETCURSEL, 1, 0]);
+    context.send([hwnd, TCM_SETCURFOCUS, 6, 0]);
+    assert.deepEqual(context.events, [[EVENT_OBJECT_SELECTION, OBJID_CLIENT, 5],
+        [EVENT_OBJECT_SELECTION, OBJID_CLIENT, 0], [EVENT_OBJECT_SELECTION, OBJID_CLIENT, 2]],
+    'getset_cur_focus_seq');
+
+    context.events.length = 0;
+    context.send([hwnd, TCM_SETCURSEL, 4, 0]);
+    context.send([hwnd, TCM_SETCURSEL, -10, 0]);
+    context.send([hwnd, TCM_SETCURSEL, 1, 0]);
+    context.send([hwnd, TCM_SETCURSEL, 6, 0]);
+    assert.deepEqual(context.events, [[EVENT_OBJECT_SELECTION, OBJID_CLIENT, 5],
+        [EVENT_OBJECT_SELECTION, OBJID_CLIENT, 0], [EVENT_OBJECT_SELECTION, OBJID_CLIENT, 2]],
+    'getset_cur_sel_seq');
+});
+
+test('a button tab control raises EVENT_OBJECT_FOCUS as its focus moves alone', async()=>{
+    const context = setup();
+    await context.makeParent();
+    const hwnd = await context.tabs(TCS_BUTTONS, 5);
+    context.hookEvents();
+    context.send([hwnd, TCM_SETCURFOCUS, 4, 0]);
+    context.send([hwnd, TCM_SETCURFOCUS, -10, 0]);
+    context.send([hwnd, TCM_SETCURSEL, 1, 0]);
+    context.send([hwnd, TCM_SETCURFOCUS, 6, 0]);
+    assert.deepEqual(context.events, [[EVENT_OBJECT_FOCUS, OBJID_CLIENT, 5],
+        [EVENT_OBJECT_SELECTION, OBJID_CLIENT, 2]], 'getset_cur_focus_buttons_seq');
+});
+
+test('a tab control raises EVENT_OBJECT_CREATE and EVENT_OBJECT_DESTROY per tab, and not the '
+    + 'selection an insert hands an unfocused control', async()=>{
+    const context = setup();
+    await context.makeParent();
+    const hwnd = await context.tabs(TCS_FIXEDWIDTH, 0);
+    context.hookEvents();
+    context.insert(hwnd, 1, { text: 'TAB', image: 1 });
+    context.insert(hwnd, 2, { text: 'TAB', image: 2 });
+    context.send([hwnd, TCM_SETCURFOCUS, -1, 0]);
+    assert.equal(context.insert(hwnd, 3, { text: 'TAB', image: 3 }), 2);
+    assert.equal(context.send([hwnd, TCM_GETCURFOCUS, 0, 0]), 2);
+    assert.deepEqual(context.events, [[EVENT_OBJECT_CREATE, OBJID_CLIENT, 1],
+        [EVENT_OBJECT_CREATE, OBJID_CLIENT, 2], [EVENT_OBJECT_SELECTION, OBJID_CLIENT, 0],
+        [EVENT_OBJECT_CREATE, OBJID_CLIENT, 3]], 'insert_focus_seq');
+
+    const two = await context.tabs(TCS_FIXEDWIDTH, 2);
+    context.events.length = 0;
+    assert.equal(context.send([two, TCM_DELETEITEM, 1, 0]), 1);
+    context.send([two, TCM_SETCURFOCUS, -1, 0]);
+    assert.equal(context.send([two, TCM_DELETEITEM, 0, 0]), 1);
+    assert.equal(context.send([two, TCM_DELETEITEM, 0, 0]), 0);
+    assert.deepEqual(context.events, [[EVENT_OBJECT_DESTROY, OBJID_CLIENT, 2],
+        [EVENT_OBJECT_SELECTION, OBJID_CLIENT, 0], [EVENT_OBJECT_DESTROY, OBJID_CLIENT, 1]],
+    'delete_focus_seq; nothing to delete, nothing told');
 });
 
 test('buttons keep the focus apart from the selection and tell TCN_FOCUSCHANGE', async()=>{

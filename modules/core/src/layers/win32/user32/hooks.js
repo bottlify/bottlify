@@ -113,9 +113,11 @@ export function createWinEventHooks(host, { windowThread, later }){
      * a hook the one before it removed is not called.
      *
      * @param {number} event @param {number} hwnd @param {number} object @param {number} child
+     * @param {unknown} [thread]  The raising thread, for a caller past an await;
+     *        the caller of the call being handled otherwise.
      */
-    const notify = (event, hwnd, object, child)=>{
-        const caller = host.callerThread?.();
+    const notify = (event, hwnd, object, child, thread)=>{
+        const caller = thread ?? host.callerThread?.();
         const raisedOn = threadIdOf(caller);
         const from = windowThread(hwnd) ?? raisedOn;
         const heard = hooks.filter(hook=>takes(hook, event, from));
@@ -138,8 +140,8 @@ export function createWinEventHooks(host, { windowThread, later }){
                 // A build with no scheduler has one thread, and nothing to wait for.
                 if ((hook.flags & WINEVENT_INCONTEXT) === 0 && hook.owner !== null)
                 {
-                    later(hook.owner, thread=>(hooks.includes(hook) && host.call
-                        ? host.call(hook.proc, args, thread) : 0));
+                    later(hook.owner, on=>(hooks.includes(hook) && host.call
+                        ? host.call(hook.proc, args, on) : 0));
                     continue;
                 }
                 const answer = /** @type {NonNullable<typeof host.call>} */ (host.call)(hook.proc,

@@ -30,6 +30,10 @@ import {
     after, pointOf,
 } from '../user32/controls.js';
 import { encodeAnsi } from '../kernel32/locale.js';
+import {
+    EVENT_OBJECT_CREATE, EVENT_OBJECT_DESTROY, EVENT_OBJECT_FOCUS, EVENT_OBJECT_SELECTION,
+    raiseEvent,
+} from './winevents.js';
 
 /** The class name a program creates the control by. */
 export const TAB_CLASS = 'SysTabControl32';
@@ -421,11 +425,12 @@ export function createTabProcedure(host, tk, images){
         view.setUint32(4, record.id >>> 0, true);
         view.setInt32(8, code, true);
         host.writeMemory(address, bytes);
-        return after(host.send(record.parent, WM_NOTIFY, record.id & 0xffff, address, thread),
-            answer=>{
-                host.release?.(address);
-                return answer;
-            });
+        const sent = host.send(record.parent, WM_NOTIFY, record.id & 0xffff, address,
+            thread);
+        return after(sent, answer=>{
+            host.release?.(address);
+            return answer;
+        });
     };
 
     /** @param {any} record @param {number} index  The selection, marked on the items. */
@@ -465,7 +470,9 @@ export function createTabProcedure(host, tk, images){
             {
                 held.focus = index;
             }
-            return after(notify(record, TCN_SELCHANGE, thread), ()=>0);
+            const told = raiseEvent(host, record, EVENT_OBJECT_SELECTION, held.selected + 1,
+                thread);
+            return after(told, ()=>after(notify(record, TCN_SELCHANGE, thread), ()=>0));
         };
         if (index < 0)
         {
@@ -490,7 +497,8 @@ export function createTabProcedure(host, tk, images){
         }
         held.focus = index;
         host.invalidate(record);
-        return after(notify(record, TCN_FOCUSCHANGE, thread), ()=>0);
+        return after(raiseEvent(host, record, EVENT_OBJECT_FOCUS, index + 1, thread),
+            ()=>after(notify(record, TCN_FOCUSCHANGE, thread), ()=>0));
     };
 
     /** @param {any} record @param {number} x @param {number} y */
@@ -654,7 +662,10 @@ export function createTabProcedure(host, tk, images){
                     held.focus = index;
                 }
                 host.invalidate(record);
-                return index;
+                // The new item is told of, and the selection a control with
+                // no focus gave it is not: comctl32's tab tests see exactly that.
+                return after(raiseEvent(host, record, EVENT_OBJECT_CREATE, index + 1, thread),
+                    ()=>index);
             }
             case TCM_GETITEMA:
             case TCM_GETITEMW: {
@@ -689,7 +700,8 @@ export function createTabProcedure(host, tk, images){
                 held.selected = shifted(held.selected);
                 held.focus = shifted(held.focus);
                 host.invalidate(record);
-                return 1;
+                return after(raiseEvent(host, record, EVENT_OBJECT_DESTROY, index + 1, thread),
+                    ()=>1);
             }
             case TCM_DELETEALLITEMS:
                 held.items.length = 0;
@@ -708,7 +720,8 @@ export function createTabProcedure(host, tk, images){
                 }
                 const previous = held.selected;
                 select(record, index < 0 ? -1 : index);
-                return previous >>> 0;
+                return after(raiseEvent(host, record, EVENT_OBJECT_SELECTION, held.selected + 1,
+                    thread), ()=>previous >>> 0);
             }
             case TCM_GETCURFOCUS:
                 return held.focus >>> 0;

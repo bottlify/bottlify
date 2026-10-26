@@ -635,6 +635,10 @@ export const imagePlace = (record, rect, shape)=>{
  * @property {(entry: number, args: number[], thread?: unknown) => number | Promise<number>} [call]
  *           Calls the program's own code: a callback a control is handed.
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {(event: number, hwnd: number, object: number, child: number, thread?: unknown)
+ *     => number | Promise<number>} [winEvent]
+ *           NotifyWinEvent, as the call of `thread`: what a control raises
+ *           where a screen reader would want to hear of a change.
  * @property {import('./objects.js').ClipboardService} [clipboard]
  *           The clipboard an edit copies to and pastes from. Absent, the
  *           clipboard messages do nothing.

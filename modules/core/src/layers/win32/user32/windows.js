@@ -5526,6 +5526,8 @@ export function createWindowFunctions(host){
         callProcedure,
         post: message=>host.queue.post(message),
         defWindowProc,
+        winEvent: (event, hwnd, object, child, thread)=>winEvents.notify(event, hwnd, object, child,
+            thread),
         // A control paints and measures in the font it was given, as the
         // real ones select it before drawing; a fresh context carries the
         // system font, which is only right for a control given none.
@@ -6720,8 +6722,6 @@ export function createWindowFunctions(host){
         });
     };
 
-    // Named, because a message for a window with no procedure of its own is
-    // handed to the default procedure in this table by `deliver` above.
     const winEvents = createWinEventHooks(host, {
         windowThread: hwnd=>{
             const record = live(hwnd);
@@ -6733,6 +6733,8 @@ export function createWindowFunctions(host){
         },
     });
 
+    // Named, because a message for a window with no procedure of its own is
+    // handed to the default procedure in this table by `deliver` above.
     const table = {
         ...paint.table,
         ...caret.table,
