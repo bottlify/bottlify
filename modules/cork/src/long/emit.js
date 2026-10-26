@@ -52,7 +52,7 @@ import { PageFlag } from '../runtime/pages.js';
 import { AF, CF, OF, PF, SF, ZF } from '../decode/table.js';
 import { XMM, emitSimd, translatesSimd } from './simd.js';
 import { regionX87, x87Stores } from './x87.js';
-import { wrapIntoRam } from '../emit/memory.js';
+import { addCodeHitHelper, addSpanHitHelper, wrapIntoRam } from '../emit/memory.js';
 import { deadFlagPass, liveFlagsOut } from '../emit/region.js';
 
 const ARITH = CF | PF | AF | ZF | SF | OF;
@@ -340,7 +340,8 @@ export const endsBlock = op=>op === 'jmp' || op === 'call' || op === 'ret' || op
 class BlockEmitter {
     /**
      * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
-     * @param {{ flags: number, shift: number, transfer: number | null, x87: number | null,
+     * @param {{ flags: number, shift: number, storeHit: number, transfer: number | null,
+     *     x87: number | null,
      *     x87Id: ((run: import('../decode/decoder.js').Instruction[]) => number) | null }}
      *     helpers  function indices, `transfer` none without transfers, `x87` none where the
      *     regions leave x87 to the interpreter; `x87Id` numbers a run of instructions for it
@@ -603,9 +604,22 @@ class BlockEmitter {
     checkPage(store, index, address, size){
         const { b } = this;
         const flags = PageFlag.INACCESSIBLE | (store ? PageFlag.HAS_CODE | PageFlag.WATCH : 0);
+        /** Leaves if a page is closed; a store, if it reaches translated code too. */
+        const check = ()=>{
+            if (store)
+            {
+                this.guard();
+                this.storeCheck(index, address, size);
+                this.close();
+            }
+            else
+            {
+                this.exitIf(index, address);
+            }
+        };
         b.localGet(A).i32const(12).op(Op.i32shru).load('i32_8u', { offset: this.flagTable })
             .i32const(flags).op(Op.i32and);
-        this.exitIf(index, address);
+        check();
         if (size > 1)
         {
             // Across a page: the last byte's page as well.
@@ -614,9 +628,31 @@ class BlockEmitter {
             this.guard();
             b.localGet(A).i32const(size - 1).op(Op.i32add).i32const(12).op(Op.i32shru)
                 .load('i32_8u', { offset: this.flagTable }).i32const(flags).op(Op.i32and);
-            this.exitIf(index, address);
+            check();
             this.close();
         }
+    }
+
+    /**
+     * A store to a page flagged closed, holding code or watched: it leaves if
+     * a page is closed or a byte lands in translated code, to the granule, as
+     * the 32-bit translator's store does (`codeHit`, which marks a watched page
+     * written). Data beside code on a page -- a JIT's buffer, a program's own
+     * variables after its functions -- and a watched page are stored to in
+     * the region; without the granules every store to them left it. The test
+     * is the module's `storeHit`, one call here.
+     *
+     * @param {number} index @param {number} address @param {number} size
+     */
+    storeCheck(index, address, size){
+        const { b } = this;
+        b.localGet(A).localGet(A);
+        if (size > 1)
+        {
+            b.i32const(size - 1).op(Op.i32add);
+        }
+        b.call(this.helpers.storeHit);
+        this.exitIf(index, address);
     }
 
     /** Loads `size` bytes at A, zero-extended to an i64. @param {number} size */
@@ -2421,6 +2457,10 @@ export function emitRegions(layout, memoryLimits, regions, slotOf, options = {})
     const x87 = x87Id === null ? null : m.importFunction('env', 'x87', m.type({
         params: [ValType.i32, ValType.i32, ValType.i32, ValType.i32, ValType.i32, ValType.i32],
         results: [ValType.i32] }));
+    // The store test past a flagged page, one module's for every region (`storeHitModule`):
+    // made in each, it was compiled again in each, on its first store into code.
+    const storeHit = m.importFunction('env', 'storeHit',
+        m.type({ params: [ValType.i32, ValType.i32], results: [ValType.i32] }));
     const flags = flagsHelper();
     const shift = shiftHelper();
     const flagsType = m.type({ params: flags.params, results: flags.results });
@@ -2429,6 +2469,7 @@ export function emitRegions(layout, memoryLimits, regions, slotOf, options = {})
     const helpers = {
         flags: m.function(flagsType, flags.locals, flags.body.toBytes()),
         shift: m.function(shiftType, shift.locals, shift.body.toBytes()),
+        storeHit,
         /** @type {number | null} */
         transfer: null,
         x87,
@@ -2452,6 +2493,36 @@ export function emitRegions(layout, memoryLimits, regions, slotOf, options = {})
             { exportAs: `r${index}`, hints: body.hints });
         m.nameFunction(at, `r${region.blocks[0].entry.toString(16).padStart(8, '0')}`);
     });
+    return m.toBytes();
+}
+
+/**
+ * The store test past a page flagged closed, holding code or watched
+ * (`storeCheck`), as a module of its own exporting `storeHit(first, last) ->
+ * 0|1`: 1 when the page of the store's first byte or of its last is closed,
+ * or a byte between lands in translated code (`spanHit`, the 32-bit
+ * translator's, over its `codeHit`, which marks a watched page written). The
+ * regions import it as `env.storeHit`.
+ *
+ * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
+ * @param {{ min: number, max?: number, shared?: boolean }} memoryLimits  the memory's, in pages
+ * @returns {Uint8Array<ArrayBuffer>}
+ */
+export function storeHitModule(layout, memoryLimits){
+    const m = new ModuleBuilder();
+    m.importMemory('env', 'memory', memoryLimits);
+    const spanHit = addSpanHitHelper(m, addCodeHitHelper(m, layout, memoryLimits.shared === true));
+    const b = new Body();
+    const flags = pageFlagsAt(layout);
+    b.localGet(0).i32const(12).op(Op.i32shru).load('i32_8u', { offset: flags })
+        .localGet(1).i32const(12).op(Op.i32shru).load('i32_8u', { offset: flags })
+        .op(Op.i32or).i32const(PageFlag.INACCESSIBLE).op(Op.i32and);
+    b.if(EMPTY);
+    b.i32const(1).op(0x0f); // return
+    b.end();
+    b.localGet(0).localGet(1).call(spanHit);
+    m.function(m.type({ params: [ValType.i32, ValType.i32], results: [ValType.i32] }), [],
+        b.toBytes(), { exportAs: 'storeHit' });
     return m.toBytes();
 }
 

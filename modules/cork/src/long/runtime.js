@@ -31,8 +31,8 @@ import { PageFlag } from '../runtime/pages.js';
 import { interpret64 } from '../interp64.js';
 import { switchCases } from './switch.js';
 import { createX87Calls } from './x87.js';
-import { LongExit, emitRegions, endsBlock, foldFunction, missFunction, translates }
-    from './emit.js';
+import { LongExit, emitRegions, endsBlock, foldFunction, missFunction, storeHitModule,
+    translates } from './emit.js';
 
 /** Instructions a block holds at most. */
 const BLOCK_LIMIT = 64;
@@ -148,6 +148,8 @@ export function createLongRunner(settings){
     // address has no region.
     const table = new WebAssembly.Table({ element: 'anyfunc', initial: 256 });
     const miss = new WebAssembly.Instance(new WebAssembly.Module(missFunction())).exports.miss;
+    const { storeHit } = new WebAssembly.Instance(new WebAssembly.Module(
+        storeHitModule(layout, limits)), { env: { memory } }).exports;
     // The record a run of regions leaves in the state block, folded into the
     // flags word before anything but translated code looks at it.
     const fold = /** @type {() => void} */ (new WebAssembly.Instance(
@@ -454,7 +456,7 @@ export function createLongRunner(settings){
                     formCalls: leafCalls, profileCalls: profileAt >= 0 }));
             const instance = new WebAssembly.Instance(module,
                 { env: { memory, table, budget: budgetGlobal, depth, label, expect,
-                    x87: x87.call } });
+                    x87: x87.call, storeHit } });
             const run = /** @type {() => number} */ (instance.exports.r0);
             record.run = run;
             const slot = slotOf(entry);

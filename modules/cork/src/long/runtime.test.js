@@ -860,6 +860,40 @@ test('an indirect call\'s sampled callees are formed in and run as interpreted',
     }
 });
 
+test('a store beside code on its page stays in the region; one into the code still leaves', ()=>{
+    //         mov edi, 0x20001000; mov byte [rdi + 0xf00], 0xc3   f: ret, a page on
+    //         lea rax, [rdi + 0xf00]; call rax                    f translated
+    //         mov ecx, 2000
+    // l:      mov [rdi], rcx; add [rdi + 8], rcx                  stores before f's granules
+    //         lea rax, [rdi + 0xf00]; call rax; dec ecx; jnz l
+    //         mov dword [rdi + 0xf00], 0xc3c0ff                   f: inc eax; ret
+    //         lea rdx, [rdi + 0xf00]; call rdx; call rdx          the new f, twice
+    const code = 'bf00100020c687000f0000c3488d87000f0000ffd0b9d007000048890f48014f08488d87000f'
+        + '0000ffd0ffc975ecc787000f0000ffc0c300488d97000f0000ffd2ffd2';
+    const cases = CORPUS.cases.slice(0, 2).map((/** @type {any} */ one, /** @type {number} */ i)=>
+        ({ ...one, text: `beside code ${i}`, code }));
+    for (const budget of [7, 1000])
+    {
+        const { failures, exits, stats } = compare(cases, budget);
+        assert.deepEqual(failures, [], `budget ${budget}`);
+        assert.equal(exits, cases.length);
+        // Two stores a round on f's page: each left the region before the
+        // granules were looked at, 8000 times; now only the store into f.
+        assert.ok(stats.exits < 20, JSON.stringify(stats));
+    }
+    // A watched page is marked written by the translated store itself.
+    // mov ecx, 1000; l: mov [rbx], rcx; dec ecx; jnz l
+    const m = machine();
+    load(m, { ...CORPUS.cases[0], code: 'b9e803000048890bffc975f9' });
+    const page = Number.parseInt(CORPUS.cases[0].regs[3], 16) >>> 12;
+    const flags = new Uint8Array(m.memory.buffer, pageFlagsAt(m.layout), 1 << 20);
+    flags[page] = PageFlag.WATCH;
+    assert.throws(()=>m.runner.run(m.state, 1000000),
+        (/** @type {{ eip?: number }} */ error)=>error.eip === EXIT);
+    assert.equal(flags[page], PageFlag.WRITTEN);
+    assert.equal(m.runner.stats.exits, 0);
+});
+
 test('a callee predicted on code since rewritten is not formed in from what replaced it', ()=>{
     //         mov edi, 0x20002000                        a buffer two pages on
     //         mov dword [rdi], 0x01c58349; mov byte [rdi + 4], 0xc3     add r13, 1; ret
