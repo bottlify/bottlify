@@ -5322,6 +5322,14 @@ export function createGdiFunctions(host){
             },
 
             /**
+             * Whether a handle is a device context at all: a call handed
+             * anything else answers before it reads its other arguments.
+             *
+             * @param {number} hdc
+             */
+            isContext: (/** @type {number} */ hdc)=>dcOf(hdc) !== null,
+
+            /**
              * How much room a string takes in the context's font.
              *
              * @param {number} hdc @param {string} text

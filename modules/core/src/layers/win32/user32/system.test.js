@@ -1568,6 +1568,12 @@ test('OemToCharBuff translates a counted buffer between the OEM and ANSI pages',
     assert.equal(fns.CharToOemBuffA.handler([TEXT_BUFFER + 8, TEXT_BUFFER + 8, 3]), 1,
         'and back in place');
     assert.deepEqual([...memory.readMemory(TEXT_BUFFER + 8, 3)], [0x81, 0x61, 0x00]);
+    // Wine's text test: a NULL source or target is FALSE, nothing written.
+    for (const [source, target] of [[0, 0], [TEXT_BUFFER, 0], [0, TEXT_BUFFER + 8]])
+    {
+        assert.equal(fns.OemToCharBuffA.handler([source, target, 3]), 0);
+        assert.equal(fns.CharToOemBuffA.handler([source, target, 3]), 0);
+    }
     assert.equal(fns.OemToCharBuffA.argBytes, 12);
     assert.equal(fns.CharToOemBuffA.argBytes, 12);
 });

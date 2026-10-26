@@ -3323,6 +3323,11 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([source, target, count])=>{
+                // Null on either side is refused, as for the uncounted form.
+                if ((source >>> 0) === 0 || (target >>> 0) === 0)
+                {
+                    return 0;
+                }
                 host.writeMemory(target >>> 0, transcodeSingleByte(
                     host.readMemory(source >>> 0, count >>> 0), OEM_PAGE, ANSI_PAGE));
                 return 1;
@@ -3334,6 +3339,11 @@ export function createSystemFunctions({ host, live, windows, classes, elsewhere 
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([source, target, count])=>{
+                // Null on either side is refused, as for the uncounted form.
+                if ((source >>> 0) === 0 || (target >>> 0) === 0)
+                {
+                    return 0;
+                }
                 host.writeMemory(target >>> 0, transcodeSingleByte(
                     host.readMemory(source >>> 0, count >>> 0), ANSI_PAGE, OEM_PAGE));
                 return 1;

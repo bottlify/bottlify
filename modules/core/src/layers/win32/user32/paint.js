@@ -148,6 +148,7 @@ const MAX_TAB_STOPS = 1024;
 /** What a character cell measures when nothing better is known. */
 const ESTIMATED_CHAR_WIDTH = 8;
 const ESTIMATED_LINE_HEIGHT = 16;
+const ERROR_INVALID_HANDLE = 6;
 /** Class styles: each window a context of its own, or the class one for all its windows. */
 const CS_OWNDC = 0x0020;
 const CS_CLASSDC = 0x0040;
@@ -174,6 +175,7 @@ const DCX_INTERSECTRGN = 0x0080;
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readCString
+ * @property {(code: number) => void} [setLastError]
  * @property {(region: number) => (Rect & { rects?: Rect[] }) | null} [regionBox]
  *           The rectangle a region object holds, and its rectangles when it is
  *           more than one; null for a handle that is not one: gdi32's, reached
@@ -1274,6 +1276,11 @@ export function createPaintFunctions(options){
         }
         if (kind === DST_TEXT || kind === DST_PREFIXTEXT)
         {
+            // No text is a failure, not a read of address zero.
+            if ((data >>> 0) === 0)
+            {
+                return 0;
+            }
             // A length of 0 is a terminated string.
             const string = (length | 0) > 0
                 ? readCounted(data, length | 0, wide)
@@ -1345,6 +1352,17 @@ export function createPaintFunctions(options){
      * @param {number[]} args @param {boolean} [wide]  UTF-16 text, as the W calls take.
      */
     const drawText = ([hdc, text, count, rect, format], wide = false)=>{
+        // No context, and the text and the rectangle are not looked at:
+        // Windows answers zero before reading either, the UTF-16 form
+        // without a word in the last error.
+        if (host.draw?.isContext && !host.draw.isContext(hdc >>> 0))
+        {
+            if (!wide)
+            {
+                host.setLastError?.(ERROR_INVALID_HANDLE);
+            }
+            return 0;
+        }
         // A count of -1 means a terminated string; any other count is the
         // string's length, and the text need not be terminated at all -- a
         // caller drawing part of a buffer passes exactly that part.
