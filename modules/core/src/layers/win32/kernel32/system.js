@@ -22,7 +22,7 @@
  * than one that flatters the host.
  */
 
-import { lstrcpyCode, lstrlenCode } from './lstr.js';
+import { lstrcpyCode, lstrcpyLongCode, lstrlenCode, lstrlenLongCode } from './lstr.js';
 import { assemble } from '../msvcrt/guest-code.js';
 import { createWin9xFunctions } from './win9x.js';
 import {
@@ -338,11 +338,12 @@ export function createSystemFunctions(host){
 
     /**
      * An lstr export as guest code, handing to its handler what the code
-     * does not read.
+     * does not read; and its x86-64 for a 64-bit process.
      *
      * @param {(at: number, trap: number, top: number) => Uint8Array} make
+     * @param {(top: number) => Uint8Array} makeLong
      */
-    const lstrCode = make=>(host.ramTop
+    const lstrCode = (make, makeLong)=>(host.ramTop
         ? {
             /**
              * @this {{ argBytes: number, handler: Function }}
@@ -353,6 +354,18 @@ export function createSystemFunctions(host){
                     convention: 'stdcall', argBytes: this.argBytes, handler: this.handler,
                 });
                 const code = make(0, 0, /** @type {number} */ (host.ramTop));
+                builder.jump(code.length - 4, trap);
+                return code;
+            },
+            /**
+             * @this {{ argBytes: number, handler: Function }}
+             * @param {import('../msvcrt/guest-code.js').CodeBuilder} builder
+             */
+            long(builder){
+                const trap = builder.register({
+                    convention: 'stdcall', argBytes: this.argBytes, handler: this.handler,
+                });
+                const code = makeLong(/** @type {number} */ (host.ramTop));
                 builder.jump(code.length - 4, trap);
                 return code;
             },
@@ -1693,7 +1706,8 @@ export function createSystemFunctions(host){
             handler: survivesFault(([text])=>((text >>> 0) === 0
                 ? 0
                 : readAnsi(text >>> 0, MAX_STRING).length)),
-            ...lstrCode((at, trap, top)=>lstrlenCode(1, at, trap, top)),
+            ...lstrCode((at, trap, top)=>lstrlenCode(1, at, trap, top),
+                top=>lstrlenLongCode(1, top)),
         },
 
         /** int lstrlenW(LPCWSTR lpString) */
@@ -1703,7 +1717,8 @@ export function createSystemFunctions(host){
             handler: survivesFault(([text])=>((text >>> 0) === 0
                 ? 0
                 : readWide(text >>> 0, MAX_STRING).length)),
-            ...lstrCode((at, trap, top)=>lstrlenCode(2, at, trap, top)),
+            ...lstrCode((at, trap, top)=>lstrlenCode(2, at, trap, top),
+                top=>lstrlenLongCode(2, top)),
         },
 
         /**
@@ -1724,7 +1739,8 @@ export function createSystemFunctions(host){
                 writeAnsi(destination >>> 0, readAnsi(source >>> 0, MAX_STRING));
                 return destination >>> 0;
             }),
-            ...lstrCode((at, trap, top)=>lstrcpyCode(1, at, trap, top)),
+            ...lstrCode((at, trap, top)=>lstrcpyCode(1, at, trap, top),
+                top=>lstrcpyLongCode(1, top)),
         },
 
         /** LPWSTR lstrcpyW(LPWSTR lpString1, LPCWSTR lpString2): lstrcpyA's, in UTF-16. */
@@ -1745,7 +1761,8 @@ export function createSystemFunctions(host){
                 host.writeMemory(destination >>> 0, new Uint8Array(units.buffer));
                 return destination >>> 0;
             }),
-            ...lstrCode((at, trap, top)=>lstrcpyCode(2, at, trap, top)),
+            ...lstrCode((at, trap, top)=>lstrcpyCode(2, at, trap, top),
+                top=>lstrcpyLongCode(2, top)),
         },
 
         /**

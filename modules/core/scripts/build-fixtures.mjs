@@ -63,7 +63,7 @@ const IMPORTS = {
             'TlsFree@4', 'TlsGetValue@4', 'TlsSetValue@8', 'FlsAlloc@4', 'FlsFree@4',
             'FlsGetValue@4', 'FlsSetValue@8', 'EncodePointer@4', 'DecodePointer@4',
             'GetProcessHeap@0', 'HeapAlloc@12', 'HeapFree@12', 'HeapSize@12', 'HeapReAlloc@16',
-            'GlobalAlloc@8', 'GlobalFree@4',
+            'GlobalAlloc@8', 'GlobalFree@4', 'lstrlenA@4', 'lstrlenW@4', 'lstrcpyA@8',
         ],
     },
     'SHELL32.dll': {

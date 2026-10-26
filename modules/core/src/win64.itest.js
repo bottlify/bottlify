@@ -61,4 +61,7 @@ test('an x86-64 program finds its blocks, thread-local storage and answers at 64
             'msvcrt.dll!realloc', 'msvcrt.dll!free', 'msvcrt.dll!_msize']
             .reduce((sum, name)=>sum + (hot.get(name) ?? 0), 0);
         assert.ok(heapCalls < 4500, `${heapCalls} heap calls crossed into the host`);
+        assert.ok(!hot.has('KERNEL32.dll!lstrlenA') && !hot.has('KERNEL32.dll!lstrlenW')
+            && !hot.has('KERNEL32.dll!lstrcpyA'),
+        'the strings are counted and copied in the guest');
     });

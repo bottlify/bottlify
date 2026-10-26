@@ -134,6 +134,9 @@ __declspec(dllimport) void *__cdecl calloc(QWORD count, QWORD bytes);
 __declspec(dllimport) void *__cdecl realloc(void *block, QWORD bytes);
 __declspec(dllimport) void __cdecl free(void *block);
 __declspec(dllimport) QWORD __cdecl _msize(void *block);
+__declspec(dllimport) int __stdcall lstrlenA(const char *text);
+__declspec(dllimport) int __stdcall lstrlenW(const WCHAR *text);
+__declspec(dllimport) char *__stdcall lstrcpyA(char *to, const char *from);
 __declspec(dllimport) long __stdcall InterlockedIncrement(volatile long *addend);
 __declspec(dllimport) long __stdcall InterlockedDecrement(volatile long *addend);
 __declspec(dllimport) long __stdcall InterlockedExchange(volatile long *target, long value);
@@ -607,6 +610,16 @@ void mainCRTStartup(void)
 
     sections();
     heaps();
+
+    char copy[16];
+    int counted = 1;
+    for (int i = 0; i < 1000; i++)
+    {
+        counted &= lstrlenA("hello, world") == 12 && lstrlenW(L"wide") == 4 && lstrlenA(0) == 0;
+    }
+    check("lstrlenA and lstrlenW count, and a null string is empty", counted);
+    check("lstrcpyA copies and answers the destination", lstrcpyA(copy, "copied") == copy
+        && lstrlenA(copy) == 6 && copy[6] == 0);
 
     int count = 0;
     WCHAR **args = CommandLineToArgvW(GetCommandLineW(), &count);
