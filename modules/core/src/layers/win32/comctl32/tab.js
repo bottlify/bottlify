@@ -48,6 +48,7 @@ export const TCS_VERTICAL = 0x0080;
 export const TCS_BUTTONS = 0x0100;
 export const TCS_MULTILINE = 0x0200;
 export const TCS_FIXEDWIDTH = 0x0400;
+export const TCS_OWNERDRAWFIXED = 0x2000;
 export const TCS_FOCUSNEVER = 0x8000;
 const WS_CLIPSIBLINGS = 0x04000000;
 
@@ -111,6 +112,12 @@ export const TCN_SELCHANGING = -552;
 export const TCN_FOCUSCHANGE = -554;
 /** NMHDR: whom it is from, its id, and the code. */
 const NMHDR_SIZE = 12;
+/** An owner-drawn tab: WM_DRAWITEM with a DRAWITEMSTRUCT of ODT_TAB, the whole item. */
+const WM_DRAWITEM = 0x002b;
+const DRAWITEMSTRUCT_SIZE = 48;
+const ODT_TAB = 101;
+const ODA_DRAWENTIRE = 0x0001;
+const ODS_SELECTED = 0x0001;
 
 const VK_LEFT = 0x25;
 const VK_RIGHT = 0x27;
@@ -411,11 +418,18 @@ export function createTabProcedure(host, tk, images){
      * Tells the parent, WM_NOTIFY with an NMHDR in guest memory for as long
      * as the parent answers.
      *
+     * The selection's notifications, TCN_SELCHANGING and TCN_SELCHANGE, go to
+     * the control's parent alone: comctl32's tab tests see a control made as
+     * an owned window tell its owner TCN_FOCUSCHANGE, and the same owner hear
+     * nothing as the selection moves.
+     *
      * @param {any} record @param {number} code @param {unknown} [thread]
      * @returns {number | Promise<number>}
      */
     const notify = (record, code, thread)=>{
-        const address = notifyWindow(record) && host.allocate ? host.allocate(NMHDR_SIZE) : 0;
+        const target = code === TCN_SELCHANGING || code === TCN_SELCHANGE
+            ? (record.parent ?? 0) >>> 0 : notifyWindow(record);
+        const address = target && host.allocate ? host.allocate(NMHDR_SIZE) : 0;
         if (address === 0)
         {
             return 0;
@@ -426,8 +440,7 @@ export function createTabProcedure(host, tk, images){
         view.setUint32(4, record.id >>> 0, true);
         view.setInt32(8, code, true);
         host.writeMemory(address, bytes);
-        const sent = host.send(notifyWindow(record), WM_NOTIFY, record.id & 0xffff, address,
-            thread);
+        const sent = host.send(target, WM_NOTIFY, record.id & 0xffff, address, thread);
         return after(sent, answer=>{
             host.release?.(address);
             return answer;
@@ -527,8 +540,11 @@ export function createTabProcedure(host, tk, images){
         return { ...rect, left: x + icon.cx };
     };
 
-    /** @param {any} record @param {number} hdc */
-    const paintTabs = (record, hdc)=>{
+    /**
+     * @param {any} record @param {number} hdc @param {unknown} [thread]
+     * @returns {number | Promise<number>}
+     */
+    const paintTabs = (record, hdc, thread)=>{
         const draw = /** @type {any} */ (host.draw);
         const held = state(record);
         const face = tk.color(COLOR_3DFACE);
@@ -548,6 +564,10 @@ export function createTabProcedure(host, tk, images){
                 {
                     tk.buttonEdge(hdc, rect, pressed);
                 }
+                if ((record.style & TCS_OWNERDRAWFIXED) !== 0)
+                {
+                    return;
+                }
                 const shift = pressed ? 1 : 0;
                 const label = drawImage(record, hdc, index, {
                     left: rect.left + shift, top: rect.top + shift,
@@ -556,7 +576,8 @@ export function createTabProcedure(host, tk, images){
                 tk.drawText(hdc, held.items[index].text, label,
                     DT_CENTER | DT_VCENTER | DT_SINGLELINE, ink);
             });
-            return;
+            return (record.style & TCS_OWNERDRAWFIXED) === 0 ? 0
+                : ownerDraw(record, hdc, 0, thread);
         }
         tk.buttonEdge(hdc, paneOf(record), false);
         layout(record).forEach((rect, index)=>{
@@ -577,8 +598,67 @@ export function createTabProcedure(host, tk, images){
                 bottom: tab.bottom }, shadow);
             draw.fill(hdc, { left: tab.right - 1, top: tab.top + 2, right: tab.right,
                 bottom: tab.bottom }, dark);
-            tk.drawText(hdc, held.items[index].text, drawImage(record, hdc, index, tab),
-                DT_CENTER | DT_VCENTER | DT_SINGLELINE, ink);
+            if ((record.style & TCS_OWNERDRAWFIXED) === 0)
+            {
+                tk.drawText(hdc, held.items[index].text, drawImage(record, hdc, index, tab),
+                    DT_CENTER | DT_VCENTER | DT_SINGLELINE, ink);
+            }
+        });
+        return (record.style & TCS_OWNERDRAWFIXED) === 0 ? 0 : ownerDraw(record, hdc, 0, thread);
+    };
+
+    /**
+     * Hands the inside of each tab, the `step`th on, to the window the
+     * control tells, one WM_DRAWITEM after another, over the border the
+     * control drew; the selected tab last, from where it stands out of the
+     * row, as comctl32's tab test finds Windows drawing it. The item data is
+     * the tab's extra bytes when they fit in a pointer -- the first four, as
+     * the 32-bit library copies them -- and a pointer to them when
+     * TCM_SETITEMEXTRA made them larger.
+     *
+     * @param {any} record @param {number} hdc @param {number} step @param {unknown} thread
+     * @returns {number | Promise<number>}
+     */
+    const ownerDraw = (record, hdc, step, thread)=>{
+        const held = state(record);
+        const target = notifyWindow(record);
+        const rects = layout(record);
+        const order = [...rects.keys()].filter(at=>at !== held.selected);
+        if (held.selected >= 0 && held.selected < rects.length)
+        {
+            order.push(held.selected);
+        }
+        const index = order[step];
+        if (index === undefined || target === 0 || !host.allocate)
+        {
+            return 0;
+        }
+        const raise = index === held.selected && !buttons(record) ? RAISE : 0;
+        const rect = { left: rects[index].left - raise, top: rects[index].top - raise,
+            right: rects[index].right + raise, bottom: rects[index].bottom };
+        const extra = held.items[index].param;
+        const data = extra.length > 4 ? host.allocate(extra.length) : 0;
+        if (data !== 0)
+        {
+            host.writeMemory(data, extra);
+        }
+        const word = new Uint8Array(4);
+        word.set(extra.subarray(0, 4));
+        const at = host.allocate(DRAWITEMSTRUCT_SIZE);
+        const bytes = new Uint8Array(DRAWITEMSTRUCT_SIZE);
+        const view = new DataView(bytes.buffer);
+        [ODT_TAB, record.id, index, ODA_DRAWENTIRE, index === held.selected ? ODS_SELECTED : 0,
+            record.hwnd, hdc, rect.left + 2, rect.top + 2, rect.right - 2, rect.bottom,
+            data !== 0 ? data : new DataView(word.buffer).getUint32(0, true)]
+            .forEach((value, field)=>view.setUint32(field * 4, value >>> 0, true));
+        host.writeMemory(at, bytes);
+        return after(host.send(target, WM_DRAWITEM, record.id, at, thread), ()=>{
+            host.release?.(at);
+            if (data !== 0)
+            {
+                host.release?.(data);
+            }
+            return ownerDraw(record, hdc, step + 1, thread);
         });
     };
 
@@ -598,8 +678,7 @@ export function createTabProcedure(host, tk, images){
                 return tk.common(record, message, thread);
             case WM_PAINT:
                 return tk.painting(record, (/** @type {number} */ hdc)=>{
-                    paintTabs(record, hdc);
-                    return 0;
+                    return after(paintTabs(record, hdc, thread), ()=>0);
                 });
             case WM_ERASEBKGND:
                 return 1;

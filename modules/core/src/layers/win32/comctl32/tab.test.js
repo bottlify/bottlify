@@ -17,6 +17,7 @@ import { createImageLists } from './imagelist.js';
 import { decodeAnsi } from '../kernel32/locale.js';
 import {
     TAB_CLASS, TCS_BUTTONS, TCS_FIXEDWIDTH, TCS_FOCUSNEVER, TCS_VERTICAL, TCS_MULTILINE,
+    TCS_OWNERDRAWFIXED,
     TCM_GETITEMCOUNT, TCM_INSERTITEMA, TCM_INSERTITEMW, TCM_GETITEMA, TCM_SETITEMA,
     TCM_DELETEITEM, TCM_GETCURSEL, TCM_SETCURSEL, TCM_GETCURFOCUS, TCM_SETCURFOCUS,
     TCM_SETITEMEXTRA, TCM_ADJUSTRECT, TCM_SETITEMSIZE, TCM_GETITEMRECT, TCM_SETMINTABWIDTH,
@@ -44,6 +45,7 @@ const HEAP = 0x18000;
 const HINSTANCE = 0x400000;
 const PARENTPROC = 0x401000;
 const THREAD = { name: 'main' };
+const WM_DRAWITEM = 0x002b;
 
 const SCREEN = { width: 320, height: 240, bitsPerPixel: 32 };
 
@@ -143,6 +145,8 @@ function setup(){
     const desktop = createSurface({ width: SCREEN.width, height: SCREEN.height });
     /** The code of every WM_NOTIFY the parent was sent, in order. @type {number[]} */
     const codes = [];
+    /** Every WM_DRAWITEM the parent was sent. @type {any[]} */
+    const drawn = [];
     /** Every WinEvent a hook heard, as [event, object, child]. @type {number[][]} */
     const events = [];
     /** What the parent answers TCN_SELCHANGING with: TRUE refuses. */
@@ -200,6 +204,16 @@ function setup(){
                 const code = memory.i32(message.lParam + 8);
                 codes.push(code);
                 return code === TCN_SELCHANGING ? answers.selChanging : 0;
+            }
+            if (message.message === WM_DRAWITEM)
+            {
+                // DRAWITEMSTRUCT: type, id, item, action, state, hwnd, hdc,
+                // rcItem, itemData.
+                const at = message.lParam;
+                drawn.push({ type: memory.u32(at), item: memory.u32(at + 8),
+                    state: memory.u32(at + 16), left: memory.i32(at + 28),
+                    top: memory.i32(at + 32), data: memory.u32(at + 44) });
+                return 1;
             }
             return table.DefWindowProcA.handler(
                 [message.hwnd, message.message, message.wParam, message.lParam]);
@@ -343,6 +357,7 @@ function setup(){
     };
 
     return { memory, desktop, fns: table, send, pump, codes, answers, makeParent, tabs, events,
+        drawn,
         hookEvents,
         insert, stateOf, itemRect, measure, windowRect, gdi32, lists: imageLists.functions };
 }
@@ -542,6 +557,58 @@ test('a tab control made as an owned window tells its owner, the window it was m
         context.codes.length = 0;
         context.send([hwnd, TCM_SETCURFOCUS, 1, 0]);
         assert.deepEqual(context.codes, [TCN_FOCUSCHANGE]);
+    });
+
+test('an owner-drawn tab control hands each tab to its parent, the selected one last, with '
+    + 'its extra bytes as the item data', async()=>{
+    // comctl32's TCM_SETITEMEXTRA test: four bytes are the data itself, more
+    // a pointer to them.
+    const WM_DRAWITEM_ODT_TAB = 101;
+    const context = setup();
+    await context.makeParent();
+    const hwnd = await context.tabs(TCS_FIXEDWIDTH | TCS_OWNERDRAWFIXED, 3);
+    context.insert(hwnd, 0, { text: 'first', param: 0xdededede });
+    context.send([hwnd, TCM_SETCURSEL, 0, 0]);
+    context.drawn.length = 0;
+    await context.fns.InvalidateRect.handler([hwnd, 0, 1]);
+    await context.fns.UpdateWindow.handler([hwnd]);
+    assert.deepEqual(context.drawn.map(item=>item.item), [1, 2, 3, 0]);
+    assert.equal(context.drawn[3].data, 0xdededede);
+    assert.equal(context.drawn[3].state, 1, 'ODS_SELECTED');
+    assert.ok(context.drawn.every(item=>item.type === WM_DRAWITEM_ODT_TAB));
+
+    context.memory.putString(TEXT, TAB_CLASS);
+    const wide = await context.fns.CreateWindowExA.handler([0, TEXT, 0,
+        WS_CHILD | WS_VISIBLE | TCS_FIXEDWIDTH | TCS_OWNERDRAWFIXED, 0, 0, 280, 160,
+        context.fns.GetParent.handler([hwnd]), 8, HINSTANCE, 0]);
+    assert.equal(context.send([wide, TCM_SETITEMEXTRA, 5, 0]), 1);
+    context.memory.bytes.fill(0, ITEM, ITEM + TCITEM.SIZE + 8);
+    context.memory.put32(ITEM + TCITEM.mask, TCIF_PARAM);
+    context.memory.bytes.fill(0xde, ITEM + TCITEM.lParam, ITEM + TCITEM.lParam + 5);
+    assert.equal(context.send([wide, TCM_INSERTITEMA, 0, ITEM]), 0);
+    context.drawn.length = 0;
+    await context.fns.UpdateWindow.handler([wide]);
+    assert.equal(context.drawn.length, 1);
+    assert.equal(context.memory.u32(context.drawn[0].data), 0xdededede,
+        'the data points at the five bytes');
+});
+
+test('a tab control made as an owned window tells its owner nothing as the selection moves',
+    async()=>{
+        // getset_cur_focus_seq's parent sequence is empty on Windows, while
+        // setfocus_parent_seq's TCN_FOCUSCHANGE reaches the same owner.
+        const context = setup();
+        const owner = await context.makeParent();
+        context.memory.putString(TEXT, TAB_CLASS);
+        const hwnd = await context.fns.CreateWindowExA.handler([0, TEXT, 0,
+            WS_VISIBLE | TCS_FOCUSNEVER, 0, 0, 280, 160, owner, 0, HINSTANCE, 0]);
+        context.insert(hwnd, 0, { text: 'a' });
+        context.insert(hwnd, 1, { text: 'b' });
+        context.codes.length = 0;
+        context.send([hwnd, TCM_SETCURFOCUS, 1, 0]);
+        context.send([hwnd, TCM_SETCURFOCUS, -1, 0]);
+        assert.deepEqual(context.codes, []);
+        assert.equal(context.send([hwnd, TCM_GETCURFOCUS, 0, 0]) | 0, -1, 'it moved all the same');
     });
 
 test('buttons keep the focus apart from the selection and tell TCN_FOCUSCHANGE', async()=>{
