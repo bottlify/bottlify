@@ -34,14 +34,14 @@ const ERROR_INSUFFICIENT_BUFFER = 122;
 const ERROR_MORE_DATA = 234;
 /** The longest name an atom holds, in characters of the form it was given in. */
 const MAX_ATOM_NAME = 255;
-/** What memory calls a string with no terminator within the limit read. */
-const UNTERMINATED = 'UNTERMINATED';
 
 /**
  * @typedef {Object} AtomHost
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readCString
+ *           A string cut to the limit when it is longer, as the layer's reader does.
  * @property {(address: number, maxLength: number) => string} [readWideString]
+ *           The same, the limit in bytes.
  * @property {(code: number) => void} [setLastError]
  */
 
@@ -77,19 +77,12 @@ export function createAtomFunctions(host){
         {
             return integerName(raw);
         }
-        let text;
-        try
+        // One character past the longest name, which the reader cuts a
+        // longer one to: a name that reaches it is too long.
+        const text = wide ? host.readWideString?.(raw, (MAX_ATOM_NAME + 1) * 2) ?? ''
+            : host.readCString(raw, MAX_ATOM_NAME + 1);
+        if (text.length > MAX_ATOM_NAME)
         {
-            // One terminator past the longest name: a name that has none by
-            // then is too long, whatever follows it.
-            text = wide ? host.readWideString?.(raw, (MAX_ATOM_NAME + 1) * 2) ?? ''
-                : host.readCString(raw, MAX_ATOM_NAME + 1);
-        }
-        catch (e){
-            if (/** @type {{ code?: string }} */ (e)?.code !== UNTERMINATED)
-            {
-                throw e;
-            }
             host.setLastError?.(ERROR_INVALID_PARAMETER);
             return null;
         }

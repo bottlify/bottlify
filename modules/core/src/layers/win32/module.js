@@ -21,7 +21,7 @@ import { createSyncFunctions } from './kernel32/sync.js';
 import { createCodeArena } from './kernel32/code-arena.js';
 import { createGuestHeap } from './kernel32/guest-heap.js';
 import { createCriticalSections } from './kernel32/critical.js';
-import { createLocaleFunctions, encodeAnsi } from './kernel32/locale.js';
+import { createLocaleFunctions, decodeAnsi, encodeAnsi } from './kernel32/locale.js';
 import {
     ENVIRONMENT_NOW, createEnvironmentFunctions, createUserenvFunctions, defaultEnvironment,
 } from './kernel32/environment.js';
@@ -447,8 +447,25 @@ export function createWin32Module(){
             // buffer to hold the pattern.
             const fillMemory = (/** @type {number} */ address, /** @type {number} */ value,
                 /** @type {number} */ length)=>memory.fillBytes(address, value, length);
-            const readCString = (/** @type {number} */ address, /** @type {number} */ maxLength)=>
-                memory.readCString(address, maxLength);
+            // A handler's limit is the most of a string it reads -- a fixed
+            // char[32] field holds exactly that, terminated or not -- so a
+            // longer string is cut there, never refused out of the host. Only
+            // memory that is not there is a fault, as the processor's would be.
+            /** @param {unknown} e */
+            const unterminated = e=>/** @type {{ code?: unknown }} */ (e)?.code === 'UNTERMINATED';
+            const readCString = (/** @type {number} */ address, /** @type {number} */ maxLength)=>{
+                try
+                {
+                    return memory.readCString(address, maxLength);
+                }
+                catch (e){
+                    if (!unterminated(e))
+                    {
+                        throw e;
+                    }
+                    return decodeAnsi(memory.readBytes(address, maxLength));
+                }
+            };
             /** Where kernel32 put one of its routines that runs in the guest. @param {string} name */
             const kernel32Export = name=>modules.find('kernel32.dll')?.addressOf?.(name) ?? 0;
             /** The C runtime image the program loaded (`CRT_IMAGES`), or null before it has one. */
@@ -484,8 +501,21 @@ export function createWin32Module(){
                     cpuRegisters.write(name, value >>> 0);
                 }
             };
-            const readWideString = (/** @type {number} */ address, /** @type {number} */ maxLength)=>
-                memory.readWideString(address, maxLength);
+            /** The same, the limit in bytes as memory takes it. */
+            const readWideString = (/** @type {number} */ address, /** @type {number} */ maxLength)=>{
+                try
+                {
+                    return memory.readWideString(address, maxLength);
+                }
+                catch (e){
+                    if (!unterminated(e))
+                    {
+                        throw e;
+                    }
+                    return new TextDecoder('utf-16le').decode(
+                        memory.readBytes(address, maxLength & ~1));
+                }
+            };
 
             // The run's class table, which is also where RPC endpoints are
             // found: COM and RPC between processes meet in the one table, and
@@ -1646,8 +1676,7 @@ export function createWin32Module(){
                     }).table,
                     ...createDebugFunctions({
                         readCString,
-                        readWideString: (address, maxLength)=>
-                            memory.readWideString(address, maxLength),
+                        readWideString,
                         say: text=>trace(text),
                     }),
                     ...createHeapFunctions({

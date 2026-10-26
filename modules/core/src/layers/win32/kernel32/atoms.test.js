@@ -148,8 +148,8 @@ test('the wide name reads back in UTF-16, cut to the characters asked for', ()=>
 });
 
 /**
- * As the memory layer reads: a string with no terminator within the limit
- * (bytes) is refused with the code that says so, and errors are recorded.
+ * As the layer reads: a string with no terminator within the limit (bytes)
+ * is cut there, and errors are recorded.
  */
 function strictSetup(){
     const bytes = new Uint8Array(0x10800);
@@ -157,14 +157,15 @@ function strictSetup(){
     const errors = [];
     /** @param {number} address @param {number} limit @param {number} unit */
     const units = (address, limit, unit)=>{
-        for (let at = 0; at + unit <= limit; at += unit)
+        let at = 0;
+        for (; at + unit <= limit; at += unit)
         {
             if (bytes[address + at] === 0 && (unit === 1 || bytes[address + at + 1] === 0))
             {
-                return at / unit;
+                break;
             }
         }
-        throw Object.assign(new Error('unterminated'), { code: 'UNTERMINATED' });
+        return at / unit;
     };
     const fns = createAtomFunctions({
         writeMemory: (address, data)=>bytes.set(data, address),
