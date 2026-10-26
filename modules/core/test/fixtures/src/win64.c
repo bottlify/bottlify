@@ -1,0 +1,265 @@
+/*
+ * Copyright © 2026 Bottlify Project
+ * Licensed under the Mozilla Public License, version 2.0
+ * See LICENSE for details
+ */
+
+/*
+ * An x86-64 program on what a 64-bit process is given at its own width: its
+ * thread and process blocks through GS, the static thread-local storage and
+ * TLS callback its own directory declares (IMAGE_TLS_DIRECTORY64, laid out
+ * here as a C runtime's tlssup does), a second thread, a wait on an array of
+ * handles, a routine the system calls back with an argument (the TLS callback
+ * told of a thread's end), quadword answers in RAX, and the pointers in
+ * localeconv's structure and CommandLineToArgvW's array. Each check prints a line; the exit code counts
+ * the checks that failed.
+ */
+
+typedef void *HANDLE;
+typedef unsigned long DWORD;
+typedef unsigned short WCHAR;
+typedef unsigned long long QWORD;
+typedef struct { char opaque[48]; } FILE;
+typedef DWORD (__stdcall *ThreadStart)(void *parameter);
+typedef void (__stdcall *TlsCallback)(void *module, DWORD reason, void *reserved);
+
+typedef struct
+{
+    QWORD StartAddressOfRawData;
+    QWORD EndAddressOfRawData;
+    QWORD AddressOfIndex;
+    QWORD AddressOfCallBacks;
+    DWORD SizeOfZeroFill;
+    DWORD Characteristics;
+} TlsDirectory;
+
+typedef struct
+{
+    DWORD dwOSVersionInfoSize;
+    DWORD dwMajorVersion;
+    DWORD dwMinorVersion;
+    DWORD dwBuildNumber;
+    DWORD dwPlatformId;
+    WCHAR szCSDVersion[128];
+} OSVERSIONINFOW;
+
+struct lconv
+{
+    char *decimal_point;
+    char *thousands_sep;
+    char *grouping;
+    char *int_curr_symbol;
+    char *currency_symbol;
+    char *mon_decimal_point;
+    char *mon_thousands_sep;
+    char *mon_grouping;
+    char *positive_sign;
+    char *negative_sign;
+    char int_frac_digits;
+    char frac_digits;
+    char p_cs_precedes;
+    char p_sep_by_space;
+    char n_cs_precedes;
+    char n_sep_by_space;
+    char p_sign_posn;
+    char n_sign_posn;
+};
+
+__declspec(dllimport) extern FILE _iob[];
+__declspec(dllimport) int __cdecl fputs(const char *text, FILE *stream);
+__declspec(dllimport) int __cdecl fputc(int character, FILE *stream);
+__declspec(dllimport) void __cdecl exit(int code);
+__declspec(dllimport) struct lconv *__cdecl localeconv(void);
+__declspec(dllimport) QWORD __cdecl mbrtowc(WCHAR *unit, const char *text, QWORD count,
+    int *state);
+__declspec(dllimport) long long __cdecl _atoi64(const char *text);
+__declspec(dllimport) HANDLE __stdcall CreateThread(void *attributes, QWORD stack,
+    ThreadStart start, void *parameter, DWORD flags, DWORD *id);
+__declspec(dllimport) HANDLE __stdcall CreateEventA(void *attributes, int manual, int initial,
+    const char *name);
+__declspec(dllimport) DWORD __stdcall WaitForMultipleObjects(DWORD count, const HANDLE *handles,
+    int all, DWORD milliseconds);
+__declspec(dllimport) int __stdcall CloseHandle(HANDLE handle);
+__declspec(dllimport) DWORD __stdcall GetCurrentThreadId(void);
+__declspec(dllimport) void *__stdcall GetModuleHandleA(const char *name);
+__declspec(dllimport) DWORD __stdcall GetVersion(void);
+__declspec(dllimport) DWORD __stdcall GetTickCount(void);
+__declspec(dllimport) QWORD __stdcall GetTickCount64(void);
+__declspec(dllimport) WCHAR *__stdcall GetCommandLineW(void);
+__declspec(dllimport) WCHAR **__stdcall CommandLineToArgvW(const WCHAR *line, int *count);
+__declspec(dllimport) long __stdcall RtlGetVersion(OSVERSIONINFOW *info);
+
+/* The image's thread-local storage, declared as a C runtime's tlssup does. */
+#pragma section(".tls", read, write)
+#pragma section(".tls$ZZZ", read, write)
+#pragma section(".CRT$XLA", read)
+#pragma section(".CRT$XLB", read)
+#pragma section(".CRT$XLZ", read)
+
+static void __stdcall onThread(void *module, DWORD reason, void *reserved);
+
+__declspec(allocate(".tls")) char _tls_start = 0;
+__declspec(allocate(".tls$ZZZ")) char _tls_end = 0;
+DWORD _tls_index;
+__declspec(allocate(".CRT$XLA")) TlsCallback __xl_a = 0;
+__declspec(allocate(".CRT$XLB")) TlsCallback __xl_b = onThread;
+__declspec(allocate(".CRT$XLZ")) TlsCallback __xl_z = 0;
+const TlsDirectory _tls_used = {
+    (QWORD)&_tls_start, (QWORD)&_tls_end, (QWORD)&_tls_index, (QWORD)(&__xl_a + 1), 0, 0,
+};
+
+static __declspec(thread) int counter = 5;
+
+static volatile int told[4];
+static volatile int toldModule = 1;
+static volatile QWORD toldReserved[4];
+static int failed;
+
+static void __stdcall onThread(void *module, DWORD reason, void *reserved)
+{
+    if (reason < 4)
+    {
+        told[reason]++;
+        toldReserved[reason] = (QWORD)reserved;
+    }
+    toldModule &= module == GetModuleHandleA(0);
+}
+
+static QWORD gs(DWORD offset)
+{
+    QWORD value;
+    __asm__ volatile ("movq %%gs:(%1), %0" : "=r"(value) : "r"((QWORD)offset));
+    return value;
+}
+
+static void say(const char *text)
+{
+    fputs(text, &_iob[1]);
+}
+
+static void number(unsigned long long value)
+{
+    char digits[24];
+    int count = 0;
+    do
+    {
+        digits[count++] = (char)('0' + value % 10);
+        value /= 10;
+    } while (value != 0);
+    while (count != 0)
+    {
+        fputc(digits[--count], &_iob[1]);
+    }
+}
+
+static void check(const char *what, int good)
+{
+    say(good ? "ok " : "FAILED ");
+    say(what);
+    fputc('\n', &_iob[1]);
+    failed += !good;
+}
+
+/* Whether a thread's variable lies in the block its slot names. */
+static int inSlot(void)
+{
+    QWORD block = ((QWORD *)gs(0x58))[_tls_index];
+    return block != 0 && (QWORD)&counter >= block && (QWORD)&counter < block + 64;
+}
+
+/* What the second thread saw of itself, checked on the first. */
+static struct
+{
+    void *parameter;
+    int counter;
+    QWORD block;
+    QWORD variable;
+    int idInBlock;
+    int slotIsCounter;
+} worker;
+
+static DWORD __stdcall work(void *parameter)
+{
+    worker.parameter = parameter;
+    worker.counter = counter;
+    counter += 100;
+    worker.block = gs(0x30);
+    worker.variable = (QWORD)&counter;
+    worker.idInBlock = gs(0x48) == GetCurrentThreadId()
+        && *(QWORD *)(worker.block + 0x30) == worker.block;
+    worker.slotIsCounter = inSlot();
+    return 7;
+}
+
+void mainCRTStartup(void)
+{
+    check("the TLS callback heard the process start, with the module", told[1] == 1
+        && toldModule && toldReserved[1] != 0);
+    check("a thread-local variable starts as its template", counter == 5);
+    counter = 42;
+
+    QWORD teb = gs(0x30);
+    QWORD peb = gs(0x60);
+    QWORD local = 0;
+    check("GS:[0x30] is the thread block's own address", teb != 0 && (teb >> 32) == 0
+        && *(QWORD *)(teb + 0x30) == teb);
+    check("GS:[0x48] is the thread's id", gs(0x48) == GetCurrentThreadId());
+    check("the stack lies between GS:[0x10] and GS:[0x08]", gs(0x10) < (QWORD)&local
+        && (QWORD)&local < gs(0x08));
+    check("GS:[0x58][_tls_index] is this thread's copy", inSlot());
+    check("the process block holds the image's base at 0x10",
+        *(QWORD *)(peb + 0x10) == (QWORD)GetModuleHandleA(0));
+    DWORD version = GetVersion();
+    check("the process block holds the version at 0x118",
+        *(DWORD *)(peb + 0x118) == (version & 0xff)
+        && *(DWORD *)(peb + 0x11c) == (version >> 8 & 0xff));
+    OSVERSIONINFOW info;
+    info.dwOSVersionInfoSize = sizeof info;
+    check("RtlGetVersion reads the version out of the 64-bit process block",
+        RtlGetVersion(&info) == 0 && info.dwMajorVersion == (version & 0xff)
+        && info.dwPlatformId == 2);
+
+    HANDLE never = CreateEventA(0, 1, 0, 0);
+    DWORD id = 0;
+    HANDLE thread = CreateThread(0, 0, work, (void *)0x1234, 0, &id);
+    HANDLE both[2] = { never, thread };
+    check("a wait on two quadword handles answers the second's index",
+        WaitForMultipleObjects(2, both, 0, 0xffffffff) == 1);
+    check("the thread had its parameter", worker.parameter == (void *)0x1234);
+    check("and its own copy of the thread-local variable, as the template has it",
+        worker.counter == 5 && counter == 42);
+    check("its block through GS is its own", worker.block != 0 && worker.block != teb
+        && worker.idInBlock && worker.slotIsCounter && worker.variable != (QWORD)&counter);
+    check("the TLS callback heard the thread start and end, with no reserved",
+        told[2] == 1 && told[3] == 1 && toldReserved[2] == 0 && toldReserved[3] == 0);
+    CloseHandle(thread);
+    CloseHandle(never);
+
+    check("a quadword answer is whole in RAX", _atoi64("4294967301") == 4294967301ll
+        && _atoi64("-2") == -2);
+    DWORD before = GetTickCount();
+    QWORD ticks = GetTickCount64();
+    check("GetTickCount64 counts the same milliseconds", (ticks >> 32) == 0
+        && (DWORD)ticks >= before && (DWORD)ticks - before < 1000);
+
+    struct lconv *conventions = localeconv();
+    check("localeconv's strings are quadword pointers", conventions->decimal_point[0] == '.'
+        && conventions->thousands_sep[0] == 0 && conventions->negative_sign[0] == 0
+        && conventions->int_frac_digits == 127);
+
+    WCHAR unit = 0;
+    int state = 0;
+    check("mbrtowc converts a byte", mbrtowc(&unit, "A", 1, &state) == 1 && unit == 'A'
+        && mbrtowc(&unit, "", 1, &state) == 0
+        && mbrtowc(&unit, "A", 0, &state) == (QWORD)-2);
+
+    int count = 0;
+    WCHAR **args = CommandLineToArgvW(GetCommandLineW(), &count);
+    check("CommandLineToArgvW's array holds quadword pointers", count == 3 && args[3] == 0
+        && args[1][0] == 'o' && args[1][3] == 0 && args[2][0] == 't');
+
+    say("failed ");
+    number((unsigned long long)failed);
+    fputc('\n', &_iob[1]);
+    exit(failed);
+}

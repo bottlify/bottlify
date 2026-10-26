@@ -537,3 +537,15 @@ test('a program is an executable whose entry calls one routine and exits with it
     assert.equal(view.getUint32(entry + 9, true), image.imageBase + exit);
     assert.throws(()=>synthesiseProgram({ library: '', routine: 'x' }), /ASCII/);
 });
+
+test('a module for a 64-bit process opens each trampoline with a no-op that is one there', ()=>{
+    // `mov edi, edi` is a 32-bit move in long mode: it clears RDI's upper
+    // half, and RDI is a register a callee keeps for its caller.
+    const module = synthesiseModule({ name: 'KERNEL32.dll', base: BASE, long: true,
+        exports: [{ name: 'ExitProcess', target: STUBS.ExitProcess }] });
+    const rva = /** @type {number} */ (module.addressOf('ExitProcess')) - BASE;
+    assert.deepEqual([...module.bytes.subarray(rva, rva + 3)], [0x66, 0x90, 0xe9],
+        'xchg ax, ax, then the jump');
+    const displacement = new DataView(module.bytes.buffer).getInt32(rva + 3, true);
+    assert.equal(BASE + rva + 7 + displacement, STUBS.ExitProcess);
+});

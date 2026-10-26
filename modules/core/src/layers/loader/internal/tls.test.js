@@ -22,36 +22,48 @@ const HEADERS = 0x200;
  *
  * @param {Uint8Array} section
  * @param {Record<number, { address: number, size: number }>} directories
+ * @param {number} [imageBase]  Given, the image is a PE32+ (x86-64) one based there.
  * @returns {Uint8Array}
  */
-function fixture(section, directories){
+function fixture(section, directories, imageBase){
     const file = new Uint8Array(HEADERS + section.length);
     const view = new DataView(file.buffer);
     const pe = 0x80;
     const optional = pe + 24;
+    const wide = imageBase !== undefined;
+    // PE32+ widens the image base and the four stack and heap sizes, which
+    // moves the directories 16 bytes on.
+    const tail = wide ? 16 : 0;
 
     view.setUint16(0, 0x5a4d, true); //             "MZ"
     view.setUint32(0x3c, pe, true); //              e_lfanew
     view.setUint32(pe, 0x00004550, true); //        "PE\0\0"
-    view.setUint16(pe + 4, 0x014c, true); //        i386
+    view.setUint16(pe + 4, wide ? 0x8664 : 0x014c, true); // x86-64 or i386
     view.setUint16(pe + 6, 1, true); //             one section
-    view.setUint16(pe + 20, 0xe0, true); //         optional header size
-    view.setUint16(optional, 0x010b, true); //      PE32
+    view.setUint16(pe + 20, 0xe0 + tail, true); //  optional header size
+    view.setUint16(optional, wide ? 0x020b : 0x010b, true); // PE32+ or PE32
     view.setUint32(optional + 16, SECTION_RVA, true); // entry point
-    view.setUint32(optional + 28, IMAGE_BASE, true);
+    if (wide)
+    {
+        view.setBigUint64(optional + 24, BigInt(imageBase), true);
+    }
+    else
+    {
+        view.setUint32(optional + 28, IMAGE_BASE, true);
+    }
     view.setUint32(optional + 32, 0x1000, true); // section alignment
     view.setUint32(optional + 56, SECTION_RVA + section.length, true); // sizeOfImage
     view.setUint32(optional + 60, HEADERS, true); // sizeOfHeaders
-    view.setUint32(optional + 92, 16, true); //     directory count
+    view.setUint32(optional + 92 + tail, 16, true); // directory count
 
     for (const [index, { address, size }] of Object.entries(directories))
     {
-        const at = optional + 96 + Number(index) * 8;
+        const at = optional + 96 + tail + Number(index) * 8;
         view.setUint32(at, address, true);
         view.setUint32(at + 4, size, true);
     }
 
-    const header = optional + 0xe0;
+    const header = optional + 0xe0 + tail;
     file.set(new TextEncoder().encode('.data'), header);
     view.setUint32(header + 8, section.length, true); //  virtualSize
     view.setUint32(header + 12, SECTION_RVA, true); //    virtualAddress
@@ -180,4 +192,39 @@ test('a template past its section\'s raw data is zeroes, whatever the file holds
     assert.deepEqual([...tls.template], new Array(8).fill(0), 'the block starts as zeroes');
     assert.deepEqual(tls.callbackRvas, [], 'and a table past the raw data is empty');
     assert.equal(tls.indexRva, SECTION_RVA + 0x200, 'the directory itself is read as it was');
+});
+
+test('a PE32+ directory holds quadword addresses, its callbacks a quadword each', ()=>{
+    // IMAGE_TLS_DIRECTORY64: the four addresses are eight bytes, so the zero
+    // fill and the characteristics sit at 32 and 36. Read as the 32-bit one,
+    // the end address would be the start's high half -- zero -- and the
+    // index the end; and a base above 4 GiB would leave every RVA wrong.
+    const base = 0x140000000;
+    const section = new Uint8Array(0x1000);
+    const view = new DataView(section.buffer);
+    /** @param {number} offset */
+    const va = offset=>BigInt(base + SECTION_RVA + offset);
+    view.setBigUint64(0, va(0x100), true);
+    view.setBigUint64(8, va(0x108), true);
+    view.setBigUint64(16, va(0x200), true);
+    view.setBigUint64(24, va(0x300), true);
+    view.setUint32(32, 48, true);
+    view.setUint32(36, 0x00500000, true);
+    for (let at = 0; at < 8; at++)
+    {
+        section[0x100 + at] = 0xb0 + at;
+    }
+    view.setBigUint64(0x300, va(0x400), true);
+    view.setBigUint64(0x308, va(0x500), true);
+    view.setBigUint64(0x318, va(0x700), true);
+    const bytes = fixture(section, { 9: { address: SECTION_RVA, size: 40 } }, base);
+    const tls = readTls(bytes, parsePe(bytes, { wide: true }));
+
+    assert.ok(tls);
+    assert.equal(tls.templateSize, 8);
+    assert.deepEqual([...tls.template], [0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7]);
+    assert.equal(tls.indexRva, SECTION_RVA + 0x200);
+    assert.equal(tls.zeroFillSize, 48);
+    assert.equal(tls.characteristics, 0x00500000);
+    assert.deepEqual(tls.callbackRvas, [SECTION_RVA + 0x400, SECTION_RVA + 0x500]);
 });

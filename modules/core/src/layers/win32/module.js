@@ -12,7 +12,7 @@ import { createRegistryService } from './advapi32/registry-service.js';
 import { createDebugFunctions } from './kernel32/debug.js';
 import { createHeapAllocator, createHeapFunctions } from './kernel32/heap.js';
 import { createProcessFunctions, createThreadState } from './kernel32/process.js';
-import { TEB } from './kernel32/teb.js';
+import { blockLayouts } from './kernel32/teb.js';
 import { createModuleFunctions } from './kernel32/modules.js';
 import { createFileFunctions } from './kernel32/files.js';
 import { createRichEditControls } from './riched/richedit.js';
@@ -320,6 +320,8 @@ export function createWin32Module(){
             const reported = reportedVersion(windows, config?.compatibility);
             const folders = shellFolders(windows);
             const pointerSize = config?.bits === 64 ? 8 : 4;
+            // The thread and process blocks a handler reads, at that width.
+            const blocks = blockLayouts(pointerSize);
 
             const memory = host.requireApi('memory');
             const kernel = host.requireApi('kernel');
@@ -481,6 +483,13 @@ export function createWin32Module(){
             const setRegisters = values=>{
                 for (const [name, value] of Object.entries(values))
                 {
+                    // An answer in EDX:EAX is a quadword, which a 64-bit
+                    // caller reads in RAX: the bridge writes it whole.
+                    if (pointerSize === 8 && name === 'edx')
+                    {
+                        bridge.answerHigh(value >>> 0);
+                        continue;
+                    }
                     cpuRegisters.write(name, value >>> 0);
                 }
             };
@@ -508,7 +517,7 @@ export function createWin32Module(){
 
             const { setError, lastErrorOf, setErrorOn: setErrorOnBlock } = createThreadState(
                 ()=>kernel.currentThread(),
-                { readU32: memory.readU32, writeU32: memory.writeU32 });
+                { readU32: memory.readU32, writeU32: memory.writeU32 }, blocks.teb);
             // Absent unless a bundle is mounted, in which case a read of a block
             // that is not here yet becomes a wait rather than a fault.
             const volume = createVolume(filesystem, config?.fetchBlocks ?? null);
@@ -592,6 +601,7 @@ export function createWin32Module(){
              * thread: every thread made after the first begins in its routine.
              */
             const threadCalls = createThreadCalls({
+                long: pointerSize === 8,
                 register: (name, fn)=>bridge.register(name, fn),
                 allocate: bytes=>heap.allocate(bytes),
                 allocateCode: bytes=>heap.allocateCode(bytes),
@@ -810,6 +820,19 @@ export function createWin32Module(){
             // The guest code the engine writes itself, on pages nothing else is
             // handed (`code-arena.js`).
             const placeCode = createCodeArena(bytes=>allocator.allocate(bytes));
+            if (pointerSize === 8)
+            {
+                // The code a 64-bit process's callbacks start at, which
+                // loads their argument registers whole.
+                bridge.placeLongCall((/** @type {Uint8Array} */ code)=>{
+                    const at = placeCode(code.length);
+                    if (at !== 0)
+                    {
+                        memory.writeBytes(at, code);
+                    }
+                    return at;
+                });
+            }
             const heap = {
                 /** @param {number} bytes @param {any} [options] */
                 allocate: (bytes, options)=>allocator.allocate(bytes, options),
@@ -1753,7 +1776,7 @@ export function createWin32Module(){
                         // what the guest reaches through FS.
                         tlsBlock: ()=>{
                             const teb = kernel.currentThread()?.tebAddress ?? 0;
-                            return teb === 0 ? 0 : memory.readU32(teb + TEB.TLS_POINTER);
+                            return teb === 0 ? 0 : memory.readU32(teb + blocks.teb.TLS_POINTER);
                         },
                         allThreads: ()=>kernel.threads(),
                         /** @param {number} bytes */
@@ -2256,6 +2279,7 @@ export function createWin32Module(){
                 }),
 
                 'SHELL32.dll': createShellFunctions({
+                    pointerSize,
                     writeMemory, readMemory, readCString,
                     // ExtractIcon hands out an icon of pixels read from another
                     // file: the object user32's CreateIcon makes.
@@ -3415,6 +3439,7 @@ export function createWin32Module(){
             // process-heap handle and the tag on every block, so a separate one
             // would reject the very handle GetProcessHeap hands out.
             libraries['ntdll.dll'] = createNtdllFunctions({
+                pointerSize,
                 readMemory,
                 writeMemory,
                 readCString,
@@ -3878,7 +3903,11 @@ export function createWin32Module(){
                  * @returns {Promise<any> | null}
                  */
                 dispatchFault(fault){
-                    if (!kernel.currentThread() || fault.stack === undefined
+                    // A 64-bit process's handlers are found through its
+                    // images' unwind tables, which nothing here walks yet;
+                    // the 32-bit chain at FS:[0] is not its, and a frame
+                    // built for it would be the wrong shape.
+                    if (pointerSize === 8 || !kernel.currentThread() || fault.stack === undefined
                         || !seh.claims(fault.vector))
                     {
                         return null;

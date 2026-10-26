@@ -414,6 +414,8 @@ export function createSecureFunctions(host){
     const toText = (valueSlots, signed)=>({
         convention: /** @type {'cdecl'} */ ('cdecl'),
         argBytes: (valueSlots + 3) * 4,
+        // An __int64 value is one argument to an x86-64 caller.
+        ...valueSlots === 2 ? { quadwords: [0] } : {},
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ args)=>{
             const buffer = args[valueSlots];

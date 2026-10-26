@@ -225,6 +225,77 @@ test('mbtowc reports one byte consumed, and zero at the terminator', ()=>{
     assert.equal(table.mbtowc.handler([unit, source + 1, 4]), 0);
 });
 
+test('mbrtowc and mbrlen are mbtowc with a state the C locale never needs', ()=>{
+    // "If s is a null pointer, the call is equivalent to mbrtowc(NULL, "", 1, ps)"
+    // and a count that holds no byte is an incomplete character, (size_t)-2.
+    const { memory, table } = build();
+    const unit = memory.allocate(4);
+    const source = memory.put('\xe9x');
+    assert.equal(table.mbrtowc.handler([unit, source, 4, 0]), 1);
+    assert.equal(memory.wide(unit, 1), '\xe9', 'the byte\'s own unit, as mbtowc widens it');
+    assert.equal(table.mbrtowc.handler([unit, source + 2, 4, 0]), 0, 'the terminator');
+    assert.equal(table.mbrtowc.handler([unit, source, 0, 0]), -2, 'nothing to read');
+    assert.equal(table.mbrtowc.handler([unit, 0, 0, 0]), 0, 'no string resets');
+    assert.equal(table.mbrlen.handler([source, 4, 0]), 1);
+    assert.equal(table.mbrlen.handler([source + 2, 4, 0]), 0);
+    assert.equal(table.mbrlen.handler([source, 0, 0]), -2);
+});
+
+test('wcrtomb writes a byte for a character to U+00FF, refuses one past it, resets with none', ()=>{
+    const memory = fakeMemory();
+    /** @type {number[]} */
+    const errno = [];
+    const table = /** @type {Record<string, any>} */ (
+        createWideFunctions({ ...memory, errno: code=>errno.push(code) }));
+    const out = memory.allocate(4);
+    assert.equal(table.wcrtomb.handler([out, 0xe9, 0]), 1);
+    assert.equal(memory.bytes[out], 0xe9);
+    assert.equal(table.wcrtomb.handler([out, 0x263a, 0]), -1);
+    assert.equal(memory.bytes[out], 0xe9, 'nothing written');
+    assert.equal(table.wcrtomb.handler([0, 0x263a, 0]), 1,
+        'no destination is the reset: the terminator\'s one byte');
+    assert.deepEqual(errno, [42], 'EILSEQ');
+});
+
+test('mbsrtowcs and wcsrtombs move the caller\'s pointer, a quadword in a 64-bit process', ()=>{
+    for (const pointerSize of [4, 8])
+    {
+        const memory = fakeMemory();
+        const table = /** @type {Record<string, any>} */ (
+            createWideFunctions({ ...memory, pointerSize }));
+        const source = memory.put('abcd');
+        const from = memory.allocate(8);
+        const view = new DataView(memory.bytes.buffer);
+        const setFrom = (/** @type {number} */ value)=>{
+            view.setUint32(from, value, true);
+            view.setUint32(from + 4, pointerSize === 8 ? 0 : 0xaaaaaaaa, true);
+        };
+        const wide = memory.allocate(16);
+
+        setFrom(source);
+        assert.equal(table.mbsrtowcs.handler([0, from, 0, 0]), 4, 'no destination counts all');
+        assert.equal(view.getUint32(from, true), source, 'and moves nothing');
+        assert.equal(table.mbsrtowcs.handler([wide, from, 2, 0]), 2);
+        assert.equal(memory.wide(wide, 2), 'ab');
+        assert.equal(view.getUint32(from, true), source + 2, 'past what it converted');
+        assert.equal(table.mbsrtowcs.handler([wide, from, 8, 0]), 2, 'the rest');
+        assert.equal(memory.wide(wide, 2), 'cd');
+        assert.equal(view.getUint16(wide + 4, true), 0, 'terminated');
+        assert.equal(view.getUint32(from, true), 0, 'the pointer null at the end');
+        assert.equal(view.getUint32(from + 4, true), pointerSize === 8 ? 0 : 0xaaaaaaaa,
+            `a ${pointerSize}-byte pointer written, and nothing past it`);
+
+        const text = memory.putWide('xyz');
+        setFrom(text);
+        const narrow = memory.allocate(8);
+        assert.equal(table.wcsrtombs.handler([narrow, from, 2, 0]), 2);
+        assert.equal(view.getUint32(from, true), text + 4);
+        assert.equal(table.wcsrtombs.handler([narrow + 2, from, 8, 0]), 1);
+        assert.equal(memory.text(narrow), 'xyz');
+        assert.equal(view.getUint32(from, true), 0);
+    }
+});
+
 test('the multi-byte names a page cannot change are bound to the byte functions themselves',
     ()=>{
         const memory = fakeMemory();

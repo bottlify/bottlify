@@ -111,6 +111,24 @@ test('_aligned_malloc answers a multiple of any power of two, and refuses anythi
     assert.deepEqual([table._aligned_malloc.argBytes, table._aligned_free.argBytes], [8, 4]);
 });
 
+test('_aligned_realloc moves the contents to a block aligned anew, and frees the old', ()=>{
+    const { memory, allocator, table } = build();
+    const block = table._aligned_malloc.handler([8, 16]);
+    memory.writeMemory(block, Uint8Array.of(1, 2, 3, 4, 5, 6, 7, 8));
+    const base = memory.u32(block - 4);
+    const grown = table._aligned_realloc.handler([block, 64, 32]);
+    assert.notEqual(grown, 0);
+    assert.equal(grown % 32, 0);
+    assert.deepEqual([...memory.bytes.subarray(grown, grown + 8)], [1, 2, 3, 4, 5, 6, 7, 8]);
+    assert.equal(allocator.block(base), null, 'the old block is freed');
+    const shrunk = table._aligned_realloc.handler([grown, 4, 16]);
+    assert.deepEqual([...memory.bytes.subarray(shrunk, shrunk + 4)], [1, 2, 3, 4]);
+    assert.equal(table._aligned_realloc.handler([shrunk, 0, 16]), 0, 'a size of zero frees');
+    const fresh = table._aligned_realloc.handler([0, 16, 64]);
+    assert.equal(fresh % 64, 0, 'no block is _aligned_malloc');
+    assert.equal(table._aligned_realloc.argBytes, 12);
+});
+
 test('malloc answers a distinct address and _msize remembers the request', ()=>{
     const { table } = build();
     const first = table.malloc.handler([16]);

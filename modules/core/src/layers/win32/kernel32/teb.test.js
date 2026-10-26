@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     createProcessBlocks, TEB, PEB, PARAMS, LDR_DATA, LDR_ENTRY, END_OF_EXCEPTION_LIST, TLS_SLOTS,
+    TEB64, PEB64, PARAMS64, LDR_DATA64, LDR_ENTRY64,
 } from './teb.js';
 import { WINDOWS_VERSIONS } from './versions.js';
 
@@ -503,3 +504,132 @@ test('addModule joins a library LoadLibrary mapped after the process started', (
     assert.equal(readUnicodeString(memory, loadOrder[1] + LDR_ENTRY.BASE_DLL_NAME), 'winmm.dll');
     assert.equal(memory.view.getUint32(loadOrder[1] + LDR_ENTRY.SIZE_OF_IMAGE, true), 0x2000);
 });
+
+/**
+ * A quadword field of a 64-bit block, as a number: its high half must be
+ * zero, every address lying below 4 GiB.
+ *
+ * @param {any} memory @param {number} at
+ */
+const quad = (memory, at)=>{
+    assert.equal(memory.view.getUint32(at + 4, true), 0, `the high half at 0x${at.toString(16)}`);
+    return memory.view.getUint32(at, true);
+};
+
+test('a 64-bit thread block is laid out as GS reaches it, its pointers quadwords', ()=>{
+    // Compiled code reads gs:[0x30] for the block, gs:[0x58] for the
+    // thread-local array, gs:[0x60] for the process block and gs:[0x10] for
+    // the stack limit a probe compares against: the 32-bit offsets there
+    // are other fields, or the middle of one.
+    const memory = guest();
+    memory.bytes.fill(0xcc);
+    const blocks = build(memory, { pointerSize: 8 });
+    const { teb, tls } = blocks.createThreadBlock({ id: 7, stackBase: 0x300000,
+        stackLimit: 0x2f0000, locals: [{ slot: 3, template: Uint8Array.of(1, 2, 3), size: 8 }] });
+
+    assert.deepEqual([TEB64.STACK_BASE, TEB64.STACK_LIMIT, TEB64.SELF, TEB64.PROCESS_ID,
+        TEB64.THREAD_ID, TEB64.TLS_POINTER, TEB64.PEB, TEB64.LAST_ERROR],
+    [0x08, 0x10, 0x30, 0x40, 0x48, 0x58, 0x60, 0x68]);
+    assert.equal(quad(memory, teb + TEB64.EXCEPTION_LIST), 0, 'no chain: handlers are in tables');
+    assert.equal(quad(memory, teb + TEB64.STACK_BASE), 0x300000);
+    assert.equal(quad(memory, teb + TEB64.STACK_LIMIT), 0x2f0000);
+    assert.equal(quad(memory, teb + TEB64.SELF), teb);
+    assert.equal(quad(memory, teb + TEB64.PROCESS_ID), 0x1234);
+    assert.equal(quad(memory, teb + TEB64.THREAD_ID), 7);
+    assert.equal(quad(memory, teb + TEB64.TLS_POINTER), tls);
+    assert.equal(quad(memory, teb + TEB64.PEB), blocks.peb);
+    // The array's slots are pointers too: the image's copy at slot 3, the
+    // others zero, in all their eight bytes.
+    const copy = quad(memory, tls + 3 * 8);
+    assert.deepEqual([...memory.bytes.subarray(copy, copy + 8)], [1, 2, 3, 0, 0, 0, 0, 0]);
+    assert.equal(quad(memory, tls + 2 * 8), 0);
+    assert.equal(quad(memory, tls + (TLS_SLOTS - 1) * 8), 0);
+
+    blocks.removeThreadLocal(3);
+    assert.equal(quad(memory, tls + 3 * 8), 0, 'a slot taken back reads zero, all of it');
+});
+
+test('a 64-bit process block holds its pointers and version where x64 code reads them', ()=>{
+    const memory = guest();
+    memory.bytes.fill(0xcc);
+    const { peb, params } = build(memory, {
+        pointerSize: 8, processHeap: 0x0c000000, processors: 4,
+        version: { major: 10, minor: 0, build: 19045, servicePackMajor: 3,
+            csdVersion: 'Service Pack 3' },
+        commandLine: '"C:\\App\\x.exe" one', standardHandles: { input: 0x10, output: 0x14,
+            error: 0x18 },
+    });
+    assert.equal(quad(memory, peb + PEB64.IMAGE_BASE_ADDRESS), 0x00400000);
+    assert.equal(quad(memory, peb + PEB64.PROCESS_PARAMETERS), params);
+    assert.equal(quad(memory, peb + PEB64.PROCESS_HEAP), 0x0c000000);
+    assert.equal(memory.view.getUint32(peb + PEB64.NUMBER_OF_PROCESSORS, true), 4);
+    assert.equal(memory.view.getUint32(peb + PEB64.OS_MAJOR_VERSION, true), 10);
+    assert.equal(memory.view.getUint32(peb + PEB64.OS_MINOR_VERSION, true), 0);
+    assert.equal(memory.view.getUint16(peb + PEB64.OS_BUILD_NUMBER, true), 19045);
+    assert.equal(memory.view.getUint32(peb + PEB64.OS_PLATFORM_ID, true), 2);
+    assert.equal(readUnicodeString64(memory, peb + PEB64.CSD_VERSION), 'Service Pack 3');
+    assert.ok(params >= peb + PEB64.SIZE, 'the parameters lie past the whole process block');
+
+    assert.equal(quad(memory, params + PARAMS64.STANDARD_INPUT), 0x10);
+    assert.equal(quad(memory, params + PARAMS64.STANDARD_OUTPUT), 0x14);
+    assert.equal(quad(memory, params + PARAMS64.STANDARD_ERROR), 0x18);
+    assert.equal(readUnicodeString64(memory, params + PARAMS64.COMMAND_LINE),
+        '"C:\\App\\x.exe" one');
+});
+
+test('a 64-bit module list links quadword pointers, walkable from the head', ()=>{
+    const memory = guest();
+    const modules = [
+        { name: 'kernel32.dll', base: 0x77000000, size: 0x80000, entryPoint: 0x77001000 },
+        { name: 'app.exe', base: 0x00400000, size: 0x10000, entryPoint: 0x00401000,
+            path: 'C:\\App\\app.exe' },
+    ];
+    const blocks = build(memory, { pointerSize: 8, modules });
+    const ldr = quad(memory, blocks.peb + PEB64.LDR);
+    assert.equal(memory.view.getUint32(ldr + LDR_DATA64.LENGTH, true), LDR_DATA64.SIZE);
+
+    for (const [list, link] of /** @type {const} */ ([
+        [LDR_DATA64.IN_LOAD_ORDER_MODULE_LIST, LDR_ENTRY64.IN_LOAD_ORDER_LINKS],
+        [LDR_DATA64.IN_MEMORY_ORDER_MODULE_LIST, LDR_ENTRY64.IN_MEMORY_ORDER_LINKS],
+        [LDR_DATA64.IN_INITIALIZATION_ORDER_MODULE_LIST, LDR_ENTRY64.IN_INITIALIZATION_ORDER_LINKS],
+    ]))
+    {
+        const head = ldr + list;
+        /** @type {number[]} */
+        const forward = [];
+        for (let at = quad(memory, head); at !== head; at = quad(memory, at))
+        {
+            forward.push(at - link);
+            assert.ok(forward.length <= modules.length, 'the list comes back to its head');
+        }
+        /** @type {number[]} */
+        const backward = [];
+        for (let at = quad(memory, head + 8); at !== head; at = quad(memory, at + 8))
+        {
+            backward.unshift(at - link);
+            assert.ok(backward.length <= modules.length);
+        }
+        assert.deepEqual(backward, forward, 'Blink, eight bytes on, walks it the other way');
+        forward.forEach((entry, index)=>{
+            assert.equal(quad(memory, entry + LDR_ENTRY64.DLL_BASE), modules[index].base);
+            assert.equal(quad(memory, entry + LDR_ENTRY64.ENTRY_POINT), modules[index].entryPoint);
+            assert.equal(memory.view.getUint32(entry + LDR_ENTRY64.SIZE_OF_IMAGE, true),
+                modules[index].size);
+            assert.equal(readUnicodeString64(memory, entry + LDR_ENTRY64.BASE_DLL_NAME),
+                modules[index].name);
+            assert.equal(readUnicodeString64(memory, entry + LDR_ENTRY64.FULL_DLL_NAME),
+                modules[index].path ?? modules[index].name);
+        });
+    }
+});
+
+/**
+ * A 64-bit UNICODE_STRING: the two counts, four bytes of padding, and the
+ * buffer's quadword pointer.
+ *
+ * @param {any} memory @param {number} descriptorAt
+ */
+function readUnicodeString64(memory, descriptorAt){
+    const length = memory.view.getUint16(descriptorAt, true);
+    return readWide(memory, quad(memory, descriptorAt + 8), length / 2);
+}

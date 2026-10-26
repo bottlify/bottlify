@@ -302,6 +302,50 @@ test('a float literal ending in a bare exponent gives back the exponent', ()=>{
     assert.equal(scanned?.end, 1);
 });
 
+test('_strtoi64 and _strtoui64 read 64 bits, clamping past them with ERANGE', ()=>{
+    const memory = fakeMemory();
+    /** @type {Record<string, number>} */
+    const registers = {};
+    /** @type {number[]} */
+    const errno = [];
+    const table = /** @type {Record<string, any>} */ (createConversionFunctions({ ...memory,
+        setRegisters: values=>Object.assign(registers, values),
+        errno: code=>void errno.push(code) }));
+    const end = memory.allocate(4);
+    /** @param {string} name @param {string} text @param {number} [base] */
+    const convert = (name, text, base = 10)=>{
+        const at = memory.put(text);
+        const low = table[name].handler([at, end, base]) >>> 0;
+        return [BigInt(registers.edx >>> 0) << 32n | BigInt(low),
+            new DataView(memory.bytes.buffer).getUint32(end, true) - at];
+    };
+    assert.deepEqual(convert('_strtoi64', ' 4294967301x'), [4294967301n, 11]);
+    assert.deepEqual(convert('_strtoi64', '-2'), [0xfffffffffffffffen, 2]);
+    assert.deepEqual(convert('_strtoi64', '0x7fffffffffffffff', 0), [0x7fffffffffffffffn, 18]);
+    assert.deepEqual(errno, []);
+    assert.deepEqual(convert('_strtoi64', '9223372036854775808'), [0x7fffffffffffffffn, 19]);
+    assert.deepEqual(convert('_strtoi64', '-9223372036854775809'), [0x8000000000000000n, 20]);
+    assert.deepEqual(convert('_strtoui64', '18446744073709551615'), [0xffffffffffffffffn, 20]);
+    assert.deepEqual(convert('_strtoui64', '-1'), [0xffffffffffffffffn, 2], 'negation wraps');
+    assert.deepEqual(convert('_strtoui64', '18446744073709551616'), [0xffffffffffffffffn, 20]);
+    assert.deepEqual(errno, [34, 34, 34], 'ERANGE for each past the range');
+    assert.deepEqual(convert('_strtoi64', 'x'), [0n, 0], 'nothing read: the start, and zero');
+});
+
+test('a 64-bit caller\'s end pointer is written whole, its high half zero', ()=>{
+    // `char *end` is a quadword there: four bytes written leave the high half
+    // of whatever the variable held, and the caller's next read faults.
+    const memory = fakeMemory();
+    const table = /** @type {Record<string, any>} */ (
+        createConversionFunctions({ ...memory, pointerSize: 8 }));
+    const end = memory.allocate(8);
+    const view = new DataView(memory.bytes.buffer);
+    view.setBigUint64(end, 0xccccccccccccccccn, true);
+    const at = memory.putWide('42x');
+    assert.equal(table.wcstol.handler([at, end, 10]), 42);
+    assert.equal(view.getBigUint64(end, true), BigInt(at + 4));
+});
+
 test('wcstol and wcstoul read any script\'s decimal digits, and Unicode\'s separators as space',
     ()=>{
         const memory = fakeMemory();

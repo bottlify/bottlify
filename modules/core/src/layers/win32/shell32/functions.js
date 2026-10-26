@@ -43,6 +43,7 @@ import { fileAttributes, msToFileTime } from '../kernel32/filetime.js';
 import { WIN32_FIND_DATAA } from '../kernel32/files.js';
 import { urlOfShortcut } from './internet-shortcut.js';
 import { charactersOf, readToTerminator } from '../common/scan-windows.js';
+import { pointerWidth } from '../common/pointers.js';
 
 /**
  * The exports a program imports from shell32 by number alone, by their XP
@@ -247,6 +248,8 @@ const CSIDL_FOLDERS = Object.freeze({
  *           The running program's path, what GetModuleFileName answers for
  *           it: CommandLineToArgvW's whole answer to an empty command line.
  * @property {(code: number) => void} [setLastError]
+ * @property {number} [pointerSize]  8 in a 64-bit process, whose arrays of
+ *           pointers CommandLineToArgvW lays out a quadword each; absent, 4.
  */
 
 /** @param {string} text @returns {Uint8Array} text in the ANSI page, with its terminator */
@@ -954,7 +957,8 @@ export function createShellFunctions(host){
                     'the program\'s path is not known: an empty line answers an empty argv[0]');
             }
             const args = text === '' ? [host.imagePath?.() ?? ''] : splitCommandLine(text);
-            const pointers = (args.length + 1) * 4;
+            const width = pointerWidth(host.pointerSize);
+            const pointers = (args.length + 1) * width.size;
             const size = args.reduce((total, arg)=>total + (arg.length + 1) * 2, pointers);
             const block = host.allocate?.(size) ?? 0;
             if (block === 0)
@@ -965,7 +969,7 @@ export function createShellFunctions(host){
             const view = new DataView(bytes.buffer);
             let at = pointers;
             args.forEach((arg, index)=>{
-                view.setUint32(index * 4, block + at, true);
+                width.set(view, index * width.size, block + at);
                 for (let unit = 0; unit < arg.length; unit++)
                 {
                     view.setUint16(at + unit * 2, arg.charCodeAt(unit), true);

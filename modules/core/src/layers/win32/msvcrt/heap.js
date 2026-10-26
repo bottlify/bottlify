@@ -211,6 +211,49 @@ export function createHeapFunctions(host){
         },
     };
 
+    /**
+     * `_aligned_malloc`'s block (below): the address malloc gave kept in the
+     * pointer just below the one handed out.
+     *
+     * @param {number[]} args
+     */
+    const alignedMalloc = ([size, alignment])=>{
+        const align = alignment >>> 0;
+        if ((align & (align - 1)) !== 0 || (size >>> 0) === 0)
+        {
+            host.errno?.(EINVAL);
+            return 0;
+        }
+        const step = Math.max(align, POINTER);
+        const bytes = (size >>> 0) + step + POINTER;
+        const base = bytes > 0xffffffff ? 0 : malloc(bytes);
+        if (base === 0)
+        {
+            host.errno?.(ENOMEM);
+            return 0;
+        }
+        const block = Math.ceil((base + POINTER) / step) * step;
+        const saved = new Uint8Array(POINTER);
+        new DataView(saved.buffer).setUint32(0, base, true);
+        host.writeMemory(block - POINTER, saved);
+        return block;
+    };
+
+    /** The malloc block an aligned one was carved from. @param {number} block */
+    const alignedBase = block=>{
+        const saved = host.readMemory((block >>> 0) - POINTER, POINTER);
+        return new DataView(saved.buffer, saved.byteOffset, POINTER).getUint32(0, true);
+    };
+
+    /** @param {number[]} args */
+    const alignedFree = ([block])=>{
+        if ((block >>> 0) !== 0)
+        {
+            host.free(alignedBase(block));
+        }
+        return 0;
+    };
+
     const table = {
         /** void *malloc(size_t size) */
         malloc: allocator,
@@ -328,43 +371,48 @@ export function createHeapFunctions(host){
         _aligned_malloc: {
             convention: 'cdecl',
             argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([size, alignment])=>{
-                const align = alignment >>> 0;
-                if ((align & (align - 1)) !== 0 || (size >>> 0) === 0)
-                {
-                    host.errno?.(EINVAL);
-                    return 0;
-                }
-                const step = Math.max(align, POINTER);
-                const bytes = (size >>> 0) + step + POINTER;
-                const base = bytes > 0xffffffff ? 0 : malloc(bytes);
-                if (base === 0)
-                {
-                    host.errno?.(ENOMEM);
-                    return 0;
-                }
-                const block = Math.ceil((base + POINTER) / step) * step;
-                const saved = new Uint8Array(POINTER);
-                new DataView(saved.buffer).setUint32(0, base, true);
-                host.writeMemory(block - POINTER, saved);
-                return block;
-            },
+            handler: alignedMalloc,
         },
 
         /** void _aligned_free(void *block) -- NULL does nothing. */
         _aligned_free: {
             convention: 'cdecl',
             argBytes: 4,
+            handler: alignedFree,
+        },
+
+        /**
+         * void *_aligned_realloc(void *block, size_t size, size_t alignment)
+         *
+         * A new aligned block holding as much of the old one as fits, the old
+         * one freed: no block is _aligned_malloc, a size of zero frees and
+         * answers NULL. A failure leaves the old block as it was.
+         */
+        _aligned_realloc: {
+            convention: 'cdecl',
+            argBytes: 12,
             /** @param {number[]} args */
-            handler: ([block])=>{
-                if ((block >>> 0) !== 0)
+            handler: ([block, size, alignment])=>{
+                if ((block >>> 0) === 0)
                 {
-                    const saved = host.readMemory((block >>> 0) - POINTER, POINTER);
-                    host.free(new DataView(saved.buffer, saved.byteOffset, POINTER)
-                        .getUint32(0, true));
+                    return alignedMalloc([size, alignment]);
                 }
-                return 0;
+                if ((size >>> 0) === 0)
+                {
+                    alignedFree([block]);
+                    return 0;
+                }
+                const moved = alignedMalloc([size, alignment]);
+                if (moved === 0)
+                {
+                    return 0;
+                }
+                const base = alignedBase(block);
+                const held = (host.block(base)?.size ?? 0) - ((block >>> 0) - base);
+                const kept = Math.max(0, Math.min(held, size >>> 0));
+                host.writeMemory(moved, host.readMemory(block >>> 0, kept).slice());
+                alignedFree([block]);
+                return moved;
             },
         },
 

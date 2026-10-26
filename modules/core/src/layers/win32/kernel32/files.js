@@ -2588,6 +2588,7 @@ export function createFileFunctions(host){
          */
         SetFilePointerEx: {
             argBytes: 20,
+            quadwords: [1],
             /** @param {number[]} args */
             handler: ([handle, distanceLow, distanceHigh, newPointer, method])=>{
                 const file = object(handle, 'file');

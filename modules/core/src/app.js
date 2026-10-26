@@ -35,7 +35,7 @@ import { readTls } from './layers/loader/internal/tls.js';
 import { jumpBytes, relocatablePrefix } from './layers/loader/internal/hooks.js';
 import { mangledCall } from './layers/loader/internal/mangling.js';
 import { mapImage } from './layers/loader/internal/image.js';
-import { createProcessBlocks, TEB } from './layers/win32/kernel32/teb.js';
+import { createProcessBlocks, TEB, TEB64 } from './layers/win32/kernel32/teb.js';
 import { SHARED_USER_DATA, createSharedUserData } from './layers/win32/kernel32/shared-data.js';
 import { supportedOsOf, windowsVersion } from './layers/win32/kernel32/versions.js';
 import { GRAPHICS_CHOICES, graphicsChoice } from './layers/graphics/choice.js';
@@ -4380,7 +4380,7 @@ async function buildApp(options){
             lastError: ()=>(win32Api ??= core.api('win32')).lastError(),
             // Where the reader above finds it for a thread with a block,
             // read there directly.
-            lastErrorOffset: TEB.LAST_ERROR,
+            lastErrorOffset: (long ? TEB64 : TEB).LAST_ERROR,
             // Costly and off unless asked for; see the dispatcher.
             traceStrings: options.traceStrings ?? false,
             callPhases: options.profileCalls ?? false,
@@ -5494,7 +5494,7 @@ async function buildApp(options){
         // program first loads it -- which is how a library the program did not
         // import announces itself to the one that asked for it.
         const placed = loader.synthesise({
-            name, base, exports, entryPoint: 'DllMain' in table ? 'DllMain' : undefined,
+            name, base, exports, entryPoint: 'DllMain' in table ? 'DllMain' : undefined, long,
         });
         systemModulesEnd = base + Math.ceil(placed.size / LIBRARY_ALIGN) * LIBRARY_ALIGN;
 
@@ -6850,10 +6850,13 @@ async function buildApp(options){
     // exports assume. It is guest code because the calls belong on a guest
     // stack; the stub's last instruction enters the program.
     const kernel32 = findModule('kernel32');
-    // RTL_CRITICAL_SECTION, free: LockCount -1 and nothing else.
-    loaderLock = allocateFromHeap(24);
-    memory.writeBytes(loaderLock, new Uint8Array(24));
-    memory.writeU32(loaderLock + 4, 0xffffffff);
+    // RTL_CRITICAL_SECTION, free: LockCount -1 and nothing else. Its first
+    // field is a pointer, so the count is past eight bytes in a 64-bit
+    // process, and the whole is 40 bytes there.
+    const pointerSize = long ? 8 : 4;
+    loaderLock = allocateFromHeap(long ? 40 : 24);
+    memory.writeBytes(loaderLock, new Uint8Array(long ? 40 : 24));
+    memory.writeU32(loaderLock + pointerSize, 0xffffffff);
     const enter = kernel32?.addressOf('EnterCriticalSection') ?? 0;
     const leave = kernel32?.addressOf('LeaveCriticalSection') ?? 0;
     const startup = synthesiseProcessInit({
@@ -6864,6 +6867,7 @@ async function buildApp(options){
             set: kernel32.addressOf('TlsSetValue') ?? 0,
         },
         ...enter !== 0 && leave !== 0 ? { loaderLock: { address: loaderLock, enter, leave } } : {},
+        long,
     });
     startupImages = [mainModule, ...shipped];
     for (const name of startup.attached)
@@ -6898,6 +6902,8 @@ async function buildApp(options){
     // on with a null.
     const process = createProcessBlocks({
         allocate: allocateFromHeap,
+        // GS's blocks in a 64-bit process, with its pointers a quadword each.
+        pointerSize,
         // A thread's blocks from the allocator everything the host hands the
         // guest comes from, which takes them back when the thread is gone;
         // the startup span never does. Aligned for the thread-local blocks

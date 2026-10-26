@@ -140,6 +140,7 @@ const KERNEL32_ALIASES = Object.freeze({
  *           unloads a hive from. Absent, NtUnloadKey stays unexported.
  * @property {import('../kernel32/processor.js').Processors} [processors]
  *           The process's processors, kernel32's own. Absent, one.
+ * @property {number} [pointerSize]  8 in a 64-bit process; absent, 4.
  */
 
 /**
@@ -326,6 +327,7 @@ export function createNtdllFunctions(host){
             divergence: host.divergence,
             processes: host.processes,
             processors: host.processors,
+            pointerSize: host.pointerSize,
         }),
 
         ...(host.setRegisters

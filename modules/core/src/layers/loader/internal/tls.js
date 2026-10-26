@@ -24,7 +24,8 @@
  * through its own startup and fails later somewhere unrelated.
  *
  * Everything is reported as an RVA. The four addresses are stored as virtual
- * addresses against the image's preferred base -- the usual defect is reading
+ * addresses against the image's preferred base -- quadwords in a PE32+ image,
+ * dwords in a PE32 one -- the usual defect is reading
  * them as RVAs and landing a whole structure somewhere plausible and wrong --
  * so they are converted once, here, and the caller adds the base it actually
  * mapped at, exactly as it does with every other address in this tree.
@@ -94,13 +95,19 @@ export function readTls(bytes, image){
     /** A stored virtual address, as the RVA everything else here speaks in. */
     const toRva = (/** @type {number} */ va)=>va === 0 ? 0 : va - image.imageBase >>> 0;
     const at = fileOffset(directory.address);
+    // IMAGE_TLS_DIRECTORY64 widens the four addresses to quadwords; the two
+    // dwords after them move with them.
+    const size = image.bits === 64 ? 8 : 4;
+    /** @param {number} offset */
+    const address = offset=>(size === 8 ? Number(view.getBigUint64(offset, true))
+        : view.getUint32(offset, true));
 
-    const startRva = toRva(view.getUint32(at, true));
-    const endRva = toRva(view.getUint32(at + 4, true));
-    const indexRva = toRva(view.getUint32(at + 8, true));
-    const callbacksRva = toRva(view.getUint32(at + 12, true));
-    const zeroFillSize = view.getUint32(at + 16, true);
-    const characteristics = view.getUint32(at + 20, true);
+    const startRva = toRva(address(at));
+    const endRva = toRva(address(at + size));
+    const indexRva = toRva(address(at + 2 * size));
+    const callbacksRva = toRva(address(at + 3 * size));
+    const zeroFillSize = view.getUint32(at + 4 * size, true);
+    const characteristics = view.getUint32(at + 4 * size + 4, true);
 
     const templateSize = endRva > startRva ? endRva - startRva : 0;
 
@@ -114,11 +121,12 @@ export function readTls(bytes, image){
     const callbackRvas = [];
     if (callbacksRva !== 0)
     {
-        const table = mappedBytes(bytes, image, callbacksRva, MAX_CALLBACKS * 4);
+        const table = mappedBytes(bytes, image, callbacksRva, MAX_CALLBACKS * size);
         const entries = new DataView(table.buffer);
         for (let index = 0; index < MAX_CALLBACKS; index++)
         {
-            const callback = entries.getUint32(index * 4, true);
+            const callback = size === 8 ? Number(entries.getBigUint64(index * 8, true))
+                : entries.getUint32(index * 4, true);
             if (callback === 0)
             {
                 break;

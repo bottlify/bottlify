@@ -191,6 +191,7 @@ export function createUcrtbaseFunctions(crt, host){
         __stdio_common_vfprintf: {
             convention: 'cdecl',
             argBytes: 24,
+            quadwords: [0],
             /** @param {number[]} args */
             handler: ([, , stream, format, , list])=>crt.vfprintf.handler([stream, format, list]),
         },
@@ -199,6 +200,7 @@ export function createUcrtbaseFunctions(crt, host){
         __stdio_common_vfwprintf: {
             convention: 'cdecl',
             argBytes: 24,
+            quadwords: [0],
             /** @param {number[]} args */
             handler: ([, , stream, format, , list])=>crt.vfwprintf.handler([stream, format, list]),
         },
@@ -213,6 +215,7 @@ export function createUcrtbaseFunctions(crt, host){
         __stdio_common_vsprintf: {
             convention: 'cdecl',
             argBytes: 28,
+            quadwords: [0],
             /** @param {number[]} args */
             handler: ([options, , buffer, count, format, , list])=>
                 narrowCounted(options, buffer, count, format, list),
@@ -222,6 +225,7 @@ export function createUcrtbaseFunctions(crt, host){
         __stdio_common_vswprintf: {
             convention: 'cdecl',
             argBytes: 28,
+            quadwords: [0],
             /** @param {number[]} args */
             handler: ([options, , buffer, count, format, , list])=>
                 wideCounted(options, buffer, count, format, list),
@@ -234,6 +238,7 @@ export function createUcrtbaseFunctions(crt, host){
         __stdio_common_vsprintf_s: {
             convention: 'cdecl',
             argBytes: 28,
+            quadwords: [0],
             /** @param {number[]} args */
             handler: ([, , buffer, size, format, , list])=>
                 crt.vsprintf_s.handler([buffer, size, format, list]),
@@ -247,6 +252,7 @@ export function createUcrtbaseFunctions(crt, host){
         __stdio_common_vsnprintf_s: {
             convention: 'cdecl',
             argBytes: 32,
+            quadwords: [0],
             /** @param {number[]} args */
             handler: ([, , buffer, size, count, format, , list])=>
                 crt._vsnprintf_s.handler([buffer, size, count, format, list]),
@@ -262,6 +268,7 @@ export function createUcrtbaseFunctions(crt, host){
         __stdio_common_vsscanf: {
             convention: 'cdecl',
             argBytes: 28,
+            quadwords: [0],
             /** @param {number[]} args */
             handler: ([options, , buffer, count, format, , list])=>{
                 const pointers = pointersAt(list);
@@ -281,6 +288,7 @@ export function createUcrtbaseFunctions(crt, host){
         __stdio_common_vfscanf: {
             convention: 'cdecl',
             argBytes: 24,
+            quadwords: [0],
             /** @param {number[]} args */
             handler: ([, , stream, format, , list])=>
                 crt.fscanf.handler([stream, format, ...pointersAt(list)]),

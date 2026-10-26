@@ -84,9 +84,15 @@ const u32 = value=>[
  *        than being told of one whose DLL_PROCESS_ATTACH has not run: "new
  *        threads can be created, but they do not begin execution until DLL
  *        initialization is done for the process".
+ * @param {boolean} [options.long]  The process is an x86-64 one: the same
+ *        calls in x86-64 code and the x64 convention (`longProcessInit`).
  * @returns {{ bytes: Uint8Array, attached: string[], tlsImages: number }}
  */
-export function synthesiseProcessInit({ libraries, entryPoint, tlsApi, loaderLock }){
+export function synthesiseProcessInit({ libraries, entryPoint, tlsApi, loaderLock, long = false }){
+    if (long)
+    {
+        return longProcessInit({ libraries, entryPoint, tlsApi, loaderLock });
+    }
     /** @type {number[]} */
     const code = [];
     /** @type {string[]} */
@@ -158,5 +164,82 @@ export function synthesiseProcessInit({ libraries, entryPoint, tlsApi, loaderLoc
         0xff, 0xe0, //               jmp eax
     );
 
+    return { bytes: new Uint8Array(code), attached, tlsImages };
+}
+
+/**
+ * The same start-up as `synthesiseProcessInit`'s, for an x86-64 process: the
+ * first four arguments in RCX, RDX, R8 and R9, 32 bytes of home space above
+ * the return address for the callee to spill them into, and RSP a multiple of
+ * 16 at every call. The thread enters here as a function is entered, eight
+ * past a multiple of 16, so 40 bytes below that are both; the program's entry
+ * point is jumped to with RSP as it came, as though the thread had started
+ * there. Every address lies below 4 GiB, so a 32-bit move zero-extends it
+ * whole.
+ *
+ * @param {Object} options
+ * @param {{ base: number, entryPoint: number, name: string, tls?: TlsSetup }[]}
+ *        options.libraries
+ * @param {number} options.entryPoint
+ * @param {{ alloc: number, set: number }} [options.tlsApi]
+ * @param {{ address: number, enter: number, leave: number }} [options.loaderLock]
+ * @returns {{ bytes: Uint8Array, attached: string[], tlsImages: number }}
+ */
+function longProcessInit({ libraries, entryPoint, tlsApi, loaderLock }){
+    /** @type {number[]} */
+    const code = [0x48, 0x83, 0xec, 0x28]; //  sub rsp, 40
+    /** @type {string[]} */
+    const attached = [];
+    let tlsImages = 0;
+    /** @param {number} routine */
+    const call = routine=>[
+        0xb8, ...u32(routine), //               mov eax, routine
+        0xff, 0xd0, //                          call rax
+    ];
+    /** DllMain's three arguments, and the call. @param {number} base @param {number} routine */
+    const attach = (base, routine)=>[
+        0xb9, ...u32(base), //                  mov ecx, hinstDLL
+        0xba, ...u32(DLL_PROCESS_ATTACH), //    mov edx, fdwReason
+        0x41, 0xb8, ...u32(LOADED_STATICALLY), // mov r8d, lpvReserved
+        ...call(routine),
+    ];
+    /** @param {number} routine */
+    const locked = routine=>(loaderLock
+        ? [0xb9, ...u32(loaderLock.address), ...call(routine)] // mov ecx, lock
+        : []);
+    code.push(...locked(loaderLock?.enter ?? 0));
+
+    for (const library of libraries)
+    {
+        if (library.tls && tlsApi)
+        {
+            code.push(
+                ...call(tlsApi.alloc), //                    eax = slot
+                0xb9, ...u32(library.tls.indexAddress), //   mov ecx, index
+                0x89, 0x01, //                               mov [rcx], eax
+                0x89, 0xc1, //                               mov ecx, eax
+                0xba, ...u32(library.tls.blockAddress), //   mov edx, block
+                ...call(tlsApi.set),
+            );
+            for (const callback of library.tls.callbacks)
+            {
+                code.push(...attach(library.base, callback));
+            }
+            tlsImages++;
+        }
+        if (!library.entryPoint || library.entryPoint === library.base)
+        {
+            continue;
+        }
+        code.push(...attach(library.base, library.entryPoint));
+        attached.push(library.name);
+    }
+
+    code.push(
+        ...locked(loaderLock?.leave ?? 0),
+        0x48, 0x83, 0xc4, 0x28, //              add rsp, 40
+        0xb8, ...u32(entryPoint), //            mov eax, entry
+        0xff, 0xe0, //                          jmp rax
+    );
     return { bytes: new Uint8Array(code), attached, tlsImages };
 }

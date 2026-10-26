@@ -21,6 +21,7 @@
  */
 
 import { encodeAnsi } from '../kernel32/locale.js';
+import { pointerWidth } from '../common/pointers.js';
 
 const MAX_STRING = 1 << 20;
 
@@ -36,7 +37,7 @@ const LCMAP_UPPERCASE = 0x00000200;
 const LCMAP_SORTKEY = 0x00000400;
 
 /** `struct lconv`: ten string pointers, then eight chars. */
-const LCONV = Object.freeze({ STRINGS: 10, CHARS: 8, SIZE: 48 });
+const LCONV = Object.freeze({ STRINGS: 10, CHARS: 8 });
 
 /** What a C locale's lconv says of a value it does not have. */
 const CHAR_MAX = 127;
@@ -52,6 +53,8 @@ const CATEGORIES = 6;
  * @property {(bytes: number) => number} allocate
  * @property {() => any} [currentThread]  Who holds a lock. Absent, one thread.
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {number} [pointerSize]  8 in a 64-bit process, whose lconv's
+ *           strings are quadword pointers; absent, 4.
  */
 
 /** @param {number} value @returns {Uint8Array} */
@@ -70,6 +73,10 @@ const upper = byte=>(byte >= 0x61 && byte <= 0x7a ? byte - 0x20 : byte);
  * @param {LocaleHost} host
  */
 export function createLocaleFunctions(host){
+    const width = pointerWidth(host.pointerSize);
+    // The pointers first, so the chars after them move with their width:
+    // 48 bytes in a 32-bit process, 88 in a 64-bit one.
+    const lconvSize = LCONV.STRINGS * width.size + LCONV.CHARS;
     /**
      * A string's bytes as these wrappers count them: a count of -1 is to the
      * terminator -- which a mapping writes too and a comparison does not
@@ -96,36 +103,82 @@ export function createLocaleFunctions(host){
         {
             return conventions;
         }
-        const block = host.allocate(LCONV.SIZE + 3);
+        const block = host.allocate(lconvSize + 3);
         if (block === 0)
         {
             return 0;
         }
-        const point = block + LCONV.SIZE;
+        const point = block + lconvSize;
         const empty = point + 2;
-        const bytes = new Uint8Array(LCONV.SIZE + 3);
+        const bytes = new Uint8Array(lconvSize + 3);
         const view = new DataView(bytes.buffer);
         for (let at = 0; at < LCONV.STRINGS; at++)
         {
-            view.setUint32(at * 4, at === 0 ? point : empty, true);
+            width.set(view, at * width.size, at === 0 ? point : empty);
         }
-        bytes.fill(CHAR_MAX, LCONV.STRINGS * 4, LCONV.SIZE);
-        bytes.set([0x2e, 0, 0], LCONV.SIZE);
+        bytes.fill(CHAR_MAX, LCONV.STRINGS * width.size, lconvSize);
+        bytes.set([0x2e, 0, 0], lconvSize);
         host.writeMemory(block, bytes);
         conventions = block;
         return block;
     };
 
     /**
-     * The runtime's locks by number: recursive, as the critical sections
-     * behind them are, and handed to the first waiter when released.
+     * The runtime's locks by number, and each stream's by its FILE's address
+     * (`file 0x...`): recursive, as the critical sections behind them are,
+     * and handed to the first waiter when released.
      *
-     * @type {Map<number, { owner: any, depth: number,
+     * @type {Map<number | string, { owner: any, depth: number,
      *                      waiters: { thread: any, resume: (value: number) => void }[] }>}
      */
     const locks = new Map();
     const ONE_THREAD = {};
     const caller = ()=>host.currentThread?.() ?? ONE_THREAD;
+
+    /**
+     * Takes a lock for the calling thread: again by its owner, it counts;
+     * held by another, the caller waits for it.
+     *
+     * @param {number | string} key
+     * @returns {number | Promise<number>}
+     */
+    const take = key=>{
+        const thread = caller();
+        const lock = locks.get(key);
+        if (!lock || lock.owner === null)
+        {
+            locks.set(key, { owner: thread, depth: 1, waiters: lock?.waiters ?? [] });
+            return 0;
+        }
+        if (lock.owner === thread)
+        {
+            lock.depth++;
+            return 0;
+        }
+        return new Promise(resume=>lock.waiters.push({ thread, resume }));
+    };
+
+    /**
+     * Released when its owner has unlocked it as often as it locked it,
+     * straight to the first thread waiting. A release by a thread that does
+     * not hold it changes nothing.
+     *
+     * @param {number | string} key
+     */
+    const release = key=>{
+        const lock = locks.get(key);
+        if (!lock || lock.owner !== caller() || --lock.depth > 0)
+        {
+            return 0;
+        }
+        const next = lock.waiters.shift();
+        lock.owner = next ? next.thread : null;
+        lock.depth = next ? 1 : 0;
+        next?.resume(0);
+        return 0;
+    };
+    /** @param {number} file */
+    const fileLock = file=>`file 0x${(file >>> 0).toString(16)}`;
 
     return {
         /**
@@ -255,22 +308,7 @@ export function createLocaleFunctions(host){
             convention: 'cdecl',
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([number])=>{
-                const thread = caller();
-                const lock = locks.get(number | 0);
-                if (!lock || lock.owner === null)
-                {
-                    locks.set(number | 0,
-                        { owner: thread, depth: 1, waiters: lock?.waiters ?? [] });
-                    return 0;
-                }
-                if (lock.owner === thread)
-                {
-                    lock.depth++;
-                    return 0;
-                }
-                return new Promise(resume=>lock.waiters.push({ thread, resume }));
-            },
+            handler: ([number])=>take(number | 0),
         },
 
         /**
@@ -284,18 +322,52 @@ export function createLocaleFunctions(host){
             convention: 'cdecl',
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([number])=>{
-                const lock = locks.get(number | 0);
-                if (!lock || lock.owner !== caller() || --lock.depth > 0)
-                {
-                    return 0;
-                }
-                const next = lock.waiters.shift();
-                lock.owner = next ? next.thread : null;
-                lock.depth = next ? 1 : 0;
-                next?.resume(0);
-                return 0;
-            },
+            handler: ([number])=>release(number | 0),
         },
+
+        /**
+         * void _lock_file(FILE *stream) / void _unlock_file(FILE *stream)
+         *
+         * The stream's own lock, which a program takes around several calls
+         * on one stream so that another thread's do not come between them:
+         * recursive, and waited for when another thread holds it, as `_lock`.
+         */
+        _lock_file: {
+            convention: 'cdecl',
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([file])=>take(fileLock(file)),
+        },
+        _unlock_file: {
+            convention: 'cdecl',
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([file])=>release(fileLock(file)),
+        },
+
+        /**
+         * UINT ___lc_codepage_func(void)
+         *
+         * The locale's code page, `__lc_codepage` read through a call: the C
+         * locale's zero. MinGW's own multibyte conversions ask it, and convert
+         * byte for byte when it answers zero.
+         */
+        ___lc_codepage_func: { convention: 'cdecl', argBytes: 0, handler: ()=>0 },
+
+        /**
+         * int ___mb_cur_max_func(void)
+         *
+         * The longest multibyte character, `__mb_cur_max` read through a call:
+         * one, in the C locale.
+         */
+        ___mb_cur_max_func: { convention: 'cdecl', argBytes: 0, handler: ()=>1 },
+
+        /**
+         * int __lconv_init(void)
+         *
+         * Called by a start-up to set up `localeconv`'s structure, which is
+         * made here when it is first asked for: nothing to do, and zero.
+         */
+        __lconv_init: { convention: 'cdecl', argBytes: 0, handler: ()=>0 },
     };
 }

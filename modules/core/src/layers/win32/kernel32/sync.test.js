@@ -505,6 +505,23 @@ test('waiting for any one of them reports which one, as an offset from the base'
         WAIT_OBJECT_0 + 1, 'the second one, which is what makes it a base');
 });
 
+test('a 64-bit caller\'s handle array holds a quadword a handle', ()=>{
+    // HANDLE is a pointer: read four bytes apart, the second handle of the set
+    // was the first's high half -- zero, an invalid handle, and the whole
+    // wait failed.
+    const host = fakeHost();
+    const fns = createSyncFunctions({ ...host, pointerSize: 8 });
+    host.register(0x10, 'event', host.kernel.createEvent({ signalled: false }));
+    host.register(0x14, 'event', host.kernel.createEvent({ signalled: true }));
+
+    const array = 0x400;
+    const view = new DataView(host.bytes.buffer);
+    view.setBigUint64(array, 0x10n, true);
+    view.setBigUint64(array + 8, 0x14n, true);
+
+    assert.equal(fns.WaitForMultipleObjects.handler([2, array, 0, INFINITE]), WAIT_OBJECT_0 + 1);
+});
+
 test('a zero timeout that finds nothing ready times out instead of blocking', ()=>{
     const host = fakeHost();
     const fns = createSyncFunctions(host);
@@ -688,6 +705,31 @@ test('SetThreadAffinityMask records the mask and answers the one before', ()=>{
     assert.deepEqual(host.errors, [87, 87, 6], 'ERROR_INVALID_PARAMETER, then _HANDLE');
     assert.equal(host.threads.second.affinityMask, 1, 'nothing changed by a refusal');
 });
+
+test('GetThreadGroupAffinity answers the thread\'s mask in group zero, the mask a pointer wide',
+    ()=>{
+        for (const pointerSize of [4, 8])
+        {
+            const host = fakeHost();
+            /** @type {any} */ (host.kernel).processors = ()=>4;
+            const fns = createSyncFunctions({ ...host, pointerSize });
+            host.register(0x20, 'thread', host.threads.second);
+            assert.equal(fns.SetThreadAffinityMask.handler([0x20, 6]), 0xf);
+            const out = 0x500;
+            host.bytes.fill(0xcc, out, out + 32);
+            assert.equal(fns.GetThreadGroupAffinity.handler([0x20, out]), 1);
+            const view = new DataView(host.bytes.buffer);
+            assert.equal(view.getUint32(out, true), 6, 'the mask');
+            if (pointerSize === 8)
+            {
+                assert.equal(view.getUint32(out + 4, true), 0, 'all eight bytes of it');
+            }
+            assert.deepEqual([...host.bytes.subarray(out + pointerSize, out + pointerSize + 8)],
+                new Array(8).fill(0), 'group zero, the reserved words zero');
+            assert.equal(host.bytes[out + pointerSize + 8], 0xcc, 'and nothing past them');
+            assert.equal(fns.GetThreadGroupAffinity.handler([0x1234, out]), 0, 'not a thread');
+        }
+    });
 
 test('on four processors a thread is kept to the ones its mask names, within its process\'s',
     ()=>{

@@ -448,6 +448,10 @@ export function createBridgeModule(){
                  *     Whether the function can set the thread's last error, which
                  *     the trace reads after each call that can. A COM method
                  *     cannot, and says so.
+                 * @param {number[]} [fn.quadwords]
+                 *     Where an argument counted as two dwords begins, which an
+                 *     x86-64 caller passes in one slot (the dispatcher's
+                 *     `readLongCall`).
                  * @returns {number} the guest address that calls it, or 0 once
                  *     this instance is disposed -- there is no guest left to place
                  *     one in.
@@ -456,7 +460,7 @@ export function createBridgeModule(){
                     name,
                     {
                         convention = Convention.STDCALL, argBytes, handler,
-                        preserveResult = false, lastError = true,
+                        preserveResult = false, lastError = true, quadwords,
                     })
                 {
                     if (convention === Convention.FASTCALL)
@@ -475,10 +479,42 @@ export function createBridgeModule(){
                     state.callbacks.reserve();
                     const { id, address } = cpu.registerTrap(
                         name, calleeCleanup(convention, argBytes), { preserveResult });
-                    state.dispatcher.register(id,
-                        { name, convention, argBytes, handler, lastError });
+                    state.dispatcher.register(id, { name, convention, argBytes, handler, lastError,
+                        ...quadwords ? { quadwords } : {} });
                     state.dispatcher.placed(address, name);
                     return address;
+                },
+
+                /**
+                 * The high half of a quadword the handler running now answers:
+                 * EDX for a 32-bit caller, RAX's upper half for a 64-bit one,
+                 * where the handler cannot reach it itself -- the bridge writes
+                 * RAX whole once the handler is done.
+                 *
+                 * @param {number} value
+                 */
+                answerHigh(value){
+                    if (cpu.bits?.() === 64)
+                    {
+                        state.dispatcher.answerHigh(value);
+                        return;
+                    }
+                    cpu.writeReg32('edx', value >>> 0);
+                },
+
+                /**
+                 * The few guest instructions a 64-bit process's callbacks start
+                 * at, which load the x64 convention's four argument registers
+                 * whole (`LONG_CALL_CODE` in `internal/callback.js`): whoever
+                 * owns guest code memory places them, when the first callback
+                 * is made.
+                 *
+                 * @param {(code: Uint8Array) => number} place  Writes the code
+                 *     into executable guest memory and answers its address,
+                 *     zero when there is no room.
+                 */
+                placeLongCall(place){
+                    state.callbacks.placeLongCall(place);
                 },
 
                 /**

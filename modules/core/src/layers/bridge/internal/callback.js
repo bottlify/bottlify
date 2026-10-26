@@ -22,7 +22,33 @@
  * Both stacks here are per thread and both are stacks rather than single slots,
  * because either kind of call can nest: a callback may trap into another host
  * function, and that one may call the guest back in turn.
+ *
+ * An x86-64 process's routine takes its first four arguments in RCX, RDX, R8
+ * and R9, finds its return address at RSP eight past a multiple of 16, with
+ * 32 bytes of home space above it and its fifth argument past those. A thread
+ * is resumed with its low dwords set alone, so the four registers are loaded
+ * whole by a few guest instructions the thread starts at (`LONG_CALL_CODE`),
+ * which pop them off the frame and jump to the routine.
  */
+
+/**
+ * What a 64-bit thread is sent to first when a routine is called with
+ * arguments: RAX holds the routine, its low dword alone set, and RSP the
+ * four registers' quadwords, then the routine's frame.
+ *
+ *     mov eax, eax           ; the routine, its upper half cleared
+ *     pop rcx
+ *     pop rdx
+ *     pop r8
+ *     pop r9
+ *     jmp rax
+ */
+export const LONG_CALL_CODE = Object.freeze([
+    0x89, 0xc0, 0x59, 0x5a, 0x41, 0x58, 0x41, 0x59, 0xff, 0xe0,
+]);
+
+/** The quadwords a 64-bit frame always holds: four registers, the return, four homes, a spare. */
+const LONG_FRAME_SLOTS = 10;
 
 /**
  * @param {Object} deps
@@ -37,6 +63,15 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
     /** @type {number | null} */
     let sentinelId = null;
     let sentinelAddress = 0;
+    /** Where `LONG_CALL_CODE` is, once placed; zero before. */
+    let longCallAddress = 0;
+    /**
+     * Who places it, in guest code memory this layer does not own: asked at
+     * the first 64-bit callback, by when the process's memory is there.
+     *
+     * @type {((code: Uint8Array) => number) | null}
+     */
+    let longCallPlacer = null;
     let calls = 0;
     let deepest = 0;
     let pending = 0;
@@ -164,6 +199,39 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
     }
 
     /**
+     * A 64-bit routine's frame below `resting`: RCX, RDX, R8 and R9 for
+     * `LONG_CALL_CODE` to pop, then the return address -- RSP eight past a
+     * multiple of 16 when the routine is entered -- the four home slots, which
+     * hold the first four arguments too, the rest of the arguments, and a
+     * spare quadword for the sentinel's park, as in the 32-bit frame. Every
+     * quadword's high half is zero: an argument is a dword, and every address
+     * lies below 4 GiB.
+     *
+     * @param {number} resting @param {number[]} args
+     * @returns {{ frameBase: number, extent: number }}
+     */
+    function longFrame(resting, args){
+        const slots = LONG_FRAME_SLOTS + Math.max(0, args.length - 4);
+        const frameBase = ((resting - slots * 8 - 8) & ~15) + 8;
+        /** @param {number} at @param {number} value */
+        const quad = (at, value)=>{
+            memory.writeU32(at, value);
+            memory.writeU32(at + 4, 0);
+        };
+        for (let index = 0; index < slots; index++)
+        {
+            quad(frameBase + index * 8, 0);
+        }
+        args.slice(0, 4).forEach((value, index)=>{
+            quad(frameBase + index * 8, value);
+            quad(frameBase + 40 + index * 8, value);
+        });
+        args.slice(4).forEach((value, index)=>quad(frameBase + 72 + index * 8, value));
+        quad(frameBase + 32, sentinelAddress);
+        return { frameBase, extent: frameBase + slots * 8 };
+    }
+
+    /**
      * Builds a callback's frame below where the thread's stack rests and
      * records it: what `call` and `callNow` both do before sending the thread.
      *
@@ -224,7 +292,19 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
         // register, or the return address of the procedure that made the
         // suspended call -- and the procedure returns into the park loop
         // once its call is answered, with nothing to say for itself.
-        const frameBase = resting - 4 * (args.length + 2);
+        const long = cpu.bits?.() === 64;
+        if (long && longCallAddress === 0)
+        {
+            longCallAddress = (longCallPlacer?.(Uint8Array.from(LONG_CALL_CODE)) ?? 0) >>> 0;
+            if (longCallAddress === 0)
+            {
+                throw new Error(`bridge: ${by} called the guest back in a 64-bit process,`
+                    + ' which has nowhere to start a callback');
+            }
+        }
+        const { frameBase, extent } = long ? longFrame(resting, args)
+            : { frameBase: resting - 4 * (args.length + 2),
+                extent: resting - 4 * (args.length + 2) + 4 * (args.length + 2) };
         // And it has to land on this thread's own stack. Three separate
         // defects have written a callback frame onto a stack belonging to
         // another thread -- each time because the resting position was read
@@ -242,8 +322,11 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
                 + ` (0x${(thread.stackLimit >>> 0).toString(16)}`
                 + `..0x${(thread.stackTop >>> 0).toString(16)})`);
         }
-        memory.writeU32(frameBase, sentinelAddress);
-        args.forEach((value, index)=>memory.writeU32(frameBase + 4 + index * 4, value));
+        if (!long)
+        {
+            memory.writeU32(frameBase, sentinelAddress);
+            args.forEach((value, index)=>memory.writeU32(frameBase + 4 + index * 4, value));
+        }
 
         const frames = callbackFrames(thread);
         calls++;
@@ -253,11 +336,23 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
         {
             started.shift();
         }
-        frames.push({ frameBase, extent: frameBase + 4 * (args.length + 2), settle, epoch, now });
+        frames.push({ frameBase, extent, settle, epoch, now });
         // Off to run guest code, whatever it was doing before.
         thread.awaitingHost = false;
         return frameBase;
     }
+
+    /**
+     * Where a thread sent into `entry` starts, and the registers it starts
+     * with besides the caller's: the routine itself in a 32-bit process, the
+     * call code with the routine in EAX in a 64-bit one.
+     *
+     * @param {number} entry @param {Record<string, number>} [registers]
+     * @returns {{ eip: number, registers?: Record<string, number> }}
+     */
+    const startOf = (entry, registers)=>(cpu.bits?.() === 64
+        ? { eip: longCallAddress, registers: { ...registers, eax: entry >>> 0 } }
+        : { eip: entry, ...registers ? { registers } : {} });
 
     /**
      * The callback frame a return to the sentinel at `esp` comes back from:
@@ -296,6 +391,17 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
 
         /** @returns {number | null} the trap id the sentinel raises, once taken */
         sentinel: ()=>sentinelId,
+
+        /**
+         * Who places `LONG_CALL_CODE`, which a 64-bit process's callbacks start
+         * at: this layer has no guest memory of its own to put code in.
+         *
+         * @param {(code: Uint8Array) => number} place  Writes the code into
+         *     executable guest memory and answers its address, zero for none.
+         */
+        placeLongCall(place){
+            longCallPlacer = place;
+        },
 
         /**
          * Records that a host call has suspended, and where the thread it
@@ -380,7 +486,9 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
                 settle = resolve;
             });
             const frameBase = enter({ thread, entry, args, stackAtRest, by, settle, now: false });
-            kernel.scheduleResume(thread, { eip: entry, esp: frameBase, registers });
+            const start = startOf(entry, registers);
+            kernel.scheduleResume(thread, { eip: start.eip, esp: frameBase,
+                registers: start.registers });
             return answer;
         },
 
@@ -402,8 +510,13 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
         callNow({ thread, entry, args = [], stackAtRest, by = 'somewhere', onReturn }){
             const frameBase = enter({ thread, entry, args, stackAtRest, by, settle: onReturn,
                 now: true });
+            const start = startOf(entry);
+            for (const [name, value] of Object.entries(start.registers ?? {}))
+            {
+                cpu.writeReg32(name, value);
+            }
             cpu.writeReg32('esp', frameBase);
-            cpu.writeReg32('eip', entry);
+            cpu.writeReg32('eip', start.eip);
         },
 
         /**

@@ -9,7 +9,8 @@ import assert from 'node:assert/strict';
 import { createLocaleFunctions } from './locale.js';
 import { fakeMemory } from './harness.test.js';
 
-/** @param {{ currentThread?: () => any, divergence?: (api: string, detail: string) => void }} [extra] */
+/** @param {{ currentThread?: () => any, divergence?: (api: string, detail: string) => void,
+ *     pointerSize?: number }} [extra] */
 const build = (extra = {})=>{
     const memory = fakeMemory();
     return {
@@ -30,6 +31,21 @@ test('localeconv is the C locale\'s, and the same structure every call', ()=>{
     assert.deepEqual([...memory.bytes.subarray(conventions + 40, conventions + 48)],
         new Array(8).fill(127), 'every number CHAR_MAX');
     assert.equal(table.localeconv.handler([]), conventions);
+});
+
+test('a 64-bit lconv holds its ten strings as quadword pointers, its chars after them', ()=>{
+    // Read as dwords, decimal_point's quadword was the decimal point and the
+    // thousands separator together, and a printf of a float faulted on it.
+    const { memory, table } = build({ pointerSize: 8 });
+    const conventions = table.localeconv.handler([]);
+    for (let at = 0; at < 10; at++)
+    {
+        assert.equal(memory.u32(conventions + at * 8 + 4), 0, `string ${at}'s high half`);
+        assert.equal(memory.text(memory.u32(conventions + at * 8)), at === 0 ? '.' : '',
+            `string ${at}`);
+    }
+    assert.deepEqual([...memory.bytes.subarray(conventions + 80, conventions + 88)],
+        new Array(8).fill(127), 'every number CHAR_MAX, past the pointers');
 });
 
 test('the locale variables are the C locale\'s zeros', ()=>{
@@ -103,4 +119,28 @@ test('_lock is recursive for its owner and makes another thread wait for the rel
     current = 'one';
     assert.ok(table._lock.handler([18]) instanceof Promise, 'now the second thread holds it');
     assert.equal(table._lock.handler([19]), 0, 'another number is another lock');
+});
+
+test('_lock_file holds a stream for one thread, apart from every other lock', async()=>{
+    let current = 'one';
+    const { table } = build({ currentThread: ()=>current });
+    const stream = 0x00412000;
+    assert.equal(table._lock_file.handler([stream]), 0);
+    assert.equal(table._lock_file.handler([stream]), 0, 'again by its owner');
+    assert.equal(table._lock.handler([stream]), 0, 'a numbered lock is not a stream\'s');
+    current = 'two';
+    assert.equal(table._lock_file.handler([stream + 0x30]), 0, 'another stream is free');
+    const waiting = table._lock_file.handler([stream]);
+    assert.ok(waiting instanceof Promise, 'the stream waits for its holder');
+    current = 'one';
+    table._unlock_file.handler([stream]);
+    table._unlock_file.handler([stream]);
+    assert.equal(await waiting, 0, 'handed over once let go as often as taken');
+});
+
+test('the locale\'s code page and longest character are the C locale\'s, through calls', ()=>{
+    const { table } = build();
+    assert.equal(table.___lc_codepage_func.handler([]), 0, 'as __lc_codepage holds it');
+    assert.equal(table.___mb_cur_max_func.handler([]), 1, 'as __mb_cur_max');
+    assert.equal(table.__lconv_init.handler([]), 0);
 });

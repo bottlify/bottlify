@@ -61,6 +61,13 @@ const JMP_REL32 = 0xe9;
  * -- a jump out of the module as the first instruction -- refuses to run.
  */
 const HOT_PATCH_PROLOGUE = [0x8b, 0xff];
+/**
+ * The same two bytes' worth of nothing for a 64-bit process, `xchg ax, ax`:
+ * in long mode `mov edi, edi` is no no-op, since a 32-bit move clears the
+ * register's upper half, and RDI is one a callee must keep -- a caller
+ * holding a quadword there across an imported call would find it cut.
+ */
+const LONG_HOT_PATCH_PROLOGUE = [0x66, 0x90];
 const INT3 = 0xcc;
 
 const EXPORT_DIRECTORY_SIZE = 40;
@@ -125,9 +132,13 @@ const encoder = new TextEncoder();
  *   The export that is the module's DllMain. A library a program loads at
  *   run time is initialised through its entry point, and a system module
  *   that has to announce itself to another library on being loaded needs one.
+ * @param {boolean} [options.long]
+ *   The module serves an x86-64 process: its trampolines open with a no-op
+ *   that is one in long mode (`LONG_HOT_PATCH_PROLOGUE`).
  * @returns {SynthesisedModule}
  */
-export function synthesiseModule({ name, base, exports, entryPoint }){
+export function synthesiseModule({ name, base, exports, entryPoint, long = false }){
+    const prologue = long ? LONG_HOT_PATCH_PROLOGUE : HOT_PATCH_PROLOGUE;
     requireAscii(name, 'module name');
     const entryIndex = entryPoint === undefined ? -1
         : exports.findIndex(entry=>entry.name === entryPoint);
@@ -248,8 +259,8 @@ export function synthesiseModule({ name, base, exports, entryPoint }){
         }
         else
         {
-            bytes.set(HOT_PATCH_PROLOGUE, rva);
-            const jump = rva + HOT_PATCH_PROLOGUE.length;
+            bytes.set(prologue, rva);
+            const jump = rva + prologue.length;
             bytes[jump] = JMP_REL32;
             // Relative to the instruction after the jump; 32-bit EIP arithmetic wraps,
             // so any pair of guest addresses is reachable regardless of sign.

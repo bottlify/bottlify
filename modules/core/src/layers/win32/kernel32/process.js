@@ -5,7 +5,7 @@
  */
 
 
-import { TEB } from './teb.js';
+import { TEB, blockLayouts } from './teb.js';
 import { createProcessors } from './processor.js';
 import { pointerWidth } from '../common/pointers.js';
 import { setCondition, verifyVersion, windowsVersion } from './versions.js';
@@ -225,8 +225,10 @@ const ERROR_NOACCESS = 998;
  * @param {() => any} currentThread
  * @param {{ readU32: (address: number) => number,
  *           writeU32: (address: number, value: number) => void } | null} [memory]
+ * @param {{ LAST_ERROR: number }} [block]  The thread block's layout: a
+ *        64-bit process's keeps the error at its own offset.
  */
-export function createThreadState(currentThread, memory = null){
+export function createThreadState(currentThread, memory = null, block = TEB){
     /**
      * @param {any} [thread]  Whose state. Defaults to the thread that is running.
      *   Naming one is for an answer produced on somebody else's turn: a call
@@ -252,7 +254,7 @@ export function createThreadState(currentThread, memory = null){
         const teb = blockOf(thread);
         if (teb !== 0 && memory)
         {
-            memory.writeU32(teb + TEB.LAST_ERROR, code >>> 0);
+            memory.writeU32(teb + block.LAST_ERROR, code >>> 0);
         }
         else
         {
@@ -264,7 +266,7 @@ export function createThreadState(currentThread, memory = null){
     const lastErrorOf = (thread = currentThread())=>{
         const teb = blockOf(thread);
         return teb !== 0 && memory
-            ? memory.readU32(teb + TEB.LAST_ERROR)
+            ? memory.readU32(teb + block.LAST_ERROR)
             : stateOf(thread).lastError;
     };
 
@@ -594,7 +596,11 @@ export function createProcessFunctions(host){
         /** @param {number} address @param {number} value */
         writeU32: (address, value)=>host.writeMemory(address, new Uint8Array(dword(value))),
     };
-    const { stateOf, setError, lastErrorOf } = createThreadState(host.currentThread, memory);
+    // The thread block at the process's width: the last error's offset, and
+    // the thread-local array's, whose slots are a pointer each.
+    const blocks = blockLayouts(host.pointerSize);
+    const { stateOf, setError, lastErrorOf } = createThreadState(host.currentThread, memory,
+        blocks.teb);
     const processors = host.processors ?? createProcessors();
 
     /** The process's place in the shutdown order, which it may move. */
@@ -935,17 +941,17 @@ export function createProcessFunctions(host){
             const block = blockFor(index);
             if (block !== 0)
             {
-                memory.writeU32(block + index * 4, 0);
+                host.writeMemory(block + index * width.size, width.bytes(0));
             }
             return;
         }
         for (const thread of host.allThreads())
         {
             const teb = thread.tebAddress ?? 0;
-            const block = teb === 0 ? 0 : memory.readU32(teb + TEB.TLS_POINTER);
+            const block = teb === 0 ? 0 : memory.readU32(teb + blocks.teb.TLS_POINTER);
             if (block !== 0)
             {
-                memory.writeU32(block + index * 4, 0);
+                host.writeMemory(block + index * width.size, width.bytes(0));
             }
         }
     };
@@ -1046,7 +1052,7 @@ export function createProcessFunctions(host){
     /**
      * @type {Record<string, { argBytes: number, handler: Function,
      *     guest?: (builder: import('./sync.js').GuestBuilder) => number,
-     *     code?: () => Uint8Array }>}
+     *     code?: () => Uint8Array, quadwords?: number[] }>}
      */
     const table = {
         /** VOID SetLastError(DWORD dwErrCode) */
@@ -1195,6 +1201,7 @@ export function createProcessFunctions(host){
          */
         VerifyVersionInfoA: {
             argBytes: 16,
+            quadwords: [2],
             /** @param {number[]} args */
             handler: args=>verify(args, false),
         },
@@ -1205,6 +1212,7 @@ export function createProcessFunctions(host){
          */
         VerifyVersionInfoW: {
             argBytes: 16,
+            quadwords: [2],
             /** @param {number[]} args */
             handler: args=>verify(args, true),
         },
@@ -1216,6 +1224,7 @@ export function createProcessFunctions(host){
         ...setRegisters ? {
             VerSetConditionMask: {
                 argBytes: 16,
+                quadwords: [0],
                 /** @param {number[]} args */
                 handler: ([low, high, typeMask, condition])=>{
                     const mask = setCondition(BigInt(low >>> 0) | BigInt(high >>> 0) << 32n,
@@ -1237,6 +1246,23 @@ export function createProcessFunctions(host){
             ...clockGuest('ticks'),
         },
 
+        /**
+         * ULONGLONG GetTickCount64(VOID)
+         *
+         * The same milliseconds since boot, which never wrap: a quadword, in
+         * EDX:EAX for a 32-bit caller and RAX for a 64-bit one.
+         */
+        ...setRegisters ? {
+            GetTickCount64: {
+                argBytes: 0,
+                handler: ()=>{
+                    const ticks = BigInt(Math.floor(host.now()));
+                    setRegisters({ edx: Number(ticks >> 32n & 0xffffffffn) });
+                    return Number(ticks & 0xffffffffn);
+                },
+            },
+        } : {},
+
         /** VOID GetSystemTimeAsFileTime(LPFILETIME lpSystemTimeAsFileTime) */
         GetSystemTimeAsFileTime: {
             argBytes: 4,
@@ -1248,6 +1274,27 @@ export function createProcessFunctions(host){
                 return 0;
             },
         },
+
+        /**
+         * VOID GetSystemTimePreciseAsFileTime(LPFILETIME lpSystemTimeAsFileTime)
+         *
+         * The same time at the best resolution the system has, which is the
+         * one clock here: GetSystemTimeAsFileTime's answer.
+         */
+        GetSystemTimePreciseAsFileTime: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: args=>table.GetSystemTimeAsFileTime.handler(args),
+        },
+
+        /**
+         * BOOL PrefetchVirtualMemory(HANDLE hProcess, ULONG_PTR NumberOfEntries,
+         *     PWIN32_MEMORY_RANGE_ENTRY VirtualAddresses, ULONG Flags)
+         *
+         * A hint that the ranges will be read soon. Every page of a process is
+         * in memory here already, so there is nothing to bring in: TRUE.
+         */
+        PrefetchVirtualMemory: { argBytes: 16, handler: ()=>1 },
 
         /**
          * BOOL GetSystemTimeAdjustment(PDWORD lpTimeAdjustment, PDWORD lpTimeIncrement,
@@ -1553,7 +1600,7 @@ export function createProcessFunctions(host){
                 const block = blockFor(slot);
                 if (block !== 0)
                 {
-                    return memory.readU32(block + slot * 4);
+                    return memory.readU32(block + slot * width.size);
                 }
                 const entry = stateOf().tls.get(slot);
                 return entry && entry.generation === slots[slot] ? entry.value : 0;
@@ -1576,7 +1623,7 @@ export function createProcessFunctions(host){
                 const block = blockFor(slot);
                 if (block !== 0)
                 {
-                    memory.writeU32(block + slot * 4, value >>> 0);
+                    host.writeMemory(block + slot * width.size, width.bytes(value));
                     return 1;
                 }
                 stateOf().tls.set(slot, {

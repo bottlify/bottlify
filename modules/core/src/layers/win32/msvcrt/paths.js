@@ -1000,6 +1000,33 @@ export function createPathFunctions(host){
         // bytes themselves rather than the narrow string reader.
         ...(host.readMemory
             ? {
+                /** int _wmkdir(const wchar_t *path) -- `_mkdir`, the path wide. */
+                _wmkdir: operation(4, ([path])=>{
+                    const text = readWide(path);
+                    if (host.files.mkdir(text) === true)
+                    {
+                        return 0;
+                    }
+                    return exists(text) ? EEXIST : ENOENT;
+                }),
+
+                /** int _wrmdir(const wchar_t *path) */
+                _wrmdir: operation(4, ([path])=>removal(readWide(path), ENOTEMPTY)),
+
+                /** int _wunlink(const wchar_t *path) / int _wremove(const wchar_t *path) */
+                _wunlink: operation(4, ([path])=>removal(readWide(path), EACCES)),
+                _wremove: operation(4, ([path])=>removal(readWide(path), EACCES)),
+
+                /** int _wrename(const wchar_t *from, const wchar_t *to) */
+                _wrename: operation(8, ([from, to])=>{
+                    const source = readWide(from);
+                    if (host.files.rename(source, readWide(to)) === true)
+                    {
+                        return 0;
+                    }
+                    return exists(source) ? EACCES : ENOENT;
+                }, 2),
+
                 /** intptr_t _wfindfirst(const wchar_t *filespec, struct _wfinddata_t *fileinfo) */
                 _wfindfirst: findFirst(WFINDDATA),
 

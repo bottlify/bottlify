@@ -350,6 +350,20 @@ test('_stati64 answers as _stat does, into the record with the 64-bit size', ()=
     assert.deepEqual(errno, [ENOENT, ENOENT, EINVAL]);
 });
 
+test('the wide stats read their path wide and answer into the same records', ()=>{
+    const { memory, fns, errno } = build({ 'C:\\game\\data.bin': bytesOf('12345') });
+    const stat = memory.allocate(STATI64.BYTES);
+    const view = new DataView(memory.bytes.buffer, stat, STATI64.BYTES);
+    assert.equal(fns._wstati64.handler([memory.putWide('C:\\game\\data.bin'), stat]), 0);
+    assert.equal(view.getBigInt64(STATI64.SIZE, true), 5n);
+    for (const name of ['_wstat', '_wstat64', '_wstat64i32'])
+    {
+        assert.equal(fns[name].handler([memory.putWide('C:\\game\\data.bin'), stat]), 0, name);
+    }
+    assert.equal(fns._wstat64.handler([memory.putWide('C:\\game\\none'), stat]), -1);
+    assert.deepEqual(errno, [ENOENT]);
+});
+
 test('_stati64 reports a size past 4 GiB whole', ()=>{
     const memory = fakeMemory();
     const files = fakeVolume({});

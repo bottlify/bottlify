@@ -27,6 +27,7 @@ import {
 import { COMPILED } from './inguest.x86.js';
 import { wideStringAt } from './widetext.js';
 import { createMultiByteHandlers, createMultiBytePage } from './mbcs.js';
+import { pointerWidth } from '../common/pointers.js';
 
 const MAX_STRING = 1 << 20;
 
@@ -38,6 +39,8 @@ const MAX_STRING = 1 << 20;
  * @property {(code: number) => void} [errno]  Where a failure says why.
  * @property {(bytes: number) => number} [allocate]  The heap a duplicate is
  *           made on; without it `_wcsdup` stays unexported.
+ * @property {number} [pointerSize]  8 in a 64-bit process, where the string
+ *           pointer `mbsrtowcs` and `wcsrtombs` advance is a quadword; absent, 4.
  */
 
 /**
@@ -64,6 +67,7 @@ const CT_ALPHA_MARK = 0x0100;
  * @param {WideHost} host
  */
 export function createWideFunctions(host){
+    const width = pointerWidth(host.pointerSize);
     /**
      * A narrow string as the C locale widens it, each byte to the unit of its
      * own value as mbtowc widens one: the memory layer reads the string in the
@@ -515,6 +519,149 @@ export function createWideFunctions(host){
                 }
                 host.writeMemory(destination, new Uint8Array([unit & 0xff]));
                 return 1;
+            },
+        },
+
+        /**
+         * size_t mbrtowc(wchar_t *dest, const char *src, size_t count, mbstate_t *state)
+         *
+         * mbtowc with a state, which the C locale never needs, a byte being a
+         * character: 1 for a character, 0 for the terminator, (size_t)-2 when
+         * the count holds no byte at all. No string is the call that resets
+         * the state, and answers 0.
+         */
+        mbrtowc: {
+            convention: 'cdecl',
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([destination, source, count])=>{
+                if ((source >>> 0) === 0)
+                {
+                    return 0;
+                }
+                if ((count >>> 0) === 0)
+                {
+                    return -2;
+                }
+                const byte = host.readMemory(source, 1)[0];
+                if ((destination >>> 0) !== 0)
+                {
+                    writeWide(destination, String.fromCharCode(byte), false);
+                }
+                return byte === 0 ? 0 : 1;
+            },
+        },
+
+        /** size_t mbrlen(const char *src, size_t count, mbstate_t *state) */
+        mbrlen: {
+            convention: 'cdecl',
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([source, count])=>{
+                if ((source >>> 0) === 0)
+                {
+                    return 0;
+                }
+                if ((count >>> 0) === 0)
+                {
+                    return -2;
+                }
+                return host.readMemory(source, 1)[0] === 0 ? 0 : 1;
+            },
+        },
+
+        /**
+         * size_t wcrtomb(char *dest, wchar_t unit, mbstate_t *state)
+         *
+         * wctomb with a state: one byte for a character to U+00FF, (size_t)-1
+         * and EILSEQ for one past it. No destination is the reset, which is
+         * the terminator's one byte.
+         */
+        wcrtomb: {
+            convention: 'cdecl',
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([destination, unit])=>{
+                if ((destination >>> 0) === 0)
+                {
+                    return 1;
+                }
+                if ((unit & 0xffff) > 0xff)
+                {
+                    host.errno?.(EILSEQ);
+                    return -1;
+                }
+                host.writeMemory(destination, new Uint8Array([unit & 0xff]));
+                return 1;
+            },
+        },
+
+        /**
+         * size_t mbsrtowcs(wchar_t *dest, const char **src, size_t count, mbstate_t *state)
+         *
+         * mbstowcs through the caller's pointer, which it moves: past the last
+         * character converted when the count ran out, to null when the
+         * terminator was reached -- and converted, into a destination there.
+         * No destination counts the whole string and moves nothing.
+         */
+        mbsrtowcs: {
+            convention: 'cdecl',
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([destination, from, count])=>{
+                const source = width.get(new DataView(host.readMemory(from >>> 0, width.size)
+                    .slice().buffer), 0);
+                const text = readNarrowUnits(source);
+                if ((destination >>> 0) === 0)
+                {
+                    return text.length;
+                }
+                const room = count >>> 0;
+                const converted = text.slice(0, room);
+                const ended = converted.length < room;
+                writeWide(destination, converted, ended);
+                host.writeMemory(from >>> 0, width.bytes(ended ? 0 : source + converted.length));
+                return converted.length;
+            },
+        },
+
+        /**
+         * size_t wcsrtombs(char *dest, const wchar_t **src, size_t count, mbstate_t *state)
+         *
+         * wcstombs through the caller's pointer, moved as mbsrtowcs moves it;
+         * a character with no byte is (size_t)-1 and EILSEQ, the pointer left
+         * at it.
+         */
+        wcsrtombs: {
+            convention: 'cdecl',
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([destination, from, count])=>{
+                const source = width.get(new DataView(host.readMemory(from >>> 0, width.size)
+                    .slice().buffer), 0);
+                const text = readWide(source);
+                const room = (destination >>> 0) === 0 ? text.length + 1 : count >>> 0;
+                const converted = text.slice(0, room);
+                const refused = converted.search(/[^\0-\xff]/);
+                if (refused >= 0)
+                {
+                    if ((destination >>> 0) !== 0)
+                    {
+                        writeNarrow(destination, converted.slice(0, refused), false);
+                        host.writeMemory(from >>> 0, width.bytes(source + refused * 2));
+                    }
+                    host.errno?.(EILSEQ);
+                    return -1;
+                }
+                if ((destination >>> 0) === 0)
+                {
+                    return text.length;
+                }
+                const ended = converted.length < room;
+                writeNarrow(destination, converted, ended);
+                host.writeMemory(from >>> 0,
+                    width.bytes(ended ? 0 : source + converted.length * 2));
+                return converted.length;
             },
         },
 

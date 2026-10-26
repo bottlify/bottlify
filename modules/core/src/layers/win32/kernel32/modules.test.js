@@ -369,6 +369,11 @@ test('SetDllDirectory adds its directory to a bare name\'s search; NULL takes it
     assert.equal(fns.LoadLibraryA.handler([0x100]), 0, 'not found with the default search');
     assert.equal(lastError(), 126);
     assert.equal(fns.SetDllDirectoryW.argBytes, 4);
+    assert.equal(fns.SetDefaultDllDirectories.handler([0x1000]), 1,
+        'LOAD_LIBRARY_SEARCH_DEFAULT_DIRS is taken');
+    assert.equal(fns.SetDefaultDllDirectories.handler([0x100]), 0,
+        'a flag LoadLibraryEx alone takes is not');
+    assert.equal(lastError(), 87);
     assert.equal(fns.SetDllDirectoryA.handler([0x200]), 1);
     asked.length = 0;
     assert.equal(fns.LoadLibraryA.handler([0x100]), 0x10000000);

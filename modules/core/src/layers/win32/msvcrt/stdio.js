@@ -1020,8 +1020,11 @@ export function createStdioFunctions(host){
         fseek: cdecl(12, ([pointer, offset, origin])=>seek(pointer, offset | 0, origin)),
 
         /** int _fseeki64(FILE *stream, __int64 offset, int origin) -- fseek past 4 GiB. */
-        _fseeki64: cdecl(16, ([pointer, low, high, origin])=>
-            seek(pointer, (high | 0) * 0x100000000 + (low >>> 0), origin)),
+        _fseeki64: {
+            ...cdecl(16, ([pointer, low, high, origin])=>
+                seek(pointer, (high | 0) * 0x100000000 + (low >>> 0), origin)),
+            quadwords: [1],
+        },
 
         ...(host.setRegisters
             ? {

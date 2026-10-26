@@ -141,14 +141,116 @@ const PARAMS_NORMALIZED = 0x80000000;
 
 /** Where the parameter block sits inside the process block's own allocation. */
 const PARAMS_OFFSET = 0x300;
+/** The same in a 64-bit process, whose process block runs past 0x300. */
+const PARAMS_OFFSET64 = 0x400;
 
 /** Room after the parameter block for the strings it points at. */
 const STRING_ARENA = 0x400;
 
+/**
+ * The same blocks in a 64-bit process, where every pointer, handle and
+ * `SIZE_T` among their fields is a quadword: the thread block GS points at
+ * (NT_TIB64 and what follows it), the process block, its loader data and
+ * module entries, and the parameter block. The offsets are the x64 ones a
+ * program's compiler built in -- `mov rax, gs:[0x58]` for a thread-local
+ * variable, `gs:[0x30]` for the block's own address, `gs:[0x10]` for the
+ * stack limit a stack probe compares against.
+ */
+export const TEB64 = Object.freeze({
+    EXCEPTION_LIST: 0x00,
+    STACK_BASE: 0x08,
+    STACK_LIMIT: 0x10,
+    SUB_SYSTEM_TIB: 0x18,
+    FIBER_DATA: 0x20,
+    ARBITRARY_USER_POINTER: 0x28,
+    SELF: 0x30,
+    ENVIRONMENT_POINTER: 0x38,
+    PROCESS_ID: 0x40,
+    THREAD_ID: 0x48,
+    ACTIVE_RPC_HANDLE: 0x50,
+    TLS_POINTER: 0x58,
+    PEB: 0x60,
+    LAST_ERROR: 0x68,
+    // Past TlsSlots (0x1480) and TlsLinks, the fields a program reads.
+    SIZE: 0x1840,
+});
+
+export const PEB64 = Object.freeze({
+    INHERITED_ADDRESS_SPACE: 0x00,
+    READ_IMAGE_FILE_EXEC_OPTIONS: 0x01,
+    BEING_DEBUGGED: 0x02,
+    IMAGE_BASE_ADDRESS: 0x10,
+    LDR: 0x18,
+    PROCESS_PARAMETERS: 0x20,
+    PROCESS_HEAP: 0x30,
+    NUMBER_OF_PROCESSORS: 0xb8,
+    OS_MAJOR_VERSION: 0x118,
+    OS_MINOR_VERSION: 0x11c,
+    OS_BUILD_NUMBER: 0x120,
+    OS_CSD_VERSION: 0x122,
+    OS_PLATFORM_ID: 0x124,
+    CSD_VERSION: 0x2e8,
+    SIZE: 0x380,
+});
+
+export const LDR_DATA64 = Object.freeze({
+    LENGTH: 0x00,
+    INITIALIZED: 0x04,
+    SS_HANDLE: 0x08,
+    IN_LOAD_ORDER_MODULE_LIST: 0x10,
+    IN_MEMORY_ORDER_MODULE_LIST: 0x20,
+    IN_INITIALIZATION_ORDER_MODULE_LIST: 0x30,
+    SIZE: 0x58,
+});
+
+export const LDR_ENTRY64 = Object.freeze({
+    IN_LOAD_ORDER_LINKS: 0x00,
+    IN_MEMORY_ORDER_LINKS: 0x10,
+    IN_INITIALIZATION_ORDER_LINKS: 0x20,
+    DLL_BASE: 0x30,
+    ENTRY_POINT: 0x38,
+    SIZE_OF_IMAGE: 0x40,
+    FULL_DLL_NAME: 0x48,
+    BASE_DLL_NAME: 0x58,
+    FLAGS: 0x68,
+    SIZE: 0x70,
+});
+
+export const PARAMS64 = Object.freeze({
+    MAXIMUM_LENGTH: 0x00,
+    LENGTH: 0x04,
+    FLAGS: 0x08,
+    DEBUG_FLAGS: 0x0c,
+    CONSOLE_HANDLE: 0x10,
+    CONSOLE_FLAGS: 0x18,
+    STANDARD_INPUT: 0x20,
+    STANDARD_OUTPUT: 0x28,
+    STANDARD_ERROR: 0x30,
+    CURRENT_DIRECTORY: 0x38,
+    DLL_PATH: 0x50,
+    IMAGE_PATH_NAME: 0x60,
+    COMMAND_LINE: 0x70,
+    ENVIRONMENT: 0x80,
+    SIZE: 0x410,
+});
+
+/**
+ * Every block's layout for a pointer of `size` bytes, and the pointer's own
+ * width: a 32-bit process's, or with 8 a 64-bit one's.
+ *
+ * @param {number} [size]  4 or 8; 4 by default
+ */
+export function blockLayouts(size = 4){
+    return size === 8
+        ? { pointer: 8, teb: TEB64, peb: PEB64, ldr: LDR_DATA64, entry: LDR_ENTRY64,
+            params: PARAMS64 }
+        : { pointer: 4, teb: TEB, peb: PEB, ldr: LDR_DATA, entry: LDR_ENTRY, params: PARAMS };
+}
+
 /** No handler is registered yet, and this is how a thread says so. */
 export const END_OF_EXCEPTION_LIST = 0xffffffff;
 
-/** How many thread-local slots the array behind FS:[0x2c] holds. */
+/** How many thread-local slots the array behind FS:[0x2c] (GS:[0x58]) holds. */
 export const TLS_SLOTS = 64;
 
 /**
@@ -197,10 +299,17 @@ export const TLS_SLOTS = 64;
  *        the loader's own module table, snapshotted here once. `addModule`
  *        on the returned object is how one loaded later, by `LoadLibrary`,
  *        joins the same three lists.
+ * @param {number} [options.pointerSize]  8 for a 64-bit process, whose blocks
+ *        are the x64 ones (`blockLayouts`); absent, 4.
  * @returns {any}
  */
 export function createProcessBlocks(options){
     const { allocate, writeMemory, processId, version, imageBase } = options;
+    const { pointer, teb: tebFields, peb: pebFields, ldr: ldrFields, entry: entryFields,
+        params: paramsFields } = blockLayouts(options.pointerSize);
+    // A UNICODE_STRING is two 16-bit counts and a pointer, which is aligned:
+    // eight bytes in all, or sixteen with a 64-bit pointer.
+    const stringSize = pointer * 2;
     const imagePath = options.imagePath ?? '';
     const commandLine = options.commandLine ?? '';
     const currentDirectory = options.currentDirectory ?? '';
@@ -208,35 +317,47 @@ export function createProcessBlocks(options){
     // One allocation for the process block, its parameter block and the strings
     // those point at. They are one object as far as a program is concerned, and
     // separate allocations would let one move without the other.
-    const peb = allocate(PARAMS_OFFSET + PARAMS.SIZE + STRING_ARENA);
-    const params = peb + PARAMS_OFFSET;
-    const write = (/** @type {number} */ at, /** @type {number} */ value)=>{
+    const paramsOffset = pointer === 8 ? PARAMS_OFFSET64 : PARAMS_OFFSET;
+    const peb = allocate(paramsOffset + paramsFields.SIZE + STRING_ARENA);
+    const params = peb + paramsOffset;
+    const write =(/** @type {number} */ at, /** @type {number} */ value)=>{
         const bytes = new Uint8Array(4);
         new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
         writeMemory(at, bytes);
     };
+    /**
+     * A pointer-sized field: in a 64-bit block the high half is zero, since
+     * every address lies below 4 GiB, and is written so whatever was there.
+     *
+     * @param {number} at @param {number} value
+     */
+    const writePointer = (at, value)=>{
+        const bytes = new Uint8Array(pointer);
+        new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
+        writeMemory(at, bytes);
+    };
 
-    writeMemory(peb, new Uint8Array(PARAMS_OFFSET + PARAMS.SIZE + STRING_ARENA));
-    write(peb + PEB.IMAGE_BASE_ADDRESS, imageBase);
-    write(peb + PEB.PROCESS_PARAMETERS, params);
+    writeMemory(peb, new Uint8Array(paramsOffset + paramsFields.SIZE + STRING_ARENA));
+    writePointer(peb + pebFields.IMAGE_BASE_ADDRESS, imageBase);
+    writePointer(peb + pebFields.PROCESS_PARAMETERS, params);
     // Read without a call wherever GetProcessHeap is compiled inline, as
     // NtCurrentTeb()->Peb->ProcessHeap: a null here is a heap nothing can
     // allocate from, and a program that tests the pointer it gets back takes
     // every allocation as out of memory.
-    write(peb + PEB.PROCESS_HEAP, options.processHeap ?? 0);
-    write(peb + PEB.OS_MAJOR_VERSION, version.major);
-    write(peb + PEB.OS_MINOR_VERSION, version.minor);
+    writePointer(peb + pebFields.PROCESS_HEAP, options.processHeap ?? 0);
+    write(peb + pebFields.OS_MAJOR_VERSION, version.major);
+    write(peb + pebFields.OS_MINOR_VERSION, version.minor);
     // Two WORDs, written as the DWORD they make up: the build, then the
     // service pack with its major number in the high byte.
-    write(peb + PEB.OS_BUILD_NUMBER, (version.build & 0xffff
+    write(peb + pebFields.OS_BUILD_NUMBER, (version.build & 0xffff
         | ((version.servicePackMajor ?? 0) & 0xff) << 24
         | ((version.servicePackMinor ?? 0) & 0xff) << 16) >>> 0);
-    write(peb + PEB.OS_PLATFORM_ID, 2); // VER_PLATFORM_WIN32_NT
+    write(peb + pebFields.OS_PLATFORM_ID, 2); // VER_PLATFORM_WIN32_NT
     // Read directly by a runtime sizing its thread pool, without a call.
-    write(peb + PEB.NUMBER_OF_PROCESSORS, options.processors ?? 1);
+    write(peb + pebFields.NUMBER_OF_PROCESSORS, options.processors ?? 1);
 
     // Strings are laid out after the parameter block, in the same allocation.
-    let strings = params + PARAMS.SIZE;
+    let strings = params + paramsFields.SIZE;
 
     /**
      * A UNICODE_STRING written in place: its length in bytes, the room it has,
@@ -254,13 +375,13 @@ export function createProcessBlocks(options){
         }
         writeMemory(strings, bytes);
 
-        const descriptor = new Uint8Array(8);
+        const descriptor = new Uint8Array(stringSize);
         const fields = new DataView(descriptor.buffer);
         // The length excludes the terminator and the maximum includes it, which
         // is how a caller tells a full buffer from one with room left.
         fields.setUint16(0, text.length * 2, true);
         fields.setUint16(2, bytes.length, true);
-        fields.setUint32(4, strings, true);
+        fields.setUint32(pointer, strings, true);
         writeMemory(at, descriptor);
         strings += bytes.length + 2 & ~1;
     };
@@ -275,40 +396,40 @@ export function createProcessBlocks(options){
         csdText[index * 2] = csdVersion.charCodeAt(index) & 0xff;
         csdText[index * 2 + 1] = csdVersion.charCodeAt(index) >>> 8;
     }
-    writeMemory(peb + PEB.SIZE, csdText);
-    write(peb + PEB.CSD_VERSION, (csdVersion.length * 2 | csdText.length << 16) >>> 0);
-    write(peb + PEB.CSD_VERSION + 4, peb + PEB.SIZE);
+    writeMemory(peb + pebFields.SIZE, csdText);
+    write(peb + pebFields.CSD_VERSION, (csdVersion.length * 2 | csdText.length << 16) >>> 0);
+    writePointer(peb + pebFields.CSD_VERSION + pointer, peb + pebFields.SIZE);
 
-    write(params + PARAMS.MAXIMUM_LENGTH, PARAMS.SIZE + STRING_ARENA);
-    write(params + PARAMS.LENGTH, PARAMS.SIZE);
-    write(params + PARAMS.FLAGS, PARAMS_NORMALIZED);
-    write(params + PARAMS.STANDARD_INPUT, standardHandles.input);
-    write(params + PARAMS.STANDARD_OUTPUT, standardHandles.output);
-    write(params + PARAMS.STANDARD_ERROR, standardHandles.error);
-    writeUnicodeString(params + PARAMS.IMAGE_PATH_NAME, imagePath);
-    writeUnicodeString(params + PARAMS.COMMAND_LINE, commandLine);
-    writeUnicodeString(params + PARAMS.CURRENT_DIRECTORY, currentDirectory);
+    write(params + paramsFields.MAXIMUM_LENGTH, paramsFields.SIZE + STRING_ARENA);
+    write(params + paramsFields.LENGTH, paramsFields.SIZE);
+    write(params + paramsFields.FLAGS, PARAMS_NORMALIZED);
+    writePointer(params + paramsFields.STANDARD_INPUT, standardHandles.input);
+    writePointer(params + paramsFields.STANDARD_OUTPUT, standardHandles.output);
+    writePointer(params + paramsFields.STANDARD_ERROR, standardHandles.error);
+    writeUnicodeString(params + paramsFields.IMAGE_PATH_NAME, imagePath);
+    writeUnicodeString(params + paramsFields.COMMAND_LINE, commandLine);
+    writeUnicodeString(params + paramsFields.CURRENT_DIRECTORY, currentDirectory);
 
     // PEB_LDR_DATA and its three lists of loaded modules. Never left null: a
     // program that walks one starting from PEB->Ldr -- anti-tamper code, a
     // plugin loader enumerating what is already there -- has every right to a
     // real circular list, the way any other process's loader leaves it.
-    const ldr = allocate(LDR_DATA.SIZE);
-    writeMemory(ldr, new Uint8Array(LDR_DATA.SIZE));
-    write(peb + PEB.LDR, ldr);
-    write(ldr + LDR_DATA.LENGTH, LDR_DATA.SIZE);
-    write(ldr + LDR_DATA.INITIALIZED, 1);
+    const ldr = allocate(ldrFields.SIZE);
+    writeMemory(ldr, new Uint8Array(ldrFields.SIZE));
+    writePointer(peb + pebFields.LDR, ldr);
+    write(ldr + ldrFields.LENGTH, ldrFields.SIZE);
+    write(ldr + ldrFields.INITIALIZED, 1);
 
-    const loadHead = ldr + LDR_DATA.IN_LOAD_ORDER_MODULE_LIST;
-    const memoryHead = ldr + LDR_DATA.IN_MEMORY_ORDER_MODULE_LIST;
-    const initHead = ldr + LDR_DATA.IN_INITIALIZATION_ORDER_MODULE_LIST;
+    const loadHead = ldr + ldrFields.IN_LOAD_ORDER_MODULE_LIST;
+    const memoryHead = ldr + ldrFields.IN_MEMORY_ORDER_MODULE_LIST;
+    const initHead = ldr + ldrFields.IN_INITIALIZATION_ORDER_MODULE_LIST;
     // Empty is circular too: a list of nothing still answers Flink === Blink
     // === its own address, or a walk that checks "have I got back to the
     // head" never does.
     for (const head of [loadHead, memoryHead, initHead])
     {
-        write(head, head);
-        write(head + 4, head);
+        writePointer(head, head);
+        writePointer(head + pointer, head);
     }
     /**
      * Each list's nodes after its head, in order: what linking and unlinking
@@ -329,10 +450,10 @@ export function createProcessBlocks(options){
     const insertTail = (head, node)=>{
         const nodes = /** @type {number[]} */ (lists.get(head));
         const tail = nodes.at(-1) ?? head;
-        write(node, head);
-        write(node + 4, tail);
-        write(tail, node);
-        write(head + 4, node);
+        writePointer(node, head);
+        writePointer(node + pointer, tail);
+        writePointer(tail, node);
+        writePointer(head + pointer, node);
         nodes.push(node);
     };
 
@@ -350,8 +471,8 @@ export function createProcessBlocks(options){
         }
         const before = at > 0 ? nodes[at - 1] : head;
         const after = at + 1 < nodes.length ? nodes[at + 1] : head;
-        write(before, after);
-        write(after + 4, before);
+        writePointer(before, after);
+        writePointer(after + pointer, before);
         nodes.splice(at, 1);
     };
 
@@ -370,11 +491,11 @@ export function createProcessBlocks(options){
             view.setUint16(index * 2, text.charCodeAt(index), true);
         }
         writeMemory(bufferAt, bytes);
-        const descriptor = new Uint8Array(8);
+        const descriptor = new Uint8Array(stringSize);
         const fields = new DataView(descriptor.buffer);
         fields.setUint16(0, text.length * 2, true);
         fields.setUint16(2, bytes.length, true);
-        fields.setUint32(4, bufferAt, true);
+        fields.setUint32(pointer, bufferAt, true);
         writeMemory(descriptorAt, descriptor);
     };
 
@@ -391,20 +512,20 @@ export function createProcessBlocks(options){
         const fullName = module.path ?? module.name;
         const baseName = module.name;
         const entry = allocate(
-            LDR_ENTRY.SIZE + fullName.length * 2 + 2 + baseName.length * 2 + 2);
-        writeMemory(entry, new Uint8Array(LDR_ENTRY.SIZE));
-        write(entry + LDR_ENTRY.DLL_BASE, module.base);
-        write(entry + LDR_ENTRY.ENTRY_POINT, module.entryPoint ?? 0);
-        write(entry + LDR_ENTRY.SIZE_OF_IMAGE, module.size ?? 0);
+            entryFields.SIZE + fullName.length * 2 + 2 + baseName.length * 2 + 2);
+        writeMemory(entry, new Uint8Array(entryFields.SIZE));
+        writePointer(entry + entryFields.DLL_BASE, module.base);
+        writePointer(entry + entryFields.ENTRY_POINT, module.entryPoint ?? 0);
+        write(entry + entryFields.SIZE_OF_IMAGE, module.size ?? 0);
 
-        const fullNameBuffer = entry + LDR_ENTRY.SIZE;
+        const fullNameBuffer = entry + entryFields.SIZE;
         const baseNameBuffer = fullNameBuffer + fullName.length * 2 + 2;
-        writeEntryString(entry + LDR_ENTRY.FULL_DLL_NAME, fullNameBuffer, fullName);
-        writeEntryString(entry + LDR_ENTRY.BASE_DLL_NAME, baseNameBuffer, baseName);
+        writeEntryString(entry + entryFields.FULL_DLL_NAME, fullNameBuffer, fullName);
+        writeEntryString(entry + entryFields.BASE_DLL_NAME, baseNameBuffer, baseName);
 
-        insertTail(loadHead, entry + LDR_ENTRY.IN_LOAD_ORDER_LINKS);
-        insertTail(memoryHead, entry + LDR_ENTRY.IN_MEMORY_ORDER_LINKS);
-        insertTail(initHead, entry + LDR_ENTRY.IN_INITIALIZATION_ORDER_LINKS);
+        insertTail(loadHead, entry + entryFields.IN_LOAD_ORDER_LINKS);
+        insertTail(memoryHead, entry + entryFields.IN_MEMORY_ORDER_LINKS);
+        insertTail(initHead, entry + entryFields.IN_INITIALIZATION_ORDER_LINKS);
         entries.set(module.base >>> 0, entry);
         return entry;
     };
@@ -421,9 +542,9 @@ export function createProcessBlocks(options){
         {
             return;
         }
-        remove(loadHead, entry + LDR_ENTRY.IN_LOAD_ORDER_LINKS);
-        remove(memoryHead, entry + LDR_ENTRY.IN_MEMORY_ORDER_LINKS);
-        remove(initHead, entry + LDR_ENTRY.IN_INITIALIZATION_ORDER_LINKS);
+        remove(loadHead, entry + entryFields.IN_LOAD_ORDER_LINKS);
+        remove(memoryHead, entry + entryFields.IN_MEMORY_ORDER_LINKS);
+        remove(initHead, entry + entryFields.IN_INITIALIZATION_ORDER_LINKS);
         entries.delete(base >>> 0);
     };
 
@@ -453,7 +574,7 @@ export function createProcessBlocks(options){
     const copyLocal = (tls, { slot, template, size }, at)=>{
         writeMemory(at, new Uint8Array(size));
         writeMemory(at, template);
-        write(tls + (slot >>> 0) * 4, at);
+        writePointer(tls + (slot >>> 0) * pointer, at);
     };
 
     return {
@@ -506,14 +627,14 @@ export function createProcessBlocks(options){
                 }
                 return null;
             };
-            const teb = take(TEB.SIZE);
-            const tls = teb === 0 ? 0 : take(TLS_SLOTS * 4);
+            const teb = take(tebFields.SIZE);
+            const tls = teb === 0 ? 0 : take(TLS_SLOTS * pointer);
             if (tls === 0)
             {
                 return refused();
             }
-            writeMemory(teb, new Uint8Array(TEB.SIZE));
-            writeMemory(tls, new Uint8Array(TLS_SLOTS * 4));
+            writeMemory(teb, new Uint8Array(tebFields.SIZE));
+            writeMemory(tls, new Uint8Array(TLS_SLOTS * pointer));
             /** @type {Map<number, number>} */
             const copies = new Map();
             for (const local of locals)
@@ -532,17 +653,22 @@ export function createProcessBlocks(options){
             }
 
             // No handler registered yet. Zero would be an address, and a
-            // dispatcher walking the chain would follow it.
-            write(teb + TEB.EXCEPTION_LIST, END_OF_EXCEPTION_LIST);
-            write(teb + TEB.STACK_BASE, stackBase);
-            write(teb + TEB.STACK_LIMIT, stackLimit);
+            // dispatcher walking the chain would follow it. A 64-bit thread
+            // has no chain: its handlers are found through the images'
+            // unwind tables, and the field is zero.
+            if (pointer === 4)
+            {
+                write(teb + tebFields.EXCEPTION_LIST, END_OF_EXCEPTION_LIST);
+            }
+            writePointer(teb + tebFields.STACK_BASE, stackBase);
+            writePointer(teb + tebFields.STACK_LIMIT, stackLimit);
             // Programs read this to get the block's own address, because FS
             // cannot be turned into a pointer any other way.
-            write(teb + TEB.SELF, teb);
-            write(teb + TEB.PROCESS_ID, processId);
-            write(teb + TEB.THREAD_ID, id);
-            write(teb + TEB.TLS_POINTER, tls);
-            write(teb + TEB.PEB, peb);
+            writePointer(teb + tebFields.SELF, teb);
+            writePointer(teb + tebFields.PROCESS_ID, processId);
+            writePointer(teb + tebFields.THREAD_ID, id);
+            writePointer(teb + tebFields.TLS_POINTER, tls);
+            writePointer(teb + tebFields.PEB, peb);
 
             threadHeld.set(teb, { tls, blocks: [teb, tls], locals: copies });
             return { teb, tls };
@@ -599,7 +725,7 @@ export function createProcessBlocks(options){
                     {
                         threadMemory.free(copy);
                         each.locals.delete(slot);
-                        write(each.tls + slot * 4, 0);
+                        writePointer(each.tls + slot * pointer, 0);
                     }
                     return false;
                 }
@@ -625,7 +751,7 @@ export function createProcessBlocks(options){
                 {
                     held.locals.delete(slot >>> 0);
                     threadMemory.free(at);
-                    write(held.tls + (slot >>> 0) * 4, 0);
+                    writePointer(held.tls + (slot >>> 0) * pointer, 0);
                 }
             }
         },

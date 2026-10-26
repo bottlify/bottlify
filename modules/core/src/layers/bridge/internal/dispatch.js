@@ -32,6 +32,10 @@ import { isDriven } from './drive.js';
  * @property {boolean} [lastError]  Whether the function can leave a thread
  *     error behind, so the trace reads it afterwards. Default true; a COM
  *     method answers with an HRESULT and never touches it.
+ * @property {number[]} [quadwords]  Where an argument the signature counts as
+ *     two dwords -- an `__int64`, a LARGE_INTEGER by value -- begins, by its
+ *     first dword's index: one argument, one register or stack slot whole, to
+ *     an x86-64 caller, which `readLongCall` splits back into the two.
  * @property {boolean} [hook]
  *     A slot hook: `handler` answers `true` (it computed the call itself) or
  *     `false` (run the guest's own code, at `target`). Which of the two
@@ -103,6 +107,7 @@ import { isDriven } from './drive.js';
  * @property {number} calls        Calls made to it.
  * @property {number} sampledMs    Host ms the timed ones of them took, each standing for
  *     `TRAP_SAMPLE` calls on average (`dispatch`).
+ * @property {number[] | null} quadwords  Of `fn`, checked; null for none.
  * @property {number} [windowCalls]  `calls` when the rate window began (`measureRates`).
  * @property {number} [windowMs]     `sampledMs` when it began.
  */
@@ -219,6 +224,12 @@ const HOOK_AREA = 'call.hook';
 const TRAP_SAMPLE = 32;
 /** How many return addresses each function's sampled crossings are counted at. */
 const CALLERS_KEPT = 64;
+
+/**
+ * Where an x86-64 call's first four arguments are when the trap reads them:
+ * RCX, RDX -- which the stub keeps in R11 before it spends DX -- R8 and R9.
+ */
+const LONG_ARGUMENT_REGISTERS = Object.freeze(['rcx', 'r11', 'r8', 'r9']);
 
 /**
  * A function's sampled frame chains as text and counts: "0xA<0xB", the first
@@ -542,6 +553,14 @@ class Dispatcher {
          */
         this.frames = [null];
         this.depth = 0;
+        /**
+         * The high half of the answer the handler running now gives, when it
+         * answers a quadword the 32-bit way, in EDX beside EAX (`answerHigh`);
+         * null for a dword. In a 64-bit process the two make RAX.
+         *
+         * @type {number | null}
+         */
+        this.wideHigh = null;
         /**
          * The names of recent calls, as a ring.
          *
@@ -917,6 +936,16 @@ class Dispatcher {
     }
 
     /**
+     * The high half of a quadword the handler running now answers, which a
+     * 32-bit caller finds in EDX and a 64-bit one in RAX's upper half.
+     *
+     * @param {number} value
+     */
+    answerHigh(value){
+        this.wideHigh = value >>> 0;
+    }
+
+    /**
      * An x86-64 call's arguments, as the x64 convention passes them: the first
      * four in RCX, RDX, R8 and R9 -- RDX as the stub kept it, in R11, before
      * the trap spent DX -- and the rest on the stack past the return address
@@ -931,12 +960,33 @@ class Dispatcher {
     readLongCall(entry, rsp){
         const args = entry.args;
         const count = entry.registerArgs + entry.stackWords;
-        const registers = ['rcx', 'r11', 'r8', 'r9'];
-        for (let i = 0; i < count; i++)
+        const registers = LONG_ARGUMENT_REGISTERS;
+        const quadwords = entry.quadwords;
+        if (quadwords === null)
         {
-            args[i] = i < 4
-                ? Number(BigInt.asIntN(32, this.cpu.readReg64(registers[i])))
-                : this.memory.readU32(rsp + 8 + 0x20 + (i - 4) * 8) | 0;
+            for (let i = 0; i < count; i++)
+            {
+                args[i] = i < 4
+                    ? Number(BigInt.asIntN(32, this.cpu.readReg64(registers[i])))
+                    : this.memory.readU32(rsp + 8 + 0x20 + (i - 4) * 8) | 0;
+            }
+            return this.memory.readU32(rsp);
+        }
+        // An argument the signature counts as two dwords is one slot here,
+        // both its halves: the slots after it come one earlier.
+        let slot = 0;
+        for (let i = 0; i < count; slot++)
+        {
+            const at = rsp + 8 + 0x20 + (slot - 4) * 8;
+            const low = slot < 4 ? Number(BigInt.asIntN(32, this.cpu.readReg64(registers[slot])))
+                : this.memory.readU32(at) | 0;
+            args[i++] = low;
+            if (quadwords.includes(i - 1) && i < count)
+            {
+                args[i++] = slot < 4
+                    ? Number(BigInt.asIntN(32, this.cpu.readReg64(registers[slot]) >> 32n))
+                    : this.memory.readU32(at + 4) | 0;
+            }
         }
         return this.memory.readU32(rsp);
     }
@@ -1297,6 +1347,10 @@ class Dispatcher {
         }
         let result;
         let late = false;
+        // Whatever the handler answers in EDX, its own: the one before was
+        // the call that set it. Read once it is done, in this same crossing:
+        // the guest it calls back runs once the crossing is over.
+        this.wideHigh = null;
         // A hook's `ms` times only the handler call itself, every time --
         // unlike the sampled `trap` phase this is the number a kernel's own
         // cost is read from, so it is not sampled.
@@ -1465,9 +1519,13 @@ class Dispatcher {
         {
             // Sign-extended, as a dword the host computes is meant: a handle
             // of -1 is INVALID_HANDLE_VALUE whole, and every address below
-            // 2 GiB reads the same either way.
+            // 2 GiB reads the same either way. A quadword answered the 32-bit
+            // way, its high half for EDX, is the two halves whole.
+            const high = this.wideHigh;
             this.cpu.writeReg64('rax', typeof result === 'bigint' ? BigInt.asUintN(64, result)
-                : BigInt.asUintN(64, BigInt(/** @type {number} */ (result) | 0)));
+                : high !== null
+                    ? BigInt(high) << 32n | BigInt(/** @type {number} */ (result) >>> 0)
+                    : BigInt.asUintN(64, BigInt(/** @type {number} */ (result) | 0)));
             return;
         }
         // Asked again rather than reusing `regs`: the handler may have
@@ -1511,6 +1569,14 @@ class Dispatcher {
         // rather than by declaration" -- so it is a `hook` for every
         // purpose downstream except how its registers are marshalled.
         const hook = fn.hook === true || site;
+        const quadwords = fn.quadwords !== undefined && fn.quadwords.length > 0
+            ? [...fn.quadwords] : null;
+        if (quadwords?.some(at=>!Number.isInteger(at) || at < 0
+            || at + 1 >= stackWords + registerArgs))
+        {
+            throw new Error(`bridge: ${fn.name}'s quadwords ${quadwords.join(', ')} are not two`
+                + ' of its argument dwords');
+        }
         this.functions[id] = {
             fn,
             name: fn.name,
@@ -1532,6 +1598,7 @@ class Dispatcher {
             hookStats: hook
                 ? { calls: 0, handled: 0, fellThrough: 0, mismatches: 0, ms: 0 } : null,
             readsError: this.errorReader && fn.lastError !== false,
+            quadwords,
             args: argumentArray(site ? 8 : stackWords + registerArgs),
             kept: Math.min(site ? 8 : stackWords + registerArgs, KEPT_ARGS),
             chainCount: 0,

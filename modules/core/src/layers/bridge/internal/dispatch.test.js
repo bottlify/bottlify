@@ -1850,3 +1850,94 @@ test('a function kept out of the ring of recent calls is counted but not kept th
     assert.equal(dispatcher.detailed().at(-1).name, 'USER32.dll!ShowWindow',
         'and none, once cleared');
 });
+
+/**
+ * A 64-bit machine: its registers quadwords, its calls the x64 convention's,
+ * RDX's first argument kept in R11 by the stub.
+ *
+ * @param {Record<string, bigint>} [set]
+ */
+function longMachine(set = {}){
+    const rsp = 0x8000;
+    /** @type {Map<string, bigint>} */
+    const r = new Map(Object.entries({ rsp: BigInt(rsp), rax: 0n, ...set }));
+    const cpu = {
+        bits: ()=>64,
+        /** @param {string} name */
+        readReg64: name=>r.get(name) ?? 0n,
+        /** @param {string} name @param {bigint} value */
+        writeReg64: (name, value)=>r.set(name, value),
+        /** @param {string} name */
+        readReg32: name=>Number((r.get(name === 'esp' ? 'rsp' : name) ?? 0n) & 0xffffffffn),
+        writeReg32: ()=>{},
+    };
+    const memory = {
+        /** @param {number} address */
+        readU32: address=>(address === rsp ? 0x401234 : 0),
+        writeU32: ()=>{},
+    };
+    const kernel = { currentThread: ()=>({ name: 'main' }), parkThread: ()=>{} };
+    const dispatcher = createDispatcher({ cpu, memory, parking: createParking({ kernel }),
+        suspend: ()=>{} });
+    return { dispatcher, r };
+}
+
+test('a 64-bit caller finds a quadword the handler answers in two halves whole in RAX', ()=>{
+    // GetTickCount64, _lseeki64, _atoi64: the 32-bit way of answering a
+    // quadword is EDX:EAX, and a 64-bit caller reads RAX alone. Sign-extending
+    // EAX instead would lose any high half and invent one for a low half
+    // with its top bit set.
+    const { dispatcher, r } = longMachine({ rcx: 7n, r11: 0xffffffffn });
+    /** @type {number[][]} */
+    const seen = [];
+    dispatcher.register(1, { name: 'X!Wide', ...STDCALL, argBytes: 8,
+        /** @param {number[]} args */
+        handler: args=>{
+            seen.push(args.slice());
+            dispatcher.answerHigh(1);
+            return 0x80000000;
+        } });
+    dispatcher.register(2, { name: 'X!Narrow', ...STDCALL, argBytes: 0, handler: ()=>-1 });
+    dispatcher.register(3, { name: 'X!Unsigned', ...STDCALL, argBytes: 0,
+        handler: ()=>0x80000000 });
+
+    dispatcher.dispatch(1);
+    assert.deepEqual(seen, [[7, -1]], 'RCX and the RDX the stub kept in R11, each a dword');
+    assert.equal(r.get('rax'), 0x180000000n);
+    dispatcher.dispatch(2);
+    assert.equal(r.get('rax'), 0xffffffffffffffffn, 'a dword answer is sign-extended');
+    dispatcher.dispatch(3);
+    assert.equal(r.get('rax'), 0xffffffff80000000n,
+        'and the high half one call gave is not the next call\'s');
+});
+
+test('a quadword argument is one x64 slot, split into the two dwords the handler reads', ()=>{
+    // _lseeki64(int fd, __int64 offset, int origin): four dwords to a 32-bit
+    // handler, three arguments to an x86-64 caller -- RCX, RDX and R8.
+    const { dispatcher } = longMachine({ rcx: 3n, r11: 0x100000005n, r8: 2n });
+    /** @type {number[][]} */
+    const seen = [];
+    dispatcher.register(1, { name: 'X!Seek', ...STDCALL, argBytes: 16, quadwords: [1],
+        /** @param {number[]} args */
+        handler: args=>(seen.push(args.slice()), 0) });
+    dispatcher.dispatch(1);
+    assert.deepEqual(seen, [[3, 5, 1, 2]]);
+
+    // Past the four registers a quadword is a stack slot whole, its high half
+    // the slot's second dword.
+    const stack = longMachine({ rcx: 1n, r11: 2n, r8: 3n, r9: 4n });
+    /** @type {Map<number, number>} */
+    const words = new Map([[0x8000, 0x401234], [0x8028, 5], [0x8030, 0xfffffffe],
+        [0x8034, 0xffffffff], [0x8038, 7]]);
+    /** @type {any} */ (stack.dispatcher).memory = {
+        /** @param {number} address */
+        readU32: address=>words.get(address) ?? 0, writeU32: ()=>{} };
+    stack.dispatcher.register(2, { name: 'X!Late', ...STDCALL, argBytes: 32, quadwords: [5],
+        /** @param {number[]} args */
+        handler: args=>(seen.push(args.slice()), 0) });
+    stack.dispatcher.dispatch(2);
+    assert.deepEqual(seen[1], [1, 2, 3, 4, 5, -2, -1, 7]);
+
+    assert.throws(()=>dispatcher.register(3, { name: 'X!Short', ...STDCALL, argBytes: 8,
+        quadwords: [1], handler: ()=>0 }), /quadwords/, 'a quadword needs two dwords');
+});

@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { TEB } from './teb.js';
+import { TEB, TEB64 } from './teb.js';
 import { createProcessors } from './processor.js';
 import {
     CLOCK, TLS_SLOTS, createProcessFunctions, getCurrentThreadIdCode, getLastErrorCode,
@@ -441,6 +441,14 @@ test('GetSystemTimeAsFileTime writes 100ns units since 1601', ()=>{
     assert.equal(u64(filetime), FILETIME_AT_UNIX_EPOCH + 10_000_000n);
 });
 
+test('GetSystemTimePreciseAsFileTime is the same clock, and a prefetch has nothing to do', ()=>{
+    const { host, fns, u64 } = setup();
+    host.clock.wallMs = 2500;
+    fns.GetSystemTimePreciseAsFileTime.handler([0x500]);
+    assert.equal(u64(0x500), FILETIME_AT_UNIX_EPOCH + 25_000_000n);
+    assert.equal(fns.PrefetchVirtualMemory.handler([-1, 1, 0x600, 0]), 1);
+});
+
 test('GetSystemTimeAdjustment reports a millisecond clock nothing adjusts, a DWORD each', ()=>{
     // Three four-byte answers side by side: one written as eight would run
     // into the next, and past the last.
@@ -621,6 +629,46 @@ test('freeing a slot zeroes it in the block of every thread', ()=>{
     assert.equal(fns.TlsFree.handler([slot]), 1);
     assert.equal(host.view.getUint32(blocks.first + slot * 4, true), 0, 'cleared for the first');
     assert.equal(host.view.getUint32(blocks.second + slot * 4, true), 0, 'and for the second');
+});
+
+test('a 64-bit thread\'s slots are quadwords, behind GS:[0x58], its last error at 0x68', ()=>{
+    // A thread-local variable is `mov rax, gs:[0x58]` and an index times eight:
+    // a slot four bytes wide puts every value but the first in another's high half.
+    const host = fakeHost();
+    const blocks = { first: 0x1100, second: 0x1300 };
+    host.threads.first.tebAddress = 0x1000;
+    host.threads.second.tebAddress = 0x1200;
+    host.bytes.fill(0xcc, blocks.first, blocks.first + 0x100);
+    host.view.setUint32(0x1000 + TEB64.TLS_POINTER, blocks.first, true);
+    host.view.setUint32(0x1200 + TEB64.TLS_POINTER, blocks.second, true);
+    const fns = createProcessFunctions({
+        ...host,
+        pointerSize: 8,
+        allThreads: ()=>[host.threads.first, host.threads.second],
+        tlsBlock: ()=>host.view.getUint32(host.currentThread().tebAddress + TEB64.TLS_POINTER,
+            true),
+    });
+    const slot = fns.TlsAlloc.handler();
+    assert.equal(host.view.getBigUint64(blocks.first + slot * 8, true), 0n,
+        'a slot handed out is zero, all eight bytes');
+    assert.equal(fns.TlsSetValue.handler([slot, 0x0c001230]), 1);
+    assert.equal(host.view.getBigUint64(blocks.first + slot * 8, true), 0x0c001230n);
+    assert.equal(fns.TlsGetValue.handler([slot]), 0x0c001230);
+    assert.equal(host.view.getUint32(0x1000 + TEB64.LAST_ERROR, true), 0,
+        'success clears the error, at the 64-bit block\'s offset');
+    assert.equal(fns.TlsGetValue.handler([TLS_SLOTS]), 0);
+    assert.equal(host.view.getUint32(0x1000 + TEB64.LAST_ERROR, true), 87,
+        'ERROR_INVALID_PARAMETER where GetLastError reads it');
+    assert.equal(fns.TlsFree.handler([slot]), 1);
+    assert.equal(host.view.getBigUint64(blocks.first + slot * 8, true), 0n);
+});
+
+test('GetTickCount64 answers the milliseconds whole, past the dword GetTickCount wraps at', ()=>{
+    const { host, fns, registers } = setup();
+    host.clock.uptimeMs = 0x1_2345_6789 + 0.5;
+    assert.equal(fns.GetTickCount64.handler([]), 0x2345_6789);
+    assert.equal(registers.edx, 1, 'the high half, where a 32-bit caller reads it');
+    assert.equal(fns.GetTickCount.handler([]), 0x2345_6789, 'the same count, wrapped');
 });
 
 test('a slot handed out again reads zero in every block, whatever was set in it while free', ()=>{

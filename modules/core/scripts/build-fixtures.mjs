@@ -57,7 +57,14 @@ const IMPORTS = {
             'GetModuleHandleA@4', 'GetCurrentProcessId@0', 'InitializeCriticalSection@4',
             'EnterCriticalSection@4', 'LeaveCriticalSection@4', 'TryEnterCriticalSection@4',
             'DeleteCriticalSection@4', 'GetCurrentProcess@0', 'GetProcessAffinityMask@12',
+            'GetTickCount@0', 'GetTickCount64@0', 'GetCommandLineW@0',
         ],
+    },
+    'SHELL32.dll': {
+        undecorated: ['CommandLineToArgvW@8'],
+    },
+    'ntdll.dll': {
+        undecorated: ['RtlGetVersion@4'],
     },
     'ADVAPI32.dll': {
         undecorated: [
@@ -115,6 +122,7 @@ const IMPORTS = {
             '_iob DATA', '_osver DATA', '_winver DATA', '_winmajor DATA', '_winminor DATA',
             '_HUGE DATA', '_environ DATA', '__getmainargs', '_initterm', '_onexit',
             '__dllonexit', 'fputs', 'fputc', 'exit', '__initenv DATA', 'strlen', 'memset',
+            'localeconv', 'mbrtowc', '_atoi64',
         ],
         decorated: ['_seh_longjmp_unwind@4'],
     },
@@ -143,6 +151,7 @@ const PROGRAMS = [
     { name: 'effect', source: 'effect.c', cxx: false },
     { name: 'hello64', source: 'hello64.c', cxx: false, x64: true },
     { name: 'crt64', source: 'crt64.c', cxx: false, x64: true },
+    { name: 'win64', source: 'win64.c', cxx: false, x64: true },
 ];
 
 /** The fixtures named on the command line, or every one. */

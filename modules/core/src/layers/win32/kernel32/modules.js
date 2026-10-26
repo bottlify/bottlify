@@ -32,6 +32,13 @@ const SEPARATOR = String.fromCharCode(92);
 const ERROR_MOD_NOT_FOUND = 126;
 const ERROR_PROC_NOT_FOUND = 127;
 const ERROR_INVALID_PARAMETER = 87;
+
+/**
+ * The flags SetDefaultDllDirectories takes: LOAD_LIBRARY_SEARCH_APPLICATION_DIR,
+ * _USER_DIRS, _SYSTEM32 and _DEFAULT_DIRS.
+ */
+const DEFAULT_DLL_DIRECTORIES = 0x200 | 0x400 | 0x800 | 0x1000;
+
 /** What FreeLibrary says of a data-file handle that names no mapping. */
 const ERROR_BAD_EXE_FORMAT = 193;
 const ERROR_INVALID_HANDLE = 6;
@@ -379,6 +386,27 @@ export function createModuleFunctions(host){
             /** @param {number[]} args */
             handler: ([path])=>{
                 dllDirectory = (path >>> 0) === 0 ? null : host.readCString(path >>> 0, MAX_NAME);
+                return 1;
+            },
+        },
+        /**
+         * BOOL SetDefaultDllDirectories(DWORD DirectoryFlags)
+         *
+         * Narrows where LoadLibrary looks to the flags' directories, which a
+         * program sets once at its start to keep its own directory and the
+         * current one out of the search. The libraries here are found by name
+         * in the engine's tables or on the volume, so the call is accepted;
+         * a flag outside the documented set is ERROR_INVALID_PARAMETER.
+         */
+        SetDefaultDllDirectories: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([flags])=>{
+                if ((flags >>> 0) === 0 || ((flags >>> 0) & ~DEFAULT_DLL_DIRECTORIES) !== 0)
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
                 return 1;
             },
         },

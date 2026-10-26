@@ -21,7 +21,7 @@
  * numbers as the ones reported here.
  */
 
-import { PEB, TEB } from '../kernel32/teb.js';
+import { blockLayouts } from '../kernel32/teb.js';
 import { STATUS } from './status.js';
 import { createProcessors } from '../kernel32/processor.js';
 import { verifyVersion, windowsVersion } from '../kernel32/versions.js';
@@ -231,6 +231,8 @@ const NORMAL_BASE_PRIORITY = 8;
  *           is an unknown class.
  * @property {import('../kernel32/processor.js').Processors} [processors]  The
  *           process's processors and its affinity, kernel32's own. Absent, one.
+ * @property {number} [pointerSize]  8 in a 64-bit process, whose thread and
+ *           process blocks are the x64 ones; absent, 4.
  */
 
 /**
@@ -301,6 +303,7 @@ export function systemProcessInformation(processes, base){
 export function createQueryFunctions(host){
     const machine = host.version ?? windowsVersion();
     const processors = host.processors ?? createProcessors();
+    const { pointer: pointerBytes, teb: TEB, peb: PEB } = blockLayouts(host.pointerSize);
 
     /** @param {number} at */
     const readU32 = at=>{
@@ -385,7 +388,7 @@ export function createQueryFunctions(host){
                 // the caller left there.
                 const csdLength = Math.min(readU32(block + PEB.CSD_VERSION) & 0xffff,
                     (CSD_VERSION_CHARACTERS - 1) * 2);
-                const csdText = readU32(block + PEB.CSD_VERSION + 4);
+                const csdText = readU32(block + PEB.CSD_VERSION + pointerBytes);
                 if (csdLength > 0 && csdText !== 0)
                 {
                     struct.set(host.readMemory(csdText, csdLength), OSVERSIONINFO.CSD_VERSION);

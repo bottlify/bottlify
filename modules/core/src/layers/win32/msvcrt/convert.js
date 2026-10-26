@@ -26,6 +26,7 @@ import * as inGuest from './inguest.js';
 import { COMPILED } from './inguest.x86.js';
 import { wideStringAt } from './widetext.js';
 import { cvtDigits } from './format.js';
+import { pointerWidth } from '../common/pointers.js';
 import * as inGuestFloat from './inguest-float.js';
 import { COMPILED as FLOAT_CODE } from './inguest-float.x86.js';
 
@@ -34,6 +35,8 @@ const MAX_STRING = 1 << 20;
 const LONG_MAX = 0x7fffffffn;
 const LONG_MIN = -0x80000000n;
 const ULONG_MAX = 0xffffffffn;
+const QUAD_MAX = 0x7fffffffffffffffn;
+const UNSIGNED_QUAD_MAX = 0xffffffffffffffffn;
 
 /** What `isspace` accepts, which is what every conversion skips first. */
 const WHITESPACE = ' \t\n\v\f\r';
@@ -282,12 +285,18 @@ export function scanDecimal(text){
  * @property {import('./float.js').FloatHost} [fpu]  Absent means the functions
  *           that return a double are not exported at all.
  * @property {(code: number) => void} [errno]  Where an out-of-range value says so.
+ * @property {number} [pointerSize]  8 in a 64-bit process, where the end
+ *           pointer a conversion writes back is a quadword; absent, 4.
+ * @property {(values: Record<string, number>) => void} [setRegisters]
+ *           Where an __int64 answer puts its high half, EDX; without it the
+ *           conversions to one are not exported.
  */
 
 /**
  * @param {ConversionHost} host
  */
 export function createConversionFunctions(host){
+    const width = pointerWidth(host.pointerSize);
     /** @param {number} pointer */
     const readString = pointer=>host.readCString(pointer, MAX_STRING);
 
@@ -324,6 +333,19 @@ export function createConversionFunctions(host){
     };
 
     /**
+     * Where a conversion stopped, through the caller's `char **`: a pointer,
+     * all of it, at the process's width.
+     *
+     * @param {number} pointer @param {number} value
+     */
+    const writeEnd = (pointer, value)=>{
+        if ((pointer >>> 0) !== 0)
+        {
+            host.writeMemory(pointer >>> 0, width.bytes(value));
+        }
+    };
+
+    /**
      * The buffer _ecvt and _fcvt return, allocated once and written over.
      *
      * Both documents say the result is overwritten by the next call, and code
@@ -345,8 +367,9 @@ export function createConversionFunctions(host){
      *        The value, or null when it is out of range and `limit` answers.
      * @param {(negative: boolean) => bigint} limit
      * @param {boolean} [wide]  A wide string, two bytes a character.
+     * @param {boolean} [quadword]  An __int64 answer, its high half in EDX.
      */
-    const strtoInteger = (argBytes, convert, limit, wide = false)=>({
+    const strtoInteger = (argBytes, convert, limit, wide = false, quadword = false)=>({
         convention: 'cdecl',
         argBytes,
         /** @param {number[]} args */
@@ -357,9 +380,13 @@ export function createConversionFunctions(host){
                 : scanInteger(readString(string), base | 0);
             // Nothing converted: the end pointer goes back to the start, so a
             // caller comparing it against the input sees no progress.
-            writeInt(end, scanned ? string + scanned.end * (wide ? 2 : 1) : string);
+            writeEnd(end, scanned ? string + scanned.end * (wide ? 2 : 1) : string);
             if (scanned === null)
             {
+                if (quadword)
+                {
+                    host.setRegisters?.({ edx: 0 });
+                }
                 return 0;
             }
             // errno is set only when the value does not fit: a caller clears it
@@ -369,6 +396,12 @@ export function createConversionFunctions(host){
             {
                 host.errno?.(ERANGE);
                 value = limit(scanned.negative);
+            }
+            if (quadword)
+            {
+                const bits = BigInt.asUintN(64, value);
+                host.setRegisters?.({ edx: Number(bits >> 32n) });
+                return Number(bits & 0xffffffffn);
             }
             return Number(BigInt.asIntN(32, value));
         },
@@ -389,6 +422,8 @@ export function createConversionFunctions(host){
     const toText = (valueSlots, signed, wide = false)=>({
         convention: 'cdecl',
         argBytes: (valueSlots + 2) * 4,
+        // An __int64 value is one argument to an x86-64 caller.
+        ...valueSlots === 2 ? { quadwords: [0] } : {},
         /** @param {number[]} args */
         handler: args=>{
             const buffer = args[valueSlots];
@@ -397,14 +432,14 @@ export function createConversionFunctions(host){
             {
                 return 0;
             }
-            const width = valueSlots * 32;
+            const bits = valueSlots * 32;
             let pattern = 0n;
             for (let slot = valueSlots - 1; slot >= 0; slot--)
             {
                 pattern = (pattern << 32n) | BigInt(args[slot] >>> 0);
             }
             (wide ? writeWideString : writeString)(buffer, signed && radix === 10
-                ? BigInt.asIntN(width, pattern).toString(10)
+                ? BigInt.asIntN(bits, pattern).toString(10)
                 : pattern.toString(radix));
             return buffer;
         },
@@ -464,6 +499,23 @@ export function createConversionFunctions(host){
     const strtoul = strtoInteger(12, toUnsignedLong, unsignedLongLimit);
 
     /**
+     * `_strtoi64` and `_strtoui64`: strtol's and strtoul's reading at 64
+     * bits. A value past the type's range is ERANGE and clamped, to the
+     * limit on its side for the signed one and to the unsigned maximum for
+     * the other, whose negative values wrap as strtoul's do.
+     *
+     * @param {bigint} magnitude @param {boolean} negative
+     */
+    const toQuad = (magnitude, negative)=>(magnitude > (negative ? QUAD_MAX + 1n : QUAD_MAX)
+        ? null : negative ? -magnitude : magnitude);
+    /** @param {boolean} negative */
+    const quadLimit = negative=>(negative ? -QUAD_MAX - 1n : QUAD_MAX);
+    /** @param {bigint} magnitude @param {boolean} negative */
+    const toUnsignedQuad = (magnitude, negative)=>(magnitude > UNSIGNED_QUAD_MAX ? null
+        : negative ? BigInt.asUintN(64, -magnitude) : magnitude);
+    const unsignedQuadLimit = ()=>UNSIGNED_QUAD_MAX;
+
+    /**
      * _ecvt and _fcvt: the digits in the buffer they share, the point and the
      * sign through the pointers.
      *
@@ -497,6 +549,19 @@ export function createConversionFunctions(host){
         strtoul: readMemory
             ? guestEntry(inGuest.strtoul, COMPILED.strtoul, { readMemory, writeMemory }, strtoul)
             : strtoul,
+
+        ...host.setRegisters ? {
+            /** __int64 _strtoi64(const char *str, char **end, int base) */
+            _strtoi64: strtoInteger(12, toQuad, quadLimit, false, true),
+            /** unsigned __int64 _strtoui64(const char *str, char **end, int base) */
+            _strtoui64: strtoInteger(12, toUnsignedQuad, unsignedQuadLimit, false, true),
+            ...readMemory ? {
+                /** __int64 _wcstoi64(const wchar_t *str, wchar_t **end, int base) */
+                _wcstoi64: strtoInteger(12, toQuad, quadLimit, true, true),
+                /** unsigned __int64 _wcstoui64(const wchar_t *str, wchar_t **end, int base) */
+                _wcstoui64: strtoInteger(12, toUnsignedQuad, unsignedQuadLimit, true, true),
+            } : {},
+        } : {},
 
         ...readMemory ? {
             /**
@@ -644,7 +709,7 @@ export function createConversionFunctions(host){
     /** @param {number[]} args */
     const strtod = args=>{
         const scanned = scanDecimal(decimalText(args[0]));
-        writeInt(args[1], scanned ? args[0] + scanned.end : args[0]);
+        writeEnd(args[1], scanned ? args[0] + scanned.end : args[0]);
         return decimal(scanned);
     };
 
@@ -658,7 +723,7 @@ export function createConversionFunctions(host){
         const text = wideStringAt(/** @type {(address: number, length: number)
             => Uint8Array} */ (readMemory), args[0]);
         const scanned = scanDecimal(text);
-        writeInt(args[1], scanned ? args[0] + scanned.end * 2 : args[0]);
+        writeEnd(args[1], scanned ? args[0] + scanned.end * 2 : args[0]);
         return decimal(scanned);
     };
 

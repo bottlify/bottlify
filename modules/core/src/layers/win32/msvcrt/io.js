@@ -1044,15 +1044,16 @@ export function createIoFunctions(host, descriptors){
      * program are executable.
      *
      * @param {number} path @param {number} buffer
-     * @param {StatLayout} layout
+     * @param {StatLayout} layout @param {boolean} [wideName]  The path a wide string.
      */
-    const statPath = (path, buffer, layout)=>{
+    const statPath = (path, buffer, layout, wideName = false)=>{
         if ((path >>> 0) === 0 || (buffer >>> 0) === 0)
         {
             fail(EINVAL);
             return -1;
         }
-        const name = host.readCString(path >>> 0, MAX_STRING).replace(/ +$/, '');
+        const name = (wideName ? wideStringAt(host.readMemory, path >>> 0)
+            : host.readCString(path >>> 0, MAX_STRING)).replace(/ +$/, '');
         const bare = /^[A-Za-z]:$/.test(name);
         const trailing = /[\\/]$/.test(name) && !/^[A-Za-z]:[\\/]$/.test(name);
         const entry = bare || trailing || name === '' ? null : host.files.stat(name);
@@ -1452,6 +1453,16 @@ export function createIoFunctions(host, descriptors){
         /** int _fstat64i32(int fd, struct _stat64i32 *buffer) */
         _fstat64i32: cdecl(8, ([fd, buffer])=>statDescriptor(fd, buffer, STAT64I32)),
 
+        // The same over a wide path, which is read from memory as it lies.
+        /** int _wstat(const wchar_t *path, struct _stat *buffer) */
+        _wstat: cdecl(8, ([path, buffer])=>statPath(path, buffer, STAT, true)),
+        /** int _wstati64(const wchar_t *path, struct _stati64 *buffer) */
+        _wstati64: cdecl(8, ([path, buffer])=>statPath(path, buffer, STATI64, true)),
+        /** int _wstat64(const wchar_t *path, struct _stat64 *buffer) */
+        _wstat64: cdecl(8, ([path, buffer])=>statPath(path, buffer, STAT64, true)),
+        /** int _wstat64i32(const wchar_t *path, struct _stat64i32 *buffer) */
+        _wstat64i32: cdecl(8, ([path, buffer])=>statPath(path, buffer, STAT64I32, true)),
+
         // An __int64 answer is EDX:EAX, and only a seam onto the registers
         // reaches EDX: without one these would answer a high half that is
         // whatever the register held, so they stay unexported.
@@ -1463,8 +1474,11 @@ export function createIoFunctions(host, descriptors){
                  * `_lseek` with an offset and an answer past 4 GiB: -1 as an
                  * __int64, with the same errno, when it fails.
                  */
-                _lseeki64: cdecl(16, ([fd, low, high, origin])=>
-                    wide(seekTo(fd, (high | 0) * 0x100000000 + (low >>> 0), origin))),
+                _lseeki64: {
+                    ...cdecl(16, ([fd, low, high, origin])=>
+                        wide(seekTo(fd, (high | 0) * 0x100000000 + (low >>> 0), origin))),
+                    quadwords: [1],
+                },
 
                 /** __int64 _telli64(int fd) */
                 _telli64: cdecl(4, ([fd])=>wide(fileAt(fd)?.position ?? -1)),

@@ -152,6 +152,9 @@ export function createSyncFunctions(host){
     const { kernel } = host;
     const processors = host.processors ?? createProcessors(kernel);
     const cs = criticalLayout(host.pointerSize);
+    // A HANDLE is a pointer: an array of them holds quadwords in a 64-bit
+    // process, each a handle's dword in its low half.
+    const handleSize = host.pointerSize ?? 4;
 
     /** @param {number} address @param {number} value */
     const writeI32 = (address, value)=>{
@@ -811,7 +814,8 @@ export function createSyncFunctions(host){
                     host.setLastError?.(ERROR_INVALID_PARAMETER);
                     return WAIT_FAILED;
                 }
-                const view = new DataView(host.readMemory(handles >>> 0, total * 4).buffer);
+                const view = new DataView(
+                    host.readMemory(handles >>> 0, total * handleSize).slice().buffer);
                 /** @type {any[]} */
                 const objects = [];
                 /** Where each of `objects` sits in the caller's handle array. */
@@ -825,7 +829,7 @@ export function createSyncFunctions(host){
                 let childAt = -1;
                 for (let at = 0; at < total; at++)
                 {
-                    const handle = view.getUint32(at * 4, true);
+                    const handle = view.getUint32(at * handleSize, true);
                     // No pseudo-handle is a member of a set, not even the two
                     // WaitForSingleObject takes: none is in the table.
                     const target = isStandardHandle(handle) ? alwaysReady() : object(handle);
@@ -1082,6 +1086,30 @@ export function createSyncFunctions(host){
                     return host.park();
                 }
                 return previous;
+            },
+        },
+
+        /**
+         * BOOL GetThreadGroupAffinity(HANDLE hThread, PGROUP_AFFINITY GroupAffinity)
+         *
+         * The thread's mask in the one processor group a machine of fewer than
+         * 64 processors has: GROUP_AFFINITY's KAFFINITY Mask, a pointer wide,
+         * then the group, zero, and three reserved words, zero.
+         */
+        GetThreadGroupAffinity: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, out])=>{
+                const thread = threadOf(handle);
+                if (!thread)
+                {
+                    host.setLastError?.(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
+                const bytes = new Uint8Array(handleSize + 8);
+                new DataView(bytes.buffer).setUint32(0, processors.threadMask(thread) >>> 0, true);
+                host.writeMemory(out >>> 0, bytes);
+                return 1;
             },
         },
 

@@ -944,6 +944,7 @@ export function createMsvcrtFunctions(host){
             },
         },
         ...createWideFunctions({
+            pointerSize: host.pointerSize,
             readMemory: host.readMemory,
             writeMemory: host.writeMemory,
             readCString: host.readCString,
@@ -951,6 +952,8 @@ export function createMsvcrtFunctions(host){
             ...host.allocate ? { allocate: host.allocate } : {},
         }),
         ...createConversionFunctions({
+            pointerSize: host.pointerSize,
+            ...host.setRegisters ? { setRegisters: host.setRegisters } : {},
             readCString: host.readCString,
             readMemory: host.readMemory,
             writeMemory: host.writeMemory,
@@ -973,6 +976,7 @@ export function createMsvcrtFunctions(host){
             ...host.divergence ? { divergence: host.divergence } : {},
         }),
         ...createLocaleFunctions({
+            pointerSize: host.pointerSize,
             readMemory: host.readMemory,
             writeMemory: host.writeMemory,
             readCString: host.readCString,

@@ -309,12 +309,13 @@ export function createLoaderModule(){
                  * @param {number} options.base
                  * @param {import('./internal/synth.js').SynthExport[]} options.exports
                  * @param {string} [options.entryPoint]  The export that is its DllMain.
+                 * @param {boolean} [options.long]  For an x86-64 process.
                  * @returns {{ base: number, size: number, entryPoint: number,
                  *   addressOf: (name: string) => number | null,
                  *   ordinalOf: (name: string) => number | null }}
                  */
-                synthesise({ name, base, exports, entryPoint }){
-                    const module = synthesiseModule({ name, base, exports, entryPoint });
+                synthesise({ name, base, exports, entryPoint, long }){
+                    const module = synthesiseModule({ name, base, exports, entryPoint, long });
                     const codeSize = module.dataRva || module.size;
 
                     memory.register({

@@ -169,6 +169,21 @@ test('remove and rename act on the volume, and _access asks whether it exists', 
     assert.equal(files.entries.has('C:\\game\\old.mpq'), false);
 });
 
+test('the wide names make, rename and remove the same entries', ()=>{
+    const { memory, files, table } = build();
+    assert.equal(table._wmkdir.handler([memory.putWide('C:\\game\\mods')]), 0);
+    assert.equal(table._wmkdir.handler([memory.putWide('C:\\game\\mods')]), -1, 'taken now');
+    assert.equal(table._wrename.handler(
+        [memory.putWide('C:\\game\\data.mpq'), memory.putWide('C:\\game\\mods\\data.mpq')]), 0);
+    assert.equal(files.entries.has('C:\\game\\mods\\data.mpq'), true);
+    assert.equal(table._wunlink.handler([memory.putWide('C:\\game\\mods\\data.mpq')]), 0);
+    assert.equal(table._wremove.handler([memory.putWide('C:\\game\\mods\\data.mpq')]), -1,
+        'gone already');
+    assert.equal(table._wrmdir.handler([memory.putWide('C:\\game\\mods')]), 0);
+    assert.equal(files.entries.has('C:\\game\\mods'), false);
+    assert.equal(table._wunlink.handler([0]), -1, 'no path');
+});
+
 test('a failing operation says why in errno, as each one documents', ()=>{
     const memory = fakeMemory();
     const files = fakeVolume(['C:\\game', 'C:\\game\\data.mpq', 'C:\\game\\saves']);
