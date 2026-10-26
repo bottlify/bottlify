@@ -790,6 +790,22 @@ test('the process priority boost is set on every thread and read back on its own
     assert.equal(fns.GetProcessPriorityBoost.argBytes, 8);
 });
 
+test('the processors are counted in one group', ()=>{
+    const { fns, host } = setup();
+    for (const name of ['GetActiveProcessorCount', 'GetMaximumProcessorCount'])
+    {
+        assert.equal(fns[name].handler([0xffff]), 1, `${name}: ALL_PROCESSOR_GROUPS`);
+        assert.equal(fns[name].handler([0]), 1, 'group 0');
+        assert.equal(fns[name].handler([0x10000]), 1, 'a WORD');
+        assert.equal(fns[name].handler([1]), 0, 'no group 1');
+        assert.equal(fns.GetLastError.handler(), ERROR_INVALID_PARAMETER);
+        assert.equal(fns[name].argBytes, 4);
+    }
+    assert.equal(fns.GetActiveProcessorGroupCount.handler(), 1);
+    assert.equal(fns.GetMaximumProcessorGroupCount.handler(), 1);
+    void host;
+});
+
 test('the priority and affinity calls pop their own stdcall bytes', ()=>{
     const { fns, host } = setup();
     assert.equal(fns.GetPriorityClass.handler([0xffffffff]), 0x20);

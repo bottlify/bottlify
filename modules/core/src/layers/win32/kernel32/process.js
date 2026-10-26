@@ -32,6 +32,9 @@ const ERROR_MOD_NOT_FOUND = 126;
 const ERROR_BAD_ARGUMENTS = 160;
 const ERROR_OLD_WIN_VERSION = 1150;
 
+/** The group number that names every processor group. */
+const ALL_PROCESSOR_GROUPS = 0xffff;
+
 /** What TlsAlloc returns when every slot is taken. */
 const TLS_OUT_OF_INDEXES = 0xffffffff;
 
@@ -598,6 +601,17 @@ export function createProcessFunctions(host){
     };
     const { stateOf, setError, lastErrorOf } = createThreadState(host.currentThread, memory);
     const processors = host.processors ?? createProcessors();
+
+    /** @param {number} group  A WORD: ALL_PROCESSOR_GROUPS or 0, the only one. */
+    const processorsIn = group=>{
+        const wanted = group & 0xffff;
+        if (wanted !== ALL_PROCESSOR_GROUPS && wanted !== 0)
+        {
+            setError(ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+        return processors.count();
+    };
 
     /** SetProcessPriorityBoost's setting. */
     let priorityBoostDisabled = false;
@@ -1410,6 +1424,29 @@ export function createProcessFunctions(host){
                 return 1;
             },
         },
+
+        /**
+         * DWORD GetActiveProcessorCount(WORD GroupNumber)
+         * DWORD GetMaximumProcessorCount(WORD GroupNumber)
+         * WORD GetActiveProcessorGroupCount(VOID)
+         * WORD GetMaximumProcessorGroupCount(VOID)
+         *
+         * One group of every processor the machine has. ALL_PROCESSOR_GROUPS
+         * counts them all; a group that is not there is 0 and
+         * ERROR_INVALID_PARAMETER.
+         */
+        GetActiveProcessorCount: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([group])=>processorsIn(group),
+        },
+        GetMaximumProcessorCount: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([group])=>processorsIn(group),
+        },
+        GetActiveProcessorGroupCount: { argBytes: 0, handler: ()=>1 },
+        GetMaximumProcessorGroupCount: { argBytes: 0, handler: ()=>1 },
 
         /**
          * BOOL SetProcessAffinityMask(HANDLE hProcess, DWORD_PTR dwProcessAffinityMask)
