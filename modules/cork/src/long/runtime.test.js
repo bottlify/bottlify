@@ -70,7 +70,8 @@ function fill(seed, size){
  * runs packed regions beside fresh ones.
  */
 function machine(transfers = true, checkReads = undefined, looseStacks = undefined,
-    defaultNaNNegative = undefined, leafCalls = true, volatileWindowMs = 0)
+    defaultNaNNegative = undefined, leafCalls = true, volatileWindowMs = 0,
+    /** @type {number | undefined} */ trapPort = undefined)
 {
     const ramSize = CORPUS.codeAt + 0x100000;
     const layout = ownLayout({ ramSize, ramBase: 0, bits: 64 });
@@ -84,10 +85,19 @@ function machine(transfers = true, checkReads = undefined, looseStacks = undefin
     const pages = createPageTable(memory, layout);
     const runner = createLongRunner({ memory, layout, pages, hot: 1, transfers, checkReads,
         looseStacks, leafCalls, volatileWindowMs, callTargets: true, packRegions: 3,
-        ...(defaultNaNNegative === undefined ? {} : { defaultNaNNegative }) });
-    const state = blockState64({ memory, layout,
+        ...(defaultNaNNegative === undefined ? {} : { defaultNaNNegative }),
+        ...(trapPort === undefined ? {} : { trapPort }) });
+    /** The writes to ports other than the trap port, each port and value. @type {number[][]} */
+    const writes = [];
+    const ports = trapPort === undefined ? undefined : {
+        trapPort,
+        read: ()=>0xffffffff,
+        /** @param {number} port @param {number} size @param {number} value */
+        write: (port, size, value)=>writes.push([port, size, value]),
+    };
+    const state = blockState64({ memory, layout, ports,
         onCodeWrite: (at, size)=>runner.invalidate(at, size) });
-    return { layout, memory, state, runner, view: new DataView(memory.buffer) };
+    return { layout, memory, state, runner, writes, view: new DataView(memory.buffer) };
 }
 
 /**
@@ -594,6 +604,57 @@ test('a switch whose table base is set before its block joins its region all the
         // host: 459 to 609 entries with the index taken after the read.
         assert.ok(transfers || stats.entered <= 3 * cases.length, JSON.stringify(stats));
     }
+});
+
+test('a write to the trap port leaves its region past it, trapped as interpreted', ()=>{
+    // loop: mov edx, 0xb077; lea eax, [rcx + 0x100]; out dx, eax   the trap port
+    //       mov edx, 0x80; out dx, eax                              a device's port
+    //       inc ecx; cmp ecx, 20; jb loop
+    const PORT = 0xb077;
+    const code = 'ba77b000008d8100010000efba80000000efffc183f91472e7';
+    const regs = [...CORPUS.cases[0].regs];
+    regs[1] = '0';
+    const one = { ...CORPUS.cases[0], text: 'trap port', code, regs };
+    /** @param {boolean} translated */
+    const outcome = translated=>{
+        const m = machine(true, undefined, undefined, undefined, true, 0, PORT);
+        load(m, one);
+        /** @type {number[]} */
+        const trapped = [];
+        let fault = 'ran on';
+        try
+        {
+            for (let round = 0; round < 1000; round++)
+            {
+                if (translated)
+                {
+                    m.runner.run(m.state, 1000);
+                }
+                else
+                {
+                    m.state.syncIn();
+                    interpret64(m.state, 1000);
+                }
+                m.state.syncOut();
+                trapped.push(...m.state.trapped.splice(0));
+            }
+        }
+        catch (e){
+            m.state.syncOut();
+            fault = /** @type {{ eip?: number }} */ (e).eip === EXIT ? 'exit' : String(e);
+        }
+        return { fault, trapped, writes: m.writes, retired: m.state.retired,
+            regs: [...new BigUint64Array(m.memory.buffer, m.layout.regs, 16)].map(String),
+            traps: m.runner.stats.traps };
+    };
+    const interpreted = outcome(false);
+    const translated = outcome(true);
+    assert.equal(interpreted.fault, 'exit');
+    assert.deepEqual(interpreted.trapped, Array.from({ length: 20 }, (_, i)=>0x100 + i));
+    assert.equal(interpreted.writes.length, 20);
+    assert.deepEqual({ ...translated, traps: 0 }, { ...interpreted, traps: 0 });
+    // Every write to the trap port left its region but the first, run cold.
+    assert.ok(translated.traps >= 19, `${translated.traps} traps`);
 });
 
 test('an access across into a closed page or past 4 GiB faults where the interpreter faults', ()=>{

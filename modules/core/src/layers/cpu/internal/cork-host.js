@@ -755,6 +755,7 @@ export function createCorkHost(config){
         ? engine.createLongRunner({ memory, layout, pages: runtime.pages,
             hot: corkConfig?.hotThreshold ?? 2,
             below: runsFrom,
+            ...trapPort === undefined ? {} : { trapPort },
             // Every long region is a module of its own: where a tail call into
             // another instance faults, the host goes between them.
             ...corkConfig?.crossTailCalls === false ? { transfers: false } : {} })

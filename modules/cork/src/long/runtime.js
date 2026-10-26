@@ -122,7 +122,8 @@ const VOLATILE_HOLD_MS = 2000;
  *     pages: import('../runtime/pages.js').PageTable,
  *     hot?: number, below?: number, transfers?: boolean, checkReads?: boolean,
  *     looseStacks?: boolean, defaultNaNNegative?: boolean, leafCalls?: boolean,
- *     callTargets?: boolean, volatileWindowMs?: number, packRegions?: number }} settings
+ *     callTargets?: boolean, volatileWindowMs?: number, packRegions?: number,
+ *     trapPort?: number }} settings
  *     `below`: no block starts under it (the host's null range, whose fetch faults on
  *     the interpreter); `transfers`: regions go on into each other through the entry
  *     hash with tail calls, where the host has them (off where a tail call into another
@@ -141,13 +142,17 @@ const VOLATILE_HOLD_MS = 2000;
  *     zstd more than the callees formed in gave back (roadmap/negative-results.md,
  *     2026-10-26); `volatileWindowMs`, the window a page's
  *     code is written `VOLATILE_AFTER` times in before it is left to the interpreter;
- *     `packRegions`, the regions formed before they are gathered into one module
+ *     `packRegions`, the regions formed before they are gathered into one module;
+ *     `trapPort`, the port whose `out dx, eax` is the host's call channel: a region
+ *     leaves past it with the value in the state's `trapped`, as the interpreter's
+ *     write records it (unset, the interpreter runs every `out`)
  */
 export function createLongRunner(settings){
     const { memory, layout, pages, hot = 2, below = 0x10000,
         transfers = features().tailCalls, leafCalls = true, callTargets = false,
         defaultNaNNegative = features().defaultNaNNegative,
-        volatileWindowMs = VOLATILE_WINDOW_MS, packRegions = PACK_REGIONS } = settings;
+        volatileWindowMs = VOLATILE_WINDOW_MS, packRegions = PACK_REGIONS, trapPort = -1 }
+        = settings;
     let readsChecked = settings.checkReads === true;
     /** Whether regions are made loose: until code is translated on a stack. */
     let loose = settings.looseStacks !== false;
@@ -162,7 +167,7 @@ export function createLongRunner(settings){
     const limits = memoryLimits(memory);
     const stats = { regions: 0, blocks: 0, translated: 0, interpreted: 0, exits: 0, dropped: 0,
         entered: 0, readSwitches: 0, stackSwitches: 0, switches: 0, leaves: 0, predicted: 0,
-        quiet: 0, deferred: 0, volatilePages: 0, granular: 0, packs: 0, packed: 0 };
+        quiet: 0, deferred: 0, volatilePages: 0, granular: 0, packs: 0, packed: 0, traps: 0 };
     /** The regions formed since the last pack, each its own module. @type {LongEntry[]} */
     const unpacked = [];
     /** By address, the times a region left before the instruction there. @type {Map<number, number>} */
@@ -652,7 +657,7 @@ export function createLongRunner(settings){
     const instantiate = regions=>{
         const module = new WebAssembly.Module(emitRegions(layout, limits, regions, slotOf,
             { transfers, checkReads: readsChecked, looseStacks: loose, defaultNaNNegative,
-                x87Id: run=>x87.add(run), granular, formCalls: leafCalls,
+                x87Id: run=>x87.add(run), granular, trapPort, formCalls: leafCalls,
                 profileCalls: profileAt >= 0 }));
         const { exports } = new WebAssembly.Instance(module,
             { env: { memory, table, budget: budgetGlobal, depth, label, expect, x87: x87.call } });
@@ -995,6 +1000,12 @@ export function createLongRunner(settings){
                     const retired = left - budgetGlobal.value;
                     state.retired += retired;
                     stats.translated += retired;
+                    if (answer === LongExit.TRAP)
+                    {
+                        stats.traps++;
+                        state.trapped.push(view.getUint32(layout.regs, true));
+                        continue;
+                    }
                     if (answer !== LongExit.INTERPRET)
                     {
                         continue;

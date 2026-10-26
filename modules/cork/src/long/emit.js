@@ -70,6 +70,11 @@ export const LongExit = Object.freeze({
     RETURNED: 2,
     /** Nothing ran: the table slot called holds no region yet (`missFunction`). */
     MISS: 3,
+    /**
+     * It wrote EAX to the trap port (`out dx, eax`), the host's call channel:
+     * RIP is past the write, and the host answers the call.
+     */
+    TRAP: 4,
 });
 
 /**
@@ -293,6 +298,9 @@ export function translates(instruction){
         case 'xor': case 'test': case 'inc': case 'dec': case 'neg': case 'not':
         case 'jmp': case 'ret': case 'cwde': case 'cdq': case 'bswap': case 'call':
             return true;
+        case 'out':
+            // `out dx, eax`, the host's call channel where dx names the trap port.
+            return operands[0].kind === 'reg' && operands[1].size === 4;
         case 'imul': case 'mul': case 'div': case 'idiv': case 'xadd': case 'cmpxchg':
         case 'bsf': case 'bsr': case 'popcnt': case 'xchg': case 'clc': case 'stc': case 'cmc':
         case 'cld': case 'std': case 'lahf': case 'sahf':
@@ -345,10 +353,11 @@ class BlockEmitter {
      * @param {{ flags: number, shift: number, transfer: number | null,
      *     x87: number | null,
      *     x87Id: ((run: import('../decode/decoder.js').Instruction[]) => number) | null,
-     *     granular: Set<number> }}
+     *     granular: Set<number>, trapPort: number }}
      *     helpers  function indices, `transfer` none without transfers, `x87` none where the
      *     regions leave x87 to the interpreter; `x87Id` numbers a run of instructions for it;
-     *     `granular`, the stores tested to the granule (`storeCheck`)
+     *     `granular`, the stores tested to the granule (`storeCheck`); `trapPort`, the port
+     *     whose write leaves with `LongExit.TRAP`, or -1
      * @param {boolean} checkReads  reads test their pages, rather than wrap into RAM
      * @param {boolean} looseStacks  a store through rsp alone tests no page
      */
@@ -1365,6 +1374,25 @@ class BlockEmitter {
         {
             case 'nop':
                 return true;
+            case 'out':
+            {
+                // To the trap port, the host's call channel: out past the write,
+                // the state complete, the host answering the call -- what the
+                // interpreter's write records. Any other port is the interpreter's.
+                const { trapPort } = this.helpers;
+                if (trapPort < 0)
+                {
+                    this.exitBefore(index, at);
+                    return true;
+                }
+                b.localGet(2).op(Op.i32wrap).i32const(0xffff).op(Op.i32and).i32const(trapPort)
+                    .op(Op.i32ne);
+                this.exitIf(index, at);
+                b.localGet(K).i32const(index + 1).op(Op.i32add).localSet(K);
+                b.i32const(LongExit.TRAP).localSet(CODE).i64const(BigInt(next)).localSet(RIP)
+                    .br(this.exitDepth);
+                return true;
+            }
             case 'mov': case 'movzx':
                 placeMemory(dst.kind === 'mem');
                 this.read(src);
@@ -2566,7 +2594,7 @@ function shiftHelper(){
  * @param {{ transfers?: boolean, checkReads?: boolean, looseStacks?: boolean,
  *     defaultNaNNegative?: boolean, formCalls?: boolean, profileCalls?: boolean,
  *     x87Id?: ((run: import('../decode/decoder.js').Instruction[]) => number) | null,
- *     granular?: Set<number> }}
+ *     granular?: Set<number>, trapPort?: number }}
  *     [options]  `defaultNaNNegative`, the host's
  *     (`features`): false puts an invalid operation's NaN right (`simd.js`); `x87Id`
  *     numbers a run of x87 instructions for the model the regions import as `env.x87`
@@ -2579,13 +2607,14 @@ function shiftHelper(){
  *     callee's rets jump back past the call (`formedReturns`); `profileCalls`: an
  *     indirect call not `quiet` notes its target in the layout's call profile
  *     (`profileCall`); `granular`, the instructions whose stores to a flagged page are
- *     tested to the granule rather than left (`storeCheck`)
+ *     tested to the granule rather than left (`storeCheck`); `trapPort`, the port whose
+ *     `out dx, eax` leaves with `LongExit.TRAP` (-1, none: every `out` the interpreter's)
  * @returns {Uint8Array<ArrayBuffer>}
  */
 export function emitRegions(layout, memoryLimits, regions, slotOf, options = {}){
     const { transfers = false, checkReads = false, looseStacks = false,
         defaultNaNNegative = true, x87Id = null, formCalls = true, profileCalls = false,
-        granular = new Set() } = options;
+        granular = new Set(), trapPort = -1 } = options;
     if (layout.bits !== 64)
     {
         throw new Error('long emit: a 64-bit layout');
@@ -2614,6 +2643,7 @@ export function emitRegions(layout, memoryLimits, regions, slotOf, options = {})
         x87,
         x87Id,
         granular,
+        trapPort,
     };
     // Named as the 32-bit translator names its functions, so a CPU profile
     // says which region, or which helper, the time went to.
@@ -2690,9 +2720,11 @@ function transferFunction(layout, regionType){
  * by being cut short goes on into the region's blocks where it holds them,
  * anything else leaves for code that may read every flag. A division counts
  * as reading every flag: its fault, taken by the interpreter, shows the
- * flags as they stand to a handler that usually goes on elsewhere. A fault
- * anywhere else may show a write the code after it overwrites dropped, as
- * the 32-bit translator's does: its handler resumes that code.
+ * flags as they stand to a handler that usually goes on elsewhere; so does
+ * a write to the trap port, which leaves for the host's handler in the
+ * middle of the block. A fault anywhere else may show a write the code after
+ * it overwrites dropped, as the 32-bit translator's does: its handler
+ * resumes that code.
  *
  * @param {LongBlock[]} blocks  in the region's address order
  * @param {Map<number, number>} indexOf
@@ -2701,7 +2733,7 @@ function transferFunction(layout, regionType){
 function flagLiveness(blocks, indexOf){
     const shaped = blocks.map(block=>{
         const instructions = block.instructions.map(instruction=>(
-            instruction.op === 'div' || instruction.op === 'idiv'
+            instruction.op === 'div' || instruction.op === 'idiv' || instruction.op === 'out'
                 ? { ...instruction, flagsRead: instruction.flagsRead | ARITH } : instruction));
         const last = instructions[instructions.length - 1];
         const next = last.eip + last.length;
